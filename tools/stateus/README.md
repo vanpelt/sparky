@@ -30,13 +30,14 @@ Determine what days of the year you spent in different U.S. states, using Google
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 # Run
-python stateus.py --input ~/takeout/location-history/Records.json --year 2025
+uv run stateus.py --input ~/takeout/location-history/Records.json --year 2025
 ```
 
 ## Requirements
 
 - Python 3.10+
+- [uv](https://docs.astral.sh/uv/)
 - See `requirements.txt`
