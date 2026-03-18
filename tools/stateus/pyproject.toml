@@ -1,0 +1,12 @@
+[project]
+name = "stateus"
+version = "0.1.0"
+description = "Determine which U.S. states you spent time in each day using Google Maps location history."
+requires-python = ">=3.10"
+dependencies = [
+    "reverse_geocoder>=1.5",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+stateus = "stateus:main"

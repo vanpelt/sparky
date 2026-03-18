@@ -3,7 +3,7 @@
 ## Python
 
 - Use **uv** for all Python work: dependency management, virtual environments, and running scripts.
-- Pin dependencies in `requirements.txt`; use `uv pip install -r requirements.txt` or `uv run` to execute.
+- Each Python tool should have a `pyproject.toml` with dependencies. Use `uv sync` to install and `uv run` to execute.
 
 ## Node.js
 

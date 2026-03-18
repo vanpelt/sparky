@@ -1,2 +1,0 @@
-reverse_geocoder>=1.5
-pandas>=2.0

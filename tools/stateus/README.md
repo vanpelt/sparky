@@ -29,8 +29,10 @@ Determine what days of the year you spent in different U.S. states, using Google
 ## Quickstart
 
 ```bash
+cd tools/stateus
+
 # Install dependencies
-uv pip install -r requirements.txt
+uv sync
 
 # Run
 uv run stateus.py --input ~/takeout/location-history/Records.json --year 2025
@@ -40,4 +42,4 @@ uv run stateus.py --input ~/takeout/location-history/Records.json --year 2025
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/)
-- See `requirements.txt`
+- See `pyproject.toml` for dependencies
