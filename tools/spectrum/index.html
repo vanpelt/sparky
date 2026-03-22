@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Electromagnetic Spectrum — An Interactive Guide</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌈</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Lora:ital,wght@0,400;0,600;0,700;1,400;1,600&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -21,7 +22,7 @@
   --border: #1e1e3a;
   --border-bright: #2e2e50;
   --glow-spread: 20px;
-  --serif: 'Instrument Serif', Georgia, serif;
+  --serif: 'Lora', Georgia, serif;
   --mono: 'DM Mono', 'Consolas', monospace;
   --sans: 'DM Mono', system-ui, sans-serif;
   --transition-snappy: 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
@@ -75,8 +76,8 @@ header {
 
 header h1 {
   font-family: var(--serif);
-  font-weight: 400;
-  font-size: clamp(2.2rem, 6vw, 3.8rem);
+  font-weight: 700;
+  font-size: clamp(2.2rem, 6vw, 3.6rem);
   background: linear-gradient(90deg,
     #ff4444 0%, #ff8844 14%, #ffcc33 28%, #44dd66 42%,
     #4488ff 57%, #6644ee 71%, #aa44ff 85%, #ff44aa 100%);
@@ -163,8 +164,13 @@ header p {
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: rgba(255,255,255,0.85);
-  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  color: #fff;
+  text-shadow:
+    -1px -1px 0 rgba(0,0,0,0.8),
+     1px -1px 0 rgba(0,0,0,0.8),
+    -1px  1px 0 rgba(0,0,0,0.8),
+     1px  1px 0 rgba(0,0,0,0.8),
+     0 0 6px rgba(0,0,0,0.9);
   white-space: nowrap;
   pointer-events: none;
   user-select: none;
@@ -176,9 +182,64 @@ header p {
   justify-content: space-between;
   color: var(--muted);
   font-size: 0.65rem;
-  padding: 0.4rem 0;
+  padding: 0 0 0.35rem;
   font-family: var(--mono);
   opacity: 0.6;
+}
+
+/* ---- Spectrum Overlay (frequency highlights) ---- */
+.spectrum-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 72px;
+  pointer-events: none;
+  z-index: 10;
+  overflow: visible;
+}
+
+.overlap-patch {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 4px;
+  border-radius: 2px;
+  animation: patchPulse 2.5s ease-in-out infinite;
+  pointer-events: none;
+  background: rgba(255,255,255,0.3);
+  border: 1px solid rgba(0,0,0,0.7);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.2);
+}
+
+.overlap-leader {
+  position: absolute;
+  width: 1px;
+  background: rgba(180,180,200,0.45);
+  pointer-events: none;
+  z-index: 11;
+}
+
+.overlap-label-flag {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  font-weight: 500;
+  white-space: nowrap;
+  padding: 1px 4px;
+  background: rgba(255,255,255,0.7);
+  color: #111;
+  border: 1px solid rgba(0,0,0,0.5);
+  border-radius: 2px;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  pointer-events: none;
+  z-index: 12;
+}
+
+@keyframes patchPulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
 }
 
 /* ---- Connector Canvas ---- */
@@ -265,12 +326,17 @@ header p {
 
 .sub-label {
   font-family: var(--mono);
-  font-size: 0.55rem;
-  font-weight: 400;
+  font-size: 0.6rem;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: rgba(255,255,255,0.8);
-  text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+  letter-spacing: 0.05em;
+  color: #fff;
+  text-shadow:
+    -1px -1px 0 rgba(0,0,0,0.85),
+     1px -1px 0 rgba(0,0,0,0.85),
+    -1px  1px 0 rgba(0,0,0,0.85),
+     1px  1px 0 rgba(0,0,0,0.85),
+     0 0 5px rgba(0,0,0,0.9);
   white-space: nowrap;
   pointer-events: none;
   user-select: none;
@@ -342,8 +408,8 @@ header p {
 
 .card-header h2 {
   font-family: var(--serif);
-  font-weight: 400;
-  font-size: 1.5rem;
+  font-weight: 700;
+  font-size: 1.4rem;
   letter-spacing: -0.01em;
 }
 
@@ -425,7 +491,7 @@ header p {
 
 .edu-header h2 {
   font-family: var(--serif);
-  font-weight: 400;
+  font-weight: 700;
   font-size: clamp(1.5rem, 4vw, 2.2rem);
   color: var(--text-bright);
   margin-bottom: 0.5rem;
@@ -480,6 +546,7 @@ header p {
 
 .accordion-trigger .acc-title {
   font-family: var(--serif);
+  font-weight: 600;
   font-size: 1.05rem;
   color: var(--text-bright);
   flex: 1;
@@ -644,7 +711,7 @@ footer a:hover { text-decoration: underline; }
   #connectorCanvas.open { height: 36px; }
   .sub-spectrum-bar { height: 46px; }
   .sub-segment { min-width: 70px; }
-  .sub-label { font-size: 0.5rem; }
+  .sub-label { font-size: 0.52rem; }
   .card { padding: 1.25rem; }
   .card-grid { grid-template-columns: 1fr; }
   .card-header h2 { font-size: 1.25rem; }
@@ -673,10 +740,13 @@ footer a:hover { text-decoration: underline; }
 </header>
 
 <div class="spectrum-container">
-  <div class="spectrum-bar" id="spectrumBar"></div>
   <div class="freq-axis">
     <span>&#8592; lower frequency / longer wavelength</span>
     <span>higher frequency / shorter wavelength &#8594;</span>
+  </div>
+  <div style="position:relative;">
+    <div class="spectrum-bar" id="spectrumBar"></div>
+    <div class="spectrum-overlay" id="spectrumOverlay"></div>
   </div>
   <canvas id="connectorCanvas"></canvas>
   <div class="sub-spectrum-wrap" id="subSpectrumWrap">
@@ -708,7 +778,7 @@ footer a:hover { text-decoration: underline; }
 const regions = [
   {
     id: 'radio', name: 'Radio', color: '#aa6633',
-    gradient: ['#553311', '#aa6633'], flex: 1.3,
+    gradient: ['#553311', '#aa6633'], flex: 1.3, fMin: 3e3, fMax: 1e9,
     icon: '\u{1F4FB}', wavelength: '1 mm \u2013 100 km+', frequency: '3 kHz \u2013 300 GHz',
     facts: [
       'The longest radio waves detected from space stretch across the entire observable universe.',
@@ -726,40 +796,101 @@ const regions = [
       { id: 'vlf', name: 'VLF', color: '#443322', gradient: ['#332211','#554433'], wavelength: '10\u2013100 km', frequency: '3\u201330 kHz',
         description: 'Very Low Frequency waves penetrate seawater, making them essential for submarine communication.',
         facts: ['Used by militaries worldwide to send one-way messages to submerged submarines','VLF signals can travel around the world by bouncing between the ionosphere and Earth\u2019s surface','Lightning strikes are a major natural source of VLF radio emissions'],
-        funFact: 'VLF receivers can "listen" to lightning storms thousands of kilometers away \u2014 they sound like eerie whistles and pops, called whistlers and sferics.' },
+        funFact: 'VLF receivers can "listen" to lightning storms thousands of kilometers away \u2014 they sound like eerie whistles and pops, called whistlers and sferics.',
+        overlapBands: [{ fMin: 3e3, fMax: 30e3, label: '3\u201330 kHz' }] },
       { id: 'am', name: 'AM Radio', color: '#553322', gradient: ['#442211','#664433'], wavelength: '180\u2013560 m', frequency: '530 kHz\u20131.7 MHz',
         description: 'Amplitude Modulation was the first practical broadcast technology, still used worldwide for talk radio and news.',
         facts: ['AM signals bounce off the ionosphere at night, letting distant stations be heard hundreds of miles away','The first commercial AM broadcast was KDKA in Pittsburgh, 1920','AM is more susceptible to static from lightning and electrical interference than FM'],
-        funFact: 'During World War II, the BBC used AM broadcasts to send coded messages to resistance fighters across occupied Europe.' },
+        funFact: 'During World War II, the BBC used AM broadcasts to send coded messages to resistance fighters across occupied Europe.',
+        overlapBands: [{ fMin: 530e3, fMax: 1.7e6, label: '530 kHz\u20131.7 MHz' }] },
       { id: 'fm', name: 'FM Radio', color: '#664433', gradient: ['#553322','#775544'], wavelength: '2.8\u20133.4 m', frequency: '88\u2013108 MHz',
-        description: 'Frequency Modulation provides higher-fidelity audio with less static, ideal for music broadcasting.',
-        facts: ['FM was invented by Edwin Armstrong in 1933, but it took decades to gain adoption over AM','FM signals are line-of-sight and don\u2019t bounce off the ionosphere, limiting their range','Stereo FM broadcasting became standard in the 1960s'],
-        funFact: 'Armstrong, who invented FM, died without seeing it become dominant. RCA and others fought his patents for decades. FM only overtook AM in listenership in the 1970s.' },
+        description: 'Frequency Modulation provides higher-fidelity audio with less static, ideal for music broadcasting. The transition from analog to digital is well underway.',
+        facts: ['FM was invented by Edwin Armstrong in 1933, but it took decades to gain adoption over AM','FM signals are line-of-sight and don\u2019t bounce off the ionosphere, limiting their range','Stereo FM broadcasting became standard in the 1960s','HD Radio (IBOC) piggybacks a digital signal alongside the analog FM signal on the same frequency \u2014 you can broadcast both simultaneously without extra spectrum','In Europe and parts of Asia, DAB/DAB+ (Digital Audio Broadcasting) uses entirely separate spectrum (174\u2013240 MHz) and is gradually replacing FM. Norway became the first country to shut down national FM in 2017.','Unlike the hard TV cutover, FM\u2019s digital transition is slower because car radios and cheap receivers still overwhelmingly use analog FM \u2014 there\u2019s no government mandate to switch in most countries'],
+        funFact: 'Armstrong, who invented FM, died without seeing it become dominant. RCA and others fought his patents for decades. FM only overtook AM in listenership in the 1970s. Now FM itself faces an existential threat from streaming \u2014 Spotify and podcasts are doing to FM what FM did to AM.',
+        overlapBands: [{ fMin: 88e6, fMax: 108e6, label: '88\u2013108 MHz FM' }, { fMin: 174e6, fMax: 240e6, label: 'DAB/DAB+ (Europe)' }] },
       { id: 'vhf', name: 'VHF / TV', color: '#775544', gradient: ['#664433','#886655'], wavelength: '1\u201310 m', frequency: '30\u2013300 MHz',
-        description: 'Very High Frequency carries television broadcasts, aviation communication, and marine radio.',
-        facts: ['VHF TV channels 2\u201313 were the original broadcast television bands','Aircraft communication and air traffic control operate on VHF','VHF marine radio (channel 16) is the international distress frequency'],
-        funFact: 'The first TV broadcast in the US was in 1928, but regular programming didn\u2019t start until 1939. Early TVs could only pick up VHF signals.' },
+        description: 'Very High Frequency carries television broadcasts, aviation communication, and marine radio. The analog-to-digital TV transition is one of the most dramatic spectrum reallocations in history.',
+        facts: ['VHF TV channels 2\u201313 were the original broadcast television bands','Aircraft communication and air traffic control operate on VHF','VHF marine radio (channel 16) is the international distress frequency','The US completed its analog TV shutdown on June 12, 2009 \u2014 every analog transmitter went dark, and viewers without a digital converter box saw only static. The government mailed out 33 million $40 converter box coupons.','Digital TV (ATSC) is vastly more efficient than analog: a single 6 MHz channel that carried one blurry analog signal can now carry 4\u20136 HD subchannels. This freed up enormous spectrum.','The "digital dividend" \u2014 spectrum freed by the analog shutdown \u2014 was auctioned for cellular use. The 700 MHz band (former TV channels 52\u201369) became prime 4G LTE spectrum, raising $19.6 billion in the 2008 auction.','ATSC 3.0 (NextGen TV) is now rolling out in the US, adding 4K, HDR, internet interactivity, and targeted advertising to broadcast TV \u2014 making over-the-air TV competitive with streaming.'],
+        funFact: 'The analog TV shutdown was delayed twice because Congress feared backlash from voters losing their TV signal. When it finally happened, call centers fielded over 300,000 calls on day one. Yet within weeks, most complaints stopped \u2014 people discovered they got more channels in better quality for free.',
+        overlapBands: [
+          { fMin: 54e6, fMax: 88e6, label: 'VHF Lo (Ch 2\u20136)' },
+          { fMin: 174e6, fMax: 216e6, label: 'VHF Hi (Ch 7\u201313)' },
+          { fMin: 118e6, fMax: 137e6, label: 'Aviation' }
+        ] },
       { id: 'uhf', name: 'UHF', color: '#886655', gradient: ['#775544','#997766'], wavelength: '10 cm\u20131 m', frequency: '300 MHz\u20133 GHz',
         description: 'Ultra High Frequency hosts cellular networks, WiFi, Bluetooth, GPS, and modern wireless communications.',
         facts: ['Your phone, WiFi router, Bluetooth headphones, and GPS all operate in UHF bands','4G LTE uses frequencies between 700 MHz and 2.6 GHz','UHF signals penetrate buildings better than higher frequencies'],
-        funFact: 'The 2.4 GHz WiFi band was originally reserved for industrial microwave ovens. It became the backbone of home internet because it was \u201cunlicensed\u201d \u2014 anyone could use it freely.' },
-      { id: 'wifi-bt', name: 'WiFi / BT', color: '#996655', gradient: ['#885544','#aa7766'], wavelength: '5\u201312.5 cm', frequency: '2.4\u20136 GHz',
-        description: 'WiFi and Bluetooth share the 2.4 GHz ISM band; WiFi 6E and newer also use 5 GHz and 6 GHz.',
-        facts: ['WiFi 6E opened 1,200 MHz of new spectrum in the 6 GHz band','Bluetooth was named after Harald Bluetooth, a 10th-century Danish king who united warring tribes','WiFi signals are absorbed by water \u2014 that\u2019s why your signal drops near aquariums and wet walls'],
-        funFact: 'The Bluetooth logo is a bind rune combining Harald Bluetooth\u2019s initials in Norse runes: \u16b4 (H) and \u16d2 (B).' },
+        funFact: 'The 2.4 GHz WiFi band was originally reserved for industrial microwave ovens. It became the backbone of home internet because it was \u201cunlicensed\u201d \u2014 anyone could use it freely.',
+        overlapBands: [
+          { fMin: 300e6, fMax: 400e6, label: 'UHF TV' },
+          { fMin: 470e6, fMax: 698e6, label: 'UHF TV (Ch 14\u201351)' },
+          { fMin: 698e6, fMax: 960e6, label: 'Cell/LTE' },
+          { fMin: 1.2e9, fMax: 1.6e9, label: 'GPS/Sat' },
+          { fMin: 2.4e9, fMax: 2.5e9, label: 'WiFi/BT' }
+        ] },
+      { id: 'wifi-bt', name: 'WiFi / BT', color: '#996655', gradient: ['#885544','#aa7766'], wavelength: '5\u201312.5 cm', frequency: '2.4\u20137.1 GHz',
+        description: 'WiFi and Bluetooth share the 2.4 GHz ISM band. WiFi has evolved rapidly \u2014 WiFi 7 (802.11be) is the latest generation, using all three bands simultaneously.',
+        facts: [
+          'WiFi 6E opened 1,200 MHz of new spectrum in the 6 GHz band (5.925\u20137.125 GHz)',
+          'WiFi 7 (802.11be, certified 2024) is dubbed "Extremely High Throughput" \u2014 theoretical max of 46 Gbps using 320 MHz channels and 4096-QAM modulation',
+          'WiFi 7\u2019s killer feature is Multi-Link Operation (MLO): a device can send and receive data across 2.4, 5, and 6 GHz bands simultaneously, rather than picking one. This dramatically reduces latency and improves reliability.',
+          'WiFi 7 uses 4096-QAM (4K-QAM), packing 12 bits per symbol vs WiFi 6\u2019s 10 bits \u2014 a 20% efficiency gain at the modulation level',
+          'Bluetooth was named after Harald Bluetooth, a 10th-century Danish king who united warring tribes',
+          'WiFi signals are absorbed by water \u2014 that\u2019s why your signal drops near aquariums and wet walls'
+        ],
+        funFact: 'The Bluetooth logo is a bind rune combining Harald Bluetooth\u2019s initials in Norse runes: \u16b4 (H) and \u16d2 (B). Meanwhile, WiFi generations went from being named by obscure IEEE numbers (802.11ac) to simple version numbers (WiFi 5, 6, 7) in 2018 \u2014 because even the Wi-Fi Alliance admitted nobody could remember the old names.',
+        overlapBands: [
+          { fMin: 2.4e9, fMax: 2.5e9, label: '2.4 GHz' },
+          { fMin: 5.15e9, fMax: 5.85e9, label: '5 GHz' },
+          { fMin: 5.925e9, fMax: 7.125e9, label: '6 GHz (6E)' }
+        ] },
       { id: 'cellular', name: 'Cellular', color: '#997755', gradient: ['#886644','#aa8866'], wavelength: '3\u201350 cm', frequency: '600 MHz\u201339 GHz',
         description: 'Cellular networks span from low-band 600 MHz (wide coverage) to millimeter-wave 5G (extreme speed).',
         facts: ['5G mmWave can deliver multi-gigabit speeds but only travels a few hundred meters','The first cell phone call was made by Motorola\u2019s Martin Cooper in 1973','Low-band 5G (600\u2013900 MHz) covers large areas but offers speeds similar to 4G'],
-        funFact: 'Martin Cooper\u2019s first cell phone call was to his rival at Bell Labs, just to gloat. The phone weighed 1.1 kg and had 30 minutes of battery life.' },
+        funFact: 'Martin Cooper\u2019s first cell phone call was to his rival at Bell Labs, just to gloat. The phone weighed 1.1 kg and had 30 minutes of battery life.',
+        overlapBands: [
+          { fMin: 698e6, fMax: 894e6, label: '700/850 MHz' },
+          { fMin: 1.7e9, fMax: 2.2e9, label: '1.9/2.1 GHz' },
+          { fMin: 2.5e9, fMax: 2.7e9, label: '2.5 GHz' },
+          { fMin: 3.4e9, fMax: 3.7e9, label: '3.5 GHz 5G' },
+          { fMin: 24.25e9, fMax: 29.5e9, label: '28 GHz mmW' },
+          { fMin: 37e9, fMax: 40e9, label: '39 GHz mmW' }
+        ] },
       { id: 'starlink', name: 'Starlink', color: '#aa8866', gradient: ['#997755','#bb9977'], wavelength: '1.5\u20132.5 cm', frequency: '12\u201318 GHz',
         description: 'SpaceX\u2019s Starlink uses Ku-band and Ka-band frequencies from low Earth orbit for global internet.',
         facts: ['Starlink satellites orbit at ~550 km, giving latencies of 20\u201340 ms \u2014 far lower than geostationary satellites','The constellation uses thousands of satellites in coordinated orbits','Starlink dishes use phased-array antennas to track multiple satellites simultaneously'],
-        funFact: 'Starlink satellites are so numerous and reflective that astronomers initially feared they would ruin ground-based observations. SpaceX now adds \u201cvisors\u201d to reduce their brightness.' }
+        funFact: 'Starlink satellites are so numerous and reflective that astronomers initially feared they would ruin ground-based observations. SpaceX now adds \u201cvisors\u201d to reduce their brightness.',
+        overlapBands: [
+          { fMin: 10.7e9, fMax: 12.7e9, label: 'Ku downlink' },
+          { fMin: 14e9, fMax: 14.5e9, label: 'Ku uplink' },
+          { fMin: 17.8e9, fMax: 19.3e9, label: 'Ka downlink' },
+          { fMin: 27.5e9, fMax: 30e9, label: 'Ka uplink' }
+        ] },
+      { id: 'radio-misc', name: 'Oddities', color: '#776655', gradient: ['#665544','#887766'], wavelength: 'Various', frequency: 'Various',
+        description: 'The radio spectrum is full of fascinating allocations, gaps, and curiosities \u2014 from frequencies reserved for radio astronomy to vast "gaps" that aren\u2019t really gaps at all.',
+        facts: [
+          'The gap between VLF and AM (30 kHz\u2013530 kHz) isn\u2019t empty \u2014 it\u2019s packed with navigation beacons (NDB), maritime distress frequencies (500 kHz Morse), longwave broadcasting (used heavily in Europe), and military communications. The 30\u2013300 kHz range is LF (Low Frequency), home to WWVB (the US atomic clock signal your watch syncs to at 60 kHz).',
+          'The gap between AM and FM (1.7\u201388 MHz) is one of the busiest parts of the spectrum: shortwave radio (3\u201330 MHz) carries international broadcasts that bounce off the ionosphere to reach the entire globe. Ham radio operators, CB radio (27 MHz), and HF military communications all live here. The 30\u201388 MHz range includes VHF-lo TV and public safety radio.',
+          'The 1420.405 MHz "hydrogen line" (21 cm) is protected worldwide \u2014 no transmissions allowed. It\u2019s the frequency neutral hydrogen naturally emits, critical for mapping galaxies and SETI.',
+          'The 37.5\u201338.25 MHz band is allocated to radio astronomy but sits next to cordless phone frequencies \u2014 causing constant interference battles.',
+          'TV white spaces (470\u2013698 MHz) are being repurposed for rural broadband as analog TV shuts down \u2014 these frequencies travel far and penetrate walls.',
+          'There\u2019s a "quiet zone" around Green Bank Observatory in West Virginia where WiFi, cell phones, and microwaves are restricted to protect radio astronomy.'
+        ],
+        funFact: 'The Wow! Signal at 1420 MHz was detected right on the hydrogen line \u2014 exactly where SETI scientists predicted an intelligent civilization might broadcast. If it was deliberate, the sender chose the one frequency every radio astronomer in the universe would be listening to.',
+        overlapBands: [
+          { fMin: 30e3, fMax: 530e3, label: 'LF/MF gap: nav beacons, WWVB' },
+          { fMin: 60e3, fMax: 60.1e3, label: 'WWVB 60 kHz' },
+          { fMin: 1.7e6, fMax: 30e6, label: 'Shortwave/HF' },
+          { fMin: 27e6, fMax: 27.4e6, label: 'CB Radio' },
+          { fMin: 1.42e9, fMax: 1.427e9, label: 'H-line 1420 MHz' },
+          { fMin: 470e6, fMax: 698e6, label: 'TV white space' },
+          { fMin: 902e6, fMax: 928e6, label: '900 MHz ISM' }
+        ] }
     ]
   },
   {
     id: 'microwave', name: 'Microwave', color: '#bb8844',
-    gradient: ['#774422', '#bb8844'], flex: 0.8,
+    gradient: ['#774422', '#bb8844'], flex: 0.8, fMin: 1e9, fMax: 300e9,
     icon: '\u{1F525}', wavelength: '1 mm \u2013 25 cm', frequency: '1 GHz \u2013 300 GHz',
     facts: [
       'Microwaves were accidentally discovered to heat food in 1945 when Percy Spencer noticed a chocolate bar melting near a radar set.',
@@ -769,35 +900,46 @@ const regions = [
     space: 'The Planck satellite mapped the CMB in microwaves with unprecedented precision, revealing tiny temperature variations that seeded all cosmic structure.',
     funFact: 'In 1964, Penzias and Wilson discovered the CMB by accident while trying to eliminate "noise" from their antenna. They initially thought it was pigeon droppings. They won the Nobel Prize.',
     subSegments: [
+      { id: 'mw-oven', name: 'MW Oven', color: '#cc8833', gradient: ['#bb7722','#dd9944'], wavelength: '12.2 cm', frequency: '2.45 GHz',
+        description: 'Microwave ovens use a magnetron to blast food with 2.45 GHz radiation at ~1,000 watts \u2014 about 5,000\u00d7 more power than your WiFi router.',
+        facts: ['The 2.45 GHz frequency was chosen because it\u2019s in the unlicensed ISM band, not because it\u2019s the optimal frequency for heating water','Microwaves cause water molecules to rotate rapidly, generating friction and heat \u2014 this is dielectric heating','A microwave oven\u2019s magnetron is essentially the same technology used in WWII radar sets'],
+        funFact: 'Percy Spencer discovered microwave heating when a chocolate bar melted in his pocket near an active radar set in 1945. He then deliberately popcorned some kernels \u2014 microwave popcorn was literally the first microwave-cooked food.',
+        overlapBands: [{ fMin: 2.4e9, fMax: 2.5e9, label: '2.45 GHz' }] },
       { id: 'l-band', name: 'L-Band', color: '#885533', gradient: ['#774422','#996644'], wavelength: '15\u201330 cm', frequency: '1\u20132 GHz',
         description: 'L-Band hosts GPS signals and some mobile satellite services.',
         facts: ['GPS L1 signal at 1575.42 MHz is used by every smartphone on Earth','Aircraft use L-Band for satellite communication over oceans','L-Band penetrates clouds and rain well, making it reliable in all weather'],
-        funFact: 'GPS satellites each carry atomic clocks accurate to within a few nanoseconds. Without relativistic corrections (both special and general), GPS positions would drift by about 10 km per day.' },
+        funFact: 'GPS satellites each carry atomic clocks accurate to within a few nanoseconds. Without relativistic corrections (both special and general), GPS positions would drift by about 10 km per day.',
+        overlapBands: [{ fMin: 1.164e9, fMax: 1.189e9, label: 'GPS L5' }, { fMin: 1.217e9, fMax: 1.237e9, label: 'GPS L2' }, { fMin: 1.565e9, fMax: 1.585e9, label: 'GPS L1' }] },
       { id: 's-band', name: 'S-Band', color: '#996644', gradient: ['#885533','#aa7755'], wavelength: '7.5\u201315 cm', frequency: '2\u20134 GHz',
         description: 'S-Band is used by weather radar, some WiFi, and NASA\u2019s Deep Space Network.',
         facts: ['Weather radar (like NEXRAD) operates at 2.7\u20133.0 GHz in S-Band','NASA communicates with many spacecraft using S-Band','Voyager 1 and 2 both use S-Band as one of their communication frequencies'],
-        funFact: 'Voyager\u2019s S-Band transmitter runs at just 23 watts \u2014 about the power of a refrigerator light bulb \u2014 yet NASA can detect it from 24 billion km away.' },
+        funFact: 'Voyager\u2019s S-Band transmitter runs at just 23 watts \u2014 about the power of a refrigerator light bulb \u2014 yet NASA can detect it from 24 billion km away.',
+        overlapBands: [{ fMin: 2.2e9, fMax: 2.3e9, label: 'DSN S-Band' }, { fMin: 2.7e9, fMax: 3e9, label: 'NEXRAD' }] },
       { id: 'c-band', name: 'C-Band', color: '#aa7755', gradient: ['#996644','#bb8866'], wavelength: '3.75\u20137.5 cm', frequency: '4\u20138 GHz',
         description: 'C-Band is used for satellite TV distribution, 5G mid-band, and weather radar.',
         facts: ['The 2020 FCC C-Band auction raised $81 billion \u2014 the most expensive spectrum auction in history','C-Band 5G offers a balance between coverage and speed','Large satellite dishes in rural areas often receive C-Band signals'],
-        funFact: 'C-Band satellite signals can be received by anyone with a large enough dish, which led to the \u201cbig ugly dish\u201d era of the 1980s when homeowners could get free satellite TV.' },
+        funFact: 'C-Band satellite signals can be received by anyone with a large enough dish, which led to the \u201cbig ugly dish\u201d era of the 1980s when homeowners could get free satellite TV.',
+        overlapBands: [{ fMin: 3.7e9, fMax: 4.2e9, label: 'Satellite DL' }, { fMin: 5.925e9, fMax: 6.425e9, label: 'Satellite UL' }] },
       { id: 'x-band-mw', name: 'X-Band', color: '#bb8866', gradient: ['#aa7755','#cc9977'], wavelength: '2.5\u20133.75 cm', frequency: '8\u201312 GHz',
         description: 'X-Band is widely used in military radar, maritime navigation, and space communication.',
         facts: ['Police speed radar guns typically operate in X-Band','Voyager also communicates on X-Band at 8.4 GHz for higher data rates','X-Band radar provides higher resolution than S-Band for weather observation'],
-        funFact: 'The "X" in X-Band originally stood for "secret" \u2014 it was classified during World War II when it was used for fire-control radar.' },
+        funFact: 'The "X" in X-Band originally stood for "secret" \u2014 it was classified during World War II when it was used for fire-control radar.',
+        overlapBands: [{ fMin: 8.2e9, fMax: 8.5e9, label: 'DSN X-Band' }, { fMin: 9.3e9, fMax: 9.5e9, label: 'Marine radar' }, { fMin: 10.5e9, fMax: 10.55e9, label: 'Speed radar' }] },
       { id: 'ku-ka-band', name: 'Ku/Ka', color: '#cc9977', gradient: ['#bb8866','#ddaa88'], wavelength: '0.75\u20132.5 cm', frequency: '12\u201340 GHz',
         description: 'Ku-Band and Ka-Band power satellite internet, direct-broadcast TV, and high-throughput satellites.',
         facts: ['Ku-Band (12\u201318 GHz) is used by most direct-to-home satellite TV','Ka-Band (26\u201340 GHz) enables higher bandwidth for internet satellites','Both bands are affected by rain fade \u2014 heavy rainfall attenuates the signals'],
-        funFact: 'Modern geostationary internet satellites operating in Ka-Band can deliver over 100 Gbps of total throughput \u2014 but they\u2019re 35,786 km away, adding 600 ms of round-trip latency.' },
+        funFact: 'Modern geostationary internet satellites operating in Ka-Band can deliver over 100 Gbps of total throughput \u2014 but they\u2019re 35,786 km away, adding 600 ms of round-trip latency.',
+        overlapBands: [{ fMin: 12.2e9, fMax: 12.7e9, label: 'DBS TV' }, { fMin: 14e9, fMax: 14.5e9, label: 'Ku uplink' }, { fMin: 26.5e9, fMax: 29.5e9, label: 'Ka satellite' }] },
       { id: 'mmwave', name: 'mmWave', color: '#ddaa88', gradient: ['#cc9977','#eebb99'], wavelength: '1\u201310 mm', frequency: '30\u2013300 GHz',
         description: 'Millimeter waves are the frontier of 5G, automotive radar, and security scanning.',
         facts: ['5G mmWave (24\u201340 GHz) can deliver multi-gigabit speeds but has very short range','Automotive radar at 77 GHz enables adaptive cruise control and collision avoidance','Airport body scanners use mmWave around 30 GHz'],
-        funFact: 'mmWave 5G signals can be blocked by your hand, a tree, or even rain. Cell towers must be placed every few hundred meters, making deployment extremely expensive in cities.' }
+        funFact: 'mmWave 5G signals can be blocked by your hand, a tree, or even rain. Cell towers must be placed every few hundred meters, making deployment extremely expensive in cities.',
+        overlapBands: [{ fMin: 24e9, fMax: 30e9, label: '5G FR2-1' }, { fMin: 37e9, fMax: 40e9, label: '5G FR2-2' }, { fMin: 76e9, fMax: 77e9, label: 'Auto radar' }, { fMin: 57e9, fMax: 64e9, label: '60 GHz WiGig' }] }
     ]
   },
   {
     id: 'infrared', name: 'Infrared', color: '#ee4422',
-    gradient: ['#991100', '#ff5522'], flex: 1.1,
+    gradient: ['#991100', '#ff5522'], flex: 1.1, fMin: 300e9, fMax: 430e12,
     icon: '\u{1F321}\uFE0F', wavelength: '700 nm \u2013 1 mm', frequency: '300 GHz \u2013 430 THz',
     facts: [
       'Infrared was the first "invisible" light discovered \u2014 by William Herschel in 1800.',
@@ -811,24 +953,28 @@ const regions = [
       { id: 'far-ir', name: 'Far IR', color: '#991100', gradient: ['#881100','#aa2200'], wavelength: '15 \u03bcm \u2013 1 mm', frequency: '300 GHz \u2013 20 THz',
         description: 'Far infrared overlaps with sub-millimeter waves and is key to studying cold objects in space.',
         facts: ['Cold dust clouds in space emit primarily in far-IR','The Herschel Space Observatory mapped far-IR emissions across the galaxy','Far-IR is absorbed by water vapor, so space-based telescopes are essential'],
-        funFact: 'The coldest known object in the universe \u2014 the Boomerang Nebula at 1 K \u2014 was characterized using far-infrared and submillimeter observations.' },
+        funFact: 'The coldest known object in the universe \u2014 the Boomerang Nebula at 1 K \u2014 was characterized using far-infrared and submillimeter observations.',
+        overlapBands: [{ fMin: 300e9, fMax: 1e12, label: 'Sub-mm astronomy' }, { fMin: 1e12, fMax: 10e12, label: 'THz gap' }, { fMin: 10e12, fMax: 20e12, label: 'Far-IR imaging' }] },
       { id: 'mid-ir', name: 'Mid IR', color: '#bb2200', gradient: ['#aa1100','#cc3311'], wavelength: '2.5\u201315 \u03bcm', frequency: '20\u2013120 THz',
         description: 'Mid-infrared is the "molecular fingerprint" region \u2014 many molecules have unique absorption signatures here.',
         facts: ['Chemical sensors and gas analyzers use mid-IR to identify specific molecules','JWST\u2019s MIRI instrument observes in mid-IR (5\u201328 \u03bcm)','Greenhouse gases like CO\u2082 and methane absorb strongly in mid-IR bands'],
-        funFact: 'Mid-IR spectroscopy can detect trace amounts of chemicals in the air \u2014 it\u2019s used in breathalyzers, environmental monitoring, and even searching for biosignatures on exoplanets.' },
+        funFact: 'Mid-IR spectroscopy can detect trace amounts of chemicals in the air \u2014 it\u2019s used in breathalyzers, environmental monitoring, and even searching for biosignatures on exoplanets.',
+        overlapBands: [{ fMin: 20e12, fMax: 37e12, label: 'CO\u2082 absorption' }, { fMin: 55e12, fMax: 65e12, label: 'JWST MIRI' }, { fMin: 88e12, fMax: 100e12, label: 'Methane band' }] },
       { id: 'near-ir', name: 'Near IR', color: '#dd3311', gradient: ['#cc2211','#ee4422'], wavelength: '700 nm \u2013 2.5 \u03bcm', frequency: '120\u2013430 THz',
         description: 'Near-infrared is just beyond visible red and is used in fiber optics, remote controls, and night vision.',
         facts: ['Fiber optic internet transmits at near-IR wavelengths (typically 1310 or 1550 nm)','TV remotes use near-IR LEDs around 940 nm','Night-vision goggles amplify near-IR light reflected by objects'],
-        funFact: 'Your phone camera can detect near-IR light \u2014 try pointing a TV remote at your camera and pressing a button. You\u2019ll see the IR LED flash that is invisible to your eyes.' },
+        funFact: 'Your phone camera can detect near-IR light \u2014 try pointing a TV remote at your camera and pressing a button. You\u2019ll see the IR LED flash that is invisible to your eyes.',
+        overlapBands: [{ fMin: 193e12, fMax: 194e12, label: '1550 nm fiber' }, { fMin: 229e12, fMax: 230e12, label: '1310 nm fiber' }, { fMin: 316e12, fMax: 320e12, label: 'TV remote 940 nm' }, { fMin: 352e12, fMax: 400e12, label: 'Night vision' }] },
       { id: 'thermal', name: 'Thermal', color: '#ff5522', gradient: ['#ee4411','#ff6633'], wavelength: '8\u201314 \u03bcm', frequency: '21\u201337 THz',
         description: 'The thermal infrared band is where room-temperature objects emit most of their radiation.',
         facts: ['Thermal cameras detect radiation in this window to create heat maps','The human body emits peak thermal radiation around 9.3 \u03bcm','FLIR (Forward-Looking Infrared) is critical for search and rescue, firefighting, and military operations'],
-        funFact: 'During the COVID-19 pandemic, thermal cameras became ubiquitous at airports and buildings. But they measure skin temperature, not core body temperature \u2014 a person who just exercised would appear "feverish."' }
+        funFact: 'During the COVID-19 pandemic, thermal cameras became ubiquitous at airports and buildings. But they measure skin temperature, not core body temperature \u2014 a person who just exercised would appear "feverish."',
+        overlapBands: [{ fMin: 21.4e12, fMax: 25e12, label: 'FLIR Band I' }, { fMin: 26.3e12, fMax: 33.3e12, label: 'Body heat 9.3 \u03bcm' }, { fMin: 33e12, fMax: 37.5e12, label: 'FLIR Band II' }] }
     ]
   },
   {
     id: 'visible', name: 'Visible', color: '#44cc44',
-    gradient: ['#ff0000', '#ff8800', '#ffff00', '#00cc00', '#0066ff', '#6600cc'], flex: 0.6,
+    gradient: ['#ff0000', '#ff8800', '#ffff00', '#00cc00', '#0066ff', '#6600cc'], flex: 0.6, fMin: 430e12, fMax: 790e12,
     icon: '\u{1F308}', wavelength: '380 \u2013 700 nm', frequency: '430 \u2013 790 THz',
     facts: [
       'Visible light is less than 0.0035% of the full electromagnetic spectrum.',
@@ -842,28 +988,33 @@ const regions = [
       { id: 'red', name: 'Red', color: '#ee2222', gradient: ['#cc0000','#ff3333'], wavelength: '620\u2013700 nm', frequency: '430\u2013484 THz',
         description: 'Red has the longest wavelength and lowest energy of visible light.',
         facts: ['Red light scatters least in the atmosphere, which is why sunsets appear red','Red LEDs were the first practical visible LEDs, invented in 1962','Dark rooms use red light because it least affects night-adapted vision'],
-        funFact: 'Mars appears red not because it emits red light but because iron oxide (rust) on its surface absorbs blue and green wavelengths, reflecting only red back to our eyes.' },
+        funFact: 'Mars appears red not because it emits red light but because iron oxide (rust) on its surface absorbs blue and green wavelengths, reflecting only red back to our eyes.',
+        overlapBands: [{ fMin: 430e12, fMax: 484e12, label: '620\u2013700 nm' }] },
       { id: 'orange-yellow', name: 'Orange\u2013Yellow', color: '#ee8800', gradient: ['#dd6600','#ffaa00'], wavelength: '565\u2013620 nm', frequency: '484\u2013530 THz',
         description: 'The warm tones of fire, sodium lamps, and autumn leaves.',
         facts: ['Sodium streetlights emit a characteristic orange-yellow line at 589 nm','The Sun\u2019s peak emission is actually in the green-yellow range (around 500 nm)','Amber traffic lights use LEDs tuned to around 590 nm'],
-        funFact: 'The Sun appears yellow from Earth because the atmosphere scatters away more blue light. From space, the Sun actually looks white.' },
+        funFact: 'The Sun appears yellow from Earth because the atmosphere scatters away more blue light. From space, the Sun actually looks white.',
+        overlapBands: [{ fMin: 484e12, fMax: 530e12, label: '565\u2013620 nm' }] },
       { id: 'green', name: 'Green', color: '#22bb22', gradient: ['#00aa00','#44dd44'], wavelength: '495\u2013565 nm', frequency: '530\u2013606 THz',
         description: 'Human eyes are most sensitive to green light \u2014 we can distinguish more shades of green than any other color.',
         facts: ['Green lasers appear much brighter than red lasers of equal power due to our eye\u2019s sensitivity','Chlorophyll reflects green light, which is why plants appear green','Night vision displays are green because our eyes can distinguish the most shades in this color'],
-        funFact: 'Plants are green because chlorophyll evolved to absorb red and blue light (the most energetic useful wavelengths) and reflect green. If plants absorbed all visible light, they\u2019d appear black.' },
+        funFact: 'Plants are green because chlorophyll evolved to absorb red and blue light (the most energetic useful wavelengths) and reflect green. If plants absorbed all visible light, they\u2019d appear black.',
+        overlapBands: [{ fMin: 530e12, fMax: 606e12, label: '495\u2013565 nm' }] },
       { id: 'blue', name: 'Blue', color: '#2266ee', gradient: ['#1144cc','#3388ff'], wavelength: '450\u2013495 nm', frequency: '606\u2013668 THz',
         description: 'Blue light has more energy than red or green and plays a key role in regulating our circadian rhythm.',
         facts: ['The sky is blue because short wavelengths scatter more in the atmosphere (Rayleigh scattering)','Blue light from screens can suppress melatonin production and affect sleep','Blue LEDs were the hardest to invent \u2014 Shuji Nakamura won the Nobel Prize for it in 2014'],
-        funFact: 'Before Nakamura\u2019s blue LED breakthrough, white LEDs were impossible (white = red + green + blue). His invention enabled the LED lighting revolution that saves billions of kWh of energy per year.' },
+        funFact: 'Before Nakamura\u2019s blue LED breakthrough, white LEDs were impossible (white = red + green + blue). His invention enabled the LED lighting revolution that saves billions of kWh of energy per year.',
+        overlapBands: [{ fMin: 606e12, fMax: 668e12, label: '450\u2013495 nm' }] },
       { id: 'violet', name: 'Violet', color: '#7733cc', gradient: ['#5511aa','#9955ee'], wavelength: '380\u2013450 nm', frequency: '668\u2013790 THz',
         description: 'Violet has the shortest wavelength and highest energy of visible light, bordering on ultraviolet.',
         facts: ['Blu-ray discs use a violet laser (405 nm) to read data at higher density than red-laser DVDs','Many gemstones like amethyst get their color from absorbing all wavelengths except violet','Most people cannot see below about 380 nm, but some with aphakia (no lens) can perceive into UV'],
-        funFact: 'Newton originally identified only five colors in the rainbow. He added orange and indigo to make seven \u2014 because he believed the number seven had mystical significance, mirroring the seven musical notes.' }
+        funFact: 'Newton originally identified only five colors in the rainbow. He added orange and indigo to make seven \u2014 because he believed the number seven had mystical significance, mirroring the seven musical notes.',
+        overlapBands: [{ fMin: 668e12, fMax: 790e12, label: '380\u2013450 nm' }] }
     ]
   },
   {
     id: 'ultraviolet', name: 'Ultra\u00ADviolet', color: '#8844ee',
-    gradient: ['#4411aa', '#9944ff'], flex: 0.9,
+    gradient: ['#4411aa', '#9944ff'], flex: 0.9, fMin: 790e12, fMax: 30e15,
     icon: '\u{1F60E}', wavelength: '10 \u2013 380 nm', frequency: '790 THz \u2013 30 PHz',
     facts: [
       'UV light causes sunburn by damaging DNA in skin cells.',
@@ -877,24 +1028,28 @@ const regions = [
       { id: 'uva', name: 'UVA', color: '#6622bb', gradient: ['#5511aa','#7733cc'], wavelength: '315\u2013380 nm', frequency: '790\u2013950 THz',
         description: 'UVA is "aging UV" \u2014 it penetrates deep into skin and causes long-term damage.',
         facts: ['UVA passes through glass and clouds, reaching your skin even indoors near windows','UVA causes premature aging, wrinkles, and contributes to skin cancer','Tanning beds primarily emit UVA radiation'],
-        funFact: 'UVA makes up 95% of the UV radiation reaching Earth\u2019s surface. Most sunscreens historically only blocked UVB \u2014 "broad spectrum" sunscreens that also block UVA are a relatively recent development.' },
+        funFact: 'UVA makes up 95% of the UV radiation reaching Earth\u2019s surface. Most sunscreens historically only blocked UVB \u2014 "broad spectrum" sunscreens that also block UVA are a relatively recent development.',
+        overlapBands: [{ fMin: 790e12, fMax: 952e12, label: 'UVA 315\u2013380 nm' }] },
       { id: 'uvb', name: 'UVB', color: '#7733cc', gradient: ['#6622bb','#8844dd'], wavelength: '280\u2013315 nm', frequency: '950 THz \u2013 1.07 PHz',
         description: 'UVB is "burning UV" \u2014 responsible for sunburn and vitamin D production.',
         facts: ['UVB triggers vitamin D synthesis in your skin \u2014 just 10\u201315 minutes of sun exposure can produce a day\u2019s supply','The SPF rating on sunscreen specifically measures UVB protection','UVB intensity varies greatly with season, time of day, and latitude'],
-        funFact: 'The hole in the ozone layer over Antarctica allowed more UVB to reach the surface, causing sunburn in penguins and blindness in Patagonian sheep until the Montreal Protocol began healing it.' },
+        funFact: 'The hole in the ozone layer over Antarctica allowed more UVB to reach the surface, causing sunburn in penguins and blindness in Patagonian sheep until the Montreal Protocol began healing it.',
+        overlapBands: [{ fMin: 952e12, fMax: 1.07e15, label: 'UVB 280\u2013315 nm' }] },
       { id: 'uvc', name: 'UVC', color: '#8844dd', gradient: ['#7733cc','#9955ee'], wavelength: '100\u2013280 nm', frequency: '1.07\u20133 PHz',
         description: 'UVC is "germicidal UV" \u2014 it destroys DNA in bacteria and viruses but is completely blocked by the ozone layer.',
         facts: ['UVC lamps are used to sterilize hospital rooms, water treatment plants, and HVAC systems','No natural UVC reaches Earth\u2019s surface; it\u2019s entirely absorbed by the ozone layer and atmosphere','222 nm "far-UVC" is being studied as potentially safe for occupied spaces \u2014 it can\u2019t penetrate skin but still kills pathogens'],
-        funFact: 'A small startup is developing overhead far-UVC lights for public spaces \u2014 they could continuously disinfect the air of viruses while being safe for people underneath. It could change how we handle pandemics.' },
+        funFact: 'A small startup is developing overhead far-UVC lights for public spaces \u2014 they could continuously disinfect the air of viruses while being safe for people underneath. It could change how we handle pandemics.',
+        overlapBands: [{ fMin: 1.07e15, fMax: 3e15, label: 'UVC 100\u2013280 nm' }, { fMin: 1.36e15, fMax: 1.36e15 * 1.01, label: '222 nm far-UVC' }] },
       { id: 'euv', name: 'Extreme UV', color: '#9955ee', gradient: ['#8844dd','#aa66ff'], wavelength: '10\u2013121 nm', frequency: '2.5\u201330 PHz',
         description: 'EUV is used in cutting-edge semiconductor manufacturing and is entirely absorbed by air.',
         facts: ['ASML\u2019s EUV lithography machines use 13.5 nm light to print transistors smaller than 5 nm','EUV machines cost over $200 million each and are among the most complex devices ever built','EUV must operate in a near-perfect vacuum because even air absorbs it'],
-        funFact: 'Every advanced smartphone chip (Apple, Qualcomm, AMD) is made using EUV lithography. Only one company on Earth \u2014 ASML in the Netherlands \u2014 can build these machines, making it arguably the most critical supply chain bottleneck in technology.' }
+        funFact: 'Every advanced smartphone chip (Apple, Qualcomm, AMD) is made using EUV lithography. Only one company on Earth \u2014 ASML in the Netherlands \u2014 can build these machines, making it arguably the most critical supply chain bottleneck in technology.',
+        overlapBands: [{ fMin: 2.22e16, fMax: 2.22e16 * 1.02, label: 'ASML 13.5 nm' }] }
     ]
   },
   {
     id: 'xray', name: 'X-Ray', color: '#2299dd',
-    gradient: ['#115588', '#33bbff'], flex: 0.9,
+    gradient: ['#115588', '#33bbff'], flex: 0.9, fMin: 30e15, fMax: 30e18,
     icon: '\u{1F9B4}', wavelength: '0.01 \u2013 10 nm', frequency: '30 PHz \u2013 30 EHz',
     facts: [
       'X-rays were discovered by Wilhelm R\u00f6ntgen in 1895. He called them "X" because their nature was unknown.',
@@ -908,24 +1063,28 @@ const regions = [
       { id: 'soft-xray', name: 'Soft X-Ray', color: '#1177aa', gradient: ['#006699','#2299cc'], wavelength: '0.1\u201310 nm', frequency: '30 PHz \u2013 3 EHz',
         description: 'Soft X-rays have lower energy and are absorbed more easily. Used in specialized microscopy and materials science.',
         facts: ['Soft X-ray microscopes can image individual cells with nanometer resolution','The Sun\u2019s corona emits strongly in soft X-rays','Soft X-rays are used to study magnetic domains in materials and thin films'],
-        funFact: 'X-ray telescopes must use mirrors at very shallow "grazing" angles because X-rays pass straight through normal mirrors. Chandra\u2019s mirrors are the smoothest ever made \u2014 if they were the size of Earth, the tallest bump would be 2 meters.' },
+        funFact: 'X-ray telescopes must use mirrors at very shallow "grazing" angles because X-rays pass straight through normal mirrors. Chandra\u2019s mirrors are the smoothest ever made \u2014 if they were the size of Earth, the tallest bump would be 2 meters.',
+        overlapBands: [{ fMin: 30e15, fMax: 300e15, label: 'Solar corona' }, { fMin: 60e15, fMax: 600e15, label: 'Chandra Observatory' }] },
       { id: 'hard-xray', name: 'Hard X-Ray', color: '#2299dd', gradient: ['#1188cc','#33aaee'], wavelength: '0.01\u20130.1 nm', frequency: '3\u201330 EHz',
         description: 'Hard X-rays penetrate deeper and are used in medical imaging, security, and high-energy astronomy.',
         facts: ['Chest X-rays use hard X-rays at about 0.01\u20130.03 nm','Hard X-ray astronomy reveals accreting black holes and neutron stars','Synchrotron light sources produce brilliant beams of hard X-rays for materials research'],
-        funFact: 'CT scans combine hundreds of X-ray images taken from different angles to build 3D models of your insides. A single CT scan of your chest delivers radiation equivalent to about 200 chest X-rays.' },
+        funFact: 'CT scans combine hundreds of X-ray images taken from different angles to build 3D models of your insides. A single CT scan of your chest delivers radiation equivalent to about 200 chest X-rays.',
+        overlapBands: [{ fMin: 3e18, fMax: 10e18, label: 'Chest X-ray' }, { fMin: 6e18, fMax: 20e18, label: 'CT scan' }, { fMin: 10e18, fMax: 30e18, label: 'Synchrotron' }] },
       { id: 'medical-xray', name: 'Medical', color: '#33aaee', gradient: ['#2299dd','#44bbff'], wavelength: '0.01\u20130.05 nm', frequency: '6\u201330 EHz',
         description: 'Medical X-rays balance penetration with dose to image bones, teeth, and internal structures.',
         facts: ['Dental X-rays use the lowest dose of any medical X-ray application','Mammography uses a specific low-energy X-ray range optimized for breast tissue','The average person receives about 3 mSv of medical X-ray radiation per year'],
-        funFact: 'In the early 1900s, shoe stores had fluoroscopes where customers could see the bones of their feet to check shoe fit. Children would play with them for fun. The practice wasn\u2019t banned until the 1970s.' },
+        funFact: 'In the early 1900s, shoe stores had fluoroscopes where customers could see the bones of their feet to check shoe fit. Children would play with them for fun. The practice wasn\u2019t banned until the 1970s.',
+        overlapBands: [{ fMin: 6e18, fMax: 8e18, label: 'Dental' }, { fMin: 8.5e18, fMax: 12e18, label: 'Mammography' }, { fMin: 15e18, fMax: 30e18, label: 'Diagnostic' }] },
       { id: 'xray-diffraction', name: 'Crystallography', color: '#44bbff', gradient: ['#33aaee','#55ccff'], wavelength: '0.05\u20130.25 nm', frequency: '1.2\u20136 EHz',
         description: 'X-ray crystallography reveals atomic-level structures of proteins, minerals, and materials.',
         facts: ['Over 90% of protein structures in the Protein Data Bank were determined by X-ray crystallography','The technique requires growing high-quality crystals, which can take years for some proteins','Max von Laue won the Nobel Prize in 1914 for proving X-rays were electromagnetic waves using crystal diffraction'],
-        funFact: 'The structure of table salt (NaCl) was the first crystal structure ever solved by X-ray diffraction, by the Braggs (father and son) in 1913. Lawrence Bragg, at 25, remains the youngest Nobel laureate in physics.' }
+        funFact: 'The structure of table salt (NaCl) was the first crystal structure ever solved by X-ray diffraction, by the Braggs (father and son) in 1913. Lawrence Bragg, at 25, remains the youngest Nobel laureate in physics.',
+        overlapBands: [{ fMin: 1.2e18, fMax: 2.4e18, label: 'Protein crystals' }, { fMin: 3e18, fMax: 6e18, label: 'Small molecule' }] }
     ]
   },
   {
     id: 'gamma', name: 'Gamma', color: '#44ddaa',
-    gradient: ['#118866', '#66ffcc'], flex: 0.9,
+    gradient: ['#118866', '#66ffcc'], flex: 0.9, fMin: 30e18, fMax: 3e22,
     icon: '\u2622\uFE0F', wavelength: '< 0.01 nm', frequency: '> 30 EHz',
     facts: [
       'Gamma rays are the most energetic EM radiation \u2014 a single gamma photon can carry millions of times the energy of visible light.',
@@ -939,19 +1098,23 @@ const regions = [
       { id: 'low-gamma', name: 'Low-E \u03b3', color: '#22aa88', gradient: ['#119977','#33bb99'], wavelength: '0.001\u20130.01 nm', frequency: '30\u2013300 EHz',
         description: 'Lower-energy gamma rays overlap with the hardest X-rays and are used in medical imaging and treatment.',
         facts: ['PET scans detect 511 keV gamma rays produced when positrons from a radioactive tracer annihilate with electrons','Cobalt-60 gamma sources are used for industrial radiography and food sterilization','The gamma knife uses ~200 focused beams of cobalt-60 gamma rays to treat brain tumors without cutting'],
-        funFact: 'A PET scan works by injecting you with a radioactive sugar. Cancer cells are hungry and consume more sugar, lighting up on the scan. You literally become temporarily radioactive.' },
+        funFact: 'A PET scan works by injecting you with a radioactive sugar. Cancer cells are hungry and consume more sugar, lighting up on the scan. You literally become temporarily radioactive.',
+        overlapBands: [{ fMin: 30e18, fMax: 50e18, label: 'Co-60 therapy' }, { fMin: 123e18, fMax: 124e18, label: 'PET 511 keV' }, { fMin: 80e18, fMax: 200e18, label: 'Gamma knife' }] },
       { id: 'high-gamma', name: 'High-E \u03b3', color: '#33cc99', gradient: ['#22bb88','#44ddaa'], wavelength: '< 0.001 nm', frequency: '> 300 EHz',
         description: 'High-energy gamma rays come from the most extreme astrophysical phenomena.',
         facts: ['TeV (tera-electronvolt) gamma rays are observed from supernova remnants and active galactic nuclei','Ground-based telescopes detect these by observing Cherenkov radiation \u2014 blue flashes in the atmosphere','The MAGIC telescopes in La Palma can detect gamma rays with energies over 50 GeV'],
-        funFact: 'In 2022, the brightest gamma-ray burst ever recorded (GRB 221009A, nicknamed "BOAT" \u2014 Brightest Of All Time) was so intense it ionized Earth\u2019s upper atmosphere and disrupted radio communications, despite originating 2.4 billion light-years away.' },
+        funFact: 'In 2022, the brightest gamma-ray burst ever recorded (GRB 221009A, nicknamed "BOAT" \u2014 Brightest Of All Time) was so intense it ionized Earth\u2019s upper atmosphere and disrupted radio communications, despite originating 2.4 billion light-years away.',
+        overlapBands: [{ fMin: 300e18, fMax: 1e21, label: 'Fermi LAT' }, { fMin: 2e21, fMax: 3e22, label: 'Cherenkov (TeV)' }] },
       { id: 'grb', name: 'GRBs', color: '#44ddaa', gradient: ['#33cc99','#55eebb'], wavelength: '< 10\u207B\u2074 nm', frequency: '> 3000 EHz',
         description: 'Gamma-Ray Bursts are the most energetic explosions in the universe since the Big Bang.',
         facts: ['Long GRBs (>2 seconds) come from massive stars collapsing into black holes','Short GRBs (<2 seconds) come from neutron star mergers','A GRB pointed at Earth from within our galaxy would likely cause a mass extinction'],
-        funFact: 'One leading theory for the Late Ordovician mass extinction (445 million years ago) is a nearby gamma-ray burst that stripped away Earth\u2019s ozone layer, flooding the surface with lethal UV radiation.' },
+        funFact: 'One leading theory for the Late Ordovician mass extinction (445 million years ago) is a nearby gamma-ray burst that stripped away Earth\u2019s ozone layer, flooding the surface with lethal UV radiation.',
+        overlapBands: [{ fMin: 3e20, fMax: 3e22, label: 'GRB peak energy' }] },
       { id: 'nuclear', name: 'Nuclear', color: '#55eebb', gradient: ['#44ddaa','#66ffcc'], wavelength: '~10\u207B\u2074\u201310\u207B\u00b2 nm', frequency: '30\u20133000 EHz',
         description: 'Nuclear gamma rays are emitted during radioactive decay, fission, and fusion reactions.',
         facts: ['Each radioactive isotope emits gamma rays at characteristic energies \u2014 a "fingerprint"','Nuclear power plants are shielded with meters of concrete to absorb gamma radiation','Gamma spectroscopy can identify specific isotopes in environmental samples, food, and cargo containers'],
-        funFact: 'After the Chernobyl disaster, gamma radiation was so intense near the reactor that robots sent to clean up had their electronics fried. Human "bio-robots" had to work in 90-second shifts, running onto the roof to shovel radioactive debris.' }
+        funFact: 'After the Chernobyl disaster, gamma radiation was so intense near the reactor that robots sent to clean up had their electronics fried. Human "bio-robots" had to work in 90-second shifts, running onto the roof to shovel radioactive debris.',
+        overlapBands: [{ fMin: 30e18, fMax: 40e18, label: 'I-131 decay' }, { fMin: 160e18, fMax: 162e18, label: 'Cs-137 662 keV' }, { fMin: 290e18, fMax: 300e18, label: 'Co-60 1.33 MeV' }] }
     ]
   }
 ];
@@ -998,13 +1161,23 @@ const educationTopics = [
     title: 'Voyager \u2014 A Whisper Across the Solar System',
     content: `
       <p><strong>Voyager 1</strong> is the most distant human-made object, currently about <strong>24.5 billion km</strong> from Earth \u2014 over 164 times the Earth-Sun distance. It\u2019s been traveling since 1977 and crossed into interstellar space in 2012.</p>
-      <div class="highlight-box">
-        <p><strong>Signal round-trip time:</strong> A radio signal traveling at the speed of light takes about <strong>23 hours</strong> to reach Voyager 1, and another 23 hours to return. That\u2019s nearly <strong>46 hours</strong> for a round trip \u2014 almost two full days just to send "are you there?" and get a reply.</p>
+      <div class="isl-grid">
+        <div>
+          <canvas class="isl-canvas" id="dsnCanvas"></canvas>
+          <div class="isl-controls">
+            <label>Voyager distance: <strong id="voyagerDistLabel">24.5</strong> billion km</label>
+            <input type="range" id="voyagerDistSlider" min="1" max="30" step="0.5" value="24.5">
+            <div class="isl-readout" id="voyagerReadout">Signal round-trip: ~45.6 hours</div>
+          </div>
+        </div>
+        <div>
+          <p><strong>Signal round-trip:</strong> A radio signal at light speed takes about <strong>23 hours</strong> to reach Voyager 1, and another 23 to return \u2014 nearly <strong>46 hours</strong> for "are you there?" and a reply.</p>
+          <p>Voyager communicates on <strong>S-Band (2.3 GHz)</strong> and <strong>X-Band (8.4 GHz)</strong>. Its transmitter runs at just <strong>23 watts</strong> \u2014 a refrigerator light bulb.</p>
+          <p><strong>The Deep Space Network:</strong> Three stations spaced ~120\u00b0 apart \u2014 <strong>Goldstone</strong> (California), <strong>Madrid</strong> (Spain), and <strong>Canberra</strong> (Australia) \u2014 ensure at least one dish always faces any point in the sky as Earth rotates. The visualization shows this continuous coverage handoff.</p>
+          <p><strong>How the dishes fight the inverse-square law:</strong> A parabolic dish focuses all the radio energy hitting its surface onto a single receiver. NASA\u2019s 70-meter dishes have an effective collecting area of ~3,850 m\u00b2. This <em>antenna gain</em> amplifies the faint signal by a factor of ~10 million compared to an omnidirectional antenna \u2014 enough to detect Voyager\u2019s <strong>10\u207B\u00b2\u2070 watt</strong> whisper.</p>
+          <p>Data rate has slowed from 115.2 kbps at Jupiter to <strong>160 bits/sec</strong> today \u2014 slower than a 1980s modem. At 17 km/s, reaching the nearest star would take <strong>73,000 years</strong>.</p>
+        </div>
       </div>
-      <p>Voyager communicates using <strong>S-Band (2.3 GHz)</strong> and <strong>X-Band (8.4 GHz)</strong> \u2014 both in the microwave/radio region of the spectrum. Its transmitter runs at just <strong>23 watts</strong>, roughly the power of a refrigerator light bulb.</p>
-      <p>By the time Voyager\u2019s signal reaches Earth, it has spread across a vast area (inverse-square law in action). The received power is about <strong>10\u207B\u00b2\u2070 watts</strong> \u2014 20 billion times weaker than the power needed to run a digital watch. NASA\u2019s 70-meter Deep Space Network dishes and extraordinarily sensitive receivers can still decode this whisper.</p>
-      <p>Voyager\u2019s data rate has slowed from 115.2 kbps at Jupiter to about <strong>160 bits per second</strong> today \u2014 slower than a 1980s modem. Yet it continues to return data about the interstellar medium, the space between stars that no human instrument has ever directly sampled.</p>
-      <p>At its current speed of about 17 km/s, Voyager 1 would take approximately <strong>73,000 years</strong> to reach the nearest star, Proxima Centauri (if it were heading that direction, which it\u2019s not).</p>
     `
   },
   {
@@ -1070,6 +1243,45 @@ const educationTopics = [
     `
   },
   {
+    id: 'radiation-poisoning',
+    icon: '\u2622\uFE0F',
+    title: 'Radiation & Radiation Poisoning',
+    content: `
+      <p><strong>The word "radiation" covers several fundamentally different phenomena.</strong> Some are electromagnetic (part of this spectrum), others are streams of particles. Understanding the difference is critical \u2014 the dangers are very different.</p>
+      <div class="highlight-box">
+        <p><strong>Electromagnetic (EM) ionizing radiation:</strong> UV-C, X-rays, and gamma rays. These are high-energy photons on the spectrum above. They carry enough energy per photon to break chemical bonds and ionize atoms.</p>
+        <p><strong>Alpha particles (\u03b1):</strong> Helium nuclei (2 protons + 2 neutrons). Heavy, slow, stopped by a sheet of paper or your outer skin layer. Harmless externally \u2014 but if inhaled or ingested (e.g., polonium-210), they devastate tissue from within. Alexander Litvinenko was assassinated with alpha-emitting Po-210 in his tea.</p>
+        <p><strong>Beta particles (\u03b2):</strong> High-energy electrons (or positrons). Penetrate skin but stopped by a few millimeters of aluminum or plastic. Can cause skin burns with prolonged exposure. Used therapeutically in some cancer treatments.</p>
+        <p><strong>Neutron radiation:</strong> Free neutrons from nuclear fission or fusion. Extremely penetrating \u2014 they pass through lead. Water, concrete, and boron-containing materials are the best shields. Neutron radiation can make other materials radioactive (neutron activation).</p>
+      </div>
+      <p><strong>How ionizing radiation damages DNA:</strong> High-energy photons or particles can break the sugar-phosphate backbone of DNA strands. A <em>single-strand break</em> is usually repaired by cellular machinery within hours. A <em>double-strand break</em> (both sides of the helix severed near the same spot) is far more dangerous \u2014 misrepair can lead to mutations, and enough damage overwhelms the cell\u2019s repair capacity, leading to cell death.</p>
+      <p><strong>Measuring radiation dose:</strong></p>
+      <ul class="fact-list">
+        <li data-icon="\u{1F4CF}"><strong>Gray (Gy):</strong> Absorbed energy \u2014 1 Gy = 1 joule absorbed per kg of tissue</li>
+        <li data-icon="\u{1F4CF}"><strong>Sievert (Sv):</strong> Biological effective dose \u2014 accounts for radiation type (alpha is 20\u00d7 more damaging per Gy than gamma)</li>
+      </ul>
+      <p><strong>Dose comparison scale:</strong></p>
+      <ul class="fact-list">
+        <li data-icon="\u{1F4F1}">Dental X-ray: ~0.005 mSv</li>
+        <li data-icon="\u2708\uFE0F">Cross-country flight: ~0.04 mSv (cosmic rays at altitude)</li>
+        <li data-icon="\u{1F3E5}">Chest X-ray: ~0.02 mSv</li>
+        <li data-icon="\u{1F30D}">Average annual background radiation: ~2.4 mSv</li>
+        <li data-icon="\u2695\uFE0F">CT scan (abdomen): ~8 mSv</li>
+        <li data-icon="\u26A0\uFE0F">Acute Radiation Syndrome onset: ~1,000 mSv (1 Sv)</li>
+        <li data-icon="\u{1F480}">Lethal dose (50% mortality in 30 days): ~4,000\u20135,000 mSv</li>
+      </ul>
+      <p><strong>Acute Radiation Syndrome (ARS):</strong> At doses above ~1 Sv received within hours, the body undergoes progressive failure. First the bone marrow (blood cell production collapses), then the gastrointestinal lining (can\u2019t absorb nutrients or keep out bacteria), and at extreme doses (>10 Sv), the central nervous system. The insidious nature of ARS is the "walking ghost" phase \u2014 after initial nausea, victims often feel fine for days or weeks before the full effects manifest.</p>
+      <div class="highlight-box">
+        <p><strong>Historical examples:</strong></p>
+        <p><strong>Hiroshima & Nagasaki (1945):</strong> The bombs produced an intense burst of gamma rays and neutrons, killing many instantly. Survivors within 1\u20132 km received massive doses, with thousands developing acute radiation sickness. Long-term effects included elevated cancer rates decades later.</p>
+        <p><strong>Chernobyl (1986):</strong> Firefighters on the reactor roof received 6\u201316 Sv. 28 died within 4 months from ARS. The surrounding area received fallout containing iodine-131, cesium-137, and strontium-90 \u2014 all beta/gamma emitters with different half-lives.</p>
+        <p><strong>The Demon Core (1945\u201346):</strong> A 6.2 kg sphere of plutonium at Los Alamos caused two separate criticality accidents. Physicist Harry Daghlian received a lethal dose when he accidentally dropped a tungsten carbide brick onto it. Nine months later, Louis Slotin was killed when a screwdriver slipped during a criticality experiment, causing a prompt critical burst. Both died within weeks.</p>
+        <p><strong>Goi\u00e2nia (1987):</strong> Scrapyard workers in Brazil opened a discarded radiotherapy capsule containing cesium-137. Fascinated by the glowing blue powder, they shared it with family and friends. 4 people died and over 100,000 were screened for contamination. It remains one of the worst radiological accidents in history.</p>
+      </div>
+      <p><strong>Key distinction:</strong> Non-ionizing EM radiation (radio waves through visible light) <strong>cannot cause radiation poisoning</strong> at any dose. Only UV-C, X-rays, and gamma rays \u2014 the highest-energy end of this spectrum \u2014 are ionizing EM radiation. And even then, the doses required for acute effects far exceed anything encountered in daily life. The radiation from your phone, WiFi, microwave oven, or 5G tower is fundamentally incapable of causing the effects described above.</p>
+    `
+  },
+  {
     id: 'earths-shields',
     icon: '\u{1F6E1}\uFE0F',
     title: 'Earth\u2019s Invisible Shields Against Radiation',
@@ -1105,6 +1317,31 @@ const educationTopics = [
       <p>This unification has profound practical consequences. A spinning magnet generates electricity (generators). Running current through a coil creates a magnet (electromagnets, electric motors). An accelerating charge radiates electromagnetic waves (antennas). A changing magnetic field in a coil induces voltage (transformers, wireless charging).</p>
       <p>Maxwell\u2019s equations also predicted that electromagnetic waves carry energy and momentum. This was confirmed when Pyotr Lebedev measured the pressure of light on a mirror in 1900. Today, <em>solar sails</em> use the momentum of sunlight to propel spacecraft \u2014 photons pushing a sail, with no fuel needed.</p>
       <p>Einstein later showed that the relationship between electricity and magnetism is even deeper: <strong>magnetism is what electricity looks like from a different frame of reference.</strong> A stationary charge creates an electric field. But observe that same charge while moving past it, and special relativity transforms part of the electric field into a magnetic field. They are literally the same thing, viewed from different perspectives.</p>
+    `
+  },
+  {
+    id: 'spectral-lines',
+    icon: '\u2b50',
+    title: 'Reading Starlight \u2014 How We Know What Stars Are Made Of',
+    content: `
+      <p>Every element in the universe has a <strong>unique fingerprint in light.</strong> When atoms absorb or emit energy, they do so at very specific wavelengths \u2014 creating bright or dark lines in the spectrum that are as distinctive as a barcode.</p>
+      <div class="isl-grid">
+        <div>
+          <canvas class="isl-canvas" id="spectraCanvas"></canvas>
+          <div class="isl-controls">
+            <label>Element: <strong id="spectraElementLabel">Hydrogen</strong></label>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;" id="spectraButtons"></div>
+          </div>
+        </div>
+        <div>
+          <p><strong>How it works:</strong> Electrons in an atom can only occupy specific energy levels. When an electron jumps between levels, it absorbs or emits a photon with energy exactly equal to the gap. Since E = hf, each transition corresponds to a specific frequency (color) of light.</p>
+          <p><strong>Absorption spectra:</strong> When starlight passes through cooler gas (like a star\u2019s outer atmosphere), atoms absorb their signature wavelengths, creating <em>dark lines</em> against the continuous rainbow \u2014 called <strong>Fraunhofer lines</strong>, first cataloged in 1814.</p>
+          <p><strong>Emission spectra:</strong> When gas is heated (like in a nebula), atoms emit their signature wavelengths as <em>bright lines</em> against a dark background.</p>
+          <p>By matching observed spectral lines to known element signatures, astronomers can determine the <strong>chemical composition, temperature, density, and even velocity</strong> of objects billions of light-years away \u2014 without ever visiting them.</p>
+          <p><strong>Helium was discovered in the Sun before it was found on Earth.</strong> In 1868, astronomers observed an unknown spectral line during a solar eclipse. They named the element "helium" after Helios (the Greek sun god). It wasn\u2019t isolated on Earth until 27 years later.</p>
+          <p>This technique \u2014 <em>spectroscopy</em> \u2014 is how we know that the universe is ~73% hydrogen, ~25% helium, and ~2% everything else. Every element heavier than helium was forged inside stars or their explosive deaths.</p>
+        </div>
+      </div>
     `
   }
 ];
@@ -1177,11 +1414,15 @@ accEl.addEventListener('click', e => {
   if (!wasOpen) {
     item.classList.add('open');
     trigger.setAttribute('aria-expanded', 'true');
-    // Initialize ISL canvas if opening that section
+    // Initialize canvases if opening relevant sections
     if (item.dataset.id === 'inverse-square') {
-      requestAnimationFrame(() => {
-        setTimeout(initISL, 100);
-      });
+      requestAnimationFrame(() => setTimeout(initISL, 100));
+    }
+    if (item.dataset.id === 'voyager') {
+      requestAnimationFrame(() => setTimeout(initDSN, 100));
+    }
+    if (item.dataset.id === 'spectral-lines') {
+      requestAnimationFrame(() => setTimeout(initSpectra, 100));
     }
   }
 });
@@ -1194,6 +1435,7 @@ function selectRegion(id) {
   if (!r) return;
 
   activeSubSegment = null;
+  clearOverlayBands();
 
   // Update active class on main bar
   document.querySelectorAll('.spectrum-region').forEach(el => {
@@ -1217,6 +1459,7 @@ function selectRegion(id) {
   // Show region overview card
   showRegionCard(r);
   activeRegion = id;
+  history.replaceState(null, '', '#' + id);
 }
 
 function buildSubBar(r) {
@@ -1258,6 +1501,12 @@ function selectSubSegment(regionId, subId) {
   });
 
   showSubSegmentCard(r, sub);
+  history.replaceState(null, '', '#' + regionId + '/' + subId);
+  if (sub.overlapBands) {
+    showOverlapBands(sub);
+  } else {
+    clearOverlayBands();
+  }
 }
 
 // ============================================================
@@ -1301,6 +1550,23 @@ function showRegionCard(r) {
 }
 
 function showSubSegmentCard(r, sub) {
+  // Check if bands cross into other regions
+  let crossNote = '';
+  if (sub.overlapBands) {
+    const otherRegions = new Set();
+    sub.overlapBands.forEach(band => {
+      regions.forEach(reg => {
+        if (reg.id !== r.id && band.fMax > reg.fMin && band.fMin < reg.fMax) {
+          otherRegions.add(reg.name);
+        }
+      });
+    });
+    if (otherRegions.size > 0) {
+      const names = [...otherRegions].join(', ');
+      crossNote = `<p style="margin-bottom:1rem;font-size:0.8rem;color:var(--muted);font-family:var(--mono);border-left:2px solid ${sub.color};padding-left:0.6rem;">\u26A1 Some ${sub.name} frequencies extend into the ${names} region of the EM spectrum. The boundary between Radio and Microwave (~1 GHz) is a historical convention \u2014 the physics is the same continuous spectrum.</p>`;
+    }
+  }
+
   containerEl.innerHTML = `
     <div class="card visible" style="border-color: ${sub.color}22;">
       <a class="card-back-link" onclick="selectRegion('${r.id}')">\u2190 back to ${r.name} overview</a>
@@ -1310,6 +1576,7 @@ function showSubSegmentCard(r, sub) {
         <span class="wavelength-badge">\u0192 ${sub.frequency}</span>
       </div>
       <p style="margin-bottom: 1rem; font-size: 0.9rem; color: var(--text);">${sub.description}</p>
+      ${crossNote}
       <div class="card-grid">
         <div class="card-section">
           <h3>Key Facts</h3>
@@ -1405,6 +1672,16 @@ window.addEventListener('resize', () => {
       if (r) drawConnector(r);
     }
     if (islInitialized) resizeISLCanvas();
+    if (dsnInitialized) resizeDSNCanvas();
+    if (spectraInitialized) resizeSpectraCanvas();
+    // Re-render overlay bands on resize
+    if (activeSubSegment) {
+      const r = regions.find(x => x.id === activeRegion);
+      if (r) {
+        const sub = r.subSegments && r.subSegments.find(s => s.id === activeSubSegment);
+        if (sub && sub.overlapBands) showOverlapBands(sub);
+      }
+    }
   }, 50);
 });
 
@@ -1454,6 +1731,29 @@ document.addEventListener('keydown', e => {
     selectRegion(regions[idx - 1].id);
   }
 });
+
+// ============================================================
+//  URL HASH NAVIGATION
+// ============================================================
+function loadFromHash() {
+  const hash = location.hash.replace('#', '');
+  if (!hash) return;
+  const parts = hash.split('/');
+  const regionId = parts[0];
+  const subId = parts[1];
+  const r = regions.find(x => x.id === regionId);
+  if (!r) return;
+  selectRegion(regionId);
+  if (subId && r.subSegments) {
+    const sub = r.subSegments.find(s => s.id === subId);
+    if (sub) {
+      // Small delay to let the sub-bar render
+      setTimeout(() => selectSubSegment(regionId, subId), 100);
+    }
+  }
+}
+// loadFromHash() called at end of script after overlayEl is defined
+window.addEventListener('hashchange', loadFromHash);
 
 // ============================================================
 //  INVERSE SQUARE LAW CANVAS
@@ -1569,6 +1869,471 @@ function drawDetector(ctx, x, y, size, intensity, label, color) {
   ctx.strokeStyle = `rgba(${hexToRgb(color)}, 0.3)`;
   ctx.strokeRect(x + 12, y - half, 5, size);
 }
+
+// ============================================================
+//  SPECTRUM OVERLAY (frequency band highlights)
+// ============================================================
+const overlayEl = document.getElementById('spectrumOverlay');
+
+function freqToPixelX(freqHz) {
+  const barRect = barEl.getBoundingClientRect();
+  const regionEls = barEl.querySelectorAll('.spectrum-region');
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    if (freqHz >= r.fMin && freqHz <= r.fMax) {
+      const el = regionEls[i];
+      const elRect = el.getBoundingClientRect();
+      const logMin = Math.log10(r.fMin);
+      const logMax = Math.log10(r.fMax);
+      const logFreq = Math.log10(freqHz);
+      const frac = (logFreq - logMin) / (logMax - logMin);
+      return (elRect.left - barRect.left) + frac * elRect.width;
+    }
+  }
+  // Frequency below first region or above last — clamp
+  if (freqHz < regions[0].fMin) return 0;
+  const lastEl = regionEls[regionEls.length - 1];
+  return lastEl.getBoundingClientRect().right - barRect.getBoundingClientRect().left;
+}
+
+function showOverlapBands(sub) {
+  clearOverlayBands();
+  if (!sub.overlapBands) return;
+
+  // Calculate patch positions
+  const patches = sub.overlapBands.map(band => {
+    const x1 = freqToPixelX(band.fMin);
+    const x2 = freqToPixelX(band.fMax);
+    return { band, x1, x2 };
+  });
+
+  // Draw patches on the bar (white translucent)
+  patches.forEach(({ band, x1, x2 }) => {
+    const patch = document.createElement('div');
+    patch.className = 'overlap-patch';
+    patch.style.left = x1 + 'px';
+    patch.style.width = Math.max(4, x2 - x1) + 'px';
+    overlayEl.appendChild(patch);
+  });
+
+  // Stack labels ABOVE the bar with leader lines going up
+  const labelH = 13;
+  const labelGap = 1;
+  const labeled = patches.filter(p => p.band.label);
+
+  // Assign tiers to avoid horizontal overlap
+  const tiers = [];
+  const tierAssignment = [];
+
+  labeled.forEach(p => {
+    const labelW = p.band.label.length * 5 + 12;
+    const anchorX = p.x1;
+    const labelLeft = anchorX;
+    const labelRight = anchorX + labelW;
+
+    let placed = false;
+    for (let t = 0; t < tiers.length; t++) {
+      const conflict = tiers[t].some(ex => !(labelRight < ex.left - 3 || labelLeft > ex.right + 3));
+      if (!conflict) {
+        tiers[t].push({ left: labelLeft, right: labelRight });
+        tierAssignment.push(t);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      tiers.push([{ left: labelLeft, right: labelRight }]);
+      tierAssignment.push(tiers.length - 1);
+    }
+  });
+
+  labeled.forEach((p, idx) => {
+    const tier = tierAssignment[idx];
+    // Labels go above: tier 0 is closest to bar, higher tiers go further up
+    const labelBottom = 4 + tier * (labelH + labelGap);
+    const anchorX = p.x1;
+
+    // Leader line from top of bar going up to label
+    const leader = document.createElement('div');
+    leader.className = 'overlap-leader';
+    leader.style.left = anchorX + 'px';
+    leader.style.bottom = '100%';
+    leader.style.height = labelBottom + 'px';
+    overlayEl.appendChild(leader);
+
+    // Label flag above
+    const lbl = document.createElement('div');
+    lbl.className = 'overlap-label-flag';
+    lbl.textContent = p.band.label;
+    lbl.style.left = anchorX + 'px';
+    lbl.style.bottom = 'calc(100% + ' + labelBottom + 'px)';
+    overlayEl.appendChild(lbl);
+  });
+}
+
+function clearOverlayBands() {
+  overlayEl.innerHTML = '';
+}
+
+// ============================================================
+//  DSN CANVAS (Voyager Deep Space Network)
+// ============================================================
+let dsnInitialized = false;
+let dsnCanvas, dsnCtx, dsnSlider, dsnDistLabel, dsnReadout;
+let dsnAngle = 0;
+let dsnAnimId = null;
+
+const DSN_STATIONS = [
+  { name: 'Goldstone', angle: 0, color: '#ff8844' },
+  { name: 'Madrid', angle: 2.094, color: '#44aaff' },    // ~120°
+  { name: 'Canberra', angle: 4.189, color: '#44dd88' }    // ~240°
+];
+
+function initDSN() {
+  dsnCanvas = document.getElementById('dsnCanvas');
+  dsnSlider = document.getElementById('voyagerDistSlider');
+  dsnDistLabel = document.getElementById('voyagerDistLabel');
+  dsnReadout = document.getElementById('voyagerReadout');
+  if (!dsnCanvas || !dsnSlider) return;
+  dsnCtx = dsnCanvas.getContext('2d');
+  dsnSlider.addEventListener('input', drawDSN);
+  resizeDSNCanvas();
+  dsnInitialized = true;
+  // Start rotation animation
+  if (!dsnAnimId) animateDSN();
+}
+
+function resizeDSNCanvas() {
+  if (!dsnCanvas) return;
+  const rect = dsnCanvas.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  dsnCanvas.width = rect.width * dpr;
+  dsnCanvas.height = rect.height * dpr;
+  dsnCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawDSN();
+}
+
+function animateDSN() {
+  dsnAngle += 0.003; // ~30s per revolution
+  if (dsnAngle > Math.PI * 2) dsnAngle -= Math.PI * 2;
+  drawDSN();
+  dsnAnimId = requestAnimationFrame(animateDSN);
+}
+
+function drawDSN() {
+  if (!dsnCtx || !dsnSlider) return;
+  const w = dsnCanvas.width / (window.devicePixelRatio || 1);
+  const h = dsnCanvas.height / (window.devicePixelRatio || 1);
+  const dist = parseFloat(dsnSlider.value);
+
+  dsnCtx.clearRect(0, 0, w, h);
+
+  const earthX = w * 0.2;
+  const earthY = h * 0.5;
+  const earthR = Math.min(w, h) * 0.15;
+
+  // Earth glow
+  const earthGlow = dsnCtx.createRadialGradient(earthX, earthY, earthR * 0.8, earthX, earthY, earthR * 2);
+  earthGlow.addColorStop(0, 'rgba(50, 120, 220, 0.15)');
+  earthGlow.addColorStop(1, 'rgba(50, 120, 220, 0)');
+  dsnCtx.fillStyle = earthGlow;
+  dsnCtx.beginPath();
+  dsnCtx.arc(earthX, earthY, earthR * 2, 0, Math.PI * 2);
+  dsnCtx.fill();
+
+  // Earth body
+  const earthGrad = dsnCtx.createRadialGradient(earthX - earthR * 0.3, earthY - earthR * 0.3, 0, earthX, earthY, earthR);
+  earthGrad.addColorStop(0, '#4488cc');
+  earthGrad.addColorStop(0.5, '#2266aa');
+  earthGrad.addColorStop(1, '#113366');
+  dsnCtx.fillStyle = earthGrad;
+  dsnCtx.beginPath();
+  dsnCtx.arc(earthX, earthY, earthR, 0, Math.PI * 2);
+  dsnCtx.fill();
+
+  // Continents hint (subtle arc patterns)
+  dsnCtx.strokeStyle = 'rgba(80, 180, 120, 0.25)';
+  dsnCtx.lineWidth = 2;
+  for (let i = 0; i < 3; i++) {
+    const a = dsnAngle + i * 2.1;
+    const cx = earthX + Math.cos(a) * earthR * 0.4;
+    const cy = earthY + Math.sin(a * 0.5) * earthR * 0.3;
+    dsnCtx.beginPath();
+    dsnCtx.arc(cx, cy, earthR * 0.3, 0, Math.PI * 0.8);
+    dsnCtx.stroke();
+  }
+
+  // DSN stations
+  let activeStation = null;
+  let bestDot = -Infinity;
+
+  DSN_STATIONS.forEach(st => {
+    const stAngle = st.angle + dsnAngle;
+    const sx = earthX + Math.cos(stAngle) * earthR;
+    const sy = earthY + Math.sin(stAngle) * earthR;
+
+    // Check if facing right (toward Voyager)
+    const dotProduct = Math.cos(stAngle);
+    if (dotProduct > bestDot && dotProduct > 0) {
+      bestDot = dotProduct;
+      activeStation = { ...st, sx, sy, stAngle };
+    }
+
+    // Draw dish marker
+    dsnCtx.fillStyle = st.color;
+    dsnCtx.beginPath();
+    dsnCtx.arc(sx, sy, 4, 0, Math.PI * 2);
+    dsnCtx.fill();
+
+    // Label (only if on the visible side)
+    if (dotProduct > -0.3) {
+      dsnCtx.fillStyle = st.color;
+      dsnCtx.font = '9px "DM Mono", monospace';
+      dsnCtx.textAlign = 'center';
+      const labelX = earthX + Math.cos(stAngle) * (earthR + 14);
+      const labelY = earthY + Math.sin(stAngle) * (earthR + 14);
+      dsnCtx.fillText(st.name, labelX, labelY + 3);
+    }
+  });
+
+  // Voyager position
+  const maxVoyagerX = w * 0.88;
+  const voyagerX = earthX + earthR + 30 + (maxVoyagerX - earthX - earthR - 30) * (dist / 30);
+  const voyagerY = earthY;
+
+  // Signal beam from active station
+  if (activeStation) {
+    const beamSpread = 0.04; // narrow beam
+    dsnCtx.beginPath();
+    dsnCtx.moveTo(activeStation.sx, activeStation.sy);
+    dsnCtx.lineTo(voyagerX, voyagerY - (voyagerX - activeStation.sx) * beamSpread);
+    dsnCtx.lineTo(voyagerX, voyagerY + (voyagerX - activeStation.sx) * beamSpread);
+    dsnCtx.closePath();
+    const beamGrad = dsnCtx.createLinearGradient(activeStation.sx, 0, voyagerX, 0);
+    beamGrad.addColorStop(0, hexToRgba(activeStation.color, 0.25));
+    beamGrad.addColorStop(0.5, hexToRgba(activeStation.color, 0.08));
+    beamGrad.addColorStop(1, hexToRgba(activeStation.color, 0.02));
+    dsnCtx.fillStyle = beamGrad;
+    dsnCtx.fill();
+
+    // Beam center line
+    dsnCtx.beginPath();
+    dsnCtx.moveTo(activeStation.sx, activeStation.sy);
+    dsnCtx.lineTo(voyagerX, voyagerY);
+    dsnCtx.strokeStyle = hexToRgba(activeStation.color, 0.15);
+    dsnCtx.lineWidth = 1;
+    dsnCtx.setLineDash([4, 6]);
+    dsnCtx.stroke();
+    dsnCtx.setLineDash([]);
+  }
+
+  // Voyager spacecraft (simple icon)
+  const vSize = 8;
+  // Body
+  dsnCtx.fillStyle = '#ccccdd';
+  dsnCtx.fillRect(voyagerX - vSize, voyagerY - 2, vSize * 2, 4);
+  // Dish (pointing left toward Earth)
+  dsnCtx.beginPath();
+  dsnCtx.moveTo(voyagerX - vSize, voyagerY - vSize);
+  dsnCtx.lineTo(voyagerX - vSize - 4, voyagerY);
+  dsnCtx.lineTo(voyagerX - vSize, voyagerY + vSize);
+  dsnCtx.strokeStyle = '#aaaacc';
+  dsnCtx.lineWidth = 1.5;
+  dsnCtx.stroke();
+  // Boom
+  dsnCtx.beginPath();
+  dsnCtx.moveTo(voyagerX, voyagerY);
+  dsnCtx.lineTo(voyagerX + vSize + 6, voyagerY - vSize);
+  dsnCtx.moveTo(voyagerX, voyagerY);
+  dsnCtx.lineTo(voyagerX + vSize + 6, voyagerY + vSize);
+  dsnCtx.strokeStyle = '#888899';
+  dsnCtx.lineWidth = 1;
+  dsnCtx.stroke();
+
+  // Signal strength indicator (glow around Voyager fading with distance)
+  const signalStrength = 1 / (dist * dist) * 25;
+  if (signalStrength > 0.01) {
+    const sigGlow = dsnCtx.createRadialGradient(voyagerX, voyagerY, 0, voyagerX, voyagerY, 20);
+    sigGlow.addColorStop(0, `rgba(100, 200, 255, ${Math.min(signalStrength, 0.4)})`);
+    sigGlow.addColorStop(1, 'rgba(100, 200, 255, 0)');
+    dsnCtx.fillStyle = sigGlow;
+    dsnCtx.beginPath();
+    dsnCtx.arc(voyagerX, voyagerY, 20, 0, Math.PI * 2);
+    dsnCtx.fill();
+  }
+
+  // Label
+  dsnCtx.fillStyle = '#8888aa';
+  dsnCtx.font = '9px "DM Mono", monospace';
+  dsnCtx.textAlign = 'center';
+  dsnCtx.fillText('Voyager 1', voyagerX, voyagerY + vSize + 16);
+
+  // Update readout
+  const roundTripHrs = (dist * 1e9 * 2 / 299792.458 / 3600).toFixed(1);
+  dsnDistLabel.textContent = dist.toFixed(1);
+  dsnReadout.textContent = `Signal round-trip: ~${roundTripHrs} hours`;
+}
+
+// ============================================================
+//  SPECTRAL LINES CANVAS
+// ============================================================
+let spectraInitialized = false;
+let spectraCanvas, spectraCtx, spectraCurrentElement;
+
+// Spectral line data: wavelengths in nm for key elements (visible range absorption lines)
+const SPECTRAL_ELEMENTS = {
+  'Hydrogen': { color: '#ff4466', lines: [410.2, 434.0, 486.1, 656.3], names: ['H\u03b4', 'H\u03b3', 'H\u03b2', 'H\u03b1'] },
+  'Helium': { color: '#ffcc44', lines: [388.9, 447.1, 471.3, 492.2, 501.6, 587.6, 667.8], names: ['', '', '', '', '', 'D3', ''] },
+  'Sodium': { color: '#ff8800', lines: [589.0, 589.6], names: ['D2', 'D1'] },
+  'Iron': { color: '#8899bb', lines: [382.0, 385.6, 404.6, 438.4, 466.8, 495.8, 516.7, 527.0, 532.8, 537.1, 561.6], names: [] },
+  'Calcium': { color: '#dd6688', lines: [393.4, 396.8, 422.7, 527.0, 616.2, 643.9], names: ['K', 'H', '', '', '', ''] },
+  'Oxygen': { color: '#44ccff', lines: [394.7, 436.8, 532.9, 543.5, 615.8, 645.4], names: [] },
+  'Neon': { color: '#ff3322', lines: [585.2, 588.2, 603.0, 607.4, 616.4, 621.7, 626.6, 633.4, 640.2, 650.7, 659.9, 667.8, 692.9], names: [] },
+  'Mercury': { color: '#aabbff', lines: [404.7, 407.8, 435.8, 546.1, 577.0, 579.1], names: ['h', '', 'g', 'e', '', ''] }
+};
+
+function initSpectra() {
+  spectraCanvas = document.getElementById('spectraCanvas');
+  if (!spectraCanvas) return;
+  spectraCtx = spectraCanvas.getContext('2d');
+  spectraCurrentElement = 'Hydrogen';
+
+  // Build element buttons
+  const btnContainer = document.getElementById('spectraButtons');
+  if (btnContainer) {
+    btnContainer.innerHTML = '';
+    Object.keys(SPECTRAL_ELEMENTS).forEach(name => {
+      const btn = document.createElement('button');
+      btn.textContent = name;
+      btn.style.cssText = `font-family:var(--mono);font-size:0.55rem;padding:3px 8px;border-radius:3px;border:1px solid ${SPECTRAL_ELEMENTS[name].color}44;background:${name === spectraCurrentElement ? SPECTRAL_ELEMENTS[name].color + '33' : 'transparent'};color:${SPECTRAL_ELEMENTS[name].color};cursor:pointer;transition:background 0.2s;`;
+      btn.addEventListener('click', () => {
+        spectraCurrentElement = name;
+        // Update button styles
+        btnContainer.querySelectorAll('button').forEach(b => {
+          const elName = b.textContent;
+          b.style.background = elName === name ? SPECTRAL_ELEMENTS[elName].color + '33' : 'transparent';
+        });
+        document.getElementById('spectraElementLabel').textContent = name;
+        drawSpectra();
+      });
+      btnContainer.appendChild(btn);
+    });
+  }
+
+  resizeSpectraCanvas();
+  spectraInitialized = true;
+}
+
+function resizeSpectraCanvas() {
+  if (!spectraCanvas) return;
+  const rect = spectraCanvas.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  spectraCanvas.width = rect.width * dpr;
+  spectraCanvas.height = rect.height * dpr;
+  spectraCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawSpectra();
+}
+
+function nmToColor(nm) {
+  // Convert wavelength in nm to approximate RGB
+  let r = 0, g = 0, b = 0;
+  if (nm >= 380 && nm < 440) { r = -(nm - 440) / 60; b = 1; }
+  else if (nm >= 440 && nm < 490) { g = (nm - 440) / 50; b = 1; }
+  else if (nm >= 490 && nm < 510) { g = 1; b = -(nm - 510) / 20; }
+  else if (nm >= 510 && nm < 580) { r = (nm - 510) / 70; g = 1; }
+  else if (nm >= 580 && nm < 645) { r = 1; g = -(nm - 645) / 65; }
+  else if (nm >= 645 && nm <= 700) { r = 1; }
+  // Intensity falloff at edges
+  let factor = 1;
+  if (nm >= 380 && nm < 420) factor = 0.3 + 0.7 * (nm - 380) / 40;
+  else if (nm > 650 && nm <= 700) factor = 0.3 + 0.7 * (700 - nm) / 50;
+  else if (nm < 380 || nm > 700) factor = 0;
+  return `rgb(${Math.round(r * factor * 255)},${Math.round(g * factor * 255)},${Math.round(b * factor * 255)})`;
+}
+
+function drawSpectra() {
+  if (!spectraCtx) return;
+  const w = spectraCanvas.width / (window.devicePixelRatio || 1);
+  const h = spectraCanvas.height / (window.devicePixelRatio || 1);
+  const el = SPECTRAL_ELEMENTS[spectraCurrentElement];
+
+  spectraCtx.clearRect(0, 0, w, h);
+
+  const spectrumTop = 20;
+  const spectrumH = h * 0.35;
+  const absorbTop = spectrumTop + spectrumH + 30;
+  const absorbH = h * 0.25;
+  const pad = 20;
+  const specW = w - pad * 2;
+  const minNm = 380, maxNm = 700;
+
+  // Draw continuous spectrum
+  for (let x = 0; x < specW; x++) {
+    const nm = minNm + (x / specW) * (maxNm - minNm);
+    spectraCtx.fillStyle = nmToColor(nm);
+    spectraCtx.fillRect(pad + x, spectrumTop, 1, spectrumH);
+  }
+
+  // Label
+  spectraCtx.fillStyle = '#888';
+  spectraCtx.font = '9px "DM Mono", monospace';
+  spectraCtx.textAlign = 'center';
+  spectraCtx.fillText('Continuous spectrum (no absorption)', w / 2, spectrumTop - 6);
+
+  // Draw absorption spectrum (continuous minus element lines)
+  for (let x = 0; x < specW; x++) {
+    const nm = minNm + (x / specW) * (maxNm - minNm);
+    // Check if near an absorption line
+    let absorbed = false;
+    el.lines.forEach(line => {
+      if (Math.abs(nm - line) < 1.5) absorbed = true;
+    });
+    spectraCtx.fillStyle = absorbed ? '#0a0a12' : nmToColor(nm);
+    spectraCtx.fillRect(pad + x, absorbTop, 1, absorbH);
+  }
+
+  // Label
+  spectraCtx.fillStyle = '#888';
+  spectraCtx.fillText(`${spectraCurrentElement} absorption spectrum`, w / 2, absorbTop - 6);
+
+  // Draw absorption line markers with labels
+  spectraCtx.strokeStyle = el.color;
+  spectraCtx.lineWidth = 1;
+  spectraCtx.fillStyle = el.color;
+  spectraCtx.font = '8px "DM Mono", monospace';
+  spectraCtx.textAlign = 'center';
+
+  el.lines.forEach((line, i) => {
+    if (line < minNm || line > maxNm) return;
+    const x = pad + ((line - minNm) / (maxNm - minNm)) * specW;
+
+    // Tick mark below absorption spectrum
+    spectraCtx.beginPath();
+    spectraCtx.moveTo(x, absorbTop + absorbH);
+    spectraCtx.lineTo(x, absorbTop + absorbH + 8);
+    spectraCtx.stroke();
+
+    // Wavelength label
+    const label = (el.names && el.names[i]) ? `${el.names[i]} ${Math.round(line)}` : `${Math.round(line)}`;
+    spectraCtx.fillText(label, x, absorbTop + absorbH + 18);
+  });
+
+  // nm axis
+  spectraCtx.fillStyle = '#666';
+  spectraCtx.font = '8px "DM Mono", monospace';
+  for (let nm = 400; nm <= 700; nm += 50) {
+    const x = pad + ((nm - minNm) / (maxNm - minNm)) * specW;
+    spectraCtx.textAlign = 'center';
+    spectraCtx.fillText(nm + ' nm', x, absorbTop + absorbH + 30);
+  }
+}
+
+// ============================================================
+//  INIT: Load from URL hash (must be after all elements defined)
+// ============================================================
+loadFromHash();
 </script>
 </body>
 </html>
