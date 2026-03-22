@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Electromagnetic Spectrum — An Interactive Guide</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a0a12;
+  --text: #e8e8f0;
+  --muted: #8888aa;
+  --card-bg: #14142a;
+  --border: #2a2a4a;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+header {
+  text-align: center;
+  padding: 3rem 1rem 1rem;
+}
+
+header h1 {
+  font-size: clamp(1.8rem, 5vw, 3rem);
+  background: linear-gradient(90deg, #ff0000, #ff8800, #ffff00, #00ff00, #0088ff, #4400ff, #8800ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 0.5rem;
+}
+
+header p {
+  color: var(--muted);
+  max-width: 600px;
+  margin: 0 auto;
+  font-size: 1.05rem;
+}
+
+/* ---- Spectrum Bar ---- */
+.spectrum-container {
+  position: relative;
+  margin: 2rem auto;
+  max-width: 1200px;
+  padding: 0 1rem;
+}
+
+.spectrum-bar {
+  position: relative;
+  height: 80px;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: crosshair;
+  display: flex;
+}
+
+.spectrum-region {
+  position: relative;
+  height: 100%;
+  transition: filter 0.2s, flex 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-right: 1px solid rgba(0,0,0,0.3);
+}
+
+.spectrum-region:last-child { border-right: none; }
+
+.spectrum-region:hover {
+  filter: brightness(1.3);
+  z-index: 2;
+}
+
+.spectrum-region.active {
+  filter: brightness(1.4) saturate(1.2);
+  z-index: 3;
+}
+
+.region-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(255,255,255,0.9);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  writing-mode: horizontal-tb;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+.freq-axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.3rem 0;
+  font-family: monospace;
+}
+
+/* ---- Info Cards ---- */
+.info-panel {
+  max-width: 1200px;
+  margin: 1.5rem auto;
+  padding: 0 1rem;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2rem;
+  display: none;
+  animation: fadeIn 0.35s ease;
+}
+
+.card.visible { display: block; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.card-icon {
+  font-size: 2.5rem;
+}
+
+.card-header h2 {
+  font-size: 1.6rem;
+}
+
+.card-header .wavelength-badge {
+  font-family: monospace;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: var(--muted);
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.25rem;
+}
+
+.card-section {
+  background: rgba(255,255,255,0.03);
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+
+.card-section h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 0.75rem;
+}
+
+.card-section p, .card-section li {
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.card-section ul {
+  list-style: none;
+  padding: 0;
+}
+
+.card-section ul li::before {
+  content: "→ ";
+  color: var(--muted);
+}
+
+.fun-fact {
+  border-left: 3px solid;
+  padding-left: 1rem;
+  margin-top: 0.75rem;
+  font-style: italic;
+  color: #ccccdd;
+}
+
+/* ---- Inverse Square Law ---- */
+.isl-section {
+  max-width: 1200px;
+  margin: 3rem auto;
+  padding: 0 1rem;
+}
+
+.isl-section h2 {
+  text-align: center;
+  font-size: 1.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.isl-section > p {
+  text-align: center;
+  color: var(--muted);
+  max-width: 700px;
+  margin: 0 auto 2rem;
+}
+
+.isl-container {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2rem;
+}
+
+.isl-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  align-items: start;
+}
+
+@media (max-width: 768px) {
+  .isl-grid { grid-template-columns: 1fr; }
+}
+
+.isl-canvas-wrap {
+  position: relative;
+}
+
+canvas#islCanvas {
+  width: 100%;
+  height: 360px;
+  border-radius: 12px;
+  background: #08080f;
+}
+
+.isl-controls {
+  margin-top: 1rem;
+}
+
+.isl-controls label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.isl-controls input[type=range] {
+  width: 100%;
+  accent-color: #ffaa00;
+}
+
+.isl-readout {
+  font-family: monospace;
+  font-size: 0.95rem;
+  margin-top: 0.5rem;
+  color: #ffcc44;
+}
+
+.isl-explanation {
+  font-size: 0.95rem;
+}
+
+.isl-explanation h3 {
+  font-size: 1.1rem;
+  margin-bottom: 0.75rem;
+}
+
+.isl-formula {
+  background: rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 1.25rem;
+  text-align: center;
+  font-size: 1.3rem;
+  font-family: 'Georgia', serif;
+  margin: 1rem 0;
+  letter-spacing: 0.02em;
+}
+
+.isl-formula .frac {
+  display: inline-block;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.isl-formula .frac-num {
+  display: block;
+  border-bottom: 2px solid var(--muted);
+  padding-bottom: 3px;
+}
+
+.isl-formula .frac-den {
+  display: block;
+  padding-top: 3px;
+}
+
+.isl-examples {
+  margin-top: 1rem;
+}
+
+.isl-examples h4 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.isl-examples ul {
+  list-style: none;
+  padding: 0;
+}
+
+.isl-examples li {
+  padding: 0.3rem 0;
+  font-size: 0.9rem;
+}
+
+.isl-examples li::before {
+  content: "✦ ";
+  color: #ffaa00;
+}
+
+/* ---- Footer ---- */
+footer {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+footer a {
+  color: #7799ff;
+  text-decoration: none;
+}
+
+footer a:hover { text-decoration: underline; }
+
+/* Prompt card */
+.prompt-hint {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.95rem;
+  padding: 1rem;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>The Electromagnetic Spectrum</h1>
+  <p>From radio waves longer than buildings to gamma rays smaller than atoms — explore the full range of light that fills our universe.</p>
+</header>
+
+<div class="spectrum-container">
+  <div class="spectrum-bar" id="spectrumBar"></div>
+  <div class="freq-axis">
+    <span>← Lower frequency / Longer wavelength</span>
+    <span>Higher frequency / Shorter wavelength →</span>
+  </div>
+</div>
+
+<div class="info-panel">
+  <div class="prompt-hint" id="promptHint">Click a region above to explore it</div>
+  <div id="cardContainer"></div>
+</div>
+
+<div class="isl-section">
+  <h2>The Inverse-Square Law</h2>
+  <p>Why does a star look faint from far away? Why does a campfire feel less warm as you step back? It all comes down to geometry.</p>
+  <div class="isl-container">
+    <div class="isl-grid">
+      <div class="isl-canvas-wrap">
+        <canvas id="islCanvas"></canvas>
+        <div class="isl-controls">
+          <label>Distance from source: <strong id="distLabel">2</strong>× baseline</label>
+          <input type="range" id="distSlider" min="1" max="8" step="0.1" value="2">
+          <div class="isl-readout" id="islReadout">Intensity: 25.0% of original</div>
+        </div>
+      </div>
+      <div class="isl-explanation">
+        <h3>How it works</h3>
+        <p>Electromagnetic radiation spreads outward from a source in all directions, like an expanding sphere. As the sphere grows, the same total energy is spread over a larger area.</p>
+        <p>Because a sphere's surface area grows with the <em>square</em> of the radius (A = 4πr²), the intensity — energy per unit area — decreases as the inverse square of distance:</p>
+        <div class="isl-formula">
+          I = <span class="frac"><span class="frac-num">P</span><span class="frac-den">4π r²</span></span>
+        </div>
+        <p>Double the distance → ¼ the intensity. Triple it → 1/9th. This applies to <em>all</em> EM radiation: light, radio, X-rays, everything.</p>
+        <div class="isl-examples">
+          <h4>Real-world examples</h4>
+          <ul>
+            <li>The Sun is ~400× farther than the Moon, so sunlight reaching us is far more intense only because the Sun is enormously more luminous</li>
+            <li>Mars receives only ~43% of the solar energy Earth gets, because it's ~1.52× farther from the Sun</li>
+            <li>WiFi signal drops to 25% when you double your distance from the router</li>
+            <li>The Voyager 1 signal is so faint at 24 billion km that NASA needs 70-meter dishes to detect it</li>
+            <li>A camera flash effective at 3m is nearly useless at 10m — only 9% intensity remains</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <p>Built for fun and learning. Part of the <a href="../../">Sparky</a> project collection.</p>
+</footer>
+
+<script>
+// ---- Spectrum Data ----
+const regions = [
+  {
+    id: 'radio',
+    name: 'Radio',
+    color: '#884422',
+    gradient: ['#553311', '#aa6633'],
+    flex: 1.3,
+    icon: '📻',
+    wavelength: '1 mm – 100 km+',
+    frequency: '3 kHz – 300 GHz',
+    facts: [
+      'The longest radio waves detected from space stretch across the entire observable universe.',
+      'Jupiter emits powerful radio bursts — it was the first planet detected by radio telescope in 1955.',
+      'The cosmic microwave background (CMB) radiation, the afterglow of the Big Bang, peaks in microwaves at the edge of the radio spectrum.'
+    ],
+    uses: [
+      'AM/FM radio broadcasting',
+      'TV signals',
+      'WiFi and Bluetooth (2.4 GHz / 5 GHz)',
+      'Radar and air traffic control',
+      'Deep-space communication (e.g. NASA\'s Deep Space Network)',
+      'Radio astronomy (mapping galaxies, detecting pulsars)'
+    ],
+    space: 'Radio telescopes revealed that the Milky Way\'s center contains a supermassive black hole (Sagittarius A*). The Event Horizon Telescope, a network of radio dishes, captured the first image of a black hole\'s shadow in 2019.',
+    funFact: 'The Wow! Signal — a strong narrowband radio signal detected in 1977 — lasted 72 seconds and has never been explained. It remains one of the most tantalizing candidates for an extraterrestrial signal.'
+  },
+  {
+    id: 'microwave',
+    name: 'Microwave',
+    color: '#996633',
+    gradient: ['#774422', '#bb8844'],
+    flex: 0.8,
+    icon: '🔥',
+    wavelength: '1 mm – 25 cm',
+    frequency: '1 GHz – 300 GHz',
+    facts: [
+      'Microwaves were accidentally discovered to heat food in 1945 when Percy Spencer noticed a chocolate bar melting in his pocket near a radar set.',
+      'The CMB is microwave radiation from about 380,000 years after the Big Bang, and its temperature is 2.725 K (−270.4°C).',
+    ],
+    uses: [
+      'Microwave ovens (2.45 GHz)',
+      'Cell phone networks (4G/5G)',
+      'Satellite communications',
+      'GPS navigation',
+      'Weather radar',
+    ],
+    space: 'The Planck satellite mapped the CMB in microwaves with unprecedented precision, revealing tiny temperature variations that are the seeds of all cosmic structure — every galaxy and star cluster.',
+    funFact: 'In 1964, Penzias and Wilson discovered the CMB by accident while trying to eliminate "noise" from their microwave antenna. They initially thought it was pigeon droppings. They won the Nobel Prize.'
+  },
+  {
+    id: 'infrared',
+    name: 'Infrared',
+    color: '#cc3300',
+    gradient: ['#991100', '#ff5522'],
+    flex: 1.1,
+    icon: '🌡️',
+    wavelength: '700 nm – 1 mm',
+    frequency: '300 GHz – 430 THz',
+    facts: [
+      'Infrared was the first "invisible" light discovered — by William Herschel in 1800 using a prism and thermometer.',
+      'About half of the Sun\'s energy reaches Earth as infrared.',
+      'Every object above absolute zero emits infrared radiation.',
+    ],
+    uses: [
+      'Thermal cameras and night vision',
+      'TV remote controls',
+      'Fiber optic communications',
+      'Heating lamps',
+      'Medical thermography',
+      'Astronomy (seeing through dust clouds)',
+    ],
+    space: 'The James Webb Space Telescope (JWST) observes primarily in infrared, allowing it to peer through cosmic dust and see the most distant, oldest galaxies — their light has been redshifted into infrared by the expansion of the universe.',
+    funFact: 'Pit vipers, boas, and pythons have infrared-sensing organs that let them "see" the body heat of prey in total darkness, essentially giving them built-in thermal cameras.'
+  },
+  {
+    id: 'visible',
+    name: 'Visible',
+    color: '#44aa44',
+    gradient: ['#ff0000', '#ff8800', '#ffff00', '#00cc00', '#0066ff', '#6600cc'],
+    flex: 0.6,
+    icon: '🌈',
+    wavelength: '380 – 700 nm',
+    frequency: '430 – 790 THz',
+    facts: [
+      'Visible light is an incredibly narrow slice — less than 0.0035% of the full electromagnetic spectrum.',
+      'Human eyes evolved to see this band because it\'s the peak of the Sun\'s emission.',
+      'The "colors" we see are our brain\'s interpretation of different wavelengths — color doesn\'t exist outside of perception.',
+    ],
+    uses: [
+      'Literally everything you see',
+      'Photography and cinema',
+      'Fiber optic data (some bands)',
+      'Laser pointers and shows',
+      'Photosynthesis in plants',
+      'Solar energy collection',
+    ],
+    space: 'Most of humanity\'s astronomical knowledge came from visible light. The Hubble Space Telescope\'s visible-light images — like the Pillars of Creation — transformed our understanding of stellar nurseries, distant galaxies, and the expansion of the universe.',
+    funFact: 'Mantis shrimp can see 12–16 types of color receptors (humans have 3). They perceive ultraviolet and polarized light, making their vision arguably the most complex in the animal kingdom.'
+  },
+  {
+    id: 'ultraviolet',
+    name: 'Ultra­violet',
+    color: '#6633cc',
+    gradient: ['#4411aa', '#9944ff'],
+    flex: 0.9,
+    icon: '😎',
+    wavelength: '10 – 380 nm',
+    frequency: '790 THz – 30 PHz',
+    facts: [
+      'UV light causes sunburn by damaging DNA in skin cells, triggering the inflammatory response we feel as pain.',
+      'The ozone layer absorbs 97–99% of the Sun\'s medium-frequency UV radiation.',
+      'Many flowers have UV patterns invisible to us but visible to bees, guiding them to nectar.',
+    ],
+    uses: [
+      'Sterilization and water purification',
+      'Black lights and forensic investigation',
+      'Curing UV-reactive resins (3D printing, dentistry)',
+      'Tanning beds',
+      'Detecting counterfeit currency',
+      'Semiconductor photolithography',
+    ],
+    space: 'Hot, young stars emit strongly in UV. NASA\'s GALEX telescope surveyed the sky in UV light, revealing star formation activity across billions of years. Without UV observations, we\'d miss much of the universe\'s stellar "birth record."',
+    funFact: 'Reindeer can see ultraviolet light. In snowy Arctic conditions, UV vision helps them spot food (lichen absorbs UV, appearing dark against UV-bright snow) and predators (fur absorbs UV, making animals stand out).'
+  },
+  {
+    id: 'xray',
+    name: 'X-Ray',
+    color: '#2299dd',
+    gradient: ['#115588', '#33bbff'],
+    flex: 0.9,
+    icon: '🦴',
+    wavelength: '0.01 – 10 nm',
+    frequency: '30 PHz – 30 EHz',
+    facts: [
+      'X-rays were discovered by Wilhelm Röntgen in 1895. He called them "X" because their nature was unknown.',
+      'The first X-ray image was of Röntgen\'s wife\'s hand — she reportedly said, "I have seen my death."',
+      'X-ray photons carry enough energy to ionize atoms and break chemical bonds.',
+    ],
+    uses: [
+      'Medical and dental imaging',
+      'CT scans (computed tomography)',
+      'Airport security scanners',
+      'Crystallography (determining molecular structures)',
+      'Industrial quality inspection',
+      'Cancer radiotherapy',
+    ],
+    space: 'NASA\'s Chandra X-ray Observatory revealed that galaxy clusters are filled with vast clouds of superheated gas at millions of degrees. X-ray astronomy shows us the universe\'s most violent events: black holes devouring matter, neutron star collisions, and supernova remnants.',
+    funFact: 'The DNA double helix structure was discovered using X-ray crystallography. Rosalind Franklin\'s famous "Photo 51" was an X-ray diffraction image that Watson and Crick used to deduce DNA\'s structure in 1953.'
+  },
+  {
+    id: 'gamma',
+    name: 'Gamma',
+    color: '#44ddaa',
+    gradient: ['#118866', '#66ffcc'],
+    flex: 0.9,
+    icon: '☢️',
+    wavelength: '< 0.01 nm',
+    frequency: '> 30 EHz',
+    facts: [
+      'Gamma rays have the most energy of any EM radiation — a single gamma photon can carry millions of times the energy of a visible photon.',
+      'They\'re produced by nuclear reactions, radioactive decay, and the most energetic cosmic events.',
+      'Earth\'s atmosphere completely blocks gamma rays — you can only observe cosmic gamma rays from space.',
+    ],
+    uses: [
+      'Cancer treatment (gamma knife surgery)',
+      'Sterilizing medical equipment and food',
+      'Nuclear energy monitoring',
+      'PET scans (positron emission tomography)',
+      'Industrial thickness gauging',
+    ],
+    space: 'Gamma-ray bursts (GRBs) are the most energetic events in the universe after the Big Bang. A typical GRB releases more energy in seconds than our Sun will emit in its entire 10-billion-year lifetime. NASA\'s Fermi Gamma-ray Space Telescope detects about one GRB per day.',
+    funFact: 'In the 1960s, the US military\'s Vela satellites — designed to detect covert nuclear tests — instead discovered gamma-ray bursts coming from deep space. It took 30 more years to figure out they came from collapsing stars and merging neutron stars.'
+  }
+];
+
+// ---- Build Spectrum Bar ----
+const bar = document.getElementById('spectrumBar');
+const container = document.getElementById('cardContainer');
+const hint = document.getElementById('promptHint');
+let activeRegion = null;
+
+regions.forEach(r => {
+  const el = document.createElement('div');
+  el.className = 'spectrum-region';
+  el.style.flex = r.flex;
+  el.dataset.id = r.id;
+
+  if (r.gradient.length > 2) {
+    el.style.background = `linear-gradient(90deg, ${r.gradient.join(', ')})`;
+  } else {
+    el.style.background = `linear-gradient(135deg, ${r.gradient[0]}, ${r.gradient[1]})`;
+  }
+
+  const label = document.createElement('span');
+  label.className = 'region-label';
+  label.textContent = r.name;
+  el.appendChild(label);
+
+  el.addEventListener('click', () => selectRegion(r.id));
+  bar.appendChild(el);
+});
+
+function selectRegion(id) {
+  const r = regions.find(x => x.id === id);
+  if (!r) return;
+
+  // Update active state on bar
+  document.querySelectorAll('.spectrum-region').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === id);
+  });
+
+  hint.style.display = 'none';
+
+  container.innerHTML = `
+    <div class="card visible" style="border-color: ${r.color}44;">
+      <div class="card-header">
+        <span class="card-icon">${r.icon}</span>
+        <h2 style="color: ${r.color};">${r.name} ${r.id === 'gamma' ? 'Rays' : r.id === 'xray' ? 'Rays' : r.id === 'visible' ? 'Light' : 'Waves'}</h2>
+        <span class="wavelength-badge">λ ${r.wavelength}</span>
+        <span class="wavelength-badge">ƒ ${r.frequency}</span>
+      </div>
+      <div class="card-grid">
+        <div class="card-section">
+          <h3>Key Facts</h3>
+          <ul>${r.facts.map(f => `<li>${f}</li>`).join('')}</ul>
+        </div>
+        <div class="card-section">
+          <h3>Practical Uses</h3>
+          <ul>${r.uses.map(u => `<li>${u}</li>`).join('')}</ul>
+        </div>
+        <div class="card-section">
+          <h3>In Space</h3>
+          <p>${r.space}</p>
+        </div>
+        <div class="card-section">
+          <h3>Fun Fact</h3>
+          <div class="fun-fact" style="border-color: ${r.color};">${r.funFact}</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  activeRegion = id;
+}
+
+// ---- Keyboard navigation ----
+document.addEventListener('keydown', e => {
+  if (!activeRegion && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+    selectRegion(regions[0].id);
+    return;
+  }
+  const idx = regions.findIndex(r => r.id === activeRegion);
+  if (e.key === 'ArrowRight' && idx < regions.length - 1) {
+    selectRegion(regions[idx + 1].id);
+  } else if (e.key === 'ArrowLeft' && idx > 0) {
+    selectRegion(regions[idx - 1].id);
+  }
+});
+
+// ---- Inverse Square Law Visualization ----
+const canvas = document.getElementById('islCanvas');
+const ctx = canvas.getContext('2d');
+const slider = document.getElementById('distSlider');
+const distLabel = document.getElementById('distLabel');
+const readout = document.getElementById('islReadout');
+
+function resizeCanvas() {
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * window.devicePixelRatio;
+  canvas.height = rect.height * window.devicePixelRatio;
+  ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+  drawISL();
+}
+
+function drawISL() {
+  const w = canvas.width / window.devicePixelRatio;
+  const h = canvas.height / window.devicePixelRatio;
+  const dist = parseFloat(slider.value);
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Source
+  const sx = 50, sy = h / 2;
+
+  // Draw expanding wavefronts
+  const maxR = w * 0.85;
+  for (let i = 1; i <= 12; i++) {
+    const r = i * 40;
+    if (r > maxR) break;
+    const alpha = 0.15 * (1 - r / maxR);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, -Math.PI * 0.4, Math.PI * 0.4);
+    ctx.strokeStyle = `rgba(255, 200, 50, ${alpha})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Draw rays
+  const numRays = 7;
+  for (let i = 0; i < numRays; i++) {
+    const angle = -0.4 + (0.8 * i / (numRays - 1));
+    const endX = sx + Math.cos(angle * Math.PI) * maxR;
+    const endY = sy + Math.sin(angle * Math.PI) * maxR;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(endX, endY);
+    ctx.strokeStyle = 'rgba(255, 200, 50, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Source glow
+  const grd = ctx.createRadialGradient(sx, sy, 0, sx, sy, 30);
+  grd.addColorStop(0, 'rgba(255, 220, 80, 0.9)');
+  grd.addColorStop(0.5, 'rgba(255, 180, 30, 0.3)');
+  grd.addColorStop(1, 'rgba(255, 150, 0, 0)');
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.arc(sx, sy, 30, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffdd66';
+  ctx.beginPath();
+  ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Distance markers at 1x and dist*x
+  const baseX = sx + 60;
+  const distX = sx + 60 * dist;
+
+  // Baseline detector (1x)
+  const baseSize = 40;
+  const baseIntensity = 1;
+  drawDetector(baseX, sy, baseSize, baseIntensity, '1×', '#66ff88');
+
+  // Distance detector
+  if (dist > 1) {
+    const distIntensity = 1 / (dist * dist);
+    const clampedX = Math.min(distX, w - 60);
+    drawDetector(clampedX, sy, baseSize, distIntensity, dist.toFixed(1) + '×', '#ff8866');
+  }
+
+  // Labels
+  distLabel.textContent = dist.toFixed(1);
+  const pct = (100 / (dist * dist)).toFixed(1);
+  readout.textContent = `Intensity at ${dist.toFixed(1)}× distance: ${pct}% of original`;
+}
+
+function drawDetector(x, y, size, intensity, label, color) {
+  // Detection area
+  const half = size / 2;
+  ctx.fillStyle = `rgba(${hexToRgb(color)}, ${0.15 + 0.6 * intensity})`;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.rect(x - 4, y - half, 8, size);
+  ctx.fill();
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle = color;
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, x, y + half + 18);
+
+  // Intensity bar
+  const barH = size * intensity;
+  ctx.fillStyle = `rgba(${hexToRgb(color)}, 0.8)`;
+  ctx.fillRect(x + 14, y + half - barH, 6, barH);
+  ctx.strokeStyle = `rgba(${hexToRgb(color)}, 0.4)`;
+  ctx.strokeRect(x + 14, y - half, 6, size);
+}
+
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return `${r},${g},${b}`;
+}
+
+slider.addEventListener('input', drawISL);
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+</script>
+</body>
+</html>

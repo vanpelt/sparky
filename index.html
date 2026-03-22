@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sparky — Project Collection</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #fafafa;
+  --text: #1a1a2e;
+  --muted: #666680;
+  --link: #2255cc;
+  --card-bg: #ffffff;
+  --border: #e0e0e8;
+  --accent: #ff6b35;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0e18;
+    --text: #e4e4f0;
+    --muted: #8888aa;
+    --link: #6699ff;
+    --card-bg: #16162a;
+    --border: #2a2a44;
+    --accent: #ff8855;
+  }
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+
+h1 {
+  font-size: 2rem;
+  margin-bottom: 0.25rem;
+}
+
+.tagline {
+  color: var(--muted);
+  margin-bottom: 2.5rem;
+  font-size: 1.05rem;
+}
+
+h2 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 0.75rem;
+  margin-top: 2rem;
+}
+
+.project-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.project-list li {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.project-list li:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+
+.project-list a {
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.project-list a:hover { text-decoration: underline; }
+
+.project-list .desc {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-top: 0.2rem;
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+footer a { color: var(--link); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>Sparky</h1>
+<p class="tagline">A collection of small tools and interactive projects, built mostly with the help of LLMs.</p>
+
+<h2>Interactive Visualizations</h2>
+<ul class="project-list">
+  <li>
+    <a href="tools/spectrum/">The Electromagnetic Spectrum</a>
+    <div class="desc">Interactive guide to the full EM spectrum — from radio waves to gamma rays — with facts, practical uses, space connections, and an inverse-square law visualization.</div>
+  </li>
+</ul>
+
+<footer>
+  <p>Source on <a href="https://github.com/vanpelt/sparky">GitHub</a>. New tools are added over time.</p>
+</footer>
+
+</body>
+</html>
