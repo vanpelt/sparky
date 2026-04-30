@@ -4,7 +4,7 @@ Slide deck on HiveMind, an internal tool for capturing how engineers use coding 
 
 ## Files
 
-- `HiveMind.html` — the deck. Single-file: embedded `<style>`, slides as `<section>` children of `<deck-stage>`, speaker notes as a JSON array. **Edit this.**
+- `index.html` — the deck. Single-file: embedded `<style>`, slides as `<section>` children of `<deck-stage>`, speaker notes as a JSON array. **Edit this.**
 - `deck-stage.js` — `<deck-stage>` custom element (slide nav, keyboard, fullscreen). Shared framework. **Don't edit unless changing the framework itself**, and if you do, the same file lives in other decks under `prezos/` — keep them in sync.
 - `assets/`, `uploads/` — images and embedded media. All paths in the HTML are relative.
 
@@ -18,7 +18,7 @@ Slide deck on HiveMind, an internal tool for capturing how engineers use coding 
 
 ## Previewing
 
-Open `HiveMind.html` directly in a browser, or serve the repo root with any static server (`python -m http.server`, etc.) and visit `/prezos/hivemind-overview/HiveMind.html`. Don't auto-open browsers or take screenshots unless the user asks — the source is the source of truth.
+Open `index.html` directly in a browser, or serve the repo root with any static server (`python -m http.server`, etc.) and visit `/prezos/hivemind-overview/`. Don't auto-open browsers or take screenshots unless the user asks — the source is the source of truth.
 
 ## Claude Design bundles
 
