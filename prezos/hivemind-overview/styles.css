@@ -648,8 +648,8 @@ deck-stage section[data-deck-active] .eyebrow {
 .traj-node .v { font-size: 26px; font-weight: 600; text-align: center; }
 .traj-link {
   color: var(--amber); font-family: 'JetBrains Mono', monospace; font-size: 32px;
-  align-self: center;
-  padding-top: 28px;
+  align-self: flex-start;
+  padding-top: 36px;
 }
 .traj-enrich {
   display: flex; flex-wrap: wrap; gap: 8px;
