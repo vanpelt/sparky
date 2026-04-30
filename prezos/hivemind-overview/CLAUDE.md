@@ -4,9 +4,10 @@ Slide deck on HiveMind, an internal tool for capturing how engineers use coding 
 
 ## Files
 
-- `index.html` — the deck. Single-file: embedded `<style>`, slides as `<section>` children of `<deck-stage>`, speaker notes as a JSON array. **Edit this.**
+- `index.html` — the deck markup. Slides are `<section>` children of `<deck-stage>`; speaker notes live in a JSON array. **Edit this for content.**
+- `styles.css` — all deck CSS. Slide-specific styles are grouped by topic with `/* ── Section ─── */` comment banners. **Edit this for visual changes.**
 - `deck-stage.js` — `<deck-stage>` custom element (slide nav, keyboard, fullscreen). Shared framework. **Don't edit unless changing the framework itself**, and if you do, the same file lives in other decks under `prezos/` — keep them in sync.
-- `assets/`, `uploads/` — images and embedded media. All paths in the HTML are relative.
+- `assets/` — images. All paths in the HTML are relative.
 
 ## Slide editing
 
