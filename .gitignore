@@ -6,3 +6,4 @@ build/
 .venv/
 *.csv
 scratch/
+prezos/**/*.pdf
