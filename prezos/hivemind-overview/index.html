@@ -1,0 +1,1307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HiveMind — Engineering Overview</title>
+<meta name="description" content="A shared layer of understanding for how we build with agents. Slide deck on HiveMind, an internal tool for capturing how engineers use coding agents.">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+
+<!-- Open Graph -->
+<meta property="og:type" content="article">
+<meta property="og:title" content="HiveMind — Engineering Overview">
+<meta property="og:description" content="A shared layer of understanding for how we build with agents. Slide deck on HiveMind, an internal tool for capturing how engineers use coding agents.">
+<meta property="og:image" content="https://vanpelt.github.io/sparky/prezos/hivemind-overview/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:url" content="https://vanpelt.github.io/sparky/prezos/hivemind-overview/">
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="HiveMind — Engineering Overview">
+<meta name="twitter:description" content="A shared layer of understanding for how we build with agents.">
+<meta name="twitter:image" content="https://vanpelt.github.io/sparky/prezos/hivemind-overview/og-image.png">
+
+<template id="__bundler_thumbnail" data-bg-color="#1a1a1a">
+  <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1200" height="800" fill="#1a1a1a"/>
+    <g transform="translate(600 400)">
+      <polygon points="0,-150 130,-75 130,75 0,150 -130,75 -130,-75" fill="none" stroke="#e89c3a" stroke-width="6"/>
+      <polygon points="0,-90 78,-45 78,45 0,90 -78,45 -78,-45" fill="#e89c3a" opacity="0.25"/>
+      <circle cx="0" cy="0" r="22" fill="#e89c3a"/>
+    </g>
+    <text x="600" y="640" text-anchor="middle" fill="#e89c3a" font-family="monospace" font-size="38" font-weight="700" letter-spacing="6">HIVEMIND</text>
+  </svg>
+</template>
+<script src="deck-stage.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script type="application/json" id="speaker-notes">
+[
+  "Welcome. I'm going to walk you through HiveMind — the tool we're building for ourselves. Quick agenda, then we go.",
+  "Open with the scope. We started writing HiveMind on January 2nd. Four months later: 176,000 sessions captured across 162 engineers, 260 devices, and 820 git repos. Agents have written more than 15 million lines of code through HiveMind, produced almost 29,000 PRs, and made 4.3 million tool calls. The hockey stick on the right tells the story — 275× growth in monthly sessions over the past year, and Claude is doing the lion's share of the work. This isn't a pilot anymore.",
+  "So the question isn't whether to use agents. It's whether we understand how we're using them. Right now we don't. That's the gap HiveMind fills.",
+  "Three reasons we started this. One, nobody knows what good looks like. Two, skills don't travel — your best Claude Code trick dies in your terminal. Three, we have zero visibility on cost, quality, and impact. HiveMind turns all of that into data.",
+  "HiveMind is built for every engineer at the company — IC's who want to get better, staff engineers who want to share patterns, leads who want to understand their team. Not a surveillance tool. A shared learning tool.",
+  "Naturally people ask: how is this different from Weave? Simple split. Weave is for engineers and product managers putting AI into their products — instrumenting customer-facing AI features, evals, traces, prompts. HiveMind is for engineering teams using AI to build their products — instrumenting our own agents as they write code. Same DNA, different audience.",
+  "Section break — product overview. Three parts: architecture, privacy, features.",
+  "Architecture. A daemon on your laptop discovers agent sessions — Claude Code, Codex, Cursor, Gemini. It ships raw entries to our backend. The backend normalizes to AG-UI events and stores them in ClickHouse. Dashboard on top. The daemon is intentionally dumb — all the smarts live server-side so we can iterate without pushing updates to your machine.",
+  "Trust model — privacy, security, and sensitive data, in three parts. Privacy: we sit on top of GitHub. Sessions tied to a repo in your org are visible to teammates with access to that repo. Sessions not tied to a git repo are private — only you see them. You can mark any session private, and disable sharing at the repo or user level. Security: short-lived tokens in the system keychain, rotated automatically. SSO and SCIM for org access. Infra is terraformed, runs in VPCs with private connect. Sensitive data: trajectories are redacted on the daemon, before anything leaves your machine. Archival and deletion are coming soon.",
+  "Features. Activity feeds. Leaderboards. Team stats. Session replays. Insights extracted from trajectories — todos, tools, skills, files modified. Repository-level views. It's a lot, and it's growing fast.",
+  "Section break — demo time.",
+  "Section break — what we've learned.",
+  "Five things we've learned in the first few months of dogfooding. I'll talk through each.",
+  "This is the one I'm most sure about. The full trajectory — every prompt, tool call, and edit — is gold. Across Claude Code, Codex, Cursor, Gemini, all of it in one shape. We enrich it on the way in: classifying prompts as bug or feature or fix, extracting which skills and subagents got invoked, flagging tool-call failures, and indexing all of it so you can search across every session in the company. This is a dataset that didn't exist at this company four months ago and it's already changing how we debug, teach, and build tooling.",
+  "Quick aside, and my favorite proof point for the flywheel. A user — not us — built a skill called Soul Stealer. It mines a teammate's sessions and generates a sub-agent that emulates them. Their thinking patterns, the things they reject, even their vocabulary. Tim Sweeney is the most-stolen soul on the team right now. The point isn't the skill itself — the point is that we did not build it. We built the substrate, and the org built the skill on top. That's the flywheel.",
+  "And one more — this is the page I personally live in. The Overview, your week at a glance. Every Friday afternoon I scroll this and write the week's update in five minutes. Sessions, focus hours, turns, PRs shipped, what's still open, the themes my work clustered into, the repos I touched. The themes become the bullet points. The bars are the receipts. It is not a dashboard — it is a memory aid.",
+  "The leaderboard is the most-visited page. People love it. But ranking by token count rewards burn — not caching dynamics, not whether the code shipped. Next iteration: rank by merged PRs, code survival, cost per merged line. Incentives shape behavior — we have to get this right.",
+  "Last learning — and this one came as a surprise. Fork. One click compacts your stuck session and hands the whole brief off to a different agent. We built it for context-exhausted sessions, but it's been a lifesaver every time Anthropic has had a wobble — which, you know, has been a few times lately. Three forks in the past month: one outage, two context limits mid-PR. We can't control Anthropic's uptime. We can control how fast you keep moving when it goes sideways.",
+  "Section break — where we go next.",
+  "Three bets for next quarter, and each one gets its own slide. One: service agents — async agents on prod events. Two: Insights V2 — a real classifier built on Weave evals. Three: code quality — does the agent's code actually survive. Quick walk through each.",
+  "Bet one — service agents. Teams are starting to wire async agents to events: a PR comment, a Sentry alert, a pagerduty page, a cron. We want HiveMind to track those alongside your interactive sessions. The unlock is workload identity federation — GH Actions, Kubernetes, Modal — so you don't have to manage credentials. Bring your sandbox or use ours. Same trajectory shape, same insights, same scoreboard. Every event becomes a session.",
+  "Bet two — Insights V2. The classification pipeline today is noisy: one-shot, no eval rigor, lots of false positives, and it surfaces single-session issues rather than what's consistently breaking across users. We're rebuilding it on Weave evals so we can actually measure quality, find the patterns that repeat across everyone working in a repo, and ship a UX that takes you from insights to PR in one command. The point: stop showing noise, start showing what to fix. And yes — we're eating our own Weave dogfood, that's the only way this gets better.",
+  "Bet three — code quality. The biggest open question: is the code AI is writing any good. We have rich data on what gets merged, what gets replaced, what gets reverted, what survives 30 and 90 days. We can read the afterlife of every diff. Two payoffs. One, a leaderboard that rewards survival instead of token burn — cost per merged line, code still in main. Two, a real answer to leadership's 'what is the AI capex buying us' — PRs shipped, code surviving, by repo and team. Receipts for the spend.",
+  "Zoom out. Great tools have always been part of how this org works. Investing here keeps us on the front edge of a landscape that is moving faster than any of us are comfortable with. HiveMind is how we stay ahead of it together.",
+  "Questions. Fire away."
+]
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<deck-stage width="1920" height="1080">
+
+<!-- ============================================================= -->
+<!-- 01 COVER -->
+<!-- ============================================================= -->
+<section data-label="01 HiveMind">
+  <div class="chrome dark">
+    <!-- node graph background -->
+    <div class="nodegraph">
+      <svg viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+        <g class="g1" opacity="0.5">
+          <path class="line" d="M 200 900 Q 500 700 900 820 T 1700 700" />
+          <path class="line" d="M 100 200 Q 400 350 800 250 T 1800 320" />
+          <path class="line" d="M 300 500 L 900 500 L 1600 500" />
+          <circle class="node" cx="200" cy="900" r="5" />
+          <circle class="node" cx="500" cy="800" r="5" />
+          <circle class="node" cx="900" cy="820" r="5" />
+          <circle class="node" cx="1300" cy="760" r="5" />
+          <circle class="node" cx="1700" cy="700" r="5" />
+          <circle class="node" cx="400" cy="310" r="5" />
+          <circle class="node" cx="800" cy="250" r="5" />
+          <circle class="node" cx="1200" cy="280" r="5" />
+          <circle class="node" cx="1800" cy="320" r="5" />
+        </g>
+        <g class="g2" opacity="0.35">
+          <path class="line" d="M 1300 100 Q 1000 400 600 300 T 100 600" />
+          <path class="line" d="M 1500 1000 Q 1200 750 800 900 T 100 800" />
+          <circle class="node" cx="1300" cy="100" r="4" />
+          <circle class="node" cx="900" cy="370" r="4" />
+          <circle class="node" cx="600" cy="300" r="4" />
+          <circle class="node" cx="300" cy="450" r="4" />
+          <circle class="node" cx="100" cy="600" r="4" />
+          <circle class="node" cx="1500" cy="1000" r="4" />
+          <circle class="node" cx="1100" cy="780" r="4" />
+          <circle class="node" cx="500" cy="870" r="4" />
+        </g>
+      </svg>
+    </div>
+    <div class="particles">
+      <span style="left: 8%; animation-duration: 14s; animation-delay: 0s;"></span>
+      <span style="left: 22%; animation-duration: 18s; animation-delay: 3s;"></span>
+      <span style="left: 36%; animation-duration: 12s; animation-delay: 1s; width: 2px; height: 2px;"></span>
+      <span style="left: 48%; animation-duration: 20s; animation-delay: 5s;"></span>
+      <span style="left: 61%; animation-duration: 16s; animation-delay: 2s; width: 4px; height: 4px;"></span>
+      <span style="left: 74%; animation-duration: 22s; animation-delay: 4s;"></span>
+      <span style="left: 86%; animation-duration: 15s; animation-delay: 0.5s;"></span>
+      <span style="left: 94%; animation-duration: 19s; animation-delay: 6s; width: 2px; height: 2px;"></span>
+    </div>
+
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>hivemind v0.6 · internal preview</span></div>
+      <div>https://hivemind.wandb.tools</div>
+    </div>
+
+    <div class="cover-brain">
+      <img src="assets/brain.png" alt="" />
+    </div>
+
+    <div class="cover">
+      <div class="reveal" style="max-width: 1000px;">
+        <div class="eyebrow" style="margin: 0;">Agentic engineering</div>
+      </div>
+      <div class="brand reveal-2" style="margin-top: 40px; max-width: 1000px;">HiveMind</div>
+      <div class="tag reveal-3" style="max-width: 980px;">A shared layer of understanding for how we build with agents.</div>
+    </div>
+
+    <div class="header-bar" style="margin-top: auto;">
+      <div>P&amp;E All-Hands · May 2026</div>
+      <div>Presented by CVP</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 02 HOOK NUMBER -->
+<!-- ============================================================= -->
+<section data-label="02 By the Numbers">
+  <div class="chrome dark" style="padding: 60px 100px 56px;">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>by the numbers</span></div>
+      <div class="mono">02 / 20</div>
+    </div>
+
+    <div class="reveal" style="margin-top: 20px;">
+      <div class="slide-title">Four months in.</div>
+    </div>
+
+    <!-- Top row: hero stat + three secondary stats -->
+    <div class="btn-top reveal-2" style="margin-top: 28px;">
+      <div class="btn-hero">
+        <div class="btn-num">176K</div>
+        <div class="btn-cap">coding sessions captured</div>
+        <div class="btn-sub">across <b>162 engineers</b> · <b>260 devices</b> · <b>820 repos</b></div>
+      </div>
+      <div class="btn-side">
+        <div class="btn-card">
+          <div class="btn-card-num">15M+</div>
+          <div class="btn-card-cap">lines of code written by agents</div>
+        </div>
+        <div class="btn-card">
+          <div class="btn-card-num">28,923</div>
+          <div class="btn-card-cap">sessions linked to a PR</div>
+        </div>
+        <div class="btn-card">
+          <div class="btn-card-num">4.3M</div>
+          <div class="btn-card-cap">tool calls observed</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom row: hockey stick + agent breakdown -->
+    <div class="btn-bot reveal-3" style="margin-top: 18px;">
+      <div class="btn-chart">
+        <div class="btn-chart-head">
+          <div>
+            <div class="btn-chart-label">SESSIONS PER MONTH</div>
+            <div class="btn-chart-title">Explosive growth 💥</div>
+          </div>
+          <div class="btn-chart-callout">
+            <div class="btn-chart-callout-num">73,604</div>
+            <div class="btn-chart-callout-cap">apr 2026</div>
+          </div>
+        </div>
+        <svg class="btn-chart-svg" viewBox="0 0 900 240" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="bnGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="oklch(0.78 0.17 75)" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="oklch(0.78 0.17 75)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <!-- gridlines -->
+          <line x1="0" y1="60"  x2="900" y2="60"  stroke="oklch(1 0 0 / 0.08)"/>
+          <line x1="0" y1="120" x2="900" y2="120" stroke="oklch(1 0 0 / 0.08)"/>
+          <line x1="0" y1="180" x2="900" y2="180" stroke="oklch(1 0 0 / 0.08)"/>
+          <!-- area + line: 4 months (Jan–Apr 2026) -->
+          <path d="M 0,210 L 0,210 L 300,191 L 600,52 L 900,30 L 900,240 L 0,240 Z" fill="url(#bnGrad)"/>
+          <path d="M 0,210 L 300,191 L 600,52 L 900,30"
+                fill="none" stroke="oklch(0.78 0.17 75)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- nodes -->
+          <circle cx="0"   cy="210" r="5" fill="oklch(0.78 0.17 75)"/>
+          <circle cx="300" cy="191" r="5" fill="oklch(0.78 0.17 75)"/>
+          <circle cx="600" cy="52"  r="5" fill="oklch(0.78 0.17 75)"/>
+          <circle cx="900" cy="30"  r="7" fill="oklch(0.78 0.17 75)" stroke="oklch(0.98 0.005 80)" stroke-width="2"/>
+        </svg>
+        <div class="btn-chart-axis">
+          <span>Jan '26</span><span>Feb '26</span><span>Mar '26</span><span>Apr '26</span>
+        </div>
+      </div>
+
+      <div class="btn-agents">
+        <div class="btn-chart-label" style="margin-bottom: 18px;">SESSIONS BY AGENT</div>
+        <div class="btn-bar"><div class="btn-bar-name">Claude</div><div class="btn-bar-track"><div class="btn-bar-fill" style="width: 100%; background: var(--amber);"></div></div><div class="btn-bar-val">140,328</div></div>
+        <div class="btn-bar"><div class="btn-bar-name">Cursor</div><div class="btn-bar-track"><div class="btn-bar-fill" style="width: 13%;"></div></div><div class="btn-bar-val">18,082</div></div>
+        <div class="btn-bar"><div class="btn-bar-name">Codex</div><div class="btn-bar-track"><div class="btn-bar-fill" style="width: 12%;"></div></div><div class="btn-bar-val">16,757</div></div>
+        <div class="btn-bar"><div class="btn-bar-name">OpenCode</div><div class="btn-bar-track"><div class="btn-bar-fill" style="width: 1.2%;"></div></div><div class="btn-bar-val">772</div></div>
+        <div class="btn-bar"><div class="btn-bar-name">Gemini</div><div class="btn-bar-track"><div class="btn-bar-fill" style="width: 0.4%;"></div></div><div class="btn-bar-val">79</div></div>
+      </div>
+    </div>
+
+    <div class="header-bar" style="margin-top: auto;">
+      <div class="mono">first commit · jan 2, 2026 &nbsp;·&nbsp; 912 commits</div>
+      <div>HIVEMIND</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 03 NEW REALITY -->
+<!-- ============================================================= -->
+<section data-label="03 New reality">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>context</span></div>
+      <div class="mono">02 / 20</div>
+    </div>
+    <div style="display: flex; flex: 1; align-items: center;">
+      <div class="reveal nr-block">
+        <div class="bar"></div>
+        <div class="nr-lede">What it means to develop and maintain software has</div>
+        <div class="nr-punch"><span class="hl">fundamentally changed.</span></div>
+      </div>
+    </div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="mono">the new reality</div>
+      <div>HIVEMIND</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 04 WHY HIVEMIND -->
+<!-- ============================================================= -->
+<section data-label="04 Why HiveMind">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>why we're building this</span></div>
+      <div class="mono">03 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 80px;">
+      <div class="slide-title">Why HiveMind</div>
+    </div>
+    <div class="rows reveal-2" style="margin-top: 80px;">
+      <div class="row">
+        <div class="idx">01</div>
+        <div class="t">You can't improve what you don't&nbsp;measure.</div>
+        <div class="d">Without data on how agents are used, we're guessing about what works.</div>
+      </div>
+      <div class="row">
+        <div class="idx">02</div>
+        <div class="t">Sharing skills and techniques should be&nbsp;easy.</div>
+        <div class="d">Your best workflow shouldn't die in your terminal history.</div>
+      </div>
+      <div class="row">
+        <div class="idx">03</div>
+        <div class="t">Visibility matters more as you run more&nbsp;agents.</div>
+        <div class="d">More concurrent sessions means more surface area to understand.</div>
+      </div>
+    </div>
+    <div class="pgnum">03</div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 05 WHO IT'S FOR -->
+<!-- ============================================================= -->
+<section data-label="05 Who it is for">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>audience</span></div>
+      <div class="mono">04 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 40px;">
+      <div class="eyebrow ink">Who it's for</div>
+      <div class="slide-title" style="margin-top: 20px;">Everyone who ships code here.</div>
+    </div>
+    <div class="reveal-2" style="margin-top: 80px;">
+      <div class="rows paper">
+        <div class="row">
+          <div class="idx" style="color: var(--amber-deep);">IC</div>
+          <div class="t">Engineers who want to get better at prompting.</div>
+          <div class="d">See how teammates approach similar problems.</div>
+        </div>
+        <div class="row">
+          <div class="idx" style="color: var(--amber-deep);">STAFF</div>
+          <div class="t">Staff+ who want to share patterns across teams.</div>
+          <div class="d">Turn individual tricks into team-wide practices.</div>
+        </div>
+        <div class="row">
+          <div class="idx" style="color: var(--amber-deep);">LEAD</div>
+          <div class="t">Leads and managers who need to<br/>understand their team.</div>
+          <div class="d">Where is work actually happening? What's blocking?</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 06 WHAT IT'S NOT -->
+<!-- ============================================================= -->
+<section data-label="06 HiveMind vs Weave">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>positioning</span></div>
+      <div class="mono">05 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 40px;">
+      <div class="eyebrow ink">Two products. Two audiences.</div>
+      <div class="slide-title" style="margin-top: 20px;">How is HiveMind<br/>different from <span style="color: var(--amber-deep);">Weave</span>?</div>
+    </div>
+    <div class="vs reveal-2">
+      <div class="vs-col">
+        <div class="vs-eyebrow">WEAVE</div>
+        <div class="vs-headline">For teams putting AI <em>into</em> their&nbsp;products.</div>
+        <div class="vs-body">Engineers and PMs instrumenting AI features they ship to customers: evals, traces, prompts, model performance.</div>
+        <div class="vs-tag">user → your AI feature</div>
+      </div>
+      <div class="vs-divider" aria-hidden="true">
+        <span class="vs-pill">vs</span>
+      </div>
+      <div class="vs-col vs-col-mind">
+        <div class="vs-eyebrow" style="color: var(--amber-deep);">HIVEMIND</div>
+        <div class="vs-headline">For teams using AI <em>to build</em> their&nbsp;products.</div>
+        <div class="vs-body">Engineering teams instrumenting how their agents write code: sessions, tools, skills, what ships and what doesn't.</div>
+        <div class="vs-tag" style="color: var(--amber-deep); border-color: var(--amber-deep);">engineer → AI agent → code</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 07 SECTION: PRODUCT -->
+<!-- ============================================================= -->
+<section data-label="07 Section · Product">
+  <div class="chrome amber">
+    <div class="header-bar" style="color: var(--ink); opacity: 0.55;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>section</span></div>
+      <div class="mono">— 01 —</div>
+    </div>
+    <div class="section-divider" style="flex: 1;">
+      <div>
+        <div class="secnum reveal" style="color: var(--ink); opacity: 0.6; margin-top: 80px;">PART ONE</div>
+        <div class="sectitle reveal-2" style="color: var(--ink); margin-top: 30px;">Product<br/>overview.</div>
+      </div>
+      <div class="reveal-3" style="display: flex; align-items: center; gap: 32px; color: var(--ink); opacity: 0.7; font-size: 32px;">
+        <div class="mono">architecture</div>
+        <div>·</div>
+        <div class="mono">privacy</div>
+        <div>·</div>
+        <div class="mono">features</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 08 ARCHITECTURE -->
+<!-- ============================================================= -->
+<section data-label="08 Architecture">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>01 · architecture</span></div>
+      <div class="mono">07 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow">Architecture</div>
+      <div class="slide-title" style="margin-top: 16px;">Dumb daemon. Smart backend.</div>
+    </div>
+
+    <div class="arch reveal-2">
+      <div class="col">
+        <div class="label">ON YOUR MACHINE</div>
+        <div class="name">hivemind daemon</div>
+        <div class="agents">
+          <div class="agent">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#D97757" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"></path></svg>
+            claude code
+          </div>
+          <div class="agent">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z"></path></svg>
+            cursor
+          </div>
+          <div class="agent">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="codex-g" gradientUnits="userSpaceOnUse" x1="12" x2="12" y1="3" y2="21"><stop stop-color="#B1A7FF"/><stop offset=".5" stop-color="#7A9DFF"/><stop offset="1" stop-color="#3941FF"/></linearGradient></defs><path fill="#fff" d="M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z"/><path fill="url(#codex-g)" d="M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z"/></svg>
+            codex
+          </div>
+          <div class="agent">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="gem-a" gradientUnits="userSpaceOnUse" x1="7" x2="11" y1="15.5" y2="12"><stop stop-color="#08B962"/><stop offset="1" stop-color="#08B962" stop-opacity="0"/></linearGradient><linearGradient id="gem-b" gradientUnits="userSpaceOnUse" x1="8" x2="11.5" y1="5.5" y2="11"><stop stop-color="#F94543"/><stop offset="1" stop-color="#F94543" stop-opacity="0"/></linearGradient><linearGradient id="gem-c" gradientUnits="userSpaceOnUse" x1="3.5" x2="17.5" y1="13.5" y2="12"><stop stop-color="#FABC12"/><stop offset=".46" stop-color="#FABC12" stop-opacity="0"/></linearGradient></defs><path fill="#3186FF" d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/><path fill="url(#gem-a)" d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/><path fill="url(#gem-b)" d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/><path fill="url(#gem-c)" d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/></svg>
+            gemini
+          </div>
+          <div class="agent agent-wide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M16 6H8v12h8V6zm4 16H4V2h16v20z"/></svg>
+            opencode
+          </div>
+        </div>
+        <div class="desc">Discovers sessions. Ships raw JSONL. Redacts secrets.</div>
+      </div>
+      <div class="arrow">
+        <span class="lab">INGEST</span>
+        <svg viewBox="0 0 80 28" preserveAspectRatio="none"><line class="ln" x1="0" y1="14" x2="68" y2="14"/><polygon class="tip" points="68,4 80,14 68,24"/></svg>
+      </div>
+      <div class="col">
+        <div class="label">FASTAPI</div>
+        <div class="name">normalize &amp; store</div>
+        <div class="pill" style="color: var(--amber);"><span class="b"></span>→ AG-UI events</div>
+        <div class="pill"><span class="b"></span>agentstream adapters</div>
+        <div class="pill"><span class="b"></span>raw + normalized</div>
+        <div class="desc">Raw sessions in. Normalized AG-UI events out.</div>
+      </div>
+      <div class="arrow">
+        <span class="lab">QUERY</span>
+        <svg viewBox="0 0 80 28" preserveAspectRatio="none"><line class="ln" x1="12" y1="14" x2="80" y2="14"/><polygon class="tip" points="12,4 0,14 12,24"/></svg>
+      </div>
+      <div class="col">
+        <div class="label">DATA + UI</div>
+        <div class="name">ClickHouse + React</div>
+        <div class="pill"><span class="b"></span>sessions · turns · tools</div>
+        <div class="pill"><span class="b"></span>PRs · $$$ · trajectories</div>
+        <div class="pill"><span class="b"></span>search index</div>
+        <div class="pill" style="color: var(--amber);"><span class="b"></span>dashboard</div>
+        <div class="desc">Fast analytics on everything the team has done.</div>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: 50px; font-size: 24px; color: var(--mute-dark); display: flex; gap: 40px;">
+      <span>// daemon is intentionally dumb — only discovery, redaction, and syncing</span>
+      <span style="margin-left: auto;">infra: clickhouse · fastapi · terraform</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 09 PRIVACY -->
+<!-- ============================================================= -->
+<section data-label="09 Privacy">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model</span></div>
+      <div class="mono">08 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 28px;">
+      <div class="eyebrow ink">Trust model</div>
+      <div class="slide-title" style="margin-top: 12px;">Privacy, security &amp; sensitive&nbsp;data.</div>
+    </div>
+
+    <div class="trust reveal-2">
+      <div class="tr-row">
+        <div class="tr-num">01</div>
+        <div class="tr-head">
+          <div class="tr-kicker">PRIVACY</div>
+          <div class="tr-title">Built on top of GitHub's privacy&nbsp;model.</div>
+        </div>
+        <div class="tr-body">
+          <p>Sessions tied to an org repo follow that repo's GitHub permissions. Sessions on personal or non-git work stay private to you.</p>
+          <div class="tr-tags">
+            <span class="tr-tag">mark any session private</span>
+            <span class="tr-tag">disable sharing per-repo</span>
+            <span class="tr-tag">disable sharing per-user</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tr-row">
+        <div class="tr-num">02</div>
+        <div class="tr-head">
+          <div class="tr-kicker">SECURITY</div>
+          <div class="tr-title">Short-lived tokens. SSO.</div>
+        </div>
+        <div class="tr-body">
+          <p>Short-lived tokens in your system keychain, rotated automatically. SSO/SCIM for org access. Infra runs in private VPCs.</p>
+          <div class="tr-tags">
+            <span class="tr-tag">keychain + rotation</span>
+            <span class="tr-tag">SSO &amp; SCIM</span>
+            <span class="tr-tag">VPC + private connect</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tr-row">
+        <div class="tr-num">03</div>
+        <div class="tr-head">
+          <div class="tr-kicker">SENSITIVE DATA</div>
+          <div class="tr-title">Redacted before it leaves your&nbsp;machine.</div>
+        </div>
+        <div class="tr-body">
+          <p>Secrets are scrubbed on your machine, before anything leaves it.</p>
+          <div class="tr-tags">
+            <span class="tr-tag">on-device redaction</span>
+            <span class="tr-tag tr-tag-soon">archival · soon</span>
+            <span class="tr-tag tr-tag-soon">deletion · soon</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 10 FEATURES -->
+<!-- ============================================================= -->
+<section data-label="10 Features">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>03 · features</span></div>
+      <div class="mono">09 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow">Features</div>
+      <div class="slide-title" style="margin-top: 16px;">Six surfaces. One shared brain.</div>
+    </div>
+    <div class="feat-grid reveal-2" style="margin-top: 50px;">
+      <div class="feat">
+        <div class="k">OVERVIEW</div>
+        <div class="t">Activity feed</div>
+        <div class="d">Your last 7 days. What you shipped, what's still open, what teammates touched.</div>
+      </div>
+      <div class="feat">
+        <div class="k">LIVE</div>
+        <div class="t">In-flight sessions</div>
+        <div class="d">See which teammates are mid-session right now — and tail along if they share it.</div>
+      </div>
+      <div class="feat">
+        <div class="k">INSIGHTS</div>
+        <div class="t">Trajectory analysis</div>
+        <div class="d">Where agents fail. Which skills they lean on. What we should fix.</div>
+      </div>
+      <div class="feat">
+        <div class="k">LEADERBOARD</div>
+        <div class="t">Cross-team stats</div>
+        <div class="d">Who's shipping most with agents. Which repos they're active in. (Incentives v2 en&nbsp;route.)</div>
+      </div>
+      <div class="feat">
+        <div class="k">USAGE</div>
+        <div class="t">Cost &amp; tokens</div>
+        <div class="d">Per-user, per-repo, per-model spend. Burn rate. Cost per merged PR.</div>
+      </div>
+      <div class="feat">
+        <div class="k">SESSIONS</div>
+        <div class="t">Full replay &amp; fork</div>
+        <div class="d">Every turn, every tool call, every diff. Searchable. Shareable. Resumable.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 11 SECTION: DEMO -->
+<!-- ============================================================= -->
+<section data-label="11 Section · Demo">
+  <div class="chrome amber">
+    <div class="header-bar" style="color: var(--ink); opacity: 0.55;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>section</span></div>
+      <div class="mono">— 02 —</div>
+    </div>
+    <div class="section-divider" style="flex: 1;">
+      <div>
+        <div class="secnum reveal" style="color: var(--ink); opacity: 0.6; margin-top: 80px;">PART TWO</div>
+        <div class="sectitle reveal-2" style="color: var(--ink); margin-top: 30px;">Demo.</div>
+      </div>
+      <div class="reveal-3" style="color: var(--ink); opacity: 0.7; font-size: 32px;" class="mono">
+        <span class="mono">live from my laptop · no slides · please heckle</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 13 SECTION: LEARNINGS -->
+<!-- ============================================================= -->
+<section data-label="13 Section · Learnings">
+  <div class="chrome amber">
+    <div class="header-bar" style="color: var(--ink); opacity: 0.55;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>section</span></div>
+      <div class="mono">— 03 —</div>
+    </div>
+    <div class="section-divider" style="flex: 1;">
+      <div>
+        <div class="secnum reveal" style="color: var(--ink); opacity: 0.6; margin-top: 80px;">PART THREE</div>
+        <div class="sectitle reveal-2" style="color: var(--ink); margin-top: 30px;">What we've<br/>learned.</div>
+      </div>
+      <div class="reveal-3" style="color: var(--ink); opacity: 0.7; font-size: 32px;">
+        <span class="mono">four months of dogfooding · five lessons</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 14 FIVE LEARNINGS -->
+<!-- ============================================================= -->
+<section data-label="14 Five learnings">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>what we've learned</span></div>
+      <div class="mono">13 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow">
+</div>
+      <div class="slide-title" style="margin-top: 16px;">Five Learnings</div>
+    </div>
+    <div class="rows reveal-2" style="margin-top: 24px;">
+      <div class="row" style="padding: 22px 0;">
+        <div class="idx">01</div>
+        <div class="t" style="font-size: 38px;">Rich trajectories are a data flywheel.</div>
+        <div class="d" style="font-size: 26px;">Every prompt, tool call, diff — across every agent. A dataset that didn't exist before.</div>
+      </div>
+      <div class="row" style="padding: 22px 0;">
+        <div class="idx">02</div>
+        <div class="t" style="font-size: 38px;">Seeing teammates' sessions is legitimately useful.</div>
+        <div class="d" style="font-size: 26px;">"How would Tim have done this?" is a one-click question.</div>
+      </div>
+      <div class="row" style="padding: 22px 0;">
+        <div class="idx">03</div>
+        <div class="t" style="font-size: 38px;">The leaderboard is loved — and tricky.</div>
+        <div class="d" style="font-size: 26px;">Highest-traffic page. Rewards token burn, not outcomes.</div>
+      </div>
+      <div class="row" style="padding: 22px 0;">
+        <div class="idx">04</div>
+        <div class="t" style="font-size: 38px;">Live + Overview unlock parallel work streams.</div>
+        <div class="d" style="font-size: 26px;">Tail one session while another runs in the background — without losing the thread.</div>
+      </div>
+      <div class="row" style="padding: 22px 0;">
+        <div class="idx">05</div>
+        <div class="t" style="font-size: 38px;">Fork is a lifesaver when Anthropic is down.</div>
+        <div class="d" style="font-size: 26px;">Hand off a stuck session to another agent in one click — keep moving while the dust settles.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 15 TRAJECTORIES ARE THE THING -->
+<!-- ============================================================= -->
+<section data-label="15 Trajectories">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>learning · 01</span></div>
+      <div class="mono">14 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 24px;">
+      <div class="eyebrow">The thing I'm sure of</div>
+      <div class="slide-title" style="margin-top: 12px;">
+        The <span style="color: var(--amber);">full trajectory</span> is a data flywheel.
+      </div>
+    </div>
+
+    <div class="traj-wrap reveal-2" style="margin-top: 40px;">
+      <div class="traj-track-label">
+        <span class="mono" style="color: var(--mute-dark); font-size: 24px; letter-spacing: 0.18em;">RAW SESSION</span>
+        <span class="mono" style="color: var(--amber); font-size: 24px; letter-spacing: 0.18em;">↓ ENRICHED ON INGEST</span>
+      </div>
+      <div class="traj">
+        <div class="traj-col">
+          <div class="traj-node"><div class="l">PROMPT</div><div class="v">user turn</div></div>
+          <div class="traj-enrich">
+            <span class="enrich-tag">bug</span>
+            <span class="enrich-tag">feature</span>
+            <span class="enrich-tag">fix</span>
+            <span class="enrich-tag enrich-mute">refactor</span>
+          </div>
+        </div>
+        <div class="traj-link">→</div>
+        <div class="traj-col">
+          <div class="traj-node"><div class="l">THOUGHT</div><div class="v">reasoning</div></div>
+          <div class="traj-enrich">
+            <span class="enrich-tag enrich-mute">intent</span>
+          </div>
+        </div>
+        <div class="traj-link">→</div>
+        <div class="traj-col">
+          <div class="traj-node"><div class="l">TOOL</div><div class="v">edit · bash · grep</div></div>
+          <div class="traj-enrich">
+            <span class="enrich-tag">skill: frontend-design</span>
+            <span class="enrich-tag">subagent: code-search</span>
+            <span class="enrich-tag enrich-fail">✕ exit&nbsp;1</span>
+          </div>
+        </div>
+        <div class="traj-link">→</div>
+        <div class="traj-col">
+          <div class="traj-node"><div class="l">DIFF</div><div class="v">code change</div></div>
+          <div class="traj-enrich">
+            <span class="enrich-tag enrich-mute">files · langs</span>
+          </div>
+        </div>
+        <div class="traj-link">→</div>
+        <div class="traj-col">
+          <div class="traj-node"><div class="l">PR</div><div class="v">shipped (or not)</div></div>
+          <div class="traj-enrich">
+            <span class="enrich-tag">merged</span>
+            <span class="enrich-tag enrich-mute">reverted?</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="traj-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true" width="22" height="22"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16" y1="16" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span class="traj-search-q">where did anyone use the <span class="hl">frontend-design</span> skill last week?</span>
+        <span class="traj-search-meta">indexed across every prompt · tool call · file · diff</span>
+      </div>
+    </div>
+
+    <div class="reveal-3 body-lg" style="margin-top: 32px; color: var(--mute-dark); max-width: 1600px;">
+      Four different agents. One common shape. That dataset didn't exist at W&amp;B four months ago — and it's <span style="color: var(--paper);">already changing how we debug, teach and build&nbsp;tooling.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 15.5 SOUL STEALER (user-built case study) -->
+<!-- ============================================================= -->
+<section data-label="15 Soul Stealer">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>learning · 02 · the flywheel in action</span></div>
+      <div class="mono">15 / 20</div>
+    </div>
+
+    <div class="reveal" style="margin-top: 24px;">
+      <div class="eyebrow">
+</div>
+      <div class="slide-title" style="margin-top: 12px; font-size: 80px;">
+        Introducing <span style="color: var(--amber);">Soul&nbsp;Stealer</span>.
+      </div>
+      <div style="margin-top: 14px; color: var(--mute-dark); max-width: 1500px; font-size: 30px; line-height: 1.4;">
+        A skill that mines a teammate's sessions and produces a sub-agent that <span style="color: var(--paper);">talks like them</span>. Not built by us. Built by a user, with the data we already had.
+      </div>
+    </div>
+
+    <div class="ss-grid reveal-2" style="margin-top: 36px;">
+
+      <!-- LEFT: terminal demo -->
+      <div class="ss-term">
+        <div class="ss-term-bar">
+          <span class="ss-tdot" style="background: oklch(0.65 0.18 25);"></span>
+          <span class="ss-tdot" style="background: oklch(0.78 0.16 90);"></span>
+          <span class="ss-tdot" style="background: oklch(0.7 0.15 145);"></span>
+          <span class="ss-tname mono">~/skills · soul-stealer</span>
+        </div>
+        <div class="ss-term-body mono">
+          <div class="ss-line"><span class="ss-prompt">$</span> /soul-stealer <span class="ss-arg">tssweeney</span> <span class="ss-arg-q">"Tim Sweeney"</span></div>
+          <div class="ss-line ss-mute">  → spawning hivemind sub-agent…</div>
+          <div class="ss-line ss-mute">  → analyzing 47 sessions · 1,284 prompts</div>
+          <div class="ss-line ss-mute">  → clustering behavioral modes…</div>
+          <div class="ss-line ss-mute">  → extracting negative space (rejections, reversals)…</div>
+          <div class="ss-line ss-mute">  → fingerprinting vocabulary…</div>
+          <div class="ss-line" style="color: var(--amber);">  ✓ ~/Desktop/skills/talk-to-tim/SKILL.md</div>
+          <div class="ss-line" style="margin-top: 14px;"><span class="ss-prompt">$</span> /talk-to-tim <span class="ss-arg-q">"should this be a class or a function?"</span></div>
+          <div class="ss-line ss-tim">  Tim: <span style="color: var(--paper);">Why is this a class? Flatten it. We'll add structure when there's a second caller.</span></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: extracted essence card -->
+      <div class="ss-card">
+        <div class="ss-card-head">
+          <div class="ss-avatar">TS</div>
+          <div>
+            <div class="ss-name">Tim Sweeney</div>
+            <div class="ss-handle mono">@tssweeney · popular soul</div>
+          </div>
+        </div>
+
+        <div class="ss-section-label mono">THINKING PATTERNS</div>
+        <div class="ss-tags">
+          <span class="ss-tag">composition over inheritance</span>
+          <span class="ss-tag">flatten until proven otherwise</span>
+          <span class="ss-tag">blast radius first</span>
+        </div>
+
+        <div class="ss-section-label mono">REJECTS</div>
+        <div class="ss-tags">
+          <span class="ss-tag ss-tag-red">premature abstraction</span>
+          <span class="ss-tag ss-tag-red">"sloppy"</span>
+          <span class="ss-tag ss-tag-red">indirection without payoff</span>
+        </div>
+
+        <div class="ss-section-label mono">FINGERPRINTS</div>
+        <div class="ss-tags">
+          <span class="ss-tag ss-tag-ghost">"thoughts?"</span>
+          <span class="ss-tag ss-tag-ghost">"first-class param"</span>
+          <span class="ss-tag ss-tag-ghost">"surface area"</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 24px; color: var(--mute-dark); font-size: 22px;">
+      // we did not build this. we built the substrate. the org built the skill.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 16 YOUR WEEK AT A GLANCE -->
+<!-- ============================================================= -->
+<section data-label="16 Your week">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>overview · your week</span></div>
+      <div class="mono">16 / 20</div>
+    </div>
+
+    <div class="reveal" style="margin-top: 28px;">
+      <div class="eyebrow">New feature</div>
+      <div class="slide-title" style="margin-top: 12px; font-size: 80px;">
+        My week, <span style="color: var(--amber);">at a glance</span>.
+      </div>
+    </div>
+
+    <div class="week-grid reveal-2" style="margin-top: 40px;">
+      <div class="week-shot">
+        <div class="screenframe">
+          <img src="assets/week-glance.png" alt="Your week at a glance — overview page"/>
+        </div>
+        <div class="week-shot-cap mono">overview.hivemind / your-week</div>
+      </div>
+
+      <aside class="week-side">
+        <div class="week-side-eyebrow mono">WHAT I LOOK AT EACH MORNING</div>
+        <ul class="week-side-list">
+          <li><span class="week-num">63</span> sessions, <span class="week-num">35.3h</span> of focus, <span class="week-num">771</span> turns — am I in the saddle?</li>
+          <li><span class="week-num">24</span> PRs shipped · <span class="week-num">6</span> still open — what's stuck?</li>
+          <li>Theme breakdown — am I drifting from what I said the week was about?</li>
+          <li>Repos touched — surprise commits in places I didn't expect.</li>
+        </ul>
+      </aside>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 24px; color: var(--mute-dark); font-size: 22px;">
+      // not a dashboard. a memory aid.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 16 LEADERBOARD INCENTIVES -->
+<!-- ============================================================= -->
+<section data-label="16 Leaderboard">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>learning · 03</span></div>
+      <div class="mono">17 / 20</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow ink">The hard one</div>
+      <div class="slide-title" style="margin-top: 16px;">The leaderboard is loved.<br/>It also rewards the wrong thing.</div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 60px; margin-top: 70px;" class="reveal-2">
+      <div>
+        <div class="eyebrow ink" style="color: oklch(0.55 0.18 25);">V1 · TODAY</div>
+        <div style="font-size: 96px; font-weight: 900; letter-spacing: -0.04em; line-height: 1; margin-top: 16px; color: oklch(0.55 0.18 25);">token count</div>
+        <div class="body" style="margin-top: 24px; max-width: 640px; color: var(--mute-light);">Rewards token burn. Ignores caching. Says nothing about whether the code actually&nbsp;shipped.</div>
+      </div>
+      <div>
+        <div class="eyebrow ink" style="color: var(--amber-deep);">V2 · NEXT</div>
+        <div style="font-size: 96px; font-weight: 900; letter-spacing: -0.04em; line-height: 1; margin-top: 16px; color: var(--amber-deep);">outcomes</div>
+        <div class="body" style="margin-top: 24px; max-width: 640px; color: var(--mute-light);">Merged PRs, code survival after 30 days, cost per merged line. Reward what&nbsp;ships.</div>
+      </div>
+    </div>
+
+    <div class="mono reveal-3" style="margin-top: auto; color: var(--mute-light); font-size: 26px; max-width: 1500px; line-height: 1.4;">
+      // incentives shape behavior. if we get the scoreboard wrong, the players optimize for the wrong game.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 17.5 FORK LIFESAVER -->
+<!-- ============================================================= -->
+<section data-label="18 Fork">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>learning · 04 · the panic button</span></div>
+      <div class="mono">18 / 20</div>
+    </div>
+
+    <div class="reveal" style="margin-top: 20px;">
+      <div class="eyebrow">When the model goes down</div>
+      <div class="slide-title" style="margin-top: 10px; font-size: 72px;">
+        Fork is a lifesaver when&nbsp;Anthropic is on
+          <span class="fork-fire" aria-hidden="true">
+            <svg viewBox="0 0 32 40" width="96" height="120"><path d="M16 2c1 7 8 9 8 18a8 8 0 0 1-16 0c0-3 1-5 3-7-1 4 1 6 3 6-2-5 1-11 2-17z" fill="oklch(0.78 0.17 75)"/><path d="M16 9c1 5 6 6 6 13a6 6 0 0 1-12 0c0-3 1-4 2-5-1 3 0 5 2 4-1-4 1-8 2-12z" fill="oklch(0.65 0.18 25)"/><path d="M16 18c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-3 0 2 1 3 2 2 0-2 0-5 0-7z" fill="oklch(0.95 0.06 90)"/></svg>
+          </span>
+      </div>
+      <div style="margin-top: 12px; color: var(--mute-dark); max-width: 1500px; font-size: 28px; line-height: 1.4;">
+        One click compacts your stuck session and hands it off to a different agent — Codex, Gemini, Cursor — with the full handoff brief. <span style="color: var(--paper);">Keep moving while the dust settles.</span>
+      </div>
+    </div>
+
+    <div class="fork-grid reveal-2" style="margin-top: 28px;">
+
+      <!-- LEFT: status / quote column -->
+      <aside class="fork-side">
+        <div class="fork-status">
+          <div class="fork-status-head mono">CLAUDE API · STATUS</div>
+          <div class="fork-status-row">
+            <span class="fork-pulse"></span>
+            <span class="fork-status-label">elevated error rates · last 30 min</span>
+          </div>
+          <div class="fork-status-row" style="opacity: 0.55;">
+            <span class="fork-pulse" style="background: oklch(0.68 0.16 145); box-shadow: 0 0 12px oklch(0.68 0.16 145); animation: none;"></span>
+            <span class="fork-status-label">codex · operational</span>
+          </div>
+          <div class="fork-status-row" style="opacity: 0.55;">
+            <span class="fork-pulse" style="background: oklch(0.68 0.16 145); box-shadow: 0 0 12px oklch(0.68 0.16 145); animation: none;"></span>
+            <span class="fork-status-label">gemini · operational</span>
+          </div>
+        </div>
+
+        <div class="fork-flow mono">
+          <div class="fork-flow-row"><span class="fork-flow-k">stuck&nbsp;at</span> <span class="fork-flow-v">turn 84 · context exhausted</span></div>
+          <div class="fork-flow-row"><span class="fork-flow-k">→ compact</span> <span class="fork-flow-v">handoff brief generated</span></div>
+          <div class="fork-flow-row"><span class="fork-flow-k">→ resume</span> <span class="fork-flow-v" style="color: var(--amber);">codex picks up the work</span></div>
+        </div>
+
+        <div class="fork-callout">
+          Used <span class="fork-num">3×</span> in the past month — once on a Tuesday outage, twice when sessions hit context limits mid-PR.
+        </div>
+      </aside>
+
+      <!-- RIGHT: real product screenshot -->
+      <div class="fork-shot">
+        <div class="screenframe">
+          <img src="assets/fork-dialog.png" alt="Fork session dialog"/>
+        </div>
+        <div class="fork-shot-cap mono">session.hivemind / fork</div>
+      </div>
+
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 16px; color: var(--mute-dark); font-size: 22px;">
+      // we don't control Anthropic's uptime. we do control how fast you keep going.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 17 SECTION: WHAT'S NEXT -->
+<!-- ============================================================= -->
+<section data-label="17 Section · Next">
+  <div class="chrome amber">
+    <div class="header-bar" style="color: var(--ink); opacity: 0.55;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>section</span></div>
+      <div class="mono">— 04 —</div>
+    </div>
+    <div class="section-divider" style="flex: 1;">
+      <div>
+        <div class="secnum reveal" style="color: var(--ink); opacity: 0.6; margin-top: 80px;">PART FOUR</div>
+        <div class="sectitle reveal-2" style="color: var(--ink); margin-top: 30px;">Where<br/>it's going.</div>
+      </div>
+      <div class="reveal-3" style="color: var(--ink); opacity: 0.7; font-size: 32px;">
+        <span class="mono">three bets · next quarter</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 18 ROADMAP — three bets, overview -->
+<!-- ============================================================= -->
+<section data-label="18 Roadmap">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>roadmap · q2</span></div>
+      <div class="mono">20 / 23</div>
+    </div>
+    <div class="reveal" style="margin-top: 28px;">
+      <div class="eyebrow">Where we're going</div>
+      <div class="slide-title" style="margin-top: 12px;">
+        Three bets. <span style="color: var(--amber);">One quarter.</span>
+      </div>
+    </div>
+    <div class="bets3 reveal-2">
+      <div class="bet-cd">
+        <div class="num">01</div>
+        <div class="tag">Service agents</div>
+        <div class="h">Agents that work while you sleep.</div>
+        <div class="d">Async agents kicked off by PR comments, prod alerts, on-call pages. Federated identity from GitHub Actions, Kubernetes, Modal. Sandboxes included.</div>
+      </div>
+      <div class="bet-cd b2">
+        <div class="num">02</div>
+        <div class="tag">Insights V2</div>
+        <div class="h">A classifier that earns its keep.</div>
+        <div class="d">Pipeline overhaul on Weave evals. Repo-wide patterns of what's consistently failing across users. UX to apply the fix from insights to PR in one command.</div>
+      </div>
+      <div class="bet-cd b3">
+        <div class="num">03</div>
+        <div class="tag">Code quality</div>
+        <div class="h">Did the agent's code matter?</div>
+        <div class="d">Track what merges, what gets replaced, what survives in production. Feed it back into the leaderboard. Give finance a number worth defending.</div>
+      </div>
+    </div>
+    <div class="reveal-3 mono" style="margin-top: 28px; color: var(--mute-dark); font-size: 22px;">
+      // each one gets its own slide. let's go.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 21 BET 01 — SERVICE AGENTS -->
+<!-- ============================================================= -->
+<section data-label="21 Service Agents">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>roadmap · bet 01 · service agents</span></div>
+      <div class="mono">21 / 23</div>
+    </div>
+
+    <div class="reveal bet-head">
+      <div class="n">01</div>
+      <div>
+        <div class="meta">Bet · 01 · Service Agents</div>
+        <div class="slide-title" style="font-size: 76px; line-height: 1.05; margin-top: 10px;">
+          Agents that <span style="color: var(--amber);">work while you sleep.</span>
+        </div>
+        <div style="margin-top: 14px; font-size: 26px; color: var(--mute-dark); max-width: 1500px; line-height: 1.4;">
+          Same trajectory shape. Same insights. Same scoreboard. Just no human in the loop.
+        </div>
+      </div>
+    </div>
+
+    <div class="sa-flow reveal-2">
+      <div class="sa-node">
+        <div class="lbl">// trigger</div>
+        <div class="ttl">An event happens.</div>
+        <ul>
+          <li>PR comment</li>
+          <li>Sentry / pagerduty</li>
+          <li>Slack mention</li>
+          <li>Cron / schedule</li>
+        </ul>
+      </div>
+      <div class="sa-arrow">→</div>
+      <div class="sa-node accent">
+        <div class="lbl">// run</div>
+        <div class="ttl">An agent runs &mdash; <span style="color: var(--amber);">no creds to manage.</span></div>
+        <ul>
+          <li>Workload identity from GH Actions, k8s, Modal</li>
+          <li>Short-lived tokens, nothing stored</li>
+          <li>Bring your sandbox &mdash; or use ours</li>
+        </ul>
+      </div>
+      <div class="sa-arrow">→</div>
+      <div class="sa-node">
+        <div class="lbl">// tracked</div>
+        <div class="ttl">It shows up in the feed.</div>
+        <ul>
+          <li>Same trajectory as a Claude Code session</li>
+          <li>Same insights, same leaderboard</li>
+          <li>Replays, redaction, privacy &mdash; all of it</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 24px; color: var(--mute-dark); font-size: 22px;">
+      // every event becomes a session. every session becomes a learning.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 22 BET 02 — INSIGHTS V2 -->
+<!-- ============================================================= -->
+<section data-label="22 Insights V2">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>roadmap · bet 02 · insights v2</span></div>
+      <div class="mono">22 / 23</div>
+    </div>
+
+    <div class="reveal bet-head b2">
+      <div class="n">02</div>
+      <div>
+        <div class="meta">Bet · 02 · Insights V2</div>
+        <div class="slide-title" style="font-size: 76px; line-height: 1.05; margin-top: 10px;">
+          A classifier that <span style="color: var(--violet);">earns its keep.</span>
+        </div>
+        <div style="margin-top: 14px; font-size: 26px; color: var(--mute-dark); max-width: 1500px; line-height: 1.4;">
+          The pipeline that turns trajectories into "here's what's broken." Today it's noisy. Next, it's measured.
+        </div>
+      </div>
+    </div>
+
+    <div class="iv2-split reveal-2">
+      <div class="iv2-col">
+        <div class="v">V1 · today</div>
+        <div class="h">Noisy.</div>
+        <ul>
+          <li>One-shot classification, no eval rigor.</li>
+          <li>False positives drown the real signals.</li>
+          <li>Surfaces single-session issues, not what's <em>consistently</em> breaking across users.</li>
+          <li>Insights you read &mdash; not insights you act on.</li>
+        </ul>
+      </div>
+      <div class="iv2-col next">
+        <div class="v">V2 · next</div>
+        <div class="h">Evaluated.</div>
+        <ul>
+          <li>Built on <em>Weave evals</em> &mdash; measured, not vibes.</li>
+          <li>Patterns that repeat: <em>what's failing for everyone in this repo?</em></li>
+          <li>Apply-the-fix UX &mdash; from insights to PR in one command.</li>
+          <li>Falsifiable. When the fix doesn't work, we see it.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 24px; color: var(--mute-dark); font-size: 22px;">
+      // we're eating Weave's dog food. it's the only way this gets better.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 23 BET 03 — CODE QUALITY -->
+<!-- ============================================================= -->
+<section data-label="23 Code Quality">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>roadmap · bet 03 · code quality</span></div>
+      <div class="mono">23 / 23</div>
+    </div>
+
+    <div class="reveal bet-head b3">
+      <div class="n">03</div>
+      <div>
+        <div class="meta">Bet · 03 · Code Quality</div>
+        <div class="slide-title" style="font-size: 76px; line-height: 1.05; margin-top: 10px;">
+          Did the agent's code <span style="color: var(--amber-deep);">matter?</span>
+        </div>
+        <div style="margin-top: 14px; font-size: 26px; color: var(--mute-dark); max-width: 1500px; line-height: 1.4;">
+          Generation is cheap. Survival is the metric. Every diff has an afterlife &mdash; we're going to read it.
+        </div>
+      </div>
+    </div>
+
+    <div class="cq-life reveal-2">
+      <div class="cq-step">
+        <div class="cq-dot"></div>
+        <div class="when">t = 0</div>
+        <div class="lbl">generated</div>
+        <div class="sub">agent writes a diff</div>
+      </div>
+      <div class="cq-step">
+        <div class="cq-dot"></div>
+        <div class="when">t + min</div>
+        <div class="lbl">PR opened</div>
+        <div class="sub">does it pass CI?</div>
+      </div>
+      <div class="cq-step">
+        <div class="cq-dot"></div>
+        <div class="when">t + day</div>
+        <div class="lbl">merged · or not</div>
+        <div class="sub">how much did review rewrite?</div>
+      </div>
+      <div class="cq-step">
+        <div class="cq-dot"></div>
+        <div class="when">t + 30d</div>
+        <div class="lbl">still here</div>
+        <div class="sub">replaced? reverted? rewritten?</div>
+      </div>
+      <div class="cq-step last">
+        <div class="cq-dot"></div>
+        <div class="when">t + 90d</div>
+        <div class="lbl">survived</div>
+        <div class="sub">in prod, shipping value</div>
+      </div>
+    </div>
+
+    <div class="cq-pay reveal-3">
+      <div class="cq-pay-tile">
+        <div class="l">payoff · engineers</div>
+        <div class="h">A leaderboard that rewards survival, not burn.</div>
+        <div class="d">Cost per merged line. Code still in main after 30 days. The scoreboard finally measures the game we're playing.</div>
+      </div>
+      <div class="cq-pay-tile">
+        <div class="l">payoff · stakeholders</div>
+        <div class="h">A clear answer to "what is the AI capex buying?"</div>
+        <div class="d">PRs shipped, code surviving, replaced, reverted &mdash; by repo, team, quarter. Receipts for the spend.</div>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 18px; color: var(--mute-dark); font-size: 22px;">
+      // generated is cheap. survived is the metric.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 19 WHY THIS MATTERS -->
+<!-- ============================================================= -->
+<section data-label="19 Why this matters">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>closing</span></div>
+      <div class="mono">19 / 20</div>
+    </div>
+    <div style="display: flex; flex: 1; align-items: center;">
+      <div class="reveal" style="max-width: 1600px;">
+        <div class="bar"></div>
+        <div class="quote" style="margin-top: 40px;">
+          Great tools are part of our DNA.<br/>
+          <span class="hl">HiveMind</span> is how we stay ahead in<br/>
+          a landscape that's accelerating.
+        </div>
+      </div>
+    </div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="mono">the key message</div>
+      <div>HIVEMIND</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 20 QUESTIONS -->
+<!-- ============================================================= -->
+<section data-label="20 Questions">
+  <div class="chrome dark">
+    <div class="nodegraph">
+      <svg viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+        <g class="g1" opacity="0.5">
+          <path class="line" d="M 200 900 Q 500 700 900 820 T 1700 700" />
+          <path class="line" d="M 100 200 Q 400 350 800 250 T 1800 320" />
+          <circle class="node" cx="200" cy="900" r="5" />
+          <circle class="node" cx="900" cy="820" r="5" />
+          <circle class="node" cx="1700" cy="700" r="5" />
+          <circle class="node" cx="400" cy="310" r="5" />
+          <circle class="node" cx="1200" cy="280" r="5" />
+        </g>
+      </svg>
+    </div>
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>questions</span></div>
+      <div class="mono">20 / 20</div>
+    </div>
+    <div class="q-wrap">
+      <div class="eyebrow reveal">Over to you</div>
+      <div class="q-big reveal-2" style="margin-top: 20px;">Questions<span class="dot">.</span></div>
+      <div class="body reveal-3" style="margin-top: 56px; color: var(--mute-dark); max-width: 1600px; display: grid; grid-template-columns: auto 1fr; gap: 14px 36px; align-items: baseline;">
+        <div class="mono" style="color: var(--mute-dark); font-size: 24px; letter-spacing: 0.1em;">SLACK</div>
+        <div class="mono" style="color: var(--amber);">#hivemind</div>
+        <div class="mono" style="color: var(--mute-dark); font-size: 24px; letter-spacing: 0.1em;">REPO</div>
+        <div class="mono" style="color: var(--amber);">wandb/agentstream</div>
+        <div class="mono" style="color: var(--mute-dark); font-size: 24px; letter-spacing: 0.1em;">INSTALL</div>
+        <div class="mono" style="color: var(--amber);">brew install wandb/taps/hivemind</div>
+        <div class="mono" style="color: var(--mute-dark); font-size: 24px; letter-spacing: 0.1em;">SITE</div>
+        <div class="mono" style="color: var(--amber);">https://hivemind.wandb.tools</div>
+      </div>
+    </div>
+    <div class="header-bar" style="margin-top: auto;">
+      <div class="mono">thanks for listening</div>
+      <div>HIVEMIND</div>
+    </div>
+  </div>
+</section>
+
+</deck-stage>
+
+<script>
+(function(){
+  const stage = document.querySelector('deck-stage');
+  if (!stage) return;
+
+  // (count-up animation removed — slide replaced with By the Numbers infographic)
+})();
+</script>
+
+</body>
+</html>
