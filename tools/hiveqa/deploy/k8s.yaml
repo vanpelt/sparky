@@ -1,0 +1,200 @@
+# Kubernetes deployment for hiveqa (headscale + hiveqad in one pod).
+#
+# Prerequisites:
+#   1. Build and push the image: docker build -t gcr.io/PROJECT/hiveqa:latest .
+#   2. Create the namespace: kubectl create namespace hiveqa
+#   3. Create the secret: kubectl -n hiveqa create secret generic hiveqa-secrets \
+#        --from-literal=ts-authkey=tskey-auth-xxxxx  # optional, auto-generated if omitted
+#   4. Update server_url in the ConfigMap to your public URL
+#   5. Apply: kubectl apply -f k8s.yaml
+#
+# For per-customer deployments, template this with the customer's domain/config.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hiveqa
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: headscale-config
+  namespace: hiveqa
+data:
+  config.yaml: |
+    server_url: "https://headscale.CUSTOMER.example.com"
+    listen_addr: "0.0.0.0:8080"
+    metrics_listen_addr: "0.0.0.0:9090"
+    grpc_listen_addr: "0.0.0.0:50443"
+    grpc_allow_insecure: true
+    noise:
+      private_key_path: /data/headscale/noise_private.key
+    prefixes:
+      v4: "100.64.0.0/10"
+      v6: "fd7a:115c:a1e0::/48"
+      allocation: sequential
+    database:
+      type: sqlite
+      sqlite:
+        path: /data/headscale/db.sqlite
+        write_ahead_log: true
+    derp:
+      server:
+        enabled: true
+        region_id: 999
+        region_code: "hiveqa"
+        region_name: "hiveqa embedded"
+        stun_listen_addr: "0.0.0.0:3478"
+        private_key_path: /data/headscale/derp_private.key
+        automatically_add_embedded_derp_region: true
+      urls:
+        - "https://controlplane.tailscale.com/derpmap/default"
+      auto_update_enabled: true
+      update_frequency: 24h
+    dns:
+      magic_dns: true
+      base_domain: "hiveqa.internal"
+      nameservers:
+        global:
+          - 1.1.1.1
+          - 8.8.8.8
+    ephemeral_node_inactivity_timeout: 5m
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hiveqa-data
+  namespace: hiveqa
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hiveqa
+  namespace: hiveqa
+  labels:
+    app: hiveqa
+spec:
+  replicas: 1  # headscale does not support HA
+  strategy:
+    type: Recreate  # ensure only one instance writes to SQLite
+  selector:
+    matchLabels:
+      app: hiveqa
+  template:
+    metadata:
+      labels:
+        app: hiveqa
+    spec:
+      containers:
+        - name: hiveqa
+          image: gcr.io/PROJECT/hiveqa:latest  # UPDATE THIS
+          ports:
+            - name: headscale
+              containerPort: 8080
+            - name: stun
+              containerPort: 3478
+              protocol: UDP
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: HIVEQA_STATE_DIR
+              value: /data/hiveqa
+            - name: HIVEQA_CONTROL_URL
+              value: "http://localhost:8080"
+            - name: HIVEQA_TLS
+              value: "none"  # K8s ingress handles TLS
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: hiveqa-secrets
+                  key: ts-authkey
+                  optional: true  # auto-generated if missing
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: headscale-config
+              mountPath: /etc/headscale
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hiveqa-data
+        - name: headscale-config
+          configMap:
+            name: headscale-config
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hiveqa
+  namespace: hiveqa
+spec:
+  selector:
+    app: hiveqa
+  ports:
+    - name: headscale
+      port: 8080
+      targetPort: 8080
+    - name: stun
+      port: 3478
+      targetPort: 3478
+      protocol: UDP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+---
+# Ingress with cert-manager for automatic TLS.
+# This is where ACME SSL certs get provisioned for the headscale endpoint.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hiveqa
+  namespace: hiveqa
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - headscale.CUSTOMER.example.com  # UPDATE THIS
+      secretName: hiveqa-tls
+  rules:
+    - host: headscale.CUSTOMER.example.com  # UPDATE THIS
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hiveqa
+                port:
+                  number: 8080
