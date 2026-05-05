@@ -5,7 +5,8 @@
  *  (a) speaker notes — reads <script type="application/json" id="speaker-notes">
  *      and posts {slideIndexChanged: N} to the parent window on nav.
  *  (b) keyboard navigation — ←/→, PgUp/PgDn, Space, Home/End, number keys.
- *  (c) press R to reset to slide 0 (with a tasteful keyboard hint).
+ *  (c) press R to reset to slide 0, F to toggle fullscreen (both shown as
+ *      keyboard hints in the overlay).
  *  (d) bottom-center overlay showing slide count + hints, fades out on idle.
  *  (e) auto-scaling — inner canvas is a fixed design size (default 1920×1080)
  *      scaled with `transform: scale()` to fit the viewport, letterboxed.
@@ -370,11 +371,13 @@
         </button>
         <span class="divider"></span>
         <button class="btn reset" type="button" aria-label="Reset to first slide" title="Reset (R)">Reset<span class="kbd">R</span></button>
+        <button class="btn reset fullscreen" type="button" aria-label="Toggle fullscreen" title="Fullscreen (F)">Fullscreen<span class="kbd">F</span></button>
       `;
 
       overlay.querySelector('.prev').addEventListener('click', () => this._go(this._index - 1, 'click'));
       overlay.querySelector('.next').addEventListener('click', () => this._go(this._index + 1, 'click'));
       overlay.querySelector('.reset').addEventListener('click', () => this._go(0, 'click'));
+      overlay.querySelector('.fullscreen').addEventListener('click', () => this._toggleFullscreen());
 
       this._root.append(style, stage, tapzones, overlay);
       this._canvas = canvas;
@@ -573,6 +576,8 @@
         this._go(this._slides.length - 1, 'keyboard');
       } else if (key === 'r' || key === 'R') {
         this._go(0, 'keyboard');
+      } else if (key === 'f' || key === 'F') {
+        this._toggleFullscreen();
       } else if (/^[0-9]$/.test(key)) {
         // 1..9 jump to that slide; 0 jumps to 10.
         const n = key === '0' ? 9 : parseInt(key, 10) - 1;
@@ -585,6 +590,18 @@
         e.preventDefault();
         this._flashOverlay();
       }
+    }
+
+    _toggleFullscreen() {
+      const doc = document;
+      const inFs = doc.fullscreenElement || doc.webkitFullscreenElement;
+      if (inFs) {
+        (doc.exitFullscreen || doc.webkitExitFullscreen).call(doc);
+      } else {
+        const el = doc.documentElement;
+        (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+      }
+      this._flashOverlay();
     }
 
     _go(i, reason = 'api') {
