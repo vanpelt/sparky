@@ -47,7 +47,9 @@
   "Naturally people ask: how is this different from Weave? Simple split. Weave is for engineers and product managers putting AI into their products — instrumenting customer-facing AI features, evals, traces, prompts. HiveMind is for engineering teams using AI to build their products — instrumenting our own agents as they write code. Same DNA, different audience.",
   "Section break — product overview. Three parts: architecture, privacy, features.",
   "Architecture. A daemon on your laptop discovers agent sessions — Claude Code, Codex, Cursor, Gemini. It ships raw entries to our backend. The backend normalizes to AG-UI events and stores them in ClickHouse. Dashboard on top. The daemon is intentionally dumb — all the smarts live server-side so we can iterate without pushing updates to your machine.",
-  "Trust model — privacy, security, and sensitive data, in three parts. Privacy: we sit on top of GitHub. Sessions tied to a repo in your org are visible to teammates with access to that repo. Sessions not tied to a git repo are private — only you see them. You can mark any session private, and disable sharing at the repo or user level. Security: short-lived tokens in the system keychain, rotated automatically. SSO and SCIM for org access. Infra is terraformed, runs in VPCs with private connect. Sensitive data: trajectories are redacted on the daemon, before anything leaves your machine. Archival and deletion are coming soon.",
+  "Privacy first. The mental model is dead simple: if a teammate can read the repo on GitHub, they can see the sessions tied to it. If you're working in an org repo, your teammates can see your sessions. If you're working in a private repo, only that repo's collaborators can. And if you're just hacking on something with no git remote — drafting a board update, working on a side project, whatever — only you ever sees that session. We didn't build a parallel ACL system because GitHub already has one and you already maintain it. Three overrides on top: mark any session private, disable sharing for an entire repo, or for a user.",
+  "Security. Three independent boundaries between you and the data. Gate one, your machine: tokens live in the system keychain, never on disk in plaintext, and rotate on a 24-hour clock. You can revoke from the dashboard and the next request just stops. Gate two, identity: SSO and SCIM end-to-end. Org membership and offboarding flow from your IdP — Okta, Azure, Google — we don't keep a parallel directory, so when HR offboards someone they're offboarded here. Gate three, network: the backend, ClickHouse, and the search index all live in a private VPC behind private connect. Infra is terraformed end to end, every read is audit-logged. Each gate fails closed — pull a token, an SSO group, or VPC peering, and the next request stops at the door.",
+  "Sensitive data. This is the slide I want you to remember. The daemon redacts on-device, before anything ships. On the left is the raw trajectory — bash commands with bearer tokens, env vars with API keys, a diff that touches a .env file. On the right is what actually crosses the wire — same shape, secrets replaced with [REDACTED]. We catch them with a combination of regex patterns for known providers and an entropy filter for the random ones, and there's a configurable allowlist you control. The boundary is your laptop, full stop. Two things that aren't there yet but are coming: per-user archival and self-serve deletion for trajectories that have already been shipped.",
   "Features. Activity feeds. Leaderboards. Team stats. Session replays. Insights extracted from trajectories — todos, tools, skills, files modified. Repository-level views. It's a lot, and it's growing fast.",
   "Section break — demo time.",
   "Section break — what we've learned.",
@@ -130,7 +132,7 @@
 
     <div class="cover">
       <div class="reveal" style="max-width: 1000px;">
-        <div class="eyebrow" style="margin: 0;">Agentic engineering</div>
+        <div class="eyebrow" style="margin: 0;">Agent engineering</div>
       </div>
       <div class="brand reveal-2" style="margin-top: 40px; max-width: 1000px;">HiveMind</div>
       <div class="tag reveal-3" style="max-width: 980px;">A shared layer of understanding for how we build with agents.</div>
@@ -150,7 +152,7 @@
   <div class="chrome dark" style="padding: 60px 100px 56px;">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>by the numbers</span></div>
-      <div class="mono">02 / 25</div>
+      <div class="mono">02 / 27</div>
     </div>
 
     <div class="reveal" style="margin-top: 20px;">
@@ -244,7 +246,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>context</span></div>
-      <div class="mono">03 / 25</div>
+      <div class="mono">03 / 27</div>
     </div>
     <div style="display: flex; flex: 1; align-items: center;">
       <div class="reveal nr-block">
@@ -267,7 +269,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>why we're building this</span></div>
-      <div class="mono">04 / 25</div>
+      <div class="mono">04 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 80px;">
       <div class="slide-title">Why HiveMind</div>
@@ -301,7 +303,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>audience</span></div>
-      <div class="mono">05 / 25</div>
+      <div class="mono">05 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 40px;">
       <div class="eyebrow ink">Who it's for</div>
@@ -337,7 +339,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>positioning</span></div>
-      <div class="mono">06 / 25</div>
+      <div class="mono">06 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 40px;">
       <div class="eyebrow ink">Two products. Two audiences.</div>
@@ -395,7 +397,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>01 · architecture</span></div>
-      <div class="mono">08 / 25</div>
+      <div class="mono">08 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow">Architecture</div>
@@ -471,60 +473,227 @@
   <div class="chrome paper">
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
-      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model</span></div>
-      <div class="mono">09 / 25</div>
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model · privacy</span></div>
+      <div class="mono">09 / 27</div>
     </div>
-    <div class="reveal" style="margin-top: 28px;">
-      <div class="eyebrow ink">Trust model</div>
-      <div class="slide-title" style="margin-top: 12px;">Privacy, security &amp; sensitive&nbsp;data.</div>
+    <div class="reveal" style="margin-top: 18px;">
+      <div class="eyebrow ink">Privacy · 1 of 3</div>
+      <div class="slide-title compact" style="margin-top: 6px;">Sessions inherit GitHub's permissions.</div>
+      <div class="slide-lede">No new ACL system. The repo decides the audience.</div>
     </div>
 
-    <div class="trust reveal-2">
-      <div class="tr-row">
-        <div class="tr-num">01</div>
-        <div class="tr-head">
-          <div class="tr-kicker">PRIVACY</div>
-          <div class="tr-title">Built on top of GitHub's privacy&nbsp;model.</div>
+    <div class="perm-flow reveal-2">
+      <div class="perm-headers">
+        <span></span>
+        <span class="ph-1">SESSION</span>
+        <span class="ph-2">GITHUB MATCH</span>
+        <span class="ph-3">VISIBILITY</span>
+      </div>
+
+      <div class="perm-band perm-band-team">
+        <div class="perm-rule">01</div>
+        <div class="perm-card">
+          <div class="pc-meta"><span>~/wandb-core</span></div>
+          <div class="pc-title">refactor inference loop</div>
         </div>
-        <div class="tr-body">
-          <p>Sessions follow their repo's GitHub permissions. Personal or non-git work stays private.</p>
-          <div class="tr-tags">
-            <span class="tr-tag">mark any session private</span>
-            <span class="tr-tag">disable sharing per-repo</span>
-            <span class="tr-tag">disable sharing per-user</span>
+        <svg class="perm-arrow" viewBox="0 0 80 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="68" y2="12"/><polygon class="tip" points="68,4 80,12 68,20"/></svg>
+        <div class="perm-card">
+          <div class="pc-meta">
+            <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+            <span>github.com/wandb/core</span>
           </div>
+          <div class="pc-title">org repo · team has read</div>
+        </div>
+        <svg class="perm-arrow" viewBox="0 0 80 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="68" y2="12"/><polygon class="tip" points="68,4 80,12 68,20"/></svg>
+        <div class="perm-out perm-out-team">
+          <div class="po-label">TEAM-VISIBLE</div>
+          <div class="po-headline">Anyone with repo read.</div>
         </div>
       </div>
 
-      <div class="tr-row">
-        <div class="tr-num">02</div>
-        <div class="tr-head">
-          <div class="tr-kicker">SECURITY</div>
-          <div class="tr-title">Short-lived tokens. SSO.</div>
+      <div class="perm-band perm-band-private">
+        <div class="perm-rule">02</div>
+        <div class="perm-card">
+          <div class="pc-meta"><span>~/wandb-secret-spike</span></div>
+          <div class="pc-title">deploy hotfix to staging</div>
         </div>
-        <div class="tr-body">
-          <p>Keychain-stored, auto-rotated. SSO/SCIM. Private VPCs.</p>
-          <div class="tr-tags">
-            <span class="tr-tag">keychain + rotation</span>
-            <span class="tr-tag">SSO &amp; SCIM</span>
-            <span class="tr-tag">VPC + private connect</span>
+        <svg class="perm-arrow" viewBox="0 0 80 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="68" y2="12"/><polygon class="tip" points="68,4 80,12 68,20"/></svg>
+        <div class="perm-card">
+          <div class="pc-meta">
+            <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a3 3 0 0 0-3 3v3H4a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-1V4a3 3 0 0 0-3-3zm0 1.25A1.75 1.75 0 0 1 9.75 4v3h-3.5V4A1.75 1.75 0 0 1 8 2.25z"/></svg>
+            <span>github.com/wandb/secret-spike</span>
           </div>
+          <div class="pc-title">private repo · 4 collaborators</div>
+        </div>
+        <svg class="perm-arrow" viewBox="0 0 80 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="68" y2="12"/><polygon class="tip" points="68,4 80,12 68,20"/></svg>
+        <div class="perm-out perm-out-private">
+          <div class="po-label">REPO-LOCKED</div>
+          <div class="po-headline">Only repo collaborators.</div>
         </div>
       </div>
 
-      <div class="tr-row">
-        <div class="tr-num">03</div>
-        <div class="tr-head">
-          <div class="tr-kicker">SENSITIVE DATA</div>
-          <div class="tr-title">Redacted before it leaves your&nbsp;machine.</div>
+      <div class="perm-band perm-band-solo">
+        <div class="perm-rule">03</div>
+        <div class="perm-card">
+          <div class="pc-meta"><span>~/scratch/notes</span></div>
+          <div class="pc-title">draft a board update</div>
         </div>
-        <div class="tr-body">
-          <p>Secrets scrubbed on-device.</p>
-          <div class="tr-tags">
-            <span class="tr-tag">on-device redaction</span>
-            <span class="tr-tag tr-tag-soon">archival · soon</span>
-            <span class="tr-tag tr-tag-soon">deletion · soon</span>
-          </div>
+        <svg class="perm-arrow" viewBox="0 0 80 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="68" y2="12"/><polygon class="tip" points="68,4 80,12 68,20"/></svg>
+        <div class="perm-card">
+          <div class="pc-meta"><span>— no git remote —</span></div>
+          <div class="pc-title muted">unmatched</div>
+        </div>
+        <svg class="perm-arrow" viewBox="0 0 80 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="68" y2="12"/><polygon class="tip" points="68,4 80,12 68,20"/></svg>
+        <div class="perm-out perm-out-solo">
+          <div class="po-label">SOLO</div>
+          <div class="po-headline">Only you. Always.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="perm-foot reveal-3">
+      <span>// override at any layer</span>
+      <div class="pf-tags">
+        <span class="tr-tag">mark any session private</span>
+        <span class="tr-tag">disable sharing per-repo</span>
+        <span class="tr-tag">disable sharing per-user</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 09b SECURITY -->
+<!-- ============================================================= -->
+<section data-label="10 Security">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model · security</span></div>
+      <div class="mono">10 / 27</div>
+    </div>
+    <div class="reveal" style="margin-top: 18px;">
+      <div class="eyebrow ink">Security · 2 of 3</div>
+      <div class="slide-title compact" style="margin-top: 6px;">Three gates. Each fails closed.</div>
+      <div class="slide-lede">Device, identity, network — independently revocable.</div>
+    </div>
+
+    <div class="gates reveal-2">
+      <div class="gate">
+        <div class="gate-num">GATE 01 · DEVICE</div>
+        <div class="gate-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <div class="gate-title">Keychain-stored, auto-rotated.</div>
+        <div class="gate-sub">Short-lived tokens. Never on disk in plaintext.</div>
+        <div class="gate-list">
+          <div class="gl-row"><span class="gl-dot"></span>macOS Keychain · libsecret</div>
+          <div class="gl-row"><span class="gl-dot"></span>24-hour rotation</div>
+          <div class="gl-row"><span class="gl-dot"></span>instant dashboard revoke</div>
+        </div>
+      </div>
+
+      <svg class="gate-arrow" viewBox="0 0 60 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="48" y2="12"/><polygon class="tip" points="48,4 60,12 48,20"/></svg>
+
+      <div class="gate gate-pinned">
+        <div class="gate-num">GATE 02 · IDENTITY</div>
+        <div class="gate-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <div class="gate-title">SSO &amp; SCIM, straight from your IdP.</div>
+        <div class="gate-sub">Membership and offboarding flow from Okta. No parallel directory.</div>
+        <div class="gate-list">
+          <div class="gl-row"><span class="gl-dot"></span>Okta · Azure AD · Google</div>
+          <div class="gl-row"><span class="gl-dot"></span>SCIM auto-deprovision</div>
+          <div class="gl-row"><span class="gl-dot"></span>group-scoped access</div>
+        </div>
+      </div>
+
+      <svg class="gate-arrow" viewBox="0 0 60 24" preserveAspectRatio="none"><line class="ln" x1="0" y1="12" x2="48" y2="12"/><polygon class="tip" points="48,4 60,12 48,20"/></svg>
+
+      <div class="gate">
+        <div class="gate-num">GATE 03 · NETWORK</div>
+        <div class="gate-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78A6 6 0 0 0 4.74 11.5a3.5 3.5 0 0 0 .76 6.92"/><path d="M12 12v9"/><path d="m8 17 4 4 4-4"/></svg>
+        </div>
+        <div class="gate-title">Private VPC, fully terraformed.</div>
+        <div class="gate-sub">Data plane behind private connect. No public ingress.</div>
+        <div class="gate-list">
+          <div class="gl-row"><span class="gl-dot"></span>VPC + private connect</div>
+          <div class="gl-row"><span class="gl-dot"></span>infra in version control</div>
+          <div class="gl-row"><span class="gl-dot"></span>audit log on every read</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="gate-perimeter reveal-3">
+      <span class="gp-label">PERIMETER</span>
+      <span class="gp-text">Pull a token, an SSO group, or VPC peering — the next request stops at the door.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 09c SENSITIVE DATA -->
+<!-- ============================================================= -->
+<section data-label="11 Sensitive data">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model · sensitive data</span></div>
+      <div class="mono">11 / 27</div>
+    </div>
+    <div class="reveal" style="margin-top: 18px;">
+      <div class="eyebrow ink">Sensitive data · 3 of 3</div>
+      <div class="slide-title compact" style="margin-top: 6px;">Minimizing sensitive data exposure.</div>
+      <div class="slide-lede">Daemon scrubs trajectories on-device, before any payload is shipped.</div>
+    </div>
+
+    <div class="redact reveal-2">
+      <div class="redact-pane">
+        <div class="redact-head">
+          <span class="rh-where">// on your laptop</span>
+          <span class="rh-state">RAW</span>
+        </div>
+<pre class="redact-code"><span class="rc-comment"># trajectory.jsonl — pre-egress</span>
+<span class="rc-key">cmd</span> : curl -H "Bearer <span class="rc-secret">sk_live_8f3d92ab</span>"
+<span class="rc-key">env</span> : ANTHROPIC_KEY=<span class="rc-secret">sk-ant-9a3…</span>
+       DATABASE_URL=<span class="rc-secret">postgres://p@ss</span>
+       AWS_SECRET=<span class="rc-secret">wJalrXUtnFEMI…</span>
+<span class="rc-key">diff</span>: + STRIPE_KEY=<span class="rc-secret">sk_live_K3y…</span></pre>
+      </div>
+
+      <div class="redact-pane right">
+        <div class="redact-head">
+          <span class="rh-where">// over the wire →</span>
+          <span class="rh-state">EGRESSED</span>
+        </div>
+<pre class="redact-code"><span class="rc-comment"># trajectory.jsonl — post-egress</span>
+<span class="rc-key">cmd</span> : curl -H "Bearer <span class="rc-redacted">[REDACTED]</span>"
+<span class="rc-key">env</span> : ANTHROPIC_KEY=<span class="rc-redacted">[REDACTED]</span>
+       DATABASE_URL=<span class="rc-redacted">[REDACTED]</span>
+       AWS_SECRET=<span class="rc-redacted">[REDACTED]</span>
+<span class="rc-key">diff</span>: + STRIPE_KEY=<span class="rc-redacted">[REDACTED]</span></pre>
+      </div>
+
+      <div class="redact-divider"></div>
+    </div>
+
+    <div class="redact-foot reveal-3">
+      <div class="rf-block">
+        <span class="rf-kicker">SCRUBBED ON-DEVICE</span>
+        <div class="rf-text">API keys, env vars, auth headers, and high-entropy strings.</div>
+        <div class="rf-tags">
+          <span class="tr-tag">regex + entropy</span>
+          <span class="tr-tag">configurable allowlist</span>
+        </div>
+      </div>
+      <div class="rf-block">
+        <span class="rf-kicker">COMING NEXT</span>
+        <div class="rf-text">Org-wide archive policy and enhanced AI PII redaction.</div>
+        <div class="rf-tags">
+          <span class="tr-tag tr-tag-soon">archival · soon</span>
+          <span class="tr-tag tr-tag-soon">AI PII redaction · soon</span>
         </div>
       </div>
     </div>
@@ -538,7 +707,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>03 · features</span></div>
-      <div class="mono">10 / 25</div>
+      <div class="mono">12 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow">Features</div>
@@ -594,7 +763,7 @@
         <div class="sectitle reveal-2" style="color: var(--ink); margin-top: 30px;">Demo.</div>
       </div>
       <div class="reveal-3" style="color: var(--ink); opacity: 0.7; font-size: 32px;" class="mono">
-        <span class="mono">live from my laptop · no slides · please heckle</span>
+        <span class="mono">live from my laptop · no slides · YOLO</span>
       </div>
     </div>
   </div>
@@ -628,7 +797,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>what we've learned</span></div>
-      <div class="mono">13 / 25</div>
+      <div class="mono">15 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow">
@@ -672,7 +841,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>learning · 01</span></div>
-      <div class="mono">14 / 25</div>
+      <div class="mono">16 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 24px;">
       <div class="eyebrow">The thing I'm sure of</div>
@@ -736,8 +905,8 @@
       </div>
     </div>
 
-    <div class="reveal-3 body-lg" style="margin-top: 32px; color: var(--mute-dark); max-width: 1600px;">
-      Four agents. One shape. <span style="color: var(--paper);">Already changing how we debug, teach, and build&nbsp;tooling.</span>
+    <div class="reveal-3 body-lg" style="margin-top: 32px; color: var(--mute-dark); max-width: 1720px; white-space: nowrap;">
+      Infinite agents. One shape. <span style="color: var(--paper);">Already changing how we debug, teach, and build&nbsp;tooling.</span>
     </div>
   </div>
 </section>
@@ -749,7 +918,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>learning · 02 · the flywheel in action</span></div>
-      <div class="mono">15 / 25</div>
+      <div class="mono">17 / 27</div>
     </div>
 
     <div class="reveal" style="margin-top: 24px;">
@@ -832,7 +1001,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>overview · your week</span></div>
-      <div class="mono">16 / 25</div>
+      <div class="mono">18 / 27</div>
     </div>
 
     <div class="reveal" style="margin-top: 28px;">
@@ -875,7 +1044,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>learning · 03</span></div>
-      <div class="mono">17 / 25</div>
+      <div class="mono">19 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow ink">The hard one</div>
@@ -895,7 +1064,7 @@
       </div>
     </div>
 
-    <div class="mono reveal-3" style="margin-top: auto; color: var(--mute-light); font-size: 26px; max-width: 1500px; line-height: 1.4;">
+    <div class="mono reveal-3" style="margin-top: auto; color: var(--mute-light); font-size: 22px; line-height: 1.4; white-space: nowrap;">
       // incentives shape behavior. if we get the scoreboard wrong, the players optimize for the wrong game.
     </div>
   </div>
@@ -908,7 +1077,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>learning · 04 · the panic button</span></div>
-      <div class="mono">18 / 25</div>
+      <div class="mono">20 / 27</div>
     </div>
 
     <div class="reveal" style="margin-top: 20px;">
@@ -985,7 +1154,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · q2</span></div>
-      <div class="mono">20 / 25</div>
+      <div class="mono">22 / 27</div>
     </div>
     <div class="reveal" style="margin-top: 28px;">
       <div class="eyebrow">Where we're going</div>
@@ -1026,7 +1195,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · bet 01 · service agents</span></div>
-      <div class="mono">21 / 25</div>
+      <div class="mono">23 / 27</div>
     </div>
 
     <div class="reveal bet-head">
@@ -1088,7 +1257,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · bet 02 · insights v2</span></div>
-      <div class="mono">22 / 25</div>
+      <div class="mono">24 / 27</div>
     </div>
 
     <div class="reveal bet-head b2">
@@ -1140,7 +1309,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · bet 03 · code quality</span></div>
-      <div class="mono">23 / 25</div>
+      <div class="mono">25 / 27</div>
     </div>
 
     <div class="reveal bet-head b3">
@@ -1216,7 +1385,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>closing</span></div>
-      <div class="mono">24 / 25</div>
+      <div class="mono">26 / 27</div>
     </div>
     <div style="display: flex; flex: 1; align-items: center;">
       <div class="reveal" style="max-width: 1600px;">
@@ -1255,7 +1424,7 @@
     </div>
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>questions</span></div>
-      <div class="mono">25 / 25</div>
+      <div class="mono">27 / 27</div>
     </div>
     <div class="q-wrap">
       <div class="eyebrow reveal">Over to you</div>
