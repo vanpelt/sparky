@@ -56,9 +56,11 @@
   "Five things we've learned in the first few months of dogfooding. I'll talk through each.",
   "This is the one I'm most sure about. The full trajectory — every prompt, tool call, and edit — is gold. Across Claude Code, Codex, Cursor, Gemini, all of it in one shape. We enrich it on the way in: classifying prompts as bug or feature or fix, extracting which skills and subagents got invoked, flagging tool-call failures, and indexing all of it so you can search across every session in the company. This is a dataset that didn't exist at this company four months ago and it's already changing how we debug, teach, and build tooling.",
   "Quick aside, and my favorite proof point for the flywheel. A user — not us — built a skill called Soul Stealer. It mines a teammate's sessions and generates a sub-agent that emulates them. Their thinking patterns, the things they reject, even their vocabulary. Tim Sweeney is the most-stolen soul on the team right now. The point isn't the skill itself — the point is that we did not build it. We built the substrate, and the org built the skill on top. That's the flywheel.",
-  "And one more — this is the page I personally live in. The Overview, your week at a glance. Every Friday afternoon I scroll this and write the week's update in five minutes. Sessions, focus hours, turns, PRs shipped, what's still open, the themes my work clustered into, the repos I touched. The themes become the bullet points. The bars are the receipts. It is not a dashboard — it is a memory aid.",
-  "The leaderboard is the most-visited page. People love it. But ranking by token count rewards burn — not caching dynamics, not whether the code shipped. Next iteration: rank by merged PRs, code survival, cost per merged line. Incentives shape behavior — we have to get this right.",
-  "Last learning — and this one came as a surprise. Fork. One click compacts your stuck session and hands the whole brief off to a different agent. We built it for context-exhausted sessions, but it's been a lifesaver every time Anthropic has had a wobble — which, you know, has been a few times lately. Three forks in the past month: one outage, two context limits mid-PR. We can't control Anthropic's uptime. We can control how fast you keep moving when it goes sideways.",
+  "Learning three — Live and Overview unlock parallel work streams. This is the page I personally live in: your week at a glance. Every Friday afternoon I scroll it and write the week's update in five minutes. Sessions, focus hours, turns, PRs shipped, what's still open, the themes my work clustered into, the repos I touched. The themes become the bullet points. The bars are the receipts. It is not a dashboard — it is a memory aid.",
+  "Learning four — the leaderboard. The most-visited page in HiveMind. People love it. But ranking by token count rewards burn — not caching dynamics, not whether the code shipped. Next iteration: rank by merged PRs, code survival, cost per merged line. Incentives shape behavior — we have to get this right.",
+  "Learning five — the Fork. One click compacts your stuck session and hands the whole brief off to a different agent. We built it for context-exhausted sessions, but it's been a lifesaver every time Anthropic has had a wobble — which, you know, has been a few times lately. Three forks in the past month: one outage, two context limits mid-PR. We can't control Anthropic's uptime. We can control how fast you keep moving when it goes sideways.",
+  "Learning six — and this is the new one for me. The bottleneck has shifted. Agents write code faster than any of us can read it, and QA and code review are now where the time goes. Two features that are starting to help. One: thumbnails on the overview page — every session is a tile, you can skim a week of work in twenty seconds. Two: AI Walkthrough, brand new. For any individual session, you get an annotated trajectory — summary, things worth a closer look, where the agent self-corrected, where it skipped something. The pitch: read the agent before you read the diff. Fifteen-minute review collapses to about three.",
+  "Learning seven — and this one I almost didn't put in. The agent is a user. Every CLI we ship gets read by Claude Code, by Codex, by whatever's coming next, just as much as by humans — so good help text, clean subcommands, predictable flags pay double. As an example: 'hivemind --help', the Sessions block — import, transcript, search, fork, insights, export — each one usable from a terminal and from a subagent. And speaking of subagents: every login drops an @hivemind subagent into ~/.claude/agents. Mention it in any Claude Code session and it can search your sessions, fork from them, summarize them. Build for both audiences and the flywheel keeps spinning.",
   "Section break — where we go next.",
   "Three bets for next quarter, and each one gets its own slide. One: service agents — async agents on prod events. Two: Insights V2 — a real classifier built on Weave evals. Three: code quality — does the agent's code actually survive. Quick walk through each.",
   "Bet one — service agents. Teams are starting to wire async agents to events: a PR comment, a Sentry alert, a pagerduty page, a cron. We want HiveMind to track those alongside your interactive sessions. The unlock is workload identity federation — GH Actions, Kubernetes, Modal — so you don't have to manage credentials. Bring your sandbox or use ours. Same trajectory shape, same insights, same scoreboard. Every event becomes a session.",
@@ -152,7 +154,7 @@
   <div class="chrome dark" style="padding: 60px 100px 56px;">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>by the numbers</span></div>
-      <div class="mono">02 / 27</div>
+      <div class="mono">02 / 29</div>
     </div>
 
     <div class="reveal" style="margin-top: 20px;">
@@ -246,7 +248,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>context</span></div>
-      <div class="mono">03 / 27</div>
+      <div class="mono">03 / 29</div>
     </div>
     <div style="display: flex; flex: 1; align-items: center;">
       <div class="reveal nr-block">
@@ -269,7 +271,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>why we're building this</span></div>
-      <div class="mono">04 / 27</div>
+      <div class="mono">04 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 80px;">
       <div class="slide-title">Why HiveMind</div>
@@ -303,7 +305,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>audience</span></div>
-      <div class="mono">05 / 27</div>
+      <div class="mono">05 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 40px;">
       <div class="eyebrow ink">Who it's for</div>
@@ -339,7 +341,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>positioning</span></div>
-      <div class="mono">06 / 27</div>
+      <div class="mono">06 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 40px;">
       <div class="eyebrow ink">Two products. Two audiences.</div>
@@ -397,7 +399,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>01 · architecture</span></div>
-      <div class="mono">08 / 27</div>
+      <div class="mono">08 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow">Architecture</div>
@@ -474,7 +476,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model · privacy</span></div>
-      <div class="mono">09 / 27</div>
+      <div class="mono">09 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 18px;">
       <div class="eyebrow ink">Privacy · 1 of 3</div>
@@ -570,7 +572,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model · security</span></div>
-      <div class="mono">10 / 27</div>
+      <div class="mono">10 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 18px;">
       <div class="eyebrow ink">Security · 2 of 3</div>
@@ -641,7 +643,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>02 · trust model · sensitive data</span></div>
-      <div class="mono">11 / 27</div>
+      <div class="mono">11 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 18px;">
       <div class="eyebrow ink">Sensitive data · 3 of 3</div>
@@ -707,7 +709,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>03 · features</span></div>
-      <div class="mono">12 / 27</div>
+      <div class="mono">12 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow">Features</div>
@@ -784,7 +786,7 @@
         <div class="sectitle reveal-2" style="color: var(--ink); margin-top: 30px;">What we've<br/>learned.</div>
       </div>
       <div class="reveal-3" style="color: var(--ink); opacity: 0.7; font-size: 32px;">
-        <span class="mono">four months of dogfooding · five lessons</span>
+        <span class="mono">four months of dogfooding · seven lessons</span>
       </div>
     </div>
   </div>
@@ -797,38 +799,48 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>what we've learned</span></div>
-      <div class="mono">15 / 27</div>
+      <div class="mono">15 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow">
 </div>
-      <div class="slide-title" style="margin-top: 16px;">Five Learnings</div>
+      <div class="slide-title" style="margin-top: 16px;">Seven Learnings</div>
     </div>
-    <div class="rows reveal-2" style="margin-top: 24px;">
-      <div class="row" style="padding: 22px 0;">
+    <div class="rows reveal-2" style="margin-top: 16px;">
+      <div class="row" style="padding: 14px 0;">
         <div class="idx">01</div>
-        <div class="t" style="font-size: 38px;">Rich trajectories are a data flywheel.</div>
-        <div class="d" style="font-size: 26px;">A dataset that didn't exist before.</div>
+        <div class="t" style="font-size: 32px;">Rich trajectories are a data flywheel.</div>
+        <div class="d" style="font-size: 22px;">A dataset that didn't exist before.</div>
       </div>
-      <div class="row" style="padding: 22px 0;">
+      <div class="row" style="padding: 14px 0;">
         <div class="idx">02</div>
-        <div class="t" style="font-size: 38px;">Seeing teammates' sessions is legitimately useful.</div>
-        <div class="d" style="font-size: 26px;">"How would Tim do this?" — one click away.</div>
+        <div class="t" style="font-size: 32px;">Seeing teammates' sessions is legitimately useful.</div>
+        <div class="d" style="font-size: 22px;">"How would Tim do this?" — one click away.</div>
       </div>
-      <div class="row" style="padding: 22px 0;">
+      <div class="row" style="padding: 14px 0;">
         <div class="idx">03</div>
-        <div class="t" style="font-size: 38px;">The leaderboard is loved — and tricky.</div>
-        <div class="d" style="font-size: 26px;">Rewards burn, not outcomes.</div>
+        <div class="t" style="font-size: 32px;">Live + Overview unlock parallel work streams.</div>
+        <div class="d" style="font-size: 22px;">Tail one session while another runs.</div>
       </div>
-      <div class="row" style="padding: 22px 0;">
+      <div class="row" style="padding: 14px 0;">
         <div class="idx">04</div>
-        <div class="t" style="font-size: 38px;">Live + Overview unlock parallel work streams.</div>
-        <div class="d" style="font-size: 26px;">Tail one session while another runs.</div>
+        <div class="t" style="font-size: 32px;">The leaderboard is loved — and tricky.</div>
+        <div class="d" style="font-size: 22px;">Rewards burn, not outcomes.</div>
       </div>
-      <div class="row" style="padding: 22px 0;">
+      <div class="row" style="padding: 14px 0;">
         <div class="idx">05</div>
-        <div class="t" style="font-size: 38px;">Fork is a lifesaver when Anthropic is down.</div>
-        <div class="d" style="font-size: 26px;">One click to hand off a stuck session.</div>
+        <div class="t" style="font-size: 32px;">Fork is a lifesaver when Anthropic is down.</div>
+        <div class="d" style="font-size: 22px;">One click to hand off a stuck session.</div>
+      </div>
+      <div class="row" style="padding: 14px 0;">
+        <div class="idx">06</div>
+        <div class="t" style="font-size: 32px;">Our bottleneck is QA and code review.</div>
+        <div class="d" style="font-size: 22px;">HiveMind can help.</div>
+      </div>
+      <div class="row" style="padding: 14px 0;">
+        <div class="idx">07</div>
+        <div class="t" style="font-size: 32px;">The Agent is a User.</div>
+        <div class="d" style="font-size: 22px;">hivemind --help FTW.</div>
       </div>
     </div>
   </div>
@@ -841,7 +853,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>learning · 01</span></div>
-      <div class="mono">16 / 27</div>
+      <div class="mono">16 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 24px;">
       <div class="eyebrow">The thing I'm sure of</div>
@@ -918,7 +930,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>learning · 02 · the flywheel in action</span></div>
-      <div class="mono">17 / 27</div>
+      <div class="mono">17 / 29</div>
     </div>
 
     <div class="reveal" style="margin-top: 24px;">
@@ -1000,8 +1012,8 @@
 <section data-label="16 Your week">
   <div class="chrome dark">
     <div class="header-bar">
-      <div class="lhs"><span class="dot"></span><span>overview · your week</span></div>
-      <div class="mono">18 / 27</div>
+      <div class="lhs"><span class="dot"></span><span>learning · 03 · the memory aid</span></div>
+      <div class="mono">18 / 29</div>
     </div>
 
     <div class="reveal" style="margin-top: 28px;">
@@ -1043,8 +1055,8 @@
   <div class="chrome paper">
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
-      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>learning · 03</span></div>
-      <div class="mono">19 / 27</div>
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>learning · 04 · the hard one</span></div>
+      <div class="mono">19 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 30px;">
       <div class="eyebrow ink">The hard one</div>
@@ -1076,8 +1088,8 @@
 <section data-label="18 Fork">
   <div class="chrome dark">
     <div class="header-bar">
-      <div class="lhs"><span class="dot"></span><span>learning · 04 · the panic button</span></div>
-      <div class="mono">20 / 27</div>
+      <div class="lhs"><span class="dot"></span><span>learning · 05 · the panic button</span></div>
+      <div class="mono">20 / 29</div>
     </div>
 
     <div class="reveal" style="margin-top: 20px;">
@@ -1127,6 +1139,158 @@
 </section>
 
 <!-- ============================================================= -->
+<!-- 16.5 QA & CODE REVIEW (learning · 06) -->
+<!-- ============================================================= -->
+<section data-label="20 QA &amp; Review">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>learning · 06 · the bottleneck</span></div>
+      <div class="mono">21 / 29</div>
+    </div>
+
+    <div class="reveal" style="margin-top: 16px;">
+      <div class="eyebrow">The new bottleneck</div>
+      <div class="slide-title" style="margin-top: 6px; font-size: 58px;">
+        QA &amp; code review is <span style="color: var(--amber);">where the time goes</span>.
+      </div>
+    </div>
+
+    <div class="qa-grid reveal-2" style="margin-top: 22px;">
+
+      <!-- LEFT: real session viewer screenshot -->
+      <div class="qa-panel qa-panel-shot">
+        <div class="qa-panel-head">
+          <span class="qa-panel-kicker">SHIPPED · THUMBNAILS</span>
+          <span class="qa-panel-meta">in any session view</span>
+        </div>
+        <div class="qa-panel-title">Skim a session at a&nbsp;glance.</div>
+        <div class="qa-shot">
+          <img src="assets/qa-thumbnails.png" alt="HiveMind session viewer with inline thumbnails of each generated artifact"/>
+        </div>
+      </div>
+
+      <!-- RIGHT: AI walkthrough -->
+      <div class="qa-panel">
+        <div class="qa-panel-head">
+          <span class="qa-panel-kicker">NEW · AI WALKTHROUGH</span>
+          <span class="qa-panel-meta">session/4f9c2…</span>
+        </div>
+        <div class="qa-panel-title">Read the agent before the&nbsp;diff.</div>
+        <div class="qa-walk">
+          <div class="qa-walk-row">
+            <div class="qa-walk-time">00:42</div>
+            <div class="qa-walk-body">
+              <div class="qa-walk-tag"><span class="qa-walk-pulse"></span>SUMMARY</div>
+              <div class="qa-walk-text">Refactored <span class="qa-walk-em">inference loop</span> · 4 files.</div>
+            </div>
+          </div>
+          <div class="qa-walk-row">
+            <div class="qa-walk-time">02:18</div>
+            <div class="qa-walk-body">
+              <div class="qa-walk-tag qa-walk-tag-issue"><span class="qa-walk-pulse"></span>WORTH A LOOK</div>
+              <div class="qa-walk-text">Silent fallback at <span class="qa-walk-em">batch.py:142</span>.</div>
+            </div>
+          </div>
+          <div class="qa-walk-row">
+            <div class="qa-walk-time">06:55</div>
+            <div class="qa-walk-body">
+              <div class="qa-walk-tag qa-walk-tag-fix"><span class="qa-walk-pulse"></span>SELF-CORRECTED</div>
+              <div class="qa-walk-text">Reverted breaking change after test failed.</div>
+            </div>
+          </div>
+          <div class="qa-walk-row">
+            <div class="qa-walk-time">11:03</div>
+            <div class="qa-walk-body">
+              <div class="qa-walk-tag"><span class="qa-walk-pulse"></span>SKIPPED</div>
+              <div class="qa-walk-text">Legacy-path tests not run.</div>
+            </div>
+          </div>
+        </div>
+        <div class="qa-walk-foot">
+          <span>// review the trajectory · not the patch</span>
+          <span class="qa-walk-summary">~15 min → ~3 min</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 18px; color: var(--mute-dark); font-size: 22px;">
+      // QA is the real bottleneck. we're tooling it.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 16.6 AGENT IS A USER (learning · 07) -->
+<!-- ============================================================= -->
+<section data-label="21 Agent is a User">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>learning · 07 · cli first</span></div>
+      <div class="mono">22 / 29</div>
+    </div>
+
+    <div class="reveal" style="margin-top: 16px;">
+      <div class="eyebrow">Built for them, used by them</div>
+      <div class="slide-title" style="margin-top: 8px; font-size: 68px;">
+        The agent is <span style="color: var(--amber);">a user</span>.
+      </div>
+      <div style="margin-top: 10px; color: var(--mute-dark); max-width: 1500px; font-size: 24px; line-height: 1.4;">
+        We design for humans <span style="color: var(--paper);">and</span> for the agent reading their terminal. Both want the same thing: a clean CLI.
+      </div>
+    </div>
+
+    <div class="agent-grid reveal-2" style="margin-top: 22px;">
+
+      <!-- LEFT: hivemind --help excerpt -->
+      <div class="ss-term" style="box-shadow: 0 0 0 1px oklch(0.55 0.18 75 / 0.12), 0 24px 80px -25px oklch(0.55 0.18 75 / 0.25);">
+        <div class="ss-term-bar">
+          <span class="ss-tdot" style="background: oklch(0.65 0.18 25);"></span>
+          <span class="ss-tdot" style="background: oklch(0.78 0.16 90);"></span>
+          <span class="ss-tdot" style="background: oklch(0.7 0.15 145);"></span>
+          <span class="ss-tname mono">~/projects · hivemind --help</span>
+        </div>
+        <div class="ss-term-body" style="padding: 22px 26px;">
+<pre class="agent-help"><span class="ah-mute">$</span> <span style="color: var(--paper);">hivemind --help</span>
+<span class="ah-desc">Usage: hivemind [OPTIONS] COMMAND [ARGS]…</span>
+
+  <span class="ah-desc">Hivemind — sync agentic coding sessions to the cloud.</span>
+
+<span class="ah-section">Sessions:</span>
+  <span class="ah-cmd">import</span>      <span class="ah-desc">Import sessions from local agent history.</span>
+  <span class="ah-cmd">transcript</span>  <span class="ah-desc">Fetch and display a session transcript.</span>
+  <span class="ah-cmd">search</span>      <span class="ah-desc">Search sessions or list recent ones.</span>
+  <span class="ah-cmd">fork</span>        <span class="ah-desc">Fork work from a previous session.</span>
+  <span class="ah-cmd">insights</span>    <span class="ah-desc">Manage contextual intelligence suggestions.</span>
+  <span class="ah-cmd">export</span>      <span class="ah-desc">Export your data as Parquet or DuckDB.</span></pre>
+        </div>
+      </div>
+
+      <!-- RIGHT: @hivemind subagent card -->
+      <div class="agent-card">
+        <div class="ag-kicker">AUTO-INSTALLED</div>
+        <div class="ag-title">@hivemind subagent.</div>
+        <div class="ag-body">Every login drops a Claude Code subagent into <span class="ag-em">~/.claude/agents</span>. Mention it and it knows your sessions, your forks, your skills.</div>
+        <div class="ag-divider"></div>
+        <div class="ag-snippet"><span class="as-prompt">›</span> <span style="color: var(--paper);">@hivemind find sessions where I used the</span>
+  <span style="color: var(--paper);">frontend-design skill last week</span>
+<span class="as-mute">  → calling hivemind search …</span>
+<span class="as-mute">  → 4 matches · ranked by recency</span>
+<span style="color: var(--amber);">  ✓ ready to fork or summarize</span></div>
+        <div class="ag-tags">
+          <span class="ag-tag">claude code</span>
+          <span class="ag-tag">cursor · soon</span>
+          <span class="ag-tag">codex · soon</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="reveal-3 mono" style="margin-top: auto; padding-top: 18px; color: var(--mute-dark); font-size: 22px;">
+      // good CLI · readable by both humans and the agent reading their terminal.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
 <!-- 17 SECTION: WHAT'S NEXT -->
 <!-- ============================================================= -->
 <section data-label="17 Section · Next">
@@ -1154,7 +1318,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · q2</span></div>
-      <div class="mono">22 / 27</div>
+      <div class="mono">24 / 29</div>
     </div>
     <div class="reveal" style="margin-top: 28px;">
       <div class="eyebrow">Where we're going</div>
@@ -1195,7 +1359,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · bet 01 · service agents</span></div>
-      <div class="mono">23 / 27</div>
+      <div class="mono">25 / 29</div>
     </div>
 
     <div class="reveal bet-head">
@@ -1257,7 +1421,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · bet 02 · insights v2</span></div>
-      <div class="mono">24 / 27</div>
+      <div class="mono">26 / 29</div>
     </div>
 
     <div class="reveal bet-head b2">
@@ -1309,7 +1473,7 @@
   <div class="chrome dark">
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>roadmap · bet 03 · code quality</span></div>
-      <div class="mono">25 / 27</div>
+      <div class="mono">27 / 29</div>
     </div>
 
     <div class="reveal bet-head b3">
@@ -1385,7 +1549,7 @@
     <div class="dotgrid"></div>
     <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
       <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>closing</span></div>
-      <div class="mono">26 / 27</div>
+      <div class="mono">28 / 29</div>
     </div>
     <div style="display: flex; flex: 1; align-items: center;">
       <div class="reveal" style="max-width: 1600px;">
@@ -1424,7 +1588,7 @@
     </div>
     <div class="header-bar">
       <div class="lhs"><span class="dot"></span><span>questions</span></div>
-      <div class="mono">27 / 27</div>
+      <div class="mono">29 / 29</div>
     </div>
     <div class="q-wrap">
       <div class="eyebrow reveal">Over to you</div>
