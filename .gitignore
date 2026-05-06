@@ -7,3 +7,5 @@ build/
 *.csv
 scratch/
 prezos/**/*.pdf
+.DS_Store
+**/.DS_Store
