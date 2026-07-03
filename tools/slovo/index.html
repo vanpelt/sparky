@@ -21,7 +21,7 @@
 <meta name="twitter:description" content="Slovo means “word.” An interactive Slavic family tree, a real map of the great dispersal, and words you can watch mutate branch by branch.">
 <meta name="twitter:image" content="https://vanpelt.github.io/sparky/tools/slovo/og-image.png">
 
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' x='50%' text-anchor='middle' font-size='84' fill='%23e0b447' font-family='Georgia,serif'>Ѫ</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👅</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Forum&family=PT+Serif:ital,wght@0,400;0,700;1,400&family=PT+Mono&display=swap" rel="stylesheet">
@@ -316,7 +316,7 @@ footer p+p{margin-top:12px}
       language expansions in European history. This is the real terrain they crossed.
     </p>
     <div class="map-frame">
-      <div id="geo-map" role="img" aria-label="Map of eastern Europe: the Slavic homeland in the Pripet basin with migration arrows west toward the Elbe and Bohemia, south across the Danube to the Balkans and the Aegean, and east toward Novgorod and the Volga–Oka"></div>
+      <div id="geo-map" role="region" aria-label="Map of eastern Europe: the Slavic homeland in the Pripet basin with migration arrows west toward the Elbe and Bohemia, south across the Danube to the Balkans and the Aegean, and east toward Novgorod and the Volga–Oka"></div>
       <div id="map-fallback" hidden>
         <svg class="fallback-map" viewBox="0 0 1000 540" role="img" aria-label="Stylized map: Slavic homeland in the Pripet basin with migration arrows west toward the Elbe, south across the Danube, and east toward Novgorod and the Volga">
           <defs>
@@ -385,7 +385,7 @@ footer p+p{margin-top:12px}
       The last three words tell a different story: what happens when
       <b>history</b>, not ancestry, picks the word.
     </p>
-    <div class="chips" id="chips" role="tablist" aria-label="Choose a word to compare"></div>
+    <div class="chips" id="chips" role="group" aria-label="Choose a word to compare"></div>
     <div class="cog-law" id="cog-law"></div>
     <div class="cog-grid" id="cog-grid"></div>
   </div>
@@ -959,7 +959,7 @@ function renderWord(w){
   document.querySelectorAll('.chip').forEach(c=>{
     const on = c.dataset.id===w.id;
     c.classList.toggle('on', on);
-    c.setAttribute('aria-selected', on);
+    c.setAttribute('aria-pressed', on);
   });
   lawEl.innerHTML = w.law;
   gridEl.innerHTML = '';
@@ -985,7 +985,8 @@ function renderWord(w){
 WORDS.forEach((w)=>{
   const b = document.createElement('button');
   b.className='chip'; b.dataset.id=w.id; b.textContent=w.chip;
-  b.setAttribute('role','tab');
+  b.type='button';
+  b.setAttribute('aria-pressed','false');
   b.addEventListener('click', ()=>renderWord(w));
   chips.appendChild(b);
 });
