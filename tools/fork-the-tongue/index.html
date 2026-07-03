@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fork the Tongue — how one language became twenty</title>
+<meta name="description" content="An interactive history of the Slavic languages: a phylogenetic tree you can trace, a real map of the great dispersal of 500–800 CE, and cognate words you can watch mutate branch by branch.">
+
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Fork the Tongue — how one language became twenty">
+<meta property="og:description" content="One prehistoric dialect from the Pripet marshes became the largest language family in Europe. Trace the tree, follow the migrations on a real map, and watch *golva mutate into głowa, glava and golová.">
+<meta property="og:image" content="https://vanpelt.github.io/sparky/tools/fork-the-tongue/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:url" content="https://vanpelt.github.io/sparky/tools/fork-the-tongue/">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Fork the Tongue — how one language became twenty">
+<meta name="twitter:description" content="An interactive Slavic family tree, a real map of the great dispersal, and words you can watch mutate branch by branch.">
+<meta name="twitter:image" content="https://vanpelt.github.io/sparky/tools/fork-the-tongue/og-image.png">
+
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' x='50%' text-anchor='middle' font-size='84' fill='%23e0b447' font-family='Georgia,serif'>Ѫ</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Forum&family=PT+Serif:ital,wght@0,400;0,700;1,400&family=PT+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+:root{
+  --ink:#171209;          /* iron-gall black-brown */
+  --ink-2:#1f1810;
+  --parchment:#e9dcbd;    /* main text */
+  --parchment-dim:#9c8d69;
+  --rule:#3a2f1d;
+  --gold:#e0b447;         /* burnished gold */
+  --gold-deep:#a97f1e;
+  --cinnabar:#d15c3b;     /* West Slavic / rubrication */
+  --verdigris:#8fae6a;    /* South Slavic */
+  --lapis:#6d9bd1;        /* East Slavic / rivers */
+  --amber:#cf9430;        /* Baltic */
+  --trunk:#d8c69a;        /* proto trunk */
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--ink);
+  color:var(--parchment);
+  font-family:"PT Serif",Georgia,serif;
+  font-size:17px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+::selection{background:var(--gold-deep);color:var(--ink)}
+a{color:var(--gold)}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+.mono{font-family:"PT Mono",monospace}
+.display{font-family:"Forum",serif;font-weight:400}
+h2.display{font-size:clamp(30px,4.4vw,44px);letter-spacing:.015em;color:var(--parchment);line-height:1.12}
+.eyebrow{
+  font-family:"PT Mono",monospace;font-size:12.5px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--gold);margin-bottom:14px;
+}
+.section{padding:88px 0 26px}
+.lede{color:var(--parchment-dim);max-width:62ch;margin-top:16px}
+.lede b{color:var(--parchment);font-weight:700}
+.lede i{color:var(--parchment)}
+.when-narrow{display:none}
+
+/* reveal on scroll */
+@media (prefers-reduced-motion:no-preference){
+  .reveal{opacity:0;transform:translateY(16px);transition:opacity .7s ease,transform .7s ease}
+  .reveal.in{opacity:1;transform:none}
+}
+
+/* ---------- hero ---------- */
+.hero{padding:96px 0 40px;position:relative;overflow:hidden}
+.hero::before{
+  content:"";position:absolute;inset:-20% -10% auto;height:120%;pointer-events:none;
+  background:radial-gradient(ellipse 60% 45% at 30% 20%,rgba(224,180,71,.07),transparent 70%);
+}
+.hero-word{
+  font-family:"Forum",serif;
+  font-size:clamp(72px,16vw,220px);
+  line-height:.95;
+  letter-spacing:.06em;
+  color:var(--gold);
+  text-shadow:0 0 60px rgba(224,180,71,.18);
+  margin:6px 0 10px -4px;
+  white-space:nowrap;
+}
+.hero-word .thin{color:var(--parchment);opacity:.28}
+.hero h1{
+  font-family:"Forum",serif;font-weight:400;
+  font-size:clamp(30px,4.2vw,46px);
+  color:var(--parchment);letter-spacing:.02em;margin-top:8px;
+}
+.hero .lede{margin-top:18px}
+.hero-rule{
+  height:1px;border:0;margin:56px 0 0;
+  background:linear-gradient(90deg,var(--gold-deep),rgba(224,180,71,.05) 70%);
+}
+
+/* ---------- tree ---------- */
+.tree-help{
+  display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center;
+  margin:22px 0 8px;color:var(--parchment-dim);
+  font-family:"PT Mono",monospace;font-size:12.5px;letter-spacing:.03em;
+}
+.key{display:inline-flex;align-items:center;gap:7px}
+.key i{width:16px;height:3px;border-radius:2px;display:inline-block}
+.tree-scroll{overflow-x:auto;margin:6px -22px 0;padding:0 22px}
+#tree{display:block;width:100%;height:auto}
+#tree text{font-family:"PT Serif",serif}
+#tree .band-label{font-family:"PT Mono",monospace;font-size:11.5px;fill:var(--parchment-dim);letter-spacing:.08em}
+#tree .band{fill:rgba(233,220,189,.028)}
+#tree .band-line{stroke:rgba(233,220,189,.07);stroke-width:1}
+#tree .edge{fill:none;stroke-linecap:round;transition:opacity .28s ease,stroke-width .28s ease}
+#tree .node circle{transition:opacity .28s ease,r .2s ease}
+#tree .node text{fill:var(--parchment);font-size:15px;transition:opacity .28s ease,fill .2s ease}
+#tree .node .sub{fill:var(--parchment-dim);font-family:"PT Mono",monospace;font-size:10.5px}
+#tree .node{cursor:pointer;outline:none}
+#tree .node:hover circle,#tree .node:focus-visible circle{r:7.5}
+#tree .node:focus-visible text{fill:var(--gold)}
+#tree.tracing .edge:not(.lit){opacity:.13}
+#tree.tracing .node:not(.lit) circle{opacity:.16}
+#tree.tracing .node:not(.lit) text{opacity:.16}
+#tree.tracing .edge.lit{stroke-width:4.5}
+#tree.tracing .edge.trunk-e.lit{stroke-width:7}
+#tree .node.sel text.name{fill:var(--gold)}
+#tree .marker863 text{font-family:"PT Mono",monospace;font-size:11px;fill:var(--gold)}
+#tree .extinct text.name{fill:var(--parchment-dim);font-style:italic}
+#tree.compact .node text{font-size:13.5px;paint-order:stroke;stroke:var(--ink);stroke-width:4px;stroke-linejoin:round}
+#tree.compact .node .sub{font-size:9.5px}
+#tree.compact.tracing .edge.lit{stroke-width:4}
+#tree.compact.tracing .edge.trunk-e.lit{stroke-width:5.5}
+@media (min-width:701px){
+  #tree{min-width:900px}
+}
+@media (max-width:700px){
+  .tree-scroll{overflow-x:hidden}
+  .when-wide{display:none}
+  .when-narrow{display:inline}
+}
+
+/* detail panel */
+.panel{
+  border:1px solid var(--rule);border-radius:6px;
+  background:linear-gradient(180deg,var(--ink-2),rgba(31,24,16,.4));
+  padding:26px 28px;margin-top:26px;
+  min-height:150px;
+  position:relative;
+}
+.panel::before{
+  content:"";position:absolute;inset:0;border-radius:6px;pointer-events:none;
+  box-shadow:inset 0 0 60px rgba(0,0,0,.35);
+}
+.panel .p-name{font-family:"Forum",serif;font-size:30px;line-height:1.15;color:var(--parchment)}
+.panel .p-endo{font-size:19px;color:var(--gold);margin-left:2px}
+.panel .p-meta{
+  font-family:"PT Mono",monospace;font-size:12.5px;color:var(--parchment-dim);
+  letter-spacing:.05em;margin:10px 0 12px;
+}
+.panel .p-meta b{color:var(--parchment);font-weight:400}
+.panel .p-note{max-width:70ch;color:var(--parchment)}
+.panel .p-note em{color:var(--gold);font-style:italic}
+.panel .p-hint{color:var(--parchment-dim);font-style:italic}
+.p-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:10px;vertical-align:2px}
+
+/* ---------- migration map ---------- */
+.map-frame{border:1px solid var(--rule);border-radius:6px;background:var(--ink-2);margin-top:26px;overflow:hidden;position:relative}
+#geo-map{height:clamp(360px,58vw,540px);width:100%;background:#0d0a05}
+.leaflet-container{background:#0d0a05;font-family:"PT Mono",monospace}
+.leaflet-tile-pane{filter:grayscale(.25) sepia(.34) saturate(.72) brightness(.86)}
+.leaflet-control-zoom a{
+  background:var(--ink-2)!important;color:var(--parchment)!important;
+  border-color:var(--rule)!important;
+}
+.leaflet-control-zoom a:hover{background:#2a2114!important}
+.leaflet-bar{border-color:var(--rule)!important}
+.leaflet-control-attribution{
+  background:rgba(23,18,9,.75)!important;color:var(--parchment-dim)!important;
+  font-size:10px!important;font-family:"PT Mono",monospace;
+}
+.leaflet-control-attribution a{color:var(--parchment-dim)!important}
+.flow-line{stroke-dasharray:7 9}
+@media (prefers-reduced-motion:no-preference){
+  .flow-line{animation:flowdash 1.5s linear infinite}
+  @keyframes flowdash{to{stroke-dashoffset:-16}}
+}
+.map-tag{
+  font-family:"PT Mono",monospace;font-size:12px;letter-spacing:.05em;
+  white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,.9),0 0 10px rgba(0,0,0,.7);
+  pointer-events:none;text-align:center;
+}
+.map-tag.home{color:var(--gold);font-size:12.5px;letter-spacing:.14em;text-align:center}
+.map-tag.home small{display:block;color:var(--parchment-dim);letter-spacing:.04em;font-size:10.5px}
+.map-tag.city{color:rgba(233,220,189,.85);font-size:10.5px}
+.arrow-head{pointer-events:none}
+.map-caption{color:var(--parchment-dim);font-size:15px;max-width:72ch;margin-top:14px}
+.map-caption b{color:var(--parchment)}
+.fallback-map{display:block;width:100%;height:auto}
+.fallback-map text{font-family:"PT Mono",monospace;fill:var(--parchment-dim);font-size:12px;letter-spacing:.06em}
+.fallback-map .sea-label{fill:rgba(109,155,209,.75)}
+.fallback-map .home-label{fill:var(--gold);font-size:12.5px}
+
+/* ---------- cognates ---------- */
+.chips{display:flex;flex-wrap:wrap;gap:10px;margin:24px 0 20px}
+.chip{
+  font-family:"PT Mono",monospace;font-size:13.5px;letter-spacing:.02em;
+  color:var(--parchment-dim);background:none;border:1px solid var(--rule);
+  border-radius:999px;padding:9px 18px;cursor:pointer;transition:all .18s ease;
+  flex:none;
+}
+.chip:hover{color:var(--parchment);border-color:var(--parchment-dim)}
+.chip.on{color:var(--ink);background:var(--gold);border-color:var(--gold);font-weight:700}
+.chip:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+@media (max-width:700px){
+  .chips{flex-wrap:nowrap;overflow-x:auto;margin:24px -22px 20px;padding:2px 22px 10px;
+    scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .chips::-webkit-scrollbar{display:none}
+}
+.cog-law{
+  border-left:3px solid var(--gold-deep);padding:4px 0 4px 18px;
+  color:var(--parchment);max-width:72ch;margin-bottom:26px;
+}
+.cog-law i{color:var(--gold)}
+.cog-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:12px}
+.cog-group{grid-column:1/-1;font-family:"PT Mono",monospace;font-size:11.5px;
+  letter-spacing:.2em;text-transform:uppercase;color:var(--parchment-dim);
+  margin-top:10px;display:flex;align-items:center;gap:10px}
+.cog-group::after{content:"";flex:1;height:1px;background:var(--rule)}
+.cog-group i{width:12px;height:12px;border-radius:50%;display:inline-block}
+.tile{
+  border:1px solid var(--rule);border-left-width:3px;border-radius:5px;
+  padding:12px 15px;background:rgba(31,24,16,.55);
+}
+.tile .t-lang{font-family:"PT Mono",monospace;font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--parchment-dim)}
+.tile .t-form{font-size:21px;margin-top:3px;color:var(--parchment)}
+.tile .t-form b{color:var(--gold);font-weight:700}
+.tile .t-tr{font-size:13.5px;color:var(--parchment-dim);font-style:italic}
+
+/* ---------- footer ---------- */
+footer{padding:90px 0 60px;color:var(--parchment-dim);font-size:14.5px}
+footer .wrap{border-top:1px solid var(--rule);padding-top:30px}
+footer p{max-width:76ch}
+footer p+p{margin-top:12px}
+
+@media (max-width:640px){
+  .section{padding:64px 0 20px}
+  .hero{padding:72px 0 32px}
+  .panel{padding:20px}
+  .panel .p-name{font-size:25px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important}
+  html{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">*slověne → twenty languages · c. 4500 BCE → today</div>
+    <div class="hero-word" aria-hidden="true">СЛОВ<span class="thin">О</span></div>
+    <h1>Fork the Tongue</h1>
+    <p class="lede">
+      The Slavs likely named themselves <i>*slověne</i> — <b>“the people of the word.”</b>
+      Their neighbours who spoke Germanic got the name <i>*němьci</i> — <b>“the mute ones.”</b>
+      This page traces how one prehistoric dialect, spoken in the marshes between the
+      Vistula and the Dnieper, forked — and forked, and forked again — into the largest
+      language family in Europe: a river of time below, a real map of the great dispersal,
+      and a set of words you can watch mutate branch by branch.
+    </p>
+    <hr class="hero-rule">
+  </div>
+</header>
+
+<!-- ================= TREE ================= -->
+<section class="section" id="tree-section">
+  <div class="wrap reveal">
+    <div class="eyebrow">I · The river of time</div>
+    <h2 class="display">One trunk, three great branches</h2>
+    <p class="lede">
+      <span class="when-wide">Time flows <b>downward</b>; left to right is <b>rough geography, west → east</b>.</span>
+      <span class="when-narrow">Time flows <b>left → right</b>, generation by generation.</span>
+      <span class="when-wide">Hover</span><span class="when-narrow">Tap</span> any name to trace its full lineage;
+      <span class="when-wide">click</span><span class="when-narrow">tap</span> it for the story.
+    </p>
+    <div class="tree-help" id="legend"></div>
+    <div class="tree-scroll">
+      <svg id="tree" viewBox="0 0 1050 1268" role="group" aria-label="Phylogenetic tree of the Slavic and Baltic languages"></svg>
+    </div>
+    <div class="panel" id="panel" aria-live="polite">
+      <div class="p-note p-hint">Select a language or ancestor above to read its story here.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= MIGRATION ================= -->
+<section class="section">
+  <div class="wrap reveal">
+    <div class="eyebrow">II · Out of the marshes</div>
+    <h2 class="display">The great dispersal, c. 500–800 CE</h2>
+    <p class="lede">
+      For two thousand years Proto-Slavic barely moved and barely changed. Then, in about
+      three centuries, it spread from the Baltic to the Aegean — one of the fastest
+      language expansions in European history. This is the real terrain they crossed.
+    </p>
+    <div class="map-frame">
+      <div id="geo-map" role="img" aria-label="Map of eastern Europe: the Slavic homeland in the Pripet basin with migration arrows west toward the Elbe and Bohemia, south across the Danube to the Balkans and the Aegean, and east toward Novgorod and the Volga–Oka"></div>
+      <div id="map-fallback" hidden>
+        <svg class="fallback-map" viewBox="0 0 1000 540" role="img" aria-label="Stylized map: Slavic homeland in the Pripet basin with migration arrows west toward the Elbe, south across the Danube, and east toward Novgorod and the Volga">
+          <defs>
+            <marker id="ah-w" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#d15c3b"/>
+            </marker>
+            <marker id="ah-s" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fae6a"/>
+            </marker>
+            <marker id="ah-e" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#6d9bd1"/>
+            </marker>
+            <radialGradient id="homeglow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#e0b447" stop-opacity=".30"/>
+              <stop offset="100%" stop-color="#e0b447" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <path d="M120,28 C220,10 330,26 375,58 C400,78 360,102 300,96 C220,88 140,80 96,58 C78,48 92,33 120,28 Z"
+                fill="rgba(109,155,209,.10)" stroke="rgba(109,155,209,.25)" stroke-width="1"/>
+          <text class="sea-label" x="200" y="60">BALTIC SEA</text>
+          <path d="M700,470 C780,440 900,442 968,470 C1000,484 1000,540 960,540 L710,540 C680,522 668,484 700,470 Z"
+                fill="rgba(109,155,209,.10)" stroke="rgba(109,155,209,.25)" stroke-width="1"/>
+          <text class="sea-label" x="800" y="505">BLACK SEA</text>
+          <path d="M262,92 C250,170 290,240 262,320 C248,362 260,410 300,452" fill="none" stroke="rgba(109,155,209,.4)" stroke-width="2"/>
+          <text x="212" y="205" fill="rgba(109,155,209,.55)">Vistula</text>
+          <path d="M612,120 C640,200 590,280 640,360 C668,406 700,440 726,472" fill="none" stroke="rgba(109,155,209,.4)" stroke-width="2"/>
+          <text x="628" y="205" fill="rgba(109,155,209,.55)">Dnieper</text>
+          <path d="M60,430 C220,470 400,420 560,460 C640,478 690,472 716,476" fill="none" stroke="rgba(109,155,209,.4)" stroke-width="2"/>
+          <text x="150" y="418" fill="rgba(109,155,209,.55)">Danube</text>
+          <ellipse cx="452" cy="278" rx="190" ry="110" fill="url(#homeglow)"/>
+          <ellipse cx="452" cy="278" rx="118" ry="56" fill="none" stroke="#e0b447" stroke-width="1.5" stroke-dasharray="3 5"/>
+          <text class="home-label" x="452" y="272" text-anchor="middle">THE HOMELAND</text>
+          <text x="452" y="292" text-anchor="middle" fill="#9c8d69">Polesia · the Pripet basin</text>
+          <path d="M330,262 C260,240 200,232 130,246" fill="none" stroke="#d15c3b" stroke-width="3" marker-end="url(#ah-w)"/>
+          <text x="112" y="222" fill="#d15c3b">to the Elbe &amp; Bohemia</text>
+          <path d="M408,338 C380,392 356,420 336,452" fill="none" stroke="#8fae6a" stroke-width="3" marker-end="url(#ah-s)"/>
+          <text x="220" y="500" fill="#8fae6a">across the Danube, into the Balkans</text>
+          <path d="M560,222 C640,170 720,140 800,128" fill="none" stroke="#6d9bd1" stroke-width="3" marker-end="url(#ah-e)"/>
+          <text x="700" y="106" fill="#6d9bd1">to Novgorod &amp; the lakes</text>
+          <path d="M588,290 C680,290 760,300 848,326" fill="none" stroke="#6d9bd1" stroke-width="3" marker-end="url(#ah-e)"/>
+          <text x="760" y="360" fill="#6d9bd1">up the Volga–Oka</text>
+        </svg>
+      </div>
+    </div>
+    <p class="map-caption">
+      Why so fast? The 6th century opened a door: the <b>Plague of Justinian</b> and endless
+      Roman–Persian wars had emptied the Balkans, the <b>Avars</b> dragged Slavic-speaking
+      farmers along on their campaigns, and Slavic itself — recently simplified, remarkably
+      uniform — worked as a lingua franca. Where the migrants settled, the dialects began to
+      drift; where steppe nomads and later the Magyars wedged themselves in between, the
+      drift became a split. <i>(Modern borders shown for orientation only — the sixth
+      century had other ideas.)</i>
+    </p>
+  </div>
+</section>
+
+<!-- ================= COGNATES ================= -->
+<section class="section">
+  <div class="wrap reveal">
+    <div class="eyebrow">III · One word, many mouths</div>
+    <h2 class="display">Watch a single word mutate</h2>
+    <p class="lede">
+      Sound change is regular: when one word shifts, thousands shift with it.
+      Pick a reconstructed root and compare its living descendants —
+      the <b>highlighted</b> letters are where the branches part ways.
+      The last three words tell a different story: what happens when
+      <b>history</b>, not ancestry, picks the word.
+    </p>
+    <div class="chips" id="chips" role="tablist" aria-label="Choose a word to compare"></div>
+    <div class="cog-law" id="cog-law"></div>
+    <div class="cog-grid" id="cog-grid"></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Dates for reconstructed stages are scholarly conventions, not birthdays — a proto-language
+      is a dialect continuum, not a point. † marks an extinct language. Speaker counts are rough,
+      as is everything on a map of the sixth century. Asterisked forms (<span class="mono">*golva</span>)
+      are reconstructed, never attested in writing.
+    </p>
+    <p>
+      Basemap © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
+      · tiles by <a href="https://carto.com/attributions">CARTO</a>.
+    </p>
+  </div>
+</footer>
+
+<script>
+/* ============================================================
+   THE TREE
+   wide:    x = rough geography (west → east) · y = time (down = later)
+   compact: x = generation (left → right)     · y = branch order
+============================================================ */
+const C = {
+  trunk:  getComputedStyle(document.documentElement).getPropertyValue('--trunk').trim(),
+  west:   getComputedStyle(document.documentElement).getPropertyValue('--cinnabar').trim(),
+  south:  getComputedStyle(document.documentElement).getPropertyValue('--verdigris').trim(),
+  east:   getComputedStyle(document.documentElement).getPropertyValue('--lapis').trim(),
+  baltic: getComputedStyle(document.documentElement).getPropertyValue('--amber').trim(),
+  gold:   getComputedStyle(document.documentElement).getPropertyValue('--gold').trim()
+};
+
+const NODES = [
+ {id:'pie', label:'Proto-Indo-European', dates:'c. 4500–2500 BCE', x:500, y:92, p:null, br:'trunk', proto:1,
+  d:{endo:'', meta:'reconstructed · no written records · Pontic–Caspian steppe',
+     note:'The unrecorded ancestor of most of Europe’s and much of Asia’s languages, rebuilt entirely by comparison. Everything on this chart descends from it — and so do English, Greek, Persian and Hindi, which makes <em>head</em>, <em>heart</em> and <em>hundred</em> distant cousins of the words in section III.'}},
+ {id:'bsl', label:'Balto-Slavic', dates:'c. 3000–1500 BCE', x:520, y:248, p:'pie', br:'trunk', proto:1,
+  d:{endo:'', meta:'reconstructed · shared accent & sound innovations',
+     note:'Baltic and Slavic share so many deep innovations — in accent, in vowel length, in word-building — that most linguists give them a common ancestor. It is the last stage the future Lithuanians and Russians spoke together.'}},
+ {id:'baltic', label:'Baltic', dates:'', x:762, y:352, p:'bsl', br:'baltic', proto:1,
+  d:{endo:'', meta:'the branch that stayed home · amber coast',
+     note:'While Slavic exploded across Europe, Baltic barely moved from the amber coast — and barely changed. Its conservatism makes it a time capsule: when reconstructing Proto-Indo-European, linguists reach for Lithuanian first.'}},
+ {id:'psl', label:'Proto-Slavic', dates:'c. 1500 BCE – 500 CE', x:398, y:432, p:'bsl', br:'trunk', proto:1,
+  d:{endo:'*slověnьskъ', meta:'reconstructed · Polesia / Pripet basin · astonishingly uniform',
+     note:'For nearly two thousand years it stayed compact, hidden in the wetlands, and stayed one language. Its signature reform: the <em>law of open syllables</em> — every syllable must end in a vowel — which reshaped virtually every word and set up the branch-splitting changes you can compare in section III.'}},
+
+ {id:'east', label:'East Slavic', dates:'c. 600–900 CE', x:900, y:592, p:'psl', br:'east', proto:1,
+  d:{endo:'', meta:'the north-eastern stream · river roads to Novgorod & Kyiv',
+     note:'Colonists followed the rivers north and east into Finnic and Baltic lands. Their dialects loved full vowels: where the south says <em>grad</em>, the east says <em>gorod</em>. Political unity under Kievan Rus’ kept them close for centuries.'}},
+ {id:'oes', label:'Old East Slavic', dates:'c. 900–1300s', x:900, y:722, p:'east', br:'east', proto:1,
+  d:{endo:'русьскъ', meta:'attested · Ostromir Gospel 1056 · Novgorod birch-bark letters',
+     note:'The written language of Kievan Rus’. Its most human records are hundreds of birch-bark notes dug out of Novgorod’s mud — shopping lists, love letters, a boy’s doodles — everyday Slavic from a thousand years ago.'}},
+ {id:'ru', label:'Russian', dates:'', x:986, y:1088, p:'oes', br:'east',
+  d:{endo:'русский', meta:'≈150 M native, ≈250 M total · Cyrillic',
+     note:'The giant of the family. Centuries of Church Slavonic prestige left it with elegant doublets — native <em>golová</em> “head” beside bookish <em>glavá</em> “chief, chapter” — two branches of this very tree living in one language.'}},
+ {id:'uk', label:'Ukrainian', dates:'', x:936, y:1088, p:'oes', br:'east',
+  d:{endo:'українська', meta:'≈35 M · Cyrillic',
+     note:'Recognizable at once by its breathy <em>h</em> where Russian has <em>g</em> (<em>holová</em>), and by <em>i</em> in closed syllables: <em>kin’</em> “horse” from older <em>kon’</em>. Its vocabulary often sides with Polish against Russian — geography talks.'}},
+ {id:'be', label:'Belarusian', dates:'', x:886, y:1088, p:'oes', br:'east',
+  d:{endo:'беларуская', meta:'≈5 M active speakers · Cyrillic',
+     note:'The rare language that spells its accent out loud: unstressed <em>o</em> becomes <em>a</em> in writing, too — <em>галава</em> for “head”. Long bilingual with Polish, long overshadowed by Russian, it survives with quiet stubbornness.'}},
+
+ {id:'west', label:'West Slavic', dates:'c. 600–900 CE', x:188, y:600, p:'psl', br:'west', proto:1,
+  d:{endo:'', meta:'the western stream · into Latin Christendom',
+     note:'These dialects pushed to the Elbe and into Bohemia. Christianized from Rome rather than Constantinople, all of them write in the Latin alphabet — and each fought it in its own way, hence Polish <em>szcz</em> and Czech <em>ř</em>.'}},
+ {id:'pl', label:'Polish', dates:'', x:288, y:1088, p:'west', br:'west',
+  d:{endo:'polski', meta:'≈40 M · Latin script · first sentence recorded 1270',
+     note:'The only major Slavic language that still speaks through its nose: Proto-Slavic’s nasal vowels survive in <em>ę</em> and <em>ą</em> (<em>pięć</em> “five”). Everyone else let them fade a thousand years ago.'}},
+ {id:'sk', label:'Slovak', dates:'', x:234, y:1088, p:'west', br:'west',
+  d:{endo:'slovenčina', meta:'≈5 M · Latin script',
+     note:'Often called the family’s crossroads: central Slovak dialects share features with West, South and East alike, and Slovaks famously understand their neighbours better than anyone. With Czech it forms a comfortable dialect continuum.'}},
+ {id:'cz', label:'Czech', dates:'', x:180, y:1088, p:'west', br:'west',
+  d:{endo:'čeština', meta:'≈10.7 M · Latin script',
+     note:'Home of <em>ř</em>, a raised trill so rare that Czech children get speech therapy for it. The modern standard was deliberately resurrected from 16th-century Bible Czech during the 19th-century National Revival.'}},
+ {id:'hsb', label:'Upper Sorbian', dates:'', x:126, y:1088, p:'west', br:'west',
+  d:{endo:'hornjoserbšćina', meta:'≈13,000 · Latin script · Lusatia, Germany',
+     note:'A remnant of the Slavs who once reached the Elbe. Spoken around Bautzen/Budyšin inside Germany, kept alive by Catholic villages, bilingual schools and sheer will.'}},
+ {id:'dsb', label:'Lower Sorbian', dates:'', x:70, y:1088, p:'west', br:'west',
+  d:{endo:'dolnoserbšćina', meta:'≈7,000, few young speakers · Latin script',
+     note:'Upper Sorbian’s smaller sibling around Cottbus/Chóśebuz, now severely endangered. Together the two Sorbian languages are the last echo of a Slavic world that once covered most of eastern Germany.'}},
+
+ {id:'south', label:'South Slavic', dates:'c. 600–900 CE', x:505, y:618, p:'psl', br:'south', proto:1,
+  d:{endo:'', meta:'the southern stream · across the Danube, 6th–7th c.',
+     note:'The boldest migration: over the Danube and deep into the Byzantine Balkans, as far as the Peloponnese. When Magyars settled the Pannonian plain (~900 CE), the land bridge to the north was cut — and South Slavic went its own way for good.'}},
+ {id:'essl', label:'Eastern South Slavic', dates:'', x:642, y:772, p:'south', br:'south', proto:1,
+  d:{endo:'', meta:'the Balkan sprachbund at work',
+     note:'Centuries of intimate contact with Greek, Albanian and Balkan Romance produced something remarkable: these Slavic languages dropped almost all their cases and grew a definite article glued to the <em>end</em> of the noun — un-Slavic behaviour, learned from the neighbours.'}},
+ {id:'bg', label:'Bulgarian', dates:'', x:668, y:1088, p:'essl', br:'south',
+  d:{endo:'български', meta:'≈7.8 M · Cyrillic',
+     note:'Direct heir of the Old Church Slavonic literary tradition — the first Slavic ever written (863 CE) was based on Slavic dialects near Thessaloniki. Says <em>gradǎt</em>, “the city,” with the article hanging off the back.'}},
+ {id:'mk', label:'Macedonian', dates:'', x:614, y:1088, p:'essl', br:'south',
+  d:{endo:'македонски', meta:'≈2 M · Cyrillic · codified 1945',
+     note:'The family’s youngest standard, but built on the oldest ground — Cyril and Methodius learned their Slavic here. It has not one definite article but three: near (<em>-ov</em>), far (<em>-on</em>), and neutral (<em>-ot</em>).'}},
+ {id:'wssl', label:'Western South Slavic', dates:'', x:432, y:756, p:'south', br:'south', proto:1,
+  d:{endo:'', meta:'a dialect continuum from the Alps toward the Vardar',
+     note:'From alpine Slovenia down the Adriatic, the dialects shade into one another village by village. The standard languages drawn over this continuum are political lines more than linguistic ones.'}},
+ {id:'sl', label:'Slovene', dates:'', x:348, y:1088, p:'wssl', br:'south',
+  d:{endo:'slovenščina', meta:'≈2.5 M · Latin script',
+     note:'Keeps the <em>dual</em> — a full grammatical number for exactly two things (<em>midva</em>, “the two of us”) — which nearly every other Indo-European language abandoned millennia ago. Also astonishingly diverse: ~48 dialects for two million people.'}},
+ {id:'sh', label:'Serbo-Croatian continuum', dates:'', x:478, y:876, p:'wssl', br:'south', proto:1,
+  d:{endo:'štokavski', meta:'one dialect system · four standards · ≈16 M',
+     note:'One pluricentric language by structure, four standards by history and identity — all built on the same Štokavian dialect, all mutually intelligible with less variation than British and American English. It even keeps a musical pitch accent.'}},
+ {id:'sr', label:'Serbian', dates:'', x:558, y:1088, p:'sh', br:'south',
+  d:{endo:'српски / srpski', meta:'≈7 M · digraphic: Cyrillic and Latin',
+     note:'Actively uses two alphabets — a newspaper may set headlines in Cyrillic and ads in Latin. Its reformer Vuk Karadžić gave it a radical rule beloved of learners: “write as you speak.”'}},
+ {id:'cnr', label:'Montenegrin', dates:'', x:506, y:1088, p:'sh', br:'south',
+  d:{endo:'crnogorski', meta:'≈300,000 · Cyrillic and Latin · official 2007',
+     note:'The newest standard on this chart, codified after independence in 2006. It added two letters of its own, <em>ś</em> and <em>ź</em>, for soft sounds the coastal dialects never gave up.'}},
+ {id:'bs', label:'Bosnian', dates:'', x:454, y:1088, p:'sh', br:'south',
+  d:{endo:'bosanski', meta:'≈2.5 M · Latin (Cyrillic historical)',
+     note:'Distinguished mostly by its Ottoman inheritance — a richer layer of Turkish, Arabic and Persian loanwords — and by memory of <em>bosančica</em>, its own medieval Cyrillic hand.'}},
+ {id:'hr', label:'Croatian', dates:'', x:402, y:1088, p:'sh', br:'south',
+  d:{endo:'hrvatski', meta:'≈5.5 M · Latin script',
+     note:'Wrote Slavic in the angular Glagolitic alphabet on the Adriatic islands into the 19th century — the last place on earth to use it. Its standard prefers coining native words where Serbian happily borrows.'}},
+
+ {id:'op', label:'Old Prussian †', dates:'† c. 1710', x:722, y:842, p:'baltic', br:'baltic', ext:1,
+  d:{endo:'prūsiskan', meta:'extinct c. 1710 · attested in 3 catechisms & a word-list',
+     note:'The Baltic language of the original Prussians, swallowed by German settlement and finished off by the plague of 1709–10. Its ghost survives in the name “Prussia” itself — a Baltic name Germany wore for centuries.'}},
+ {id:'lt', label:'Lithuanian', dates:'', x:778, y:1088, p:'baltic', br:'baltic',
+  d:{endo:'lietuvių', meta:'≈3 M · Latin script',
+     note:'Often called the most conservative living Indo-European language: it keeps tones, seven cases and word-shapes close enough to Sanskrit that linguists trade (exaggerated) tales of Lithuanian farmers understanding Vedic proverbs.'}},
+ {id:'lv', label:'Latvian', dates:'', x:832, y:1088, p:'baltic', br:'baltic',
+  d:{endo:'latviešu', meta:'≈1.5 M · Latin script',
+     note:'Lithuanian’s livelier sibling — it fixed stress on the first syllable and sanded down old endings, largely under the influence of Livonian, the Finnic language it slowly absorbed along the coast.'}}
+];
+
+const byId = {}; NODES.forEach(n => byId[n.id] = n);
+const COLOR = n => C[n.br];
+
+const BANDS = [
+ {y0:44,  y1:186,  label:'4500 BCE'},
+ {y0:186, y1:330,  label:'2500 BCE'},
+ {y0:330, y1:520,  label:'1500 BCE'},
+ {y0:520, y1:688,  label:'500 CE'},
+ {y0:688, y1:952,  label:'1000 CE'},
+ {y0:952, y1:1108, label:'1500 CE'}
+];
+
+/* child order for the compact (mobile) layout */
+const KIDS = {
+  pie:['bsl'], bsl:['psl','baltic'], psl:['west','south','east'],
+  west:['pl','cz','sk','hsb','dsb'],
+  south:['wssl','essl'], wssl:['sl','sh'], sh:['hr','bs','cnr','sr'], essl:['mk','bg'],
+  east:['oes'], oes:['ru','uk','be'],
+  baltic:['lt','lv','op']
+};
+const DEPTH = {pie:0, bsl:1, psl:2, baltic:2, west:3, south:3, east:3,
+               oes:4, essl:4, wssl:4, sh:5};
+
+const svg = document.getElementById('tree');
+const NS = 'http://www.w3.org/2000/svg';
+function el(name, attrs, parent){
+  const e = document.createElementNS(NS, name);
+  for(const k in attrs) e.setAttribute(k, attrs[k]);
+  (parent || svg).appendChild(e);
+  return e;
+}
+
+let edgeEls = {}, nodeEls = {};
+let selected = null;
+const compactMQ = window.matchMedia('(max-width: 700px)');
+
+function ancestors(id){ const out=[]; let n=byId[id]; while(n){ out.push(n.id); n = n.p? byId[n.p] : null; } return out; }
+function descendants(id){
+  const out=[]; const stack=[id];
+  while(stack.length){
+    const cur = stack.pop();
+    NODES.forEach(n=>{ if(n.p===cur){ out.push(n.id); stack.push(n.id); } });
+  }
+  return out;
+}
+function trace(id){
+  const lit = new Set([...ancestors(id), ...descendants(id)]);
+  svg.classList.add('tracing');
+  NODES.forEach(n=>{
+    nodeEls[n.id].classList.toggle('lit', lit.has(n.id));
+    if(edgeEls[n.id]) edgeEls[n.id].classList.toggle('lit', lit.has(n.id));
+  });
+}
+function untrace(){
+  svg.classList.remove('tracing');
+  NODES.forEach(n=>{
+    nodeEls[n.id].classList.remove('lit');
+    if(edgeEls[n.id]) edgeEls[n.id].classList.remove('lit');
+  });
+}
+
+/* ---- wide layout: geography × time ---- */
+function renderWide(){
+  svg.setAttribute('viewBox','0 0 1050 1268');
+
+  BANDS.forEach((b,i)=>{
+    if(i%2===0) el('rect',{x:0,y:b.y0,width:1050,height:b.y1-b.y0,class:'band'});
+    el('line',{x1:0,y1:b.y0,x2:1050,y2:b.y0,class:'band-line'});
+    const t = el('text',{x:8,y:b.y0+16,class:'band-label'});
+    t.textContent = b.label;
+  });
+  const tToday = el('text',{x:8,y:1102,class:'band-label'}); tToday.textContent='TODAY';
+  el('line',{x1:0,y1:1108,x2:1050,y2:1108,class:'band-line'});
+
+  const mk863 = el('g',{class:'marker863'});
+  ['◆ 863 CE','Cyril & Methodius:','Slavic first written'].forEach((line,i)=>{
+    const t = el('text',{x:8,y:702+i*17}, mk863);
+    t.textContent = line;
+  });
+
+  const gEdges = el('g',{});
+  NODES.forEach(n=>{
+    if(!n.p) return;
+    const p = byId[n.p];
+    const dy = n.y - p.y;
+    const d = `M ${p.x} ${p.y} C ${p.x} ${p.y + dy*0.55}, ${n.x} ${n.y - dy*0.45}, ${n.x} ${n.y}`;
+    const trunk = (n.br==='trunk');
+    edgeEls[n.id] = el('path',{d, class:'edge'+(trunk?' trunk-e':''),
+      stroke: COLOR(n), 'stroke-width': trunk?5:3, opacity: n.ext? .75 : .9}, gEdges);
+  });
+
+  NODES.forEach(n=>{
+    const g = el('g',{class:'node'+(n.ext?' extinct':''), tabindex:0, role:'button',
+                      'aria-label': n.label + (n.dates? ', '+n.dates : '')});
+    el('circle',{cx:n.x, cy:n.y, r: n.proto?6:4.5, fill: n.proto? '#171209' : COLOR(n),
+                 stroke: COLOR(n), 'stroke-width': n.proto?2.5:1.5}, g);
+    if(n.proto){
+      const anchor = (n.x > 860)? 'end' : (n.x < 200 ? 'start' : 'middle');
+      const tx = anchor==='end'? n.x-12 : anchor==='start'? n.x+12 : n.x;
+      const t = el('text',{x:tx, y:n.y-14, 'text-anchor':anchor, class:'name'}, g);
+      t.textContent = n.label;
+      if(n.dates){
+        const s = el('text',{x:tx, y:n.y+24, 'text-anchor':anchor, class:'sub'}, g);
+        s.textContent = n.dates;
+      }
+    } else {
+      const t = el('text',{class:'name',
+        transform:`translate(${n.x+4} ${n.y+16}) rotate(52)`, 'text-anchor':'start'}, g);
+      t.textContent = n.label;
+      if(n.dates){
+        const s = el('text',{class:'sub',
+          transform:`translate(${n.x-8} ${n.y+20}) rotate(52)`, 'text-anchor':'start'}, g);
+        s.textContent = n.dates;
+      }
+    }
+    nodeEls[n.id] = g;
+  });
+}
+
+/* ---- compact layout: generations × branch order ---- */
+const COMPACT_LBL = {
+  pie: {dy:22, anchor:'start'},
+  bsl: {dy:-10, anchor:'start'},
+  psl: {dy:-10, anchor:'start'},
+  west:{dy:-10, anchor:'start'},
+  south:{dy:-10, anchor:'start'},
+  east:{dy:-10, anchor:'end'},
+  oes: {dy:-10, anchor:'start'},
+  baltic:{dy:-10, anchor:'start'},
+  wssl:{dy:-10, anchor:'end', short:'W. South Slavic'},
+  essl:{dy:-10, anchor:'end', short:'E. South Slavic'},
+  sh:  {dy:4, anchor:'start', xoff:14, short:'Serbo-Croatian'}
+};
+function renderCompact(){
+  const colX = d => 18 + d*34;
+  const LEAF_X = colX(6);
+  const rowH = 46, top = 46;
+  const pos = {};
+
+  let row = 0;
+  (function place(id){
+    const kids = KIDS[id];
+    if(!kids || !kids.length){
+      pos[id] = {x: LEAF_X, y: top + row*rowH};
+      row++;
+      return;
+    }
+    kids.forEach(place);
+    const ys = kids.map(k=>pos[k].y);
+    pos[id] = {x: colX(DEPTH[id]), y: (Math.min(...ys)+Math.max(...ys))/2};
+  })('pie');
+
+  const H = top + row*rowH + 8;
+  svg.setAttribute('viewBox',`0 0 420 ${H}`);
+
+  const gEdges = el('g',{});
+  NODES.forEach(n=>{
+    if(!n.p) return;
+    const p = pos[n.p], q = pos[n.id];
+    const mx = (p.x+q.x)/2;
+    const d = `M ${p.x} ${p.y} C ${mx} ${p.y}, ${mx} ${q.y}, ${q.x} ${q.y}`;
+    const trunk = (n.br==='trunk');
+    edgeEls[n.id] = el('path',{d, class:'edge'+(trunk?' trunk-e':''),
+      stroke: COLOR(n), 'stroke-width': trunk?4:2.5, opacity: n.ext? .75 : .9}, gEdges);
+  });
+
+  NODES.forEach(n=>{
+    const q = pos[n.id];
+    const g = el('g',{class:'node'+(n.ext?' extinct':''), tabindex:0, role:'button',
+                      'aria-label': n.label + (n.dates? ', '+n.dates : '')});
+    el('circle',{cx:q.x, cy:q.y, r: n.proto?5:4, fill: n.proto? '#171209' : COLOR(n),
+                 stroke: COLOR(n), 'stroke-width': n.proto?2.2:1.5}, g);
+    if(KIDS[n.id]){
+      const cfg = COMPACT_LBL[n.id] || {dy:-10, anchor:'start'};
+      const tx = cfg.anchor==='end' ? q.x-10 : Math.max(4, q.x + (cfg.xoff != null ? cfg.xoff : -2));
+      const t = el('text',{x:tx, y:q.y+cfg.dy, 'text-anchor':cfg.anchor, class:'name'}, g);
+      t.textContent = cfg.short || n.label;
+    } else {
+      const t = el('text',{x:q.x+11, y:q.y+4.5, 'text-anchor':'start', class:'name'}, g);
+      t.textContent = n.label;
+      if(n.dates){
+        const s = el('text',{x:q.x+11, y:q.y+19, 'text-anchor':'start', class:'sub'}, g);
+        s.textContent = n.dates;
+      }
+    }
+    nodeEls[n.id] = g;
+  });
+}
+
+function drawIn(){
+  if(window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const depth = id => ancestors(id).length;
+  Object.keys(edgeEls).forEach(id=>{
+    const p = edgeEls[id];
+    const len = p.getTotalLength();
+    p.style.strokeDasharray = len;
+    p.style.strokeDashoffset = len;
+    p.style.transition = 'none';
+    requestAnimationFrame(()=>{
+      p.style.transition = `stroke-dashoffset 900ms ease ${ (depth(id)-1)*260 }ms`;
+      p.style.strokeDashoffset = 0;
+      setTimeout(()=>{ p.style.transition=''; p.style.strokeDasharray=''; p.style.strokeDashoffset=''; }, (depth(id))*260 + 1400);
+    });
+  });
+}
+
+function renderTree(animate){
+  svg.innerHTML = '';
+  edgeEls = {}; nodeEls = {};
+  svg.classList.remove('tracing');
+  svg.classList.toggle('compact', compactMQ.matches);
+  if(compactMQ.matches) renderCompact(); else renderWide();
+
+  NODES.forEach(n=>{
+    const g = nodeEls[n.id];
+    g.addEventListener('pointerenter', ()=>trace(n.id));
+    g.addEventListener('pointerleave', untrace);
+    g.addEventListener('focus', ()=>trace(n.id));
+    g.addEventListener('blur', untrace);
+    g.addEventListener('click', ()=>select(n.id));
+    g.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); select(n.id); }});
+  });
+  if(selected && nodeEls[selected]) nodeEls[selected].classList.add('sel');
+  if(animate) drawIn();
+}
+
+/* ---- detail panel ---- */
+const panel = document.getElementById('panel');
+function select(id){
+  if(selected && nodeEls[selected]) nodeEls[selected].classList.remove('sel');
+  selected = id;
+  nodeEls[id].classList.add('sel');
+  const n = byId[id];
+  panel.innerHTML =
+    `<div class="p-name"><span class="p-dot" style="background:${COLOR(n)}"></span>${n.label}` +
+    (n.d.endo? ` <span class="p-endo">${n.d.endo}</span>` : '') + `</div>` +
+    `<div class="p-meta">${n.dates? '<b>'+n.dates+'</b> · ' : ''}${n.d.meta}</div>` +
+    `<div class="p-note">${n.d.note}</div>`;
+}
+
+renderTree(true);
+select('psl');
+compactMQ.addEventListener('change', ()=>renderTree(false));
+
+/* ---- legend ---- */
+const legend = document.getElementById('legend');
+[['Proto trunk',C.trunk],['West Slavic',C.west],['South Slavic',C.south],
+ ['East Slavic',C.east],['Baltic',C.baltic]].forEach(([label,col])=>{
+  const s = document.createElement('span');
+  s.className='key';
+  s.innerHTML = `<i style="background:${col}"></i>${label}`;
+  legend.appendChild(s);
+});
+const dag = document.createElement('span');
+dag.className='key'; dag.textContent = '† extinct';
+legend.appendChild(dag);
+
+/* ============================================================
+   THE MAP — real terrain via Leaflet + CARTO dark tiles
+============================================================ */
+function bezier(a, c, b, steps){
+  const pts = [];
+  for(let i=0;i<=steps;i++){
+    const t = i/steps, u = 1-t;
+    pts.push([u*u*a[0] + 2*u*t*c[0] + t*t*b[0],
+              u*u*a[1] + 2*u*t*c[1] + t*t*b[1]]);
+  }
+  return pts;
+}
+
+function showMapFallback(){
+  document.getElementById('geo-map').style.display = 'none';
+  document.getElementById('map-fallback').hidden = false;
+}
+
+function initMap(){
+  if(typeof L === 'undefined'){ showMapFallback(); return; }
+  try{
+    const map = L.map('geo-map', {
+      scrollWheelZoom:false, zoomSnap:.5, minZoom:3.5, maxZoom:8,
+      worldCopyJump:false, attributionControl:true
+    });
+    map.fitBounds([[39.6, 10.0],[60.0, 42.0]], {padding:[8,8]});
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      subdomains:'abcd', maxZoom:19
+    }).addTo(map);
+    if(L.Browser.mobile){ map.dragging.disable(); }
+
+    /* homeland: Polesia / the Pripet basin */
+    const HOME = [52.1, 27.4];
+    const homePts = [];
+    for(let i=0;i<48;i++){
+      const a = i/48*2*Math.PI;
+      homePts.push([HOME[0] + 1.55*Math.sin(a), HOME[1] + 4.1*Math.cos(a)]);
+    }
+    L.polygon(homePts, {color:'#e0b447', weight:1.5, dashArray:'4 6',
+      fillColor:'#e0b447', fillOpacity:.09, interactive:false}).addTo(map);
+    L.marker(HOME, {interactive:false, icon:L.divIcon({className:'',
+      html:'<div class="map-tag home">THE HOMELAND<small>Polesia · the Pripet basin</small></div>',
+      iconSize:[220,36], iconAnchor:[110,18]})}).addTo(map);
+
+    /* migration flows: [from, control, to, colour, label, labelAt] */
+    const FLOWS = [
+      [[52.5,24.8],[53.4,17.6],[52.9,12.2],'#d15c3b','to the Elbe',[54.15,13.6]],
+      [[51.6,24.4],[50.7,19.6],[49.9,14.6],'#d15c3b','into Bohemia',[48.6,16.9]],
+      [[51.2,26.4],[47.2,23.2],[44.7,20.5],'#8fae6a','across the Danube',[46.3,24.4]],
+      [[44.5,20.4],[42.2,21.3],[40.9,22.9],'#8fae6a','to the Aegean',[41.9,25.9]],
+      [[53.3,29.3],[55.9,30.4],[58.4,31.2],'#6d9bd1','to Novgorod & the lakes',[57.1,35.9]],
+      [[52.9,30.9],[54.6,35.3],[56.1,40.4],'#6d9bd1','up the Volga–Oka',[54.7,38.4]]
+    ];
+    const arrowMarkers = [];
+    FLOWS.forEach(([a,c,b,col,label,at])=>{
+      const pts = bezier(a,c,b,48);
+      L.polyline(pts, {color:col, weight:3, opacity:.92, className:'flow-line',
+        interactive:false}).addTo(map);
+      const m = L.marker(b, {interactive:false, icon:L.divIcon({className:'arrow-head',
+        html:`<svg width="15" height="15" viewBox="0 0 10 10" style="display:block"><path d="M0,0 L10,5 L0,10 z" fill="${col}"/></svg>`,
+        iconSize:[15,15], iconAnchor:[7,7]})}).addTo(map);
+      arrowMarkers.push([m, pts]);
+      L.marker(at, {interactive:false, icon:L.divIcon({className:'',
+        html:`<div class="map-tag" style="color:${col}">${label}</div>`,
+        iconSize:[190,16], iconAnchor:[95,8]})}).addTo(map);
+    });
+    function aimArrows(){
+      arrowMarkers.forEach(([m, pts])=>{
+        const p1 = map.latLngToContainerPoint(pts[pts.length-2]);
+        const p2 = map.latLngToContainerPoint(pts[pts.length-1]);
+        const deg = Math.atan2(p2.y-p1.y, p2.x-p1.x)*180/Math.PI;
+        const elc = m.getElement();
+        if(elc && elc.firstChild) elc.firstChild.style.transform = `rotate(${deg}deg)`;
+      });
+    }
+    map.whenReady(aimArrows);
+    map.on('zoomend', aimArrows);
+
+    /* waypoints of the story */
+    [[58.52,31.27,'Novgorod'],[50.45,30.52,'Kyiv'],[50.09,14.42,'Prague'],
+     [44.79,20.45,'Belgrade'],[40.64,22.94,'Thessaloniki']].forEach(([lat,lng,name])=>{
+      L.circleMarker([lat,lng], {radius:3.5, color:'#e9dcbd', weight:1.2,
+        fillColor:'#171209', fillOpacity:1, interactive:false}).addTo(map);
+      L.marker([lat,lng], {interactive:false, icon:L.divIcon({className:'',
+        html:`<div class="map-tag city">${name}</div>`,
+        iconSize:[120,14], iconAnchor:[60,-6]})}).addTo(map);
+    });
+  }catch(e){
+    showMapFallback();
+  }
+}
+window.addEventListener('DOMContentLoaded', initMap);
+
+/* ============================================================
+   COGNATE EXPLORER
+============================================================ */
+const GROUPS = [
+  {id:'west', label:'West', col:C.west},
+  {id:'south',label:'South',col:C.south},
+  {id:'east', label:'East', col:C.east},
+  {id:'baltic',label:'Baltic',col:C.baltic}
+];
+
+const WORDS = [
+ {id:'golva', chip:'*golva “head”',
+  law:'Proto-Slavic hated closed syllables, so <i>*golva</i> had to change. Each branch fixed it differently: the East grew an extra vowel (<i>-olo-</i>, “pleophony”), the West flipped the sounds (<i>-ło-/-la-</i>), the South flipped them and lengthened (<i>-la-</i>). Baltic, untouched by the law, still says it the old way.',
+  rows:{
+   west:[['Polish','g⟦ło⟧wa',''],['Czech','⟦hla⟧va','h < g'],['Upper Sorbian','⟦hło⟧wa','']],
+   south:[['Serbian','г⟦ла⟧ва','glava'],['Croatian','g⟦la⟧va',''],['Slovene','g⟦la⟧va',''],['Bulgarian','г⟦ла⟧ва','glava']],
+   east:[['Russian','г⟦оло⟧ва́','golová'],['Ukrainian','⟦голо⟧ва́','holová · h < g'],['Belarusian','г⟦ала⟧ва́','halavá']],
+   baltic:[['Lithuanian','g⟦al⟧và','the original order'],['Latvian','g⟦al⟧va','']]
+  }},
+ {id:'gord', chip:'*gordъ “stronghold”',
+  law:'Same law, different word — and a fossil record of history: the root that became “city” in the south stayed “castle” in Czech and narrowed to “garden” in Ukrainian. It is the <i>-grad</i> of Belgrade and the <i>-gorod</i> of Novgorod. English <i>yard</i> and <i>garden</i> are the same Indo-European root, unshifted.',
+  rows:{
+   west:[['Polish','g⟦ró⟧d','gród · archaic “castle-town”'],['Czech','⟦hra⟧d','“castle”'],['Slovak','⟦hra⟧d','“castle”']],
+   south:[['Serbian','г⟦ра⟧д','grad · “city”'],['Croatian','g⟦ra⟧d','“city”'],['Bulgarian','г⟦ра⟧д','grad · “city”'],['Slovene','g⟦ra⟧d','“castle”']],
+   east:[['Russian','г⟦оро⟧д','górod · “city”'],['Ukrainian','⟦горо⟧д','horód · “vegetable garden”'],['Belarusian','г⟦ора⟧д','hórad · “city”']],
+   baltic:[['Lithuanian','g⟦ar̃⟧das','“pen, enclosure”']]
+  }},
+ {id:'melko', chip:'*melko “milk”',
+  law:'The pattern once more — <i>molokó / mleko / mlijeko</i> — with a twist: <i>*melko</i> may itself be a very early Germanic loan. Baltic never took it at all; Lithuanian milk is <i>pienas</i>, an unrelated word. Even sisters shop at different markets.',
+  rows:{
+   west:[['Polish','m⟦le⟧ko',''],['Czech','m⟦lé⟧ko',''],['Slovak','m⟦lie⟧ko','']],
+   south:[['Serbian','м⟦ле⟧ко','mleko'],['Croatian','m⟦lije⟧ko','ijekavian'],['Slovene','m⟦le⟧ko',''],['Bulgarian','м⟦ля⟧ко','mlyáko']],
+   east:[['Russian','м⟦оло⟧ко́','molokó'],['Ukrainian','м⟦оло⟧ко́','molokó'],['Belarusian','м⟦ала⟧ко́','malakó']],
+   baltic:[['Lithuanian','pienas','a different root entirely']]
+  }},
+ {id:'pet', chip:'*pętь “five”',
+  law:'Proto-Slavic had French-style nasal vowels, <i>ę</i> and <i>ǫ</i>. Nearly everyone let them fade into plain vowels a millennium ago — everyone except Polish, which still says <i>pięć</i> through the nose. Baltic never fused the nasal into the vowel in the first place: Lithuanian keeps a real <i>n</i>.',
+  rows:{
+   west:[['Polish','pi⟦ę⟧ć','nasal survives!'],['Czech','p⟦ě⟧t','pět'],['Slovak','p⟦ä⟧ť','päť']],
+   south:[['Serbian','п⟦е⟧т','pet'],['Slovene','p⟦e⟧t',''],['Bulgarian','п⟦е⟧т','pet'],['Macedonian','п⟦е⟧т','pet']],
+   east:[['Russian','п⟦я⟧ть','pyat’'],['Ukrainian','п’⟦я⟧ть','p’yat’'],['Belarusian','п⟦я⟧ць','pyats’']],
+   baltic:[['Lithuanian','pe⟦n⟧ki','the nasal consonant intact'],['Latvian','pieci','']]
+  }},
+ {id:'voda', chip:'*voda “water”',
+  law:'The control group. After five thousand years and every split on this page, almost every Slav still says the same two syllables their Proto-Indo-European ancestors did (<i>*wódr̥</i>). Some words are simply said too often to mutate. English <i>water</i> is the same word by the Germanic road — and so, via Gaelic <i>uisce</i>, is <i>whisky</i>.',
+  rows:{
+   west:[['Polish','⟦w⟧oda','the w is only spelling'],['Czech','voda',''],['Slovak','voda','']],
+   south:[['Serbian','вода','voda'],['Croatian','voda',''],['Slovene','voda',''],['Bulgarian','вода','vodá']],
+   east:[['Russian','вода́','vodá'],['Ukrainian','вода́','vodá'],['Belarusian','в⟦а⟧да́','vadá · the accent spelled out']],
+   baltic:[['Lithuanian','va⟦n⟧duo','the ancient nasal, intact'],['Latvian','⟦ūdens⟧','closer to English water']]
+  }},
+ {id:'chaj', chip:'čajь “tea” (a loan)',
+  law:'A control experiment: “tea” arrived long after the family split, so its shape tracks <i>trade routes, not ancestry</i>. Overland routes carried Mandarin <i>chá</i> → <i>čaj</i>; Poland instead built <i>herbata</i> from Latin <i>herba thea</i> — and passed it to its old partners Belarus and Lithuania, cutting straight across the genetic branches above.',
+  rows:{
+   west:[['Polish','⟦herbata⟧','from Latin herba thea'],['Czech','⟦čaj⟧',''],['Slovak','⟦čaj⟧','']],
+   south:[['Serbian','⟦чај⟧','čaj'],['Croatian','⟦čaj⟧',''],['Bulgarian','⟦чай⟧','chay']],
+   east:[['Russian','⟦чай⟧','chai'],['Ukrainian','⟦чай⟧','chai'],['Belarusian','⟦гарбата⟧','harbáta — the Polish word!']],
+   baltic:[['Lithuanian','⟦arbata⟧','also from Polish herbata'],['Latvian','⟦tēja⟧','from German/Dutch tee']]
+  }},
+ {id:'sugar', chip:'“sugar” — three roads',
+  law:'None of these words is native — sugar itself wasn’t. Each branch bought it from a different empire: the West from German <i>Zucker</i>, the Ottoman Balkans from Turkish <i>şeker</i>, Russia and Bulgaria from Greek <i>sákkharon</i>. Trace any road back — through Arabic <i>sukkar</i> and Persian <i>šakar</i> — and all of them converge on Sanskrit <i>śárkarā</i>, “gravel.” English <i>sugar</i> took a fourth road, through Old French.',
+  rows:{
+   west:[['Polish','⟦cukier⟧','from German Zucker'],['Czech','⟦cukr⟧',''],['Slovak','⟦cukor⟧','']],
+   south:[['Serbian','⟦шећер⟧','šećer — Ottoman Turkish şeker'],['Bosnian','⟦šećer⟧','Turkish şeker'],['Macedonian','⟦шеќер⟧','šeḱer'],['Bulgarian','⟦захар⟧','zahar — Greek, like Russian']],
+   east:[['Russian','⟦сахар⟧','sákhar — from Greek sákkharon'],['Ukrainian','⟦цукор⟧','tsukor — the Polish word'],['Belarusian','⟦цукар⟧','tsukar — likewise']],
+   baltic:[['Lithuanian','⟦cukrus⟧','via Polish'],['Latvian','⟦cukurs⟧','via German']]
+  }},
+ {id:'boja', chip:'“colour” — the Ottoman layer',
+  law:'What four centuries of Ottoman rule left behind: the everyday vocabulary of the Balkans is full of Turkish. A Serbian speaker paints with <i>boja</i> (Turkish <i>boya</i>), sleeps on a <i>jastuk</i> (<i>yastık</i>), pulls on <i>čarape</i> (<i>çorap</i>) and eats with a <i>kašika</i> (<i>kaşık</i>) — while the northern cousins keep older words. Farther north the replacements came from other empires: Czech <i>barva</i> is medieval German, Polish <i>kolor</i> is Latin. Russian <i>цвет</i> is the untouched Slavic original.',
+  rows:{
+   west:[['Polish','⟦kolor⟧','from Latin color'],['Czech','⟦barva⟧','from Middle High German varwe'],['Slovak','⟦farba⟧','German again']],
+   south:[['Serbian','⟦боја⟧','boja — Ottoman Turkish boya'],['Bosnian','⟦boja⟧','Turkish boya'],['Croatian','⟦boja⟧','the Ottoman word crossed the border'],['Macedonian','⟦боја⟧','boja'],['Bulgarian','⟦боя⟧','boyá “paint, dye” — native цвят survives for “colour”']],
+   east:[['Russian','⟦цвет⟧','tsvet — the native Slavic word'],['Ukrainian','⟦колір⟧','kolir — via Polish, from Latin'],['Belarusian','⟦колер⟧','koler — likewise']],
+   baltic:[['Lithuanian','⟦spalva⟧','a native Baltic word'],['Latvian','⟦krāsa⟧','from Old East Slavic krasa “beauty”']]
+  }}
+];
+
+const chips = document.getElementById('chips');
+const lawEl = document.getElementById('cog-law');
+const gridEl = document.getElementById('cog-grid');
+
+function renderWord(w){
+  document.querySelectorAll('.chip').forEach(c=>{
+    const on = c.dataset.id===w.id;
+    c.classList.toggle('on', on);
+    c.setAttribute('aria-selected', on);
+  });
+  lawEl.innerHTML = w.law;
+  gridEl.innerHTML = '';
+  GROUPS.forEach(g=>{
+    const rows = w.rows[g.id];
+    if(!rows || !rows.length) return;
+    const h = document.createElement('div');
+    h.className='cog-group';
+    h.innerHTML = `<i style="background:${g.col}"></i>${g.label} Slavic`.replace('Baltic Slavic','Baltic');
+    gridEl.appendChild(h);
+    rows.forEach(([lang,form,tr])=>{
+      const t = document.createElement('div');
+      t.className='tile';
+      t.style.borderLeftColor = g.col;
+      const f = form.replace('⟦','<b>').replace('⟧','</b>');
+      t.innerHTML = `<div class="t-lang">${lang}</div><div class="t-form">${f}</div>` +
+                    (tr? `<div class="t-tr">${tr}</div>` : '');
+      gridEl.appendChild(t);
+    });
+  });
+}
+
+WORDS.forEach((w)=>{
+  const b = document.createElement('button');
+  b.className='chip'; b.dataset.id=w.id; b.textContent=w.chip;
+  b.setAttribute('role','tab');
+  b.addEventListener('click', ()=>renderWord(w));
+  chips.appendChild(b);
+});
+renderWord(WORDS[0]);
+
+/* ---- reveal on scroll ---- */
+if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window){
+  const io = new IntersectionObserver(entries=>{
+    entries.forEach(en=>{ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target); } });
+  }, {threshold:.08});
+  document.querySelectorAll('.reveal').forEach(elm=>io.observe(elm));
+}else{
+  document.querySelectorAll('.reveal').forEach(elm=>elm.classList.add('in'));
+}
+</script>
+</body>
+</html>
