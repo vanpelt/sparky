@@ -3,23 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fork the Tongue — how one language became twenty</title>
-<meta name="description" content="An interactive history of the Slavic languages: a phylogenetic tree you can trace, a real map of the great dispersal of 500–800 CE, and cognate words you can watch mutate branch by branch.">
+<title>Slovo — how one word became twenty languages</title>
+<meta name="description" content="Slovo means “word.” An interactive history of the Slavic languages: a phylogenetic tree you can trace, a real map of the great dispersal of 500–800 CE, and cognate words you can watch mutate branch by branch.">
 
 <!-- Open Graph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Fork the Tongue — how one language became twenty">
+<meta property="og:title" content="Slovo — how one word became twenty languages">
 <meta property="og:description" content="One prehistoric dialect from the Pripet marshes became the largest language family in Europe. Trace the tree, follow the migrations on a real map, and watch *golva mutate into głowa, glava and golová.">
-<meta property="og:image" content="https://vanpelt.github.io/sparky/tools/fork-the-tongue/og-image.png">
+<meta property="og:image" content="https://vanpelt.github.io/sparky/tools/slovo/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:url" content="https://vanpelt.github.io/sparky/tools/fork-the-tongue/">
+<meta property="og:url" content="https://vanpelt.github.io/sparky/tools/slovo/">
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Fork the Tongue — how one language became twenty">
-<meta name="twitter:description" content="An interactive Slavic family tree, a real map of the great dispersal, and words you can watch mutate branch by branch.">
-<meta name="twitter:image" content="https://vanpelt.github.io/sparky/tools/fork-the-tongue/og-image.png">
+<meta name="twitter:title" content="Slovo — how one word became twenty languages">
+<meta name="twitter:description" content="Slovo means “word.” An interactive Slavic family tree, a real map of the great dispersal, and words you can watch mutate branch by branch.">
+<meta name="twitter:image" content="https://vanpelt.github.io/sparky/tools/slovo/og-image.png">
 
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' x='50%' text-anchor='middle' font-size='84' fill='%23e0b447' font-family='Georgia,serif'>Ѫ</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -270,9 +270,10 @@ footer p+p{margin-top:12px}
   <div class="wrap">
     <div class="eyebrow">*slověne → twenty languages · c. 4500 BCE → today</div>
     <div class="hero-word" aria-hidden="true">СЛОВ<span class="thin">О</span></div>
-    <h1>Fork the Tongue</h1>
+    <h1>Slovo — the people of the word</h1>
     <p class="lede">
-      The Slavs likely named themselves <i>*slověne</i> — <b>“the people of the word.”</b>
+      <i>Slovo</i> means <b>“word,”</b> and the Slavs likely named themselves for it:
+      <i>*slověne</i> — <b>“the people of the word.”</b>
       Their neighbours who spoke Germanic got the name <i>*němьci</i> — <b>“the mute ones.”</b>
       This page traces how one prehistoric dialect, spoken in the marshes between the
       Vistula and the Dnieper, forked — and forked, and forked again — into the largest
@@ -876,6 +877,14 @@ const GROUPS = [
 ];
 
 const WORDS = [
+ {id:'slovo', chip:'*slovo “word”',
+  law:'The word this whole page is named after. Proto-Slavic <i>*slovo</i> “word” goes back to the same Indo-European root as Greek <i>kléos</i> — “fame,” the glory Achilles chose over long life — and English <i>loud</i>: at bottom, <i>“that which is heard.”</i> From it the Slavs named themselves <i>*slověne</i>, the people of the word. Then the branches bent even their own name-word: a Serbian <i>slovo</i> is a letter of the alphabet, a Slovene <i>slovo</i> is a farewell, and Baltic kept the oldest sense of all — Lithuanian <i>šlovė</i> is still “glory.”',
+  rows:{
+   west:[['Polish','słowo','“word”'],['Czech','slovo','“word” — plus sloveso, “verb”'],['Slovak','slovo','“word”']],
+   south:[['Serbian','слово','slovo · “a letter of the alphabet”'],['Croatian','slovo','“letter” — the meaning drifted'],['Slovene','slovo','“farewell” — taking leave of your words'],['Bulgarian','слово','slovo · “speech, oration”']],
+   east:[['Russian','сло́во','slóvo · “word”'],['Ukrainian','сло́во','slóvo · “word”'],['Belarusian','сло́в⟦а⟧','slóva · the accent spelled out']],
+   baltic:[['Lithuanian','⟦š⟧lovė','“glory” — the oldest meaning'],['Latvian','⟦slava⟧','“fame, praise”']]
+  }},
  {id:'golva', chip:'*golva “head”',
   law:'Proto-Slavic hated closed syllables, so <i>*golva</i> had to change. Each branch fixed it differently: the East grew an extra vowel (<i>-olo-</i>, “pleophony”), the West flipped the sounds (<i>-ło-/-la-</i>), the South flipped them and lengthened (<i>-la-</i>). Baltic, untouched by the law, still says it the old way.',
   rows:{
