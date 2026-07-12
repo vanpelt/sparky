@@ -17,12 +17,33 @@ SIZE_MB=${4:-2048}
 DOCKER=$(command -v docker || command -v podman)
 MNT=$(mktemp -d)
 CID=""
+BUILD_IMAGE=""
 cleanup() {
   [ -n "$CID" ] && $DOCKER rm -f "$CID" >/dev/null 2>&1 || true
+  [ -n "$BUILD_IMAGE" ] && $DOCKER rmi "$BUILD_IMAGE" >/dev/null 2>&1 || true
   mountpoint -q "$MNT" && umount "$MNT" || true
   rmdir "$MNT" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# Ensure the image ships sshd + a real init before we flatten it. We do this
+# with `docker build` (a real builder with working apt) rather than chrooting
+# into the exported tree — the chroot has no /proc,/sys,/dev bind mounts, so
+# apt/gpg fail with "apt-key error code 29". Debian/Ubuntu only; bring your own
+# sshd for other bases.
+echo ">> ensuring sshd + init in $IMAGE"
+BUILD_IMAGE="sparkbox-rootfs-build:$$"
+$DOCKER build -t "$BUILD_IMAGE" - >/dev/null <<EOF
+FROM $IMAGE
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -eu; \
+    if [ ! -x /usr/sbin/sshd ]; then \
+      apt-get update -qq; \
+      apt-get install -y -qq openssh-server systemd-sysv iproute2 iputils-ping ca-certificates; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    mkdir -p /run/sshd
+EOF
 
 echo ">> creating ${SIZE_MB}MB ext4 at $OUT"
 truncate -s "${SIZE_MB}M" "$OUT"
@@ -30,21 +51,17 @@ mkfs.ext4 -q -F "$OUT"
 mount -o loop "$OUT" "$MNT"
 
 echo ">> exporting $IMAGE"
-CID=$($DOCKER create "$IMAGE" /bin/true)
+CID=$($DOCKER create "$BUILD_IMAGE" /bin/true)
 $DOCKER export "$CID" | tar -x -C "$MNT"
 
-echo ">> baking in gateway key + sshd + serial getty"
+echo ">> baking in gateway key + sshd config"
 mkdir -p "$MNT/root/.ssh"
 cp "$PUBKEY" "$MNT/root/.ssh/authorized_keys"
 chmod 700 "$MNT/root/.ssh" && chmod 600 "$MNT/root/.ssh/authorized_keys"
 
-# Ensure sshd exists and starts. For the ubuntu image, install openssh-server
-# at build time if missing (chroot needs qemu-user-static only for cross-arch).
 if [ ! -x "$MNT/usr/sbin/sshd" ]; then
-  echo ">> openssh-server missing in image — installing via chroot"
-  cp /etc/resolv.conf "$MNT/etc/resolv.conf"
-  chroot "$MNT" /bin/sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server" \
-    || { echo "install openssh-server failed — use an image that ships sshd"; exit 1; }
+  echo "sshd still missing after build — use a Debian/Ubuntu base or an image that ships sshd" >&2
+  exit 1
 fi
 mkdir -p "$MNT/etc/ssh/sshd_config.d"
 cat > "$MNT/etc/ssh/sshd_config.d/sparkbox.conf" <<'EOF'

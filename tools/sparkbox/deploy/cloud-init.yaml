@@ -1,0 +1,129 @@
+#cloud-config
+# Zero-touch sparkbox host provisioning. This is a TEMPLATE: deploy/launch-host.sh
+# fills the double-at placeholder tokens (secrets + release) and passes the
+# result as baremetal user-data. It fetches PREBUILT artifacts from Object Storage
+# (seconds) instead of building from source (minutes) — see hack/build-artifacts.sh.
+#
+# Secrets injected here (never stored in the artifact bucket):
+#   - your laptop pubkey (users.conf)
+#   - the FLEET gateway host + upstream PRIVATE keys (base64), whose public
+#     halves are baked into the rootfs so every sandbox trusts the gateway.
+
+package_update: true
+packages:
+  - curl
+  - xfsprogs
+  - iptables
+  - ca-certificates
+
+write_files:
+  - path: /srv/sparkbox/users.conf
+    permissions: '0644'
+    content: |
+      @@USERS_CONF@@
+
+  - path: /srv/sparkbox/sparkbox.env
+    permissions: '0644'
+    content: |
+      PROXY_DOMAIN=@@PROXY_DOMAIN@@
+
+  # Staged OUTSIDE /srv/sparkbox/data — the provision script mounts the XFS
+  # volume there, which would otherwise shadow anything write_files put under
+  # it. The script copies these into data/state after mounting.
+  - path: /srv/sparkbox/keys/gateway_host_key.pem
+    permissions: '0600'
+    encoding: b64
+    content: @@GATEWAY_HOST_KEY_B64@@
+
+  - path: /srv/sparkbox/keys/gateway_upstream_key.pem
+    permissions: '0600'
+    encoding: b64
+    content: @@GATEWAY_UPSTREAM_KEY_B64@@
+
+  - path: /etc/systemd/system/sparkbox.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=sparkbox agentic sandbox gateway (SSH + HTTP proxy + firecracker)
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=/dev/kvm
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/srv/sparkbox/sparkbox.env
+      User=root
+      ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
+        --state-dir /srv/sparkbox/data/state \
+        --kernel /srv/sparkbox/vmlinux \
+        --image-dir /srv/sparkbox/data/images \
+        --users /srv/sparkbox/users.conf \
+        --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
+        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN}
+      Restart=always
+      RestartSec=2
+      LimitNOFILE=1048576
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/sparkbox-provision.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Fetch + verify a sparkbox artifact release and bring the host up.
+      set -euxo pipefail
+      BASE=@@BUCKET_BASE@@
+      RELEASE=@@RELEASE@@
+      DIR=/srv/sparkbox
+
+      [ -e /dev/kvm ] || { echo "no /dev/kvm — not a KVM host"; exit 1; }
+
+      # Resolve "latest" to a concrete release tag.
+      if [ "$RELEASE" = latest ]; then
+        RELEASE=$(curl -fsSL "$BASE/latest.env" | sed -n 's/^RELEASE=//p')
+      fi
+      REL="$BASE/releases/$RELEASE"
+
+      # XFS reflink volume so per-sandbox rootfs copies are instant CoW clones.
+      mkdir -p "$DIR/data"
+      if ! mountpoint -q "$DIR/data"; then
+        if [ ! -f "$DIR/data.img" ]; then
+          truncate -s 100G "$DIR/data.img"
+          mkfs.xfs -q -m reflink=1 "$DIR/data.img"
+        fi
+        mount -o loop "$DIR/data.img" "$DIR/data"
+        grep -q "$DIR/data.img" /etc/fstab || \
+          echo "$DIR/data.img $DIR/data xfs loop 0 0" >> /etc/fstab
+      fi
+      mkdir -p "$DIR/data/state" "$DIR/data/images"
+
+      # Move the staged fleet gateway keys into the (now-mounted) state dir.
+      # They were written outside the mount so it wouldn't shadow them.
+      install -m 600 "$DIR/keys/gateway_host_key.pem"     "$DIR/data/state/gateway_host_key.pem"
+      install -m 600 "$DIR/keys/gateway_upstream_key.pem" "$DIR/data/state/gateway_upstream_key.pem"
+
+      # Fetch manifest, then each artifact, verifying sha256.
+      curl -fsSL "$REL/manifest.env" -o "$DIR/manifest.env"
+      . "$DIR/manifest.env"
+      fetch() { curl -fsSL "$1" -o "$2"; echo "$3  $2" | sha256sum -c -; }
+      fetch "$REL/vmlinux"        "$DIR/vmlinux"              "$SHA256_VMLINUX"
+      fetch "$REL/firecracker"    /usr/local/bin/firecracker  "$SHA256_FIRECRACKER"
+      fetch "$REL/sparkbox"       /usr/local/bin/sparkbox     "$SHA256_SPARKBOX"
+      chmod +x /usr/local/bin/firecracker /usr/local/bin/sparkbox
+      fetch "$REL/ubuntu.ext4.gz" "$DIR/data/images/ubuntu.ext4.gz" "$SHA256_ROOTFS_GZ"
+      gunzip -f "$DIR/data/images/ubuntu.ext4.gz"
+
+      # NAT for sandbox egress (172.30.0.0/16 via the default uplink).
+      sysctl -qw net.ipv4.ip_forward=1
+      echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-sparkbox.conf
+      UPLINK=$(ip route | awk '/default/{print $5; exit}')
+      iptables -t nat -C POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
+
+      systemctl daemon-reload
+      systemctl enable --now sparkbox.service
+      echo "sparkbox provisioned from release $RELEASE"
+
+runcmd:
+  - [ bash, /usr/local/sbin/sparkbox-provision.sh ]

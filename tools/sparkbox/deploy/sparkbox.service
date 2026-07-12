@@ -1,0 +1,24 @@
+[Unit]
+Description=sparkbox agentic sandbox gateway (SSH + HTTP proxy + firecracker)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/dev/kvm
+
+[Service]
+Type=simple
+EnvironmentFile=/srv/sparkbox/sparkbox.env
+# firecracker needs root for tap devices and /dev/kvm.
+User=root
+ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
+  --state-dir /srv/sparkbox/data/state \
+  --kernel /srv/sparkbox/vmlinux \
+  --image-dir /srv/sparkbox/data/images \
+  --users /srv/sparkbox/users.conf \
+  --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
+  --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN}
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
