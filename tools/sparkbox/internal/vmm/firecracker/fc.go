@@ -38,6 +38,10 @@ type Options struct {
 	FirecrackerBin string
 	// Subnet is the /16 carved into per-VM /30-style pairs, default 172.30.0.0.
 	Subnet string
+	// Subnet6 is a routable IPv6 /64 delegated to the host (e.g.
+	// "2001:db8:1c7::/64"). When set, each VM gets a globally-routable /128 from
+	// it (dual-stack, no NAT). Empty keeps VMs IPv4-only.
+	Subnet6 string
 }
 
 type vmState struct {
@@ -48,10 +52,11 @@ type vmState struct {
 }
 
 type Driver struct {
-	mu   sync.Mutex
-	opts Options
-	vms  map[string]*vmState
-	next int
+	mu      sync.Mutex
+	opts    Options
+	vms     map[string]*vmState
+	next    int
+	prefix6 net.IP // parsed /64 network address; nil disables IPv6
 }
 
 func New(opts Options) (*Driver, error) {
@@ -61,13 +66,24 @@ func New(opts Options) (*Driver, error) {
 	if opts.Subnet == "" {
 		opts.Subnet = "172.30.0.0"
 	}
+	d := &Driver{opts: opts, vms: map[string]*vmState{}, next: 1}
+	if opts.Subnet6 != "" {
+		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
+		if err != nil {
+			return nil, fmt.Errorf("subnet6 %q: %w", opts.Subnet6, err)
+		}
+		if ones, _ := ipNet.Mask.Size(); ones > 112 {
+			return nil, fmt.Errorf("subnet6 %q: need /112 or larger for per-VM addressing", opts.Subnet6)
+		}
+		d.prefix6 = ipNet.IP.To16()
+	}
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
 	}
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
 	}
-	return &Driver{opts: opts, vms: map[string]*vmState{}, next: 1}, nil
+	return d, nil
 }
 
 func (d *Driver) vmDir(name string) string {
@@ -77,6 +93,24 @@ func (d *Driver) vmDir(name string) string {
 func (d *Driver) hostIP(idx int) string  { return fmt.Sprintf("172.30.%d.1", idx) }
 func (d *Driver) guestIP(idx int) string { return fmt.Sprintf("172.30.%d.2", idx) }
 func tapName(idx int) string             { return fmt.Sprintf("sbtap%d", idx) }
+
+// IPv6 addressing: each slot gets a point-to-point /127 carved from the /64,
+// host on the even address and guest on the odd one. Slot idx=1 -> ::2 (host) /
+// ::3 (guest), leaving ::1 free for the host's own edge address (the AAAA
+// target). Globally routable, so egress needs no NAT — just host forwarding.
+func (d *Driver) hostIP6(idx int) string  { return d.addr6(idx * 2) }
+func (d *Driver) guestIP6(idx int) string { return d.addr6(idx*2 + 1) }
+
+func (d *Driver) addr6(off int) string {
+	ip := make(net.IP, net.IPv6len)
+	copy(ip, d.prefix6)
+	// Place the offset in the low 32 bits of the /64's host portion.
+	ip[12] = byte(off >> 24)
+	ip[13] = byte(off >> 16)
+	ip[14] = byte(off >> 8)
+	ip[15] = byte(off)
+	return ip.String()
+}
 
 func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, error) {
 	d.mu.Lock()
@@ -119,10 +153,16 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	sock := filepath.Join(dir, "fc.sock")
 	os.Remove(sock) //nolint:errcheck
 
-	// Static guest networking via kernel arg — no DHCP daemon needed.
+	// Static guest networking via kernel arg — no DHCP daemon needed. The ip=
+	// arg is IPv4-only; IPv6 is applied inside the guest by the sparkbox-netcfg
+	// hook (build-rootfs.sh), which reads sparkbox_ip6/sparkbox_gw6 here.
 	kernelArgs := fmt.Sprintf(
 		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off",
 		d.guestIP(st.idx), d.hostIP(st.idx))
+	if d.prefix6 != nil {
+		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
+			d.guestIP6(st.idx), d.hostIP6(st.idx))
+	}
 
 	fcCfg := sdk.Config{
 		SocketPath:      sock,
@@ -276,8 +316,13 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 	} else {
 		inst.State = vmm.StateRunning
 		inst.SSHAddr = net.JoinHostPort(d.guestIP(st.idx), "22")
-		// The proxy reaches in-VM services at the guest IP on the forwarded port.
+		// The proxy reaches in-VM services over the internal v4 hop (works
+		// regardless of whether the guest app binds v4 or ::); the routable v6
+		// is the sandbox's public identity + no-NAT egress.
 		inst.HostIP = d.guestIP(st.idx)
+		if d.prefix6 != nil {
+			inst.GuestV6 = d.guestIP6(st.idx)
+		}
 	}
 	return inst
 }
@@ -289,8 +334,13 @@ func (d *Driver) createTap(ctx context.Context, idx int) error {
 	cmds := [][]string{
 		{"ip", "tuntap", "add", "dev", tap, "mode", "tap"},
 		{"ip", "addr", "add", d.hostIP(idx) + "/30", "dev", tap},
-		{"ip", "link", "set", "dev", tap, "up"},
 	}
+	if d.prefix6 != nil {
+		// Host side of the point-to-point /127; the connected route this creates
+		// is how inbound traffic to the guest's /128 reaches the tap.
+		cmds = append(cmds, []string{"ip", "-6", "addr", "add", d.hostIP6(idx) + "/127", "dev", tap})
+	}
+	cmds = append(cmds, []string{"ip", "link", "set", "dev", tap, "up"})
 	for _, c := range cmds {
 		if out, err := exec.CommandContext(ctx, c[0], c[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%v: %v: %s", c, err, out)

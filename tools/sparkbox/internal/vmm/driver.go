@@ -36,6 +36,10 @@ type Instance struct {
 	// HostIP is the address (no port) reachable from the host for the VM's own
 	// services — the HTTP proxy dials HostIP:<forwarded-port>. Empty when paused.
 	HostIP string
+	// GuestV6 is the sandbox's globally-routable IPv6 address (from the host's
+	// delegated /64), used for no-NAT egress and direct v6 addressing. Empty
+	// when paused or when the driver has no IPv6 prefix configured.
+	GuestV6 string
 }
 
 // Driver manages sandbox VM lifecycles on a single host.

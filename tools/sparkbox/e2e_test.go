@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -172,10 +173,14 @@ func TestNewSandboxOnConnect(t *testing.T) {
 	if len(boxes) != 1 {
 		t.Fatalf("expected 1 sandbox, got %d", len(boxes))
 	}
-	if boxes[0].Owner != "tester" || !strings.HasPrefix(boxes[0].Name, "tester-") {
+	// Names are playful "adjective-noun" (optionally with a -hex suffix on
+	// collision), owned by the connecting user.
+	if boxes[0].Owner != "tester" || !nameRe.MatchString(boxes[0].Name) {
 		t.Fatalf("unexpected sandbox record: %+v", boxes[0])
 	}
 }
+
+var nameRe = regexp.MustCompile(`^[a-z]+-[a-z]+(-[0-9a-f]+)?$`)
 
 func TestOwnershipAndAuth(t *testing.T) {
 	ts := newStack(t)

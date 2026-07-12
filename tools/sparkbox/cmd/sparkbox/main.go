@@ -53,6 +53,7 @@ func serve(args []string) error {
 		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
 		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		subnet6      = fs.String("subnet6", "", "firecracker: routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address")
 		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain  = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
@@ -90,6 +91,7 @@ func serve(args []string) error {
 	case "firecracker":
 		driver, err = fcdriver.New(fcdriver.Options{
 			KernelPath: *kernelPath, ImageDir: *imageDir, StateDir: *stateDir,
+			Subnet6: *subnet6,
 		})
 		if err != nil {
 			return err

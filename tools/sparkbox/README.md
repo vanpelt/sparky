@@ -75,6 +75,30 @@ host and add `--proxy-tls`. Two providers:
 
 Run TLS on `:443`: `--proxy-addr :443 --proxy-tls`.
 
+### IPv6
+
+If your host has a **routed IPv6 `/64`** (Scaleway Elastic Metal, Hetzner, etc.
+delegate one), pass it with `--subnet6` and every sandbox becomes dual-stack:
+it keeps its internal IPv4 (for the SSH gateway and proxy hops) and additionally
+gets a **globally-routable `/128`** carved from the block — no NAT, real v6
+egress and a real v6 identity (surfaced as `guest_v6` in the sandbox API).
+
+```sh
+sparkbox serve --driver firecracker --subnet6 2001:bc8:702:1c7::/64 ...
+```
+
+Per slot the driver assigns a point-to-point `/127` (host `::2`, guest `::3`,
+next VM `::4`/`::5`, …), leaving `::1` free for the host's own edge address. The
+host must have IPv6 forwarding on (`net.ipv6.conf.all.forwarding=1`); the guest
+side is configured at boot by the `sparkbox-netcfg` hook baked into the rootfs
+(the kernel `ip=` arg is IPv4-only). No NAT — the `/64` is routed to the host,
+which forwards inbound to each guest via the per-VM `/127` route.
+
+**DNS:** the edge is dual-stack, so point records at the *host*, not at VMs —
+`AAAA *.hivemind.tools → <host's own v6, e.g. 2001:bc8:702:1c7::1>` alongside
+`A *.hivemind.tools → <host v4>`. Keep both **grey-cloud (DNS-only)** in
+Cloudflare so sparkbox terminates TLS directly.
+
 ## Quickstart (no KVM needed — mock driver)
 
 ```sh
@@ -116,6 +140,8 @@ production gap list (jailer, warm snapshots, rate limits).
 - [ ] Validate on a Hetzner auction box; measure cold-create and resume times
       (incl. the proxy path — the host reaches the guest directly over the
       tap's /30, so no extra NAT is needed, but it's untested on hardware)
+- [x] IPv6-native: dual-stack guests with a routable /128 per sandbox from a
+      delegated /64 (`--subnet6`), no NAT
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
 - [ ] Jailer, balloon, I/O limits; inter-sandbox network isolation
 - [ ] Multi-host: capacity reporting + best-fit placement (flyd pattern)

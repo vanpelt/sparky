@@ -22,6 +22,10 @@ OS_ID=${OS_ID:-7d1914e1-f4ab-47fc-bd8c-b3a23143e87a}   # Ubuntu 24.04 LTS
 RELEASE=${RELEASE:-latest}
 PROXY_DOMAIN=${PROXY_DOMAIN:-hivemind.tools}
 BUCKET_BASE=${BUCKET_BASE:-https://sparkbox-artifacts.s3.fr-par.scw.cloud}
+# Optional routed IPv6 /64 (e.g. 2001:bc8:702:1c7::/64) → per-sandbox v6.
+SUBNET6=${SUBNET6:-}
+SUBNET6_FLAG=""
+[ -n "$SUBNET6" ] && SUBNET6_FLAG="--subnet6 $SUBNET6"
 
 USER_NAME=${USER_NAME:-$(whoami)}
 USER_PUBKEY=${USER_PUBKEY:-$HOME/.ssh/id_ed25519.pub}
@@ -36,6 +40,7 @@ RENDERED=$(mktemp)
 trap 'rm -f "$RENDERED"' EXIT
 USERS_CONF="$USERS_CONF" PROXY_DOMAIN="$PROXY_DOMAIN" RELEASE="$RELEASE" \
 BUCKET_BASE="$BUCKET_BASE" GHK="$GATEWAY_HOST_KEY" GUK="$GATEWAY_UPSTREAM_KEY" \
+SUBNET6_FLAG="$SUBNET6_FLAG" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
 import base64, os, sys
 t = open(sys.argv[1]).read()
@@ -45,6 +50,7 @@ for k, v in {
     '@@PROXY_DOMAIN@@': os.environ['PROXY_DOMAIN'],
     '@@RELEASE@@': os.environ['RELEASE'],
     '@@BUCKET_BASE@@': os.environ['BUCKET_BASE'],
+    '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
     '@@GATEWAY_HOST_KEY_B64@@': b64(os.environ['GHK']),
     '@@GATEWAY_UPSTREAM_KEY_B64@@': b64(os.environ['GUK']),
 }.items():

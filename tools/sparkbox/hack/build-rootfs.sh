@@ -70,6 +70,53 @@ PasswordAuthentication no
 AcceptEnv LANG LC_* GIT_* TERM
 EOF
 
+echo ">> installing IPv6 guest-network hook"
+# The kernel ip= arg only configures IPv4. The firecracker driver passes the
+# guest's routable IPv6 on the cmdline (sparkbox_ip6=<addr>/127 sparkbox_gw6=..);
+# this oneshot applies it to eth0 at boot. No-op when those args are absent.
+mkdir -p "$MNT/usr/local/sbin"
+cat > "$MNT/usr/local/sbin/sparkbox-netcfg" <<'EOF'
+#!/bin/sh
+# Apply sparkbox IPv6 config from the kernel cmdline to eth0.
+IFACE=eth0
+IP6=""; GW6=""
+for tok in $(cat /proc/cmdline); do
+  case "$tok" in
+    sparkbox_ip6=*) IP6="${tok#sparkbox_ip6=}" ;;
+    sparkbox_gw6=*) GW6="${tok#sparkbox_gw6=}" ;;
+  esac
+done
+[ -n "$IP6" ] || exit 0
+ip link set "$IFACE" up
+ip -6 addr replace "$IP6" dev "$IFACE"
+[ -n "$GW6" ] && ip -6 route replace default via "$GW6" dev "$IFACE"
+exit 0
+EOF
+chmod +x "$MNT/usr/local/sbin/sparkbox-netcfg"
+
+# systemd path (ubuntu:24.04 and friends): run early, before sshd.
+if [ -e "$MNT/lib/systemd/systemd" ]; then
+  cat > "$MNT/etc/systemd/system/sparkbox-net.service" <<'EOF'
+[Unit]
+Description=sparkbox guest IPv6 configuration
+DefaultDependencies=no
+After=network-pre.target local-fs.target
+Before=ssh.service sshd.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sparkbox-netcfg
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # Enable without a chroot: symlink into multi-user.target.wants.
+  mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+  ln -sf ../sparkbox-net.service \
+    "$MNT/etc/systemd/system/multi-user.target.wants/sparkbox-net.service"
+fi
+
 # Minimal boot: systemd images work as-is with init=/sbin/init; for slim
 # images, drop in a tiny rc that brings up sshd on the kernel-arg-configured
 # eth0 (ip=... is handled by the kernel itself, no DHCP client needed).
@@ -79,6 +126,7 @@ if [ ! -e "$MNT/sbin/init" ] && [ ! -e "$MNT/lib/systemd/systemd" ]; then
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null
+/usr/local/sbin/sparkbox-netcfg 2>/dev/null || true
 mkdir -p /run/sshd
 /usr/sbin/sshd
 exec /bin/sh -c 'while true; do sleep 3600; done'

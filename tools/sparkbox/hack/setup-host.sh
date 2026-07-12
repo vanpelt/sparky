@@ -107,6 +107,22 @@ UPLINK=$(ip route | awk '/default/{print $5; exit}')
 iptables -t nat -C POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
 
+# IPv6: if you have a routed /64, each sandbox gets a globally-routable /128
+# from it (dual-stack, no NAT). Set SPARKBOX_SUBNET6 to enable, e.g.
+#   SPARKBOX_SUBNET6=2001:bc8:702:1c7::/64 ./setup-host.sh '<user> <key>'
+SUBNET6_ARG=""
+if [ -n "${SPARKBOX_SUBNET6:-}" ]; then
+  echo "== IPv6 forwarding for sandbox egress ($SPARKBOX_SUBNET6, no NAT) =="
+  sysctl -qw net.ipv6.conf.all.forwarding=1
+  echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.d/99-sparkbox.conf
+  # The /64 must be *routed to this host* by your provider (Scaleway Elastic
+  # Metal delegates one). No NAT needed: guest /128s are globally routable and
+  # the per-VM /127 tap routes the driver adds deliver inbound traffic. Reserve
+  # ::1 for this host's own edge address (the AAAA target).
+  SUBNET6_ARG=" \\
+    --subnet6 $SPARKBOX_SUBNET6"
+fi
+
 cat <<EOF
 
 == done ==
@@ -118,7 +134,7 @@ Start the server with:
     --image-dir $SPARKBOX_DIR/data/images \\
     --users $SPARKBOX_DIR/users.conf \\
     --ssh-addr :2222 --api-addr 127.0.0.1:8080 \\
-    --proxy-addr :8081 --proxy-domain hivemind.tools
+    --proxy-addr :8081 --proxy-domain hivemind.tools${SUBNET6_ARG}
 
 Then from your laptop:
 

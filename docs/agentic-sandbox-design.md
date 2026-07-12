@@ -231,6 +231,11 @@ for 32 threads / 128 GB:
   ≈ **€1/mo per always-available sandbox** on one machine.
 - No per-VM public IPv4 (the proxy pool + HTTPS edge handles ingress) — at
   ~$0.5–4/mo per IPv4 these days, per-VM IPs would rival the compute cost.
+  IPv6 flips this: a single routed `/64` (free with most bare-metal hosts) has
+  18 quintillion addresses, so every sandbox can hold its *own* globally-routable
+  `/128` for no-NAT egress. sparkbox does exactly this (`--subnet6`) while still
+  fronting all *ingress* through the dual-stack edge — public URLs stay reachable
+  from IPv4-only clients, which ~half of them still are.
 
 The requirement bare metal imposes: **KVM access**, i.e. real hardware or the
 few VPS providers with nested virt. Hetzner/OVH dedicated is the sweet spot;

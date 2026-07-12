@@ -15,7 +15,7 @@ ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
   --image-dir /srv/sparkbox/data/images \
   --users /srv/sparkbox/users.conf \
   --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
-  --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN}
+  --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} ${SUBNET6_FLAG}
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

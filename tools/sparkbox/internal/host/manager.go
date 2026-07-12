@@ -30,7 +30,8 @@ type Sandbox struct {
 	State      vmm.State `json:"state"`
 	SSHAddr    string    `json:"ssh_addr,omitempty"`
 	SSHUser    string    `json:"ssh_user,omitempty"`
-	HostIP     string    `json:"host_ip,omitempty"` // guest IP for the HTTP proxy; empty when paused
+	HostIP     string    `json:"host_ip,omitempty"`  // guest IP for the HTTP proxy; empty when paused
+	GuestV6    string    `json:"guest_v6,omitempty"` // routable IPv6 identity; empty when paused
 	CreatedAt  time.Time `json:"created_at"`
 	LastActive time.Time `json:"last_active"`
 }
@@ -75,6 +76,7 @@ func NewManager(opts Options) (*Manager, error) {
 			b.State = vmm.StatePaused
 			b.SSHAddr = ""
 			b.HostIP = ""
+			b.GuestV6 = ""
 		}
 	}
 	return m, m.save()
@@ -106,7 +108,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	b := &Sandbox{
 		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
 		State: inst.State, SSHAddr: inst.SSHAddr, SSHUser: inst.SSHUser,
-		HostIP: inst.HostIP, CreatedAt: now, LastActive: now,
+		HostIP: inst.HostIP, GuestV6: inst.GuestV6, CreatedAt: now, LastActive: now,
 	}
 	m.boxes[name] = b
 	// Default web route: <name>.<domain> -> :8000, so every sandbox is
@@ -161,6 +163,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		b.SSHAddr = inst.SSHAddr
 		b.SSHUser = inst.SSHUser
 		b.HostIP = inst.HostIP
+		b.GuestV6 = inst.GuestV6
 		m.log.Info("sandbox resumed", "name", name)
 	}
 	b.LastActive = time.Now().UTC()
@@ -199,6 +202,7 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	b.State = vmm.StatePaused
 	b.SSHAddr = ""
 	b.HostIP = ""
+	b.GuestV6 = ""
 	m.log.Info("sandbox paused", "name", name)
 	return m.save()
 }

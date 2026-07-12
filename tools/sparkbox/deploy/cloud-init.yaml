@@ -26,6 +26,7 @@ write_files:
     permissions: '0644'
     content: |
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
+      SUBNET6_FLAG=@@SUBNET6_FLAG@@
 
   # Staged OUTSIDE /srv/sparkbox/data — the provision script mounts the XFS
   # volume there, which would otherwise shadow anything write_files put under
@@ -59,7 +60,7 @@ write_files:
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
         --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
-        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN}
+        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} ${SUBNET6_FLAG}
       Restart=always
       RestartSec=2
       LimitNOFILE=1048576
@@ -114,9 +115,11 @@ write_files:
       fetch "$REL/ubuntu.ext4.gz" "$DIR/data/images/ubuntu.ext4.gz" "$SHA256_ROOTFS_GZ"
       gunzip -f "$DIR/data/images/ubuntu.ext4.gz"
 
-      # NAT for sandbox egress (172.30.0.0/16 via the default uplink).
-      sysctl -qw net.ipv4.ip_forward=1
-      echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-sparkbox.conf
+      # NAT for IPv4 sandbox egress (172.30.0.0/16 via the default uplink).
+      # IPv6 forwarding too: when --subnet6 is set each sandbox gets a routable
+      # /128 and egresses without NAT (harmless to enable when it isn't).
+      sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
+      printf 'net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\n' > /etc/sysctl.d/99-sparkbox.conf
       UPLINK=$(ip route | awk '/default/{print $5; exit}')
       iptables -t nat -C POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
         iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
