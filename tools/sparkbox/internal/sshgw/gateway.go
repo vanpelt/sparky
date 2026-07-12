@@ -1,0 +1,249 @@
+// Package sshgw is the smart SSH proxy: clients run `ssh <sandbox>@gateway`,
+// are identified by public key, and the gateway resumes the target sandbox if
+// suspended (resume-on-connect) before piping the session through.
+//
+// SSH has no Host header, so the sandbox name travels in the SSH username —
+// the simplest of the two routing schemes exe.dev's design allows (the other
+// keys off destination IP from a shared pool; see docs/agentic-sandbox-design.md).
+package sshgw
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"time"
+
+	gssh "github.com/gliderlabs/ssh"
+	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+)
+
+// NewSandboxUser is the reserved SSH username that creates a fresh sandbox on
+// connect: `ssh new@gateway`.
+const NewSandboxUser = "new"
+
+const authedUserKey = "sparkbox-user"
+
+type Gateway struct {
+	mgr          *host.Manager
+	users        *Users
+	log          *slog.Logger
+	hostKey      xssh.Signer
+	upstreamKey  xssh.Signer // authenticates the gateway into VMs
+	defaultImage string
+	dialTimeout  time.Duration
+}
+
+type GatewayOptions struct {
+	Manager      *host.Manager
+	Users        *Users
+	HostKey      xssh.Signer
+	UpstreamKey  xssh.Signer
+	DefaultImage string
+	Logger       *slog.Logger
+}
+
+func New(opts GatewayOptions) *Gateway {
+	return &Gateway{
+		mgr: opts.Manager, users: opts.Users, log: opts.Logger,
+		hostKey: opts.HostKey, upstreamKey: opts.UpstreamKey,
+		defaultImage: opts.DefaultImage, dialTimeout: 15 * time.Second,
+	}
+}
+
+// Server builds the gliderlabs/ssh server; callers run Serve/ListenAndServe.
+func (g *Gateway) Server(addr string) *gssh.Server {
+	srv := &gssh.Server{
+		Addr:    addr,
+		Handler: g.handle,
+		PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
+			user, ok := g.users.Lookup(key)
+			if !ok {
+				g.log.Warn("rejected unknown key", "remote", ctx.RemoteAddr())
+				return false
+			}
+			ctx.SetValue(authedUserKey, user)
+			return true
+		},
+	}
+	srv.AddHostKey(g.hostKey)
+	return srv
+}
+
+func (g *Gateway) handle(s gssh.Session) {
+	user, _ := s.Context().Value(authedUserKey).(string)
+	sandboxName := s.User()
+	log := g.log.With("user", user, "sandbox", sandboxName, "remote", s.RemoteAddr())
+
+	ctx, cancel := context.WithTimeout(s.Context(), g.dialTimeout)
+	defer cancel()
+
+	if sandboxName == NewSandboxUser {
+		name := fmt.Sprintf("%s-%s", user, randomSuffix())
+		if _, err := g.mgr.Create(ctx, name, user, g.defaultImage, 0, 0); err != nil {
+			fail(s, log, "create sandbox", err)
+			return
+		}
+		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s@<gateway>\r\n", name, name)
+		sandboxName = name
+	}
+
+	box, ok := g.mgr.Get(sandboxName)
+	if !ok {
+		fail(s, log, "lookup", fmt.Errorf("no sandbox named %q", sandboxName))
+		return
+	}
+	if box.Owner != user {
+		// Same message as not-found: don't leak other users' sandbox names.
+		fail(s, log, "lookup", fmt.Errorf("no sandbox named %q", sandboxName))
+		return
+	}
+
+	// Resume-on-connect: the user perceives an always-on machine; suspended
+	// sandboxes cost only disk.
+	box, err := g.mgr.EnsureRunning(ctx, sandboxName)
+	if err != nil {
+		fail(s, log, "resume", err)
+		return
+	}
+	defer g.mgr.Touch(sandboxName)
+
+	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
+	if err != nil {
+		fail(s, log, "dial vm", err)
+		return
+	}
+	defer client.Close()
+
+	exitCode, err := g.pipeSession(s, client)
+	if err != nil {
+		log.Warn("session ended with error", "err", err)
+	}
+	s.Exit(exitCode) //nolint:errcheck
+}
+
+// dialUpstream connects to the VM's sshd, retrying briefly since a freshly
+// resumed/booted VM may not be accepting connections yet.
+func (g *Gateway) dialUpstream(ctx context.Context, addr, user string) (*xssh.Client, error) {
+	cfg := &xssh.ClientConfig{
+		User: user,
+		Auth: []xssh.AuthMethod{xssh.PublicKeys(g.upstreamKey)},
+		// The gateway provisions the VM and owns the only route to it; there
+		// is no prior host key to verify against on first boot.
+		HostKeyCallback: xssh.InsecureIgnoreHostKey(), //nolint:gosec
+		Timeout:         3 * time.Second,
+	}
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp", addr, cfg.Timeout)
+		if err == nil {
+			c, chans, reqs, err := xssh.NewClientConn(conn, addr, cfg)
+			if err == nil {
+				return xssh.NewClient(c, chans, reqs), nil
+			}
+			conn.Close()
+			lastErr = err
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("vm ssh not reachable: %w", lastErr)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// pipeSession mirrors the client's session (PTY, env, command, window
+// changes, streams) onto a session inside the VM and returns the exit code.
+func (g *Gateway) pipeSession(s gssh.Session, client *xssh.Client) (int, error) {
+	up, err := client.NewSession()
+	if err != nil {
+		return 1, err
+	}
+	defer up.Close()
+
+	for _, kv := range s.Environ() {
+		if k, v, ok := splitEnv(kv); ok {
+			up.Setenv(k, v) //nolint:errcheck // VM sshd may restrict AcceptEnv
+		}
+	}
+
+	ptyReq, winCh, isPty := s.Pty()
+	if isPty {
+		modes := xssh.TerminalModes{xssh.ECHO: 1}
+		if err := up.RequestPty(ptyReq.Term, ptyReq.Window.Height, ptyReq.Window.Width, modes); err != nil {
+			return 1, err
+		}
+		go func() {
+			for win := range winCh {
+				up.WindowChange(win.Height, win.Width) //nolint:errcheck
+			}
+		}()
+	}
+
+	stdin, err := up.StdinPipe()
+	if err != nil {
+		return 1, err
+	}
+	stdout, err := up.StdoutPipe()
+	if err != nil {
+		return 1, err
+	}
+	stderr, err := up.StderrPipe()
+	if err != nil {
+		return 1, err
+	}
+	go func() {
+		io.Copy(stdin, s) //nolint:errcheck
+		stdin.Close()
+	}()
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(s, stdout); done <- struct{}{} }()          //nolint:errcheck
+	go func() { io.Copy(s.Stderr(), stderr); done <- struct{}{} }() //nolint:errcheck
+
+	if raw := s.RawCommand(); raw != "" {
+		err = up.Start(raw)
+	} else {
+		err = up.Shell()
+	}
+	if err != nil {
+		return 1, err
+	}
+	err = up.Wait()
+	<-done
+	<-done
+	if err == nil {
+		return 0, nil
+	}
+	if exitErr, ok := err.(*xssh.ExitError); ok {
+		return exitErr.ExitStatus(), nil
+	}
+	return 1, err
+}
+
+func fail(s gssh.Session, log *slog.Logger, what string, err error) {
+	log.Error(what+" failed", "err", err)
+	fmt.Fprintf(s.Stderr(), "sparkbox: %s failed: %v\r\n", what, err)
+	s.Exit(1) //nolint:errcheck
+}
+
+func splitEnv(kv string) (string, string, bool) {
+	for i := 0; i < len(kv); i++ {
+		if kv[i] == '=' {
+			return kv[:i], kv[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
+func randomSuffix() string {
+	b := make([]byte, 3)
+	rand.Read(b) //nolint:errcheck
+	return hex.EncodeToString(b)
+}

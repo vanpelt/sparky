@@ -1,0 +1,261 @@
+// Package host is the single-host control plane: it owns sandbox records,
+// persists them to a JSON state file, drives the vmm.Driver, and pauses idle
+// sandboxes (the suspend-to-snapshot cost lever).
+package host
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+)
+
+var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+type Sandbox struct {
+	Name       string    `json:"name"`
+	Owner      string    `json:"owner"`
+	Image      string    `json:"image"`
+	VCPUs      int64     `json:"vcpus"`
+	MemMB      int64     `json:"mem_mb"`
+	State      vmm.State `json:"state"`
+	SSHAddr    string    `json:"ssh_addr,omitempty"`
+	SSHUser    string    `json:"ssh_user,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastActive time.Time `json:"last_active"`
+}
+
+type Manager struct {
+	mu       sync.Mutex
+	driver   vmm.Driver
+	log      *slog.Logger
+	path     string // JSON state file
+	boxes    map[string]*Sandbox
+	gwPubKey string
+}
+
+type Options struct {
+	StateDir         string
+	Driver           vmm.Driver
+	GatewayPublicKey string
+	Logger           *slog.Logger
+}
+
+func NewManager(opts Options) (*Manager, error) {
+	m := &Manager{
+		driver:   opts.Driver,
+		log:      opts.Logger,
+		path:     filepath.Join(opts.StateDir, "sandboxes.json"),
+		boxes:    map[string]*Sandbox{},
+		gwPubKey: opts.GatewayPublicKey,
+	}
+	if err := m.load(); err != nil {
+		return nil, err
+	}
+	// Driver state does not survive process restarts in the mock driver, and
+	// firecracker VMs died with the previous process too. Mark everything
+	// paused; Resume recreates on demand.
+	for _, b := range m.boxes {
+		if b.State == vmm.StateRunning {
+			b.State = vmm.StatePaused
+			b.SSHAddr = ""
+		}
+	}
+	return m, m.save()
+}
+
+func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
+	if !nameRe.MatchString(name) {
+		return nil, fmt.Errorf("invalid sandbox name %q (lowercase alphanumerics and dashes)", name)
+	}
+	if vcpus <= 0 {
+		vcpus = 1
+	}
+	if memMB <= 0 {
+		memMB = 1024
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.boxes[name]; ok {
+		return nil, fmt.Errorf("sandbox %q already exists", name)
+	}
+	inst, err := m.driver.Create(ctx, vmm.Config{
+		Name: name, Image: image, VCPUs: vcpus, MemMB: memMB,
+		GatewayPublicKey: m.gwPubKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	b := &Sandbox{
+		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
+		State: inst.State, SSHAddr: inst.SSHAddr, SSHUser: inst.SSHUser,
+		CreatedAt: now, LastActive: now,
+	}
+	m.boxes[name] = b
+	m.log.Info("sandbox created", "name", name, "owner", owner)
+	return copyOf(b), m.save()
+}
+
+func (m *Manager) Get(name string) (*Sandbox, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return nil, false
+	}
+	return copyOf(b), true
+}
+
+func (m *Manager) List() []*Sandbox {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Sandbox, 0, len(m.boxes))
+	for _, b := range m.boxes {
+		out = append(out, copyOf(b))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// EnsureRunning resumes the sandbox if paused and returns its SSH endpoint.
+// This is the gateway's resume-on-connect entry point.
+func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return nil, fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.State != vmm.StateRunning {
+		inst, err := m.resumeOrRecreate(ctx, b)
+		if err != nil {
+			return nil, err
+		}
+		b.State = inst.State
+		b.SSHAddr = inst.SSHAddr
+		b.SSHUser = inst.SSHUser
+		m.log.Info("sandbox resumed", "name", name)
+	}
+	b.LastActive = time.Now().UTC()
+	return copyOf(b), m.save()
+}
+
+// resumeOrRecreate handles the post-restart case where the driver has no
+// record of the sandbox: Resume fails, so recreate it from the stored spec
+// (mock loses nothing since the workdir persists; firecracker cold-boots the
+// still-present per-VM disk).
+func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instance, error) {
+	inst, err := m.driver.Resume(ctx, b.Name)
+	if err == nil {
+		return inst, nil
+	}
+	m.log.Warn("resume failed, recreating", "name", b.Name, "err", err)
+	return m.driver.Create(ctx, vmm.Config{
+		Name: b.Name, Image: b.Image, VCPUs: b.VCPUs, MemMB: b.MemMB,
+		GatewayPublicKey: m.gwPubKey,
+	})
+}
+
+func (m *Manager) Pause(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.State == vmm.StatePaused {
+		return nil
+	}
+	if err := m.driver.Pause(ctx, name); err != nil {
+		return err
+	}
+	b.State = vmm.StatePaused
+	b.SSHAddr = ""
+	m.log.Info("sandbox paused", "name", name)
+	return m.save()
+}
+
+func (m *Manager) Destroy(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.boxes[name]; !ok {
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if err := m.driver.Destroy(ctx, name); err != nil {
+		return err
+	}
+	delete(m.boxes, name)
+	m.log.Info("sandbox destroyed", "name", name)
+	return m.save()
+}
+
+// Touch records sandbox activity (an SSH session) for the idle reaper.
+func (m *Manager) Touch(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.boxes[name]; ok {
+		b.LastActive = time.Now().UTC()
+		m.save() //nolint:errcheck
+	}
+}
+
+// RunReaper pauses running sandboxes idle longer than timeout. Blocks until
+// ctx is done.
+func (m *Manager) RunReaper(ctx context.Context, timeout, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			for _, b := range m.List() {
+				if b.State == vmm.StateRunning && time.Since(b.LastActive) > timeout {
+					if err := m.Pause(ctx, b.Name); err != nil {
+						m.log.Error("reaper pause failed", "name", b.Name, "err", err)
+					} else {
+						m.log.Info("reaper paused idle sandbox", "name", b.Name)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (m *Manager) load() error {
+	data, err := os.ReadFile(m.path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, &m.boxes)
+}
+
+// save persists state; callers must hold m.mu.
+func (m *Manager) save() error {
+	data, err := json.MarshalIndent(m.boxes, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := m.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.path)
+}
+
+func copyOf(b *Sandbox) *Sandbox {
+	c := *b
+	return &c
+}
