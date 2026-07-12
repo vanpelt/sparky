@@ -73,7 +73,8 @@ host and add `--proxy-tls`. Two providers:
   TLS-ALPN-01/HTTP-01 (no DNS API needed, but needs `:443` + port `80`
   reachable, and each new subdomain is a separate cert subject to rate limits).
 
-Run TLS on `:443`: `--proxy-addr :443 --proxy-tls`.
+Run TLS on `:443`: `--proxy-addr :443 --proxy-tls`. Full walkthrough (Cloudflare
+setup, nameserver move, records, IPv6): [`docs/deploy-dns.md`](docs/deploy-dns.md).
 
 ### IPv6
 
