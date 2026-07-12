@@ -1,7 +1,7 @@
 package sparkbox_test
 
 // End-to-end test of the HTTP proxy edge over the mock stack: a route maps a
-// subdomain to a sandbox + port, and a request to <sub>.hivemind.sh is
+// subdomain to a sandbox + port, and a request to <sub>.hivemind.tools is
 // reverse-proxied to a backend standing in for a service inside the VM. Also
 // covers resume-on-connect: hitting a paused sandbox's URL wakes it.
 
@@ -25,7 +25,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
-const proxyDomain = "hivemind.sh"
+const proxyDomain = "hivemind.tools"
 
 type proxyStack struct {
 	mgr   *host.Manager
@@ -115,7 +115,7 @@ func TestProxyRoutesToBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, body := ps.get(t, "webvm.hivemind.sh")
+	code, body := ps.get(t, "webvm.hivemind.tools")
 	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (%s)", code, body)
 	}
@@ -123,7 +123,7 @@ func TestProxyRoutesToBackend(t *testing.T) {
 		t.Fatalf("unexpected body %q", body)
 	}
 	// Host header must be preserved for the backend, not rewritten to the guest IP.
-	if wantHost := "host=webvm.hivemind.sh"; body[len(body)-len(wantHost):] != wantHost {
+	if wantHost := "host=webvm.hivemind.tools"; body[len(body)-len(wantHost):] != wantHost {
 		t.Fatalf("Host not preserved: %q", body)
 	}
 }
@@ -149,7 +149,7 @@ func TestProxyResumesPausedSandbox(t *testing.T) {
 		t.Fatalf("expected paused, got %s", box.State)
 	}
 
-	code, body := ps.get(t, "sleepy.hivemind.sh")
+	code, body := ps.get(t, "sleepy.hivemind.tools")
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 after resume, got %d (%s)", code, body)
 	}
@@ -162,7 +162,7 @@ func TestProxyUnknownHosts(t *testing.T) {
 	ps := newProxyStack(t)
 
 	// No route registered for this subdomain.
-	if code, _ := ps.get(t, "ghost.hivemind.sh"); code != http.StatusNotFound {
+	if code, _ := ps.get(t, "ghost.hivemind.tools"); code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown route, got %d", code)
 	}
 	// Host outside the proxy domain.

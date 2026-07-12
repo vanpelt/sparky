@@ -101,7 +101,7 @@ Start the server with:
     --image-dir $SPARKBOX_DIR/data/images \\
     --users $SPARKBOX_DIR/users.conf \\
     --ssh-addr :2222 --api-addr 127.0.0.1:8080 \\
-    --proxy-addr :8081 --proxy-domain hivemind.sh
+    --proxy-addr :8081 --proxy-domain hivemind.tools
 
 Then from your laptop:
 
@@ -109,7 +109,13 @@ Then from your laptop:
   ssh -p 2222 <name>@<this-host-ip>    # shell into it
 
 Web routing: a sandbox "myvm" serving on :8000 is reachable at
-myvm.hivemind.sh. For a public edge, point a wildcard DNS record
-*.hivemind.sh at this host and add --proxy-tls (serves on :443, needs port 80
-open for ACME). Route state lives in $SPARKBOX_DIR/data/state/sparkbox.db.
+myvm.hivemind.tools. For a public HTTPS edge, point a wildcard DNS record
+*.hivemind.tools at this host, then serve TLS on :443 with a Cloudflare DNS-01
+wildcard cert:
+
+  export CLOUDFLARE_API_TOKEN=<scoped Zone.DNS:Edit token>
+  sparkbox serve ... --proxy-addr :443 --proxy-tls \\
+    --proxy-domain hivemind.tools --tls-email you@example.com
+
+Route state lives in $SPARKBOX_DIR/data/state/sparkbox.db.
 EOF

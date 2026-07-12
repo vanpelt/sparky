@@ -17,11 +17,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
-
-	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -57,8 +54,10 @@ func serve(args []string) error {
 		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
-		proxyDomain  = fs.String("proxy-domain", "hivemind.sh", "base domain for sandbox web routes")
-		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS via ACME autocert for *.<proxy-domain> (needs :443 and port 80 reachable)")
+		proxyDomain  = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
+		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
+		tlsProvider  = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
+		tlsEmail     = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -136,19 +135,12 @@ func serve(args []string) error {
 	if *proxyAddr != "" {
 		proxySrv = &http.Server{Addr: *proxyAddr, Handler: proxy.New(mgr, routeStore, *proxyDomain, log)}
 		if *proxyTLS {
-			am := &autocert.Manager{
-				Prompt: autocert.AcceptTOS,
-				Cache:  autocert.DirCache(filepath.Join(*stateDir, "autocert")),
-				HostPolicy: func(_ context.Context, h string) error {
-					if h == *proxyDomain || strings.HasSuffix(h, "."+*proxyDomain) {
-						return nil
-					}
-					return fmt.Errorf("host %q not under %s", h, *proxyDomain)
-				},
+			log.Info("obtaining TLS certificate", "provider", *tlsProvider, "domain", *proxyDomain)
+			if err := setupProxyTLS(ctx, proxySrv, tlsParams{
+				provider: *tlsProvider, domain: *proxyDomain, email: *tlsEmail, stateDir: *stateDir,
+			}); err != nil {
+				return fmt.Errorf("proxy tls: %w", err)
 			}
-			proxySrv.TLSConfig = am.TLSConfig()
-			// Port 80 serves ACME HTTP-01 challenges and redirects the rest.
-			go http.ListenAndServe(":80", am.HTTPHandler(nil)) //nolint:errcheck
 			go func() { errCh <- proxySrv.ListenAndServeTLS("", "") }()
 		} else {
 			go func() { errCh <- proxySrv.ListenAndServe() }()

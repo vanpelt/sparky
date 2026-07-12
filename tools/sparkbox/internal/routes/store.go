@@ -1,5 +1,5 @@
 // Package routes is the sqlite-backed store of HTTP proxy routes: each row
-// maps a subdomain (e.g. "myvm" under hivemind.sh) to a sandbox and the guest
+// maps a subdomain (e.g. "myvm" under hivemind.tools) to a sandbox and the guest
 // port to forward to. The proxy edge (internal/proxy) reads it to route
 // requests; the host manager writes a default route per sandbox and deletes
 // them on destroy.

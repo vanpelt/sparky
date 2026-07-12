@@ -278,9 +278,12 @@ Four small Go services plus an image pipeline:
    vsock/tap. Add the exe.dev destination-IP trick later.
 4. **`edge`** — wildcard-TLS HTTP reverse proxy into VMs (a thin Go proxy or
    just Caddy). *Implemented in the MVP (`internal/proxy` + `internal/routes`):*
-   `<subdomain>.hivemind.sh` → guest `IP:port`, subdomain defaults to the
+   `<subdomain>.hivemind.tools` → guest `IP:port`, subdomain defaults to the
    sandbox name and port to `:8000`, routes stored in sqlite, resume-on-connect
-   on HTTP hits, per-subdomain ACME certs on demand via `--proxy-tls`.
+   on HTTP hits. TLS via `--proxy-tls`: a single `*.hivemind.tools` wildcard
+   cert obtained by ACME DNS-01 through Cloudflare (CertMagic) — one cert covers
+   every ephemeral sandbox subdomain, sidestepping Let's Encrypt per-name rate
+   limits — or per-host autocert as a no-DNS-API fallback.
 5. **Image pipeline** — flatten OCI images to block devices; for each template,
    pre-boot once to sshd-ready and keep the memory snapshot: every sandbox
    thereafter *resumes* in ~hundreds of ms instead of cold-booting.

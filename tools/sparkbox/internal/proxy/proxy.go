@@ -1,11 +1,11 @@
 // Package proxy is the HTTP edge: it maps <subdomain>.<domain> (e.g.
-// myvm.hivemind.sh) to a sandbox VM's guest IP and a configured port, resuming
+// myvm.hivemind.tools) to a sandbox VM's guest IP and a configured port, resuming
 // the sandbox on demand (resume-on-connect, like the SSH gateway) before
 // reverse-proxying the request through.
 //
 // Routes come from internal/routes (sqlite). A sandbox named "myvm" gets a
 // default route myvm -> :8000 at create time, so it is reachable at
-// myvm.hivemind.sh with no extra setup; users can add routes on other
+// myvm.hivemind.tools with no extra setup; users can add routes on other
 // subdomains or ports via the control API.
 //
 // The proxy is intentionally unauthenticated: these are public web previews of
@@ -39,7 +39,7 @@ const targetKey ctxKey = iota
 type Server struct {
 	mgr    *host.Manager
 	store  *routes.Store
-	domain string // base domain, e.g. "hivemind.sh"
+	domain string // base domain, e.g. "hivemind.tools"
 	log    *slog.Logger
 	rp     *httputil.ReverseProxy
 }
@@ -57,7 +57,7 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 			pr.SetURL(target)
 			pr.SetXForwarded()
 			// Preserve the client-facing host so apps that key off Host (or
-			// build absolute URLs) see myvm.hivemind.sh, not the guest IP.
+			// build absolute URLs) see myvm.hivemind.tools, not the guest IP.
 			pr.Out.Host = pr.In.Host
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -107,8 +107,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // subdomainOf extracts the label(s) in host that precede ".<domain>".
-// "myvm.hivemind.sh:8081" with domain "hivemind.sh" -> ("myvm", true).
-// A bare "hivemind.sh" or a host outside the domain returns ok=false.
+// "myvm.hivemind.tools:8081" with domain "hivemind.tools" -> ("myvm", true).
+// A bare "hivemind.tools" or a host outside the domain returns ok=false.
 func (s *Server) subdomainOf(host string) (string, bool) {
 	h := strings.ToLower(host)
 	if i := strings.IndexByte(h, ':'); i >= 0 { // strip :port

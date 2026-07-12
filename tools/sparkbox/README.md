@@ -8,14 +8,14 @@ resume-on-connect. Companion implementation to
 ```
 ssh new@gateway            → creates a sandbox, tells you its name
 ssh <name>@gateway         → resumes it if suspended, drops you in
-https://<name>.hivemind.sh → reverse-proxy to a port inside the sandbox
+https://<name>.hivemind.tools → reverse-proxy to a port inside the sandbox
 POST /v1/sandboxes         → control API (create/list/pause/resume/destroy/routes)
 ```
 
 SSH has no Host header, so the sandbox name travels in the SSH *username*;
 the *user* is identified purely by their public key (the exe.dev model). HTTP
 *does* have a Host header, so web traffic routes by subdomain instead:
-`<subdomain>.hivemind.sh` maps to a sandbox and a guest port (default `:8000`,
+`<subdomain>.hivemind.tools` maps to a sandbox and a guest port (default `:8000`,
 subdomain defaults to the sandbox name). Idle sandboxes are automatically
 paused by a reaper and transparently resumed on the next connection — over SSH
 *or* HTTP.
@@ -26,7 +26,7 @@ paused by a reaper and transparently resumed on the next connection — over SSH
 cmd/sparkbox            single binary: `sparkbox serve`
 internal/sshgw          smart SSH proxy (gliderlabs/ssh): pubkey auth,
                         username routing, resume-on-connect, session piping
-internal/proxy          HTTP edge: <sub>.hivemind.sh -> guest IP:port,
+internal/proxy          HTTP edge: <sub>.hivemind.tools -> guest IP:port,
                         resume-on-connect, reverse proxy (websockets ok)
 internal/routes         sqlite route store (subdomain -> sandbox:port),
                         pure-Go modernc.org/sqlite, no cgo
@@ -39,12 +39,12 @@ internal/vmm/firecracker real microVMs via firecracker-go-sdk — needs /dev/kvm
 
 ## Web routing
 
-Every sandbox is reachable over HTTP at `<name>.hivemind.sh`, forwarded to
+Every sandbox is reachable over HTTP at `<name>.hivemind.tools`, forwarded to
 port `8000` inside the VM by default. Change the port or add extra subdomains
 through the control API:
 
 ```sh
-# forward myvm.hivemind.sh to :3000 instead of :8000
+# forward myvm.hivemind.tools to :3000 instead of :8000
 curl -XPOST localhost:8080/v1/sandboxes/myvm/routes -d '{"port":3000}'
 # expose a second subdomain -> :9000
 curl -XPOST localhost:8080/v1/sandboxes/myvm/routes -d '{"subdomain":"api-myvm","port":9000}'
@@ -54,11 +54,26 @@ curl -XDELETE localhost:8080/v1/routes/api-myvm       # remove
 
 Route state lives in `<state-dir>/sparkbox.db` (sqlite). The proxy listens on
 `--proxy-addr` (default `:8081`) under `--proxy-domain` (default
-`hivemind.sh`). For a real public edge, point a wildcard DNS record
-`*.hivemind.sh` at the host and pass `--proxy-tls` to have sparkbox obtain
-per-subdomain certificates on demand via ACME (needs `:443` and port `80`
-reachable). Previews are **public** — anyone with the URL reaches the app,
-the same model as exe.dev.
+`hivemind.tools`). Previews are **public** — anyone with the URL reaches the
+app, the same model as exe.dev.
+
+### TLS
+
+For a real public edge, point a wildcard DNS record `*.hivemind.tools` at the
+host and add `--proxy-tls`. Two providers:
+
+- **`--tls-provider cloudflare`** (default) — obtains a single
+  `*.hivemind.tools` wildcard certificate via the ACME **DNS-01** challenge and
+  auto-renews it (via [CertMagic](https://github.com/caddyserver/certmagic) +
+  the Cloudflare libdns provider). One cert covers every sandbox subdomain, so
+  no per-name issuance and no brush with Let's Encrypt rate limits regardless of
+  how many ephemeral sandboxes churn. Needs a scoped `Zone.DNS:Edit` token in
+  `CLOUDFLARE_API_TOKEN`; no inbound port 80/443 needed for issuance (DNS-01).
+- **`--tls-provider autocert`** — per-host certificates issued on demand via
+  TLS-ALPN-01/HTTP-01 (no DNS API needed, but needs `:443` + port `80`
+  reachable, and each new subdomain is a separate cert subject to rate limits).
+
+Run TLS on `:443`: `--proxy-addr :443 --proxy-tls`.
 
 ## Quickstart (no KVM needed — mock driver)
 
@@ -95,8 +110,9 @@ production gap list (jailer, warm snapshots, rate limits).
       PTY + winch + env + exit-code piping, `new@` provisioning
 - [x] Control API (sandbox + route CRUD)
 - [x] Firecracker driver (compiles; untested pending a KVM host)
-- [x] HTTPS edge proxy for in-sandbox web servers (`<sub>.hivemind.sh`,
-      sqlite route store, resume-on-connect, ACME on-demand certs)
+- [x] HTTPS edge proxy for in-sandbox web servers (`<sub>.hivemind.tools`,
+      sqlite route store, resume-on-connect; TLS via Cloudflare DNS-01 wildcard
+      cert or autocert on-demand)
 - [ ] Validate on a Hetzner auction box; measure cold-create and resume times
       (incl. the proxy path — the host reaches the guest directly over the
       tap's /30, so no extra NAT is needed, but it's untested on hardware)
