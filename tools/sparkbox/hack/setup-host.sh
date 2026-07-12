@@ -38,14 +38,31 @@ echo "== guest kernel (Firecracker CI build) =="
 mkdir -p "$SPARKBOX_DIR"
 if [ ! -f "$SPARKBOX_DIR/vmlinux" ]; then
   ARCH=$(uname -m)
-  REL=$(curl -fsSL https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
-    | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
-  CI_VERSION=${REL%.*}   # vX.Y.Z -> vX.Y, the CI artifact prefix
-  KEY=$(curl -fsSL "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${CI_VERSION}/${ARCH}/vmlinux-&list-type=2" \
-    | grep -oP '(?<=<Key>)firecracker-ci/[^<]+vmlinux-[0-9][^<]*(?=</Key>)' | sort -V | tail -1)
-  [ -n "$KEY" ] || { echo "could not resolve CI kernel for ${CI_VERSION}"; exit 1; }
-  echo "fetching $KEY"
-  curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${KEY}" -o "$SPARKBOX_DIR/vmlinux"
+  if [ -n "${KERNEL_URL:-}" ]; then
+    # Pin an exact kernel (the artifact pipeline does this for reproducibility).
+    echo "fetching pinned $KERNEL_URL"
+    curl -fsSL "$KERNEL_URL" -o "$SPARKBOX_DIR/vmlinux"
+  else
+    # The CI kernel bucket lags Firecracker *releases* and its folders don't
+    # map 1:1 to release tags (e.g. release v1.16.x but newest kernel folder
+    # v1.15), so don't derive the folder from the release. Instead discover the
+    # newest *stable* firecracker-ci/vX.Y/ folder that actually ships a vmlinux,
+    # skipping experimental suffixes (-pcie-poc, -backup, -al, -vmclock, ...).
+    BUCKET="http://spec.ccfc.min.s3.amazonaws.com"
+    CI_VERSION=$(curl -fsSL "${BUCKET}/?list-type=2&prefix=firecracker-ci/&delimiter=/" \
+      | grep -oP '(?<=<Prefix>)firecracker-ci/v[0-9]+\.[0-9]+/(?=</Prefix>)' \
+      | grep -oP 'v[0-9]+\.[0-9]+' | sort -V | tail -1)
+    [ -n "$CI_VERSION" ] || { echo "could not enumerate CI kernel versions"; exit 1; }
+    LIST=$(curl -fsSL "${BUCKET}/?list-type=2&prefix=firecracker-ci/${CI_VERSION}/${ARCH}/vmlinux-" \
+      | grep -oP '(?<=<Key>)firecracker-ci/[^<]+(?=</Key>)' \
+      | grep -vE '\.config$|-no-acpi')
+    # Prefer a 6.1.x LTS guest kernel; fall back to the newest available.
+    KEY=$(printf '%s\n' "$LIST" | grep -E 'vmlinux-6\.1\.' | sort -V | tail -1)
+    [ -n "$KEY" ] || KEY=$(printf '%s\n' "$LIST" | sort -V | tail -1)
+    [ -n "$KEY" ] || { echo "could not resolve CI kernel for ${CI_VERSION}"; exit 1; }
+    echo "resolved guest kernel: $KEY"
+    curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${KEY}" -o "$SPARKBOX_DIR/vmlinux"
+  fi
 fi
 
 echo "== XFS work volume (reflink CoW for instant rootfs copies) =="

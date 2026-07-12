@@ -163,12 +163,17 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 		cancel()
 		return err
 	}
-	if err := m.Start(ctx); err != nil {
+	// Start/ResumeVM must use vmCtx, not the caller's ctx: the SDK stops the
+	// VMM (SIGTERM) when the context passed here is cancelled. The caller's ctx
+	// is request-scoped (the create-on-connect SSH session), so binding to it
+	// kills the microVM the instant that first connection closes. The VM's
+	// lifetime is owned by vmCtx, cancelled only by Pause/Destroy via st.cancel.
+	if err := m.Start(vmCtx); err != nil {
 		cancel()
 		return fmt.Errorf("start vm: %w", err)
 	}
 	if snapshot != nil {
-		if err := m.ResumeVM(ctx); err != nil {
+		if err := m.ResumeVM(vmCtx); err != nil {
 			m.StopVMM() //nolint:errcheck
 			cancel()
 			return fmt.Errorf("resume from snapshot: %w", err)
@@ -201,6 +206,10 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	}
 	st.machine.StopVMM() //nolint:errcheck
 	st.cancel()
+	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
+	// Resume recreates it via createTap. Leaving it wedges Resume with
+	// "tuntap add: Device or resource busy" on the still-present device.
+	d.deleteTap(st.idx)
 	st.machine = nil
 	st.paused = true
 	return nil
