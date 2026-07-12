@@ -16,11 +16,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/crypto/acme/autocert"
+
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	fcdriver "github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/firecracker"
@@ -50,6 +56,9 @@ func serve(args []string) error {
 		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
 		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
+		proxyDomain  = fs.String("proxy-domain", "hivemind.sh", "base domain for sandbox web routes")
+		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS via ACME autocert for *.<proxy-domain> (needs :443 and port 80 reachable)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -91,9 +100,16 @@ func serve(args []string) error {
 	}
 	defer driver.Close()
 
+	routeStore, err := routes.Open(filepath.Join(*stateDir, "sparkbox.db"))
+	if err != nil {
+		return fmt.Errorf("route store: %w", err)
+	}
+	defer routeStore.Close()
+
 	mgr, err := host.NewManager(host.Options{
 		StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
+		Routes: routeStore,
 	})
 	if err != nil {
 		return err
@@ -109,13 +125,38 @@ func serve(args []string) error {
 
 	go mgr.RunReaper(ctx, *idleTimeout, time.Minute)
 
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, *defaultImage, log).Handler()}
+	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}
 	sshSrv := gw.Server(*sshAddr)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() { errCh <- apiSrv.ListenAndServe() }()
 	go func() { errCh <- sshSrv.ListenAndServe() }()
-	log.Info("sparkbox up", "driver", *driverName, "ssh", *sshAddr, "api", *apiAddr)
+
+	var proxySrv *http.Server
+	if *proxyAddr != "" {
+		proxySrv = &http.Server{Addr: *proxyAddr, Handler: proxy.New(mgr, routeStore, *proxyDomain, log)}
+		if *proxyTLS {
+			am := &autocert.Manager{
+				Prompt: autocert.AcceptTOS,
+				Cache:  autocert.DirCache(filepath.Join(*stateDir, "autocert")),
+				HostPolicy: func(_ context.Context, h string) error {
+					if h == *proxyDomain || strings.HasSuffix(h, "."+*proxyDomain) {
+						return nil
+					}
+					return fmt.Errorf("host %q not under %s", h, *proxyDomain)
+				},
+			}
+			proxySrv.TLSConfig = am.TLSConfig()
+			// Port 80 serves ACME HTTP-01 challenges and redirects the rest.
+			go http.ListenAndServe(":80", am.HTTPHandler(nil)) //nolint:errcheck
+			go func() { errCh <- proxySrv.ListenAndServeTLS("", "") }()
+		} else {
+			go func() { errCh <- proxySrv.ListenAndServe() }()
+		}
+	}
+
+	log.Info("sparkbox up", "driver", *driverName, "ssh", *sshAddr, "api", *apiAddr,
+		"proxy", *proxyAddr, "domain", *proxyDomain, "proxy_tls", *proxyTLS)
 
 	select {
 	case <-ctx.Done():
@@ -126,6 +167,9 @@ func serve(args []string) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	apiSrv.Shutdown(shutCtx) //nolint:errcheck
-	sshSrv.Close()           //nolint:errcheck
+	if proxySrv != nil {
+		proxySrv.Shutdown(shutCtx) //nolint:errcheck
+	}
+	sshSrv.Close() //nolint:errcheck
 	return nil
 }

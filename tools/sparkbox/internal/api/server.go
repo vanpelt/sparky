@@ -11,16 +11,18 @@ import (
 	"strings"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 )
 
 type Server struct {
 	mgr          *host.Manager
+	routes       *routes.Store
 	log          *slog.Logger
 	defaultImage string
 }
 
-func New(mgr *host.Manager, defaultImage string, log *slog.Logger) *Server {
-	return &Server{mgr: mgr, log: log, defaultImage: defaultImage}
+func New(mgr *host.Manager, store *routes.Store, defaultImage string, log *slog.Logger) *Server {
+	return &Server{mgr: mgr, routes: store, log: log, defaultImage: defaultImage}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -34,6 +36,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.destroy)
 	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.pause)
 	mux.HandleFunc("POST /v1/sandboxes/{name}/resume", s.resume)
+	mux.HandleFunc("GET /v1/sandboxes/{name}/routes", s.listRoutes)
+	mux.HandleFunc("POST /v1/sandboxes/{name}/routes", s.addRoute)
+	mux.HandleFunc("DELETE /v1/routes/{subdomain}", s.deleteRoute)
 	return mux
 }
 
@@ -43,6 +48,10 @@ type createRequest struct {
 	Image string `json:"image,omitempty"`
 	VCPUs int64  `json:"vcpus,omitempty"`
 	MemMB int64  `json:"mem_mb,omitempty"`
+	// Subdomain/Port customise the sandbox's web route at create time. Omitted,
+	// the sandbox is reachable at <name>.<domain> -> :8000.
+	Subdomain string `json:"subdomain,omitempty"`
+	Port      int    `json:"port,omitempty"`
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +71,20 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
+	}
+	// Manager already registered the default route <name> -> :8000. Override it
+	// (or add a second subdomain) if the request customised the web route.
+	if s.routes != nil && (req.Subdomain != "" || req.Port != 0) {
+		route := routes.Route{
+			Subdomain: orDefault(req.Subdomain, req.Name),
+			Sandbox:   req.Name,
+			Owner:     req.Owner,
+			Port:      orDefaultInt(req.Port, routes.DefaultPort),
+		}
+		if err := s.routes.Upsert(route); err != nil {
+			writeErr(w, statusFor(err), err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, box)
 }
@@ -104,7 +127,86 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, box)
 }
 
+// listRoutes returns every web route pointing at a sandbox.
+func (s *Server) listRoutes(w http.ResponseWriter, r *http.Request) {
+	if s.routes == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("routing not enabled"))
+		return
+	}
+	name := r.PathValue("name")
+	if _, ok := s.mgr.Get(name); !ok {
+		writeErr(w, http.StatusNotFound, errors.New("not found"))
+		return
+	}
+	rs, err := s.routes.ListBySandbox(name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if rs == nil {
+		rs = []routes.Route{}
+	}
+	writeJSON(w, http.StatusOK, rs)
+}
+
+type routeRequest struct {
+	Subdomain string `json:"subdomain,omitempty"`
+	Port      int    `json:"port,omitempty"`
+}
+
+// addRoute creates or updates a web route for a sandbox. Subdomain defaults to
+// the sandbox name, port to 8000.
+func (s *Server) addRoute(w http.ResponseWriter, r *http.Request) {
+	if s.routes == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("routing not enabled"))
+		return
+	}
+	name := r.PathValue("name")
+	box, ok := s.mgr.Get(name)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("not found"))
+		return
+	}
+	var req routeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	route := routes.Route{
+		Subdomain: orDefault(req.Subdomain, name),
+		Sandbox:   name,
+		Owner:     box.Owner,
+		Port:      orDefaultInt(req.Port, routes.DefaultPort),
+	}
+	if err := s.routes.Upsert(route); err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	// Echo the stored row so created_at reflects reality (Upsert preserves the
+	// original timestamp on updates).
+	if stored, ok, _ := s.routes.GetBySubdomain(route.Subdomain); ok {
+		route = stored
+	}
+	writeJSON(w, http.StatusCreated, route)
+}
+
+// deleteRoute removes a single route by subdomain.
+func (s *Server) deleteRoute(w http.ResponseWriter, r *http.Request) {
+	if s.routes == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("routing not enabled"))
+		return
+	}
+	if err := s.routes.Delete(r.PathValue("subdomain")); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func statusFor(err error) int {
+	if errors.Is(err, routes.ErrSubdomainTaken) {
+		return http.StatusConflict
+	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "not found"):
@@ -116,6 +218,20 @@ func statusFor(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func orDefaultInt(v, def int) int {
+	if v == 0 {
+		return def
+	}
+	return v
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

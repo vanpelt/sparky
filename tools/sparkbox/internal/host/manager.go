@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -29,6 +30,7 @@ type Sandbox struct {
 	State      vmm.State `json:"state"`
 	SSHAddr    string    `json:"ssh_addr,omitempty"`
 	SSHUser    string    `json:"ssh_user,omitempty"`
+	HostIP     string    `json:"host_ip,omitempty"` // guest IP for the HTTP proxy; empty when paused
 	CreatedAt  time.Time `json:"created_at"`
 	LastActive time.Time `json:"last_active"`
 }
@@ -40,6 +42,7 @@ type Manager struct {
 	path     string // JSON state file
 	boxes    map[string]*Sandbox
 	gwPubKey string
+	routes   *routes.Store // optional: proxy route bookkeeping
 }
 
 type Options struct {
@@ -47,6 +50,9 @@ type Options struct {
 	Driver           vmm.Driver
 	GatewayPublicKey string
 	Logger           *slog.Logger
+	// Routes, if set, gets a default route per sandbox on create and is cleaned
+	// up on destroy. Nil disables proxy-route bookkeeping (used by unit tests).
+	Routes *routes.Store
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -56,6 +62,7 @@ func NewManager(opts Options) (*Manager, error) {
 		path:     filepath.Join(opts.StateDir, "sandboxes.json"),
 		boxes:    map[string]*Sandbox{},
 		gwPubKey: opts.GatewayPublicKey,
+		routes:   opts.Routes,
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -67,6 +74,7 @@ func NewManager(opts Options) (*Manager, error) {
 		if b.State == vmm.StateRunning {
 			b.State = vmm.StatePaused
 			b.SSHAddr = ""
+			b.HostIP = ""
 		}
 	}
 	return m, m.save()
@@ -98,9 +106,18 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	b := &Sandbox{
 		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
 		State: inst.State, SSHAddr: inst.SSHAddr, SSHUser: inst.SSHUser,
-		CreatedAt: now, LastActive: now,
+		HostIP: inst.HostIP, CreatedAt: now, LastActive: now,
 	}
 	m.boxes[name] = b
+	// Default web route: <name>.<domain> -> :8000, so every sandbox is
+	// reachable over HTTP with no extra setup.
+	if m.routes != nil {
+		if err := m.routes.Upsert(routes.Route{
+			Subdomain: name, Sandbox: name, Owner: owner, Port: routes.DefaultPort,
+		}); err != nil {
+			m.log.Warn("default route creation failed", "name", name, "err", err)
+		}
+	}
 	m.log.Info("sandbox created", "name", name, "owner", owner)
 	return copyOf(b), m.save()
 }
@@ -143,6 +160,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		b.State = inst.State
 		b.SSHAddr = inst.SSHAddr
 		b.SSHUser = inst.SSHUser
+		b.HostIP = inst.HostIP
 		m.log.Info("sandbox resumed", "name", name)
 	}
 	b.LastActive = time.Now().UTC()
@@ -180,6 +198,7 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	}
 	b.State = vmm.StatePaused
 	b.SSHAddr = ""
+	b.HostIP = ""
 	m.log.Info("sandbox paused", "name", name)
 	return m.save()
 }
@@ -194,6 +213,11 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 		return err
 	}
 	delete(m.boxes, name)
+	if m.routes != nil {
+		if err := m.routes.DeleteBySandbox(name); err != nil {
+			m.log.Warn("route cleanup failed", "name", name, "err", err)
+		}
+	}
 	m.log.Info("sandbox destroyed", "name", name)
 	return m.save()
 }

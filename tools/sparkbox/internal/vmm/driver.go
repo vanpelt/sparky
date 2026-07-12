@@ -33,6 +33,9 @@ type Instance struct {
 	State   State
 	SSHAddr string // host:port the gateway dials to reach the VM's sshd
 	SSHUser string // user the gateway logs in as
+	// HostIP is the address (no port) reachable from the host for the VM's own
+	// services — the HTTP proxy dials HostIP:<forwarded-port>. Empty when paused.
+	HostIP string
 }
 
 // Driver manages sandbox VM lifecycles on a single host.

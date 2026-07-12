@@ -211,6 +211,9 @@ func (d *Driver) instance(vm *fakeVM) *vmm.Instance {
 	} else {
 		inst.State = vmm.StateRunning
 		inst.SSHAddr = vm.listener.Addr().String()
+		// Fake VMs live on loopback; a real service the user starts inside is
+		// reachable at 127.0.0.1:<port> from the proxy's point of view.
+		inst.HostIP = "127.0.0.1"
 	}
 	return inst
 }

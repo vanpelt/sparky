@@ -267,6 +267,8 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 	} else {
 		inst.State = vmm.StateRunning
 		inst.SSHAddr = net.JoinHostPort(d.guestIP(st.idx), "22")
+		// The proxy reaches in-VM services at the guest IP on the forwarded port.
+		inst.HostIP = d.guestIP(st.idx)
 	}
 	return inst
 }
