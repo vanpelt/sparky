@@ -57,6 +57,25 @@ Route state lives in `<state-dir>/sparkbox.db` (sqlite). The proxy listens on
 `hivemind.tools`). Previews are **public** — anyone with the URL reaches the
 app, the same model as exe.dev.
 
+### Operator console
+
+A password-gated web console lists every sandbox on the host and lets you
+pause a running one (or resume a paused one). It rides the proxy edge at
+`console.<domain>`, so it's covered by the same wildcard cert/DNS as sandbox
+routes — no extra record needed.
+
+```sh
+# enable it; empty password (the default) disables the console entirely
+sparkbox serve ... --console-password s3cret        # or SPARKBOX_CONSOLE_PASSWORD=…
+# then browse to https://console.hivemind.tools
+```
+
+The password is a single shared secret; prefer the `SPARKBOX_CONSOLE_PASSWORD`
+env var over the flag so it stays out of `ps`/`systemd status`. A correct login
+sets an HMAC-derived cookie (no server-side session store), `Secure` whenever
+the edge serves TLS. The console UI is a single `go:embed`-ed page — no frontend
+build. **Run it behind `--proxy-tls`**: the password crosses the wire on login.
+
 ### TLS
 
 For a real public edge, point a wildcard DNS record `*.hivemind.tools` at the
@@ -143,6 +162,7 @@ production gap list (jailer, warm snapshots, rate limits).
       tap's /30, so no extra NAT is needed, but it's untested on hardware)
 - [x] IPv6-native: dual-stack guests with a routable /128 per sandbox from a
       delegated /64 (`--subnet6`), no NAT
+- [x] Password-gated operator console at `console.<domain>` (list + pause/resume)
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
 - [ ] Jailer, balloon, I/O limits; inter-sandbox network isolation
 - [ ] Multi-host: capacity reporting + best-fit placement (flyd pattern)

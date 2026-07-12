@@ -42,6 +42,18 @@ type Server struct {
 	domain string // base domain, e.g. "hivemind.tools"
 	log    *slog.Logger
 	rp     *httputil.ReverseProxy
+
+	// console, if set, is served at <consoleSub>.<domain> instead of being
+	// treated as a sandbox web route (see SetConsole).
+	console    http.Handler
+	consoleSub string
+}
+
+// SetConsole reserves a subdomain (e.g. "console") for the operator console,
+// served by h rather than proxied to a sandbox. Call once before serving.
+func (s *Server) SetConsole(sub string, h http.Handler) {
+	s.consoleSub = strings.ToLower(sub)
+	s.console = h
 }
 
 func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger) *Server {
@@ -73,6 +85,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub, ok := s.subdomainOf(r.Host)
 	if !ok {
 		http.Error(w, "sparkbox: request host is not under "+s.domain, http.StatusNotFound)
+		return
+	}
+	// The operator console owns its subdomain and is not a sandbox route.
+	if s.console != nil && sub == s.consoleSub {
+		s.console.ServeHTTP(w, r)
 		return
 	}
 	route, ok, err := s.store.GetBySubdomain(sub)

@@ -22,11 +22,13 @@ write_files:
     content: |
       @@USERS_CONF@@
 
+  # 0600: holds the operator-console password, so keep it off world-read.
   - path: /srv/sparkbox/sparkbox.env
-    permissions: '0644'
+    permissions: '0600'
     content: |
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
+      SPARKBOX_CONSOLE_PASSWORD=@@CONSOLE_PASSWORD@@
 
   # Staged OUTSIDE /srv/sparkbox/data — the provision script mounts the XFS
   # volume there, which would otherwise shadow anything write_files put under

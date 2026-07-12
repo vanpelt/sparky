@@ -27,6 +27,9 @@ SUBNET6=${SUBNET6:-}
 SUBNET6_FLAG=""
 [ -n "$SUBNET6" ] && SUBNET6_FLAG="--subnet6 $SUBNET6"
 
+# Optional operator console password (enables console.<domain>); empty disables.
+CONSOLE_PASSWORD=${CONSOLE_PASSWORD:-}
+
 USER_NAME=${USER_NAME:-$(whoami)}
 USER_PUBKEY=${USER_PUBKEY:-$HOME/.ssh/id_ed25519.pub}
 GATEWAY_HOST_KEY=${GATEWAY_HOST_KEY:?path to the fleet gateway_host_key.pem}
@@ -40,7 +43,7 @@ RENDERED=$(mktemp)
 trap 'rm -f "$RENDERED"' EXIT
 USERS_CONF="$USERS_CONF" PROXY_DOMAIN="$PROXY_DOMAIN" RELEASE="$RELEASE" \
 BUCKET_BASE="$BUCKET_BASE" GHK="$GATEWAY_HOST_KEY" GUK="$GATEWAY_UPSTREAM_KEY" \
-SUBNET6_FLAG="$SUBNET6_FLAG" \
+SUBNET6_FLAG="$SUBNET6_FLAG" CONSOLE_PASSWORD="$CONSOLE_PASSWORD" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
 import base64, os, sys
 t = open(sys.argv[1]).read()
@@ -51,6 +54,7 @@ for k, v in {
     '@@RELEASE@@': os.environ['RELEASE'],
     '@@BUCKET_BASE@@': os.environ['BUCKET_BASE'],
     '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
+    '@@CONSOLE_PASSWORD@@': os.environ['CONSOLE_PASSWORD'],
     '@@GATEWAY_HOST_KEY_B64@@': b64(os.environ['GHK']),
     '@@GATEWAY_UPSTREAM_KEY_B64@@': b64(os.environ['GUK']),
 }.items():

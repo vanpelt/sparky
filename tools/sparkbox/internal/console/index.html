@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sparkbox console</title>
+<style>
+  /* shadcn "new-york" design tokens (zinc), light + dark. */
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.6rem;
+    --green: 142 71% 45%;
+    --amber: 38 92% 50%;
+    --red: 0 72% 51%;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+      --ring: 240 4.9% 83.9%;
+      --green: 142 69% 58%;
+      --amber: 38 92% 60%;
+      --red: 0 84% 65%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 64px; }
+
+  /* header */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 24px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+  }
+  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .brand .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin: 0; }
+
+  /* buttons */
+  button {
+    font: inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid transparent; padding: 7px 13px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px; transition: .12s ease;
+    white-space: nowrap;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .btn-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+  .btn-primary:hover:not(:disabled) { opacity: .9; }
+  .btn-outline {
+    background: transparent; border-color: hsl(var(--border));
+    color: hsl(var(--foreground));
+  }
+  .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+  .btn-sm { padding: 5px 11px; font-size: 13px; }
+
+  /* stat cards */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+  @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+  }
+  .stat { padding: 15px 16px; }
+  .stat .label { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .stat .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; }
+  .stat .value small { font-size: 13px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+
+  /* table */
+  .panel { overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid hsl(var(--border));
+  }
+  .panel-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .panel-head .hint { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 11px 16px; white-space: nowrap; }
+  th {
+    font-size: 11px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .04em; color: hsl(var(--muted-foreground));
+  }
+  tbody tr { border-top: 1px solid hsl(var(--border)); }
+  tbody tr:hover { background: hsl(var(--muted) / .5); }
+  td.name { font-weight: 550; }
+  td.owner, td.spec, td.age { color: hsl(var(--muted-foreground)); }
+  td.actions { text-align: right; }
+
+  /* badges */
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    font-weight: 500; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid hsl(var(--border));
+  }
+  .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+  .badge.running { color: hsl(var(--green)); border-color: hsl(var(--green) / .35); }
+  .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
+  .badge.paused { color: hsl(var(--muted-foreground)); }
+  .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+
+  /* login */
+  .login-wrap { min-height: 62vh; display: grid; place-items: center; }
+  .login { width: 100%; max-width: 360px; padding: 26px; }
+  .login h2 { margin: 0 0 4px; font-size: 17px; font-weight: 650; }
+  .login p { margin: 0 0 18px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+  .login label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+  input[type=password] {
+    width: 100%; font: inherit; padding: 8px 11px; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground)); margin-bottom: 14px;
+  }
+  input[type=password]:focus { outline: 2px solid hsl(var(--ring) / .5); outline-offset: 1px; }
+  .login button { width: 100%; justify-content: center; }
+
+  .muted { color: hsl(var(--muted-foreground)); }
+  .empty { padding: 40px 16px; text-align: center; color: hsl(var(--muted-foreground)); }
+  .hidden { display: none !important; }
+
+  /* toast */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); padding: 10px 16px; font-size: 13px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.18); opacity: 0; transition: opacity .2s;
+    pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: hsl(var(--red) / .5); color: hsl(var(--red)); }
+</style>
+</head>
+<body>
+  <!-- LOGIN -->
+  <div id="login-view" class="wrap login-wrap hidden">
+    <form id="login-form" class="card login">
+      <div class="brand" style="margin-bottom:16px">
+        <div class="logo">s</div>
+        <div>
+          <h2 style="margin:0">sparkbox console</h2>
+          <p style="margin:0" class="muted">cluster control</p>
+        </div>
+      </div>
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password" autofocus />
+      <button type="submit" class="btn-primary">Sign in</button>
+    </form>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="dash-view" class="wrap hidden">
+    <header>
+      <div class="brand">
+        <div class="logo">s</div>
+        <div>
+          <h1>sparkbox console</h1>
+          <p class="sub" id="domain-label">cluster control</p>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center">
+        <span class="muted" id="refreshed" style="font-size:12px"></span>
+        <button class="btn-outline btn-sm" id="logout-btn">Sign out</button>
+      </div>
+    </header>
+
+    <div class="stats">
+      <div class="card stat"><div class="label">Sandboxes</div><div class="value" id="s-total">–</div></div>
+      <div class="card stat"><div class="label">Running</div><div class="value" id="s-running">–</div></div>
+      <div class="card stat"><div class="label">Paused</div><div class="value" id="s-paused">–</div></div>
+      <div class="card stat"><div class="label">Allocated</div><div class="value" id="s-alloc">–</div></div>
+    </div>
+
+    <div class="card panel">
+      <div class="panel-head">
+        <h2>Sandboxes</h2>
+        <span class="hint">auto-refreshes every 4s · idle VMs auto-pause after 30m</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th><th>Status</th><th>Owner</th><th>Image</th>
+              <th>Resources</th><th>Last active</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty hidden">No sandboxes yet. Create one with <code>ssh new@…</code>.</div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let timer = null;
+
+  function toast(msg, isErr) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.className = "show" + (isErr ? " err" : "");
+    clearTimeout(t._h);
+    t._h = setTimeout(() => (t.className = ""), 2600);
+  }
+
+  function show(view) {
+    $("login-view").classList.toggle("hidden", view !== "login");
+    $("dash-view").classList.toggle("hidden", view !== "dash");
+    if (view === "login") { clearInterval(timer); timer = null; $("pw").focus(); }
+  }
+
+  function rel(iso) {
+    if (!iso) return "–";
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return Math.floor(s) + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function badge(state) {
+    const running = state === "running";
+    return '<span class="badge ' + (running ? "running" : "paused") + '">' +
+      '<span class="dot"></span>' + (running ? "running" : "paused") + "</span>";
+  }
+
+  async function act(name, verb, btn) {
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/sandboxes/" + encodeURIComponent(name) + "/" + verb, { method: "POST" });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast(name + " " + (verb === "pause" ? "paused" : "resumed"));
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  function render(list) {
+    const running = list.filter((b) => b.state === "running").length;
+    $("s-total").textContent = list.length;
+    $("s-running").textContent = running;
+    $("s-paused").textContent = list.length - running;
+    const vcpu = list.reduce((n, b) => n + (b.vcpus || 0), 0);
+    const mem = list.reduce((n, b) => n + (b.mem_mb || 0), 0);
+    $("s-alloc").innerHTML = vcpu + ' <small>vCPU · ' + (mem / 1024).toFixed(mem % 1024 ? 1 : 0) + ' GB</small>';
+
+    const rows = $("rows");
+    rows.innerHTML = "";
+    for (const b of list) {
+      const tr = document.createElement("tr");
+      const running = b.state === "running";
+      const action = running
+        ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + b.name + '">Pause</button>'
+        : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + b.name + '">Resume</button>';
+      tr.innerHTML =
+        '<td class="name">' + esc(b.name) + "</td>" +
+        "<td>" + badge(b.state) + "</td>" +
+        '<td class="owner">' + esc(b.owner || "–") + "</td>" +
+        '<td class="owner">' + esc(b.image || "–") + "</td>" +
+        '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + ((b.mem_mb || 0) / 1024).toFixed(b.mem_mb % 1024 ? 1 : 0) + " GB</td>" +
+        '<td class="age">' + rel(b.last_active) + "</td>" +
+        '<td class="actions">' + action + "</td>";
+      rows.appendChild(tr);
+    }
+    $("empty").classList.toggle("hidden", list.length > 0);
+    $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
+    rows.querySelectorAll("button[data-act]").forEach((btn) =>
+      btn.addEventListener("click", () => act(btn.dataset.name, btn.dataset.act, btn)));
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch("/api/sandboxes");
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error(r.statusText);
+      const list = await r.json();
+      show("dash");
+      render(Array.isArray(list) ? list : []);
+      if (!timer) timer = setInterval(refresh, 4000);
+    } catch (e) {
+      toast("refresh failed: " + e.message, true);
+    }
+  }
+
+  $("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector("button");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: $("pw").value }),
+      });
+      if (!r.ok) throw new Error("wrong password");
+      $("pw").value = "";
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("logout-btn").addEventListener("click", async () => {
+    await fetch("/logout", { method: "POST" }).catch(() => {});
+    show("login");
+  });
+
+  // Reflect the console's own hostname in the header.
+  $("domain-label").textContent = location.host;
+
+  refresh();
+})();
+</script>
+</body>
+</html>

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -57,6 +58,8 @@ func serve(args []string) error {
 		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain  = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
+		consolePass  = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
+		consoleSub   = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
 		tlsProvider  = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail     = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
 	)
@@ -135,7 +138,18 @@ func serve(args []string) error {
 
 	var proxySrv *http.Server
 	if *proxyAddr != "" {
-		proxySrv = &http.Server{Addr: *proxyAddr, Handler: proxy.New(mgr, routeStore, *proxyDomain, log)}
+		px := proxy.New(mgr, routeStore, *proxyDomain, log)
+		// The password is a secret, so prefer an env var (kept out of ps/systemd
+		// status) and fall back to the flag for local/dev use.
+		consolePw := *consolePass
+		if consolePw == "" {
+			consolePw = os.Getenv("SPARKBOX_CONSOLE_PASSWORD")
+		}
+		if consolePw != "" {
+			px.SetConsole(*consoleSub, console.New(mgr, consolePw, *proxyTLS, log).Handler())
+			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
+		}
+		proxySrv = &http.Server{Addr: *proxyAddr, Handler: px}
 		if *proxyTLS {
 			log.Info("obtaining TLS certificate", "provider", *tlsProvider, "domain", *proxyDomain)
 			if err := setupProxyTLS(ctx, proxySrv, tlsParams{

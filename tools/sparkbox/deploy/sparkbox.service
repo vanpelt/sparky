@@ -6,6 +6,8 @@ ConditionPathExists=/dev/kvm
 
 [Service]
 Type=simple
+# sparkbox.env supplies PROXY_DOMAIN, optional SUBNET6_FLAG, and an optional
+# SPARKBOX_CONSOLE_PASSWORD (set it to enable console.<domain>).
 EnvironmentFile=/srv/sparkbox/sparkbox.env
 # firecracker needs root for tap devices and /dev/kvm.
 User=root
