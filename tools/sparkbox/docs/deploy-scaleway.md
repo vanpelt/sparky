@@ -11,6 +11,12 @@ Roughly €2.60/day while you experiment. The €0.077/h `EM-A116X-SSD` exists b
 its 4c/4t 2011-era Xeon isn't worth the savings. (Prices July 2026, excl.
 VAT: [pricing](https://www.scaleway.com/en/pricing/elastic-metal/).)
 
+> **Validated on `EM-B220E-NVMe`** (the full lifecycle below + the zero-touch
+> pipeline in §6). A610R is frequently out of stock and per-offer quota starts
+> at 0 on fresh accounts — see [Gotchas](#gotchas). Any Ryzen/EPYC-class NVMe
+> offer works; keep the whole fleet on **one** CPU family so snapshots stay
+> portable.
+
 ## 1. Account + CLI
 
 1. Sign up at [console.scaleway.com](https://console.scaleway.com), complete
@@ -89,7 +95,48 @@ curl -s -XPOST localhost:8080/v1/sandboxes/t1/pause
 time ssh -p 2222 t1@<server-ip> true                                                  # snapshot resume
 ```
 
-## 5. Tear down (stop the meter)
+## 5. Zero-touch fleet provisioning (recommended)
+
+§3–4 build sparkbox from source **on** the host — great for a first box, slow
+for a fleet. For repeatable deploys, build once and let new hosts self-provision
+by fetching prebuilt artifacts over cloud-init. No SSH, no compiler on the box.
+
+**Build + publish a release** (once, from any host with the repo, docker, go,
+firecracker, a guest `vmlinux`, and `rclone` pointed at a Scaleway Object
+Storage bucket). The rootfs bakes only the gateway *public* key; the *private*
+keys are the fleet secret and are never uploaded.
+
+```sh
+# on a build host (e.g. an existing sparkbox box):
+RELEASE=v1 tools/sparkbox/hack/build-artifacts.sh
+# -> uploads vmlinux, firecracker, sparkbox, ubuntu.ext4.gz, manifest.env
+#    to  <bucket>/releases/v1/  (public-read) and points latest.env at it.
+```
+
+**Launch a self-provisioning host.** `launch-host.sh` renders your secrets (your
+laptop pubkey + the fleet gateway *private* keys) into cloud-init user-data,
+creates + installs the server, and walks away. On first boot cloud-init fetches
++ sha256-verifies the release, builds the XFS reflink volume + egress NAT, and
+starts `sparkbox.service`.
+
+```sh
+GATEWAY_HOST_KEY=secrets/gateway_host_key.pem \
+GATEWAY_UPSTREAM_KEY=secrets/gateway_upstream_key.pem \
+RELEASE=v1 \
+tools/sparkbox/deploy/launch-host.sh
+# then, ~1-2 min after the box reports 'ready':
+ssh -p 2222 new@<server-ip>        # a real microVM, cold
+```
+
+The gateway public/private keypair is **fleet-wide**: its public half is baked
+into every release's rootfs so every sandbox trusts any fleet gateway, and the
+private half is injected per-host as a secret. Generate it once (setup-host.sh
+does on the first box) and reuse it across every release + host.
+
+Timings observed on `EM-B220E-NVMe`: OS install ~10 min, then cloud-init ~4–5
+min to fetch the ~155 MB release and serve the first microVM — fully hands-off.
+
+## 6. Tear down (stop the meter)
 
 ```sh
 scw baremetal server delete <SERVER_ID> zone=fr-par-1
@@ -104,6 +151,15 @@ scw fip ip list  # then: scw fip ip delete <ID>
   anything you care about.
 - **Zone stock varies.** If `fr-par-1` is out of A610R, check other offers
   with `scw baremetal offer list` — anything Ryzen/EPYC with NVMe works.
+- **Per-offer quota starts at 0.** Fresh/unverified accounts get `0/0` on most
+  Elastic Metal offers, and `create` fails with a quota error. Complete
+  **identity verification** in the console (IAM → verify) — it lifted every
+  offer's quota at once for us. Until then, probe offers individually; one tier
+  (for us `EM-B220E-NVMe`) sometimes has quota while others read 0.
+- **Confirm deletes.** `scw baremetal server delete` has silently no-op'd for us
+  once (server kept billing). Always **re-list** afterward — `scw baremetal
+  server list` should no longer show it — and don't trust the delete until it's
+  gone.
 - **Kernel:** the host kernel is stock Ubuntu (fine); the *guest* vmlinux
   comes from Firecracker's CI bucket via the setup script. Keep the fleet on
   one CPU family — snapshots aren't portable across CPU models, and Scaleway
