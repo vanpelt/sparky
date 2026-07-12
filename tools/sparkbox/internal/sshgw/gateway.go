@@ -84,7 +84,7 @@ func (g *Gateway) handle(s gssh.Session) {
 	defer cancel()
 
 	if sandboxName == NewSandboxUser {
-		name := fmt.Sprintf("%s-%s", user, randomSuffix())
+		name := g.newName()
 		if _, err := g.mgr.Create(ctx, name, user, g.defaultImage, 0, 0); err != nil {
 			fail(s, log, "create sandbox", err)
 			return
@@ -240,6 +240,19 @@ func splitEnv(kv string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+// newName returns a fun, unused "adjective-noun" sandbox name. If the random
+// pool keeps colliding with existing sandboxes, it falls back to appending a
+// short hex suffix so a name is always produced.
+func (g *Gateway) newName() string {
+	for i := 0; i < 8; i++ {
+		n := randomName()
+		if _, exists := g.mgr.Get(n); !exists {
+			return n
+		}
+	}
+	return randomName() + "-" + randomSuffix()
 }
 
 func randomSuffix() string {
