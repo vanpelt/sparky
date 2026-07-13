@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,30 @@ const (
 	defaultMemMB int64 = 8192
 )
 
+// LimitError is returned when a sandbox can't be brought to running because the
+// owner already has too many running. It carries the running set so callers
+// (the SSH gateway) can tell the user exactly what to pause.
+type LimitError struct {
+	Max     int
+	Running []string // names of the owner's currently-running sandboxes
+}
+
+func (e *LimitError) Error() string {
+	return fmt.Sprintf("running-sandbox limit reached (%d/%d): %s",
+		len(e.Running), e.Max, strings.Join(e.Running, ", "))
+}
+
+// CapacityError is returned when starting a sandbox would push the host's
+// allocated RAM past the admission budget.
+type CapacityError struct {
+	RequestedMB, UsedMB, BudgetMB int64
+}
+
+func (e *CapacityError) Error() string {
+	return fmt.Sprintf("host at capacity: %d MB running + %d MB requested exceeds the %d MB budget",
+		e.UsedMB, e.RequestedMB, e.BudgetMB)
+}
+
 type Sandbox struct {
 	Name       string    `json:"name"`
 	Owner      string    `json:"owner"`
@@ -45,13 +70,16 @@ type Sandbox struct {
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	driver   vmm.Driver
-	log      *slog.Logger
-	path     string // JSON state file
-	boxes    map[string]*Sandbox
-	gwPubKey string
-	routes   *routes.Store // optional: proxy route bookkeeping
+	mu          sync.Mutex
+	driver      vmm.Driver
+	log         *slog.Logger
+	path        string // JSON state file
+	boxes       map[string]*Sandbox
+	gwPubKey    string
+	routes      *routes.Store // optional: proxy route bookkeeping
+	maxPerOwner int           // max running sandboxes per owner; 0 = unlimited
+	memAdmitPct int           // RAM admission threshold as % of host; 0 = disabled
+	hostMemMB   int64         // host RAM in MB for admission; 0 = disabled
 }
 
 type Options struct {
@@ -62,16 +90,27 @@ type Options struct {
 	// Routes, if set, gets a default route per sandbox on create and is cleaned
 	// up on destroy. Nil disables proxy-route bookkeeping (used by unit tests).
 	Routes *routes.Store
+	// MaxRunningPerOwner caps how many sandboxes one owner may have running at
+	// once (0 = unlimited). Enforced on create and resume-on-connect.
+	MaxRunningPerOwner int
+	// MemAdmissionPct + HostMemMB gate starting a sandbox on host RAM: a start
+	// is refused if running sandboxes' allocated RAM would exceed
+	// HostMemMB*MemAdmissionPct/100. Either being 0 disables the check.
+	MemAdmissionPct int
+	HostMemMB       int64
 }
 
 func NewManager(opts Options) (*Manager, error) {
 	m := &Manager{
-		driver:   opts.Driver,
-		log:      opts.Logger,
-		path:     filepath.Join(opts.StateDir, "sandboxes.json"),
-		boxes:    map[string]*Sandbox{},
-		gwPubKey: opts.GatewayPublicKey,
-		routes:   opts.Routes,
+		driver:      opts.Driver,
+		log:         opts.Logger,
+		path:        filepath.Join(opts.StateDir, "sandboxes.json"),
+		boxes:       map[string]*Sandbox{},
+		gwPubKey:    opts.GatewayPublicKey,
+		routes:      opts.Routes,
+		maxPerOwner: opts.MaxRunningPerOwner,
+		memAdmitPct: opts.MemAdmissionPct,
+		hostMemMB:   opts.HostMemMB,
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -105,6 +144,9 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	if _, ok := m.boxes[name]; ok {
 		return nil, fmt.Errorf("sandbox %q already exists", name)
 	}
+	if err := m.admit(owner, memMB, ""); err != nil {
+		return nil, err
+	}
 	inst, err := m.driver.Create(ctx, vmm.Config{
 		Name: name, Image: image, VCPUs: vcpus, MemMB: memMB,
 		GatewayPublicKey: m.gwPubKey,
@@ -130,6 +172,37 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	}
 	m.log.Info("sandbox created", "name", name, "owner", owner)
 	return copyOf(b), m.save()
+}
+
+// admit enforces the running-sandbox limits before a start (create or resume).
+// Callers must hold m.mu. exclude is the name of the sandbox being resumed (so
+// it isn't counted against its own start), or "" for a create.
+func (m *Manager) admit(owner string, memMB int64, exclude string) error {
+	if m.maxPerOwner > 0 {
+		var running []string
+		for _, b := range m.boxes {
+			if b.Name != exclude && b.Owner == owner && b.State == vmm.StateRunning {
+				running = append(running, b.Name)
+			}
+		}
+		if len(running) >= m.maxPerOwner {
+			sort.Strings(running)
+			return &LimitError{Max: m.maxPerOwner, Running: running}
+		}
+	}
+	if m.memAdmitPct > 0 && m.hostMemMB > 0 {
+		var used int64
+		for _, b := range m.boxes {
+			if b.Name != exclude && b.State == vmm.StateRunning {
+				used += b.MemMB
+			}
+		}
+		budget := m.hostMemMB * int64(m.memAdmitPct) / 100
+		if used+memMB > budget {
+			return &CapacityError{RequestedMB: memMB, UsedMB: used, BudgetMB: budget}
+		}
+	}
+	return nil
 }
 
 func (m *Manager) Get(name string) (*Sandbox, bool) {
@@ -163,6 +236,11 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		return nil, fmt.Errorf("sandbox %q not found", name)
 	}
 	if b.State != vmm.StateRunning {
+		// Resuming brings this sandbox back to running, so it's subject to the
+		// same limits as a fresh create (exclude itself — it isn't running yet).
+		if err := m.admit(b.Owner, b.MemMB, b.Name); err != nil {
+			return nil, err
+		}
 		inst, err := m.resumeOrRecreate(ctx, b)
 		if err != nil {
 			return nil, err

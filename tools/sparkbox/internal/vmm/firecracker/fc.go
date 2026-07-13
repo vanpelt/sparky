@@ -91,7 +91,34 @@ func New(opts Options) (*Driver, error) {
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
 	}
+	// A previous process (e.g. before a service restart) leaves its sbtap*
+	// devices behind; the first Create would then fail with "Device or resource
+	// busy". Nothing is running in a fresh process, so sweep them now.
+	sweepStaleTaps()
 	return d, nil
+}
+
+// sweepStaleTaps deletes leftover sbtap* devices from a prior process. Safe at
+// startup only — call before any VM exists.
+func sweepStaleTaps() {
+	out, err := exec.Command("ip", "-o", "link", "show").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// "3: sbtap1@if4: <BROADCAST,...>" -> field 1 is the name.
+		parts := strings.SplitN(line, ": ", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		name := parts[1]
+		if i := strings.IndexByte(name, '@'); i >= 0 {
+			name = name[:i]
+		}
+		if strings.HasPrefix(name, "sbtap") {
+			exec.Command("ip", "link", "del", name).Run() //nolint:errcheck
+		}
+	}
 }
 
 func (d *Driver) vmDir(name string) string {
@@ -142,14 +169,17 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 	}
 
 	st := &vmState{idx: d.next}
-	d.next++
 	if err := d.createTap(ctx, st.idx); err != nil {
+		// Clean up any half-configured (or stale) device so a retry can reuse
+		// this slot, and don't advance d.next — a failed create leaks no idx.
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, cfg.VCPUs, cfg.MemMB, st, rootfs, nil); err != nil {
 		d.deleteTap(st.idx)
 		return nil, err
 	}
+	d.next++
 	d.vms[cfg.Name] = st
 	return d.instance(cfg.Name, st), nil
 }

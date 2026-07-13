@@ -124,5 +124,6 @@ echo
 echo "== launched =="
 echo "   watch:  scw baremetal server wait $SRV zone=$ZONE"
 echo "   ip:     scw baremetal server get $SRV zone=$ZONE -o json | python3 -c 'import json,sys;print([i[\"address\"] for i in json.load(sys.stdin)[\"ips\"] if i[\"version\"]==\"IPv4\"][0])'"
-echo "   then:   ssh -p 2222 new@<ip>    # cloud-init finishes ~1-2 min after 'ready'"
+echo "   then:   ssh new@<ip>           # port 22; cloud-init finishes ~1-2 min after 'ready'"
+echo "   admin:  ssh -p 2222 ubuntu@<ip>  # host admin sshd moved to 2222 (gateway owns :22)"
 echo "   teardown: scw baremetal server delete $SRV zone=$ZONE"

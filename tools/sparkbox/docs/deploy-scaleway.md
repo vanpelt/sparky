@@ -141,8 +141,13 @@ GATEWAY_UPSTREAM_KEY=secrets/gateway_upstream_key.pem \
 RELEASE=v1 \
 tools/sparkbox/deploy/launch-host.sh
 # then, ~1-2 min after the box reports 'ready':
-ssh -p 2222 new@<server-ip>        # a real microVM, cold
+ssh new@<server-ip>        # a real microVM, cold (gateway on port 22)
 ```
+
+On the zero-touch fleet path the gateway owns **port 22**, and cloud-init moves
+the host's own admin sshd to **2222** (`ssh -p 2222 ubuntu@<server-ip>` for host
+maintenance). The from-source path in §3–4 instead keeps the gateway on 2222 so
+it can coexist with the untouched admin sshd on 22.
 
 The gateway public/private keypair is **fleet-wide**: its public half is baked
 into every release's rootfs so every sandbox trusts any fleet gateway, and the

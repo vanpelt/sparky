@@ -11,10 +11,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
@@ -26,6 +28,15 @@ import (
 // NewSandboxUser is the reserved SSH username that creates a fresh sandbox on
 // connect: `ssh new@gateway`.
 const NewSandboxUser = "new"
+
+// ControlUser is the reserved SSH username for the out-of-band control channel:
+// `ssh ctl@gateway list` / `ssh ctl@gateway pause <name>`. It never routes to a
+// VM, so no sandbox may be named "ctl".
+const ControlUser = "ctl"
+
+const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
+	"  list            list your sandboxes and their state\r\n" +
+	"  pause <name>    pause a running sandbox to free a slot\r\n"
 
 const authedUserKey = "sparkbox-user"
 
@@ -80,13 +91,18 @@ func (g *Gateway) handle(s gssh.Session) {
 	sandboxName := s.User()
 	log := g.log.With("user", user, "sandbox", sandboxName, "remote", s.RemoteAddr())
 
+	if sandboxName == ControlUser {
+		g.handleControl(s, user, log)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(s.Context(), g.dialTimeout)
 	defer cancel()
 
 	if sandboxName == NewSandboxUser {
 		name := g.newName()
 		if _, err := g.mgr.Create(ctx, name, user, g.defaultImage, 0, 0); err != nil {
-			fail(s, log, "create sandbox", err)
+			g.failStart(s, log, "create sandbox", err)
 			return
 		}
 		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s@<gateway>\r\n", name, name)
@@ -108,7 +124,7 @@ func (g *Gateway) handle(s gssh.Session) {
 	// sandboxes cost only disk.
 	box, err := g.mgr.EnsureRunning(ctx, sandboxName)
 	if err != nil {
-		fail(s, log, "resume", err)
+		g.failStart(s, log, "resume", err)
 		return
 	}
 	defer g.mgr.Touch(sandboxName)
@@ -231,6 +247,83 @@ func fail(s gssh.Session, log *slog.Logger, what string, err error) {
 	log.Error(what+" failed", "err", err)
 	fmt.Fprintf(s.Stderr(), "sparkbox: %s failed: %v\r\n", what, err)
 	s.Exit(1) //nolint:errcheck
+}
+
+// failStart is fail plus friendly, actionable guidance for the resource-limit
+// errors, which are expected user-facing conditions rather than faults.
+func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err error) {
+	var limit *host.LimitError
+	if errors.As(err, &limit) {
+		log.Info("start refused: per-owner limit", "running", limit.Running)
+		fmt.Fprintf(s.Stderr(),
+			"sparkbox: you already have %d running sandboxes (max %d): %s\r\n"+
+				"Pause one to free a slot, e.g.:  ssh %s@<gateway> pause %s\r\n",
+			len(limit.Running), limit.Max, strings.Join(limit.Running, ", "),
+			ControlUser, limit.Running[0])
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	var capacity *host.CapacityError
+	if errors.As(err, &capacity) {
+		log.Info("start refused: host at capacity", "used_mb", capacity.UsedMB, "budget_mb", capacity.BudgetMB)
+		fmt.Fprintf(s.Stderr(),
+			"sparkbox: host is at capacity (%d/%d MB allocated). Try again shortly, or pause a sandbox:  ssh %s@<gateway> list\r\n",
+			capacity.UsedMB, capacity.BudgetMB, ControlUser)
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	fail(s, log, what, err)
+}
+
+// handleControl serves the `ctl@` out-of-band channel: managing sandboxes
+// without dialing into one. It only ever touches the caller's own sandboxes.
+func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
+	args := s.Command()
+	if len(args) == 0 {
+		fmt.Fprint(s.Stderr(), controlUsage)
+		s.Exit(2) //nolint:errcheck
+		return
+	}
+	switch args[0] {
+	case "list":
+		n := 0
+		for _, b := range g.mgr.List() {
+			if b.Owner != user {
+				continue
+			}
+			fmt.Fprintf(s, "%-24s %s\r\n", b.Name, b.State)
+			n++
+		}
+		if n == 0 {
+			fmt.Fprint(s, "no sandboxes yet — create one with: ssh new@<gateway>\r\n")
+		}
+		s.Exit(0) //nolint:errcheck
+	case "pause":
+		if len(args) < 2 {
+			fmt.Fprint(s.Stderr(), "usage: ssh ctl@<gateway> pause <name>\r\n")
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		name := args[1]
+		box, ok := g.mgr.Get(name)
+		if !ok || box.Owner != user {
+			// Same message either way: don't leak other users' sandbox names.
+			fmt.Fprintf(s.Stderr(), "sparkbox: no sandbox named %q\r\n", name)
+			s.Exit(1) //nolint:errcheck
+			return
+		}
+		ctx, cancel := context.WithTimeout(s.Context(), g.dialTimeout)
+		defer cancel()
+		if err := g.mgr.Pause(ctx, name); err != nil {
+			fail(s, log, "pause", err)
+			return
+		}
+		fmt.Fprintf(s, "paused %s\r\n", name)
+		s.Exit(0) //nolint:errcheck
+	default:
+		fmt.Fprintf(s.Stderr(), "unknown command %q\r\n%s", args[0], controlUsage)
+		s.Exit(2) //nolint:errcheck
+	}
 }
 
 func splitEnv(kv string) (string, string, bool) {

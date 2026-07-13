@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +54,9 @@ func serve(args []string) error {
 		apiAddr      = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
 		defaultImage = fs.String("default-image", "ubuntu", "rootfs template for new sandboxes")
 		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
+		maxPerOwner  = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
+		memAdmitPct  = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' allocated RAM would exceed this % of host RAM (0 = disabled)")
+		hostMemMB    = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
 		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		subnet6      = fs.String("subnet6", "", "firecracker: routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address")
@@ -110,14 +115,23 @@ func serve(args []string) error {
 	}
 	defer routeStore.Close()
 
+	hostMem := *hostMemMB
+	if hostMem == 0 {
+		hostMem = detectHostMemMB()
+	}
 	mgr, err := host.NewManager(host.Options{
 		StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
-		Routes: routeStore,
+		Routes:             routeStore,
+		MaxRunningPerOwner: *maxPerOwner,
+		MemAdmissionPct:    *memAdmitPct,
+		HostMemMB:          hostMem,
 	})
 	if err != nil {
 		return err
 	}
+	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
+		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem)
 
 	gw := sshgw.New(sshgw.GatewayOptions{
 		Manager: mgr, Users: users, HostKey: hostKey, UpstreamKey: upstreamKey,
@@ -180,4 +194,25 @@ func serve(args []string) error {
 	}
 	sshSrv.Close() //nolint:errcheck
 	return nil
+}
+
+// detectHostMemMB reads total RAM from /proc/meminfo (Linux). Returns 0 when it
+// can't be determined (e.g. non-Linux dev machines), which disables admission.
+func detectHostMemMB() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line) // ["MemTotal:", "<kB>", "kB"]
+		if len(fields) >= 2 {
+			if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				return kb / 1024
+			}
+		}
+	}
+	return 0
 }

@@ -62,7 +62,7 @@ write_files:
         --kernel /srv/sparkbox/vmlinux \
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
-        --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
+        --ssh-addr :22 --api-addr 127.0.0.1:8080 \
         --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $SUBNET6_FLAG $TLS_FLAGS
       Restart=always
       RestartSec=2
@@ -132,6 +132,17 @@ write_files:
         chmod 600 /etc/netplan/99-sparkbox-flexible.yaml
         netplan apply || true
       fi
+
+      # Free port 22 for the sandbox gateway by moving the host's own admin
+      # sshd to :2222. Ubuntu 24.04 socket-activates ssh, so a bare `Port` in
+      # sshd_config is ignored while ssh.socket owns the listener — disable the
+      # socket and run ssh.service with an explicit Port instead. Must happen
+      # before sparkbox.service starts, or the gateway can't bind :22. (Admin in:
+      # `ssh -p 2222 ubuntu@<native-ip>`.)
+      printf 'Port 2222\n' > /etc/ssh/sshd_config.d/sparkbox-admin-port.conf
+      systemctl disable --now ssh.socket 2>/dev/null || true
+      systemctl enable ssh.service 2>/dev/null || true
+      systemctl restart ssh.service 2>/dev/null || systemctl restart ssh || true
 
       # NAT for IPv4 sandbox egress (172.30.0.0/16 via the default uplink).
       # IPv6 forwarding too: when --subnet6 is set each sandbox gets a routable

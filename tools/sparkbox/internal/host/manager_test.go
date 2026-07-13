@@ -1,0 +1,137 @@
+package host_test
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"errors"
+	"io"
+	"log/slog"
+	"testing"
+
+	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
+)
+
+// newTestManager wires a Manager onto the in-process mock driver with the given
+// limits. Returned Manager persists to a temp dir; the driver is closed on
+// cleanup so per-VM listeners don't leak between tests.
+func newTestManager(t *testing.T, opts host.Options) *host.Manager {
+	t.Helper()
+	dir := t.TempDir()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := xssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := mock.New(dir, signer)
+	t.Cleanup(func() { driver.Close() })
+
+	opts.StateDir = dir
+	opts.Driver = driver
+	opts.GatewayPublicKey = string(xssh.MarshalAuthorizedKey(signer.PublicKey()))
+	opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr, err := host.NewManager(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mgr
+}
+
+func mustCreate(t *testing.T, m *host.Manager, name, owner string, memMB int64) {
+	t.Helper()
+	if _, err := m.Create(context.Background(), name, owner, "ubuntu", 1, memMB); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+}
+
+func TestPerOwnerRunningCap(t *testing.T) {
+	m := newTestManager(t, host.Options{MaxRunningPerOwner: 2})
+
+	mustCreate(t, m, "a1", "alice", 512)
+	mustCreate(t, m, "a2", "alice", 512)
+
+	// Third running sandbox for alice is refused with a typed, populated error.
+	_, err := m.Create(context.Background(), "a3", "alice", "ubuntu", 1, 512)
+	var limit *host.LimitError
+	if !errors.As(err, &limit) {
+		t.Fatalf("want *LimitError, got %v", err)
+	}
+	if limit.Max != 2 || len(limit.Running) != 2 {
+		t.Fatalf("unexpected LimitError: %+v", limit)
+	}
+	if limit.Running[0] != "a1" || limit.Running[1] != "a2" {
+		t.Fatalf("Running not sorted/complete: %v", limit.Running)
+	}
+
+	// The cap is per-owner: bob is unaffected.
+	mustCreate(t, m, "b1", "bob", 512)
+
+	// Pausing frees a slot for alice.
+	if err := m.Pause(context.Background(), "a1"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "a3", "alice", 512)
+}
+
+func TestResumeRespectsCap(t *testing.T) {
+	m := newTestManager(t, host.Options{MaxRunningPerOwner: 2})
+	mustCreate(t, m, "a1", "alice", 512)
+	mustCreate(t, m, "a2", "alice", 512)
+	if err := m.Pause(context.Background(), "a1"); err != nil { // a2 running, a1 paused
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "a3", "alice", 512) // a2,a3 running; a1 paused -> 2 running
+
+	// Reconnecting to the paused a1 would make 3 running: refused.
+	_, err := m.EnsureRunning(context.Background(), "a1")
+	var limit *host.LimitError
+	if !errors.As(err, &limit) {
+		t.Fatalf("resume past cap: want *LimitError, got %v", err)
+	}
+}
+
+func TestMemAdmission(t *testing.T) {
+	// Budget = 2048 MB * 100% = 2048. Unlimited count so only RAM gates.
+	m := newTestManager(t, host.Options{MemAdmissionPct: 100, HostMemMB: 2048})
+
+	mustCreate(t, m, "a1", "alice", 1024) // used 0 -> 1024
+	mustCreate(t, m, "a2", "alice", 1024) // used 1024 -> 2048 (== budget, allowed)
+
+	_, err := m.Create(context.Background(), "a3", "alice", "ubuntu", 1, 1024)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("want *CapacityError, got %v", err)
+	}
+	if capErr.BudgetMB != 2048 || capErr.UsedMB != 2048 || capErr.RequestedMB != 1024 {
+		t.Fatalf("unexpected CapacityError: %+v", capErr)
+	}
+
+	// Freeing RAM (pause) lets the next start in.
+	if err := m.Pause(context.Background(), "a1"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "a3", "alice", 1024)
+}
+
+func TestNoLimitsWhenZero(t *testing.T) {
+	m := newTestManager(t, host.Options{}) // all limits disabled
+	for _, n := range []string{"a1", "a2", "a3", "a4", "a5"} {
+		mustCreate(t, m, n, "alice", 4096)
+	}
+	if got := len(m.List()); got != 5 {
+		t.Fatalf("want 5 sandboxes, got %d", got)
+	}
+	// Sanity: they're all running (nothing refused).
+	for _, b := range m.List() {
+		if b.State != vmm.StateRunning {
+			t.Fatalf("%s not running: %s", b.Name, b.State)
+		}
+	}
+}
