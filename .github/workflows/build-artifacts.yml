@@ -1,0 +1,123 @@
+name: sparkbox artifacts
+
+# Build and publish a versioned sparkbox artifact release (sparkbox binary,
+# guest kernel, firecracker, rootfs template + manifest) to Scaleway Object
+# Storage — the same layout deploy/cloud-init.yaml fetches on host boot. This is
+# the CI mirror of tools/sparkbox/hack/build-artifacts.sh; it downloads the
+# pinned kernel/firecracker the build host would otherwise have staged.
+#
+# Secrets/vars required (set once via gh; see the README deploy section):
+#   secret SCW_ACCESS_KEY / SCW_SECRET_KEY  - Scaleway API key, doubles as S3 creds
+#   var    GATEWAY_UPSTREAM_PUBKEY          - fleet gateway public key baked into
+#                                             the rootfs (must match the private
+#                                             key cloud-init injects per host)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release tag (blank = UTC timestamp)"
+        required: false
+        default: ""
+      promote_latest:
+        description: "Point latest.env at this release (fleet default)"
+        type: boolean
+        default: true
+      image:
+        description: "Base OCI image for the rootfs"
+        required: false
+        default: "ubuntu:24.04"
+
+concurrency:
+  group: sparkbox-artifacts
+  cancel-in-progress: false
+
+env:
+  FIRECRACKER_VERSION: v1.16.1
+  BUCKET: sparkbox-artifacts
+  REGION: fr-par
+  S3_ENDPOINT: s3.fr-par.scw.cloud
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      - name: Install rclone
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone
+
+      - name: Download firecracker ${{ env.FIRECRACKER_VERSION }}
+        run: |
+          arch=$(uname -m)
+          ver=${FIRECRACKER_VERSION}
+          curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${ver}/firecracker-${ver}-${arch}.tgz" | tar xz
+          sudo install "release-${ver}-${arch}/firecracker-${ver}-${arch}" /usr/local/bin/firecracker
+          firecracker --version | head -1
+
+      - name: Download guest kernel (Firecracker CI, 6.1.x LTS)
+        run: |
+          arch=$(uname -m)
+          bucket="http://spec.ccfc.min.s3.amazonaws.com"
+          ci=$(curl -fsSL "${bucket}/?list-type=2&prefix=firecracker-ci/&delimiter=/" \
+            | grep -oP '(?<=<Prefix>)firecracker-ci/v[0-9]+\.[0-9]+/(?=</Prefix>)' \
+            | grep -oP 'v[0-9]+\.[0-9]+' | sort -V | tail -1)
+          [ -n "$ci" ] || { echo "could not enumerate CI kernel versions"; exit 1; }
+          list=$(curl -fsSL "${bucket}/?list-type=2&prefix=firecracker-ci/${ci}/${arch}/vmlinux-" \
+            | grep -oP '(?<=<Key>)firecracker-ci/[^<]+(?=</Key>)' | grep -vE '\.config$|-no-acpi')
+          key=$(printf '%s\n' "$list" | grep -E 'vmlinux-6\.1\.' | sort -V | tail -1)
+          [ -n "$key" ] || key=$(printf '%s\n' "$list" | sort -V | tail -1)
+          [ -n "$key" ] || { echo "could not resolve CI kernel for ${ci}"; exit 1; }
+          echo "guest kernel: $key"
+          curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${key}" -o "$RUNNER_TEMP/vmlinux"
+
+      - name: Write fleet gateway public key
+        env:
+          GATEWAY_UPSTREAM_PUBKEY: ${{ vars.GATEWAY_UPSTREAM_PUBKEY }}
+        run: |
+          [ -n "$GATEWAY_UPSTREAM_PUBKEY" ] || { echo "vars.GATEWAY_UPSTREAM_PUBKEY is not set"; exit 1; }
+          printf '%s\n' "$GATEWAY_UPSTREAM_PUBKEY" > "$RUNNER_TEMP/gateway_upstream_key.pub"
+
+      - name: Configure rclone (Scaleway Object Storage)
+        env:
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+        run: |
+          [ -n "$SCW_ACCESS_KEY" ] && [ -n "$SCW_SECRET_KEY" ] || { echo "SCW_ACCESS_KEY/SCW_SECRET_KEY secrets are not set"; exit 1; }
+          mkdir -p "$HOME/.config/rclone"
+          cat > "$HOME/.config/rclone/rclone.conf" <<EOF
+          [scw]
+          type = s3
+          provider = Scaleway
+          access_key_id = ${SCW_ACCESS_KEY}
+          secret_access_key = ${SCW_SECRET_KEY}
+          region = ${REGION}
+          endpoint = ${S3_ENDPOINT}
+          acl = public-read
+          EOF
+
+      - name: Build + publish release
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+          RELEASE: ${{ inputs.release }}
+          IMAGE: ${{ inputs.image }}
+          PROMOTE_LATEST: ${{ inputs.promote_latest && '1' || '0' }}
+          REPO_DIR: ${{ github.workspace }}
+          RCLONE_REMOTE: scw
+          KERNEL: ${{ runner.temp }}/vmlinux
+          GATEWAY_PUBKEY_FILE: ${{ runner.temp }}/gateway_upstream_key.pub
+        run: |
+          ./hack/build-artifacts.sh | tee "$RUNNER_TEMP/publish.log"
+          echo "### sparkbox artifacts published :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^  (release|base URL|manifest|promoted|.*skipped latest)' "$RUNNER_TEMP/publish.log" \
+            | sed 's/^  /- /' >> "$GITHUB_STEP_SUMMARY"
