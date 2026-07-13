@@ -69,10 +69,23 @@ if '@@' in t:
 sys.stdout.write(t)
 PY
 
-echo "== creating server $NAME ($TYPE, $ZONE) — billing starts now =="
-SRV=$(scw baremetal server create name="$NAME" type="$TYPE" zone="$ZONE" -o json \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-echo "   server id: $SRV"
+# SERVER_ID lets you retry the install against an already-created box (e.g. after
+# a transient failure) instead of ordering — and paying for — a second server.
+if [ -n "${SERVER_ID:-}" ]; then
+  SRV="$SERVER_ID"
+  echo "== reusing existing server $SRV =="
+else
+  echo "== creating server $NAME ($TYPE, $ZONE) — billing starts now =="
+  SRV=$(scw baremetal server create name="$NAME" type="$TYPE" zone="$ZONE" -o json \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  echo "   server id: $SRV"
+fi
+
+# Elastic Metal physically provisions ("delivers") the hardware after create;
+# an install issued before the box is delivered fails with "Server is not
+# delivered". Block until it's ready.
+echo "== waiting for hardware delivery =="
+scw baremetal server wait "$SRV" zone="$ZONE" >/dev/null
 
 echo "== installing Ubuntu 24.04 + cloud-init (self-provisions on first boot) =="
 # scw stores user-data.content as a protobuf *bytes* field: it base64-decodes
