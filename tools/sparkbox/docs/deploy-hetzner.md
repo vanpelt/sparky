@@ -36,8 +36,11 @@ install release-*/firecracker-*[!.debug] /usr/local/bin/firecracker
 #    at, or build one with their recommended microVM config
 #    (resources/guest_configs in the firecracker repo).
 
-# 5. Build a rootfs template (bakes in the gateway's public key).
-./hack/build-rootfs.sh ubuntu:24.04 /srv/sparkbox/images/ubuntu.ext4 gateway_upstream_key.pub 4096
+# 5. Build a rootfs template (bakes in the gateway's public key). The fleet
+#    default is codex-universal (~30GB of toolchains; the ext4 is a thin
+#    ceiling — reflink clones only pay for written blocks). For a slim box use
+#    ubuntu:24.04 with size 4096 and pass a matching --default-image below.
+./hack/build-rootfs.sh ghcr.io/openai/codex-universal:latest /srv/sparkbox/images/universal.ext4 gateway_upstream_key.pub 65536
 
 # 6. Enable NAT so sandboxes can reach the internet (taps are 172.30.0.0/16).
 echo 1 > /proc/sys/net/ipv4/ip_forward

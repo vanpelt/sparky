@@ -20,8 +20,14 @@ RCLONE_REMOTE=${RCLONE_REMOTE:-sparkbox-artifacts}
 REGION=${REGION:-fr-par}
 RELEASE=${RELEASE:-$(date -u +%Y-%m-%d-%H%M)}
 GATEWAY_PUBKEY_FILE=${GATEWAY_PUBKEY_FILE:-$SPARKBOX_DIR/gateway_upstream_key.pub}
-IMAGE=${IMAGE:-ubuntu:24.04}
-ROOTFS_MB=${ROOTFS_MB:-10240}   # per-sandbox root disk ceiling (thin CoW copy)
+# Default base: OpenAI's codex-universal — ubuntu:24.04 preloaded with
+# toolchains for ~10 languages (python/node/go/rust/java/ruby/php/swift/
+# elixir/bazel), i.e. what a coding agent expects to find. ~11GB to pull,
+# ~30GB unpacked, so the build host wants ~70GB of scratch disk. Override
+# IMAGE=ubuntu:24.04 ROOTFS_NAME=ubuntu ROOTFS_MB=10240 for a slim build.
+IMAGE=${IMAGE:-ghcr.io/openai/codex-universal:latest}
+ROOTFS_NAME=${ROOTFS_NAME:-universal}   # template + artifact basename; must match the server's --default-image
+ROOTFS_MB=${ROOTFS_MB:-65536}   # per-sandbox root disk ceiling (thin CoW copy; ~30GB is toolchains)
 # Kernel + firecracker default to a build host's staged copies, but CI (see
 # .github/workflows/build-artifacts.yml) downloads them and points here.
 KERNEL=${KERNEL:-$SPARKBOX_DIR/vmlinux}
@@ -47,12 +53,23 @@ cp "$FIRECRACKER_BIN" "$STAGE/firecracker"
 
 echo "== build rootfs (bakes the fleet gateway public key) =="
 $SUDO "$REPO_DIR/tools/sparkbox/hack/build-rootfs.sh" \
-  "$IMAGE" "$STAGE/ubuntu.ext4" "$GATEWAY_PUBKEY_FILE" "$ROOTFS_MB"
-# build-rootfs.sh runs as root under $SUDO; reclaim the artifact so we can gzip
-# and upload it unprivileged.
-[ -n "$SUDO" ] && $SUDO chown "$(id -u):$(id -g)" "$STAGE/ubuntu.ext4"
-echo "== gzip rootfs (mostly-empty ext4 -> a few hundred MB) =="
-gzip -f "$STAGE/ubuntu.ext4"   # -> ubuntu.ext4.gz
+  "$IMAGE" "$STAGE/$ROOTFS_NAME.ext4" "$GATEWAY_PUBKEY_FILE" "$ROOTFS_MB"
+# build-rootfs.sh runs as root under $SUDO; reclaim the artifact so we can
+# compress and upload it unprivileged.
+[ -n "$SUDO" ] && $SUDO chown "$(id -u):$(id -g)" "$STAGE/$ROOTFS_NAME.ext4"
+
+# Disk-starved CI runners: once the template is flattened, the (huge) base
+# image is dead weight in /var/lib/docker — drop it before compression adds
+# another ~11GB alongside the ext4. Opt-in so build hosts keep their pull cache.
+if [ "${PRUNE_IMAGE:-0}" = 1 ] && command -v docker >/dev/null; then
+  $SUDO docker rmi -f "$IMAGE" >/dev/null 2>&1 || true
+fi
+
+# pigz when available: single-threaded gzip on a ~30GB template is the
+# difference between ~5 and ~25 minutes. Output is plain .gz either way.
+GZIP_BIN=$(command -v pigz || command -v gzip)
+echo "== compress rootfs ($(basename "$GZIP_BIN")) =="
+"$GZIP_BIN" -f "$STAGE/$ROOTFS_NAME.ext4"   # -> $ROOTFS_NAME.ext4.gz
 
 echo "== manifest =="
 FC_VER=$("$FIRECRACKER_BIN" --version | head -1 | grep -oE 'v[0-9.]+' | head -1)
@@ -62,14 +79,15 @@ FIRECRACKER_VERSION=$FC_VER
 SHA256_VMLINUX=$(sha "$STAGE/vmlinux")
 SHA256_FIRECRACKER=$(sha "$STAGE/firecracker")
 SHA256_SPARKBOX=$(sha "$STAGE/sparkbox")
-SHA256_ROOTFS_GZ=$(sha "$STAGE/ubuntu.ext4.gz")
+ROOTFS_NAME=$ROOTFS_NAME
+SHA256_ROOTFS_GZ=$(sha "$STAGE/$ROOTFS_NAME.ext4.gz")
 GATEWAY_PUBKEY="$(cat "$GATEWAY_PUBKEY_FILE")"
 EOF
 echo "---"; cat "$STAGE/manifest.env"; echo "---"
 
 echo "== upload release $RELEASE (public-read) =="
 base="$RCLONE_REMOTE:$BUCKET/releases/$RELEASE"
-for f in vmlinux firecracker sparkbox ubuntu.ext4.gz manifest.env; do
+for f in vmlinux firecracker sparkbox "$ROOTFS_NAME.ext4.gz" manifest.env; do
   echo ">> $f ($(du -h "$STAGE/$f" | cut -f1))"
   rclone copyto "$STAGE/$f" "$base/$f" --s3-acl public-read
 done

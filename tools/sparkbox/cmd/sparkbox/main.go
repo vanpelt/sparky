@@ -52,7 +52,7 @@ func serve(args []string) error {
 		usersPath    = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
 		sshAddr      = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
 		apiAddr      = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
-		defaultImage = fs.String("default-image", "ubuntu", "rootfs template for new sandboxes")
+		defaultImage = fs.String("default-image", "universal", "rootfs template for new sandboxes")
 		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
 		maxPerOwner  = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
 		memAdmitPct  = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' allocated RAM would exceed this % of host RAM (0 = disabled)")

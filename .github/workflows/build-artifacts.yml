@@ -24,9 +24,17 @@ on:
         type: boolean
         default: true
       image:
-        description: "Base OCI image for the rootfs"
+        description: "Base OCI image for the rootfs (ubuntu:24.04 for a slim build — set rootfs_name=ubuntu + rootfs_mb=10240 too)"
         required: false
-        default: "ubuntu:24.04"
+        default: "ghcr.io/openai/codex-universal:latest"
+      rootfs_name:
+        description: "Rootfs template basename (must match the server's --default-image)"
+        required: false
+        default: "universal"
+      rootfs_mb:
+        description: "Rootfs ext4 size in MB (per-sandbox disk ceiling; thin CoW)"
+        required: false
+        default: "65536"
 
 concurrency:
   group: sparkbox-artifacts
@@ -52,8 +60,26 @@ jobs:
           go-version-file: tools/sparkbox/go.mod
           cache-dependency-path: tools/sparkbox/go.sum
 
-      - name: Install rclone
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone
+      - name: Install rclone + pigz
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone pigz
+
+      # The codex-universal rootfs build peaks at ~65GB of scratch (unpacked
+      # base image + flattened ext4 coexisting during export, then ext4 + .gz
+      # during compression) — more than a stock runner's free disk. Shed the
+      # preinstalled toolchains we don't use (build-artifacts.sh only needs
+      # go/docker/curl/rclone). Best-effort: paths vary across runner images.
+      # If this still ENOSPCs, run hack/build-artifacts.sh on a build host.
+      - name: Free runner disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell /usr/local/share/chromium \
+            /usr/local/lib/node_modules /usr/share/miniconda /usr/lib/jvm \
+            /usr/lib/google-cloud-sdk /opt/microsoft /usr/local/julia* || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean
+          df -h / | tail -1
 
       - name: Download firecracker ${{ env.FIRECRACKER_VERSION }}
         run: |
@@ -111,6 +137,9 @@ jobs:
           GOARCH: amd64
           RELEASE: ${{ inputs.release }}
           IMAGE: ${{ inputs.image }}
+          ROOTFS_NAME: ${{ inputs.rootfs_name }}
+          ROOTFS_MB: ${{ inputs.rootfs_mb }}
+          PRUNE_IMAGE: "1"
           PROMOTE_LATEST: ${{ inputs.promote_latest && '1' || '0' }}
           REPO_DIR: ${{ github.workspace }}
           RCLONE_REMOTE: scw

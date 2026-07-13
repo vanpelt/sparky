@@ -5,13 +5,21 @@
 # Run as root on the host:  sudo ./setup-host.sh <your-laptop-pubkey-line...>
 #
 # Does: sanity checks, firecracker install, guest kernel download, XFS
-# work volume (reflink CoW), Go + sparkbox build, gateway keys, ubuntu
-# rootfs template, NAT, and prints how to start the server.
+# work volume (reflink CoW), Go + sparkbox build, gateway keys, rootfs
+# template (codex-universal by default), NAT, and prints how to start the
+# server.
 set -euo pipefail
 
 SPARKBOX_DIR=${SPARKBOX_DIR:-/srv/sparkbox}
 SPARKBOX_USER_KEY=${1:?usage: setup-host.sh '<user> <ssh-ed25519 AAAA... comment>' — the users.conf line for your laptop key}
 REPO_URL=${REPO_URL:-https://github.com/vanpelt/sparky}
+# Rootfs template: codex-universal = ubuntu:24.04 + toolchains for ~10
+# languages (~11GB pull / ~30GB unpacked — the thing coding agents expect).
+# Override IMAGE=ubuntu:24.04 ROOTFS_NAME=ubuntu ROOTFS_MB=4096 for a quick
+# slim host; ROOTFS_NAME must then match the server's --default-image flag.
+IMAGE=${IMAGE:-ghcr.io/openai/codex-universal:latest}
+ROOTFS_NAME=${ROOTFS_NAME:-universal}
+ROOTFS_MB=${ROOTFS_MB:-65536}
 
 echo "== sanity checks =="
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
@@ -69,7 +77,9 @@ echo "== XFS work volume (reflink CoW for instant rootfs copies) =="
 if ! mountpoint -q "$SPARKBOX_DIR/data"; then
   mkdir -p "$SPARKBOX_DIR/data"
   if [ ! -f "$SPARKBOX_DIR/data.img" ]; then
-    truncate -s 100G "$SPARKBOX_DIR/data.img"   # sparse; grows on use
+    # Sparse; grows on use. The universal template alone is ~30GB of real
+    # blocks, plus per-sandbox write deltas + memory snapshot files.
+    truncate -s 300G "$SPARKBOX_DIR/data.img"
     mkfs.xfs -q -m reflink=1 "$SPARKBOX_DIR/data.img"
   fi
   mount -o loop "$SPARKBOX_DIR/data.img" "$SPARKBOX_DIR/data"
@@ -94,10 +104,10 @@ timeout 3 sparkbox serve --driver mock --state-dir "$SPARKBOX_DIR/data/state" \
 [ -f "$SPARKBOX_DIR/data/state/gateway_upstream_key.pem" ] || { echo "key generation failed"; exit 1; }
 ssh-keygen -y -f "$SPARKBOX_DIR/data/state/gateway_upstream_key.pem" > "$SPARKBOX_DIR/gateway_upstream_key.pub"
 
-echo "== ubuntu rootfs template =="
-if [ ! -f "$SPARKBOX_DIR/data/images/ubuntu.ext4" ]; then
-  ./hack/build-rootfs.sh ubuntu:24.04 "$SPARKBOX_DIR/data/images/ubuntu.ext4" \
-    "$SPARKBOX_DIR/gateway_upstream_key.pub" 4096
+echo "== $ROOTFS_NAME rootfs template ($IMAGE) =="
+if [ ! -f "$SPARKBOX_DIR/data/images/$ROOTFS_NAME.ext4" ]; then
+  ./hack/build-rootfs.sh "$IMAGE" "$SPARKBOX_DIR/data/images/$ROOTFS_NAME.ext4" \
+    "$SPARKBOX_DIR/gateway_upstream_key.pub" "$ROOTFS_MB"
 fi
 
 echo "== NAT for sandbox egress (172.30.0.0/16 via default uplink) =="
@@ -132,6 +142,7 @@ Start the server with:
     --state-dir $SPARKBOX_DIR/data/state \\
     --kernel $SPARKBOX_DIR/vmlinux \\
     --image-dir $SPARKBOX_DIR/data/images \\
+    --default-image $ROOTFS_NAME \\
     --users $SPARKBOX_DIR/users.conf \\
     --ssh-addr :2222 --api-addr 127.0.0.1:8080 \\
     --proxy-addr :8081 --proxy-domain hivemind.tools${SUBNET6_ARG}

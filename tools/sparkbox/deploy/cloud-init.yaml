@@ -90,10 +90,13 @@ write_files:
       REL="$BASE/releases/$RELEASE"
 
       # XFS reflink volume so per-sandbox rootfs copies are instant CoW clones.
+      # Sparse (grows on use), sized for the codex-universal era: the template
+      # alone is ~30GB real blocks, plus per-sandbox write deltas and memory
+      # snapshot files (MemMB each). EM-B220E-NVME has ~1TB of NVMe.
       mkdir -p "$DIR/data"
       if ! mountpoint -q "$DIR/data"; then
         if [ ! -f "$DIR/data.img" ]; then
-          truncate -s 100G "$DIR/data.img"
+          truncate -s 300G "$DIR/data.img"
           mkfs.xfs -q -m reflink=1 "$DIR/data.img"
         fi
         mount -o loop "$DIR/data.img" "$DIR/data"
@@ -115,8 +118,12 @@ write_files:
       fetch "$REL/firecracker"    /usr/local/bin/firecracker  "$SHA256_FIRECRACKER"
       fetch "$REL/sparkbox"       /usr/local/bin/sparkbox     "$SHA256_SPARKBOX"
       chmod +x /usr/local/bin/firecracker /usr/local/bin/sparkbox
-      fetch "$REL/ubuntu.ext4.gz" "$DIR/data/images/ubuntu.ext4.gz" "$SHA256_ROOTFS_GZ"
-      gunzip -f "$DIR/data/images/ubuntu.ext4.gz"
+      # The manifest names the rootfs template (ROOTFS_NAME=universal since the
+      # codex-universal base; releases predating the field shipped ubuntu.ext4
+      # with a matching binary default, hence the fallback).
+      ROOTFS_NAME=${ROOTFS_NAME:-ubuntu}
+      fetch "$REL/$ROOTFS_NAME.ext4.gz" "$DIR/data/images/$ROOTFS_NAME.ext4.gz" "$SHA256_ROOTFS_GZ"
+      gunzip -f "$DIR/data/images/$ROOTFS_NAME.ext4.gz"
 
       # Pin any reserved (flexible) IPs on the primary NIC so DNS stays stable
       # across host rebuilds. launch-host.sh attaches them to the server (they

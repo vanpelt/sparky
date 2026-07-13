@@ -72,10 +72,12 @@ chmod +x setup-host.sh
 `hack/setup-host.sh` handles everything: verifies `/dev/kvm`, installs
 firecracker + a Firecracker-CI guest kernel, creates an **XFS loopback
 volume** for reflink CoW rootfs copies (Scaleway's default install is ext4,
-which can't reflink), builds sparkbox, generates gateway keys, builds an
-`ubuntu.ext4` rootfs template from `ubuntu:24.04` with the gateway key baked
-in, and sets up NAT for sandbox egress. It prints the `sparkbox serve`
-command when done.
+which can't reflink), builds sparkbox, generates gateway keys, builds a
+`universal.ext4` rootfs template from `ghcr.io/openai/codex-universal:latest`
+(ubuntu:24.04 + toolchains for ~10 languages; ~11GB pull / ~30GB unpacked —
+override with `IMAGE=ubuntu:24.04 ROOTFS_NAME=ubuntu ROOTFS_MB=4096` for a
+slim box) with the gateway key baked in, and sets up NAT for sandbox egress.
+It prints the `sparkbox serve` command when done.
 
 ## 4. Validate
 
@@ -109,8 +111,9 @@ keys are the fleet secret and are never uploaded.
 ```sh
 # on a build host (e.g. an existing sparkbox box):
 RELEASE=v1 tools/sparkbox/hack/build-artifacts.sh
-# -> uploads vmlinux, firecracker, sparkbox, ubuntu.ext4.gz, manifest.env
+# -> uploads vmlinux, firecracker, sparkbox, universal.ext4.gz, manifest.env
 #    to  <bucket>/releases/v1/  (public-read) and points latest.env at it.
+#    (wants ~70GB of scratch disk: the codex-universal base is ~30GB unpacked)
 ```
 
 **…or publish from CI.** `.github/workflows/build-artifacts.yml` runs the exact

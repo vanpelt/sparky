@@ -7,6 +7,12 @@
 #
 # Usage: build-rootfs.sh <docker-image> <output.ext4> <gateway-pubkey-file> [size-mb]
 # Requires: docker (or podman), mkfs.ext4, root (for the loop mount).
+#
+# Works with any Debian/Ubuntu-based image, including big toolchain images like
+# ghcr.io/openai/codex-universal (ubuntu:24.04 + toolchains for ~10 languages,
+# ~30GB unpacked — pass a size-mb that fits; the guard below checks). The ext4
+# is a thin ceiling: hosts clone it with XFS reflinks, so sandboxes only pay
+# for blocks they write.
 set -euo pipefail
 
 IMAGE=${1:?docker image, e.g. ubuntu:24.04}
@@ -60,7 +66,40 @@ RUN set -eu; \
     if command -v unminimize >/dev/null 2>&1; then yes | unminimize || true; fi; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /run/sshd
+# Persist the image's environment for VM logins. Docker ENV vars (PATH with
+# tool shims, NVM_DIR, PYENV_ROOT, COREPACK_*, ...) live in image *metadata*
+# and vanish when \`docker export\` flattens the filesystem. Resolve a login
+# shell's final environment (ENV + /etc/profile hooks: mise/pyenv/nvm/cargo/
+# phpenv init) and bake it into /etc/environment, which pam_env applies to
+# EVERY ssh session — including the non-interactive \`ssh box '<cmd>'\` execs
+# coding agents use, which read no profile at all. LANG/LC_* are excluded
+# (/etc/default/locale owns locale, see update-locale above).
+# Also: images like codex-universal ship pyenv with no global version set
+# (their container entrypoint picks one; entrypoints never run in a VM), which
+# leaves \`python\` shims erroring — default to the newest installed version.
+RUN set -eu; \
+    if command -v pyenv >/dev/null 2>&1; then \
+      cur=\$(pyenv global 2>/dev/null || true); \
+      if [ -z "\$cur" ] || [ "\$cur" = system ]; then \
+        pyenv global "\$(pyenv versions --bare | sort -V | tail -1)"; \
+      fi; \
+    fi; \
+    bash -lc env 2>/dev/null \
+      | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+      | grep -vE '^(HOME|HOSTNAME|PWD|OLDPWD|SHLVL|SHELL|LOGNAME|USER|MAIL|TERM|PS1|LS_COLORS|LESS[A-Z]*|LANG|LC_[A-Z]+|DEBIAN_FRONTEND|_)=' \
+      > /etc/environment
 EOF
+
+# Fail fast if the flattened image won't fit the requested ext4 — better now
+# than 20 minutes in with a half-extracted tar and ENOSPC. 1.2x + 512MB covers
+# ext4 metadata + a little breathing room (the real workspace headroom should
+# come from passing a generous size-mb; the copy is thin either way).
+IMG_BYTES=$($DOCKER image inspect -f '{{.Size}}' "$BUILD_IMAGE")
+MIN_MB=$(( IMG_BYTES / 1048576 * 12 / 10 + 512 ))
+if [ "$SIZE_MB" -lt "$MIN_MB" ]; then
+  echo "size-mb $SIZE_MB is too small: $IMAGE unpacks to ~$((IMG_BYTES/1048576))MB (need >= ${MIN_MB}MB)" >&2
+  exit 1
+fi
 
 echo ">> creating ${SIZE_MB}MB ext4 at $OUT"
 truncate -s "${SIZE_MB}M" "$OUT"
