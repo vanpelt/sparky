@@ -29,6 +29,7 @@ write_files:
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
       SPARKBOX_CONSOLE_PASSWORD=@@CONSOLE_PASSWORD@@
+      TLS_FLAGS=@@TLS_FLAGS@@
 
   # Staged OUTSIDE /srv/sparkbox/data — the provision script mounts the XFS
   # volume there, which would otherwise shadow anything write_files put under
@@ -62,7 +63,7 @@ write_files:
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
         --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
-        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} ${SUBNET6_FLAG}
+        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} ${SUBNET6_FLAG} ${TLS_FLAGS}
       Restart=always
       RestartSec=2
       LimitNOFILE=1048576
