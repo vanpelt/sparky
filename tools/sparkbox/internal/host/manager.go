@@ -21,6 +21,14 @@ import (
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
+// Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
+// `new@` path always does; the HTTP API may override). Bounded only by host
+// capacity — an 8c/16t/64GB box fits ~8 of these before overcommit.
+const (
+	defaultVCPUs int64 = 2
+	defaultMemMB int64 = 8192
+)
+
 type Sandbox struct {
 	Name       string    `json:"name"`
 	Owner      string    `json:"owner"`
@@ -87,10 +95,10 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		return nil, fmt.Errorf("invalid sandbox name %q (lowercase alphanumerics and dashes)", name)
 	}
 	if vcpus <= 0 {
-		vcpus = 1
+		vcpus = defaultVCPUs
 	}
 	if memMB <= 0 {
-		memMB = 1024
+		memMB = defaultMemMB
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

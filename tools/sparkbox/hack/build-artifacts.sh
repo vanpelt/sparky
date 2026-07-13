@@ -21,7 +21,7 @@ REGION=${REGION:-fr-par}
 RELEASE=${RELEASE:-$(date -u +%Y-%m-%d-%H%M)}
 GATEWAY_PUBKEY_FILE=${GATEWAY_PUBKEY_FILE:-$SPARKBOX_DIR/gateway_upstream_key.pub}
 IMAGE=${IMAGE:-ubuntu:24.04}
-ROOTFS_MB=${ROOTFS_MB:-4096}
+ROOTFS_MB=${ROOTFS_MB:-10240}   # per-sandbox root disk ceiling (thin CoW copy)
 # Kernel + firecracker default to a build host's staged copies, but CI (see
 # .github/workflows/build-artifacts.yml) downloads them and points here.
 KERNEL=${KERNEL:-$SPARKBOX_DIR/vmlinux}

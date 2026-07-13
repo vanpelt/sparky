@@ -168,6 +168,27 @@ NIC — no virtual MAC needed) and cloud-init pins `FLEXIBLE_ADDRS` on the prima
 interface via a netplan drop-in that keeps DHCP for the default route. For a /64
 use its `::1` host address, not the bare `/64`. DNS never changes again.
 
+**Per-sandbox IPv6 (optional).** By default sandboxes are IPv4-only (a private
+`172.30.x/30` with NAT egress) and the flexible `/64` is used only for the
+host's own edge address (`::1`, the AAAA target). Pass `SUBNET6=<the /64>` to
+also give every sandbox a *globally routable* `/128` carved from that same /64
+(host `::2`, guest `::3`, next VM `::4/::5`, … — `::1` stays the host edge, no
+collision). Routable means **no NAT** on v6 egress — just host forwarding
+(already enabled) — and each sandbox is directly addressable inbound:
+
+```sh
+SUBNET6=2001:bc8:702:1c7::/64 \
+FLEXIBLE_FIP_IDS=<v4-fip-id>,<v6-fip-id> \
+FLEXIBLE_ADDRS="62.210.142.210/32 2001:bc8:702:1c7::1/64" \
+GATEWAY_HOST_KEY=... GATEWAY_UPSTREAM_KEY=... \
+tools/sparkbox/deploy/launch-host.sh
+```
+
+The host keeps `::1/64` on eth0 while each tap gets a more-specific `/127`, so
+longest-prefix routing sends VM traffic to the taps. If the routed /64 turns out
+to be delivered on-link rather than routed and the /127s don't take, pin the
+host edge as `::1/128` instead so nothing shadows the per-VM routes.
+
 Timings observed on `EM-B220E-NVMe`: OS install ~10 min, then cloud-init ~4–5
 min to fetch the ~155 MB release and serve the first microVM — fully hands-off.
 

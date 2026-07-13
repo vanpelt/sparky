@@ -157,8 +157,8 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	// arg is IPv4-only; IPv6 is applied inside the guest by the sparkbox-netcfg
 	// hook (build-rootfs.sh), which reads sparkbox_ip6/sparkbox_gw6 here.
 	kernelArgs := fmt.Sprintf(
-		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off",
-		d.guestIP(st.idx), d.hostIP(st.idx))
+		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s",
+		d.guestIP(st.idx), d.hostIP(st.idx), name)
 	if d.prefix6 != nil {
 		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
 			d.guestIP6(st.idx), d.hostIP6(st.idx))
