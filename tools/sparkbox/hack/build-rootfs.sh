@@ -86,6 +86,14 @@ for tok in $(cat /proc/cmdline); do
     sparkbox_gw6=*) GW6="${tok#sparkbox_gw6=}" ;;
   esac
 done
+
+# The kernel ip= arg configures the interface but writes no resolver (Firecracker
+# boots vmlinux with no initrd, so nothing populates /etc/resolv.conf). Egress is
+# NAT'd, so point at public resolvers; skip if something already set one.
+if [ ! -s /etc/resolv.conf ]; then
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+fi
+
 [ -n "$IP6" ] || exit 0
 ip link set "$IFACE" up
 ip -6 addr replace "$IP6" dev "$IFACE"
