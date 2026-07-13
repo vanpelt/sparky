@@ -118,6 +118,21 @@ write_files:
       fetch "$REL/ubuntu.ext4.gz" "$DIR/data/images/ubuntu.ext4.gz" "$SHA256_ROOTFS_GZ"
       gunzip -f "$DIR/data/images/ubuntu.ext4.gz"
 
+      # Pin any reserved (flexible) IPs on the primary NIC so DNS stays stable
+      # across host rebuilds. launch-host.sh attaches them to the server (they
+      # route to its NIC); here we merge them into cloud-init's netplan config
+      # (interface id "eth0") as static addresses — DHCP still owns the default
+      # IP/route, and netplan re-applies these on every boot.
+      FLEXIBLE_ADDRS="@@FLEXIBLE_ADDRS@@"
+      if [ -n "$FLEXIBLE_ADDRS" ]; then
+        { echo "network:"; echo "  version: 2"; echo "  ethernets:"; \
+          echo "    eth0:"; echo "      addresses:"; \
+          for a in $FLEXIBLE_ADDRS; do echo "        - \"$a\""; done; \
+        } > /etc/netplan/99-sparkbox-flexible.yaml
+        chmod 600 /etc/netplan/99-sparkbox-flexible.yaml
+        netplan apply || true
+      fi
+
       # NAT for IPv4 sandbox egress (172.30.0.0/16 via the default uplink).
       # IPv6 forwarding too: when --subnet6 is set each sandbox gets a routable
       # /128 and egresses without NAT (harmless to enable when it isn't).

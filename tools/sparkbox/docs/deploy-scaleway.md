@@ -149,6 +149,25 @@ into every release's rootfs so every sandbox trusts any fleet gateway, and the
 private half is injected per-host as a secret. Generate it once (setup-host.sh
 does on the first box) and reuse it across every release + host.
 
+**Stable DNS via flexible IPs (optional but recommended).** Each new box gets a
+fresh ephemeral IP, which means re-pointing DNS on every rebuild. Reserve
+Scaleway *flexible* IPs once and have `launch-host.sh` move them onto each new
+box instead. Reserve them (`scw fip ip create`, add `is-ipv6=true` for a v6
+/64), point Cloudflare `A`/`AAAA` at them **once** (grey / DNS-only), then pass
+their IDs + host addresses on every launch:
+
+```sh
+FLEXIBLE_FIP_IDS=<v4-fip-id>,<v6-fip-id> \
+FLEXIBLE_ADDRS="62.210.142.210/32 2001:bc8:702:1c7::1/64" \
+GATEWAY_HOST_KEY=... GATEWAY_UPSTREAM_KEY=... \
+tools/sparkbox/deploy/launch-host.sh
+```
+
+`launch-host.sh` attaches the flexible IPs to the new server (they route to its
+NIC — no virtual MAC needed) and cloud-init pins `FLEXIBLE_ADDRS` on the primary
+interface via a netplan drop-in that keeps DHCP for the default route. For a /64
+use its `::1` host address, not the bare `/64`. DNS never changes again.
+
 Timings observed on `EM-B220E-NVMe`: OS install ~10 min, then cloud-init ~4–5
 min to fetch the ~155 MB release and serve the first microVM — fully hands-off.
 

@@ -34,6 +34,15 @@ CONSOLE_PASSWORD=${CONSOLE_PASSWORD:-}
 #   TLS_FLAGS="--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@example.com"
 TLS_FLAGS=${TLS_FLAGS:-}
 
+# Optional reserved (flexible) IPs so DNS points at a stable address forever,
+# not the ephemeral per-box IP. FLEXIBLE_FIP_IDS is a comma-separated list of
+# `scw fip ip` IDs to move onto the new server; FLEXIBLE_ADDRS is the matching
+# space-separated CIDR host addresses the guest pins on its primary NIC (for a
+# /64 use the ::1 host address, e.g. 2001:bc8:702:1c7::1/64, not the bare /64).
+# Point Cloudflare A/AAAA at these once and never touch DNS again.
+FLEXIBLE_FIP_IDS=${FLEXIBLE_FIP_IDS:-}
+FLEXIBLE_ADDRS=${FLEXIBLE_ADDRS:-}
+
 USER_NAME=${USER_NAME:-$(whoami)}
 USER_PUBKEY=${USER_PUBKEY:-$HOME/.ssh/id_ed25519.pub}
 GATEWAY_HOST_KEY=${GATEWAY_HOST_KEY:?path to the fleet gateway_host_key.pem}
@@ -48,6 +57,7 @@ trap 'rm -f "$RENDERED"' EXIT
 USERS_CONF="$USERS_CONF" PROXY_DOMAIN="$PROXY_DOMAIN" RELEASE="$RELEASE" \
 BUCKET_BASE="$BUCKET_BASE" GHK="$GATEWAY_HOST_KEY" GUK="$GATEWAY_UPSTREAM_KEY" \
 SUBNET6_FLAG="$SUBNET6_FLAG" CONSOLE_PASSWORD="$CONSOLE_PASSWORD" TLS_FLAGS="$TLS_FLAGS" \
+FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
 import base64, os, sys
 t = open(sys.argv[1]).read()
@@ -60,6 +70,7 @@ for k, v in {
     '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
     '@@CONSOLE_PASSWORD@@': os.environ['CONSOLE_PASSWORD'],
     '@@TLS_FLAGS@@': os.environ['TLS_FLAGS'],
+    '@@FLEXIBLE_ADDRS@@': os.environ['FLEXIBLE_ADDRS'],
     '@@GATEWAY_HOST_KEY_B64@@': b64(os.environ['GHK']),
     '@@GATEWAY_UPSTREAM_KEY_B64@@': b64(os.environ['GUK']),
 }.items():
@@ -86,6 +97,18 @@ fi
 # delivered". Block until it's ready.
 echo "== waiting for hardware delivery =="
 scw baremetal server wait "$SRV" zone="$ZONE" >/dev/null
+
+# Move the reserved flexible IPs onto this server (they route to its NIC; the
+# guest pins FLEXIBLE_ADDRS via netplan on first boot). Attaching before install
+# means the routing is live by the time the box comes up.
+if [ -n "$FLEXIBLE_FIP_IDS" ]; then
+  echo "== attaching flexible IPs ($FLEXIBLE_FIP_IDS) to $SRV =="
+  fip_args=""; i=0
+  IFS=',' read -ra _fips <<< "$FLEXIBLE_FIP_IDS"
+  for f in "${_fips[@]}"; do fip_args="$fip_args fips-ids.$i=$f"; i=$((i+1)); done
+  # shellcheck disable=SC2086
+  scw fip ip attach $fip_args server-id="$SRV" zone="$ZONE" >/dev/null
+fi
 
 echo "== installing Ubuntu 24.04 + cloud-init (self-provisions on first boot) =="
 # scw stores user-data.content as a protobuf *bytes* field: it base64-decodes
