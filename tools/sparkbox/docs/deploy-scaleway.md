@@ -174,9 +174,19 @@ min to fetch the ~155 MB release and serve the first microVM — fully hands-off
 ## 6. Tear down (stop the meter)
 
 ```sh
+# Detaches reserved flexible IPs (keeps them for the next box), then deletes:
+tools/sparkbox/deploy/teardown-host.sh                 # auto-detects a single box
+# or: SERVER_ID=<id> tools/sparkbox/deploy/teardown-host.sh
+```
+
+`teardown-host.sh` detaches any flexible IPs *before* deleting the server —
+otherwise they stay "attached" to the dead server id and orphan (still billed,
+awkward to reclaim). It keeps the IPs by default (they carry your DNS); pass
+`DELETE_FLEXIBLE_IPS=1` to actually release them. Raw equivalent:
+
+```sh
+scw fip ip detach fips-ids.0=<fip-id> zone=fr-par-1   # per attached IP, first
 scw baremetal server delete <SERVER_ID> zone=fr-par-1
-# flexible IPs are billed separately (€0.005/h) until released, if you added one:
-scw fip ip list  # then: scw fip ip delete <ID>
 ```
 
 ## Gotchas
