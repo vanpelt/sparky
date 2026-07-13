@@ -152,8 +152,12 @@ TOML
 touch "$MNT/etc/bash.bashrc"
 cat >> "$MNT/etc/bash.bashrc" <<'BRC'
 
-# sparkbox: colorful starship prompt for interactive shells
+# sparkbox: interactive shell polish
 case $- in *i*)
+  # Fall back to a known-good TERM when the client's terminal has no terminfo
+  # entry in this guest (ghostty/kitty ship their own, absent from ncurses-term)
+  # — otherwise curses apps like top/htop silently fail to initialize.
+  if ! infocmp "$TERM" >/dev/null 2>&1; then export TERM=xterm-256color; fi
   export STARSHIP_CONFIG=/etc/starship.toml
   if command -v starship >/dev/null 2>&1; then eval "$(starship init bash)"; fi
   ;;

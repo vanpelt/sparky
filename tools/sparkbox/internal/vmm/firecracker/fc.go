@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
@@ -57,6 +58,7 @@ type Driver struct {
 	vms     map[string]*vmState
 	next    int
 	prefix6 net.IP // parsed /64 network address; nil disables IPv6
+	uplink6 string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
 func New(opts Options) (*Driver, error) {
@@ -76,6 +78,12 @@ func New(opts Options) (*Driver, error) {
 			return nil, fmt.Errorf("subnet6 %q: need /112 or larger for per-VM addressing", opts.Subnet6)
 		}
 		d.prefix6 = ipNet.IP.To16()
+		// Scaleway (and most providers) deliver the routed /64 on-link: the
+		// upstream router NDP-resolves each guest's /128 on the segment, and the
+		// host only auto-answers for its own addresses. Per-VM addresses live on
+		// the taps, so without proxy NDP on the uplink their return traffic is
+		// dropped. Record the uplink now; createTap adds a proxy entry per guest.
+		d.uplink6 = defaultRoute6Dev()
 	}
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
@@ -346,11 +354,40 @@ func (d *Driver) createTap(ctx context.Context, idx int) error {
 			return fmt.Errorf("%v: %v: %s", c, err, out)
 		}
 	}
+	// Answer NDP for this guest's /128 on the uplink so the provider's on-link
+	// delivery of the routed /64 reaches the VM (its address lives on the tap,
+	// not the uplink). Best-effort: the VM still boots if this fails, it just
+	// won't have v6 return traffic. del-then-add keeps it idempotent.
+	if d.prefix6 != nil && d.uplink6 != "" {
+		exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv6.conf."+d.uplink6+".proxy_ndp=1").Run() //nolint:errcheck
+		exec.CommandContext(ctx, "ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run()     //nolint:errcheck
+		exec.CommandContext(ctx, "ip", "-6", "neigh", "add", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
+	}
 	return nil
 }
 
 func (d *Driver) deleteTap(idx int) {
+	if d.prefix6 != nil && d.uplink6 != "" {
+		exec.Command("ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
+	}
 	exec.Command("ip", "link", "del", tapName(idx)).Run() //nolint:errcheck
+}
+
+// defaultRoute6Dev returns the interface backing the IPv6 default route (e.g.
+// "enp65s0f0"), or "" if there is none. Used to place proxy-NDP entries for
+// guest addresses on the correct uplink.
+func defaultRoute6Dev() string {
+	out, err := exec.Command("ip", "-6", "route", "show", "default").Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "dev" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
 }
 
 // macFor derives a stable locally-administered MAC from the network slot so
