@@ -113,6 +113,22 @@ RELEASE=v1 tools/sparkbox/hack/build-artifacts.sh
 #    to  <bucket>/releases/v1/  (public-read) and points latest.env at it.
 ```
 
+**…or publish from CI.** `.github/workflows/build-artifacts.yml` runs the exact
+same script on a GitHub runner — pick *Run workflow* under Actions (inputs: an
+optional `release` tag, `promote_latest`, and the rootfs base image). It needs
+three one-time settings, copied from your local `scw` + fleet key:
+
+```sh
+printf %s "$(scw config get access-key)" | gh secret set SCW_ACCESS_KEY
+printf %s "$(scw config get secret-key)" | gh secret set SCW_SECRET_KEY
+# the fleet gateway PUBLIC key baked into the rootfs (derive from the private key):
+gh variable set GATEWAY_UPSTREAM_PUBKEY \
+  --body "$(ssh-keygen -y -f secrets/gateway_upstream_key.pem)"
+```
+
+The Scaleway API key doubles as S3 credentials. `workflow_dispatch` only appears
+once the workflow file is on the **default branch**, so merge it to `main` first.
+
 **Launch a self-provisioning host.** `launch-host.sh` renders your secrets (your
 laptop pubkey + the fleet gateway *private* keys) into cloud-init user-data,
 creates + installs the server, and walks away. On first boot cloud-init fetches
