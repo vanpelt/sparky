@@ -11,6 +11,10 @@ Type=simple
 # TLS_FLAGS. TLS_FLAGS is appended last, so to serve HTTPS put e.g.
 #   TLS_FLAGS=--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@x
 # there (a repeated --proxy-addr wins, overriding the :8081 default below).
+# NOTE: these MUST be referenced unbraced ($SUBNET6_FLAG $TLS_FLAGS). systemd
+# splits $VAR at whitespace (empty -> zero args) but treats ${VAR} as one
+# argument (empty -> one empty arg, which terminates Go's flag parsing and
+# silently drops everything after it).
 EnvironmentFile=/srv/sparkbox/sparkbox.env
 # firecracker needs root for tap devices and /dev/kvm.
 User=root
@@ -20,7 +24,7 @@ ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
   --image-dir /srv/sparkbox/data/images \
   --users /srv/sparkbox/users.conf \
   --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
-  --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} ${SUBNET6_FLAG} ${TLS_FLAGS}
+  --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $SUBNET6_FLAG $TLS_FLAGS
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
