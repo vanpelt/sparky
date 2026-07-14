@@ -29,6 +29,10 @@ SUBNET6_FLAG=""
 
 # Optional operator console password (enables console.<domain>); empty disables.
 CONSOLE_PASSWORD=${CONSOLE_PASSWORD:-}
+# Optional Cloudflare token (Zone.DNS:Edit on the proxy domain): enables
+# per-sandbox AAAA records so `ssh <name>.<domain>` routes by front-door IPv6
+# (needs SUBNET6), and DNS-01 wildcard TLS when TLS_FLAGS picks cloudflare.
+CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
 # Optional extra proxy flags, appended last (a repeated --proxy-addr wins). To
 # serve HTTPS on :443 with on-demand Let's Encrypt certs (no Cloudflare token):
 #   TLS_FLAGS="--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@example.com"
@@ -57,7 +61,7 @@ trap 'rm -f "$RENDERED"' EXIT
 USERS_CONF="$USERS_CONF" PROXY_DOMAIN="$PROXY_DOMAIN" RELEASE="$RELEASE" \
 BUCKET_BASE="$BUCKET_BASE" GHK="$GATEWAY_HOST_KEY" GUK="$GATEWAY_UPSTREAM_KEY" \
 SUBNET6_FLAG="$SUBNET6_FLAG" CONSOLE_PASSWORD="$CONSOLE_PASSWORD" TLS_FLAGS="$TLS_FLAGS" \
-FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
+CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
 import base64, os, sys
 t = open(sys.argv[1]).read()
@@ -69,6 +73,7 @@ for k, v in {
     '@@BUCKET_BASE@@': os.environ['BUCKET_BASE'],
     '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
     '@@CONSOLE_PASSWORD@@': os.environ['CONSOLE_PASSWORD'],
+    '@@CLOUDFLARE_API_TOKEN@@': os.environ['CLOUDFLARE_API_TOKEN'],
     '@@TLS_FLAGS@@': os.environ['TLS_FLAGS'],
     '@@FLEXIBLE_ADDRS@@': os.environ['FLEXIBLE_ADDRS'],
     '@@GATEWAY_HOST_KEY_B64@@': b64(os.environ['GHK']),

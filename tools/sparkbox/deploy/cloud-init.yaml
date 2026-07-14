@@ -23,13 +23,17 @@ write_files:
     content: |
       @@USERS_CONF@@
 
-  # 0600: holds the operator-console password, so keep it off world-read.
+  # 0600: holds the operator-console password and the Cloudflare token, so
+  # keep it off world-read. CLOUDFLARE_API_TOKEN (Zone.DNS:Edit) enables
+  # per-sandbox AAAA publishing for hostname SSH routing — and DNS-01 wildcard
+  # TLS if TLS_FLAGS selects the cloudflare provider; empty disables both.
   - path: /srv/sparkbox/sparkbox.env
     permissions: '0600'
     content: |
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
       SPARKBOX_CONSOLE_PASSWORD=@@CONSOLE_PASSWORD@@
+      CLOUDFLARE_API_TOKEN=@@CLOUDFLARE_API_TOKEN@@
       TLS_FLAGS=@@TLS_FLAGS@@
 
   # Staged OUTSIDE /srv/sparkbox/data — the provision script mounts the XFS

@@ -8,6 +8,7 @@ require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/gliderlabs/ssh v0.3.8
 	github.com/libdns/cloudflare v0.2.2
+	github.com/libdns/libdns v1.1.1
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.54.0
 	modernc.org/sqlite v1.53.0
@@ -39,7 +40,6 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect

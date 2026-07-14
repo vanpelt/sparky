@@ -129,6 +129,7 @@ func serve(args []string) error {
 	// working regardless (v4 clients, no per-name DNS yet).
 	var doors *frontdoor.Mapper
 	var plumber *frontdoor.Plumber
+	var doorHooks frontdoor.Multi
 	if *subnet6 != "" {
 		if doors, err = frontdoor.New(*subnet6); err != nil {
 			// A prefix narrower than /64 still works for guest addressing, so
@@ -137,6 +138,16 @@ func serve(args []string) error {
 			doors = nil
 		} else {
 			plumber = frontdoor.NewPlumber(doors, log)
+			doorHooks = frontdoor.Multi{plumber}
+			// With a Cloudflare token, each sandbox also gets an AAAA record so
+			// `ssh <name>.<domain>` resolves to its front door. Same token scope
+			// as the DNS-01 TLS provider (Zone.DNS:Edit).
+			if token := os.Getenv("CLOUDFLARE_API_TOKEN"); token != "" {
+				doorHooks = append(doorHooks, frontdoor.NewPublisher(doors, *proxyDomain, token, log))
+				log.Info("front-door DNS publishing enabled", "zone", *proxyDomain)
+			} else {
+				log.Info("front-door DNS publishing disabled", "reason", "no CLOUDFLARE_API_TOKEN")
+			}
 		}
 	}
 
@@ -150,8 +161,8 @@ func serve(args []string) error {
 		NodeName:           nodeName,
 		HostVCPUs:          int64(runtime.NumCPU()),
 	}
-	if plumber != nil {
-		mgrOpts.FrontDoor = plumber
+	if doorHooks != nil {
+		mgrOpts.FrontDoor = doorHooks
 	}
 	mgr, err := host.NewManager(mgrOpts)
 	if err != nil {
@@ -169,14 +180,16 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Claim the front-door range (AnyIP) and answer NDP for the reserved names
-	// plus every sandbox that already exists; new ones are plumbed on create.
+	// Claim the front-door range (AnyIP), then run every hook (NDP plumbing +
+	// DNS records) for the reserved names and each existing sandbox. This is
+	// the reconcile pass: new sandboxes are handled on create, and anything
+	// that failed or drifted since the last run is repaired here.
 	if plumber != nil {
 		plumber.EnsureRange(ctx)
-		plumber.Ensure(ctx, sshgw.NewSandboxUser)
-		plumber.Ensure(ctx, sshgw.ControlUser)
+		doorHooks.Ensure(ctx, sshgw.NewSandboxUser)
+		doorHooks.Ensure(ctx, sshgw.ControlUser)
 		for _, b := range mgr.List() {
-			plumber.Ensure(ctx, b.Name)
+			doorHooks.Ensure(ctx, b.Name)
 		}
 		log.Info("front doors enabled", "range", doors.Range(),
 			"new", doors.Addr(sshgw.NewSandboxUser).String())
