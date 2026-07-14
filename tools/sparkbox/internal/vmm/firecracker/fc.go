@@ -396,8 +396,8 @@ func (d *Driver) createTap(ctx context.Context, idx int) error {
 	// not the uplink). Best-effort: the VM still boots if this fails, it just
 	// won't have v6 return traffic. del-then-add keeps it idempotent.
 	if d.prefix6 != nil && d.uplink6 != "" {
-		exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv6.conf."+d.uplink6+".proxy_ndp=1").Run() //nolint:errcheck
-		exec.CommandContext(ctx, "ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run()     //nolint:errcheck
+		exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv6.conf."+d.uplink6+".proxy_ndp=1").Run()             //nolint:errcheck
+		exec.CommandContext(ctx, "ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
 		exec.CommandContext(ctx, "ip", "-6", "neigh", "add", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
 	}
 	return nil

@@ -25,6 +25,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -60,7 +61,7 @@ func serve(args []string) error {
 		hostMemMB    = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
 		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
-		subnet6      = fs.String("subnet6", "", "firecracker: routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address")
+		subnet6      = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
 		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain  = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
@@ -121,7 +122,25 @@ func serve(args []string) error {
 		hostMem = detectHostMemMB()
 	}
 	nodeName, _ := os.Hostname()
-	mgr, err := host.NewManager(host.Options{
+
+	// Front doors: with a delegated IPv6 prefix, every sandbox name maps to a
+	// deterministic public address, so `ssh <name>.<domain>` can route by the
+	// dialed address instead of the SSH username. Username routing keeps
+	// working regardless (v4 clients, no per-name DNS yet).
+	var doors *frontdoor.Mapper
+	var plumber *frontdoor.Plumber
+	if *subnet6 != "" {
+		if doors, err = frontdoor.New(*subnet6); err != nil {
+			// A prefix narrower than /64 still works for guest addressing, so
+			// don't fail the server — just run without hostname SSH routing.
+			log.Warn("front doors disabled", "err", err)
+			doors = nil
+		} else {
+			plumber = frontdoor.NewPlumber(doors, log)
+		}
+	}
+
+	mgrOpts := host.Options{
 		StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
 		Routes:             routeStore,
@@ -130,7 +149,11 @@ func serve(args []string) error {
 		HostMemMB:          hostMem,
 		NodeName:           nodeName,
 		HostVCPUs:          int64(runtime.NumCPU()),
-	})
+	}
+	if plumber != nil {
+		mgrOpts.FrontDoor = plumber
+	}
+	mgr, err := host.NewManager(mgrOpts)
 	if err != nil {
 		return err
 	}
@@ -140,10 +163,24 @@ func serve(args []string) error {
 	gw := sshgw.New(sshgw.GatewayOptions{
 		Manager: mgr, Users: users, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
+		Doors: doors, Domain: *proxyDomain,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Claim the front-door range (AnyIP) and answer NDP for the reserved names
+	// plus every sandbox that already exists; new ones are plumbed on create.
+	if plumber != nil {
+		plumber.EnsureRange(ctx)
+		plumber.Ensure(ctx, sshgw.NewSandboxUser)
+		plumber.Ensure(ctx, sshgw.ControlUser)
+		for _, b := range mgr.List() {
+			plumber.Ensure(ctx, b.Name)
+		}
+		log.Info("front doors enabled", "range", doors.Range(),
+			"new", doors.Addr(sshgw.NewSandboxUser).String())
+	}
 
 	go mgr.RunReaper(ctx, *idleTimeout, time.Minute)
 

@@ -135,3 +135,45 @@ func TestNoLimitsWhenZero(t *testing.T) {
 		}
 	}
 }
+
+// recordingFrontDoor captures Ensure/Remove calls for assertions.
+type recordingFrontDoor struct {
+	ensured, removed []string
+}
+
+func (f *recordingFrontDoor) Ensure(_ context.Context, name string) {
+	f.ensured = append(f.ensured, name)
+}
+func (f *recordingFrontDoor) Remove(_ context.Context, name string) {
+	f.removed = append(f.removed, name)
+}
+
+func TestFrontDoorHook(t *testing.T) {
+	fd := &recordingFrontDoor{}
+	mgr := newTestManager(t, host.Options{FrontDoor: fd})
+	ctx := context.Background()
+
+	if _, err := mgr.Create(ctx, "doorful", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if len(fd.ensured) != 1 || fd.ensured[0] != "doorful" {
+		t.Fatalf("Ensure calls = %v, want [doorful]", fd.ensured)
+	}
+	// Pause/resume must not touch the front door — the address is name-based
+	// and stable for the sandbox's whole life.
+	if err := mgr.Pause(ctx, "doorful"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.EnsureRunning(ctx, "doorful"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fd.ensured) != 1 || len(fd.removed) != 0 {
+		t.Fatalf("pause/resume touched the front door: ensured=%v removed=%v", fd.ensured, fd.removed)
+	}
+	if err := mgr.Destroy(ctx, "doorful"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fd.removed) != 1 || fd.removed[0] != "doorful" {
+		t.Fatalf("Remove calls = %v, want [doorful]", fd.removed)
+	}
+}

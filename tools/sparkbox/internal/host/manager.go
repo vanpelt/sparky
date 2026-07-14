@@ -69,6 +69,15 @@ type Sandbox struct {
 	LastActive time.Time `json:"last_active"`
 }
 
+// FrontDoor is an optional hook for per-sandbox public-address plumbing (see
+// internal/frontdoor): Ensure is called when a sandbox is created, Remove when
+// it is destroyed. Implementations are expected to be best-effort — a sandbox
+// is never failed over front-door plumbing.
+type FrontDoor interface {
+	Ensure(ctx context.Context, name string)
+	Remove(ctx context.Context, name string)
+}
+
 type Manager struct {
 	mu          sync.Mutex
 	driver      vmm.Driver
@@ -77,6 +86,7 @@ type Manager struct {
 	boxes       map[string]*Sandbox
 	gwPubKey    string
 	routes      *routes.Store // optional: proxy route bookkeeping
+	frontDoor   FrontDoor     // optional: per-sandbox address plumbing
 	maxPerOwner int           // max running sandboxes per owner; 0 = unlimited
 	memAdmitPct int           // RAM admission threshold as % of host; 0 = disabled
 	hostMemMB   int64         // host RAM in MB for admission; 0 = disabled
@@ -104,6 +114,8 @@ type Options struct {
 	NodeName string
 	// HostVCPUs is the host's logical CPU count for capacity reports (0 = unknown).
 	HostVCPUs int64
+	// FrontDoor, if set, gets Ensure/Remove calls as sandboxes come and go.
+	FrontDoor FrontDoor
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -119,6 +131,7 @@ func NewManager(opts Options) (*Manager, error) {
 		hostMemMB:   opts.HostMemMB,
 		nodeName:    opts.NodeName,
 		hostVCPUs:   opts.HostVCPUs,
+		frontDoor:   opts.FrontDoor,
 	}
 	if m.nodeName == "" {
 		m.nodeName = "local"
@@ -180,6 +193,9 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		}); err != nil {
 			m.log.Warn("default route creation failed", "name", name, "err", err)
 		}
+	}
+	if m.frontDoor != nil {
+		m.frontDoor.Ensure(ctx, name)
 	}
 	m.log.Info("sandbox created", "name", name, "owner", owner)
 	return copyOf(b), m.save()
@@ -359,6 +375,9 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 		if err := m.routes.DeleteBySandbox(name); err != nil {
 			m.log.Warn("route cleanup failed", "name", name, "err", err)
 		}
+	}
+	if m.frontDoor != nil {
+		m.frontDoor.Remove(ctx, name)
 	}
 	m.log.Info("sandbox destroyed", "name", name)
 	return m.save()

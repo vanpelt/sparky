@@ -22,6 +22,7 @@ import (
 	gssh "github.com/gliderlabs/ssh"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
@@ -53,6 +54,8 @@ type Gateway struct {
 	upstreamKey  xssh.Signer // authenticates the gateway into VMs
 	defaultImage string
 	dialTimeout  time.Duration
+	doors        *frontdoor.Mapper // optional: hostname (dest-IP) routing
+	domain       string            // base domain for user-facing hints, e.g. "hivemind.tools"
 }
 
 type GatewayOptions struct {
@@ -62,6 +65,12 @@ type GatewayOptions struct {
 	UpstreamKey  xssh.Signer
 	DefaultImage string
 	Logger       *slog.Logger
+	// Doors, if set, enables hostname routing: connections whose destination
+	// address is a front-door IPv6 are routed to the matching sandbox, and the
+	// SSH username no longer has to carry the sandbox name.
+	Doors *frontdoor.Mapper
+	// Domain is the base DNS domain used in user-facing hints (optional).
+	Domain string
 }
 
 func New(opts GatewayOptions) *Gateway {
@@ -69,6 +78,7 @@ func New(opts GatewayOptions) *Gateway {
 		mgr: opts.Manager, users: opts.Users, log: opts.Logger,
 		hostKey: opts.HostKey, upstreamKey: opts.UpstreamKey,
 		defaultImage: opts.DefaultImage, dialTimeout: 15 * time.Second,
+		doors: opts.Doors, domain: opts.Domain,
 	}
 }
 
@@ -94,6 +104,21 @@ func (g *Gateway) Server(addr string) *gssh.Server {
 func (g *Gateway) handle(s gssh.Session) {
 	user, _ := s.Context().Value(authedUserKey).(string)
 	sandboxName := s.User()
+
+	// Hostname routing: when the client dialed a sandbox's front-door IPv6
+	// (ssh myvm.<domain>), the destination address names the target and the
+	// SSH username is not consulted for routing. Outside the front-door range
+	// (or when doors are disabled) the username carries the name, as ever.
+	viaDoor := false
+	if name, ok, inRange := g.resolveDoor(s.LocalAddr()); inRange {
+		if !ok {
+			log := g.log.With("user", user, "dest", s.LocalAddr().String(), "remote", s.RemoteAddr())
+			fail(s, log, "lookup", fmt.Errorf("no sandbox at this address — create one with: ssh new.%s", g.domainHint()))
+			return
+		}
+		sandboxName = name
+		viaDoor = true
+	}
 	log := g.log.With("user", user, "sandbox", sandboxName, "remote", s.RemoteAddr())
 
 	if sandboxName == ControlUser {
@@ -110,7 +135,11 @@ func (g *Gateway) handle(s gssh.Session) {
 			g.failStart(s, log, "create sandbox", err)
 			return
 		}
-		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s@<gateway>\r\n", name, name)
+		if viaDoor {
+			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s.%s\r\n", name, name, g.domainHint())
+		} else {
+			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s@<gateway>\r\n", name, name)
+		}
 		sandboxName = name
 	}
 
@@ -146,6 +175,44 @@ func (g *Gateway) handle(s gssh.Session) {
 		log.Warn("session ended with error", "err", err)
 	}
 	s.Exit(exitCode) //nolint:errcheck
+}
+
+// resolveDoor maps the connection's destination address to a sandbox name.
+// inRange reports whether the address is a front-door address at all; ok
+// whether it named a reserved user or an existing sandbox. When the address
+// is out of range (or doors are disabled) the caller falls back to routing by
+// the SSH username.
+func (g *Gateway) resolveDoor(addr net.Addr) (name string, ok, inRange bool) {
+	if g.doors == nil {
+		return "", false, false
+	}
+	ta, isTCP := addr.(*net.TCPAddr)
+	if !isTCP || !g.doors.Contains(ta.IP) {
+		return "", false, false
+	}
+	// Reserved names first: their doors exist before any sandbox does (and no
+	// sandbox may claim them for routing).
+	for _, r := range []string{NewSandboxUser, ControlUser} {
+		if g.doors.Addr(r).Equal(ta.IP) {
+			return r, true, true
+		}
+	}
+	names := make([]string, 0, 16)
+	for _, b := range g.mgr.List() {
+		names = append(names, b.Name)
+	}
+	if n, found := g.doors.Resolve(ta.IP, names); found {
+		return n, true, true
+	}
+	return "", false, true
+}
+
+// domainHint is the base domain for user-facing "ssh <x>.<domain>" hints.
+func (g *Gateway) domainHint() string {
+	if g.domain != "" {
+		return g.domain
+	}
+	return "<domain>"
 }
 
 // dialUpstream connects to the VM's sshd, retrying briefly since a freshly
