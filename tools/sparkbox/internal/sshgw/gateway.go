@@ -40,6 +40,11 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 
 const authedUserKey = "sparkbox-user"
 
+// pauseTimeout bounds ctl pause. Pausing writes the guest's full memory
+// snapshot (GBs for a warm sandbox) — the 15s dial timeout wedged an 8GB
+// guest mid-pause. Sized for the slowest plausible snapshot, not a dial.
+const pauseTimeout = 3 * time.Minute
+
 type Gateway struct {
 	mgr          *host.Manager
 	users        *Users
@@ -312,7 +317,7 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 			s.Exit(1) //nolint:errcheck
 			return
 		}
-		ctx, cancel := context.WithTimeout(s.Context(), g.dialTimeout)
+		ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
 		defer cancel()
 		if err := g.mgr.Pause(ctx, name); err != nil {
 			fail(s, log, "pause", err)

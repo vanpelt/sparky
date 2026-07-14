@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
@@ -279,7 +280,13 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	}
 	if err := st.machine.CreateSnapshot(ctx,
 		filepath.Join(dir, "mem.snap"), filepath.Join(dir, "state.snap")); err != nil {
-		st.machine.ResumeVM(ctx) //nolint:errcheck // best effort: leave it running rather than wedged
+		// Recover on a FRESH context: when the failure IS the caller's ctx
+		// expiring (snapshot outran a deadline), resuming on that same dead
+		// ctx fails instantly and leaves the vCPUs paused — an unreachable,
+		// unresumable sandbox that needs a manual firecracker-socket poke.
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer rcancel()
+		st.machine.ResumeVM(rctx) //nolint:errcheck // best effort: leave it running rather than wedged
 		return err
 	}
 	st.machine.StopVMM() //nolint:errcheck
