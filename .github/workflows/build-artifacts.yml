@@ -35,6 +35,10 @@ on:
         description: "Rootfs ext4 size in MB (per-sandbox disk ceiling; thin CoW)"
         required: false
         default: "65536"
+      rebuild_rootfs:
+        description: "Force a rootfs rebuild even on a content-cache hit"
+        type: boolean
+        default: false
 
 concurrency:
   group: sparkbox-artifacts
@@ -139,6 +143,7 @@ jobs:
           IMAGE: ${{ inputs.image }}
           ROOTFS_NAME: ${{ inputs.rootfs_name }}
           ROOTFS_MB: ${{ inputs.rootfs_mb }}
+          REBUILD_ROOTFS: ${{ inputs.rebuild_rootfs && '1' || '0' }}
           PRUNE_IMAGE: "1"
           PROMOTE_LATEST: ${{ inputs.promote_latest && '1' || '0' }}
           REPO_DIR: ${{ github.workspace }}
