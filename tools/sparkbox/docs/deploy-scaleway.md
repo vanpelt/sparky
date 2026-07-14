@@ -111,9 +111,11 @@ keys are the fleet secret and are never uploaded.
 ```sh
 # on a build host (e.g. an existing sparkbox box):
 RELEASE=v1 tools/sparkbox/hack/build-artifacts.sh
-# -> uploads vmlinux, firecracker, sparkbox, universal.ext4.gz, manifest.env
-#    to  <bucket>/releases/v1/  (public-read) and points latest.env at it.
-#    (wants ~70GB of scratch disk: the codex-universal base is ~30GB unpacked)
+# -> uploads vmlinux, firecracker, sparkbox, manifest.env to
+#    <bucket>/releases/v1/ (public-read) and points latest.env at it. The
+#    universal.ext4.zst rootfs is content-addressed under <bucket>/rootfs/ and
+#    only rebuilt+uploaded when its inputs change (wants ~70GB of scratch disk
+#    when it does; binary-only releases take ~2 minutes).
 ```
 
 **…or publish from CI.** `.github/workflows/build-artifacts.yml` runs the exact

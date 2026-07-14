@@ -15,6 +15,7 @@ packages:
   - xfsprogs
   - iptables
   - ca-certificates
+  - zstd
 
 write_files:
   - path: /srv/sparkbox/users.conf
@@ -121,12 +122,19 @@ write_files:
       # The manifest names the rootfs template (ROOTFS_NAME) and where it lives
       # in the bucket (ROOTFS_PATH, bucket-relative — content-addressed under
       # rootfs/<key>/ so unchanged templates are shared across releases).
-      # Fallbacks cover manifests predating each field: per-release path, and
-      # ubuntu.ext4 from before the codex-universal base.
+      # Fallbacks cover manifests predating each field: per-release .gz path,
+      # SHA256_ROOTFS_GZ, and ubuntu.ext4 from before the codex-universal base.
+      # Decompress keys off the extension: new releases ship .zst (~5x faster
+      # to unpack than the ~30GB gunzip, the old long pole of provisioning).
       ROOTFS_NAME=${ROOTFS_NAME:-ubuntu}
       ROOTFS_PATH=${ROOTFS_PATH:-releases/$RELEASE/$ROOTFS_NAME.ext4.gz}
-      fetch "$BASE/$ROOTFS_PATH" "$DIR/data/images/$ROOTFS_NAME.ext4.gz" "$SHA256_ROOTFS_GZ"
-      gunzip -f "$DIR/data/images/$ROOTFS_NAME.ext4.gz"
+      SHA256_ROOTFS=${SHA256_ROOTFS:-${SHA256_ROOTFS_GZ:-}}
+      ROOTFS_FILE="$DIR/data/images/$(basename "$ROOTFS_PATH")"
+      fetch "$BASE/$ROOTFS_PATH" "$ROOTFS_FILE" "$SHA256_ROOTFS"
+      case "$ROOTFS_FILE" in
+        *.zst) zstd -d -f --rm "$ROOTFS_FILE" ;;
+        *)     gunzip -f "$ROOTFS_FILE" ;;
+      esac
 
       # Pin any reserved (flexible) IPs on the primary NIC so DNS stays stable
       # across host rebuilds. launch-host.sh attaches them to the server (they

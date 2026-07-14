@@ -64,8 +64,8 @@ jobs:
           go-version-file: tools/sparkbox/go.mod
           cache-dependency-path: tools/sparkbox/go.sum
 
-      - name: Install rclone + pigz
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone pigz
+      - name: Install rclone + zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone zstd
 
       # The codex-universal rootfs build peaks at ~65GB of scratch (unpacked
       # base image + flattened ext4 coexisting during export, then ext4 + .gz

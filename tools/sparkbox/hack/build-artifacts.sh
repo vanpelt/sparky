@@ -64,16 +64,16 @@ cp "$FIRECRACKER_BIN" "$STAGE/firecracker"
 # refreshes the cached copy). The .sha256 sidecar is uploaded *after* the
 # image, so its presence marks a complete upload — never a torn one.
 ROOTFS_REUSED=0
-ROOTFS_PATH="releases/$RELEASE/$ROOTFS_NAME.ext4.gz"   # fallback: uncached, built per-release
+ROOTFS_PATH="releases/$RELEASE/$ROOTFS_NAME.ext4.zst"   # fallback: uncached, built per-release
 IMG_MANIFEST=$(docker manifest inspect "$IMAGE" 2>/dev/null || true)
 if [ -n "$IMG_MANIFEST" ]; then
   ROOTFS_KEY=$({ printf '%s' "$IMG_MANIFEST"; \
                  cat "$REPO_DIR/tools/sparkbox/hack/build-rootfs.sh" "$GATEWAY_PUBKEY_FILE"; \
                  printf '%s %s' "$ROOTFS_NAME" "$ROOTFS_MB"; } | sha256sum | cut -c1-16)
-  ROOTFS_PATH="rootfs/$ROOTFS_KEY/$ROOTFS_NAME.ext4.gz"
+  ROOTFS_PATH="rootfs/$ROOTFS_KEY/$ROOTFS_NAME.ext4.zst"
   if [ "${REBUILD_ROOTFS:-0}" != 1 ] \
-     && SHA256_ROOTFS_GZ=$(rclone cat "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.sha256" 2>/dev/null) \
-     && [ -n "$SHA256_ROOTFS_GZ" ]; then
+     && SHA256_ROOTFS=$(rclone cat "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.sha256" 2>/dev/null) \
+     && [ -n "$SHA256_ROOTFS" ]; then
     ROOTFS_REUSED=1
     echo "== rootfs cache hit: $ROOTFS_PATH (skipping build + upload) =="
   fi
@@ -96,12 +96,14 @@ if [ "$ROOTFS_REUSED" = 0 ]; then
     $SUDO docker rmi -f "$IMAGE" >/dev/null 2>&1 || true
   fi
 
-  # pigz when available: single-threaded gzip on a ~30GB template is the
-  # difference between ~5 and ~25 minutes. Output is plain .gz either way.
-  GZIP_BIN=$(command -v pigz || command -v gzip)
-  echo "== compress rootfs ($(basename "$GZIP_BIN")) =="
-  "$GZIP_BIN" -f "$STAGE/$ROOTFS_NAME.ext4"   # -> $ROOTFS_NAME.ext4.gz
-  SHA256_ROOTFS_GZ=$(sha "$STAGE/$ROOTFS_NAME.ext4.gz")
+  # zstd over gzip: multicore compress here, and — the real win — ~5x faster
+  # decompress on the host, where gunzip of the ~30GB template was the long
+  # pole of provisioning. -10 lands near gzip-9's ratio at a fraction of the
+  # time; --rm drops the raw ext4 as soon as the .zst lands (disk headroom).
+  command -v zstd >/dev/null || { echo "zstd required: apt-get install zstd"; exit 1; }
+  echo "== compress rootfs (zstd) =="
+  zstd -T0 -10 -f --rm "$STAGE/$ROOTFS_NAME.ext4" -o "$STAGE/$ROOTFS_NAME.ext4.zst"
+  SHA256_ROOTFS=$(sha "$STAGE/$ROOTFS_NAME.ext4.zst")
 fi
 
 echo "== manifest =="
@@ -114,21 +116,21 @@ SHA256_FIRECRACKER=$(sha "$STAGE/firecracker")
 SHA256_SPARKBOX=$(sha "$STAGE/sparkbox")
 ROOTFS_NAME=$ROOTFS_NAME
 ROOTFS_PATH=$ROOTFS_PATH
-SHA256_ROOTFS_GZ=$SHA256_ROOTFS_GZ
+SHA256_ROOTFS=$SHA256_ROOTFS
 GATEWAY_PUBKEY="$(cat "$GATEWAY_PUBKEY_FILE")"
 EOF
 echo "---"; cat "$STAGE/manifest.env"; echo "---"
 
 echo "== upload release $RELEASE (public-read) =="
 if [ "$ROOTFS_REUSED" = 0 ]; then
-  echo ">> $ROOTFS_PATH ($(du -h "$STAGE/$ROOTFS_NAME.ext4.gz" | cut -f1))"
+  echo ">> $ROOTFS_PATH ($(du -h "$STAGE/$ROOTFS_NAME.ext4.zst" | cut -f1))"
   # Fat multipart settings: rclone's defaults (5MB chunks x4 in flight) crawl
   # at ~2MB/s from a US GitHub runner to fr-par (~100ms RTT) — the 11GB rootfs
   # took 1h37m of a 2h build. 64MB x16 keeps the pipe full regardless of RTT.
-  rclone copyto "$STAGE/$ROOTFS_NAME.ext4.gz" "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH" \
+  rclone copyto "$STAGE/$ROOTFS_NAME.ext4.zst" "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH" \
     --s3-acl public-read --s3-chunk-size 64M --s3-upload-concurrency 16
   # Sidecar last: it doubles as the cache's "upload completed" marker.
-  printf '%s\n' "$SHA256_ROOTFS_GZ" > "$STAGE/rootfs.sha256"
+  printf '%s\n' "$SHA256_ROOTFS" > "$STAGE/rootfs.sha256"
   rclone copyto "$STAGE/rootfs.sha256" "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.sha256" --s3-acl public-read
 fi
 base="$RCLONE_REMOTE:$BUCKET/releases/$RELEASE"
