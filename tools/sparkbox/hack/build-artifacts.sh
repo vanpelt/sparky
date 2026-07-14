@@ -89,7 +89,11 @@ echo "== upload release $RELEASE (public-read) =="
 base="$RCLONE_REMOTE:$BUCKET/releases/$RELEASE"
 for f in vmlinux firecracker sparkbox "$ROOTFS_NAME.ext4.gz" manifest.env; do
   echo ">> $f ($(du -h "$STAGE/$f" | cut -f1))"
-  rclone copyto "$STAGE/$f" "$base/$f" --s3-acl public-read
+  # Fat multipart settings: rclone's defaults (5MB chunks x4 in flight) crawl
+  # at ~2MB/s from a US GitHub runner to fr-par (~100ms RTT) — the 11GB rootfs
+  # took 1h37m of a 2h build. 64MB x16 keeps the pipe full regardless of RTT.
+  rclone copyto "$STAGE/$f" "$base/$f" --s3-acl public-read \
+    --s3-chunk-size 64M --s3-upload-concurrency 16
 done
 # Point "latest" at this release for cloud-init's default resolution. Set
 # PROMOTE_LATEST=0 to publish a release without making it the fleet default.
