@@ -5,15 +5,13 @@
 #
 # Prereqs: scw CLI configured; a published release (hack/build-artifacts.sh); the
 # fleet gateway PRIVATE keys whose public halves are baked into that release's
-# rootfs. Point GATEWAY_HOST_KEY / GATEWAY_UPSTREAM_KEY at those PEM files.
-#
-# Usage:
-#   GATEWAY_HOST_KEY=secrets/gateway_host_key.pem \
-#   GATEWAY_UPSTREAM_KEY=secrets/gateway_upstream_key.pem \
-#   ./launch-host.sh
+# rootfs. Secrets auto-load from ~/.sparkbox/secrets (override SECRETS_DIR):
+# gateway_{host,upstream}_key.pem plus a .env supplying CLOUDFLARE_API_TOKEN,
+# so a plain `./launch-host.sh` launches fully wired. Explicit env vars win.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TEMPLATE="$HERE/cloud-init.yaml"
+SECRETS_DIR=${SECRETS_DIR:-$HOME/.sparkbox/secrets}
 
 NAME=${NAME:-sparkbox-$(date -u +%m%d%H%M)}
 TYPE=${TYPE:-EM-B220E-NVME}
@@ -29,9 +27,13 @@ SUBNET6_FLAG=""
 
 # Optional operator console password (enables console.<domain>); empty disables.
 CONSOLE_PASSWORD=${CONSOLE_PASSWORD:-}
-# Optional Cloudflare token (Zone.DNS:Edit on the proxy domain): enables
-# per-sandbox AAAA records so `ssh <name>.<domain>` routes by front-door IPv6
-# (needs SUBNET6), and DNS-01 wildcard TLS when TLS_FLAGS picks cloudflare.
+# Cloudflare token (Zone.DNS:Edit on the proxy domain): enables per-sandbox
+# AAAA records so `ssh <name>.<domain>` routes by front-door IPv6 (needs
+# SUBNET6), and DNS-01 wildcard TLS when TLS_FLAGS picks cloudflare. Defaults
+# from $SECRETS_DIR/.env when not exported; empty disables DNS publishing.
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "$SECRETS_DIR/.env" ]; then
+  CLOUDFLARE_API_TOKEN=$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$SECRETS_DIR/.env")
+fi
 CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
 # Optional extra proxy flags, appended last (a repeated --proxy-addr wins). To
 # serve HTTPS on :443 with on-demand Let's Encrypt certs (no Cloudflare token):
@@ -49,8 +51,11 @@ FLEXIBLE_ADDRS=${FLEXIBLE_ADDRS:-}
 
 USER_NAME=${USER_NAME:-$(whoami)}
 USER_PUBKEY=${USER_PUBKEY:-$HOME/.ssh/id_ed25519.pub}
-GATEWAY_HOST_KEY=${GATEWAY_HOST_KEY:?path to the fleet gateway_host_key.pem}
-GATEWAY_UPSTREAM_KEY=${GATEWAY_UPSTREAM_KEY:?path to the fleet gateway_upstream_key.pem}
+GATEWAY_HOST_KEY=${GATEWAY_HOST_KEY:-$SECRETS_DIR/gateway_host_key.pem}
+GATEWAY_UPSTREAM_KEY=${GATEWAY_UPSTREAM_KEY:-$SECRETS_DIR/gateway_upstream_key.pem}
+for k in "$GATEWAY_HOST_KEY" "$GATEWAY_UPSTREAM_KEY"; do
+  [ -f "$k" ] || { echo "missing fleet gateway key $k (set GATEWAY_HOST_KEY/GATEWAY_UPSTREAM_KEY or SECRETS_DIR)"; exit 1; }
+done
 
 [ -f "$USER_PUBKEY" ] || { echo "no pubkey at $USER_PUBKEY (set USER_PUBKEY)"; exit 1; }
 USERS_CONF="$USER_NAME $(cat "$USER_PUBKEY")"
