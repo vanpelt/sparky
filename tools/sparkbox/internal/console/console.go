@@ -18,10 +18,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 //go:embed index.html
@@ -33,9 +38,16 @@ const (
 	tokenSalt    = "sparkbox-console/v1"
 )
 
+// probeTimeout bounds the per-route TCP dial that checks whether anything is
+// listening on a forwarded port. Guest IPs are on a local bridge, so a live
+// listener answers in microseconds; anything slower is effectively down.
+const probeTimeout = 300 * time.Millisecond
+
 // Handler serves the console UI and its JSON API.
 type Handler struct {
 	mgr    *host.Manager
+	store  *routes.Store // optional: nil hides web routes from the UI
+	domain string        // base domain for building route URLs, e.g. "hivemind.tools"
 	log    *slog.Logger
 	token  string // expected cookie value, derived from the password
 	secure bool   // set the Secure flag on the auth cookie (proxy terminates TLS)
@@ -44,8 +56,8 @@ type Handler struct {
 // New builds a console handler. password must be non-empty; callers gate on that
 // so an unset password disables the console entirely rather than shipping an
 // empty-password login. secure should be true when the proxy edge serves TLS.
-func New(mgr *host.Manager, password string, secure bool, log *slog.Logger) *Handler {
-	return &Handler{mgr: mgr, log: log, token: deriveToken(password), secure: secure}
+func New(mgr *host.Manager, store *routes.Store, domain, password string, secure bool, log *slog.Logger) *Handler {
+	return &Handler{mgr: mgr, store: store, domain: domain, log: log, token: deriveToken(password), secure: secure}
 }
 
 // deriveToken maps a password to the opaque cookie value. Same password in,
@@ -61,6 +73,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /login", h.login)
 	mux.HandleFunc("POST /logout", h.logout)
 	mux.HandleFunc("GET /api/sandboxes", h.requireAuth(h.list))
+	mux.HandleFunc("GET /api/cluster", h.requireAuth(h.cluster))
 	mux.HandleFunc("POST /api/sandboxes/{name}/pause", h.requireAuth(h.pause))
 	mux.HandleFunc("POST /api/sandboxes/{name}/resume", h.requireAuth(h.resume))
 	mux.HandleFunc("GET /", h.index)
@@ -123,8 +136,71 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// routeStatus is a web route as shown in the UI: where it points and whether a
+// TCP dial to the forwarded port currently succeeds. Listening is only
+// meaningful while the sandbox is running (a paused sandbox has no address).
+type routeStatus struct {
+	Subdomain string `json:"subdomain"`
+	Port      int    `json:"port"`
+	Listening bool   `json:"listening"`
+}
+
+// sandboxView is a Sandbox plus its web routes for the dashboard.
+type sandboxView struct {
+	*host.Sandbox
+	Routes []routeStatus `json:"routes"`
+}
+
 func (h *Handler) list(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, h.mgr.List())
+	boxes := h.mgr.List()
+	views := make([]sandboxView, len(boxes))
+	var wg sync.WaitGroup
+	for i, b := range boxes {
+		views[i] = sandboxView{Sandbox: b, Routes: []routeStatus{}}
+		if h.store == nil {
+			continue
+		}
+		rs, err := h.store.ListBySandbox(b.Name)
+		if err != nil {
+			h.log.Warn("route list failed", "sandbox", b.Name, "err", err)
+			continue
+		}
+		for _, rt := range rs {
+			views[i].Routes = append(views[i].Routes, routeStatus{Subdomain: rt.Subdomain, Port: rt.Port})
+		}
+		// Probe every forwarded port of a running sandbox concurrently; the
+		// whole fan-out is bounded by probeTimeout, not routes × timeout.
+		if b.State != vmm.StateRunning || b.HostIP == "" {
+			continue
+		}
+		for j := range views[i].Routes {
+			wg.Add(1)
+			go func(addr string, listening *bool) {
+				defer wg.Done()
+				conn, err := net.DialTimeout("tcp", addr, probeTimeout)
+				if err == nil {
+					conn.Close()
+					*listening = true
+				}
+			}(net.JoinHostPort(b.HostIP, strconv.Itoa(views[i].Routes[j].Port)), &views[i].Routes[j].Listening)
+		}
+	}
+	wg.Wait()
+	writeJSON(w, http.StatusOK, views)
+}
+
+// clusterResponse reports capacity as a list of nodes so the payload shape
+// already fits a future multi-box deployment (today it has exactly one entry).
+type clusterResponse struct {
+	Domain string              `json:"domain"`
+	Nodes  []host.NodeCapacity `json:"nodes"`
+}
+
+func (h *Handler) cluster(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, clusterResponse{
+		Domain: h.domain,
+		Nodes:  []host.NodeCapacity{h.mgr.Capacity()},
+	})
 }
 
 func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {

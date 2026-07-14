@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -168,6 +169,61 @@ func TestProxyUnknownHosts(t *testing.T) {
 	// Host outside the proxy domain.
 	if code, _ := ps.get(t, "example.com"); code != http.StatusNotFound {
 		t.Fatalf("expected 404 for foreign host, got %d", code)
+	}
+}
+
+// getHTML issues a request with a browser-style Accept header.
+func (ps *proxyStack) getHTML(t *testing.T, host string) (int, string, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	rec := httptest.NewRecorder()
+	ps.proxy.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Result().Body)
+	return rec.Code, string(body), rec.Header().Get("Content-Type")
+}
+
+func TestProxyErrorPages(t *testing.T) {
+	ps := newProxyStack(t)
+	ctx := context.Background()
+
+	// Unknown route + browser Accept -> styled HTML 404.
+	code, body, ct := ps.getHTML(t, "ghost.hivemind.tools")
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", code)
+	}
+	if !strings.Contains(ct, "text/html") || !strings.Contains(body, "Nothing is forwarded here") {
+		t.Fatalf("expected HTML error page, got ct=%q body=%q", ct, body)
+	}
+
+	// Same URL without a browser Accept -> plain text for curl and friends.
+	code, body = ps.get(t, "ghost.hivemind.tools")
+	if code != http.StatusNotFound || strings.Contains(body, "<html") {
+		t.Fatalf("expected plain-text 404, got %d %q", code, body)
+	}
+
+	// Running sandbox whose forwarded port has no listener -> 502 naming the port.
+	if _, err := ps.mgr.Create(ctx, "deadport", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // free the port so nothing is listening
+	if err := ps.store.Upsert(routes.Route{
+		Subdomain: "deadport", Sandbox: "deadport", Owner: "alice", Port: port,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	code, body, ct = ps.getHTML(t, "deadport.hivemind.tools")
+	if code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", code, body)
+	}
+	if !strings.Contains(ct, "text/html") || !strings.Contains(body, fmt.Sprintf("Nothing is listening on port %d", port)) {
+		t.Fatalf("expected HTML 502 naming port %d, got ct=%q body=%q", port, ct, body)
 	}
 }
 

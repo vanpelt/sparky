@@ -80,6 +80,8 @@ type Manager struct {
 	maxPerOwner int           // max running sandboxes per owner; 0 = unlimited
 	memAdmitPct int           // RAM admission threshold as % of host; 0 = disabled
 	hostMemMB   int64         // host RAM in MB for admission; 0 = disabled
+	nodeName    string        // this host's name in capacity reports
+	hostVCPUs   int64         // host logical CPUs for capacity reports; 0 = unknown
 }
 
 type Options struct {
@@ -98,6 +100,10 @@ type Options struct {
 	// HostMemMB*MemAdmissionPct/100. Either being 0 disables the check.
 	MemAdmissionPct int
 	HostMemMB       int64
+	// NodeName identifies this host in capacity reports (defaults to "local").
+	NodeName string
+	// HostVCPUs is the host's logical CPU count for capacity reports (0 = unknown).
+	HostVCPUs int64
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -111,6 +117,11 @@ func NewManager(opts Options) (*Manager, error) {
 		maxPerOwner: opts.MaxRunningPerOwner,
 		memAdmitPct: opts.MemAdmissionPct,
 		hostMemMB:   opts.HostMemMB,
+		nodeName:    opts.NodeName,
+		hostVCPUs:   opts.HostVCPUs,
+	}
+	if m.nodeName == "" {
+		m.nodeName = "local"
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -224,6 +235,47 @@ func (m *Manager) List() []*Sandbox {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// NodeCapacity is one host's resource picture: what the box has, what the
+// admission controller will hand out, and what running sandboxes have claimed.
+// Sparkbox is single-host today, but capacity is reported per node so a
+// multi-box control plane can aggregate a []NodeCapacity without a schema
+// change. Total* fields are 0 when the host couldn't be inspected (non-Linux
+// dev machines); BudgetMemMB is 0 when admission control is disabled.
+type NodeCapacity struct {
+	Node        string `json:"node"`
+	TotalVCPUs  int64  `json:"total_vcpus"`
+	TotalMemMB  int64  `json:"total_mem_mb"`
+	BudgetMemMB int64  `json:"budget_mem_mb"` // TotalMemMB * MemAdmissionPct/100
+	UsedVCPUs   int64  `json:"used_vcpus"`    // allocated to running sandboxes
+	UsedMemMB   int64  `json:"used_mem_mb"`   // allocated to running sandboxes
+	Running     int    `json:"running"`
+	Sandboxes   int    `json:"sandboxes"`
+}
+
+// Capacity reports this node's resources. Used* counts only running sandboxes,
+// mirroring the admission check: paused sandboxes cost disk, not RAM/CPU.
+func (m *Manager) Capacity() NodeCapacity {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := NodeCapacity{
+		Node:       m.nodeName,
+		TotalVCPUs: m.hostVCPUs,
+		TotalMemMB: m.hostMemMB,
+		Sandboxes:  len(m.boxes),
+	}
+	if m.memAdmitPct > 0 {
+		c.BudgetMemMB = m.hostMemMB * int64(m.memAdmitPct) / 100
+	}
+	for _, b := range m.boxes {
+		if b.State == vmm.StateRunning {
+			c.Running++
+			c.UsedVCPUs += b.VCPUs
+			c.UsedMemMB += b.MemMB
+		}
+	}
+	return c
 }
 
 // EnsureRunning resumes the sandbox if paused and returns its SSH endpoint.

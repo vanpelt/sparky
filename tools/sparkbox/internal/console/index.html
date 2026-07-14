@@ -92,6 +92,19 @@
   .stat .label { font-size: 12px; color: hsl(var(--muted-foreground)); }
   .stat .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; }
   .stat .value small { font-size: 13px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+  .stat .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+
+  /* capacity meters */
+  .meter {
+    height: 5px; border-radius: 999px; background: hsl(var(--muted));
+    margin-top: 10px; overflow: hidden;
+  }
+  .meter > div {
+    height: 100%; border-radius: 999px; background: hsl(var(--green));
+    width: 0; transition: width .3s ease;
+  }
+  .meter.warn > div { background: hsl(var(--amber)); }
+  .meter.hot > div { background: hsl(var(--red)); }
 
   /* table */
   .panel { overflow: hidden; }
@@ -125,6 +138,20 @@
   .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
   .badge.paused { color: hsl(var(--muted-foreground)); }
   .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+
+  /* route chips */
+  .route {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid hsl(var(--border));
+    color: hsl(var(--foreground)); text-decoration: none; margin-right: 6px;
+  }
+  .route:hover { background: hsl(var(--muted)); }
+  .route .port { color: hsl(var(--muted-foreground)); }
+  .route .dot { width: 6px; height: 6px; }
+  .route.live { border-color: hsl(var(--green) / .35); }
+  .route.live .dot { background: hsl(var(--green)); box-shadow: 0 0 0 2px hsl(var(--green) / .18); }
+  .route.dead .dot { background: hsl(var(--red) / .8); }
+  .route.idle .dot { background: transparent; border: 1px solid hsl(var(--muted-foreground)); }
 
   /* login */
   .login-wrap { min-height: 62vh; display: grid; place-items: center; }
@@ -190,10 +217,28 @@
     </header>
 
     <div class="stats">
-      <div class="card stat"><div class="label">Sandboxes</div><div class="value" id="s-total">–</div></div>
-      <div class="card stat"><div class="label">Running</div><div class="value" id="s-running">–</div></div>
-      <div class="card stat"><div class="label">Paused</div><div class="value" id="s-paused">–</div></div>
-      <div class="card stat"><div class="label">Allocated</div><div class="value" id="s-alloc">–</div></div>
+      <div class="card stat">
+        <div class="label">Sandboxes</div>
+        <div class="value" id="s-total">–</div>
+        <div class="sub" id="s-states">–</div>
+      </div>
+      <div class="card stat">
+        <div class="label">Memory</div>
+        <div class="value" id="c-mem">–</div>
+        <div class="sub" id="c-mem-sub">–</div>
+        <div class="meter" id="c-mem-meter"><div></div></div>
+      </div>
+      <div class="card stat">
+        <div class="label">vCPU</div>
+        <div class="value" id="c-cpu">–</div>
+        <div class="sub" id="c-cpu-sub">–</div>
+        <div class="meter" id="c-cpu-meter"><div></div></div>
+      </div>
+      <div class="card stat">
+        <div class="label">Headroom</div>
+        <div class="value" id="c-free">–</div>
+        <div class="sub" id="c-free-sub">–</div>
+      </div>
     </div>
 
     <div class="card panel">
@@ -206,7 +251,7 @@
           <thead>
             <tr>
               <th>Name</th><th>Status</th><th>Owner</th><th>Image</th>
-              <th>Resources</th><th>Last active</th><th></th>
+              <th>Resources</th><th>Web routes</th><th>Last active</th><th></th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -266,21 +311,77 @@
     }
   }
 
+  let domain = ""; // base domain for route links, from /api/cluster
+
+  function gb(mb) {
+    const g = (mb || 0) / 1024;
+    return g.toFixed(g && g % 1 ? 1 : 0);
+  }
+
+  function meter(id, used, total) {
+    const el = $(id);
+    const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    el.className = "meter" + (pct >= 90 ? " hot" : pct >= 70 ? " warn" : "");
+    el.firstElementChild.style.width = pct + "%";
+  }
+
+  // renderCluster fills the capacity cards. The API returns per-node capacity;
+  // sum across nodes so this keeps working when there is more than one box.
+  function renderCluster(c) {
+    domain = c.domain || "";
+    const nodes = c.nodes || [];
+    const sum = (k) => nodes.reduce((n, x) => n + (x[k] || 0), 0);
+    const totalMem = sum("total_mem_mb"), budget = sum("budget_mem_mb") || totalMem;
+    const usedMem = sum("used_mem_mb"), totalCpu = sum("total_vcpus"), usedCpu = sum("used_vcpus");
+    const nodeLabel = nodes.length + " node" + (nodes.length === 1 ? "" : "s");
+
+    if (totalMem > 0) {
+      $("c-mem").innerHTML = gb(usedMem) + " <small>/ " + gb(budget) + " GB</small>";
+      $("c-mem-sub").textContent = gb(totalMem) + " GB physical · " + nodeLabel;
+      const freeMB = Math.max(0, budget - usedMem);
+      $("c-free").innerHTML = gb(freeMB) + " <small>GB free</small>";
+      $("c-free-sub").textContent = "fits ~" + Math.floor(freeMB / 8192) + " more default sandboxes";
+    } else {
+      $("c-mem").innerHTML = gb(usedMem) + " <small>GB</small>";
+      $("c-mem-sub").textContent = "host capacity unknown";
+      $("c-free").textContent = "–";
+      $("c-free-sub").textContent = "host capacity unknown";
+    }
+    meter("c-mem-meter", usedMem, budget);
+    $("c-cpu").innerHTML = usedCpu + (totalCpu > 0 ? " <small>/ " + totalCpu + "</small>" : "");
+    $("c-cpu-sub").textContent = totalCpu > 0 ? "allocated of " + totalCpu + " host threads" : "host capacity unknown";
+    meter("c-cpu-meter", usedCpu, totalCpu);
+  }
+
+  // routeChips renders each web route as a linked pill with a health dot:
+  // green = something answered on the forwarded port, red = running but
+  // nothing listening, hollow = paused (a visit would wake it).
+  function routeChips(b) {
+    const rs = b.routes || [];
+    if (!rs.length) return '<span class="muted">–</span>';
+    const running = b.state === "running";
+    return rs.map((r) => {
+      const cls = running ? (r.listening ? "live" : "dead") : "idle";
+      const title = running
+        ? (r.listening ? "listening" : "nothing listening on port " + r.port)
+        : "paused — a request will wake it";
+      const href = location.protocol + "//" + esc(r.subdomain) + "." + esc(domain || location.host.replace(/^[^.]+\./, ""));
+      return '<a class="route ' + cls + '" target="_blank" rel="noopener" href="' + href + '" title="' + title + '">' +
+        '<span class="dot"></span>' + esc(r.subdomain) + ' <span class="port">:' + r.port + "</span></a>";
+    }).join("");
+  }
+
   function render(list) {
     const running = list.filter((b) => b.state === "running").length;
     $("s-total").textContent = list.length;
-    $("s-running").textContent = running;
-    $("s-paused").textContent = list.length - running;
-    const vcpu = list.reduce((n, b) => n + (b.vcpus || 0), 0);
-    const mem = list.reduce((n, b) => n + (b.mem_mb || 0), 0);
-    $("s-alloc").innerHTML = vcpu + ' <small>vCPU · ' + (mem / 1024).toFixed(mem % 1024 ? 1 : 0) + ' GB</small>';
+    $("s-states").textContent = running + " running · " + (list.length - running) + " paused";
 
     const rows = $("rows");
     rows.innerHTML = "";
     for (const b of list) {
       const tr = document.createElement("tr");
-      const running = b.state === "running";
-      const action = running
+      const isRunning = b.state === "running";
+      const action = isRunning
         ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + b.name + '">Pause</button>'
         : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + b.name + '">Resume</button>';
       tr.innerHTML =
@@ -288,7 +389,8 @@
         "<td>" + badge(b.state) + "</td>" +
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
-        '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + ((b.mem_mb || 0) / 1024).toFixed(b.mem_mb % 1024 ? 1 : 0) + " GB</td>" +
+        '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB</td>" +
+        "<td>" + routeChips(b) + "</td>" +
         '<td class="age">' + rel(b.last_active) + "</td>" +
         '<td class="actions">' + action + "</td>";
       rows.appendChild(tr);
@@ -306,10 +408,12 @@
 
   async function refresh() {
     try {
-      const r = await fetch("/api/sandboxes");
-      if (r.status === 401) return show("login");
+      const [r, rc] = await Promise.all([fetch("/api/sandboxes"), fetch("/api/cluster")]);
+      if (r.status === 401 || rc.status === 401) return show("login");
       if (!r.ok) throw new Error(r.statusText);
+      if (!rc.ok) throw new Error(rc.statusText);
       const list = await r.json();
+      renderCluster(await rc.json());
       show("dash");
       render(Array.isArray(list) ? list : []);
       if (!timer) timer = setInterval(refresh, 4000);

@@ -14,7 +14,9 @@ package proxy
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -32,9 +34,19 @@ import (
 // come back before giving up (a cold firecracker boot is well under this).
 const resumeTimeout = 30 * time.Second
 
+//go:embed error.html
+var errorHTML string
+
+// errorTpl renders proxy error responses for browsers; API clients (no
+// text/html in Accept) get the plain-text equivalent.
+var errorTpl = template.Must(template.New("error").Parse(errorHTML))
+
 type ctxKey int
 
-const targetKey ctxKey = iota
+const (
+	targetKey ctxKey = iota
+	routeKey         // the routes.Route being served, for error reporting
+)
 
 type Server struct {
 	mgr    *host.Manager
@@ -74,8 +86,13 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Warn("proxy upstream error", "host", r.Host, "err", err)
-			w.WriteHeader(http.StatusBadGateway)
-			fmt.Fprintf(w, "sparkbox: upstream not reachable — is your app listening on the forwarded port?\n(%v)\n", err)
+			route, _ := r.Context().Value(routeKey).(routes.Route)
+			s.errorPage(w, r, http.StatusBadGateway,
+				fmt.Sprintf("Nothing is listening on port %d", route.Port),
+				fmt.Sprintf("Sandbox %q is up, but nothing answered on the forwarded port (%v).", route.Sandbox, err),
+				template.HTML(fmt.Sprintf(
+					"Start a server inside the sandbox — e.g. <code>python3 -m http.server %d --bind 0.0.0.0</code> — or point this subdomain at another port via the routes API.",
+					route.Port)))
 		},
 	}
 	return s
@@ -95,11 +112,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route, ok, err := s.store.GetBySubdomain(sub)
 	if err != nil {
 		s.log.Error("route lookup failed", "subdomain", sub, "err", err)
-		http.Error(w, "sparkbox: route lookup failed", http.StatusInternalServerError)
+		s.errorPage(w, r, http.StatusInternalServerError, "Route lookup failed",
+			"The proxy couldn't consult its routing table. This is a sparkbox fault, not yours.", "")
 		return
 	}
 	if !ok {
-		http.Error(w, fmt.Sprintf("sparkbox: no route for %s.%s", sub, s.domain), http.StatusNotFound)
+		s.errorPage(w, r, http.StatusNotFound, "Nothing is forwarded here",
+			fmt.Sprintf("%s.%s isn't mapped to any sandbox port.", sub, s.domain),
+			template.HTML(fmt.Sprintf(
+				"Create a sandbox with <code>ssh new@%s</code> (it gets this URL automatically), or add a route to an existing sandbox via the routes API.",
+				template.HTMLEscapeString(s.domain))))
 		return
 	}
 
@@ -110,17 +132,42 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	box, err := s.mgr.EnsureRunning(ctx, route.Sandbox)
 	if err != nil {
 		s.log.Warn("resume for proxy failed", "sandbox", route.Sandbox, "err", err)
-		http.Error(w, fmt.Sprintf("sparkbox: sandbox %q unavailable: %v", route.Sandbox, err), http.StatusBadGateway)
+		s.errorPage(w, r, http.StatusBadGateway, "The sandbox couldn't be started",
+			fmt.Sprintf("Sandbox %q exists but didn't come up: %v.", route.Sandbox, err),
+			"Retry in a moment — if the host is at capacity, pausing another sandbox frees room.")
 		return
 	}
 	if box.HostIP == "" {
-		http.Error(w, "sparkbox: sandbox has no network address", http.StatusBadGateway)
+		s.errorPage(w, r, http.StatusBadGateway, "The sandbox has no network address",
+			fmt.Sprintf("Sandbox %q is up but reported no guest IP to forward to.", route.Sandbox), "")
 		return
 	}
 
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(box.HostIP, strconv.Itoa(route.Port))}
-	r = r.WithContext(context.WithValue(r.Context(), targetKey, target))
+	ctx2 := context.WithValue(r.Context(), targetKey, target)
+	r = r.WithContext(context.WithValue(ctx2, routeKey, route))
 	s.rp.ServeHTTP(w, r)
+}
+
+// errorPage writes a friendly HTML error for browsers, or a terse text/plain
+// line for everything else (curl, health checks). hint may embed markup.
+func (s *Server) errorPage(w http.ResponseWriter, r *http.Request, code int, title, message string, hint template.HTML) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Error(w, fmt.Sprintf("sparkbox: %s — %s", title, message), code)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+	err := errorTpl.Execute(w, struct {
+		Code          int
+		Status, Title string
+		Message       string
+		Hint          template.HTML
+	}{code, http.StatusText(code), title, message, hint})
+	if err != nil {
+		s.log.Error("error page render failed", "err", err)
+	}
 }
 
 // subdomainOf extracts the label(s) in host that precede ".<domain>".

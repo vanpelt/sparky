@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -119,6 +120,7 @@ func serve(args []string) error {
 	if hostMem == 0 {
 		hostMem = detectHostMemMB()
 	}
+	nodeName, _ := os.Hostname()
 	mgr, err := host.NewManager(host.Options{
 		StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
@@ -126,6 +128,8 @@ func serve(args []string) error {
 		MaxRunningPerOwner: *maxPerOwner,
 		MemAdmissionPct:    *memAdmitPct,
 		HostMemMB:          hostMem,
+		NodeName:           nodeName,
+		HostVCPUs:          int64(runtime.NumCPU()),
 	})
 	if err != nil {
 		return err
@@ -160,7 +164,7 @@ func serve(args []string) error {
 			consolePw = os.Getenv("SPARKBOX_CONSOLE_PASSWORD")
 		}
 		if consolePw != "" {
-			px.SetConsole(*consoleSub, console.New(mgr, consolePw, *proxyTLS, log).Handler())
+			px.SetConsole(*consoleSub, console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log).Handler())
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
 		proxySrv = &http.Server{Addr: *proxyAddr, Handler: px}
