@@ -67,6 +67,11 @@ type Sandbox struct {
 	GuestV6    string    `json:"guest_v6,omitempty"` // routable IPv6 identity; empty when paused
 	CreatedAt  time.Time `json:"created_at"`
 	LastActive time.Time `json:"last_active"`
+	// KeyFP is the fingerprint of the SSH key whose session last created or
+	// resumed this sandbox. It rides along into the id token's `key_fp` claim
+	// for auditing — which of a user's machines started this thing — and is
+	// deliberately not meant for authorization policy.
+	KeyFP string `json:"key_fp,omitempty"`
 }
 
 // FrontDoor is an optional hook for per-sandbox public-address plumbing (see
@@ -240,6 +245,40 @@ func (m *Manager) Get(name string) (*Sandbox, bool) {
 		return nil, false
 	}
 	return copyOf(b), true
+}
+
+// GetByHostIP returns the running sandbox whose guest IP is ip. This is how
+// the metadata service attributes a connection to a sandbox: the guest IP is
+// the source address of a request that reached the host's tap, which TCP makes
+// unforgeable (see internal/metadata). Paused sandboxes have no address and
+// never match.
+func (m *Manager) GetByHostIP(ip string) (*Sandbox, bool) {
+	if ip == "" {
+		return nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, b := range m.boxes {
+		if b.HostIP == ip && b.State == vmm.StateRunning {
+			return copyOf(b), true
+		}
+	}
+	return nil, false
+}
+
+// RecordKey stamps the SSH key fingerprint that authenticated a session for
+// this sandbox. Best-effort bookkeeping for the `key_fp` claim: a sandbox is
+// never failed over it.
+func (m *Manager) RecordKey(name, fp string) {
+	if fp == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.boxes[name]; ok && b.KeyFP != fp {
+		b.KeyFP = fp
+		m.save() //nolint:errcheck
+	}
 }
 
 func (m *Manager) List() []*Sandbox {

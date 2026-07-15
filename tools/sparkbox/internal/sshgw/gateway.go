@@ -24,6 +24,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
 // NewSandboxUser is the reserved SSH username that creates a fresh sandbox on
@@ -35,11 +36,24 @@ const NewSandboxUser = "new"
 // VM, so no sandbox may be named "ctl".
 const ControlUser = "ctl"
 
-const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
-	"  list            list your sandboxes and their state\r\n" +
-	"  pause <name>    pause a running sandbox to free a slot\r\n"
+// SignupUser is the reserved SSH username that registers a new account:
+// `ssh signup@gateway`. It is the one door an *unregistered* key may open —
+// turning that key into an account is its entire job — so the public-key
+// check lets a stranger through here and nowhere else.
+const SignupUser = "signup"
 
-const authedUserKey = "sparkbox-user"
+// ReservedUsers are the gateway's own doors. No sandbox may be named one of
+// these (they'd be unreachable), and each gets a front-door address before any
+// sandbox exists.
+var ReservedUsers = []string{NewSandboxUser, ControlUser, SignupUser}
+
+// authedUserKey holds the handle the presented key belongs to; it is unset for
+// an unregistered key at the signup door. authedKeyKey holds the key itself,
+// which signup needs to register and every session needs for `key_fp`.
+const (
+	authedUserKey = "sparkbox-user"
+	authedKeyKey  = "sparkbox-key"
+)
 
 // pauseTimeout bounds ctl pause. Pausing writes the guest's full memory
 // snapshot (GBs for a warm sandbox) — the 15s dial timeout wedged an 8GB
@@ -47,20 +61,22 @@ const authedUserKey = "sparkbox-user"
 const pauseTimeout = 3 * time.Minute
 
 type Gateway struct {
-	mgr          *host.Manager
-	users        *Users
-	log          *slog.Logger
-	hostKey      xssh.Signer
-	upstreamKey  xssh.Signer // authenticates the gateway into VMs
-	defaultImage string
-	dialTimeout  time.Duration
-	doors        *frontdoor.Mapper // optional: hostname (dest-IP) routing
-	domain       string            // base domain for user-facing hints, e.g. "hivemind.tools"
+	mgr            *host.Manager
+	users          *users.Store
+	log            *slog.Logger
+	hostKey        xssh.Signer
+	upstreamKey    xssh.Signer // authenticates the gateway into VMs
+	defaultImage   string
+	dialTimeout    time.Duration
+	doors          *frontdoor.Mapper // optional: hostname (dest-IP) routing
+	domain         string            // base domain for user-facing hints, e.g. "hivemind.tools"
+	openSignup     bool              // signup without an invite code
+	invitesPerUser int               // non-operator invite quota; 0 = operator only
 }
 
 type GatewayOptions struct {
 	Manager      *host.Manager
-	Users        *Users
+	Users        *users.Store
 	HostKey      xssh.Signer
 	UpstreamKey  xssh.Signer
 	DefaultImage string
@@ -71,6 +87,12 @@ type GatewayOptions struct {
 	Doors *frontdoor.Mapper
 	// Domain is the base DNS domain used in user-facing hints (optional).
 	Domain string
+	// OpenSignup drops the invite requirement, letting anyone who can reach the
+	// gateway register a key. Useful for a demo box; off by default.
+	OpenSignup bool
+	// InvitesPerUser is how many invites a non-operator active user may mint.
+	// 0 (the default) means only operators can invite.
+	InvitesPerUser int
 }
 
 func New(opts GatewayOptions) *Gateway {
@@ -79,6 +101,7 @@ func New(opts GatewayOptions) *Gateway {
 		hostKey: opts.HostKey, upstreamKey: opts.UpstreamKey,
 		defaultImage: opts.DefaultImage, dialTimeout: 15 * time.Second,
 		doors: opts.Doors, domain: opts.Domain,
+		openSignup: opts.OpenSignup, invitesPerUser: opts.InvitesPerUser,
 	}
 }
 
@@ -88,13 +111,20 @@ func (g *Gateway) Server(addr string) *gssh.Server {
 		Addr:    addr,
 		Handler: g.handle,
 		PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
-			user, ok := g.users.Lookup(key)
-			if !ok {
-				g.log.Warn("rejected unknown key", "remote", ctx.RemoteAddr())
-				return false
+			ctx.SetValue(authedKeyKey, key)
+			if user, ok := g.users.Lookup(key); ok {
+				ctx.SetValue(authedUserKey, user)
+				return true
 			}
-			ctx.SetValue(authedUserKey, user)
-			return true
+			// An unregistered key gets through to the signup door and nowhere
+			// else: registering it is precisely what that door is for. Every
+			// other path still requires a key the store already knows.
+			if g.isSignupDoor(ctx.User(), ctx.LocalAddr()) {
+				return true
+			}
+			g.log.Warn("rejected unknown key", "remote", ctx.RemoteAddr(),
+				"fp", xssh.FingerprintSHA256(key))
+			return false
 		},
 	}
 	srv.AddHostKey(g.hostKey)
@@ -121,8 +151,18 @@ func (g *Gateway) handle(s gssh.Session) {
 	}
 	log := g.log.With("user", user, "sandbox", sandboxName, "remote", s.RemoteAddr())
 
+	if sandboxName == SignupUser {
+		g.handleSignup(s, user, log)
+		return
+	}
 	if sandboxName == ControlUser {
 		g.handleControl(s, user, log)
+		return
+	}
+	// Only the signup door admits an unregistered key; anything else reaching
+	// here without a handle is a bug rather than a user error.
+	if user == "" {
+		fail(s, log, "authenticate", fmt.Errorf("this key isn't registered — run: ssh %s@%s", SignupUser, g.domainHint()))
 		return
 	}
 
@@ -162,6 +202,9 @@ func (g *Gateway) handle(s gssh.Session) {
 		return
 	}
 	defer g.mgr.Touch(sandboxName)
+	// Record which of the owner's machines is driving this sandbox; it rides
+	// into the id token as `key_fp` for auditing.
+	g.mgr.RecordKey(sandboxName, sessionKeyFP(s))
 
 	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
 	if err != nil {
@@ -192,7 +235,7 @@ func (g *Gateway) resolveDoor(addr net.Addr) (name string, ok, inRange bool) {
 	}
 	// Reserved names first: their doors exist before any sandbox does (and no
 	// sandbox may claim them for routing).
-	for _, r := range []string{NewSandboxUser, ControlUser} {
+	for _, r := range ReservedUsers {
 		if g.doors.Addr(r).Equal(ta.IP) {
 			return r, true, true
 		}
@@ -205,6 +248,30 @@ func (g *Gateway) resolveDoor(addr net.Addr) (name string, ok, inRange bool) {
 		return n, true, true
 	}
 	return "", false, true
+}
+
+// isSignupDoor reports whether a connection is aimed at the signup door,
+// under either routing scheme. It runs during the public-key check, before a
+// session exists, which is why it takes the username and destination directly.
+func (g *Gateway) isSignupDoor(user string, local net.Addr) bool {
+	if name, ok, inRange := g.resolveDoor(local); inRange {
+		return ok && name == SignupUser
+	}
+	return user == SignupUser
+}
+
+// sessionKey returns the public key that authenticated this session.
+func sessionKey(s gssh.Session) gssh.PublicKey {
+	k, _ := s.Context().Value(authedKeyKey).(gssh.PublicKey)
+	return k
+}
+
+// sessionKeyFP is the fingerprint of the session's key, for the `key_fp` claim.
+func sessionKeyFP(s gssh.Session) string {
+	if k := sessionKey(s); k != nil {
+		return xssh.FingerprintSHA256(k)
+	}
+	return ""
 }
 
 // domainHint is the base domain for user-facing "ssh <x>.<domain>" hints.
@@ -345,57 +412,6 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 		return
 	}
 	fail(s, log, what, err)
-}
-
-// handleControl serves the `ctl@` out-of-band channel: managing sandboxes
-// without dialing into one. It only ever touches the caller's own sandboxes.
-func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
-	args := s.Command()
-	if len(args) == 0 {
-		fmt.Fprint(s.Stderr(), controlUsage)
-		s.Exit(2) //nolint:errcheck
-		return
-	}
-	switch args[0] {
-	case "list":
-		n := 0
-		for _, b := range g.mgr.List() {
-			if b.Owner != user {
-				continue
-			}
-			fmt.Fprintf(s, "%-24s %s\r\n", b.Name, b.State)
-			n++
-		}
-		if n == 0 {
-			fmt.Fprint(s, "no sandboxes yet — create one with: ssh new@<gateway>\r\n")
-		}
-		s.Exit(0) //nolint:errcheck
-	case "pause":
-		if len(args) < 2 {
-			fmt.Fprint(s.Stderr(), "usage: ssh ctl@<gateway> pause <name>\r\n")
-			s.Exit(2) //nolint:errcheck
-			return
-		}
-		name := args[1]
-		box, ok := g.mgr.Get(name)
-		if !ok || box.Owner != user {
-			// Same message either way: don't leak other users' sandbox names.
-			fmt.Fprintf(s.Stderr(), "sparkbox: no sandbox named %q\r\n", name)
-			s.Exit(1) //nolint:errcheck
-			return
-		}
-		ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
-		defer cancel()
-		if err := g.mgr.Pause(ctx, name); err != nil {
-			fail(s, log, "pause", err)
-			return
-		}
-		fmt.Fprintf(s, "paused %s\r\n", name)
-		s.Exit(0) //nolint:errcheck
-	default:
-		fmt.Fprintf(s.Stderr(), "unknown command %q\r\n%s", args[0], controlUsage)
-		s.Exit(2) //nolint:errcheck
-	}
 }
 
 func splitEnv(kv string) (string, string, bool) {

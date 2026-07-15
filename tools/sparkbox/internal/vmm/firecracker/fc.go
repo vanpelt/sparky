@@ -391,6 +391,20 @@ func (d *Driver) createTap(ctx context.Context, idx int) error {
 			return fmt.Errorf("%v: %v: %s", c, err, out)
 		}
 	}
+	// Strict reverse-path filtering: drop any packet from this tap whose source
+	// address doesn't route back to it, so a guest can't source-spoof a
+	// neighbour's address across the host's inter-tap forwarding. Set per-tap
+	// because the kernel takes the max of the "all" and per-device values, so a
+	// permissive host default can't undo it.
+	//
+	// Best-effort, like the proxy-NDP setup below: this is defence in depth, not
+	// the guarantee. The metadata service identifies callers by source address
+	// (see internal/metadata), and TCP already makes that unspoofable — a forged
+	// SYN is answered towards the real owner of the address, so the spoofer
+	// never completes the handshake. Failing sandbox creation over this would
+	// trade a whole-host outage for no real security.
+	exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv4.conf."+tap+".rp_filter=1").Run() //nolint:errcheck
+
 	// Answer NDP for this guest's /128 on the uplink so the provider's on-link
 	// delivery of the routed /64 reaches the VM (its address lives on the tap,
 	// not the uplink). Best-effort: the VM still boots if this fails, it just

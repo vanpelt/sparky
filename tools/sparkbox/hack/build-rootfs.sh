@@ -14,6 +14,7 @@
 # is a thin ceiling: hosts clone it with XFS reflinks, so sandboxes only pay
 # for blocks they write.
 set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
 
 IMAGE=${1:?docker image, e.g. ubuntu:24.04}
 OUT=${2:?output path, e.g. images/ubuntu.ext4}
@@ -251,6 +252,11 @@ exit 0
 EOF
 chmod +x "$MNT/usr/local/sbin/sparkbox-netcfg"
 
+echo ">> installing workload identity (OIDC token) hook"
+# Shared with deploy/refresh-agent-tools.sh, which patches the same payload
+# into already-published templates on a host — keep it in one place.
+"$HERE/../deploy/install-guest-identity.sh" "$MNT"
+
 # systemd path (ubuntu:24.04 and friends): run early, before sshd.
 if [ -e "$MNT/lib/systemd/systemd" ]; then
   cat > "$MNT/etc/systemd/system/sparkbox-net.service" <<'EOF'
@@ -284,6 +290,10 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null
 /usr/local/sbin/sparkbox-netcfg 2>/dev/null || true
+# No systemd here, so no timer: fetch an identity token once at boot. It
+# expires in an hour and won't renew — slim images are a fallback for bring-up,
+# not the shipped path (which is the systemd timer).
+/usr/local/sbin/sparkbox-token 2>/dev/null || true
 mkdir -p /run/sshd
 /usr/sbin/sshd
 exec /bin/sh -c 'while true; do sleep 3600; done'

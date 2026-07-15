@@ -1,6 +1,8 @@
 # Sparkbox identity: user registration, SSH key linking, and OIDC workload identity
 
-Status: **design** (2026-07-15). Nothing here is implemented.
+Status: **implemented** (2026-07-15) — M1 and M2 both landed in one pass; see
+"What shipped" at the bottom for where each piece lives and where the built
+thing deviates from this design.
 
 ## Why
 
@@ -67,16 +69,33 @@ fights the planned gateway/worker split.
 ### Token minting and delivery into guests
 
 The host already has an unforgeable per-VM channel: each guest's default
-gateway is its own tap's host address `172.30.<idx>.1`. Bind a tiny metadata
-service on **each tap host IP** (port 8967, chosen unused) and identify the
-caller by the *local* address of the accepted connection — not the source IP,
-which a guest could spoof; the local address is determined by which tap
-delivered the packet. `GET /token?aud=...` then:
+gateway is its own tap's host address `172.30.<idx>.1`. A tiny metadata service
+on port 8967 (chosen unused) identifies the caller by the **source** address of
+the accepted connection. `GET /token?aud=...` then:
 
-1. local addr `172.30.<idx>.1` → slot idx → sandbox → `{name, owner}` from the
-   manager (the same in-memory state the gateway trusts today);
+1. source addr `172.30.<idx>.2` → sandbox → `{name, owner}` from the manager
+   (the same in-memory state the gateway trusts today); the destination must be
+   that source's own gateway, so a guest can only ever ask its own;
 2. joins owner → user record (Part 2) for the identity claims;
 3. mints a fresh ES256 JWT, TTL **1h**, unique `jti`, and returns it.
+
+> **Correction (found during implementation).** This design originally said to
+> trust the connection's *local* address, on the reasoning that a guest could
+> spoof its source but not which tap delivered the packet. That is backwards,
+> and would have handed any guest a token for any other sandbox:
+>
+> - The **destination is attacker-chosen.** The host has IP forwarding on and
+>   Linux uses the weak host model, so it accepts a packet addressed to any
+>   local address arriving on any interface. A guest in slot 5 just connects to
+>   `172.30.9.1`; the kernel delivers it, and the accepted socket's local
+>   address reads `172.30.9.1` — slot 9's token, handed to slot 5. Binding a
+>   separate listener per tap does not help: that socket accepts the packet too.
+> - The **source is not spoofable here.** This is TCP: a SYN with a forged
+>   source is answered by a SYN-ACK routed to the real owner of that address (a
+>   different tap), so the spoofer never completes the handshake and gets
+>   nothing. `rp_filter=1` on each tap drops those packets outright as well.
+>
+> Regression test: `TestGuestCannotMintATokenForAnotherSandbox`.
 
 No secret material lives in the guest; possession of the network position *is*
 the authentication, exactly like cloud IMDS. Rate-limit per VM and never cache
@@ -139,8 +158,11 @@ not a login dependency.
 
 ### User store
 
-`<state-dir>/users.json`, atomic save like `sandboxes.json` (moves to SQLite
-together with the registry when multi-box lands):
+**SQLite** (`<state-dir>/sparkbox.db`, the same file the proxy routes already
+live in — a second connection, which WAL makes safe). This is the one shape
+change from the original plan: the store went straight to SQLite rather than a
+`users.json` staging post, since invite redemption wants an atomic
+compare-and-set and key lookup wants a real index. The record it holds:
 
 ```json
 { "handle": "vanpelt",
@@ -225,18 +247,43 @@ keys, the claim persists; verification is at link time, recorded with
    codes; GitHub `.keys` verification; `github` claim appears in tokens.
 3. **M3 — later**: device-flow OAuth (email/org claims), per-sandbox service
    subjects (`sub: sparkbox:sandbox:<owner>/<name>`) if a relying party wants
-   sandbox-granular subjects, console self-service, SQLite store with
-   multi-box.
+   sandbox-granular subjects, console self-service, moving the *sandbox
+   registry* (still `sandboxes.json`) into SQLite alongside the user store when
+   multi-box lands.
 
-## Open questions
+## Resolved questions
 
-- **Audience allowlist**: ship `--oidc-audiences` defaulting to the hivemind
-  SaaS URL only, or allow any `aud` (relying parties enforce theirs anyway)?
-  Default-closed proposed.
-- **Invite policy**: operator-only vs. every active user gets N invites.
-  Operator-only proposed for M2.
-- **Token TTL**: 1h matches the k8s reference shape and hivemind's clamp
-  floor; shorter (15m) is possible but makes the guest timer chattier for no
-  clear win.
-- Should `signup` be open (no invite) when the operator sets a flag? Useful
-  for demos; off by default.
+Each shipped as proposed:
+
+- **Audience allowlist**: `--oidc-audiences`, default-closed to the hivemind
+  SaaS URL. Empty allows any `aud`.
+- **Invite policy**: operator-only. `--invites-per-user` (default 0) opens a
+  quota to non-operators. "Operator" needed a definition and got one with no
+  new config: the accounts seeded from `users.conf` — the file whoever
+  provisions the host writes — are the operators (`invited_by = "operator"`).
+- **Token TTL**: 1h, refreshed by the guest timer every 45 min (~75% of life).
+- **Open signup**: `--open-signup`, off by default.
+
+## What shipped
+
+| Piece | Where |
+|---|---|
+| Identity store (users, keys, invites) | `internal/users` |
+| Issuer: ES256 key, minting, discovery + JWKS | `internal/oidc` |
+| Per-sandbox token endpoint | `internal/metadata` |
+| `signup@` door, `ctl keys`, `ctl invite`, `ctl whoami` | `internal/sshgw` |
+| Guest token unit + timer | `deploy/install-guest-identity.sh` |
+
+Notes on the built thing:
+
+- The guest payload is installed by one script called from **both**
+  `hack/build-rootfs.sh` (bake time) and `deploy/refresh-agent-tools.sh` (host
+  side, no rebuild), so templates published before workload identity existed
+  pick it up on the next provision. It is versioned by `IDENTITY_REV`, which
+  the refresher stamps and compares.
+- The issuer rides the existing proxy edge at `oidc.<domain>`; both TLS
+  providers already cover it (wildcard / autocert HostPolicy). Running without
+  `--proxy-tls` logs a warning: the `iss` claim is https and a verifier will
+  not be able to fetch it.
+- `key_fp` is recorded via `Manager.RecordKey` on each session rather than
+  threaded through `Create`, keeping the signature churn out of the API.

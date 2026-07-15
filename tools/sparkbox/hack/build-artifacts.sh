@@ -58,8 +58,9 @@ cp "$FIRECRACKER_BIN" "$STAGE/firecracker"
 # The ~11GB rootfs dwarfs everything else here, yet most releases only change
 # the sparkbox binary. Key the rootfs on everything that determines its bytes:
 # the base image's registry manifest (digest changes when upstream pushes),
-# build-rootfs.sh itself (it embeds the whole guest config), the baked gateway
-# pubkey, and the name/size args. Same key -> reuse the bucket copy and skip
+# build-rootfs.sh and the guest-identity payload it installs (between them they
+# embed the whole guest config), the baked gateway pubkey, and the name/size
+# args. Same key -> reuse the bucket copy and skip
 # docker/compress/upload entirely. REBUILD_ROOTFS=1 forces a rebuild (and
 # refreshes the cached copy). The .sha256 sidecar is uploaded *after* the
 # image, so its presence marks a complete upload — never a torn one.
@@ -68,7 +69,9 @@ ROOTFS_PATH="releases/$RELEASE/$ROOTFS_NAME.ext4.zst"   # fallback: uncached, bu
 IMG_MANIFEST=$(docker manifest inspect "$IMAGE" 2>/dev/null || true)
 if [ -n "$IMG_MANIFEST" ]; then
   ROOTFS_KEY=$({ printf '%s' "$IMG_MANIFEST"; \
-                 cat "$REPO_DIR/tools/sparkbox/hack/build-rootfs.sh" "$GATEWAY_PUBKEY_FILE"; \
+                 cat "$REPO_DIR/tools/sparkbox/hack/build-rootfs.sh" \
+                     "$REPO_DIR/tools/sparkbox/deploy/install-guest-identity.sh" \
+                     "$GATEWAY_PUBKEY_FILE"; \
                  printf '%s %s' "$ROOTFS_NAME" "$ROOTFS_MB"; } | sha256sum | cut -c1-16)
   ROOTFS_PATH="rootfs/$ROOTFS_KEY/$ROOTFS_NAME.ext4.zst"
   if [ "${REBUILD_ROOTFS:-0}" != 1 ] \

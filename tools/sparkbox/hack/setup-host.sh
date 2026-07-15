@@ -110,12 +110,41 @@ if [ ! -f "$SPARKBOX_DIR/data/images/$ROOTFS_NAME.ext4" ]; then
     "$SPARKBOX_DIR/gateway_upstream_key.pub" "$ROOTFS_MB"
 fi
 
-echo "== NAT for sandbox egress (172.30.0.0/16 via default uplink) =="
-sysctl -qw net.ipv4.ip_forward=1
-echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-sparkbox.conf
-UPLINK=$(ip route | awk '/default/{print $5; exit}')
-iptables -t nat -C POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
-  iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
+echo "== kernel networking (forwarding + strict reverse-path filtering) =="
+# ip_forward routes sandbox traffic between taps and the uplink. rp_filter is
+# strict because the metadata service identifies its caller by source address
+# and the host forwards between taps, so a guest must not be able to
+# source-spoof a neighbour; the driver sets it per-tap as each is created, this
+# covers the host default. /etc/sysctl.d so it survives reboots.
+cat > /etc/sysctl.d/99-sparkbox.conf <<'SYSCTL'
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.default.rp_filter=1
+SYSCTL
+sysctl -q --system
+
+echo "== packet-filter rules (sandbox NAT + metadata port), applied at boot =="
+# Same script and unit the cloud-init path installs — iptables rules are not
+# kernel state that persists, so a boot unit owns them. Without this, one reboot
+# silently drops sandbox egress.
+install -m 0755 "$(dirname "$0")/../deploy/sparkbox-net.sh" /usr/local/sbin/sparkbox-net.sh
+cat > /etc/systemd/system/sparkbox-net.service <<'UNIT'
+[Unit]
+Description=sparkbox host packet-filter rules (sandbox NAT + metadata port)
+After=network-online.target
+Wants=network-online.target
+Before=sparkbox.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sparkbox-net.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now sparkbox-net.service
 
 # IPv6: if you have a routed /64, each sandbox gets a globally-routable /128
 # from it (dual-stack, no NAT). Set SPARKBOX_SUBNET6 to enable, e.g.

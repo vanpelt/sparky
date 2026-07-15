@@ -6,8 +6,10 @@ resume-on-connect. Companion implementation to
 [`docs/agentic-sandbox-design.md`](../../docs/agentic-sandbox-design.md).
 
 ```
+ssh signup@gateway         → registers your key (invite code + handle)
 ssh new@gateway            → creates a sandbox, tells you its name
 ssh <name>@gateway         → resumes it if suspended, drops you in
+ssh ctl@gateway keys list  → manage your account's SSH keys
 https://<name>.hivemind.tools → reverse-proxy to a port inside the sandbox
 POST /v1/sandboxes         → control API (create/list/pause/resume/destroy/routes)
 ```
@@ -19,6 +21,26 @@ the *user* is identified purely by their public key (the exe.dev model). HTTP
 subdomain defaults to the sandbox name). Idle sandboxes are automatically
 paused by a reaper and transparently resumed on the next connection — over SSH
 *or* HTTP.
+
+## Identity
+
+Users are SSH public keys and nothing else — no passwords, no cookies. An
+account (handle + keyring + optional *verified* GitHub link) lives in the
+sqlite store next to the routes; `users.conf` remains the bootstrap seed, and
+the accounts it names are the operators. Registration happens over the only
+door a stranger has, SSH: `ssh signup@<domain>` runs a short dialog gated by a
+single-use invite code (`ssh ctl@<domain> invite` mints one). GitHub linking
+needs no OAuth app — it checks the key you're connected with against
+`github.com/<login>.keys`, which is the same evidence GitHub accepts for a
+push.
+
+Each sandbox can also prove who it belongs to. Sparkbox is an OIDC issuer at
+`oidc.<domain>`, and every guest gets a fresh 1h ES256 id token dropped at
+`/var/run/secrets/hivemind/token` — the path hivemind's auth chain already
+reads — so `hivemind start` federates with no secret in the VM and nothing
+pasted. The guest is authenticated by its network position (it can only reach
+the metadata endpoint over its own tap), exactly like a cloud IMDS. See
+[`docs/identity-federation-design.md`](docs/identity-federation-design.md).
 
 ## Architecture
 
@@ -163,6 +185,11 @@ production gap list (jailer, warm snapshots, rate limits).
 - [x] IPv6-native: dual-stack guests with a routable /128 per sandbox from a
       delegated /64 (`--subnet6`), no NAT
 - [x] Password-gated operator console at `console.<domain>` (list + pause/resume)
+- [x] User accounts in sqlite: `signup@` over SSH, invite codes, multi-key
+      keyrings (`ctl keys`), GitHub linking verified against `<login>.keys`
+- [x] OIDC workload identity: issuer at `oidc.<domain>`, per-sandbox id tokens
+      over an IMDS-style metadata endpoint, so `hivemind start` federates with
+      no secret in the guest
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
 - [ ] Jailer, balloon, I/O limits; inter-sandbox network isolation
 - [ ] Multi-host: capacity reporting + best-fit placement (flyd pattern)

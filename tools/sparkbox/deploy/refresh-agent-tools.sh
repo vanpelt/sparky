@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Bake up-to-date agent CLIs (Claude Code + Codex) into the sparkbox rootfs
-# templates WITHOUT rebuilding the image. Runs on the host as root.
+# Bake up-to-date agent CLIs (Claude Code + Codex) and the guest workload-identity
+# payload into the sparkbox rootfs templates WITHOUT rebuilding the image. Runs
+# on the host as root.
 #
 # Rebuilding the rootfs is a ~65-minute docker+CI affair; this is seconds. The
 # firecracker driver reflinks <image-dir>/<image>.ext4 at every sandbox create,
@@ -25,6 +26,11 @@ set -euo pipefail
 
 IMAGES_DIR=${IMAGES_DIR:-/srv/sparkbox/data/images}
 TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/data/tools}
+# Installs the guest OIDC token unit + timer into a mounted template. Shared
+# verbatim with hack/build-rootfs.sh so the two paths can't drift; cloud-init
+# lands it next to this script. Templates published before workload identity
+# existed get it here, with no ~65-minute image rebuild.
+GUEST_IDENTITY=${GUEST_IDENTITY:-/usr/local/sbin/sparkbox-install-guest-identity.sh}
 CLAUDE_BASE=${CLAUDE_BASE:-https://downloads.claude.ai/claude-code-releases}
 CODEX_REPO=${CODEX_REPO:-openai/codex}
 HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
@@ -67,11 +73,21 @@ case "$HM_VER" in
   *) echo "bad hivemind version from manifest: $HM_VER" >&2; exit 1 ;;
 esac
 
+# The guest identity payload is versioned by the installer itself, so bumping
+# IDENTITY_REV there re-patches every template on the next run.
+[ -x "$GUEST_IDENTITY" ] || { echo "missing guest identity installer at $GUEST_IDENTITY" >&2; exit 1; }
+IDENTITY_REV=$(sed -n 's/^IDENTITY_REV=//p' "$GUEST_IDENTITY" | head -1)
+case "$IDENTITY_REV" in
+  [0-9]*) ;;
+  *) echo "could not read IDENTITY_REV from $GUEST_IDENTITY" >&2; exit 1 ;;
+esac
+
 if [ "$FORCE" = 0 ] && [ -f "$STAMP" ] \
    && grep -qx "CLAUDE_VERSION=$CLAUDE_VER" "$STAMP" \
    && grep -qx "CODEX_TAG=$CODEX_TAG" "$STAMP" \
-   && grep -qx "HIVEMIND_VERSION=$HM_VER" "$STAMP"; then
-  echo "agent tools already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER)"
+   && grep -qx "HIVEMIND_VERSION=$HM_VER" "$STAMP" \
+   && grep -qx "IDENTITY_REV=$IDENTITY_REV" "$STAMP"; then
+  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV)"
   exit 0
 fi
 
@@ -129,6 +145,10 @@ for tpl in "$IMAGES_DIR"/*.ext4; do
   # race to self-update on top of it (wasted bandwidth, mid-session surprises).
   grep -qs '^DISABLE_AUTOUPDATER=' "$MNT/etc/environment" || \
     echo 'DISABLE_AUTOUPDATER=1' >> "$MNT/etc/environment"
+  # Workload identity: the token unit + timer that keep
+  # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with
+  # no secret in the guest and nothing to paste.
+  "$GUEST_IDENTITY" "$MNT"
   umount "$MNT" && rmdir "$MNT"; MNT=""
   mv -f "$TMP" "$tpl"; TMP=""
   patched=$((patched + 1))
@@ -139,9 +159,9 @@ if [ "$patched" = 0 ]; then
   exit 1
 fi
 
-printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\n' \
-  "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" > "$STAMP"
+printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\n' \
+  "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" "$IDENTITY_REV" > "$STAMP"
 # Drop cached binaries from older versions; keep the current set.
 find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'hivemind-*' \) \
   ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" ! -name "$(basename "$HM_BIN")" -delete
-echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + hivemind $HM_VER"
+echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + hivemind $HM_VER + identity rev $IDENTITY_REV"

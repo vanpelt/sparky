@@ -6,8 +6,9 @@
 # Prereqs: scw CLI configured; a published release (hack/build-artifacts.sh); the
 # fleet gateway PRIVATE keys whose public halves are baked into that release's
 # rootfs. Secrets auto-load from ~/.sparkbox/secrets (override SECRETS_DIR):
-# gateway_{host,upstream}_key.pem plus a .env supplying CLOUDFLARE_API_TOKEN,
-# so a plain `./launch-host.sh` launches fully wired. Explicit env vars win.
+# gateway_{host,upstream}_key.pem, oidc_signing_key.pem, plus a .env supplying
+# CLOUDFLARE_API_TOKEN, so a plain `./launch-host.sh` launches fully wired.
+# Explicit env vars win. The OIDC key is generated on first launch if absent.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TEMPLATE="$HERE/cloud-init.yaml"
@@ -57,6 +58,18 @@ for k in "$GATEWAY_HOST_KEY" "$GATEWAY_UPSTREAM_KEY"; do
   [ -f "$k" ] || { echo "missing fleet gateway key $k (set GATEWAY_HOST_KEY/GATEWAY_UPSTREAM_KEY or SECRETS_DIR)"; exit 1; }
 done
 
+# ES256 key that signs sandbox identity tokens. Unlike the gateway keys it has
+# no counterpart baked into the rootfs, so it can be generated here on demand —
+# but it IS fleet state: keep it, or every relying party has to re-onboard
+# against a new JWKS. Generated once, then reused from SECRETS_DIR forever.
+OIDC_SIGNING_KEY=${OIDC_SIGNING_KEY:-$SECRETS_DIR/oidc_signing_key.pem}
+if [ ! -f "$OIDC_SIGNING_KEY" ]; then
+  echo "== generating fleet OIDC signing key at $OIDC_SIGNING_KEY =="
+  mkdir -p "$(dirname "$OIDC_SIGNING_KEY")"
+  ( umask 077; openssl ecparam -name prime256v1 -genkey -noout -out "$OIDC_SIGNING_KEY" )
+  echo "   back this up — losing it invalidates every service account bound to this issuer"
+fi
+
 [ -f "$USER_PUBKEY" ] || { echo "no pubkey at $USER_PUBKEY (set USER_PUBKEY)"; exit 1; }
 USERS_CONF="$USER_NAME $(cat "$USER_PUBKEY")"
 
@@ -65,7 +78,10 @@ RENDERED=$(mktemp)
 trap 'rm -f "$RENDERED"' EXIT
 USERS_CONF="$USERS_CONF" PROXY_DOMAIN="$PROXY_DOMAIN" RELEASE="$RELEASE" \
 BUCKET_BASE="$BUCKET_BASE" GHK="$GATEWAY_HOST_KEY" GUK="$GATEWAY_UPSTREAM_KEY" \
+OIDC_KEY="$OIDC_SIGNING_KEY" \
 REFRESH_TOOLS="$HERE/refresh-agent-tools.sh" \
+GUEST_IDENTITY="$HERE/install-guest-identity.sh" \
+NET_SETUP="$HERE/sparkbox-net.sh" \
 SUBNET6_FLAG="$SUBNET6_FLAG" CONSOLE_PASSWORD="$CONSOLE_PASSWORD" TLS_FLAGS="$TLS_FLAGS" \
 CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
@@ -84,7 +100,10 @@ for k, v in {
     '@@FLEXIBLE_ADDRS@@': os.environ['FLEXIBLE_ADDRS'],
     '@@GATEWAY_HOST_KEY_B64@@': b64(os.environ['GHK']),
     '@@GATEWAY_UPSTREAM_KEY_B64@@': b64(os.environ['GUK']),
+    '@@OIDC_SIGNING_KEY_B64@@': b64(os.environ['OIDC_KEY']),
     '@@REFRESH_TOOLS_B64@@': b64(os.environ['REFRESH_TOOLS']),
+    '@@GUEST_IDENTITY_B64@@': b64(os.environ['GUEST_IDENTITY']),
+    '@@NET_SETUP_B64@@': b64(os.environ['NET_SETUP']),
 }.items():
     t = t.replace(k, v)
 if '@@' in t:

@@ -59,6 +59,11 @@ type Server struct {
 	// treated as a sandbox web route (see SetConsole).
 	console    http.Handler
 	consoleSub string
+
+	// issuer, if set, serves the OIDC discovery document and JWKS at
+	// <issuerSub>.<domain> (see SetIssuer).
+	issuer    http.Handler
+	issuerSub string
 }
 
 // SetConsole reserves a subdomain (e.g. "console") for the operator console,
@@ -66,6 +71,20 @@ type Server struct {
 func (s *Server) SetConsole(sub string, h http.Handler) {
 	s.consoleSub = strings.ToLower(sub)
 	s.console = h
+}
+
+// SetIssuer reserves a subdomain (e.g. "oidc") for the OIDC issuer's discovery
+// document and JWKS, served by h rather than proxied to a sandbox. Call once
+// before serving.
+//
+// It lives on the proxy edge because a verifier requires the issuer to be
+// reachable over public https — it fetches the discovery document, follows
+// jwks_uri, and refuses anything that isn't a public address. The edge already
+// terminates TLS for the wildcard, so this is two GET handlers, not a new
+// listener.
+func (s *Server) SetIssuer(sub string, h http.Handler) {
+	s.issuerSub = strings.ToLower(sub)
+	s.issuer = h
 }
 
 func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger) *Server {
@@ -104,9 +123,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: request host is not under "+s.domain, http.StatusNotFound)
 		return
 	}
-	// The operator console owns its subdomain and is not a sandbox route.
+	// The operator console and the OIDC issuer own their subdomains and are not
+	// sandbox routes.
 	if s.console != nil && sub == s.consoleSub {
 		s.console.ServeHTTP(w, r)
+		return
+	}
+	if s.issuer != nil && sub == s.issuerSub {
+		s.issuer.ServeHTTP(w, r)
 		return
 	}
 	route, ok, err := s.store.GetBySubdomain(sub)

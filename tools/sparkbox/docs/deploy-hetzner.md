@@ -42,11 +42,24 @@ install release-*/firecracker-*[!.debug] /usr/local/bin/firecracker
 #    ubuntu:24.04 with size 4096 and pass a matching --default-image below.
 ./hack/build-rootfs.sh ghcr.io/openai/codex-universal:latest /srv/sparkbox/images/universal.ext4 gateway_upstream_key.pub 65536
 
-# 6. Enable NAT so sandboxes can reach the internet (taps are 172.30.0.0/16).
-echo 1 > /proc/sys/net/ipv4/ip_forward
-iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o $(ip route | awk '/default/{print $5; exit}') -j MASQUERADE
+# 6. Kernel networking: forwarding so sandboxes reach the internet, and strict
+#    reverse-path filtering so a guest can't source-spoof a neighbour (the
+#    metadata service identifies its caller by source address).
+#    /etc/sysctl.d, not /proc, so it survives a reboot.
+cat > /etc/sysctl.d/99-sparkbox.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.default.rp_filter=1
+EOF
+sysctl -q --system
 
-# 7. Run it.
+# 7. NAT for sandbox egress + lock the metadata port to taps (172.30.0.0/16).
+#    iptables rules are not persistent state, so a boot unit owns them —
+#    applying them by hand means losing sandbox egress at the next reboot.
+install -m 0755 deploy/sparkbox-net.sh /usr/local/sbin/sparkbox-net.sh
+systemctl enable --now sparkbox-net.service   # unit body: see hack/setup-host.sh
+
+# 8. Run it.
 sparkbox serve --driver firecracker \
   --state-dir /srv/sparkbox/state \
   --kernel /srv/sparkbox/vmlinux \

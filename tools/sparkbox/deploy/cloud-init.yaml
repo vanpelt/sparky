@@ -8,6 +8,9 @@
 #   - your laptop pubkey (users.conf)
 #   - the FLEET gateway host + upstream PRIVATE keys (base64), whose public
 #     halves are baked into the rootfs so every sandbox trusts the gateway.
+#   - the FLEET OIDC signing key (base64): the ES256 key every sandbox's
+#     identity token is signed with. It is fleet-wide so the issuer keeps the
+#     same JWKS across host rebuilds and relying parties never re-onboard.
 
 package_update: true
 packages:
@@ -49,6 +52,14 @@ write_files:
     encoding: b64
     content: @@GATEWAY_UPSTREAM_KEY_B64@@
 
+  # ES256 (P-256) key that signs sandbox identity tokens. Fleet-wide, like the
+  # gateway keys: rebuild a host and the issuer's JWKS is unchanged, so nobody
+  # has to re-onboard a service account.
+  - path: /srv/sparkbox/keys/oidc_signing_key.pem
+    permissions: '0600'
+    encoding: b64
+    content: @@OIDC_SIGNING_KEY_B64@@
+
   # Host-side agent-CLI refresher (deploy/refresh-agent-tools.sh, injected as
   # b64 by launch-host.sh): patches claude+codex into the rootfs templates in
   # seconds instead of rebuilding the image. Run at provision + daily by timer.
@@ -56,6 +67,40 @@ write_files:
     permissions: '0755'
     encoding: b64
     content: @@REFRESH_TOOLS_B64@@
+
+  # Guest workload-identity installer, called by the refresher above (and by
+  # hack/build-rootfs.sh at bake time — one source of truth for both).
+  - path: /usr/local/sbin/sparkbox-install-guest-identity.sh
+    permissions: '0755'
+    encoding: b64
+    content: @@GUEST_IDENTITY_B64@@
+
+  # Host packet-filter rules (deploy/sparkbox-net.sh). Applied by the unit below
+  # on every boot — cloud-init's runcmd is per-instance, so rules set there would
+  # vanish on the first reboot and take sandbox egress with them.
+  - path: /usr/local/sbin/sparkbox-net.sh
+    permissions: '0755'
+    encoding: b64
+    content: @@NET_SETUP_B64@@
+
+  - path: /etc/systemd/system/sparkbox-net.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=sparkbox host packet-filter rules (sandbox NAT + metadata port)
+      # After network: the script derives the uplink from the default route.
+      # Before sparkbox: no sandbox should exist before its egress path does.
+      After=network-online.target
+      Wants=network-online.target
+      Before=sparkbox.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/sparkbox-net.sh
+
+      [Install]
+      WantedBy=multi-user.target
 
   - path: /etc/systemd/system/sparkbox-refresh-tools.service
     permissions: '0644'
@@ -148,6 +193,7 @@ write_files:
       # They were written outside the mount so it wouldn't shadow them.
       install -m 600 "$DIR/keys/gateway_host_key.pem"     "$DIR/data/state/gateway_host_key.pem"
       install -m 600 "$DIR/keys/gateway_upstream_key.pem" "$DIR/data/state/gateway_upstream_key.pem"
+      install -m 600 "$DIR/keys/oidc_signing_key.pem"     "$DIR/data/state/oidc_signing_key.pem"
 
       # Fetch manifest, then each artifact, verifying sha256.
       curl -fsSL "$REL/manifest.env" -o "$DIR/manifest.env"
@@ -207,16 +253,28 @@ write_files:
       systemctl enable ssh.service 2>/dev/null || true
       systemctl restart ssh.service 2>/dev/null || systemctl restart ssh || true
 
-      # NAT for IPv4 sandbox egress (172.30.0.0/16 via the default uplink).
-      # IPv6 forwarding too: when --subnet6 is set each sandbox gets a routable
-      # /128 and egresses without NAT (harmless to enable when it isn't).
-      sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
-      printf 'net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\n' > /etc/sysctl.d/99-sparkbox.conf
-      UPLINK=$(ip route | awk '/default/{print $5; exit}')
-      iptables -t nat -C POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
-        iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
+      # Kernel networking knobs, written to /etc/sysctl.d so they reapply on
+      # every boot (this script runs once, at first boot only):
+      #   ip_forward       — route sandbox traffic between taps and the uplink.
+      #   v6 forwarding    — with --subnet6 each sandbox gets a routable /128 and
+      #                      egresses without NAT (harmless to enable when unset).
+      #   rp_filter strict — the metadata service identifies a caller by source
+      #                      address and the host forwards between taps, so a
+      #                      guest must not be able to source-spoof a neighbour.
+      #                      The driver sets this per-tap as each is created;
+      #                      this covers the host default too.
+      cat > /etc/sysctl.d/99-sparkbox.conf <<'SYSCTL'
+      net.ipv4.ip_forward=1
+      net.ipv6.conf.all.forwarding=1
+      net.ipv4.conf.all.rp_filter=1
+      net.ipv4.conf.default.rp_filter=1
+      SYSCTL
+      sysctl -q --system
 
       systemctl daemon-reload
+      # The iptables rules themselves live in sparkbox-net.service, which
+      # reapplies them on every boot — see the unit above.
+      systemctl enable --now sparkbox-net.service
       systemctl enable --now sparkbox-refresh-tools.timer
       systemctl enable --now sparkbox.service
       echo "sparkbox provisioned from release $RELEASE"

@@ -27,9 +27,12 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	fcdriver "github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/firecracker"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -69,6 +72,11 @@ func serve(args []string) error {
 		consoleSub   = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
 		tlsProvider  = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail     = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
+		oidcSub      = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
+		oidcAud      = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
+		metaAddr     = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
+		openSignup   = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
+		invitesPer   = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -89,9 +97,35 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("upstream key: %w", err)
 	}
-	users, err := sshgw.LoadUsers(*usersPath)
+	// The identity store lives in the same sqlite file as the proxy routes.
+	// users.conf stays the bootstrap seed: it is how a freshly provisioned host
+	// knows its first (operator) user before anyone can run `ssh signup@`.
+	userStore, err := users.Open(filepath.Join(*stateDir, "sparkbox.db"))
 	if err != nil {
+		return fmt.Errorf("user store: %w", err)
+	}
+	defer userStore.Close()
+	if err := users.SeedFile(*usersPath, userStore, log); err != nil {
 		return fmt.Errorf("users: %w", err)
+	}
+
+	// ES256 signing key for the OIDC issuer. It cannot be the ed25519 gateway
+	// key: verifiers (hivemind among them) allowlist RS256/ES256 only.
+	oidcKey, err := oidc.LoadOrCreateKey(*stateDir, "oidc_signing_key")
+	if err != nil {
+		return fmt.Errorf("oidc signing key: %w", err)
+	}
+	prevKey, err := oidc.LoadKeyIfPresent(*stateDir, "oidc_signing_key_prev")
+	if err != nil {
+		return fmt.Errorf("previous oidc signing key: %w", err)
+	}
+	issuer, err := oidc.New(oidc.Options{
+		IssuerURL: "https://" + *oidcSub + "." + *proxyDomain,
+		Signer:    oidcKey, Previous: prevKey,
+		Audiences: splitList(*oidcAud),
+	})
+	if err != nil {
+		return fmt.Errorf("oidc issuer: %w", err)
 	}
 
 	var driver vmm.Driver
@@ -172,9 +206,10 @@ func serve(args []string) error {
 		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem)
 
 	gw := sshgw.New(sshgw.GatewayOptions{
-		Manager: mgr, Users: users, HostKey: hostKey, UpstreamKey: upstreamKey,
+		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
 		Doors: doors, Domain: *proxyDomain,
+		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -186,8 +221,9 @@ func serve(args []string) error {
 	// that failed or drifted since the last run is repaired here.
 	if plumber != nil {
 		plumber.EnsureRange(ctx)
-		doorHooks.Ensure(ctx, sshgw.NewSandboxUser)
-		doorHooks.Ensure(ctx, sshgw.ControlUser)
+		for _, r := range sshgw.ReservedUsers {
+			doorHooks.Ensure(ctx, r)
+		}
 		for _, b := range mgr.List() {
 			doorHooks.Ensure(ctx, b.Name)
 		}
@@ -200,13 +236,41 @@ func serve(args []string) error {
 	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}
 	sshSrv := gw.Server(*sshAddr)
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() { errCh <- apiSrv.ListenAndServe() }()
 	go func() { errCh <- sshSrv.ListenAndServe() }()
+
+	// Guest metadata service: hands each sandbox an id token over its own tap.
+	// It binds every interface because taps come and go, and identifies the
+	// caller by source address — see internal/metadata for why that's the safe
+	// end of the connection to trust.
+	if *metaAddr != "" {
+		meta := metadata.New(metadata.Options{
+			Manager: mgr, Issuer: issuer, Users: userStore, Logger: log,
+			DefaultAudience: firstOr(splitList(*oidcAud), defaultAudience),
+			NodeName:        nodeName,
+		})
+		go func() { errCh <- meta.ListenAndServe(ctx, *metaAddr) }()
+		log.Info("guest metadata service enabled", "addr", *metaAddr, "issuer", issuer.URL())
+	}
 
 	var proxySrv *http.Server
 	if *proxyAddr != "" {
 		px := proxy.New(mgr, routeStore, *proxyDomain, log)
+		// The issuer rides on the existing proxy edge: wildcard DNS already
+		// resolves oidc.<domain> to this host and autocert already issues a cert
+		// per SNI, so serving it is two GET handlers and no new listener.
+		px.SetIssuer(*oidcSub, issuer.Handler())
+		log.Info("oidc issuer enabled", "url", issuer.URL(), "audiences", *oidcAud)
+		if !*proxyTLS {
+			// The `iss` claim must be an https URL a verifier can actually
+			// fetch: they follow it to the discovery document and JWKS over
+			// public https, and refuse anything else. Fine for a local mock run,
+			// fatal to federation on a real host — so say so plainly.
+			log.Warn("oidc issuer advertises https but --proxy-tls is off; "+
+				"relying parties will not be able to verify these tokens",
+				"issuer", issuer.URL())
+		}
 		// The password is a secret, so prefer an env var (kept out of ps/systemd
 		// status) and fall back to the flag for local/dev use.
 		consolePw := *consolePass
@@ -248,6 +312,30 @@ func serve(args []string) error {
 	}
 	sshSrv.Close() //nolint:errcheck
 	return nil
+}
+
+// defaultAudience is the hivemind SaaS URL: the relying party sparkbox exists
+// to federate with today. The audience allowlist defaults closed to it — a
+// relying party enforces its own `aud`, but minting only what we mean to mint
+// keeps a stolen token from being replayable anywhere else.
+const defaultAudience = "https://hivemind.wandb.tools"
+
+// splitList parses a comma-separated flag into a trimmed, non-empty list.
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func firstOr(list []string, def string) string {
+	if len(list) > 0 {
+		return list[0]
+	}
+	return def
 }
 
 // detectHostMemMB reads total RAM from /proc/meminfo (Linux). Returns 0 when it
