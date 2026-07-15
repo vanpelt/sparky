@@ -49,6 +49,40 @@ write_files:
     encoding: b64
     content: @@GATEWAY_UPSTREAM_KEY_B64@@
 
+  # Host-side agent-CLI refresher (deploy/refresh-agent-tools.sh, injected as
+  # b64 by launch-host.sh): patches claude+codex into the rootfs templates in
+  # seconds instead of rebuilding the image. Run at provision + daily by timer.
+  - path: /usr/local/sbin/sparkbox-refresh-tools.sh
+    permissions: '0755'
+    encoding: b64
+    content: @@REFRESH_TOOLS_B64@@
+
+  - path: /etc/systemd/system/sparkbox-refresh-tools.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=refresh agent CLIs (claude, codex) in sparkbox rootfs templates
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/sparkbox-refresh-tools.sh
+
+  - path: /etc/systemd/system/sparkbox-refresh-tools.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=daily agent-CLI refresh for sparkbox rootfs templates
+
+      [Timer]
+      OnCalendar=daily
+      RandomizedDelaySec=1h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
   - path: /etc/systemd/system/sparkbox.service
     permissions: '0644'
     content: |
@@ -140,6 +174,13 @@ write_files:
         *)     gunzip -f "$ROOTFS_FILE" ;;
       esac
 
+      # Bake up-to-date agent CLIs (claude, codex) into the fresh template.
+      # --force: the template was just replaced, so ignore any version stamp.
+      # Best-effort — a download hiccup shouldn't fail provisioning; the daily
+      # timer (enabled below) retries.
+      /usr/local/sbin/sparkbox-refresh-tools.sh --force \
+        || echo "WARN: agent tools refresh failed; timer will retry"
+
       # Pin any reserved (flexible) IPs on the primary NIC so DNS stays stable
       # across host rebuilds. launch-host.sh attaches them to the server (they
       # route to its NIC); here we merge them into cloud-init's netplan config
@@ -176,6 +217,7 @@ write_files:
         iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
 
       systemctl daemon-reload
+      systemctl enable --now sparkbox-refresh-tools.timer
       systemctl enable --now sparkbox.service
       echo "sparkbox provisioned from release $RELEASE"
 
