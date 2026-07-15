@@ -9,11 +9,14 @@
 # concurrent create sees either the old or the new template, never a torn one.
 # Running/paused VMs keep their own rootfs copies and are untouched.
 #
-# Sources (both self-contained single binaries, no guest deps):
-#   claude: downloads.claude.ai native build, sha256-verified via the release
-#           manifest (same scheme as the official install.sh)
-#   codex:  github.com/openai/codex latest release, static musl build (zst).
-#           No plain checksum published (only sigstore) — TLS-only fetch.
+# Sources (all self-contained single binaries, no guest deps):
+#   claude:   downloads.claude.ai native build, sha256-verified via the release
+#             manifest (same scheme as the official install.sh)
+#   codex:    github.com/openai/codex latest release, static musl build (zst).
+#             No plain checksum published (only sigstore) — TLS-only fetch.
+#   hivemind: github.com/wandb/hivemind release binary, version + sha256
+#             resolved from the repo's hivemind-latest.json manifest (the same
+#             manifest the official installer at hivemind.wandb.tools uses).
 #
 # Usage: refresh-agent-tools.sh [--force]
 #   --force  re-patch templates even when the version stamp says current
@@ -24,12 +27,13 @@ IMAGES_DIR=${IMAGES_DIR:-/srv/sparkbox/data/images}
 TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/data/tools}
 CLAUDE_BASE=${CLAUDE_BASE:-https://downloads.claude.ai/claude-code-releases}
 CODEX_REPO=${CODEX_REPO:-openai/codex}
+HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
 case "$(uname -m)" in
-  x86_64)  CLAUDE_PLAT=linux-x64;   CODEX_ARCH=x86_64 ;;
-  aarch64) CLAUDE_PLAT=linux-arm64; CODEX_ARCH=aarch64 ;;
+  x86_64)  CLAUDE_PLAT=linux-x64;   CODEX_ARCH=x86_64;  HM_PLAT=linux-x86_64 ;;
+  aarch64) CLAUDE_PLAT=linux-arm64; CODEX_ARCH=aarch64; HM_PLAT=linux-arm64 ;;
   *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -50,11 +54,24 @@ case "$CODEX_TAG" in
   rust-v[0-9]*) ;;
   *) echo "bad codex tag from releases/latest redirect: $CODEX_TAG" >&2; exit 1 ;;
 esac
+# Hivemind's manifest carries version, per-platform URL, and sha256 in one doc.
+read -r HM_VER HM_URL HM_SHA <<EOF
+$(curl -fsSL "$HIVEMIND_MANIFEST" | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+p = m["platforms"][sys.argv[1]]
+print(m["version"], p["binary_url"], p["binary_sha256"])' "$HM_PLAT")
+EOF
+case "$HM_VER" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "bad hivemind version from manifest: $HM_VER" >&2; exit 1 ;;
+esac
 
 if [ "$FORCE" = 0 ] && [ -f "$STAMP" ] \
    && grep -qx "CLAUDE_VERSION=$CLAUDE_VER" "$STAMP" \
-   && grep -qx "CODEX_TAG=$CODEX_TAG" "$STAMP"; then
-  echo "agent tools already current (claude $CLAUDE_VER, codex $CODEX_TAG)"
+   && grep -qx "CODEX_TAG=$CODEX_TAG" "$STAMP" \
+   && grep -qx "HIVEMIND_VERSION=$HM_VER" "$STAMP"; then
+  echo "agent tools already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER)"
   exit 0
 fi
 
@@ -75,6 +92,14 @@ if [ ! -x "$CODEX_BIN" ]; then
   curl -fsSL "https://github.com/$CODEX_REPO/releases/download/$CODEX_TAG/codex-$CODEX_ARCH-unknown-linux-musl.zst" \
     | zstd -d -o "$CODEX_BIN.tmp" -f
   chmod 0755 "$CODEX_BIN.tmp" && mv "$CODEX_BIN.tmp" "$CODEX_BIN"
+fi
+
+HM_BIN="$TOOLS_DIR/hivemind-$HM_VER-$HM_PLAT"
+if [ ! -x "$HM_BIN" ]; then
+  echo ">> downloading hivemind $HM_VER ($HM_PLAT)"
+  curl -fsSL "$HM_URL" -o "$HM_BIN.tmp"
+  echo "$HM_SHA  $HM_BIN.tmp" | sha256sum -c - >/dev/null
+  chmod 0755 "$HM_BIN.tmp" && mv "$HM_BIN.tmp" "$HM_BIN"
 fi
 
 # ---- patch every template atomically -----------------------------------------
@@ -99,6 +124,7 @@ for tpl in "$IMAGES_DIR"/*.ext4; do
   mount -o loop "$TMP" "$MNT"
   install -m 0755 "$CLAUDE_BIN" "$MNT/usr/local/bin/claude"
   install -m 0755 "$CODEX_BIN"  "$MNT/usr/local/bin/codex"
+  install -m 0755 "$HM_BIN"     "$MNT/usr/local/bin/hivemind"
   # The template stays the single source of tool versions; don't let each guest
   # race to self-update on top of it (wasted bandwidth, mid-session surprises).
   grep -qs '^DISABLE_AUTOUPDATER=' "$MNT/etc/environment" || \
@@ -113,8 +139,9 @@ if [ "$patched" = 0 ]; then
   exit 1
 fi
 
-printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\n' "$CLAUDE_VER" "$CODEX_TAG" > "$STAMP"
-# Drop cached binaries from older versions; keep the current pair.
-find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' \) \
-  ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" -delete
-echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG"
+printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\n' \
+  "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" > "$STAMP"
+# Drop cached binaries from older versions; keep the current set.
+find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'hivemind-*' \) \
+  ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" ! -name "$(basename "$HM_BIN")" -delete
+echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + hivemind $HM_VER"
