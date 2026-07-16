@@ -76,8 +76,14 @@ func seedOne(s *Store, handle string, key xssh.PublicKey, comment string) error 
 	return s.AddKey(handle, key, comment, "seed")
 }
 
-// githubKeysURL is where GitHub serves an account's public SSH keys.
-const githubKeysURL = "https://github.com/%s/.keys"
+// githubKeysURL is where GitHub serves an account's public SSH keys. The login
+// and ".keys" are one path segment: github.com/<login>.keys, not
+// github.com/<login>/.keys — the latter 404s for every account.
+//
+// A var, not a const, so tests can point it at a local server: this URL was
+// wrong (the extra slash) from the first commit until 2026-07-15, and nothing
+// caught it because there was no way to exercise it without reaching GitHub.
+var githubKeysURL = "https://github.com/%s.keys"
 
 // githubLoginOK bounds logins to GitHub's own rules (alphanumerics and single
 // dashes, 39 max) so nothing exotic reaches the URL we fetch.

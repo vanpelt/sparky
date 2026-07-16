@@ -38,6 +38,19 @@ func LoadOrCreateKey(dir, name string) (xssh.Signer, error) {
 	return xssh.NewSignerFromKey(priv)
 }
 
+// LoadKey returns the signer at <dir>/<name>.pem, erroring if it does not
+// exist. A fleet host uses this instead of LoadOrCreateKey: its keys are
+// hydrated from Secret Manager before sparkbox starts, so a missing file means
+// the fetch failed — and silently generating a fresh one would mint a new fleet
+// identity that no rootfs trusts and no client has pinned, locking everyone out.
+func LoadKey(dir, name string) (xssh.Signer, error) {
+	data, err := os.ReadFile(filepath.Join(dir, name+".pem"))
+	if err != nil {
+		return nil, err
+	}
+	return xssh.ParsePrivateKey(data)
+}
+
 // PublicKeyLine renders a signer's public key as an authorized_keys line.
 func PublicKeyLine(s xssh.Signer) string {
 	return fmt.Sprintf("%s", xssh.MarshalAuthorizedKey(s.PublicKey()))

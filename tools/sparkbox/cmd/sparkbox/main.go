@@ -39,11 +39,21 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: sparkbox serve [flags]")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: sparkbox <serve|fetch-secrets> [flags]")
 		os.Exit(2)
 	}
-	if err := serve(os.Args[2:]); err != nil {
+	var err error
+	switch os.Args[1] {
+	case "serve":
+		err = serve(os.Args[2:])
+	case "fetch-secrets":
+		err = fetchSecrets(os.Args[2:])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: sparkbox <serve|fetch-secrets> [flags]")
+		os.Exit(2)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "sparkbox:", err)
 		os.Exit(1)
 	}
@@ -53,7 +63,9 @@ func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
 		driverName   = fs.String("driver", "mock", "vm driver: mock | firecracker")
-		stateDir     = fs.String("state-dir", "./state", "directory for keys, state, and VM data")
+		stateDir     = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
+		keyDir       = fs.String("key-dir", "", "directory holding the three fleet key PEMs (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
+		requireKeys  = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
 		usersPath    = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
 		sshAddr      = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
 		apiAddr      = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
@@ -89,11 +101,25 @@ func serve(args []string) error {
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
 		return err
 	}
-	hostKey, err := sshgw.LoadOrCreateKey(*stateDir, "gateway_host_key")
+	// The three fleet keys live in --key-dir (default --state-dir). On a fleet
+	// host that's tmpfs, hydrated from Secret Manager by `sparkbox fetch-secrets`
+	// before this starts, and --require-keys turns a missing file into a hard
+	// failure rather than a silently-minted new fleet identity.
+	keysIn := *keyDir
+	if keysIn == "" {
+		keysIn = *stateDir
+	}
+	loadSSH := sshgw.LoadOrCreateKey
+	loadOIDC := oidc.LoadOrCreateKey
+	if *requireKeys {
+		loadSSH = sshgw.LoadKey
+		loadOIDC = oidc.LoadKey
+	}
+	hostKey, err := loadSSH(keysIn, "gateway_host_key")
 	if err != nil {
 		return fmt.Errorf("host key: %w", err)
 	}
-	upstreamKey, err := sshgw.LoadOrCreateKey(*stateDir, "gateway_upstream_key")
+	upstreamKey, err := loadSSH(keysIn, "gateway_upstream_key")
 	if err != nil {
 		return fmt.Errorf("upstream key: %w", err)
 	}
@@ -111,11 +137,11 @@ func serve(args []string) error {
 
 	// ES256 signing key for the OIDC issuer. It cannot be the ed25519 gateway
 	// key: verifiers (hivemind among them) allowlist RS256/ES256 only.
-	oidcKey, err := oidc.LoadOrCreateKey(*stateDir, "oidc_signing_key")
+	oidcKey, err := loadOIDC(keysIn, "oidc_signing_key")
 	if err != nil {
 		return fmt.Errorf("oidc signing key: %w", err)
 	}
-	prevKey, err := oidc.LoadKeyIfPresent(*stateDir, "oidc_signing_key_prev")
+	prevKey, err := oidc.LoadKeyIfPresent(keysIn, "oidc_signing_key_prev")
 	if err != nil {
 		return fmt.Errorf("previous oidc signing key: %w", err)
 	}

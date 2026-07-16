@@ -60,6 +60,21 @@ if [ "${#FIPS[@]}" -gt 0 ] && [ -z "${KEEP_ATTACHED:-}" ]; then
   done
 fi
 
+# Delete the per-host IAM identity (application "sparkbox-host-<name>"), which
+# cascades its policy and API key. launch-host.sh mints one per box; leaving them
+# behind burns the org's 100-application / 50-policy quota. Resolve the box name
+# first (we may only have SERVER_ID).
+HOST_NAME=${NAME:-$(scw baremetal server get "$SRV" zone="$ZONE" -o json 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)}
+if [ -n "$HOST_NAME" ]; then
+  APP_ID=$(scw iam application list name="sparkbox-host-$HOST_NAME" -o json 2>/dev/null \
+    | HN="$HOST_NAME" python3 -c 'import json,os,sys; print(next((a["id"] for a in json.load(sys.stdin) if a["name"]=="sparkbox-host-"+os.environ["HN"]), ""))' 2>/dev/null || true)
+  if [ -n "$APP_ID" ]; then
+    echo "== deleting host identity sparkbox-host-$HOST_NAME ($APP_ID) =="
+    scw iam application delete "$APP_ID" >/dev/null 2>&1 || echo "   (could not delete app $APP_ID — delete it manually)"
+  fi
+fi
+
 echo "== deleting server $SRV — billing stops =="
 scw baremetal server delete "$SRV" zone="$ZONE" >/dev/null
 echo "== done =="

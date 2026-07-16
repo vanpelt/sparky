@@ -1,16 +1,17 @@
 #cloud-config
 # Zero-touch sparkbox host provisioning. This is a TEMPLATE: deploy/launch-host.sh
-# fills the double-at placeholder tokens (secrets + release) and passes the
-# result as baremetal user-data. It fetches PREBUILT artifacts from Object Storage
-# (seconds) instead of building from source (minutes) — see hack/build-artifacts.sh.
+# fills the double-at placeholder tokens (config + one bootstrap key) and passes
+# the result as baremetal user-data. It fetches PREBUILT artifacts from Object
+# Storage (seconds) instead of building from source — see hack/build-artifacts.sh.
 #
-# Secrets injected here (never stored in the artifact bucket):
-#   - your laptop pubkey (users.conf)
-#   - the FLEET gateway host + upstream PRIVATE keys (base64), whose public
-#     halves are baked into the rootfs so every sandbox trusts the gateway.
-#   - the FLEET OIDC signing key (base64): the ES256 key every sandbox's
-#     identity token is signed with. It is fleet-wide so the issuer keeps the
-#     same JWKS across host rebuilds and relying parties never re-onboard.
+# Fleet secrets NO LONGER ride in this user-data. The three private keys (gateway
+# host + upstream, OIDC signing) and the two passwords (console, Cloudflare) live
+# in Scaleway Secret Manager under /sparkbox/fleet; sparkbox-secrets.service fetches
+# them into tmpfs (/run/sparkbox) on every boot, before sparkbox starts. The ONLY
+# secret still in user-data is the host's Secret Manager API key (/etc/sparkbox/
+# fetch.env), which launch-host.sh mints per host, pins to this box's IP, scopes to
+# SecretManagerSecretAccess, and expires — so a leaked user-data is near-worthless.
+# Injected in the clear here: your laptop pubkey (users.conf) and non-secret config.
 
 package_update: true
 packages:
@@ -26,39 +27,26 @@ write_files:
     content: |
       @@USERS_CONF@@
 
-  # 0600: holds the operator-console password and the Cloudflare token, so
-  # keep it off world-read. CLOUDFLARE_API_TOKEN (Zone.DNS:Edit) enables
-  # per-sandbox AAAA publishing for hostname SSH routing — and DNS-01 wildcard
-  # TLS if TLS_FLAGS selects the cloudflare provider; empty disables both.
+  # Non-secret host config only. The console password and Cloudflare token used
+  # to live here; they now come from Secret Manager into /run/sparkbox/secrets.env
+  # (fetched by sparkbox-secrets.service), which sparkbox.service also reads.
   - path: /srv/sparkbox/sparkbox.env
-    permissions: '0600'
+    permissions: '0644'
     content: |
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
-      SPARKBOX_CONSOLE_PASSWORD=@@CONSOLE_PASSWORD@@
-      CLOUDFLARE_API_TOKEN=@@CLOUDFLARE_API_TOKEN@@
       TLS_FLAGS=@@TLS_FLAGS@@
 
-  # Staged OUTSIDE /srv/sparkbox/data — the provision script mounts the XFS
-  # volume there, which would otherwise shadow anything write_files put under
-  # it. The script copies these into data/state after mounting.
-  - path: /srv/sparkbox/keys/gateway_host_key.pem
+  # The one secret still in user-data: this host's Secret Manager API key, used
+  # ONLY by sparkbox-secrets.service to fetch the fleet secrets. It is IP-pinned,
+  # scoped to SecretManagerSecretAccess, and expiring (see mint-host-identity.sh),
+  # so a leak of this file is near-worthless off this box.
+  - path: /etc/sparkbox/fetch.env
     permissions: '0600'
-    encoding: b64
-    content: @@GATEWAY_HOST_KEY_B64@@
-
-  - path: /srv/sparkbox/keys/gateway_upstream_key.pem
-    permissions: '0600'
-    encoding: b64
-    content: @@GATEWAY_UPSTREAM_KEY_B64@@
-
-  # ES256 (P-256) key that signs sandbox identity tokens. Fleet-wide, like the
-  # gateway keys: rebuild a host and the issuer's JWKS is unchanged, so nobody
-  # has to re-onboard a service account.
-  - path: /srv/sparkbox/keys/oidc_signing_key.pem
-    permissions: '0600'
-    encoding: b64
-    content: @@OIDC_SIGNING_KEY_B64@@
+    content: |
+      SCW_SECRET_KEY=@@SCW_SECRET_KEY@@
+      SCW_DEFAULT_PROJECT_ID=@@SCW_PROJECT_ID@@
+      SCW_DEFAULT_REGION=@@SCW_REGION@@
 
   # Host-side agent-CLI refresher (deploy/refresh-agent-tools.sh, injected as
   # b64 by launch-host.sh): patches claude+codex into the rootfs templates in
@@ -128,21 +116,67 @@ write_files:
       [Install]
       WantedBy=timers.target
 
+  # Hydrate fleet secrets from Secret Manager into tmpfs before sparkbox starts.
+  # Runs on every boot: /run is cleared on reboot, so the keys must be re-fetched.
+  # If this fails (e.g. the IP pin rejects us), sparkbox.service does not start —
+  # fail closed, and journalctl -u sparkbox-secrets shows Scaleway's reason.
+  - path: /etc/systemd/system/sparkbox-secrets.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=fetch sparkbox fleet secrets from Scaleway Secret Manager into tmpfs
+      After=network-online.target
+      Wants=network-online.target
+      Before=sparkbox.service
+      # Retry indefinitely: at first boot the just-minted IAM key can 403 for up
+      # to ~60s while the policy propagates. Without this, systemd's default rate
+      # limit (5 starts/10s) trips and gives up before propagation completes.
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      EnvironmentFile=/etc/sparkbox/fetch.env
+      ExecStart=/usr/local/bin/sparkbox fetch-secrets \
+        --path /sparkbox/fleet \
+        --key-dir /run/sparkbox/keys \
+        --env-out /run/sparkbox/secrets.env
+      # Boot-time network races Scaleway's eventual consistency on a just-minted
+      # key; the fetch retries internally, and systemd retries the unit too.
+      Restart=on-failure
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+
   - path: /etc/systemd/system/sparkbox.service
     permissions: '0644'
     content: |
       [Unit]
       Description=sparkbox agentic sandbox gateway (SSH + HTTP proxy + firecracker)
-      After=network-online.target
-      Wants=network-online.target
+      After=network-online.target sparkbox-secrets.service
+      # Want (not Require) the fetch: a hard Requires= permanently fails this unit
+      # if the fetch is briefly down at boot, and systemd won't retroactively
+      # start us when it later succeeds. With Wants=+After=, we start after the
+      # fetch attempt; if keys aren't there yet, --require-keys exits us and
+      # Restart=always retries every 2s until sparkbox-secrets (Restart=on-failure)
+      # has written them. Fail-closed and self-healing, no manual intervention.
+      Wants=network-online.target sparkbox-secrets.service
       ConditionPathExists=/dev/kvm
+      # Don't let the restart loop (below) trip systemd's default start-rate
+      # limit while we wait for sparkbox-secrets to write the keys into /run.
+      StartLimitIntervalSec=0
 
       [Service]
       Type=simple
+      # Non-secret config, then the fetched secrets (console password, Cloudflare
+      # token). The `-` tolerates the file's brief absence; Requires= orders it.
       EnvironmentFile=/srv/sparkbox/sparkbox.env
+      EnvironmentFile=-/run/sparkbox/secrets.env
       User=root
       ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
         --state-dir /srv/sparkbox/data/state \
+        --key-dir /run/sparkbox/keys --require-keys \
         --kernel /srv/sparkbox/vmlinux \
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
@@ -189,11 +223,9 @@ write_files:
       fi
       mkdir -p "$DIR/data/state" "$DIR/data/images"
 
-      # Move the staged fleet gateway keys into the (now-mounted) state dir.
-      # They were written outside the mount so it wouldn't shadow them.
-      install -m 600 "$DIR/keys/gateway_host_key.pem"     "$DIR/data/state/gateway_host_key.pem"
-      install -m 600 "$DIR/keys/gateway_upstream_key.pem" "$DIR/data/state/gateway_upstream_key.pem"
-      install -m 600 "$DIR/keys/oidc_signing_key.pem"     "$DIR/data/state/oidc_signing_key.pem"
+      # Fleet keys are no longer staged here — sparkbox-secrets.service fetches
+      # them from Secret Manager into /run/sparkbox/keys (tmpfs) before sparkbox
+      # starts, on this and every subsequent boot.
 
       # Fetch manifest, then each artifact, verifying sha256.
       curl -fsSL "$REL/manifest.env" -o "$DIR/manifest.env"
@@ -276,6 +308,10 @@ write_files:
       # reapplies them on every boot — see the unit above.
       systemctl enable --now sparkbox-net.service
       systemctl enable --now sparkbox-refresh-tools.timer
+      # Fetch fleet secrets into tmpfs first; sparkbox.service Requires= it, so
+      # enabling it here (and on every boot) is what puts keys in /run before the
+      # gateway starts. If the fetch fails, sparkbox stays down — by design.
+      systemctl enable sparkbox-secrets.service
       systemctl enable --now sparkbox.service
       echo "sparkbox provisioned from release $RELEASE"
 

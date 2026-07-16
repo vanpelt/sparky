@@ -56,6 +56,19 @@ func LoadOrCreateKey(dir, name string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
+// LoadKey returns the key at <dir>/<name>.pem, erroring if it does not exist.
+// A fleet host uses this instead of LoadOrCreateKey: the key is hydrated from
+// Secret Manager before sparkbox starts, so a missing file means the fetch
+// failed — and silently generating a fresh one would change the issuer's JWKS,
+// breaking every relying party bound to it.
+func LoadKey(dir, name string) (*ecdsa.PrivateKey, error) {
+	data, err := os.ReadFile(filepath.Join(dir, name+".pem"))
+	if err != nil {
+		return nil, err
+	}
+	return parseECPrivateKey(data)
+}
+
 // LoadKeyIfPresent returns the key at <dir>/<name>.pem, or nil when the file
 // doesn't exist. Used for the optional previous key that keeps a rotation
 // verifiable while old tokens are still in flight.
