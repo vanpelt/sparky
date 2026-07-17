@@ -354,9 +354,15 @@ type NodeCapacity struct {
 	TotalMemMB  int64  `json:"total_mem_mb"`
 	BudgetMemMB int64  `json:"budget_mem_mb"` // TotalMemMB * MemAdmissionPct/100
 	UsedVCPUs   int64  `json:"used_vcpus"`    // allocated to running sandboxes
-	UsedMemMB   int64  `json:"used_mem_mb"`   // allocated to running sandboxes
-	Running     int    `json:"running"`
-	Sandboxes   int    `json:"sandboxes"`
+	UsedMemMB   int64  `json:"used_mem_mb"`   // allocated ceiling of running sandboxes (sum of MemMB)
+	// EffectiveMemMB is what admission actually charges running sandboxes: the
+	// working-set reserve under live overcommit, or the full ceiling when off.
+	// This — not UsedMemMB — is what to compare against BudgetMemMB.
+	EffectiveMemMB int64 `json:"effective_mem_mb"`
+	// ReserveMemMB is the per-VM working-set floor; 0 means overcommit is off.
+	ReserveMemMB int64 `json:"reserve_mem_mb"`
+	Running      int   `json:"running"`
+	Sandboxes    int   `json:"sandboxes"`
 }
 
 // Capacity reports this node's resources. Used* counts only running sandboxes,
@@ -365,10 +371,11 @@ func (m *Manager) Capacity() NodeCapacity {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := NodeCapacity{
-		Node:       m.nodeName,
-		TotalVCPUs: m.hostVCPUs,
-		TotalMemMB: m.hostMemMB,
-		Sandboxes:  len(m.boxes),
+		Node:         m.nodeName,
+		TotalVCPUs:   m.hostVCPUs,
+		TotalMemMB:   m.hostMemMB,
+		ReserveMemMB: m.reserveMB,
+		Sandboxes:    len(m.boxes),
 	}
 	if m.memAdmitPct > 0 {
 		c.BudgetMemMB = m.hostMemMB * int64(m.memAdmitPct) / 100
@@ -378,6 +385,7 @@ func (m *Manager) Capacity() NodeCapacity {
 			c.Running++
 			c.UsedVCPUs += b.VCPUs
 			c.UsedMemMB += b.MemMB
+			c.EffectiveMemMB += m.effectiveMemMB(b.MemMB)
 		}
 	}
 	return c

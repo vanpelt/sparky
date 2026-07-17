@@ -19,6 +19,7 @@
     --radius: 0.6rem;
     --green: 142 71% 45%;
     --amber: 38 92% 50%;
+    --blue: 217 91% 56%;
     --red: 0 72% 51%;
   }
   @media (prefers-color-scheme: dark) {
@@ -34,6 +35,7 @@
       --ring: 240 4.9% 83.9%;
       --green: 142 69% 58%;
       --amber: 38 92% 60%;
+      --blue: 217 91% 66%;
       --red: 0 84% 65%;
     }
   }
@@ -92,6 +94,9 @@
   .stat .label { font-size: 12px; color: hsl(var(--muted-foreground)); }
   .stat .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; }
   .stat .value small { font-size: 13px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+  /* the overcommit ratio is the dashboard's signature — the one number that
+     says "N VMs live on a fraction of their allocated RAM". */
+  .stat .value.accent { color: hsl(var(--blue)); font-size: 30px; font-variant-numeric: tabular-nums; }
   .stat .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
 
   /* capacity meters */
@@ -228,17 +233,15 @@
         <div class="sub" id="s-states">–</div>
       </div>
       <div class="card stat">
-        <div class="label">Memory</div>
+        <div class="label">Live memory</div>
         <div class="value" id="c-mem">–</div>
         <div class="sub" id="c-mem-sub">–</div>
-        <div class="sub" id="c-mem-live" style="color:hsl(var(--blue, 217 91% 60%))"></div>
         <div class="meter" id="c-mem-meter"><div></div></div>
       </div>
       <div class="card stat">
-        <div class="label">vCPU</div>
-        <div class="value" id="c-cpu">–</div>
-        <div class="sub" id="c-cpu-sub">–</div>
-        <div class="meter" id="c-cpu-meter"><div></div></div>
+        <div class="label">Overcommit</div>
+        <div class="value accent" id="c-over" title="allocated RAM ceiling ÷ what the guests actually use">–</div>
+        <div class="sub" id="c-over-sub">–</div>
       </div>
       <div class="card stat">
         <div class="label">Headroom</div>
@@ -250,7 +253,7 @@
     <div class="card panel">
       <div class="panel-head">
         <h2>Sandboxes</h2>
-        <span class="hint">auto-refreshes every 4s · idle VMs auto-pause after 30m · ⏰ = next scheduled wake · pinned = always-on</span>
+        <span class="hint">auto-refreshes every 4s · idle VMs balloon down, then pause · ⏰ next scheduled wake · pinned = always-on</span>
       </div>
       <div class="table-scroll">
         <table>
@@ -343,32 +346,75 @@
     el.firstElementChild.style.width = pct + "%";
   }
 
-  // renderCluster fills the capacity cards. The API returns per-node capacity;
-  // sum across nodes so this keeps working when there is more than one box.
+  // The capacity cards need two sources: the cluster endpoint (physical RAM,
+  // admission budget, allocated ceiling, reserve) and the sandbox list (real
+  // per-guest usage from balloon stats). Stash both and repaint from whichever
+  // arrived, so the cards are correct no matter which fetch lands first.
+  let cap = { cluster: null, list: null };
+
   function renderCluster(c) {
     domain = c.domain || "";
-    const nodes = c.nodes || [];
-    const sum = (k) => nodes.reduce((n, x) => n + (x[k] || 0), 0);
-    const totalMem = sum("total_mem_mb"), budget = sum("budget_mem_mb") || totalMem;
-    const usedMem = sum("used_mem_mb"), totalCpu = sum("total_vcpus"), usedCpu = sum("used_vcpus");
-    const nodeLabel = nodes.length + " node" + (nodes.length === 1 ? "" : "s");
+    cap.cluster = c;
+    paintCapacity();
+  }
 
-    if (totalMem > 0) {
-      $("c-mem").innerHTML = gb(usedMem) + " <small>/ " + gb(budget) + " GB</small>";
-      $("c-mem-sub").textContent = gb(totalMem) + " GB physical · " + nodeLabel;
-      const freeMB = Math.max(0, budget - usedMem);
-      $("c-free").innerHTML = gb(freeMB) + " <small>GB free</small>";
-      $("c-free-sub").textContent = "fits ~" + Math.floor(freeMB / 8192) + " more default sandboxes";
-    } else {
-      $("c-mem").innerHTML = gb(usedMem) + " <small>GB</small>";
-      $("c-mem-sub").textContent = "host capacity unknown";
-      $("c-free").textContent = "–";
-      $("c-free-sub").textContent = "host capacity unknown";
+  // paintCapacity tells the truth under live overcommit: the health meter reads
+  // REAL usage against physical RAM (not the allocated ceiling against the
+  // budget, which is designed to be exceeded), and the ceiling becomes the
+  // numerator of the overcommit ratio — the win, not a warning.
+  function paintCapacity() {
+    const c = cap.cluster, L = cap.list;
+    const nodes = (c && c.nodes) || [];
+    const sum = (k) => nodes.reduce((a, x) => a + (x[k] || 0), 0);
+    const phys = sum("total_mem_mb");
+    const budget = sum("budget_mem_mb") || phys;
+    const alloc = sum("used_mem_mb");          // provisioned ceiling (sum of 8GBs)
+    const effective = sum("effective_mem_mb"); // what admission actually charges
+    const reserve = nodes.reduce((m, x) => Math.max(m, x.reserve_mem_mb || 0), 0);
+    const usedCpu = sum("used_vcpus"), totalCpu = sum("total_vcpus");
+
+    const running = L ? L.running : sum("running");
+    const real = L ? L.realUsed : 0;
+    const realKnown = L ? L.realKnown : false;
+
+    // Card 1 — Sandboxes, including the ballooned (Warm) tier.
+    if (L) {
+      $("s-total").textContent = L.total;
+      $("s-states").textContent =
+        L.running + " running · " + L.ballooned + " ballooned · " + L.paused + " paused";
     }
-    meter("c-mem-meter", usedMem, budget);
-    $("c-cpu").innerHTML = usedCpu + (totalCpu > 0 ? " <small>/ " + totalCpu + "</small>" : "");
-    $("c-cpu-sub").textContent = totalCpu > 0 ? "allocated of " + totalCpu + " host threads" : "host capacity unknown";
-    meter("c-cpu-meter", usedCpu, totalCpu);
+
+    // Card 2 — Live memory: what the guests actually use vs physical RAM.
+    const used = realKnown ? real : effective;
+    if (phys > 0) {
+      $("c-mem").innerHTML = gb(used) + " <small>/ " + gb(phys) + " GB</small>";
+      $("c-mem-sub").textContent = realKnown
+        ? "real use across " + running + " guest" + (running === 1 ? "" : "s")
+        : "admission estimate — connect a VM for live stats";
+      meter("c-mem-meter", used, phys);
+    } else {
+      $("c-mem").innerHTML = gb(used) + " <small>GB</small>";
+      $("c-mem-sub").textContent = "host capacity unknown";
+    }
+
+    // Card 3 — Overcommit ratio (the signature): ceiling ÷ real footprint.
+    const denom = realKnown ? real : effective;
+    const ratio = denom > 0 ? alloc / denom : 0;
+    $("c-over").textContent =
+      ratio >= 1 ? (ratio < 10 ? ratio.toFixed(1) : Math.round(ratio)) + "×"
+      : running ? "1×" : "–";
+    $("c-over-sub").innerHTML = running
+      ? gb(alloc) + " GB provisioned on " + gb(denom) + " GB " + (realKnown ? "real" : "reserved")
+        + (totalCpu > 0 ? " · " + usedCpu + " vCPU on " + totalCpu + " threads" : "")
+      : "no running sandboxes";
+
+    // Card 4 — Headroom: how many more you can actually start (admission math).
+    const perVM = reserve > 0 ? reserve : 8192;
+    const remain = Math.max(0, budget - effective);
+    $("c-free").innerHTML = "~" + Math.floor(remain / perVM) + " <small>more</small>";
+    $("c-free-sub").textContent = reserve > 0
+      ? "at " + gb(reserve) + " GB reserve/VM · " + gb(budget) + " GB RAM budget"
+      : "at 8 GB/VM — overcommit off";
   }
 
   // routeChips renders each web route as a linked pill with a health dot:
@@ -390,21 +436,16 @@
   }
 
   function render(list) {
-    const running = list.filter((b) => b.state === "running").length;
-    $("s-total").textContent = list.length;
-    $("s-states").textContent = running + " running · " + (list.length - running) + " paused";
-
-    // Live overcommit read-out: real RAM in use across running guests vs the
-    // ceiling they're allocated. When actual << allocated, the overcommit bet
-    // is paying off — this is the number the whole redesign is about.
-    let live = 0, liveKnown = false, allocRunning = 0;
+    // Fold the list into capacity stats (real usage, tier counts) and repaint
+    // the cards; the cluster fetch supplies the rest.
+    let running = 0, ballooned = 0, real = 0, realKnown = false;
     for (const b of list) {
-      if (b.state === "running") allocRunning += b.mem_mb || 0;
-      if (typeof b.mem_used_mb === "number") { live += b.mem_used_mb; liveKnown = true; }
+      if (b.state === "running") running++;
+      if (b.ballooned) ballooned++;
+      if (typeof b.mem_used_mb === "number") { real += b.mem_used_mb; realKnown = true; }
     }
-    $("c-mem-live").textContent = liveKnown
-      ? "live: " + gb(live) + " GB used of " + gb(allocRunning) + " GB allocated"
-      : "";
+    cap.list = { total: list.length, running, ballooned, paused: list.length - running, realUsed: real, realKnown };
+    paintCapacity();
 
     const rows = $("rows");
     rows.innerHTML = "";

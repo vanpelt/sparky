@@ -32,13 +32,13 @@ SUBNET6=${SUBNET6:-}
 SUBNET6_FLAG=""
 [ -n "$SUBNET6" ] && SUBNET6_FLAG="--subnet6 $SUBNET6"
 
-# Optional live-overcommit flags. Empty by default (count the full memory
-# ceiling per VM, the safe baseline). To pack more warm VMs on a box, set the
-# working-set floor measured with hack/measure-density.py, e.g.:
-#   OVERCOMMIT_FLAGS="--mem-reserve-mb 1024"
-# It can also be flipped on a running host by editing /srv/sparkbox/sparkbox.env
-# and `systemctl restart sparkbox` — no relaunch needed.
-OVERCOMMIT_FLAGS=${OVERCOMMIT_FLAGS:-}
+# Live-overcommit + density defaults for fleet hosts. A sandbox's RAM is lazily
+# allocated, so an 8GB VM costs its working set (~0.5GB idle, measured), not 8GB
+# — admission charges the --mem-reserve-mb floor instead of the ceiling, and the
+# per-owner cap rises to match. Verified in prod: 12 running 8GB VMs cost ~7GB.
+# Override for a conservative box with OVERCOMMIT_FLAGS="" ; retune the reserve
+# from hack/measure-density.py or the console's live-usage readout.
+OVERCOMMIT_FLAGS=${OVERCOMMIT_FLAGS:-"--mem-reserve-mb 1024 --max-running-per-owner 50"}
 
 # Optional extra proxy flags, appended last. For HTTPS on :443 with on-demand
 # Let's Encrypt (no Cloudflare token):
