@@ -18,6 +18,10 @@ HOST_IP=${HOST_IP:?set HOST_IP to the host outbound public IPv4}
 REGION=${REGION:-$(scw config get default-region 2>/dev/null || echo fr-par)}
 PROJECT_ID=${PROJECT_ID:-$(scw config get default-project-id)}
 KEY_TTL_DAYS=${KEY_TTL_DAYS:-30}
+# When the host has routed IPv6 (SUBNET6), it may reach api.scaleway.com over
+# IPv6 (happy-eyeballs prefers v6), so the source Scaleway sees is a v6 address
+# in that block, not the native IPv4. Pinning only v4 would then 403 the fetch.
+SUBNET6=${SUBNET6:-}
 # Scope the policy to the whole /sparkbox/ tree so per-host secret paths added
 # later (e.g. /sparkbox/host-<id>/) stay covered without touching the policy.
 FLEET_PREFIX=${FLEET_PREFIX:-/sparkbox/}
@@ -40,12 +44,17 @@ log "   application: $APP_ID"
 # for per-box isolation, give a box its own Project. IP pin + read-only
 # (SecretManagerSecretAccess) + expiry are the load-bearing controls.
 COND="request.ip == '$HOST_IP'"
+if [ -n "$SUBNET6" ]; then
+  # inIpRange covers any v6 source in the delegated /64 (verified: CEL accepts
+  # it for IPv6). The box egresses from either its native v4 or a v6 in-block.
+  COND="$COND || inIpRange(request.ip, '$SUBNET6')"
+fi
 POLICY_ID=$(scw iam policy create name="sparkbox-host-$NAME" application-id="$APP_ID" \
   rules.0.project-ids.0="$PROJECT_ID" \
   rules.0.permission-set-names.0=SecretManagerSecretAccess \
   rules.0.condition="$COND" -o json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-log "   policy:      $POLICY_ID (SecretManagerSecretAccess, project-scoped, ip==$HOST_IP)"
+log "   policy:      $POLICY_ID (SecretManagerSecretAccess, project-scoped, ${SUBNET6:+v4+v6 }pin)"
 
 EXPIRES=$(python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=$KEY_TTL_DAYS)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
 KEY_JSON=$(scw iam api-key create application-id="$APP_ID" expires-at="$EXPIRES" \

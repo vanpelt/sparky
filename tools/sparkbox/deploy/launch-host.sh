@@ -80,14 +80,19 @@ fi
 
 # --- mint the host's IP-pinned Secret Manager key ---------------------------
 # The box's native public IPv4 is its outbound source address (DHCP owns the
-# default route even when flexible IPs are attached as extras), which is what the
-# request.ip policy condition matches. With no flexible IP there is exactly one.
+# default route even when flexible IPs are attached as extras). Exclude any
+# attached flexible address so we pin to the native IP, not the flexible one.
 HOST_IP=$(scw baremetal server get "$SRV" zone="$ZONE" -o json \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(i["address"] for i in d["ips"] if i["version"]=="IPv4"))')
-echo "== host public IPv4: $HOST_IP =="
+  | FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" python3 -c 'import json,sys,os
+d=json.load(sys.stdin)
+flex=set(a.split("/")[0] for a in os.environ.get("FLEXIBLE_ADDRS","").split())
+v4=[i["address"] for i in d["ips"] if i["version"]=="IPv4" and i["address"] not in flex]
+print(v4[0] if v4 else "")')
+[ -n "$HOST_IP" ] || { echo "could not determine native public IPv4"; exit 1; }
+echo "== host native public IPv4: $HOST_IP ${SUBNET6:+(+ v6 $SUBNET6)} =="
 
 eval "$(NAME="$NAME" HOST_IP="$HOST_IP" REGION="$REGION" PROJECT_ID="$PROJECT_ID" \
-        KEY_TTL_DAYS="$KEY_TTL_DAYS" "$HERE/mint-host-identity.sh")"
+        KEY_TTL_DAYS="$KEY_TTL_DAYS" SUBNET6="$SUBNET6" "$HERE/mint-host-identity.sh")"
 # eval brought APP_ID / POLICY_ID / ACCESS_KEY / SECRET_KEY into scope.
 [ -n "${SECRET_KEY:-}" ] || { echo "failed to mint host identity"; exit 1; }
 
