@@ -23,14 +23,20 @@ RCLONE_REMOTE=${RCLONE_REMOTE:-sparkbox-artifacts}
 REGION=${REGION:-fr-par}
 RELEASE=${RELEASE:-$(date -u +%Y-%m-%d-%H%M)}
 GATEWAY_PUBKEY_FILE=${GATEWAY_PUBKEY_FILE:-$SPARKBOX_DIR/gateway_upstream_key.pub}
-# Default base: OpenAI's codex-universal — ubuntu:24.04 preloaded with
-# toolchains for ~10 languages (python/node/go/rust/java/ruby/php/swift/
-# elixir/bazel), i.e. what a coding agent expects to find. ~11GB to pull,
-# ~30GB unpacked, so the build host wants ~70GB of scratch disk. Override
-# IMAGE=ubuntu:24.04 ROOTFS_NAME=ubuntu ROOTFS_MB=10240 for a slim build.
-IMAGE=${IMAGE:-ghcr.io/openai/codex-universal:latest}
+# Base image: by default we build our OWN lean image from tools/sparkbox/images/
+# (ubuntu:24.04 + a curated toolset + headless Chrome + the `sparky` login user;
+# see that Dockerfile). ~3-5GB, vs the ~30GB codex-universal it replaces. Override
+# IMAGE=<ref> to flatten a prebuilt image instead (e.g. ubuntu:24.04 for a minimal
+# build, or a legacy codex-universal); when IMAGE is set we don't build our own.
+IMAGE=${IMAGE:-}
+IMAGES_DIR="$REPO_DIR/tools/sparkbox/images"
+BUILD_OWN_IMAGE=0
+if [ -z "$IMAGE" ]; then
+  BUILD_OWN_IMAGE=1
+  IMAGE="sparkbox-base:$RELEASE"   # local tag, built on cache miss below
+fi
 ROOTFS_NAME=${ROOTFS_NAME:-universal}   # template + artifact basename; must match the server's --default-image
-ROOTFS_MB=${ROOTFS_MB:-65536}   # per-sandbox root disk ceiling (thin CoW copy; ~30GB is toolchains)
+ROOTFS_MB=${ROOTFS_MB:-65536}   # per-sandbox root disk ceiling (thin CoW copy; mostly unwritten)
 # Kernel + firecracker default to a build host's staged copies, but CI (see
 # .github/workflows/build-artifacts.yml) downloads them and points here.
 KERNEL=${KERNEL:-$SPARKBOX_DIR/vmlinux}
@@ -66,9 +72,21 @@ cp "$FIRECRACKER_BIN" "$STAGE/firecracker"
 # image, so its presence marks a complete upload — never a torn one.
 ROOTFS_REUSED=0
 ROOTFS_PATH="releases/$RELEASE/$ROOTFS_NAME.ext4.zst"   # fallback: uncached, built per-release
-IMG_MANIFEST=$(docker manifest inspect "$IMAGE" 2>/dev/null || true)
-if [ -n "$IMG_MANIFEST" ]; then
-  ROOTFS_KEY=$({ printf '%s' "$IMG_MANIFEST"; \
+# What shapes the rootfs bytes? For our own image, the Dockerfile + its whole
+# build context (all of images/) + the ubuntu:24.04 base digest (rebuild when
+# upstream moves). For an external IMAGE, that image's registry manifest. A local
+# tag has no registry manifest — keying on the build context is what lets us cache
+# a locally-built image at all.
+if [ "$BUILD_OWN_IMAGE" = 1 ]; then
+  # Relative paths (subshell cd) so the key is identical on CI and a build host —
+  # sha256sum otherwise embeds the absolute path, which differs per machine.
+  BASE_KEY=$({ ( cd "$IMAGES_DIR" && find . -type f -exec sha256sum {} + | sort ); \
+               docker manifest inspect ubuntu:24.04 2>/dev/null || echo 'ubuntu:24.04?'; })
+else
+  BASE_KEY=$(docker manifest inspect "$IMAGE" 2>/dev/null || true)
+fi
+if [ -n "$BASE_KEY" ]; then
+  ROOTFS_KEY=$({ printf '%s' "$BASE_KEY"; \
                  cat "$REPO_DIR/tools/sparkbox/hack/build-rootfs.sh" \
                      "$REPO_DIR/tools/sparkbox/deploy/install-guest-identity.sh" \
                      "$GATEWAY_PUBKEY_FILE"; \
@@ -78,31 +96,42 @@ if [ -n "$IMG_MANIFEST" ]; then
      && SHA256_ROOTFS=$(rclone cat "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.sha256" 2>/dev/null) \
      && [ -n "$SHA256_ROOTFS" ]; then
     ROOTFS_REUSED=1
-    echo "== rootfs cache hit: $ROOTFS_PATH (skipping build + upload) =="
+    # The login user is baked into the (cached) template; read it from the sidecar
+    # uploaded alongside it so the manifest can still carry ROOTFS_LOGIN_USER.
+    ROOTFS_LOGIN_USER=$(rclone cat "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.login-user" 2>/dev/null || echo root)
+    echo "== rootfs cache hit: $ROOTFS_PATH (login user: $ROOTFS_LOGIN_USER; skipping build + upload) =="
   fi
 else
-  echo "!! docker manifest inspect $IMAGE failed — no cache key; building into the release dir"
+  echo "!! no cache key for $IMAGE — building into the release dir"
 fi
 
 if [ "$ROOTFS_REUSED" = 0 ]; then
+  if [ "$BUILD_OWN_IMAGE" = 1 ]; then
+    echo "== build base image from images/Dockerfile (tag $IMAGE) =="
+    docker build -t "$IMAGE" "$IMAGES_DIR"
+  fi
+
   echo "== build rootfs (bakes the fleet gateway public key) =="
   $SUDO "$REPO_DIR/tools/sparkbox/hack/build-rootfs.sh" \
     "$IMAGE" "$STAGE/$ROOTFS_NAME.ext4" "$GATEWAY_PUBKEY_FILE" "$ROOTFS_MB"
-  # build-rootfs.sh runs as root under $SUDO; reclaim the artifact so we can
-  # compress and upload it unprivileged.
-  [ -n "$SUDO" ] && $SUDO chown "$(id -u):$(id -g)" "$STAGE/$ROOTFS_NAME.ext4"
+  # build-rootfs.sh runs as root under $SUDO; reclaim the artifact + the login-user
+  # sidecar it wrote so we can compress, read, and upload them unprivileged.
+  [ -n "$SUDO" ] && $SUDO chown "$(id -u):$(id -g)" \
+    "$STAGE/$ROOTFS_NAME.ext4" "$STAGE/$ROOTFS_NAME.ext4.login-user"
+  ROOTFS_LOGIN_USER=$(cat "$STAGE/$ROOTFS_NAME.ext4.login-user" 2>/dev/null || echo root)
 
-  # Disk-starved CI runners: once the template is flattened, the (huge) base
-  # image is dead weight in /var/lib/docker — drop it before compression adds
-  # another ~11GB alongside the ext4. Opt-in so build hosts keep their pull cache.
+  # Disk-starved CI runners: once the template is flattened, the base image is
+  # dead weight in /var/lib/docker — drop it before compression adds another
+  # copy alongside the ext4. Opt-in so build hosts keep their layer cache.
   if [ "${PRUNE_IMAGE:-0}" = 1 ] && command -v docker >/dev/null; then
     $SUDO docker rmi -f "$IMAGE" >/dev/null 2>&1 || true
   fi
 
   # zstd over gzip: multicore compress here, and — the real win — ~5x faster
-  # decompress on the host, where gunzip of the ~30GB template was the long
-  # pole of provisioning. -10 lands near gzip-9's ratio at a fraction of the
-  # time; --rm drops the raw ext4 as soon as the .zst lands (disk headroom).
+  # decompress on the host, where gunzip of the template was a long pole of
+  # provisioning (far less so now the base is ~4GB, not ~30GB). -10 lands near
+  # gzip-9's ratio at a fraction of the time; --rm drops the raw ext4 as soon as
+  # the .zst lands (disk headroom).
   command -v zstd >/dev/null || { echo "zstd required: apt-get install zstd"; exit 1; }
   echo "== compress rootfs (zstd) =="
   zstd -T0 -10 -f --rm "$STAGE/$ROOTFS_NAME.ext4" -o "$STAGE/$ROOTFS_NAME.ext4.zst"
@@ -111,6 +140,10 @@ fi
 
 echo "== manifest =="
 FC_VER=$("$FIRECRACKER_BIN" --version | head -1 | grep -oE 'v[0-9.]+' | head -1)
+# The guest account the gateway logs in as, baked into the template's
+# authorized_keys. cloud-init reads this to drive `sparkbox serve
+# --default-login-user`. Default root for legacy/label-less templates.
+ROOTFS_LOGIN_USER=${ROOTFS_LOGIN_USER:-root}
 cat > "$STAGE/manifest.env" <<EOF
 RELEASE=$RELEASE
 FIRECRACKER_VERSION=$FC_VER
@@ -120,6 +153,7 @@ SHA256_SPARKBOX=$(sha "$STAGE/sparkbox")
 ROOTFS_NAME=$ROOTFS_NAME
 ROOTFS_PATH=$ROOTFS_PATH
 SHA256_ROOTFS=$SHA256_ROOTFS
+ROOTFS_LOGIN_USER=$ROOTFS_LOGIN_USER
 GATEWAY_PUBKEY="$(cat "$GATEWAY_PUBKEY_FILE")"
 EOF
 echo "---"; cat "$STAGE/manifest.env"; echo "---"
@@ -132,7 +166,11 @@ if [ "$ROOTFS_REUSED" = 0 ]; then
   # took 1h37m of a 2h build. 64MB x16 keeps the pipe full regardless of RTT.
   rclone copyto "$STAGE/$ROOTFS_NAME.ext4.zst" "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH" \
     --s3-acl public-read --s3-chunk-size 64M --s3-upload-concurrency 16
-  # Sidecar last: it doubles as the cache's "upload completed" marker.
+  # Login-user sidecar before the sha256 marker: a future cache hit keys off the
+  # .sha256's presence, and it reads .login-user, so that must land first.
+  printf '%s\n' "$ROOTFS_LOGIN_USER" > "$STAGE/rootfs.login-user"
+  rclone copyto "$STAGE/rootfs.login-user" "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.login-user" --s3-acl public-read
+  # sha256 sidecar last: it doubles as the cache's "upload completed" marker.
   printf '%s\n' "$SHA256_ROOTFS" > "$STAGE/rootfs.sha256"
   rclone copyto "$STAGE/rootfs.sha256" "$RCLONE_REMOTE:$BUCKET/$ROOTFS_PATH.sha256" --s3-acl public-read
 fi
@@ -154,6 +192,6 @@ fi
 echo
 echo "== published =="
 echo "  release:  $RELEASE"
-echo "  rootfs:   $ROOTFS_PATH ($([ "$ROOTFS_REUSED" = 1 ] && echo reused || echo built))"
+echo "  rootfs:   $ROOTFS_PATH ($([ "$ROOTFS_REUSED" = 1 ] && echo reused || echo built), login user: $ROOTFS_LOGIN_USER)"
 echo "  base URL: https://$BUCKET.s3.$REGION.scw.cloud/releases/$RELEASE/"
 echo "  manifest: https://$BUCKET.s3.$REGION.scw.cloud/releases/$RELEASE/manifest.env"

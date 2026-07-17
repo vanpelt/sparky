@@ -1,0 +1,35 @@
+# Starship prompt with sensible, nerd-font-free defaults (no glyphs that render as
+# tofu on a plain xterm). Wired into /etc/bash.bashrc by the Dockerfile.
+add_newline = false
+format = '$username$hostname$directory$git_branch$git_status$cmd_duration$character'
+
+[username]
+show_always = true
+style_user = 'bold cyan'
+style_root = 'bold red'
+format = '[$user]($style)'
+
+[hostname]
+ssh_only = false
+style = 'bold green'
+format = '[@$hostname]($style) '
+
+[directory]
+style = 'bold blue'
+truncation_length = 4
+truncate_to_repo = false
+
+[git_branch]
+symbol = 'git '
+style = 'bold purple'
+
+[git_status]
+style = 'bold yellow'
+
+[cmd_duration]
+min_time = 2000
+style = 'yellow'
+
+[character]
+success_symbol = '[#](bold green)'
+error_symbol = '[#](bold red)'

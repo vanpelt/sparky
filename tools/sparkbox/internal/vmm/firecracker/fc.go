@@ -44,6 +44,10 @@ type Options struct {
 	// "2001:db8:1c7::/64"). When set, each VM gets a globally-routable /128 from
 	// it (dual-stack, no NAT). Empty keeps VMs IPv4-only.
 	Subnet6 string
+	// LoginUser is the guest account the gateway SSHes in as — set to match the
+	// template's baked authorized_keys (our images declare it via the
+	// sparkbox.login-user label; see hack/build-rootfs.sh). Empty defaults root.
+	LoginUser string
 }
 
 type vmState struct {
@@ -412,7 +416,11 @@ func (d *Driver) Close() error {
 }
 
 func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
-	inst := &vmm.Instance{Name: name, SSHUser: "root"}
+	user := d.opts.LoginUser
+	if user == "" {
+		user = "root"
+	}
+	inst := &vmm.Instance{Name: name, SSHUser: user}
 	if st.paused {
 		inst.State = vmm.StatePaused
 	} else {

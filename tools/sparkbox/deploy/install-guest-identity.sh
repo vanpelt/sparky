@@ -18,10 +18,22 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=1
+IDENTITY_REV=2
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
+
+# Which account runs the agent in this guest? The token unit runs as root, but
+# the daemon reading /var/run/secrets/hivemind/token runs as the login user — so
+# the token has to be readable by them. Derive that user from the tree itself:
+# build-rootfs.sh baked the gateway key into exactly one home's authorized_keys
+# (see its sparkbox.login-user handling), so the non-root account that owns an
+# authorized_keys IS the login user. Default root (legacy root-login templates).
+SANDBOX_USER=root
+while IFS=: read -r u _ _ _ _ home _; do
+  [ "$u" != root ] && [ -n "$home" ] && [ -f "$MNT$home/.ssh/authorized_keys" ] \
+    && { SANDBOX_USER=$u; break; }
+done < "$MNT/etc/passwd"
 
 mkdir -p "$MNT/usr/local/sbin"
 
@@ -35,12 +47,15 @@ mkdir -p "$MNT/usr/local/sbin"
 # daemon re-reads that file ~5 minutes before expiry. Keeping the path fresh is
 # the whole integration: `hivemind start` federates with no env vars, no login,
 # and nothing pasted.
-sed "s/@@META_PORT@@/$META_PORT/g" > "$MNT/usr/local/sbin/sparkbox-token" <<'EOF'
+sed -e "s/@@META_PORT@@/$META_PORT/g" -e "s/@@SANDBOX_USER@@/$SANDBOX_USER/g" \
+    > "$MNT/usr/local/sbin/sparkbox-token" <<'EOF'
 #!/bin/sh
 # Refresh this sandbox's OIDC id token and identity snapshot.
 set -eu
 TOKEN_FILE=${HIVEMIND_OIDC_TOKEN_FILE:-/var/run/secrets/hivemind/token}
 IDENTITY_FILE=/run/sparkbox/identity.json
+# The account that reads the token (the login user; root on legacy templates).
+SANDBOX_USER=@@SANDBOX_USER@@
 
 # The metadata service listens on our default gateway: the host end of our own
 # tap. We cannot reach any other sandbox's endpoint, and none can reach ours.
@@ -49,13 +64,17 @@ GW=$(ip -4 route show default | awk '{print $3; exit}')
 META="http://$GW:@@META_PORT@@"
 
 mkdir -p "$(dirname "$TOKEN_FILE")" /run/sparkbox
-chmod 0700 "$(dirname "$TOKEN_FILE")"
+# 0755 (not 0700) so the non-root SANDBOX_USER can traverse to the token; the
+# token file itself stays 0600, owned by that user, so only they (and root) read.
+chmod 0755 "$(dirname "$TOKEN_FILE")"
 
 # Write via temp file + rename: the daemon re-reads this path on its own
 # schedule, so it must never catch a half-written token.
 TMP="$TOKEN_FILE.tmp"
 if curl -fsS --max-time 10 "$META/token" -o "$TMP"; then
   chmod 0600 "$TMP"
+  [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
+    && chown "$SANDBOX_USER" "$TMP"
   mv -f "$TMP" "$TOKEN_FILE"
 else
   rm -f "$TMP"

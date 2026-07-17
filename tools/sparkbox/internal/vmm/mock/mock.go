@@ -41,6 +41,9 @@ type Driver struct {
 	stateDir string
 	hostKey  xssh.Signer
 	vms      map[string]*fakeVM
+	// LoginUser mirrors the firecracker driver's login user so a mock host
+	// reports the same SSHUser the real fleet would. Empty defaults root.
+	LoginUser string
 }
 
 func New(stateDir string, hostKey xssh.Signer) *Driver {
@@ -248,7 +251,11 @@ func max64(a, b int64) int64 {
 }
 
 func (d *Driver) instance(vm *fakeVM) *vmm.Instance {
-	inst := &vmm.Instance{Name: vm.name, SSHUser: "root"}
+	user := d.LoginUser
+	if user == "" {
+		user = "root"
+	}
+	inst := &vmm.Instance{Name: vm.name, SSHUser: user}
 	if vm.paused {
 		inst.State = vmm.StatePaused
 	} else {

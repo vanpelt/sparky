@@ -192,6 +192,15 @@ a vmlinux, and has **not yet been exercised on real hardware** — see
 [`docs/deploy-hetzner.md`](docs/deploy-hetzner.md) for bring-up and the
 production gap list (jailer, warm snapshots, rate limits).
 
+The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
+(a lean Ubuntu 24.04 + Go/Python·uv/Node + headless Chrome, ~4GB — replacing the
+~30GB `codex-universal`). It logs in as a non-root **`sparky`** user, declared by
+the image's `sparkbox.login-user` label and honored end-to-end (build-rootfs bakes
+the gateway key into `/home/sparky`, the release manifest carries
+`ROOTFS_LOGIN_USER`, and `sparkbox serve --default-login-user` follows it). Build a
+release with `hack/build-artifacts.sh` (blank `IMAGE` = build our own; set `IMAGE=`
+to flatten a prebuilt image instead).
+
 ## Status / roadmap
 
 - [x] Driver interface + mock driver, manager, JSON persistence, idle reaper

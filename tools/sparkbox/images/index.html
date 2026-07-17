@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sparkbox</title>
+  <style>
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e;
+      --accent: #58a6ff; --line: #30363d; --card: #161b22;
+    }
+    @media (prefers-color-scheme: light) {
+      :root { --bg: #ffffff; --fg: #1f2328; --muted: #656d76;
+              --accent: #0969da; --line: #d0d7de; --card: #f6f8fa; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg);
+      font: 15px/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      display: grid; place-items: center; padding: 2rem;
+    }
+    main { width: 100%; max-width: 620px; }
+    pre.logo {
+      color: var(--accent); font-size: 12px; line-height: 1.2; margin: 0 0 1.5rem;
+      overflow-x: auto;
+    }
+    h1 { font-size: 1.1rem; margin: 0 0 .25rem; font-weight: 600; }
+    .host { color: var(--accent); }
+    p { color: var(--muted); margin: .5rem 0 1.5rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+      padding: 1rem 1.25rem;
+    }
+    .card h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--muted); margin: 0 0 .75rem; }
+    code { color: var(--fg); }
+    .row { display: flex; gap: .5rem; padding: .2rem 0; }
+    .row .k { color: var(--accent); }
+    footer { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <main>
+    <pre class="logo"> ____                  _    _
+/ ___| _ __   __ _ _ __| | _| |__   _____  __
+\___ \| '_ \ / _` | '__| |/ / '_ \ / _ \ \/ /
+ ___) | |_) | (_| | |  |   <| |_) | (_) &gt;  &lt;
+|____/| .__/ \__,_|_|  |_|\_\_.__/ \___/_/\_\
+      |_|          agentic sandbox</pre>
+    <h1>This is <span class="host">__HOSTNAME__</span></h1>
+    <p>An ephemeral microVM. Work persists while the box is warm; it suspends
+       when idle and resumes the instant you reconnect.</p>
+    <div class="card">
+      <h2>You're seeing nginx's default page</h2>
+      <div class="row"><span class="k">serve your app →</span>
+        <code>bind any port; it's routed automatically</code></div>
+      <div class="row"><span class="k">replace this →</span>
+        <code>/var/www/html/index.html</code></div>
+      <div class="row"><span class="k">stop nginx →</span>
+        <code>sudo systemctl stop nginx</code></div>
+    </div>
+    <footer>powered by sparkbox</footer>
+  </main>
+</body>
+</html>

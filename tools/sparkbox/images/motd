@@ -1,0 +1,11 @@
+
+   ____                  _    _
+  / ___| _ __   __ _ _ __| | _| |__   _____  __
+  \___ \| '_ \ / _` | '__| |/ / '_ \ / _ \ \/ /
+   ___) | |_) | (_| | |  |   <| |_) | (_) >  <
+  |____/| .__/ \__,_|_|  |_|\_\_.__/ \___/_/\_\
+        |_|          agentic sandbox
+
+  An ephemeral microVM. Work persists while the box is warm; it
+  suspends when idle and resumes the instant you reconnect.
+

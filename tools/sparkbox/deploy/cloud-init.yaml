@@ -191,7 +191,7 @@ write_files:
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
         --ssh-addr :22 --api-addr 127.0.0.1:8080 \
-        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $SUBNET6_FLAG $EDGE_V4_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
+        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $LOGIN_USER_FLAG $SUBNET6_FLAG $EDGE_V4_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
       Restart=always
       RestartSec=2
       LimitNOFILE=1048576
@@ -230,9 +230,9 @@ write_files:
       REL="$BASE/releases/$RELEASE"
 
       # XFS reflink volume so per-sandbox rootfs copies are instant CoW clones.
-      # Sparse (grows on use), sized for the codex-universal era: the template
-      # alone is ~30GB real blocks, plus per-sandbox write deltas and memory
-      # snapshot files (MemMB each). EM-B220E-NVME has ~1TB of NVMe.
+      # Sparse (grows on use): the lean base template is only a few GB of real
+      # blocks, plus per-sandbox write deltas and memory snapshot files (MemMB
+      # each). 300G leaves ample room; EM-B220E-NVME has ~1TB of NVMe.
       mkdir -p "$DIR/data"
       if ! mountpoint -q "$DIR/data"; then
         if [ ! -f "$DIR/data.img" ]; then
@@ -273,6 +273,14 @@ write_files:
         *.zst) zstd -d -f --rm "$ROOTFS_FILE" ;;
         *)     gunzip -f "$ROOTFS_FILE" ;;
       esac
+
+      # The gateway must SSH into guests as the account baked into the template's
+      # authorized_keys — `sparky` for our own image, `root` for legacy templates.
+      # The manifest carries it as ROOTFS_LOGIN_USER; thread it into the service
+      # env (idempotent) so `sparkbox serve --default-login-user` matches the
+      # template. Default root: a manifest without the field predates the label.
+      sed -i '/^LOGIN_USER_FLAG=/d' "$DIR/sparkbox.env" 2>/dev/null || true
+      echo "LOGIN_USER_FLAG=--default-login-user=${ROOTFS_LOGIN_USER:-root}" >> "$DIR/sparkbox.env"
 
       # Bake up-to-date agent CLIs (claude, codex) into the fresh template.
       # --force: the template was just replaced, so ignore any version stamp.

@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/netip"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -74,6 +74,7 @@ func serve(args []string) error {
 		sshAddr      = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
 		apiAddr      = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
 		defaultImage = fs.String("default-image", "universal", "rootfs template for new sandboxes")
+		defaultLogin = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
 		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
 		idleBalloon  = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
 		maxPerOwner  = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
@@ -171,11 +172,13 @@ func serve(args []string) error {
 	var driver vmm.Driver
 	switch *driverName {
 	case "mock":
-		driver = mock.New(*stateDir, hostKey)
+		md := mock.New(*stateDir, hostKey)
+		md.LoginUser = *defaultLogin
+		driver = md
 	case "firecracker":
 		driver, err = fcdriver.New(fcdriver.Options{
 			KernelPath: *kernelPath, ImageDir: *imageDir, StateDir: *stateDir,
-			Subnet6: *subnet6,
+			Subnet6: *subnet6, LoginUser: *defaultLogin,
 		})
 		if err != nil {
 			return err

@@ -2,17 +2,17 @@
 # Build a Firecracker rootfs ext4 template from an OCI/Docker image.
 #
 # This is the "container image as block device" trick from the design doc:
-# flatten an image, bake in the gateway's SSH public key + a tiny init, and
-# every sandbox gets a CoW reflink copy of the result.
+# flatten an image, bake in the gateway's SSH public key, install the guest boot
+# hooks, and every sandbox gets a CoW reflink copy of the result.
 #
 # Usage: build-rootfs.sh <docker-image> <output.ext4> <gateway-pubkey-file> [size-mb]
 # Requires: docker (or podman), mkfs.ext4, root (for the loop mount).
 #
-# Works with any Debian/Ubuntu-based image, including big toolchain images like
-# ghcr.io/openai/codex-universal (ubuntu:24.04 + toolchains for ~10 languages,
-# ~30GB unpacked — pass a size-mb that fits; the guard below checks). The ext4
-# is a thin ceiling: hosts clone it with XFS reflinks, so sandboxes only pay
-# for blocks they write.
+# The image is expected to already ship sshd + systemd + a polished shell — our
+# hack/images/Dockerfile bakes all of that (and declares its login user via the
+# sparkbox.login-user label). This script no longer patches the image; it just
+# flattens it. The ext4 is a thin ceiling: hosts clone it with XFS reflinks, so
+# sandboxes only pay for blocks they write.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -24,78 +24,25 @@ SIZE_MB=${4:-2048}
 DOCKER=$(command -v docker || command -v podman)
 MNT=$(mktemp -d)
 CID=""
-BUILD_IMAGE=""
 cleanup() {
   [ -n "$CID" ] && $DOCKER rm -f "$CID" >/dev/null 2>&1 || true
-  [ -n "$BUILD_IMAGE" ] && $DOCKER rmi "$BUILD_IMAGE" >/dev/null 2>&1 || true
   mountpoint -q "$MNT" && umount "$MNT" || true
   rmdir "$MNT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# Ensure the image ships sshd + a real init AND a polished interactive
-# environment before we flatten it. We do this with `docker build` (a real
-# builder with working apt + network) rather than chrooting into the exported
-# tree — the chroot has no /proc,/sys,/dev bind mounts, so apt/gpg fail with
-# "apt-key error code 29". Debian/Ubuntu only; bring your own sshd for other
-# bases.
-#
-# The package set makes the sandbox feel like a real machine rather than a
-# stripped container: procps (`top`/`ps`/`free`), ncurses-term (the terminfo DB
-# — without it curses apps like `top` init-fail and print nothing under a
-# forwarded xterm-256color TERM), locales (kills the "cannot change locale"
-# warning when the client forwards LC_*), plus everyday CLI tooling and
-# starship for a nice prompt. `unminimize` restores man pages/docs the base
-# image strips (best-effort — it's slow and occasionally flaky in a builder).
-echo ">> ensuring sshd + init + polished env in $IMAGE"
-BUILD_IMAGE="sparkbox-rootfs-build:$$"
-$DOCKER build -t "$BUILD_IMAGE" - >/dev/null <<EOF
-FROM $IMAGE
-ENV DEBIAN_FRONTEND=noninteractive
-RUN set -eu; \
-    apt-get update -qq; \
-    apt-get install -y -qq --no-install-recommends \
-      openssh-server systemd-sysv iproute2 iputils-ping ca-certificates \
-      procps ncurses-term ncurses-base locales tzdata \
-      curl git less nano vim-tiny sudo bash-completion; \
-    sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen; \
-    locale-gen; \
-    update-locale LANG=en_US.UTF-8; \
-    curl -fsSL https://starship.rs/install.sh -o /tmp/starship-install.sh; \
-    sh /tmp/starship-install.sh -y -b /usr/local/bin; \
-    rm -f /tmp/starship-install.sh; \
-    if command -v unminimize >/dev/null 2>&1; then yes | unminimize || true; fi; \
-    rm -rf /var/lib/apt/lists/*; \
-    mkdir -p /run/sshd
-# Persist the image's environment for VM logins. Docker ENV vars (PATH with
-# tool shims, NVM_DIR, PYENV_ROOT, COREPACK_*, ...) live in image *metadata*
-# and vanish when \`docker export\` flattens the filesystem. Resolve a login
-# shell's final environment (ENV + /etc/profile hooks: mise/pyenv/nvm/cargo/
-# phpenv init) and bake it into /etc/environment, which pam_env applies to
-# EVERY ssh session — including the non-interactive \`ssh box '<cmd>'\` execs
-# coding agents use, which read no profile at all. LANG/LC_* are excluded
-# (/etc/default/locale owns locale, see update-locale above).
-# Also: images like codex-universal ship pyenv with no global version set
-# (their container entrypoint picks one; entrypoints never run in a VM), which
-# leaves \`python\` shims erroring — default to the newest installed version.
-RUN set -eu; \
-    if command -v pyenv >/dev/null 2>&1; then \
-      cur=\$(pyenv global 2>/dev/null || true); \
-      if [ -z "\$cur" ] || [ "\$cur" = system ]; then \
-        pyenv global "\$(pyenv versions --bare | sort -V | tail -1)"; \
-      fi; \
-    fi; \
-    bash -lc env 2>/dev/null \
-      | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
-      | grep -vE '^(HOME|HOSTNAME|PWD|OLDPWD|SHLVL|SHELL|LOGNAME|USER|MAIL|TERM|PS1|LS_COLORS|LESS[A-Z]*|LANG|LC_[A-Z]+|DEBIAN_FRONTEND|_)=' \
-      > /etc/environment
-EOF
+# Which user does the gateway log in as? The image declares it via the
+# sparkbox.login-user label (our hack/images/Dockerfile sets "sparky"); default
+# root for images that predate the label (bare ubuntu / codex-universal).
+LOGIN_USER=$($DOCKER inspect -f '{{index .Config.Labels "sparkbox.login-user"}}' "$IMAGE" 2>/dev/null || true)
+[ -n "$LOGIN_USER" ] || LOGIN_USER=root
+echo ">> login user: $LOGIN_USER"
 
 # Fail fast if the flattened image won't fit the requested ext4 — better now
 # than 20 minutes in with a half-extracted tar and ENOSPC. 1.2x + 512MB covers
 # ext4 metadata + a little breathing room (the real workspace headroom should
 # come from passing a generous size-mb; the copy is thin either way).
-IMG_BYTES=$($DOCKER image inspect -f '{{.Size}}' "$BUILD_IMAGE")
+IMG_BYTES=$($DOCKER image inspect -f '{{.Size}}' "$IMAGE")
 MIN_MB=$(( IMG_BYTES / 1048576 * 12 / 10 + 512 ))
 if [ "$SIZE_MB" -lt "$MIN_MB" ]; then
   echo "size-mb $SIZE_MB is too small: $IMAGE unpacks to ~$((IMG_BYTES/1048576))MB (need >= ${MIN_MB}MB)" >&2
@@ -108,104 +55,45 @@ mkfs.ext4 -q -F "$OUT"
 mount -o loop "$OUT" "$MNT"
 
 echo ">> exporting $IMAGE"
-CID=$($DOCKER create "$BUILD_IMAGE" /bin/true)
+CID=$($DOCKER create "$IMAGE" /bin/true)
 $DOCKER export "$CID" | tar -x -C "$MNT"
 
-echo ">> baking in gateway key + sshd config"
-mkdir -p "$MNT/root/.ssh"
-cp "$PUBKEY" "$MNT/root/.ssh/authorized_keys"
-chmod 700 "$MNT/root/.ssh" && chmod 600 "$MNT/root/.ssh/authorized_keys"
-
 if [ ! -x "$MNT/usr/sbin/sshd" ]; then
-  echo "sshd still missing after build — use a Debian/Ubuntu base or an image that ships sshd" >&2
+  echo "sshd missing in $IMAGE — bake it into the image (see hack/images/Dockerfile) or use a base that ships sshd" >&2
   exit 1
 fi
+
+echo ">> baking in gateway key for $LOGIN_USER + sshd config"
+# Resolve the login user's home + numeric uid:gid from the flattened tree, so we
+# own the authorized_keys correctly without a chroot.
+if [ "$LOGIN_USER" = root ]; then
+  HOME_DIR=/root
+  ROOT_LOGIN=prohibit-password
+else
+  HOME_DIR=$(awk -F: -v u="$LOGIN_USER" '$1==u{print $6}' "$MNT/etc/passwd")
+  [ -n "$HOME_DIR" ] || { echo "login user $LOGIN_USER not found in image /etc/passwd" >&2; exit 1; }
+  ROOT_LOGIN=no
+fi
+UID_GID=$(awk -F: -v u="$LOGIN_USER" '$1==u{print $3":"$4}' "$MNT/etc/passwd")
+[ -n "$UID_GID" ] || UID_GID=0:0
+SSH_DIR="$MNT$HOME_DIR/.ssh"
+mkdir -p "$SSH_DIR"
+cp "$PUBKEY" "$SSH_DIR/authorized_keys"
+chmod 700 "$SSH_DIR" && chmod 600 "$SSH_DIR/authorized_keys"
+chown -R "$UID_GID" "$MNT$HOME_DIR/.ssh"
+
 mkdir -p "$MNT/etc/ssh/sshd_config.d"
-cat > "$MNT/etc/ssh/sshd_config.d/sparkbox.conf" <<'EOF'
-PermitRootLogin prohibit-password
+cat > "$MNT/etc/ssh/sshd_config.d/sparkbox.conf" <<EOF
+PermitRootLogin $ROOT_LOGIN
 PasswordAuthentication no
 AcceptEnv LANG LC_* GIT_* TERM
 EOF
 
-echo ">> baking in the polished shell environment (motd, starship, prompt)"
-# Custom login splash. Ubuntu's default MOTD is a wall of dynamic ads
-# ("system minimized", ESM upsells, last-login noise) generated by the
-# /etc/update-motd.d scripts and printed by pam_motd — clear them and drop a
-# clean static banner instead.
-rm -f "$MNT"/etc/update-motd.d/* 2>/dev/null || true
-rm -f "$MNT/etc/legal" 2>/dev/null || true
-cat > "$MNT/etc/motd" <<'MOTD'
+# The shell polish (MOTD, starship, /etc/environment, locale, ghostty terminfo)
+# now lives in hack/images/Dockerfile so the image is the single source of truth.
 
-   ____                  _    _
-  / ___| _ __   __ _ _ __| | _| |__   _____  __
-  \___ \| '_ \ / _` | '__| |/ / '_ \ / _ \ \/ /
-   ___) | |_) | (_| | |  |   <| |_) | (_) >  <
-  |____/| .__/ \__,_|_|  |_|\_\_.__/ \___/_/\_\
-        |_|          agentic sandbox
-
-  An ephemeral microVM. Work persists while the box is warm; it
-  suspends when idle and resumes the instant you reconnect.
-
-MOTD
-
-# Starship prompt with sensible, nerd-font-free defaults. The binary is
-# installed in the docker build above; here we configure it and wire it into
-# the global bashrc (sourced by both login and interactive shells on Ubuntu).
-cat > "$MNT/etc/starship.toml" <<'TOML'
-add_newline = false
-format = '$username$hostname$directory$git_branch$git_status$cmd_duration$character'
-
-[username]
-show_always = true
-style_user = 'bold cyan'
-style_root = 'bold red'
-format = '[$user]($style)'
-
-[hostname]
-ssh_only = false
-style = 'bold green'
-format = '[@$hostname]($style) '
-
-[directory]
-style = 'bold blue'
-truncation_length = 4
-truncate_to_repo = false
-
-[git_branch]
-symbol = 'git '
-style = 'bold purple'
-
-[git_status]
-style = 'bold yellow'
-
-[cmd_duration]
-min_time = 2000
-style = 'yellow'
-
-[character]
-success_symbol = '[#](bold green)'
-error_symbol = '[#](bold red)'
-TOML
-
-# Append the starship hook once; guard so non-interactive shells (e.g. the
-# gateway's `ssh <vm> true` health probe) skip it.
-touch "$MNT/etc/bash.bashrc"
-cat >> "$MNT/etc/bash.bashrc" <<'BRC'
-
-# sparkbox: interactive shell polish
-case $- in *i*)
-  # Fall back to a known-good TERM when the client's terminal has no terminfo
-  # entry in this guest (ghostty/kitty ship their own, absent from ncurses-term)
-  # — otherwise curses apps like top/htop silently fail to initialize.
-  if ! infocmp "$TERM" >/dev/null 2>&1; then export TERM=xterm-256color; fi
-  export STARSHIP_CONFIG=/etc/starship.toml
-  if command -v starship >/dev/null 2>&1; then eval "$(starship init bash)"; fi
-  ;;
-esac
-BRC
-
-# Don't let a stale /etc/hostname from the build container leak into the guest;
-# the sparkbox-netcfg hook sets the hostname to the sandbox name at boot.
+# Don't let a stale /etc/hostname from the image leak into the guest; the
+# sparkbox-netcfg hook sets the hostname to the sandbox name at boot.
 : > "$MNT/etc/hostname"
 
 echo ">> installing IPv6 guest-network hook"
@@ -301,4 +189,8 @@ EOF
   chmod +x "$MNT/sbin/init"
 fi
 
-echo ">> done: $OUT"
+# Record the login user next to the template so build-artifacts.sh can publish it
+# (ROOTFS_LOGIN_USER in the manifest) and the gateway logs in as the right user.
+printf '%s\n' "$LOGIN_USER" > "$OUT.login-user"
+
+echo ">> done: $OUT (login user: $LOGIN_USER)"

@@ -24,9 +24,9 @@ on:
         type: boolean
         default: true
       image:
-        description: "Base OCI image for the rootfs (ubuntu:24.04 for a slim build — set rootfs_name=ubuntu + rootfs_mb=10240 too)"
+        description: "Base OCI image for the rootfs. Blank = build our own lean image from tools/sparkbox/images/ (recommended). Set an image ref to flatten a prebuilt one instead (e.g. ubuntu:24.04)."
         required: false
-        default: "ghcr.io/openai/codex-universal:latest"
+        default: ""
       rootfs_name:
         description: "Rootfs template basename (must match the server's --default-image)"
         required: false
@@ -67,9 +67,9 @@ jobs:
       - name: Install rclone + zstd
         run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone zstd
 
-      # The codex-universal rootfs build peaks at ~65GB of scratch (unpacked
-      # base image + flattened ext4 coexisting during export, then ext4 + .gz
-      # during compression) — more than a stock runner's free disk. Shed the
+      # Our own lean image (~4GB) needs far less scratch than the old
+      # codex-universal (~65GB peak), but building it + flattening + compressing
+      # still wants headroom beyond a stock runner's free disk. Shed the
       # preinstalled toolchains we don't use (build-artifacts.sh only needs
       # go/docker/curl/rclone). Best-effort: paths vary across runner images.
       # If this still ENOSPCs, run hack/build-artifacts.sh on a build host.
