@@ -31,6 +31,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -177,6 +178,12 @@ func serve(args []string) error {
 	}
 	defer routeStore.Close()
 
+	scheduleStore, err := schedule.Open(filepath.Join(*stateDir, "schedules.db"))
+	if err != nil {
+		return fmt.Errorf("schedule store: %w", err)
+	}
+	defer scheduleStore.Close()
+
 	hostMem := *hostMemMB
 	if hostMem == 0 {
 		hostMem = detectHostMemMB()
@@ -215,6 +222,7 @@ func serve(args []string) error {
 		StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
 		Routes:             routeStore,
+		Schedules:          scheduleStore,
 		MaxRunningPerOwner: *maxPerOwner,
 		MemAdmissionPct:    *memAdmitPct,
 		HostMemMB:          hostMem,
@@ -236,6 +244,7 @@ func serve(args []string) error {
 		DefaultImage: *defaultImage, Logger: log,
 		Doors: doors, Domain: *proxyDomain,
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
+		Schedules: scheduleStore,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -262,6 +271,11 @@ func serve(args []string) error {
 	mgr.ResumePinned(ctx)
 
 	go mgr.RunReaper(ctx, *idleTimeout, time.Minute)
+
+	// The platform scheduler wakes sandboxes to run due cron jobs (the honest
+	// answer to background work in a scale-to-zero world). It ticks every 30s so
+	// minute-granularity crons fire promptly; the gateway is its exec runner.
+	go schedule.NewScheduler(scheduleStore, gw, log).Run(ctx, 30*time.Second)
 
 	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}
 	sshSrv := gw.Server(*sshAddr)
@@ -308,7 +322,9 @@ func serve(args []string) error {
 			consolePw = os.Getenv("SPARKBOX_CONSOLE_PASSWORD")
 		}
 		if consolePw != "" {
-			px.SetConsole(*consoleSub, console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log).Handler())
+			consoleH := console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log)
+			consoleH.SetSchedules(scheduleStore)
+			px.SetConsole(*consoleSub, consoleH.Handler())
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
 		proxySrv = &http.Server{Addr: *proxyAddr, Handler: px}

@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	gssh "github.com/gliderlabs/ssh"
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
@@ -19,6 +21,9 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  pause <name>             pause a running sandbox to free a slot\r\n" +
 	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
 	"  unpin <name>             let a sandbox pause when idle again\r\n" +
+	"  schedule list            list your platform-scheduled jobs\r\n" +
+	"  schedule add <box> \"<cron>\" <cmd>  wake <box> on a cron schedule to run <cmd>\r\n" +
+	"  schedule rm <id>         remove a scheduled job\r\n" +
 	"  whoami                   show your account and linked identities\r\n" +
 	"  keys list                list the SSH keys on your account\r\n" +
 	"  keys add \"<key line>\"    link another key\r\n" +
@@ -99,6 +104,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		fmt.Fprintf(s, "unpinned %s — it will pause when idle\r\n", name)
 		s.Exit(0) //nolint:errcheck
+	case "schedule":
+		g.controlSchedule(s, user, args[1:], log)
 	case "whoami":
 		g.controlWhoami(s, user)
 	case "keys":
@@ -322,6 +329,108 @@ func (g *Gateway) controlInvite(s gssh.Session, user string, log *slog.Logger) {
 		code, int(users.InviteTTL.Hours()/24))
 	fmt.Fprintf(s, "they run:    ssh %s@%s\r\n", SignupUser, g.domainHint())
 	s.Exit(0) //nolint:errcheck
+}
+
+// controlSchedule manages the caller's platform-scheduler entries: cron jobs
+// the host fires by waking the sandbox, so periodic work survives scale-to-zero
+// (resource-model design, Part 3). It only ever touches the caller's own
+// sandboxes and schedules.
+func (g *Gateway) controlSchedule(s gssh.Session, user string, args []string, log *slog.Logger) {
+	if g.schedules == nil {
+		fmt.Fprint(s.Stderr(), "sparkbox: platform scheduling isn't enabled on this host.\r\n")
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "list":
+		entries, err := g.schedules.ListByOwner(user)
+		if err != nil {
+			fail(s, log, "schedule list", err)
+			return
+		}
+		if len(entries) == 0 {
+			fmt.Fprintf(s, "no scheduled jobs — add one with:\r\n  ssh %s@%s schedule add <box> \"*/30 * * * *\" <cmd>\r\n",
+				ControlUser, g.domainHint())
+			s.Exit(0) //nolint:errcheck
+			return
+		}
+		now := time.Now()
+		for _, e := range entries {
+			next := "unparseable"
+			if t, err := schedule.NextRun(e.Spec, now); err == nil {
+				next = t.Local().Format("2006-01-02 15:04 MST")
+			}
+			last := "never"
+			if !e.LastRun.IsZero() {
+				mark := "✓"
+				if e.LastError != "" {
+					mark = "✗"
+				}
+				last = e.LastRun.Local().Format("01-02 15:04") + " " + mark
+			}
+			fmt.Fprintf(s, "%s  %-20s %-15s  next %s  last %s\r\n      $ %s\r\n",
+				e.ID, e.Sandbox, e.Spec, next, last, e.Command)
+			if e.LastError != "" {
+				fmt.Fprintf(s, "      ! %s\r\n", e.LastError)
+			}
+		}
+		s.Exit(0) //nolint:errcheck
+	case "add":
+		// schedule add <sandbox> "<cron>" <command...>
+		if len(args) < 4 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> schedule add <sandbox> \"<cron>\" <command>\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		sandbox := args[1]
+		box, ok := g.mgr.Get(sandbox)
+		if !ok || box.Owner != user {
+			fmt.Fprintf(s.Stderr(), "sparkbox: no sandbox named %q\r\n", sandbox)
+			s.Exit(1) //nolint:errcheck
+			return
+		}
+		spec := args[2]
+		cmd := strings.Join(args[3:], " ")
+		e, err := g.schedules.Add(schedule.Entry{Sandbox: sandbox, Owner: user, Spec: spec, Command: cmd})
+		if err != nil {
+			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+			s.Exit(1) //nolint:errcheck
+			return
+		}
+		log.Info("schedule added", "user", user, "sandbox", sandbox, "id", e.ID, "spec", spec)
+		next, _ := schedule.NextRun(spec, time.Now())
+		fmt.Fprintf(s, "added %s — waking %s on %q; next fire %s\r\n",
+			e.ID, sandbox, spec, next.Local().Format("2006-01-02 15:04 MST"))
+		s.Exit(0) //nolint:errcheck
+	case "rm":
+		if len(args) < 2 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> schedule rm <id>\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		id := args[1]
+		e, err := g.schedules.Get(id)
+		if err != nil || e.Owner != user {
+			// Same message either way: don't leak another user's schedule ids.
+			fmt.Fprintf(s.Stderr(), "sparkbox: no schedule %q\r\n", id)
+			s.Exit(1) //nolint:errcheck
+			return
+		}
+		if err := g.schedules.Delete(id); err != nil {
+			fail(s, log, "schedule rm", err)
+			return
+		}
+		log.Info("schedule removed", "user", user, "id", id)
+		fmt.Fprintf(s, "removed %s\r\n", id)
+		s.Exit(0) //nolint:errcheck
+	default:
+		fmt.Fprintf(s.Stderr(), "unknown schedule command %q\r\n%s", sub, controlUsage)
+		s.Exit(2) //nolint:errcheck
+	}
 }
 
 func truncate(s string, n int) string {

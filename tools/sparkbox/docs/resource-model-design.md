@@ -242,9 +242,13 @@ rewrite.
 
 ## Rollout
 
-1. **M1 — honesty + the crux.** Platform scheduler (`ctl@ schedule`) and the pinned
-   tier, plus the console surfacing each sandbox's tier and next wake. This fixes
-   the trust problem (cron) before we chase density, and needs no new VM states.
+1. **M1 — honesty + the crux. ✅ landed.** Platform scheduler (`ctl@ schedule`) and
+   the pinned tier (`ctl@ pin`/`unpin`, reaper-exempt, resumed on boot), plus the
+   console surfacing each sandbox's tier (pinned badge) and next scheduled wake.
+   This fixes the trust problem (cron) before we chase density, and needs no new
+   VM states. Schedules live in their own sqlite store; a host-side loop resumes
+   the sandbox when a job is due, runs it through the gateway exec path, and lets
+   it idle again.
 2. **M2 — the Stopped tier + snapshot GC.** Add Stopped, drive Paused→Stopped→
    Deleted from the reaper on idle + disk pressure. This is what makes "50
    sandboxes" physically fit.

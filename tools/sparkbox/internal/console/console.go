@@ -26,6 +26,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -46,12 +47,17 @@ const probeTimeout = 300 * time.Millisecond
 // Handler serves the console UI and its JSON API.
 type Handler struct {
 	mgr    *host.Manager
-	store  *routes.Store // optional: nil hides web routes from the UI
-	domain string        // base domain for building route URLs, e.g. "hivemind.tools"
+	store  *routes.Store   // optional: nil hides web routes from the UI
+	sched  *schedule.Store // optional: nil hides the next-wake column
+	domain string          // base domain for building route URLs, e.g. "hivemind.tools"
 	log    *slog.Logger
 	token  string // expected cookie value, derived from the password
 	secure bool   // set the Secure flag on the auth cookie (proxy terminates TLS)
 }
+
+// SetSchedules attaches the platform-scheduler store so the dashboard can show
+// each sandbox's next scheduled wake. Optional; nil leaves the column blank.
+func (h *Handler) SetSchedules(s *schedule.Store) { h.sched = s }
 
 // New builds a console handler. password must be non-empty; callers gate on that
 // so an unset password disables the console entirely rather than shipping an
@@ -147,18 +153,24 @@ type routeStatus struct {
 	Listening bool   `json:"listening"`
 }
 
-// sandboxView is a Sandbox plus its web routes for the dashboard.
+// sandboxView is a Sandbox plus its web routes and next scheduled wake for the
+// dashboard. NextWake is the soonest upcoming platform-scheduler fire across the
+// sandbox's jobs; Schedules is how many it has.
 type sandboxView struct {
 	*host.Sandbox
-	Routes []routeStatus `json:"routes"`
+	Routes    []routeStatus `json:"routes"`
+	NextWake  *time.Time    `json:"next_wake,omitempty"`
+	Schedules int           `json:"schedules,omitempty"`
 }
 
 func (h *Handler) list(w http.ResponseWriter, _ *http.Request) {
 	boxes := h.mgr.List()
 	views := make([]sandboxView, len(boxes))
+	now := time.Now()
 	var wg sync.WaitGroup
 	for i, b := range boxes {
 		views[i] = sandboxView{Sandbox: b, Routes: []routeStatus{}}
+		views[i].NextWake, views[i].Schedules = h.nextWake(b.Name, now)
 		if h.store == nil {
 			continue
 		}
@@ -189,6 +201,34 @@ func (h *Handler) list(w http.ResponseWriter, _ *http.Request) {
 	}
 	wg.Wait()
 	writeJSON(w, http.StatusOK, views)
+}
+
+// nextWake returns the soonest upcoming scheduled fire for a sandbox and the
+// number of schedules it has. Zero values when scheduling is disabled or the
+// sandbox has none.
+func (h *Handler) nextWake(sandbox string, now time.Time) (*time.Time, int) {
+	if h.sched == nil {
+		return nil, 0
+	}
+	entries, err := h.sched.ListBySandbox(sandbox)
+	if err != nil {
+		h.log.Warn("schedule list failed", "sandbox", sandbox, "err", err)
+		return nil, 0
+	}
+	var soonest time.Time
+	for _, e := range entries {
+		t, err := schedule.NextRun(e.Spec, now)
+		if err != nil {
+			continue
+		}
+		if soonest.IsZero() || t.Before(soonest) {
+			soonest = t
+		}
+	}
+	if soonest.IsZero() {
+		return nil, len(entries)
+	}
+	return &soonest, len(entries)
 }
 
 // clusterResponse reports capacity as a list of nodes so the payload shape

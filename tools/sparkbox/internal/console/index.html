@@ -140,6 +140,7 @@
   .badge.paused .dot { background: hsl(var(--muted-foreground)); }
   .badge.pinned { color: hsl(var(--amber, 38 92% 50%)); border-color: hsl(var(--amber, 38 92% 50%) / .35); margin-left: 6px; }
   .badge.pinned .dot { background: hsl(var(--amber, 38 92% 50%)); }
+  .badge.wake { color: hsl(var(--muted-foreground)); margin-left: 6px; font-variant-numeric: tabular-nums; }
 
   /* route chips */
   .route {
@@ -246,7 +247,7 @@
     <div class="card panel">
       <div class="panel-head">
         <h2>Sandboxes</h2>
-        <span class="hint">auto-refreshes every 4s · idle VMs auto-pause after 30m</span>
+        <span class="hint">auto-refreshes every 4s · idle VMs auto-pause after 30m · ⏰ = next scheduled wake · pinned = always-on</span>
       </div>
       <div class="table-scroll">
         <table>
@@ -291,6 +292,17 @@
     if (s < 3600) return Math.floor(s / 60) + "m ago";
     if (s < 86400) return Math.floor(s / 3600) + "h ago";
     return Math.floor(s / 86400) + "d ago";
+  }
+
+  // wakeChip shows the next platform-scheduled wake for a scale-to-zero
+  // sandbox — the reassurance that a paused box's cron will still fire.
+  function wakeChip(b) {
+    if (!b.next_wake) return "";
+    const t = new Date(b.next_wake);
+    const when = t.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const n = b.schedules || 1;
+    const title = n + " scheduled job" + (n === 1 ? "" : "s") + " · next wake " + t.toLocaleString();
+    return '<span class="badge wake" title="' + title + '">⏰ ' + when + "</span>";
   }
 
   function badge(state) {
@@ -398,7 +410,7 @@
         : "";
       tr.innerHTML =
         '<td class="name">' + esc(b.name) + "</td>" +
-        "<td>" + badge(b.state) + pinBadge + "</td>" +
+        "<td>" + badge(b.state) + pinBadge + wakeChip(b) + "</td>" +
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
         '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB</td>" +

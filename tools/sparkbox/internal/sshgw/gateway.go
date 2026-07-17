@@ -24,6 +24,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
@@ -72,6 +73,7 @@ type Gateway struct {
 	domain         string            // base domain for user-facing hints, e.g. "hivemind.tools"
 	openSignup     bool              // signup without an invite code
 	invitesPerUser int               // non-operator invite quota; 0 = operator only
+	schedules      *schedule.Store   // optional: platform scheduler store (ctl@ schedule)
 }
 
 type GatewayOptions struct {
@@ -93,6 +95,9 @@ type GatewayOptions struct {
 	// InvitesPerUser is how many invites a non-operator active user may mint.
 	// 0 (the default) means only operators can invite.
 	InvitesPerUser int
+	// Schedules, if set, enables the `ctl@ schedule` commands for managing
+	// platform-side cron entries. Nil disables the feature (unit tests).
+	Schedules *schedule.Store
 }
 
 func New(opts GatewayOptions) *Gateway {
@@ -102,6 +107,7 @@ func New(opts GatewayOptions) *Gateway {
 		defaultImage: opts.DefaultImage, dialTimeout: 15 * time.Second,
 		doors: opts.Doors, domain: opts.Domain,
 		openSignup: opts.OpenSignup, invitesPerUser: opts.InvitesPerUser,
+		schedules: opts.Schedules,
 	}
 }
 

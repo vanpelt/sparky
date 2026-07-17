@@ -187,6 +187,9 @@ production gap list (jailer, warm snapshots, rate limits).
 - [x] Password-gated operator console at `console.<domain>` (list + pause/resume + pin)
 - [x] Pinned "always-on" tier: reaper-exempt sandboxes so in-VM cron/daemons keep
       running (`ctl pin <name>`), resumed automatically on host boot
+- [x] Platform scheduler: cron jobs the host fires by waking a scale-to-zero
+      sandbox, so periodic work is reliable without keeping it warm
+      (`ctl schedule add <box> "*/30 * * * *" <cmd>`); next wake shown in console
 - [x] User accounts in sqlite: `signup@` over SSH, invite codes, multi-key
       keyrings (`ctl keys`), GitHub linking verified against `<login>.keys`
 - [x] OIDC workload identity: issuer at `oidc.<domain>`, per-sandbox id tokens

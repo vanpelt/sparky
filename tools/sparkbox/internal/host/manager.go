@@ -81,6 +81,13 @@ type Sandbox struct {
 	KeyFP string `json:"key_fp,omitempty"`
 }
 
+// ScheduleCleaner drops a sandbox's platform-scheduler entries when it is
+// destroyed, so a deleted sandbox leaves no jobs that would wake a ghost
+// forever. Satisfied structurally by *schedule.Store (avoids importing it).
+type ScheduleCleaner interface {
+	DeleteBySandbox(sandbox string) error
+}
+
 // FrontDoor is an optional hook for per-sandbox public-address plumbing (see
 // internal/frontdoor): Ensure is called when a sandbox is created, Remove when
 // it is destroyed. Implementations are expected to be best-effort — a sandbox
@@ -97,13 +104,14 @@ type Manager struct {
 	path        string // JSON state file
 	boxes       map[string]*Sandbox
 	gwPubKey    string
-	routes      *routes.Store // optional: proxy route bookkeeping
-	frontDoor   FrontDoor     // optional: per-sandbox address plumbing
-	maxPerOwner int           // max running sandboxes per owner; 0 = unlimited
-	memAdmitPct int           // RAM admission threshold as % of host; 0 = disabled
-	hostMemMB   int64         // host RAM in MB for admission; 0 = disabled
-	nodeName    string        // this host's name in capacity reports
-	hostVCPUs   int64         // host logical CPUs for capacity reports; 0 = unknown
+	routes      *routes.Store   // optional: proxy route bookkeeping
+	schedules   ScheduleCleaner // optional: platform-scheduler cleanup on destroy
+	frontDoor   FrontDoor       // optional: per-sandbox address plumbing
+	maxPerOwner int             // max running sandboxes per owner; 0 = unlimited
+	memAdmitPct int             // RAM admission threshold as % of host; 0 = disabled
+	hostMemMB   int64           // host RAM in MB for admission; 0 = disabled
+	nodeName    string          // this host's name in capacity reports
+	hostVCPUs   int64           // host logical CPUs for capacity reports; 0 = unknown
 }
 
 type Options struct {
@@ -114,6 +122,8 @@ type Options struct {
 	// Routes, if set, gets a default route per sandbox on create and is cleaned
 	// up on destroy. Nil disables proxy-route bookkeeping (used by unit tests).
 	Routes *routes.Store
+	// Schedules, if set, has a sandbox's schedules deleted when it is destroyed.
+	Schedules ScheduleCleaner
 	// MaxRunningPerOwner caps how many sandboxes one owner may have running at
 	// once (0 = unlimited). Enforced on create and resume-on-connect.
 	MaxRunningPerOwner int
@@ -138,6 +148,7 @@ func NewManager(opts Options) (*Manager, error) {
 		boxes:       map[string]*Sandbox{},
 		gwPubKey:    opts.GatewayPublicKey,
 		routes:      opts.Routes,
+		schedules:   opts.Schedules,
 		maxPerOwner: opts.MaxRunningPerOwner,
 		memAdmitPct: opts.MemAdmissionPct,
 		hostMemMB:   opts.HostMemMB,
@@ -456,6 +467,11 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	if m.routes != nil {
 		if err := m.routes.DeleteBySandbox(name); err != nil {
 			m.log.Warn("route cleanup failed", "name", name, "err", err)
+		}
+	}
+	if m.schedules != nil {
+		if err := m.schedules.DeleteBySandbox(name); err != nil {
+			m.log.Warn("schedule cleanup failed", "name", name, "err", err)
 		}
 	}
 	if m.frontDoor != nil {
