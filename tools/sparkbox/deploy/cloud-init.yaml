@@ -37,6 +37,11 @@ write_files:
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
       OVERCOMMIT_FLAGS=@@OVERCOMMIT_FLAGS@@
       TLS_FLAGS=@@TLS_FLAGS@@
+      # Bare values (not the flag form) so sparkbox-net.service can source them:
+      # the v6 any-port REDIRECT only fires when SUBNET6 is in the unit's env, and
+      # PROXY_PORT must match the edge listener (:443 under TLS, :8081 otherwise).
+      SUBNET6=@@SUBNET6@@
+      PROXY_PORT=@@PROXY_PORT@@
 
   # The one secret still in user-data: this host's Secret Manager API key, used
   # ONLY by sparkbox-secrets.service to fetch the fleet secrets. It is IP-pinned,
@@ -86,6 +91,9 @@ write_files:
       [Service]
       Type=oneshot
       RemainAfterExit=yes
+      # SUBNET6 (enables the v6 REDIRECT branch) + PROXY_PORT (edge listener) live
+      # here; without this the script sees neither and only v4 any-port forwards.
+      EnvironmentFile=/srv/sparkbox/sparkbox.env
       ExecStart=/usr/local/sbin/sparkbox-net.sh
 
       [Install]

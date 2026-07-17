@@ -45,6 +45,13 @@ OVERCOMMIT_FLAGS=${OVERCOMMIT_FLAGS:-"--mem-reserve-mb 1024 --max-running-per-ow
 #   TLS_FLAGS="--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@example.com"
 TLS_FLAGS=${TLS_FLAGS:-}
 
+# Edge listener port for the any-port REDIRECT. The base cloud-init serves the
+# proxy on :8081; TLS_FLAGS may override it (e.g. --proxy-addr :443 under TLS).
+# sparkbox-net.sh redirects the private-port range to whichever port the edge
+# actually listens on, so derive the effective one here (last --proxy-addr wins).
+PROXY_PORT=8081
+[[ "$TLS_FLAGS" =~ --proxy-addr[[:space:]]+:?([0-9]+) ]] && PROXY_PORT="${BASH_REMATCH[1]}"
+
 # Optional reserved (flexible) IPs so DNS points at a stable address across host
 # rebuilds. FLEXIBLE_FIP_IDS is a comma-separated list of `scw fip ip` IDs to move
 # onto the new server; FLEXIBLE_ADDRS is the matching space-separated CIDR host
@@ -114,7 +121,8 @@ SCW_SECRET_KEY="$SECRET_KEY" SCW_PROJECT_ID="$PROJECT_ID" SCW_REGION="$REGION" \
 REFRESH_TOOLS="$HERE/refresh-agent-tools.sh" \
 GUEST_IDENTITY="$HERE/install-guest-identity.sh" \
 NET_SETUP="$HERE/sparkbox-net.sh" \
-SUBNET6_FLAG="$SUBNET6_FLAG" TLS_FLAGS="$TLS_FLAGS" OVERCOMMIT_FLAGS="$OVERCOMMIT_FLAGS" \
+SUBNET6_FLAG="$SUBNET6_FLAG" SUBNET6="$SUBNET6" PROXY_PORT="$PROXY_PORT" \
+TLS_FLAGS="$TLS_FLAGS" OVERCOMMIT_FLAGS="$OVERCOMMIT_FLAGS" \
 FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
 import base64, os, sys
@@ -126,6 +134,8 @@ for k, v in {
     '@@RELEASE@@': os.environ['RELEASE'],
     '@@BUCKET_BASE@@': os.environ['BUCKET_BASE'],
     '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
+    '@@SUBNET6@@': os.environ['SUBNET6'],
+    '@@PROXY_PORT@@': os.environ['PROXY_PORT'],
     '@@TLS_FLAGS@@': os.environ['TLS_FLAGS'],
     '@@OVERCOMMIT_FLAGS@@': os.environ['OVERCOMMIT_FLAGS'],
     '@@FLEXIBLE_ADDRS@@': os.environ['FLEXIBLE_ADDRS'],
