@@ -113,7 +113,10 @@ RUN systemctl set-default multi-user.target && \
       man-db.timer motd-news.timer motd-news.service \
       apt-daily.timer apt-daily-upgrade.timer \
       2>/dev/null || true && \
+    # sshd as a plain always-on daemon on :22: enable ssh.service and DISABLE the
+    # socket-activation unit, or the two conflict on 24.04 and :22 ends up unbound.
     systemctl enable ssh.service 2>/dev/null || true && \
+    systemctl disable ssh.socket 2>/dev/null || true && \
     # Heavy optional daemons ship installed but OFF (keep boot fast + RAM free);
     # a sandbox starts them on demand. docker.socket stays enabled, so `docker`
     # activates the engine on first use without it running in every idle box.

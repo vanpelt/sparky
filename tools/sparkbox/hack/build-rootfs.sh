@@ -132,6 +132,13 @@ if [ ! -s /etc/resolv.conf ]; then
   printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
 fi
 
+# Firecracker guests boot with no cloud-init to regenerate the SSH host keys the
+# image intentionally omits (per-guest keys, never a pair shared across every
+# sandbox). Generate any missing ones here — this oneshot is ordered
+# Before=ssh.service, so sshd finds them and can actually bind :22. Without this,
+# sshd exits on "no hostkeys available" and the gateway gets connection-refused.
+ssh-keygen -A 2>/dev/null || true
+
 [ -n "$IP6" ] || exit 0
 ip link set "$IFACE" up
 ip -6 addr replace "$IP6" dev "$IFACE"
