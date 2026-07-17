@@ -113,21 +113,14 @@ jobs:
           sudo install "release-${ver}-${arch}/firecracker-${ver}-${arch}" /usr/local/bin/firecracker
           firecracker --version | head -1
 
-      - name: Download guest kernel (Firecracker CI, 6.1.x LTS)
+      - name: Build sparkbox guest kernel (6.1 + docker/TUN deltas)
+        # We ship our OWN vmlinux, not the stock firecracker-ci one: the stock
+        # config lacks IP_NF_RAW/NF_TABLES (docker container networking) and TUN
+        # (tailscale). build-kernel.sh = Firecracker CI 6.1 config + our fragment.
         run: |
-          arch=$(uname -m)
-          bucket="http://spec.ccfc.min.s3.amazonaws.com"
-          ci=$(curl -fsSL "${bucket}/?list-type=2&prefix=firecracker-ci/&delimiter=/" \
-            | grep -oP '(?<=<Prefix>)firecracker-ci/v[0-9]+\.[0-9]+/(?=</Prefix>)' \
-            | grep -oP 'v[0-9]+\.[0-9]+' | sort -V | tail -1)
-          [ -n "$ci" ] || { echo "could not enumerate CI kernel versions"; exit 1; }
-          list=$(curl -fsSL "${bucket}/?list-type=2&prefix=firecracker-ci/${ci}/${arch}/vmlinux-" \
-            | grep -oP '(?<=<Key>)firecracker-ci/[^<]+(?=</Key>)' | grep -vE '\.config$|-no-acpi')
-          key=$(printf '%s\n' "$list" | grep -E 'vmlinux-6\.1\.' | sort -V | tail -1)
-          [ -n "$key" ] || key=$(printf '%s\n' "$list" | sort -V | tail -1)
-          [ -n "$key" ] || { echo "could not resolve CI kernel for ${ci}"; exit 1; }
-          echo "guest kernel: $key"
-          curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${key}" -o "$RUNNER_TEMP/vmlinux"
+          OUT="$RUNNER_TEMP/vmlinux" KVER=6.1.155 JOBS="$(nproc)" \
+            ./hack/build-kernel.sh
+          sha256sum "$RUNNER_TEMP/vmlinux"
 
       - name: Write fleet gateway public key
         env:

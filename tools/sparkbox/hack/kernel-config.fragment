@@ -1,0 +1,33 @@
+# sparkbox guest-kernel config deltas, merged over the Firecracker CI microvm
+# config (resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config). The
+# stock firecracker-ci vmlinux ships these OFF, which is why a sandbox can't run
+# docker (container networking) or tailscale (no TUN). Everything else docker
+# needs — BRIDGE, VETH, OVERLAY_FS, IP_NF_* legacy tables, NF_NAT/conntrack —
+# the base config already has. build-kernel.sh applies this with merge_config +
+# olddefconfig, so kconfig pulls in any dependencies.
+
+# --- Container networking (docker bridge + NAT) ---
+# The raw table is the exact miss that breaks `docker run`: dockerd's bridge
+# driver installs a raw-table DROP rule and bails with "table `raw' does not
+# exist" without it.
+CONFIG_IP_NF_RAW=y
+CONFIG_IP6_NF_RAW=y
+# nftables backend: Ubuntu 24.04's iptables is iptables-nft, so give it a real
+# nft core + the xtables-over-nft shim rather than forcing the legacy alternative.
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
+CONFIG_NFT_COMPAT=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+# Common in docker/compose-generated rulesets.
+CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
+# Overlay/swarm networking.
+CONFIG_VXLAN=y
+CONFIG_BRIDGE_VLAN_FILTERING=y
+
+# --- TUN / WireGuard (tailscale) ---
+# /dev/net/tun for tailscale's tailscale0 interface (also any user TUN/TAP);
+# in-kernel WireGuard lets tailscale use the fast path instead of userspace WG.
+CONFIG_TUN=y
+CONFIG_WIREGUARD=y

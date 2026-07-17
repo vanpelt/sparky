@@ -117,11 +117,14 @@ RUN systemctl set-default multi-user.target && \
     # socket-activation unit, or the two conflict on 24.04 and :22 ends up unbound.
     systemctl enable ssh.service 2>/dev/null || true && \
     systemctl disable ssh.socket 2>/dev/null || true && \
-    # Heavy optional daemons ship installed but OFF (keep boot fast + RAM free);
-    # a sandbox starts them on demand. docker.socket stays enabled, so `docker`
-    # activates the engine on first use without it running in every idle box.
-    systemctl disable nginx.service docker.service containerd.service tailscaled.service \
-      2>/dev/null || true && \
+    # Docker runs by default (parity with exe.dev): enable the engine +
+    # containerd so a sandbox has a working docker the moment it boots. Needs the
+    # sparkbox guest kernel (hack/build-kernel.sh) — the stock firecracker-ci
+    # vmlinux lacks IP_NF_RAW/NF_TABLES/etc and docker's bridge networking fails
+    # on it. nginx + tailscale stay OFF (start on demand); tailscale also needs
+    # CONFIG_TUN from that same kernel.
+    systemctl enable docker.service docker.socket containerd.service 2>/dev/null || true && \
+    systemctl disable nginx.service tailscaled.service 2>/dev/null || true && \
     mkdir -p /etc/systemd/journald.conf.d && \
     printf '[Journal]\nStorage=persistent\n' > /etc/systemd/journald.conf.d/persistent.conf
 # Grow the root fs on first boot if the host ever ships a smaller template than
