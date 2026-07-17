@@ -389,7 +389,16 @@ func serve(args []string) error {
 			}); err != nil {
 				return fmt.Errorf("proxy tls: %w", err)
 			}
-			go func() { errCh <- proxySrv.ListenAndServeTLS("", "") }()
+			// Sniff each connection below TLS: a cleartext-HTTP client that
+			// dialed the HTTPS edge (e.g. http://myvm.hivemind.tools:4444) is
+			// answered with a 308 to the https:// URL instead of the TLS stack's
+			// bare "Client sent an HTTP request to an HTTPS server.".
+			ln, lerr := net.Listen("tcp", proxySrv.Addr)
+			if lerr != nil {
+				return fmt.Errorf("proxy edge listen %s: %w", proxySrv.Addr, lerr)
+			}
+			ln = proxy.RedirectPlainHTTP(ln, log)
+			go func() { errCh <- proxySrv.ServeTLS(ln, "", "") }()
 		} else {
 			go func() { errCh <- proxySrv.ListenAndServe() }()
 		}
