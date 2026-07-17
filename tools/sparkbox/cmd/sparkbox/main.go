@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/http"
 	"os"
 	"os/signal"
@@ -84,6 +85,7 @@ func serve(args []string) error {
 		subnet6      = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
 		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain  = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
+		edgeV4       = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
 		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
 		consolePass  = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
 		consoleSub   = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
@@ -221,8 +223,20 @@ func serve(args []string) error {
 			// `ssh <name>.<domain>` resolves to its front door. Same token scope
 			// as the DNS-01 TLS provider (Zone.DNS:Edit).
 			if token := os.Getenv("CLOUDFLARE_API_TOKEN"); token != "" {
-				doorHooks = append(doorHooks, frontdoor.NewPublisher(doors, *proxyDomain, token, log))
-				log.Info("front-door DNS publishing enabled", "zone", *proxyDomain)
+				// Publish an A at the shared edge alongside the per-name AAAA, or
+				// the AAAA shadows the wildcard A and the name dies over IPv4.
+				var edge netip.Addr
+				if *edgeV4 != "" {
+					if a, perr := netip.ParseAddr(*edgeV4); perr == nil && a.Is4() {
+						edge = a
+					} else {
+						log.Warn("ignoring --edge-v4: not an IPv4 address", "value", *edgeV4)
+					}
+				} else {
+					log.Warn("front-door names will not resolve over IPv4", "reason", "no --edge-v4 (per-name AAAA shadows the wildcard A)")
+				}
+				doorHooks = append(doorHooks, frontdoor.NewPublisher(doors, *proxyDomain, token, edge, log))
+				log.Info("front-door DNS publishing enabled", "zone", *proxyDomain, "edge_v4", *edgeV4)
 			} else {
 				log.Info("front-door DNS publishing disabled", "reason", "no CLOUDFLARE_API_TOKEN")
 			}

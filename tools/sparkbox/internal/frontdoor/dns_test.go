@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
 	"sync"
 	"testing"
 
@@ -50,7 +51,15 @@ func newTestPublisher(t *testing.T) (*Publisher, *recordingDNS, *Mapper) {
 	m := mustMapper(t)
 	dns := &recordingDNS{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return newPublisher(m, "hivemind.tools", dns, log), dns, m
+	return newPublisher(m, "hivemind.tools", dns, netip.Addr{}, log), dns, m
+}
+
+func newTestPublisherWithEdge(t *testing.T, edge netip.Addr) (*Publisher, *recordingDNS, *Mapper) {
+	t.Helper()
+	m := mustMapper(t)
+	dns := &recordingDNS{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return newPublisher(m, "hivemind.tools", dns, edge, log), dns, m
 }
 
 func TestPublisherEnsurePublishesAAAA(t *testing.T) {
@@ -72,6 +81,46 @@ func TestPublisherEnsurePublishesAAAA(t *testing.T) {
 	}
 	if rr.TTL != recordTTL {
 		t.Fatalf("record ttl = %s, want %s", rr.TTL, recordTTL)
+	}
+}
+
+// byType indexes a record slice by DNS type -> data, failing on a wrong count.
+func byType(t *testing.T, label string, recs []libdns.Record, want int) map[string]string {
+	t.Helper()
+	if len(recs) != want {
+		t.Fatalf("%s: %d records, want %d", label, len(recs), want)
+	}
+	m := map[string]string{}
+	for _, r := range recs {
+		rr := r.RR()
+		m[rr.Type] = rr.Data
+	}
+	return m
+}
+
+func TestPublisherPublishesAAlongsideAAAAWhenEdgeSet(t *testing.T) {
+	edge := netip.MustParseAddr("62.210.142.210")
+	p, dns, m := newTestPublisherWithEdge(t, edge)
+
+	p.Ensure(context.Background(), "fuzzy-otter")
+	p.Remove(context.Background(), "fuzzy-otter")
+	p.flush()
+
+	// Both publish and delete carry the AAAA (front door) and the A (shared
+	// edge) — the A is what keeps the name resolving over IPv4 once the explicit
+	// AAAA has shadowed the wildcard.
+	wantAAAA := m.Addr("fuzzy-otter").String()
+	for _, tc := range []struct {
+		label string
+		recs  []libdns.Record
+	}{{"publish", dns.sets}, {"delete", dns.dels}} {
+		got := byType(t, tc.label, tc.recs, 2)
+		if got["AAAA"] != wantAAAA {
+			t.Fatalf("%s AAAA = %q, want %s", tc.label, got["AAAA"], wantAAAA)
+		}
+		if got["A"] != edge.String() {
+			t.Fatalf("%s A = %q, want %s", tc.label, got["A"], edge)
+		}
 	}
 }
 

@@ -111,8 +111,18 @@ eval "$(NAME="$NAME" HOST_IP="$HOST_IP" REGION="$REGION" PROJECT_ID="$PROJECT_ID
 # eval brought APP_ID / POLICY_ID / ACCESS_KEY / SECRET_KEY into scope.
 [ -n "${SECRET_KEY:-}" ] || { echo "failed to mint host identity"; exit 1; }
 
+# Edge IPv4 for per-sandbox A records. The gateway publishes a front-door AAAA
+# per name, which shadows the wildcard *.<domain> A in Cloudflare — so it must
+# also publish an A at the shared edge or names die over IPv4. Point it at the
+# same address the wildcard A does: the flexible v4 if we pinned one, else the
+# host's native public v4. (No flag when neither exists → AAAA-only, v6-only.)
+EDGE_V4=$(printf '%s\n' $FLEXIBLE_ADDRS | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+EDGE_V4=${EDGE_V4:-$HOST_IP}
+EDGE_V4_FLAG=""
+[ -n "$EDGE_V4" ] && EDGE_V4_FLAG="--edge-v4 $EDGE_V4"
+
 # --- render cloud-init ------------------------------------------------------
-echo "== rendering cloud-init (release=$RELEASE domain=$PROXY_DOMAIN) =="
+echo "== rendering cloud-init (release=$RELEASE domain=$PROXY_DOMAIN edge-v4=${EDGE_V4:-none}) =="
 RENDERED=$(mktemp)
 trap 'rm -f "$RENDERED"' EXIT
 USERS_CONF="$USERS_CONF" PROXY_DOMAIN="$PROXY_DOMAIN" RELEASE="$RELEASE" \
@@ -122,6 +132,7 @@ REFRESH_TOOLS="$HERE/refresh-agent-tools.sh" \
 GUEST_IDENTITY="$HERE/install-guest-identity.sh" \
 NET_SETUP="$HERE/sparkbox-net.sh" \
 SUBNET6_FLAG="$SUBNET6_FLAG" SUBNET6="$SUBNET6" PROXY_PORT="$PROXY_PORT" \
+EDGE_V4_FLAG="$EDGE_V4_FLAG" \
 TLS_FLAGS="$TLS_FLAGS" OVERCOMMIT_FLAGS="$OVERCOMMIT_FLAGS" \
 FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
@@ -136,6 +147,7 @@ for k, v in {
     '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
     '@@SUBNET6@@': os.environ['SUBNET6'],
     '@@PROXY_PORT@@': os.environ['PROXY_PORT'],
+    '@@EDGE_V4_FLAG@@': os.environ['EDGE_V4_FLAG'],
     '@@TLS_FLAGS@@': os.environ['TLS_FLAGS'],
     '@@OVERCOMMIT_FLAGS@@': os.environ['OVERCOMMIT_FLAGS'],
     '@@FLEXIBLE_ADDRS@@': os.environ['FLEXIBLE_ADDRS'],
