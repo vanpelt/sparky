@@ -241,7 +241,13 @@ def main() -> int:
     try:
         for i in range(1, args.count + 1):
             name = f"{args.owner}-{i:03d}"
-            status, body = api.create(name, args.owner, args.image, args.vcpus, args.mem_mb)
+            # Each probe gets its OWN owner so the per-owner running cap
+            # (--max-running-per-owner, default 2) never fires — we want the
+            # *memory* admission budget to be the thing that stops us, since
+            # that's the number the redesign is about (it counts the full 8GB
+            # ceiling per VM and will refuse while the box is still mostly free).
+            owner = name
+            status, body = api.create(name, owner, args.image, args.vcpus, args.mem_mb)
             if status not in (200, 201):
                 print(f"  ! create {name} failed [{status}]: {(body or {}).get('error')}",
                       file=sys.stderr)
@@ -314,10 +320,13 @@ def summarise(samples: list[dict], base_avail: int, args) -> None:
 
 
 def cleanup(api: API, owner: str) -> int:
-    boxes = [b for b in api.list() if b.get("owner") == owner]
+    # Probes are created with owner == name == "<tag>-NNN", so match the tag as
+    # a prefix (each probe is its own owner to dodge the per-owner running cap).
+    boxes = [b for b in api.list()
+             if b.get("owner", "").startswith(owner) or b.get("name", "").startswith(owner)]
     for b in boxes:
         api.destroy(b["name"])
-    print(f"destroyed {len(boxes)} sandbox(es) owned by {owner!r}")
+    print(f"destroyed {len(boxes)} sandbox(es) tagged {owner!r}")
     return 0
 
 
