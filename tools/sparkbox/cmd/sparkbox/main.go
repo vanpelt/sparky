@@ -72,9 +72,11 @@ func serve(args []string) error {
 		apiAddr      = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
 		defaultImage = fs.String("default-image", "universal", "rootfs template for new sandboxes")
 		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
+		idleBalloon  = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
 		maxPerOwner  = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
-		memAdmitPct  = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' allocated RAM would exceed this % of host RAM (0 = disabled)")
+		memAdmitPct  = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
 		hostMemMB    = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
+		memReserve   = fs.Int64("mem-reserve-mb", 0, "per-VM working-set floor (MB) enabling live overcommit: admission counts this instead of the full memory ceiling, and idle VMs balloon down to it (0 = off; count the full ceiling, never balloon)")
 		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		subnet6      = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
@@ -226,6 +228,7 @@ func serve(args []string) error {
 		MaxRunningPerOwner: *maxPerOwner,
 		MemAdmissionPct:    *memAdmitPct,
 		HostMemMB:          hostMem,
+		MemReserveMB:       *memReserve,
 		NodeName:           nodeName,
 		HostVCPUs:          int64(runtime.NumCPU()),
 	}
@@ -237,7 +240,8 @@ func serve(args []string) error {
 		return err
 	}
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
-		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem)
+		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem,
+		"mem_reserve_mb", *memReserve, "overcommit", *memReserve > 0)
 
 	gw := sshgw.New(sshgw.GatewayOptions{
 		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
@@ -270,7 +274,7 @@ func serve(args []string) error {
 	// up so their in-guest daemons keep running across a host reboot.
 	mgr.ResumePinned(ctx)
 
-	go mgr.RunReaper(ctx, *idleTimeout, time.Minute)
+	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
 
 	// The platform scheduler wakes sandboxes to run due cron jobs (the honest
 	// answer to background work in a scale-to-zero world). It ticks every 30s so

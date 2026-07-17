@@ -27,11 +27,13 @@ import (
 )
 
 type fakeVM struct {
-	name     string
-	workdir  string
-	listener net.Listener
-	server   *gssh.Server
-	paused   bool
+	name          string
+	workdir       string
+	listener      net.Listener
+	server        *gssh.Server
+	paused        bool
+	memMB         int64
+	balloonTarget int64 // MiB the balloon is holding (0 = deflated)
 }
 
 type Driver struct {
@@ -55,7 +57,7 @@ func (d *Driver) Create(_ context.Context, cfg vmm.Config) (*vmm.Instance, error
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return nil, err
 	}
-	vm := &fakeVM{name: cfg.Name, workdir: workdir}
+	vm := &fakeVM{name: cfg.Name, workdir: workdir, memMB: cfg.MemMB}
 	if err := d.start(vm, cfg.GatewayPublicKey); err != nil {
 		return nil, err
 	}
@@ -202,6 +204,47 @@ func (d *Driver) Close() error {
 		}
 	}
 	return nil
+}
+
+// SetBalloonTarget records the balloon target so tests can assert the manager's
+// reclaim logic. The mock has no real memory to hand back — it just tracks the
+// number. Implements vmm.Ballooner. Errors on a paused/missing VM, matching the
+// firecracker driver (you can't balloon a VM that isn't running).
+func (d *Driver) SetBalloonTarget(_ context.Context, name string, targetMiB int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	vm, ok := d.vms[name]
+	if !ok || vm.paused {
+		return fmt.Errorf("vm %q not running", name)
+	}
+	if targetMiB < 0 {
+		targetMiB = 0
+	}
+	vm.balloonTarget = targetMiB
+	return nil
+}
+
+// BalloonStats synthesises a plausible picture from the recorded target so the
+// control plane and console have something to render under the mock driver.
+func (d *Driver) BalloonStats(_ context.Context, name string) (vmm.BalloonStats, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	vm, ok := d.vms[name]
+	if !ok || vm.paused {
+		return vmm.BalloonStats{}, fmt.Errorf("vm %q not running", name)
+	}
+	return vmm.BalloonStats{
+		TargetMiB: vm.balloonTarget,
+		ActualMiB: vm.balloonTarget,
+		FreeMiB:   max64(0, vm.memMB-vm.balloonTarget-256), // pretend ~256MiB in use
+	}, nil
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (d *Driver) instance(vm *fakeVM) *vmm.Instance {

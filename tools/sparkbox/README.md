@@ -195,6 +195,10 @@ production gap list (jailer, warm snapshots, rate limits).
 - [x] OIDC workload identity: issuer at `oidc.<domain>`, per-sandbox id tokens
       over an IMDS-style metadata endpoint, so `hivemind start` federates with
       no secret in the guest
+- [x] Live memory overcommit: `deflate_on_oom` balloon per VM + two-stage idle
+      reaper (balloon-down → pause) + working-set admission (`--mem-reserve-mb`),
+      so idle VMs return RAM to the host while staying live. Measure the real
+      per-VM cost + KSM savings with `hack/measure-density.py`
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
-- [ ] Jailer, balloon, I/O limits; inter-sandbox network isolation
+- [ ] KSM host tuning + cgroup cpu.max; jailer, I/O limits; net isolation
 - [ ] Multi-host: capacity reporting + best-fit placement (flyd pattern)

@@ -242,6 +242,18 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 		cancel()
 		return err
 	}
+	// Attach a deflated memory balloon on fresh boot so the platform can later
+	// reclaim this guest's idle RAM to the host without pausing it (the
+	// live-overcommit lever). deflate_on_oom lets the guest take its own pages
+	// back under pressure, so an aggressive balloon can't OOM-kill it; stats
+	// polling exposes the guest's real working set. The balloon is a pre-boot
+	// device, so it's injected into the init handler chain here. On resume the
+	// balloon is restored from the snapshot, so we skip it (re-adding would
+	// fight the snapshot-load handlers).
+	if snapshot == nil {
+		m.Handlers.FcInit = m.Handlers.FcInit.Append(
+			sdk.NewCreateBalloonHandler(0, true, balloonStatsIntervalSecs))
+	}
 	// Start/ResumeVM must use vmCtx, not the caller's ctx: the SDK stops the
 	// VMM (SIGTERM) when the context passed here is cancelled. The caller's ctx
 	// is request-scoped (the create-on-connect SSH session), so binding to it
@@ -324,6 +336,51 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 		return nil, err
 	}
 	return d.instance(name, st), nil
+}
+
+// balloonStatsIntervalSecs is how often the guest refreshes balloon stats. A
+// small interval keeps the working-set signal fresh; the read itself is
+// on-demand (BalloonStats) so this is cheap.
+const balloonStatsIntervalSecs int64 = 1
+
+// SetBalloonTarget inflates (or deflates, at 0) the named VM's balloon to
+// reclaim targetMiB of guest RAM to the host. Implements vmm.Ballooner.
+func (d *Driver) SetBalloonTarget(ctx context.Context, name string, targetMiB int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, ok := d.vms[name]
+	if !ok || st.machine == nil {
+		return fmt.Errorf("vm %q not running", name)
+	}
+	if targetMiB < 0 {
+		targetMiB = 0
+	}
+	return st.machine.UpdateBalloon(ctx, targetMiB)
+}
+
+// BalloonStats reports the guest's current memory picture. Implements
+// vmm.Ballooner. Errors if the VM isn't running or has no balloon (e.g. an old
+// snapshot predating this feature).
+func (d *Driver) BalloonStats(ctx context.Context, name string) (vmm.BalloonStats, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, ok := d.vms[name]
+	if !ok || st.machine == nil {
+		return vmm.BalloonStats{}, fmt.Errorf("vm %q not running", name)
+	}
+	s, err := st.machine.GetBalloonStats(ctx)
+	if err != nil {
+		return vmm.BalloonStats{}, err
+	}
+	out := vmm.BalloonStats{
+		FreeMiB:      s.FreeMemory / (1024 * 1024),
+		AvailableMiB: s.AvailableMemory / (1024 * 1024),
+	}
+	if s.ActualMib != nil {
+		out.ActualMiB = *s.ActualMib
+		out.TargetMiB = *s.ActualMib
+	}
+	return out, nil
 }
 
 func (d *Driver) Destroy(_ context.Context, name string) error {

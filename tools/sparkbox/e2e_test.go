@@ -237,7 +237,8 @@ func TestIdleReaper(t *testing.T) {
 	if _, err := ts.mgr.Create(ctx, "sleepy", "tester", "ubuntu", 1, 512); err != nil {
 		t.Fatal(err)
 	}
-	go ts.mgr.RunReaper(ctx, 50*time.Millisecond, 25*time.Millisecond)
+	// balloonAfter=0 disables the balloon stage; this exercises pause + resume.
+	go ts.mgr.RunReaper(ctx, 0, 50*time.Millisecond, 25*time.Millisecond)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {

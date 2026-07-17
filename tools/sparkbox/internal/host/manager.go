@@ -74,6 +74,11 @@ type Sandbox struct {
 	// bounded, paid capability. Pinned sandboxes are also resumed on host boot
 	// (ResumePinned) so a restart doesn't silently kill the daemon.
 	Pinned bool `json:"pinned,omitempty"`
+	// Ballooned means the idle reaper has inflated this (still-running) sandbox's
+	// memory balloon to hand its unused RAM back to the host — the live-overcommit
+	// "Warm" tier. The guest keeps running (cron/daemons fire); it just has a
+	// smaller resident footprint until the next activity deflates it.
+	Ballooned bool `json:"ballooned,omitempty"`
 	// KeyFP is the fingerprint of the SSH key whose session last created or
 	// resumed this sandbox. It rides along into the id token's `key_fp` claim
 	// for auditing — which of a user's machines started this thing — and is
@@ -100,6 +105,7 @@ type FrontDoor interface {
 type Manager struct {
 	mu          sync.Mutex
 	driver      vmm.Driver
+	balloon     vmm.Ballooner // driver's balloon capability, if it has one; else nil
 	log         *slog.Logger
 	path        string // JSON state file
 	boxes       map[string]*Sandbox
@@ -110,6 +116,7 @@ type Manager struct {
 	maxPerOwner int             // max running sandboxes per owner; 0 = unlimited
 	memAdmitPct int             // RAM admission threshold as % of host; 0 = disabled
 	hostMemMB   int64           // host RAM in MB for admission; 0 = disabled
+	reserveMB   int64           // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
 	nodeName    string          // this host's name in capacity reports
 	hostVCPUs   int64           // host logical CPUs for capacity reports; 0 = unknown
 }
@@ -132,6 +139,12 @@ type Options struct {
 	// HostMemMB*MemAdmissionPct/100. Either being 0 disables the check.
 	MemAdmissionPct int
 	HostMemMB       int64
+	// MemReserveMB is the per-VM working-set floor that turns on live overcommit:
+	// when > 0, admission counts this (not the full memory ceiling) per running
+	// sandbox, and the idle reaper balloons a warm sandbox down to leave only
+	// this much resident. 0 (the default) keeps the old behaviour — count the
+	// full ceiling, never balloon — so overcommit is opt-in and measurement-set.
+	MemReserveMB int64
 	// NodeName identifies this host in capacity reports (defaults to "local").
 	NodeName string
 	// HostVCPUs is the host's logical CPU count for capacity reports (0 = unknown).
@@ -152,9 +165,15 @@ func NewManager(opts Options) (*Manager, error) {
 		maxPerOwner: opts.MaxRunningPerOwner,
 		memAdmitPct: opts.MemAdmissionPct,
 		hostMemMB:   opts.HostMemMB,
+		reserveMB:   opts.MemReserveMB,
 		nodeName:    opts.NodeName,
 		hostVCPUs:   opts.HostVCPUs,
 		frontDoor:   opts.FrontDoor,
+	}
+	// The balloon reclaim path is optional — only firecracker (and the mock)
+	// implement it. Detect it once so the reaper and resume paths can use it.
+	if bl, ok := opts.Driver.(vmm.Ballooner); ok {
+		m.balloon = bl
 	}
 	if m.nodeName == "" {
 		m.nodeName = "local"
@@ -244,15 +263,28 @@ func (m *Manager) admit(owner string, memMB int64, exclude string) error {
 		var used int64
 		for _, b := range m.boxes {
 			if b.Name != exclude && b.State == vmm.StateRunning {
-				used += b.MemMB
+				used += m.effectiveMemMB(b.MemMB)
 			}
 		}
 		budget := m.hostMemMB * int64(m.memAdmitPct) / 100
-		if used+memMB > budget {
-			return &CapacityError{RequestedMB: memMB, UsedMB: used, BudgetMB: budget}
+		cost := m.effectiveMemMB(memMB)
+		if used+cost > budget {
+			return &CapacityError{RequestedMB: cost, UsedMB: used, BudgetMB: budget}
 		}
 	}
 	return nil
+}
+
+// effectiveMemMB is what admission charges for a running sandbox. With live
+// overcommit on (reserveMB > 0) we charge the working-set floor instead of the
+// full ceiling, since idle guests are ballooned down to ~reserveMB and the
+// balloon's deflate-on-oom + host swap absorb the rare spike. Off, we charge
+// the full ceiling (the old, pessimistic Firecracker-reservation accounting).
+func (m *Manager) effectiveMemMB(memMB int64) int64 {
+	if m.reserveMB > 0 && m.reserveMB < memMB {
+		return m.reserveMB
+	}
+	return memMB
 }
 
 func (m *Manager) Get(name string) (*Sandbox, bool) {
@@ -377,6 +409,9 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		b.GuestV6 = inst.GuestV6
 		m.log.Info("sandbox resumed", "name", name)
 	}
+	// Activity returns a ballooned-down sandbox to full RAM (whether it was
+	// just resumed or was warm-but-ballooned).
+	m.deflate(ctx, b)
 	b.LastActive = time.Now().UTC()
 	return copyOf(b), m.save()
 }
@@ -491,9 +526,13 @@ func (m *Manager) Touch(name string) {
 	}
 }
 
-// RunReaper pauses running sandboxes idle longer than timeout. Blocks until
-// ctx is done.
-func (m *Manager) RunReaper(ctx context.Context, timeout, interval time.Duration) {
+// RunReaper walks idle sandboxes down the activity gradient. Blocks until ctx
+// is done. Two thresholds: a running sandbox idle past balloonAfter is
+// *ballooned down* (RAM reclaimed to the host, VM still running); idle past
+// pauseAfter it is *paused* (snapshotted, RAM fully freed). balloonAfter <= 0
+// or no reserve configured skips the balloon stage — straight to pause, the
+// old behaviour.
+func (m *Manager) RunReaper(ctx context.Context, balloonAfter, pauseAfter, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -501,28 +540,70 @@ func (m *Manager) RunReaper(ctx context.Context, timeout, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			m.reapOnce(ctx, timeout)
+			m.reapOnce(ctx, balloonAfter, pauseAfter)
 		}
 	}
 }
 
-// reapOnce pauses every running sandbox idle longer than timeout. Split out
-// from RunReaper's loop so the policy is unit-testable without a ticker.
-func (m *Manager) reapOnce(ctx context.Context, timeout time.Duration) {
+// reapOnce applies one pass of the idle policy. Split out from RunReaper's loop
+// so the two-stage gradient is unit-testable without a ticker.
+func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Duration) {
 	for _, b := range m.List() {
-		// Pinned sandboxes hold their RAM slot on purpose so in-guest
+		// Pinned sandboxes hold their full RAM on purpose so in-guest
 		// timers/daemons keep firing; the reaper never touches them.
-		if b.Pinned {
+		if b.Pinned || b.State != vmm.StateRunning {
 			continue
 		}
-		if b.State == vmm.StateRunning && time.Since(b.LastActive) > timeout {
+		idle := time.Since(b.LastActive)
+		switch {
+		case idle > pauseAfter:
 			if err := m.Pause(ctx, b.Name); err != nil {
 				m.log.Error("reaper pause failed", "name", b.Name, "err", err)
 			} else {
 				m.log.Info("reaper paused idle sandbox", "name", b.Name)
 			}
+		case m.reserveMB > 0 && balloonAfter > 0 && !b.Ballooned && idle > balloonAfter:
+			if err := m.balloonDown(ctx, b.Name); err != nil {
+				m.log.Warn("reaper balloon-down failed", "name", b.Name, "err", err)
+			}
 		}
 	}
+}
+
+// balloonDown reclaims a running sandbox's idle RAM to the host by inflating
+// its balloon to leave only the working-set reserve, without pausing it. A
+// no-op if overcommit is off, the driver has no balloon, or there's nothing to
+// reclaim above the reserve.
+func (m *Manager) balloonDown(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok || b.State != vmm.StateRunning || b.Ballooned || m.balloon == nil || m.reserveMB <= 0 {
+		return nil
+	}
+	target := b.MemMB - m.reserveMB
+	if target <= 0 {
+		return nil
+	}
+	if err := m.balloon.SetBalloonTarget(ctx, name, target); err != nil {
+		return err
+	}
+	b.Ballooned = true
+	m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
+	return m.save()
+}
+
+// deflate returns a ballooned sandbox's RAM on reactivation. Callers hold m.mu.
+func (m *Manager) deflate(ctx context.Context, b *Sandbox) {
+	if !b.Ballooned || m.balloon == nil {
+		return
+	}
+	if err := m.balloon.SetBalloonTarget(ctx, b.Name, 0); err != nil {
+		m.log.Warn("balloon deflate failed", "name", b.Name, "err", err)
+		return
+	}
+	b.Ballooned = false
+	m.log.Info("deflated balloon on activity", "name", b.Name)
 }
 
 func (m *Manager) load() error {

@@ -55,3 +55,27 @@ type Driver interface {
 	// Close releases driver resources (running fake VMs, VMM processes).
 	Close() error
 }
+
+// BalloonStats reports a ballooned guest's memory picture, in MiB. All fields
+// are best-effort — a driver without balloon stats returns zeros.
+type BalloonStats struct {
+	TargetMiB    int64 // how much RAM we've asked the balloon to reclaim to the host
+	ActualMiB    int64 // how much the balloon currently holds
+	FreeMiB      int64 // guest-reported free memory
+	AvailableMiB int64 // guest estimate of memory available for new work
+}
+
+// Ballooner is an optional Driver capability: reclaiming a *running* guest's
+// unused RAM to the host through a virtio-balloon, without pausing it. This is
+// the live-overcommit lever — an idle-but-warm sandbox hands most of its RAM
+// back while its in-guest cron and daemons keep running. Drivers that can't do
+// this simply don't implement it; the manager checks with a type assertion, so
+// adding the capability never breaks a driver that lacks it.
+type Ballooner interface {
+	// SetBalloonTarget inflates the balloon to reclaim targetMiB of guest RAM to
+	// the host (0 fully deflates, giving the guest all its RAM back). It is a
+	// no-op error if the named VM isn't running.
+	SetBalloonTarget(ctx context.Context, name string, targetMiB int64) error
+	// BalloonStats reports the guest's current memory use, when available.
+	BalloonStats(ctx context.Context, name string) (BalloonStats, error)
+}

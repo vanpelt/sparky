@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -121,6 +122,27 @@ func TestMemAdmission(t *testing.T) {
 	mustCreate(t, m, "a3", "alice", 1024)
 }
 
+func TestReserveAdmissionMultipliesDensity(t *testing.T) {
+	// Budget = 8192 MB. With a 1024 MB working-set reserve, each 8 GB-ceiling
+	// sandbox is charged 1024 MB, so 8 fit where the old full-ceiling accounting
+	// fit only 1.
+	m := newTestManager(t, host.Options{
+		MemAdmissionPct: 100, HostMemMB: 8192, MemReserveMB: 1024,
+	})
+	for i := 0; i < 8; i++ {
+		mustCreate(t, m, fmt.Sprintf("v%d", i), "alice", 8192)
+	}
+	// The 9th would push effective usage to 9×1024 > 8192: refused.
+	_, err := m.Create(context.Background(), "v8", "alice", "ubuntu", 1, 8192)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("want *CapacityError past the reserve budget, got %v", err)
+	}
+	if capErr.RequestedMB != 1024 || capErr.UsedMB != 8192 || capErr.BudgetMB != 8192 {
+		t.Fatalf("unexpected CapacityError: %+v", capErr)
+	}
+}
+
 func TestNoLimitsWhenZero(t *testing.T) {
 	m := newTestManager(t, host.Options{}) // all limits disabled
 	for _, n := range []string{"a1", "a2", "a3", "a4", "a5"} {
@@ -162,8 +184,9 @@ func TestPinnedSurvivesReaper(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// timeout=0: every idle running sandbox is eligible on the first tick.
-	go m.RunReaper(ctx, 0, time.Millisecond)
+	// pauseAfter=0: every idle running sandbox is eligible on the first tick.
+	// balloonAfter=0 disables the balloon stage (this test is about pausing).
+	go m.RunReaper(ctx, 0, 0, time.Millisecond)
 
 	// The unpinned sandbox is paused by the reaper...
 	waitFor(t, func() bool {

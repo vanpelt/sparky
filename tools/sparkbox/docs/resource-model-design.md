@@ -1,10 +1,27 @@
 # Sparkbox pooled resource model: many cheap sandboxes on one host
 
-Status: **design** (2026-07-17). Nothing here is built yet. The target is
-exe.dev's felt experience — a user has "up to 50" always-on machines, each up to
-2 vCPU / 8 GB / 25 GB disk, ~100 GB pooled — on a single 64 GB Elastic Metal box,
-which is a 6× memory overcommit that only closes because idle sandboxes cost
-almost nothing.
+Status: **being built** (updated 2026-07-17). The target is exe.dev's felt
+experience — a user has "up to 50" always-on machines, each up to 2 vCPU / 8 GB /
+25 GB disk, ~100 GB pooled — on a single 64 GB Elastic Metal box, which is a 6×
+memory overcommit that only closes because idle sandboxes cost almost nothing.
+
+> **Course correction (2026-07-17): live overcommit, not pause-for-density.**
+> This doc originally assumed a warm 8 GB VM costs 8 GB of host RAM, so density
+> had to come from suspend-to-disk *pausing*. That premise is wrong, and
+> exe.dev's own docs say so: "Your VMs share CPU/RAM — you pay for underlying
+> resources, not per VM." Their VMs report **running**, never paused. The real
+> mechanism is **live overcommit**: a Firecracker/CLH guest's RAM is lazily
+> allocated anonymous memory (confirmed in our `fc.go` — no prealloc), so an idle
+> guest with an 8 GB *ceiling* only faults in its small working set. KSM dedups
+> the shared base image, a memory balloon + swap reclaim the rest under pressure,
+> and idle vCPU threads cost ~0. So the primary density lever is **keep VMs
+> running and account honestly**, not pause them. Pause/Stopped survive as
+> *deeper* idle tiers (host-reboot survival, disk reclaim), not the thing that
+> makes 50 fit. **Landed on this pivot:** a memory balloon on every Firecracker
+> VM, a two-stage reaper (balloon-down → pause), and working-set-aware admission
+> gated behind `--mem-reserve-mb` (measure with `hack/measure-density.py`, then
+> set it). The sections below are being revised toward this; where they still say
+> "pause is the density lever," read "balloon-down is."
 
 ## Why
 
@@ -61,10 +78,15 @@ handles servers and background work as **two different problems** (Parts 2 and 3
   and time-sensitive — a sandbox resumed after an hour would mint/hold tokens with
   a wrong `iat/exp`. TLS validation and logs skew too. Resume must step the guest
   clock (Part 6).
-- **Fixed 2 vCPU / 8192 MB per sandbox** (`host/manager.go:28`), enforced as a
-  hard Firecracker reservation with **no balloon device** (`fc.go:11`). So RAM is
-  reserved, not "up to" — a warm sandbox costs its full 8 GB even if the guest
-  uses 200 MB. Ballooning (Part 4) is what would let us keep more warm.
+- **Fixed 2 vCPU / 8192 MB per sandbox** (`host/manager.go:28`). ~~So RAM is
+  reserved, not "up to."~~ **Corrected:** Firecracker configures guest RAM as
+  lazily-allocated anonymous mmap (no prealloc/hugepages in `fc.go`), so a warm
+  sandbox that touched 300 MB costs ~300 MB of host RAM, *not* 8 GB. The "8 GB"
+  is a **ceiling**, and the old full-8 GB charge was purely an *admission
+  accounting* choice, not a kernel fact — which is exactly why we thought only ~7
+  fit. **Landed:** every VM now gets a `deflate_on_oom` memory balloon
+  (`vmm.Ballooner`, `fc.go`), so we can reclaim an idle guest's RAM to the host
+  without pausing it (Part 4).
 - **Admission is RAM-only and ignores paused VMs** (`manager.go:225`). It never
   considers disk, never counts snapshot cost, and on a full host it *refuses* a
   resume ("pause one to free a slot") rather than evicting (Part 5).
@@ -169,12 +191,13 @@ density one.
   counts against the pool, which is the honest accounting and also the pressure
   that drives Paused→Stopped). Enforced at create/resume and surfaced live.
 - **Burstable compute, not fixed reservation.** exe.dev's "*up to* 2 vCPU / 8 GB"
-  implies a ceiling over a smaller baseline. Two moves: (a) give Firecracker a
-  **memory balloon** so an idle-but-warm guest returns unused RAM to the host,
-  letting us keep several more warm within the 64 GB budget; (b) run vCPUs under a
+  implies a ceiling over a smaller baseline. Two moves: (a) **✅ landed** — every
+  Firecracker VM gets a `deflate_on_oom` **memory balloon** with stats polling
+  (`vmm.Ballooner` + `fc.go`); the idle reaper balloons a warm guest down to the
+  `--mem-reserve-mb` working-set floor (RAM returned to the host, guest still
+  running), and activity deflates it. (b) **still to do** — run vCPUs under a
   **cgroup cpu.max** so 2 vCPU is a burst ceiling with fair sharing under
-  contention, not a hard 2-core reservation. Both increase safe overcommit; both
-  are additive to the reservation model we have today.
+  contention, not a hard 2-core reservation. Both increase safe overcommit.
 
 ## Part 5 — Admission and eviction: disk- and RAM-aware, evict don't refuse
 
@@ -183,7 +206,11 @@ refuses if not. The pooled model needs three changes:
 
 1. **Two-dimensional admission.** Check the RAM budget *and* the owner's pooled
    disk quota (including the snapshot this pause would write). Starting a sandbox
-   that would blow either is refused with the specific reason.
+   that would blow either is refused with the specific reason. **RAM dimension
+   landed:** with `--mem-reserve-mb` set, admission charges the working-set floor
+   per running VM, not the full ceiling (`Manager.effectiveMemMB`), so the box
+   fits `ceiling ÷ reserve`× more warm — the actual density unlock. The disk
+   dimension is still to do.
 2. **Count the true cost of paused VMs.** Paused VMs cost 0 RAM but real disk;
    admission and the reaper must see snapshot disk as a first-class resource, or
    the "keep a Paused cache" policy silently fills the volume.
@@ -254,8 +281,11 @@ rewrite.
    sandboxes" physically fit.
 3. **M3 — quotas.** XFS project quotas (per-VM), pooled per-owner accounting,
    total-sandbox cap, two-dimensional admission.
-4. **M4 — density + seamlessness.** Memory balloon, cgroup cpu.max, wake-on-any-
-   port, LRU eviction under resume pressure, resume clock-step.
+4. **M4 — density + seamlessness.** **Memory balloon + working-set admission
+   landed early** (`--mem-reserve-mb`, two-stage reaper) — this is the real
+   density lever now that we know pause isn't. Still to do: KSM host tuning
+   (measure with `hack/measure-density.py --ksm` first), cgroup cpu.max,
+   wake-on-any-port, LRU eviction under resume pressure, resume clock-step.
 5. **M5 — multi-box.** Per-owner host pinning + a capacity-aware assignment control
    plane; Stopped-sandbox migration for rebalancing.
 
