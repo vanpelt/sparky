@@ -30,6 +30,9 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  keys rm <SHA256:...>     unlink a key (never the last one)\r\n" +
 	"  keys import-github       adopt every key github.com lists for your login\r\n" +
 	"  keys verify-github       re-check your GitHub link\r\n" +
+	"  email [set <addr>|clear] show or set the email forwarded to private apps\r\n" +
+	"  share <name> [public|private]  show or set who can reach a sandbox's URLs\r\n" +
+	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
 	"  invite                   mint a single-use invite code\r\n"
 
 // handleControl serves the `ctl@` out-of-band channel: managing sandboxes and
@@ -110,6 +113,12 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlWhoami(s, user)
 	case "keys":
 		g.controlKeys(s, user, args[1:], log)
+	case "email":
+		g.controlEmail(s, user, args[1:], log)
+	case "share":
+		g.controlShare(s, user, args[1:], log)
+	case "session-token":
+		g.controlSessionToken(s, user, args[1:], log)
 	case "invite":
 		g.controlInvite(s, user, log)
 	default:

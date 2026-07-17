@@ -8,8 +8,13 @@
 // myvm.hivemind.tools with no extra setup; users can add routes on other
 // subdomains or ports via the control API.
 //
-// The proxy is intentionally unauthenticated: these are public web previews of
-// whatever the sandbox serves, the same model as exe.dev's per-sandbox URLs.
+// A route is public or private (routes.Visibility). Public routes are
+// unauthenticated web previews — whatever the sandbox serves, the same model as
+// exe.dev's per-sandbox URLs. Private routes (the default) are gated: a visitor
+// must present a session identifying a handle that owns the sandbox, or an
+// operator, and that identity is forwarded upstream as X-Forwarded-* headers.
+// Gating is active only when SetAuth has wired a session verifier; without it
+// (local/mock runs) every route serves openly.
 package proxy
 
 import (
@@ -26,8 +31,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
 // resumeTimeout bounds how long a request will wait for a paused sandbox to
@@ -44,9 +51,26 @@ var errorTpl = template.Must(template.New("error").Parse(errorHTML))
 type ctxKey int
 
 const (
-	targetKey ctxKey = iota
-	routeKey         // the routes.Route being served, for error reporting
+	targetKey   ctxKey = iota
+	routeKey           // the routes.Route being served, for error reporting
+	identityKey        // the authenticated visitor (edgeauth.Identity), for header injection
+	portKey            // the original dialed port recovered below TLS (SO_ORIGINAL_DST)
 )
+
+// Accounts is the slice of the user store the edge needs to authorise a
+// visitor: resolving a handle to its operator status and email. *users.Store
+// satisfies it.
+type Accounts interface {
+	Get(handle string) (users.User, error)
+}
+
+// WithOriginalPort stamps the pre-DNAT destination port on a connection's
+// context. The edge listens on one port but iptables REDIRECTs the whole
+// private-port range to it; this is how a request learns it was dialed on
+// :4444. Set from the http.Server's ConnContext (see cmd/sparkbox).
+func WithOriginalPort(ctx context.Context, port int) context.Context {
+	return context.WithValue(ctx, portKey, port)
+}
 
 type Server struct {
 	mgr    *host.Manager
@@ -64,6 +88,35 @@ type Server struct {
 	// <issuerSub>.<domain> (see SetIssuer).
 	issuer    http.Handler
 	issuerSub string
+
+	// login/session/accounts, if set (via SetAuth), turn on the private-route
+	// gate: login serves the browser sign-in at <loginSub>.<domain>, session
+	// verifies the cookie/bearer token, and accounts authorises the handle.
+	login    http.Handler
+	loginSub string
+	session  *edgeauth.Signer
+	accounts Accounts
+
+	// listenPort is the edge's own listen port (e.g. 443). A request whose
+	// recovered/Host port equals it means "dialed the edge directly" — the
+	// default web route — not "forward to guest:<listenPort>".
+	listenPort int
+}
+
+// SetListenPort records the edge's own listen port so targetPort can tell a
+// direct hit from an any-port URL. Optional; 0 disables the check.
+func (s *Server) SetListenPort(p int) { s.listenPort = p }
+
+// SetAuth turns on authenticated forwarding. loginSub reserves a subdomain for
+// the browser sign-in handler; session verifies visitor tokens; accounts maps a
+// handle to its record (operator status, email). Until this is called, every
+// route — even one marked private — serves without a gate, which is what a
+// local mock run wants. Call once before serving.
+func (s *Server) SetAuth(loginSub string, login http.Handler, session *edgeauth.Signer, accounts Accounts) {
+	s.loginSub = strings.ToLower(loginSub)
+	s.login = login
+	s.session = session
+	s.accounts = accounts
 }
 
 // SetConsole reserves a subdomain (e.g. "console") for the operator console,
@@ -102,6 +155,21 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 			// Preserve the client-facing host so apps that key off Host (or
 			// build absolute URLs) see myvm.hivemind.tools, not the guest IP.
 			pr.Out.Host = pr.In.Host
+			// Identity headers: always strip any client-supplied copies first so
+			// a request can't spoof them, then set our own from the verified
+			// session. The names are the oauth2-proxy convention, so upstreams
+			// already written for that ecosystem work unmodified. A public route
+			// carries no identity, so all three stay absent (never blank).
+			for _, h := range []string{"X-Forwarded-User", "X-Forwarded-Email", "X-Forwarded-Preferred-Username"} {
+				pr.Out.Header.Del(h)
+			}
+			if id, ok := pr.In.Context().Value(identityKey).(edgeauth.Identity); ok {
+				pr.Out.Header.Set("X-Forwarded-User", id.Handle)
+				pr.Out.Header.Set("X-Forwarded-Preferred-Username", id.Handle)
+				if id.Email != "" {
+					pr.Out.Header.Set("X-Forwarded-Email", id.Email)
+				}
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Warn("proxy upstream error", "host", r.Host, "err", err)
@@ -133,6 +201,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.issuer.ServeHTTP(w, r)
 		return
 	}
+	if s.login != nil && sub == s.loginSub {
+		s.login.ServeHTTP(w, r)
+		return
+	}
 	route, ok, err := s.store.GetBySubdomain(sub)
 	if err != nil {
 		s.log.Error("route lookup failed", "subdomain", sub, "err", err)
@@ -149,9 +221,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The auth gate runs BEFORE resume-on-connect: an unauthenticated hit on a
+	// paused private sandbox must redirect to login without waking the VM, so
+	// the gate is never a free way to spin up someone else's box.
+	ctxr := r.Context()
+	if id, gated := s.authorize(w, r, route); gated {
+		return // authorize already wrote the redirect/401/403
+	} else if id != nil {
+		ctxr = context.WithValue(ctxr, identityKey, *id)
+	}
+
+	// The forwarded port comes from the URL (…:4444) when the visitor named one,
+	// otherwise the route's configured port. This is what makes any-port URLs
+	// work with no per-port route row.
+	port := s.targetPort(r, route)
+
 	// Resume-on-connect: bring the sandbox up if it was reaped, and keep it
 	// marked active so the reaper leaves it alone while it's serving traffic.
-	ctx, cancel := context.WithTimeout(r.Context(), resumeTimeout)
+	ctx, cancel := context.WithTimeout(ctxr, resumeTimeout)
 	defer cancel()
 	box, err := s.mgr.EnsureRunning(ctx, route.Sandbox)
 	if err != nil {
@@ -167,10 +254,84 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(box.HostIP, strconv.Itoa(route.Port))}
-	ctx2 := context.WithValue(r.Context(), targetKey, target)
+	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(box.HostIP, strconv.Itoa(port))}
+	// Report the actually-forwarded port in any upstream error, not the route's
+	// default, since an any-port URL can override it.
+	route.Port = port
+	ctx2 := context.WithValue(ctxr, targetKey, target)
 	r = r.WithContext(context.WithValue(ctx2, routeKey, route))
 	s.rp.ServeHTTP(w, r)
+}
+
+// targetPort resolves which guest port to forward to. Preference order:
+// the pre-DNAT port recovered below TLS (authoritative when iptables REDIRECT
+// funnelled an any-port URL in), then an explicit port in the Host header
+// (covers direct binds and non-Linux dev), then the route's configured port.
+// The edge's own listen port is ignored — dialing the edge directly means "the
+// default web route", not "forward to guest:443".
+func (s *Server) targetPort(r *http.Request, route routes.Route) int {
+	if p, ok := r.Context().Value(portKey).(int); ok && p > 0 && p != s.listenPort {
+		return p
+	}
+	if _, portStr, err := net.SplitHostPort(r.Host); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p != s.listenPort {
+			return p
+		}
+	}
+	return route.Port
+}
+
+// authorize enforces a route's visibility. It returns gated=true when it has
+// already written a response (redirect to login, 401, or 403) and the caller
+// must stop. On an allowed request it returns the verified identity (nil for a
+// public route or when auth isn't wired) to forward upstream.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, route routes.Route) (id *edgeauth.Identity, gated bool) {
+	// Auth not wired (local/mock) or an explicitly public route: serve openly,
+	// with no identity to forward.
+	if s.session == nil || route.Visibility == routes.VisibilityPublic {
+		return nil, false
+	}
+	visitor, ok := s.session.IdentityFrom(r)
+	if !ok {
+		s.challenge(w, r)
+		return nil, true
+	}
+	if !s.mayView(visitor.Handle, route) {
+		// They are signed in, just not allowed here — a 403, never a redirect
+		// loop back to a login that would change nothing.
+		s.errorPage(w, r, http.StatusForbidden, "You don't have access to this sandbox",
+			fmt.Sprintf("This URL is private to %s. You're signed in as %s.", route.Owner, visitor.Handle),
+			"Ask the owner to make this port public, or sign in with an account that owns it.")
+		return nil, true
+	}
+	return &visitor, false
+}
+
+// mayView is the picked access scope: the sandbox owner, or an operator.
+func (s *Server) mayView(handle string, route routes.Route) bool {
+	if handle == route.Owner {
+		return true
+	}
+	if s.accounts == nil {
+		return false
+	}
+	u, err := s.accounts.Get(handle)
+	return err == nil && u.IsOperator()
+}
+
+// challenge sends an unauthenticated visitor to the login page (browsers) or
+// answers 401 (API clients), preserving the original URL to return to.
+func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
+	if s.login == nil || !strings.Contains(r.Header.Get("Accept"), "text/html") {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "sparkbox: authentication required — mint a token with `ssh ctl@"+s.domain+
+			" session-token` and send it as `Authorization: Bearer <token>`", http.StatusUnauthorized)
+		return
+	}
+	ret := "https://" + r.Host + r.URL.RequestURI()
+	dest := "https://" + s.loginSub + "." + s.domain + "/?return=" + url.QueryEscape(ret)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
 
 // errorPage writes a friendly HTML error for browsers, or a terse text/plain

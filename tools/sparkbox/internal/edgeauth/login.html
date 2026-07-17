@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in · sparkbox</title>
+<style>
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --danger: 0 72% 51%;
+    --radius: 0.6rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); max-width: 480px; width: 100%;
+    padding: 28px 30px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+    display: grid; place-items: center; font-weight: 700; font-size: 15px;
+  }
+  .brand span { font-size: 13px; font-weight: 600; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
+  p { margin: 0 0 8px; color: hsl(var(--muted-foreground)); }
+  ol { margin: 10px 0 4px; padding-left: 20px; color: hsl(var(--muted-foreground)); }
+  li { margin: 4px 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: hsl(var(--muted)); border-radius: 4px; padding: 1px 5px;
+    color: hsl(var(--foreground)); user-select: all;
+  }
+  textarea {
+    width: 100%; margin-top: 14px; min-height: 84px; resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+  button {
+    margin-top: 12px; width: 100%; padding: 10px 14px; border: 0; cursor: pointer;
+    border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 600;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+  }
+  .err {
+    margin-top: 14px; padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--danger) / .12); border: 1px solid hsl(var(--danger) / .4);
+    color: hsl(var(--danger)); font-size: 13px; display: none;
+  }
+  .err.show { display: block; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><div class="logo">s</div><span>sparkbox</span></div>
+    <h1>Sign in</h1>
+    <p>This is a private URL. Mint a session token from a machine with your SSH key:</p>
+    <ol>
+      <li>Run <code>ssh ctl@{{.Gateway}} session-token</code></li>
+      <li>Paste the <code>spk_v1…</code> value below.</li>
+    </ol>
+    <form method="POST" action="/session">
+      <input type="hidden" name="return" value="{{.Return}}" />
+      <textarea name="token" placeholder="spk_v1…" autofocus spellcheck="false"></textarea>
+      <div class="err" id="err">That token was invalid or expired. Mint a fresh one and try again.</div>
+      <button type="submit">Continue</button>
+    </form>
+  </main>
+  <script>
+    if (new URLSearchParams(location.search).get("err")) {
+      document.getElementById("err").classList.add("show");
+    }
+  </script>
+</body>
+</html>

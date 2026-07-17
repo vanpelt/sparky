@@ -28,3 +28,42 @@ fi
 # that alone: only sandbox taps may reach the port at all.
 iptables -C INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP 2>/dev/null || \
   iptables -I INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP
+
+# Any-port authenticated forwarding: the edge listens on ONE port but a user can
+# reach any guest port at https://<name>.<domain>:<PORT>. REDIRECT the whole
+# private-port range on the public uplink to the edge listener; the edge recovers
+# the original port via SO_ORIGINAL_DST and forwards to that guest port.
+#
+# Scoping matters: the redirect lives in a dedicated chain hooked only for
+# traffic arriving on the uplink, so guest→gateway metadata (which arrives on
+# sbtap+, not the uplink) is never caught. Admin sshd (:2222) and the edge port
+# itself are excluded so we don't redirect them into the web edge.
+PROXY_PORT="${PROXY_PORT:-443}"
+PORT_LO="${PROXY_REDIRECT_LO:-1024}"
+PORT_HI="${PROXY_REDIRECT_HI:-65535}"
+EXCLUDE_PORTS="${PROXY_REDIRECT_EXCLUDE:-2222} $PROXY_PORT"
+if [ -n "$UPLINK" ]; then
+  # Rebuild the chain from scratch each run so it stays in sync with the config
+  # (excludes, range, edge port) without accumulating stale rules.
+  iptables -t nat -N SPARKBOX_EDGE 2>/dev/null || iptables -t nat -F SPARKBOX_EDGE
+  for p in $EXCLUDE_PORTS; do
+    iptables -t nat -A SPARKBOX_EDGE -p tcp --dport "$p" -j RETURN
+  done
+  iptables -t nat -A SPARKBOX_EDGE -p tcp --dport "$PORT_LO:$PORT_HI" -j REDIRECT --to-ports "$PROXY_PORT"
+  iptables -t nat -C PREROUTING -i "$UPLINK" -p tcp -j SPARKBOX_EDGE 2>/dev/null || \
+    iptables -t nat -I PREROUTING -i "$UPLINK" -p tcp -j SPARKBOX_EDGE
+
+  # Same for IPv6 when the host has a routable prefix: web traffic to the
+  # flexible v6 hits the same edge. Best-effort — skip if ip6tables nat is absent.
+  if [ -n "${SUBNET6:-}" ] && ip6tables -t nat -L >/dev/null 2>&1; then
+    ip6tables -t nat -N SPARKBOX_EDGE 2>/dev/null || ip6tables -t nat -F SPARKBOX_EDGE
+    for p in $EXCLUDE_PORTS; do
+      ip6tables -t nat -A SPARKBOX_EDGE -p tcp --dport "$p" -j RETURN
+    done
+    ip6tables -t nat -A SPARKBOX_EDGE -p tcp --dport "$PORT_LO:$PORT_HI" -j REDIRECT --to-ports "$PROXY_PORT"
+    ip6tables -t nat -C PREROUTING -i "$UPLINK" -p tcp -j SPARKBOX_EDGE 2>/dev/null || \
+      ip6tables -t nat -I PREROUTING -i "$UPLINK" -p tcp -j SPARKBOX_EDGE
+  fi
+else
+  echo "WARN: no default route — skipping any-port REDIRECT" >&2
+fi

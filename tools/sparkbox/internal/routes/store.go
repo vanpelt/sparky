@@ -23,9 +23,26 @@ import (
 // DefaultPort is forwarded to when a route doesn't specify one.
 const DefaultPort = 8000
 
+// Visibility governs whether the proxy edge gates a route behind a login.
+// Private is the default: a visitor must present a valid session identifying a
+// handle that owns the sandbox (or an operator). Public restores the old
+// unauthenticated web-preview behaviour, opt-in via `ctl@ share <name> public`.
+const (
+	VisibilityPrivate = "private"
+	VisibilityPublic  = "public"
+)
+
+// ValidVisibility reports whether v is a known visibility value.
+func ValidVisibility(v string) bool {
+	return v == VisibilityPrivate || v == VisibilityPublic
+}
+
 // ErrSubdomainTaken is returned when a subdomain is already bound to a
 // different sandbox.
 var ErrSubdomainTaken = errors.New("subdomain already in use by another sandbox")
+
+// ErrNoSuchRoute is returned when an operation targets a subdomain with no row.
+var ErrNoSuchRoute = errors.New("no such route")
 
 // subdomainRe allows one or more dash-separated DNS labels (so both "myvm" and
 // "web-myvm" or "api.myvm" work as subdomains).
@@ -33,11 +50,12 @@ var subdomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9](
 
 // Route maps <Subdomain>.<domain> to Sandbox:Port.
 type Route struct {
-	Subdomain string    `json:"subdomain"`
-	Sandbox   string    `json:"sandbox"`
-	Owner     string    `json:"owner"`
-	Port      int       `json:"port"`
-	CreatedAt time.Time `json:"created_at"`
+	Subdomain  string    `json:"subdomain"`
+	Sandbox    string    `json:"sandbox"`
+	Owner      string    `json:"owner"`
+	Port       int       `json:"port"`
+	Visibility string    `json:"visibility"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // ValidSubdomain reports whether s is a usable subdomain label.
@@ -81,7 +99,40 @@ func Open(path string) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
+	// Migration: routes predating authenticated forwarding have no visibility
+	// column. New routes default to private (secure by default); existing rows
+	// inherit that too, so a fresh deploy gates previews until `share … public`.
+	if err := addColumnIfMissing(db, "routes", "visibility",
+		"TEXT NOT NULL DEFAULT '"+VisibilityPrivate+"'"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN unless the column already
+// exists. sqlite has no ADD COLUMN IF NOT EXISTS, and a bare ALTER errors on
+// the second boot, so we consult table_info first.
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -98,6 +149,12 @@ func (s *Store) Upsert(r Route) error {
 	}
 	if r.Port <= 0 || r.Port > 65535 {
 		return fmt.Errorf("invalid port %d", r.Port)
+	}
+	if r.Visibility == "" {
+		r.Visibility = VisibilityPrivate
+	}
+	if !ValidVisibility(r.Visibility) {
+		return fmt.Errorf("invalid visibility %q", r.Visibility)
 	}
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now().UTC()
@@ -122,23 +179,45 @@ func (s *Store) Upsert(r Route) error {
 		return ErrSubdomainTaken
 	}
 
+	// Only the port is updated on conflict: visibility is set once at creation
+	// and thereafter changed only through SetVisibility, so the host manager
+	// re-writing the default route on every resume can't silently re-privatise a
+	// subdomain the owner deliberately made public.
 	if _, err := tx.Exec(`
-		INSERT INTO routes (subdomain, sandbox, owner, port, created_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO routes (subdomain, sandbox, owner, port, visibility, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(subdomain) DO UPDATE SET port = excluded.port`,
-		r.Subdomain, r.Sandbox, r.Owner, r.Port, r.CreatedAt); err != nil {
+		r.Subdomain, r.Sandbox, r.Owner, r.Port, r.Visibility, r.CreatedAt); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SetVisibility flips a route between public and private. It returns
+// ErrNoSuchRoute if the subdomain has no row.
+func (s *Store) SetVisibility(subdomain, visibility string) error {
+	if !ValidVisibility(visibility) {
+		return fmt.Errorf("invalid visibility %q", visibility)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE routes SET visibility = ? WHERE subdomain = ?`, visibility, subdomain)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNoSuchRoute
+	}
+	return nil
 }
 
 // GetBySubdomain returns the route for a subdomain, if any.
 func (s *Store) GetBySubdomain(subdomain string) (Route, bool, error) {
 	var r Route
 	err := s.db.QueryRow(
-		`SELECT subdomain, sandbox, owner, port, created_at FROM routes WHERE subdomain = ?`,
+		`SELECT subdomain, sandbox, owner, port, visibility, created_at FROM routes WHERE subdomain = ?`,
 		subdomain,
-	).Scan(&r.Subdomain, &r.Sandbox, &r.Owner, &r.Port, &r.CreatedAt)
+	).Scan(&r.Subdomain, &r.Sandbox, &r.Owner, &r.Port, &r.Visibility, &r.CreatedAt)
 	if err == sql.ErrNoRows {
 		return Route{}, false, nil
 	}
@@ -150,17 +229,17 @@ func (s *Store) GetBySubdomain(subdomain string) (Route, bool, error) {
 
 // ListBySandbox returns all routes pointing at a sandbox.
 func (s *Store) ListBySandbox(sandbox string) ([]Route, error) {
-	return s.query(`SELECT subdomain, sandbox, owner, port, created_at FROM routes WHERE sandbox = ? ORDER BY subdomain`, sandbox)
+	return s.query(`SELECT subdomain, sandbox, owner, port, visibility, created_at FROM routes WHERE sandbox = ? ORDER BY subdomain`, sandbox)
 }
 
 // ListByOwner returns all routes owned by a user.
 func (s *Store) ListByOwner(owner string) ([]Route, error) {
-	return s.query(`SELECT subdomain, sandbox, owner, port, created_at FROM routes WHERE owner = ? ORDER BY subdomain`, owner)
+	return s.query(`SELECT subdomain, sandbox, owner, port, visibility, created_at FROM routes WHERE owner = ? ORDER BY subdomain`, owner)
 }
 
 // List returns every route.
 func (s *Store) List() ([]Route, error) {
-	return s.query(`SELECT subdomain, sandbox, owner, port, created_at FROM routes ORDER BY subdomain`)
+	return s.query(`SELECT subdomain, sandbox, owner, port, visibility, created_at FROM routes ORDER BY subdomain`)
 }
 
 func (s *Store) query(q string, args ...any) ([]Route, error) {
@@ -172,7 +251,7 @@ func (s *Store) query(q string, args ...any) ([]Route, error) {
 	var out []Route
 	for rows.Next() {
 		var r Route
-		if err := rows.Scan(&r.Subdomain, &r.Sandbox, &r.Owner, &r.Port, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.Subdomain, &r.Sandbox, &r.Owner, &r.Port, &r.Visibility, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

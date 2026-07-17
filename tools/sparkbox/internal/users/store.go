@@ -51,7 +51,7 @@ var handleRe = regexp.MustCompile(`^[a-z0-9-]{2,32}$`)
 // reserved handles would collide with the gateway's own doors and subdomains.
 var reserved = map[string]bool{
 	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
-	"admin": true, "root": true, "sparkbox": true, "www": true,
+	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
 }
 
 // ValidHandle reports whether h is a claimable handle.
@@ -72,6 +72,7 @@ type User struct {
 	CreatedAt        time.Time  `json:"created_at"`
 	Status           string     `json:"status"` // active | disabled
 	InvitedBy        string     `json:"invited_by,omitempty"`
+	Email            string     `json:"email,omitempty"`
 	GitHubLogin      string     `json:"github_login,omitempty"`
 	GitHubVerifiedAt *time.Time `json:"github_verified_at,omitempty"`
 }
@@ -140,7 +141,39 @@ func Open(path string) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
+	// Migration: the email column postdates the authenticated proxy, which
+	// forwards it upstream as X-Forwarded-Email. Nullable — an account without a
+	// set email simply has the header omitted.
+	if err := addColumnIfMissing(db, "users", "email", "TEXT"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN unless the column already
+// exists (sqlite has no ADD COLUMN IF NOT EXISTS, and a bare ALTER errors on
+// the second boot).
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -169,12 +202,12 @@ func (s *Store) Lookup(key xssh.PublicKey) (string, bool) {
 // Get returns one user record.
 func (s *Store) Get(handle string) (User, error) {
 	var u User
-	var invitedBy, ghLogin sql.NullString
+	var invitedBy, ghLogin, email sql.NullString
 	var ghAt sql.NullTime
 	err := s.db.QueryRow(
-		`SELECT handle, created_at, status, invited_by, github_login, github_verified_at
+		`SELECT handle, created_at, status, invited_by, email, github_login, github_verified_at
 		 FROM users WHERE handle = ?`, handle,
-	).Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &ghLogin, &ghAt)
+	).Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &email, &ghLogin, &ghAt)
 	if err == sql.ErrNoRows {
 		return User{}, ErrNoSuchUser
 	}
@@ -182,6 +215,7 @@ func (s *Store) Get(handle string) (User, error) {
 		return User{}, err
 	}
 	u.InvitedBy = invitedBy.String
+	u.Email = email.String
 	u.GitHubLogin = ghLogin.String
 	if ghAt.Valid {
 		t := ghAt.Time
@@ -193,7 +227,7 @@ func (s *Store) Get(handle string) (User, error) {
 // List returns every user, handle-sorted.
 func (s *Store) List() ([]User, error) {
 	rows, err := s.db.Query(
-		`SELECT handle, created_at, status, invited_by, github_login, github_verified_at
+		`SELECT handle, created_at, status, invited_by, email, github_login, github_verified_at
 		 FROM users ORDER BY handle`)
 	if err != nil {
 		return nil, err
@@ -202,12 +236,13 @@ func (s *Store) List() ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		var invitedBy, ghLogin sql.NullString
+		var invitedBy, ghLogin, email sql.NullString
 		var ghAt sql.NullTime
-		if err := rows.Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &ghLogin, &ghAt); err != nil {
+		if err := rows.Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &email, &ghLogin, &ghAt); err != nil {
 			return nil, err
 		}
 		u.InvitedBy = invitedBy.String
+		u.Email = email.String
 		u.GitHubLogin = ghLogin.String
 		if ghAt.Valid {
 			t := ghAt.Time
@@ -344,6 +379,37 @@ func (s *Store) RemoveKey(handle, fp string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// emailRe is a deliberately loose sanity check: a local part, an @, and a
+// dotted domain. The edge only forwards this string as a header; it is not an
+// address we send mail to, so we reject the obviously-malformed and no more.
+var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
+// ValidEmail reports whether e passes the loose header-safety check.
+func ValidEmail(e string) bool { return len(e) <= 254 && emailRe.MatchString(e) }
+
+// SetEmail records (or clears, with "") the account's email. The edge forwards
+// it upstream as X-Forwarded-Email once set.
+func (s *Store) SetEmail(handle, email string) error {
+	email = strings.TrimSpace(email)
+	if email != "" && !ValidEmail(email) {
+		return fmt.Errorf("that doesn't look like an email address")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var value any
+	if email != "" {
+		value = email
+	}
+	res, err := s.db.Exec(`UPDATE users SET email = ? WHERE handle = ?`, value, handle)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNoSuchUser
+	}
+	return nil
 }
 
 // LinkGitHub records a verified GitHub login. Callers must have verified the

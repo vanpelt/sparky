@@ -22,8 +22,10 @@ import (
 	gssh "github.com/gliderlabs/ssh"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
@@ -74,6 +76,8 @@ type Gateway struct {
 	openSignup     bool              // signup without an invite code
 	invitesPerUser int               // non-operator invite quota; 0 = operator only
 	schedules      *schedule.Store   // optional: platform scheduler store (ctl@ schedule)
+	routes         *routes.Store     // optional: proxy routes, for ctl@ share
+	session        *edgeauth.Signer  // optional: edge session signer, for ctl@ session-token
 }
 
 type GatewayOptions struct {
@@ -98,6 +102,13 @@ type GatewayOptions struct {
 	// Schedules, if set, enables the `ctl@ schedule` commands for managing
 	// platform-side cron entries. Nil disables the feature (unit tests).
 	Schedules *schedule.Store
+	// Routes, if set, enables `ctl@ share` to flip a sandbox's web routes
+	// between public and private. Nil disables it.
+	Routes *routes.Store
+	// Session, if set, enables `ctl@ session-token` to mint an edge session
+	// token from the caller's (already key-authenticated) ctl channel. Nil
+	// disables it.
+	Session *edgeauth.Signer
 }
 
 func New(opts GatewayOptions) *Gateway {
@@ -108,6 +119,7 @@ func New(opts GatewayOptions) *Gateway {
 		doors: opts.Doors, domain: opts.Domain,
 		openSignup: opts.OpenSignup, invitesPerUser: opts.InvitesPerUser,
 		schedules: opts.Schedules,
+		routes:    opts.Routes, session: opts.Session,
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
@@ -85,6 +87,8 @@ func serve(args []string) error {
 		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
 		consolePass  = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
 		consoleSub   = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
+		loginSub     = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
+		sessionTTL   = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
 		tlsProvider  = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail     = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
 		oidcSub      = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
@@ -156,6 +160,11 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("oidc issuer: %w", err)
 	}
+
+	// The edge session signer is keyed off the OIDC signing material (HKDF), so
+	// authenticated forwarding adds no new fleet secret. It signs the browser/API
+	// tokens `ctl@ session-token` mints and the proxy edge verifies.
+	sessionSigner := edgeauth.NewSigner(oidcKey.D.Bytes())
 
 	var driver vmm.Driver
 	switch *driverName {
@@ -249,6 +258,7 @@ func serve(args []string) error {
 		Doors: doors, Domain: *proxyDomain,
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
+		Routes:    routeStore, Session: sessionSigner,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -310,6 +320,17 @@ func serve(args []string) error {
 		// per SNI, so serving it is two GET handlers and no new listener.
 		px.SetIssuer(*oidcSub, issuer.Handler())
 		log.Info("oidc issuer enabled", "url", issuer.URL(), "audiences", *oidcAud)
+
+		// Authenticated forwarding: private routes are gated behind a session the
+		// visitor mints from their SSH key, and the browser sign-in rides the edge
+		// at login.<domain> like the console and issuer do.
+		loginH := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
+			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
+			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain,
+		})
+		px.SetAuth(*loginSub, loginH.Handler(), sessionSigner, userStore)
+		px.SetListenPort(portOf(*proxyAddr))
+		log.Info("authenticated forwarding enabled", "login", *loginSub+"."+*proxyDomain, "session_ttl", *sessionTTL)
 		if !*proxyTLS {
 			// The `iss` claim must be an https URL a verifier can actually
 			// fetch: they follow it to the discovery document and JWKS over
@@ -331,7 +352,19 @@ func serve(args []string) error {
 			px.SetConsole(*consoleSub, consoleH.Handler())
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
-		proxySrv = &http.Server{Addr: *proxyAddr, Handler: px}
+		proxySrv = &http.Server{
+			Addr:    *proxyAddr,
+			Handler: px,
+			// Recover the pre-DNAT port below TLS: iptables REDIRECTs the private
+			// port range to this one listener, and this is how a request learns it
+			// was dialed on e.g. :4444 so it can forward to that guest port.
+			ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+				if p, ok := proxy.OriginalDstPort(c); ok {
+					return proxy.WithOriginalPort(ctx, p)
+				}
+				return ctx
+			},
+		}
 		if *proxyTLS {
 			log.Info("obtaining TLS certificate", "provider", *tlsProvider, "domain", *proxyDomain)
 			if err := setupProxyTLS(ctx, proxySrv, tlsParams{
@@ -386,6 +419,18 @@ func firstOr(list []string, def string) string {
 		return list[0]
 	}
 	return def
+}
+
+// portOf extracts the numeric port from a listen address like ":443" or
+// "0.0.0.0:8081". Returns 0 when there is no parseable port, which just
+// disables the edge's "dialed me directly" check in the proxy.
+func portOf(addr string) int {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(p)
+	return n
 }
 
 // detectHostMemMB reads total RAM from /proc/meminfo (Linux). Returns 0 when it

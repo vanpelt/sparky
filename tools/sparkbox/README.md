@@ -10,7 +10,8 @@ ssh signup@gateway         → registers your key (invite code + handle)
 ssh new@gateway            → creates a sandbox, tells you its name
 ssh <name>@gateway         → resumes it if suspended, drops you in
 ssh ctl@gateway keys list  → manage your account's SSH keys
-https://<name>.hivemind.tools → reverse-proxy to a port inside the sandbox
+https://<name>.hivemind.tools       → reverse-proxy to a port inside the sandbox
+https://<name>.hivemind.tools:4444  → …any port; private by default, login-gated
 POST /v1/sandboxes         → control API (create/list/pause/resume/destroy/routes)
 ```
 
@@ -24,8 +25,10 @@ paused by a reaper and transparently resumed on the next connection — over SSH
 
 ## Identity
 
-Users are SSH public keys and nothing else — no passwords, no cookies. An
-account (handle + keyring + optional *verified* GitHub link) lives in the
+Users are SSH public keys and nothing else — no passwords. (A browser session
+for a private web route is a cookie, but its value is a token you mint from that
+same SSH key; see *Authenticated forwarding* below.) An account (handle +
+keyring + optional *verified* GitHub link, plus an optional email) lives in the
 sqlite store next to the routes; `users.conf` remains the bootstrap seed, and
 the accounts it names are the operators. Registration happens over the only
 door a stranger has, SSH: `ssh signup@<domain>` runs a short dialog gated by a
@@ -41,6 +44,26 @@ reads — so `hivemind start` federates with no secret in the VM and nothing
 pasted. The guest is authenticated by its network position (it can only reach
 the metadata endpoint over its own tap), exactly like a cloud IMDS. See
 [`docs/identity-federation-design.md`](docs/identity-federation-design.md).
+
+## Authenticated forwarding
+
+Web routes are **private by default**: a visitor to `<name>.hivemind.tools`
+(any port) is redirected to sign in and must be the sandbox's owner or an
+operator. The login credential is a session token you mint from your SSH key —
+`ssh ctl@<domain> session-token` — and paste into the sign-in page (or send as
+`Authorization: Bearer <token>` for API access). It is a keyed MAC whose key is
+HKDF-derived from the OIDC signing key, so this adds no new fleet secret and no
+server-side session store. Once authorised, the edge forwards the visitor's
+identity upstream as `X-Forwarded-User` / `X-Forwarded-Email` /
+`X-Forwarded-Preferred-Username` (oauth2-proxy names; client-supplied copies are
+stripped first), so the app behind the port can do its own authorization.
+
+Publish a port to the world with `ssh ctl@<domain> share <name> public`
+(`private` re-gates it); set the forwarded address with `ssh ctl@<domain> email
+set you@example.com`. Any port works without pre-registering a route: a boot-time
+`iptables REDIRECT` (`deploy/sparkbox-net.sh`) funnels the private port range to
+the single TLS edge, which recovers the dialed port via `SO_ORIGINAL_DST`. See
+[`docs/authenticated-proxy-design.md`](docs/authenticated-proxy-design.md).
 
 ## Architecture
 
