@@ -31,6 +31,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -66,39 +67,43 @@ func main() {
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
-		driverName   = fs.String("driver", "mock", "vm driver: mock | firecracker")
-		stateDir     = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
-		keyDir       = fs.String("key-dir", "", "directory holding the three fleet key PEMs (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
-		requireKeys  = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
-		usersPath    = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
-		sshAddr      = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
-		apiAddr      = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
-		defaultImage = fs.String("default-image", "universal", "rootfs template for new sandboxes")
-		defaultLogin = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
-		idleTimeout  = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
-		idleBalloon  = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
-		maxPerOwner  = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
-		memAdmitPct  = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
-		hostMemMB    = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
-		memReserve   = fs.Int64("mem-reserve-mb", 0, "per-VM working-set floor (MB) enabling live overcommit: admission counts this instead of the full memory ceiling, and idle VMs balloon down to it (0 = off; count the full ceiling, never balloon)")
-		kernelPath   = fs.String("kernel", "", "firecracker: vmlinux path")
-		imageDir     = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
-		subnet6      = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
-		proxyAddr    = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
-		proxyDomain  = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
-		edgeV4       = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
-		proxyTLS     = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
-		consolePass  = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
-		consoleSub   = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
-		loginSub     = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
-		sessionTTL   = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
-		tlsProvider  = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
-		tlsEmail     = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
-		oidcSub      = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
-		oidcAud      = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
-		metaAddr     = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
-		openSignup   = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
-		invitesPer   = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
+		driverName    = fs.String("driver", "mock", "vm driver: mock | firecracker")
+		stateDir      = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
+		keyDir        = fs.String("key-dir", "", "directory holding the three fleet key PEMs (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
+		requireKeys   = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
+		usersPath     = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
+		sshAddr       = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
+		apiAddr       = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
+		defaultImage  = fs.String("default-image", "universal", "rootfs template for new sandboxes")
+		defaultLogin  = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
+		idleTimeout   = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
+		idleBalloon   = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
+		maxPerOwner   = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
+		memAdmitPct   = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
+		hostMemMB     = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
+		memReserve    = fs.Int64("mem-reserve-mb", 0, "per-VM working-set floor (MB) enabling live overcommit: admission counts this instead of the full memory ceiling, and idle VMs balloon down to it (0 = off; count the full ceiling, never balloon)")
+		diskPool      = fs.Int64("disk-pool-mb-per-owner", 0, "cap an owner's pooled on-disk usage across all their sandboxes + archives (0 = unlimited); soft accounting enforced at create/restore")
+		archiveRemote = fs.String("archive-remote", "", "rclone remote name for sandbox archives (e.g. sparkbox-artifacts); empty disables archive/restore. Needs S3 WRITE creds in the host's rclone.conf")
+		archiveBucket = fs.String("archive-bucket", "", "bucket within --archive-remote for archives (required to enable archiving)")
+		archivePrefix = fs.String("archive-prefix", "archives", "object-key prefix archives are written under: <prefix>/<owner>/<name>.ext4.zst")
+		kernelPath    = fs.String("kernel", "", "firecracker: vmlinux path")
+		imageDir      = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		subnet6       = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
+		proxyAddr     = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
+		proxyDomain   = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
+		edgeV4        = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
+		proxyTLS      = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
+		consolePass   = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
+		consoleSub    = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
+		loginSub      = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
+		sessionTTL    = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
+		tlsProvider   = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
+		tlsEmail      = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
+		oidcSub       = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
+		oidcAud       = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
+		metaAddr      = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
+		openSignup    = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
+		invitesPer    = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -255,11 +260,20 @@ func serve(args []string) error {
 		MemAdmissionPct:    *memAdmitPct,
 		HostMemMB:          hostMem,
 		MemReserveMB:       *memReserve,
+		DiskPoolMBPerOwner: *diskPool,
+		ArchivePrefix:      *archivePrefix,
 		NodeName:           nodeName,
 		HostVCPUs:          int64(runtime.NumCPU()),
 	}
 	if doorHooks != nil {
 		mgrOpts.FrontDoor = doorHooks
+	}
+	// Archiving is opt-in: only wire the object store when a remote+bucket are
+	// configured. Assign through the local (non-nil) check so a nil *Store never
+	// becomes a non-nil ObjectStore interface (the classic typed-nil trap).
+	if arch := objstore.New(*archiveRemote, *archiveBucket); arch != nil {
+		mgrOpts.Archive = arch
+		log.Info("sandbox archiving enabled", "remote", *archiveRemote, "bucket", *archiveBucket, "prefix", *archivePrefix)
 	}
 	mgr, err := host.NewManager(mgrOpts)
 	if err != nil {

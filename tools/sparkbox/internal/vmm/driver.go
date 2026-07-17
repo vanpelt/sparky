@@ -11,6 +11,12 @@ type State string
 const (
 	StateRunning State = "running"
 	StatePaused  State = "paused"
+	// StateArchived means the sandbox's rootfs has been compacted and parked in
+	// object storage; no host RAM and (after the archive completes) no host disk.
+	// Resume downloads the archive and cold-boots it — see host.Manager.Archive /
+	// the Archivable driver capability. Purely a control-plane state: the driver
+	// itself only knows running/paused, so this never appears in vmm.Instance.
+	StateArchived State = "archived"
 )
 
 // Config describes the sandbox VM to create.
@@ -63,6 +69,46 @@ type BalloonStats struct {
 	ActualMiB    int64 // how much the balloon currently holds
 	FreeMiB      int64 // guest-reported free memory
 	AvailableMiB int64 // guest estimate of memory available for new work
+}
+
+// Archivable is an optional Driver capability: turning a sandbox's on-disk
+// rootfs into a portable, compacted artifact (for parking in object storage or
+// promoting to a fork-able template) and rehydrating one. Object storage itself
+// lives above the driver (host.ObjectStore) — the driver only ever deals in
+// local files, keeping it unaware of buckets and credentials.
+//
+// All three operate on a *stopped* VM: the caller (host.Manager) pauses first
+// so the guest has flushed and unmounted its rootfs. PackRootfs/Snapshot both
+// run e2fsck + zerofree so the compressed artifact is ~the used size, not the
+// full 25 GB ceiling. Drivers that can't do this simply don't implement it; the
+// manager checks with a type assertion, so the capability is additive.
+type Archivable interface {
+	// PackRootfs compacts the named (stopped) VM's rootfs into a single
+	// compressed file, drops any memory snapshot (archive is a cold restore),
+	// and returns the artifact's local path. The path is outside the VM's dir so
+	// a subsequent Destroy can reclaim the dir without deleting it.
+	PackRootfs(ctx context.Context, name string) (path string, err error)
+	// UnpackRootfs installs a previously packed artifact as name's rootfs so the
+	// next Create/Resume cold-boots it. inPath is a file PackRootfs produced.
+	UnpackRootfs(ctx context.Context, name, inPath string) error
+	// Snapshot compacts and *sanitizes* (strips per-guest identity: SSH host
+	// keys, machine-id, hostname, cached tokens) the named VM's rootfs into a new
+	// reusable template the driver resolves like any Config.Image, so
+	// Create{Image: newImage} forks a fresh sandbox from it.
+	Snapshot(ctx context.Context, name, newImage string) error
+	// RemoveTemplate deletes a template previously produced by Snapshot (and its
+	// sidecar). Used to clean up a deleted snapshot. A missing template is not an
+	// error. The image must be a snapshot template, never a base image — the
+	// manager only ever passes names it minted via Snapshot.
+	RemoveTemplate(ctx context.Context, image string) error
+}
+
+// DiskReporter is an optional Driver capability: reporting a sandbox's on-host
+// disk footprint (rootfs write delta + any memory snapshot), in MiB. Used by
+// the pooled per-owner disk accounting. Best-effort; drivers without it are
+// simply not counted.
+type DiskReporter interface {
+	DiskUsageMB(ctx context.Context, name string) (int64, error)
 }
 
 // Ballooner is an optional Driver capability: reclaiming a *running* guest's

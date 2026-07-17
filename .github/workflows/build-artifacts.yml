@@ -32,9 +32,9 @@ on:
         required: false
         default: "universal"
       rootfs_mb:
-        description: "Rootfs ext4 size in MB (per-sandbox disk ceiling; thin CoW)"
+        description: "Rootfs ext4 size in MB (per-sandbox disk ceiling; thin CoW). 25600 = 25 GiB (exe.dev parity)."
         required: false
-        default: "65536"
+        default: "25600"
       rebuild_rootfs:
         description: "Force a rootfs rebuild even on a content-cache hit"
         type: boolean

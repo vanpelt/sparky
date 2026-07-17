@@ -19,7 +19,10 @@ REPO_URL=${REPO_URL:-https://github.com/vanpelt/sparky}
 # slim host; ROOTFS_NAME must then match the server's --default-image flag.
 IMAGE=${IMAGE:-ghcr.io/openai/codex-universal:latest}
 ROOTFS_NAME=${ROOTFS_NAME:-universal}
-ROOTFS_MB=${ROOTFS_MB:-65536}
+# 25 GiB per-sandbox ceiling (exe.dev parity). The ext4 IS this size, so the
+# guest can't exceed it; thin CoW reflink copies mean sandboxes only pay for
+# blocks they write. The 300 GB host XFS volume below is the shared pool.
+ROOTFS_MB=${ROOTFS_MB:-25600}
 
 echo "== sanity checks =="
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
@@ -29,7 +32,8 @@ grep -qE 'vmx|svm' /proc/cpuinfo || { echo "no VT-x/AMD-V in cpuinfo"; exit 1; }
 echo "== packages =="
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  golang-go docker.io curl iptables xfsprogs git
+  golang-go docker.io curl iptables xfsprogs git \
+  e2fsprogs zerofree zstd rclone   # archive/snapshot: fsck + zero free space + compress; rclone for object storage
 
 echo "== firecracker =="
 if ! command -v firecracker >/dev/null; then

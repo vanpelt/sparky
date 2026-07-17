@@ -63,6 +63,11 @@ const (
 // guest mid-pause. Sized for the slowest plausible snapshot, not a dial.
 const pauseTimeout = 3 * time.Minute
 
+// archiveTimeout bounds ctl archive/restore. Both move the whole rootfs: archive
+// runs fsck + zerofree + zstd of a 25 GB image then uploads it; restore
+// downloads + decompresses. Sized for a slow link and a full disk, not a dial.
+const archiveTimeout = 15 * time.Minute
+
 type Gateway struct {
 	mgr            *host.Manager
 	users          *users.Store

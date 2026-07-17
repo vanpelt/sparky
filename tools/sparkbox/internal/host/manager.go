@@ -6,9 +6,11 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -54,6 +56,18 @@ func (e *CapacityError) Error() string {
 		e.UsedMB, e.RequestedMB, e.BudgetMB)
 }
 
+// DiskQuotaError is returned when a create or restore would push an owner's
+// pooled on-disk usage past their per-owner disk budget.
+type DiskQuotaError struct {
+	Owner                       string
+	RequestedMB, UsedMB, PoolMB int64
+}
+
+func (e *DiskQuotaError) Error() string {
+	return fmt.Sprintf("disk pool full for %s: %d MB used + %d MB requested exceeds the %d MB pool",
+		e.Owner, e.UsedMB, e.RequestedMB, e.PoolMB)
+}
+
 type Sandbox struct {
 	Name       string    `json:"name"`
 	Owner      string    `json:"owner"`
@@ -84,6 +98,16 @@ type Sandbox struct {
 	// for auditing — which of a user's machines started this thing — and is
 	// deliberately not meant for authorization policy.
 	KeyFP string `json:"key_fp,omitempty"`
+	// ArchiveKey is the object-storage key holding this sandbox's rootfs when
+	// State is archived (empty otherwise). ArchivedAt is when it was parked.
+	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
+	ArchiveKey string    `json:"archive_key,omitempty"`
+	ArchivedAt time.Time `json:"archived_at,omitempty"`
+	// DiskMB is this sandbox's approximate on-host disk footprint (rootfs write
+	// delta + any memory snapshot), refreshed opportunistically by the reaper and
+	// summed per owner for the pooled-disk admission check. 0 for an archived box
+	// (no local footprint — its archive counts against the pool instead).
+	DiskMB int64 `json:"disk_mb,omitempty"`
 }
 
 // ScheduleCleaner drops a sandbox's platform-scheduler entries when it is
@@ -102,13 +126,30 @@ type FrontDoor interface {
 	Remove(ctx context.Context, name string)
 }
 
+// ObjectStore is where archived sandbox rootfs artifacts are parked and fetched
+// back (see internal/objstore). Optional — nil disables archiving, and the
+// manager also needs the driver to implement vmm.Archivable. Keys are
+// bucket-relative paths the manager lays out under <prefix>/<owner>/.
+type ObjectStore interface {
+	Put(ctx context.Context, key, localPath string) error
+	Get(ctx context.Context, key, localPath string) error
+	Delete(ctx context.Context, key string) error
+	Exists(ctx context.Context, key string) (bool, error)
+}
+
 type Manager struct {
 	mu          sync.Mutex
 	driver      vmm.Driver
-	balloon     vmm.Ballooner // driver's balloon capability, if it has one; else nil
+	balloon     vmm.Ballooner    // driver's balloon capability, if it has one; else nil
+	archiver    vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
+	diskReport  vmm.DiskReporter // driver's disk-usage capability; else nil
+	archive     ObjectStore      // object store for archives; nil disables archiving
 	log         *slog.Logger
+	stateDir    string // dir holding sandboxes.json + transient archive staging
 	path        string // JSON state file
 	boxes       map[string]*Sandbox
+	snaps       map[string]*Snapshot // fork-able templates, keyed by template image name
+	snapsPath   string               // snapshots.json
 	gwPubKey    string
 	routes      *routes.Store   // optional: proxy route bookkeeping
 	schedules   ScheduleCleaner // optional: platform-scheduler cleanup on destroy
@@ -117,6 +158,8 @@ type Manager struct {
 	memAdmitPct int             // RAM admission threshold as % of host; 0 = disabled
 	hostMemMB   int64           // host RAM in MB for admission; 0 = disabled
 	reserveMB   int64           // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
+	diskPoolMB  int64           // per-owner pooled-disk budget in MB; 0 = disabled
+	archivePfx  string          // object-key prefix for archives (default "archives")
 	nodeName    string          // this host's name in capacity reports
 	hostVCPUs   int64           // host logical CPUs for capacity reports; 0 = unknown
 }
@@ -151,34 +194,64 @@ type Options struct {
 	HostVCPUs int64
 	// FrontDoor, if set, gets Ensure/Remove calls as sandboxes come and go.
 	FrontDoor FrontDoor
+	// Archive is the object store for archived rootfs artifacts. Nil (or a driver
+	// without vmm.Archivable) disables the archive/restore lifecycle.
+	Archive ObjectStore
+	// ArchivePrefix is the object-key prefix archives are written under
+	// (default "archives"): <prefix>/<owner>/<name>.ext4.zst.
+	ArchivePrefix string
+	// DiskPoolMBPerOwner caps an owner's pooled on-disk usage across all their
+	// sandboxes + archives (0 = unlimited). Soft accounting, enforced at
+	// create/restore — see admit.
+	DiskPoolMBPerOwner int64
 }
 
 func NewManager(opts Options) (*Manager, error) {
 	m := &Manager{
 		driver:      opts.Driver,
 		log:         opts.Logger,
+		stateDir:    opts.StateDir,
 		path:        filepath.Join(opts.StateDir, "sandboxes.json"),
+		snapsPath:   filepath.Join(opts.StateDir, "snapshots.json"),
 		boxes:       map[string]*Sandbox{},
+		snaps:       map[string]*Snapshot{},
 		gwPubKey:    opts.GatewayPublicKey,
 		routes:      opts.Routes,
 		schedules:   opts.Schedules,
+		archive:     opts.Archive,
+		archivePfx:  opts.ArchivePrefix,
 		maxPerOwner: opts.MaxRunningPerOwner,
 		memAdmitPct: opts.MemAdmissionPct,
 		hostMemMB:   opts.HostMemMB,
 		reserveMB:   opts.MemReserveMB,
+		diskPoolMB:  opts.DiskPoolMBPerOwner,
 		nodeName:    opts.NodeName,
 		hostVCPUs:   opts.HostVCPUs,
 		frontDoor:   opts.FrontDoor,
+	}
+	if m.archivePfx == "" {
+		m.archivePfx = "archives"
 	}
 	// The balloon reclaim path is optional — only firecracker (and the mock)
 	// implement it. Detect it once so the reaper and resume paths can use it.
 	if bl, ok := opts.Driver.(vmm.Ballooner); ok {
 		m.balloon = bl
 	}
+	// Same for the disk-lifecycle capabilities: archive/restore/snapshot needs
+	// vmm.Archivable; pooled-disk accounting needs vmm.DiskReporter.
+	if ar, ok := opts.Driver.(vmm.Archivable); ok {
+		m.archiver = ar
+	}
+	if dr, ok := opts.Driver.(vmm.DiskReporter); ok {
+		m.diskReport = dr
+	}
 	if m.nodeName == "" {
 		m.nodeName = "local"
 	}
 	if err := m.load(); err != nil {
+		return nil, err
+	}
+	if err := m.loadSnapshots(); err != nil {
 		return nil, err
 	}
 	// Driver state does not survive process restarts in the mock driver, and
@@ -210,7 +283,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	if _, ok := m.boxes[name]; ok {
 		return nil, fmt.Errorf("sandbox %q already exists", name)
 	}
-	if err := m.admit(owner, memMB, ""); err != nil {
+	if err := m.admit(owner, memMB, 0, ""); err != nil {
 		return nil, err
 	}
 	inst, err := m.driver.Create(ctx, vmm.Config{
@@ -243,10 +316,12 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	return copyOf(b), m.save()
 }
 
-// admit enforces the running-sandbox limits before a start (create or resume).
-// Callers must hold m.mu. exclude is the name of the sandbox being resumed (so
-// it isn't counted against its own start), or "" for a create.
-func (m *Manager) admit(owner string, memMB int64, exclude string) error {
+// admit enforces the per-owner limits before a start (create or resume/restore).
+// Callers must hold m.mu. exclude is the name of the sandbox being started (so
+// it isn't counted against its own start), or "" for a create. reqDiskMB is the
+// disk that start will occupy on the pooled budget (0 for a create — a fresh
+// reflink is ~free until written; the box's own DiskMB for a resume/restore).
+func (m *Manager) admit(owner string, memMB, reqDiskMB int64, exclude string) error {
 	if m.maxPerOwner > 0 {
 		var running []string
 		for _, b := range m.boxes {
@@ -270,6 +345,21 @@ func (m *Manager) admit(owner string, memMB int64, exclude string) error {
 		cost := m.effectiveMemMB(memMB)
 		if used+cost > budget {
 			return &CapacityError{RequestedMB: cost, UsedMB: used, BudgetMB: budget}
+		}
+	}
+	// Pooled per-owner disk (soft accounting): the sum of an owner's on-disk
+	// footprints — running/paused rootfs + snapshots, plus archived boxes'
+	// object-storage size — must stay under their pool. Conservative: reflink-
+	// shared base blocks are counted per box, so this over-counts, never under.
+	if m.diskPoolMB > 0 {
+		var used int64
+		for _, b := range m.boxes {
+			if b.Name != exclude && b.Owner == owner {
+				used += b.DiskMB
+			}
+		}
+		if used+reqDiskMB > m.diskPoolMB {
+			return &DiskQuotaError{Owner: owner, RequestedMB: reqDiskMB, UsedMB: used, PoolMB: m.diskPoolMB}
 		}
 	}
 	return nil
@@ -361,8 +451,13 @@ type NodeCapacity struct {
 	EffectiveMemMB int64 `json:"effective_mem_mb"`
 	// ReserveMemMB is the per-VM working-set floor; 0 means overcommit is off.
 	ReserveMemMB int64 `json:"reserve_mem_mb"`
-	Running      int   `json:"running"`
-	Sandboxes    int   `json:"sandboxes"`
+	// UsedDiskMB is the summed on-disk footprint of all sandboxes on this node
+	// (rootfs deltas + snapshots + archived boxes' object-storage size).
+	// DiskPoolMBPerOwner is the per-owner pooled budget (0 = unlimited).
+	UsedDiskMB         int64 `json:"used_disk_mb"`
+	DiskPoolMBPerOwner int64 `json:"disk_pool_mb_per_owner"`
+	Running            int   `json:"running"`
+	Sandboxes          int   `json:"sandboxes"`
 }
 
 // Capacity reports this node's resources. Used* counts only running sandboxes,
@@ -371,16 +466,18 @@ func (m *Manager) Capacity() NodeCapacity {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := NodeCapacity{
-		Node:         m.nodeName,
-		TotalVCPUs:   m.hostVCPUs,
-		TotalMemMB:   m.hostMemMB,
-		ReserveMemMB: m.reserveMB,
-		Sandboxes:    len(m.boxes),
+		Node:               m.nodeName,
+		TotalVCPUs:         m.hostVCPUs,
+		TotalMemMB:         m.hostMemMB,
+		ReserveMemMB:       m.reserveMB,
+		DiskPoolMBPerOwner: m.diskPoolMB,
+		Sandboxes:          len(m.boxes),
 	}
 	if m.memAdmitPct > 0 {
 		c.BudgetMemMB = m.hostMemMB * int64(m.memAdmitPct) / 100
 	}
 	for _, b := range m.boxes {
+		c.UsedDiskMB += b.DiskMB
 		if b.State == vmm.StateRunning {
 			c.Running++
 			c.UsedVCPUs += b.VCPUs
@@ -394,16 +491,35 @@ func (m *Manager) Capacity() NodeCapacity {
 // EnsureRunning resumes the sandbox if paused and returns its SSH endpoint.
 // This is the gateway's resume-on-connect entry point.
 func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, error) {
+	// An archived sandbox must first be pulled back onto local disk. That's a
+	// multi-GB download, so restore runs without m.mu held and flips the record
+	// to Paused; the resume path below then cold-boots the restored rootfs.
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("sandbox %q not found", name)
+	}
+	archived, archKey := b.State == vmm.StateArchived, b.ArchiveKey
+	m.mu.Unlock()
+	if archived {
+		if err := m.restore(ctx, name, archKey); err != nil {
+			return nil, err
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b, ok := m.boxes[name]
+	b, ok = m.boxes[name]
 	if !ok {
 		return nil, fmt.Errorf("sandbox %q not found", name)
 	}
 	if b.State != vmm.StateRunning {
 		// Resuming brings this sandbox back to running, so it's subject to the
 		// same limits as a fresh create (exclude itself — it isn't running yet).
-		if err := m.admit(b.Owner, b.MemMB, b.Name); err != nil {
+		// Its own footprint (rootfs, or the just-restored size) is the disk it
+		// reclaims against the pool.
+		if err := m.admit(b.Owner, b.MemMB, b.DiskMB, b.Name); err != nil {
 			return nil, err
 		}
 		inst, err := m.resumeOrRecreate(ctx, b)
@@ -459,6 +575,128 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	b.GuestV6 = ""
 	m.log.Info("sandbox paused", "name", name)
 	return m.save()
+}
+
+// archiveKey is where an owner's sandbox archive lives in the object store.
+func (m *Manager) archiveKey(owner, name string) string {
+	return path.Join(m.archivePfx, owner, name+".ext4.zst")
+}
+
+// ArchivingEnabled reports whether this host can archive (an object store and a
+// capable driver are both configured). Surfaces use it to hide the action.
+func (m *Manager) ArchivingEnabled() bool {
+	return m.archive != nil && m.archiver != nil
+}
+
+// Archive parks a sandbox's rootfs in object storage and frees its host disk:
+// the deepest idle tier below Paused. It pauses the VM (flush + unmount), packs
+// the rootfs (fsck + zero free space + zstd), uploads it, then destroys the
+// local VM — leaving only a small control-plane record in the Archived state.
+// Resume-on-connect brings it back transparently (see EnsureRunning/restore).
+//
+// The heavy pack/upload runs without m.mu held so it doesn't stall the whole
+// host; the record is only flipped to Archived once the upload is durable.
+func (m *Manager) Archive(ctx context.Context, name string) error {
+	if !m.ArchivingEnabled() {
+		return errors.New("archiving is not enabled on this host")
+	}
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.State == vmm.StateArchived {
+		m.mu.Unlock()
+		return nil
+	}
+	owner := b.Owner
+	m.mu.Unlock()
+
+	// Pause first so the guest has flushed and unmounted its rootfs. Idempotent
+	// if already paused; uses the manager Pause so state/teardown are consistent.
+	if err := m.Pause(ctx, name); err != nil {
+		return fmt.Errorf("archive %s: pause: %w", name, err)
+	}
+
+	packPath, err := m.archiver.PackRootfs(ctx, name)
+	if err != nil {
+		return fmt.Errorf("archive %s: pack: %w", name, err)
+	}
+	defer os.Remove(packPath) //nolint:errcheck
+	var archiveMB int64
+	if fi, serr := os.Stat(packPath); serr == nil {
+		archiveMB = fi.Size() / (1024 * 1024)
+	}
+	key := m.archiveKey(owner, name)
+	if err := m.archive.Put(ctx, key, packPath); err != nil {
+		return fmt.Errorf("archive %s: upload: %w", name, err)
+	}
+	// The archive is durable now, so reclaim the local VM dir (rootfs + any
+	// leftover snapshot). Use the driver directly, NOT Manager.Destroy: the
+	// sandbox is coming back, so its routes, schedules, and front door must stay.
+	if err := m.driver.Destroy(ctx, name); err != nil {
+		m.log.Warn("archive: local destroy failed (archive is safe)", "name", name, "err", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok = m.boxes[name]
+	if !ok {
+		// Destroyed out from under us mid-archive; don't leave an orphan object.
+		go m.archive.Delete(context.WithoutCancel(ctx), key) //nolint:errcheck
+		return nil
+	}
+	b.State = vmm.StateArchived
+	b.ArchiveKey = key
+	b.ArchivedAt = time.Now().UTC()
+	b.SSHAddr, b.HostIP, b.GuestV6 = "", "", ""
+	// Local disk is freed, but the archive still occupies the owner's pooled
+	// budget (in object storage) — count its compressed size, not 0.
+	b.DiskMB = archiveMB
+	m.log.Info("sandbox archived", "name", name, "key", key, "archive_mb", archiveMB)
+	return m.save()
+}
+
+// restore pulls an archived sandbox's rootfs back onto local disk and marks it
+// Paused, so the normal resume path (resumeOrRecreate → cold boot from the
+// present rootfs) brings it up. The multi-GB download + unpack run without m.mu
+// held. The archive object is dropped once we hold a local copy — archive/
+// restore is a move, not a copy, so a re-archive later rewrites a fresh one.
+func (m *Manager) restore(ctx context.Context, name, key string) error {
+	if !m.ArchivingEnabled() {
+		return errors.New("sandbox is archived but archiving is not enabled on this host")
+	}
+	if key == "" {
+		return fmt.Errorf("sandbox %q has no archive key", name)
+	}
+	tmp := filepath.Join(m.stateDir, name+".restore.ext4.zst")
+	defer os.Remove(tmp) //nolint:errcheck
+	if err := m.archive.Get(ctx, key, tmp); err != nil {
+		return fmt.Errorf("restore %s: download: %w", name, err)
+	}
+	if err := m.archiver.UnpackRootfs(ctx, name, tmp); err != nil {
+		return fmt.Errorf("restore %s: unpack: %w", name, err)
+	}
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	b.State = vmm.StatePaused // rootfs present, no snapshot → resumeOrRecreate cold-boots it
+	b.ArchiveKey = ""
+	b.ArchivedAt = time.Time{}
+	err := m.save()
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if derr := m.archive.Delete(ctx, key); derr != nil {
+		m.log.Warn("restore: archive cleanup failed", "name", name, "key", key, "err", derr)
+	}
+	m.log.Info("sandbox restored from archive", "name", name)
+	return nil
 }
 
 // MemStats reports a running sandbox's real memory use in MiB, read from its
@@ -528,11 +766,19 @@ func (m *Manager) ResumePinned(ctx context.Context) {
 func (m *Manager) Destroy(ctx context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.boxes[name]; !ok {
+	b, ok := m.boxes[name]
+	if !ok {
 		return fmt.Errorf("sandbox %q not found", name)
 	}
 	if err := m.driver.Destroy(ctx, name); err != nil {
 		return err
+	}
+	// An archived sandbox has no local VM (already destroyed at archive time) but
+	// its rootfs lives in object storage — drop it so a delete leaves nothing.
+	if b.State == vmm.StateArchived && m.archive != nil && b.ArchiveKey != "" {
+		if err := m.archive.Delete(ctx, b.ArchiveKey); err != nil {
+			m.log.Warn("archive object cleanup failed", "name", name, "key", b.ArchiveKey, "err", err)
+		}
 	}
 	delete(m.boxes, name)
 	if m.routes != nil {
@@ -584,6 +830,11 @@ func (m *Manager) RunReaper(ctx context.Context, balloonAfter, pauseAfter, inter
 // reapOnce applies one pass of the idle policy. Split out from RunReaper's loop
 // so the two-stage gradient is unit-testable without a ticker.
 func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Duration) {
+	// Keep pooled-disk accounting fresh while we're already ticking: a running/
+	// paused sandbox's rootfs (and snapshot) grow over time.
+	if m.diskReport != nil && m.diskPoolMB > 0 {
+		m.RefreshDiskUsage(ctx)
+	}
 	for _, b := range m.List() {
 		// Pinned sandboxes hold their full RAM on purpose so in-guest
 		// timers/daemons keep firing; the reaper never touches them.
@@ -603,6 +854,40 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 				m.log.Warn("reaper balloon-down failed", "name", b.Name, "err", err)
 			}
 		}
+	}
+}
+
+// RefreshDiskUsage re-measures every non-archived sandbox's on-host footprint
+// for pooled accounting. Called each reaper tick (when a disk pool is set) and
+// available for on-demand refresh. Archived boxes keep their fixed archive size.
+func (m *Manager) RefreshDiskUsage(ctx context.Context) {
+	if m.diskReport == nil {
+		return
+	}
+	for _, b := range m.List() {
+		if b.State != vmm.StateArchived {
+			m.refreshDiskUsage(ctx, b.Name)
+		}
+	}
+}
+
+// refreshDiskUsage measures a sandbox's current on-host footprint (rootfs +
+// snapshot) via the driver and updates its DiskMB for pooled accounting. The
+// driver call is made without m.mu held (a `du` can be slow); the brief locked
+// section only stores the result.
+func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
+	if m.diskReport == nil {
+		return
+	}
+	mb, err := m.diskReport.DiskUsageMB(ctx, name)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.boxes[name]; ok && b.State != vmm.StateArchived && b.DiskMB != mb {
+		b.DiskMB = mb
+		m.save() //nolint:errcheck
 	}
 }
 

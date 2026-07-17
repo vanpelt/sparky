@@ -20,6 +20,12 @@ packages:
   - iptables
   - ca-certificates
   - zstd
+  # archive/snapshot: fsck + zero free space before compression; rclone ships
+  # archives to object storage (needs S3 WRITE creds in the host's rclone.conf —
+  # see docs/resource-model-design.md Part 8; archiving is off until configured).
+  - e2fsprogs
+  - zerofree
+  - rclone
 
 write_files:
   - path: /srv/sparkbox/users.conf

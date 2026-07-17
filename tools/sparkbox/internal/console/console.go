@@ -83,6 +83,11 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cluster", h.requireAuth(h.cluster))
 	mux.HandleFunc("POST /api/sandboxes/{name}/pause", h.requireAuth(h.pause))
 	mux.HandleFunc("POST /api/sandboxes/{name}/resume", h.requireAuth(h.resume))
+	mux.HandleFunc("POST /api/sandboxes/{name}/archive", h.requireAuth(h.archive))
+	mux.HandleFunc("POST /api/sandboxes/{name}/snapshot", h.requireAuth(h.snapshot))
+	mux.HandleFunc("GET /api/snapshots", h.requireAuth(h.listSnapshots))
+	mux.HandleFunc("POST /api/snapshots/{snapshot}/fork", h.requireAuth(h.fork))
+	mux.HandleFunc("POST /api/snapshots/{snapshot}/delete", h.requireAuth(h.deleteSnapshot))
 	mux.HandleFunc("POST /api/sandboxes/{name}/pin", h.requireAuth(h.pin))
 	mux.HandleFunc("POST /api/sandboxes/{name}/unpin", h.requireAuth(h.unpin))
 	mux.HandleFunc("GET /", h.index)
@@ -284,6 +289,92 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, box)
 }
 
+// archive parks a sandbox's rootfs in object storage and frees its host disk.
+// Restore is the resume action (EnsureRunning restores an archived sandbox
+// transparently), so the UI reuses the resume button for archived rows.
+func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := h.mgr.Archive(r.Context(), name); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console archived sandbox", "name", name)
+	box, _ := h.mgr.Get(name)
+	writeJSON(w, http.StatusOK, box)
+}
+
+type snapshotReq struct {
+	SnapshotName string `json:"snapshot_name"`
+}
+
+// snapshot captures a sandbox's current disk as a fork-able template (owned by
+// the sandbox's owner).
+func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	box, ok := h.mgr.Get(name)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req snapshotReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	snap, err := h.mgr.Snapshot(r.Context(), name, req.SnapshotName, box.Owner)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console snapshot created", "sandbox", name, "snapshot", req.SnapshotName)
+	writeJSON(w, http.StatusCreated, snap)
+}
+
+func (h *Handler) listSnapshots(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, h.mgr.AllSnapshots())
+}
+
+type forkReq struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
+// fork spins up a new sandbox from a snapshot. Owner comes from the request
+// (the operator picks who owns the fork); the manager verifies the snapshot
+// belongs to that owner.
+func (h *Handler) fork(w http.ResponseWriter, r *http.Request) {
+	var req forkReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	if req.Name == "" || req.Owner == "" {
+		writeErr(w, http.StatusBadRequest, "name and owner are required")
+		return
+	}
+	box, err := h.mgr.Fork(r.Context(), r.PathValue("snapshot"), req.Name, req.Owner, 0, 0)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console forked snapshot", "snapshot", r.PathValue("snapshot"), "into", req.Name)
+	writeJSON(w, http.StatusCreated, box)
+}
+
+func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
+	var req forkReq // reuse: only Owner is needed to scope the delete
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	if err := h.mgr.DeleteSnapshot(r.Context(), r.PathValue("snapshot"), req.Owner); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console deleted snapshot", "snapshot", r.PathValue("snapshot"), "owner", req.Owner)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // pin marks a sandbox always-on and resumes it so its in-guest daemons start
 // running immediately. unpin clears the flag, letting the reaper pause it again.
 func (h *Handler) pin(w http.ResponseWriter, r *http.Request) {
@@ -314,8 +405,16 @@ func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
 }
 
 func statusFor(err error) int {
-	if err != nil && contains(err.Error(), "not found") {
+	if err == nil {
+		return http.StatusInternalServerError
+	}
+	switch {
+	case contains(err.Error(), "not found"):
 		return http.StatusNotFound
+	case contains(err.Error(), "not enabled"):
+		return http.StatusNotImplemented
+	case contains(err.Error(), "pool full"):
+		return http.StatusInsufficientStorage
 	}
 	return http.StatusInternalServerError
 }

@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -401,6 +403,212 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	d.deleteTap(st.idx)
 	delete(d.vms, name)
 	return os.RemoveAll(d.vmDir(name))
+}
+
+// imageNameRe bounds a snapshot/template basename so Snapshot can't be tricked
+// into writing outside ImageDir. Mirrors the manager's sandbox-name rules but
+// also allows the '.' and uppercase we use in derived template names.
+var imageNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}$`)
+
+// --- Archivable + DiskReporter: the disk-lifecycle capabilities ------------
+
+func (d *Driver) rootfsPath(name string) string {
+	return filepath.Join(d.vmDir(name), "rootfs.ext4")
+}
+
+// stoppedRootfs returns name's rootfs path, refusing a *running* VM: archive and
+// snapshot run e2fsck/zerofree/mount against the ext4, which would corrupt a
+// live guest's disk. The manager pauses before calling, so a paused (machine ==
+// nil) or post-restart (no driver entry) VM is fine.
+func (d *Driver) stoppedRootfs(name string) (string, error) {
+	d.mu.Lock()
+	st, ok := d.vms[name]
+	running := ok && st.machine != nil
+	d.mu.Unlock()
+	if running {
+		return "", fmt.Errorf("vm %q is running; pause it first", name)
+	}
+	rootfs := d.rootfsPath(name)
+	if _, err := os.Stat(rootfs); err != nil {
+		return "", fmt.Errorf("no rootfs for %q: %w", name, err)
+	}
+	return rootfs, nil
+}
+
+// PackRootfs implements vmm.Archivable: compact the stopped VM's rootfs, drop
+// its memory snapshot, and zstd it into a sibling of the VM dir (so Destroy(dir)
+// won't clobber it before the manager uploads).
+func (d *Driver) PackRootfs(ctx context.Context, name string) (string, error) {
+	rootfs, err := d.stoppedRootfs(name)
+	if err != nil {
+		return "", err
+	}
+	if err := compact(ctx, rootfs); err != nil {
+		return "", err
+	}
+	// Archive is a cold restore, so the memory snapshot is dead weight — dropping
+	// it is exactly the disk pausing spent that we now reclaim.
+	dir := d.vmDir(name)
+	os.Remove(filepath.Join(dir, "mem.snap"))   //nolint:errcheck
+	os.Remove(filepath.Join(dir, "state.snap")) //nolint:errcheck
+	out := dir + ".pack.ext4.zst"
+	if o, err := exec.CommandContext(ctx, "zstd", "-T0", "-10", "-f", rootfs, "-o", out).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("compress rootfs: %v: %s", err, o)
+	}
+	return out, nil
+}
+
+// UnpackRootfs implements vmm.Archivable: decompress a packed artifact into
+// name's VM dir so the next Create cold-boots it (Create skips its reflink copy
+// when rootfs.ext4 already exists).
+func (d *Driver) UnpackRootfs(ctx context.Context, name, inPath string) error {
+	d.mu.Lock()
+	st, ok := d.vms[name]
+	running := ok && st.machine != nil
+	d.mu.Unlock()
+	if running {
+		return fmt.Errorf("vm %q is running", name)
+	}
+	dir := d.vmDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	rootfs := filepath.Join(dir, "rootfs.ext4")
+	if o, err := exec.CommandContext(ctx, "zstd", "-d", "-f", inPath, "-o", rootfs).CombinedOutput(); err != nil {
+		return fmt.Errorf("decompress rootfs: %v: %s", err, o)
+	}
+	return nil
+}
+
+// Snapshot implements vmm.Archivable: promote the stopped VM's rootfs into a new
+// reusable ImageDir template. Reflink-copies first (never mutates the source
+// VM's disk), sanitizes per-guest identity, compacts, then renames into place.
+func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
+	if !imageNameRe.MatchString(newImage) {
+		return fmt.Errorf("invalid snapshot image name %q", newImage)
+	}
+	rootfs, err := d.stoppedRootfs(name)
+	if err != nil {
+		return err
+	}
+	if d.opts.ImageDir == "" {
+		return fmt.Errorf("no image dir configured; cannot snapshot")
+	}
+	tmp := filepath.Join(d.opts.ImageDir, "."+newImage+".ext4.tmp")
+	final := filepath.Join(d.opts.ImageDir, newImage+".ext4")
+	os.Remove(tmp) //nolint:errcheck // clear any torn prior attempt
+	if o, err := exec.CommandContext(ctx, "cp", "--reflink=auto", rootfs, tmp).CombinedOutput(); err != nil {
+		return fmt.Errorf("copy rootfs: %v: %s", err, o)
+	}
+	if err := sanitizeTemplate(ctx, tmp); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return err
+	}
+	if err := compact(ctx, tmp); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return err
+	}
+	// Login-user sidecar (build-rootfs.sh writes the same file next to templates
+	// it builds) so the gateway logs into forks as the right account.
+	user := d.opts.LoginUser
+	if user == "" {
+		user = "root"
+	}
+	os.WriteFile(final+".login-user", []byte(user+"\n"), 0o644) //nolint:errcheck
+	return nil
+}
+
+// RemoveTemplate implements vmm.Archivable: delete a snapshot template + sidecar.
+func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
+	if !imageNameRe.MatchString(image) {
+		return fmt.Errorf("invalid template name %q", image)
+	}
+	if d.opts.ImageDir == "" {
+		return nil
+	}
+	final := filepath.Join(d.opts.ImageDir, image+".ext4")
+	os.Remove(final + ".login-user") //nolint:errcheck
+	if err := os.Remove(final); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// DiskUsageMB implements vmm.DiskReporter: the VM dir's on-host footprint
+// (rootfs write delta + any memory snapshot), in MiB. A missing dir (archived /
+// destroyed) is zero, not an error.
+func (d *Driver) DiskUsageMB(ctx context.Context, name string) (int64, error) {
+	dir := d.vmDir(name)
+	if _, err := os.Stat(dir); err != nil {
+		return 0, nil
+	}
+	out, err := exec.CommandContext(ctx, "du", "-sk", dir).Output()
+	if err != nil {
+		return 0, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, nil
+	}
+	kb, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return kb / 1024, nil
+}
+
+// compact fscks then zeroes the free space of an unmounted ext4 image so a
+// following zstd/reflink only carries used blocks. e2fsck -fy is mandatory
+// before zerofree (which refuses a dirty fs) and repairs the unclean state a
+// killed VMM leaves the disk in.
+func compact(ctx context.Context, path string) error {
+	cmd := exec.CommandContext(ctx, "e2fsck", "-fy", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// e2fsck exits 1/2 when it *corrected* errors — success for us; only >= 4
+		// (uncorrected or operational error) is fatal.
+		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() >= 4 {
+			return fmt.Errorf("e2fsck %s: %v: %s", path, err, out)
+		}
+	}
+	if o, err := exec.CommandContext(ctx, "zerofree", path).CombinedOutput(); err != nil {
+		return fmt.Errorf("zerofree %s: %v: %s", path, err, o)
+	}
+	return nil
+}
+
+// sanitizeTemplate strips a rootfs of its per-guest identity so every fork gets
+// a fresh one — the same end state hack/build-rootfs.sh gives a freshly built
+// template (blank hostname, no SSH host keys; the sparkbox-netcfg boot hook
+// regenerates them via ssh-keygen -A). Best-effort per file: a template missing
+// any of these is still valid.
+func sanitizeTemplate(ctx context.Context, path string) error {
+	mnt, err := os.MkdirTemp("", "sparkbox-snap-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(mnt) //nolint:errcheck
+	if o, err := exec.CommandContext(ctx, "mount", "-o", "loop", path, mnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount %s: %v: %s", path, err, o)
+	}
+	for _, rel := range []string{"etc/machine-id", "var/lib/dbus/machine-id", "etc/resolv.conf"} {
+		os.Remove(filepath.Join(mnt, rel)) //nolint:errcheck
+	}
+	os.WriteFile(filepath.Join(mnt, "etc/hostname"), nil, 0o644) //nolint:errcheck
+	if keys, _ := filepath.Glob(filepath.Join(mnt, "etc/ssh/ssh_host_*")); keys != nil {
+		for _, k := range keys {
+			os.Remove(k) //nolint:errcheck
+		}
+	}
+	os.RemoveAll(filepath.Join(mnt, "var/run/secrets/hivemind")) //nolint:errcheck
+	os.RemoveAll(filepath.Join(mnt, "run/secrets/hivemind"))     //nolint:errcheck
+	if o, err := exec.CommandContext(ctx, "umount", mnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("umount %s: %v: %s", mnt, err, o)
+	}
+	return nil
 }
 
 func (d *Driver) Close() error {

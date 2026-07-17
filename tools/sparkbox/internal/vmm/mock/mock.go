@@ -10,6 +10,7 @@
 package mock
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
 	"io"
@@ -57,8 +58,17 @@ func (d *Driver) Create(_ context.Context, cfg vmm.Config) (*vmm.Instance, error
 		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
 	}
 	workdir := filepath.Join(d.stateDir, "mock-vms", cfg.Name)
+	seed := isEmptyDir(workdir) // fresh dir? then a snapshot template may seed it
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return nil, err
+	}
+	// Fork support (mirrors the firecracker reflink-from-template path): if a
+	// snapshot template exists for this image and the workdir is fresh, seed it.
+	// A restore leaves the workdir already populated (UnpackRootfs), so skip.
+	if seed {
+		if tpl := filepath.Join(d.stateDir, "mock-templates", cfg.Image); dirExists(tpl) {
+			copyTree(tpl, workdir) //nolint:errcheck // best effort, like reflink fallback
+		}
 	}
 	vm := &fakeVM{name: cfg.Name, workdir: workdir, memMB: cfg.MemMB}
 	if err := d.start(vm, cfg.GatewayPublicKey); err != nil {
@@ -248,6 +258,188 @@ func max64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// --- Archivable + DiskReporter (the disk-lifecycle capabilities) -----------
+//
+// The mock's "disk" is a workdir tree. PackRootfs tars it to a single file the
+// manager can hand to a (fake) object store; UnpackRootfs reverses it; Snapshot
+// copies it into a template dir Create seeds forks from. Pure stdlib so the full
+// archive/restore/snapshot/fork lifecycle is exercisable in `go test` with no
+// KVM, tar, or zstd on the machine.
+
+func (d *Driver) workdirFor(name string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if vm, ok := d.vms[name]; ok {
+		return vm.workdir
+	}
+	return filepath.Join(d.stateDir, "mock-vms", name)
+}
+
+func (d *Driver) notRunning(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if vm, ok := d.vms[name]; ok && !vm.paused {
+		return fmt.Errorf("vm %q is running", name)
+	}
+	return nil
+}
+
+func (d *Driver) PackRootfs(_ context.Context, name string) (string, error) {
+	if err := d.notRunning(name); err != nil {
+		return "", err
+	}
+	workdir := d.workdirFor(name)
+	out := workdir + ".pack.tar"
+	if err := tarTree(workdir, out); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+func (d *Driver) UnpackRootfs(_ context.Context, name, inPath string) error {
+	workdir := filepath.Join(d.stateDir, "mock-vms", name)
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		return err
+	}
+	return untarTree(inPath, workdir)
+}
+
+func (d *Driver) Snapshot(_ context.Context, name, newImage string) error {
+	if err := d.notRunning(name); err != nil {
+		return err
+	}
+	tpl := filepath.Join(d.stateDir, "mock-templates", newImage)
+	os.RemoveAll(tpl) //nolint:errcheck
+	return copyTree(d.workdirFor(name), tpl)
+}
+
+func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
+	return os.RemoveAll(filepath.Join(d.stateDir, "mock-templates", image))
+}
+
+// DiskUsageMB reports the workdir's byte size in MiB, so pooled-disk accounting
+// has a real (if tiny) signal under the mock — a test writes a sized file to
+// move the needle.
+func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
+	workdir := filepath.Join(d.stateDir, "mock-vms", name)
+	var total int64
+	filepath.Walk(workdir, func(_ string, info os.FileInfo, err error) error { //nolint:errcheck
+		if err == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total / (1024 * 1024), nil
+}
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+func isEmptyDir(p string) bool {
+	entries, err := os.ReadDir(p)
+	return err != nil || len(entries) == 0 // missing counts as empty (fresh)
+}
+
+// copyTree recursively copies src into dst (files + dirs, mode-preserving).
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm()|0o700)
+		}
+		if !info.Mode().IsRegular() {
+			return nil // skip sockets/symlinks — the mock's workdir has none
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		_, err = io.Copy(out, in)
+		return err
+	})
+}
+
+// tarTree writes a plain (uncompressed) tar of dir's regular files to out.
+func tarTree(dir, out string) error {
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	tw := tar.NewWriter(f)
+	defer tw.Close()
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || !info.Mode().IsRegular() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		hdr := &tar.Header{Name: rel, Mode: int64(info.Mode().Perm()), Size: info.Size()}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(tw, src)
+		return err
+	})
+}
+
+// untarTree extracts a tarTree archive into dir.
+func untarTree(in, dir string) error {
+	f, err := os.Open(in)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dir, filepath.Clean("/"+hdr.Name)) // defuse path traversal
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode))
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, tr); err != nil { //nolint:gosec // mock-only, sizes are ours
+			out.Close()
+			return err
+		}
+		out.Close()
+	}
 }
 
 func (d *Driver) instance(vm *fakeVM) *vmm.Instance {

@@ -36,7 +36,7 @@ if [ -z "$IMAGE" ]; then
   IMAGE="sparkbox-base:$RELEASE"   # local tag, built on cache miss below
 fi
 ROOTFS_NAME=${ROOTFS_NAME:-universal}   # template + artifact basename; must match the server's --default-image
-ROOTFS_MB=${ROOTFS_MB:-65536}   # per-sandbox root disk ceiling (thin CoW copy; mostly unwritten)
+ROOTFS_MB=${ROOTFS_MB:-25600}   # per-sandbox root disk ceiling, 25 GiB (thin CoW copy; mostly unwritten). The guest sees exactly this much and can't exceed it — the ext4 IS this size. Mirrors exe.dev's 25 GB/VM.
 # Kernel + firecracker default to a build host's staged copies, but CI (see
 # .github/workflows/build-artifacts.yml) downloads them and points here.
 KERNEL=${KERNEL:-$SPARKBOX_DIR/vmlinux}

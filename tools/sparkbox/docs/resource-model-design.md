@@ -92,7 +92,10 @@ handles servers and background work as **two different problems** (Parts 2 and 3
   resume ("pause one to free a slot") rather than evicting (Part 5).
 - **No disk quota of any kind.** The 300 GB XFS volume is mounted without
   `prjquota`; a sandbox can grow its rootfs to the 64 GB ceiling and nothing caps
-  per-owner or pooled usage (`cloud-init.yaml:220`).
+  per-owner or pooled usage (`cloud-init.yaml:220`). **Addressed in Part 8:** the
+  per-VM ceiling is now 25 GB (the ext4 *is* that size, so it's hard), and pooled
+  per-owner usage has soft admission accounting (`--disk-pool-mb-per-owner`); hard
+  `prjquota` is still the future exact replacement.
 - **`--max-running-per-owner` (default 2) caps running, not total.** There is no
   total-sandbox-per-owner cap.
 
@@ -256,6 +259,64 @@ is small; a busy fleet needs the **multi-box path** (already in the backlog):
 Cross-host pooled quota and a real scheduler are out of scope here; this doc is the
 single-host model plus the pinning seam that keeps multi-box from requiring a
 rewrite.
+
+## Part 8 — Disk lifecycle: 25 GB VMs, pooled quota, archive & snapshot (✅ landed)
+
+The activity gradient (Parts 1, 4-5) reclaims RAM then, at the Stopped tier, disk.
+This part makes the disk story concrete and adds two levers beyond it: parking a
+cold VM's disk **off-host** entirely, and reusing a customized VM as a **template**.
+Every fork here took the simpler option deliberately (see the git history / the
+plan that shipped it).
+
+- **25 GB per VM, hard.** The rootfs ext4 template is now built at 25 GiB
+  (`ROOTFS_MB=25600` in `hack/build-artifacts.sh` + `hack/setup-host.sh`), matching
+  exe.dev. Because the guest's filesystem *is* that size, it physically cannot
+  exceed it — no quota needed for the per-VM cap. Thin XFS reflink copies mean a
+  sandbox still only pays for blocks it writes. Changing the size busts the
+  content-addressed rootfs cache key, so the next release rebuilds the template.
+
+- **Pooled per-owner disk, soft.** `--disk-pool-mb-per-owner` (0 = off) caps the
+  sum of an owner's on-disk footprints. Accounting is *soft*, mirroring RAM
+  admission: the driver reports each VM's `du` (`vmm.DiskReporter.DiskUsageMB`),
+  the reaper refreshes `Sandbox.DiskMB` each tick, and `admit` refuses a create/
+  restore that would push the owner over (`DiskQuotaError`). Archived boxes count
+  their compressed object-storage size; conservative (reflink-shared base blocks
+  are counted per VM), never under. Hard XFS `prjquota` (Part 4) remains the exact
+  future replacement.
+
+- **Archive → object storage (a 6th state below Stopped).** `ctl@ archive <name>`
+  / the console Archive button / `POST …/archive` pause the VM, drop its memory
+  snapshot, **`e2fsck` + `zerofree` + `zstd`** the rootfs (the "fschk/compaction"
+  step — zeroed free space compresses away, so the artifact is ~the used size),
+  upload it to `<prefix>/<owner>/<name>.ext4.zst` (private ACL), and destroy the
+  local VM. The record survives in the new **`StateArchived`**, costing **zero host
+  RAM and zero host disk**. Resume-on-connect restores transparently: `EnsureRunning`
+  downloads + unpacks the rootfs, flips the box to Paused, and the existing
+  cold-boot-from-present-rootfs path (`fc.go` Create skips its reflink when a
+  rootfs is already there) brings it up — no new boot path. Object storage lives
+  above the driver (`host.ObjectStore` → `internal/objstore`, an rclone wrapper
+  reusing the release-artifact conventions); the driver only ever deals in local
+  files (`vmm.Archivable.PackRootfs`/`UnpackRootfs`). Archive is a *move*: restore
+  deletes the object, a later re-archive rewrites it, and Destroy drops it.
+  **Deploy prereq:** the serve host needs `e2fsprogs`/`zerofree`/`zstd` (added to
+  setup-host + cloud-init) and, unlike the public-read release bucket that CI owns,
+  **S3 write creds in its rclone.conf** — archives are private user data.
+
+- **Snapshot → fork (a reusable template).** `ctl@ snapshot create <box> <name>`
+  captures a customized VM as a fork-able template: the driver compacts and
+  **sanitizes** the rootfs (strips SSH host keys, `machine-id`, hostname, cached
+  identity token — so every fork regenerates its own identity, exactly what
+  `build-rootfs.sh` does at image-build time) into a new `<image-dir>/snap-<owner>-
+  <name>.ext4`. `ctl@ fork <snap> <newname>` (or the console) then creates a
+  sandbox with that template as its image, reusing the reflink `--image` path with
+  zero new mechanism. Snapshots are owner-scoped in a small `snapshots.json`
+  registry; forks already made keep their own reflink copy, so deleting a snapshot
+  never affects them. v1 keeps snapshots **local** to the host (no object-storage
+  backup, no OCI export) — both are follow-ups.
+
+Archive stays **manual** in v1 (no auto-archive reaper tier yet); the natural next
+step is driving Paused→Stopped→Archived on idle + disk pressure, which slots onto
+this same machinery.
 
 ## What we already have (so this is mostly policy, not new mechanics)
 

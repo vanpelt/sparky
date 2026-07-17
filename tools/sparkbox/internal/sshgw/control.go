@@ -19,8 +19,14 @@ import (
 const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  list                     list your sandboxes and their state\r\n" +
 	"  pause <name>             pause a running sandbox to free a slot\r\n" +
+	"  archive <name>           park a sandbox in object storage (frees host disk)\r\n" +
+	"  restore <name>           bring an archived sandbox back and start it\r\n" +
 	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
 	"  unpin <name>             let a sandbox pause when idle again\r\n" +
+	"  snapshot list            list your snapshots (fork-able templates)\r\n" +
+	"  snapshot create <box> <name>  save <box>'s current disk as a template\r\n" +
+	"  snapshot rm <name>       delete a snapshot template\r\n" +
+	"  fork <snapshot> <name>   create a new sandbox from one of your snapshots\r\n" +
 	"  schedule list            list your platform-scheduled jobs\r\n" +
 	"  schedule add <box> \"<cron>\" <cmd>  wake <box> on a cron schedule to run <cmd>\r\n" +
 	"  schedule rm <id>         remove a scheduled job\r\n" +
@@ -76,6 +82,34 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		fmt.Fprintf(s, "paused %s\r\n", name)
 		s.Exit(0) //nolint:errcheck
+	case "archive":
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
+			return
+		}
+		fmt.Fprintf(s, "archiving %s (fsck + compress + upload; this can take a minute)…\r\n", name)
+		ctx, cancel := context.WithTimeout(s.Context(), archiveTimeout)
+		defer cancel()
+		if err := g.mgr.Archive(ctx, name); err != nil {
+			fail(s, log, "archive", err)
+			return
+		}
+		fmt.Fprintf(s, "archived %s — host disk freed; `restore %s` (or just connect) brings it back\r\n", name, name)
+		s.Exit(0) //nolint:errcheck
+	case "restore":
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
+			return
+		}
+		fmt.Fprintf(s, "restoring %s (download + boot)…\r\n", name)
+		ctx, cancel := context.WithTimeout(s.Context(), archiveTimeout)
+		defer cancel()
+		if _, err := g.mgr.EnsureRunning(ctx, name); err != nil {
+			fail(s, log, "restore", err)
+			return
+		}
+		fmt.Fprintf(s, "restored %s — it's running\r\n", name)
+		s.Exit(0) //nolint:errcheck
 	case "pin":
 		name, ok := g.ownedBoxArg(s, user, args)
 		if !ok {
@@ -107,6 +141,10 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		fmt.Fprintf(s, "unpinned %s — it will pause when idle\r\n", name)
 		s.Exit(0) //nolint:errcheck
+	case "snapshot":
+		g.controlSnapshot(s, user, args[1:], log)
+	case "fork":
+		g.controlFork(s, user, args[1:], log)
 	case "schedule":
 		g.controlSchedule(s, user, args[1:], log)
 	case "whoami":
@@ -440,6 +478,85 @@ func (g *Gateway) controlSchedule(s gssh.Session, user string, args []string, lo
 		fmt.Fprintf(s.Stderr(), "unknown schedule command %q\r\n%s", sub, controlUsage)
 		s.Exit(2) //nolint:errcheck
 	}
+}
+
+// controlSnapshot manages the caller's fork-able templates: snapshot list |
+// create <box> <name> | rm <name>. Only ever touches the caller's own sandboxes
+// and snapshots.
+func (g *Gateway) controlSnapshot(s gssh.Session, user string, args []string, log *slog.Logger) {
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "list":
+		snaps := g.mgr.Snapshots(user)
+		if len(snaps) == 0 {
+			fmt.Fprintf(s, "no snapshots — create one with:\r\n  ssh %s@%s snapshot create <box> <name>\r\n",
+				ControlUser, g.domainHint())
+			s.Exit(0) //nolint:errcheck
+			return
+		}
+		for _, sn := range snaps {
+			fmt.Fprintf(s, "%-24s from %-20s %s\r\n", sn.Name, sn.FromBox, sn.CreatedAt.Local().Format("2006-01-02 15:04"))
+		}
+		s.Exit(0) //nolint:errcheck
+	case "create":
+		if len(args) < 3 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> snapshot create <box> <name>\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		box, ok := g.mgr.Get(args[1])
+		if !ok || box.Owner != user {
+			fmt.Fprintf(s.Stderr(), "sparkbox: no sandbox named %q\r\n", args[1])
+			s.Exit(1) //nolint:errcheck
+			return
+		}
+		fmt.Fprintf(s, "snapshotting %s → %q (pause + compact; this can take a minute)…\r\n", args[1], args[2])
+		ctx, cancel := context.WithTimeout(s.Context(), archiveTimeout)
+		defer cancel()
+		if _, err := g.mgr.Snapshot(ctx, args[1], args[2], user); err != nil {
+			fail(s, log, "snapshot create", err)
+			return
+		}
+		fmt.Fprintf(s, "created snapshot %q — fork it with: ssh %s@%s fork %s <new-name>\r\n",
+			args[2], ControlUser, g.domainHint(), args[2])
+		s.Exit(0) //nolint:errcheck
+	case "rm":
+		if len(args) < 2 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> snapshot rm <name>\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		if err := g.mgr.DeleteSnapshot(s.Context(), args[1], user); err != nil {
+			fail(s, log, "snapshot rm", err)
+			return
+		}
+		fmt.Fprintf(s, "deleted snapshot %q\r\n", args[1])
+		s.Exit(0) //nolint:errcheck
+	default:
+		fmt.Fprintf(s.Stderr(), "unknown snapshot command %q\r\n%s", sub, controlUsage)
+		s.Exit(2) //nolint:errcheck
+	}
+}
+
+// controlFork creates a new sandbox from one of the caller's snapshots.
+func (g *Gateway) controlFork(s gssh.Session, user string, args []string, log *slog.Logger) {
+	if len(args) < 2 {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> fork <snapshot> <new-name>\r\n", ControlUser)
+		s.Exit(2) //nolint:errcheck
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
+	defer cancel()
+	if _, err := g.mgr.Fork(ctx, args[0], args[1], user, 0, 0); err != nil {
+		fail(s, log, "fork", err)
+		return
+	}
+	fmt.Fprintf(s, "created %s from snapshot %q — connect with: ssh %s@%s\r\n",
+		args[1], args[0], args[1], g.domainHint())
+	s.Exit(0) //nolint:errcheck
 }
 
 func truncate(s string, n int) string {

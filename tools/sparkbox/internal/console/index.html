@@ -143,6 +143,8 @@
   .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
   .badge.paused { color: hsl(var(--muted-foreground)); }
   .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+  .badge.archived { color: hsl(var(--violet, 262 83% 66%)); border-color: hsl(var(--violet, 262 83% 66%) / .35); }
+  .badge.archived .dot { background: hsl(var(--violet, 262 83% 66%)); }
   .badge.pinned { color: hsl(var(--amber, 38 92% 50%)); border-color: hsl(var(--amber, 38 92% 50%) / .35); margin-left: 6px; }
   .badge.pinned .dot { background: hsl(var(--amber, 38 92% 50%)); }
   .badge.wake { color: hsl(var(--muted-foreground)); margin-left: 6px; font-variant-numeric: tabular-nums; }
@@ -268,6 +270,22 @@
       </div>
       <div id="empty" class="empty hidden">No sandboxes yet. Create one with <code>ssh new@…</code>.</div>
     </div>
+
+    <div class="card panel" id="snaps-card" style="margin-top:18px">
+      <div class="panel-head">
+        <h2>Snapshots</h2>
+        <span class="hint">fork-able templates captured from a customized sandbox</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Snapshot</th><th>Owner</th><th>From</th><th>Created</th><th></th></tr>
+          </thead>
+          <tbody id="snap-rows"></tbody>
+        </table>
+      </div>
+      <div id="snap-empty" class="empty hidden">No snapshots yet. Capture one with the <strong>Snapshot</strong> action above.</div>
+    </div>
   </div>
 
   <div id="toast"></div>
@@ -312,9 +330,10 @@
   }
 
   function badge(state) {
-    const running = state === "running";
-    return '<span class="badge ' + (running ? "running" : "paused") + '">' +
-      '<span class="dot"></span>' + (running ? "running" : "paused") + "</span>";
+    // running | paused | archived (rootfs parked in object storage, 0 host disk)
+    const cls = state === "running" ? "running" : (state === "archived" ? "archived" : "paused");
+    return '<span class="badge ' + cls + '">' +
+      '<span class="dot"></span>' + cls + "</span>";
   }
 
   async function act(name, verb, btn) {
@@ -323,7 +342,7 @@
       const r = await fetch("/api/sandboxes/" + encodeURIComponent(name) + "/" + verb, { method: "POST" });
       if (r.status === 401) return show("login");
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-      const past = { pause: "paused", resume: "resumed", pin: "pinned", unpin: "unpinned" };
+      const past = { pause: "paused", resume: "resumed", pin: "pinned", unpin: "unpinned", archive: "archived" };
       toast(name + " " + (past[verb] || verb));
       await refresh();
     } catch (e) {
@@ -457,10 +476,26 @@
       const pinBtn = b.pinned
         ? '<button class="btn-outline btn-sm" data-act="unpin" data-name="' + b.name + '">Unpin</button>'
         : '<button class="btn-outline btn-sm" data-act="pin" data-name="' + b.name + '">Pin</button>';
+      const isArchived = b.state === "archived";
       const stateBtn = isRunning
         ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + b.name + '">Pause</button>'
-        : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + b.name + '">Resume</button>';
-      const action = (b.pinned ? "" : stateBtn + " ") + pinBtn;
+        : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + b.name + '">' +
+          (isArchived ? "Restore" : "Resume") + "</button>";
+      // Archive is the deepest idle tier (rootfs → object storage, host disk
+      // freed). Offered on any live row; an archived row only offers Restore.
+      const archiveBtn = isArchived
+        ? ""
+        : '<button class="btn-outline btn-sm" data-act="archive" data-name="' + b.name +
+          '" title="park this sandbox in object storage and free its host disk">Archive</button>';
+      // Snapshot works from any live state (running/paused/pinned) — it pauses,
+      // then captures the disk as a fork-able template.
+      const snapBtn = isArchived
+        ? ""
+        : '<button class="btn-outline btn-sm" data-act="snapshot" data-name="' + b.name +
+          '" title="save this disk as a fork-able template">Snapshot</button>';
+      const action = isArchived
+        ? stateBtn
+        : (b.pinned ? "" : stateBtn + " " + archiveBtn + " ") + snapBtn + " " + pinBtn;
       const pinBadge = b.pinned
         ? '<span class="badge pinned"><span class="dot"></span>pinned</span>'
         : "";
@@ -488,7 +523,91 @@
     $("empty").classList.toggle("hidden", list.length > 0);
     $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
     rows.querySelectorAll("button[data-act]").forEach((btn) =>
-      btn.addEventListener("click", () => act(btn.dataset.name, btn.dataset.act, btn)));
+      btn.addEventListener("click", () => {
+        if (btn.dataset.act === "snapshot") return snapshotBox(btn.dataset.name, btn);
+        act(btn.dataset.name, btn.dataset.act, btn);
+      }));
+  }
+
+  // snapshotBox prompts for a name and captures a sandbox's disk as a template.
+  async function snapshotBox(name, btn) {
+    const snap = (prompt("Snapshot name for " + name + " (lowercase letters, digits, dashes):") || "").trim();
+    if (!snap) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/sandboxes/" + encodeURIComponent(name) + "/snapshot", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ snapshot_name: snap }),
+      });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast("snapshot " + snap + " created");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  // renderSnaps paints the snapshots panel: fork spins up a new sandbox from a
+  // template, delete removes it (forks already made keep their own copy).
+  function renderSnaps(list) {
+    const rows = $("snap-rows");
+    rows.innerHTML = "";
+    for (const s of list) {
+      const tr = document.createElement("tr");
+      const fork = '<button class="btn-outline btn-sm" data-fork="' + esc(s.name) + '" data-owner="' + esc(s.owner) + '">Fork</button>';
+      const del = '<button class="btn-outline btn-sm" data-del="' + esc(s.name) + '" data-owner="' + esc(s.owner) + '">Delete</button>';
+      tr.innerHTML =
+        '<td class="name">' + esc(s.name) + "</td>" +
+        '<td class="owner">' + esc(s.owner) + "</td>" +
+        '<td class="owner">' + esc(s.from_box || "–") + "</td>" +
+        '<td class="age">' + rel(s.created_at) + "</td>" +
+        '<td class="actions">' + fork + " " + del + "</td>";
+      rows.appendChild(tr);
+    }
+    $("snap-empty").classList.toggle("hidden", list.length > 0);
+    rows.querySelectorAll("button[data-fork]").forEach((btn) =>
+      btn.addEventListener("click", () => forkSnap(btn.dataset.fork, btn.dataset.owner, btn)));
+    rows.querySelectorAll("button[data-del]").forEach((btn) =>
+      btn.addEventListener("click", () => delSnap(btn.dataset.del, btn.dataset.owner, btn)));
+  }
+
+  async function forkSnap(snap, owner, btn) {
+    const name = (prompt("New sandbox name from snapshot " + snap + ":") || "").trim();
+    if (!name) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/snapshots/" + encodeURIComponent(snap) + "/fork", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, owner }),
+      });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast("forked " + name + " from " + snap);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  async function delSnap(snap, owner, btn) {
+    if (!confirm("Delete snapshot " + snap + "? Forks already made are unaffected.")) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/snapshots/" + encodeURIComponent(snap) + "/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner }),
+      });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast("deleted snapshot " + snap);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
   }
 
   function esc(s) {
@@ -498,7 +617,9 @@
 
   async function refresh() {
     try {
-      const [r, rc] = await Promise.all([fetch("/api/sandboxes"), fetch("/api/cluster")]);
+      const [r, rc, rs] = await Promise.all([
+        fetch("/api/sandboxes"), fetch("/api/cluster"), fetch("/api/snapshots"),
+      ]);
       if (r.status === 401 || rc.status === 401) return show("login");
       if (!r.ok) throw new Error(r.statusText);
       if (!rc.ok) throw new Error(rc.statusText);
@@ -506,6 +627,10 @@
       renderCluster(await rc.json());
       show("dash");
       render(Array.isArray(list) ? list : []);
+      if (rs.ok) {
+        const snaps = await rs.json();
+        renderSnaps(Array.isArray(snaps) ? snaps : []);
+      }
       if (!timer) timer = setInterval(refresh, 4000);
     } catch (e) {
       toast("refresh failed: " + e.message, true);
