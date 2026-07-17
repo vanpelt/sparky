@@ -17,6 +17,8 @@ import (
 const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  list                     list your sandboxes and their state\r\n" +
 	"  pause <name>             pause a running sandbox to free a slot\r\n" +
+	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
+	"  unpin <name>             let a sandbox pause when idle again\r\n" +
 	"  whoami                   show your account and linked identities\r\n" +
 	"  keys list                list the SSH keys on your account\r\n" +
 	"  keys add \"<key line>\"    link another key\r\n" +
@@ -42,7 +44,11 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 			if b.Owner != user {
 				continue
 			}
-			fmt.Fprintf(s, "%-24s %s\r\n", b.Name, b.State)
+			tier := "scale-to-zero"
+			if b.Pinned {
+				tier = "pinned"
+			}
+			fmt.Fprintf(s, "%-24s %-8s %s\r\n", b.Name, b.State, tier)
 			n++
 		}
 		if n == 0 {
@@ -50,17 +56,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		s.Exit(0) //nolint:errcheck
 	case "pause":
-		if len(args) < 2 {
-			fmt.Fprint(s.Stderr(), "usage: ssh ctl@<gateway> pause <name>\r\n")
-			s.Exit(2) //nolint:errcheck
-			return
-		}
-		name := args[1]
-		box, ok := g.mgr.Get(name)
-		if !ok || box.Owner != user {
-			// Same message either way: don't leak other users' sandbox names.
-			fmt.Fprintf(s.Stderr(), "sparkbox: no sandbox named %q\r\n", name)
-			s.Exit(1) //nolint:errcheck
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
 			return
 		}
 		ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
@@ -70,6 +67,37 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 			return
 		}
 		fmt.Fprintf(s, "paused %s\r\n", name)
+		s.Exit(0) //nolint:errcheck
+	case "pin":
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
+			return
+		}
+		if err := g.mgr.SetPinned(name, true); err != nil {
+			fail(s, log, "pin", err)
+			return
+		}
+		// Pinning implies "keep it running now", so resume it immediately.
+		ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
+		defer cancel()
+		if _, err := g.mgr.EnsureRunning(ctx, name); err != nil {
+			// The pin flag is set; it just isn't warm yet. Report but don't fail.
+			fmt.Fprintf(s.Stderr(), "sparkbox: pinned %s, but couldn't resume it now: %v\r\n", name, err)
+			s.Exit(1) //nolint:errcheck
+			return
+		}
+		fmt.Fprintf(s, "pinned %s — it stays always-on (in-VM cron & daemons keep running)\r\n", name)
+		s.Exit(0) //nolint:errcheck
+	case "unpin":
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
+			return
+		}
+		if err := g.mgr.SetPinned(name, false); err != nil {
+			fail(s, log, "unpin", err)
+			return
+		}
+		fmt.Fprintf(s, "unpinned %s — it will pause when idle\r\n", name)
 		s.Exit(0) //nolint:errcheck
 	case "whoami":
 		g.controlWhoami(s, user)
@@ -81,6 +109,27 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		fmt.Fprintf(s.Stderr(), "unknown command %q\r\n%s", args[0], controlUsage)
 		s.Exit(2) //nolint:errcheck
 	}
+}
+
+// ownedBoxArg validates that args[1] names a sandbox the caller owns, printing
+// the usage/not-found error and exiting the session on any failure. It returns
+// the sandbox name and ok=true only when the caller may act on it. The
+// not-found and not-owned cases share one message so we never leak whether
+// another user's sandbox exists.
+func (g *Gateway) ownedBoxArg(s gssh.Session, user string, args []string) (string, bool) {
+	if len(args) < 2 {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> %s <name>\r\n", ControlUser, args[0])
+		s.Exit(2) //nolint:errcheck
+		return "", false
+	}
+	name := args[1]
+	box, ok := g.mgr.Get(name)
+	if !ok || box.Owner != user {
+		fmt.Fprintf(s.Stderr(), "sparkbox: no sandbox named %q\r\n", name)
+		s.Exit(1) //nolint:errcheck
+		return "", false
+	}
+	return name, true
 }
 
 func (g *Gateway) controlWhoami(s gssh.Session, user string) {

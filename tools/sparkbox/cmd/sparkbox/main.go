@@ -257,6 +257,10 @@ func serve(args []string) error {
 			"new", doors.Addr(sshgw.NewSandboxUser).String())
 	}
 
+	// A process restart marks every sandbox paused; bring the pinned ones back
+	// up so their in-guest daemons keep running across a host reboot.
+	mgr.ResumePinned(ctx)
+
 	go mgr.RunReaper(ctx, *idleTimeout, time.Minute)
 
 	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}

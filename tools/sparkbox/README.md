@@ -184,7 +184,9 @@ production gap list (jailer, warm snapshots, rate limits).
       tap's /30, so no extra NAT is needed, but it's untested on hardware)
 - [x] IPv6-native: dual-stack guests with a routable /128 per sandbox from a
       delegated /64 (`--subnet6`), no NAT
-- [x] Password-gated operator console at `console.<domain>` (list + pause/resume)
+- [x] Password-gated operator console at `console.<domain>` (list + pause/resume + pin)
+- [x] Pinned "always-on" tier: reaper-exempt sandboxes so in-VM cron/daemons keep
+      running (`ctl pin <name>`), resumed automatically on host boot
 - [x] User accounts in sqlite: `signup@` over SSH, invite codes, multi-key
       keyrings (`ctl keys`), GitHub linking verified against `<login>.keys`
 - [x] OIDC workload identity: issuer at `oidc.<domain>`, per-sandbox id tokens

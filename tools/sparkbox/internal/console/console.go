@@ -76,6 +76,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cluster", h.requireAuth(h.cluster))
 	mux.HandleFunc("POST /api/sandboxes/{name}/pause", h.requireAuth(h.pause))
 	mux.HandleFunc("POST /api/sandboxes/{name}/resume", h.requireAuth(h.resume))
+	mux.HandleFunc("POST /api/sandboxes/{name}/pin", h.requireAuth(h.pin))
+	mux.HandleFunc("POST /api/sandboxes/{name}/unpin", h.requireAuth(h.unpin))
 	mux.HandleFunc("GET /", h.index)
 	return mux
 }
@@ -222,6 +224,35 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.Info("console resumed sandbox", "name", name)
+	writeJSON(w, http.StatusOK, box)
+}
+
+// pin marks a sandbox always-on and resumes it so its in-guest daemons start
+// running immediately. unpin clears the flag, letting the reaper pause it again.
+func (h *Handler) pin(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := h.mgr.SetPinned(name, true); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	box, err := h.mgr.EnsureRunning(r.Context(), name)
+	if err != nil {
+		// The flag stuck; it just isn't warm yet. Surface the reason.
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console pinned sandbox", "name", name)
+	writeJSON(w, http.StatusOK, box)
+}
+
+func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := h.mgr.SetPinned(name, false); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console unpinned sandbox", "name", name)
+	box, _ := h.mgr.Get(name)
 	writeJSON(w, http.StatusOK, box)
 }
 

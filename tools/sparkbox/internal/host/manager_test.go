@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 
@@ -133,6 +134,80 @@ func TestNoLimitsWhenZero(t *testing.T) {
 		if b.State != vmm.StateRunning {
 			t.Fatalf("%s not running: %s", b.Name, b.State)
 		}
+	}
+}
+
+// waitFor polls cond until it returns true or ~2s elapses, failing the test on
+// timeout. Used to observe an asynchronous loop (the reaper) without a fixed
+// sleep.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition not met within 2s")
+}
+
+func TestPinnedSurvivesReaper(t *testing.T) {
+	m := newTestManager(t, host.Options{})
+	mustCreate(t, m, "keep", "alice", 512)
+	mustCreate(t, m, "drop", "alice", 512)
+	if err := m.SetPinned("keep", true); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// timeout=0: every idle running sandbox is eligible on the first tick.
+	go m.RunReaper(ctx, 0, time.Millisecond)
+
+	// The unpinned sandbox is paused by the reaper...
+	waitFor(t, func() bool {
+		b, _ := m.Get("drop")
+		return b.State == vmm.StatePaused
+	})
+	// ...but the pinned one is never touched.
+	if b, _ := m.Get("keep"); b.State != vmm.StateRunning {
+		t.Fatalf("pinned sandbox was reaped: state=%s", b.State)
+	}
+	if b, _ := m.Get("keep"); !b.Pinned {
+		t.Fatal("pin flag lost across the reaper run")
+	}
+}
+
+func TestResumePinnedOnBoot(t *testing.T) {
+	m := newTestManager(t, host.Options{})
+	ctx := context.Background()
+	mustCreate(t, m, "keep", "alice", 512)
+	mustCreate(t, m, "drop", "alice", 512)
+	if err := m.SetPinned("keep", true); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a host restart: everything is paused.
+	for _, n := range []string{"keep", "drop"} {
+		if err := m.Pause(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.ResumePinned(ctx)
+
+	if b, _ := m.Get("keep"); b.State != vmm.StateRunning {
+		t.Fatalf("pinned sandbox not resumed on boot: state=%s", b.State)
+	}
+	if b, _ := m.Get("drop"); b.State != vmm.StatePaused {
+		t.Fatalf("unpinned sandbox resumed unexpectedly: state=%s", b.State)
+	}
+}
+
+func TestSetPinnedUnknown(t *testing.T) {
+	m := newTestManager(t, host.Options{})
+	if err := m.SetPinned("ghost", true); err == nil {
+		t.Fatal("SetPinned on a missing sandbox should error")
 	}
 }
 

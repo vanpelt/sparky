@@ -138,6 +138,8 @@
   .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
   .badge.paused { color: hsl(var(--muted-foreground)); }
   .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+  .badge.pinned { color: hsl(var(--amber, 38 92% 50%)); border-color: hsl(var(--amber, 38 92% 50%) / .35); margin-left: 6px; }
+  .badge.pinned .dot { background: hsl(var(--amber, 38 92% 50%)); }
 
   /* route chips */
   .route {
@@ -303,7 +305,8 @@
       const r = await fetch("/api/sandboxes/" + encodeURIComponent(name) + "/" + verb, { method: "POST" });
       if (r.status === 401) return show("login");
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-      toast(name + " " + (verb === "pause" ? "paused" : "resumed"));
+      const past = { pause: "paused", resume: "resumed", pin: "pinned", unpin: "unpinned" };
+      toast(name + " " + (past[verb] || verb));
       await refresh();
     } catch (e) {
       toast(e.message, true);
@@ -381,12 +384,21 @@
     for (const b of list) {
       const tr = document.createElement("tr");
       const isRunning = b.state === "running";
-      const action = isRunning
+      // A pinned sandbox is exempt from the reaper; its only power action is
+      // unpinning (pausing it directly would just be undone by ResumePinned).
+      const pinBtn = b.pinned
+        ? '<button class="btn-outline btn-sm" data-act="unpin" data-name="' + b.name + '">Unpin</button>'
+        : '<button class="btn-outline btn-sm" data-act="pin" data-name="' + b.name + '">Pin</button>';
+      const stateBtn = isRunning
         ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + b.name + '">Pause</button>'
         : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + b.name + '">Resume</button>';
+      const action = (b.pinned ? "" : stateBtn + " ") + pinBtn;
+      const pinBadge = b.pinned
+        ? '<span class="badge pinned"><span class="dot"></span>pinned</span>'
+        : "";
       tr.innerHTML =
         '<td class="name">' + esc(b.name) + "</td>" +
-        "<td>" + badge(b.state) + "</td>" +
+        "<td>" + badge(b.state) + pinBadge + "</td>" +
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
         '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB</td>" +

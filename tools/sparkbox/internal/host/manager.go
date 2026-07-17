@@ -67,6 +67,13 @@ type Sandbox struct {
 	GuestV6    string    `json:"guest_v6,omitempty"` // routable IPv6 identity; empty when paused
 	CreatedAt  time.Time `json:"created_at"`
 	LastActive time.Time `json:"last_active"`
+	// Pinned exempts a sandbox from the idle reaper: a pinned sandbox stays
+	// resident so in-guest cron, daemons, and queue workers keep running (the
+	// "always-on" escape hatch for work with no inbound trigger — see the
+	// resource-model design, Part 3). It costs a permanent RAM slot, so it's a
+	// bounded, paid capability. Pinned sandboxes are also resumed on host boot
+	// (ResumePinned) so a restart doesn't silently kill the daemon.
+	Pinned bool `json:"pinned,omitempty"`
 	// KeyFP is the fingerprint of the SSH key whose session last created or
 	// resumed this sandbox. It rides along into the id token's `key_fp` claim
 	// for auditing — which of a user's machines started this thing — and is
@@ -400,6 +407,42 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	return m.save()
 }
 
+// SetPinned marks a sandbox pinned (exempt from the idle reaper) or clears the
+// flag. Pinning does not itself resume the sandbox — callers that want it warm
+// immediately follow with EnsureRunning.
+func (m *Manager) SetPinned(name string, pinned bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.Pinned == pinned {
+		return nil
+	}
+	b.Pinned = pinned
+	m.log.Info("sandbox pin changed", "name", name, "pinned", pinned)
+	return m.save()
+}
+
+// ResumePinned brings every pinned sandbox back to running. Called once at
+// startup (after load), since a process restart marks all sandboxes paused —
+// without this a host reboot would silently freeze a pinned daemon until
+// someone next connected. Best-effort: a pinned sandbox that can't be admitted
+// or resumed is logged and left paused rather than failing boot.
+func (m *Manager) ResumePinned(ctx context.Context) {
+	for _, b := range m.List() {
+		if !b.Pinned || b.State == vmm.StateRunning {
+			continue
+		}
+		if _, err := m.EnsureRunning(ctx, b.Name); err != nil {
+			m.log.Warn("resume pinned sandbox failed", "name", b.Name, "err", err)
+			continue
+		}
+		m.log.Info("resumed pinned sandbox on boot", "name", b.Name)
+	}
+}
+
 func (m *Manager) Destroy(ctx context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -442,14 +485,25 @@ func (m *Manager) RunReaper(ctx context.Context, timeout, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, b := range m.List() {
-				if b.State == vmm.StateRunning && time.Since(b.LastActive) > timeout {
-					if err := m.Pause(ctx, b.Name); err != nil {
-						m.log.Error("reaper pause failed", "name", b.Name, "err", err)
-					} else {
-						m.log.Info("reaper paused idle sandbox", "name", b.Name)
-					}
-				}
+			m.reapOnce(ctx, timeout)
+		}
+	}
+}
+
+// reapOnce pauses every running sandbox idle longer than timeout. Split out
+// from RunReaper's loop so the policy is unit-testable without a ticker.
+func (m *Manager) reapOnce(ctx context.Context, timeout time.Duration) {
+	for _, b := range m.List() {
+		// Pinned sandboxes hold their RAM slot on purpose so in-guest
+		// timers/daemons keep firing; the reaper never touches them.
+		if b.Pinned {
+			continue
+		}
+		if b.State == vmm.StateRunning && time.Since(b.LastActive) > timeout {
+			if err := m.Pause(ctx, b.Name); err != nil {
+				m.log.Error("reaper pause failed", "name", b.Name, "err", err)
+			} else {
+				m.log.Info("reaper paused idle sandbox", "name", b.Name)
 			}
 		}
 	}
