@@ -453,6 +453,34 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	return m.save()
 }
 
+// MemStats reports a running sandbox's real memory use in MiB, read from its
+// balloon statistics — the live-overcommit signal: what the guest actually
+// touches versus its configured ceiling. ok=false when unavailable (the driver
+// has no balloon, the sandbox isn't running, or it predates the balloon device,
+// e.g. an old snapshot). The driver call is made without m.mu held.
+func (m *Manager) MemStats(ctx context.Context, name string) (usedMiB int64, ok bool) {
+	m.mu.Lock()
+	b, exists := m.boxes[name]
+	if !exists || m.balloon == nil || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return 0, false
+	}
+	memMB, bl := b.MemMB, m.balloon
+	m.mu.Unlock()
+
+	st, err := bl.BalloonStats(ctx, name)
+	if err != nil {
+		return 0, false
+	}
+	// The guest sees (ceiling − ballooned) RAM; what it's actually using is that
+	// minus what it reports free. This is roughly the host RAM the VM costs.
+	used := memMB - st.ActualMiB - st.FreeMiB
+	if used < 0 {
+		used = 0
+	}
+	return used, true
+}
+
 // SetPinned marks a sandbox pinned (exempt from the idle reaper) or clears the
 // flag. Pinning does not itself resume the sandbox — callers that want it warm
 // immediately follow with EnsureRunning.

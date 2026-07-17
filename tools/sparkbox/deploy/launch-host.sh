@@ -32,6 +32,14 @@ SUBNET6=${SUBNET6:-}
 SUBNET6_FLAG=""
 [ -n "$SUBNET6" ] && SUBNET6_FLAG="--subnet6 $SUBNET6"
 
+# Optional live-overcommit flags. Empty by default (count the full memory
+# ceiling per VM, the safe baseline). To pack more warm VMs on a box, set the
+# working-set floor measured with hack/measure-density.py, e.g.:
+#   OVERCOMMIT_FLAGS="--mem-reserve-mb 1024"
+# It can also be flipped on a running host by editing /srv/sparkbox/sparkbox.env
+# and `systemctl restart sparkbox` — no relaunch needed.
+OVERCOMMIT_FLAGS=${OVERCOMMIT_FLAGS:-}
+
 # Optional extra proxy flags, appended last. For HTTPS on :443 with on-demand
 # Let's Encrypt (no Cloudflare token):
 #   TLS_FLAGS="--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@example.com"
@@ -106,7 +114,8 @@ SCW_SECRET_KEY="$SECRET_KEY" SCW_PROJECT_ID="$PROJECT_ID" SCW_REGION="$REGION" \
 REFRESH_TOOLS="$HERE/refresh-agent-tools.sh" \
 GUEST_IDENTITY="$HERE/install-guest-identity.sh" \
 NET_SETUP="$HERE/sparkbox-net.sh" \
-SUBNET6_FLAG="$SUBNET6_FLAG" TLS_FLAGS="$TLS_FLAGS" FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
+SUBNET6_FLAG="$SUBNET6_FLAG" TLS_FLAGS="$TLS_FLAGS" OVERCOMMIT_FLAGS="$OVERCOMMIT_FLAGS" \
+FLEXIBLE_ADDRS="$FLEXIBLE_ADDRS" \
 python3 - "$TEMPLATE" > "$RENDERED" <<'PY'
 import base64, os, sys
 t = open(sys.argv[1]).read()
@@ -118,6 +127,7 @@ for k, v in {
     '@@BUCKET_BASE@@': os.environ['BUCKET_BASE'],
     '@@SUBNET6_FLAG@@': os.environ['SUBNET6_FLAG'],
     '@@TLS_FLAGS@@': os.environ['TLS_FLAGS'],
+    '@@OVERCOMMIT_FLAGS@@': os.environ['OVERCOMMIT_FLAGS'],
     '@@FLEXIBLE_ADDRS@@': os.environ['FLEXIBLE_ADDRS'],
     '@@SCW_SECRET_KEY@@': os.environ['SCW_SECRET_KEY'],
     '@@SCW_PROJECT_ID@@': os.environ['SCW_PROJECT_ID'],

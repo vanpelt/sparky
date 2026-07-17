@@ -11,6 +11,7 @@
 package console
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -161,9 +162,12 @@ type sandboxView struct {
 	Routes    []routeStatus `json:"routes"`
 	NextWake  *time.Time    `json:"next_wake,omitempty"`
 	Schedules int           `json:"schedules,omitempty"`
+	// MemUsedMB is the guest's real memory use in MiB (from balloon stats), the
+	// live-overcommit signal against MemMB's ceiling. nil when unavailable.
+	MemUsedMB *int64 `json:"mem_used_mb,omitempty"`
 }
 
-func (h *Handler) list(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	boxes := h.mgr.List()
 	views := make([]sandboxView, len(boxes))
 	now := time.Now()
@@ -171,6 +175,19 @@ func (h *Handler) list(w http.ResponseWriter, _ *http.Request) {
 	for i, b := range boxes {
 		views[i] = sandboxView{Sandbox: b, Routes: []routeStatus{}}
 		views[i].NextWake, views[i].Schedules = h.nextWake(b.Name, now)
+		// Read the guest's real memory use concurrently (balloon stats); bounded
+		// by probeTimeout so one slow VM can't stall the dashboard.
+		if b.State == vmm.StateRunning {
+			wg.Add(1)
+			go func(name string, dst **int64) {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+				defer cancel()
+				if used, ok := h.mgr.MemStats(ctx, name); ok {
+					*dst = &used
+				}
+			}(b.Name, &views[i].MemUsedMB)
+		}
 		if h.store == nil {
 			continue
 		}

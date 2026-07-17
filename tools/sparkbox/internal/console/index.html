@@ -141,6 +141,8 @@
   .badge.pinned { color: hsl(var(--amber, 38 92% 50%)); border-color: hsl(var(--amber, 38 92% 50%) / .35); margin-left: 6px; }
   .badge.pinned .dot { background: hsl(var(--amber, 38 92% 50%)); }
   .badge.wake { color: hsl(var(--muted-foreground)); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .badge.ballooned { color: hsl(var(--blue, 217 91% 60%)); border-color: hsl(var(--blue, 217 91% 60%) / .35); margin-left: 6px; }
+  .badge.ballooned .dot { background: hsl(var(--blue, 217 91% 60%)); }
 
   /* route chips */
   .route {
@@ -229,6 +231,7 @@
         <div class="label">Memory</div>
         <div class="value" id="c-mem">–</div>
         <div class="sub" id="c-mem-sub">–</div>
+        <div class="sub" id="c-mem-live" style="color:hsl(var(--blue, 217 91% 60%))"></div>
         <div class="meter" id="c-mem-meter"><div></div></div>
       </div>
       <div class="card stat">
@@ -391,6 +394,18 @@
     $("s-total").textContent = list.length;
     $("s-states").textContent = running + " running · " + (list.length - running) + " paused";
 
+    // Live overcommit read-out: real RAM in use across running guests vs the
+    // ceiling they're allocated. When actual << allocated, the overcommit bet
+    // is paying off — this is the number the whole redesign is about.
+    let live = 0, liveKnown = false, allocRunning = 0;
+    for (const b of list) {
+      if (b.state === "running") allocRunning += b.mem_mb || 0;
+      if (typeof b.mem_used_mb === "number") { live += b.mem_used_mb; liveKnown = true; }
+    }
+    $("c-mem-live").textContent = liveKnown
+      ? "live: " + gb(live) + " GB used of " + gb(allocRunning) + " GB allocated"
+      : "";
+
     const rows = $("rows");
     rows.innerHTML = "";
     for (const b of list) {
@@ -408,12 +423,22 @@
       const pinBadge = b.pinned
         ? '<span class="badge pinned"><span class="dot"></span>pinned</span>'
         : "";
+      // The balloon badge marks the live-overcommit "Warm" tier: idle, RAM
+      // handed back to the host, but still running (cron/daemons keep firing).
+      const balloonBadge = b.ballooned
+        ? '<span class="badge ballooned"><span class="dot"></span>ballooned</span>'
+        : "";
+      // Show real RAM use against the ceiling when the guest reports it — the
+      // overcommit story in one number (e.g. "0.3 / 8 GB").
+      const mem = typeof b.mem_used_mb === "number"
+        ? gb(b.mem_used_mb) + " / " + gb(b.mem_mb)
+        : gb(b.mem_mb);
       tr.innerHTML =
         '<td class="name">' + esc(b.name) + "</td>" +
-        "<td>" + badge(b.state) + pinBadge + wakeChip(b) + "</td>" +
+        "<td>" + badge(b.state) + pinBadge + balloonBadge + wakeChip(b) + "</td>" +
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
-        '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB</td>" +
+        '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + mem + " GB</td>" +
         "<td>" + routeChips(b) + "</td>" +
         '<td class="age">' + rel(b.last_active) + "</td>" +
         '<td class="actions">' + action + "</td>";

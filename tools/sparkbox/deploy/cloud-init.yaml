@@ -35,6 +35,7 @@ write_files:
     content: |
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
+      OVERCOMMIT_FLAGS=@@OVERCOMMIT_FLAGS@@
       TLS_FLAGS=@@TLS_FLAGS@@
 
   # The one secret still in user-data: this host's Secret Manager API key, used
@@ -181,7 +182,7 @@ write_files:
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
         --ssh-addr :22 --api-addr 127.0.0.1:8080 \
-        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $SUBNET6_FLAG $TLS_FLAGS
+        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
       Restart=always
       RestartSec=2
       LimitNOFILE=1048576
