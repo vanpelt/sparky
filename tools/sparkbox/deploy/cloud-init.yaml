@@ -301,8 +301,20 @@ write_files:
       # socket and run ssh.service with an explicit Port instead. Must happen
       # before sparkbox.service starts, or the gateway can't bind :22. (Admin in:
       # `ssh -p 2222 ubuntu@<native-ip>`.)
+      # Order matters and a stale listener is fatal: if any sshd is still bound to
+      # :22 when sparkbox starts, the gateway crash-loops on "address already in
+      # use" forever. `disable --now ssh.socket` alone proved insufficient — the
+      # socket can re-activate and `restart ssh.service` doesn't guarantee the old
+      # :22 listener exits — so mask the socket and explicitly evict anything still
+      # holding :22 before the (later) sparkbox.service start. Safe here because
+      # sparkbox isn't up yet, so the only thing on :22 can be sshd.
       printf 'Port 2222\n' > /etc/ssh/sshd_config.d/sparkbox-admin-port.conf
       systemctl disable --now ssh.socket 2>/dev/null || true
+      systemctl mask ssh.socket 2>/dev/null || true
+      systemctl stop ssh.service 2>/dev/null || systemctl stop ssh 2>/dev/null || true
+      for p in $(ss -H -tlnp 'sport = :22' 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+        [ "$(cat /proc/$p/comm 2>/dev/null)" = sshd ] && kill "$p" 2>/dev/null || true
+      done
       systemctl enable ssh.service 2>/dev/null || true
       systemctl restart ssh.service 2>/dev/null || systemctl restart ssh || true
 
