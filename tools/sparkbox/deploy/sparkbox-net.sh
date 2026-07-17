@@ -29,6 +29,24 @@ fi
 iptables -C INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP 2>/dev/null || \
   iptables -I INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP
 
+# Sandbox forwarding. On a host that ALSO runs docker, dockerd sets the FORWARD
+# policy to DROP and only whitelists its own bridges — so sandbox tap traffic is
+# dropped and egress silently breaks. Explicitly accept sbtap+ in both
+# directions, inserted at the top so it wins over docker's chain. Harmless on a
+# non-docker host, where the default FORWARD policy is already ACCEPT.
+iptables -C FORWARD -i sbtap+ -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i sbtap+ -j ACCEPT
+iptables -C FORWARD -o sbtap+ -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -o sbtap+ -j ACCEPT
+
+# Any-port authenticated forwarding via an uplink REDIRECT is only for the
+# direct-public-IP edge, where web traffic arrives ON the uplink. Behind a
+# reverse tunnel (e.g. Cloudflare Tunnel) it arrives from localhost instead, so
+# the REDIRECT is unnecessary — and on a shared/home box it would hijack ALL
+# inbound uplink TCP in the range, clobbering unrelated LAN services. Set
+# SPARKBOX_EDGE_REDIRECT=0 to skip it (tunnel mode).
+if [ "${SPARKBOX_EDGE_REDIRECT:-1}" != 1 ]; then
+  echo "SPARKBOX_EDGE_REDIRECT=0 — skipping uplink any-port REDIRECT (tunnel mode)" >&2
+else
+
 # Any-port authenticated forwarding: the edge listens on ONE port but a user can
 # reach any guest port at https://<name>.<domain>:<PORT>. REDIRECT the whole
 # private-port range on the public uplink to the edge listener; the edge recovers
@@ -67,3 +85,5 @@ if [ -n "$UPLINK" ]; then
 else
   echo "WARN: no default route — skipping any-port REDIRECT" >&2
 fi
+
+fi  # SPARKBOX_EDGE_REDIRECT
