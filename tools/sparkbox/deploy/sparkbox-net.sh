@@ -87,3 +87,31 @@ else
 fi
 
 fi  # SPARKBOX_EDGE_REDIRECT
+
+# Any-port forwarding over the TAILNET. The uplink REDIRECT above is off in
+# tunnel mode, but tailnet members dial the edge IP directly over WireGuard, so
+# https://<name>.<domain>:<PORT> works once the edge IP's <PORT> is REDIRECTed to
+# the edge listener (the edge recovers the original port via SO_ORIGINAL_DST).
+# Scoped to the tailscale interface. Caveat: the edge IP is the HOST's OWN tailnet
+# IP, so host-stack services reachable over the tailnet — sshd :22, the gateway
+# :2222, the DNS responder :53, the edge :443 itself, and any co-tenant such as an
+# openclaw `tailscale serve` — MUST be excluded or a dial to them is hijacked into
+# the web edge. Getting :22/:2222 wrong locks the operator out, so the defaults
+# below are deliberately protective; extend via SPARKBOX_TAILNET_EXCLUDE. Enable
+# by setting SPARKBOX_TAILNET_IF (e.g. tailscale0); empty disables it.
+TNET_IF="${SPARKBOX_TAILNET_IF:-}"
+if [ -n "$TNET_IF" ]; then
+  TNET_PORT="${PROXY_PORT:-443}"
+  TNET_LO="${PROXY_REDIRECT_LO:-1024}"
+  TNET_HI="${PROXY_REDIRECT_HI:-65535}"
+  TNET_EXCLUDE="${SPARKBOX_TAILNET_EXCLUDE:-22 2222 53 8443} $TNET_PORT"
+  # Rebuild from scratch each run so excludes/range/edge-port stay in sync.
+  iptables -t nat -N SPARKBOX_TNET 2>/dev/null || iptables -t nat -F SPARKBOX_TNET
+  for p in $TNET_EXCLUDE; do
+    iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$p" -j RETURN
+  done
+  iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$TNET_LO:$TNET_HI" -j REDIRECT --to-ports "$TNET_PORT"
+  iptables -t nat -C PREROUTING -i "$TNET_IF" -p tcp -j SPARKBOX_TNET 2>/dev/null || \
+    iptables -t nat -I PREROUTING -i "$TNET_IF" -p tcp -j SPARKBOX_TNET
+  echo "tailnet any-port REDIRECT on $TNET_IF -> :$TNET_PORT (excludes: $TNET_EXCLUDE)" >&2
+fi
