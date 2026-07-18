@@ -131,6 +131,13 @@ if [ -n "$EDGE_IP" ] || [ -n "$TNET_IF" ]; then
     # the destination to the INCOMING interface's primary IP (the host's tailnet IP),
     # not the edge /32, so redirected traffic would miss the edge entirely.
     iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$TNET_LO:$TNET_HI" -j DNAT --to-destination "$EDGE_IP:$TNET_PORT"
+    # Bare ssh on the edge IP: the edge owns this /32, so :22 can be the SSH
+    # gateway without touching host sshd (which answers on the host's IPs, not
+    # here). DNAT rather than a gateway bind: sshd's 0.0.0.0:22 wildcard makes a
+    # specific-IP :22 bind EADDRINUSE. :22 is below TNET_LO, so without this rule
+    # it would fall through to the host stack.
+    GW_PORT="${SPARKBOX_GATEWAY_PORT:-2222}"
+    iptables -t nat -A SPARKBOX_TNET -p tcp --dport 22 -j DNAT --to-destination "$EDGE_IP:$GW_PORT"
   else
     iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$TNET_LO:$TNET_HI" -j REDIRECT --to-ports "$TNET_PORT"
   fi

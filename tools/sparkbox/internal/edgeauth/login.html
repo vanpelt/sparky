@@ -87,7 +87,7 @@
     <h1>Sign in</h1>
     <p>This is a private URL. Mint a session token from a machine with your SSH key:</p>
     <ol>
-      <li>Run <code>ssh ctl@{{.Gateway}} session-token</code></li>
+      <li>Run <code>ssh {{.PortFlag}}ctl@{{.Gateway}} session-token</code></li>
       <li>Paste the <code>spk_v1…</code> value below.</li>
     </ol>
     <form method="POST" action="/session">

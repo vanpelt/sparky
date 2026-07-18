@@ -2,6 +2,7 @@ package edgeauth
 
 import (
 	_ "embed"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,10 @@ type LoginConfig struct {
 	TTL     time.Duration
 	Logger  *slog.Logger
 	Gateway string // SSH host shown in the mint instructions, e.g. "hivemind.tools"
+	// GatewayPort is the gateway's SSH listen port. When it isn't 22 the mint
+	// instructions include -p<port>, so the shown command is copy-pasteable
+	// (port 22 on the edge address is typically the host's own sshd, not us).
+	GatewayPort int
 }
 
 // LoginHandler serves the browser login: a page that takes a token minted via
@@ -64,10 +69,15 @@ func (h *LoginHandler) page(w http.ResponseWriter, r *http.Request) {
 	ret := h.safeReturn(r.URL.Query().Get("return"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	portFlag := ""
+	if h.cfg.GatewayPort != 0 && h.cfg.GatewayPort != 22 {
+		portFlag = fmt.Sprintf("-p%d ", h.cfg.GatewayPort)
+	}
 	err := loginTpl.Execute(w, struct {
-		Return  string
-		Gateway string
-	}{ret, h.cfg.Gateway})
+		Return   string
+		Gateway  string
+		PortFlag string
+	}{ret, h.cfg.Gateway, portFlag})
 	if err != nil && h.cfg.Logger != nil {
 		h.cfg.Logger.Error("login page render failed", "err", err)
 	}

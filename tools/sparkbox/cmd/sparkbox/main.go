@@ -77,6 +77,7 @@ func serve(args []string) error {
 		requireKeys    = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
 		usersPath      = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
 		sshAddr        = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
+		sshAdvertise   = fs.Int("ssh-advertise-port", 0, "gateway port shown in user-facing instructions when it differs from the listen port (e.g. 22 when an edge DNAT forwards :22 to the gateway); 0 uses the listen port")
 		apiAddr        = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
 		defaultImage   = fs.String("default-image", "universal", "rootfs template for new sandboxes")
 		defaultLogin   = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
@@ -411,7 +412,7 @@ func serve(args []string) error {
 		// at login.<domain> like the console and issuer do.
 		loginH := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
 			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
-			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain,
+			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain, GatewayPort: gatewayPort(*sshAdvertise, *sshAddr),
 		})
 		px.SetAuth(*loginSub, loginH.Handler(), sessionSigner, userStore)
 		px.SetListenPort(portOf(*proxyAddr))
@@ -536,6 +537,16 @@ func firstOr(list []string, def string) string {
 // portOf extracts the numeric port from a listen address like ":443" or
 // "0.0.0.0:8081". Returns 0 when there is no parseable port, which just
 // disables the edge's "dialed me directly" check in the proxy.
+// gatewayPort picks the port user-facing instructions should show for the SSH
+// gateway: the advertised override when set (an edge DNAT can expose the
+// gateway on a different port than it binds), else the listen port.
+func gatewayPort(advertised int, listenAddr string) int {
+	if advertised != 0 {
+		return advertised
+	}
+	return portOf(listenAddr)
+}
+
 func portOf(addr string) int {
 	_, p, err := net.SplitHostPort(addr)
 	if err != nil {
