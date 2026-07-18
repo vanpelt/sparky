@@ -99,19 +99,50 @@ fi  # SPARKBOX_EDGE_REDIRECT
 # the web edge. Getting :22/:2222 wrong locks the operator out, so the defaults
 # below are deliberately protective; extend via SPARKBOX_TAILNET_EXCLUDE. Enable
 # by setting SPARKBOX_TAILNET_IF (e.g. tailscale0); empty disables it.
-TNET_IF="${SPARKBOX_TAILNET_IF:-}"
-if [ -n "$TNET_IF" ]; then
-  TNET_PORT="${PROXY_PORT:-443}"
-  TNET_LO="${PROXY_REDIRECT_LO:-1024}"
-  TNET_HI="${PROXY_REDIRECT_HI:-65535}"
-  TNET_EXCLUDE="${SPARKBOX_TAILNET_EXCLUDE:-22 2222 53 8443} $TNET_PORT"
-  # Rebuild from scratch each run so excludes/range/edge-port stay in sync.
+TNET_PORT="${PROXY_PORT:-443}"
+TNET_LO="${PROXY_REDIRECT_LO:-1024}"
+TNET_HI="${PROXY_REDIRECT_HI:-65535}"
+EDGE_IP="${SPARKBOX_EDGE_IP:-}"       # edge has its OWN /32 -> match by dest, no excludes (preferred)
+TNET_IF="${SPARKBOX_TAILNET_IF:-}"    # edge shares the host tailnet IP -> match by iface, exclude host ports
+if [ -n "$EDGE_IP" ]; then
+  # Give the edge its own address on a dummy iface (a subnet-routed /32 advertised
+  # to the tailnet). Boot-persistent: recreated here every boot.
+  ip link show sparkedge >/dev/null 2>&1 || ip link add sparkedge type dummy
+  ip addr show dev sparkedge 2>/dev/null | grep -q "$EDGE_IP/32" || ip addr add "$EDGE_IP/32" dev sparkedge
+  ip link set sparkedge up
+fi
+if [ -n "$EDGE_IP" ] || [ -n "$TNET_IF" ]; then
+  # Rebuild from scratch each run so range/excludes/edge-port stay in sync.
   iptables -t nat -N SPARKBOX_TNET 2>/dev/null || iptables -t nat -F SPARKBOX_TNET
-  for p in $TNET_EXCLUDE; do
+  if [ -n "$EDGE_IP" ]; then
+    # Dest-scoped: host services live on other IPs and never match -d EDGE_IP, so the
+    # only ports to spare are the edge IP's OWN in-range services (the SSH gateway).
+    # :443 and :53 are below the range and pass through untouched.
+    EXC="${SPARKBOX_TAILNET_EXCLUDE:-2222}"
+  else
+    # Interface-scoped (shared host IP): protect every host-stack port on the tailnet IP.
+    EXC="${SPARKBOX_TAILNET_EXCLUDE:-22 2222 53 8443} $TNET_PORT"
+  fi
+  for p in $EXC; do
     iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$p" -j RETURN
   done
-  iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$TNET_LO:$TNET_HI" -j REDIRECT --to-ports "$TNET_PORT"
-  iptables -t nat -C PREROUTING -i "$TNET_IF" -p tcp -j SPARKBOX_TNET 2>/dev/null || \
+  if [ -n "$EDGE_IP" ]; then
+    # DNAT to the edge's own IP explicitly. REDIRECT can't be used here: it rewrites
+    # the destination to the INCOMING interface's primary IP (the host's tailnet IP),
+    # not the edge /32, so redirected traffic would miss the edge entirely.
+    iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$TNET_LO:$TNET_HI" -j DNAT --to-destination "$EDGE_IP:$TNET_PORT"
+  else
+    iptables -t nat -A SPARKBOX_TNET -p tcp --dport "$TNET_LO:$TNET_HI" -j REDIRECT --to-ports "$TNET_PORT"
+  fi
+  # Re-hook cleanly: drop ANY prior hook of either mode (loop — a live mode-switch can
+  # leave a stale one), then install the current one at the top of PREROUTING.
+  while iptables -t nat -D PREROUTING -i tailscale0 -p tcp -j SPARKBOX_TNET 2>/dev/null; do :; done
+  if [ -n "$EDGE_IP" ]; then
+    while iptables -t nat -D PREROUTING -d "$EDGE_IP" -p tcp -j SPARKBOX_TNET 2>/dev/null; do :; done
+    iptables -t nat -I PREROUTING -d "$EDGE_IP" -p tcp -j SPARKBOX_TNET
+    echo "tailnet any-port DNAT: dest $EDGE_IP -> :$TNET_PORT (spare: $EXC)" >&2
+  else
     iptables -t nat -I PREROUTING -i "$TNET_IF" -p tcp -j SPARKBOX_TNET
-  echo "tailnet any-port REDIRECT on $TNET_IF -> :$TNET_PORT (excludes: $TNET_EXCLUDE)" >&2
+    echo "tailnet any-port REDIRECT: iface $TNET_IF -> :$TNET_PORT (excludes: $EXC)" >&2
+  fi
 fi
