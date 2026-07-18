@@ -111,6 +111,33 @@ type DiskReporter interface {
 	DiskUsageMB(ctx context.Context, name string) (int64, error)
 }
 
+// Renamer is an optional Driver capability: moving a stopped VM's on-host
+// state to a new name, so the manager can rename a sandbox without a
+// pack/unpack round trip. The caller (host.Manager) pauses first and — for
+// drivers whose memory snapshots embed paths (firecracker's state.snap
+// records absolute paths into the old VM dir) — drops snapshots first, so the
+// next start cold-boots the moved rootfs.
+type Renamer interface {
+	RenameVM(oldName, newName string) error
+}
+
+// Rebooter is an optional Driver capability: discarding a stopped VM's memory
+// snapshot so the next start is a cold boot of the preserved rootfs instead
+// of a resume. This is how Manager.Reboot restarts a guest (pause → drop →
+// EnsureRunning) and how Rename avoids resuming a snapshot that points at the
+// old VM dir.
+type Rebooter interface {
+	DropSnapshots(name string) error
+}
+
+// CPUStatser is an optional Driver capability: the cumulative CPU time a
+// sandbox has consumed on the host, in nanoseconds. Callers derive a
+// utilization percentage from deltas between polls; the counter resets to
+// zero on a cold boot (it follows the VMM process, not the guest).
+type CPUStatser interface {
+	CPUTimeNanos(ctx context.Context, name string) (uint64, error)
+}
+
 // Ballooner is an optional Driver capability: reclaiming a *running* guest's
 // unused RAM to the host through a virtio-balloon, without pausing it. This is
 // the live-overcommit lever — an idle-but-warm sandbox hands most of its RAM

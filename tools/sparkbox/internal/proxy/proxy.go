@@ -79,15 +79,10 @@ type Server struct {
 	log    *slog.Logger
 	rp     *httputil.ReverseProxy
 
-	// console, if set, is served at <consoleSub>.<domain> instead of being
-	// treated as a sandbox web route (see SetConsole).
-	console    http.Handler
-	consoleSub string
-
-	// issuer, if set, serves the OIDC discovery document and JWKS at
-	// <issuerSub>.<domain> (see SetIssuer).
-	issuer    http.Handler
-	issuerSub string
+	// reserved maps subdomains owned by built-in handlers (operator console,
+	// OIDC issuer, login, user console) — checked before route lookup, so a
+	// sandbox route can never shadow them (see SetReserved).
+	reserved map[string]http.Handler
 
 	// login/session/accounts, if set (via SetAuth), turn on the private-route
 	// gate: login serves the browser sign-in at <loginSub>.<domain>, session
@@ -117,14 +112,24 @@ func (s *Server) SetAuth(loginSub string, login http.Handler, session *edgeauth.
 	s.login = login
 	s.session = session
 	s.accounts = accounts
+	if login != nil {
+		s.SetReserved(loginSub, login)
+	}
+}
+
+// SetReserved dedicates a subdomain to a built-in handler: requests for
+// <sub>.<domain> are served by h instead of being looked up as a sandbox
+// route, so a sandbox can never shadow it. Call before serving.
+func (s *Server) SetReserved(sub string, h http.Handler) {
+	if s.reserved == nil {
+		s.reserved = make(map[string]http.Handler)
+	}
+	s.reserved[strings.ToLower(sub)] = h
 }
 
 // SetConsole reserves a subdomain (e.g. "console") for the operator console,
 // served by h rather than proxied to a sandbox. Call once before serving.
-func (s *Server) SetConsole(sub string, h http.Handler) {
-	s.consoleSub = strings.ToLower(sub)
-	s.console = h
-}
+func (s *Server) SetConsole(sub string, h http.Handler) { s.SetReserved(sub, h) }
 
 // SetIssuer reserves a subdomain (e.g. "oidc") for the OIDC issuer's discovery
 // document and JWKS, served by h rather than proxied to a sandbox. Call once
@@ -135,10 +140,7 @@ func (s *Server) SetConsole(sub string, h http.Handler) {
 // jwks_uri, and refuses anything that isn't a public address. The edge already
 // terminates TLS for the wildcard, so this is two GET handlers, not a new
 // listener.
-func (s *Server) SetIssuer(sub string, h http.Handler) {
-	s.issuerSub = strings.ToLower(sub)
-	s.issuer = h
-}
+func (s *Server) SetIssuer(sub string, h http.Handler) { s.SetReserved(sub, h) }
 
 func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger) *Server {
 	s := &Server{
@@ -170,6 +172,31 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 					pr.Out.Header.Set("X-Forwarded-Email", id.Email)
 				}
 			}
+			// The zone-wide session cookie must never reach a guest: it is valid
+			// on every subdomain, so forwarding it would hand each sandbox app its
+			// visitors' session tokens. Only that pair is removed, by textual
+			// surgery rather than a parse/re-serialize round-trip — Go's cookie
+			// parser silently drops or re-quotes pairs it can't round-trip (raw
+			// UTF-8 values, non-token names), and a guest app's cookies must
+			// survive byte-for-byte. A header without the pair stays untouched.
+			if lines := pr.Out.Header.Values("Cookie"); len(lines) > 0 {
+				if kept, changed := stripSessionCookie(lines); changed {
+					pr.Out.Header.Del("Cookie")
+					for _, l := range kept {
+						pr.Out.Header.Add("Cookie", l)
+					}
+				}
+			}
+			// The same session token is also accepted as an Authorization: Bearer
+			// credential (edgeauth.IdentityFrom), so that channel is closed too:
+			// a bearer value carrying the session-token prefix is stripped —
+			// valid, stale, or forged alike — while a guest app's own bearer
+			// tokens, which never carry it, pass through untouched.
+			if tok, ok := strings.CutPrefix(pr.Out.Header.Get("Authorization"), "Bearer "); ok {
+				if strings.HasPrefix(strings.TrimSpace(tok), edgeauth.TokenPrefix) {
+					pr.Out.Header.Del("Authorization")
+				}
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Warn("proxy upstream error", "host", r.Host, "err", err)
@@ -191,18 +218,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: request host is not under "+s.domain, http.StatusNotFound)
 		return
 	}
-	// The operator console and the OIDC issuer own their subdomains and are not
-	// sandbox routes.
-	if s.console != nil && sub == s.consoleSub {
-		s.console.ServeHTTP(w, r)
-		return
-	}
-	if s.issuer != nil && sub == s.issuerSub {
-		s.issuer.ServeHTTP(w, r)
-		return
-	}
-	if s.login != nil && sub == s.loginSub {
-		s.login.ServeHTTP(w, r)
+	// Reserved subdomains (operator console, OIDC issuer, login, user console)
+	// belong to built-in handlers and are not sandbox routes.
+	if h, ok := s.reserved[sub]; ok {
+		h.ServeHTTP(w, r)
 		return
 	}
 	route, ok, err := s.store.GetBySubdomain(sub)
@@ -261,6 +280,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx2 := context.WithValue(ctxr, targetKey, target)
 	r = r.WithContext(context.WithValue(ctx2, routeKey, route))
 	s.rp.ServeHTTP(w, r)
+}
+
+// stripSessionCookie removes the edge session cookie pair from Cookie header
+// lines, leaving every other pair byte-for-byte intact — the stdlib parser
+// (Cookies/AddCookie) would drop pairs with non-token names or non-ASCII
+// values and re-quote ones with spaces. It returns the surviving lines (a line
+// whose only pair was the session cookie disappears entirely) and whether
+// anything was removed; when nothing was, the input lines come back unchanged.
+func stripSessionCookie(lines []string) (kept []string, changed bool) {
+	for _, line := range lines {
+		parts := strings.Split(line, ";")
+		surviving := parts[:0]
+		hit := false
+		for _, part := range parts {
+			name, _, _ := strings.Cut(part, "=")
+			if strings.TrimSpace(name) == edgeauth.CookieName {
+				hit = true
+				continue
+			}
+			surviving = append(surviving, part)
+		}
+		switch {
+		case !hit:
+			kept = append(kept, line)
+		case len(surviving) > 0:
+			changed = true
+			kept = append(kept, strings.TrimSpace(strings.Join(surviving, ";")))
+		default:
+			changed = true
+		}
+	}
+	return kept, changed
 }
 
 // targetPort resolves which guest port to forward to. Preference order:

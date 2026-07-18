@@ -63,7 +63,6 @@ type Driver struct {
 	mu      sync.Mutex
 	opts    Options
 	vms     map[string]*vmState
-	next    int
 	prefix6 net.IP // parsed /64 network address; nil disables IPv6
 	uplink6 string // iface backing the v6 default route, for per-guest proxy NDP
 }
@@ -75,7 +74,7 @@ func New(opts Options) (*Driver, error) {
 	if opts.Subnet == "" {
 		opts.Subnet = "172.30.0.0"
 	}
-	d := &Driver{opts: opts, vms: map[string]*vmState{}, next: 1}
+	d := &Driver{opts: opts, vms: map[string]*vmState{}}
 	if opts.Subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
 		if err != nil {
@@ -175,10 +174,15 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		}
 	}
 
-	st := &vmState{idx: d.next}
+	idx, err := d.freeSlot()
+	if err != nil {
+		return nil, err
+	}
+	st := &vmState{idx: idx}
 	if err := d.createTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
-		// this slot, and don't advance d.next — a failed create leaks no idx.
+		// this slot; only recording it in d.vms reserves it, so a failed create
+		// leaks no idx.
 		d.deleteTap(st.idx)
 		return nil, err
 	}
@@ -186,9 +190,28 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		d.deleteTap(st.idx)
 		return nil, err
 	}
-	d.next++
 	d.vms[cfg.Name] = st
 	return d.instance(cfg.Name, st), nil
+}
+
+// freeSlot returns the lowest network slot no vmState holds. Caller must hold
+// d.mu. Every path that drops a record (Destroy, DropSnapshots, RenameVM)
+// thereby releases its slot for reuse — a reused slot can't collide with a
+// live tap because paused VMs keep their record (idx stays reserved) and the
+// record only goes away after the tap does. The bound comes from hostIP's
+// "172.30.<idx>.1" third octet; past it a Create would mint an unroutable
+// address, so error instead.
+func (d *Driver) freeSlot() (int, error) {
+	used := make(map[int]bool, len(d.vms))
+	for _, s := range d.vms {
+		used[s.idx] = true
+	}
+	for idx := 1; idx <= 255; idx++ {
+		if !used[idx] {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("no free network slots (max 255 concurrent VMs)")
 }
 
 // boot starts a Firecracker process for the VM; snapshot, when non-nil, is
@@ -559,6 +582,115 @@ func (d *Driver) DiskUsageMB(ctx context.Context, name string) (int64, error) {
 		return 0, err
 	}
 	return kb / 1024, nil
+}
+
+// --- Renamer + Rebooter + CPUStatser: the user-console capabilities --------
+
+// DropSnapshots implements vmm.Rebooter: delete the stopped VM's memory
+// snapshot pair (the same files PackRootfs drops) and forget the driver's
+// record of it. Without a snapshot the paused record is a trap — Resume would
+// fail and the manager's recreate path would then hit Create's already-exists
+// check — so forgetting it leaves the VM in the post-restart shape that
+// resumeOrRecreate cold-boots from the preserved rootfs.ext4.
+func (d *Driver) DropSnapshots(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if st, ok := d.vms[name]; ok && st.machine != nil {
+		return fmt.Errorf("vm %q is running; pause it first", name)
+	}
+	dir := d.vmDir(name)
+	for _, f := range []string{"mem.snap", "state.snap"} {
+		if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	delete(d.vms, name)
+	return nil
+}
+
+// RenameVM implements vmm.Renamer: move the stopped VM's state dir to the new
+// name. Refuses while a memory snapshot exists — state.snap embeds absolute
+// paths into the old dir, so resuming after the move would break; the manager
+// calls DropSnapshots first, which also drops the driver record, so the next
+// start cold-boots the moved rootfs.ext4 under the new name.
+func (d *Driver) RenameVM(oldName, newName string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if st, ok := d.vms[oldName]; ok && st.machine != nil {
+		return fmt.Errorf("vm %q is running; pause it first", oldName)
+	}
+	if _, ok := d.vms[newName]; ok {
+		return fmt.Errorf("vm %q already exists", newName)
+	}
+	oldDir, newDir := d.vmDir(oldName), d.vmDir(newName)
+	for _, f := range []string{"mem.snap", "state.snap"} {
+		if _, err := os.Stat(filepath.Join(oldDir, f)); err == nil {
+			return fmt.Errorf("vm %q has a memory snapshot; drop snapshots before renaming", oldName)
+		}
+	}
+	if _, err := os.Stat(newDir); err == nil {
+		return fmt.Errorf("vm dir for %q already exists", newName)
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return err
+	}
+	delete(d.vms, oldName)
+	return nil
+}
+
+// userHZ is the fixed unit /proc/<pid>/stat reports utime/stime in (10ms
+// ticks). It is part of the kernel's userspace ABI, constant regardless of
+// the kernel's CONFIG_HZ.
+const userHZ = 100
+
+// CPUTimeNanos implements vmm.CPUStatser: cumulative utime+stime of the
+// firecracker process from /proc/<pid>/stat. This measures the whole FC
+// process (vCPU threads + VMM overhead), so surface it to users as "host
+// CPU", not guest CPU.
+func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, ok := d.vms[name]
+	if !ok || st.machine == nil {
+		return 0, fmt.Errorf("vm %q not running", name)
+	}
+	pid, err := st.machine.PID()
+	if err != nil {
+		return 0, err
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	ticks, err := procStatCPUTicks(string(data))
+	if err != nil {
+		return 0, err
+	}
+	return ticks * (1_000_000_000 / userHZ), nil
+}
+
+// procStatCPUTicks sums the utime and stime fields (14 and 15) of a
+// /proc/<pid>/stat line. The comm field may itself contain spaces and ')',
+// so fields are counted from the last ')' rather than split naively.
+func procStatCPUTicks(stat string) (uint64, error) {
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 {
+		return 0, fmt.Errorf("malformed stat line %q", stat)
+	}
+	fields := strings.Fields(stat[i+1:])
+	// fields[0] is field 3 (state), so utime/stime land at indices 11/12.
+	if len(fields) < 13 {
+		return 0, fmt.Errorf("stat line has %d fields after comm, want >= 13", len(fields))
+	}
+	utime, err := strconv.ParseUint(fields[11], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("utime: %w", err)
+	}
+	stime, err := strconv.ParseUint(fields[12], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("stime: %w", err)
+	}
+	return utime + stime, nil
 }
 
 // compact fscks then zeroes the free space of an unmounted ext4 image so a

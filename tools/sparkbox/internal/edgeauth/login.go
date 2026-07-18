@@ -110,16 +110,23 @@ func (h *LoginHandler) logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, h.safeReturn(r.PostForm.Get("return")), http.StatusSeeOther)
 }
 
-// safeReturn constrains a return URL to https on this zone, defeating an
-// open-redirect (`?return=https://evil.com`). Anything off-zone or unparseable
-// collapses to the zone root.
+// safeReturn constrains a return URL to this zone, defeating an open-redirect
+// (`?return=https://evil.com`). Anything off-zone or unparseable collapses to
+// the zone root. The scheme rule follows the edge: https-only when the edge
+// terminates TLS, with http also allowed on a non-TLS edge (the mock-driver
+// dev loop serves the whole zone over http, and its consoles hand out http
+// return URLs).
 func (h *LoginHandler) safeReturn(raw string) string {
-	fallback := "https://" + strings.TrimPrefix(h.cfg.Domain, ".") + "/"
+	scheme := "https"
+	if !h.cfg.Secure {
+		scheme = "http"
+	}
+	fallback := scheme + "://" + strings.TrimPrefix(h.cfg.Domain, ".") + "/"
 	if raw == "" {
 		return fallback
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" {
+	if err != nil || (u.Scheme != "https" && !(u.Scheme == "http" && !h.cfg.Secure)) {
 		return fallback
 	}
 	host := u.Hostname()

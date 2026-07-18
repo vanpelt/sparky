@@ -52,6 +52,7 @@ var handleRe = regexp.MustCompile(`^[a-z0-9-]{2,32}$`)
 var reserved = map[string]bool{
 	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
 	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
+	"my": true, // user console subdomain
 }
 
 // ValidHandle reports whether h is a claimable handle.
@@ -95,10 +96,15 @@ type Store struct {
 // Open opens (creating if needed) the sqlite database at path and applies the
 // schema.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// DSN pragmas run on every pooled connection (a db.Exec pragma binds to
+	// just one), and _txlock=immediate takes the write lock at Begin, where
+	// busy_timeout applies — every transaction in this store writes. See the
+	// fuller rationale in secrets.Open; the stores share sparkbox.db.
+	db, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
+	// Redundant with the DSN, but an unsupported pragma fails Open loudly.
 	for _, pragma := range []string{
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA journal_mode=WAL",

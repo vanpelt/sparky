@@ -199,3 +199,41 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met within 2s")
 }
+
+func TestRenameSandbox(t *testing.T) {
+	st := testStore(t)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.Add(Entry{Sandbox: "myvm", Owner: "alice", Spec: "@hourly", Command: "echo a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Add(Entry{Sandbox: "myvm", Owner: "alice", Spec: "@daily", Command: "echo b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Add(Entry{Sandbox: "othervm", Owner: "bob", Spec: "@hourly", Command: "echo c"}); err != nil {
+		t.Fatal(err)
+	}
+
+	must(st.RenameSandbox("myvm", "newvm"))
+
+	moved, err := st.ListBySandbox("newvm")
+	must(err)
+	if len(moved) != 2 {
+		t.Fatalf("expected 2 entries under newvm, got %d", len(moved))
+	}
+	old, err := st.ListBySandbox("myvm")
+	must(err)
+	if len(old) != 0 {
+		t.Fatalf("expected no entries left under myvm, got %d", len(old))
+	}
+	// Other sandboxes are untouched.
+	other, err := st.ListBySandbox("othervm")
+	must(err)
+	if len(other) != 1 {
+		t.Fatalf("expected othervm's entry untouched, got %d", len(other))
+	}
+}

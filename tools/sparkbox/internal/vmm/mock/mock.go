@@ -34,7 +34,8 @@ type fakeVM struct {
 	server        *gssh.Server
 	paused        bool
 	memMB         int64
-	balloonTarget int64 // MiB the balloon is holding (0 = deflated)
+	balloonTarget int64  // MiB the balloon is holding (0 = deflated)
+	cpuNanos      uint64 // synthetic cumulative CPU time (see CPUTimeNanos)
 }
 
 type Driver struct {
@@ -332,6 +333,72 @@ func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
 		return nil
 	})
 	return total / (1024 * 1024), nil
+}
+
+// --- Renamer + Rebooter + CPUStatser (the user-console capabilities) --------
+
+// DropSnapshots implements vmm.Rebooter. The mock keeps no memory snapshot —
+// its "disk" is the workdir — so the only work is forgetting the paused VM,
+// which makes the manager's next EnsureRunning recreate it from the persisted
+// workdir: the same cold-boot-observable semantics as firecracker.
+func (d *Driver) DropSnapshots(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if vm, ok := d.vms[name]; ok && !vm.paused {
+		return fmt.Errorf("vm %q is running; pause it first", name)
+	}
+	delete(d.vms, name)
+	return nil
+}
+
+// RenameVM implements vmm.Renamer: move the stopped VM's workdir and rekey the
+// driver's record. The .gateway_key rides along inside the workdir, so a later
+// Resume under the new name authenticates unchanged.
+func (d *Driver) RenameVM(oldName, newName string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if vm, ok := d.vms[oldName]; ok && !vm.paused {
+		return fmt.Errorf("vm %q is running; pause it first", oldName)
+	}
+	if _, ok := d.vms[newName]; ok {
+		return fmt.Errorf("vm %q already exists", newName)
+	}
+	oldDir := filepath.Join(d.stateDir, "mock-vms", oldName)
+	newDir := filepath.Join(d.stateDir, "mock-vms", newName)
+	if _, err := os.Stat(newDir); err == nil {
+		return fmt.Errorf("workdir for %q already exists", newName)
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return err
+	}
+	if vm, ok := d.vms[oldName]; ok {
+		delete(d.vms, oldName)
+		vm.name = newName
+		vm.workdir = newDir
+		d.vms[newName] = vm
+	}
+	return nil
+}
+
+// mockCPUTickNanos is the synthetic CPU time each CPUTimeNanos call accrues.
+// Fixed so tests computing client-side percentages from poll deltas get exact,
+// deterministic numbers.
+const mockCPUTickNanos uint64 = 50_000_000 // 50ms
+
+// CPUTimeNanos implements vmm.CPUStatser with a monotonic synthetic counter:
+// every call on a running VM accrues mockCPUTickNanos. Errors on a
+// paused/missing VM, matching the firecracker driver; the counter survives
+// pause/resume (the fakeVM record persists) but not DropSnapshots, matching
+// firecracker's reset-on-cold-boot.
+func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	vm, ok := d.vms[name]
+	if !ok || vm.paused {
+		return 0, fmt.Errorf("vm %q not running", name)
+	}
+	vm.cpuNanos += mockCPUTickNanos
+	return vm.cpuNanos, nil
 }
 
 func dirExists(p string) bool {

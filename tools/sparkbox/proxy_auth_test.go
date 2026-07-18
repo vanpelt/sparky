@@ -271,6 +271,148 @@ func TestPublicRouteServesUngatedWithNoIdentity(t *testing.T) {
 	}
 }
 
+// cookieEchoBackend replies with the raw Cookie header it received, so tests
+// can assert what the edge forwarded.
+func cookieEchoBackend(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "cookie=%q", r.Header.Get("Cookie"))
+	})}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestSessionCookieNeverReachesUpstream(t *testing.T) {
+	as := newAuthStack(t)
+	ctx := context.Background()
+	as.mkUser(t, "alice", "", false)
+	if _, err := as.mgr.Create(ctx, "secret", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	port := cookieEchoBackend(t)
+	as.route(t, "secret", "secret", "alice", port, routes.VisibilityPrivate)
+
+	// The session cookie authenticates the visitor but must be stripped before
+	// the request reaches the guest; the app's own cookie passes through.
+	resp := as.req(t, "secret.hivemind.tools",
+		withCookie(as.token(t, "alice", "")),
+		func(r *http.Request) { r.AddCookie(&http.Cookie{Name: "app_pref", Value: "dark"}) })
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for owner, got %d (%s)", resp.StatusCode, body)
+	}
+	if want := `cookie="app_pref=dark"`; body != want {
+		t.Fatalf("session cookie leaked upstream (or app cookie lost).\n got: %s\nwant: %s", body, want)
+	}
+
+	// A public route with only the session cookie forwards no Cookie header at
+	// all, not an empty one.
+	if _, err := as.mgr.Create(ctx, "demo", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	as.route(t, "demo", "demo", "alice", port, routes.VisibilityPublic)
+	resp = as.req(t, "demo.hivemind.tools", withCookie(as.token(t, "alice", "")))
+	if body := readBody(t, resp); body != `cookie=""` {
+		t.Fatalf("public route leaked the session cookie: %s", body)
+	}
+}
+
+func TestCookieStripPreservesGuestCookiesByteForByte(t *testing.T) {
+	as := newAuthStack(t)
+	ctx := context.Background()
+	if _, err := as.mgr.Create(ctx, "demo", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	port := cookieEchoBackend(t)
+	as.route(t, "demo", "demo", "alice", port, routes.VisibilityPublic)
+
+	// Pairs Go's cookie parser cannot round-trip (raw UTF-8 value, non-token
+	// name, unquoted space) must survive the session-pair removal untouched.
+	raw := "greeting=héllo; " + edgeauth.CookieName + "=" + as.token(t, "alice", "") + "; {legacy}=1; v=a b"
+	resp := as.req(t, "demo.hivemind.tools",
+		func(r *http.Request) { r.Header.Set("Cookie", raw) })
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, body)
+	}
+	if want := `cookie="greeting=héllo; {legacy}=1; v=a b"`; body != want {
+		t.Fatalf("guest cookies mangled by session strip.\n got: %s\nwant: %s", body, want)
+	}
+
+	// A header without the session pair passes through byte-for-byte, odd
+	// spacing and all.
+	raw = "greeting=héllo;  {legacy}=1;v=a b"
+	resp = as.req(t, "demo.hivemind.tools",
+		func(r *http.Request) { r.Header.Set("Cookie", raw) })
+	if body := readBody(t, resp); body != `cookie="`+raw+`"` {
+		t.Fatalf("session-free Cookie header not preserved verbatim: %s", body)
+	}
+}
+
+// authEchoBackend replies with the raw Authorization header it received, so
+// tests can assert what the edge forwarded.
+func authEchoBackend(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "auth=%q", r.Header.Get("Authorization"))
+	})}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestSessionBearerTokenNeverReachesUpstream(t *testing.T) {
+	as := newAuthStack(t)
+	ctx := context.Background()
+	as.mkUser(t, "alice", "", false)
+	if _, err := as.mgr.Create(ctx, "secret", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	port := authEchoBackend(t)
+	as.route(t, "secret", "secret", "alice", port, routes.VisibilityPrivate)
+
+	// The bearer session token authenticates the visitor but must be stripped
+	// before the request reaches the guest — it is the same zone-wide
+	// credential as the cookie.
+	resp := as.req(t, "secret.hivemind.tools", withBearer(as.token(t, "alice", "")))
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for owner, got %d (%s)", resp.StatusCode, body)
+	}
+	if want := `auth=""`; body != want {
+		t.Fatalf("session bearer token leaked upstream.\n got: %s\nwant: %s", body, want)
+	}
+
+	// A guest app's own bearer token is not ours to strip: authenticate via
+	// cookie and the unrelated Authorization header passes through untouched.
+	resp = as.req(t, "secret.hivemind.tools",
+		withCookie(as.token(t, "alice", "")),
+		withBearer("guest-app-token"))
+	if body := readBody(t, resp); body != `auth="Bearer guest-app-token"` {
+		t.Fatalf("guest bearer token mangled: %s", body)
+	}
+
+	// A stale or forged spk_v1. token is still a session token to strip, even
+	// on a public route where the gate never ran.
+	if _, err := as.mgr.Create(ctx, "demo", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	as.route(t, "demo", "demo", "alice", port, routes.VisibilityPublic)
+	resp = as.req(t, "demo.hivemind.tools", withBearer("spk_v1.bogus.bogus"))
+	if body := readBody(t, resp); body != `auth=""` {
+		t.Fatalf("spk_v1-prefixed token leaked upstream: %s", body)
+	}
+}
+
 func TestAnyPortURLOverridesRoutePort(t *testing.T) {
 	as := newAuthStack(t)
 	ctx := context.Background()

@@ -35,8 +35,11 @@ import (
 // value is also accepted as an Authorization: Bearer credential.
 const CookieName = "spark_session"
 
-// tokenPrefix versions the wire format so a future change is unambiguous.
-const tokenPrefix = "spk_v1."
+// TokenPrefix versions the wire format so a future change is unambiguous.
+// Exported because the proxy's Rewrite hook recognises (and strips) session
+// tokens in guest-bound Authorization headers by this prefix — the two must
+// never drift apart.
+const TokenPrefix = "spk_v1."
 
 // hkdfInfo domain-separates the edge-session key from any other use of the
 // OIDC key material.
@@ -84,21 +87,21 @@ func (s *Signer) Mint(id Identity, ttl time.Duration) (string, time.Time, error)
 		return "", time.Time{}, err
 	}
 	payload := base64.RawURLEncoding.EncodeToString(body)
-	return tokenPrefix + payload + "." + s.mac(payload), exp, nil
+	return TokenPrefix + payload + "." + s.mac(payload), exp, nil
 }
 
 // mac is the base64url HMAC-SHA256 over the versioned payload. The prefix is
 // part of the signed input so a token can't be replayed under a future format.
 func (s *Signer) mac(payload string) string {
 	m := hmac.New(sha256.New, s.key)
-	m.Write([]byte(tokenPrefix))
+	m.Write([]byte(TokenPrefix))
 	m.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
 // Verify checks a token's MAC and expiry and returns the asserted identity.
 func (s *Signer) Verify(token string) (Identity, bool) {
-	rest, ok := strings.CutPrefix(token, tokenPrefix)
+	rest, ok := strings.CutPrefix(token, TokenPrefix)
 	if !ok {
 		return Identity{}, false
 	}

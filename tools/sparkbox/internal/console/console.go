@@ -154,9 +154,10 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // TCP dial to the forwarded port currently succeeds. Listening is only
 // meaningful while the sandbox is running (a paused sandbox has no address).
 type routeStatus struct {
-	Subdomain string `json:"subdomain"`
-	Port      int    `json:"port"`
-	Listening bool   `json:"listening"`
+	Subdomain  string `json:"subdomain"`
+	Port       int    `json:"port"`
+	Visibility string `json:"visibility"`
+	Listening  bool   `json:"listening"`
 }
 
 // sandboxView is a Sandbox plus its web routes and next scheduled wake for the
@@ -202,7 +203,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, rt := range rs {
-			views[i].Routes = append(views[i].Routes, routeStatus{Subdomain: rt.Subdomain, Port: rt.Port})
+			views[i].Routes = append(views[i].Routes, routeStatus{Subdomain: rt.Subdomain, Port: rt.Port, Visibility: rt.Visibility})
 		}
 		// Probe every forwarded port of a running sandbox concurrently; the
 		// whole fan-out is bounded by probeTimeout, not routes × timeout.

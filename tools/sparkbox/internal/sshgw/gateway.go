@@ -305,12 +305,21 @@ func (g *Gateway) domainHint() string {
 	return "<domain>"
 }
 
-// dialUpstream connects to the VM's sshd, retrying briefly since a freshly
-// resumed/booted VM may not be accepting connections yet.
+// dialUpstream connects to the VM's sshd with the gateway's upstream key.
 func (g *Gateway) dialUpstream(ctx context.Context, addr, user string) (*xssh.Client, error) {
+	return DialUpstream(ctx, addr, user, g.upstreamKey)
+}
+
+// DialUpstream connects to a VM's sshd as user, authenticating with key, and
+// retries briefly since a freshly resumed/booted VM may not be accepting
+// connections yet. It keeps retrying until ctx expires, so callers must pass
+// a bounded context. Exported for internal/envsync, whose pushes must dial
+// the guest directly rather than ride RunInSandbox (whose first act is
+// EnsureRunning, which would wake a paused box).
+func DialUpstream(ctx context.Context, addr, user string, key xssh.Signer) (*xssh.Client, error) {
 	cfg := &xssh.ClientConfig{
 		User: user,
-		Auth: []xssh.AuthMethod{xssh.PublicKeys(g.upstreamKey)},
+		Auth: []xssh.AuthMethod{xssh.PublicKeys(key)},
 		// The gateway provisions the VM and owns the only route to it; there
 		// is no prior host key to verify against on first boot.
 		HostKeyCallback: xssh.InsecureIgnoreHostKey(), //nolint:gosec

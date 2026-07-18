@@ -1,22 +1,18 @@
 package host_test
 
 import (
+	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"errors"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
-	xssh "golang.org/x/crypto/ssh"
-
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
 // memStore is an in-memory host.ObjectStore for tests — it just copies bytes
@@ -70,30 +66,18 @@ func (s *memStore) len() int {
 	return len(s.objs)
 }
 
+func (s *memStore) object(key string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.objs[key]
+}
+
 // managerWithDir wires a manager on the mock driver but returns the state dir
 // too, so a test can poke the mock's per-VM workdir (its "disk").
 func managerWithDir(t *testing.T, opts host.Options) (*host.Manager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := xssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	driver := mock.New(dir, signer)
-	t.Cleanup(func() { driver.Close() })
-	opts.StateDir = dir
-	opts.Driver = driver
-	opts.GatewayPublicKey = string(xssh.MarshalAuthorizedKey(signer.PublicKey()))
-	opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	mgr, err := host.NewManager(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return mgr, dir
+	return newManagerInDir(t, dir, opts), dir
 }
 
 func workdirFile(dir, box, rel string) string {
@@ -267,5 +251,313 @@ func TestDiskPoolAdmission(t *testing.T) {
 	// The pool is per-owner: bob is unaffected.
 	if _, err := m.Create(ctx, "b1", "bob", "ubuntu", 1, 512); err != nil {
 		t.Fatalf("bob should be admitted: %v", err)
+	}
+}
+
+// envFileRel is the stub syncer's stand-in for /etc/environment inside the
+// mock VM's workdir ("rootfs").
+const envFileRel = "etc-environment"
+
+// bakedLine stands in for the toolchain PATH the image bakes outside the
+// managed block; it must survive both push and strip.
+const bakedLine = "PATH=/usr/local/bin\n"
+
+const plaintextSecret = `HUSH="s3kr3t-plaintext"`
+
+// stripSyncer is a stub envsync syncer: PushEnv writes a managed block holding
+// a recognizable secret into the mock VM's workdir env file and StripEnv
+// rewrites the block empty — the same file shapes the real Syncer produces
+// over SSH. Both record their calls so tests can assert ordering and the box
+// state they were handed.
+type stripSyncer struct {
+	dir string // manager state dir; mock workdirs live under it
+
+	mu       sync.Mutex
+	pushes   []string
+	strips   []string
+	stripErr error
+	stripBox *host.Sandbox // copy handed to the most recent StripEnv
+}
+
+func (s *stripSyncer) envPath(box string) string { return workdirFile(s.dir, box, envFileRel) }
+
+func (s *stripSyncer) PushEnv(_ context.Context, box *host.Sandbox) error {
+	if box.State != vmm.StateRunning {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pushes = append(s.pushes, box.Name)
+	block := envsync.BlockBegin + "\n" + plaintextSecret + "\n" + envsync.BlockEnd + "\n"
+	return os.WriteFile(s.envPath(box.Name), []byte(bakedLine+block), 0o644)
+}
+
+func (s *stripSyncer) StripEnv(_ context.Context, box *host.Sandbox) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.strips = append(s.strips, box.Name)
+	s.stripBox = box
+	if s.stripErr != nil {
+		return s.stripErr
+	}
+	block := envsync.BlockBegin + "\n" + envsync.BlockEnd + "\n"
+	return os.WriteFile(s.envPath(box.Name), []byte(bakedLine+block), 0o644)
+}
+
+func (s *stripSyncer) pushCount(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, b := range s.pushes {
+		if b == name {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *stripSyncer) stripCount(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, b := range s.strips {
+		if b == name {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *stripSyncer) lastStripBox() *host.Sandbox {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stripBox
+}
+
+func TestArchiveStripsManagedEnvBlock(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Archive: store})
+	syncer := &stripSyncer{dir: dir}
+	m.SetEnvSync(syncer)
+
+	if _, err := m.Create(ctx, "a1", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("a1") == 1 })
+
+	if err := m.Archive(ctx, "a1"); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if got := syncer.stripCount("a1"); got != 1 {
+		t.Fatalf("strip count = %d, want 1", got)
+	}
+	b, _ := m.Get("a1")
+	obj := store.object(b.ArchiveKey)
+	if len(obj) == 0 {
+		t.Fatal("no archive object uploaded")
+	}
+	if bytes.Contains(obj, []byte(plaintextSecret)) {
+		t.Fatal("packed archive still contains the plaintext secret")
+	}
+	if !bytes.Contains(obj, []byte(bakedLine)) {
+		t.Fatal("strip clobbered content outside the managed block")
+	}
+
+	// Restore re-pushes via the EnsureRunning hook: the env comes back.
+	if _, err := m.EnsureRunning(ctx, "a1"); err != nil {
+		t.Fatalf("restore/resume: %v", err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("a1") == 2 })
+	got, err := os.ReadFile(syncer.envPath("a1"))
+	if err != nil {
+		t.Fatalf("env file missing after restore: %v", err)
+	}
+	if !bytes.Contains(got, []byte(plaintextSecret)) {
+		t.Fatal("env block not restored after resume")
+	}
+}
+
+func TestArchiveWakesPausedBoxToStrip(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Archive: store})
+	syncer := &stripSyncer{dir: dir}
+	m.SetEnvSync(syncer)
+
+	if _, err := m.Create(ctx, "p1", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("p1") == 1 })
+	if err := m.Pause(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Archiving a paused box still strips: the guest is woken just long enough.
+	if err := m.Archive(ctx, "p1"); err != nil {
+		t.Fatalf("archive paused box: %v", err)
+	}
+	if got := syncer.stripCount("p1"); got != 1 {
+		t.Fatalf("strip count = %d, want 1", got)
+	}
+	sb := syncer.lastStripBox()
+	if sb.State != vmm.StateRunning || sb.SSHAddr == "" {
+		t.Fatalf("strip saw state %q addr %q, want a reachable running box", sb.State, sb.SSHAddr)
+	}
+	// The wake was strip-scoped, never an EnsureRunning: no extra push fired.
+	if got := syncer.pushCount("p1"); got != 1 {
+		t.Fatalf("push count after wake-to-strip = %d, want 1", got)
+	}
+	b, _ := m.Get("p1")
+	if b.State != vmm.StateArchived {
+		t.Fatalf("state = %q, want archived", b.State)
+	}
+	if obj := store.object(b.ArchiveKey); bytes.Contains(obj, []byte(plaintextSecret)) {
+		t.Fatal("packed archive of a paused box still contains the plaintext secret")
+	}
+}
+
+func TestArchiveAbortsWhenStripFails(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Archive: store})
+	syncer := &stripSyncer{dir: dir, stripErr: errors.New("guest wedged")}
+	m.SetEnvSync(syncer)
+
+	if _, err := m.Create(ctx, "w1", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("w1") == 1 })
+
+	err := m.Archive(ctx, "w1")
+	if err == nil || !contains(err.Error(), "strip") {
+		t.Fatalf("archive with failing strip: want strip error, got %v", err)
+	}
+	if store.len() != 0 {
+		t.Fatalf("failed strip must not upload; store has %d objects", store.len())
+	}
+	// The box was running on entry, so the aborted archive leaves it running.
+	if b, _ := m.Get("w1"); b.State != vmm.StateRunning {
+		t.Fatalf("state = %q after aborted archive of a running box, want running", b.State)
+	}
+}
+
+// A box the strip itself woke must not be left running when the strip fails:
+// the caller only pauses after a successful strip, so the failure path has to
+// undo its own wake.
+func TestFailedStripRepausesWokenBox(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Archive: store})
+	syncer := &stripSyncer{dir: dir, stripErr: errors.New("guest wedged")}
+	m.SetEnvSync(syncer)
+
+	if _, err := m.Create(ctx, "w2", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("w2") == 1 })
+	if err := m.Pause(ctx, "w2"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Archive(ctx, "w2"); err == nil {
+		t.Fatal("archive with failing strip should error")
+	}
+	if b, _ := m.Get("w2"); b.State != vmm.StatePaused {
+		t.Fatalf("state = %q after failed strip of a paused box, want paused", b.State)
+	}
+	if store.len() != 0 {
+		t.Fatalf("failed strip must not upload; store has %d objects", store.len())
+	}
+}
+
+// The strip-time wake must restart the idle clock: a box being archived is by
+// definition long-idle, and a stale LastActive would let a reaper tick pause
+// it again mid-strip.
+func TestStripWakeBumpsLastActive(t *testing.T) {
+	ctx := context.Background()
+	m, dir := managerWithDir(t, host.Options{Archive: newMemStore()})
+	syncer := &stripSyncer{dir: dir}
+	m.SetEnvSync(syncer)
+
+	if _, err := m.Create(ctx, "p2", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("p2") == 1 })
+	if err := m.Pause(ctx, "p2"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	t0 := time.Now()
+
+	if err := m.Archive(ctx, "p2"); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	sb := syncer.lastStripBox()
+	if !sb.LastActive.After(t0) {
+		t.Fatalf("strip saw LastActive %v, want after the wake at %v", sb.LastActive, t0)
+	}
+}
+
+func TestSnapshotStripsManagedEnvBlock(t *testing.T) {
+	ctx := context.Background()
+	m, dir := managerWithDir(t, host.Options{})
+	syncer := &stripSyncer{dir: dir}
+	m.SetEnvSync(syncer)
+
+	if _, err := m.Create(ctx, "base", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("base") == 1 })
+
+	if _, err := m.Snapshot(ctx, "base", "golden", "alice"); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if got := syncer.stripCount("base"); got != 1 {
+		t.Fatalf("strip count = %d, want 1", got)
+	}
+	tpl, err := os.ReadFile(filepath.Join(dir, "mock-templates", "snap-alice-golden", envFileRel))
+	if err != nil {
+		t.Fatalf("template env file: %v", err)
+	}
+	if bytes.Contains(tpl, []byte(plaintextSecret)) {
+		t.Fatal("snapshot template still contains the plaintext secret")
+	}
+	if !bytes.Contains(tpl, []byte(bakedLine)) {
+		t.Fatal("strip clobbered content outside the managed block")
+	}
+
+	// A fork boots from the stripped template and gets its own create-time push.
+	if _, err := m.Fork(ctx, "golden", "clone", "alice", 0, 0); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	waitFor(t, func() bool { return syncer.pushCount("clone") == 1 })
+	got, err := os.ReadFile(syncer.envPath("clone"))
+	if err != nil {
+		t.Fatalf("fork env file: %v", err)
+	}
+	if !bytes.Contains(got, []byte(plaintextSecret)) {
+		t.Fatal("fork's env block not rewritten by the create-time push")
+	}
+}
+
+// A pusher without the StripEnv capability must not block archiving — the
+// strip is an optional extension detected by type assertion.
+func TestArchiveWithoutStripperProceeds(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, _ := managerWithDir(t, host.Options{Archive: store})
+	pusher := &envRecorder{}
+	m.SetEnvSync(pusher)
+
+	if _, err := m.Create(ctx, "n1", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return pusher.count("n1") == 1 })
+	if err := m.Archive(ctx, "n1"); err != nil {
+		t.Fatalf("archive with plain EnvPusher: %v", err)
+	}
+	if store.len() != 1 {
+		t.Fatalf("object store has %d objects, want 1", store.len())
 	}
 }

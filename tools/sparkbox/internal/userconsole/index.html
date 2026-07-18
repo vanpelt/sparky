@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sparkbox — my machines</title>
+<style>
+  /* shadcn "new-york" design tokens (zinc), light + dark — kept identical to
+     the admin console so the two consoles read as siblings. */
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.6rem;
+    --green: 142 71% 45%;
+    --amber: 38 92% 50%;
+    --blue: 217 91% 56%;
+    --red: 0 72% 51%;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+      --ring: 240 4.9% 83.9%;
+      --green: 142 69% 58%;
+      --amber: 38 92% 60%;
+      --blue: 217 91% 66%;
+      --red: 0 84% 65%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 64px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* header */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 20px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+  }
+  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .brand .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin: 0; }
+
+  /* buttons */
+  button {
+    font: inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid transparent; padding: 7px 13px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px; transition: .12s ease;
+    white-space: nowrap;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .btn-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+  .btn-primary:hover:not(:disabled) { opacity: .9; }
+  .btn-outline {
+    background: transparent; border-color: hsl(var(--border));
+    color: hsl(var(--foreground));
+  }
+  .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+  .btn-sm { padding: 5px 11px; font-size: 13px; }
+  .btn-danger { color: hsl(var(--red)); border-color: hsl(var(--red) / .4); }
+  .btn-danger:hover:not(:disabled) { background: hsl(var(--red) / .08); }
+  a.btn-primary { text-decoration: none; display: inline-flex; align-items: center;
+    justify-content: center; border-radius: calc(var(--radius) - 2px); padding: 8px 13px; }
+
+  /* tabs */
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid hsl(var(--border)); margin-bottom: 18px; }
+  .tab {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 8px 14px; color: hsl(var(--muted-foreground));
+  }
+  .tab:hover { color: hsl(var(--foreground)); }
+  .tab.active { color: hsl(var(--foreground)); border-bottom-color: hsl(var(--primary)); font-weight: 600; }
+
+  /* cards / panels */
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+  }
+  .panel { overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 14px 16px; border-bottom: 1px solid hsl(var(--border)); flex-wrap: wrap;
+  }
+  .panel-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .panel-head .hint { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 11px 16px; white-space: nowrap; }
+  th {
+    font-size: 11px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .04em; color: hsl(var(--muted-foreground));
+  }
+  tbody tr { border-top: 1px solid hsl(var(--border)); }
+  tbody tr:hover { background: hsl(var(--muted) / .5); }
+  td.name { font-weight: 550; }
+  td.age { color: hsl(var(--muted-foreground)); }
+  td.actions { text-align: right; }
+
+  /* machine cards */
+  .machine { margin-bottom: 14px; }
+  .m-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 13px 16px; flex-wrap: wrap;
+  }
+  .m-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .m-title .name { font-weight: 600; font-size: 14px; }
+  .m-title .spec { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .m-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .m-body {
+    border-top: 1px solid hsl(var(--border)); padding: 13px 16px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+  }
+  @media (max-width: 720px) { .m-body { grid-template-columns: 1fr; } }
+  .m-stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); }
+  .m-stat .value { font-size: 14px; font-weight: 550; margin-top: 2px;
+    font-variant-numeric: tabular-nums; }
+  .m-stat .value small { font-weight: 500; color: hsl(var(--muted-foreground)); }
+  .m-foot { border-top: 1px solid hsl(var(--border)); padding: 12px 16px;
+    display: grid; gap: 12px; }
+  .m-sect .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
+  .env-warn {
+    margin: 0 16px 12px; padding: 8px 12px; font-size: 12.5px;
+    border: 1px solid hsl(var(--red) / .4); border-radius: calc(var(--radius) - 2px);
+    color: hsl(var(--red)); background: hsl(var(--red) / .06);
+  }
+
+  /* capacity meters */
+  .meter {
+    height: 5px; border-radius: 999px; background: hsl(var(--muted));
+    margin-top: 8px; overflow: hidden;
+  }
+  .meter > div {
+    height: 100%; border-radius: 999px; background: hsl(var(--green));
+    width: 0; transition: width .3s ease;
+  }
+  .meter.warn > div { background: hsl(var(--amber)); }
+  .meter.hot > div { background: hsl(var(--red)); }
+
+  /* badges */
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    font-weight: 500; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid hsl(var(--border));
+  }
+  .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+  .badge.running { color: hsl(var(--green)); border-color: hsl(var(--green) / .35); }
+  .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
+  .badge.paused { color: hsl(var(--muted-foreground)); }
+  .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+  .badge.archived { color: hsl(var(--violet, 262 83% 66%)); border-color: hsl(var(--violet, 262 83% 66%) / .35); }
+  .badge.archived .dot { background: hsl(var(--violet, 262 83% 66%)); }
+  .badge.pinned { color: hsl(var(--amber)); border-color: hsl(var(--amber) / .35); }
+  .badge.pinned .dot { background: hsl(var(--amber)); }
+  .badge.op { color: hsl(var(--blue)); border-color: hsl(var(--blue) / .35); }
+
+  /* route rows + chips */
+  .route-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .route {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid hsl(var(--border));
+    color: hsl(var(--foreground)); text-decoration: none;
+  }
+  .route:hover { background: hsl(var(--muted)); }
+  .route .port { color: hsl(var(--muted-foreground)); }
+  .route .dot { width: 6px; height: 6px; }
+  .route.live { border-color: hsl(var(--green) / .35); }
+  .route.live .dot { background: hsl(var(--green)); box-shadow: 0 0 0 2px hsl(var(--green) / .18); }
+  .route.dead .dot { background: hsl(var(--red) / .8); }
+  .route.idle .dot { background: transparent; border: 1px solid hsl(var(--muted-foreground)); }
+  .vis { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 999px; }
+  .vis.private { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
+  .vis.public { background: hsl(var(--amber) / .15); color: hsl(var(--amber)); }
+  .port-form { display: inline-flex; align-items: center; gap: 6px; }
+  .port-form input { width: 76px; }
+
+  /* tag chips */
+  .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+    padding: 2px 5px 2px 9px; border-radius: 999px; background: hsl(var(--muted));
+    color: hsl(var(--foreground));
+  }
+  .chip.plain { padding: 2px 9px; }
+  .chip-x {
+    border: none; background: transparent; padding: 0 3px; font-size: 13px;
+    line-height: 1; color: hsl(var(--muted-foreground)); border-radius: 999px;
+  }
+  .chip-x:hover { color: hsl(var(--red)); }
+  .chip-input {
+    font: inherit; font-size: 12px; width: 90px; padding: 2px 8px;
+    border: 1px dashed hsl(var(--border)); border-radius: 999px;
+    background: transparent; color: hsl(var(--foreground));
+  }
+  .chip-input:focus { outline: 2px solid hsl(var(--ring) / .5); outline-offset: 1px; }
+
+  /* inputs */
+  input[type=text], input[type=password], input[type=number] {
+    font: inherit; padding: 8px 11px; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+  input:focus { outline: 2px solid hsl(var(--ring) / .5); outline-offset: 1px; }
+  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+  .field-hint { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
+
+  /* secrets form */
+  .secret-form { padding: 16px; display: grid; gap: 14px;
+    grid-template-columns: 1fr 1.4fr 1fr auto; align-items: start;
+    border-bottom: 1px solid hsl(var(--border)); }
+  @media (max-width: 860px) { .secret-form { grid-template-columns: 1fr; } }
+  .secret-form input { width: 100%; }
+  .secret-form .save { align-self: end; }
+  .notice {
+    padding: 12px 16px; font-size: 12.5px; color: hsl(var(--muted-foreground));
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .notice strong { color: hsl(var(--foreground)); font-weight: 600; }
+
+  /* sign-in */
+  .signin-wrap { min-height: 62vh; display: grid; place-items: center; }
+  .signin { width: 100%; max-width: 380px; padding: 26px; }
+  .signin h2 { margin: 0 0 4px; font-size: 17px; font-weight: 650; }
+  .signin p { margin: 0 0 18px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+  .signin a.btn-primary { width: 100%; }
+
+  /* rename dialog */
+  dialog {
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+    background: hsl(var(--card)); color: hsl(var(--foreground));
+    padding: 22px; width: 100%; max-width: 400px;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; }
+  dialog p { margin: 0 0 14px; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+  dialog input[type=text] { width: 100%; margin-bottom: 14px; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+
+  .muted { color: hsl(var(--muted-foreground)); }
+  .empty { padding: 40px 16px; text-align: center; color: hsl(var(--muted-foreground)); }
+  .hidden { display: none !important; }
+
+  /* toast */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); padding: 10px 16px; font-size: 13px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.18); opacity: 0; transition: opacity .2s;
+    pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: hsl(var(--red) / .5); color: hsl(var(--red)); }
+</style>
+</head>
+<body>
+  <!-- SIGNED OUT -->
+  <div id="signin-view" class="wrap signin-wrap hidden">
+    <div class="card signin">
+      <div class="brand" style="margin-bottom:16px">
+        <div class="logo">s</div>
+        <div>
+          <h2 style="margin:0">sparkbox</h2>
+          <p style="margin:0" class="muted">my machines</p>
+        </div>
+      </div>
+      <p>Sign in with your sparkbox account to manage your machines and secrets.</p>
+      <a id="signin-link" class="btn-primary" href="#">Sign in</a>
+    </div>
+  </div>
+
+  <!-- LOAD FAILED (non-401: edge 502, server restart, network) -->
+  <div id="error-view" class="wrap signin-wrap hidden">
+    <div class="card signin">
+      <div class="brand" style="margin-bottom:16px">
+        <div class="logo">s</div>
+        <div>
+          <h2 style="margin:0">sparkbox</h2>
+          <p style="margin:0" class="muted">my machines</p>
+        </div>
+      </div>
+      <p id="error-msg">Couldn't reach the console.</p>
+      <button class="btn-primary" id="error-retry" style="width:100%; justify-content:center">Retry</button>
+    </div>
+  </div>
+
+  <!-- APP -->
+  <div id="app-view" class="wrap hidden">
+    <header>
+      <div class="brand">
+        <div class="logo">s</div>
+        <div>
+          <h1>sparkbox</h1>
+          <p class="sub" id="domain-label">my machines</p>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center">
+        <span class="muted" id="refreshed" style="font-size:12px"></span>
+        <span id="who" class="badge hidden"></span>
+        <button class="btn-outline btn-sm" id="logout-btn">Sign out</button>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="machines">Machines</button>
+      <button class="tab" data-tab="secrets">Secrets</button>
+    </div>
+
+    <!-- MACHINES TAB -->
+    <div id="tab-machines">
+      <div id="machine-list"></div>
+      <div id="machines-empty" class="card empty hidden">
+        No machines yet. Create one with <code class="mono">ssh new@…</code>.
+      </div>
+
+      <div class="card panel" style="margin-top:18px">
+        <div class="panel-head">
+          <h2>Snapshots</h2>
+          <span class="hint">fork-able templates captured from a customized machine</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Snapshot</th><th>From</th><th>Created</th><th></th></tr>
+            </thead>
+            <tbody id="snap-rows"></tbody>
+          </table>
+        </div>
+        <div id="snap-empty" class="empty hidden">No snapshots yet. Capture one with the <strong>Snapshot</strong> action above.</div>
+      </div>
+    </div>
+
+    <!-- SECRETS TAB -->
+    <div id="tab-secrets" class="hidden">
+      <div class="card panel">
+        <div class="panel-head">
+          <h2>Secrets</h2>
+          <span class="hint">delivered as environment variables to machines that share a tag</span>
+        </div>
+        <div class="notice">
+          Values are <strong>write-only</strong>: once saved they can be updated or deleted, never
+          read back here. A secret reaches every machine that shares one of its tags —
+          <strong>new shells see changes now; running processes keep their old environment until
+          the machine reboots</strong>. Anything running inside a tagged machine can read these values.
+        </div>
+        <form id="secret-form" class="secret-form">
+          <div>
+            <label for="sec-name">Name</label>
+            <input id="sec-name" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="OPENAI_API_KEY" maxlength="64" />
+            <div class="field-hint">UPPER_SNAKE_CASE, up to 64 chars</div>
+          </div>
+          <div>
+            <label for="sec-value">Value</label>
+            <input id="sec-value" type="password" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="value (never shown again)" />
+            <div class="field-hint">single line, up to 4 KiB</div>
+          </div>
+          <div>
+            <label for="sec-tags">Tags</label>
+            <input id="sec-tags" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="ml, prod" />
+            <div class="field-hint">comma-separated; matches machine tags</div>
+          </div>
+          <button type="submit" class="btn-primary save" id="sec-save">Save</button>
+        </form>
+        <div id="secrets-disabled" class="notice hidden">
+          Secrets are disabled on this host: the encryption key does not match the stored
+          data. An operator must resolve the key mismatch before secrets can be used.
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Tags</th><th>Version</th><th>Updated</th><th></th></tr>
+            </thead>
+            <tbody id="secret-rows"></tbody>
+          </table>
+        </div>
+        <div id="secrets-empty" class="empty hidden">No secrets yet. Add one above, then tag a machine to deliver it.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RENAME -->
+  <dialog id="rename-dlg">
+    <h3>Rename <span id="rename-old" class="mono"></span></h3>
+    <p>
+      SSH and web addresses switch immediately. A running machine is paused briefly to
+      rename. The hostname <em>inside</em> the machine updates on its next reboot.
+    </p>
+    <input id="rename-new" type="text" class="mono" autocomplete="off" spellcheck="false"
+      placeholder="new-name" maxlength="63" />
+    <div class="row">
+      <button class="btn-outline" id="rename-cancel" type="button">Cancel</button>
+      <button class="btn-primary" id="rename-go" type="button">Rename</button>
+    </div>
+  </dialog>
+
+  <div id="toast"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let timer = null;
+
+  const ENV_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
+  const TAG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+  const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/; // mirrors the host manager's nameRe
+
+  function toast(msg, isErr) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.className = "show" + (isErr ? " err" : "");
+    clearTimeout(t._h);
+    t._h = setTimeout(() => (t.className = ""), 2600);
+  }
+
+  // domain is the zone this console lives in: the console's own hostname minus
+  // its first label (my.example.com -> example.com). Route links and the
+  // login redirect both hang off it.
+  function domain() {
+    return location.hostname.replace(/^[^.]+\./, "");
+  }
+
+  // portSuffix carries the console's own non-default port into every
+  // generated link (the mock-driver dev loop serves on :8081); empty on the
+  // scheme default, where links stay bare.
+  function portSuffix() {
+    return location.port ? ":" + location.port : "";
+  }
+
+  function show(view) {
+    $("signin-view").classList.toggle("hidden", view !== "signin");
+    $("app-view").classList.toggle("hidden", view !== "app");
+    $("error-view").classList.toggle("hidden", view !== "error");
+    if (view !== "app") {
+      clearInterval(timer);
+      timer = null;
+    }
+    if (view === "signin") {
+      $("signin-link").href = location.protocol + "//login." + domain() + portSuffix() +
+        "/?return=" + encodeURIComponent(location.href);
+    }
+  }
+
+  // showError swaps in the full-page failure state: a non-401 error on first
+  // load (edge 502, server restart) would otherwise leave both views hidden —
+  // a blank page with no retry. The Retry button restarts init.
+  function showError(msg) {
+    $("error-msg").textContent = msg;
+    show("error");
+  }
+
+  function rel(iso) {
+    if (!iso) return "–";
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return Math.floor(s) + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function gb(mb) {
+    const g = (mb || 0) / 1024;
+    return g.toFixed(g && g % 1 ? 1 : 0);
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // api wraps fetch: every mutation carries the CSRF header the backend
+  // requires (SameSite=Lax alone can't fence off same-site sandbox pages),
+  // JSON bodies are encoded, 401 flips to the sign-in view, and API errors
+  // surface as thrown Errors with the server's message.
+  async function api(path, opts) {
+    const o = Object.assign({ method: "GET", headers: {} }, opts || {});
+    if (o.method !== "GET") o.headers["X-Sparkbox-Console"] = "1";
+    if (o.body !== undefined) {
+      o.headers["Content-Type"] = "application/json";
+      o.body = JSON.stringify(o.body);
+    }
+    const r = await fetch(path, o);
+    if (r.status === 401) {
+      show("signin");
+      const err = new Error("signed out");
+      err.unauthorized = true; // callers must not treat this as a load failure
+      throw err;
+    }
+    if (!r.ok) {
+      throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    }
+    return r.json().catch(() => null);
+  }
+
+  function badge(state) {
+    // running | paused | archived (rootfs parked in object storage)
+    const cls = state === "running" ? "running" : (state === "archived" ? "archived" : "paused");
+    return '<span class="badge ' + cls + '"><span class="dot"></span>' + cls + "</span>";
+  }
+
+  function meterHTML(used, total) {
+    const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    const cls = pct >= 90 ? " hot" : pct >= 70 ? " warn" : "";
+    return '<div class="meter' + cls + '"><div style="width:' + pct.toFixed(1) + '%"></div></div>';
+  }
+
+  // CPU% is computed client-side from the delta of the server's cumulative
+  // cpu_seconds between polls, normalized by vcpus (so 100% = all vCPUs busy).
+  // The first poll after load — or after a machine starts — has no baseline
+  // and shows "–".
+  const cpuPrev = {}; // name -> { s: cpu_seconds, t: Date.now() }
+
+  function cpuPct(b, now) {
+    if (typeof b.cpu_seconds !== "number") return null;
+    const prev = cpuPrev[b.name];
+    cpuPrev[b.name] = { s: b.cpu_seconds, t: now };
+    if (!prev || now <= prev.t || b.cpu_seconds < prev.s) return null;
+    const pct = ((b.cpu_seconds - prev.s) / ((now - prev.t) / 1000)) / (b.vcpus || 1) * 100;
+    return Math.max(0, Math.min(100, pct));
+  }
+
+  // editing reports whether the user is mid-interaction with an inline editor
+  // (tag input, port field, open dialog). The 4s repaint is skipped then so a
+  // half-typed tag never gets wiped by a poll.
+  function editing() {
+    const ae = document.activeElement;
+    if ($("rename-dlg").open) return true;
+    return !!(ae && ae.tagName === "INPUT" && ae.closest("#machine-list"));
+  }
+
+  // ---- in-flight mutations ----
+
+  // Keys of mutations still awaiting a response ("act:webby:pause"). The 4s
+  // poll rebuilds cards mid-request, which would resurrect a disabled button
+  // as clickable; renderers re-disable any rebuilt button whose key is here.
+  const inflight = new Set();
+
+  function inflightKey(btn) {
+    const d = btn.dataset;
+    if (d.act) return "act:" + d.name + ":" + d.act;
+    if (d.snap) return "snap:" + d.snap;
+    if (d.vis) return "vis:" + d.sub;
+    if (d.portSet) return "port:" + d.portSet;
+    if (d.untag) return "tags:" + d.name;
+    if (d.fork) return "fork:" + d.fork;
+    if (d.del) return "delsnap:" + d.del;
+    if (d.delSecret) return "delsecret:" + d.delSecret;
+    return null;
+  }
+
+  function reapplyInflight(root) {
+    if (!inflight.size) return;
+    root.querySelectorAll("button").forEach((btn) => {
+      const k = inflightKey(btn);
+      if (k && inflight.has(k)) btn.disabled = true;
+    });
+  }
+
+  // mutate runs one mutation with its control disabled for the whole request
+  // — poll repaints included, via inflight — toasts failures, and refreshes
+  // on success. The key is released before that refresh so its repaint
+  // re-enables the rebuilt button.
+  async function mutate(key, btn, fn) {
+    inflight.add(key);
+    btn.disabled = true;
+    let ok = false;
+    try {
+      await fn();
+      ok = true;
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      inflight.delete(key);
+      btn.disabled = false;
+    }
+    if (ok) await refresh();
+  }
+
+  // ---- machines ----
+
+  async function act(name, verb, btn) {
+    await mutate("act:" + name + ":" + verb, btn, async () => {
+      await api("/api/machines/" + encodeURIComponent(name) + "/" + verb, { method: "POST" });
+      const past = {
+        pause: "paused", resume: "resumed", reboot: "rebooted",
+        archive: "archived", pin: "pinned", unpin: "unpinned",
+      };
+      toast(name + " " + (past[verb] || verb));
+    });
+  }
+
+  function tagChips(b) {
+    const tags = b.tags || [];
+    return '<div class="chips">' +
+      tags.map((t) =>
+        '<span class="chip">' + esc(t) +
+        '<button class="chip-x" data-untag="' + esc(t) + '" data-name="' + esc(b.name) +
+        '" title="remove tag (secrets on this tag stop reaching this machine)">×</button></span>').join("") +
+      '<input class="chip-input" data-tag-input="' + esc(b.name) +
+      '" placeholder="+ tag" maxlength="40" autocomplete="off" spellcheck="false" />' +
+      "</div>";
+  }
+
+  function routePanel(b) {
+    const rs = b.routes || [];
+    const running = b.state === "running";
+    let html = rs.map((r) => {
+      const cls = running ? (r.listening ? "live" : "dead") : "idle";
+      const title = running
+        ? (r.listening ? "listening" : "nothing listening on port " + r.port)
+        : "paused — a request will wake it";
+      const href = location.protocol + "//" + esc(r.subdomain) + "." + esc(domain()) + portSuffix();
+      const vis = r.visibility === "public" ? "public" : "private";
+      const flip = vis === "public" ? "private" : "public";
+      return '<div class="route-row">' +
+        '<a class="route ' + cls + '" target="_blank" rel="noopener" href="' + href +
+        '" title="' + esc(title) + '"><span class="dot"></span>' + esc(r.subdomain) +
+        ' <span class="port">:' + (r.port | 0) + "</span></a>" +
+        '<span class="vis ' + vis + '">' + vis + "</span>" +
+        '<button class="btn-outline btn-sm" data-vis="' + flip + '" data-sub="' + esc(r.subdomain) +
+        '" title="' + (flip === "public"
+          ? "anyone on the internet can reach this route"
+          : "only signed-in visitors can reach this route") + '">Make ' + flip + "</button>" +
+        "</div>";
+    }).join("");
+    // The port editor drives the machine's default route (subdomain = name);
+    // changing the port preserves the route's visibility.
+    const def = rs.find((r) => r.subdomain === b.name);
+    html += '<div class="port-form">' +
+      '<span class="muted" style="font-size:12px">forward port</span>' +
+      '<input type="number" min="1" max="65535" class="btn-sm mono" data-port-input="' + esc(b.name) +
+      '" value="' + (def ? (def.port | 0) : "") + '" placeholder="8080" />' +
+      '<button class="btn-outline btn-sm" data-port-set="' + esc(b.name) + '">Set</button>' +
+      "</div>";
+    return html;
+  }
+
+  function machineCard(b, now) {
+    const isRunning = b.state === "running";
+    const isArchived = b.state === "archived";
+
+    const pct = cpuPct(b, now);
+    const cpu = isRunning && pct !== null
+      ? pct.toFixed(pct < 10 ? 1 : 0) + "<small>%</small>" + meterHTML(pct, 100)
+      : '<span class="muted">–</span>';
+    const mem = typeof b.mem_used_mb === "number"
+      ? gb(b.mem_used_mb) + " <small>/ " + gb(b.mem_mb) + " GB</small>" + meterHTML(b.mem_used_mb, b.mem_mb)
+      : gb(b.mem_mb) + " <small>GB</small>";
+    // disk_total_mb is the per-machine cap when the backend reports it; a
+    // machine without one gets a bare footprint figure, no meter.
+    const disk = isArchived
+      ? '<span class="muted">parked in object storage</span>'
+      : typeof b.disk_total_mb === "number" && b.disk_total_mb > 0
+        ? gb(b.disk_mb) + " <small>/ " + gb(b.disk_total_mb) + " GB</small>" + meterHTML(b.disk_mb || 0, b.disk_total_mb)
+        : gb(b.disk_mb) + " <small>GB</small>";
+
+    const stateBtn = isRunning
+      ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + esc(b.name) + '">Pause</button>'
+      : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + esc(b.name) + '">' +
+        (isArchived ? "Restore" : "Resume") + "</button>";
+    const rebootBtn = isArchived ? "" :
+      '<button class="btn-outline btn-sm" data-act="reboot" data-name="' + esc(b.name) +
+      '" title="cold-boot: running processes restart and pick up secret changes">Reboot</button>';
+    const archiveBtn = isArchived || b.pinned ? "" :
+      '<button class="btn-outline btn-sm" data-act="archive" data-name="' + esc(b.name) +
+      '" title="park this machine in object storage and free its host disk">Archive</button>';
+    const snapBtn = isArchived ? "" :
+      '<button class="btn-outline btn-sm" data-snap="' + esc(b.name) +
+      '" title="save this disk as a fork-able template">Snapshot</button>';
+    const renameBtn = isArchived ? "" :
+      '<button class="btn-outline btn-sm" data-rename="' + esc(b.name) + '">Rename</button>';
+    const pinBtn = isArchived ? "" : (b.pinned
+      ? '<button class="btn-outline btn-sm" data-act="unpin" data-name="' + esc(b.name) + '">Unpin</button>'
+      : '<button class="btn-outline btn-sm" data-act="pin" data-name="' + esc(b.name) + '">Pin</button>');
+    // A pinned running machine is exempt from the idle reaper; pausing it
+    // directly would just be undone, so its power action is unpinning. But
+    // pinned does not imply running (a pin whose warm-up failed, or an
+    // operator pause), and a paused pinned machine still needs its Resume.
+    const actions = isArchived
+      ? stateBtn
+      : ((b.pinned && isRunning) ? "" : stateBtn + " ") + rebootBtn + " " + snapBtn + " " + archiveBtn + " " + renameBtn + " " + pinBtn;
+
+    const pinBadge = b.pinned
+      ? '<span class="badge pinned"><span class="dot"></span>pinned</span>' : "";
+    const envWarn = b.env_undecryptable
+      ? '<div class="env-warn">Secrets for this machine cannot be decrypted — the encryption key' +
+        " has changed. Nothing was pushed. Re-enter the affected secrets in the Secrets tab.</div>"
+      : "";
+
+    return '<div class="card machine">' +
+      '<div class="m-head">' +
+        '<div class="m-title">' +
+          '<span class="name mono">' + esc(b.name) + "</span>" + badge(b.state) + pinBadge +
+          '<span class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB · " +
+            esc(b.image || "–") + " · active " + rel(b.last_active) + "</span>" +
+        "</div>" +
+        '<div class="m-actions">' + actions + "</div>" +
+      "</div>" + envWarn +
+      '<div class="m-body">' +
+        '<div class="m-stat"><div class="label">Host CPU</div><div class="value">' + cpu + "</div></div>" +
+        '<div class="m-stat"><div class="label">Memory</div><div class="value">' + mem + "</div></div>" +
+        '<div class="m-stat"><div class="label">Disk</div><div class="value">' + disk + "</div></div>" +
+      "</div>" +
+      '<div class="m-foot">' +
+        '<div class="m-sect"><div class="label">Tags <span style="text-transform:none;letter-spacing:0">' +
+          "— secrets with a matching tag land in this machine's environment</span></div>" + tagChips(b) + "</div>" +
+        '<div class="m-sect"><div class="label">Web routes</div>' + routePanel(b) + "</div>" +
+      "</div>" +
+    "</div>";
+  }
+
+  function renderMachines(list) {
+    const now = Date.now();
+    // Always take a CPU sample so the delta window stays fresh even when the
+    // repaint is skipped mid-edit.
+    const cards = list.map((b) => machineCard(b, now));
+    if (editing()) return;
+    const wrap = $("machine-list");
+    wrap.innerHTML = cards.join("");
+    $("machines-empty").classList.toggle("hidden", list.length > 0);
+
+    wrap.querySelectorAll("button[data-act]").forEach((btn) =>
+      btn.addEventListener("click", () => act(btn.dataset.name, btn.dataset.act, btn)));
+    wrap.querySelectorAll("button[data-snap]").forEach((btn) =>
+      btn.addEventListener("click", () => snapshotBox(btn.dataset.snap, btn)));
+    wrap.querySelectorAll("button[data-rename]").forEach((btn) =>
+      btn.addEventListener("click", () => openRename(btn.dataset.rename)));
+    wrap.querySelectorAll("button[data-untag]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const b = list.find((x) => x.name === btn.dataset.name);
+        if (!b) return;
+        setTags(btn.dataset.name, (b.tags || []).filter((t) => t !== btn.dataset.untag), btn);
+      }));
+    wrap.querySelectorAll("input[data-tag-input]").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const tag = inp.value.trim();
+        if (!tag) return;
+        if (!TAG_RE.test(tag)) return toast("tags are lowercase letters, digits, dashes (max 40)", true);
+        const b = list.find((x) => x.name === inp.dataset.tagInput);
+        if (!b || (b.tags || []).includes(tag)) { inp.value = ""; return; }
+        setTags(b.name, (b.tags || []).concat(tag), inp);
+      }));
+    wrap.querySelectorAll("button[data-vis]").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        mutate("vis:" + btn.dataset.sub, btn, async () => {
+          await api("/api/routes/" + encodeURIComponent(btn.dataset.sub) + "/visibility",
+            { method: "POST", body: { visibility: btn.dataset.vis } });
+          toast(btn.dataset.sub + " is now " + btn.dataset.vis);
+        })));
+    wrap.querySelectorAll("button[data-port-set]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.portSet;
+        const inp = wrap.querySelector('input[data-port-input="' + CSS.escape(name) + '"]');
+        const port = parseInt(inp && inp.value, 10);
+        if (!port || port < 1 || port > 65535) return toast("port must be 1–65535", true);
+        mutate("port:" + name, btn, async () => {
+          await api("/api/machines/" + encodeURIComponent(name) + "/port",
+            { method: "POST", body: { port: port } });
+          toast(name + " now forwards port " + port);
+        });
+      }));
+    reapplyInflight(wrap);
+  }
+
+  async function setTags(name, tags, el) {
+    await mutate("tags:" + name, el, async () => {
+      await api("/api/machines/" + encodeURIComponent(name) + "/tags",
+        { method: "PUT", body: { tags: tags } });
+      toast(name + " tags updated");
+      el.blur(); // release the editing() guard so the repaint lands
+    });
+  }
+
+  // snapshotBox prompts for a name and captures a machine's disk as a template.
+  async function snapshotBox(name, btn) {
+    const snap = (prompt("Snapshot name for " + name + " (lowercase letters, digits, dashes):") || "").trim();
+    if (!snap) return;
+    await mutate("snap:" + name, btn, async () => {
+      await api("/api/machines/" + encodeURIComponent(name) + "/snapshot",
+        { method: "POST", body: { snapshot_name: snap } });
+      toast("snapshot " + snap + " created");
+    });
+  }
+
+  // ---- rename dialog ----
+
+  function openRename(name) {
+    $("rename-old").textContent = name;
+    $("rename-new").value = name;
+    $("rename-dlg")._name = name;
+    $("rename-dlg").showModal();
+    $("rename-new").select();
+  }
+
+  $("rename-cancel").addEventListener("click", () => $("rename-dlg").close());
+  $("rename-new").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("rename-go").click(); }
+  });
+  $("rename-go").addEventListener("click", async () => {
+    const dlg = $("rename-dlg");
+    const oldName = dlg._name;
+    const newName = $("rename-new").value.trim();
+    if (newName === oldName) return dlg.close();
+    if (!NAME_RE.test(newName)) return toast("names are lowercase letters, digits, dashes", true);
+    const btn = $("rename-go");
+    btn.disabled = true;
+    try {
+      await api("/api/machines/" + encodeURIComponent(oldName) + "/rename",
+        { method: "POST", body: { new_name: newName } });
+      dlg.close();
+      toast(oldName + " renamed to " + newName + " — hostname updates on next reboot");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- snapshots ----
+
+  function renderSnaps(list) {
+    if (editing()) return;
+    const rows = $("snap-rows");
+    rows.innerHTML = "";
+    for (const s of list) {
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="name mono">' + esc(s.name) + "</td>" +
+        '<td class="muted">' + esc(s.from_box || "–") + "</td>" +
+        '<td class="age">' + rel(s.created_at) + "</td>" +
+        '<td class="actions">' +
+          '<button class="btn-outline btn-sm" data-fork="' + esc(s.name) + '">Fork</button> ' +
+          '<button class="btn-outline btn-sm btn-danger" data-del="' + esc(s.name) + '">Delete</button></td>';
+      rows.appendChild(tr);
+    }
+    $("snap-empty").classList.toggle("hidden", list.length > 0);
+    rows.querySelectorAll("button[data-fork]").forEach((btn) =>
+      btn.addEventListener("click", () => forkSnap(btn.dataset.fork, btn)));
+    rows.querySelectorAll("button[data-del]").forEach((btn) =>
+      btn.addEventListener("click", () => delSnap(btn.dataset.del, btn)));
+    reapplyInflight(rows);
+  }
+
+  async function forkSnap(snap, btn) {
+    const name = (prompt("New machine name from snapshot " + snap + ":") || "").trim();
+    if (!name) return;
+    await mutate("fork:" + snap, btn, async () => {
+      await api("/api/snapshots/" + encodeURIComponent(snap) + "/fork",
+        { method: "POST", body: { name: name } });
+      toast("forked " + name + " from " + snap);
+    });
+  }
+
+  async function delSnap(snap, btn) {
+    if (!confirm("Delete snapshot " + snap + "? Forks already made are unaffected.")) return;
+    await mutate("delsnap:" + snap, btn, async () => {
+      await api("/api/snapshots/" + encodeURIComponent(snap) + "/delete", { method: "POST" });
+      toast("deleted snapshot " + snap);
+    });
+  }
+
+  // ---- secrets ----
+
+  function renderSecrets(list) {
+    const rows = $("secret-rows");
+    rows.innerHTML = "";
+    for (const s of list) {
+      const name = s.name || s.env_name || "";
+      const tags = (s.tags || []).length
+        ? (s.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
+        : '<span class="muted">– none: reaches no machine</span>';
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="name mono">' + esc(name) + "</td>" +
+        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>v" + (s.version | 0) + "</td>" +
+        '<td class="age">' + rel(s.updated_at) + "</td>" +
+        '<td class="actions">' +
+          '<button class="btn-outline btn-sm" data-edit="' + esc(name) +
+            '" data-tags="' + esc((s.tags || []).join(",")) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm btn-danger" data-del-secret="' + esc(name) + '">Delete</button></td>';
+      rows.appendChild(tr);
+    }
+    $("secrets-empty").classList.toggle("hidden", list.length > 0);
+    rows.querySelectorAll("button[data-edit]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        // Prefill the form for an update; the value is write-only, so it
+        // always starts blank — saving overwrites the stored value.
+        $("sec-name").value = btn.dataset.edit;
+        $("sec-tags").value = btn.dataset.tags;
+        $("sec-value").value = "";
+        $("sec-value").focus();
+      }));
+    rows.querySelectorAll("button[data-del-secret]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.delSecret;
+        if (!confirm("Delete secret " + name + "? It is removed from tagged machines' environments; " +
+          "running processes keep it until reboot.")) return;
+        mutate("delsecret:" + name, btn, async () => {
+          await api("/api/secrets/" + encodeURIComponent(name), { method: "DELETE" });
+          toast("deleted " + name);
+        });
+      }));
+    reapplyInflight(rows);
+  }
+
+  function secretsDisabled(off) {
+    $("secrets-disabled").classList.toggle("hidden", !off);
+    $("secret-form").classList.toggle("hidden", off);
+  }
+
+  $("secret-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("sec-name").value.trim();
+    const value = $("sec-value").value;
+    const tags = $("sec-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    if (!ENV_RE.test(name)) {
+      return toast("name must be UPPER_SNAKE_CASE: start with A–Z or _, then A–Z, 0–9, _ (max 64)", true);
+    }
+    if (!value) return toast("value is required", true);
+    if (/[\n\r\0]/.test(value)) return toast("value must be a single line", true);
+    if (new TextEncoder().encode(value).length > 4096) return toast("value exceeds 4 KiB", true);
+    for (const t of tags) {
+      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+    }
+    const btn = $("sec-save");
+    btn.disabled = true;
+    try {
+      await api("/api/secrets/" + encodeURIComponent(name),
+        { method: "PUT", body: { value: value, tags: tags } });
+      toast(name + " saved — new shells see it now; reboot machines to update running processes");
+      $("sec-name").value = "";
+      $("sec-value").value = "";
+      $("sec-tags").value = "";
+      await refresh();
+    } catch (e2) {
+      toast(e2.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- tabs / shell ----
+
+  document.querySelectorAll(".tab").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
+      $("tab-machines").classList.toggle("hidden", btn.dataset.tab !== "machines");
+      $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
+    }));
+
+  $("logout-btn").addEventListener("click", async () => {
+    await fetch("/api/logout", { method: "POST", headers: { "X-Sparkbox-Console": "1" } }).catch(() => {});
+    show("signin");
+  });
+
+  async function errText(r) {
+    return (await r.json().catch(() => ({}))).error || r.statusText;
+  }
+
+  async function refresh() {
+    try {
+      const [rm, rs, rn] = await Promise.all([
+        fetch("/api/machines"), fetch("/api/secrets"), fetch("/api/snapshots"),
+      ]);
+      if (rm.status === 401) return show("signin");
+      if (!rm.ok) throw new Error(await errText(rm));
+      const machines = await rm.json();
+      show("app");
+      renderMachines(Array.isArray(machines) ? machines : []);
+      // The "updated" stamp asserts every pane is current; a failed secrets
+      // or snapshots fetch keeps a stale table, so it must not re-stamp.
+      let fresh = true;
+      // 501 = secrets subsystem disabled (encryption-key mismatch); the tab
+      // stays visible with an explanation rather than silently vanishing.
+      if (rs.status === 501) {
+        secretsDisabled(true);
+        renderSecrets([]);
+      } else if (rs.ok) {
+        secretsDisabled(false);
+        const secrets = await rs.json();
+        renderSecrets(Array.isArray(secrets) ? secrets : []);
+      } else {
+        fresh = false;
+        toast("secrets refresh failed: " + (await errText(rs)), true);
+      }
+      if (rn.ok) {
+        const snaps = await rn.json();
+        renderSnaps(Array.isArray(snaps) ? snaps : []);
+      } else {
+        fresh = false;
+        toast("snapshots refresh failed: " + (await errText(rn)), true);
+      }
+      if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
+      if (!timer) timer = setInterval(refresh, 4000);
+    } catch (e) {
+      // Before the first successful load nothing is visible yet, so a toast
+      // alone would leave a blank page; swap in the retryable error state.
+      if ($("app-view").classList.contains("hidden")) {
+        showError("Couldn't load your machines: " + e.message);
+      } else {
+        toast("refresh failed: " + e.message, true);
+      }
+    }
+  }
+
+  async function init() {
+    $("domain-label").textContent = location.host;
+    try {
+      const me = await api("/api/me");
+      const who = $("who");
+      who.textContent = me.handle + (me.operator ? " · operator" : "");
+      who.className = "badge" + (me.operator ? " op" : "");
+    } catch (e) {
+      // api() already flipped to the sign-in view on 401; anything else
+      // (edge 502, server restart) gets the visible error state.
+      if (!e.unauthorized) showError("Couldn't reach the console: " + e.message);
+      return;
+    }
+    await refresh();
+  }
+
+  $("error-retry").addEventListener("click", init);
+  init();
+})();
+</script>
+</body>
+</html>

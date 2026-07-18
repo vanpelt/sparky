@@ -85,4 +85,29 @@ func TestLoginRejectsBadTokenAndOpenRedirect(t *testing.T) {
 	if got := h.safeReturn("https://ok.hivemind.tools/x"); got != "https://ok.hivemind.tools/x" {
 		t.Fatalf("legit return rejected: %q", got)
 	}
+	// A TLS edge stays https-only: an http return collapses to the zone root.
+	if got := h.safeReturn("http://ok.hivemind.tools/x"); got != "https://hivemind.tools/" {
+		t.Fatalf("http return on a TLS edge not blocked: %q", got)
+	}
+}
+
+// A non-TLS edge (the mock-driver dev loop on localtest.me) serves the zone
+// over http, so safeReturn must accept http return URLs there — still on-zone
+// only — and its fallback must be reachable (http, not https).
+func TestSafeReturnHTTPOnNonTLSEdge(t *testing.T) {
+	s := NewSigner([]byte("k"))
+	h := NewLoginHandler(LoginConfig{Signer: s, Domain: "localtest.me", Gateway: "localtest.me", Secure: false})
+
+	if got := h.safeReturn("http://my.localtest.me:8081/x"); got != "http://my.localtest.me:8081/x" {
+		t.Fatalf("dev-loop http return rejected: %q", got)
+	}
+	if got := h.safeReturn("https://my.localtest.me/x"); got != "https://my.localtest.me/x" {
+		t.Fatalf("https return rejected on non-TLS edge: %q", got)
+	}
+	if got := h.safeReturn("http://evil.com/steal"); got != "http://localtest.me/" {
+		t.Fatalf("off-zone http return not collapsed: %q", got)
+	}
+	if got := h.safeReturn(""); got != "http://localtest.me/" {
+		t.Fatalf("fallback on non-TLS edge should be http: %q", got)
+	}
 }

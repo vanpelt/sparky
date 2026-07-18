@@ -31,7 +31,7 @@ func TestVerifyRejectsTampering(t *testing.T) {
 
 	// Flip a byte in the payload — the MAC must no longer match.
 	b := []byte(tok)
-	b[len(tokenPrefix)+2] ^= 0x01
+	b[len(TokenPrefix)+2] ^= 0x01
 	if _, ok := s.Verify(string(b)); ok {
 		t.Fatal("tampered token verified")
 	}

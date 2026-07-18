@@ -58,6 +58,12 @@ func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*S
 	}
 	m.mu.Unlock()
 
+	// Every fork copies this rootfs byte-for-byte, so the managed secret block
+	// must be cleared before capture — the fork's create-time push writes the
+	// then-current set.
+	if err := m.stripEnvForPack(ctx, box); err != nil {
+		return nil, fmt.Errorf("snapshot %q: %w", snapName, err)
+	}
 	// Pause so the guest has flushed + unmounted its rootfs before we fsck/mount
 	// it. Idempotent if already paused.
 	if err := m.Pause(ctx, box); err != nil {

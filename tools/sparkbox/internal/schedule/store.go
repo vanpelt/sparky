@@ -73,10 +73,15 @@ type Store struct {
 // Open opens (creating if needed) the sqlite database at path and applies the
 // schema.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// DSN pragmas run on every pooled connection (a db.Exec pragma binds to
+	// just one), and _txlock=immediate takes the write lock at Begin, where
+	// busy_timeout applies. See the fuller rationale in secrets.Open; the
+	// stores share sparkbox.db.
+	db, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
+	// Redundant with the DSN, but an unsupported pragma fails Open loudly.
 	for _, pragma := range []string{
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA journal_mode=WAL",
@@ -192,6 +197,16 @@ func (s *Store) DeleteBySandbox(sandbox string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`DELETE FROM schedules WHERE sandbox = ?`, sandbox)
+	return err
+}
+
+// RenameSandbox moves a sandbox's schedule entries to its new name so its
+// jobs keep firing after a rename. The manager guarantees the new name is
+// unclaimed before calling.
+func (s *Store) RenameSandbox(old, new string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE schedules SET sandbox = ? WHERE sandbox = ?`, new, old)
 	return err
 }
 

@@ -71,10 +71,15 @@ type Store struct {
 // Open opens (creating if needed) the sqlite database at path and applies the
 // schema.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// DSN pragmas run on every pooled connection (a db.Exec pragma binds to
+	// just one), and _txlock=immediate takes the write lock at Begin, where
+	// busy_timeout applies — every transaction in this store writes. See the
+	// fuller rationale in secrets.Open; the stores share sparkbox.db.
+	db, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
+	// Redundant with the DSN, but an unsupported pragma fails Open loudly.
 	for _, pragma := range []string{
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA journal_mode=WAL",
@@ -180,9 +185,9 @@ func (s *Store) Upsert(r Route) error {
 	}
 
 	// Only the port is updated on conflict: visibility is set once at creation
-	// and thereafter changed only through SetVisibility, so the host manager
-	// re-writing the default route on every resume can't silently re-privatise a
-	// subdomain the owner deliberately made public.
+	// and thereafter changed only through SetVisibility, so a port change (the
+	// console's "change port", or the API re-writing a route) can't silently
+	// re-privatise a subdomain the owner deliberately made public.
 	if _, err := tx.Exec(`
 		INSERT INTO routes (subdomain, sandbox, owner, port, visibility, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -257,6 +262,65 @@ func (s *Store) query(q string, args ...any) ([]Route, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// RenameSandbox follows a sandbox rename: every route pointing at old is
+// repointed at new, and the default route (the row whose subdomain is the
+// sandbox's own name) moves to the new subdomain so <new>.<domain> keeps
+// working and the old subdomain is released. Custom subdomains stay put; if
+// one already claims the new name, it serves <new>.<domain> and the old
+// default row is dropped instead of moved. Returns ErrSubdomainTaken if the
+// new subdomain is already routed to a different sandbox — the caller checks
+// this before renaming, so hitting it here means the world moved.
+//
+// The call is idempotent: rows already in the target state (a row at new
+// pointing at new, no sandbox=old rows) are left alone and the call succeeds,
+// so a crashed rename is repaired by renaming again.
+func (s *Store) RenameSandbox(old, new string) error {
+	if !ValidSubdomain(new) {
+		return fmt.Errorf("invalid subdomain %q", new)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var existingSandbox string
+	err = tx.QueryRow(`SELECT sandbox FROM routes WHERE subdomain = ?`, new).Scan(&existingSandbox)
+	switch {
+	case err == sql.ErrNoRows:
+		// New subdomain is free: move the default row. The sandbox=old guard
+		// makes a re-run after a partial rename a no-op instead of stealing a
+		// custom route that happens to be named old.
+		if _, err := tx.Exec(
+			`UPDATE routes SET subdomain = ? WHERE subdomain = ? AND sandbox = ?`,
+			new, old, old); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	case existingSandbox != old && existingSandbox != new:
+		return ErrSubdomainTaken
+	default:
+		// existingSandbox == old: the sandbox already has a custom route named
+		// new; it keeps <new>.<domain> working, so drop the old default row to
+		// release the old subdomain (matching the ErrNoRows branch).
+		// existingSandbox == new: a previous (possibly crashed) rename already
+		// moved the row at new; the delete and the repoint below finish or
+		// no-op whatever remains. The sandbox=old guard leaves alone a custom
+		// route that happens to be named old.
+		if _, err := tx.Exec(
+			`DELETE FROM routes WHERE subdomain = ? AND sandbox = ?`, old, old); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE routes SET sandbox = ? WHERE sandbox = ?`, new, old); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Delete removes a single route by subdomain.

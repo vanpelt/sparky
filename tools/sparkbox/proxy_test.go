@@ -227,6 +227,25 @@ func TestProxyErrorPages(t *testing.T) {
 	}
 }
 
+func TestReservedSubdomainBeatsRouteLookup(t *testing.T) {
+	ps := newProxyStack(t)
+	ctx := context.Background()
+
+	// A sandbox whose default route claims the same subdomain must lose to the
+	// reserved handler — reserved dispatch runs before route lookup.
+	if _, err := ps.mgr.Create(ctx, "taken", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	ps.proxy.(*proxy.Server).SetReserved("taken", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "reserved-handler")
+	}))
+
+	code, body := ps.get(t, "taken.hivemind.tools")
+	if code != http.StatusOK || body != "reserved-handler" {
+		t.Fatalf("reserved subdomain not dispatched to handler: %d %q", code, body)
+	}
+}
+
 func TestDefaultRouteCreatedOnCreate(t *testing.T) {
 	ps := newProxyStack(t)
 	ctx := context.Background()

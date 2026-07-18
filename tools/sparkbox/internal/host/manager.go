@@ -24,6 +24,16 @@ import (
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
+// reservedNames are subdomains the gateway and consoles own: a sandbox's name
+// is its default subdomain, so taking one would shadow a platform door. Own
+// copy of users.reserved (users/store.go) per the deliberate-duplication
+// convention — the users package owns handle policy, not sandbox policy.
+var reservedNames = map[string]bool{
+	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
+	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
+	"my": true,
+}
+
 // Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
 // `new@` path always does; the HTTP API may override). Bounded only by host
 // capacity — an 8c/16t/64GB box fits ~8 of these before overcommit.
@@ -108,6 +118,12 @@ type Sandbox struct {
 	// summed per owner for the pooled-disk admission check. 0 for an archived box
 	// (no local footprint — its archive counts against the pool instead).
 	DiskMB int64 `json:"disk_mb,omitempty"`
+	// RenamedFrom journals an in-flight rename (see Rename): the record is
+	// saved under its new name with this set to the old name before the VM dir
+	// moves on disk, so a crash between the two converges at the next load
+	// (see NewManager) instead of stranding the rootfs under the other name.
+	// Empty except inside that window.
+	RenamedFrom string `json:"renamed_from,omitempty"`
 }
 
 // ScheduleCleaner drops a sandbox's platform-scheduler entries when it is
@@ -115,6 +131,28 @@ type Sandbox struct {
 // forever. Satisfied structurally by *schedule.Store (avoids importing it).
 type ScheduleCleaner interface {
 	DeleteBySandbox(sandbox string) error
+}
+
+// TagCleaner keeps sandbox tag rows (see internal/secrets) in step with the
+// sandbox lifecycle: rows are dropped when a sandbox is destroyed and follow a
+// rename. Satisfied structurally by *secrets.Store (avoids importing it).
+type TagCleaner interface {
+	DeleteBySandbox(sandbox string) error
+	RenameSandbox(old, new string) error
+}
+
+// sandboxRenamer is the rename hook side stores (routes, schedules) grow so
+// their sandbox-keyed rows follow a rename. Detected with a type assertion at
+// call time, so a store that predates the method is simply skipped.
+type sandboxRenamer interface {
+	RenameSandbox(old, new string) error
+}
+
+// EnvPusher pushes an owner's secret environment into a sandbox's
+// /etc/environment over SSH (see internal/envsync). Optional and always
+// best-effort: a lifecycle operation is never failed over a push.
+type EnvPusher interface {
+	PushEnv(ctx context.Context, box *Sandbox) error
 }
 
 // FrontDoor is an optional hook for per-sandbox public-address plumbing (see
@@ -143,6 +181,9 @@ type Manager struct {
 	balloon     vmm.Ballooner    // driver's balloon capability, if it has one; else nil
 	archiver    vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
 	diskReport  vmm.DiskReporter // driver's disk-usage capability; else nil
+	renamer     vmm.Renamer      // driver's VM-rename capability; else nil
+	rebooter    vmm.Rebooter     // driver's snapshot-discard capability; else nil
+	cpuStats    vmm.CPUStatser   // driver's CPU-time capability; else nil
 	archive     ObjectStore      // object store for archives; nil disables archiving
 	log         *slog.Logger
 	stateDir    string // dir holding sandboxes.json + transient archive staging
@@ -154,6 +195,8 @@ type Manager struct {
 	routes      *routes.Store   // optional: proxy route bookkeeping
 	schedules   ScheduleCleaner // optional: platform-scheduler cleanup on destroy
 	frontDoor   FrontDoor       // optional: per-sandbox address plumbing
+	tags        TagCleaner      // optional: sandbox tag-row cleanup on destroy/rename
+	envSync     EnvPusher       // optional: secret-env push when a sandbox reaches running
 	maxPerOwner int             // max running sandboxes per owner; 0 = unlimited
 	memAdmitPct int             // RAM admission threshold as % of host; 0 = disabled
 	hostMemMB   int64           // host RAM in MB for admission; 0 = disabled
@@ -174,6 +217,9 @@ type Options struct {
 	Routes *routes.Store
 	// Schedules, if set, has a sandbox's schedules deleted when it is destroyed.
 	Schedules ScheduleCleaner
+	// Tags, if set, has a sandbox's tag rows deleted on destroy and moved on
+	// rename. Satisfied structurally by *secrets.Store.
+	Tags TagCleaner
 	// MaxRunningPerOwner caps how many sandboxes one owner may have running at
 	// once (0 = unlimited). Enforced on create and resume-on-connect.
 	MaxRunningPerOwner int
@@ -218,6 +264,7 @@ func NewManager(opts Options) (*Manager, error) {
 		gwPubKey:    opts.GatewayPublicKey,
 		routes:      opts.Routes,
 		schedules:   opts.Schedules,
+		tags:        opts.Tags,
 		archive:     opts.Archive,
 		archivePfx:  opts.ArchivePrefix,
 		maxPerOwner: opts.MaxRunningPerOwner,
@@ -245,6 +292,16 @@ func NewManager(opts Options) (*Manager, error) {
 	if dr, ok := opts.Driver.(vmm.DiskReporter); ok {
 		m.diskReport = dr
 	}
+	// And the user-console capabilities: rename, cold-boot reboot, CPU stats.
+	if rn, ok := opts.Driver.(vmm.Renamer); ok {
+		m.renamer = rn
+	}
+	if rb, ok := opts.Driver.(vmm.Rebooter); ok {
+		m.rebooter = rb
+	}
+	if cs, ok := opts.Driver.(vmm.CPUStatser); ok {
+		m.cpuStats = cs
+	}
 	if m.nodeName == "" {
 		m.nodeName = "local"
 	}
@@ -253,6 +310,22 @@ func NewManager(opts Options) (*Manager, error) {
 	}
 	if err := m.loadSnapshots(); err != nil {
 		return nil, err
+	}
+	// Complete any rename that crashed between its journal save and its final
+	// save (see Rename): the record already carries the new name, so re-run the
+	// dir move — it succeeds when the crash preceded the move, and fails
+	// harmlessly when the dir already moved (old gone, new present).
+	for name, b := range m.boxes {
+		if b.RenamedFrom == "" {
+			continue
+		}
+		if m.renamer != nil {
+			if err := m.renamer.RenameVM(b.RenamedFrom, name); err != nil {
+				m.log.Info("rename reconcile: vm dir already moved",
+					"name", name, "from", b.RenamedFrom, "err", err)
+			}
+		}
+		b.RenamedFrom = ""
 	}
 	// Driver state does not survive process restarts in the mock driver, and
 	// firecracker VMs died with the previous process too. Mark everything
@@ -271,6 +344,9 @@ func NewManager(opts Options) (*Manager, error) {
 func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
 	if !nameRe.MatchString(name) {
 		return nil, fmt.Errorf("invalid sandbox name %q (lowercase alphanumerics and dashes)", name)
+	}
+	if reservedNames[name] {
+		return nil, fmt.Errorf("sandbox name %q is reserved", name)
 	}
 	if vcpus <= 0 {
 		vcpus = defaultVCPUs
@@ -313,6 +389,9 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		m.frontDoor.Ensure(ctx, name)
 	}
 	m.log.Info("sandbox created", "name", name, "owner", owner)
+	// Unconditional push on create also covers forks: a forked rootfs carries
+	// the template's managed env block, and this rewrite is what replaces it.
+	m.pushEnv(ctx, copyOf(b))
 	return copyOf(b), m.save()
 }
 
@@ -432,6 +511,20 @@ func (m *Manager) List() []*Sandbox {
 	return out
 }
 
+// ListByOwner returns one owner's sandboxes, sorted by name.
+func (m *Manager) ListByOwner(owner string) []*Sandbox {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*Sandbox
+	for _, b := range m.boxes {
+		if b.Owner == owner {
+			out = append(out, copyOf(b))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // NodeCapacity is one host's resource picture: what the box has, what the
 // admission controller will hand out, and what running sandboxes have claimed.
 // Sparkbox is single-host today, but capacity is reported per node so a
@@ -532,12 +625,44 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		b.HostIP = inst.HostIP
 		b.GuestV6 = inst.GuestV6
 		m.log.Info("sandbox resumed", "name", name)
+		// The rootfs survived pause/archive/host-restart, but the env may have
+		// changed while the box was down — reconcile on every return to running.
+		m.pushEnv(ctx, copyOf(b))
 	}
 	// Activity returns a ballooned-down sandbox to full RAM (whether it was
 	// just resumed or was warm-but-ballooned).
 	m.deflate(ctx, b)
 	b.LastActive = time.Now().UTC()
 	return copyOf(b), m.save()
+}
+
+// SetEnvSync installs the env-push hook after construction — the syncer needs
+// the gateway's upstream SSH key, which only exists once the manager does.
+// Once set, every sandbox that reaches running (create, resume, restore,
+// recreate, fork) gets a best-effort push, so the guest's env file self-heals
+// on the next start no matter how a change-time push was missed.
+func (m *Manager) SetEnvSync(p EnvPusher) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.envSync = p
+}
+
+// pushEnv fires the env-sync hook for a sandbox that just reached running.
+// Callers hold m.mu; the push dials the guest's sshd, so it runs on its own
+// goroutine (bounded, detached from the caller's ctx) and can never fail or
+// slow the lifecycle operation it rides on.
+func (m *Manager) pushEnv(ctx context.Context, b *Sandbox) {
+	if m.envSync == nil {
+		return
+	}
+	p := m.envSync
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
+		defer cancel()
+		if err := p.PushEnv(ctx, b); err != nil {
+			m.log.Warn("env push failed", "name", b.Name, "err", err)
+		}
+	}()
 }
 
 // resumeOrRecreate handles the post-restart case where the driver has no
@@ -577,6 +702,227 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	return m.save()
 }
 
+// Reboot cold-restarts a sandbox's guest: pause, discard the memory snapshot,
+// then EnsureRunning falls through resumeOrRecreate to a cold boot of the
+// preserved rootfs. This is the only way already-running guest processes pick
+// up a changed /etc/environment (new SSH sessions see it immediately).
+func (m *Manager) Reboot(ctx context.Context, name string) error {
+	if m.rebooter == nil {
+		return errors.New("reboot is not enabled on this host (driver cannot drop snapshots)")
+	}
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.State == vmm.StateArchived {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q is archived; resume it instead", name)
+	}
+	m.mu.Unlock()
+
+	// Pause first so the guest has flushed its rootfs; idempotent if paused.
+	// A resume-on-connect can slip in between the pause and the snapshot drop
+	// (clients auto-reconnect the moment the pause kills their session), so
+	// re-check under the lock — held across the drop, like Rename — and
+	// re-pause once if the box was resumed out from under us.
+	for attempt := 0; ; attempt++ {
+		if err := m.Pause(ctx, name); err != nil {
+			return fmt.Errorf("reboot %s: pause: %w", name, err)
+		}
+		m.mu.Lock()
+		b, ok = m.boxes[name]
+		if !ok {
+			m.mu.Unlock()
+			return fmt.Errorf("sandbox %q not found", name)
+		}
+		if b.State == vmm.StatePaused {
+			err := m.rebooter.DropSnapshots(name)
+			m.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("reboot %s: drop snapshots: %w", name, err)
+			}
+			break
+		}
+		m.mu.Unlock()
+		if attempt > 0 {
+			return fmt.Errorf("reboot %s: sandbox keeps being resumed mid-reboot; try again", name)
+		}
+	}
+	if _, err := m.EnsureRunning(ctx, name); err != nil {
+		return fmt.Errorf("reboot %s: %w", name, err)
+	}
+	m.log.Info("sandbox rebooted", "name", name)
+	return nil
+}
+
+// Rename gives a sandbox a new name — and with it a new default subdomain and
+// SSH address. A running sandbox is auto-paused first (its VM dir moves on
+// disk), and its memory snapshot is dropped before the move because a
+// firecracker state.snap embeds absolute paths into the old dir — so the next
+// start cold-boots the moved rootfs. Archived sandboxes are refused: their
+// archive object is keyed by name (archiveKey), so the flow is restore, then
+// rename. The record is journaled under the new name (RenamedFrom) before the
+// irreversible dir move, so a crash on either side of the move converges at
+// the next load. The routes store moves first and fatally — its rows carry
+// ownership for private-route auth, so an orphaned sandbox=old row is a
+// security hole, not a cosmetic one — and is rolled back (idempotently) if
+// the record commit or dir move then fails; a crash between the hook and the
+// commit is repaired by renaming again, which renameChecks and the store's
+// idempotent RenameSandbox both tolerate. The remaining side stores
+// (schedules, tags, front door) follow best-effort and idempotently.
+func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) error {
+	if m.renamer == nil {
+		return errors.New("rename is not enabled on this host")
+	}
+	if !nameRe.MatchString(newName) {
+		return fmt.Errorf("invalid sandbox name %q (lowercase alphanumerics and dashes)", newName)
+	}
+	if reservedNames[newName] {
+		return fmt.Errorf("sandbox name %q is reserved", newName)
+	}
+	m.mu.Lock()
+	if err := m.renameChecks(oldName, newName, owner); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Unlock()
+
+	// Pause first so the rootfs is flushed and the VM dir is movable.
+	// Idempotent if already paused.
+	if err := m.Pause(ctx, oldName); err != nil {
+		return fmt.Errorf("rename %s: pause: %w", oldName, err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Re-validate: the world may have moved between the pause and the lock.
+	if err := m.renameChecks(oldName, newName, owner); err != nil {
+		return err
+	}
+	b := m.boxes[oldName]
+	if b.State != vmm.StatePaused {
+		return fmt.Errorf("sandbox %q was resumed mid-rename; try again", oldName)
+	}
+	// Snapshots must go before the dir moves (see the doc comment); dropping
+	// them alone is safe — the next start simply cold-boots.
+	if m.rebooter != nil {
+		if err := m.rebooter.DropSnapshots(oldName); err != nil {
+			return fmt.Errorf("rename %s: drop snapshots: %w", oldName, err)
+		}
+	}
+	// Move the routes first, and fatally: once the record commits under the
+	// new name, a failed hook could never be re-fired (Rename(old,new) would
+	// no longer find old), permanently orphaning rows whose Owner column
+	// gates private-route auth. Before the commit the failure is clean — the
+	// record and VM dir are untouched — and the store's RenameSandbox is
+	// idempotent, so the crash-repair story ("rename again") holds on either
+	// side of it.
+	var routesRenamer sandboxRenamer
+	if m.routes != nil {
+		routesRenamer, _ = any(m.routes).(sandboxRenamer)
+	}
+	if routesRenamer != nil {
+		if err := routesRenamer.RenameSandbox(oldName, newName); err != nil {
+			return fmt.Errorf("rename %s: routes: %w", oldName, err)
+		}
+	}
+	undoRoutes := func() {
+		if routesRenamer == nil {
+			return
+		}
+		if err := routesRenamer.RenameSandbox(newName, oldName); err != nil {
+			// Recoverable: renaming old→new again completes the half-moved
+			// state (renameChecks tolerates the box's own rows at newName).
+			m.log.Warn("route rename rollback failed; rename again to repair",
+				"old", oldName, "new", newName, "err", err)
+		}
+	}
+	// Journal the rename before the irreversible dir move: flip the record to
+	// the new name with RenamedFrom set and make it durable, so a crash on
+	// either side of the move is reconciled at the next load (see NewManager)
+	// instead of leaving a record whose VM dir lives under the other name.
+	delete(m.boxes, oldName)
+	b.Name = newName
+	b.RenamedFrom = oldName
+	m.boxes[newName] = b
+	undo := func() {
+		delete(m.boxes, newName)
+		b.Name = oldName
+		b.RenamedFrom = ""
+		m.boxes[oldName] = b
+	}
+	if err := m.save(); err != nil {
+		undo()
+		undoRoutes()
+		return err
+	}
+	if err := m.renamer.RenameVM(oldName, newName); err != nil {
+		// The dir move is a single rename(2), so on error nothing moved and
+		// the record can safely return to the old name.
+		undo()
+		m.save() //nolint:errcheck
+		undoRoutes()
+		return fmt.Errorf("rename %s: %w", oldName, err)
+	}
+	b.RenamedFrom = ""
+	if err := m.save(); err != nil {
+		return err
+	}
+	// The remaining side plumbing is best-effort per convention: the sandbox
+	// record is the source of truth and each hook is idempotent under re-run.
+	if sr, ok := m.schedules.(sandboxRenamer); ok {
+		if err := sr.RenameSandbox(oldName, newName); err != nil {
+			m.log.Warn("schedule rename failed", "old", oldName, "new", newName, "err", err)
+		}
+	}
+	if m.tags != nil {
+		if err := m.tags.RenameSandbox(oldName, newName); err != nil {
+			m.log.Warn("tag rename failed", "old", oldName, "new", newName, "err", err)
+		}
+	}
+	if m.frontDoor != nil {
+		m.frontDoor.Remove(ctx, oldName)
+		m.frontDoor.Ensure(ctx, newName)
+	}
+	m.log.Info("sandbox renamed", "old", oldName, "new", newName, "owner", b.Owner)
+	return nil
+}
+
+// renameChecks validates a rename against current state. Callers hold m.mu.
+// Run twice — once before the auto-pause and again before committing — since
+// the pause happens with the lock released.
+func (m *Manager) renameChecks(oldName, newName, owner string) error {
+	b, ok := m.boxes[oldName]
+	if !ok || b.Owner != owner {
+		return fmt.Errorf("sandbox %q not found", oldName)
+	}
+	if b.State == vmm.StateArchived {
+		return fmt.Errorf("sandbox %q is archived; restore it first, then rename", oldName)
+	}
+	if _, exists := m.boxes[newName]; exists {
+		return fmt.Errorf("sandbox %q already exists", newName)
+	}
+	if m.routes != nil {
+		r, found, err := m.routes.GetBySubdomain(newName)
+		if err != nil {
+			return fmt.Errorf("rename %s: route check: %w", oldName, err)
+		}
+		// The subdomain is free if its route already belongs to this box: as
+		// a custom route (sandbox == oldName), or half-moved by a rename that
+		// crashed between the routes hook and the record commit (sandbox ==
+		// newName, same owner — the owner guard keeps a stale row from a
+		// destroyed box, which carries someone else's auth, blocking here
+		// rather than being silently adopted). Renaming again completes the
+		// crashed move: the routes store's RenameSandbox is idempotent.
+		if found && r.Sandbox != oldName && !(r.Sandbox == newName && r.Owner == owner) {
+			return fmt.Errorf("subdomain %q is already taken", newName)
+		}
+	}
+	return nil
+}
+
 // archiveKey is where an owner's sandbox archive lives in the object store.
 func (m *Manager) archiveKey(owner, name string) string {
 	return path.Join(m.archivePfx, owner, name+".ext4.zst")
@@ -613,7 +959,13 @@ func (m *Manager) Archive(ctx context.Context, name string) error {
 	owner := b.Owner
 	m.mu.Unlock()
 
-	// Pause first so the guest has flushed and unmounted its rootfs. Idempotent
+	// The packed rootfs is uploaded verbatim, so the managed secret block must
+	// be cleared while the guest is reachable — restore re-pushes it via the
+	// EnsureRunning hook, so nothing is lost.
+	if err := m.stripEnvForPack(ctx, name); err != nil {
+		return fmt.Errorf("archive %s: %w", name, err)
+	}
+	// Pause so the guest has flushed and unmounted its rootfs. Idempotent
 	// if already paused; uses the manager Pause so state/teardown are consistent.
 	if err := m.Pause(ctx, name); err != nil {
 		return fmt.Errorf("archive %s: pause: %w", name, err)
@@ -727,6 +1079,29 @@ func (m *Manager) MemStats(ctx context.Context, name string) (usedMiB int64, ok 
 	return used, true
 }
 
+// CPUSeconds reports a running sandbox's cumulative host CPU time in seconds —
+// the VMM process's vCPU + overhead time, so surfaces should label it "host
+// CPU". Callers derive a utilization percentage from deltas between polls
+// (÷ vcpus); the counter resets to zero on a cold boot. ok=false when
+// unavailable (the driver has no CPU stats, or the sandbox isn't running).
+// The driver call is made without m.mu held.
+func (m *Manager) CPUSeconds(ctx context.Context, name string) (seconds float64, ok bool) {
+	m.mu.Lock()
+	b, exists := m.boxes[name]
+	if !exists || m.cpuStats == nil || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return 0, false
+	}
+	cs := m.cpuStats
+	m.mu.Unlock()
+
+	nanos, err := cs.CPUTimeNanos(ctx, name)
+	if err != nil {
+		return 0, false
+	}
+	return float64(nanos) / 1e9, true
+}
+
 // SetPinned marks a sandbox pinned (exempt from the idle reaper) or clears the
 // flag. Pinning does not itself resume the sandbox — callers that want it warm
 // immediately follow with EnsureRunning.
@@ -789,6 +1164,11 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	if m.schedules != nil {
 		if err := m.schedules.DeleteBySandbox(name); err != nil {
 			m.log.Warn("schedule cleanup failed", "name", name, "err", err)
+		}
+	}
+	if m.tags != nil {
+		if err := m.tags.DeleteBySandbox(name); err != nil {
+			m.log.Warn("tag cleanup failed", "name", name, "err", err)
 		}
 	}
 	if m.frontDoor != nil {
