@@ -5,290 +5,279 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>sparkbox — my machines</title>
 <style>
-  /* shadcn "new-york" design tokens (zinc), light + dark — kept identical to
-     the admin console so the two consoles read as siblings. */
+  /* ==========================================================================
+     sparkbox — "Instrument Cluster for a Living Fleet"
+     A monitoring-wall identity for ephemeral microVMs: a faint measurement grid
+     as substrate, monospace call-signs and gauge-style tabular readouts, uppercase
+     silkscreen labels, and STATE as the only saturated color on an instrument-ink
+     surface. Brand/interactive is one controlled teal; green/amber/violet/red carry
+     meaning exclusively. System fonts only.
+
+     Two governing rules, stated so they can't drift:
+       1. Machine FACTS are monospace (names, ports, vitals, tags); human SENTENCES
+          are sans (notices, dialogs, toasts, empty states).
+       2. Hue separation is load-bearing: the teal ACTION accent never doubles as a
+          STATE color, and no state borrows the action hue.
+
+     The one signature — and the ONLY looping motion — is the heartbeat on a running
+     machine's status dot. Everything else that is "live" (route lamps, feed stamp)
+     is steady-lit, so the single pulse keeps one meaning: this machine is alive.
+     ========================================================================== */
+
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --border: 240 5.9% 90%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.6rem;
-    --green: 142 71% 45%;
-    --amber: 38 92% 50%;
-    --blue: 217 91% 56%;
-    --red: 0 72% 51%;
+    /* surfaces — cool instrument paper (NOT cream, NOT near-black) */
+    --bg:#E7ECEF; --surface:#FBFCFD; --surface-2:#EFF3F5; --well:#E4EAEE;
+    --grid-line:rgba(26,40,52,.06);
+    /* ink */
+    --ink:#16232E; --ink-2:#5A6975; --line:#D2DBE1; --line-strong:#B7C3CB;
+    /* brand / interactive — deep instrument teal ("spark" ignition, controlled) */
+    --accent:#0A6E7B; --accent-hover:#085a65; --accent-ink:#FFFFFF;
+    /* state chroma — the ONLY saturated colors on the page */
+    --alive:#178A5A;  /* running / listening */
+    --held:#B0730F;   /* paused / public route / meter warn */
+    --parked:#6A50C4; /* archived */
+    --alert:#BE3A31;  /* danger / meter hot / dead route */
+    --signal:#295FD0; /* operator / neutral live */
+    --radius:8px; --radius-sm:5px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --background: 240 10% 3.9%;
-      --foreground: 0 0% 98%;
-      --card: 240 10% 5.5%;
-      --muted: 240 3.7% 15.9%;
-      --muted-foreground: 240 5% 64.9%;
-      --border: 240 3.7% 15.9%;
-      --primary: 0 0% 98%;
-      --primary-foreground: 240 5.9% 10%;
-      --ring: 240 4.9% 83.9%;
-      --green: 142 69% 58%;
-      --amber: 38 92% 60%;
-      --blue: 217 91% 66%;
-      --red: 0 84% 65%;
+      --bg:#0E161C; --surface:#16212A; --surface-2:#1D2A34; --well:#0F1920;
+      --grid-line:rgba(140,175,195,.055);
+      --ink:#DBE6EC; --ink-2:#7F8F9B; --line:#26333D; --line-strong:#35454F;
+      --accent:#2FBACF; --accent-hover:#4ecfe1; --accent-ink:#052128;
+      --alive:#35C285; --held:#E1A544; --parked:#A088F2; --alert:#EA6D61; --signal:#6098FF;
     }
   }
+  :root[data-theme="dark"] {
+    --bg:#0E161C; --surface:#16212A; --surface-2:#1D2A34; --well:#0F1920;
+    --grid-line:rgba(140,175,195,.055);
+    --ink:#DBE6EC; --ink-2:#7F8F9B; --line:#26333D; --line-strong:#35454F;
+    --accent:#2FBACF; --accent-hover:#4ecfe1; --accent-ink:#052128;
+    --alive:#35C285; --held:#E1A544; --parked:#A088F2; --alert:#EA6D61; --signal:#6098FF;
+  }
+  :root[data-theme="light"] {
+    --bg:#E7ECEF; --surface:#FBFCFD; --surface-2:#EFF3F5; --well:#E4EAEE;
+    --grid-line:rgba(26,40,52,.06);
+    --ink:#16232E; --ink-2:#5A6975; --line:#D2DBE1; --line-strong:#B7C3CB;
+    --accent:#0A6E7B; --accent-hover:#085a65; --accent-ink:#FFFFFF;
+    --alive:#178A5A; --held:#B0730F; --parked:#6A50C4; --alert:#BE3A31; --signal:#295FD0;
+  }
+
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
-    background: hsl(var(--background));
-    color: hsl(var(--foreground));
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-      "Helvetica Neue", Arial, sans-serif;
-    font-size: 14px;
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
+    min-height: 100vh; background-color: var(--bg);
+    /* signature substrate: a faint engineering measurement grid — instrument
+       panel, not decoration; reads in the gutters around the opaque bays. */
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 32px 32px; background-attachment: fixed;
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 64px; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .wrap { position: relative; max-width: 1060px; margin: 0 auto; padding: 26px 20px 72px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--ink-2); }
 
-  /* header */
-  header {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 16px; margin-bottom: 20px;
-  }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .logo {
-    width: 30px; height: 30px; border-radius: 8px; flex: none;
-    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
-    display: grid; place-items: center; font-weight: 700; font-size: 16px;
-  }
-  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-  .brand .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin: 0; }
+  /* ---------------------------------------------------------------- header */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 34px; height: 34px; border-radius: 9px; flex: none; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; font-size: 17px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), 0 1px 2px rgba(0,0,0,.18); }
+  .brand-id { display: grid; gap: 1px; }
+  .brand h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: -0.01em; text-transform: lowercase; }
+  .brand .sub { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--ink-2); margin: 0; }
+  .masthead-side { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  /* live telemetry stamp — steady "feed is live" cue (not a second pulse) */
+  #refreshed { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--ink-2); letter-spacing: .02em; display: inline-flex; align-items: center; gap: 7px; text-transform: uppercase; }
+  #refreshed:not(:empty)::before { content: ""; width: 6px; height: 6px; border-radius: 999px; background: var(--alive); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--alive) 20%, transparent); }
 
-  /* buttons */
-  button {
-    font: inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid transparent; padding: 7px 13px; font-weight: 500;
-    display: inline-flex; align-items: center; gap: 6px; transition: .12s ease;
-    white-space: nowrap;
-  }
+  /* --------------------------------------------------------------- buttons */
+  button { font: inherit; cursor: pointer; border-radius: var(--radius-sm); border: 1px solid transparent; padding: 7px 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; transition: background .12s ease, border-color .12s ease, color .12s ease, transform .04s ease; white-space: nowrap; color: var(--ink); }
   button:disabled { opacity: .5; cursor: default; }
-  .btn-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
-  .btn-primary:hover:not(:disabled) { opacity: .9; }
-  .btn-outline {
-    background: transparent; border-color: hsl(var(--border));
-    color: hsl(var(--foreground));
-  }
-  .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
-  .btn-sm { padding: 5px 11px; font-size: 13px; }
-  .btn-danger { color: hsl(var(--red)); border-color: hsl(var(--red) / .4); }
-  .btn-danger:hover:not(:disabled) { background: hsl(var(--red) / .08); }
-  a.btn-primary { text-decoration: none; display: inline-flex; align-items: center;
-    justify-content: center; border-radius: calc(var(--radius) - 2px); padding: 8px 13px; }
+  /* tactile actuator: a real press affordance for a tool that is all controls */
+  button:active:not(:disabled) { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; box-shadow: inset 0 1px 0 rgba(255,255,255,.14); }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-outline { background: var(--surface-2); border-color: var(--line-strong); color: var(--ink); }
+  .btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn-sm { padding: 5px 10px; font-size: 12.5px; }
+  .btn-danger { color: var(--alert); border-color: color-mix(in srgb, var(--alert) 42%, transparent); background: var(--surface-2); }
+  .btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--alert) 12%, var(--surface)); border-color: var(--alert); color: var(--alert); }
+  a.btn-primary { text-decoration: none; justify-content: center; padding: 9px 14px; border-radius: var(--radius-sm); }
 
-  /* tabs */
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid hsl(var(--border)); margin-bottom: 18px; }
-  .tab {
-    background: transparent; border: none; border-bottom: 2px solid transparent;
-    border-radius: 0; padding: 8px 14px; color: hsl(var(--muted-foreground));
-  }
-  .tab:hover { color: hsl(var(--foreground)); }
-  .tab.active { color: hsl(var(--foreground)); border-bottom-color: hsl(var(--primary)); font-weight: 600; }
+  /* ------------------------------------------------------------------ tabs */
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 20px; overflow-x: auto; }
+  .tab { background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 9px 4px; margin-right: 12px; color: var(--ink-2); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .tab:hover { color: var(--ink); }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
 
-  /* cards / panels */
-  .card {
-    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
-    border-radius: var(--radius);
-  }
+  /* ------------------------------------------------------- cards / panels */
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 1px 2px rgba(16,32,44,.04); }
   .panel { overflow: hidden; }
-  .panel-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 14px 16px; border-bottom: 1px solid hsl(var(--border)); flex-wrap: wrap;
-  }
-  .panel-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
-  .panel-head .hint { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); flex-wrap: wrap; }
+  .panel-head h2 { font-size: 12px; font-weight: 700; margin: 0; text-transform: uppercase; letter-spacing: .07em; }
+  .panel-head .hint, .hint { font-size: 12px; color: var(--ink-2); }
   .table-scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 11px 16px; white-space: nowrap; }
-  th {
-    font-size: 11px; font-weight: 500; text-transform: uppercase;
-    letter-spacing: .04em; color: hsl(var(--muted-foreground));
-  }
-  tbody tr { border-top: 1px solid hsl(var(--border)); }
-  tbody tr:hover { background: hsl(var(--muted) / .5); }
-  td.name { font-weight: 550; }
-  td.age { color: hsl(var(--muted-foreground)); }
+  th { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-2); border-bottom: 1px solid var(--line); }
+  tbody tr { border-top: 1px solid var(--line); }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
+  td.name { font-weight: 600; }
+  td.age { color: var(--ink-2); font-variant-numeric: tabular-nums; }
   td.actions { text-align: right; }
 
-  /* machine cards */
-  .machine { margin-bottom: 14px; }
-  .m-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 13px 16px; flex-wrap: wrap;
-  }
+  /* --------------------------------------------------- machine bays (cards) */
+  .machine { position: relative; overflow: hidden; margin-bottom: 14px; }
+  /* state rail — vital-sign edge, read at a glance across the fleet */
+  .machine::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--line-strong); }
+  .machine:has(.badge.running)::before { background: var(--alive); }
+  .machine:has(.badge.running) { border-color: color-mix(in srgb, var(--alive) 26%, var(--line)); }
+  .machine:has(.badge.paused)::before { background: color-mix(in srgb, var(--held) 55%, var(--line)); }
+  .machine:has(.badge.archived)::before { background: var(--parked); }
+  /* de-emphasize non-running machines by MUTING the call-sign, never by dimming
+     the whole card — its action buttons must stay fully legible and clickable. */
+  .machine:has(.badge.paused) .m-title .name,
+  .machine:has(.badge.archived) .m-title .name { color: var(--ink-2); }
+  .m-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px 13px 18px; flex-wrap: wrap; }
   .m-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .m-title .name { font-weight: 600; font-size: 14px; }
-  .m-title .spec { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .m-title .name { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; color: var(--ink); }
+  .m-title .spec { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--ink-2); }
   .m-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .m-body {
-    border-top: 1px solid hsl(var(--border)); padding: 13px 16px;
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
-  }
-  @media (max-width: 720px) { .m-body { grid-template-columns: 1fr; } }
-  .m-stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-    color: hsl(var(--muted-foreground)); }
-  .m-stat .value { font-size: 14px; font-weight: 550; margin-top: 2px;
-    font-variant-numeric: tabular-nums; }
-  .m-stat .value small { font-weight: 500; color: hsl(var(--muted-foreground)); }
-  .m-foot { border-top: 1px solid hsl(var(--border)); padding: 12px 16px;
-    display: grid; gap: 12px; }
-  .m-sect .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-    color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
-  .env-warn {
-    margin: 0 16px 12px; padding: 8px 12px; font-size: 12.5px;
-    border: 1px solid hsl(var(--red) / .4); border-radius: calc(var(--radius) - 2px);
-    color: hsl(var(--red)); background: hsl(var(--red) / .06);
-  }
+  .m-body { border-top: 1px solid var(--line); padding: 14px 16px 14px 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; background: color-mix(in srgb, var(--surface-2) 45%, var(--surface)); }
+  .m-stat .label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); font-weight: 700; }
+  /* vitals read as gauge faces: big tabular monospace */
+  .m-stat .value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 19px; font-weight: 600; margin-top: 3px; line-height: 1.15; font-variant-numeric: tabular-nums; color: var(--ink); }
+  .m-stat .value small { font-size: 11px; font-weight: 500; color: var(--ink-2); }
+  .m-foot { border-top: 1px solid var(--line); padding: 13px 16px 14px 18px; display: grid; gap: 14px; }
+  .m-sect .label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); margin-bottom: 7px; font-weight: 700; }
+  .env-warn { margin: 0 16px 12px 18px; padding: 9px 12px; font-size: 12.5px; border: 1px solid color-mix(in srgb, var(--alert) 42%, transparent); border-left-width: 3px; border-radius: var(--radius-sm); color: var(--alert); background: color-mix(in srgb, var(--alert) 8%, var(--surface)); }
 
-  /* capacity meters */
-  .meter {
-    height: 5px; border-radius: 999px; background: hsl(var(--muted));
-    margin-top: 8px; overflow: hidden;
-  }
-  .meter > div {
-    height: 100%; border-radius: 999px; background: hsl(var(--green));
-    width: 0; transition: width .3s ease;
-  }
-  .meter.warn > div { background: hsl(var(--amber)); }
-  .meter.hot > div { background: hsl(var(--red)); }
+  /* ------------------------------------------------------- capacity gauges */
+  .meter { height: 6px; border-radius: 999px; background: var(--surface-2); margin-top: 9px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--line); }
+  /* flat instrument fill — no skeuomorphic gloss */
+  .meter > div { height: 100%; border-radius: 999px; width: 0; background: var(--alive); transition: width .35s cubic-bezier(.2,.7,.3,1); }
+  .meter.warn > div { background: var(--held); }
+  .meter.hot > div { background: var(--alert); }
 
-  /* badges */
-  .badge {
-    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
-    font-weight: 500; padding: 2px 9px; border-radius: 999px;
-    border: 1px solid hsl(var(--border));
-  }
+  /* ---------------------------------------------------------------- badges */
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); text-transform: uppercase; letter-spacing: .04em; }
   .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
-  .badge.running { color: hsl(var(--green)); border-color: hsl(var(--green) / .35); }
-  .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
-  .badge.paused { color: hsl(var(--muted-foreground)); }
-  .badge.paused .dot { background: hsl(var(--muted-foreground)); }
-  .badge.archived { color: hsl(var(--violet, 262 83% 66%)); border-color: hsl(var(--violet, 262 83% 66%) / .35); }
-  .badge.archived .dot { background: hsl(var(--violet, 262 83% 66%)); }
-  .badge.pinned { color: hsl(var(--amber)); border-color: hsl(var(--amber) / .35); }
-  .badge.pinned .dot { background: hsl(var(--amber)); }
-  .badge.op { color: hsl(var(--blue)); border-color: hsl(var(--blue) / .35); }
-
-  /* route rows + chips */
-  .route-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
-  .route {
-    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
-    padding: 2px 8px; border-radius: 999px; border: 1px solid hsl(var(--border));
-    color: hsl(var(--foreground)); text-decoration: none;
+  .badge.running { color: var(--alive); border-color: color-mix(in srgb, var(--alive) 40%, transparent); background: color-mix(in srgb, var(--alive) 9%, var(--surface)); }
+  /* THE HEARTBEAT — the one looping motion on the page; a running machine is alive */
+  .badge.running .dot { background: var(--alive); animation: vital 2.4s ease-out infinite; }
+  .badge.paused { color: var(--ink-2); }
+  .badge.paused .dot { background: var(--ink-2); }
+  .badge.archived { color: var(--parked); border-color: color-mix(in srgb, var(--parked) 40%, transparent); background: color-mix(in srgb, var(--parked) 9%, var(--surface)); }
+  .badge.archived .dot { background: var(--parked); }
+  .badge.pinned { color: var(--held); border-color: color-mix(in srgb, var(--held) 40%, transparent); background: color-mix(in srgb, var(--held) 9%, var(--surface)); }
+  .badge.pinned .dot { background: var(--held); }
+  .badge.op { color: var(--signal); border-color: color-mix(in srgb, var(--signal) 40%, transparent); background: color-mix(in srgb, var(--signal) 9%, var(--surface)); }
+  @keyframes vital {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--alive) 60%, transparent); }
+    70%  { box-shadow: 0 0 0 7px color-mix(in srgb, var(--alive) 0%, transparent); }
+    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--alive) 0%, transparent); }
   }
-  .route:hover { background: hsl(var(--muted)); }
-  .route .port { color: hsl(var(--muted-foreground)); }
-  .route .dot { width: 6px; height: 6px; }
-  .route.live { border-color: hsl(var(--green) / .35); }
-  .route.live .dot { background: hsl(var(--green)); box-shadow: 0 0 0 2px hsl(var(--green) / .18); }
-  .route.dead .dot { background: hsl(var(--red) / .8); }
-  .route.idle .dot { background: transparent; border: 1px solid hsl(var(--muted-foreground)); }
-  .vis { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 999px; }
-  .vis.private { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
-  .vis.public { background: hsl(var(--amber) / .15); color: hsl(var(--amber)); }
-  .port-form { display: inline-flex; align-items: center; gap: 6px; }
-  .port-form input { width: 76px; }
 
-  /* tag chips */
+  /* ---------------------------------------------------------------- chips */
   .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .chip {
-    display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
-    padding: 2px 5px 2px 9px; border-radius: 999px; background: hsl(var(--muted));
-    color: hsl(var(--foreground));
-  }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 2px 5px 2px 9px; border-radius: 6px; background: var(--surface-2); color: var(--ink); border: 1px solid var(--line); }
   .chip.plain { padding: 2px 9px; }
-  .chip-x {
-    border: none; background: transparent; padding: 0 3px; font-size: 13px;
-    line-height: 1; color: hsl(var(--muted-foreground)); border-radius: 999px;
-  }
-  .chip-x:hover { color: hsl(var(--red)); }
-  .chip-input {
-    font: inherit; font-size: 12px; width: 90px; padding: 2px 8px;
-    border: 1px dashed hsl(var(--border)); border-radius: 999px;
-    background: transparent; color: hsl(var(--foreground));
-  }
-  .chip-input:focus { outline: 2px solid hsl(var(--ring) / .5); outline-offset: 1px; }
+  .chip-x { border: none; background: transparent; padding: 0 3px; font-size: 13px; line-height: 1; color: var(--ink-2); border-radius: 4px; cursor: pointer; }
+  .chip-x:hover { color: var(--alert); }
+  .chip-input { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; width: 92px; padding: 3px 9px; border-radius: 6px; border: 1px dashed var(--line-strong); background: transparent; color: var(--ink); }
 
-  /* inputs */
-  input[type=text], input[type=password], input[type=number] {
-    font: inherit; padding: 8px 11px; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
-    color: hsl(var(--foreground));
-  }
-  input:focus { outline: 2px solid hsl(var(--ring) / .5); outline-offset: 1px; }
-  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
-  .field-hint { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
+  /* -------------------------------------------------------- routes: patch bay */
+  /* The routes section is the one machine sub-section with a .port-form. It reads
+     as a recessed patch panel — subdomain:port is a patch point — flat and
+     scannable, no LED gradients. Signal lamps carry live/dead/idle. */
+  .m-sect:has(.port-form) { background: var(--well); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 11px 12px; box-shadow: inset 0 1px 2px rgba(16,32,44,.06); }
+  .route-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 7px; }
+  .route { display: inline-flex; align-items: center; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); text-decoration: none; }
+  .route:hover { border-color: var(--accent); color: var(--accent); }
+  .route .port { color: var(--ink-2); }
+  .route .dot { width: 7px; height: 7px; }
+  /* signal lamps — steady-lit, so the heartbeat stays the only pulse */
+  .route.live { border-color: color-mix(in srgb, var(--alive) 40%, transparent); }
+  .route.live .dot { background: var(--alive); box-shadow: 0 0 0 2px color-mix(in srgb, var(--alive) 22%, transparent); }
+  .route.dead .dot { background: var(--alert); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--alert) 55%, transparent); }
+  .route.idle .dot { background: transparent; border: 1px solid var(--ink-2); }
+  .vis { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: .05em; }
+  .vis.private { background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line); }
+  /* a public route is an exposure event — light an amber lamp that says "open" */
+  .vis.public { background: color-mix(in srgb, var(--held) 16%, var(--surface)); color: var(--held); border: 1px solid color-mix(in srgb, var(--held) 38%, transparent); }
+  .vis.public::before { content: ""; width: 6px; height: 6px; border-radius: 999px; background: var(--held); box-shadow: 0 0 0 2px color-mix(in srgb, var(--held) 25%, transparent); }
+  .port-form { display: inline-flex; align-items: center; gap: 6px; margin-top: 3px; }
+  .port-form input { width: 82px; }
 
-  /* secrets form */
-  .secret-form { padding: 16px; display: grid; gap: 14px;
-    grid-template-columns: 1fr 1.4fr 1fr auto; align-items: start;
-    border-bottom: 1px solid hsl(var(--border)); }
-  @media (max-width: 860px) { .secret-form { grid-template-columns: 1fr; } }
+  /* ---------------------------------------------------------------- inputs */
+  input[type=text], input[type=password], input[type=number] { font: inherit; padding: 8px 11px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); }
+  input::placeholder { color: color-mix(in srgb, var(--ink-2) 75%, transparent); }
+  label { display: block; font-size: 10.5px; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+  .field-hint { font-size: 11.5px; color: var(--ink-2); margin-top: 5px; }
+
+  /* ------------------------------------------------------------ secrets form */
+  .secret-form { padding: 16px 16px 16px 18px; display: grid; gap: 14px; grid-template-columns: 1fr 1.4fr 1fr auto; align-items: start; border-bottom: 1px solid var(--line); }
   .secret-form input { width: 100%; }
   .secret-form .save { align-self: end; }
-  .notice {
-    padding: 12px 16px; font-size: 12.5px; color: hsl(var(--muted-foreground));
-    border-bottom: 1px solid hsl(var(--border));
-  }
-  .notice strong { color: hsl(var(--foreground)); font-weight: 600; }
+  .notice { padding: 12px 16px 12px 18px; font-size: 12.5px; color: var(--ink-2); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2) 55%, var(--surface)); }
+  .notice strong { color: var(--ink); font-weight: 700; }
+  #secrets-disabled { color: var(--held); background: color-mix(in srgb, var(--held) 8%, var(--surface)); border-bottom-color: color-mix(in srgb, var(--held) 30%, transparent); }
 
-  /* sign-in */
-  .signin-wrap { min-height: 62vh; display: grid; place-items: center; }
-  .signin { width: 100%; max-width: 380px; padding: 26px; }
-  .signin h2 { margin: 0 0 4px; font-size: 17px; font-weight: 650; }
-  .signin p { margin: 0 0 18px; font-size: 13px; color: hsl(var(--muted-foreground)); }
-  .signin a.btn-primary { width: 100%; }
-
-  /* rename dialog */
-  dialog {
-    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
-    background: hsl(var(--card)); color: hsl(var(--foreground));
-    padding: 22px; width: 100%; max-width: 400px;
-  }
-  dialog::backdrop { background: rgba(0,0,0,.45); }
-  dialog h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; }
-  dialog p { margin: 0 0 14px; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
-  dialog input[type=text] { width: 100%; margin-bottom: 14px; }
-  dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
-
-  .muted { color: hsl(var(--muted-foreground)); }
-  .empty { padding: 40px 16px; text-align: center; color: hsl(var(--muted-foreground)); }
+  /* ------------------------------------------------ sign-in / error / empty */
+  .signin-wrap { min-height: 64vh; display: grid; place-items: center; }
+  .signin { width: 100%; max-width: 390px; padding: 28px; }
+  .signin .brand { margin-bottom: 18px; }
+  .signin h2 { margin: 0; font-size: 16px; font-weight: 700; text-transform: lowercase; }
+  .signin p { margin: 0 0 18px; font-size: 13px; color: var(--ink-2); }
+  .signin a.btn-primary, .signin button.btn-primary { width: 100%; }
+  .empty { padding: 44px 16px; text-align: center; color: var(--ink-2); font-size: 13px; }
+  .empty code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink); }
   .hidden { display: none !important; }
 
-  /* toast */
-  #toast {
-    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
-    border-radius: var(--radius); padding: 10px 16px; font-size: 13px;
-    box-shadow: 0 8px 30px rgba(0,0,0,.18); opacity: 0; transition: opacity .2s;
-    pointer-events: none; max-width: 90vw;
-  }
+  /* ---------------------------------------------------------- rename dialog */
+  dialog { border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--ink); padding: 24px; width: 100%; max-width: 410px; box-shadow: 0 24px 60px rgba(8,18,26,.35); }
+  dialog::backdrop { background: rgba(6,14,20,.55); backdrop-filter: blur(2px); }
+  dialog h3 { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+  dialog h3 .mono { color: var(--accent); }
+  dialog p { margin: 0 0 14px; font-size: 12.5px; color: var(--ink-2); }
+  dialog input[type=text] { width: 100%; margin-bottom: 16px; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ------------------------------------------------------------------ toast */
+  /* human sentences → sans (rule 1); only embedded identifiers stay mono */
+  #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--surface); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); padding: 10px 16px; font-size: 13px; color: var(--ink); box-shadow: 0 12px 34px rgba(8,18,26,.28); opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
   #toast.show { opacity: 1; }
-  #toast.err { border-color: hsl(var(--red) / .5); color: hsl(var(--red)); }
+  #toast.err { border-left-color: var(--alert); color: var(--alert); }
+
+  /* ------------------------------------------------------- focus visibility */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  input:focus-visible, .chip-input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 1px; border-color: var(--accent); }
+
+  /* ------------------------------------------------------------- responsive */
+  @media (max-width: 720px) { .wrap { padding: 20px 14px 60px; } .m-body { grid-template-columns: 1fr; } header { gap: 10px; } .m-actions { width: 100%; } }
+  @media (max-width: 860px) { .secret-form { grid-template-columns: 1fr; } }
+
+  /* ---------------------------------------------------- reduced-motion floor */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    /* the heartbeat becomes a solid "on" ring so the running state still reads */
+    .badge.running .dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--alive) 22%, transparent); }
+  }
 </style>
 </head>
 <body>
   <!-- SIGNED OUT -->
   <div id="signin-view" class="wrap signin-wrap hidden">
     <div class="card signin">
-      <div class="brand" style="margin-bottom:16px">
-        <div class="logo">s</div>
-        <div>
-          <h2 style="margin:0">sparkbox</h2>
-          <p style="margin:0" class="muted">my machines</p>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">s</div>
+        <div class="brand-id">
+          <h2>sparkbox</h2>
+          <p class="muted">my machines</p>
         </div>
       </div>
       <p>Sign in with your sparkbox account to manage your machines and secrets.</p>
@@ -299,11 +288,11 @@
   <!-- LOAD FAILED (non-401: edge 502, server restart, network) -->
   <div id="error-view" class="wrap signin-wrap hidden">
     <div class="card signin">
-      <div class="brand" style="margin-bottom:16px">
-        <div class="logo">s</div>
-        <div>
-          <h2 style="margin:0">sparkbox</h2>
-          <p style="margin:0" class="muted">my machines</p>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">s</div>
+        <div class="brand-id">
+          <h2>sparkbox</h2>
+          <p class="muted">my machines</p>
         </div>
       </div>
       <p id="error-msg">Couldn't reach the console.</p>
@@ -315,14 +304,14 @@
   <div id="app-view" class="wrap hidden">
     <header>
       <div class="brand">
-        <div class="logo">s</div>
-        <div>
+        <div class="logo" aria-hidden="true">s</div>
+        <div class="brand-id">
           <h1>sparkbox</h1>
           <p class="sub" id="domain-label">my machines</p>
         </div>
       </div>
-      <div style="display:flex; gap:8px; align-items:center">
-        <span class="muted" id="refreshed" style="font-size:12px"></span>
+      <div class="masthead-side">
+        <span id="refreshed"></span>
         <span id="who" class="badge hidden"></span>
         <button class="btn-outline btn-sm" id="logout-btn">Sign out</button>
       </div>
