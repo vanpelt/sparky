@@ -27,6 +27,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/dnsedge"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -102,6 +103,8 @@ func serve(args []string) error {
 		oidcSub       = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
 		oidcAud       = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
 		metaAddr      = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
+		dnsAddr       = fs.String("dns-addr", "", "wildcard DNS responder listen address (e.g. <edge-ip>:53); serves *.<domain> -> the edge for a Tailscale split-DNS entry. Empty disables it")
+		dnsAnswer     = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
 		openSignup    = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
 		invitesPer    = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
 	)
@@ -325,7 +328,7 @@ func serve(args []string) error {
 	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}
 	sshSrv := gw.Server(*sshAddr)
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 	go func() { errCh <- apiSrv.ListenAndServe() }()
 	go func() { errCh <- sshSrv.ListenAndServe() }()
 
@@ -341,6 +344,33 @@ func serve(args []string) error {
 		})
 		go func() { errCh <- meta.ListenAndServe(ctx, *metaAddr) }()
 		log.Info("guest metadata service enabled", "addr", *metaAddr, "issuer", issuer.URL())
+	}
+
+	// Wildcard DNS responder for the tailnet edge: answers *.<domain> with the
+	// edge IP so a Tailscale split-DNS entry resolves every sandbox name to this
+	// box, no per-name DNS. Answers default to the concrete IP in --proxy-addr.
+	if *dnsAddr != "" {
+		var answers []netip.Addr
+		for _, s := range splitList(*dnsAnswer) {
+			a, perr := netip.ParseAddr(s)
+			if perr != nil {
+				return fmt.Errorf("--dns-answer %q: %w", s, perr)
+			}
+			answers = append(answers, a)
+		}
+		if len(answers) == 0 {
+			if host, _, herr := net.SplitHostPort(*proxyAddr); herr == nil {
+				if a, perr := netip.ParseAddr(host); perr == nil {
+					answers = append(answers, a)
+				}
+			}
+		}
+		if len(answers) == 0 {
+			return errors.New("--dns-addr set but no answer IP: pass --dns-answer or use a concrete IP host in --proxy-addr")
+		}
+		dnsSrv := dnsedge.New(*proxyDomain, answers, log)
+		go func() { errCh <- dnsSrv.ListenAndServe(ctx, *dnsAddr) }()
+		log.Info("wildcard DNS responder enabled", "addr", *dnsAddr, "domain", *proxyDomain, "answers", answers)
 	}
 
 	var proxySrv *http.Server

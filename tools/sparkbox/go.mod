@@ -9,6 +9,7 @@ require (
 	github.com/gliderlabs/ssh v0.3.8
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/libdns v1.1.1
+	github.com/miekg/dns v1.1.72
 	github.com/robfig/cron/v3 v3.0.1
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.54.0
@@ -46,7 +47,6 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/oklog/ulid v1.3.1 // indirect
