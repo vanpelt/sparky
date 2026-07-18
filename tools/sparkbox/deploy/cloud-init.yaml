@@ -20,12 +20,14 @@ packages:
   - iptables
   - ca-certificates
   - zstd
+  - unzip
   # archive/snapshot: fsck + zero free space before compression; rclone ships
   # archives to object storage (needs S3 WRITE creds in the host's rclone.conf —
   # see docs/resource-model-design.md Part 8; archiving is off until configured).
+  # rclone itself is installed in runcmd, not here: apt's rclone (~1.60) 501s on
+  # Cloudflare R2 uploads, so we fetch a current static binary instead.
   - e2fsprogs
   - zerofree
-  - rclone
 
 write_files:
   - path: /srv/sparkbox/users.conf
@@ -364,4 +366,11 @@ write_files:
       echo "sparkbox provisioned from release $RELEASE"
 
 runcmd:
+  # Current rclone for R2 archiving (apt's ~1.60 501s on R2 uploads). Static
+  # binary into /usr/local/bin so it wins over any distro rclone on PATH.
+  - |
+    case "$(dpkg --print-architecture)" in amd64) R=amd64;; arm64) R=arm64;; *) R=amd64;; esac
+    T=$(mktemp -d) && curl -fsSL "https://downloads.rclone.org/rclone-current-linux-$R.zip" -o "$T/r.zip" \
+      && ( cd "$T" && unzip -oq r.zip && install -m0755 rclone-*-linux-$R/rclone /usr/local/bin/rclone ) \
+      && rm -rf "$T" && rclone version | head -1
   - [ bash, /usr/local/sbin/sparkbox-provision.sh ]

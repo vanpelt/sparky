@@ -32,8 +32,12 @@ grep -qE 'vmx|svm' /proc/cpuinfo || { echo "no VT-x/AMD-V in cpuinfo"; exit 1; }
 echo "== packages =="
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  golang-go docker.io curl iptables xfsprogs git \
-  e2fsprogs zerofree zstd rclone   # archive/snapshot: fsck + zero free space + compress; rclone for object storage
+  golang-go docker.io curl iptables xfsprogs git unzip \
+  e2fsprogs zerofree zstd   # archive/snapshot: fsck + zero free space + compress (rclone below)
+
+echo "== rclone (current — apt's is too old for Cloudflare R2) =="
+# The distro rclone (~1.60) 501s on R2 uploads; install a current static binary.
+"$(dirname "$0")/../deploy/install-rclone.sh"
 
 echo "== firecracker =="
 if ! command -v firecracker >/dev/null; then

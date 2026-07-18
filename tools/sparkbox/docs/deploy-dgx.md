@@ -177,6 +177,50 @@ sudo cloudflared service install                            # enabled systemd se
 subdomain and routes to the right sandbox. Wildcard `*.catnip.sh` means every
 sandbox is reachable with no per-name DNS.
 
+Note: with the tunnel, sparkbox does **no DNS updates** — the one wildcard CNAME
+covers every sandbox. Do NOT put a `CLOUDFLARE_API_TOKEN` in sparkbox's env: the
+only thing that reads it is the front-door DNS publisher, which is gated behind
+`--subnet6` (unset here) and would write per-name `AAAA` records that *shadow*
+the wildcard CNAME and break routing.
+
+## 5b. Sandbox archiving to Cloudflare R2 (optional)
+
+Archiving parks an idle sandbox's rootfs in object storage (`e2fsck` + `zerofree`
++ `zstd`, then upload) and frees host disk; a restore (or just reconnecting)
+brings it back. It talks to any S3 endpoint via rclone — here, Cloudflare R2.
+
+```sh
+# 1. Current rclone (apt's ~1.60 501s on R2 uploads — see gotchas).
+sudo ./deploy/install-rclone.sh
+
+# 2. R2 bucket + an R2 API token with **Object Read & Write** on that bucket.
+#    The token page shows an S3 Access Key ID + Secret Access Key — THOSE are what
+#    rclone uses (not the `cfat…` Cloudflare API *token value*, which is REST-only).
+sudo install -d -m700 /root/.config/rclone
+sudo tee /root/.config/rclone/rclone.conf >/dev/null <<EOF
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = <R2 Access Key ID>
+secret_access_key = <R2 Secret Access Key>
+endpoint = https://<account-id>.r2.cloudflarestorage.com
+region = auto
+no_check_bucket = true
+EOF
+# NOTE: do NOT set `acl = private`. R2 rejects PutObject carrying an ACL header
+# unless the token has *admin* (not just Read & Write) — you'll get 403 on writes
+# while reads succeed. Omitting acl is the fix.
+
+# 3. Point sparkbox at it (add to /etc/sparkbox/sparkbox.env + the ExecStart flags):
+#    --archive-remote ${SPARKBOX_ARCHIVE_REMOTE} --archive-bucket ${SPARKBOX_ARCHIVE_BUCKET}
+#    SPARKBOX_ARCHIVE_REMOTE=r2
+#    SPARKBOX_ARCHIVE_BUCKET=<bucket>
+sudo systemctl restart sparkbox        # log should read: "sandbox archiving enabled"
+```
+
+Then: `ssh -p 2222 ctl@<host> archive <name>` parks it; `restore <name>` (or just
+reconnecting / hitting its URL) brings it back.
+
 ## 6. Use it
 
 ```sh
