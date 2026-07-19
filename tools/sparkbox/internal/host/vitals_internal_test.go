@@ -6,6 +6,8 @@ package host
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -206,6 +208,32 @@ func TestVitalsStartSeedsZeroBaseline(t *testing.T) {
 
 	if rx := m.boxes["fresh"].NetRxBytes; rx != 50_000_000 {
 		t.Fatalf("NetRxBytes = %d, want 50000000 — traffic before the first tick went unmetered", rx)
+	}
+}
+
+// TestReapRefreshesDiskWithoutPoolQuota: disk measurement must not depend on a
+// pooled quota being configured. It used to, so every host running without
+// --disk-pool-mb-per-owner (including the DGX) reported every sandbox as 0 GB
+// in both consoles. The pool gates admission, not observation.
+func TestReapRefreshesDiskWithoutPoolQuota(t *testing.T) {
+	m := internalManager(t, Options{}) // no DiskPoolMBPerOwner
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "box", "alice", "ubuntu", 1, 2048); err != nil {
+		t.Fatal(err)
+	}
+	m.boxes["box"].DiskMB = 0
+	// The mock reports its workdir's real size, so give it something to find:
+	// a fresh workdir rounds down to 0 MB and the assertion couldn't tell a
+	// working refresh from a skipped one.
+	blob := make([]byte, 3<<20)
+	if err := os.WriteFile(filepath.Join(m.stateDir, "mock-vms", "box", "rootfs"), blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m.reapOnce(ctx, 0, 30*time.Minute)
+
+	if m.boxes["box"].DiskMB == 0 {
+		t.Fatal("disk footprint still 0 with no pool quota set; measurement must not be gated on enforcement")
 	}
 }
 

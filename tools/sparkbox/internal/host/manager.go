@@ -1417,9 +1417,14 @@ func (m *Manager) RunReaper(ctx context.Context, balloonAfter, pauseAfter, inter
 // reapOnce applies one pass of the idle policy. Split out from RunReaper's loop
 // so the two-stage gradient is unit-testable without a ticker.
 func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Duration) {
-	// Keep pooled-disk accounting fresh while we're already ticking: a running/
-	// paused sandbox's rootfs (and snapshot) grow over time.
-	if m.diskReport != nil && m.diskPoolMB > 0 {
+	// Keep disk accounting fresh while we're already ticking: a running/paused
+	// sandbox's rootfs (and snapshot) grow over time.
+	//
+	// Measurement is deliberately NOT gated on the pooled quota. It used to be,
+	// which meant a host running without --disk-pool-mb-per-owner never measured
+	// anything and reported every sandbox as 0 GB — the number the consoles show.
+	// The pool governs *admission*, not whether we are allowed to look.
+	if m.diskReport != nil {
 		m.RefreshDiskUsage(ctx)
 	}
 	// Fold in-guest resource use into LastActive before judging idleness, so a

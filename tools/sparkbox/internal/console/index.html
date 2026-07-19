@@ -15,10 +15,17 @@
     gap: 16px; margin-bottom: 24px;
   }
   .brand { display: flex; align-items: center; gap: 10px; }
+  /* The mark is the one element that does NOT follow the theme: --primary
+     inverts to near-white in dark mode, and the emoji's gold would drop to
+     about 2:1 against it. Pinning the tile dark keeps the bolt on high
+     contrast in both themes, the way a real logo stays constant. */
   .logo {
     width: 30px; height: 30px; border-radius: 8px; flex: none;
-    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
-    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 17px;
+    /* Emoji glyphs carry their own side bearings and sit high on the box, so
+       they need slightly more size and an optical nudge to centre in the tile. */
+    line-height: 1; text-indent: 0.02em;
   }
   .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
   .brand .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin: 0; }
@@ -143,7 +150,7 @@
   <div id="login-view" class="wrap login-wrap hidden">
     <form id="login-form" class="card login">
       <div class="brand" style="margin-bottom:16px">
-        <div class="logo">s</div>
+        <div class="logo">&#9889;&#65039;</div>
         <div>
           <h2 style="margin:0">sparkbox console</h2>
           <p style="margin:0" class="muted">cluster control</p>
@@ -159,7 +166,7 @@
   <div id="dash-view" class="wrap hidden">
     <header>
       <div class="brand">
-        <div class="logo">s</div>
+        <div class="logo">&#9889;&#65039;</div>
         <div>
           <h1>sparkbox console</h1>
           <p class="sub" id="domain-label">cluster control</p>
