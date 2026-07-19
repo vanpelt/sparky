@@ -138,6 +138,21 @@ type CPUStatser interface {
 	CPUTimeNanos(ctx context.Context, name string) (uint64, error)
 }
 
+// NetStatser is an optional Driver capability: the cumulative bytes a sandbox's
+// virtual NIC has carried, counted from the *guest's* point of view — rx is
+// what the guest received, tx what it sent. The host-side tap reports the
+// mirror image of that (a packet the guest sends is an rx on the host), so
+// drivers do the swap and callers never have to think about it.
+//
+// The counters live with the host-side device, which is torn down and
+// recreated on every pause/resume and cold boot, so they reset to zero far
+// more often than the CPU counter does. A reading lower than the previous one
+// is a reset, not a 64-bit rollover: callers accumulating lifetime totals must
+// treat it as such (see Manager.sampleVitals).
+type NetStatser interface {
+	NetBytes(ctx context.Context, name string) (rx, tx uint64, err error)
+}
+
 // Ballooner is an optional Driver capability: reclaiming a *running* guest's
 // unused RAM to the host through a virtio-balloon, without pausing it. This is
 // the live-overcommit lever — an idle-but-warm sandbox hands most of its RAM

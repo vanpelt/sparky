@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
@@ -83,6 +84,10 @@ type Gateway struct {
 	schedules      *schedule.Store   // optional: platform scheduler store (ctl@ schedule)
 	routes         *routes.Store     // optional: proxy routes, for ctl@ share
 	session        *edgeauth.Signer  // optional: edge session signer, for ctl@ session-token
+	// live tracks the interactive sessions attached to each sandbox so they can
+	// be hung up cleanly when it is paused — see livesessions.go.
+	liveMu sync.Mutex
+	live   map[string]map[*liveSession]struct{}
 }
 
 type GatewayOptions struct {
@@ -228,6 +233,12 @@ func (g *Gateway) handle(s gssh.Session) {
 	// Record which of the owner's machines is driving this sandbox; it rides
 	// into the id token as `key_fp` for auditing.
 	g.mgr.RecordKey(sandboxName, sessionKeyFP(s))
+
+	// Register before dialling so a pause racing this connection still finds the
+	// session and closes it, rather than leaving a terminal attached to a VM
+	// that is no longer there.
+	_, _, isPTY := s.Pty()
+	defer g.trackSession(sandboxName, s, isPTY)()
 
 	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
 	if err != nil {

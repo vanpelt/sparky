@@ -116,8 +116,9 @@
 
   .m-body {
     border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
   }
+  @media (max-width: 900px) { .m-body { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 640px) { .m-body { grid-template-columns: 1fr; } }
   .m-stat .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
     color: hsl(var(--muted-foreground)); }
@@ -665,6 +666,11 @@
     const mem = typeof b.mem_used_mb === "number"
       ? gb(b.mem_used_mb) + " <small>/ " + gb(b.mem_mb) + " GB</small>" + meterHTML(b.mem_used_mb, b.mem_mb)
       : gb(b.mem_mb) + " <small>GB</small>";
+    // Lifetime bytes in/out, from the guest's point of view, accumulated across
+    // every run this machine has had — so unlike CPU and memory it stays
+    // meaningful while paused, and does not reset when the VM cycles.
+    const net = '<span title="total received / sent since this machine was created">↓ ' +
+      bytes(b.net_rx_bytes) + " <small>·</small> ↑ " + bytes(b.net_tx_bytes) + "</span>";
     // disk_total_mb is the per-machine cap when the backend reports it; a
     // machine without one gets a bare footprint figure, no meter.
     const disk = isArchived
@@ -747,6 +753,7 @@
         '<div class="m-stat"><div class="label">Host CPU</div><div class="value">' + cpu + "</div></div>" +
         '<div class="m-stat"><div class="label">Memory</div><div class="value">' + mem + "</div></div>" +
         '<div class="m-stat"><div class="label">Disk</div><div class="value">' + disk + "</div></div>" +
+        '<div class="m-stat"><div class="label">Network</div><div class="value">' + net + "</div></div>" +
       "</div>" +
       '<div class="m-foot">' +
         '<div class="m-sect"><div class="label">Tags <span style="text-transform:none;letter-spacing:0">' +

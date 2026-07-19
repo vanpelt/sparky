@@ -1,5 +1,5 @@
-// sparkbox shared console helpers: DOM lookup, toast, relative time, GB
-// formatting, HTML escaping, and the running/paused/archived state badge.
+// sparkbox shared console helpers: DOM lookup, toast, relative time, GB and
+// byte formatting, HTML escaping, and the running/paused/archived state badge.
 // Shared between the operator console (internal/console) and the user
 // console (internal/userconsole) — inlined into each page's IIFE.
 const $ = (id) => document.getElementById(id);
@@ -24,6 +24,17 @@ function rel(iso) {
 function gb(mb) {
   const g = (mb || 0) / 1024;
   return g.toFixed(g && g % 1 ? 1 : 0);
+}
+
+// bytes renders a lifetime byte counter. These span kilobytes on a box that
+// just booted to hundreds of gigabytes on a long-lived one, so the unit has to
+// float; one decimal below 10 keeps "1.4 GB" from collapsing to "1 GB".
+function bytes(n) {
+  if (typeof n !== "number" || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i > 0 && n < 10 ? n.toFixed(1) : Math.round(n)) + " " + units[i];
 }
 
 function esc(s) {

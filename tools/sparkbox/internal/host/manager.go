@@ -108,6 +108,14 @@ type Sandbox struct {
 	// for auditing — which of a user's machines started this thing — and is
 	// deliberately not meant for authorization policy.
 	KeyFP string `json:"key_fp,omitempty"`
+	// NetRxBytes/NetTxBytes are lifetime network totals from the guest's point
+	// of view: bytes it received and bytes it sent. The driver's underlying
+	// counters die with the host-side tap on every pause/resume, so these are
+	// accumulated from per-sample deltas (sampleVitals) rather than read
+	// straight through — they only ever grow, and they survive a restart
+	// because they ride in the state file. Metering for future egress limits.
+	NetRxBytes uint64 `json:"net_rx_bytes,omitempty"`
+	NetTxBytes uint64 `json:"net_tx_bytes,omitempty"`
 	// ArchiveKey is the object-storage key holding this sandbox's rootfs when
 	// State is archived (empty otherwise). ArchivedAt is when it was parked.
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
@@ -164,6 +172,21 @@ type FrontDoor interface {
 	Remove(ctx context.Context, name string)
 }
 
+// SessionCloser hangs up the interactive sessions attached to a sandbox that is
+// about to stop being reachable, so an attached terminal is released instead of
+// being left pointing at a VM that is no longer running. Satisfied by
+// *sshgw.Gateway; nil simply skips the courtesy.
+//
+// Implementations MUST return without waiting for those sessions to finish
+// unwinding: this is called with the manager's lock held, and a session's
+// teardown path takes that same lock.
+type SessionCloser interface {
+	// CloseSandboxSessions closes every session attached to sandbox, telling the
+	// user why (reason is a fragment like "paused after 30m idle"), and returns
+	// how many it closed.
+	CloseSandboxSessions(sandbox, reason string) int
+}
+
 // ObjectStore is where archived sandbox rootfs artifacts are parked and fetched
 // back (see internal/objstore). Optional — nil disables archiving, and the
 // manager also needs the driver to implement vmm.Archivable. Keys are
@@ -184,6 +207,7 @@ type Manager struct {
 	renamer     vmm.Renamer      // driver's VM-rename capability; else nil
 	rebooter    vmm.Rebooter     // driver's snapshot-discard capability; else nil
 	cpuStats    vmm.CPUStatser   // driver's CPU-time capability; else nil
+	netStats    vmm.NetStatser   // driver's network-counter capability; else nil
 	archive     ObjectStore      // object store for archives; nil disables archiving
 	log         *slog.Logger
 	stateDir    string // dir holding sandboxes.json + transient archive staging
@@ -192,19 +216,34 @@ type Manager struct {
 	snaps       map[string]*Snapshot // fork-able templates, keyed by template image name
 	snapsPath   string               // snapshots.json
 	gwPubKey    string
-	routes      *routes.Store   // optional: proxy route bookkeeping
-	schedules   ScheduleCleaner // optional: platform-scheduler cleanup on destroy
-	frontDoor   FrontDoor       // optional: per-sandbox address plumbing
-	tags        TagCleaner      // optional: sandbox tag-row cleanup on destroy/rename
-	envSync     EnvPusher       // optional: secret-env push when a sandbox reaches running
-	maxPerOwner int             // max running sandboxes per owner; 0 = unlimited
-	memAdmitPct int             // RAM admission threshold as % of host; 0 = disabled
-	hostMemMB   int64           // host RAM in MB for admission; 0 = disabled
-	reserveMB   int64           // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
-	diskPoolMB  int64           // per-owner pooled-disk budget in MB; 0 = disabled
-	archivePfx  string          // object-key prefix for archives (default "archives")
-	nodeName    string          // this host's name in capacity reports
-	hostVCPUs   int64           // host logical CPUs for capacity reports; 0 = unknown
+	routes      *routes.Store           // optional: proxy route bookkeeping
+	schedules   ScheduleCleaner         // optional: platform-scheduler cleanup on destroy
+	frontDoor   FrontDoor               // optional: per-sandbox address plumbing
+	tags        TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
+	envSync     EnvPusher               // optional: secret-env push when a sandbox reaches running
+	sessions    SessionCloser           // optional: hang up attached sessions when a sandbox pauses
+	maxPerOwner int                     // max running sandboxes per owner; 0 = unlimited
+	memAdmitPct int                     // RAM admission threshold as % of host; 0 = disabled
+	hostMemMB   int64                   // host RAM in MB for admission; 0 = disabled
+	reserveMB   int64                   // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
+	diskPoolMB  int64                   // per-owner pooled-disk budget in MB; 0 = disabled
+	archivePfx  string                  // object-key prefix for archives (default "archives")
+	nodeName    string                  // this host's name in capacity reports
+	hostVCPUs   int64                   // host logical CPUs for capacity reports; 0 = unknown
+	actCPUPct   float64                 // activity floor: % of one core over a sample; 0 = off
+	actNetBytes uint64                  // activity floor: bytes per sample; 0 = off
+	vitals      map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
+}
+
+// vitalsSample is the previous reaper-tick reading of a sandbox's resource
+// counters, kept in memory only: it exists to turn the drivers' cumulative
+// counters into per-interval rates. It is deliberately not persisted — after a
+// restart the first tick just re-primes rather than charging a bogus delta
+// against a counter that reset while we were down.
+type vitalsSample struct {
+	at       time.Time
+	cpuNanos uint64
+	rx, tx   uint64 // raw driver counters, which reset on every tap teardown
 }
 
 type Options struct {
@@ -250,6 +289,20 @@ type Options struct {
 	// sandboxes + archives (0 = unlimited). Soft accounting, enforced at
 	// create/restore — see admit.
 	DiskPoolMBPerOwner int64
+	// ActivityCPUPct and ActivityNetBytes turn on in-guest activity detection:
+	// each reaper tick samples every running sandbox's host CPU time and
+	// network counters, and a sandbox busier than either threshold has its
+	// idle clock reset. This is what keeps a long-running agent (or build, or
+	// training job) with no inbound traffic from being reaped mid-flight —
+	// without it the only activity signal is control-plane traffic.
+	//
+	// ActivityCPUPct is percent of ONE host core averaged across the sample
+	// interval; ActivityNetBytes is bytes moved in either direction over that
+	// interval. Either being 0 disables that half; both 0 keeps the old
+	// traffic-only behaviour. Measured baselines on an idle box: ~0.4% CPU and
+	// ~3 KB/min, against 3.6-14% CPU and 400 KB-4 MB/min for a working agent.
+	ActivityCPUPct   float64
+	ActivityNetBytes uint64
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -261,6 +314,9 @@ func NewManager(opts Options) (*Manager, error) {
 		snapsPath:   filepath.Join(opts.StateDir, "snapshots.json"),
 		boxes:       map[string]*Sandbox{},
 		snaps:       map[string]*Snapshot{},
+		vitals:      map[string]vitalsSample{},
+		actCPUPct:   opts.ActivityCPUPct,
+		actNetBytes: opts.ActivityNetBytes,
 		gwPubKey:    opts.GatewayPublicKey,
 		routes:      opts.Routes,
 		schedules:   opts.Schedules,
@@ -301,6 +357,9 @@ func NewManager(opts Options) (*Manager, error) {
 	}
 	if cs, ok := opts.Driver.(vmm.CPUStatser); ok {
 		m.cpuStats = cs
+	}
+	if ns, ok := opts.Driver.(vmm.NetStatser); ok {
+		m.netStats = ns
 	}
 	if m.nodeName == "" {
 		m.nodeName = "local"
@@ -647,6 +706,15 @@ func (m *Manager) SetEnvSync(p EnvPusher) {
 	m.envSync = p
 }
 
+// SetSessions installs the hook that hangs up sessions attached to a sandbox
+// being paused. Installed post-construction because the gateway is built with
+// the manager, so it cannot be passed in at construction time.
+func (m *Manager) SetSessions(c SessionCloser) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions = c
+}
+
 // pushEnv fires the env-sync hook for a sandbox that just reached running.
 // Callers hold m.mu; the push dials the guest's sshd, so it runs on its own
 // goroutine (bounded, detached from the caller's ctx) and can never fail or
@@ -682,6 +750,13 @@ func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instan
 }
 
 func (m *Manager) Pause(ctx context.Context, name string) error {
+	return m.pause(ctx, name, "was paused")
+}
+
+// pause is Pause with the explanation shown to anyone attached to the sandbox.
+// The reaper passes its own wording ("went idle for 30m") so a user whose
+// terminal just got closed learns why without having to go looking.
+func (m *Manager) pause(ctx context.Context, name, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.boxes[name]
@@ -691,6 +766,12 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	if b.State == vmm.StatePaused {
 		return nil
 	}
+	// Release attached terminals before the VM stops answering. Done first so
+	// the goodbye reaches the client while the session is still healthy; the
+	// hook returns immediately, so it cannot deadlock against the lock we hold.
+	if m.sessions != nil {
+		m.sessions.CloseSandboxSessions(name, reason)
+	}
 	if err := m.driver.Pause(ctx, name); err != nil {
 		return err
 	}
@@ -698,6 +779,10 @@ func (m *Manager) Pause(ctx context.Context, name string) error {
 	b.SSHAddr = ""
 	b.HostIP = ""
 	b.GuestV6 = ""
+	// Drop the baseline: the tap goes away with the VM, so the next reading
+	// after a resume starts from zero over an interval spanning the whole pause.
+	// Re-priming costs one tick and keeps that from reading as a rate.
+	delete(m.vitals, name)
 	m.log.Info("sandbox paused", "name", name)
 	return m.save()
 }
@@ -1156,6 +1241,7 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 		}
 	}
 	delete(m.boxes, name)
+	delete(m.vitals, name)
 	if m.routes != nil {
 		if err := m.routes.DeleteBySandbox(name); err != nil {
 			m.log.Warn("route cleanup failed", "name", name, "err", err)
@@ -1188,6 +1274,118 @@ func (m *Manager) Touch(name string) {
 	}
 }
 
+// minVitalsInterval is the shortest gap between two readings we'll turn into a
+// rate. The reaper ticks a minute apart so this only guards pathological cases
+// (a test looping reapOnce, a tick storm after clock adjustment) where the tiny
+// divisor would turn counter noise into a huge apparent rate.
+const minVitalsInterval = 5 * time.Second
+
+// refreshVitals samples every running sandbox's CPU and network counters, adds
+// the network delta to its lifetime totals, and resets the idle clock of any
+// sandbox busier than the configured activity floors.
+//
+// This is the signal that makes the reaper safe for unattended work. Without
+// it the only evidence of life is control-plane traffic — an SSH connect, a
+// proxied request — so a box running a coding agent, a build, or a training
+// job for an hour with nobody watching looks exactly as idle as an abandoned
+// one, and gets paused mid-flight. Deltas are per-interval rates, so a sandbox
+// has to be *continuously* quiet across the whole idle timeout to be reaped.
+//
+// Accumulating byte totals happens whenever the driver can report them, even
+// with the activity floors off, because that accounting is also the basis for
+// egress metering.
+func (m *Manager) refreshVitals(ctx context.Context) {
+	if m.cpuStats == nil && m.netStats == nil {
+		return
+	}
+	now := time.Now()
+	for _, b := range m.List() {
+		if b.State != vmm.StateRunning {
+			continue
+		}
+		// Driver calls go out without m.mu held: they read sysfs and /proc, and
+		// the manager lock guards a lot more than this sandbox.
+		cur := vitalsSample{at: now}
+		var cpuOK, netOK bool
+		if m.cpuStats != nil {
+			if n, err := m.cpuStats.CPUTimeNanos(ctx, b.Name); err == nil {
+				cur.cpuNanos, cpuOK = n, true
+			}
+		}
+		if m.netStats != nil {
+			if rx, tx, err := m.netStats.NetBytes(ctx, b.Name); err == nil {
+				cur.rx, cur.tx, netOK = rx, tx, true
+			}
+		}
+		if !cpuOK && !netOK {
+			continue // sandbox went away or lost its tap between List and here
+		}
+		m.applyVitals(ctx, b.Name, cur, cpuOK, netOK)
+	}
+}
+
+// applyVitals folds one reading into a sandbox's state under m.mu: it charges
+// the network delta to the lifetime totals and decides whether the sandbox was
+// busy enough over the interval to count as active. Split from refreshVitals so
+// the lock is held only for bookkeeping, never across a driver call.
+func (m *Manager) applyVitals(ctx context.Context, name string, cur vitalsSample, cpuOK, netOK bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return
+	}
+	prev, primed := m.vitals[name]
+	if !primed {
+		// First reading for this sandbox (fresh boot, resume, or a control-plane
+		// restart). There is no baseline to subtract, and the counters may have
+		// just reset, so record it and judge activity from the next tick.
+		m.vitals[name] = cur
+		return
+	}
+	elapsed := cur.at.Sub(prev.at)
+	if elapsed < minVitalsInterval {
+		// Keep the older baseline rather than replacing it: a too-short gap
+		// should defer the measurement, not discard the interval entirely.
+		return
+	}
+	m.vitals[name] = cur
+
+	var netDelta uint64
+	if netOK {
+		rxDelta, txDelta := counterDelta(prev.rx, cur.rx), counterDelta(prev.tx, cur.tx)
+		netDelta = rxDelta + txDelta
+		b.NetRxBytes += rxDelta
+		b.NetTxBytes += txDelta
+	}
+	var cpuPct float64
+	if cpuOK {
+		cpuPct = float64(counterDelta(prev.cpuNanos, cur.cpuNanos)) / float64(elapsed.Nanoseconds()) * 100
+	}
+
+	busy := (m.actCPUPct > 0 && cpuOK && cpuPct >= m.actCPUPct) ||
+		(m.actNetBytes > 0 && netOK && netDelta >= m.actNetBytes)
+	if busy {
+		b.LastActive = time.Now().UTC()
+		// Work is happening, so give back the RAM the warm tier reclaimed.
+		m.deflate(ctx, b)
+		m.log.Debug("sandbox active by vitals", "name", name,
+			"cpu_pct", cpuPct, "net_bytes", netDelta, "elapsed", elapsed)
+	}
+	m.save() //nolint:errcheck
+}
+
+// counterDelta subtracts two readings of a cumulative counter that restarts at
+// zero whenever its backing device is recreated — which for the tap counters is
+// every pause/resume. A reading below the previous one is that reset, not a
+// 64-bit rollover, so the new value *is* the delta.
+func counterDelta(prev, cur uint64) uint64 {
+	if cur < prev {
+		return cur
+	}
+	return cur - prev
+}
+
 // RunReaper walks idle sandboxes down the activity gradient. Blocks until ctx
 // is done. Two thresholds: a running sandbox idle past balloonAfter is
 // *ballooned down* (RAM reclaimed to the host, VM still running); idle past
@@ -1215,6 +1413,9 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 	if m.diskReport != nil && m.diskPoolMB > 0 {
 		m.RefreshDiskUsage(ctx)
 	}
+	// Fold in-guest resource use into LastActive before judging idleness, so a
+	// sandbox that is working but receiving no inbound traffic isn't reaped.
+	m.refreshVitals(ctx)
 	for _, b := range m.List() {
 		// Pinned sandboxes hold their full RAM on purpose so in-guest
 		// timers/daemons keep firing; the reaper never touches them.
@@ -1224,7 +1425,7 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 		idle := time.Since(b.LastActive)
 		switch {
 		case idle > pauseAfter:
-			if err := m.Pause(ctx, b.Name); err != nil {
+			if err := m.pause(ctx, b.Name, fmt.Sprintf("went idle for %s", pauseAfter)); err != nil {
 				m.log.Error("reaper pause failed", "name", b.Name, "err", err)
 			} else {
 				m.log.Info("reaper paused idle sandbox", "name", b.Name)

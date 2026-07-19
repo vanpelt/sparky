@@ -36,6 +36,7 @@ type fakeVM struct {
 	memMB         int64
 	balloonTarget int64  // MiB the balloon is holding (0 = deflated)
 	cpuNanos      uint64 // synthetic cumulative CPU time (see CPUTimeNanos)
+	netRx, netTx  uint64 // synthetic cumulative network bytes (see NetBytes)
 }
 
 type Driver struct {
@@ -399,6 +400,34 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	}
 	vm.cpuNanos += mockCPUTickNanos
 	return vm.cpuNanos, nil
+}
+
+// NetBytes implements vmm.NetStatser. Unlike CPUTimeNanos it does not accrue on
+// its own — the counters only move when a test calls SetNetBytes — so a test
+// can hold a sandbox network-silent (the idle case) or step it by an exact
+// number of bytes. Errors on a paused/missing VM, matching firecracker.
+func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	vm, ok := d.vms[name]
+	if !ok || vm.paused {
+		return 0, 0, fmt.Errorf("vm %q not running", name)
+	}
+	return vm.netRx, vm.netTx, nil
+}
+
+// SetNetBytes drives the synthetic network counters for a running VM. Passing
+// values below the current ones simulates the reset a tap teardown causes, so
+// tests can cover the accumulator's reset handling.
+func (d *Driver) SetNetBytes(name string, rx, tx uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	vm, ok := d.vms[name]
+	if !ok {
+		return fmt.Errorf("vm %q not found", name)
+	}
+	vm.netRx, vm.netTx = rx, tx
+	return nil
 }
 
 func dirExists(p string) bool {

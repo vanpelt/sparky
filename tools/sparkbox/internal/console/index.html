@@ -205,7 +205,7 @@
           <thead>
             <tr>
               <th>Name</th><th>Status</th><th>Owner</th><th>Image</th>
-              <th>Resources</th><th>Web routes</th><th>Last active</th><th></th>
+              <th>Resources</th><th>Network</th><th>Web routes</th><th>Last active</th><th></th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -481,6 +481,8 @@
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
         '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + mem + " GB</td>" +
+        '<td class="spec" title="total received / sent since this sandbox was created">↓ ' +
+          bytes(b.net_rx_bytes) + " · ↑ " + bytes(b.net_tx_bytes) + "</td>" +
         "<td>" + routeChips(b) + "</td>" +
         '<td class="age">' + rel(b.last_active) + "</td>" +
         '<td class="actions">' + action + "</td>";

@@ -34,6 +34,7 @@ def _machines(tick):
         {"name": "dazzling-canyon", "state": "paused", "vcpus": 2,
          "mem_mb": 8192, "mem_used_mb": None, "disk_mb": 614, "disk_total_mb": 25600,
          "cpu_seconds": None, "image": "universal", "last_active": _iso(600),
+         "net_rx_bytes": 48213, "net_tx_bytes": 9004,
          "pinned": False, "env_undecryptable": False, "tags": [],
          "routes": [
              {"subdomain": "app", "port": 4444, "visibility": "public", "listening": False},
@@ -42,6 +43,7 @@ def _machines(tick):
         {"name": "brave-meadow", "state": "running", "vcpus": 4,
          "mem_mb": 16384, "mem_used_mb": 6820, "disk_mb": 12040, "disk_total_mb": 25600,
          "cpu_seconds": 1200 + tick * 3.1, "image": "universal", "last_active": _iso(4),
+         "net_rx_bytes": 4923847112, "net_tx_bytes": 812394002,
          "pinned": True, "env_undecryptable": False, "tags": ["ml", "prod"],
          "routes": [
              {"subdomain": "brave-meadow", "port": 8080, "visibility": "private", "listening": True},
@@ -51,6 +53,7 @@ def _machines(tick):
         {"name": "cold-harbor", "state": "archived", "vcpus": 2,
          "mem_mb": 8192, "mem_used_mb": None, "disk_mb": 0, "disk_total_mb": 25600,
          "cpu_seconds": None, "image": "universal", "last_active": _iso(90000),
+         "net_rx_bytes": 73400320, "net_tx_bytes": 15728640,
          "pinned": False, "env_undecryptable": False, "tags": ["staging"],
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
     ]

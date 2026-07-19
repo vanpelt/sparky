@@ -669,6 +669,43 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	return ticks * (1_000_000_000 / userHZ), nil
 }
 
+// NetBytes implements vmm.NetStatser from the host tap's byte counters.
+// Directions are swapped on the way out: the tap's rx is traffic the *guest*
+// transmitted, its tx traffic the guest received. The counters are owned by
+// the tap device, which createTap/deleteTap cycle on every pause/resume, so
+// they restart at zero far more often than the CPU counter — callers must
+// treat a decrease as a reset.
+func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, ok := d.vms[name]
+	if !ok || st.machine == nil {
+		return 0, 0, fmt.Errorf("vm %q not running", name)
+	}
+	tap := tapName(st.idx)
+	// Guest rx is the tap's tx and vice versa.
+	if rx, err = readTapCounter(tap, "tx_bytes"); err != nil {
+		return 0, 0, err
+	}
+	if tx, err = readTapCounter(tap, "rx_bytes"); err != nil {
+		return 0, 0, err
+	}
+	return rx, tx, nil
+}
+
+// readTapCounter reads one of a tap device's sysfs byte counters.
+func readTapCounter(tap, stat string) (uint64, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/statistics/%s", tap, stat))
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s/%s: %w", tap, stat, err)
+	}
+	return n, nil
+}
+
 // procStatCPUTicks sums the utime and stime fields (14 and 15) of a
 // /proc/<pid>/stat line. The comm field may itself contain spaces and ')',
 // so fields are counted from the last ')' rather than split naively.
