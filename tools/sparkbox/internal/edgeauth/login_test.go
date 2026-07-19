@@ -11,7 +11,10 @@ import (
 
 func newTestLogin() (*LoginHandler, *Signer) {
 	s := NewSigner([]byte("k"))
-	h := NewLoginHandler(LoginConfig{Signer: s, Domain: "hivemind.tools", Gateway: "hivemind.tools", Secure: true})
+	h, err := NewLoginHandler(LoginConfig{Signer: s, Domain: "hivemind.tools", Gateway: "hivemind.tools", Secure: true})
+	if err != nil {
+		panic(err)
+	}
 	return h, s
 }
 
@@ -96,7 +99,10 @@ func TestLoginRejectsBadTokenAndOpenRedirect(t *testing.T) {
 // only — and its fallback must be reachable (http, not https).
 func TestSafeReturnHTTPOnNonTLSEdge(t *testing.T) {
 	s := NewSigner([]byte("k"))
-	h := NewLoginHandler(LoginConfig{Signer: s, Domain: "localtest.me", Gateway: "localtest.me", Secure: false})
+	h, err := NewLoginHandler(LoginConfig{Signer: s, Domain: "localtest.me", Gateway: "localtest.me", Secure: false})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := h.safeReturn("http://my.localtest.me:8081/x"); got != "http://my.localtest.me:8081/x" {
 		t.Fatalf("dev-loop http return rejected: %q", got)

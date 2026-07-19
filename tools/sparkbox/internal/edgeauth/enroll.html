@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sign in · sparkbox</title>
+<title>Add a passkey · sparkbox</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
 <style>
   :root {
@@ -49,30 +49,16 @@
   .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
   .logo {
     width: 28px; height: 28px; border-radius: 7px; flex: none;
-    /* The tile stays dark in both themes, matching the consoles: the mark is a
-       full-colour emoji, so it needs one constant backdrop rather than one that
-       inverts with the scheme. */
     background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
     display: grid; place-items: center; font-weight: 700; font-size: 16px;
-    /* Emoji glyphs carry their own side bearings and sit high on the box, so
-       they need slightly more size and an optical nudge to centre in the tile. */
     line-height: 1; text-indent: 0.02em;
   }
   .brand span { font-size: 13px; font-weight: 600; }
   h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
   p { margin: 0 0 8px; color: hsl(var(--muted-foreground)); }
-  ol { margin: 10px 0 4px; padding-left: 20px; color: hsl(var(--muted-foreground)); }
-  li { margin: 4px 0; }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
     background: hsl(var(--muted)); border-radius: 4px; padding: 1px 5px;
-    color: hsl(var(--foreground)); user-select: all;
-  }
-  textarea {
-    width: 100%; margin-top: 14px; min-height: 84px; resize: vertical;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
-    padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
     color: hsl(var(--foreground));
   }
   button {
@@ -80,23 +66,12 @@
     border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 600;
     background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
   }
-  .divider {
-    display: flex; align-items: center; gap: 10px; margin: 18px 0 4px;
-    color: hsl(var(--muted-foreground)); font-size: 12px;
-  }
-  .divider::before, .divider::after {
-    content: ""; flex: 1; height: 1px; background: hsl(var(--border));
-  }
   .alt {
     display: block; margin-top: 10px; width: 100%; background: none; border: 0;
     padding: 4px; cursor: pointer; text-align: center; font-size: 13px;
     color: hsl(var(--muted-foreground)); text-decoration: underline;
     text-underline-offset: 3px;
   }
-  #token-section { display: none; margin-top: 4px; }
-  #token-section.show { display: block; }
-  body.token-only #passkey-section, body.token-only .divider, body.token-only .alt { display: none; }
-  body.token-only #token-section { display: block; }
   .err {
     margin-top: 14px; padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
     background: hsl(var(--danger) / .12); border: 1px solid hsl(var(--danger) / .4);
@@ -105,48 +80,24 @@
   .err.show { display: block; }
 </style>
 </head>
-<body{{if not .Passkeys}} class="token-only"{{end}}>
+<body>
   <main class="card">
     <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
-    <h1>Sign in</h1>
-    <p>This is a private URL.</p>
-    {{if .Passkeys}}
-    <div id="passkey-section">
-      <button type="button" id="passkey-btn">&#128273; Sign in with a passkey</button>
-    </div>
-    <div class="divider">or</div>
-    <button type="button" class="alt" id="token-toggle">Use a session token instead</button>
-    {{end}}
-    <div id="token-section">
-      <p>Mint a session token from a machine with your SSH key:</p>
-      <ol>
-        <li>Run <code>ssh {{.PortFlag}}ctl@{{.Gateway}} session-token</code></li>
-        <li>Paste the <code>spk_v1…</code> value below.</li>
-      </ol>
-      <form method="POST" action="/session">
-        <input type="hidden" name="return" value="{{.Return}}" />
-        <textarea name="token" placeholder="spk_v1…" spellcheck="false"></textarea>
-        <button type="submit">Continue</button>
-      </form>
-    </div>
+    <h1>Add a passkey?</h1>
+    <p>You're signed in as <code>{{.Handle}}</code>.</p>
+    <p>A passkey lets this browser sign in with Touch&nbsp;ID, Face&nbsp;ID, or your
+       security key — no more minting session tokens over SSH.</p>
+    <button type="button" id="create-btn">Create a passkey</button>
+    <button type="button" class="alt" id="skip-btn">Not now</button>
     <div class="err" id="err"></div>
   </main>
   <script>
-    var RETURN = document.querySelector('input[name="return"]').value;
+    var RETURN = {{.Return}};
     function showErr(msg) {
       var el = document.getElementById("err");
       el.textContent = msg;
       el.classList.add("show");
     }
-    if (new URLSearchParams(location.search).get("err")) {
-      showErr("That token was invalid or expired. Mint a fresh one and try again.");
-      var ts = document.getElementById("token-section");
-      if (ts) ts.classList.add("show");
-    }
-  </script>
-  {{if .Passkeys}}
-  <script>
-    // base64url <-> ArrayBuffer, the WebAuthn wire format's JSON carriage.
     function b64uDec(s) {
       s = s.replace(/-/g, "+").replace(/_/g, "/");
       return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); });
@@ -157,53 +108,62 @@
       return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
 
-    document.getElementById("token-toggle").addEventListener("click", function () {
-      document.getElementById("token-section").classList.toggle("show");
+    document.getElementById("skip-btn").addEventListener("click", function () {
+      location.href = RETURN;
     });
 
-    // No WebAuthn (very old browser, some embedded webviews): the token path
-    // is the only one that can work, so don't advertise a dead button.
     if (!window.PublicKeyCredential) {
-      document.body.classList.add("token-only");
+      // Nothing to enroll with — don't strand the visitor on a dead page.
+      location.href = RETURN;
     }
 
-    document.getElementById("passkey-btn").addEventListener("click", async function () {
+    document.getElementById("create-btn").addEventListener("click", async function () {
       var btn = this;
       btn.disabled = true;
       document.getElementById("err").classList.remove("show");
       try {
-        var begin = await fetch("/webauthn/login/begin", { method: "POST" });
+        var begin = await fetch("/webauthn/register/begin", { method: "POST" });
         var body = await begin.json();
-        if (!begin.ok) throw new Error(body.error || "could not start sign-in");
+        if (!begin.ok) throw new Error(body.error || "could not start passkey setup");
         var opts = body.publicKey;
         opts.challenge = b64uDec(opts.challenge);
-        (opts.allowCredentials || []).forEach(function (c) { c.id = b64uDec(c.id); });
-        var cred = await navigator.credentials.get({ publicKey: opts });
-        var fin = await fetch("/webauthn/login/finish?return=" + encodeURIComponent(RETURN), {
+        opts.user.id = b64uDec(opts.user.id);
+        (opts.excludeCredentials || []).forEach(function (c) { c.id = b64uDec(c.id); });
+        var cred = await navigator.credentials.create({ publicKey: opts });
+        // A device label, so `ctl passkey ls` reads better than raw ids.
+        var label = (navigator.userAgentData && navigator.userAgentData.platform) ||
+          navigator.platform || "";
+        var fin = await fetch("/webauthn/register/finish?label=" + encodeURIComponent(label), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             id: cred.id, rawId: b64uEnc(cred.rawId), type: cred.type,
             response: {
-              authenticatorData: b64uEnc(cred.response.authenticatorData),
+              attestationObject: b64uEnc(cred.response.attestationObject),
               clientDataJSON: b64uEnc(cred.response.clientDataJSON),
-              signature: b64uEnc(cred.response.signature),
-              userHandle: cred.response.userHandle ? b64uEnc(cred.response.userHandle) : null
+              transports: cred.response.getTransports ? cred.response.getTransports() : []
             },
             clientExtensionResults: cred.getClientExtensionResults()
           })
         });
         var out = await fin.json();
-        if (!out.ok) throw new Error(out.error || "sign-in failed");
-        location.href = out.return;
+        if (!out.ok) throw new Error(out.error || "could not save the passkey");
+        location.href = RETURN;
       } catch (e) {
-        // NotAllowedError is the user closing the prompt — not an error state
-        // worth a red box.
-        if (e.name !== "NotAllowedError") showErr(e.message || String(e));
+        if (e.name === "NotAllowedError") {
+          // The user dismissed the prompt; treat it like "not now".
+          btn.disabled = false;
+          return;
+        }
+        if (e.name === "InvalidStateError") {
+          // This authenticator is already enrolled (excludeCredentials hit).
+          location.href = RETURN;
+          return;
+        }
+        showErr(e.message || String(e));
         btn.disabled = false;
       }
     });
   </script>
-  {{end}}
 </body>
 </html>

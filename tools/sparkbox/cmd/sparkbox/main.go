@@ -417,10 +417,14 @@ func serve(args []string) error {
 		// Authenticated forwarding: private routes are gated behind a session the
 		// visitor mints from their SSH key, and the browser sign-in rides the edge
 		// at login.<domain> like the console and issuer do.
-		loginH := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
+		loginH, lerr := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
 			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
 			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain, GatewayPort: gatewayPort(*sshAdvertise, *sshAddr),
+			Passkeys: userStore, Subdomain: *loginSub, Port: portOf(*proxyAddr),
 		})
+		if lerr != nil {
+			return fmt.Errorf("login handler: %w", lerr)
+		}
 		px.SetAuth(*loginSub, loginH.Handler(), sessionSigner, userStore)
 		px.SetListenPort(portOf(*proxyAddr))
 		log.Info("authenticated forwarding enabled", "login", *loginSub+"."+*proxyDomain, "session_ttl", *sessionTTL)

@@ -135,6 +135,15 @@ func Open(path string) (*Store, error) {
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS user_keys_wire ON user_keys(wire);
 		CREATE INDEX IF NOT EXISTS user_keys_handle ON user_keys(handle);
+		CREATE TABLE IF NOT EXISTS user_passkeys (
+			cred_id      TEXT PRIMARY KEY,
+			handle       TEXT NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
+			label        TEXT NOT NULL DEFAULT '',
+			credential   TEXT NOT NULL,
+			created_at   TIMESTAMP NOT NULL,
+			last_used_at TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS user_passkeys_handle ON user_passkeys(handle);
 		CREATE TABLE IF NOT EXISTS invites (
 			code_hash  TEXT PRIMARY KEY,
 			created_by TEXT NOT NULL,

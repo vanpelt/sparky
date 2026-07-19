@@ -74,9 +74,12 @@ func newAuthStack(t *testing.T) *authStack {
 	}
 
 	signer := edgeauth.NewSigner([]byte("test-key-material"))
-	login := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
+	login, err := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
 		Signer: signer, Domain: proxyDomain, Gateway: proxyDomain, Logger: log,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	px := proxy.New(mgr, store, proxyDomain, log)
 	px.SetAuth("login", login.Handler(), signer, userStore)
 

@@ -1,6 +1,7 @@
 package sshgw
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
 // sessionTokenMaxTTL caps how long a minted edge session stays valid. Longer
@@ -124,6 +126,67 @@ func (g *Gateway) controlShare(s gssh.Session, user string, args []string, log *
 		fmt.Fprintf(s, "%s is now private — visitors must sign in and own it (%d route(s)).\r\n", name, n)
 	}
 	s.Exit(0) //nolint:errcheck
+}
+
+// controlPasskey lists or removes the caller's WebAuthn passkeys. Enrollment
+// happens in the browser (the login page offers it after a token sign-in);
+// this is the audit-and-revoke end, deliberately on the SSH channel so a lost
+// or stolen browser credential can be killed from any machine with your key.
+func (g *Gateway) controlPasskey(s gssh.Session, user string, args []string, log *slog.Logger) {
+	usage := func() {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> passkey [list|rm <id>]\r\n", ControlUser)
+		s.Exit(2) //nolint:errcheck
+	}
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "list", "ls":
+		pks, err := g.users.Passkeys(user)
+		if err != nil {
+			fail(s, log, "passkey list", err)
+			return
+		}
+		if len(pks) == 0 {
+			fmt.Fprintf(s, "no passkeys — enroll one by signing in at https://login.%s\r\n", g.domainHint())
+			s.Exit(0) //nolint:errcheck
+			return
+		}
+		for _, p := range pks {
+			lastUsed := "never used"
+			if p.LastUsedAt != nil {
+				lastUsed = "last used " + p.LastUsedAt.Format("2006-01-02")
+			}
+			label := p.Label
+			if label == "" {
+				label = "-"
+			}
+			fmt.Fprintf(s, "%-24s %-16s added %s  %s\r\n",
+				truncate(p.ID, 24), truncate(label, 16), p.CreatedAt.Format("2006-01-02"), lastUsed)
+		}
+		s.Exit(0) //nolint:errcheck
+	case "rm", "remove":
+		if len(args) < 2 {
+			usage()
+			return
+		}
+		switch err := g.users.RemovePasskey(user, args[1]); {
+		case errors.Is(err, users.ErrNoSuchPasskey):
+			fmt.Fprintf(s.Stderr(), "sparkbox: no passkey matches %q — see `passkey list`\r\n", args[1])
+			s.Exit(1) //nolint:errcheck
+		case errors.Is(err, users.ErrAmbiguousPasskey):
+			fmt.Fprintf(s.Stderr(), "sparkbox: %q matches more than one passkey — use more of the id\r\n", args[1])
+			s.Exit(1) //nolint:errcheck
+		case err != nil:
+			fail(s, log, "passkey rm", err)
+		default:
+			log.Info("passkey removed", "user", user, "id", args[1])
+			fmt.Fprintf(s, "removed — that passkey can no longer sign in\r\n")
+			s.Exit(0) //nolint:errcheck
+		}
+	default:
+		usage()
+	}
 }
 
 // controlSessionToken mints an edge session token for the caller. The ctl
