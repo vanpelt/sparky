@@ -51,14 +51,16 @@
     <p>An ephemeral microVM. Work persists while the box is warm; it suspends
        when idle and resumes the instant you reconnect.</p>
     <div class="card">
-      <h2>You're seeing nginx's default page</h2>
-      <div class="row"><span class="k">serve your app →</span>
-        <code>bind any port; it's routed automatically</code></div>
-      <div class="row"><span class="k">replace this →</span>
-        <code>/var/www/html/index.html</code></div>
-      <div class="row"><span class="k">stop nginx →</span>
-        <code>sudo systemctl stop nginx</code></div>
+      <h2>This is nginx, on port 80</h2>
+      <div class="row"><span class="k">serve files →</span>
+        <code>drop them in /var/www/html</code></div>
+      <div class="row"><span class="k">your own app →</span>
+        <code>bind 0.0.0.0 on any port; nginx isn't in the way</code></div>
+      <div class="row"><span class="k">reach a port →</span>
+        <code>https://__HOSTNAME__:PORT</code></div>
     </div>
+    <p>Port 8000 is what the bare URL forwards to and is left free for you —
+       nothing here listens on it.</p>
     <footer>powered by sparkbox</footer>
   </main>
 </body>

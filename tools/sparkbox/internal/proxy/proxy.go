@@ -57,6 +57,27 @@ const (
 	portKey            // the original dialed port recovered below TLS (SO_ORIGINAL_DST)
 )
 
+// upstreamTransport dials guest apps. It is deliberately not http.DefaultTransport:
+//
+//   - MaxIdleConnsPerHost defaults to 2, which for a proxy means the third
+//     concurrent request to the same guest pays a fresh TCP handshake. A single
+//     page load of a dev server easily exceeds that.
+//   - ResponseHeaderTimeout stays unset: a guest app is allowed to think for as
+//     long as it likes (long-poll, a slow first compile) without the edge
+//     deciding it is dead.
+//   - Compression is passed through rather than managed. The client's
+//     Accept-Encoding reaches the app verbatim and the app's encoded bytes reach
+//     the client untouched — no transparent gunzip that would desynchronise
+//     Content-Encoding from the body.
+var upstreamTransport = &http.Transport{
+	DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	MaxIdleConns:          256,
+	MaxIdleConnsPerHost:   64,
+	IdleConnTimeout:       90 * time.Second,
+	ExpectContinueTimeout: time.Second,
+	DisableCompression:    true,
+}
+
 // Accounts is the slice of the user store the edge needs to authorise a
 // visitor: resolving a handle to its operator status and email. *users.Store
 // satisfies it.
@@ -150,6 +171,15 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 		log:    log,
 	}
 	s.rp = &httputil.ReverseProxy{
+		Transport: upstreamTransport,
+		// -1 means "flush after every write", i.e. no response buffering at all.
+		// The stdlib default only streams eagerly for text/event-stream and for
+		// unknown-length bodies, which quietly stalls anything else that trickles:
+		// a chunked log tail, an LLM token stream that sets its own Content-Type,
+		// a progress endpoint. This edge fronts one guest app for one user, so
+		// there is no throughput case for buffering, and "whatever the app writes
+		// appears when it writes it" is the behaviour a web app author expects.
+		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			target, _ := pr.In.Context().Value(targetKey).(*url.URL)
 			pr.SetURL(target)
@@ -198,18 +228,47 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 				}
 			}
 		},
+		// ErrorHandler only ever runs before anything has been written to the
+		// client: the stdlib handles a failure part-way through a body by
+		// panicking with http.ErrAbortHandler (aborting the connection) rather
+		// than calling here, so this is always free to write a fresh response.
+		// Do not add a "have we started?" guard — the upgrade-negotiation errors
+		// that reach this path deserve a real 502, and suppressing them would
+		// leave a failed websocket handshake hanging with no answer.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Warn("proxy upstream error", "host", r.Host, "err", err)
 			route, _ := r.Context().Value(routeKey).(routes.Route)
 			s.errorPage(w, r, http.StatusBadGateway,
 				fmt.Sprintf("Nothing is listening on port %d", route.Port),
-				fmt.Sprintf("Sandbox %q is up, but nothing answered on the forwarded port (%v).", route.Sandbox, err),
-				template.HTML(fmt.Sprintf(
-					"Start a server inside the sandbox — e.g. <code>python3 -m http.server %d --bind 0.0.0.0</code> — or point this subdomain at another port via the routes API.",
-					route.Port)))
+				// The underlying dial error goes to the log, not the page: on a
+				// public route this is served to strangers, and it would spell
+				// out the guest's internal address for them.
+				fmt.Sprintf("Sandbox %s is running, but nothing answered on port %d.", route.Sandbox, route.Port),
+				s.notListeningHint(r, route.Port))
 		},
 	}
 	return s
+}
+
+// notListeningHint is the advice on the 502 page, and the closest thing sparkbox
+// has to onboarding: this URL is the first thing a new sandbox shows its owner.
+// It answers the three questions that actually come up, in the order they bite.
+func (s *Server) notListeningHint(r *http.Request, port int) template.HTML {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = template.HTMLEscapeString(host)
+	return template.HTML(fmt.Sprintf(
+		`<p><strong>Bind 0.0.0.0, not 127.0.0.1.</strong> The edge reaches your app `+
+			`across the sandbox's network interface, so a loopback-only listener is `+
+			`invisible from out here — this is the usual cause.</p>`+
+			`<p><strong>Nothing is reserved.</strong> Port %d is simply where this URL `+
+			`forwards by default; no sparkbox process is holding it. Start your app and `+
+			`reload.</p>`+
+			`<p><strong>Any other port works too</strong>, with no configuration: put it `+
+			`in the URL, e.g. <code>https://%s:5173</code>.</p>`,
+		port, host))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
