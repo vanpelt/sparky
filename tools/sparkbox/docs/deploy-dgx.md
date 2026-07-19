@@ -163,6 +163,29 @@ EOF
 sudo systemctl enable --now sparkbox.service
 ```
 
+## 4b. Agent CLIs in sandboxes (claude, codex, hivemind)
+
+The rootfs template does **not** ship the agent CLIs — they move too fast to bake
+into an image rebuild. The cloud path (`deploy/cloud-init.yaml`) patches them
+into the template in seconds and re-patches daily; on a hand-built box, run the
+same tooling installer once. It drops `sparkbox-refresh-tools.sh` +
+`sparkbox-install-guest-identity.sh` into `/usr/local/sbin`, installs a daily
+timer, and does one immediate `--force` patch of the current template. Point
+`IMAGES_DIR` at wherever `--image-dir` reads from (this box uses
+`/srv/sparkbox/images`, not the cloud path's `data/images`).
+
+```sh
+cd tools/sparkbox
+sudo IMAGES_DIR=/srv/sparkbox/images TOOLS_DIR=/srv/sparkbox/tools \
+  ./deploy/install-host-tooling.sh
+```
+
+The patch is atomic (reflink/copy → loop-mount → install → rename), so it's safe
+to run on a live box: in-flight `ssh new@` sees either the old or new template,
+never a torn one; running sandboxes keep their own disk. Verify:
+`ssh -p2222 new@<gateway>` then `ssh -p2222 <name>@<gateway> 'claude --version;
+codex --version; hivemind --version'`.
+
 ## 5. Cloudflare Tunnel
 
 ```sh

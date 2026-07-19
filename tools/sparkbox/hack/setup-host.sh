@@ -139,6 +139,14 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now sparkbox-net.service
 
+echo "== agent-CLI refresher (claude/codex/hivemind) + daily timer =="
+# The one host-side unit this script used to omit — the cloud path (cloud-init)
+# always installs it, so a from-source box would silently ship sandboxes with no
+# agent CLIs. install-host-tooling.sh bakes them into the template now and every
+# day. IMAGES_DIR/TOOLS_DIR match this script's XFS data volume layout.
+IMAGES_DIR="$SPARKBOX_DIR/data/images" TOOLS_DIR="$SPARKBOX_DIR/data/tools" \
+  "$(dirname "$0")/../deploy/install-host-tooling.sh"
+
 # IPv6: if you have a routed /64, each sandbox gets a globally-routable /128
 # from it (dual-stack, no NAT). Set SPARKBOX_SUBNET6 to enable, e.g.
 #   SPARKBOX_SUBNET6=2001:bc8:702:1c7::/64 ./setup-host.sh '<user> <key>'
