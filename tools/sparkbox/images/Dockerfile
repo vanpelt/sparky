@@ -96,6 +96,20 @@ RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
     DEBIAN_FRONTEND=noninteractive apt-get install -y tailscale && \
     rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (gh) via its official apt keyring — the same install method as
+# tailscale above, so it resolves per-arch (amd64/arm64) from GitHub's own repo
+# rather than a hardcoded tarball. Agents use `gh` to clone/PR against private
+# repos with a forwarded token; unlike tailscale/nginx it stays on the PATH ready
+# to use (no service).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gh && \
+    rm -rf /var/lib/apt/lists/*
+
 # ---- systemd: trim for a fast microVM boot --------------------------------
 # ubuntu:24.04's image is already fairly minimal (we skip the ubuntu-server
 # metapackages), so we only mask the units that would otherwise probe hardware,
