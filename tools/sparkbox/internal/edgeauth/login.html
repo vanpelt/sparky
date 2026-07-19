@@ -48,8 +48,14 @@
   .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
   .logo {
     width: 28px; height: 28px; border-radius: 7px; flex: none;
-    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
-    display: grid; place-items: center; font-weight: 700; font-size: 15px;
+    /* The tile stays dark in both themes, matching the consoles: the mark is a
+       full-colour emoji, so it needs one constant backdrop rather than one that
+       inverts with the scheme. */
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    /* Emoji glyphs carry their own side bearings and sit high on the box, so
+       they need slightly more size and an optical nudge to centre in the tile. */
+    line-height: 1; text-indent: 0.02em;
   }
   .brand span { font-size: 13px; font-weight: 600; }
   h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
@@ -83,7 +89,7 @@
 </head>
 <body>
   <main class="card">
-    <div class="brand"><div class="logo">s</div><span>sparkbox</span></div>
+    <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
     <h1>Sign in</h1>
     <p>This is a private URL. Mint a session token from a machine with your SSH key:</p>
     <ol>
