@@ -435,6 +435,9 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		HostIP: inst.HostIP, GuestV6: inst.GuestV6, CreatedAt: now, LastActive: now,
 	}
 	m.boxes[name] = b
+	// Fresh tap and VMM process, so the counters start at zero and the first
+	// tick can charge a real delta instead of only priming (see EnsureRunning).
+	m.vitals[name] = vitalsSample{at: time.Now()}
 	// Default web route: <name>.<domain> -> :8000, so every sandbox is
 	// reachable over HTTP with no extra setup.
 	if m.routes != nil {
@@ -684,6 +687,12 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		b.HostIP = inst.HostIP
 		b.GuestV6 = inst.GuestV6
 		m.log.Info("sandbox resumed", "name", name)
+		// Seed a zero baseline: this start built a fresh tap and a fresh VMM
+		// process, so both counter sets demonstrably begin at zero. Without it
+		// the next tick would only *prime*, and every byte moved between resume
+		// and that tick would go unmetered — which is most of the traffic on a
+		// box that resumes, does one burst of work, and goes quiet.
+		m.vitals[name] = vitalsSample{at: time.Now()}
 		// The rootfs survived pause/archive/host-restart, but the env may have
 		// changed while the box was down — reconcile on every return to running.
 		m.pushEnv(ctx, copyOf(b))

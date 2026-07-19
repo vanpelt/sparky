@@ -178,6 +178,37 @@ func TestVitalsFirstReadingOnlyPrimes(t *testing.T) {
 	}
 }
 
+// TestVitalsStartSeedsZeroBaseline: starting a sandbox builds a fresh tap and
+// VMM process, so the counters provably begin at zero and the first tick must
+// charge a real delta. Caught on live hardware, where a 50 MB download between
+// resume and the first tick vanished into a priming read — which is most of the
+// traffic on a box that wakes, does one burst of work, and goes quiet again.
+func TestVitalsStartSeedsZeroBaseline(t *testing.T) {
+	m := internalManager(t, Options{ActivityNetBytes: 64 * 1024})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "fresh", "alice", "ubuntu", 1, 2048); err != nil {
+		t.Fatal(err)
+	}
+	driver := m.driver.(*mock.Driver)
+
+	// Traffic arrives before the reaper's first look at this sandbox.
+	if err := driver.SetNetBytes("fresh", 50_000_000, 1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	// Age the seeded baseline past the minimum sample interval.
+	m.mu.Lock()
+	s := m.vitals["fresh"]
+	s.at = time.Now().Add(-time.Minute)
+	m.vitals["fresh"] = s
+	m.mu.Unlock()
+
+	m.reapOnce(ctx, 0, 30*time.Minute)
+
+	if rx := m.boxes["fresh"].NetRxBytes; rx != 50_000_000 {
+		t.Fatalf("NetRxBytes = %d, want 50000000 — traffic before the first tick went unmetered", rx)
+	}
+}
+
 // TestVitalsPauseDropsBaseline: a resumed sandbox must re-prime rather than
 // measure across the pause, whose interval would dilute any rate to nothing.
 func TestVitalsPauseDropsBaseline(t *testing.T) {
