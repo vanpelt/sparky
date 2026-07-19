@@ -95,6 +95,7 @@ type Gateway struct {
 	schedules      *schedule.Store   // optional: platform scheduler store (ctl@ schedule)
 	routes         *routes.Store     // optional: proxy routes, for ctl@ share
 	session        *edgeauth.Signer  // optional: edge session signer, for ctl@ session-token
+	tags           SandboxTagger     // optional: sandbox tag reads/writes; nil disables tagging
 	// live tracks the interactive sessions attached to each sandbox so they can
 	// be hung up cleanly when it is paused — see livesessions.go.
 	liveMu sync.Mutex
@@ -130,6 +131,19 @@ type GatewayOptions struct {
 	// token from the caller's (already key-authenticated) ctl channel. Nil
 	// disables it.
 	Session *edgeauth.Signer
+	// Tags, if set, enables tagging a sandbox at creation (`ssh new@<gateway>
+	// --tag ml`) and the `ctl@ tags` command. Satisfied by *secrets.Store; nil
+	// disables both.
+	Tags SandboxTagger
+}
+
+// SandboxTagger is the slice of the secrets store the gateway needs to read and
+// stamp a sandbox's tags. Tags select which of an owner's secrets get pushed
+// into that sandbox's environment, so setting them is a privileged operation
+// the gateway only ever performs for the caller's own boxes.
+type SandboxTagger interface {
+	TagsFor(sandbox string) ([]string, error)
+	SetTags(sandbox, owner string, tags []string) error
 }
 
 func New(opts GatewayOptions) *Gateway {
@@ -140,7 +154,7 @@ func New(opts GatewayOptions) *Gateway {
 		doors: opts.Doors, domain: opts.Domain,
 		openSignup: opts.OpenSignup, invitesPerUser: opts.InvitesPerUser,
 		schedules: opts.Schedules,
-		routes:    opts.Routes, session: opts.Session,
+		routes:    opts.Routes, session: opts.Session, tags: opts.Tags,
 	}
 }
 
@@ -209,15 +223,41 @@ func (g *Gateway) handle(s gssh.Session) {
 	defer cancel()
 
 	if sandboxName == NewSandboxUser {
+		// `ssh new@<gateway> ml prod` stamps the box before it exists. Bare words
+		// are taken as tags, not just --tag: the local ssh client swallows
+		// leading-dash arguments as its own options, so `ssh new@host --tag ml`
+		// never reaches us without an `ssh new@host -- --tag ml` incantation.
+		// This door takes no other arguments, so there is nothing to confuse.
+		flagged, bare, err := parseTags(s.Command())
+		if err != nil {
+			fail(s, log, "create sandbox", err)
+			return
+		}
+		tags := dedupeTags(append(flagged, normalizeTags(bare)...))
 		name := g.newName()
+		// Tags first: Create pushes the owner's secret env asynchronously, and
+		// which secrets that picks up is exactly what tags decide. Stamping after
+		// Create would race that push and usually lose.
+		if err := g.applyTags(name, user, tags); err != nil {
+			fail(s, log, "create sandbox", err)
+			return
+		}
 		if _, err := g.mgr.Create(ctx, name, user, g.defaultImage, 0, 0); err != nil {
+			// Don't strand tag rows for a sandbox that never came into being.
+			if len(tags) > 0 && g.tags != nil {
+				g.tags.SetTags(name, user, nil) //nolint:errcheck // best-effort cleanup
+			}
 			g.failStart(s, log, "create sandbox", err)
 			return
 		}
+		tagNote := ""
+		if len(tags) > 0 {
+			tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
+		}
 		if viaDoor {
-			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s.%s\r\n", name, name, g.domainHint())
+			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: ssh %s.%s\r\n", name, tagNote, name, g.domainHint())
 		} else {
-			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q — reconnect with: ssh %s@<gateway>\r\n", name, name)
+			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: ssh %s@<gateway>\r\n", name, tagNote, name)
 		}
 		sandboxName = name
 	}

@@ -321,7 +321,7 @@ func serve(args []string) error {
 		Doors: doors, Domain: *proxyDomain,
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
-		Routes:    routeStore, Session: sessionSigner,
+		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
 	})
 	// The gateway knows which terminals are attached to which sandbox, so it is
 	// what the manager calls to release them when a sandbox is paused.

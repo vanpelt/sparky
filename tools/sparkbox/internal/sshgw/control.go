@@ -18,17 +18,28 @@ import (
 )
 
 const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
+	"\r\n" +
+	" creating a sandbox\r\n" +
+	"  (new sandbox)            ssh new@<gateway> [<tag>…]   — creates one and connects\r\n" +
+	"  fork <snapshot> <name> [--tag <t>]…  create one from a snapshot you saved\r\n" +
+	"\r\n" +
+	" sandboxes\r\n" +
 	"  list                     list your sandboxes and their state\r\n" +
 	"  pause <name>             pause a running sandbox to free a slot\r\n" +
 	"  archive <name>           park a sandbox in object storage (frees host disk)\r\n" +
 	"  restore <name>           bring an archived sandbox back and start it\r\n" +
 	"  resize <name> <size>     grow a sandbox's root disk, e.g. 25G (cold-boots it)\r\n" +
+	"  rm <name>                delete a sandbox and its disk — permanent, see archive\r\n" +
+	"  tags <name> [<tag>…]     show or set tags (they select which secrets it gets)\r\n" +
 	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
 	"  unpin <name>             let a sandbox pause when idle again\r\n" +
-	"  snapshot list            list your snapshots (fork-able templates)\r\n" +
+	"\r\n" +
+	" snapshots (fork-able disk templates)\r\n" +
+	"  snapshot list            list your snapshots\r\n" +
 	"  snapshot create <box> <name>  save <box>'s current disk as a template\r\n" +
 	"  snapshot rm <name>       delete a snapshot template\r\n" +
-	"  fork <snapshot> <name>   create a new sandbox from one of your snapshots\r\n" +
+	"\r\n" +
+	" other\r\n" +
 	"  schedule list            list your platform-scheduled jobs\r\n" +
 	"  schedule add <box> \"<cron>\" <cmd>  wake <box> on a cron schedule to run <cmd>\r\n" +
 	"  schedule rm <id>         remove a scheduled job\r\n" +
@@ -140,6 +151,21 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		fmt.Fprintf(s, "resized %s — it's running again with a %d MB disk\r\n", name, sizeMB)
 		s.Exit(0) //nolint:errcheck
+	case "rm", "remove", "destroy":
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
+		defer cancel()
+		if err := g.mgr.Destroy(ctx, name); err != nil {
+			fail(s, log, "rm", err)
+			return
+		}
+		fmt.Fprintf(s, "removed %s — its disk is gone\r\n", name)
+		s.Exit(0) //nolint:errcheck
+	case "tags":
+		g.controlTags(s, user, args, log)
 	case "pin":
 		name, ok := g.ownedBoxArg(s, user, args)
 		if !ok {
@@ -606,19 +632,94 @@ func (g *Gateway) controlSnapshot(s gssh.Session, user string, args []string, lo
 
 // controlFork creates a new sandbox from one of the caller's snapshots.
 func (g *Gateway) controlFork(s gssh.Session, user string, args []string, log *slog.Logger) {
-	if len(args) < 2 {
-		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> fork <snapshot> <new-name>\r\n", ControlUser)
+	tags, rest, err := parseTags(args)
+	if err != nil {
+		fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
 		s.Exit(2) //nolint:errcheck
 		return
 	}
+	if len(rest) < 2 {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> fork <snapshot> <new-name> [--tag <t>]…\r\n"+
+			"       list your snapshots with: ssh %s@<gateway> snapshot list\r\n", ControlUser, ControlUser)
+		s.Exit(2) //nolint:errcheck
+		return
+	}
+	snapshot, name := rest[0], rest[1]
 	ctx, cancel := context.WithTimeout(s.Context(), pauseTimeout)
 	defer cancel()
-	if _, err := g.mgr.Fork(ctx, args[0], args[1], user, 0, 0); err != nil {
+	// Tags before Fork, for the same reason as create: the secret-env push is
+	// kicked off by the fork and tags are what decide its contents.
+	if err := g.applyTags(name, user, tags); err != nil {
 		fail(s, log, "fork", err)
 		return
 	}
-	fmt.Fprintf(s, "created %s from snapshot %q — connect with: ssh %s@%s\r\n",
-		args[1], args[0], args[1], g.domainHint())
+	if _, err := g.mgr.Fork(ctx, snapshot, name, user, 0, 0); err != nil {
+		if len(tags) > 0 && g.tags != nil {
+			g.tags.SetTags(name, user, nil) //nolint:errcheck // best-effort cleanup
+		}
+		fail(s, log, "fork", err)
+		return
+	}
+	tagNote := ""
+	if len(tags) > 0 {
+		tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
+	}
+	fmt.Fprintf(s, "created %s from snapshot %q%s — connect with: ssh %s@%s\r\n",
+		name, snapshot, tagNote, name, g.domainHint())
+	s.Exit(0) //nolint:errcheck
+}
+
+// controlTags shows or replaces a sandbox's tags. Tags select which of the
+// owner's secrets are pushed into the sandbox's environment, so setting them
+// re-syncs the box rather than waiting for its next resume.
+func (g *Gateway) controlTags(s gssh.Session, user string, args []string, log *slog.Logger) {
+	name, ok := g.ownedBoxArg(s, user, args)
+	if !ok {
+		return
+	}
+	if g.tags == nil {
+		fail(s, log, "tags", errors.New("tagging is not enabled on this host"))
+		return
+	}
+	// `tags <name>` reads; `tags <name> a b c` replaces the whole set, and
+	// `tags <name> --clear` empties it (an empty list can't be typed otherwise).
+	if len(args) == 2 {
+		tags, err := g.tags.TagsFor(name)
+		if err != nil {
+			fail(s, log, "tags", err)
+			return
+		}
+		if len(tags) == 0 {
+			fmt.Fprintf(s, "%s has no tags — set them with: ssh %s@<gateway> tags %s <tag>…\r\n",
+				name, ControlUser, name)
+		} else {
+			fmt.Fprintf(s, "%s: %s\r\n", name, strings.Join(tags, ", "))
+		}
+		s.Exit(0) //nolint:errcheck
+		return
+	}
+	var want []string
+	if !(len(args) == 3 && args[2] == "--clear") {
+		parsed, rest, err := parseTags(args[2:])
+		if err != nil {
+			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		// Bare words are tags too, so `tags box ml prod` works alongside --tag.
+		want = dedupeTags(append(parsed, normalizeTags(rest)...))
+	}
+	if err := g.tags.SetTags(name, user, want); err != nil {
+		fail(s, log, "tags", err)
+		return
+	}
+	if len(want) == 0 {
+		fmt.Fprintf(s, "cleared tags on %s\r\n", name)
+	} else {
+		fmt.Fprintf(s, "%s: %s\r\n", name, strings.Join(want, ", "))
+	}
+	// Secrets follow tags, so the box needs a re-push to match its new set.
+	g.mgr.ResyncEnv(s.Context(), name)
 	s.Exit(0) //nolint:errcheck
 }
 

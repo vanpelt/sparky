@@ -740,6 +740,22 @@ func (m *Manager) SetSessions(c SessionCloser) {
 // Callers hold m.mu; the push dials the guest's sshd, so it runs on its own
 // goroutine (bounded, detached from the caller's ctx) and can never fail or
 // slow the lifecycle operation it rides on.
+// ResyncEnv re-pushes a sandbox's secret environment, for callers that changed
+// something the push depends on — chiefly its tags, which decide which of the
+// owner's secrets it receives. No-op for a sandbox that isn't running: the
+// EnsureRunning hook pushes on its next start anyway.
+func (m *Manager) ResyncEnv(ctx context.Context, name string) {
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return
+	}
+	cp := copyOf(b)
+	m.mu.Unlock()
+	m.pushEnv(ctx, cp)
+}
+
 func (m *Manager) pushEnv(ctx context.Context, b *Sandbox) {
 	if m.envSync == nil {
 		return
