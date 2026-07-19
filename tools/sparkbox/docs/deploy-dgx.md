@@ -117,6 +117,16 @@ other things on a shared box — this box uses `127.0.0.1:8079` / `127.0.0.1:809
 The proxy binds to localhost because only `cloudflared` needs to reach it. The
 SSH gateway is `:2222` (host sshd owns `:22`).
 
+Note the **overcommit flags** (`--mem-reserve-mb 1024 --max-running-per-owner
+50`): these are the fleet density defaults that `deploy/launch-host.sh` bakes
+into the cloud path, and they belong here too. Without them the per-owner
+running cap falls back to its conservative default of **2** — and RAM admission
+charges each VM its full ceiling (~8 GB) rather than the 1 GB reserve floor, so
+you'd cap out at ~12 concurrent long before 50. A sandbox's RAM is lazily
+allocated (an idle 8 GB VM costs ~0.5 GB measured), which is what makes the
+reserve floor safe; retune it from `hack/measure-density.py` or the console's
+live-usage readout.
+
 ```sh
 sudo tee /etc/sparkbox/sparkbox.env >/dev/null <<'EOF'
 SPARKBOX_STATE_DIR=/srv/sparkbox/state
@@ -142,7 +152,8 @@ ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
   --image-dir ${SPARKBOX_IMAGE_DIR} --default-image universal --default-login-user sparky \
   --users ${SPARKBOX_USERS} \
   --ssh-addr ${SPARKBOX_SSH_ADDR} --api-addr ${SPARKBOX_API_ADDR} \
-  --proxy-addr ${SPARKBOX_PROXY_ADDR} --proxy-domain ${SPARKBOX_DOMAIN}
+  --proxy-addr ${SPARKBOX_PROXY_ADDR} --proxy-domain ${SPARKBOX_DOMAIN} \
+  --mem-reserve-mb 1024 --max-running-per-owner 50
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
