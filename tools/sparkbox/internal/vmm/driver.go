@@ -104,11 +104,15 @@ type Archivable interface {
 }
 
 // DiskReporter is an optional Driver capability: reporting a sandbox's on-host
-// disk footprint (rootfs write delta + any memory snapshot), in MiB. Used by
-// the pooled per-owner disk accounting. Best-effort; drivers without it are
-// simply not counted.
+// disk footprint and its ceiling, in MiB. Feeds the pooled per-owner accounting
+// and the consoles' disk meter. Best-effort; drivers without it are not counted.
 type DiskReporter interface {
+	// DiskUsageMB is the sandbox's durable on-host footprint: blocks allocated
+	// to its rootfs, excluding any regenerable memory snapshot.
 	DiskUsageMB(ctx context.Context, name string) (int64, error)
+	// DiskCapacityMB is the guest's hard disk ceiling — the size of the rootfs
+	// filesystem, which it cannot grow past. 0 when unknown.
+	DiskCapacityMB(ctx context.Context, name string) (int64, error)
 }
 
 // Renamer is an optional Driver capability: moving a stopped VM's on-host

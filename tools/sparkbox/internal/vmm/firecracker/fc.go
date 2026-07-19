@@ -564,12 +564,25 @@ func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
 // DiskUsageMB implements vmm.DiskReporter: the VM dir's on-host footprint
 // (rootfs write delta + any memory snapshot), in MiB. A missing dir (archived /
 // destroyed) is zero, not an error.
+// DiskUsageMB implements vmm.DiskReporter: blocks actually allocated to the
+// sandbox's rootfs image.
+//
+// Deliberately the rootfs alone, not the whole VM directory. mem.snap is a
+// memory dump the size of the guest's RAM ceiling (8 GiB on a paused 8 GiB box)
+// that exists only while paused and is discarded on the next cold boot — it
+// dwarfs the real data and swamps both the console figure and the pooled quota
+// with something the user never put there. What this reports is the sandbox's
+// durable content: the bytes an archive would carry.
+//
+// The image is sparse (a reflink copy of the template, filled in as the guest
+// writes), so `du` without --apparent-size is what distinguishes a box holding
+// 3 GB of data from one holding 20.
 func (d *Driver) DiskUsageMB(ctx context.Context, name string) (int64, error) {
-	dir := d.vmDir(name)
-	if _, err := os.Stat(dir); err != nil {
+	rootfs := d.rootfsPath(name)
+	if _, err := os.Stat(rootfs); err != nil {
 		return 0, nil
 	}
-	out, err := exec.CommandContext(ctx, "du", "-sk", dir).Output()
+	out, err := exec.CommandContext(ctx, "du", "-sk", rootfs).Output()
 	if err != nil {
 		return 0, err
 	}
@@ -582,6 +595,19 @@ func (d *Driver) DiskUsageMB(ctx context.Context, name string) (int64, error) {
 		return 0, err
 	}
 	return kb / 1024, nil
+}
+
+// DiskCapacityMB implements vmm.DiskReporter: the rootfs image's *apparent*
+// size, which is the guest's hard ceiling — the ext4 filesystem is exactly this
+// big and the guest cannot grow past it. Discovered per sandbox rather than
+// configured, so boxes created from differently-sized templates each report
+// their own ceiling. 0 when the image is missing.
+func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
+	fi, err := os.Stat(d.rootfsPath(name))
+	if err != nil {
+		return 0, nil
+	}
+	return fi.Size() / (1024 * 1024), nil
 }
 
 // --- Renamer + Rebooter + CPUStatser: the user-console capabilities --------

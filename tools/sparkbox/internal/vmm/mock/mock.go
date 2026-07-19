@@ -336,6 +336,19 @@ func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
 	return total / (1024 * 1024), nil
 }
 
+// mockDiskCapacityMB is the synthetic per-sandbox disk ceiling, matching the
+// 25 GiB the real templates are built at.
+const mockDiskCapacityMB int64 = 25600
+
+// DiskCapacityMB implements vmm.DiskReporter with a fixed ceiling for any VM
+// the mock knows about, standing in for the rootfs image's apparent size.
+func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
+	if _, err := os.Stat(filepath.Join(d.stateDir, "mock-vms", name)); err != nil {
+		return 0, nil
+	}
+	return mockDiskCapacityMB, nil
+}
+
 // --- Renamer + Rebooter + CPUStatser (the user-console capabilities) --------
 
 // DropSnapshots implements vmm.Rebooter. The mock keeps no memory snapshot —

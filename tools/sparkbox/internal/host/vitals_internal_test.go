@@ -235,6 +235,11 @@ func TestReapRefreshesDiskWithoutPoolQuota(t *testing.T) {
 	if m.boxes["box"].DiskMB == 0 {
 		t.Fatal("disk footprint still 0 with no pool quota set; measurement must not be gated on enforcement")
 	}
+	// The ceiling rides along, so the consoles can draw a meter rather than a
+	// bare figure.
+	if m.boxes["box"].DiskTotalMB == 0 {
+		t.Fatal("disk ceiling not reported; the console meter needs it")
+	}
 }
 
 // TestVitalsPauseDropsBaseline: a resumed sandbox must re-prime rather than

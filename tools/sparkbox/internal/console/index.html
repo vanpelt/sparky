@@ -212,7 +212,7 @@
           <thead>
             <tr>
               <th>Name</th><th>Status</th><th>Owner</th><th>Image</th>
-              <th>Resources</th><th>Network</th><th>Web routes</th><th>Last active</th><th></th>
+              <th>Resources</th><th>Disk</th><th>Network</th><th>Web routes</th><th>Last active</th><th></th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -488,6 +488,11 @@
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
         '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + mem + " GB</td>" +
+        '<td class="spec" title="rootfs bytes in use / the guest\'s hard ceiling (memory snapshot excluded)">' +
+          (b.state === "archived" ? "parked"
+            : typeof b.disk_total_mb === "number" && b.disk_total_mb > 0
+              ? gb(b.disk_mb) + " / " + gb(b.disk_total_mb) + " GB"
+              : gb(b.disk_mb) + " GB") + "</td>" +
         '<td class="spec" title="total received / sent since this sandbox was created">↓ ' +
           bytes(b.net_rx_bytes) + " · ↑ " + bytes(b.net_tx_bytes) + "</td>" +
         "<td>" + routeChips(b) + "</td>" +

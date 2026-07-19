@@ -164,6 +164,73 @@ func TestCloseSandboxSessionsDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestCloseAllSessionsSpansSandboxes covers the redeploy case: a control-plane
+// restart never pauses anything, so shutdown has to sweep every sandbox's
+// sessions rather than one named box's.
+func TestCloseAllSessionsSpansSandboxes(t *testing.T) {
+	gw, _, _ := newDoorGateway(t)
+	a, b := &fakeSession{}, &fakeSession{}
+	gw.trackSession("box-a", a, true)
+	gw.trackSession("box-b", b, true)
+
+	if n := gw.CloseAllSessions("was interrupted", time.Second); n != 2 {
+		t.Fatalf("closed %d sessions across sandboxes, want 2", n)
+	}
+	for name, s := range map[string]*fakeSession{"box-a": a, "box-b": b} {
+		if !s.isClosed() {
+			t.Errorf("%s session left open by shutdown", name)
+		}
+		if !strings.Contains(s.written(), "\x1b[?1006l") {
+			t.Errorf("%s terminal not restored: %q", name, s.written())
+		}
+		// Each session names its own sandbox in the goodbye.
+		if !strings.Contains(s.written(), name) {
+			t.Errorf("%s goodbye named the wrong sandbox: %q", name, s.written())
+		}
+	}
+}
+
+// TestCloseAllSessionsWaits: at shutdown the process is about to exit, so bytes
+// still in flight are lost. Unlike the pause path, this one must block until the
+// sessions are actually done.
+func TestCloseAllSessionsWaits(t *testing.T) {
+	gw, _, _ := newDoorGateway(t)
+	sess := &fakeSession{}
+	gw.trackSession("box", sess, true)
+
+	gw.CloseAllSessions("was interrupted", 2*time.Second)
+
+	// No waitFor here — that is the point. It must already be closed on return.
+	if !sess.isClosed() {
+		t.Fatal("CloseAllSessions returned before the session was closed; the restore bytes would be lost on exit")
+	}
+}
+
+// TestTerminalRestoreDisablesInputModes pins the modes that actually produce the
+// garbage a user sees. The reported symptom was "35;24;36M" spew on mouse move,
+// which is SGR mouse reporting (1006) still latched after the connection died.
+func TestTerminalRestoreDisablesInputModes(t *testing.T) {
+	for _, m := range []struct{ seq, why string }{
+		{"\x1b[?9l", "X10 mouse"},
+		{"\x1b[?1000l", "normal mouse tracking"},
+		{"\x1b[?1002l", "button-event tracking"},
+		{"\x1b[?1003l", "any-event tracking"},
+		{"\x1b[?1004l", "focus reporting"},
+		{"\x1b[?1006l", "SGR mouse encoding — the reported symptom"},
+		{"\x1b[?2004l", "bracketed paste"},
+		{"\x1b[?1049l", "alternate screen"},
+	} {
+		if !strings.Contains(terminalRestore, m.seq) {
+			t.Errorf("terminalRestore does not disable %s (%q)", m.why, m.seq)
+		}
+	}
+	// Input-generating modes must be cleared before the cosmetic ones: those are
+	// what spew into a terminal the user is still typing at.
+	if strings.Index(terminalRestore, "\x1b[?1006l") > strings.Index(terminalRestore, "\x1b[0m") {
+		t.Error("mouse reporting is disabled after the cosmetic reset; clear input modes first")
+	}
+}
+
 // TestTrackSessionUnregisters: a session that ended on its own must not be
 // hung up later, and the per-sandbox map must not leak entries.
 func TestTrackSessionUnregisters(t *testing.T) {

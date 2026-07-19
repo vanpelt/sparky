@@ -507,6 +507,13 @@ func serve(args []string) error {
 		return err
 	}
 	log.Info("shutting down")
+	// Release attached terminals BEFORE tearing anything down. sshSrv.Close()
+	// drops live connections abruptly, which leaves a full-screen TUI's modes
+	// (mouse reporting, alternate screen) latched in the user's terminal with
+	// nothing left to undo them — the redeploy-wedged-my-terminal case. This
+	// blocks briefly so the restore sequence actually reaches the wire before
+	// the process exits; systemd's stop timeout is far longer.
+	gw.CloseAllSessions("was interrupted by a control-plane restart", 3*time.Second)
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	apiSrv.Shutdown(shutCtx) //nolint:errcheck

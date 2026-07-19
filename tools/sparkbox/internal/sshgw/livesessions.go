@@ -15,6 +15,7 @@ package sshgw
 import (
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -30,12 +31,18 @@ const closeGrace = 2 * time.Second
 //
 // Sent only to sessions that requested a PTY — on a plain `ssh box cmd` these
 // bytes would be corruption in the middle of the command's output.
+// Ordered deliberately: the modes that make the terminal *emit* input come
+// first, because those are what fill a disconnected terminal with garbage like
+// "35;24;36M" on every mouse move. Cosmetic state follows.
 const terminalRestore = "" +
-	"\x1b[?1000l\x1b[?1002l\x1b[?1003l" + // mouse tracking: normal, button-event, any-event
-	"\x1b[?1005l\x1b[?1006l\x1b[?1015l" + // and the extended coordinate encodings
+	"\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l" + // every mouse tracking mode
+	"\x1b[?1004l" + // focus in/out reporting (emits \e[I and \e[O)
+	"\x1b[?1005l\x1b[?1006l\x1b[?1015l" + // the extended coordinate encodings
 	"\x1b[?2004l" + // bracketed paste
 	"\x1b[?1l" + // application cursor keys
 	"\x1b[?1049l" + // leave the alternate screen (restores the user's scrollback)
+	"\x1b[r" + // drop any scrolling region the TUI set up
+	"\x1b(B\x0f" + // G0 back to ASCII and shift-in, undoing line-drawing charsets
 	"\x1b[?25h" + // cursor back on
 	"\x1b[?7h" + // autowrap back on
 	"\x1b[0m" // default colours and attributes
@@ -50,14 +57,15 @@ type sessionConn interface {
 
 // liveSession is one tracked interactive session.
 type liveSession struct {
-	sess  sessionConn
-	isPTY bool
+	sess    sessionConn
+	sandbox string
+	isPTY   bool
 }
 
 // trackSession registers a session as attached to a sandbox and returns the
 // function that unregisters it. Safe to call for both PTY and exec sessions.
 func (g *Gateway) trackSession(sandbox string, s sessionConn, isPTY bool) func() {
-	ls := &liveSession{sess: s, isPTY: isPTY}
+	ls := &liveSession{sess: s, sandbox: sandbox, isPTY: isPTY}
 	g.liveMu.Lock()
 	if g.live == nil {
 		g.live = map[string]map[*liveSession]struct{}{}
@@ -90,18 +98,60 @@ func (g *Gateway) trackSession(sandbox string, s sessionConn, isPTY bool) func()
 // (Touch, in the handler's defer). Blocking here would deadlock the manager.
 func (g *Gateway) CloseSandboxSessions(sandbox, reason string) int {
 	g.liveMu.Lock()
-	set := g.live[sandbox]
-	victims := make([]*liveSession, 0, len(set))
-	for ls := range set {
+	victims := make([]*liveSession, 0, len(g.live[sandbox]))
+	for ls := range g.live[sandbox] {
 		victims = append(victims, ls)
 	}
 	g.liveMu.Unlock()
+	return g.closeAll(victims, reason, 0)
+}
 
-	for _, ls := range victims {
-		go g.hangUp(ls, sandbox, reason)
+// CloseAllSessions hangs up every attached session on the gateway and blocks
+// until they are done (or wait elapses). This is the process-shutdown path: a
+// redeploy SIGTERMs the control plane and sshSrv.Close() drops every connection
+// abruptly, which is precisely the wedged-terminal case — the sandbox is never
+// paused, so CloseSandboxSessions never runs, and the client is left holding a
+// dead socket with mouse reporting still latched on.
+//
+// Unlike the pause path this one *must* wait: the process is about to exit, and
+// bytes still buffered when it does are simply lost.
+func (g *Gateway) CloseAllSessions(reason string, wait time.Duration) int {
+	g.liveMu.Lock()
+	var victims []*liveSession
+	for _, set := range g.live {
+		for ls := range set {
+			victims = append(victims, ls)
+		}
 	}
-	if len(victims) > 0 {
-		g.log.Info("closed attached sessions", "sandbox", sandbox, "count", len(victims), "reason", reason)
+	g.liveMu.Unlock()
+	return g.closeAll(victims, reason, wait)
+}
+
+// closeAll hangs up the given sessions. wait > 0 blocks until they finish or the
+// deadline passes; wait == 0 returns immediately, which the pause path requires
+// because the manager calls it holding a lock the teardown also takes.
+func (g *Gateway) closeAll(victims []*liveSession, reason string, wait time.Duration) int {
+	if len(victims) == 0 {
+		return 0
+	}
+	var wg sync.WaitGroup
+	for _, ls := range victims {
+		wg.Add(1)
+		go func(ls *liveSession) {
+			defer wg.Done()
+			g.hangUp(ls, reason)
+		}(ls)
+	}
+	g.log.Info("closed attached sessions", "count", len(victims), "reason", reason)
+	if wait <= 0 {
+		return len(victims)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(wait):
+		g.log.Warn("some sessions did not close before the deadline", "wait", wait)
 	}
 	return len(victims)
 }
@@ -109,7 +159,7 @@ func (g *Gateway) CloseSandboxSessions(sandbox, reason string) int {
 // hangUp writes the parting message and closes one session. The write is
 // bounded by closeGrace: a client that has stopped reading must not keep the
 // session alive, and Close unblocks the writer if it is still stuck.
-func (g *Gateway) hangUp(ls *liveSession, sandbox, reason string) {
+func (g *Gateway) hangUp(ls *liveSession, reason string) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -120,7 +170,7 @@ func (g *Gateway) hangUp(ls *liveSession, sandbox, reason string) {
 		// \r\n throughout: the client's terminal is in raw mode, so a bare \n
 		// would step down a line without returning to column zero.
 		msg += fmt.Sprintf("\r\nsparkbox: sandbox %q %s — reconnect with: ssh %s\r\n",
-			sandbox, reason, g.reconnectHint(sandbox))
+			ls.sandbox, reason, g.reconnectHint(ls.sandbox))
 		fmt.Fprint(ls.sess.Stderr(), msg) //nolint:errcheck // best-effort goodbye
 	}()
 	select {

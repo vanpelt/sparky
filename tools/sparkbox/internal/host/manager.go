@@ -121,11 +121,19 @@ type Sandbox struct {
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
 	ArchiveKey string    `json:"archive_key,omitempty"`
 	ArchivedAt time.Time `json:"archived_at,omitempty"`
-	// DiskMB is this sandbox's approximate on-host disk footprint (rootfs write
-	// delta + any memory snapshot), refreshed opportunistically by the reaper and
-	// summed per owner for the pooled-disk admission check. 0 for an archived box
-	// (no local footprint — its archive counts against the pool instead).
+	// DiskMB is this sandbox's durable on-host disk footprint: blocks allocated
+	// to its rootfs, i.e. the bytes an archive would carry. The memory snapshot
+	// is deliberately excluded — it is regenerable, exists only while paused, and
+	// at the size of the guest's RAM ceiling it would dwarf the real data.
+	// Refreshed by the reaper and summed per owner for the pooled-disk admission
+	// check. 0 for an archived box (its archive counts against the pool instead).
 	DiskMB int64 `json:"disk_mb,omitempty"`
+	// DiskTotalMB is the guest's hard disk ceiling — the size of its rootfs
+	// filesystem, which it cannot grow past. Discovered from the image rather
+	// than configured, so boxes built from different templates report their own.
+	// 0 when the driver can't say, which the consoles render as a bare figure
+	// with no meter.
+	DiskTotalMB int64 `json:"disk_total_mb,omitempty"`
 	// RenamedFrom journals an in-flight rename (see Rename): the record is
 	// saved under its new name with this set to the old name before the VM dir
 	// moves on disk, so a crash between the two converges at the next load
@@ -1478,10 +1486,22 @@ func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 	if err != nil {
 		return
 	}
+	// Ceiling is best-effort and independent: a driver that can't report it just
+	// leaves the consoles showing a bare footprint with no meter.
+	capMB, capErr := m.diskReport.DiskCapacityMB(ctx, name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if b, ok := m.boxes[name]; ok && b.State != vmm.StateArchived && b.DiskMB != mb {
-		b.DiskMB = mb
+	b, ok := m.boxes[name]
+	if !ok || b.State == vmm.StateArchived {
+		return
+	}
+	changed := b.DiskMB != mb
+	b.DiskMB = mb
+	if capErr == nil && capMB > 0 && b.DiskTotalMB != capMB {
+		b.DiskTotalMB = capMB
+		changed = true
+	}
+	if changed {
 		m.save() //nolint:errcheck
 	}
 }
