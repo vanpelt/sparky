@@ -5,68 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>sparkbox — my machines</title>
 <style>
-  /* shadcn "new-york" design tokens (zinc), light + dark — kept identical to
-     the admin console so the two consoles read as siblings. Monochrome by
-     design: the only chroma is a small set of state signals (dot colors). */
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --border: 240 5.9% 90%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.6rem;
-    --green: 142 71% 45%;
-    --amber: 38 92% 50%;
-    --blue: 217 91% 56%;
-    --red: 0 72% 51%;
-    --violet: 262 83% 66%;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --background: 240 10% 3.9%;
-      --foreground: 0 0% 98%;
-      --card: 240 10% 5.5%;
-      --muted: 240 3.7% 15.9%;
-      --muted-foreground: 240 5% 64.9%;
-      --border: 240 3.7% 15.9%;
-      --primary: 0 0% 98%;
-      --primary-foreground: 240 5.9% 10%;
-      --ring: 240 4.9% 83.9%;
-      --green: 142 69% 58%;
-      --amber: 38 92% 60%;
-      --blue: 217 91% 66%;
-      --red: 0 84% 65%;
-      --violet: 262 83% 74%;
-    }
-  }
-  :root[data-theme="dark"] {
-    --background: 240 10% 3.9%; --foreground: 0 0% 98%; --card: 240 10% 5.5%;
-    --muted: 240 3.7% 15.9%; --muted-foreground: 240 5% 64.9%; --border: 240 3.7% 15.9%;
-    --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%; --ring: 240 4.9% 83.9%;
-    --green: 142 69% 58%; --amber: 38 92% 60%; --blue: 217 91% 66%; --red: 0 84% 65%; --violet: 262 83% 74%;
-  }
-  :root[data-theme="light"] {
-    --background: 0 0% 100%; --foreground: 240 10% 3.9%; --card: 0 0% 100%;
-    --muted: 240 4.8% 95.9%; --muted-foreground: 240 3.8% 46.1%; --border: 240 5.9% 90%;
-    --primary: 240 5.9% 10%; --primary-foreground: 0 0% 98%; --ring: 240 5.9% 10%;
-    --green: 142 71% 45%; --amber: 38 92% 50%; --blue: 217 91% 56%; --red: 0 72% 51%; --violet: 262 83% 66%;
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    background: hsl(var(--background));
-    color: hsl(var(--foreground));
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-      "Helvetica Neue", Arial, sans-serif;
-    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
-  }
+  /* Monochrome by design: the only chroma is a small set of state signals
+     (dot colors). Design tokens + reset are shared with the admin console
+     (internal/console) so the two read as siblings. */
+  /*SHARED_CSS*/
   .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 64px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .muted { color: hsl(var(--muted-foreground)); }
 
   /* header */
   header {
@@ -84,19 +28,15 @@
   .masthead-side { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   #refreshed { font-size: 11.5px; color: hsl(var(--muted-foreground)); }
 
-  /* buttons — one small, quiet default; a single emphasized primary per surface */
+  /* buttons — one small, quiet default; a single emphasized primary per
+     surface. Structural base + .btn-primary/.btn-outline colors come from
+     the shared design system. */
   button {
-    font: inherit; font-size: 13px; cursor: pointer; background: transparent;
-    border-radius: calc(var(--radius) - 2px); border: 1px solid transparent;
-    padding: 6px 11px; font-weight: 500; display: inline-flex; align-items: center;
-    justify-content: center; gap: 6px; transition: background .12s ease, border-color .12s ease, color .12s ease;
-    white-space: nowrap; color: hsl(var(--foreground));
+    font-size: 13px; background: transparent; padding: 6px 11px; font-weight: 500;
+    justify-content: center; transition: background .12s ease, border-color .12s ease, color .12s ease;
+    color: hsl(var(--foreground));
   }
-  button:disabled { opacity: .5; cursor: default; }
-  .btn-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); border-color: hsl(var(--primary)); }
-  .btn-primary:hover:not(:disabled) { opacity: .9; }
-  .btn-outline { background: transparent; border-color: hsl(var(--border)); }
-  .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+  .btn-primary { border-color: hsl(var(--primary)); }
   .btn-ghost { background: transparent; border-color: transparent; color: hsl(var(--muted-foreground)); }
   .btn-ghost:hover:not(:disabled) { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
   .btn-sm { padding: 4px 9px; font-size: 12.5px; }
@@ -119,7 +59,6 @@
   .tab.active { color: hsl(var(--foreground)); border-bottom-color: hsl(var(--primary)); font-weight: 600; }
 
   /* cards / panels */
-  .card { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: var(--radius); }
   .panel { overflow: hidden; }
   .panel-head {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -299,22 +238,6 @@
   dialog p { margin: 0 0 14px; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
   dialog input[type=text] { width: 100%; margin-bottom: 14px; }
   dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
-
-  /* toast */
-  #toast {
-    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 60;
-    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
-    border-radius: var(--radius); padding: 10px 15px; font-size: 13px;
-    box-shadow: 0 10px 30px -8px hsl(240 10% 3.9% / .3); opacity: 0; transition: opacity .2s;
-    pointer-events: none; max-width: 90vw;
-  }
-  #toast.show { opacity: 1; }
-  #toast.err { border-color: hsl(var(--red) / .5); color: hsl(var(--red)); }
-
-  /* focus visibility */
-  :focus-visible { outline: 2px solid hsl(var(--ring) / .55); outline-offset: 2px; border-radius: 3px; }
-
-  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
 </style>
 </head>
 <body>
@@ -464,20 +387,12 @@
 
 <script>
 (function () {
-  const $ = (id) => document.getElementById(id);
+  /*SHARED_JS*/
   let timer = null;
 
   const ENV_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
   const TAG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
   const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/; // mirrors the host manager's nameRe
-
-  function toast(msg, isErr) {
-    const t = $("toast");
-    t.textContent = msg;
-    t.className = "show" + (isErr ? " err" : "");
-    clearTimeout(t._h);
-    t._h = setTimeout(() => (t.className = ""), 2600);
-  }
 
   // An optional explicit zone, e.g. <meta name="sparkbox-domain" content="catnip.sh">.
   // Unset in production (the console derives its zone from its own hostname); the
@@ -523,25 +438,6 @@
     show("error");
   }
 
-  function rel(iso) {
-    if (!iso) return "–";
-    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-    if (s < 60) return Math.floor(s) + "s ago";
-    if (s < 3600) return Math.floor(s / 60) + "m ago";
-    if (s < 86400) return Math.floor(s / 3600) + "h ago";
-    return Math.floor(s / 86400) + "d ago";
-  }
-
-  function gb(mb) {
-    const g = (mb || 0) / 1024;
-    return g.toFixed(g && g % 1 ? 1 : 0);
-  }
-
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
-
   // api wraps fetch: every mutation carries the CSRF header the backend
   // requires (SameSite=Lax alone can't fence off same-site sandbox pages),
   // JSON bodies are encoded, 401 flips to the sign-in view, and API errors
@@ -564,12 +460,6 @@
       throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     }
     return r.json().catch(() => null);
-  }
-
-  function badge(state) {
-    // running | paused | archived (rootfs parked in object storage)
-    const cls = state === "running" ? "running" : (state === "archived" ? "archived" : "paused");
-    return '<span class="badge ' + cls + '"><span class="dot"></span>' + cls + "</span>";
   }
 
   function meterHTML(used, total) {

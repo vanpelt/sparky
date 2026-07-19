@@ -22,6 +22,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(HERE, "..", "internal", "userconsole", "index.html")
+SHARED_CSS = os.path.join(HERE, "..", "internal", "webui", "shared.css")
+SHARED_JS = os.path.join(HERE, "..", "internal", "webui", "shared.js")
 
 # ---- mock fleet: one machine per state, plus routes/tags/secrets/snapshots ----
 def _iso(sec_ago):
@@ -108,6 +110,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             html = open(INDEX, encoding="utf-8").read()
+            # index.html carries /*SHARED_CSS*/ and /*SHARED_JS*/ markers that
+            # the real server (internal/webui.Build) fills in from these same
+            # files before minifying; mirror that here so the preview matches
+            # what actually ships.
+            html = html.replace("/*SHARED_CSS*/", open(SHARED_CSS, encoding="utf-8").read(), 1)
+            html = html.replace("/*SHARED_JS*/", open(SHARED_JS, encoding="utf-8").read(), 1)
         except OSError as e:
             self.send_error(500, f"cannot read index.html: {e}")
             return

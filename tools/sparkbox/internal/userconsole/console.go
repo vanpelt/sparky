@@ -34,10 +34,15 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
 
 //go:embed index.html
-var indexHTML []byte
+var indexTemplate []byte
+
+// indexPage is the console SPA composed against the shared design system,
+// minified, and pre-gzipped once at package init — see internal/webui.
+var indexPage = webui.Build(indexTemplate)
 
 // probeTimeout bounds the per-route TCP dial that checks whether anything is
 // listening on a forwarded port, and the per-sandbox mem/CPU stat reads.
@@ -135,10 +140,9 @@ func (h *Handler) Handler() http.Handler {
 
 // index always serves the single-page app; the page itself calls the API and
 // renders the sign-in state when that returns 401.
-func (h *Handler) index(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+func (h *Handler) index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write(indexHTML) //nolint:errcheck
+	indexPage.ServeHTTP(w, r)
 }
 
 type meResponse struct {

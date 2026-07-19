@@ -29,10 +29,15 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
 
 //go:embed index.html
-var indexHTML []byte
+var indexTemplate []byte
+
+// indexPage is the console SPA composed against the shared design system,
+// minified, and pre-gzipped once at package init — see internal/webui.
+var indexPage = webui.Build(indexTemplate)
 
 const (
 	cookieName   = "spark_console"
@@ -96,9 +101,8 @@ func (h *Handler) Handler() http.Handler {
 
 // index always serves the single-page app; the page itself calls /api/sandboxes
 // and renders the login form if that returns 401.
-func (h *Handler) index(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(indexHTML) //nolint:errcheck
+func (h *Handler) index(w http.ResponseWriter, r *http.Request) {
+	indexPage.ServeHTTP(w, r)
 }
 
 type loginRequest struct {
