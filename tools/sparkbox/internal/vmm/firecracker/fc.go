@@ -14,6 +14,7 @@ package firecracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -595,6 +596,57 @@ func (d *Driver) DiskUsageMB(ctx context.Context, name string) (int64, error) {
 		return 0, err
 	}
 	return kb / 1024, nil
+}
+
+// ResizeDisk implements vmm.DiskResizer: grow a stopped sandbox's rootfs to
+// sizeMB. The image is a bare ext4 (no partition table), so this is the same
+// three steps we run on a template — fsck, extend the file, extend the
+// filesystem into it — in the order that keeps the disk consistent if we die
+// partway: a truncate that lands without the resize2fs just leaves unused tail
+// bytes, whereas the reverse would leave a filesystem larger than its device.
+//
+// stoppedRootfs is the guard against resizing under a live guest. It is the
+// second half of the safety pairing; the first (dropping the memory snapshot)
+// belongs to the manager, which is the only layer that knows about snapshots.
+func (d *Driver) ResizeDisk(ctx context.Context, name string, sizeMB int64) error {
+	rootfs, err := d.stoppedRootfs(name)
+	if err != nil {
+		return err
+	}
+	fi, err := os.Stat(rootfs)
+	if err != nil {
+		return err
+	}
+	want := sizeMB * 1024 * 1024
+	if want <= fi.Size() {
+		return fmt.Errorf("disk is already %d MB; resize only grows (asked for %d MB)",
+			fi.Size()/(1024*1024), sizeMB)
+	}
+	// -f because the image is unmounted but not necessarily marked clean, and
+	// resize2fs refuses a dirty filesystem outright.
+	if out, err := exec.CommandContext(ctx, "e2fsck", "-fy", rootfs).CombinedOutput(); err != nil {
+		// e2fsck exits 1 when it fixed something, which is success for us; only
+		// 4+ (uncorrected errors) is fatal.
+		if code := exitCode(err); code > 2 {
+			return fmt.Errorf("e2fsck: %v: %s", err, out)
+		}
+	}
+	if err := os.Truncate(rootfs, want); err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+	if out, err := exec.CommandContext(ctx, "resize2fs", rootfs).CombinedOutput(); err != nil {
+		return fmt.Errorf("resize2fs: %v: %s", err, out)
+	}
+	return nil
+}
+
+// exitCode extracts a process exit status, or -1 if err isn't an exit error.
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 // DiskCapacityMB implements vmm.DiskReporter: the rootfs image's *apparent*

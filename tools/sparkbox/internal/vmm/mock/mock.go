@@ -44,6 +44,8 @@ type Driver struct {
 	stateDir string
 	hostKey  xssh.Signer
 	vms      map[string]*fakeVM
+	// diskCap overrides the default per-VM disk ceiling, set by ResizeDisk.
+	diskCap map[string]int64
 	// LoginUser mirrors the firecracker driver's login user so a mock host
 	// reports the same SSHUser the real fleet would. Empty defaults root.
 	LoginUser string
@@ -337,7 +339,7 @@ func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
 }
 
 // mockDiskCapacityMB is the synthetic per-sandbox disk ceiling, matching the
-// 25 GiB the real templates are built at.
+// 25 GiB the real templates are built at. ResizeDisk overrides it per VM.
 const mockDiskCapacityMB int64 = 25600
 
 // DiskCapacityMB implements vmm.DiskReporter with a fixed ceiling for any VM
@@ -346,7 +348,35 @@ func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
 	if _, err := os.Stat(filepath.Join(d.stateDir, "mock-vms", name)); err != nil {
 		return 0, nil
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if mb, ok := d.diskCap[name]; ok {
+		return mb, nil
+	}
 	return mockDiskCapacityMB, nil
+}
+
+// ResizeDisk implements vmm.DiskResizer. It records the new ceiling rather than
+// moving real bytes, but keeps the two rules that matter to callers: it refuses
+// a VM the driver still has running, and it refuses to shrink.
+func (d *Driver) ResizeDisk(_ context.Context, name string, sizeMB int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if vm, ok := d.vms[name]; ok && !vm.paused {
+		return fmt.Errorf("vm %q is running; pause it first", name)
+	}
+	cur := mockDiskCapacityMB
+	if mb, ok := d.diskCap[name]; ok {
+		cur = mb
+	}
+	if sizeMB <= cur {
+		return fmt.Errorf("disk is already %d MB; resize only grows (asked for %d MB)", cur, sizeMB)
+	}
+	if d.diskCap == nil {
+		d.diskCap = map[string]int64{}
+	}
+	d.diskCap[name] = sizeMB
+	return nil
 }
 
 // --- Renamer + Rebooter + CPUStatser (the user-console capabilities) --------

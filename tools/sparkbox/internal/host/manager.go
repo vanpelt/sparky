@@ -214,6 +214,7 @@ type Manager struct {
 	diskReport  vmm.DiskReporter // driver's disk-usage capability; else nil
 	renamer     vmm.Renamer      // driver's VM-rename capability; else nil
 	rebooter    vmm.Rebooter     // driver's snapshot-discard capability; else nil
+	diskResize  vmm.DiskResizer  // driver's disk-grow capability; else nil
 	cpuStats    vmm.CPUStatser   // driver's CPU-time capability; else nil
 	netStats    vmm.NetStatser   // driver's network-counter capability; else nil
 	archive     ObjectStore      // object store for archives; nil disables archiving
@@ -362,6 +363,9 @@ func NewManager(opts Options) (*Manager, error) {
 	}
 	if rb, ok := opts.Driver.(vmm.Rebooter); ok {
 		m.rebooter = rb
+	}
+	if dr, ok := opts.Driver.(vmm.DiskResizer); ok {
+		m.diskResize = dr
 	}
 	if cs, ok := opts.Driver.(vmm.CPUStatser); ok {
 		m.cpuStats = cs
@@ -808,6 +812,82 @@ func (m *Manager) pause(ctx context.Context, name, reason string) error {
 // then EnsureRunning falls through resumeOrRecreate to a cold boot of the
 // preserved rootfs. This is the only way already-running guest processes pick
 // up a changed /etc/environment (new SSH sessions see it immediately).
+// Resize grows a sandbox's root disk to sizeMB and brings it back up.
+//
+// The snapshot drop is not an implementation detail, it is the whole reason
+// this is a manager operation rather than a driver call. A guest's block-device
+// geometry is baked into its memory snapshot, so resuming one onto a grown
+// filesystem gives a guest whose ext4 superblock claims more blocks than its
+// virtio-blk device reports — writes past the old boundary land nowhere. Resize
+// therefore always pauses, DISCARDS the snapshot, resizes, and cold boots.
+// Never resize-then-resume.
+//
+// Grow only (see vmm.DiskResizer). The new ceiling costs no disk up front: the
+// image is sparse, so it fills in as the guest writes.
+func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
+	if m.diskResize == nil {
+		return errors.New("resize is not enabled on this host (driver cannot resize disks)")
+	}
+	if m.rebooter == nil {
+		// Without snapshot-dropping we cannot guarantee the cold boot that makes
+		// a resize safe, so refuse rather than risk a stale-geometry resume.
+		return errors.New("resize is not enabled on this host (driver cannot drop snapshots)")
+	}
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.State == vmm.StateArchived {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q is archived; restore it first", name)
+	}
+	m.mu.Unlock()
+
+	// Same pause/drop dance as Reboot: a client whose session we just killed
+	// reconnects immediately, so re-check under the lock and re-pause once if
+	// the box got resumed out from under us.
+	for attempt := 0; ; attempt++ {
+		if err := m.Pause(ctx, name); err != nil {
+			return fmt.Errorf("resize %s: pause: %w", name, err)
+		}
+		m.mu.Lock()
+		b, ok = m.boxes[name]
+		if !ok {
+			m.mu.Unlock()
+			return fmt.Errorf("sandbox %q not found", name)
+		}
+		if b.State == vmm.StatePaused {
+			err := m.rebooter.DropSnapshots(name)
+			m.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("resize %s: drop snapshots: %w", name, err)
+			}
+			break
+		}
+		m.mu.Unlock()
+		if attempt > 0 {
+			return fmt.Errorf("resize %s: sandbox keeps being resumed mid-resize; try again", name)
+		}
+	}
+
+	// Deliberately outside the lock: fsck + resize2fs take seconds, and holding
+	// m.mu would stall every proxied request on the host. The driver refuses a
+	// running VM, so the worst a racing resume can do is fail this cleanly —
+	// leaving a sandbox that is simply still its old size.
+	if err := m.diskResize.ResizeDisk(ctx, name, sizeMB); err != nil {
+		return fmt.Errorf("resize %s: %w", name, err)
+	}
+	m.refreshDiskUsage(ctx, name)
+
+	if _, err := m.EnsureRunning(ctx, name); err != nil {
+		return fmt.Errorf("resize %s: %w", name, err)
+	}
+	m.log.Info("sandbox disk resized", "name", name, "size_mb", sizeMB)
+	return nil
+}
+
 func (m *Manager) Reboot(ctx context.Context, name string) error {
 	if m.rebooter == nil {
 		return errors.New("reboot is not enabled on this host (driver cannot drop snapshots)")

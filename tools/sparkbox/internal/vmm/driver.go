@@ -157,6 +157,22 @@ type NetStatser interface {
 	NetBytes(ctx context.Context, name string) (rx, tx uint64, err error)
 }
 
+// DiskResizer is an optional Driver capability: growing a *stopped* sandbox's
+// root filesystem to a new size.
+//
+// Grow only. Shrinking an ext4 means resizing the filesystem before truncating
+// the image — the opposite order — and it fails outright if the data doesn't
+// fit below the new boundary, so a half-completed shrink is a destroyed disk.
+// The safe operation is the one we support.
+//
+// Implementations MUST refuse a running VM: the resize rewrites filesystem
+// metadata the live guest has cached. Callers must additionally discard any
+// memory snapshot first — see Manager.Resize for why that pairing is not
+// optional.
+type DiskResizer interface {
+	ResizeDisk(ctx context.Context, name string, sizeMB int64) error
+}
+
 // Ballooner is an optional Driver capability: reclaiming a *running* guest's
 // unused RAM to the host through a virtio-balloon, without pausing it. This is
 // the live-overcommit lever — an idle-but-warm sandbox hands most of its RAM

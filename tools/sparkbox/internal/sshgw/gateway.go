@@ -69,6 +69,17 @@ const pauseTimeout = 3 * time.Minute
 // downloads + decompresses. Sized for a slow link and a full disk, not a dial.
 const archiveTimeout = 15 * time.Minute
 
+// resizeTimeout bounds ctl resize. The work is an e2fsck plus a resize2fs over
+// the whole image, then a cold boot — seconds on a lightly-used disk, minutes
+// on a full one. Sized for the slow case.
+const resizeTimeout = 10 * time.Minute
+
+// maxDiskMB is the largest disk `ctl resize` will hand out (1 TB). Not policy
+// so much as a fat-finger guard: the image is sparse, so an accidental "25000G"
+// would succeed instantly and only bite later, as a guest slowly filling a disk
+// far larger than the host.
+const maxDiskMB int64 = 1024 * 1024
+
 type Gateway struct {
 	mgr            *host.Manager
 	users          *users.Store

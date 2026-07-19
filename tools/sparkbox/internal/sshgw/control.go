@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  pause <name>             pause a running sandbox to free a slot\r\n" +
 	"  archive <name>           park a sandbox in object storage (frees host disk)\r\n" +
 	"  restore <name>           bring an archived sandbox back and start it\r\n" +
+	"  resize <name> <size>     grow a sandbox's root disk, e.g. 25G (cold-boots it)\r\n" +
 	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
 	"  unpin <name>             let a sandbox pause when idle again\r\n" +
 	"  snapshot list            list your snapshots (fork-able templates)\r\n" +
@@ -39,7 +41,8 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  email [set <addr>|clear] show or set the email forwarded to private apps\r\n" +
 	"  share <name> [public|private]  show or set who can reach a sandbox's URLs\r\n" +
 	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
-	"  invite                   mint a single-use invite code\r\n"
+	"  invite                   mint a single-use invite code\r\n" +
+	"  help                     print this list\r\n"
 
 // handleControl serves the `ctl@` out-of-band channel: managing sandboxes and
 // your own account without dialing into a VM. It only ever touches the
@@ -110,6 +113,33 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		fmt.Fprintf(s, "restored %s — it's running\r\n", name)
 		s.Exit(0) //nolint:errcheck
+	case "resize":
+		name, ok := g.ownedBoxArg(s, user, args)
+		if !ok {
+			return
+		}
+		if len(args) < 3 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> resize <name> <size>   e.g. 25G\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		sizeMB, err := parseSizeMB(args[2])
+		if err != nil {
+			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		// Resizing cold-boots the sandbox, so say so before the session goes
+		// quiet for the fsck — and warn that in-guest processes do not survive.
+		fmt.Fprintf(s, "resizing %s to %d MB (pause + cold boot; running processes restart)…\r\n", name, sizeMB)
+		ctx, cancel := context.WithTimeout(s.Context(), resizeTimeout)
+		defer cancel()
+		if err := g.mgr.Resize(ctx, name, sizeMB); err != nil {
+			fail(s, log, "resize", err)
+			return
+		}
+		fmt.Fprintf(s, "resized %s — it's running again with a %d MB disk\r\n", name, sizeMB)
+		s.Exit(0) //nolint:errcheck
 	case "pin":
 		name, ok := g.ownedBoxArg(s, user, args)
 		if !ok {
@@ -159,10 +189,43 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlSessionToken(s, user, args[1:], log)
 	case "invite":
 		g.controlInvite(s, user, log)
+	case "help", "-h", "--help":
+		// Asked for, so it goes to stdout and exits 0 — unlike the same text
+		// printed as an error for a bad command.
+		fmt.Fprint(s, controlUsage)
+		s.Exit(0) //nolint:errcheck
 	default:
 		fmt.Fprintf(s.Stderr(), "unknown command %q\r\n%s", args[0], controlUsage)
 		s.Exit(2) //nolint:errcheck
 	}
+}
+
+// parseSizeMB reads a human disk size into MiB: "25G"/"25GB"/"25g" and
+// "512M"/"512MB", or a bare number, which is taken as GB because that is the
+// unit anyone naming a sandbox disk is thinking in — "resize box 25" meaning
+// 25 MB would be a surprising way to lose an afternoon.
+func parseSizeMB(arg string) (int64, error) {
+	t := strings.TrimSpace(strings.ToUpper(arg))
+	t = strings.TrimSuffix(t, "B") // GB -> G, MB -> M
+	mult := int64(1024)            // bare number: GB
+	switch {
+	case strings.HasSuffix(t, "G"):
+		t, mult = strings.TrimSuffix(t, "G"), 1024
+	case strings.HasSuffix(t, "M"):
+		t, mult = strings.TrimSuffix(t, "M"), 1
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad size %q — use e.g. 25G or 512M", arg)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("size must be positive, got %q", arg)
+	}
+	mb := n * mult
+	if mb > maxDiskMB {
+		return 0, fmt.Errorf("size %q exceeds the %d GB per-sandbox limit", arg, maxDiskMB/1024)
+	}
+	return mb, nil
 }
 
 // ownedBoxArg validates that args[1] names a sandbox the caller owns, printing
