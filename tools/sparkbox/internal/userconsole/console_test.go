@@ -172,6 +172,7 @@ var apiEndpoints = []struct{ method, path string }{
 	{"GET", "/api/machines"},
 	{"POST", "/api/machines/somebox/pause"},
 	{"POST", "/api/machines/somebox/resume"},
+	{"DELETE", "/api/machines/somebox"},
 	{"POST", "/api/machines/somebox/archive"},
 	{"POST", "/api/machines/somebox/pin"},
 	{"POST", "/api/machines/somebox/unpin"},
@@ -237,6 +238,7 @@ func TestCrossOwnerIs404(t *testing.T) {
 		{"POST", "/api/machines/alices-box/snapshot", map[string]string{"snapshot_name": "steal"}},
 		{"POST", "/api/machines/alices-box/rename", map[string]string{"new_name": "mine-now"}},
 		{"POST", "/api/machines/alices-box/reboot", nil},
+		{"DELETE", "/api/machines/alices-box", nil},
 		{"POST", "/api/machines/alices-box/port", map[string]int{"port": 8080}},
 		{"PUT", "/api/machines/alices-box/tags", map[string][]string{"tags": {"prod"}}},
 		{"POST", "/api/routes/alices-box/visibility", map[string]string{"visibility": "public"}},
@@ -407,6 +409,38 @@ func TestPortChangePreservesVisibility(t *testing.T) {
 	rec = tc.do(t, "POST", "/api/routes/webby/visibility", "alice", map[string]string{"visibility": "friends-only"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad visibility: status %d, want 400", rec.Code)
+	}
+}
+
+// TestUserConsoleDestroy: the owner can remove their machine, its routes are
+// swept with it, and it drops off the list. (Object-storage cleanup of an
+// archived box is exercised in host/archive_test.go's TestDestroyArchivedDropsObject.)
+func TestUserConsoleDestroy(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+
+	rec := tc.do(t, "DELETE", "/api/machines/webby", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("destroy: status %d (%s)", rec.Code, rec.Body)
+	}
+	if _, ok := tc.mgr.Get("webby"); ok {
+		t.Fatal("machine still present after destroy")
+	}
+	// The default route the manager created is gone too.
+	if _, found, err := tc.routes.GetBySubdomain("webby"); err != nil || found {
+		t.Fatalf("route survived destroy: found=%v err=%v", found, err)
+	}
+	// It no longer appears in the owner's machine list.
+	var views []json.RawMessage
+	if err := json.Unmarshal(tc.do(t, "GET", "/api/machines", "alice", nil).Body.Bytes(), &views); err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 0 {
+		t.Fatalf("destroyed machine still listed: %d", len(views))
+	}
+	// Removing a machine that isn't there answers 404 with the shared body.
+	if rec := tc.do(t, "DELETE", "/api/machines/webby", "alice", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("destroy missing: status %d, want 404", rec.Code)
 	}
 }
 

@@ -88,6 +88,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cluster", h.requireAuth(h.cluster))
 	mux.HandleFunc("POST /api/sandboxes/{name}/pause", h.requireAuth(h.pause))
 	mux.HandleFunc("POST /api/sandboxes/{name}/resume", h.requireAuth(h.resume))
+	mux.HandleFunc("DELETE /api/sandboxes/{name}", h.requireAuth(h.destroy))
 	mux.HandleFunc("POST /api/sandboxes/{name}/archive", h.requireAuth(h.archive))
 	mux.HandleFunc("POST /api/sandboxes/{name}/snapshot", h.requireAuth(h.snapshot))
 	mux.HandleFunc("GET /api/snapshots", h.requireAuth(h.listSnapshots))
@@ -292,6 +293,20 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("console resumed sandbox", "name", name)
 	writeJSON(w, http.StatusOK, box)
+}
+
+// destroy permanently removes a sandbox: its VM and local disk, and — when the
+// box is archived — its rootfs object in storage (Manager.Destroy handles that
+// cleanup). Routes, schedules, and tags are dropped with it. Irreversible, so
+// the console gates it behind a confirmation modal.
+func (h *Handler) destroy(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := h.mgr.Destroy(r.Context(), name); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("console destroyed sandbox", "name", name)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // archive parks a sandbox's rootfs in object storage and frees its host disk.

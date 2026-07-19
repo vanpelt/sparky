@@ -44,6 +44,9 @@
   .btn-danger { color: hsl(var(--red)); }
   .btn-danger.btn-outline { border-color: hsl(var(--red) / .4); }
   .btn-danger:hover:not(:disabled) { background: hsl(var(--red) / .1); color: hsl(var(--red)); }
+  /* solid destructive button — the confirm action inside the remove modal */
+  .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
+  .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
   a.btn-primary { text-decoration: none; padding: 7px 13px; }
   /* icon button (the ··· overflow trigger) */
   .btn-icon { padding: 5px; width: 28px; height: 28px; color: hsl(var(--muted-foreground)); }
@@ -107,6 +110,8 @@
     border-color: transparent; background: transparent;
   }
   .menu-pop button:hover:not(:disabled) { background: hsl(var(--muted)); }
+  .menu-pop button.btn-danger { color: hsl(var(--red)); }
+  .menu-pop button.btn-danger:hover:not(:disabled) { background: hsl(var(--red) / .1); }
   .menu-pop .sep { height: 1px; background: hsl(var(--border)); margin: 3px 0; }
 
   .m-body {
@@ -119,7 +124,10 @@
   .m-stat .value { font-size: 13px; font-weight: 600; margin-top: 1px;
     font-variant-numeric: tabular-nums; }
   .m-stat .value small { font-weight: 500; color: hsl(var(--muted-foreground)); }
-  .m-foot { border-top: 1px solid hsl(var(--border)); padding: 11px 14px; display: grid; gap: 11px; }
+  /* tags and web routes sit side by side; they stack on a narrow viewport */
+  .m-foot { border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 11px 22px; align-items: start; }
+  @media (max-width: 640px) { .m-foot { grid-template-columns: 1fr; } }
   .m-sect .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
     color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
   .env-warn {
@@ -173,10 +181,6 @@
   .vis.private:hover:not(:disabled) { color: hsl(var(--foreground)); }
   .vis.public { background: hsl(var(--amber) / .14); color: hsl(var(--amber)); border-color: hsl(var(--amber) / .28); }
   .vis.public:hover:not(:disabled) { background: hsl(var(--amber) / .22); }
-  .port-form { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; }
-  .port-form input { width: 68px; text-align: center; }
-  .port-form input::-webkit-inner-spin-button,
-  .port-form input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
   .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .chip {
@@ -236,8 +240,12 @@
   }
   dialog::backdrop { background: hsl(240 10% 3.9% / .5); }
   dialog h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
-  dialog p { margin: 0 0 14px; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
-  dialog input[type=text] { width: 100%; margin-bottom: 14px; }
+  dialog h3 .mono, dialog p .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  dialog p { margin: 0 0 14px; font-size: 12.5px; color: hsl(var(--muted-foreground)); line-height: 1.5; }
+  dialog p .mono { color: hsl(var(--foreground)); }
+  dialog input[type=text], dialog input[type=number] { width: 100%; margin-bottom: 14px; }
+  dialog input[type=number]::-webkit-inner-spin-button,
+  dialog input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
 </style>
 </head>
@@ -384,6 +392,28 @@
     </div>
   </dialog>
 
+  <!-- DEFAULT PORT -->
+  <dialog id="port-dlg">
+    <h3>Default port for <span id="port-name" class="mono"></span></h3>
+    <p>The guest port that <span id="port-host" class="mono"></span> forwards to. The route's
+      visibility is preserved.</p>
+    <input id="port-input" type="number" min="1" max="65535" class="mono" placeholder="8080" />
+    <div class="row">
+      <button class="btn-outline" id="port-cancel" type="button">Cancel</button>
+      <button class="btn-primary" id="port-go" type="button">Set port</button>
+    </div>
+  </dialog>
+
+  <!-- REMOVE CONFIRMATION -->
+  <dialog id="confirm-dlg">
+    <h3>Remove machine</h3>
+    <p id="confirm-msg"></p>
+    <div class="row">
+      <button class="btn-outline" id="confirm-cancel" type="button">Cancel</button>
+      <button class="btn-danger-solid" id="confirm-go" type="button">Remove</button>
+    </div>
+  </dialog>
+
   <div id="toast"></div>
 
 <script>
@@ -489,7 +519,7 @@
   // half-typed tag never gets wiped by a poll.
   function editing() {
     const ae = document.activeElement;
-    if ($("rename-dlg").open) return true;
+    if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open) return true;
     // an open ··· overflow menu counts as mid-interaction: the 4s repaint would
     // otherwise rebuild the card and snap the menu shut under the cursor.
     if (document.querySelector("#machine-list .menu-pop:not(.hidden)")) return true;
@@ -534,7 +564,6 @@
     if (d.act) return "act:" + d.name + ":" + d.act;
     if (d.snap) return "snap:" + d.snap;
     if (d.vis) return "vis:" + d.sub;
-    if (d.portSet) return "port:" + d.portSet;
     if (d.untag) return "tags:" + d.name;
     if (d.fork) return "fork:" + d.fork;
     if (d.del) return "delsnap:" + d.del;
@@ -619,16 +648,9 @@
         '">' + vis + "</button>" +
         "</div>";
     }).join("");
-    // The port editor drives the machine's default route (subdomain = name);
-    // changing the port preserves the route's visibility.
-    const def = rs.find((r) => r.subdomain === b.name);
-    html += '<div class="port-form">' +
-      '<span class="muted" style="font-size:12px">default port</span>' +
-      '<input type="number" min="1" max="65535" class="btn-sm mono" data-port-input="' + esc(b.name) +
-      '" value="' + (def ? (def.port | 0) : "") + '" placeholder="8080"' +
-      ' title="the guest port this machine\'s default route (' + esc(b.name) + '.' + esc(domain()) + ') forwards to" />' +
-      '<button class="btn-outline btn-sm" data-port-set="' + esc(b.name) + '">Set</button>' +
-      "</div>";
+    if (!rs.length) html = '<span class="muted" style="font-size:12px">no web routes</span>';
+    // The default port (guest port the machine's <name> route forwards to) is
+    // edited from the ··· actions menu, which opens the port dialog.
     return html;
   }
 
@@ -678,11 +700,24 @@
     // overflow menu for the rest, so it stays a two-control surface instead of
     // a six-button row. Everything non-empty for this state that isn't the
     // power action falls into the menu.
+    // The default route is <name>.<domain>; its port is edited from the menu.
+    const defRoute = (b.routes || []).find((r) => r.subdomain === b.name);
+    const portItem = isArchived ? "" :
+      '<button data-portdlg="' + esc(b.name) + '" data-port="' + (defRoute ? (defRoute.port | 0) : "") +
+      '" title="set the guest port this machine\'s default route forwards to">Set default port…</button>';
+    const removeItem =
+      '<button class="btn-danger" data-delbox="' + esc(b.name) + '" data-archived="' + (isArchived ? 1 : 0) +
+      '" title="permanently remove this machine and its disk">Remove…</button>';
+
     const powerBtn = (b.pinned && isRunning) ? pinBtn : stateBtn;
-    const menuItems = isArchived ? [] : [
-      rebootBtn, snapBtn, renameBtn, archiveBtn,
+    const coreItems = isArchived ? [] : [
+      rebootBtn, snapBtn, renameBtn, portItem, archiveBtn,
       (b.pinned && isRunning) ? "" : pinBtn,
     ].filter(Boolean);
+    // Remove is always offered — archived boxes included, since that's where the
+    // object-storage cleanup matters most — set off below a separator.
+    const menuItems = coreItems.concat(
+      coreItems.length ? ['<div class="sep"></div>'] : [], [removeItem]);
     const dots = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
       '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
     const menuHTML = menuItems.length
@@ -761,18 +796,10 @@
             { method: "POST", body: { visibility: btn.dataset.vis } });
           toast(btn.dataset.sub + " is now " + btn.dataset.vis);
         })));
-    wrap.querySelectorAll("button[data-port-set]").forEach((btn) =>
-      btn.addEventListener("click", () => {
-        const name = btn.dataset.portSet;
-        const inp = wrap.querySelector('input[data-port-input="' + CSS.escape(name) + '"]');
-        const port = parseInt(inp && inp.value, 10);
-        if (!port || port < 1 || port > 65535) return toast("port must be 1–65535", true);
-        mutate("port:" + name, btn, async () => {
-          await api("/api/machines/" + encodeURIComponent(name) + "/port",
-            { method: "POST", body: { port: port } });
-          toast(name + " now forwards port " + port);
-        });
-      }));
+    wrap.querySelectorAll("button[data-portdlg]").forEach((btn) =>
+      btn.addEventListener("click", () => openPort(btn.dataset.portdlg, btn.dataset.port)));
+    wrap.querySelectorAll("button[data-delbox]").forEach((btn) =>
+      btn.addEventListener("click", () => openRemove(btn.dataset.delbox, btn.dataset.archived === "1")));
     reapplyInflight(wrap);
   }
 
@@ -823,6 +850,76 @@
         { method: "POST", body: { new_name: newName } });
       dlg.close();
       toast(oldName + " renamed to " + newName + " — hostname updates on next reboot");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- default-port dialog ----
+
+  function openPort(name, port) {
+    $("port-name").textContent = name;
+    $("port-host").textContent = name + "." + domain() + portSuffix();
+    $("port-input").value = port || "";
+    const dlg = $("port-dlg");
+    dlg._name = name;
+    dlg.showModal();
+    $("port-input").focus();
+    $("port-input").select();
+  }
+
+  $("port-cancel").addEventListener("click", () => $("port-dlg").close());
+  $("port-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("port-go").click(); }
+  });
+  $("port-go").addEventListener("click", async () => {
+    const dlg = $("port-dlg");
+    const name = dlg._name;
+    const port = parseInt($("port-input").value, 10);
+    if (!port || port < 1 || port > 65535) return toast("port must be 1–65535", true);
+    const btn = $("port-go");
+    btn.disabled = true;
+    try {
+      await api("/api/machines/" + encodeURIComponent(name) + "/port",
+        { method: "POST", body: { port: port } });
+      dlg.close();
+      toast(name + " now forwards port " + port);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- remove (destroy) dialog ----
+
+  // Removing an archived machine also drops its rootfs copy from object storage
+  // (the backend folds that cleanup in), so the message calls that out.
+  function openRemove(name, archived) {
+    const dlg = $("confirm-dlg");
+    dlg._name = name;
+    $("confirm-msg").innerHTML =
+      'Permanently remove <span class="mono">' + esc(name) + "</span>? " +
+      "This destroys the machine and its disk" +
+      (archived ? ", including its archived copy in object storage," : "") +
+      " and cannot be undone.";
+    dlg.showModal();
+  }
+
+  $("confirm-cancel").addEventListener("click", () => $("confirm-dlg").close());
+  $("confirm-go").addEventListener("click", async () => {
+    const dlg = $("confirm-dlg");
+    const name = dlg._name;
+    const btn = $("confirm-go");
+    btn.disabled = true;
+    try {
+      await api("/api/machines/" + encodeURIComponent(name), { method: "DELETE" });
+      dlg.close();
+      toast(name + " removed");
       await refresh();
     } catch (e) {
       toast(e.message, true);

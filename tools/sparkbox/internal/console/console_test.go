@@ -146,6 +146,46 @@ func TestConsoleListAndPause(t *testing.T) {
 	}
 }
 
+func TestConsoleDestroy(t *testing.T) {
+	h, mgr, _ := newTestConsole(t)
+	ctx := context.Background()
+	if _, err := mgr.Create(ctx, "gone-gull", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	cookie := login(t, h, testPassword)
+
+	// DELETE without the cookie is rejected — and leaves the sandbox intact.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/sandboxes/gone-gull", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated destroy: status %d, want 401", rec.Code)
+	}
+	if _, ok := mgr.Get("gone-gull"); !ok {
+		t.Fatal("sandbox destroyed by unauthenticated request")
+	}
+
+	// Authenticated DELETE removes it.
+	req := httptest.NewRequest("DELETE", "/api/sandboxes/gone-gull", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("destroy: status %d, want 200", rec.Code)
+	}
+	if _, ok := mgr.Get("gone-gull"); ok {
+		t.Fatal("sandbox still present after destroy")
+	}
+
+	// Destroying a missing sandbox is a 404.
+	req = httptest.NewRequest("DELETE", "/api/sandboxes/gone-gull", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("destroy missing: status %d, want 404", rec.Code)
+	}
+}
+
 func TestConsoleClusterCapacity(t *testing.T) {
 	h, mgr, _ := newTestConsole(t)
 	ctx := context.Background()

@@ -26,6 +26,10 @@
   /* buttons — structural base + colors come from the shared design system */
   button { padding: 7px 13px; font-weight: 500; }
   .btn-sm { padding: 5px 11px; font-size: 13px; }
+  .btn-danger.btn-outline { color: hsl(var(--red)); border-color: hsl(var(--red) / .4); }
+  .btn-danger.btn-outline:hover:not(:disabled) { background: hsl(var(--red) / .1); }
+  .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
+  .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
 
   /* stat cards */
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
@@ -120,6 +124,18 @@
   .login button { width: 100%; justify-content: center; }
 
   .empty { padding: 40px 16px; text-align: center; color: hsl(var(--muted-foreground)); }
+
+  /* confirmation dialog */
+  dialog {
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+    background: hsl(var(--card)); color: hsl(var(--foreground));
+    padding: 22px; width: 100%; max-width: 400px;
+  }
+  dialog::backdrop { background: hsl(240 10% 3.9% / .5); }
+  dialog h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+  dialog p { margin: 0 0 16px; font-size: 12.5px; color: hsl(var(--muted-foreground)); line-height: 1.5; }
+  dialog p .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: hsl(var(--foreground)); }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -215,6 +231,16 @@
     </div>
   </div>
 
+  <!-- REMOVE CONFIRMATION -->
+  <dialog id="confirm-dlg">
+    <h3>Remove sandbox</h3>
+    <p id="confirm-msg"></p>
+    <div class="row">
+      <button class="btn-outline" id="confirm-cancel" type="button">Cancel</button>
+      <button class="btn-danger-solid" id="confirm-go" type="button">Remove</button>
+    </div>
+  </dialog>
+
   <div id="toast"></div>
 
 <script>
@@ -253,6 +279,42 @@
       btn.disabled = false;
     }
   }
+
+  // ---- remove (destroy) with confirmation ----
+
+  // confirmRemove opens the modal; the confirm button carries out the DELETE.
+  // Removing an archived box also drops its rootfs copy from object storage
+  // (the backend folds that in), so the message calls that out.
+  function confirmRemove(name, archived) {
+    const dlg = $("confirm-dlg");
+    dlg._name = name;
+    $("confirm-msg").innerHTML =
+      'Permanently remove <span class="mono">' + esc(name) + "</span>? " +
+      "This destroys the sandbox and its disk" +
+      (archived ? ", including its archived copy in object storage," : "") +
+      " and cannot be undone.";
+    dlg.showModal();
+  }
+
+  $("confirm-cancel").addEventListener("click", () => $("confirm-dlg").close());
+  $("confirm-go").addEventListener("click", async () => {
+    const dlg = $("confirm-dlg");
+    const name = dlg._name;
+    const btn = $("confirm-go");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/sandboxes/" + encodeURIComponent(name), { method: "DELETE" });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      dlg.close();
+      toast(name + " removed");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   let domain = ""; // base domain for route links, from /api/cluster
 
@@ -391,9 +453,15 @@
         ? ""
         : '<button class="btn-outline btn-sm" data-act="snapshot" data-name="' + b.name +
           '" title="save this disk as a fork-able template">Snapshot</button>';
-      const action = isArchived
+      // Remove is offered on every row (archived included — that's where the
+      // object-storage cleanup matters most), styled danger and confirmed.
+      const delBtn = '<button class="btn-outline btn-sm btn-danger" data-del-box="' + b.name +
+        '" data-archived="' + (isArchived ? 1 : 0) +
+        '" title="permanently remove this sandbox and its disk">Remove</button>';
+      const action = (isArchived
         ? stateBtn
-        : (b.pinned ? "" : stateBtn + " " + archiveBtn + " ") + snapBtn + " " + pinBtn;
+        : (b.pinned ? "" : stateBtn + " " + archiveBtn + " ") + snapBtn + " " + pinBtn) +
+        " " + delBtn;
       const pinBadge = b.pinned
         ? '<span class="badge pinned"><span class="dot"></span>pinned</span>'
         : "";
@@ -425,6 +493,8 @@
         if (btn.dataset.act === "snapshot") return snapshotBox(btn.dataset.name, btn);
         act(btn.dataset.name, btn.dataset.act, btn);
       }));
+    rows.querySelectorAll("button[data-del-box]").forEach((btn) =>
+      btn.addEventListener("click", () => confirmRemove(btn.dataset.delBox, btn.dataset.archived === "1")));
   }
 
   // snapshotBox prompts for a name and captures a sandbox's disk as a template.
