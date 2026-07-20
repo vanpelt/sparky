@@ -222,7 +222,8 @@ func (g *Gateway) handle(s gssh.Session) {
 	ctx, cancel := context.WithTimeout(s.Context(), g.dialTimeout)
 	defer cancel()
 
-	if sandboxName == NewSandboxUser {
+	viaNewDoor := sandboxName == NewSandboxUser
+	if viaNewDoor {
 		// `ssh new@<gateway> ml prod` stamps the box before it exists. Bare words
 		// are taken as tags, not just --tag: the local ssh client swallows
 		// leading-dash arguments as its own options, so `ssh new@host --tag ml`
@@ -298,7 +299,7 @@ func (g *Gateway) handle(s gssh.Session) {
 	}
 	defer client.Close()
 
-	exitCode, err := g.pipeSession(s, client)
+	exitCode, err := g.pipeSession(s, client, viaNewDoor)
 	if err != nil {
 		log.Warn("session ended with error", "err", err)
 	}
@@ -408,9 +409,21 @@ func DialUpstream(ctx context.Context, addr, user string, key xssh.Signer) (*xss
 	}
 }
 
+// execsCommand reports whether a session should run the client's command inside
+// the guest rather than opening a shell.
+//
+// tagsOnly is the `new@` door, whose arguments parseTags already consumed as
+// tags. Running them a second time as a guest command gives every tag an
+// accidental second meaning: `ssh new@host claude` both tagged the box and
+// launched claude, and `ssh new@host ml` would tag it and then die on `ml:
+// command not found`. A freshly created sandbox always gets a shell.
+func execsCommand(raw string, tagsOnly bool) bool { return raw != "" && !tagsOnly }
+
 // pipeSession mirrors the client's session (PTY, env, command, window
 // changes, streams) onto a session inside the VM and returns the exit code.
-func (g *Gateway) pipeSession(s gssh.Session, client *xssh.Client) (int, error) {
+// tagsOnly suppresses command execution for callers whose arguments carry a
+// different meaning than "run this in the guest" — see the `new@` door.
+func (g *Gateway) pipeSession(s gssh.Session, client *xssh.Client, tagsOnly bool) (int, error) {
 	up, err := client.NewSession()
 	if err != nil {
 		return 1, err
@@ -456,7 +469,7 @@ func (g *Gateway) pipeSession(s gssh.Session, client *xssh.Client) (int, error) 
 	go func() { io.Copy(s, stdout); done <- struct{}{} }()          //nolint:errcheck
 	go func() { io.Copy(s.Stderr(), stderr); done <- struct{}{} }() //nolint:errcheck
 
-	if raw := s.RawCommand(); raw != "" {
+	if raw := s.RawCommand(); execsCommand(raw, tagsOnly) {
 		err = up.Start(raw)
 	} else {
 		err = up.Shell()
