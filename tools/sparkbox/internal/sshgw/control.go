@@ -21,7 +21,7 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"\r\n" +
 	" creating a sandbox\r\n" +
 	"  (new sandbox)            ssh new@<gateway> [<tag>…]   — creates one and connects\r\n" +
-	"  (named sandbox)          ssh new+<name>@<gateway> [<tag>…]  — same, but you pick the name\r\n" +
+	"                           ssh new+<name>@<gateway>     — same, but you name it\r\n" +
 	"  fork <snapshot> <name> [--tag <t>]…  create one from a snapshot you saved\r\n" +
 	"\r\n" +
 	" sandboxes\r\n" +
