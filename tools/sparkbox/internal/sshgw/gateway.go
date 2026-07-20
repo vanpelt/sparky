@@ -265,11 +265,7 @@ func (g *Gateway) handle(s gssh.Session) {
 		if len(tags) > 0 {
 			tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
 		}
-		if viaDoor {
-			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: ssh %s.%s\r\n", name, tagNote, name, g.domainHint())
-		} else {
-			fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: ssh %s@<gateway>\r\n", name, tagNote, name)
-		}
+		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: ssh %s\r\n", name, tagNote, g.reconnectHint(name, viaDoor))
 		sandboxName = name
 	}
 
@@ -530,9 +526,9 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 		log.Info("start refused: per-owner limit", "running", limit.Running)
 		fmt.Fprintf(s.Stderr(),
 			"sparkbox: you already have %d running sandboxes (max %d): %s\r\n"+
-				"Pause one to free a slot, e.g.:  ssh %s@<gateway> pause %s\r\n",
+				"Pause one to free a slot, e.g.:  ssh %s@%s pause %s\r\n",
 			len(limit.Running), limit.Max, strings.Join(limit.Running, ", "),
-			ControlUser, limit.Running[0])
+			ControlUser, g.domainHint(), limit.Running[0])
 		s.Exit(1) //nolint:errcheck
 		return
 	}
@@ -540,8 +536,8 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 	if errors.As(err, &capacity) {
 		log.Info("start refused: host at capacity", "used_mb", capacity.UsedMB, "budget_mb", capacity.BudgetMB)
 		fmt.Fprintf(s.Stderr(),
-			"sparkbox: host is at capacity (%d/%d MB allocated). Try again shortly, or pause a sandbox:  ssh %s@<gateway> list\r\n",
-			capacity.UsedMB, capacity.BudgetMB, ControlUser)
+			"sparkbox: host is at capacity (%d/%d MB allocated). Try again shortly, or pause a sandbox:  ssh %s@%s list\r\n",
+			capacity.UsedMB, capacity.BudgetMB, ControlUser, g.domainHint())
 		s.Exit(1) //nolint:errcheck
 		return
 	}

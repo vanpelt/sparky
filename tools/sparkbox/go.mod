@@ -8,6 +8,7 @@ require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/gliderlabs/ssh v0.3.8
 	github.com/go-webauthn/webauthn v0.17.4
+	github.com/klauspost/compress v1.19.0
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/libdns v1.1.1
 	github.com/miekg/dns v1.1.72

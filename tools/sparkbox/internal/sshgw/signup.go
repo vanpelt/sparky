@@ -43,7 +43,7 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 	// The dialog needs a terminal to echo and edit input. Without a PTY (`ssh
 	// signup@host < /dev/null`, or a script) there is nothing sensible to do.
 	if _, _, isPty := s.Pty(); !isPty {
-		fmt.Fprint(s.Stderr(), "sparkbox: signup is interactive — connect without a command:  ssh signup@<gateway>\r\n")
+		fmt.Fprintf(s.Stderr(), "sparkbox: signup is interactive — connect from a terminal, with no command or piped stdin:  ssh %s@%s\r\n", SignupUser, g.domainHint())
 		s.Exit(2) //nolint:errcheck
 		return
 	}
@@ -94,8 +94,8 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 
 	// GitHub linking and email are optional and never block registration: the
 	// account exists from here on regardless of how these go.
-	login := g.askGitHub(s.Context(), t, handle, key, fp, log)
-	g.askEmail(s.Context(), t, handle, login, log)
+	emailPrefetch := g.askGitHub(s.Context(), t, handle, key, fp, log)
+	g.askEmail(s.Context(), t, handle, emailPrefetch, log)
 
 	fmt.Fprintf(t, "registered as %q. try:  ssh %s@%s\r\n", handle, NewSandboxUser, g.domainHint())
 	s.Exit(0) //nolint:errcheck
@@ -150,51 +150,62 @@ func (g *Gateway) askHandle(t *term.Terminal) (string, error) {
 // askGitHub offers to link a GitHub account by checking the connecting key
 // against github.com/<login>.keys. Possession of a key GitHub publishes for an
 // account proves control of it — the same evidence GitHub itself accepts for a
-// git push — so this needs no OAuth app, browser, or client secret. It returns
-// the verified login, or "" when the link was skipped or didn't verify.
-func (g *Gateway) askGitHub(ctx context.Context, t *term.Terminal, handle string, key gssh.PublicKey, fp string, log *slog.Logger) string {
+// git push — so this needs no OAuth app, browser, or client secret. On a
+// verified link it returns a channel that will deliver the profile's public
+// email for askEmail's prefill; nil when the link was skipped or didn't verify.
+func (g *Gateway) askGitHub(ctx context.Context, t *term.Terminal, handle string, key gssh.PublicKey, fp string, log *slog.Logger) <-chan string {
 	fmt.Fprint(t, "link a GitHub account? enter your GitHub username to verify\r\n")
 	fmt.Fprint(t, "this key against github.com/<user>.keys (or blank to skip)\r\n")
 	t.SetPrompt("github: ")
 	line, err := t.ReadLine()
 	if err != nil {
-		return ""
+		return nil
 	}
 	login := strings.TrimSpace(line)
 	if login == "" {
-		return ""
+		return nil
 	}
+	// Fetch the profile email now, concurrent with the key check below: both
+	// requests depend only on the typed login, so the second GitHub round-trip
+	// hides behind the first instead of stalling the email prompt. The buffer
+	// lets the goroutine finish even when the channel is dropped unverified.
+	emailCh := make(chan string, 1)
+	go func() {
+		em, _ := users.FetchGitHubEmail(ctx, login)
+		emailCh <- em
+	}()
 	ok, err := users.VerifyGitHubKey(ctx, login, key)
 	if err != nil {
 		fmt.Fprintf(t, "couldn't check github (%v) — skipping; link later with:\r\n", err)
 		fmt.Fprintf(t, "  ssh %s@%s keys verify-github %s\r\n", ControlUser, g.domainHint(), login)
-		return ""
+		return nil
 	}
 	if !ok {
 		fmt.Fprintf(t, "%s isn't listed on github.com/%s.keys — skipping the link.\r\n", fp, login)
 		fmt.Fprintf(t, "add it there, then run:  ssh %s@%s keys verify-github %s\r\n",
 			ControlUser, g.domainHint(), login)
-		return ""
+		return nil
 	}
 	if err := g.users.LinkGitHub(handle, login); err != nil {
 		log.Error("github link failed after verifying", "handle", handle, "login", login, "err", err)
-		return ""
+		return nil
 	}
 	log.Info("github verified at signup", "handle", handle, "login", login)
 	fmt.Fprintf(t, "✓ key %s is listed on github.com/%s — verified.\r\n", fp, login)
-	return login
+	return emailCh
 }
 
 // askEmail offers to record a contact email. The dialog is the only reliable
 // capture point: the SSH wire protocol never carries the key's comment, so
 // there is no address to read off the connecting key. When GitHub was just
-// linked and the profile shows a public email, that address becomes an
-// accept-with-Enter default.
-func (g *Gateway) askEmail(ctx context.Context, t *term.Terminal, handle, ghLogin string, log *slog.Logger) {
+// linked and the profile shows a public email (delivered via prefetch, started
+// back in askGitHub), that address becomes an accept-with-Enter default.
+func (g *Gateway) askEmail(ctx context.Context, t *term.Terminal, handle string, prefetch <-chan string, log *slog.Logger) {
 	prefill := ""
-	if ghLogin != "" {
-		if em, err := users.FetchGitHubEmail(ctx, ghLogin); err == nil {
-			prefill = em
+	if prefetch != nil {
+		select {
+		case prefill = <-prefetch:
+		case <-ctx.Done():
 		}
 	}
 	fmt.Fprint(t, "add a contact email? apps behind the proxy see it as X-Forwarded-Email\r\n")

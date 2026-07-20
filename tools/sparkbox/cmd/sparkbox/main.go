@@ -43,23 +43,27 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/userconsole"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
-	fcdriver "github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/firecracker"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
 func main() {
+	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets> [flags]"
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: sparkbox <serve|fetch-secrets> [flags]")
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "serve":
 		err = serve(os.Args[2:])
+	case "setup":
+		err = setup(os.Args[2:])
+	case "doctor":
+		err = doctor(os.Args[2:])
 	case "fetch-secrets":
 		err = fetchSecrets(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: sparkbox <serve|fetch-secrets> [flags]")
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	if err != nil {
@@ -204,10 +208,7 @@ func serve(args []string) error {
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = fcdriver.New(fcdriver.Options{
-			KernelPath: *kernelPath, ImageDir: *imageDir, StateDir: *stateDir,
-			Subnet6: *subnet6, LoginUser: *defaultLogin,
-		})
+		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin)
 		if err != nil {
 			return err
 		}

@@ -35,20 +35,12 @@ func SeedFile(path string, s *Store, log *slog.Logger) error {
 	line := 0
 	for sc.Scan() {
 		line++
-		text := strings.TrimSpace(sc.Text())
-		if text == "" || strings.HasPrefix(text, "#") {
-			continue
-		}
-		handle, keyText, ok := strings.Cut(text, " ")
-		if !ok {
-			return fmt.Errorf("%s:%d: expected '<handle> <authorized_keys line>'", path, line)
-		}
-		key, comment, _, _, err := xssh.ParseAuthorizedKey([]byte(keyText))
+		handle, key, comment, ok, err := ParseSeedLine(sc.Text())
 		if err != nil {
 			return fmt.Errorf("%s:%d: %w", path, line, err)
 		}
-		if !ValidHandle(handle) {
-			return fmt.Errorf("%s:%d: invalid handle %q (2-32 chars of a-z, 0-9, dash; some names are reserved)", path, line, handle)
+		if !ok {
+			continue
 		}
 		if err := seedOne(s, handle, key, comment); err != nil {
 			return fmt.Errorf("%s:%d: %w", path, line, err)
@@ -58,6 +50,29 @@ func SeedFile(path string, s *Store, log *slog.Logger) error {
 		}
 	}
 	return sc.Err()
+}
+
+// ParseSeedLine parses one users.conf line: "<handle> <authorized_keys line>".
+// Blank and #-comment lines return ok=false with no error. It is the single
+// parser for the format — `sparkbox doctor` validates files through it too, so
+// what doctor blesses is exactly what SeedFile accepts.
+func ParseSeedLine(text string) (handle string, key xssh.PublicKey, comment string, ok bool, err error) {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.HasPrefix(text, "#") {
+		return "", nil, "", false, nil
+	}
+	handle, keyText, found := strings.Cut(text, " ")
+	if !found {
+		return "", nil, "", false, fmt.Errorf("expected '<handle> <authorized_keys line>'")
+	}
+	key, comment, _, _, err = xssh.ParseAuthorizedKey([]byte(keyText))
+	if err != nil {
+		return "", nil, "", false, err
+	}
+	if !ValidHandle(handle) {
+		return "", nil, "", false, fmt.Errorf("invalid handle %q (2-32 chars of a-z, 0-9, dash; some names are reserved)", handle)
+	}
+	return handle, key, comment, true, nil
 }
 
 func seedOne(s *Store, handle string, key xssh.PublicKey, comment string) error {
