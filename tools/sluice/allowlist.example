@@ -1,0 +1,23 @@
+# sluice allowlist — one rule per line. '#' starts a comment.
+#
+#   example.com     allows example.com AND every subdomain (www., api., …)
+#   *.example.com   allows subdomains only, NOT the bare example.com
+#
+# A guest can only resolve — and, with --enforce, only reach — names covered
+# here. Everything else gets NXDOMAIN and is dropped.
+
+# Package registries / language toolchains
+pypi.org
+files.pythonhosted.org
+registry.npmjs.org
+crates.io
+static.crates.io
+proxy.golang.org
+
+# Source hosting
+github.com
+*.githubusercontent.com
+codeload.github.com
+
+# Anthropic API (for agents running in the sandbox)
+api.anthropic.com
