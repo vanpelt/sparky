@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 )
 
@@ -99,7 +100,7 @@ func (m Manifest) Artifacts(base string, cfg Config) []Artifact {
 		},
 		{
 			Name: "rootfs", URL: base + "/" + strings.TrimLeft(m.RootfsPath, "/"),
-			SHA256: m.SHA256Rootfs, Dest: cfg.ImageDir + "/" + baseName(m.RootfsPath),
+			SHA256: m.SHA256Rootfs, Dest: cfg.ImageDir + "/" + path.Base(m.RootfsPath),
 		},
 	}
 }
@@ -133,11 +134,4 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-func baseName(p string) string {
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
-	}
-	return p
 }

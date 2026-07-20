@@ -46,14 +46,7 @@ func doctor(args []string) error {
 // passing only --root shifts the whole layout while individual flags still win.
 func applyPaths(cfg hostsetup.Config, root, stateDir, keyDir, kernel, imageDir, defaultImage, users string) hostsetup.Config {
 	if root != "" && root != cfg.Root {
-		cfg = hostsetup.DefaultConfig()
-		cfg.Root = root
-		d := hostsetup.DefaultConfig()
-		// Re-derive the root-relative paths for the new root.
-		cfg.StateDir = replaceRoot(d.StateDir, d.Root, root)
-		cfg.ImageDir = replaceRoot(d.ImageDir, d.Root, root)
-		cfg.KernelPath = replaceRoot(d.KernelPath, d.Root, root)
-		cfg.UsersPath = replaceRoot(d.UsersPath, d.Root, root)
+		cfg = hostsetup.DefaultConfigAt(root)
 	}
 	if stateDir != "" {
 		cfg.StateDir = stateDir
@@ -74,11 +67,4 @@ func applyPaths(cfg hostsetup.Config, root, stateDir, keyDir, kernel, imageDir, 
 		cfg.UsersPath = users
 	}
 	return cfg
-}
-
-func replaceRoot(path, oldRoot, newRoot string) string {
-	if len(path) >= len(oldRoot) && path[:len(oldRoot)] == oldRoot {
-		return newRoot + path[len(oldRoot):]
-	}
-	return path
 }

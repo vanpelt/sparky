@@ -41,7 +41,7 @@ func testEnv(t *testing.T, dry bool) (*Env, string) {
 	cfg.UsersPath = filepath.Join(cfg.Root, "users.conf")
 	cfg.DryRun = dry
 	e := &Env{
-		Ctx: context.Background(), Cfg: cfg, DryRun: dry,
+		Ctx: context.Background(), Cfg: cfg,
 		Run:        &fakeRunner{},
 		Fetch:      mapFetcher{},
 		Log:        &bytes.Buffer{},

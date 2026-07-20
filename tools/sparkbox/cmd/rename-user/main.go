@@ -12,9 +12,6 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -40,7 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load oidc key: %v", err)
 	}
-	aead, err := newAEAD(secrets.DeriveKEK(key.D.Bytes()))
+	resealer, err := secrets.NewResealer(secrets.DeriveKEK(key.D.Bytes()))
 	if err != nil {
 		log.Fatalf("aead: %v", err)
 	}
@@ -81,11 +78,7 @@ func main() {
 		if err := rows.Scan(&id, &env, &blob); err != nil {
 			log.Fatal(err)
 		}
-		pt, err := open(aead, aad(*from, env, id), blob)
-		if err != nil {
-			log.Fatalf("unseal secret %s (%s): %v", id, env, err)
-		}
-		ct, err := seal(aead, aad(*to, env, id), pt)
+		ct, err := resealer.Reseal(*from, *to, env, id, blob)
 		if err != nil {
 			log.Fatalf("reseal secret %s (%s): %v", id, env, err)
 		}
@@ -128,31 +121,4 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("renamed %q -> %q. passkeys were deleted: re-enroll via the login page.\n", *from, *to)
-}
-
-func aad(owner, env, id string) []byte {
-	return []byte("sparkbox-secret/v1|" + owner + "|" + env + "|" + id)
-}
-
-func newAEAD(kek []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(kek)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-func open(aead cipher.AEAD, aad, blob []byte) ([]byte, error) {
-	if len(blob) < aead.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	return aead.Open(nil, blob[:aead.NonceSize()], blob[aead.NonceSize():], aad)
-}
-
-func seal(aead cipher.AEAD, aad, pt []byte) ([]byte, error) {
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	return aead.Seal(nonce, nonce, pt, aad), nil
 }

@@ -43,7 +43,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/userconsole"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
-	fcdriver "github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/firecracker"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
@@ -209,10 +208,7 @@ func serve(args []string) error {
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = fcdriver.New(fcdriver.Options{
-			KernelPath: *kernelPath, ImageDir: *imageDir, StateDir: *stateDir,
-			Subnet6: *subnet6, LoginUser: *defaultLogin,
-		})
+		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin)
 		if err != nil {
 			return err
 		}

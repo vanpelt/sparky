@@ -173,9 +173,26 @@ func TestEndToEnd(t *testing.T) {
 func TestNewSandboxOnConnect(t *testing.T) {
 	ts := newStack(t)
 
-	_, stderr := ts.run(t, sshgw.NewSandboxUser, "true")
-	if !strings.Contains(stderr, "created sandbox") {
-		t.Fatalf("expected creation banner on stderr, got %q", stderr)
+	// A plain connect (no command) creates a sandbox and drops into its
+	// shell; immediate stdin EOF ends the shell so the session returns.
+	client := ts.dial(t, sshgw.NewSandboxUser)
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	sess.Stdin = strings.NewReader("")
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Wait(); err != nil {
+		t.Fatalf("shell: %v (stderr: %s)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "created sandbox") {
+		t.Fatalf("expected creation banner on stderr, got %q", stderr.String())
 	}
 
 	boxes := ts.mgr.List()
@@ -186,6 +203,27 @@ func TestNewSandboxOnConnect(t *testing.T) {
 	// collision), owned by the connecting user.
 	if boxes[0].Owner != "tester" || !nameRe.MatchString(boxes[0].Name) {
 		t.Fatalf("unexpected sandbox record: %+v", boxes[0])
+	}
+
+	// new@'s arguments are tags, never a guest command. This stack wires no
+	// tag store, so the door must refuse the word — not run it in the guest.
+	tagClient := ts.dial(t, sshgw.NewSandboxUser)
+	defer tagClient.Close()
+	tagSess, err := tagClient.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tagSess.Close()
+	var tagErr bytes.Buffer
+	tagSess.Stderr = &tagErr
+	if err := tagSess.Run("true"); err == nil {
+		t.Fatal("expected tag-create to fail on a host without tagging")
+	}
+	if !strings.Contains(tagErr.String(), "tagging is not enabled") {
+		t.Fatalf("expected tagging-disabled error, got %q", tagErr.String())
+	}
+	if got := len(ts.mgr.List()); got != 1 {
+		t.Fatalf("failed tag-create must not leave a sandbox, have %d", got)
 	}
 }
 

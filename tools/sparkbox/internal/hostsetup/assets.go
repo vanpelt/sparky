@@ -40,7 +40,7 @@ func renderService(cfg Config) (string, error) {
 		DefaultImage: cfg.DefaultImage,
 		UsersPath:    cfg.UsersPath,
 		SSHAddr:      sshAddr,
-		ProxyAddr:    ":8081",
+		ProxyAddr:    fmt.Sprintf(":%d", proxyPort),
 	}); err != nil {
 		return "", err
 	}

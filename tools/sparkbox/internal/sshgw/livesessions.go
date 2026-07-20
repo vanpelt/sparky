@@ -170,7 +170,7 @@ func (g *Gateway) hangUp(ls *liveSession, reason string) {
 		// \r\n throughout: the client's terminal is in raw mode, so a bare \n
 		// would step down a line without returning to column zero.
 		msg += fmt.Sprintf("\r\nsparkbox: sandbox %q %s — reconnect with: ssh %s\r\n",
-			ls.sandbox, reason, g.reconnectHint(ls.sandbox))
+			ls.sandbox, reason, g.reconnectHint(ls.sandbox, true))
 		fmt.Fprint(ls.sess.Stderr(), msg) //nolint:errcheck // best-effort goodbye
 	}()
 	select {
@@ -180,11 +180,17 @@ func (g *Gateway) hangUp(ls *liveSession, reason string) {
 	ls.sess.Close() //nolint:errcheck
 }
 
-// reconnectHint renders the address a user reconnects on, matching the form
-// used elsewhere in the gateway's user-facing messages.
-func (g *Gateway) reconnectHint(sandbox string) string {
-	if d := g.domainHint(); d != "" {
-		return sandbox + "." + d
+// reconnectHint renders the address a user reconnects on. viaDoor picks the
+// front-door hostname form (`ssh <name>.<domain>`) the caller knows the user
+// is already using; otherwise the gateway form (`ssh <name>@<domain>`). With
+// no domain configured there is no concrete address to print, so a <gateway>
+// placeholder stands in.
+func (g *Gateway) reconnectHint(sandbox string, viaDoor bool) string {
+	if g.domain == "" {
+		return sandbox + "@<gateway>"
 	}
-	return sandbox + "@<gateway>"
+	if viaDoor {
+		return sandbox + "." + g.domain
+	}
+	return sandbox + "@" + g.domain
 }

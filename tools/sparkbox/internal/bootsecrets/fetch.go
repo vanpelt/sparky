@@ -56,6 +56,19 @@ var manifest = []struct {
 	{"console-password", envVar, "SPARKBOX_CONSOLE_PASSWORD", false},
 }
 
+// KeyFiles lists the fleet key PEM basenames materialized under KeyDir — the
+// same files `sparkbox serve` loads and `sparkbox doctor` checks for. Owned
+// here so adding or renaming a fleet key is a one-place change.
+func KeyFiles() []string {
+	var out []string
+	for _, s := range manifest {
+		if s.kind != envVar {
+			out = append(out, s.dest)
+		}
+	}
+	return out
+}
+
 // Fetch reads every manifest secret and materializes it. It is safe to re-run:
 // each write is atomic, so a reader never sees a half-written key.
 func Fetch(ctx context.Context, cfg Config) error {

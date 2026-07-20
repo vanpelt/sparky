@@ -79,6 +79,31 @@ func unseal(aead cipher.AEAD, aad, blob []byte) ([]byte, error) {
 	return pt, nil
 }
 
+// Resealer re-encrypts stored blobs under a different owner. It exists for
+// offline migrations (cmd/rename-user): the AAD binds each ciphertext to its
+// owner, so a handle rename must unseal and re-seal every row — through this
+// type, under the same AAD layout and blob format the store itself uses.
+type Resealer struct{ aead cipher.AEAD }
+
+// NewResealer builds a Resealer from the KEK (see DeriveKEK).
+func NewResealer(kek []byte) (*Resealer, error) {
+	aead, err := newAEAD(kek)
+	if err != nil {
+		return nil, err
+	}
+	return &Resealer{aead: aead}, nil
+}
+
+// Reseal unseals blob bound to (from, envName, id) and seals it bound to
+// (to, envName, id) with a fresh nonce.
+func (r *Resealer) Reseal(from, to, envName, id string, blob []byte) ([]byte, error) {
+	pt, err := unseal(r.aead, aadFor(from, envName, id), blob)
+	if err != nil {
+		return nil, err
+	}
+	return seal(r.aead, aadFor(to, envName, id), pt)
+}
+
 // secretValue wraps a plaintext secret so it cannot leak into a log line:
 // slog renders it via LogValue, fmt via String/GoString — all redacted. Any
 // code in this package that must mention a value logs it wrapped.

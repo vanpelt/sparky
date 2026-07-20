@@ -26,7 +26,6 @@ type Env struct {
 	Cfg      Config
 	Run      Runner
 	Fetch    Fetcher
-	DryRun   bool
 	Log      io.Writer
 	Manifest Manifest
 
@@ -43,7 +42,7 @@ type Env struct {
 func NewEnv(ctx context.Context, cfg Config, run Runner, fetch Fetcher, log io.Writer) *Env {
 	home, _ := os.UserHomeDir()
 	return &Env{
-		Ctx: ctx, Cfg: cfg, Run: run, Fetch: fetch, DryRun: cfg.DryRun, Log: log,
+		Ctx: ctx, Cfg: cfg, Run: run, Fetch: fetch, Log: log,
 		SystemdDir: "/etc/systemd/system",
 		SysctlDir:  "/etc/sysctl.d",
 		SbinDir:    "/usr/local/sbin",
@@ -81,7 +80,7 @@ func Provision(e *Env) error {
 	// Preflight: the host-capability subset must pass before we touch anything.
 	pre := RunChecks(System(), e.Cfg, preflightChecks())
 	if AnyFail(pre) {
-		if e.DryRun {
+		if e.Cfg.DryRun {
 			e.logf("preflight (advisory in --dry-run):\n")
 			PrintResults(e.Log, pre)
 		} else {
@@ -92,7 +91,7 @@ func Provision(e *Env) error {
 	}
 
 	steps := allSteps()
-	if e.DryRun {
+	if e.Cfg.DryRun {
 		e.logf("plan for %s (release %s, domain %s):\n", e.Cfg.Root, e.Cfg.Release, e.Cfg.ProxyDomain)
 	}
 	for _, s := range steps {
@@ -100,7 +99,7 @@ func Provision(e *Env) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", s.Name, err)
 		}
-		if e.DryRun {
+		if e.Cfg.DryRun {
 			if sat {
 				e.logf("  - %-16s ✓ already satisfied%s\n", s.Name, suffix(note))
 			} else {
@@ -118,7 +117,7 @@ func Provision(e *Env) error {
 		}
 	}
 
-	if e.DryRun {
+	if e.Cfg.DryRun {
 		e.logf("\ndry run — nothing was changed.\n")
 		return nil
 	}
@@ -304,12 +303,7 @@ func stepFetchArtifacts() Step {
 				if err != nil {
 					return err
 				}
-				if a.Name == "rootfs" {
-					if _, err := decompressInPlace(a.Dest); err != nil {
-						return fmt.Errorf("decompress rootfs: %w", err)
-					}
-				}
-				verb := "present (verified)"
+				verb := "present"
 				if dl {
 					verb = "downloaded"
 				}
@@ -549,7 +543,7 @@ func (e *Env) renderEnvFile() string {
 	fmt.Fprintf(&b, "LOGIN_USER_FLAG=%s\n", login)
 	b.WriteString("SUBNET6_FLAG=\n")
 	b.WriteString("SUBNET6=\n")
-	b.WriteString("PROXY_PORT=8081\n")
+	fmt.Fprintf(&b, "PROXY_PORT=%d\n", proxyPort)
 	b.WriteString("# Live memory overcommit + density defaults (retune with hack/measure-density.py):\n")
 	b.WriteString("OVERCOMMIT_FLAGS=--mem-reserve-mb 1024 --max-running-per-owner 50\n")
 	b.WriteString("# HTTPS edge: set e.g. TLS_FLAGS=--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@example.com\n")

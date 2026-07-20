@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/bootsecrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
-	xssh "golang.org/x/crypto/ssh"
 )
 
 // Status is a check outcome. A Fail means the host cannot run sparkbox as
@@ -48,12 +48,9 @@ type Check struct {
 	Run  func(Probe, Config) Result
 }
 
-// The fleet key PEM basenames sparkbox serve loads (internal/sshgw, internal/oidc).
-var fleetKeyFiles = []string{
-	"gateway_host_key.pem",
-	"gateway_upstream_key.pem",
-	"oidc_signing_key.pem",
-}
+// The fleet key PEM basenames sparkbox serve loads, owned by bootsecrets so
+// the check can't drift from what a fleet boot writes.
+var fleetKeyFiles = bootsecrets.KeyFiles()
 
 // DefaultChecks is the ordered doctor battery. Environment checks come first
 // (they need no config), then artifact/config checks, then live-service checks.
@@ -137,7 +134,8 @@ func fail(detail, hint string) Result { return Result{Status: Fail, Detail: deta
 
 func checkOS(p Probe, _ Config) Result {
 	if p.GOOS() != "linux" {
-		return fail(p.GOOS(), "sparkbox hosts must run Linux (firecracker needs KVM)")
+		return fail(p.GOOS(), "sparkbox hosts must run Linux (firecracker needs KVM); "+
+			"on this machine you can still develop against `sparkbox serve --driver mock`")
 	}
 	return pass("linux")
 }
@@ -278,27 +276,19 @@ func checkUsers(p Probe, cfg Config) Result {
 	return pass(fmt.Sprintf("%d user(s)", n))
 }
 
-// countUsers parses users.conf exactly as users.SeedFile does (one
-// "<handle> <authorized_keys line>" per line, blanks/# ignored) and returns the
-// entry count, so doctor validates the file without opening the sqlite store.
+// countUsers counts users.conf entries via users.ParseSeedLine — the same
+// parser SeedFile uses — so doctor validates the file without opening the
+// sqlite store and can never drift from what serve accepts.
 func countUsers(b []byte) (int, error) {
 	n := 0
 	for i, raw := range strings.Split(string(b), "\n") {
-		text := strings.TrimSpace(raw)
-		if text == "" || strings.HasPrefix(text, "#") {
-			continue
-		}
-		handle, keyText, ok := strings.Cut(text, " ")
-		if !ok {
-			return 0, fmt.Errorf("line %d: expected '<handle> <public key>'", i+1)
-		}
-		if !users.ValidHandle(handle) {
-			return 0, fmt.Errorf("line %d: invalid handle %q", i+1, handle)
-		}
-		if _, _, _, _, err := xssh.ParseAuthorizedKey([]byte(keyText)); err != nil {
+		_, _, _, ok, err := users.ParseSeedLine(raw)
+		if err != nil {
 			return 0, fmt.Errorf("line %d: %w", i+1, err)
 		}
-		n++
+		if ok {
+			n++
+		}
 	}
 	return n, nil
 }
@@ -340,8 +330,8 @@ func checkService(p Probe, _ Config) Result {
 	// output rather than treating the error as fatal. Only the known one-word
 	// states are meaningful; anything else (e.g. "System has not been booted
 	// with systemd") means we can't tell, so report it as unknown, not a state.
-	out := firstLine(strings.TrimSpace(mustString(p.Run("systemctl", "is-active", "sparkbox.service"))))
-	switch out {
+	out, _ := p.Run("systemctl", "is-active", "sparkbox.service")
+	switch firstLine(strings.TrimSpace(out)) {
 	case "active":
 		return pass("active")
 	case "inactive", "failed", "activating", "deactivating":
@@ -350,10 +340,6 @@ func checkService(p Probe, _ Config) Result {
 		return warn("unknown", "not provisioned yet? run `sparkbox setup`, then this reports the live state")
 	}
 }
-
-// mustString returns just the output, discarding the error — used where a
-// non-zero exit is expected and the output carries the answer.
-func mustString(out string, _ error) string { return out }
 
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {

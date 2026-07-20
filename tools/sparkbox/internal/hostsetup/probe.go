@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 // Probe abstracts every read-only interaction a check makes with the host, so
@@ -63,7 +64,7 @@ func (sysProbe) Writable(path string) bool {
 // Sysctl reads the runtime value from /proc/sys, translating the dotted key to
 // its path (net.ipv4.ip_forward -> /proc/sys/net/ipv4/ip_forward).
 func (sysProbe) Sysctl(key string) (string, error) {
-	b, err := os.ReadFile("/proc/sys/" + sysctlKeyToPath(key))
+	b, err := os.ReadFile("/proc/sys/" + strings.ReplaceAll(key, ".", "/"))
 	if err != nil {
 		return "", err
 	}
@@ -73,16 +74,4 @@ func (sysProbe) Sysctl(key string) (string, error) {
 func (sysProbe) Run(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return string(bytes.TrimSpace(out)), err
-}
-
-func sysctlKeyToPath(key string) string {
-	out := make([]byte, 0, len(key))
-	for i := 0; i < len(key); i++ {
-		if key[i] == '.' {
-			out = append(out, '/')
-		} else {
-			out = append(out, key[i])
-		}
-	}
-	return string(out)
 }

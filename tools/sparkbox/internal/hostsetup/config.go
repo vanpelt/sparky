@@ -14,13 +14,17 @@ package hostsetup
 
 import (
 	"path/filepath"
-	"runtime"
 )
 
 // DefaultArtifactBase is the public Object Storage bucket that hack/build-
 // artifacts.sh publishes releases to: <base>/latest.env, <base>/releases/<tag>/
 // {manifest.env,vmlinux,firecracker} and the rootfs at the manifest's ROOTFS_PATH.
 const DefaultArtifactBase = "https://sparkbox-artifacts.s3.fr-par.scw.cloud"
+
+// proxyPort is the HTTP edge port. The standalone unit's --proxy-addr and
+// sparkbox.env's PROXY_PORT (which sparkbox-net.sh DNATs any-port traffic to)
+// must agree, so both renders read this one constant.
+const proxyPort = 8081
 
 // Config is the shared configuration for both doctor and setup. Its zero value
 // is not useful; callers build it from flags (see cmd/sparkbox) and DefaultConfig
@@ -71,8 +75,11 @@ type Config struct {
 
 // DefaultConfig returns a Config with the on-host paths the systemd units and
 // cloud-init already agree on, so doctor and setup describe the same layout.
-func DefaultConfig() Config {
-	root := "/srv/sparkbox"
+func DefaultConfig() Config { return DefaultConfigAt("/srv/sparkbox") }
+
+// DefaultConfigAt returns the standard layout rooted at root, so an operator's
+// --root flag shifts every derived path together.
+func DefaultConfigAt(root string) Config {
 	return Config{
 		Root:           root,
 		StateDir:       filepath.Join(root, "data", "state"),
@@ -109,7 +116,3 @@ func (c Config) rootfsPath() string {
 
 // envPath is the non-secret host config the systemd units source.
 func (c Config) envPath() string { return filepath.Join(c.Root, "sparkbox.env") }
-
-// hostArch reports the running architecture; split out so tests do not depend
-// on the build host.
-func hostArch() string { return runtime.GOARCH }

@@ -61,17 +61,48 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// downloadVerify fetches a.URL to a.Dest, verifying a.SHA256 as it streams
-// (never buffering the body). It is idempotent: if a.Dest already exists with a
-// matching sha, it is left untouched and (false, nil) is returned. A sha
-// mismatch leaves no partial file at a.Dest.
-func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool, err error) {
-	if a.SHA256 != "" {
-		if have, herr := sha256File(a.Dest); herr == nil && have == a.SHA256 {
-			return false, nil
+// decompressor maps an artifact path to its on-disk destination and, when the
+// path carries a compression suffix (.zst / .gz), a reader-wrapper that
+// decompresses the stream. wrap == nil means the artifact is stored as-is.
+func decompressor(p string) (dest string, wrap func(io.Reader) (io.ReadCloser, error)) {
+	switch {
+	case strings.HasSuffix(p, ".zst"):
+		return strings.TrimSuffix(p, ".zst"), func(r io.Reader) (io.ReadCloser, error) {
+			zr, err := zstd.NewReader(r)
+			if err != nil {
+				return nil, err
+			}
+			return zr.IOReadCloser(), nil
 		}
+	case strings.HasSuffix(p, ".gz"):
+		return strings.TrimSuffix(p, ".gz"), func(r io.Reader) (io.ReadCloser, error) {
+			return gzip.NewReader(r)
+		}
+	default:
+		return p, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(a.Dest), 0o755); err != nil {
+}
+
+// downloadVerify fetches a.URL, verifying a.SHA256 over the wire bytes as it
+// streams (never buffering the body). A compressed a.Dest is decompressed
+// during the same pass, so the multi-GB rootfs costs one disk write and its
+// compressed form never lands on disk. Idempotency: an uncompressed artifact
+// is skipped when a.Dest already matches the sha; a compressed one is skipped
+// when its decompressed target exists (the sha covers bytes that are never
+// kept, so existence is the strongest cheap check). A failure — including a
+// sha mismatch discovered only after the stream ends — leaves no partial file.
+func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool, err error) {
+	dest, wrap := decompressor(a.Dest)
+	if wrap == nil {
+		if a.SHA256 != "" {
+			if have, herr := sha256File(dest); herr == nil && have == a.SHA256 {
+				return false, nil
+			}
+		}
+	} else if _, serr := os.Stat(dest); serr == nil {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return false, err
 	}
 	body, err := f.Get(ctx, a.URL)
@@ -80,13 +111,24 @@ func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool
 	}
 	defer body.Close()
 
-	tmp := a.Dest + ".tmp"
+	// The hash sees exactly the wire bytes the (optional) decompressor pulls
+	// through the tee; our artifacts are single-frame, so that is all of them.
+	h := sha256.New()
+	var src io.Reader = io.TeeReader(body, h)
+	if wrap != nil {
+		zr, werr := wrap(src)
+		if werr != nil {
+			return false, werr
+		}
+		defer zr.Close()
+		src = zr
+	}
+	tmp := dest + ".tmp"
 	out, err := os.Create(tmp)
 	if err != nil {
 		return false, err
 	}
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(out, h), body); err != nil {
+	if _, err := io.Copy(out, src); err != nil {
 		out.Close()
 		os.Remove(tmp)
 		return false, err
@@ -107,65 +149,9 @@ func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool
 		os.Remove(tmp)
 		return false, err
 	}
-	if err := os.Rename(tmp, a.Dest); err != nil {
+	if err := os.Rename(tmp, dest); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
 	return true, nil
-}
-
-// decompressInPlace expands a .zst or .gz artifact to the path with the
-// compression suffix stripped, then removes the compressed source (matching the
-// shell's `zstd -d --rm`). A path without a known suffix is a no-op. It returns
-// the resulting (decompressed) path.
-func decompressInPlace(path string) (string, error) {
-	switch {
-	case strings.HasSuffix(path, ".zst"):
-		return decompress(path, strings.TrimSuffix(path, ".zst"), func(r io.Reader) (io.ReadCloser, error) {
-			zr, err := zstd.NewReader(r)
-			if err != nil {
-				return nil, err
-			}
-			return zr.IOReadCloser(), nil
-		})
-	case strings.HasSuffix(path, ".gz"):
-		return decompress(path, strings.TrimSuffix(path, ".gz"), func(r io.Reader) (io.ReadCloser, error) {
-			return gzip.NewReader(r)
-		})
-	default:
-		return path, nil
-	}
-}
-
-func decompress(src, dst string, wrap func(io.Reader) (io.ReadCloser, error)) (string, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", err
-	}
-	defer in.Close()
-	zr, err := wrap(in)
-	if err != nil {
-		return "", err
-	}
-	defer zr.Close()
-	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(out, zr); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return "", err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return "", err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return "", err
-	}
-	os.Remove(src)
-	return dst, nil
 }

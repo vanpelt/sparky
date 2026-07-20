@@ -70,64 +70,78 @@ func TestDownloadVerify(t *testing.T) {
 	}
 }
 
-func TestDecompressInPlace(t *testing.T) {
-	dir := t.TempDir()
+// TestDownloadVerifyDecompresses covers the streaming-decompress path: the sha
+// is verified over the compressed wire bytes, only the decompressed file lands
+// on disk, and an existing decompressed file short-circuits the re-download.
+func TestDownloadVerifyDecompresses(t *testing.T) {
 	raw := bytes.Repeat([]byte("ext4-blocks"), 1000)
+	zbytes := compressZstd(t, raw)
+	gbytes := compressGzip(t, raw)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rootfs.zst":
+			w.Write(zbytes)
+		case "/rootfs.gz":
+			w.Write(gbytes)
+		}
+	}))
+	defer srv.Close()
+	f := NewHTTPFetcher()
+	dir := t.TempDir()
 
-	// zstd
-	zpath := filepath.Join(dir, "universal.ext4.zst")
-	writeZstd(t, zpath, raw)
-	out, err := decompressInPlace(zpath)
-	if err != nil {
-		t.Fatal(err)
+	// zstd: decompressed dest, no compressed file left behind.
+	a := Artifact{Name: "rootfs", URL: srv.URL + "/rootfs.zst", SHA256: sha(zbytes), Dest: filepath.Join(dir, "universal.ext4.zst")}
+	dl, err := downloadVerify(context.Background(), f, a)
+	if err != nil || !dl {
+		t.Fatalf("zstd download: dl=%v err=%v", dl, err)
 	}
-	if out != filepath.Join(dir, "universal.ext4") {
-		t.Fatalf("out path = %q", out)
-	}
-	if got, _ := os.ReadFile(out); !bytes.Equal(got, raw) {
+	if got, _ := os.ReadFile(filepath.Join(dir, "universal.ext4")); !bytes.Equal(got, raw) {
 		t.Fatal("zstd content mismatch")
 	}
-	if _, err := os.Stat(zpath); !os.IsNotExist(err) {
-		t.Fatal("compressed source should be removed")
+	if _, err := os.Stat(a.Dest); !os.IsNotExist(err) {
+		t.Fatal("compressed form must never land on disk")
 	}
 
-	// gzip
-	gpath := filepath.Join(dir, "ubuntu.ext4.gz")
-	writeGzip(t, gpath, raw)
-	out, err = decompressInPlace(gpath)
-	if err != nil {
-		t.Fatal(err)
+	// Second call skips on the decompressed file (partial re-runs must not
+	// re-download the multi-GB rootfs).
+	dl, err = downloadVerify(context.Background(), f, a)
+	if err != nil || dl {
+		t.Fatalf("second download should skip: dl=%v err=%v", dl, err)
 	}
-	if got, _ := os.ReadFile(out); !bytes.Equal(got, raw) {
+
+	// gzip path.
+	g := Artifact{Name: "rootfs", URL: srv.URL + "/rootfs.gz", SHA256: sha(gbytes), Dest: filepath.Join(dir, "ubuntu.ext4.gz")}
+	if dl, err := downloadVerify(context.Background(), f, g); err != nil || !dl {
+		t.Fatalf("gzip download: dl=%v err=%v", dl, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "ubuntu.ext4")); !bytes.Equal(got, raw) {
 		t.Fatal("gzip content mismatch")
 	}
 
-	// plain path is a no-op
-	plain := filepath.Join(dir, "already.ext4")
-	os.WriteFile(plain, raw, 0o644)
-	if out, err := decompressInPlace(plain); err != nil || out != plain {
-		t.Fatalf("plain path should be a no-op: %q %v", out, err)
+	// A sha mismatch leaves no decompressed file behind.
+	bad := Artifact{Name: "rootfs", URL: srv.URL + "/rootfs.zst", SHA256: sha([]byte("other")), Dest: filepath.Join(dir, "bad.ext4.zst")}
+	if _, err := downloadVerify(context.Background(), f, bad); err == nil {
+		t.Fatal("expected sha mismatch error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bad.ext4")); !os.IsNotExist(err) {
+		t.Fatal("mismatched download must not leave a partial file")
 	}
 }
 
-func writeZstd(t *testing.T, path string, data []byte) {
+func compressZstd(t *testing.T, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w, _ := zstd.NewWriter(&buf)
 	w.Write(data)
 	w.Close()
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return buf.Bytes()
 }
 
-func writeGzip(t *testing.T, path string, data []byte) {
+func compressGzip(t *testing.T, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w := gzip.NewWriter(&buf)
 	w.Write(data)
 	w.Close()
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return buf.Bytes()
 }
