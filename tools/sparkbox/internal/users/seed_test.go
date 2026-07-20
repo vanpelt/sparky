@@ -113,6 +113,37 @@ func TestVerifyGitHubKey(t *testing.T) {
 	})
 }
 
+func TestFetchGitHubEmail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/vanpelt":
+			fmt.Fprint(w, `{"login":"vanpelt","email":"cvp@example.com"}`)
+		case "/users/private":
+			fmt.Fprint(w, `{"login":"private","email":null}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prev := githubUserAPIURL
+	githubUserAPIURL = srv.URL + "/users/%s"
+	t.Cleanup(func() { githubUserAPIURL = prev })
+
+	if got, err := FetchGitHubEmail(context.Background(), "vanpelt"); err != nil || got != "cvp@example.com" {
+		t.Errorf("FetchGitHubEmail = %q, %v; want cvp@example.com", got, err)
+	}
+	// A profile with no public email is the common case, not an error.
+	if got, err := FetchGitHubEmail(context.Background(), "private"); err != nil || got != "" {
+		t.Errorf("FetchGitHubEmail for a private profile = %q, %v; want \"\"", got, err)
+	}
+	if _, err := FetchGitHubEmail(context.Background(), "nosuchuser"); err == nil {
+		t.Error("want an error for an account GitHub does not serve")
+	}
+	if _, err := FetchGitHubEmail(context.Background(), "bad/../login"); err == nil {
+		t.Error("want an error for a login that would escape the URL path")
+	}
+}
+
 func TestFetchGitHubKeys(t *testing.T) {
 	_, oneLine := newKey(t, "laptop")
 	_, twoLine := newKey(t, "desktop")

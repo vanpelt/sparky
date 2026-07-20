@@ -92,9 +92,10 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 	}
 	log.Info("user registered", "handle", handle, "fp", fp, "invited_by", invitedBy)
 
-	// GitHub linking is optional and never blocks registration: the account
-	// exists from here on regardless of how this goes.
-	g.askGitHub(s.Context(), t, handle, key, fp, log)
+	// GitHub linking and email are optional and never block registration: the
+	// account exists from here on regardless of how these go.
+	login := g.askGitHub(s.Context(), t, handle, key, fp, log)
+	g.askEmail(s.Context(), t, handle, login, log)
 
 	fmt.Fprintf(t, "registered as %q. try:  ssh %s@%s\r\n", handle, NewSandboxUser, g.domainHint())
 	s.Exit(0) //nolint:errcheck
@@ -149,37 +150,84 @@ func (g *Gateway) askHandle(t *term.Terminal) (string, error) {
 // askGitHub offers to link a GitHub account by checking the connecting key
 // against github.com/<login>.keys. Possession of a key GitHub publishes for an
 // account proves control of it — the same evidence GitHub itself accepts for a
-// git push — so this needs no OAuth app, browser, or client secret.
-func (g *Gateway) askGitHub(ctx context.Context, t *term.Terminal, handle string, key gssh.PublicKey, fp string, log *slog.Logger) {
+// git push — so this needs no OAuth app, browser, or client secret. It returns
+// the verified login, or "" when the link was skipped or didn't verify.
+func (g *Gateway) askGitHub(ctx context.Context, t *term.Terminal, handle string, key gssh.PublicKey, fp string, log *slog.Logger) string {
 	fmt.Fprint(t, "link a GitHub account? enter your GitHub username to verify\r\n")
 	fmt.Fprint(t, "this key against github.com/<user>.keys (or blank to skip)\r\n")
 	t.SetPrompt("github: ")
 	line, err := t.ReadLine()
 	if err != nil {
-		return
+		return ""
 	}
 	login := strings.TrimSpace(line)
 	if login == "" {
-		return
+		return ""
 	}
 	ok, err := users.VerifyGitHubKey(ctx, login, key)
 	if err != nil {
 		fmt.Fprintf(t, "couldn't check github (%v) — skipping; link later with:\r\n", err)
 		fmt.Fprintf(t, "  ssh %s@%s keys verify-github %s\r\n", ControlUser, g.domainHint(), login)
-		return
+		return ""
 	}
 	if !ok {
 		fmt.Fprintf(t, "%s isn't listed on github.com/%s.keys — skipping the link.\r\n", fp, login)
 		fmt.Fprintf(t, "add it there, then run:  ssh %s@%s keys verify-github %s\r\n",
 			ControlUser, g.domainHint(), login)
-		return
+		return ""
 	}
 	if err := g.users.LinkGitHub(handle, login); err != nil {
 		log.Error("github link failed after verifying", "handle", handle, "login", login, "err", err)
-		return
+		return ""
 	}
 	log.Info("github verified at signup", "handle", handle, "login", login)
 	fmt.Fprintf(t, "✓ key %s is listed on github.com/%s — verified.\r\n", fp, login)
+	return login
+}
+
+// askEmail offers to record a contact email. The dialog is the only reliable
+// capture point: the SSH wire protocol never carries the key's comment, so
+// there is no address to read off the connecting key. When GitHub was just
+// linked and the profile shows a public email, that address becomes an
+// accept-with-Enter default.
+func (g *Gateway) askEmail(ctx context.Context, t *term.Terminal, handle, ghLogin string, log *slog.Logger) {
+	prefill := ""
+	if ghLogin != "" {
+		if em, err := users.FetchGitHubEmail(ctx, ghLogin); err == nil {
+			prefill = em
+		}
+	}
+	fmt.Fprint(t, "add a contact email? apps behind the proxy see it as X-Forwarded-Email\r\n")
+	if prefill != "" {
+		fmt.Fprintf(t, "(enter to use %s from your GitHub profile, or \"skip\")\r\n", prefill)
+	} else {
+		fmt.Fprint(t, "(or blank to skip)\r\n")
+	}
+	t.SetPrompt("email: ")
+	for attempt := 0; attempt < 3; attempt++ {
+		line, err := t.ReadLine()
+		if err != nil {
+			return
+		}
+		email := strings.TrimSpace(line)
+		switch {
+		case email == "" && prefill != "":
+			email = prefill
+		case email == "" || email == "skip":
+			return
+		}
+		if !users.ValidEmail(email) {
+			fmt.Fprint(t, "that doesn't look like an email address (or \"skip\").\r\n")
+			continue
+		}
+		if err := g.users.SetEmail(handle, email); err != nil {
+			log.Error("set email at signup", "handle", handle, "err", err)
+			return
+		}
+		fmt.Fprintf(t, "✓ email set to %s — change it with:  ssh %s@%s email set <addr>\r\n",
+			email, ControlUser, g.domainHint())
+		return
+	}
 }
 
 // keyComment labels the key for `keys list`. SSH doesn't carry the client's

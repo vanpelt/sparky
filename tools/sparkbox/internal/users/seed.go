@@ -3,6 +3,7 @@ package users
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -64,16 +65,39 @@ func seedOne(s *Store, handle string, key xssh.PublicKey, comment string) error 
 		if owner != handle {
 			return fmt.Errorf("key %s is already linked to user %q", xssh.FingerprintSHA256(key), owner)
 		}
-		return nil
-	}
-	if _, err := s.Get(handle); err == ErrNoSuchUser {
-		return s.Create(handle, key, comment, "seed", OperatorInviter)
+	} else if _, err := s.Get(handle); err == ErrNoSuchUser {
+		if err := s.Create(handle, key, comment, "seed", OperatorInviter); err != nil {
+			return err
+		}
 	} else if err != nil {
 		return err
+	} else {
+		// The user exists (from an earlier seed or a signup) but this key is new:
+		// a second machine added to users.conf.
+		if err := s.AddKey(handle, key, comment, "seed"); err != nil {
+			return err
+		}
 	}
-	// The user exists (from an earlier seed or a signup) but this key is new:
-	// a second machine added to users.conf.
-	return s.AddKey(handle, key, comment, "seed")
+	return backfillEmail(s, handle, comment)
+}
+
+// backfillEmail adopts a key comment as the account email when the whole
+// comment is one address (the ssh-keygen default of user@host rarely qualifies
+// — no dot — but a deliberate "you@example.com" comment does) and the account
+// has none. users.conf is the only place a comment survives: the SSH wire
+// protocol never carries it, so seeding is the one chance to pick the address
+// up for free. Never overwrites — the file is a bootstrap, not the owner of
+// the field.
+func backfillEmail(s *Store, handle, comment string) error {
+	email := strings.TrimSpace(comment)
+	if !ValidEmail(email) {
+		return nil
+	}
+	u, err := s.Get(handle)
+	if err != nil || u.Email != "" {
+		return err
+	}
+	return s.SetEmail(handle, email)
 }
 
 // githubKeysURL is where GitHub serves an account's public SSH keys. The login
@@ -137,6 +161,46 @@ func VerifyGitHubKey(ctx context.Context, login string, key xssh.PublicKey) (boo
 		}
 	}
 	return false, nil
+}
+
+// githubUserAPIURL is where GitHub serves an account's public profile. A var
+// for the same reason as githubKeysURL: so tests can exercise it locally.
+var githubUserAPIURL = "https://api.github.com/users/%s"
+
+// FetchGitHubEmail returns login's public profile email, or "" when the
+// profile doesn't show one — the common case, since the field is opt-in. It
+// only prefills the signup email prompt, so callers treat "" and most errors
+// alike: no default, just ask.
+func FetchGitHubEmail(ctx context.Context, login string) (string, error) {
+	if !githubLoginOK(login) {
+		return "", fmt.Errorf("invalid github login %q", login)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(githubUserAPIURL, login), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github returned %s for %q", resp.Status, login)
+	}
+	var profile struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&profile); err != nil {
+		return "", err
+	}
+	email := strings.TrimSpace(profile.Email)
+	if !ValidEmail(email) {
+		return "", nil
+	}
+	return email, nil
 }
 
 // FetchGitHubKeys returns every public key github.com serves for login. Used

@@ -348,14 +348,17 @@ func TestSignupRegistersAnUnregisteredKey(t *testing.T) {
 	}
 	signer, pub := newClientKey(t)
 
-	// invite code, handle, then blank to skip the GitHub link (which would
-	// otherwise reach out to github.com from a unit test).
-	out := ts.signup(t, signer, code, "cvp", "")
+	// invite code, handle, blank to skip the GitHub link (which would
+	// otherwise reach out to github.com from a unit test), then an email.
+	out := ts.signup(t, signer, code, "cvp", "", "cvp@example.com")
 	if !strings.Contains(out, `registered as "cvp"`) {
 		t.Fatalf("signup did not confirm registration:\n%s", out)
 	}
 	if h, ok := ts.users.Lookup(pub); !ok || h != "cvp" {
 		t.Fatalf("Lookup after signup = %q, %v; want cvp, true", h, ok)
+	}
+	if u, err := ts.users.Get("cvp"); err != nil || u.Email != "cvp@example.com" {
+		t.Errorf("email after signup = %q, %v; want cvp@example.com", u.Email, err)
 	}
 
 	// The freshly registered key now opens the normal doors as its own account.
@@ -413,7 +416,7 @@ func TestInviteCannotBeUsedTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, _ := newClientKey(t)
-	if out := ts.signup(t, first, code, "alice", ""); !strings.Contains(out, `registered as "alice"`) {
+	if out := ts.signup(t, first, code, "alice", "", ""); !strings.Contains(out, `registered as "alice"`) {
 		t.Fatalf("first signup failed:\n%s", out)
 	}
 	second, pub := newClientKey(t)
@@ -436,7 +439,7 @@ func TestSignupRefusesATakenHandle(t *testing.T) {
 	}
 	signer, pub := newClientKey(t)
 	// "tester" is already seeded; the dialog should re-ask, then accept "cvp".
-	out := ts.signup(t, signer, code, "tester", "cvp", "")
+	out := ts.signup(t, signer, code, "tester", "cvp", "", "")
 	if !strings.Contains(out, "is taken") {
 		t.Errorf("dialog did not report the handle as taken:\n%s", out)
 	}
@@ -489,7 +492,7 @@ func TestOnlyOperatorsCanInvite(t *testing.T) {
 	code := strings.Fields(strings.SplitN(out, "invite code: ", 2)[1])[0]
 
 	signer, _ := newClientKey(t)
-	if o := ts.signup(t, signer, code, "guest", ""); !strings.Contains(o, `registered as "guest"`) {
+	if o := ts.signup(t, signer, code, "guest", "", ""); !strings.Contains(o, `registered as "guest"`) {
 		t.Fatalf("guest signup failed:\n%s", o)
 	}
 	// The invited user is not an operator, so they get no invites of their own.

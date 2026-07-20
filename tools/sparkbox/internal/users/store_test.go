@@ -388,6 +388,43 @@ func TestSeedFileImportsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// A key comment that is exactly one address becomes the account email — the
+// seed file is the only place a comment is visible (the SSH wire protocol
+// never carries it). Host-style comments and accounts with an email already
+// set are left alone.
+func TestSeedFileBackfillsEmailFromComment(t *testing.T) {
+	s := testStore(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, emailLine := newKey(t, "cvp@example.com")
+	_, hostLine := newKey(t, "vanpelt@Chris-Van-Pelt-M3 (NVIDIA Sync)")
+
+	path := filepath.Join(t.TempDir(), "users.conf")
+	conf := "vanpelt " + emailLine + "\ncvp " + hostLine + "\n"
+	if err := os.WriteFile(path, []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedFile(path, s, log); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := s.Get("vanpelt"); u.Email != "cvp@example.com" {
+		t.Errorf("email = %q, want the key comment cvp@example.com", u.Email)
+	}
+	if u, _ := s.Get("cvp"); u.Email != "" {
+		t.Errorf("a host-style comment was adopted as an email: %q", u.Email)
+	}
+
+	// An address the user set themselves survives re-seeding.
+	if err := s.SetEmail("vanpelt", "chosen@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedFile(path, s, log); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := s.Get("vanpelt"); u.Email != "chosen@example.com" {
+		t.Errorf("re-seeding overwrote the email: %q", u.Email)
+	}
+}
+
 func TestSeedFileRejectsBadInput(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, line := newKey(t, "")
