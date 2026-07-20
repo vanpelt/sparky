@@ -421,6 +421,7 @@ func serve(args []string) error {
 			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
 			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain, GatewayPort: gatewayPort(*sshAdvertise, *sshAddr),
 			Passkeys: userStore, Subdomain: *loginSub, Port: portOf(*proxyAddr),
+			HomeSub: *userConsoleSub,
 		})
 		if lerr != nil {
 			return fmt.Errorf("login handler: %w", lerr)

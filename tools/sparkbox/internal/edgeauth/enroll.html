@@ -66,6 +66,16 @@
     border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 600;
     background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
   }
+  label {
+    display: block; margin-top: 14px; font-size: 12px; font-weight: 600;
+    color: hsl(var(--muted-foreground));
+  }
+  input[type="text"] {
+    width: 100%; margin-top: 6px; padding: 9px 12px; font-size: 14px;
+    border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
   .alt {
     display: block; margin-top: 10px; width: 100%; background: none; border: 0;
     padding: 4px; cursor: pointer; text-align: center; font-size: 13px;
@@ -87,6 +97,8 @@
     <p>You're signed in as <code>{{.Handle}}</code>.</p>
     <p>A passkey lets this browser sign in with Touch&nbsp;ID, Face&nbsp;ID, or your
        security key — no more minting session tokens over SSH.</p>
+    <label for="pk-name">Name shown in your passkey manager</label>
+    <input type="text" id="pk-name" value="{{.Handle}}" maxlength="64" spellcheck="false" />
     <button type="button" id="create-btn">Create a passkey</button>
     <button type="button" class="alt" id="skip-btn">Not now</button>
     <div class="err" id="err"></div>
@@ -122,7 +134,11 @@
       btn.disabled = true;
       document.getElementById("err").classList.remove("show");
       try {
-        var begin = await fetch("/webauthn/register/begin", { method: "POST" });
+        var begin = await fetch("/webauthn/register/begin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: document.getElementById("pk-name").value })
+        });
         var body = await begin.json();
         if (!begin.ok) throw new Error(body.error || "could not start passkey setup");
         var opts = body.publicKey;
@@ -148,6 +164,9 @@
         });
         var out = await fin.json();
         if (!out.ok) throw new Error(out.error || "could not save the passkey");
+        // Same hint the login page reads: this browser now holds a passkey,
+        // so future sign-ins lead with it.
+        localStorage.setItem("sparkbox-passkey", "1");
         location.href = RETURN;
       } catch (e) {
         if (e.name === "NotAllowedError") {

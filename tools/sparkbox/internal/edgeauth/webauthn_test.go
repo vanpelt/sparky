@@ -1,6 +1,7 @@
 package edgeauth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,62 @@ func TestRegisterBeginRequiresSession(t *testing.T) {
 	if body.PublicKey.AuthenticatorSelection.ResidentKey != "required" {
 		t.Errorf("residentKey = %q; want required (discoverable sign-in depends on it)",
 			body.PublicKey.AuthenticatorSelection.ResidentKey)
+	}
+}
+
+// The enrollee may pick the cosmetic name their passkey manager shows, but
+// the WebAuthn user id underneath is always the account handle.
+func TestRegisterBeginHonorsDisplayName(t *testing.T) {
+	h, s, _ := newPasskeyLogin(t)
+	tok, _, _ := s.Mint(Identity{Handle: "vanpelt"}, time.Hour)
+	req := httptest.NewRequest("POST", "https://login.hivemind.tools/webauthn/register/begin",
+		strings.NewReader(`{"name":"Chris Van Pelt"}`))
+	req.Header.Set("Origin", "https://login.hivemind.tools")
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: tok})
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register begin = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		PublicKey struct {
+			User struct {
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				DisplayName string `json:"displayName"`
+			} `json:"user"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.PublicKey.User.Name != "Chris Van Pelt" || body.PublicKey.User.DisplayName != "Chris Van Pelt" {
+		t.Errorf("display name not honored: %+v", body.PublicKey.User)
+	}
+	if id, _ := base64.RawURLEncoding.DecodeString(body.PublicKey.User.ID); string(id) != "vanpelt" {
+		t.Errorf("user id must stay the handle, got %q", body.PublicKey.User.ID)
+	}
+}
+
+// With no return URL to go back to, sign-in lands on the user console rather
+// than the (empty) zone apex.
+func TestSafeReturnFallsBackToHomeSub(t *testing.T) {
+	s := NewSigner([]byte("k"))
+	h, err := NewLoginHandler(LoginConfig{
+		Signer: s, Domain: "hivemind.tools", Gateway: "hivemind.tools", Secure: true,
+		HomeSub: "my",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.safeReturn(""); got != "https://my.hivemind.tools/" {
+		t.Fatalf("empty return should land on the user console, got %q", got)
+	}
+	if got := h.safeReturn("https://evil.com/x"); got != "https://my.hivemind.tools/" {
+		t.Fatalf("off-zone return should collapse to the user console, got %q", got)
+	}
+	if got := h.safeReturn("https://app.hivemind.tools/x"); got != "https://app.hivemind.tools/x" {
+		t.Fatalf("legit return mangled: %q", got)
 	}
 }
 

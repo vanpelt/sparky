@@ -48,6 +48,10 @@ type LoginConfig struct {
 	// Port is the edge's public listen port; non-standard ports appear in the
 	// WebAuthn origin. 0 means the scheme default.
 	Port int
+	// HomeSub, when set, names the subdomain a sign-in lands on if no return
+	// URL was carried (someone opened login.<domain> directly). The natural
+	// value is the user console ("my") — the zone apex serves nothing.
+	HomeSub string
 }
 
 // LoginHandler serves the browser login: passkey sign-in when enabled, and the
@@ -207,7 +211,11 @@ func (h *LoginHandler) safeReturn(raw string) string {
 	if !h.cfg.Secure {
 		scheme = "http"
 	}
-	fallback := scheme + "://" + strings.TrimPrefix(h.cfg.Domain, ".") + "/"
+	home := strings.TrimPrefix(h.cfg.Domain, ".")
+	if h.cfg.HomeSub != "" {
+		home = h.cfg.HomeSub + "." + home
+	}
+	fallback := scheme + "://" + home + "/"
 	if raw == "" {
 		return fallback
 	}

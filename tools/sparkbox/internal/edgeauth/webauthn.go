@@ -97,15 +97,23 @@ func (c *ceremonies) take(id string) (webauthn.SessionData, bool) {
 // passkeyUser adapts a sparkbox account to the library's User. The WebAuthn
 // user handle is the account handle's bytes: handles are immutable and ≤32
 // chars (well under the 64-byte cap), and an opaque random id would only add a
-// mapping table for the same guarantee.
+// mapping table for the same guarantee. name is the cosmetic label a passkey
+// manager displays; it is chosen at enrollment, never stored server-side, and
+// never part of an authorization decision.
 type passkeyUser struct {
 	handle string
+	name   string
 	creds  []users.Passkey
 }
 
-func (u passkeyUser) WebAuthnID() []byte          { return []byte(u.handle) }
-func (u passkeyUser) WebAuthnName() string        { return u.handle }
-func (u passkeyUser) WebAuthnDisplayName() string { return u.handle }
+func (u passkeyUser) WebAuthnID() []byte { return []byte(u.handle) }
+func (u passkeyUser) WebAuthnName() string {
+	if u.name != "" {
+		return u.name
+	}
+	return u.handle
+}
+func (u passkeyUser) WebAuthnDisplayName() string { return u.WebAuthnName() }
 func (u passkeyUser) WebAuthnCredentials() []webauthn.Credential {
 	out := make([]webauthn.Credential, len(u.creds))
 	for i, p := range u.creds {
@@ -283,7 +291,18 @@ func (h *LoginHandler) registerBegin(w http.ResponseWriter, r *http.Request) {
 		h.jsonErr(w, http.StatusInternalServerError, "could not start passkey setup", err)
 		return
 	}
-	user := passkeyUser{handle: id.Handle, creds: pks}
+	// The visitor may pick the name their passkey manager will display; the
+	// account handle underneath is not theirs to choose (it is the OIDC
+	// subject), so only the cosmetic field is client input.
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // absent/empty body → handle
+	name := strings.TrimSpace(req.Name)
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	user := passkeyUser{handle: id.Handle, name: name, creds: pks}
 	exclude := make([]protocol.CredentialDescriptor, len(pks))
 	for i, p := range pks {
 		exclude[i] = p.Credential.Descriptor()

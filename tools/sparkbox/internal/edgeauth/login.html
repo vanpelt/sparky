@@ -81,22 +81,31 @@
     background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
   }
   .divider {
-    display: flex; align-items: center; gap: 10px; margin: 18px 0 4px;
+    align-items: center; gap: 10px; margin: 18px 0 4px;
     color: hsl(var(--muted-foreground)); font-size: 12px;
   }
   .divider::before, .divider::after {
     content: ""; flex: 1; height: 1px; background: hsl(var(--border));
   }
   .alt {
-    display: block; margin-top: 10px; width: 100%; background: none; border: 0;
+    margin-top: 10px; width: 100%; background: none; border: 0;
     padding: 4px; cursor: pointer; text-align: center; font-size: 13px;
     color: hsl(var(--muted-foreground)); text-decoration: underline;
     text-underline-offset: 3px;
   }
-  #token-section { display: none; margin-top: 4px; }
-  #token-section.show { display: block; }
-  body.token-only #passkey-section, body.token-only .divider, body.token-only .alt { display: none; }
-  body.token-only #token-section { display: block; }
+  #token-section { margin-top: 4px; }
+  /* Two arrangements, picked per-browser by script: token-first (the default —
+     this browser hasn't enrolled a passkey, so don't lead with a button that
+     can only dead-end) and pk-first (it has; passkeys take the front seat). */
+  #passkey-section, .divider, #token-toggle { display: none; }
+  #passkey-alt { display: block; }
+  body.pk-first #passkey-section { display: block; }
+  body.pk-first .divider { display: flex; }
+  body.pk-first #token-toggle { display: block; }
+  body.pk-first #token-section { display: none; }
+  body.pk-first #token-section.show { display: block; }
+  body.pk-first #passkey-alt { display: none; }
+  body.token-only #passkey-alt { display: none; }
   .err {
     margin-top: 14px; padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
     background: hsl(var(--danger) / .12); border: 1px solid hsl(var(--danger) / .4);
@@ -129,6 +138,9 @@
         <button type="submit">Continue</button>
       </form>
     </div>
+    {{if .Passkeys}}
+    <button type="button" class="alt" id="passkey-alt">Sign in with a passkey instead</button>
+    {{end}}
     <div class="err" id="err"></div>
   </main>
   <script>
@@ -157,18 +169,24 @@
       return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
 
+    // The server can't know whether *this browser* holds a passkey before
+    // anyone authenticates, so the page remembers: enrollment and each
+    // successful passkey sign-in set a local hint, and the layout leads with
+    // whichever method this browser last proved it can do.
+    var HINT = "sparkbox-passkey";
+    if (!window.PublicKeyCredential) {
+      // No WebAuthn (very old browser, some embedded webviews): the token
+      // path is the only one that can work, so don't advertise a dead button.
+      document.body.classList.add("token-only");
+    } else if (localStorage.getItem(HINT)) {
+      document.body.classList.add("pk-first");
+    }
+
     document.getElementById("token-toggle").addEventListener("click", function () {
       document.getElementById("token-section").classList.toggle("show");
     });
 
-    // No WebAuthn (very old browser, some embedded webviews): the token path
-    // is the only one that can work, so don't advertise a dead button.
-    if (!window.PublicKeyCredential) {
-      document.body.classList.add("token-only");
-    }
-
-    document.getElementById("passkey-btn").addEventListener("click", async function () {
-      var btn = this;
+    async function passkeySignIn(btn) {
       btn.disabled = true;
       document.getElementById("err").classList.remove("show");
       try {
@@ -194,7 +212,13 @@
           })
         });
         var out = await fin.json();
-        if (!out.ok) throw new Error(out.error || "sign-in failed");
+        if (!out.ok) {
+          // The server refused the assertion — likely revoked via `ctl
+          // passkey rm`. Drop the hint so the next visit leads with tokens.
+          if (fin.status === 401) localStorage.removeItem(HINT);
+          throw new Error(out.error || "sign-in failed");
+        }
+        localStorage.setItem(HINT, "1");
         location.href = out.return;
       } catch (e) {
         // NotAllowedError is the user closing the prompt — not an error state
@@ -202,7 +226,9 @@
         if (e.name !== "NotAllowedError") showErr(e.message || String(e));
         btn.disabled = false;
       }
-    });
+    }
+    document.getElementById("passkey-btn").addEventListener("click", function () { passkeySignIn(this); });
+    document.getElementById("passkey-alt").addEventListener("click", function () { passkeySignIn(this); });
   </script>
   {{end}}
 </body>
