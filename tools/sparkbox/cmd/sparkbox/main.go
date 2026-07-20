@@ -48,18 +48,23 @@ import (
 )
 
 func main() {
+	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets> [flags]"
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: sparkbox <serve|fetch-secrets> [flags]")
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "serve":
 		err = serve(os.Args[2:])
+	case "setup":
+		err = setup(os.Args[2:])
+	case "doctor":
+		err = doctor(os.Args[2:])
 	case "fetch-secrets":
 		err = fetchSecrets(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: sparkbox <serve|fetch-secrets> [flags]")
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	if err != nil {

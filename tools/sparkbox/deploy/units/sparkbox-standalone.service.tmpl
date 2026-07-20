@@ -1,0 +1,37 @@
+[Unit]
+Description=sparkbox agentic sandbox gateway (SSH + HTTP proxy + firecracker)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/dev/kvm
+# The gateway crash-loops until :22 (or :2222) is free and the rootfs template
+# exists; don't let that trip systemd's default start-rate limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Non-secret host config: PROXY_DOMAIN plus optional flag bundles
+# (LOGIN_USER_FLAG, TLS_FLAGS, SUBNET6_FLAG, OVERCOMMIT_FLAGS) and an optional
+# SPARKBOX_CONSOLE_PASSWORD. These MUST be referenced unbraced ($TLS_FLAGS, not
+# ${TLS_FLAGS}): systemd splits $VAR at whitespace (empty -> zero args) but
+# treats ${VAR} as one argument (empty -> one empty arg, which terminates Go's
+# flag parsing and silently drops everything after it).
+EnvironmentFile={{.EnvPath}}
+# firecracker needs root for /dev/kvm and tap devices.
+User=root
+# Standalone host: fleet keys are generated locally into the state dir on first
+# start (LoadOrCreateKey) — no Secret Manager, and no fleet key-dir/require-keys
+# flags (those are for a tmpfs-fed fleet host).
+ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
+  --state-dir {{.StateDir}} \
+  --kernel {{.KernelPath}} \
+  --image-dir {{.ImageDir}} \
+  --default-image {{.DefaultImage}} \
+  --users {{.UsersPath}} \
+  --ssh-addr {{.SSHAddr}} --api-addr 127.0.0.1:8080 \
+  --proxy-addr {{.ProxyAddr}} --proxy-domain ${PROXY_DOMAIN} $LOGIN_USER_FLAG $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

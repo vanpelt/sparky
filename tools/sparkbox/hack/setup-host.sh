@@ -2,7 +2,18 @@
 # One-shot setup for a fresh Ubuntu 24.04 bare-metal host (e.g. Scaleway
 # Elastic Metal, Hetzner) to run sparkbox with the firecracker driver.
 #
-# Run as root on the host:  sudo ./setup-host.sh <your-laptop-pubkey-line...>
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: For most hosts, prefer the built-in provisioner — it needs no repo
+# checkout, downloads a PREBUILT release (no ~65-min rootfs/kernel build), is
+# idempotent, installs + starts the systemd service, and self-verifies:
+#
+#     sparkbox doctor                       # preflight
+#     sudo sparkbox setup --proxy-domain …  # provision + start
+#
+# See docs/getting-started.md. Keep using THIS script when you specifically need
+# to BUILD the kernel + rootfs from source on the host (custom image, air-gapped
+# bucket, or no published release) — that is what it still does below.
+# ─────────────────────────────────────────────────────────────────────────────
 #
 # Does: sanity checks, firecracker install, guest kernel download, XFS
 # work volume (reflink CoW), Go + sparkbox build, gateway keys, rootfs

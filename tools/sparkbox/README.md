@@ -183,6 +183,22 @@ per-sandbox workdir — the full control plane, gateway, pause/resume, and
 reaper paths are real; only the isolation is fake. `go test ./...` runs an
 end-to-end suite over exactly this stack.
 
+## Deploy on your own Linux host
+
+The `sparkbox` binary is its own installer. On any KVM-capable Linux host:
+
+```sh
+sparkbox doctor        # is this host ready? (PASS/WARN/FAIL per prerequisite)
+sudo sparkbox setup --proxy-domain yourdomain.tools   # provision + start (idempotent; --dry-run to preview)
+```
+
+`setup` fetches a prebuilt release (guest kernel, firecracker, rootfs — all
+sha256-verified), lays down an XFS reflink volume, seeds your operator SSH key,
+installs the systemd units, and starts the gateway; `doctor` diagnoses a host at
+any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
+[`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
+fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
+
 ## Real microVMs
 
 `--driver firecracker` boots actual Firecracker microVMs (rootfs templates
