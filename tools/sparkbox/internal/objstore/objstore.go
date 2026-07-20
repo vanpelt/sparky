@@ -1,8 +1,8 @@
 // Package objstore is a thin rclone-shell-out object store for sandbox
-// archives. It deliberately reuses the fleet's existing rclone conventions (the
-// same remote + bucket that hack/build-artifacts.sh publishes release artifacts
-// to), so a host that can already fetch releases can archive with one extra
-// config: write credentials in its rclone.conf.
+// archives. It deliberately reuses the fleet's existing rclone conventions, so
+// a host already configured for object storage can archive with one extra
+// config: write credentials in its rclone.conf. (Release artifacts themselves
+// come from GitHub Releases over plain HTTPS — no rclone involved.)
 //
 // Unlike release artifacts, archives are *user data* — a sandbox's whole rootfs
 // — so they are written with the default (private) ACL, never public-read.
@@ -43,8 +43,8 @@ func (s *Store) ref(key string) string {
 }
 
 // Put uploads localPath to key. Fat multipart settings (64M chunks × 16 in
-// flight) keep a high-RTT pipe full for the multi-GB rootfs, matching the
-// tuning hack/build-artifacts.sh landed on for the same fr-par bucket.
+// flight) keep a high-RTT pipe full for the multi-GB rootfs; rclone's defaults
+// (5MB x4) crawl at ~2MB/s to a distant region regardless of bandwidth.
 func (s *Store) Put(ctx context.Context, key, localPath string) error {
 	return s.run(ctx, "copyto", localPath, s.ref(key),
 		"--s3-chunk-size", "64M", "--s3-upload-concurrency", "16")

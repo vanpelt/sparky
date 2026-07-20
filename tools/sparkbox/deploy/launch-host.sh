@@ -9,7 +9,7 @@
 # Order matters: the IP pin needs the box's real address, so we create + wait for
 # delivery FIRST, then mint the key against that IP, then render + install.
 #
-# Prereqs: scw CLI configured; a published release (hack/build-artifacts.sh) whose
+# Prereqs: scw CLI configured; a published release (see the release workflow) whose
 # rootfs bakes in the gateway upstream pubkey matching the key in Secret Manager;
 # the fleet secrets uploaded (deploy/upload-fleet-secrets.sh). A plain
 # `./launch-host.sh` then launches a fully-wired host.

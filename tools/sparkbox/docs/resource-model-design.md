@@ -269,7 +269,7 @@ Every fork here took the simpler option deliberately (see the git history / the
 plan that shipped it).
 
 - **25 GB per VM, hard.** The rootfs ext4 template is now built at 25 GiB
-  (`ROOTFS_MB=25600` in `hack/build-artifacts.sh` + `hack/setup-host.sh`), matching
+  (`ROOTFS_MB=25600` in `hack/stage-artifacts.sh` + `hack/setup-host.sh`), matching
   exe.dev. Because the guest's filesystem *is* that size, it physically cannot
   exceed it — no quota needed for the per-VM cap. Thin XFS reflink copies mean a
   sandbox still only pays for blocks it writes. Changing the size busts the

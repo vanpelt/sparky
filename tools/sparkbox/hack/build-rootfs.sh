@@ -196,7 +196,7 @@ EOF
   chmod +x "$MNT/sbin/init"
 fi
 
-# Record the login user next to the template so build-artifacts.sh can publish it
+# Record the login user next to the template so stage-artifacts.sh can publish it
 # (ROOTFS_LOGIN_USER in the manifest) and the gateway logs in as the right user.
 printf '%s\n' "$LOGIN_USER" > "$OUT.login-user"
 

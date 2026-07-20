@@ -27,7 +27,8 @@ FRAGMENT=${FRAGMENT:-$HERE/kernel-config.fragment}
 # the firecracker CI config's arch label differ (arm64 vs aarch64), and the boot
 # artifact differs too: x86_64 emits an ELF `vmlinux` at the tree root, arm64 a
 # flat `Image` under arch/arm64/boot/. Firecracker doesn't care about the output
-# filename, so OUT stays ../vmlinux for both to keep build-artifacts.sh unchanged.
+# filename, so OUT stays ../vmlinux for both; stage-artifacts.sh renames the
+# staged copy to vmlinux-<arch> when it publishes.
 ARCH=${ARCH:-$(uname -m)}
 case "$ARCH" in
   x86_64|amd64)  KARCH=x86_64; CI_ARCH=x86_64;  KTARGET=vmlinux; KIMAGE_REL=vmlinux ;;

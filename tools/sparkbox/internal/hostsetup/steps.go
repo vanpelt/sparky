@@ -213,20 +213,20 @@ func stepResolveRelease() Step {
 			return fmt.Sprintf("resolve %q from %s and fetch the release manifest", e.Cfg.Release, e.Cfg.ArtifactBase)
 		},
 		Apply: func(e *Env) error {
-			tag, err := ResolveRelease(e.Ctx, e.Cfg.ArtifactBase, e.Cfg.Release, e.Fetch)
-			if err != nil {
-				return err
-			}
-			rc, err := e.Fetch.Get(e.Ctx, ManifestURL(e.Cfg.ArtifactBase, tag))
+			// One GET does both jobs: "latest" rides GitHub's
+			// /releases/latest/download redirect, and the manifest that comes
+			// back names the concrete tag every artifact URL is then built from.
+			rc, err := e.Fetch.Get(e.Ctx, ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release))
 			if err != nil {
 				return fmt.Errorf("fetch manifest: %w", err)
 			}
 			defer rc.Close()
-			m, err := ParseManifest(rc, tag)
+			m, err := ParseManifest(rc, e.Cfg.Release)
 			if err != nil {
 				return err
 			}
 			e.Manifest = m
+			tag := m.Release
 			// The gateway's --default-image must match the template basename the
 			// manifest ships, so downstream env/unit steps use it.
 			if m.RootfsName != "" {

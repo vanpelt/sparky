@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -62,7 +63,7 @@ func TestDryRunMutatesNothing(t *testing.T) {
 	e.Log = buf
 	// Resolve works offline via the map fetcher.
 	e.Fetch = mapFetcher{
-		e.Cfg.ArtifactBase + "/latest.env": "RELEASE=r1\n",
+		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nARCH=" + runtime.GOARCH + "\n",
 	}
 	if err := Provision(e); err != nil {
 		t.Fatalf("dry-run Provision: %v", err)

@@ -3,6 +3,7 @@ package hostsetup
 import (
 	"context"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,65 +19,65 @@ func (m mapFetcher) Get(_ context.Context, url string) (io.ReadCloser, error) {
 }
 
 func TestParseManifestModern(t *testing.T) {
-	src := `RELEASE=20260720-abc
-FIRECRACKER_VERSION=v1.7.0
+	src := `RELEASE=v0.3.0
+ARCH=arm64
+FIRECRACKER_VERSION=v1.16.1
 SHA256_VMLINUX=aaa
 SHA256_FIRECRACKER=bbb
 SHA256_SPARKBOX=ccc
 ROOTFS_NAME=universal
-ROOTFS_PATH=rootfs/deadbeef00000000/universal.ext4.zst
+ROOTFS_ASSET=universal-arm64.ext4.zst
 SHA256_ROOTFS=ddd
 ROOTFS_LOGIN_USER=sparky
 `
-	m, err := ParseManifest(strings.NewReader(src), "20260720-abc")
+	m, err := ParseManifest(strings.NewReader(src), "v0.3.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Release != "20260720-abc" || m.RootfsName != "universal" ||
-		m.RootfsPath != "rootfs/deadbeef00000000/universal.ext4.zst" ||
+	if m.Release != "v0.3.0" || m.Arch != "arm64" || m.RootfsName != "universal" ||
+		m.RootfsAsset != "universal-arm64.ext4.zst" ||
 		m.SHA256Rootfs != "ddd" || m.RootfsLogin != "sparky" || m.SHA256Vmlinux != "aaa" {
 		t.Fatalf("unexpected manifest: %+v", m)
 	}
 }
 
-func TestParseManifestLegacyFallbacks(t *testing.T) {
-	// A manifest predating ROOTFS_PATH / SHA256_ROOTFS / ROOTFS_LOGIN_USER.
+func TestParseManifestFallbacks(t *testing.T) {
+	// A manifest omitting ARCH / ROOTFS_ASSET / ROOTFS_LOGIN_USER: the arch
+	// defaults to this host's, and the rootfs asset is derived from it.
 	src := `RELEASE=old
 SHA256_VMLINUX=aaa
-SHA256_ROOTFS_GZ=eee
 `
 	m, err := ParseManifest(strings.NewReader(src), "old")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.RootfsName != "ubuntu" {
-		t.Errorf("RootfsName fallback = %q, want ubuntu", m.RootfsName)
+	if m.RootfsName != "universal" {
+		t.Errorf("RootfsName fallback = %q, want universal", m.RootfsName)
 	}
-	if m.RootfsPath != "releases/old/ubuntu.ext4.gz" {
-		t.Errorf("RootfsPath fallback = %q", m.RootfsPath)
+	if want := "universal-" + runtime.GOARCH + ".ext4.zst"; m.RootfsAsset != want {
+		t.Errorf("RootfsAsset fallback = %q, want %q", m.RootfsAsset, want)
 	}
-	if m.SHA256Rootfs != "eee" {
-		t.Errorf("SHA256_ROOTFS should fall back to SHA256_ROOTFS_GZ, got %q", m.SHA256Rootfs)
+	if m.Arch != runtime.GOARCH {
+		t.Errorf("Arch fallback = %q, want %q", m.Arch, runtime.GOARCH)
 	}
 	if m.RootfsLogin != "root" {
 		t.Errorf("RootfsLogin fallback = %q, want root", m.RootfsLogin)
 	}
 }
 
-func TestResolveRelease(t *testing.T) {
-	base := "https://ex.test"
-	f := mapFetcher{base + "/latest.env": "RELEASE=20260720-xyz\n"}
-	got, err := ResolveRelease(context.Background(), base, "latest", f)
-	if err != nil {
-		t.Fatal(err)
+func TestManifestURLLatestAndPinned(t *testing.T) {
+	const base = "https://github.com/vanpelt/sparky/releases"
+	name := "manifest-" + runtime.GOARCH + ".env"
+	// "latest" rides GitHub's redirect; a concrete tag addresses the release
+	// directly. A trailing slash on the base must not double up.
+	if got, want := ManifestURL(base+"/", "latest"), base+"/latest/download/"+name; got != want {
+		t.Errorf("latest manifest URL = %q, want %q", got, want)
 	}
-	if got != "20260720-xyz" {
-		t.Fatalf("resolved %q", got)
+	if got, want := ManifestURL(base, "v0.3.0"), base+"/download/v0.3.0/"+name; got != want {
+		t.Errorf("pinned manifest URL = %q, want %q", got, want)
 	}
-	// A concrete tag is returned without fetching.
-	got, err = ResolveRelease(context.Background(), base, "pinned", nil)
-	if err != nil || got != "pinned" {
-		t.Fatalf("pinned tag: %q %v", got, err)
+	if got, want := ManifestURL(base, ""), base+"/latest/download/"+name; got != want {
+		t.Errorf("empty release URL = %q, want %q", got, want)
 	}
 }
 
@@ -87,10 +88,10 @@ func TestArtifactsURLs(t *testing.T) {
 		ImageDir:       "/srv/sparkbox/data/images",
 	}
 	m := Manifest{
-		Release: "r1", SHA256Vmlinux: "a", SHA256Firecrkr: "b",
-		RootfsName: "universal", RootfsPath: "rootfs/key/universal.ext4.zst", SHA256Rootfs: "d",
+		Release: "v0.3.0", Arch: "arm64", SHA256Vmlinux: "a", SHA256Firecrkr: "b",
+		RootfsName: "universal", RootfsAsset: "universal-arm64.ext4.zst", SHA256Rootfs: "d",
 	}
-	arts := m.Artifacts("https://ex.test/", cfg)
+	arts := m.Artifacts("https://github.com/vanpelt/sparky/releases/", cfg)
 	byName := map[string]Artifact{}
 	for _, a := range arts {
 		byName[a.Name] = a
@@ -98,19 +99,33 @@ func TestArtifactsURLs(t *testing.T) {
 	if len(arts) != 3 {
 		t.Fatalf("want 3 artifacts (no sparkbox self-fetch), got %d", len(arts))
 	}
-	if byName["vmlinux"].URL != "https://ex.test/releases/r1/vmlinux" {
+	const dl = "https://github.com/vanpelt/sparky/releases/download/v0.3.0/"
+	if byName["vmlinux"].URL != dl+"vmlinux-arm64" {
 		t.Errorf("vmlinux URL = %q", byName["vmlinux"].URL)
+	}
+	if byName["firecracker"].URL != dl+"firecracker-arm64" {
+		t.Errorf("firecracker URL = %q", byName["firecracker"].URL)
 	}
 	if byName["firecracker"].Mode != 0o755 {
 		t.Errorf("firecracker should be executable")
 	}
-	if byName["rootfs"].URL != "https://ex.test/rootfs/key/universal.ext4.zst" {
+	if byName["rootfs"].URL != dl+"universal-arm64.ext4.zst" {
 		t.Errorf("rootfs URL = %q", byName["rootfs"].URL)
 	}
+	// The asset is arch-suffixed; what lands on disk is not — it must decompress
+	// to the universal.ext4 the server's --default-image resolves.
 	if byName["rootfs"].Dest != "/srv/sparkbox/data/images/universal.ext4.zst" {
 		t.Errorf("rootfs dest = %q", byName["rootfs"].Dest)
 	}
-	if ManifestURL("https://ex.test", "r1") != "https://ex.test/releases/r1/manifest.env" {
-		t.Errorf("manifest URL wrong")
+}
+
+// A "latest" setup must not fetch artifacts through the latest redirect: the
+// manifest's concrete tag pins every asset to the same build.
+func TestArtifactsPinToManifestRelease(t *testing.T) {
+	m := Manifest{Release: "v0.3.0", Arch: "amd64", RootfsAsset: "universal-amd64.ext4.zst"}
+	for _, a := range m.Artifacts("https://ex.test/releases", Config{}) {
+		if strings.Contains(a.URL, "/latest/") {
+			t.Errorf("%s resolved through the latest redirect: %s", a.Name, a.URL)
+		}
 	}
 }

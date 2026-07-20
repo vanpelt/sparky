@@ -2,7 +2,9 @@
 # Zero-touch sparkbox host provisioning. This is a TEMPLATE: deploy/launch-host.sh
 # fills the double-at placeholder tokens (config + one bootstrap key) and passes
 # the result as baremetal user-data. It fetches PREBUILT artifacts from Object
-# Storage (seconds) instead of building from source — see hack/build-artifacts.sh.
+# Storage (seconds) instead of building from source. LEGACY: this Scaleway path
+# still expects the old bucket layout; the current release path is GitHub
+# Releases via `sparkbox setup` (see .github/workflows/build-artifacts.yml).
 #
 # Fleet secrets NO LONGER ride in this user-data. The three private keys (gateway
 # host + upstream, OIDC signing) and the two passwords (console, Cloudflare) live

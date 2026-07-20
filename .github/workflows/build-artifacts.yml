@@ -1,32 +1,44 @@
-name: sparkbox artifacts
+name: sparkbox release
 
-# Build and publish a versioned sparkbox artifact release (sparkbox binary,
-# guest kernel, firecracker, rootfs template + manifest) to Scaleway Object
-# Storage — the same layout deploy/cloud-init.yaml fetches on host boot. This is
-# the CI mirror of tools/sparkbox/hack/build-artifacts.sh; it downloads the
-# pinned kernel/firecracker the build host would otherwise have staged.
+# Build a versioned sparkbox artifact release for BOTH linux/amd64 and
+# linux/arm64 and publish it as a GitHub Release. `sparkbox setup` on a fresh
+# host fetches these assets (see internal/hostsetup): it picks the pair matching
+# its own runtime.GOARCH, so an x86 cloud VM and the aarch64 DGX Spark provision
+# from the same release tag.
 #
-# Secrets/vars required (set once via gh; see the README deploy section):
-#   secret SCW_ACCESS_KEY / SCW_SECRET_KEY  - Scaleway API key, doubles as S3 creds
-#   var    GATEWAY_UPSTREAM_PUBKEY          - fleet gateway public key baked into
-#                                             the rootfs (must match the private
-#                                             key cloud-init injects per host)
+# Shape of a run:
+#   prepare    resolve the tag, open a DRAFT release (nothing is public yet)
+#   image      Depot builds tools/sparkbox/images/ for both platforms at once and
+#              pushes one multi-arch tag to GHCR
+#   artifacts  a matrix of NATIVE runners (ubuntu-24.04 / ubuntu-24.04-arm) each
+#              build the guest kernel + the sparkbox binary, pull their arch's
+#              image variant, flatten it into an ext4 template, and upload their
+#              assets to the draft. No emulation anywhere.
+#   publish    flip the draft live once BOTH arches landed, so a release is never
+#              half-populated — `setup` resolving "latest" can't catch a torn one
+#
+# Triggers: push a `v*` tag to cut a real release; workflow_dispatch for ad-hoc
+# builds (these default to a `dev-<timestamp>` prerelease, which does NOT move
+# the /releases/latest pointer hosts resolve).
+#
+# Config required (set once via gh):
+#   var GATEWAY_UPSTREAM_PUBKEY  fleet gateway public key baked into the rootfs
+#                                (must match the private key the host holds)
+# Depot authenticates by OIDC trust relationship — no token secret.
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       release:
-        description: "Release tag (blank = UTC timestamp)"
+        description: "Release tag (blank = dev-<UTC timestamp>)"
         required: false
         default: ""
-      promote_latest:
-        description: "Point latest.env at this release (fleet default)"
+      prerelease:
+        description: "Mark as prerelease (does NOT move the `latest` pointer hosts resolve)"
         type: boolean
         default: true
-      image:
-        description: "Base OCI image for the rootfs. Blank = build our own lean image from tools/sparkbox/images/ (recommended). Set an image ref to flatten a prebuilt one instead (e.g. ubuntu:24.04)."
-        required: false
-        default: ""
       rootfs_name:
         description: "Rootfs template basename (must match the server's --default-image)"
         required: false
@@ -35,24 +47,125 @@ on:
         description: "Rootfs ext4 size in MB (per-sandbox disk ceiling; thin CoW). 25600 = 25 GiB (exe.dev parity)."
         required: false
         default: "25600"
-      rebuild_rootfs:
-        description: "Force a rootfs rebuild even on a content-cache hit"
-        type: boolean
-        default: false
 
 concurrency:
-  group: sparkbox-artifacts
+  group: sparkbox-release-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   FIRECRACKER_VERSION: v1.16.1
-  BUCKET: sparkbox-artifacts
-  REGION: fr-par
-  S3_ENDPOINT: s3.fr-par.scw.cloud
+  KERNEL_VERSION: 6.1.155
+  DEPOT_PROJECT: h0htfmz04l
+  IMAGE_REPO: ghcr.io/${{ github.repository }}/universal
+  ROOTFS_NAME: ${{ inputs.rootfs_name || 'universal' }}
+  ROOTFS_MB: ${{ inputs.rootfs_mb || '25600' }}
 
 jobs:
-  publish:
+  # ---------------------------------------------------------------- prepare --
+  prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release: ${{ steps.tag.outputs.release }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_RELEASE: ${{ inputs.release }}
+          # A tag push names the release; a dispatch invents a dev tag unless
+          # one was typed. Prereleases never become the `latest` hosts resolve.
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$IS_TAG" = true ]; then
+            release="${GITHUB_REF#refs/tags/}"
+            prerelease=false
+          else
+            release="${INPUT_RELEASE:-dev-$(date -u +%Y%m%d-%H%M%S)}"
+            prerelease="${INPUT_PRERELEASE:-true}"
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "### sparkbox release \`$release\` (prerelease: $prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ steps.tag.outputs.release }}
+        run: |
+          # Idempotent: re-running a failed release reuses the existing draft and
+          # overwrites its assets (`gh release upload --clobber` below).
+          if gh release view "$RELEASE" >/dev/null 2>&1; then
+            echo "reusing existing release $RELEASE"
+            exit 0
+          fi
+          cat > notes.md <<EOF
+          Artifacts for linux/amd64 and linux/arm64. Provision a host with:
+
+          \`\`\`sh
+          arch=\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          curl -fsSLo sparkbox https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE}/sparkbox-linux-\$arch
+          chmod +x sparkbox && sudo ./sparkbox setup --release ${RELEASE}
+          \`\`\`
+          EOF
+          gh release create "$RELEASE" --draft --target "$GITHUB_SHA" \
+            --title "sparkbox $RELEASE" --notes-file notes.md
+
+  # ------------------------------------------------------------------ image --
+  image:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # Depot OIDC trust relationship
+    steps:
+      - uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # One Depot build produces both platforms (native builders, shared layer
+      # cache) and pushes a single multi-arch tag. Each artifacts-matrix runner
+      # then `docker pull`s that tag and gets its own arch's variant.
+      - uses: depot/build-push-action@v1
+        with:
+          project: ${{ env.DEPOT_PROJECT }}
+          context: tools/sparkbox/images
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # :latest only follows real releases — a dev prerelease must not become
+          # what `docker pull …/universal` hands somebody.
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ needs.prepare.outputs.release }}
+            ${{ needs.prepare.outputs.prerelease == 'false' && format('{0}:latest', env.IMAGE_REPO) || '' }}
+
+  # -------------------------------------------------------------- artifacts --
+  artifacts:
+    needs: [prepare, image]
+    permissions:
+      contents: write
+      packages: read
+    strategy:
+      fail-fast: false # let one arch finish even if the other trips; re-run the failed leg
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm # free for public repos; native aarch64
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: tools/sparkbox
@@ -64,15 +177,13 @@ jobs:
           go-version-file: tools/sparkbox/go.mod
           cache-dependency-path: tools/sparkbox/go.sum
 
-      - name: Install rclone + zstd
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone zstd
+      - name: Install zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
 
-      # Our own lean image (~4GB) needs far less scratch than the old
-      # codex-universal (~65GB peak), but building it + flattening + compressing
+      # Our lean image (~2-4GB) plus the ext4 it flattens into plus the .zst
       # still wants headroom beyond a stock runner's free disk. Shed the
-      # preinstalled toolchains we don't use (build-artifacts.sh only needs
-      # go/docker/curl/rclone). Best-effort: paths vary across runner images.
-      # If this still ENOSPCs, run hack/build-artifacts.sh on a build host.
+      # preinstalled toolchains we don't use (we only need go/docker/curl).
+      # Best-effort: paths vary across runner images and arches.
       - name: Free runner disk space
         run: |
           df -h / | tail -1
@@ -87,21 +198,20 @@ jobs:
           sudo apt-get clean
           df -h / | tail -1
 
-      # Stage the rootfs scratch (30GB ext4 + 10GB zst) on /mnt when it's big
-      # enough — the runner's second temp disk. Splitting scratch from docker's
-      # /var/lib/docker (~31GB unpacked base image on /) is what keeps a full
-      # rebuild under each disk's ceiling; one ENOSPC'd runner died so hard the
-      # agent couldn't write its own logs. build-artifacts.sh stages via
-      # mktemp, which honors TMPDIR.
-      - name: Stage scratch on the roomiest disk
+      # Stage the release (ext4 + .zst) on /mnt when it's big enough — the
+      # runner's second temp disk. Splitting staging from docker's
+      # /var/lib/docker is what keeps a full build under each disk's ceiling;
+      # one ENOSPC'd runner died so hard the agent couldn't write its own logs.
+      - name: Pick the roomiest disk for staging
         run: |
           free_mnt=$(df --output=avail -BG /mnt 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0)
-          if [ "${free_mnt:-0}" -ge 45 ]; then
+          if [ "${free_mnt:-0}" -ge 30 ]; then
             sudo mkdir -p /mnt/stage && sudo chmod 1777 /mnt/stage
-            echo "TMPDIR=/mnt/stage" >> "$GITHUB_ENV"
+            echo "OUT_DIR=/mnt/stage/release" >> "$GITHUB_ENV"
             echo "staging on /mnt (${free_mnt}G free)"
           else
-            echo "staying on / (/mnt only ${free_mnt:-0}G free)"
+            echo "OUT_DIR=$RUNNER_TEMP/release" >> "$GITHUB_ENV"
+            echo "staging on / (/mnt only ${free_mnt:-0}G free)"
           fi
           df -h / /mnt 2>/dev/null || true
 
@@ -113,12 +223,23 @@ jobs:
           sudo install "release-${ver}-${arch}/firecracker-${ver}-${arch}" /usr/local/bin/firecracker
           firecracker --version | head -1
 
+      # The kernel is the slowest step (~15 min) and only changes when the
+      # script, the config fragment, or KVER does — cache it per arch.
+      - name: Cache guest kernel
+        id: kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vmlinux
+          key: guest-kernel-${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('tools/sparkbox/hack/build-kernel.sh', 'tools/sparkbox/hack/kernel-config.fragment') }}
+
       - name: Build sparkbox guest kernel (6.1 + docker/TUN deltas)
-        # We ship our OWN vmlinux, not the stock firecracker-ci one: the stock
-        # config lacks IP_NF_RAW/NF_TABLES (docker container networking) and TUN
-        # (tailscale). build-kernel.sh = Firecracker CI 6.1 config + our fragment.
+        # We ship our OWN kernel, not the stock firecracker-ci one: that config
+        # lacks IP_NF_RAW/NF_TABLES (docker container networking) and TUN
+        # (tailscale). build-kernel.sh = Firecracker CI 6.1 config + our
+        # fragment, built natively for this runner's arch.
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: |
-          OUT="$RUNNER_TEMP/vmlinux" KVER=6.1.155 JOBS="$(nproc)" \
+          OUT="$RUNNER_TEMP/vmlinux" KVER="$KERNEL_VERSION" JOBS="$(nproc)" \
             ./hack/build-kernel.sh
           sha256sum "$RUNNER_TEMP/vmlinux"
 
@@ -129,42 +250,54 @@ jobs:
           [ -n "$GATEWAY_UPSTREAM_PUBKEY" ] || { echo "vars.GATEWAY_UPSTREAM_PUBKEY is not set"; exit 1; }
           printf '%s\n' "$GATEWAY_UPSTREAM_PUBKEY" > "$RUNNER_TEMP/gateway_upstream_key.pub"
 
-      - name: Configure rclone (Scaleway Object Storage)
-        env:
-          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
-          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
-        run: |
-          [ -n "$SCW_ACCESS_KEY" ] && [ -n "$SCW_SECRET_KEY" ] || { echo "SCW_ACCESS_KEY/SCW_SECRET_KEY secrets are not set"; exit 1; }
-          mkdir -p "$HOME/.config/rclone"
-          cat > "$HOME/.config/rclone/rclone.conf" <<EOF
-          [scw]
-          type = s3
-          provider = Scaleway
-          access_key_id = ${SCW_ACCESS_KEY}
-          secret_access_key = ${SCW_SECRET_KEY}
-          region = ${REGION}
-          endpoint = ${S3_ENDPOINT}
-          acl = public-read
-          EOF
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
-      - name: Build + publish release
+      - name: Stage ${{ matrix.arch }} artifacts
         env:
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: amd64
-          RELEASE: ${{ inputs.release }}
-          IMAGE: ${{ inputs.image }}
-          ROOTFS_NAME: ${{ inputs.rootfs_name }}
-          ROOTFS_MB: ${{ inputs.rootfs_mb }}
-          REBUILD_ROOTFS: ${{ inputs.rebuild_rootfs && '1' || '0' }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
+          ARCH: ${{ matrix.arch }}
+          IMAGE: ${{ env.IMAGE_REPO }}:${{ needs.prepare.outputs.release }}
           PRUNE_IMAGE: "1"
-          PROMOTE_LATEST: ${{ inputs.promote_latest && '1' || '0' }}
           REPO_DIR: ${{ github.workspace }}
-          RCLONE_REMOTE: scw
           KERNEL: ${{ runner.temp }}/vmlinux
           GATEWAY_PUBKEY_FILE: ${{ runner.temp }}/gateway_upstream_key.pub
+        run: ./hack/stage-artifacts.sh
+
+      - name: Upload assets to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
         run: |
-          ./hack/build-artifacts.sh | tee "$RUNNER_TEMP/publish.log"
-          echo "### sparkbox artifacts published :rocket:" >> "$GITHUB_STEP_SUMMARY"
-          grep -E '^  (release|base URL|manifest|promoted|.*skipped latest)' "$RUNNER_TEMP/publish.log" \
-            | sed 's/^  /- /' >> "$GITHUB_STEP_SUMMARY"
+          gh release upload "$RELEASE" "$OUT_DIR"/* --clobber
+          {
+            echo "### ${{ matrix.arch }} assets"
+            ( cd "$OUT_DIR" && du -h -- * | awk '{print "- `"$2"` ("$1")"}' )
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- publish --
+  publish:
+    needs: [prepare, artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          # --latest is what makes /releases/latest/download/<asset> — the URL
+          # `sparkbox setup` hits when it resolves "latest" — point here.
+          if [ "$PRERELEASE" = true ]; then
+            gh release edit "$RELEASE" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$RELEASE" --draft=false --prerelease=false --latest
+          fi
+          echo "### published :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- https://github.com/$GH_REPO/releases/tag/$RELEASE" >> "$GITHUB_STEP_SUMMARY"

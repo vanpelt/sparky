@@ -213,9 +213,31 @@ The default base image is **self-built** from [`images/Dockerfile`](images/Docke
 ~30GB `codex-universal`). It logs in as a non-root **`sparky`** user, declared by
 the image's `sparkbox.login-user` label and honored end-to-end (build-rootfs bakes
 the gateway key into `/home/sparky`, the release manifest carries
-`ROOTFS_LOGIN_USER`, and `sparkbox serve --default-login-user` follows it). Build a
-release with `hack/build-artifacts.sh` (blank `IMAGE` = build our own; set `IMAGE=`
-to flatten a prebuilt image instead).
+`ROOTFS_LOGIN_USER`, and `sparkbox serve --default-login-user` follows it).
+
+## Releases
+
+Artifacts ship as **GitHub Releases, built for linux/amd64 and linux/arm64** —
+the same tag provisions an x86 cloud VM or an aarch64 DGX Spark. Push a `v*` tag
+and [`.github/workflows/build-artifacts.yml`](../../.github/workflows/build-artifacts.yml)
+does the rest: Depot builds the `images/Dockerfile` base for both platforms and
+pushes one multi-arch tag to GHCR, then a matrix of native runners
+(`ubuntu-24.04` / `ubuntu-24.04-arm`) each compile the guest kernel, build the
+`sparkbox` binary, and flatten their arch's image into an ext4 template. The
+release only goes public once **both** arches land, so `setup` can never resolve
+a half-populated `latest`.
+
+```sh
+git tag v0.3.0 && git push origin v0.3.0    # cut a release
+gh workflow run "sparkbox release"          # ad-hoc dev-<ts> prerelease (doesn't move `latest`)
+```
+
+Assets are flat and arch-suffixed — `sparkbox-linux-<arch>`, `vmlinux-<arch>`,
+`firecracker-<arch>`, `universal-<arch>.ext4.zst`, `manifest-<arch>.env` — and
+`sparkbox setup` picks its own arch's set, pinned to the tag the manifest names.
+To build a release by hand on a build host, `hack/stage-artifacts.sh` stages one
+arch into `OUT_DIR` (blank `IMAGE` = build the base image locally; set `IMAGE=`
+to flatten a prebuilt one instead).
 
 ## Status / roadmap
 

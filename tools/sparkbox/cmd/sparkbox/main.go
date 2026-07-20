@@ -46,8 +46,13 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
+// version is the artifact release tag this binary was built from, stamped by
+// hack/stage-artifacts.sh (-X main.version). A hand-built binary says "dev", so
+// `sparkbox version` on a host answers "which release is this box running?".
+var version = "dev"
+
 func main() {
-	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets> [flags]"
+	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets|version> [flags]"
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -62,6 +67,8 @@ func main() {
 		err = doctor(os.Args[2:])
 	case "fetch-secrets":
 		err = fetchSecrets(os.Args[2:])
+	case "version", "--version", "-v":
+		fmt.Printf("sparkbox %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)

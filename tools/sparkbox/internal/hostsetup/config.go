@@ -16,10 +16,12 @@ import (
 	"path/filepath"
 )
 
-// DefaultArtifactBase is the public Object Storage bucket that hack/build-
-// artifacts.sh publishes releases to: <base>/latest.env, <base>/releases/<tag>/
-// {manifest.env,vmlinux,firecracker} and the rootfs at the manifest's ROOTFS_PATH.
-const DefaultArtifactBase = "https://sparkbox-artifacts.s3.fr-par.scw.cloud"
+// DefaultArtifactBase is the GitHub Releases endpoint the release workflow
+// publishes to. Assets are a flat, arch-suffixed namespace under
+// <base>/download/<tag>/ (or <base>/latest/download/ for the newest
+// non-prerelease): manifest-<arch>.env, vmlinux-<arch>, firecracker-<arch>,
+// <rootfs>-<arch>.ext4.zst, sparkbox-linux-<arch>.
+const DefaultArtifactBase = "https://github.com/vanpelt/sparky/releases"
 
 // proxyPort is the HTTP edge port. The standalone unit's --proxy-addr and
 // sparkbox.env's PROXY_PORT (which sparkbox-net.sh DNATs any-port traffic to)
@@ -53,7 +55,8 @@ type Config struct {
 	// --- setup only ---
 	// ArtifactBase overrides DefaultArtifactBase.
 	ArtifactBase string
-	// Release is the artifact release tag, or "latest" to resolve latest.env.
+	// Release is the artifact release tag, or "latest" for the newest
+	// non-prerelease release (GitHub's /releases/latest redirect).
 	Release string
 	// OperatorKey is a path to (or the literal text of) the operator's SSH
 	// public key seeded into users.conf. Empty auto-detects ~/.ssh/id_ed25519.pub.
