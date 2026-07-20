@@ -111,6 +111,14 @@ ssh -p 2222 <name>@<host>       # resume + shell in (auto-resumes if paused)
 ssh -p 2222 ctl@<host> help     # account/keys/routes/schedule controls
 ```
 
+Words after `new@` (or `new+<name>@`) are **tags**, not a command — a new
+sandbox always gets a shell. Passing any word also stops ssh from allocating a
+terminal, which leaves you in a shell with no prompt, so add `-t`:
+
+```sh
+ssh -t -p 2222 new+foo@<host> claude   # sandbox `foo` tagged `claude`
+```
+
 Web routes are live at `http://<name>.<proxy-domain>:8081` immediately. For a
 public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
 

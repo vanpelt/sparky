@@ -22,6 +22,9 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	" creating a sandbox\r\n" +
 	"  (new sandbox)            ssh new@<gateway> [<tag>…]   — creates one and connects\r\n" +
 	"                           ssh new+<name>@<gateway>     — same, but you name it\r\n" +
+	"     the words after new@ are tags, never a command to run — a fresh sandbox\r\n" +
+	"     always gets a shell. Passing any word makes ssh skip the terminal, so use\r\n" +
+	"     `ssh -t new+<name>@<gateway> <tag>…` or you get a shell with no prompt.\r\n" +
 	"  fork <snapshot> <name> [--tag <t>]…  create one from a snapshot you saved\r\n" +
 	"\r\n" +
 	" sandboxes\r\n" +
