@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in · sparkbox</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --danger: 0 72% 51%;
+    --radius: 0.6rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); max-width: 480px; width: 100%;
+    padding: 28px 30px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    /* The tile stays dark in both themes, matching the consoles: the mark is a
+       full-colour emoji, so it needs one constant backdrop rather than one that
+       inverts with the scheme. */
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    /* Emoji glyphs carry their own side bearings and sit high on the box, so
+       they need slightly more size and an optical nudge to centre in the tile. */
+    line-height: 1; text-indent: 0.02em;
+  }
+  .brand span { font-size: 13px; font-weight: 600; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
+  p { margin: 0 0 8px; color: hsl(var(--muted-foreground)); }
+  ol { margin: 10px 0 4px; padding-left: 20px; color: hsl(var(--muted-foreground)); }
+  li { margin: 4px 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: hsl(var(--muted)); border-radius: 4px; padding: 1px 5px;
+    color: hsl(var(--foreground)); user-select: all;
+  }
+  textarea {
+    width: 100%; margin-top: 14px; min-height: 84px; resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+  button {
+    margin-top: 12px; width: 100%; padding: 10px 14px; border: 0; cursor: pointer;
+    border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 600;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+  }
+  .divider {
+    align-items: center; gap: 10px; margin: 18px 0 4px;
+    color: hsl(var(--muted-foreground)); font-size: 12px;
+  }
+  .divider::before, .divider::after {
+    content: ""; flex: 1; height: 1px; background: hsl(var(--border));
+  }
+  .alt {
+    margin-top: 10px; width: 100%; background: none; border: 0;
+    padding: 4px; cursor: pointer; text-align: center; font-size: 13px;
+    color: hsl(var(--muted-foreground)); text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  #token-section { margin-top: 4px; }
+  /* Two arrangements, picked per-browser by script: token-first (the default —
+     this browser hasn't enrolled a passkey, so don't lead with a button that
+     can only dead-end) and pk-first (it has; passkeys take the front seat). */
+  #passkey-section, .divider, #token-toggle { display: none; }
+  #passkey-alt { display: block; }
+  body.pk-first #passkey-section { display: block; }
+  body.pk-first .divider { display: flex; }
+  body.pk-first #token-toggle { display: block; }
+  body.pk-first #token-section { display: none; }
+  body.pk-first #token-section.show { display: block; }
+  body.pk-first #passkey-alt { display: none; }
+  body.token-only #passkey-alt { display: none; }
+  .err {
+    margin-top: 14px; padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--danger) / .12); border: 1px solid hsl(var(--danger) / .4);
+    color: hsl(var(--danger)); font-size: 13px; display: none;
+  }
+  .err.show { display: block; }
+</style>
+</head>
+<body{{if not .Passkeys}} class="token-only"{{end}}>
+  <main class="card">
+    <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
+    <h1>Sign in</h1>
+    <p>This is a private URL.</p>
+    {{if .Passkeys}}
+    <div id="passkey-section">
+      <button type="button" id="passkey-btn">&#128273; Sign in with a passkey</button>
+    </div>
+    <div class="divider">or</div>
+    <button type="button" class="alt" id="token-toggle">Use a session token instead</button>
+    {{end}}
+    <div id="token-section">
+      <p>Mint a session token from a machine with your SSH key:</p>
+      <ol>
+        <li>Run <code>ssh {{.PortFlag}}ctl@{{.Gateway}} session-token</code></li>
+        <li>Paste the <code>spk_v1…</code> value below.</li>
+      </ol>
+      <form method="POST" action="/session">
+        <input type="hidden" name="return" value="{{.Return}}" />
+        <textarea name="token" placeholder="spk_v1…" spellcheck="false"></textarea>
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+    {{if .Passkeys}}
+    <button type="button" class="alt" id="passkey-alt">Sign in with a passkey instead</button>
+    {{end}}
+    <div class="err" id="err"></div>
+  </main>
+  <script>
+    var RETURN = document.querySelector('input[name="return"]').value;
+    function showErr(msg) {
+      var el = document.getElementById("err");
+      el.textContent = msg;
+      el.classList.add("show");
+    }
+    if (new URLSearchParams(location.search).get("err")) {
+      showErr("That token was invalid or expired. Mint a fresh one and try again.");
+      var ts = document.getElementById("token-section");
+      if (ts) ts.classList.add("show");
+    }
+  </script>
+  {{if .Passkeys}}
+  <script>
+    // base64url <-> ArrayBuffer, the WebAuthn wire format's JSON carriage.
+    function b64uDec(s) {
+      s = s.replace(/-/g, "+").replace(/_/g, "/");
+      return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); });
+    }
+    function b64uEnc(buf) {
+      var bytes = new Uint8Array(buf), bin = "";
+      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    // The server can't know whether *this browser* holds a passkey before
+    // anyone authenticates, so the page remembers: enrollment and each
+    // successful passkey sign-in set a local hint, and the layout leads with
+    // whichever method this browser last proved it can do.
+    var HINT = "sparkbox-passkey";
+    if (!window.PublicKeyCredential) {
+      // No WebAuthn (very old browser, some embedded webviews): the token
+      // path is the only one that can work, so don't advertise a dead button.
+      document.body.classList.add("token-only");
+    } else if (localStorage.getItem(HINT)) {
+      document.body.classList.add("pk-first");
+    }
+
+    document.getElementById("token-toggle").addEventListener("click", function () {
+      document.getElementById("token-section").classList.toggle("show");
+    });
+
+    async function passkeySignIn(btn) {
+      btn.disabled = true;
+      document.getElementById("err").classList.remove("show");
+      try {
+        var begin = await fetch("/webauthn/login/begin", { method: "POST" });
+        var body = await begin.json();
+        if (!begin.ok) throw new Error(body.error || "could not start sign-in");
+        var opts = body.publicKey;
+        opts.challenge = b64uDec(opts.challenge);
+        (opts.allowCredentials || []).forEach(function (c) { c.id = b64uDec(c.id); });
+        var cred = await navigator.credentials.get({ publicKey: opts });
+        var fin = await fetch("/webauthn/login/finish?return=" + encodeURIComponent(RETURN), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: cred.id, rawId: b64uEnc(cred.rawId), type: cred.type,
+            response: {
+              authenticatorData: b64uEnc(cred.response.authenticatorData),
+              clientDataJSON: b64uEnc(cred.response.clientDataJSON),
+              signature: b64uEnc(cred.response.signature),
+              userHandle: cred.response.userHandle ? b64uEnc(cred.response.userHandle) : null
+            },
+            clientExtensionResults: cred.getClientExtensionResults()
+          })
+        });
+        var out = await fin.json();
+        if (!out.ok) {
+          // The server refused the assertion — likely revoked via `ctl
+          // passkey rm`. Drop the hint so the next visit leads with tokens.
+          if (fin.status === 401) localStorage.removeItem(HINT);
+          throw new Error(out.error || "sign-in failed");
+        }
+        localStorage.setItem(HINT, "1");
+        location.href = out.return;
+      } catch (e) {
+        // NotAllowedError is the user closing the prompt — not an error state
+        // worth a red box.
+        if (e.name !== "NotAllowedError") showErr(e.message || String(e));
+        btn.disabled = false;
+      }
+    }
+    document.getElementById("passkey-btn").addEventListener("click", function () { passkeySignIn(this); });
+    document.getElementById("passkey-alt").addEventListener("click", function () { passkeySignIn(this); });
+  </script>
+  {{end}}
+</body>
+</html>

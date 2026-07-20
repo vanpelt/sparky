@@ -1,0 +1,7 @@
+# System-wide environment, applied by pam_env to EVERY ssh session — including the
+# non-interactive `ssh box '<cmd>'` execs coding agents use, which read no profile.
+# Docker ENV/PATH lives in image metadata and vanishes on `docker export`, so the
+# guest's toolchain PATH has to be spelled out here instead. Login user is `sparky`
+# (see the sparkbox.login-user image label), hence the fixed ~/.local/bin entry.
+PATH=/home/sparky/.local/bin:/home/sparky/go/bin:/usr/local/go/bin:/headless-shell:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+GOPATH=/home/sparky/go

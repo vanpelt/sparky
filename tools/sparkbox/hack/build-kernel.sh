@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Build the sparkbox guest kernel: the Firecracker CI microvm 6.1 config plus
+# our deltas (kernel-config.fragment — docker container networking + TUN for
+# tailscale). The stock firecracker-ci kernel omits these, so a sandbox can't
+# run docker or tailscale. Produces the uncompressed kernel image the firecracker
+# driver boots: an ELF `vmlinux` on x86_64 (with the PVH note CONFIG_PVH=y emits)
+# or a flat `Image` on arm64.
+#
+# Runs natively on an x86_64 OR aarch64 Linux build host (a CI runner, the
+# sparkbox EM box, or the DGX Spark). Target arch defaults to the host's; set
+# ARCH=arm64|x86_64 to be explicit (cross-compiling needs a matching toolchain).
+# Installs build deps via apt when missing. Reproducible: pin KVER +
+# BASE_CONFIG_URL and the same inputs yield the same config.
+#
+#   KVER=6.1.155 ./build-kernel.sh              # -> ../vmlinux (native arch)
+#   OUT=/tmp/vmlinux KVER=6.1.155 ./build-kernel.sh
+set -euo pipefail
+
+KVER=${KVER:-6.1.155}
+HERE=$(cd "$(dirname "$0")" && pwd)
+OUT=${OUT:-$HERE/../vmlinux}
+WORK=${WORK:-/tmp/sparkbox-kbuild}
+JOBS=${JOBS:-$(nproc)}
+FRAGMENT=${FRAGMENT:-$HERE/kernel-config.fragment}
+
+# Target arch. Default to the build host's (native build). The kernel's ARCH= and
+# the firecracker CI config's arch label differ (arm64 vs aarch64), and the boot
+# artifact differs too: x86_64 emits an ELF `vmlinux` at the tree root, arm64 a
+# flat `Image` under arch/arm64/boot/. Firecracker doesn't care about the output
+# filename, so OUT stays ../vmlinux for both; stage-artifacts.sh renames the
+# staged copy to vmlinux-<arch> when it publishes.
+ARCH=${ARCH:-$(uname -m)}
+case "$ARCH" in
+  x86_64|amd64)  KARCH=x86_64; CI_ARCH=x86_64;  KTARGET=vmlinux; KIMAGE_REL=vmlinux ;;
+  aarch64|arm64) KARCH=arm64;  CI_ARCH=aarch64; KTARGET=Image;   KIMAGE_REL=arch/arm64/boot/Image ;;
+  *) echo "unsupported ARCH=$ARCH (want x86_64 | arm64)" >&2; exit 1 ;;
+esac
+
+BASE_CONFIG_URL=${BASE_CONFIG_URL:-https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-ci-${CI_ARCH}-6.1.config}
+SRC_URL=${SRC_URL:-https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz}
+
+echo "== sparkbox guest kernel $KVER (arch=$KARCH jobs=$JOBS) =="
+
+# Build deps. `dwarves` (pahole) is required when the base config has
+# CONFIG_DEBUG_INFO_BTF=y, which the firecracker CI config does.
+need=(build-essential flex bison bc libssl-dev libelf-dev dwarves cpio xz-utils curl)
+missing=()
+for p in "${need[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "== apt install: ${missing[*]} =="
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+fi
+
+mkdir -p "$WORK"
+cd "$WORK"
+
+if [ ! -d "linux-${KVER}" ]; then
+  echo "== fetch $SRC_URL =="
+  curl -fsSL "$SRC_URL" -o "linux-${KVER}.tar.xz"
+  tar xf "linux-${KVER}.tar.xz"
+fi
+cd "linux-${KVER}"
+
+echo "== base config <- $BASE_CONFIG_URL =="
+curl -fsSL "$BASE_CONFIG_URL" -o .config
+
+echo "== merge sparkbox fragment =="
+# merge_config.sh applies the fragment on top of .config, then we let
+# olddefconfig resolve dependencies (KVER's kconfig, not the base's).
+ARCH=$KARCH ./scripts/kconfig/merge_config.sh -m .config "$FRAGMENT"
+make ARCH=$KARCH olddefconfig
+
+# Fail loudly if a delta silently didn't take (a typo'd or dependency-gated
+# symbol would otherwise ship a kernel that still can't run docker/tailscale).
+echo "== verify deltas landed =="
+for sym in CONFIG_TUN CONFIG_IP_NF_RAW CONFIG_NF_TABLES CONFIG_VXLAN CONFIG_WIREGUARD; do
+  if ! grep -q "^${sym}=[ym]" .config; then
+    echo "ERROR: ${sym} did not end up enabled in .config" >&2
+    exit 1
+  fi
+  echo "  ok: $(grep "^${sym}=" .config)"
+done
+
+echo "== build $KTARGET =="
+make ARCH=$KARCH -j"$JOBS" "$KTARGET"
+
+cp -f "$KIMAGE_REL" "$OUT"
+echo "== done: $OUT =="
+sha256sum "$OUT"
+file "$OUT"

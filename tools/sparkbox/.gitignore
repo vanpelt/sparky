@@ -1,0 +1,4 @@
+# local `go build ./cmd/sparkbox` output (README quick-start), never committed
+/sparkbox
+# local mock-run state dir (`--state-dir ./state`)
+/state/

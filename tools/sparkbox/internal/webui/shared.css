@@ -1,0 +1,93 @@
+/* sparkbox shared design tokens (shadcn "new-york", zinc) + base reset.
+   Shared between the operator console (internal/console) and the user
+   console (internal/userconsole) so the two read as siblings; each page adds
+   its own layout and component sizing on top of this. */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%;
+  --muted: 240 4.8% 95.9%;
+  --muted-foreground: 240 3.8% 46.1%;
+  --border: 240 5.9% 90%;
+  --primary: 240 5.9% 10%;
+  --primary-foreground: 0 0% 98%;
+  --ring: 240 5.9% 10%;
+  --radius: 0.6rem;
+  --green: 142 71% 45%;
+  --amber: 38 92% 50%;
+  --blue: 217 91% 56%;
+  --red: 0 72% 51%;
+  --violet: 262 83% 66%;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 5.5%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --border: 240 3.7% 15.9%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --ring: 240 4.9% 83.9%;
+    --green: 142 69% 58%;
+    --amber: 38 92% 60%;
+    --blue: 217 91% 66%;
+    --red: 0 84% 65%;
+    --violet: 262 83% 74%;
+  }
+}
+:root[data-theme="dark"] {
+  --background: 240 10% 3.9%; --foreground: 0 0% 98%; --card: 240 10% 5.5%;
+  --muted: 240 3.7% 15.9%; --muted-foreground: 240 5% 64.9%; --border: 240 3.7% 15.9%;
+  --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%; --ring: 240 4.9% 83.9%;
+  --green: 142 69% 58%; --amber: 38 92% 60%; --blue: 217 91% 66%; --red: 0 84% 65%; --violet: 262 83% 74%;
+}
+:root[data-theme="light"] {
+  --background: 0 0% 100%; --foreground: 240 10% 3.9%; --card: 0 0% 100%;
+  --muted: 240 4.8% 95.9%; --muted-foreground: 240 3.8% 46.1%; --border: 240 5.9% 90%;
+  --primary: 240 5.9% 10%; --primary-foreground: 0 0% 98%; --ring: 240 5.9% 10%;
+  --green: 142 71% 45%; --amber: 38 92% 50%; --blue: 217 91% 56%; --red: 0 72% 51%; --violet: 262 83% 66%;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.muted { color: hsl(var(--muted-foreground)); }
+.hidden { display: none !important; }
+.card { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: var(--radius); }
+
+/* buttons: structural base only — each page sets its own padding/font-size. */
+button {
+  font: inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
+  border: 1px solid transparent; display: inline-flex; align-items: center;
+  gap: 6px; white-space: nowrap; transition: .12s ease;
+}
+button:disabled { opacity: .5; cursor: default; }
+.btn-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.btn-primary:hover:not(:disabled) { opacity: .9; }
+.btn-outline { background: transparent; border-color: hsl(var(--border)); color: hsl(var(--foreground)); }
+.btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+
+/* toast */
+#toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 60;
+  background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+  border-radius: var(--radius); padding: 10px 15px; font-size: 13px;
+  box-shadow: 0 10px 30px -8px hsl(240 10% 3.9% / .3); opacity: 0; transition: opacity .2s;
+  pointer-events: none; max-width: 90vw;
+}
+#toast.show { opacity: 1; }
+#toast.err { border-color: hsl(var(--red) / .5); color: hsl(var(--red)); }
+
+:focus-visible { outline: 2px solid hsl(var(--ring) / .55); outline-offset: 2px; border-radius: 3px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }

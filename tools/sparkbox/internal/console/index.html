@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sparkbox console</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  /*SHARED_CSS*/
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 64px; }
+
+  /* header */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 24px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  /* The mark is the one element that does NOT follow the theme: --primary
+     inverts to near-white in dark mode, and the emoji's gold would drop to
+     about 2:1 against it. Pinning the tile dark keeps the bolt on high
+     contrast in both themes, the way a real logo stays constant. */
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 17px;
+    /* Emoji glyphs carry their own side bearings and sit high on the box, so
+       they need slightly more size and an optical nudge to centre in the tile. */
+    line-height: 1; text-indent: 0.02em;
+  }
+  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .brand .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin: 0; }
+
+  /* buttons — structural base + colors come from the shared design system */
+  button { padding: 7px 13px; font-weight: 500; }
+  .btn-sm { padding: 5px 11px; font-size: 13px; }
+  .btn-danger.btn-outline { color: hsl(var(--red)); border-color: hsl(var(--red) / .4); }
+  .btn-danger.btn-outline:hover:not(:disabled) { background: hsl(var(--red) / .1); }
+  .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
+  .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
+
+  /* stat cards */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+  @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { padding: 15px 16px; }
+  .stat .label { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .stat .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; }
+  .stat .value small { font-size: 13px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+  /* the overcommit ratio is the dashboard's signature — the one number that
+     says "N VMs live on a fraction of their allocated RAM". */
+  .stat .value.accent { color: hsl(var(--blue)); font-size: 30px; font-variant-numeric: tabular-nums; }
+  .stat .sub { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+
+  /* capacity meters */
+  .meter {
+    height: 5px; border-radius: 999px; background: hsl(var(--muted));
+    margin-top: 10px; overflow: hidden;
+  }
+  .meter > div {
+    height: 100%; border-radius: 999px; background: hsl(var(--green));
+    width: 0; transition: width .3s ease;
+  }
+  .meter.warn > div { background: hsl(var(--amber)); }
+  .meter.hot > div { background: hsl(var(--red)); }
+
+  /* table */
+  .panel { overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid hsl(var(--border));
+  }
+  .panel-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .panel-head .hint { font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 11px 16px; white-space: nowrap; }
+  th {
+    font-size: 11px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .04em; color: hsl(var(--muted-foreground));
+  }
+  tbody tr { border-top: 1px solid hsl(var(--border)); }
+  tbody tr:hover { background: hsl(var(--muted) / .5); }
+  td.name { font-weight: 550; }
+  td.owner, td.spec, td.age { color: hsl(var(--muted-foreground)); }
+  td.actions { text-align: right; }
+
+  /* badges */
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    font-weight: 500; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid hsl(var(--border));
+  }
+  .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+  .badge.running { color: hsl(var(--green)); border-color: hsl(var(--green) / .35); }
+  .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .18); }
+  .badge.paused { color: hsl(var(--muted-foreground)); }
+  .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+  .badge.archived { color: hsl(var(--violet)); border-color: hsl(var(--violet) / .35); }
+  .badge.archived .dot { background: hsl(var(--violet)); }
+  .badge.pinned { color: hsl(var(--amber)); border-color: hsl(var(--amber) / .35); margin-left: 6px; }
+  .badge.pinned .dot { background: hsl(var(--amber)); }
+  .badge.wake { color: hsl(var(--muted-foreground)); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .badge.ballooned { color: hsl(var(--blue)); border-color: hsl(var(--blue) / .35); margin-left: 6px; }
+  .badge.ballooned .dot { background: hsl(var(--blue)); }
+
+  /* route chips */
+  .route {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid hsl(var(--border));
+    color: hsl(var(--foreground)); text-decoration: none; margin-right: 6px;
+  }
+  .route:hover { background: hsl(var(--muted)); }
+  .route .port { color: hsl(var(--muted-foreground)); }
+  .route .dot { width: 6px; height: 6px; }
+  .route.live { border-color: hsl(var(--green) / .35); }
+  .route.live .dot { background: hsl(var(--green)); box-shadow: 0 0 0 2px hsl(var(--green) / .18); }
+  .route.dead .dot { background: hsl(var(--red) / .8); }
+  .route.idle .dot { background: transparent; border: 1px solid hsl(var(--muted-foreground)); }
+
+  /* login */
+  .login-wrap { min-height: 62vh; display: grid; place-items: center; }
+  .login { width: 100%; max-width: 360px; padding: 26px; }
+  .login h2 { margin: 0 0 4px; font-size: 17px; font-weight: 650; }
+  .login p { margin: 0 0 18px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+  .login label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+  input[type=password] {
+    width: 100%; font: inherit; padding: 8px 11px; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground)); margin-bottom: 14px;
+  }
+  input[type=password]:focus { outline: 2px solid hsl(var(--ring) / .5); outline-offset: 1px; }
+  .login button { width: 100%; justify-content: center; }
+
+  .empty { padding: 40px 16px; text-align: center; color: hsl(var(--muted-foreground)); }
+
+  /* confirmation dialog */
+  dialog {
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+    background: hsl(var(--card)); color: hsl(var(--foreground));
+    padding: 22px; width: 100%; max-width: 400px;
+  }
+  dialog::backdrop { background: hsl(240 10% 3.9% / .5); }
+  dialog h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+  dialog p { margin: 0 0 16px; font-size: 12.5px; color: hsl(var(--muted-foreground)); line-height: 1.5; }
+  dialog p .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: hsl(var(--foreground)); }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+  <!-- LOGIN -->
+  <div id="login-view" class="wrap login-wrap hidden">
+    <form id="login-form" class="card login">
+      <div class="brand" style="margin-bottom:16px">
+        <div class="logo">&#9889;&#65039;</div>
+        <div>
+          <h2 style="margin:0">sparkbox console</h2>
+          <p style="margin:0" class="muted">cluster control</p>
+        </div>
+      </div>
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password" autofocus />
+      <button type="submit" class="btn-primary">Sign in</button>
+    </form>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="dash-view" class="wrap hidden">
+    <header>
+      <div class="brand">
+        <div class="logo">&#9889;&#65039;</div>
+        <div>
+          <h1>sparkbox console</h1>
+          <p class="sub" id="domain-label">cluster control</p>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center">
+        <span class="muted" id="refreshed" style="font-size:12px"></span>
+        <button class="btn-outline btn-sm" id="logout-btn">Sign out</button>
+      </div>
+    </header>
+
+    <div class="stats">
+      <div class="card stat">
+        <div class="label">Sandboxes</div>
+        <div class="value" id="s-total">–</div>
+        <div class="sub" id="s-states">–</div>
+      </div>
+      <div class="card stat">
+        <div class="label">Live memory</div>
+        <div class="value" id="c-mem">–</div>
+        <div class="sub" id="c-mem-sub">–</div>
+        <div class="meter" id="c-mem-meter"><div></div></div>
+      </div>
+      <div class="card stat">
+        <div class="label">Overcommit</div>
+        <div class="value accent" id="c-over" title="allocated RAM ceiling ÷ what the guests actually use">–</div>
+        <div class="sub" id="c-over-sub">–</div>
+      </div>
+      <div class="card stat">
+        <div class="label">Headroom</div>
+        <div class="value" id="c-free">–</div>
+        <div class="sub" id="c-free-sub">–</div>
+      </div>
+    </div>
+
+    <div class="card panel">
+      <div class="panel-head">
+        <h2>Sandboxes</h2>
+        <span class="hint">auto-refreshes every 4s · idle VMs balloon down, then pause · ⏰ next scheduled wake · pinned = always-on</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th><th>Status</th><th>Owner</th><th>Image</th>
+              <th>Resources</th><th>Disk</th><th>Network</th><th>Web routes</th><th>Last active</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty hidden">No sandboxes yet. Create one with <code>ssh new@…</code>.</div>
+    </div>
+
+    <div class="card panel" id="snaps-card" style="margin-top:18px">
+      <div class="panel-head">
+        <h2>Snapshots</h2>
+        <span class="hint">fork-able templates captured from a customized sandbox</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Snapshot</th><th>Owner</th><th>From</th><th>Created</th><th></th></tr>
+          </thead>
+          <tbody id="snap-rows"></tbody>
+        </table>
+      </div>
+      <div id="snap-empty" class="empty hidden">No snapshots yet. Capture one with the <strong>Snapshot</strong> action above.</div>
+    </div>
+  </div>
+
+  <!-- REMOVE CONFIRMATION -->
+  <dialog id="confirm-dlg">
+    <h3>Remove sandbox</h3>
+    <p id="confirm-msg"></p>
+    <div class="row">
+      <button class="btn-outline" id="confirm-cancel" type="button">Cancel</button>
+      <button class="btn-danger-solid" id="confirm-go" type="button">Remove</button>
+    </div>
+  </dialog>
+
+  <div id="toast"></div>
+
+<script>
+(function () {
+  /*SHARED_JS*/
+  let timer = null;
+
+  function show(view) {
+    $("login-view").classList.toggle("hidden", view !== "login");
+    $("dash-view").classList.toggle("hidden", view !== "dash");
+    if (view === "login") { clearInterval(timer); timer = null; $("pw").focus(); }
+  }
+
+  // wakeChip shows the next platform-scheduled wake for a scale-to-zero
+  // sandbox — the reassurance that a paused box's cron will still fire.
+  function wakeChip(b) {
+    if (!b.next_wake) return "";
+    const t = new Date(b.next_wake);
+    const when = t.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const n = b.schedules || 1;
+    const title = n + " scheduled job" + (n === 1 ? "" : "s") + " · next wake " + t.toLocaleString();
+    return '<span class="badge wake" title="' + title + '">⏰ ' + when + "</span>";
+  }
+
+  async function act(name, verb, btn) {
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/sandboxes/" + encodeURIComponent(name) + "/" + verb, { method: "POST" });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      const past = { pause: "paused", resume: "resumed", pin: "pinned", unpin: "unpinned", archive: "archived" };
+      toast(name + " " + (past[verb] || verb));
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  // ---- remove (destroy) with confirmation ----
+
+  // confirmRemove opens the modal; the confirm button carries out the DELETE.
+  // Removing an archived box also drops its rootfs copy from object storage
+  // (the backend folds that in), so the message calls that out.
+  function confirmRemove(name, archived) {
+    const dlg = $("confirm-dlg");
+    dlg._name = name;
+    $("confirm-msg").innerHTML =
+      'Permanently remove <span class="mono">' + esc(name) + "</span>? " +
+      "This destroys the sandbox and its disk" +
+      (archived ? ", including its archived copy in object storage," : "") +
+      " and cannot be undone.";
+    dlg.showModal();
+  }
+
+  $("confirm-cancel").addEventListener("click", () => $("confirm-dlg").close());
+  $("confirm-go").addEventListener("click", async () => {
+    const dlg = $("confirm-dlg");
+    const name = dlg._name;
+    const btn = $("confirm-go");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/sandboxes/" + encodeURIComponent(name), { method: "DELETE" });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      dlg.close();
+      toast(name + " removed");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  let domain = ""; // base domain for route links, from /api/cluster
+
+  function meter(id, used, total) {
+    const el = $(id);
+    const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    el.className = "meter" + (pct >= 90 ? " hot" : pct >= 70 ? " warn" : "");
+    el.firstElementChild.style.width = pct + "%";
+  }
+
+  // The capacity cards need two sources: the cluster endpoint (physical RAM,
+  // admission budget, allocated ceiling, reserve) and the sandbox list (real
+  // per-guest usage from balloon stats). Stash both and repaint from whichever
+  // arrived, so the cards are correct no matter which fetch lands first.
+  let cap = { cluster: null, list: null };
+
+  function renderCluster(c) {
+    domain = c.domain || "";
+    cap.cluster = c;
+    paintCapacity();
+  }
+
+  // paintCapacity tells the truth under live overcommit: the health meter reads
+  // REAL usage against physical RAM (not the allocated ceiling against the
+  // budget, which is designed to be exceeded), and the ceiling becomes the
+  // numerator of the overcommit ratio — the win, not a warning.
+  function paintCapacity() {
+    const c = cap.cluster, L = cap.list;
+    const nodes = (c && c.nodes) || [];
+    const sum = (k) => nodes.reduce((a, x) => a + (x[k] || 0), 0);
+    const phys = sum("total_mem_mb");
+    const budget = sum("budget_mem_mb") || phys;
+    const alloc = sum("used_mem_mb");          // provisioned ceiling (sum of 8GBs)
+    const effective = sum("effective_mem_mb"); // what admission actually charges
+    const reserve = nodes.reduce((m, x) => Math.max(m, x.reserve_mem_mb || 0), 0);
+    const usedCpu = sum("used_vcpus"), totalCpu = sum("total_vcpus");
+
+    const running = L ? L.running : sum("running");
+    const real = L ? L.realUsed : 0;
+    const realKnown = L ? L.realKnown : false;
+
+    // Card 1 — Sandboxes, including the ballooned (Warm) tier.
+    if (L) {
+      $("s-total").textContent = L.total;
+      $("s-states").textContent =
+        L.running + " running · " + L.ballooned + " ballooned · " + L.paused + " paused";
+    }
+
+    // Card 2 — Live memory: what the guests actually use vs physical RAM.
+    const used = realKnown ? real : effective;
+    if (phys > 0) {
+      $("c-mem").innerHTML = gb(used) + " <small>/ " + gb(phys) + " GB</small>";
+      $("c-mem-sub").textContent = realKnown
+        ? "real use across " + running + " guest" + (running === 1 ? "" : "s")
+        : "admission estimate — connect a VM for live stats";
+      meter("c-mem-meter", used, phys);
+    } else {
+      $("c-mem").innerHTML = gb(used) + " <small>GB</small>";
+      $("c-mem-sub").textContent = "host capacity unknown";
+    }
+
+    // Card 3 — Overcommit ratio (the signature): ceiling ÷ real footprint.
+    const denom = realKnown ? real : effective;
+    const ratio = denom > 0 ? alloc / denom : 0;
+    $("c-over").textContent =
+      ratio >= 1 ? (ratio < 10 ? ratio.toFixed(1) : Math.round(ratio)) + "×"
+      : running ? "1×" : "–";
+    $("c-over-sub").innerHTML = running
+      ? gb(alloc) + " GB provisioned on " + gb(denom) + " GB " + (realKnown ? "real" : "reserved")
+        + (totalCpu > 0 ? " · " + usedCpu + " vCPU on " + totalCpu + " threads" : "")
+      : "no running sandboxes";
+
+    // Card 4 — Headroom: how many more you can actually start (admission math).
+    const perVM = reserve > 0 ? reserve : 8192;
+    const remain = Math.max(0, budget - effective);
+    $("c-free").innerHTML = "~" + Math.floor(remain / perVM) + " <small>more</small>";
+    $("c-free-sub").textContent = reserve > 0
+      ? "at " + gb(reserve) + " GB reserve/VM · " + gb(budget) + " GB RAM budget"
+      : "at 8 GB/VM — overcommit off";
+  }
+
+  // routeChips renders each web route as a linked pill with a health dot:
+  // green = something answered on the forwarded port, red = running but
+  // nothing listening, hollow = paused (a visit would wake it).
+  function routeChips(b) {
+    const rs = b.routes || [];
+    if (!rs.length) return '<span class="muted">–</span>';
+    const running = b.state === "running";
+    return rs.map((r) => {
+      const cls = running ? (r.listening ? "live" : "dead") : "idle";
+      const title = running
+        ? (r.listening ? "listening" : "nothing listening on port " + r.port)
+        : "paused — a request will wake it";
+      const href = location.protocol + "//" + esc(r.subdomain) + "." + esc(domain || location.host.replace(/^[^.]+\./, ""));
+      return '<a class="route ' + cls + '" target="_blank" rel="noopener" href="' + href + '" title="' + title + '">' +
+        '<span class="dot"></span>' + esc(r.subdomain) + ' <span class="port">:' + r.port + "</span></a>";
+    }).join("");
+  }
+
+  function render(list) {
+    // Fold the list into capacity stats (real usage, tier counts) and repaint
+    // the cards; the cluster fetch supplies the rest.
+    let running = 0, ballooned = 0, real = 0, realKnown = false;
+    for (const b of list) {
+      if (b.state === "running") running++;
+      if (b.ballooned) ballooned++;
+      if (typeof b.mem_used_mb === "number") { real += b.mem_used_mb; realKnown = true; }
+    }
+    cap.list = { total: list.length, running, ballooned, paused: list.length - running, realUsed: real, realKnown };
+    paintCapacity();
+
+    const rows = $("rows");
+    rows.innerHTML = "";
+    for (const b of list) {
+      const tr = document.createElement("tr");
+      const isRunning = b.state === "running";
+      // A pinned sandbox is exempt from the reaper; its only power action is
+      // unpinning (pausing it directly would just be undone by ResumePinned).
+      const pinBtn = b.pinned
+        ? '<button class="btn-outline btn-sm" data-act="unpin" data-name="' + b.name + '">Unpin</button>'
+        : '<button class="btn-outline btn-sm" data-act="pin" data-name="' + b.name + '">Pin</button>';
+      const isArchived = b.state === "archived";
+      const stateBtn = isRunning
+        ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + b.name + '">Pause</button>'
+        : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + b.name + '">' +
+          (isArchived ? "Restore" : "Resume") + "</button>";
+      // Archive is the deepest idle tier (rootfs → object storage, host disk
+      // freed). Offered on any live row; an archived row only offers Restore.
+      const archiveBtn = isArchived
+        ? ""
+        : '<button class="btn-outline btn-sm" data-act="archive" data-name="' + b.name +
+          '" title="park this sandbox in object storage and free its host disk">Archive</button>';
+      // Snapshot works from any live state (running/paused/pinned) — it pauses,
+      // then captures the disk as a fork-able template.
+      const snapBtn = isArchived
+        ? ""
+        : '<button class="btn-outline btn-sm" data-act="snapshot" data-name="' + b.name +
+          '" title="save this disk as a fork-able template">Snapshot</button>';
+      // Remove is offered on every row (archived included — that's where the
+      // object-storage cleanup matters most), styled danger and confirmed.
+      const delBtn = '<button class="btn-outline btn-sm btn-danger" data-del-box="' + b.name +
+        '" data-archived="' + (isArchived ? 1 : 0) +
+        '" title="permanently remove this sandbox and its disk">Remove</button>';
+      const action = (isArchived
+        ? stateBtn
+        : (b.pinned ? "" : stateBtn + " " + archiveBtn + " ") + snapBtn + " " + pinBtn) +
+        " " + delBtn;
+      const pinBadge = b.pinned
+        ? '<span class="badge pinned"><span class="dot"></span>pinned</span>'
+        : "";
+      // The balloon badge marks the live-overcommit "Warm" tier: idle, RAM
+      // handed back to the host, but still running (cron/daemons keep firing).
+      const balloonBadge = b.ballooned
+        ? '<span class="badge ballooned"><span class="dot"></span>ballooned</span>'
+        : "";
+      // Show real RAM use against the ceiling when the guest reports it — the
+      // overcommit story in one number (e.g. "0.3 / 8 GB").
+      const mem = typeof b.mem_used_mb === "number"
+        ? gb(b.mem_used_mb) + " / " + gb(b.mem_mb)
+        : gb(b.mem_mb);
+      tr.innerHTML =
+        '<td class="name">' + esc(b.name) + "</td>" +
+        "<td>" + badge(b.state) + pinBadge + balloonBadge + wakeChip(b) + "</td>" +
+        '<td class="owner">' + esc(b.owner || "–") + "</td>" +
+        '<td class="owner">' + esc(b.image || "–") + "</td>" +
+        '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + mem + " GB</td>" +
+        '<td class="spec" title="rootfs bytes in use / the guest\'s hard ceiling (memory snapshot excluded)">' +
+          (b.state === "archived" ? "parked"
+            : typeof b.disk_total_mb === "number" && b.disk_total_mb > 0
+              ? gb(b.disk_mb) + " / " + gb(b.disk_total_mb) + " GB"
+              : gb(b.disk_mb) + " GB") + "</td>" +
+        '<td class="spec" title="total received / sent since this sandbox was created">↓ ' +
+          bytes(b.net_rx_bytes) + " · ↑ " + bytes(b.net_tx_bytes) + "</td>" +
+        "<td>" + routeChips(b) + "</td>" +
+        '<td class="age">' + rel(b.last_active) + "</td>" +
+        '<td class="actions">' + action + "</td>";
+      rows.appendChild(tr);
+    }
+    $("empty").classList.toggle("hidden", list.length > 0);
+    $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
+    rows.querySelectorAll("button[data-act]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        if (btn.dataset.act === "snapshot") return snapshotBox(btn.dataset.name, btn);
+        act(btn.dataset.name, btn.dataset.act, btn);
+      }));
+    rows.querySelectorAll("button[data-del-box]").forEach((btn) =>
+      btn.addEventListener("click", () => confirmRemove(btn.dataset.delBox, btn.dataset.archived === "1")));
+  }
+
+  // snapshotBox prompts for a name and captures a sandbox's disk as a template.
+  async function snapshotBox(name, btn) {
+    const snap = (prompt("Snapshot name for " + name + " (lowercase letters, digits, dashes):") || "").trim();
+    if (!snap) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/sandboxes/" + encodeURIComponent(name) + "/snapshot", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ snapshot_name: snap }),
+      });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast("snapshot " + snap + " created");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  // renderSnaps paints the snapshots panel: fork spins up a new sandbox from a
+  // template, delete removes it (forks already made keep their own copy).
+  function renderSnaps(list) {
+    const rows = $("snap-rows");
+    rows.innerHTML = "";
+    for (const s of list) {
+      const tr = document.createElement("tr");
+      const fork = '<button class="btn-outline btn-sm" data-fork="' + esc(s.name) + '" data-owner="' + esc(s.owner) + '">Fork</button>';
+      const del = '<button class="btn-outline btn-sm" data-del="' + esc(s.name) + '" data-owner="' + esc(s.owner) + '">Delete</button>';
+      tr.innerHTML =
+        '<td class="name">' + esc(s.name) + "</td>" +
+        '<td class="owner">' + esc(s.owner) + "</td>" +
+        '<td class="owner">' + esc(s.from_box || "–") + "</td>" +
+        '<td class="age">' + rel(s.created_at) + "</td>" +
+        '<td class="actions">' + fork + " " + del + "</td>";
+      rows.appendChild(tr);
+    }
+    $("snap-empty").classList.toggle("hidden", list.length > 0);
+    rows.querySelectorAll("button[data-fork]").forEach((btn) =>
+      btn.addEventListener("click", () => forkSnap(btn.dataset.fork, btn.dataset.owner, btn)));
+    rows.querySelectorAll("button[data-del]").forEach((btn) =>
+      btn.addEventListener("click", () => delSnap(btn.dataset.del, btn.dataset.owner, btn)));
+  }
+
+  async function forkSnap(snap, owner, btn) {
+    const name = (prompt("New sandbox name from snapshot " + snap + ":") || "").trim();
+    if (!name) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/snapshots/" + encodeURIComponent(snap) + "/fork", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, owner }),
+      });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast("forked " + name + " from " + snap);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  async function delSnap(snap, owner, btn) {
+    if (!confirm("Delete snapshot " + snap + "? Forks already made are unaffected.")) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/snapshots/" + encodeURIComponent(snap) + "/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner }),
+      });
+      if (r.status === 401) return show("login");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      toast("deleted snapshot " + snap);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  async function refresh() {
+    try {
+      const [r, rc, rs] = await Promise.all([
+        fetch("/api/sandboxes"), fetch("/api/cluster"), fetch("/api/snapshots"),
+      ]);
+      if (r.status === 401 || rc.status === 401) return show("login");
+      if (!r.ok) throw new Error(r.statusText);
+      if (!rc.ok) throw new Error(rc.statusText);
+      const list = await r.json();
+      renderCluster(await rc.json());
+      show("dash");
+      render(Array.isArray(list) ? list : []);
+      if (rs.ok) {
+        const snaps = await rs.json();
+        renderSnaps(Array.isArray(snaps) ? snaps : []);
+      }
+      if (!timer) timer = setInterval(refresh, 4000);
+    } catch (e) {
+      toast("refresh failed: " + e.message, true);
+    }
+  }
+
+  $("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector("button");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: $("pw").value }),
+      });
+      if (!r.ok) throw new Error("wrong password");
+      $("pw").value = "";
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("logout-btn").addEventListener("click", async () => {
+    await fetch("/logout", { method: "POST" }).catch(() => {});
+    show("login");
+  });
+
+  // Reflect the console's own hostname in the header.
+  $("domain-label").textContent = location.host;
+
+  refresh();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Add a passkey · sparkbox</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --danger: 0 72% 51%;
+    --radius: 0.6rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); max-width: 480px; width: 100%;
+    padding: 28px 30px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    line-height: 1; text-indent: 0.02em;
+  }
+  .brand span { font-size: 13px; font-weight: 600; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
+  p { margin: 0 0 8px; color: hsl(var(--muted-foreground)); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: hsl(var(--muted)); border-radius: 4px; padding: 1px 5px;
+    color: hsl(var(--foreground));
+  }
+  button {
+    margin-top: 12px; width: 100%; padding: 10px 14px; border: 0; cursor: pointer;
+    border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 600;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+  }
+  label {
+    display: block; margin-top: 14px; font-size: 12px; font-weight: 600;
+    color: hsl(var(--muted-foreground));
+  }
+  input[type="text"] {
+    width: 100%; margin-top: 6px; padding: 9px 12px; font-size: 14px;
+    border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+  .alt {
+    display: block; margin-top: 10px; width: 100%; background: none; border: 0;
+    padding: 4px; cursor: pointer; text-align: center; font-size: 13px;
+    color: hsl(var(--muted-foreground)); text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .err {
+    margin-top: 14px; padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--danger) / .12); border: 1px solid hsl(var(--danger) / .4);
+    color: hsl(var(--danger)); font-size: 13px; display: none;
+  }
+  .err.show { display: block; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
+    <h1>Add a passkey?</h1>
+    <p>You're signed in as <code>{{.Handle}}</code>.</p>
+    <p>A passkey lets this browser sign in with Touch&nbsp;ID, Face&nbsp;ID, or your
+       security key — no more minting session tokens over SSH.</p>
+    <label for="pk-name">Name shown in your passkey manager</label>
+    <input type="text" id="pk-name" value="{{.Handle}}" maxlength="64" spellcheck="false" />
+    <button type="button" id="create-btn">Create a passkey</button>
+    <button type="button" class="alt" id="skip-btn">Not now</button>
+    <div class="err" id="err"></div>
+  </main>
+  <script>
+    var RETURN = {{.Return}};
+    function showErr(msg) {
+      var el = document.getElementById("err");
+      el.textContent = msg;
+      el.classList.add("show");
+    }
+    function b64uDec(s) {
+      s = s.replace(/-/g, "+").replace(/_/g, "/");
+      return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); });
+    }
+    function b64uEnc(buf) {
+      var bytes = new Uint8Array(buf), bin = "";
+      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    document.getElementById("skip-btn").addEventListener("click", function () {
+      location.href = RETURN;
+    });
+
+    if (!window.PublicKeyCredential) {
+      // Nothing to enroll with — don't strand the visitor on a dead page.
+      location.href = RETURN;
+    }
+
+    document.getElementById("create-btn").addEventListener("click", async function () {
+      var btn = this;
+      btn.disabled = true;
+      document.getElementById("err").classList.remove("show");
+      try {
+        var begin = await fetch("/webauthn/register/begin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: document.getElementById("pk-name").value })
+        });
+        var body = await begin.json();
+        if (!begin.ok) throw new Error(body.error || "could not start passkey setup");
+        var opts = body.publicKey;
+        opts.challenge = b64uDec(opts.challenge);
+        opts.user.id = b64uDec(opts.user.id);
+        (opts.excludeCredentials || []).forEach(function (c) { c.id = b64uDec(c.id); });
+        var cred = await navigator.credentials.create({ publicKey: opts });
+        // A device label, so `ctl passkey ls` reads better than raw ids.
+        var label = (navigator.userAgentData && navigator.userAgentData.platform) ||
+          navigator.platform || "";
+        var fin = await fetch("/webauthn/register/finish?label=" + encodeURIComponent(label), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: cred.id, rawId: b64uEnc(cred.rawId), type: cred.type,
+            response: {
+              attestationObject: b64uEnc(cred.response.attestationObject),
+              clientDataJSON: b64uEnc(cred.response.clientDataJSON),
+              transports: cred.response.getTransports ? cred.response.getTransports() : []
+            },
+            clientExtensionResults: cred.getClientExtensionResults()
+          })
+        });
+        var out = await fin.json();
+        if (!out.ok) throw new Error(out.error || "could not save the passkey");
+        // Same hint the login page reads: this browser now holds a passkey,
+        // so future sign-ins lead with it.
+        localStorage.setItem("sparkbox-passkey", "1");
+        location.href = RETURN;
+      } catch (e) {
+        if (e.name === "NotAllowedError") {
+          // The user dismissed the prompt; treat it like "not now".
+          btn.disabled = false;
+          return;
+        }
+        if (e.name === "InvalidStateError") {
+          // This authenticator is already enrolled (excludeCredentials hit).
+          location.href = RETURN;
+          return;
+        }
+        showErr(e.message || String(e));
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

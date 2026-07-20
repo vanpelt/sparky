@@ -1,0 +1,35 @@
+[Unit]
+Description=sparkbox agentic sandbox gateway (SSH + HTTP proxy + firecracker)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/dev/kvm
+
+[Service]
+Type=simple
+# sparkbox.env supplies PROXY_DOMAIN, optional SUBNET6_FLAG, an optional
+# SPARKBOX_CONSOLE_PASSWORD (set it to enable console.<domain>), an optional
+# OVERCOMMIT_FLAGS (e.g. "--mem-reserve-mb 1024" to turn on live memory
+# overcommit — measure the floor with hack/measure-density.py first), and
+# optional TLS_FLAGS. TLS_FLAGS is appended last, so to serve HTTPS put e.g.
+#   TLS_FLAGS=--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@x
+# there (a repeated --proxy-addr wins, overriding the :8081 default below).
+# NOTE: these MUST be referenced unbraced ($SUBNET6_FLAG $TLS_FLAGS). systemd
+# splits $VAR at whitespace (empty -> zero args) but treats ${VAR} as one
+# argument (empty -> one empty arg, which terminates Go's flag parsing and
+# silently drops everything after it).
+EnvironmentFile=/srv/sparkbox/sparkbox.env
+# firecracker needs root for tap devices and /dev/kvm.
+User=root
+ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
+  --state-dir /srv/sparkbox/data/state \
+  --kernel /srv/sparkbox/vmlinux \
+  --image-dir /srv/sparkbox/data/images \
+  --users /srv/sparkbox/users.conf \
+  --ssh-addr :2222 --api-addr 127.0.0.1:8080 \
+  --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

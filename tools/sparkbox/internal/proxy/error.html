@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{.Code}} · sparkbox</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --radius: 0.6rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); max-width: 480px; width: 100%;
+    padding: 28px 30px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    /* The tile stays dark in both themes, matching the consoles: the mark is a
+       full-colour emoji, so it needs one constant backdrop rather than one that
+       inverts with the scheme. */
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    /* Emoji glyphs carry their own side bearings and sit high on the box, so
+       they need slightly more size and an optical nudge to centre in the tile. */
+    line-height: 1; text-indent: 0.02em;
+  }
+  .brand span { font-size: 13px; font-weight: 600; }
+  .code {
+    font-size: 13px; font-weight: 600; color: hsl(var(--muted-foreground));
+    letter-spacing: .06em;
+  }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
+  p { margin: 0 0 8px; color: hsl(var(--muted-foreground)); }
+  .hint {
+    margin-top: 18px; padding: 12px 14px; border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--muted) / .6); border: 1px solid hsl(var(--border));
+    font-size: 13px; color: hsl(var(--muted-foreground));
+  }
+  .hint p { font-size: 13px; margin: 0 0 10px; }
+  .hint p:last-child { margin-bottom: 0; }
+  .hint strong { color: hsl(var(--foreground)); font-weight: 600; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: hsl(var(--muted)); border-radius: 4px; padding: 1px 5px;
+    color: hsl(var(--foreground));
+  }
+  .host { color: hsl(var(--foreground)); font-weight: 550; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
+    <div class="code">{{.Code}} {{.Status}}</div>
+    <h1>{{.Title}}</h1>
+    <p>{{.Message}}</p>
+    {{if .Hint}}<div class="hint">{{.Hint}}</div>{{end}}
+  </main>
+</body>
+</html>
