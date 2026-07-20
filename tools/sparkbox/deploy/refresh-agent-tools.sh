@@ -34,6 +34,10 @@ GUEST_IDENTITY=${GUEST_IDENTITY:-/usr/local/sbin/sparkbox-install-guest-identity
 CLAUDE_BASE=${CLAUDE_BASE:-https://downloads.claude.ai/claude-code-releases}
 CODEX_REPO=${CODEX_REPO:-openai/codex}
 HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
+# Revision of the guest-side agent conditioning below (/etc/environment knobs +
+# the ~/.claude.json onboarding seed). Versioned like IDENTITY_REV so bumping it
+# re-patches every template on the next run even when no tool version moved.
+AGENT_ENV_REV=1
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -86,8 +90,9 @@ if [ "$FORCE" = 0 ] && [ -f "$STAMP" ] \
    && grep -qx "CLAUDE_VERSION=$CLAUDE_VER" "$STAMP" \
    && grep -qx "CODEX_TAG=$CODEX_TAG" "$STAMP" \
    && grep -qx "HIVEMIND_VERSION=$HM_VER" "$STAMP" \
-   && grep -qx "IDENTITY_REV=$IDENTITY_REV" "$STAMP"; then
-  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV)"
+   && grep -qx "IDENTITY_REV=$IDENTITY_REV" "$STAMP" \
+   && grep -qx "AGENT_ENV_REV=$AGENT_ENV_REV" "$STAMP"; then
+  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV)"
   exit 0
 fi
 
@@ -118,6 +123,77 @@ if [ ! -x "$HM_BIN" ]; then
   chmod 0755 "$HM_BIN.tmp" && mv "$HM_BIN.tmp" "$HM_BIN"
 fi
 
+# ---- guest agent conditioning -------------------------------------------------
+# Claude Code gates its TUI behind two first-run dialogs that have nothing to do
+# with auth, so a sandbox carrying a valid CLAUDE_CODE_OAUTH_TOKEN still lands on
+# the theme picker and then the login screen instead of a prompt:
+#
+#   1. the theme picker / welcome flow, gated on ~/.claude.json's
+#      `hasCompletedOnboarding`
+#   2. the "is this a project you trust?" dialog, gated per-directory on
+#      `projects[cwd].hasTrustDialogAccepted`
+#
+# We satisfy (1) by seeding the config below, and (2) with CLAUDE_CODE_SANDBOXED,
+# a first-class escape hatch in the binary (its trust check opens with
+# `if (CLAUDE_CODE_SANDBOXED) return true`). That flag ALSO stops project-scoped
+# permission rules from being dropped as untrusted, i.e. a cloned repo's
+# .claude/settings.json allow-rules apply without a prompt — correct here, since
+# the VM is itself the sandbox boundary and holds nothing the owner can't reach.
+#
+# Note this seeds config, never credentials: auth stays the env token that
+# envsync pushes per-tag, and no ~/.claude/.credentials.json is ever written, so
+# there is no credential state to sync between host and guest or across boxes.
+seed_agent_env() {
+  local mnt=$1
+  # The template stays the single source of tool versions; don't let each guest
+  # race to self-update on top of it (wasted bandwidth, mid-session surprises).
+  grep -qs '^DISABLE_AUTOUPDATER=' "$mnt/etc/environment" || \
+    echo 'DISABLE_AUTOUPDATER=1' >> "$mnt/etc/environment"
+  grep -qs '^CLAUDE_CODE_SANDBOXED=' "$mnt/etc/environment" || \
+    echo 'CLAUDE_CODE_SANDBOXED=1' >> "$mnt/etc/environment"
+
+  # Resolve the login user from the template itself rather than hardcoding
+  # `sparky`, so this tracks the sparkbox.login-user label if it ever changes.
+  local pw home uid gid
+  pw=$(awk -F: '$3 == 1000 {print; exit}' "$mnt/etc/passwd") || return 0
+  [ -n "$pw" ] || { echo "   !! no uid-1000 user in template; skipping claude seed" >&2; return 0; }
+  uid=$(echo "$pw" | cut -d: -f3)
+  gid=$(echo "$pw" | cut -d: -f4)
+  home=$(echo "$pw" | cut -d: -f6)
+  [ -d "$mnt$home" ] || { echo "   !! $home missing in template; skipping claude seed" >&2; return 0; }
+
+  # MERGE, never overwrite: this loop also walks `snap-<owner>-<name>.ext4` fork
+  # templates, whose ~/.claude.json is a real user's accumulated state (project
+  # trust, history pointers, theme choice). We assert only the onboarding keys,
+  # and leave a theme already chosen by the user alone.
+  CLAUDE_VER="$CLAUDE_VER" python3 - "$mnt$home/.claude.json" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    cfg = {}
+except Exception as e:
+    print(f"   !! {path} unreadable ({e}); leaving it alone", file=sys.stderr)
+    sys.exit(0)
+
+cfg["hasCompletedOnboarding"] = True
+cfg["lastOnboardingVersion"] = os.environ["CLAUDE_VER"]
+cfg.setdefault("theme", "dark")
+
+tmp = path + ".seed-new"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
+PY
+  chown "$uid:$gid" "$mnt$home/.claude.json"
+  chmod 0644 "$mnt$home/.claude.json"
+}
+
 # ---- patch every template atomically -----------------------------------------
 MNT=""
 TMP=""
@@ -141,10 +217,7 @@ for tpl in "$IMAGES_DIR"/*.ext4; do
   install -m 0755 "$CLAUDE_BIN" "$MNT/usr/local/bin/claude"
   install -m 0755 "$CODEX_BIN"  "$MNT/usr/local/bin/codex"
   install -m 0755 "$HM_BIN"     "$MNT/usr/local/bin/hivemind"
-  # The template stays the single source of tool versions; don't let each guest
-  # race to self-update on top of it (wasted bandwidth, mid-session surprises).
-  grep -qs '^DISABLE_AUTOUPDATER=' "$MNT/etc/environment" || \
-    echo 'DISABLE_AUTOUPDATER=1' >> "$MNT/etc/environment"
+  seed_agent_env "$MNT"
   # Workload identity: the token unit + timer that keep
   # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with
   # no secret in the guest and nothing to paste.
@@ -159,8 +232,8 @@ if [ "$patched" = 0 ]; then
   exit 1
 fi
 
-printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\n' \
-  "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" "$IDENTITY_REV" > "$STAMP"
+printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
+  "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
 # Drop cached binaries from older versions; keep the current set.
 find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'hivemind-*' \) \
   ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" ! -name "$(basename "$HM_BIN")" -delete
