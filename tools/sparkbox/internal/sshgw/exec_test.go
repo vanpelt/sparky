@@ -24,3 +24,32 @@ func TestExecsCommand(t *testing.T) {
 		})
 	}
 }
+
+// `new+<name>` in the username is the only unambiguous channel for a requested
+// sandbox name — see splitNewName.
+func TestSplitNewName(t *testing.T) {
+	for _, tc := range []struct {
+		user      string
+		routeTo   string
+		requested string
+	}{
+		{"new+myvm", "new", "myvm"},
+		{"new+gentle-ferret", "new", "gentle-ferret"},
+		{"new", "new", ""},
+		{"gentle-ferret", "gentle-ferret", ""},
+		{"ctl", "ctl", ""},
+		// A '+' that isn't the new@ door routes as-is; Create rejects it later.
+		{"somebox+x", "somebox+x", ""},
+		// Degenerate: `new+` asks for the empty name, which falls back to a
+		// generated one rather than erroring.
+		{"new+", "new", ""},
+	} {
+		t.Run(tc.user, func(t *testing.T) {
+			routeTo, requested := splitNewName(tc.user)
+			if routeTo != tc.routeTo || requested != tc.requested {
+				t.Errorf("splitNewName(%q) = (%q, %q), want (%q, %q)",
+					tc.user, routeTo, requested, tc.routeTo, tc.requested)
+			}
+		})
+	}
+}

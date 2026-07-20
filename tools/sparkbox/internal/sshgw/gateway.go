@@ -202,6 +202,8 @@ func (g *Gateway) handle(s gssh.Session) {
 		sandboxName = name
 		viaDoor = true
 	}
+
+	sandboxName, requestedName := splitNewName(sandboxName)
 	log := g.log.With("user", user, "sandbox", sandboxName, "remote", s.RemoteAddr())
 
 	if sandboxName == SignupUser {
@@ -228,14 +230,22 @@ func (g *Gateway) handle(s gssh.Session) {
 		// are taken as tags, not just --tag: the local ssh client swallows
 		// leading-dash arguments as its own options, so `ssh new@host --tag ml`
 		// never reaches us without an `ssh new@host -- --tag ml` incantation.
-		// This door takes no other arguments, so there is nothing to confuse.
+		// This door takes no other arguments — a chosen name arrives in the
+		// username instead (splitNewName), precisely so it can't be mistaken for
+		// a tag — so every bare word here is unambiguously a tag.
 		flagged, bare, err := parseTags(s.Command())
 		if err != nil {
 			fail(s, log, "create sandbox", err)
 			return
 		}
 		tags := dedupeTags(append(flagged, normalizeTags(bare)...))
-		name := g.newName()
+		// Create is the one validator: it owns the name charset, the reserved
+		// subdomain set, and the already-taken check, so a requested name gets
+		// exactly the same treatment as a generated one.
+		name := requestedName
+		if name == "" {
+			name = g.newName()
+		}
 		// Tags first: Create pushes the owner's secret env asynchronously, and
 		// which secrets that picks up is exactly what tags decide. Stamping after
 		// Create would race that push and usually lose.
@@ -407,6 +417,23 @@ func DialUpstream(ctx context.Context, addr, user string, key xssh.Signer) (*xss
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// splitNewName reads `new+myvm` as "the new@ door, and call it myvm", returning
+// the routing name and the requested sandbox name ("" when none was asked for).
+//
+// The name rides in the username rather than the arguments because names and
+// tags are character-identical (both `[a-z0-9-]`), so a positional word could
+// never be told apart from a tag — `ssh new@host ml` is genuinely ambiguous. Nor
+// can a flag carry it: ssh(1) rejects `--name` as its own bad option, and
+// silently reads `-name` as `-n -a -m -e`, quietly doing something else entirely.
+// A front-door name comes from DNS and cannot contain '+', so this only ever
+// fires on a username.
+func splitNewName(user string) (routeTo, requested string) {
+	if rest, found := strings.CutPrefix(user, NewSandboxUser+"+"); found {
+		return NewSandboxUser, rest
+	}
+	return user, ""
 }
 
 // execsCommand reports whether a session should run the client's command inside
