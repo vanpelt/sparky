@@ -99,9 +99,15 @@ func runCmd(args []string) int {
 		im.Pin("static", a)
 	}
 
-	deny := dnsproxy.DenyNXDOMAIN
-	if strings.EqualFold(o.denyMode, "refused") {
+	var deny dnsproxy.DenyMode
+	switch strings.ToLower(o.denyMode) {
+	case "nxdomain":
+		deny = dnsproxy.DenyNXDOMAIN
+	case "refused":
 		deny = dnsproxy.DenyREFUSED
+	default:
+		fmt.Fprintf(os.Stderr, "sluice run: --deny must be nxdomain or refused, got %q\n", o.denyMode)
+		return 2
 	}
 	proxy, err := dnsproxy.New(dnsproxy.Config{
 		Allow: list, IPMap: im, Upstreams: o.upstreams, Deny: deny, Logger: log,
@@ -183,20 +189,31 @@ func syncLoop(ctx context.Context, o runOpts, mtr *meter.Meter, im *ipmap.Map, l
 }
 
 func reconcile(o runOpts, mtr *meter.Meter, im *ipmap.Map, log *slog.Logger) {
-	// Attach to any new taps; pin their host (gateway) addresses so guest→gateway
-	// traffic (DNS, metadata, ssh) is never dropped in enforce mode.
+	// Attach to any new (or recreated) taps; pin their host (gateway) addresses
+	// so guest→gateway traffic (DNS, metadata, ssh) is never dropped in enforce
+	// mode. Attach re-attaches when a name's tap was torn down and rebuilt under
+	// the same sbtap<idx> — it reports whether it actually (re)attached.
+	present := make(map[string]struct{})
 	for _, name := range tapInterfaces(o.tapPrefix) {
-		if mtr.Attached(name) {
-			continue
-		}
-		if err := mtr.Attach(name); err != nil {
+		present[name] = struct{}{}
+		attached, err := mtr.Attach(name)
+		if err != nil {
 			log.Warn("attach tap", "iface", name, "err", err)
 			continue
 		}
-		for _, a := range interfaceAddrs(name) {
-			im.Pin("gateway", a)
+		if attached {
+			for _, a := range interfaceAddrs(name) {
+				im.Pin("gateway", a)
+			}
+			log.Info("attached tap", "iface", name)
 		}
-		log.Info("attached tap", "iface", name)
+	}
+	// Detach taps that have gone away, freeing their kernel links.
+	for _, name := range mtr.AttachedNames() {
+		if _, ok := present[name]; !ok {
+			mtr.Detach(name)
+			log.Info("detached tap", "iface", name)
+		}
 	}
 
 	// Expire stale DNS entries, then mirror the live allow-set into the kernel.

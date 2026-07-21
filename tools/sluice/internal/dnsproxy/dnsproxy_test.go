@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,11 +20,11 @@ import (
 type fakeUpstream struct {
 	zone  map[string][]string // name (fqdn) -> IPs
 	ttl   uint32
-	calls int
+	calls atomic.Uint64
 }
 
 func (f *fakeUpstream) Exchange(m *dns.Msg, _ string) (*dns.Msg, time.Duration, error) {
-	f.calls++
+	f.calls.Add(1)
 	resp := new(dns.Msg)
 	resp.SetReply(m)
 	q := m.Question[0]
@@ -117,8 +119,8 @@ func TestDeniedNameNotForwarded(t *testing.T) {
 	if w.msg.Rcode != dns.RcodeNameError {
 		t.Fatalf("expected NXDOMAIN, got rcode %d", w.msg.Rcode)
 	}
-	if up.calls != 0 {
-		t.Errorf("denied query must not reach upstream (calls=%d)", up.calls)
+	if up.calls.Load() != 0 {
+		t.Errorf("denied query must not reach upstream (calls=%d)", up.calls.Load())
 	}
 	if im.Allowed(netip.MustParseAddr("203.0.113.9")) {
 		t.Error("denied name's IP must never enter the allow-set")
@@ -142,8 +144,8 @@ func TestWildcardApexDenied(t *testing.T) {
 	w2 := &capWriter{}
 	p.ServeDNS(w2, query("storage.googleapis.com", dns.TypeA))
 	// Not in the fake zone, so upstream returns NXDOMAIN — but it WAS forwarded.
-	if up.calls != 1 {
-		t.Errorf("subdomain of wildcard should be forwarded once, calls=%d", up.calls)
+	if up.calls.Load() != 1 {
+		t.Errorf("subdomain of wildcard should be forwarded once, calls=%d", up.calls.Load())
 	}
 }
 
@@ -161,6 +163,36 @@ func TestDenyModeRefused(t *testing.T) {
 	}
 }
 
+func TestConcurrentStatsNoRace(t *testing.T) {
+	up := &fakeUpstream{zone: map[string][]string{"api.github.com.": {"140.82.112.5"}}, ttl: 300}
+	p, _ := newTestProxy(t, up)
+
+	const workers, each = 8, 50
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				p.ServeDNS(&capWriter{}, query("api.github.com", dns.TypeA)) // allow
+				p.ServeDNS(&capWriter{}, query("evil.com", dns.TypeA))       // deny
+			}
+		}()
+	}
+	wg.Wait()
+
+	s := p.StatsSnapshot()
+	if want := uint64(workers * each * 2); s.Queries != want {
+		t.Errorf("Queries = %d, want %d", s.Queries, want)
+	}
+	if want := uint64(workers * each); s.Allowed != want {
+		t.Errorf("Allowed = %d, want %d", s.Allowed, want)
+	}
+	if want := uint64(workers * each); s.Denied != want {
+		t.Errorf("Denied = %d, want %d", s.Denied, want)
+	}
+}
+
 func TestNonINClassDenied(t *testing.T) {
 	up := &fakeUpstream{}
 	p, _ := newTestProxy(t, up)
@@ -171,7 +203,7 @@ func TestNonINClassDenied(t *testing.T) {
 	if w.msg.Rcode != dns.RcodeNameError {
 		t.Errorf("CHAOS class should be denied, got %d", w.msg.Rcode)
 	}
-	if up.calls != 0 {
+	if up.calls.Load() != 0 {
 		t.Error("non-IN class must not be forwarded")
 	}
 }

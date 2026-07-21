@@ -203,14 +203,22 @@ func TestAttachToInterface(t *testing.T) {
 		dev = "lo" // always present; we detach immediately
 	}
 
-	if err := m.Attach(dev); err != nil {
+	attached, err := m.Attach(dev)
+	if err != nil {
 		t.Fatalf("Attach(%s): %v", dev, err)
+	}
+	if !attached {
+		t.Fatal("first Attach should report attached=true")
 	}
 	if !m.Attached(dev) {
 		t.Fatal("Attached() false after Attach")
 	}
-	if err := m.Attach(dev); err != nil {
-		t.Fatalf("Attach idempotency: %v", err)
+	// Second attach to the same device (same ifindex) is a no-op.
+	if attached, err := m.Attach(dev); err != nil || attached {
+		t.Fatalf("Attach idempotency: attached=%v err=%v", attached, err)
+	}
+	if names := m.AttachedNames(); len(names) != 1 || names[0] != dev {
+		t.Fatalf("AttachedNames = %v, want [%s]", names, dev)
 	}
 	m.Detach(dev)
 	if m.Attached(dev) {

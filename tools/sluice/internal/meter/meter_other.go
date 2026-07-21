@@ -21,9 +21,10 @@ type Meter struct{}
 // Load always fails off Linux.
 func Load() (*Meter, error) { return nil, ErrUnsupported }
 
-func (m *Meter) Attach(string) error                        { return ErrUnsupported }
+func (m *Meter) Attach(string) (bool, error)                { return false, ErrUnsupported }
 func (m *Meter) Detach(string)                              {}
 func (m *Meter) Attached(string) bool                       { return false }
+func (m *Meter) AttachedNames() []string                    { return nil }
 func (m *Meter) Flows() (map[netip.Addr]report.Flow, error) { return nil, ErrUnsupported }
 func (m *Meter) SetEnforce(bool) error                      { return ErrUnsupported }
 func (m *Meter) SyncAllowed([]netip.Addr) error             { return ErrUnsupported }

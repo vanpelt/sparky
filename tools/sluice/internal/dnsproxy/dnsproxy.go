@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -62,7 +63,9 @@ type Proxy struct {
 	stats Stats
 }
 
-// Stats counts decisions for observability.
+// Stats counts decisions for observability. Its fields are updated with
+// sync/atomic because the DNS server calls ServeDNS from one goroutine per
+// query; read a consistent copy with StatsSnapshot.
 type Stats struct {
 	Queries uint64
 	Allowed uint64
@@ -81,11 +84,14 @@ func New(cfg Config) (*Proxy, error) {
 	if len(cfg.Upstreams) == 0 {
 		return nil, errors.New("dnsproxy: no upstreams")
 	}
-	if cfg.Client == nil {
-		cfg.Client = &dns.Client{Net: "udp"}
-	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 3 * time.Second
+	}
+	if cfg.Client == nil {
+		// Bound the client itself, not just our ctx: exchangeCtx's goroutine
+		// blocks until Exchange returns, so a client with no deadline could keep
+		// it alive well past the ctx timeout.
+		cfg.Client = &dns.Client{Net: "udp", Timeout: cfg.Timeout}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -95,7 +101,7 @@ func New(cfg Config) (*Proxy, error) {
 
 // ServeDNS implements dns.Handler.
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
-	p.stats.Queries++
+	atomic.AddUint64(&p.stats.Queries, 1)
 	resp := p.handle(w, req)
 	if resp == nil {
 		return
@@ -113,7 +119,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	// Only IN-class A/AAAA/CNAME etc. are meaningful for egress. Other classes
 	// are refused outright rather than forwarded.
 	if q.Qclass != dns.ClassINET {
-		p.stats.Denied++
+		atomic.AddUint64(&p.stats.Denied, 1)
 		p.log.Info("dns", "decision", "deny", "reason", "class", "client", client,
 			"name", q.Name, "type", dns.TypeToString[q.Qtype])
 		return p.denyReply(req)
@@ -122,7 +128,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	name := q.Name
 	allowed, pattern := p.cfg.Allow.Allowed(name)
 	if !allowed {
-		p.stats.Denied++
+		atomic.AddUint64(&p.stats.Denied, 1)
 		p.log.Info("dns", "decision", "deny", "client", client,
 			"name", name, "type", dns.TypeToString[q.Qtype])
 		return p.denyReply(req)
@@ -130,7 +136,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 
 	resp, rtt, err := p.forward(req)
 	if err != nil {
-		p.stats.Errors++
+		atomic.AddUint64(&p.stats.Errors, 1)
 		p.log.Warn("dns", "decision", "error", "client", client, "name", name, "err", err.Error())
 		return errorReply(req, dns.RcodeServerFailure)
 	}
@@ -139,7 +145,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	if len(ips) > 0 {
 		p.cfg.IPMap.Record(canonicalName(pattern, name), ips, time.Duration(minTTL)*time.Second)
 	}
-	p.stats.Allowed++
+	atomic.AddUint64(&p.stats.Allowed, 1)
 	p.log.Info("dns", "decision", "allow", "client", client, "name", name,
 		"type", dns.TypeToString[q.Qtype], "pattern", pattern,
 		"answers", len(ips), "rtt_ms", rtt.Milliseconds())
@@ -193,8 +199,15 @@ func (p *Proxy) denyReply(req *dns.Msg) *dns.Msg {
 	return errorReply(req, dns.RcodeNameError)
 }
 
-// StatsSnapshot returns a copy of the running counters.
-func (p *Proxy) StatsSnapshot() Stats { return p.stats }
+// StatsSnapshot returns a consistent copy of the running counters.
+func (p *Proxy) StatsSnapshot() Stats {
+	return Stats{
+		Queries: atomic.LoadUint64(&p.stats.Queries),
+		Allowed: atomic.LoadUint64(&p.stats.Allowed),
+		Denied:  atomic.LoadUint64(&p.stats.Denied),
+		Errors:  atomic.LoadUint64(&p.stats.Errors),
+	}
+}
 
 func errorReply(req *dns.Msg, rcode int) *dns.Msg {
 	m := new(dns.Msg)

@@ -44,7 +44,15 @@ type Meter struct {
 	fromG   *ebpf.Program
 	toG     *ebpf.Program
 
-	links map[string][]link.Link // ifname -> its attachments
+	links map[string]attachment // ifname -> its attachments
+}
+
+// attachment records the links for one interface plus the ifindex they were
+// attached to, so a tap deleted and recreated under the same name (sparkbox
+// reuses sbtap<idx> names) is detected as a new device and re-attached.
+type attachment struct {
+	index int
+	links []link.Link
 }
 
 // Load brings up the eBPF maps and programs. It does not attach to any
@@ -61,7 +69,7 @@ func Load() (*Meter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load bpf collection: %w", err)
 	}
-	m := &Meter{coll: coll, links: map[string][]link.Link{}}
+	m := &Meter{coll: coll, links: map[string]attachment{}}
 	for name, dst := range map[string]**ebpf.Map{"flows": &m.flows, "allowed": &m.allowed, "config": &m.config} {
 		mp, ok := coll.Maps[name]
 		if !ok {
@@ -81,38 +89,43 @@ func Load() (*Meter, error) {
 	return m, nil
 }
 
-// Attach wires both directions of the program onto ifname's clsact hooks. It is
-// idempotent per interface: a second call for an already-attached name is a
-// no-op. from_guest lands on ingress (packets the guest sent), to_guest on
-// egress (packets bound for the guest).
-func (m *Meter) Attach(ifname string) error {
-	if _, ok := m.links[ifname]; ok {
-		return nil
-	}
+// Attach wires both directions of the program onto ifname's clsact hooks and
+// reports whether it performed a (re)attach. It is idempotent while the
+// interface keeps the same ifindex; if the name now resolves to a different
+// index (the tap was recreated), the stale links are dropped and it re-attaches
+// to the new device. from_guest lands on ingress (packets the guest sent),
+// to_guest on egress (packets bound for the guest).
+func (m *Meter) Attach(ifname string) (bool, error) {
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
-		return fmt.Errorf("lookup %s: %w", ifname, err)
+		return false, fmt.Errorf("lookup %s: %w", ifname, err)
+	}
+	if cur, ok := m.links[ifname]; ok {
+		if cur.index == iface.Index {
+			return false, nil // already attached to this exact device
+		}
+		m.Detach(ifname) // same name, new ifindex → drop stale links first
 	}
 	ingress, err := link.AttachTCX(link.TCXOptions{
 		Interface: iface.Index, Program: m.fromG, Attach: ebpf.AttachTCXIngress,
 	})
 	if err != nil {
-		return fmt.Errorf("attach ingress on %s: %w", ifname, err)
+		return false, fmt.Errorf("attach ingress on %s: %w", ifname, err)
 	}
 	egress, err := link.AttachTCX(link.TCXOptions{
 		Interface: iface.Index, Program: m.toG, Attach: ebpf.AttachTCXEgress,
 	})
 	if err != nil {
 		ingress.Close()
-		return fmt.Errorf("attach egress on %s: %w", ifname, err)
+		return false, fmt.Errorf("attach egress on %s: %w", ifname, err)
 	}
-	m.links[ifname] = []link.Link{ingress, egress}
-	return nil
+	m.links[ifname] = attachment{index: iface.Index, links: []link.Link{ingress, egress}}
+	return true, nil
 }
 
 // Detach removes the attachments for ifname (e.g. when a tap disappears).
 func (m *Meter) Detach(ifname string) {
-	for _, l := range m.links[ifname] {
+	for _, l := range m.links[ifname].links {
 		l.Close()
 	}
 	delete(m.links, ifname)
@@ -122,6 +135,16 @@ func (m *Meter) Detach(ifname string) {
 func (m *Meter) Attached(ifname string) bool {
 	_, ok := m.links[ifname]
 	return ok
+}
+
+// AttachedNames returns the interfaces the meter is currently attached to, so
+// the reconcile loop can detach ones whose tap has gone away.
+func (m *Meter) AttachedNames() []string {
+	out := make([]string, 0, len(m.links))
+	for name := range m.links {
+		out = append(out, name)
+	}
+	return out
 }
 
 // Flows reads the full per-remote-IP counter table.
