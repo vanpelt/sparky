@@ -89,17 +89,23 @@ entries, since everything else is dropped.
 
 ## Guest configuration
 
-Point the guest's `/etc/resolv.conf` at its gateway:
+Guests must resolve through their gateway (`172.30.<idx>.1`), where sluice
+listens. sparkbox wires this for you: start the gateway with
 
-```
-nameserver 172.30.<idx>.1
+```sh
+sparkbox serve --driver firecracker --guest-dns gateway ...
 ```
 
-sparkbox already writes `etc/resolv.conf` when it builds the rootfs
-(`hack/build-rootfs.sh`), so this is a one-line change there. In `--enforce`
-mode a guest cannot bypass the resolver: public DNS/DoH/DoT endpoints are not on
-the allowlist, so packets to them are dropped, leaving the gateway resolver as
-the only working path to a name.
+and the Firecracker driver passes `sparkbox_dns=<gateway-ip>` on the guest kernel
+cmdline. The guest `sparkbox-netcfg` hook (baked by `hack/build-rootfs.sh`) reads
+it and writes `/etc/resolv.conf` accordingly, overriding any resolver the image
+shipped. Without the flag, guests fall back to public DNS (plain NAT'd egress, no
+allowlisting) — so existing fleets are unaffected until you opt in. You can also
+pass a literal address (`--guest-dns 10.0.0.53`) instead of `gateway`.
+
+In `--enforce` mode a guest cannot bypass the resolver: public DNS/DoH/DoT
+endpoints are not on the allowlist, so packets to them are dropped, leaving the
+gateway resolver as the only working path to a name.
 
 ## Deploy
 

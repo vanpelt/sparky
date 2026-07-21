@@ -126,8 +126,11 @@ allow-set on a tick, and reads `flows` for the report.
 
 A `sluice.service` unit runs beside `sparkbox-net.service`. It needs `CAP_BPF` +
 `CAP_NET_ADMIN` (load/attach) and `CAP_NET_BIND_SERVICE` (`:53`), and a kernel
-≥ 6.6 for TCX. The guest rootfs points `resolv.conf` at its gateway — a one-line
-addition to `sparkbox/hack/build-rootfs.sh`, which already writes that file.
+≥ 6.6 for TCX. Guests are pointed at the gateway resolver by starting sparkbox
+with `--guest-dns gateway`: the Firecracker driver emits `sparkbox_dns=<gateway>`
+on the guest kernel cmdline (alongside the existing `sparkbox_ip6`/`_gw6`/`_host`
+tokens), and the guest `sparkbox-netcfg` hook writes `/etc/resolv.conf` from it.
+Absent the flag, guests keep public DNS, so the change is opt-in per fleet.
 
 Roll it out observe-only first (metering + domain logs, no drops) to see what
 real workloads actually reach, turn those domains into the allowlist, then flip
