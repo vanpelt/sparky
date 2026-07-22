@@ -1,0 +1,3 @@
+/bin/
+# The compiled eBPF object is intentionally committed (go:embed needs it and it
+# is arch-independent) — do NOT ignore internal/meter/sluice_bpfel.o.

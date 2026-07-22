@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,13 @@ type Options struct {
 	// template's baked authorized_keys (our images declare it via the
 	// sparkbox.login-user label; see hack/build-rootfs.sh). Empty defaults root.
 	LoginUser string
+	// GuestDNS points guests at a specific resolver via the sparkbox_dns kernel
+	// arg, honoured by the guest sparkbox-netcfg hook. The literal "gateway"
+	// expands per-VM to the guest's own gateway (172.30.<idx>.1), where the
+	// sluice allowlist resolver listens; any other value is used verbatim as the
+	// nameserver address. Empty leaves guests on public resolvers (no
+	// allowlisting).
+	GuestDNS string
 }
 
 type vmState struct {
@@ -74,6 +82,9 @@ func New(opts Options) (*Driver, error) {
 	}
 	if opts.Subnet == "" {
 		opts.Subnet = "172.30.0.0"
+	}
+	if err := validateGuestDNS(opts.GuestDNS); err != nil {
+		return nil, err
 	}
 	d := &Driver{opts: opts, vms: map[string]*vmState{}}
 	if opts.Subnet6 != "" {
@@ -135,6 +146,40 @@ func (d *Driver) vmDir(name string) string {
 func (d *Driver) hostIP(idx int) string  { return fmt.Sprintf("172.30.%d.1", idx) }
 func (d *Driver) guestIP(idx int) string { return fmt.Sprintf("172.30.%d.2", idx) }
 func tapName(idx int) string             { return fmt.Sprintf("sbtap%d", idx) }
+
+// validateGuestDNS accepts only the empty string (feature off), the "gateway"
+// sentinel, or a bare IP literal. Anything else — a hostname, or a value with
+// whitespace that would inject extra kernel args — is rejected, so a typo in
+// --guest-dns fails loudly instead of producing a malformed cmdline or an
+// unusable /etc/resolv.conf inside the guest.
+func validateGuestDNS(guestDNS string) error {
+	switch guestDNS {
+	case "", "gateway":
+		return nil
+	}
+	if _, err := netip.ParseAddr(guestDNS); err != nil {
+		return fmt.Errorf("guest-dns %q: must be \"gateway\" or an IP address", guestDNS)
+	}
+	return nil
+}
+
+// guestDNSArg builds the sparkbox_dns kernel-arg fragment (with a leading space)
+// for the guest netcfg hook. The sentinel "gateway" expands to this VM's gateway
+// address, where the sluice allowlist resolver listens; an IP literal is used
+// verbatim. An empty setting yields no arg, leaving the guest on public DNS.
+func guestDNSArg(guestDNS, gatewayIP string) (string, error) {
+	if err := validateGuestDNS(guestDNS); err != nil {
+		return "", err
+	}
+	switch guestDNS {
+	case "":
+		return "", nil
+	case "gateway":
+		return " sparkbox_dns=" + gatewayIP, nil
+	default:
+		return " sparkbox_dns=" + guestDNS, nil
+	}
+}
 
 // IPv6 addressing: each slot gets a point-to-point /127 carved from the /64,
 // host on the even address and guest on the odd one. Slot idx=1 -> ::2 (host) /
@@ -232,6 +277,11 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
 			d.guestIP6(st.idx), d.hostIP6(st.idx))
 	}
+	dnsArg, err := guestDNSArg(d.opts.GuestDNS, d.hostIP(st.idx))
+	if err != nil {
+		return err
+	}
+	kernelArgs += dnsArg
 
 	fcCfg := sdk.Config{
 		SocketPath:      sock,

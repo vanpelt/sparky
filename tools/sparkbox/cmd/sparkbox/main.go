@@ -107,6 +107,7 @@ func serve(args []string) error {
 		kernelPath     = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir       = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		subnet6        = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
+		guestDNS       = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
 		proxyAddr      = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain    = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
@@ -215,7 +216,7 @@ func serve(args []string) error {
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin)
+		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin, *guestDNS)
 		if err != nil {
 			return err
 		}
