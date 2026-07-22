@@ -17,6 +17,12 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+// publicResolvers are the recursive resolvers the ACME DNS-01 solver consults
+// for its own bookkeeping. Two operators, so one being unreachable is not an
+// outage; both answer the public view of a zone, which is the only view that
+// matters when proving control of a name to a certificate authority.
+var publicResolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
+
 type tlsParams struct {
 	provider string // "cloudflare" | "autocert"
 	domain   string // base domain, e.g. hivemind.tools
@@ -95,6 +101,21 @@ func wildcardTLSConfig(ctx context.Context, p tlsParams) (*tls.Config, []string,
 	certmagic.DefaultACME.DNS01Solver = &certmagic.DNS01Solver{
 		DNSManager: certmagic.DNSManager{
 			DNSProvider: &cloudflare.Provider{APIToken: token},
+			// Resolve challenge bookkeeping against public DNS, never the host's
+			// own view of the world. Before an ACME challenge is presented, the
+			// solver walks up the name looking for the zone's SOA — and on a
+			// tailnet-edge host, this very binary is what answers the zone: the
+			// split-DNS entry points <domain> at our dnsedge responder, which
+			// serves A/AAAA and an empty NOERROR for everything else. An SOA
+			// query therefore comes back empty, the walk climbs past the zone to
+			// the TLD, and issuance dies on "could not determine zone" — for a
+			// name that resolves perfectly well everywhere else on the internet.
+			//
+			// This is not only about new names. The same walk runs on every
+			// RENEWAL, so a host that shadows its own zone eventually cannot
+			// replace the wildcard the whole edge depends on, and only finds out
+			// when the certificate expires.
+			Resolvers: publicResolvers,
 		},
 	}
 
