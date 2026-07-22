@@ -29,8 +29,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -69,8 +72,11 @@ type OwnerSyncer interface {
 // Handler serves the user console UI and its JSON API.
 type Handler struct {
 	mgr      *host.Manager
-	routes   *routes.Store  // optional: nil hides web routes and disables port/visibility
-	secrets  *secrets.Store // optional: nil disables tags + secrets endpoints
+	routes   *routes.Store       // optional: nil hides web routes and disables port/visibility
+	secrets  *secrets.Store      // optional: nil disables tags + secrets endpoints
+	netrules *netrules.Store     // optional: nil disables network-rule endpoints (501)
+	netsync  *netpush.Syncer     // optional: nil (or no sluice socket) disables bandwidth + policy push
+	favicons *domainmeta.FaviconCache // optional: nil serves the globe fallback
 	accounts edgeauth.Accounts
 	signer   *edgeauth.Signer
 	syncer   OwnerSyncer
@@ -88,6 +94,7 @@ type Handler struct {
 // tag/secret changes to running sandboxes. secure should be true when the
 // proxy edge serves TLS.
 func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Store,
+	netrulesStore *netrules.Store, netSync *netpush.Syncer, favicons *domainmeta.FaviconCache,
 	accounts edgeauth.Accounts, signer *edgeauth.Signer, syncer OwnerSyncer,
 	subdomain, domain string, secure bool, log *slog.Logger) *Handler {
 	if subdomain == "" {
@@ -100,6 +107,7 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 	domain = strings.TrimPrefix(domain, ".")
 	return &Handler{
 		mgr: mgr, routes: routeStore, secrets: secretsStore,
+		netrules: netrulesStore, netsync: netSync, favicons: favicons,
 		accounts: accounts, signer: signer, syncer: syncer,
 		domain: domain, secure: secure, log: log,
 		loginURL: "https://login." + domain + "/",
@@ -135,14 +143,26 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("GET /api/secrets", require(h.listSecrets))
 	mux.Handle("PUT /api/secrets/{env_name}", mutate(h.putSecret))
 	mux.Handle("DELETE /api/secrets/{env_name}", mutate(h.deleteSecret))
+	mux.Handle("GET /api/network-rules", require(h.listNetRules))
+	mux.Handle("PUT /api/network-rules/{name}", mutate(h.putNetRule))
+	mux.Handle("DELETE /api/network-rules/{name}", mutate(h.deleteNetRule))
+	mux.Handle("GET /api/machines/{name}/bandwidth", require(h.bandwidth))
+	mux.Handle("GET /api/favicon", require(h.favicon))
 	mux.HandleFunc("GET /", h.index)
 	return mux
 }
 
 // index always serves the single-page app; the page itself calls the API and
-// renders the sign-in state when that returns 401.
+// renders the sign-in state when that returns 401. The CSP keeps all resources
+// first-party: favicons are served from /api/favicon (this origin), so no icon
+// CDN needs whitelisting and the page can't be made to fetch a third party.
+// 'unsafe-inline' is required because the SPA inlines its <style>/<script>
+// (a strict nonce would mean reworking the webui minify pipeline).
 func (h *Handler) index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
+			"script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'")
 	indexPage.ServeHTTP(w, r)
 }
 
@@ -537,6 +557,7 @@ func (h *Handler) setTags(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("user console set tags", "sandbox", name, "tags", len(req.Tags), "handle", handleFrom(r))
 	h.syncOwner(r.Context(), box.Owner)
+	h.pushNet() // tags govern network rules too: re-push this VM's egress policy
 	tags, err := h.secrets.TagsFor(name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -701,6 +722,140 @@ func (h *Handler) deleteSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// listNetRules returns the session's network rule-sets in full (patterns +
+// tags) — unlike secrets, allow patterns are policy, not sensitive.
+func (h *Handler) listNetRules(w http.ResponseWriter, r *http.Request) {
+	if h.netrules == nil {
+		writeErr(w, http.StatusNotImplemented, "network rules are not enabled on this host")
+		return
+	}
+	rules, err := h.netrules.ListRules(handleFrom(r))
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if rules == nil {
+		rules = []netrules.RuleMeta{}
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+type netRuleReq struct {
+	Allow []string `json:"allow"`
+	Tags  []string `json:"tags"`
+}
+
+// putNetRule creates or updates a rule-set and re-pushes egress policy so any
+// running VM carrying one of its tags picks up the change.
+func (h *Handler) putNetRule(w http.ResponseWriter, r *http.Request) {
+	if h.netrules == nil {
+		writeErr(w, http.StatusNotImplemented, "network rules are not enabled on this host")
+		return
+	}
+	name := r.PathValue("name")
+	var req netRuleReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	handle := handleFrom(r)
+	if err := h.netrules.PutRule(handle, name, netrules.RuleSpec{Allow: req.Allow}, req.Tags); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("user console saved network rule", "name", name, "tags", len(req.Tags), "handle", handle)
+	h.pushNet()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) deleteNetRule(w http.ResponseWriter, r *http.Request) {
+	if h.netrules == nil {
+		writeErr(w, http.StatusNotImplemented, "network rules are not enabled on this host")
+		return
+	}
+	name := r.PathValue("name")
+	handle := handleFrom(r)
+	if err := h.netrules.DeleteRule(handle, name); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("user console deleted network rule", "name", name, "handle", handle)
+	h.pushNet()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// bwDomain is one destination's bandwidth, enriched with a display name so the
+// SPA can render a Ubiquiti-style row without re-deriving it client-side.
+type bwDomain struct {
+	Domain   string `json:"domain"`
+	Display  string `json:"display"`
+	Resolved bool   `json:"resolved"`
+	TxBytes  uint64 `json:"tx_bytes"`
+	RxBytes  uint64 `json:"rx_bytes"`
+	Total    uint64 `json:"total"`
+}
+
+type bwResponse struct {
+	Name    string     `json:"name"`
+	TxBytes uint64     `json:"tx_bytes"`
+	RxBytes uint64     `json:"rx_bytes"`
+	Domains []bwDomain `json:"domains"`
+}
+
+// bandwidth returns one VM's per-domain egress breakdown from sluice, already
+// sorted by total bytes and labelled with display names. Owner-scoped via
+// ownedBox, so a cross-owner name 404s like any other.
+func (h *Handler) bandwidth(w http.ResponseWriter, r *http.Request) {
+	box, name, ok := h.ownedBox(r)
+	if !ok {
+		notFoundBox(w, name)
+		return
+	}
+	if h.netsync == nil || !h.netsync.Enabled() {
+		writeErr(w, http.StatusNotImplemented, "network metering is not enabled on this host")
+		return
+	}
+	usage, err := h.netsync.Usage(r.Context(), box.Owner)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	resp := bwResponse{Name: name, Domains: []bwDomain{}}
+	if u, ok := usage[name]; ok {
+		resp.TxBytes, resp.RxBytes = u.TxBytes, u.RxBytes
+		for _, d := range u.Domains {
+			resp.Domains = append(resp.Domains, bwDomain{
+				Domain:   d.Domain,
+				Display:  domainmeta.DisplayName(d.Domain),
+				Resolved: d.Resolved,
+				TxBytes:  d.TxBytes,
+				RxBytes:  d.RxBytes,
+				Total:    d.TxBytes + d.RxBytes,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// favicon serves a domain's icon from the host-side cache, always 200 (the
+// neutral globe on any miss) so the SPA's <img> never breaks. Cached hard at
+// the browser since a site's icon rarely changes.
+func (h *Handler) favicon(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if h.favicons == nil || domain == "" {
+		data, ct := domainmeta.GlobeSVG()
+		w.Header().Set("Content-Type", ct)
+		w.Write(data) //nolint:errcheck
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	data, ct, _ := h.favicons.Get(ctx, domain)
+	w.Header().Set("Content-Type", ct)
+	w.Write(data) //nolint:errcheck
+}
+
 // syncOwner fires the change-time env push. Nil-safe; the syncer itself is
 // async and best-effort, so this never delays or fails the response.
 func (h *Handler) syncOwner(ctx context.Context, owner string) {
@@ -710,14 +865,34 @@ func (h *Handler) syncOwner(ctx context.Context, owner string) {
 	h.syncer.SyncOwner(ctx, owner)
 }
 
+// pushNet re-pushes the whole fleet's egress policy to sluice after a rule or
+// tag change. Best-effort and async on a fresh context so it never delays or
+// fails the response; the syncer sends a full snapshot, so a single push
+// reconciles every affected VM.
+func (h *Handler) pushNet() {
+	if h.netsync == nil || !h.netsync.Enabled() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := h.netsync.Push(ctx); err != nil {
+			h.log.Warn("push egress policy", "err", err)
+		}
+	}()
+}
+
 // statusFor maps store/manager errors onto HTTP statuses by their sentinel or
 // message, per the local-copy convention (internal/console has its own).
 func statusFor(err error) int {
 	switch {
 	case err == nil:
 		return http.StatusInternalServerError
-	case errors.Is(err, secrets.ErrNoSuchSecret), errors.Is(err, routes.ErrNoSuchRoute):
+	case errors.Is(err, secrets.ErrNoSuchSecret), errors.Is(err, routes.ErrNoSuchRoute),
+		errors.Is(err, netrules.ErrNoSuchRule):
 		return http.StatusNotFound
+	case errors.Is(err, netrules.ErrInvalidRule):
+		return http.StatusBadRequest
 	case errors.Is(err, routes.ErrSubdomainTaken):
 		return http.StatusConflict
 	}

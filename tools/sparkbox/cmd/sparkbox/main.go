@@ -28,11 +28,14 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/dnsedge"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
@@ -108,6 +111,7 @@ func serve(args []string) error {
 		imageDir       = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		subnet6        = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
 		guestDNS       = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
+		sluiceSocket   = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
 		proxyAddr      = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain    = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
@@ -208,6 +212,15 @@ func serve(args []string) error {
 		return fmt.Errorf("secrets store: %w", err)
 	}
 	defer secretsStore.Close()
+
+	// Network rule-sets (per-tag egress allowlists) live in the same DB, on their
+	// own connection. Independent of sluice: rules can be authored even when the
+	// data plane is down; they take effect once pushed.
+	netrulesStore, err := netrules.Open(filepath.Join(*stateDir, "sparkbox.db"), log)
+	if err != nil {
+		return fmt.Errorf("netrules store: %w", err)
+	}
+	defer netrulesStore.Close()
 
 	var driver vmm.Driver
 	switch *driverName {
@@ -320,6 +333,18 @@ func serve(args []string) error {
 	// post-construction so the manager never depends on it at build time.
 	syncer := envsync.New(secretsStore, mgr, upstreamKey, log)
 	mgr.SetEnvSync(syncer)
+
+	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
+	// --sluice-socket is set, which makes the syncer a no-op (rules can still be
+	// authored, just not enforced). Favicons are cached under the state dir.
+	var sluiceClient *netpush.Client
+	if *sluiceSocket != "" {
+		sluiceClient = netpush.NewClient(*sluiceSocket)
+		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
+	}
+	netSyncer := netpush.NewSyncer(sluiceClient, fleet{mgr}, netrulesStore, log)
+	faviconCache := domainmeta.NewFaviconCache(filepath.Join(*stateDir, "favicons"), nil)
+
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
 		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem,
 		"mem_reserve_mb", *memReserve, "overcommit", *memReserve > 0)
@@ -360,6 +385,12 @@ func serve(args []string) error {
 	mgr.ResumePinned(ctx)
 
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
+	// Reconcile egress policy to sluice periodically so VM churn (create, resume,
+	// destroy) that bypasses the console's change-time push still converges. The
+	// console also pushes on every rule/tag mutation for immediacy.
+	if netSyncer.Enabled() {
+		go pushLoop(ctx, netSyncer, log)
+	}
 
 	// The platform scheduler wakes sandboxes to run due cron jobs (the honest
 	// answer to background work in a scale-to-zero world). It ticks every 30s so
@@ -473,7 +504,7 @@ func serve(args []string) error {
 				log.Warn("user console subdomain collides with an existing route, which is now unreachable",
 					"subdomain", *userConsoleSub, "sandbox", rt.Sandbox)
 			}
-			uc := userconsole.New(mgr, routeStore, secretsStore, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, *proxyTLS, log)
+			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, *proxyTLS, log)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain)
 		}
@@ -545,6 +576,38 @@ func serve(args []string) error {
 const defaultAudience = "https://hivemind.wandb.tools"
 
 // splitList parses a comma-separated flag into a trimmed, non-empty list.
+// fleet adapts the host manager to netpush.Fleet: only running sandboxes have a
+// live tap, so paused/archived ones are filtered out here.
+type fleet struct{ mgr *host.Manager }
+
+func (f fleet) List() []netpush.Sandbox {
+	var out []netpush.Sandbox
+	for _, b := range f.mgr.List() {
+		if b.State != vmm.StateRunning {
+			continue
+		}
+		out = append(out, netpush.Sandbox{Name: b.Name, Owner: b.Owner, HostIP: b.HostIP})
+	}
+	return out
+}
+
+// pushLoop reconciles egress policy to sluice on a ticker (and once at start),
+// so fleet changes that skip the console's change-time push still converge.
+func pushLoop(ctx context.Context, s *netpush.Syncer, log *slog.Logger) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		if err := s.Push(ctx); err != nil && ctx.Err() == nil {
+			log.Warn("periodic egress policy push", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
