@@ -155,24 +155,30 @@ func TestSandboxNameFromHost(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"demo.xterm." + testDomain, "demo", true},
-		{"DEMO.XTERM." + strings.ToUpper(testDomain), "demo", true},
-		{"demo.xterm." + testDomain + ":8443", "demo", true},
-		{"fuzzy-otter-2.xterm." + testDomain, "fuzzy-otter-2", true},
+		{"demo-xterm." + testDomain, "demo", true},
+		{"DEMO-XTERM." + strings.ToUpper(testDomain), "demo", true},
+		{"demo-xterm." + testDomain + ":8443", "demo", true},
+		// A sandbox name may itself contain hyphens — the generator emits
+		// nothing else — so only the LAST one separates name from label.
+		{"fuzzy-otter-2-xterm." + testDomain, "fuzzy-otter-2", true},
 		// The zone is checked, so a forged Host cannot point the origin gate at
 		// a hostname this server does not actually answer for.
-		{"demo.xterm.evil.example", "", false},
-		// Bare label, wrong reserved label, and the console's own host.
+		{"demo-xterm.evil.example", "", false},
+		// Bare label, wrong reserved label, the sandbox's own front door, and
+		// the console's host.
 		{"xterm." + testDomain, "", false},
-		{"demo.term." + testDomain, "", false},
+		{"demo-term." + testDomain, "", false},
+		{"demo." + testDomain, "", false},
 		{"my." + testDomain, "", false},
-		// A three-label prefix would mean the edge dispatched something this
-		// handler cannot name.
-		{"a.b.xterm." + testDomain, "", false},
+		// Deeper than one label: the edge claims these (a route could otherwise
+		// be squatted at one) and hands them here to be refused. Answering
+		// "demo" for a.demo-xterm would give one sandbox two origins, which is
+		// exactly what the WebSocket origin gate assumes cannot happen.
+		{"a.demo-xterm." + testDomain, "", false},
 		// Charset: the name reaches host.Manager as a lookup key.
-		{"-lead.xterm." + testDomain, "", false},
-		{"Up_per.xterm." + testDomain, "", false},
-		{"..xterm." + testDomain, "", false},
+		{"-lead-xterm." + testDomain, "", false},
+		{"Up_per-xterm." + testDomain, "", false},
+		{"-xterm." + testDomain, "", false},
 	}
 	for _, c := range cases {
 		got, ok := hz.h.SandboxName(c.host)
@@ -184,7 +190,7 @@ func TestSandboxNameFromHost(t *testing.T) {
 
 func TestPageRequiresAuth(t *testing.T) {
 	hz := newHarness(t, newBox("demo", "alice", vmm.StateRunning))
-	host := "demo.xterm." + testDomain
+	host := "demo-xterm." + testDomain
 
 	// A browser is sent to log in and comes back to exactly where it was.
 	rec := hz.get(t, host, "/", "")
@@ -192,7 +198,7 @@ func TestPageRequiresAuth(t *testing.T) {
 		t.Fatalf("unauthenticated page = %d, want 303", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, "https://login."+testDomain) || !strings.Contains(loc, "demo.xterm") {
+	if !strings.HasPrefix(loc, "https://login."+testDomain) || !strings.Contains(loc, "demo-xterm") {
 		t.Errorf("login redirect = %q, want a return to the terminal", loc)
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" {
@@ -217,7 +223,7 @@ func TestPageRequiresAuth(t *testing.T) {
 
 func TestOwnerScoping(t *testing.T) {
 	hz := newHarness(t, newBox("demo", "alice", vmm.StatePaused))
-	host := "demo.xterm." + testDomain
+	host := "demo-xterm." + testDomain
 
 	if rec := hz.get(t, host, "/", "alice"); rec.Code != http.StatusOK {
 		t.Fatalf("owner page = %d, want 200", rec.Code)
@@ -234,7 +240,7 @@ func TestOwnerScoping(t *testing.T) {
 	// A stranger's answer must be byte-identical to a genuinely absent
 	// sandbox's, or the difference between them is a name-existence oracle.
 	foreign := hz.get(t, host, "/", "mallory")
-	missing := hz.get(t, "nosuchbox.xterm."+testDomain, "/", "mallory")
+	missing := hz.get(t, "nosuchbox-xterm."+testDomain, "/", "mallory")
 	if foreign.Code != http.StatusNotFound {
 		t.Fatalf("cross-owner page = %d, want 404", foreign.Code)
 	}
@@ -263,7 +269,7 @@ func TestCrossOwnerWebSocketIsRefusedBeforeResume(t *testing.T) {
 	for _, handle := range []string{"mallory", "opsy"} {
 		t.Run(handle, func(t *testing.T) {
 			hz := newHarness(t, newBox("demo", "alice", vmm.StatePaused))
-			host := "demo.xterm." + testDomain
+			host := "demo-xterm." + testDomain
 
 			req := httptest.NewRequest(http.MethodGet, "https://"+host+"/ws", nil)
 			req.Host = host
@@ -291,7 +297,7 @@ func TestCrossOwnerWebSocketIsRefusedBeforeResume(t *testing.T) {
 // which is arbitrary user code on a same-site origin — from opening an
 // authenticated shell with the visitor's cookie.
 func TestOriginGate(t *testing.T) {
-	self := "demo.xterm." + testDomain
+	self := "demo-xterm." + testDomain
 	cases := []struct {
 		name   string
 		origin string
@@ -300,10 +306,10 @@ func TestOriginGate(t *testing.T) {
 	}{
 		{"same origin", "https://" + self, false, http.StatusOK},
 		{"another sandbox's page", "https://demo." + testDomain, false, http.StatusForbidden},
-		{"another terminal", "https://other.xterm." + testDomain, false, http.StatusForbidden},
+		{"another terminal", "https://other-xterm." + testDomain, false, http.StatusForbidden},
 		{"the user console", "https://my." + testDomain, false, http.StatusForbidden},
 		{"off-zone attacker", "https://evil.example", false, http.StatusForbidden},
-		// A prefix match would let "https://demo.xterm.hivemind.tools.evil.example"
+		// A prefix match would let "https://demo-xterm.hivemind.tools.evil.example"
 		// through; the comparison is exact.
 		{"suffix trick", "https://" + self + ".evil.example", false, http.StatusForbidden},
 		{"scheme downgrade", "http://" + self, false, http.StatusForbidden},
@@ -351,7 +357,7 @@ func TestOriginGate(t *testing.T) {
 
 func TestHTTP2IsRefusedClearly(t *testing.T) {
 	hz := newHarness(t, newBox("demo", "alice", vmm.StateRunning))
-	self := "demo.xterm." + testDomain
+	self := "demo-xterm." + testDomain
 	req := httptest.NewRequest(http.MethodGet, "https://"+self+"/ws", nil)
 	req.Host = self
 	req.ProtoMajor, req.ProtoMinor = 2, 0
@@ -367,7 +373,7 @@ func TestHTTP2IsRefusedClearly(t *testing.T) {
 
 func TestPageCarriesCSPAndTerminal(t *testing.T) {
 	hz := newHarness(t, newBox("demo", "alice", vmm.StateRunning))
-	rec := hz.get(t, "demo.xterm."+testDomain, "/", "alice")
+	rec := hz.get(t, "demo-xterm."+testDomain, "/", "alice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("page = %d", rec.Code)
 	}
@@ -413,7 +419,7 @@ func TestAssetsAreServedImmutably(t *testing.T) {
 		{"/assets/addon-fit.js", "text/javascript"},
 		{"/assets/addon-web-links.js", "text/javascript"},
 	} {
-		rec := hz.get(t, "demo.xterm."+testDomain, c.path, "")
+		rec := hz.get(t, "demo-xterm."+testDomain, c.path, "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s = %d, want 200", c.path, rec.Code)
 		}
@@ -431,7 +437,7 @@ func TestAssetsAreServedImmutably(t *testing.T) {
 
 func TestUnknownPathIs404(t *testing.T) {
 	hz := newHarness(t, newBox("demo", "alice", vmm.StateRunning))
-	if rec := hz.get(t, "demo.xterm."+testDomain, "/terminal/ws", "alice"); rec.Code != http.StatusNotFound {
+	if rec := hz.get(t, "demo-xterm."+testDomain, "/terminal/ws", "alice"); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown path = %d, want 404", rec.Code)
 	}
 }
@@ -445,15 +451,15 @@ func TestRequestOrigin(t *testing.T) {
 		fwd  string
 		want string
 	}{
-		{false, "", "http://demo.xterm.hivemind.tools"},
-		{true, "", "https://demo.xterm.hivemind.tools"},
-		{false, "https", "https://demo.xterm.hivemind.tools"},
-		{true, "http", "http://demo.xterm.hivemind.tools"},
-		{false, "https, http", "https://demo.xterm.hivemind.tools"},
+		{false, "", "http://demo-xterm.hivemind.tools"},
+		{true, "", "https://demo-xterm.hivemind.tools"},
+		{false, "https", "https://demo-xterm.hivemind.tools"},
+		{true, "http", "http://demo-xterm.hivemind.tools"},
+		{false, "https, http", "https://demo-xterm.hivemind.tools"},
 	}
 	for _, c := range cases {
-		r := httptest.NewRequest(http.MethodGet, "http://demo.xterm.hivemind.tools/ws", nil)
-		r.Host = "demo.xterm.hivemind.tools"
+		r := httptest.NewRequest(http.MethodGet, "http://demo-xterm.hivemind.tools/ws", nil)
+		r.Host = "demo-xterm.hivemind.tools"
 		r.TLS = nil
 		if c.tls {
 			r.TLS = &tls.ConnectionState{}

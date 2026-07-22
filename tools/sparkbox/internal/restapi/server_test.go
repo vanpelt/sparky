@@ -760,7 +760,7 @@ func TestSandboxLifecycle(t *testing.T) {
 	if box.URL != "https://demo."+testDomain {
 		t.Fatalf("url %q", box.URL)
 	}
-	if box.TerminalURL != "https://demo.xterm."+testDomain {
+	if box.TerminalURL != "https://demo-xterm."+testDomain {
 		t.Fatalf("terminal_url %q", box.TerminalURL)
 	}
 

@@ -216,7 +216,7 @@ func TestSandboxInfoCarriesURLs(t *testing.T) {
 	if got.URL != "https://alicebox.example.test" {
 		t.Errorf("URL = %q", got.URL)
 	}
-	if got.TerminalURL != "https://alicebox.xterm.example.test" {
+	if got.TerminalURL != "https://alicebox-xterm.example.test" {
 		t.Errorf("TerminalURL = %q", got.TerminalURL)
 	}
 	if got.Tags == nil {

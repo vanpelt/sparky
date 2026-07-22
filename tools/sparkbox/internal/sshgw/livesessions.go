@@ -72,7 +72,7 @@ const (
 	viaFrontDoor connectVia = iota
 	// viaGateway is the username-routed SSH form, `ssh <name>@<domain>`.
 	viaGateway
-	// viaBrowser is the terminal page, `https://<name>.<xterm>.<domain>`.
+	// viaBrowser is the terminal page, `https://<name>-<xterm>.<domain>`.
 	viaBrowser
 )
 
@@ -230,7 +230,7 @@ func (g *Gateway) hangUp(ls *liveSession, reason string) {
 // rather than inventing a URL that would not resolve.
 func (g *Gateway) reconnectHint(sandbox string, via connectVia) string {
 	if via == viaBrowser && g.domain != "" && g.xtermSubdomain != "" {
-		return "https://" + sandbox + "." + g.xtermSubdomain + "." + g.domain
+		return "https://" + sandbox + "-" + g.xtermSubdomain + "." + g.domain
 	}
 	if g.domain == "" {
 		return "ssh " + sandbox + "@<gateway>"

@@ -131,7 +131,7 @@ func newWSHarness(t *testing.T, state vmm.State) *wsHarness {
 	hz := newHarness(t, &host.Sandbox{Name: "demo", Owner: "alice", State: state,
 		SSHAddr: "127.0.0.1:1", SSHUser: "sparky"})
 	wh := &wsHarness{harness: hz, pty: newFakePTY(),
-		host: "demo.xterm." + testDomain, sessionConn: make(chan SessionConn, 1)}
+		host: "demo-xterm." + testDomain, sessionConn: make(chan SessionConn, 1)}
 
 	hz.h.open = func(_ context.Context, _ *host.Sandbox, _ string, _, _ int) (PTY, error) {
 		return wh.pty, nil

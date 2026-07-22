@@ -23,7 +23,7 @@ type SandboxInfo struct {
 	CreatedAt   time.Time `json:"created_at"`
 	LastActive  time.Time `json:"last_active"`
 	URL         string    `json:"url,omitempty"`          // https://<name>.<domain>
-	TerminalURL string    `json:"terminal_url,omitempty"` // https://<name>.xterm.<domain>
+	TerminalURL string    `json:"terminal_url,omitempty"` // https://<name>-xterm.<domain>
 }
 
 type SnapshotInfo struct {

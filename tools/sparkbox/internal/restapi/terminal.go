@@ -7,7 +7,7 @@ import (
 )
 
 // terminalWS is the WebSocket door onto a sandbox's shell — the same session
-// the page at https://<name>.xterm.<domain> opens, documented here so a
+// the page at https://<name>-xterm.<domain> opens, documented here so a
 // non-browser client can drive it too.
 //
 // It is a GET, so it passes through edgeauth.Require rather than

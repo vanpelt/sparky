@@ -199,24 +199,25 @@ credentials-file: /root/.cloudflared/$TUNNEL.json
 ingress:
   - hostname: "*.catnip.sh"
     service: http://127.0.0.1:8091
-  - hostname: "*.xterm.catnip.sh"          # browser terminals: a second label
-    service: http://127.0.0.1:8091
   - service: http_status:404
 EOF
 
 sudo cloudflared tunnel ingress validate
-sudo cloudflared tunnel route dns sparkbox '*.catnip.sh'         # wildcard CNAME -> tunnel
-sudo cloudflared tunnel route dns sparkbox '*.xterm.catnip.sh'   # browser terminals
+sudo cloudflared tunnel route dns sparkbox '*.catnip.sh'    # wildcard CNAME -> tunnel
 sudo cloudflared service install                            # enabled systemd service
 ```
 
-Both wildcards are required, and the second is not redundant: a wildcard matches
-exactly one label, so neither `*.catnip.sh` the DNS record nor Cloudflare's edge
-certificate covers `demo.xterm.catnip.sh`. Without it the terminal page fails
-inside the TLS handshake, which the browser shows as a certificate interstitial
-and which produces no sparkbox log line at all — so it reads like a DNS bug for
-hours. Skip both lines (and pass `--xterm-subdomain ""`) if you don't want
-browser terminals.
+One wildcard covers everything, browser terminals included: they are served at
+`<name>-xterm.catnip.sh`, a single label. This is why the separator is a hyphen.
+A wildcard matches exactly one label, so `*.catnip.sh` covers neither
+`demo.xterm.catnip.sh` the DNS record nor — and this is the one that cannot be
+fixed by adding a record — Cloudflare's edge certificate, which is issued as
+`catnip.sh, *.catnip.sh` and stops there. A two-label terminal host therefore
+died inside the TLS handshake at Cloudflare with
+`ERR_SSL_VERSION_OR_CIPHER_MISMATCH`, before the tunnel, before the origin, and
+with no sparkbox log line anywhere — so it read like a DNS bug for hours and was
+reachable only over the tailnet. Multi-label edge certificates need Cloudflare's
+paid Advanced Certificate Manager; one hyphen needs nothing.
 
 `cloudflared` preserves the original `Host` header, so sparkbox resolves the
 subdomain and routes to the right sandbox. Wildcard `*.catnip.sh` means every
@@ -280,38 +281,34 @@ certificate that covers it.
 | Flag | Default | What it does | Turn it off with |
 |---|---|---|---|
 | `--api-subdomain` | `api` | `https://api.catnip.sh` — every `ctl@` command as an HTTP call, plus `/docs`, `/openapi.json`, `/openapi.yaml` | `--api-subdomain ""` |
-| `--xterm-subdomain` | `xterm` | `https://<name>.xterm.catnip.sh` — an xterm.js shell in a browser tab | `--xterm-subdomain ""` |
+| `--xterm-subdomain` | `xterm` | `https://<name>-xterm.catnip.sh` — an xterm.js shell in a browser tab | `--xterm-subdomain ""` |
 
 `api.catnip.sh` is a single label, so the wildcard you already have covers it in
-both DNS and TLS: nothing to do. **`<name>.xterm.catnip.sh` is two labels, and a
-wildcard matches exactly one** — RFC 4592 in DNS, RFC 6125 in certificates — so
-it needs its own record and its own certificate name. That is the entire
-operational cost of this feature.
+both DNS and TLS: nothing to do. `<name>-xterm.catnip.sh` is also a single
+label, for exactly that reason — see §5. Neither surface costs a record or a
+certificate name of its own.
+
+The one thing it does cost is a **reserved name suffix**. The edge dispatches
+every subdomain ending in `-xterm` to the terminal handler before it consults a
+route, so a sandbox or route actually named `web-xterm` would be answered by the
+terminal instead of by itself. New ones are refused; anything already on disk
+gets a startup `WARN` naming it.
 
 ### What must exist, and what breaks without it
 
 | Missing | Symptom | Fix |
 |---|---|---|
-| `*.xterm.catnip.sh` DNS | `NXDOMAIN`; the browser never reaches sparkbox | the `cloudflared tunnel route dns` line in §5, or an `A` record |
-| `*.xterm.catnip.sh` in the cert | full-page certificate interstitial, **no sparkbox log line at all** — it fails inside the TLS handshake | see below; check the startup `tls certificates managed` line |
-| tunnel ingress rule | Cloudflare `404`s before the origin is dialled | the second `hostname:` block in §5 |
-| nothing (feature off) | `<name>.xterm.catnip.sh` 404s cleanly, `terminal_url` is absent from API responses, `/v1/capabilities` reports `"terminal":false` | — |
+| `*.catnip.sh` DNS / cert | everything is broken, not just terminals | §5 |
+| tunnel ingress rule | Cloudflare `404`s before the origin is dialled | the `hostname:` block in §5 |
+| nothing (feature off) | `<name>-xterm.catnip.sh` 404s cleanly, `terminal_url` is absent from API responses, `/v1/capabilities` reports `"terminal":false` | — |
 
 Startup tells you which of these you are in. Grep the journal for:
 
 ```
-msg="browser terminals enabled" url=https://<name>.xterm.catnip.sh
+msg="browser terminals enabled" url=https://<name>-xterm.catnip.sh
 msg="rest api enabled" url=https://api.catnip.sh docs=https://api.catnip.sh/docs
-msg="tls certificates managed" names="[catnip.sh *.catnip.sh *.xterm.catnip.sh]"
-msg="browser-terminal wildcard DNS not published" reason=… note=…
+msg="tls certificates managed" names="[catnip.sh *.catnip.sh]"
 ```
-
-The third line is the only place the certificate outcome is visible: the
-`*.xterm` order is issued **separately and non-fatally**, so a zone that cannot
-validate it costs you browser terminals rather than turning a working box into a
-boot loop — but it also means the name is simply absent from that list instead of
-crashing anything. If it is missing, the preceding `WARN browser terminals will
-not be reachable over https` has the ACME error.
 
 ### This box specifically (tunnel + tailnet edge)
 
@@ -320,32 +317,26 @@ path from sparkbox's own `:443` on a dedicated tailnet IP, with cloudflared
 repointed at that as an **https origin** ([`tailnet-edge-design.md`](tailnet-edge-design.md),
 [`dedicated-edge-ip-cutover.md`](dedicated-edge-ip-cutover.md)). It therefore
 **does** carry a `CLOUDFLARE_API_TOKEN`, for the DNS-01 wildcard certificate —
-safe because `--subnet6` stays unset. That shape matters here, because
-cloudflared validates the origin certificate with the original hostname as SNI:
-the `*.xterm` certificate is needed on the origin as well, not only at
-Cloudflare's edge. So:
+safe because `--subnet6` stays unset. That shape is why the terminal hostname
+matters twice over: cloudflared validates the origin certificate with the
+original hostname as SNI, so a name outside the wildcard fails at the origin as
+well as at Cloudflare's edge. With `<name>-xterm.catnip.sh` both are the same
+one certificate. So:
 
-- **The certificate is automatic.** With `--proxy-tls` and the token present,
-  sparkbox asks for `*.xterm.catnip.sh` alongside `*.catnip.sh` on the next
-  restart. Confirm with the `tls certificates managed` line, or from a peer:
-  `openssl s_client -connect 10.66.0.1:443 -servername demo.xterm.catnip.sh </dev/null 2>/dev/null | openssl x509 -noout -text | grep DNS:`
-- **The tailnet path needs no DNS work.** Split-DNS sends the whole `catnip.sh`
-  zone to the edge, and the built-in `dnsedge` responder answers the entire
-  subtree, `a.b.catnip.sh` included.
-- **The public path is manual, and stays manual.** The record must be a
-  *proxied* `CNAME` to `<uuid>.cfargotunnel.com`; sparkbox does not know the
-  tunnel UUID and cannot compute it. Run the `cloudflared tunnel route dns
-  sparkbox '*.xterm.catnip.sh'` line from §5 and add the matching `ingress`
-  block. Add the ingress rule explicitly rather than relying on `*.catnip.sh` to
-  glob across the extra label — one line of config is cheaper than finding out
-  in production.
-- **The wildcard publisher will stand down**, because `--edge-v4` is not set on
-  this box: `WARN browser-terminal wildcard DNS not published … reason="no edge
-  address (pass --edge-v4)"`. That is correct here. Do **not** add `--edge-v4`
-  to make the warning go away — it would publish an `A` record at that address
-  for the whole subtree. (It would not actually clobber the tunnel: the
-  publisher reads the zone first and leaves an existing `CNAME` alone. Do not
-  rely on that.)
+- **Nothing to do for terminals, on either path.** The wildcard `*.catnip.sh` —
+  the DNS record, Cloudflare's edge certificate, and sparkbox's own DNS-01
+  certificate — already covers them. Confirm from a peer:
+  `openssl s_client -connect 10.66.0.1:443 -servername demo-xterm.catnip.sh </dev/null 2>/dev/null | openssl x509 -noout -text | grep DNS:`
+- **This is what the two-label form cost.** `demo.xterm.catnip.sh` worked over
+  the tailnet (split-DNS sends the whole zone to the edge, and `dnsedge` answers
+  the entire subtree) and died on the public path at Cloudflare's universal
+  certificate. Anyone off the tailnet — or on it but using an exit node, which
+  routes DNS through the exit node and quietly bypasses the split-DNS route —
+  got `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` and nothing in any log.
+- **Sanity check when a terminal misbehaves:** compare
+  `dig +short <name>-xterm.catnip.sh` against `dig +short @10.66.0.1
+  <name>-xterm.catnip.sh`. Cloudflare anycast IPs from the first mean you are on
+  the public path (which now works); `10.66.0.1` means the tailnet edge.
 
 Verify the whole thing end to end from a laptop:
 
@@ -372,7 +363,7 @@ ssh -p 2222 <name>@<host>                        # shell in (arm64, docker, /dev
 ssh -p 2222 ctl@<host> share <name> public       # expose its URL (routes are private by default)
 curl https://<name>.catnip.sh                    # served through the tunnel
 
-open https://<name>.xterm.catnip.sh              # a shell in a browser tab
+open https://<name>-xterm.catnip.sh              # a shell in a browser tab
 TOKEN=$(ssh -p 2222 ctl@<host> session-token | tr -d '\r\n')
 curl -H "Authorization: Bearer $TOKEN" https://api.catnip.sh/v1/sandboxes
 ```

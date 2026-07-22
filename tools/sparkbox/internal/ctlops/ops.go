@@ -359,7 +359,7 @@ func (o *Ops) info(b *host.Sandbox) SandboxInfo {
 	if o.domain != "" {
 		si.URL = "https://" + b.Name + "." + o.domain
 		if o.xtermSubdomain != "" {
-			si.TerminalURL = "https://" + b.Name + "." + o.xtermSubdomain + "." + o.domain
+			si.TerminalURL = "https://" + b.Name + "-" + o.xtermSubdomain + "." + o.domain
 		}
 	}
 	return si

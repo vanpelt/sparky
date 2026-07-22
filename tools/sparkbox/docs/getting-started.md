@@ -112,7 +112,7 @@ ssh -p 2222 ctl@<host> help     # account/keys/routes/schedule controls
 ```
 
 The same commands are also a REST API at `api.<domain>` and each sandbox also
-has a shell in a browser tab at `<name>.xterm.<domain>` — both need the HTTPS
+has a shell in a browser tab at `<name>-xterm.<domain>` — both need the HTTPS
 edge, so see *Day-2* below.
 
 Web routes are live at `http://<name>.<proxy-domain>:8081` immediately. For a
@@ -132,7 +132,7 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   (run it under TLS) to get `console.<domain>`.
 - **REST API + browser terminals.** Both are on by default once the HTTPS edge
   is up: `https://api.<domain>/docs` documents every `ctl@` command as an HTTP
-  call, and `https://<name>.xterm.<domain>` is a shell in a browser tab. The
+  call, and `https://<name>-xterm.<domain>` is a shell in a browser tab. The
   credential for both is a session token minted from your SSH key.
   ```sh
   # `session-token` speaks the ctl channel's CRLF, so strip the \r or the
@@ -151,15 +151,15 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   snapshots, schedules, terminals) so you can check before an endpoint answers
   `501`.
 
-  The terminal needs a **second** wildcard, `*.xterm.<domain>`, in DNS *and* in
-  the certificate — a wildcard covers exactly one label. sparkbox asks for the
-  certificate when `CLOUDFLARE_API_TOKEN` is set, and publishes the DNS record
-  when `--edge-v4` is set too (it has no address to point it at otherwise);
-  publish that record yourself if either is missing (see
-  [deploy-dns.md](deploy-dns.md)). A missing record is NXDOMAIN; a missing
-  certificate name is a browser interstitial with no server-side log line, so
-  check the `tls certificates managed` line at startup. Move or disable either
-  surface with `--api-subdomain` / `--xterm-subdomain`.
+  The terminal host is **one label** — `<name>-xterm.<domain>`, hyphen, not
+  `<name>.xterm.<domain>` — so the `*.<domain>` wildcard you already have in DNS
+  and in the certificate covers it, and there is nothing further to publish.
+  (A wildcard matches exactly one label, so the dotted form needed a second
+  wildcard of each; Cloudflare's universal certificate will not issue one, which
+  made browser terminals fail with `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` for
+  anyone off the tailnet.) The price is a reserved suffix: sandbox names and
+  route subdomains may not end in `-xterm`, and the store refuses them. Move or
+  disable either surface with `--api-subdomain` / `--xterm-subdomain`.
 - **IPv6 per sandbox.** With a routed `/64`, set `SUBNET6` + `SUBNET6_FLAG` in
   `sparkbox.env`; see the README's IPv6 section.
 - **Add users.** Operators mint invite codes (`ssh -p 2222 ctl@<host> invite`);

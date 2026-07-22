@@ -178,7 +178,9 @@ func (b *blob) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // specHosts are the three subtrees the canonical document names by label:
 // api.<zone> in servers[0].url and every curl snippet built from it,
-// xterm.<zone> in the terminal examples, login.<zone> in the auth prose. They
+// xterm.<zone> in the terminal examples — where it appears as the tail of
+// <name>-xterm.<zone>, which substitutes correctly for the same reason a bare
+// api.<zone> does — and login.<zone> in the auth prose. They
 // are all relocatable at runtime (--api-subdomain, --xterm-subdomain,
 // --login-subdomain), so substituting only the zone would leave a relabelled
 // deployment's docs page pointing every one of its copy-paste examples at a

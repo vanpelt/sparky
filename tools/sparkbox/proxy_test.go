@@ -7,6 +7,7 @@ package sparkbox_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
@@ -246,9 +248,12 @@ func TestReservedSubdomainBeatsRouteLookup(t *testing.T) {
 	}
 
 	// A reserved SUFFIX must beat the route table for the same reason, and the
-	// attack is real rather than theoretical: routes.ValidSubdomain permits
-	// dotted subdomains, so mallory can register the exact host alice's browser
-	// terminal lives on. Route-lookup-first would hand her the shell page.
+	// attack is real rather than theoretical: subdomains may contain hyphens
+	// (the advertised `web-myvm` shape), so a row named "victim-xterm" is the
+	// exact host alice's browser terminal lives on. ValidSubdomain refuses that
+	// name now, but this store write bypasses it deliberately — rows predating
+	// the rule exist, and the edge must not depend on the store to be safe.
+	// Route-lookup-first would hand mallory the shell page.
 	ps.proxy.(*proxy.Server).SetReservedSuffix("xterm", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name, ok := proxy.SuffixName(r)
 		if !ok {
@@ -256,14 +261,39 @@ func TestReservedSubdomainBeatsRouteLookup(t *testing.T) {
 		}
 		fmt.Fprint(w, "xterm-handler:"+name)
 	}))
+	// The store refuses the name outright — the first line of defence, and the
+	// one that keeps an operator from creating this by accident.
 	if err := ps.store.Upsert(routes.Route{
-		Subdomain: "victim.xterm", Sandbox: "taken", Owner: "mallory", Port: 8000,
-	}); err != nil {
-		t.Fatal(err)
+		Subdomain: "victim-xterm", Sandbox: "taken", Owner: "mallory", Port: 8000,
+	}); err == nil {
+		t.Fatal("store accepted a route ending in the reserved terminal suffix")
 	}
-	code, body = ps.get(t, "victim.xterm.hivemind.tools")
+	// Which is exactly why the row here is written behind its back: a database
+	// predating the rule can hold one, and the edge's ordering must hold on its
+	// own rather than by trusting whatever put the row there.
+	insertRouteRaw(t, ps.dir, "victim-xterm", "taken", "mallory", 8000)
+
+	code, body = ps.get(t, "victim-xterm.hivemind.tools")
 	if code != http.StatusOK || body != "xterm-handler:victim" {
 		t.Fatalf("hostile route shadowed the xterm suffix: %d %q", code, body)
+	}
+}
+
+// insertRouteRaw writes a routes row straight to sqlite, bypassing the store's
+// validation. Only for constructing states the store will no longer produce but
+// an older one might have left on disk.
+func insertRouteRaw(t *testing.T, dir, subdomain, sandbox, owner string, port int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "sparkbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(
+		`INSERT INTO routes (subdomain, sandbox, owner, port, visibility, created_at) VALUES (?,?,?,?,?,?)`,
+		subdomain, sandbox, owner, port, routes.VisibilityPrivate, time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

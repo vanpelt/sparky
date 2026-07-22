@@ -90,7 +90,7 @@ curl -sH "$AUTH" -H 'Content-Type: application/json' \
      -d '{"tags":["prod"]}' $API/v1/sandboxes
 # {"name":"plucky-panda","state":"running","tags":["prod"],…,
 #  "url":"https://plucky-panda.hivemind.tools",
-#  "terminal_url":"https://plucky-panda.xterm.hivemind.tools"}
+#  "terminal_url":"https://plucky-panda-xterm.hivemind.tools"}
 curl -sH "$AUTH" $API/v1/sandboxes          # {"sandboxes":[…]}
 
 # act on one; retype the tag set; free the slot
@@ -114,7 +114,7 @@ either way you poll `/v1/jobs/{id}`. Asking twice for the same work on the same
 sandbox returns the job already running rather than starting a second one, and
 `Idempotency-Key` replays any mutation for 24 hours.
 
-The browser terminal is `https://<name>.xterm.<domain>` — an xterm.js page over
+The browser terminal is `https://<name>-xterm.<domain>` — an xterm.js page over
 an authenticated WebSocket into a real PTY in that sandbox, with the same
 resume-on-connect as `ssh <name>@<domain>`. Open it and you get a shell; nothing
 to install, and the sign-in is the same passkey/token flow as any private route.
@@ -133,13 +133,15 @@ not, so a forgotten tab cannot pin a sandbox warm forever.
 `--api-subdomain` and `--xterm-subdomain` move or disable either surface. See
 [`docs/rest-api-and-xterm-design.md`](docs/rest-api-and-xterm-design.md).
 
-> The terminal needs a **second** wildcard in DNS and TLS: a wildcard matches
-> exactly one label, so `*.<domain>` does not cover `<name>.xterm.<domain>`.
-> With `CLOUDFLARE_API_TOKEN` **and** `--edge-v4` both set, sparkbox publishes
-> `*.xterm.<domain>` itself; it asks for the extra certificate on the token
-> alone. Otherwise publish the record by hand (`docs/deploy-dns.md`) — a missing
-> record is NXDOMAIN, a missing certificate name is an interstitial, and either
-> way the startup log names what it skipped and why.
+> The terminal host is one label on purpose. A wildcard matches exactly one
+> label — RFC 4592 in DNS, RFC 6125 in certificates — so the dotted
+> `<name>.xterm.<domain>` would need a second wildcard in *both*, and hosted TLS
+> front ends generally will not issue it: Cloudflare's universal certificate is
+> `<domain>, *.<domain>` and stops there, so the deeper name dies inside the TLS
+> handshake with `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` and no sparkbox log line
+> to explain it. `<name>-xterm.<domain>` needs nothing beyond the `*.<domain>`
+> record and certificate every sandbox front door already uses. The cost is a
+> reserved name suffix: sandboxes and routes may not end in `-xterm`.
 
 ## Architecture
 
@@ -155,7 +157,7 @@ internal/host           manager: sandbox records, JSON state, idle reaper
 internal/ctlops         control-plane core: one method per ctl@ command,
                         shared by the SSH channel, the REST API and the terminal
 internal/restapi        authenticated REST surface at api.<domain> + OpenAPI
-internal/xterm          browser terminal at <name>.xterm.<domain> (WebSocket→PTY)
+internal/xterm          browser terminal at <name>-xterm.<domain> (WebSocket→PTY)
 internal/api            legacy loopback-only CRUD API — never mount on the edge
 internal/vmm            driver interface
 internal/vmm/mock       fake VMs (in-process ssh servers) — runs anywhere
@@ -213,10 +215,9 @@ host and add `--proxy-tls`. Two providers:
   no per-name issuance and no brush with Let's Encrypt rate limits regardless of
   how many ephemeral sandboxes churn. Needs a scoped `Zone.DNS:Edit` token in
   `CLOUDFLARE_API_TOKEN`; no inbound port 80/443 needed for issuance (DNS-01).
-  With `--xterm-subdomain` set (the default), a second wildcard
-  `*.xterm.hivemind.tools` is requested alongside it — separately, and
-  non-fatally, so a zone that cannot validate it costs you browser terminals
-  rather than turning the box into a boot loop. The startup log line
+  That one pair is everything — browser terminals live at
+  `<name>-xterm.hivemind.tools`, a single label, so they are covered by the same
+  wildcard rather than needing one of their own. The startup log line
   `tls certificates managed` reports what was actually obtained.
 - **`--tls-provider autocert`** — per-host certificates issued on demand via
   TLS-ALPN-01/HTTP-01 (no DNS API needed, but needs `:443` + port `80`

@@ -32,10 +32,10 @@ func TestSubdomainOf(t *testing.T) {
 		{"myvm.hivemind.tools:8081", "myvm", true},
 		// Two labels: the whole prefix comes back as one string, which is why
 		// the reserved map can never match these and suffix dispatch exists.
-		{"demo.xterm.hivemind.tools", "demo.xterm", true},
+		{"demo-xterm.hivemind.tools", "demo-xterm", true},
 		{"api.myvm.hivemind.tools", "api.myvm", true},
 		// Three labels are not special-cased either.
-		{"a.b.xterm.hivemind.tools", "a.b.xterm", true},
+		{"a.b-xterm.hivemind.tools", "a.b-xterm", true},
 		// The apex has no subdomain, and neither does a foreign host.
 		{"hivemind.tools", "", false},
 		{"hivemind.tools:443", "", false},
@@ -70,20 +70,23 @@ func TestSuffixDispatch(t *testing.T) {
 		host string
 		want string // "" means "not dispatched to a built-in handler"
 	}{
-		{"demo.xterm.hivemind.tools", "xterm:demo"},
-		{"demo.XTERM.hivemind.tools", "xterm:demo"},
-		{"demo.xterm.hivemind.tools:8443", "xterm:demo"},
+		{"demo-xterm.hivemind.tools", "xterm:demo"},
+		{"demo-XTERM.hivemind.tools", "xterm:demo"},
+		{"demo-xterm.hivemind.tools:8443", "xterm:demo"},
 		// The whole subtree belongs to the handler, however deep. Falling
-		// through here would leave a "a.b.xterm" route row able to squat it.
-		{"a.b.xterm.hivemind.tools", "xterm:a.b"},
+		// through here would leave a "a.b-xterm" route row able to squat it.
+		{"a.b-xterm.hivemind.tools", "xterm:a.b"},
 		// Exact reservations still win, and unrelated hosts are untouched.
 		{"console.hivemind.tools", "console"},
 		{"myvm.hivemind.tools", ""},
 		// The bare label is not claimed by SetReservedSuffix.
 		{"xterm.hivemind.tools", ""},
-		// Neither is a different suffix that merely contains the label.
-		{"demo.notxterm.hivemind.tools", ""},
-		{"demo.xterm2.hivemind.tools", ""},
+		// Neither is a different suffix that merely contains the label, nor a
+		// name the label is only a prefix of — the split is on the last hyphen,
+		// so "demoxterm" and "demo-xterm2" are ordinary route lookups.
+		{"demo-notxterm.hivemind.tools", ""},
+		{"demo-xterm2.hivemind.tools", ""},
+		{"demoxterm.hivemind.tools", ""},
 	}
 	for _, c := range cases {
 		sub, ok := s.subdomainOf(c.host)

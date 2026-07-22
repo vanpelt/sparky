@@ -32,10 +32,36 @@ var reservedNames = map[string]bool{
 	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
 	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
 	"my": true,
-	// "xterm" is the browser terminal's label: the edge owns the whole
-	// *.xterm.<domain> subtree, and a sandbox called "xterm" would additionally
-	// claim the bare xterm.<domain>. "api" is the REST edge.
+	// "xterm" is the browser terminal's label and "api" is the REST edge; both
+	// name a door of their own at <label>.<domain>.
 	"xterm": true, "api": true,
+}
+
+// reservedSuffixes are name endings the edge claims before it ever consults a
+// route: the browser terminal for sandbox "demo" is served at
+// "demo-xterm.<domain>", so a sandbox actually NAMED "web-xterm" would have its
+// own front door answered by the terminal handler and be unreachable over HTTP.
+// Refusing the name is the only place that stays fixable — by the time the
+// request arrives the edge cannot tell the two apart.
+//
+// Own copy of the literal rather than xterm.ReservedSuffix: that package
+// imports this one, so the dependency cannot run the other way. It follows the
+// same deliberate-duplication convention as reservedNames above, and
+// cmd/sparkbox warns at startup for any label an operator configured instead.
+var reservedSuffixes = []string{"-xterm"}
+
+// reservedName reports whether name is one the platform has claimed, either
+// outright or by suffix.
+func reservedName(name string) bool {
+	if reservedNames[name] {
+		return true
+	}
+	for _, suffix := range reservedSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
@@ -490,7 +516,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	if !nameRe.MatchString(name) {
 		return nil, &NameError{Problem: NameInvalid, Noun: "sandbox", Name: name}
 	}
-	if reservedNames[name] {
+	if reservedName(name) {
 		return nil, &NameError{Problem: NameReserved, Noun: "sandbox", Name: name}
 	}
 	if vcpus <= 0 {
@@ -1051,7 +1077,7 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 	if !nameRe.MatchString(newName) {
 		return &NameError{Problem: NameInvalid, Noun: "sandbox", Name: newName}
 	}
-	if reservedNames[newName] {
+	if reservedName(newName) {
 		return &NameError{Problem: NameReserved, Noun: "sandbox", Name: newName}
 	}
 	m.mu.Lock()

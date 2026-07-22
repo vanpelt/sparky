@@ -35,6 +35,30 @@ this text disagree, the code wins. Deviations worth knowing about:
   them as the same session. A PTY is not the metadata authority the userconsole
   bypass grants: it hands over the owner's credentials, agent tokens and repos
   on a cookie alone.
+- **The terminal host is `<name>-xterm.<domain>`, not `<name>.xterm.<domain>`**
+  (changed 2026-07-22; everything below describing the dotted form is historical).
+  The dotted form is two labels, and a wildcard matches exactly one — RFC 4592 in
+  DNS, RFC 6125 in certificates — which this design accounted for with a second
+  wildcard record and a second ACME order. Both worked. What they could not fix
+  is a hosted TLS front end that terminates in front of sparkbox with a
+  certificate it issued for the zone: Cloudflare's universal certificate is
+  `<domain>, *.<domain>`, the deeper name is not in it, and multi-label coverage
+  needs the paid Advanced Certificate Manager. So the public path died inside the
+  TLS handshake with `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` — before the tunnel,
+  before the origin, with no sparkbox log line — and terminals worked only over
+  the tailnet, where split-DNS and the built-in `dnsedge` responder answer the
+  whole subtree. One hyphen puts the terminal back under the wildcard that
+  already exists for every sandbox front door, and both the second wildcard order
+  (`wildcardTLSConfig`) and the wildcard publisher (`publishXtermWildcard`,
+  `frontdoor.PublishWildcard`) were deleted rather than kept.
+
+  The cost is a reserved suffix. `proxy.SetReservedSuffix` now claims every
+  subdomain ending in `-xterm`, before the route lookup — same ordering, same
+  security property, since a route row named `victim-xterm` is as creatable as
+  `victim.xterm` was. So `host.Manager` and `routes.ValidSubdomain` refuse names
+  ending that way, and `cmd/sparkbox` warns at startup about any that predate the
+  rule. If a future surface wants a subtree of its own, it should take a hyphen
+  too.
 
 Verified end to end against the mock driver: `POST /v1/sandboxes` →
 `terminal_url` → page → `101` upgrade → a live shell prompt; a cross-owner

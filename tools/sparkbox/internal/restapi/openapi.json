@@ -51,7 +51,7 @@
     },
     {
       "name": "terminal",
-      "description": "The browser terminal's WebSocket, the same one https://<name>.xterm.example.com opens."
+      "description": "The browser terminal's WebSocket, the same one https://<name>-xterm.example.com opens."
     },
     {
       "name": "jobs",
@@ -217,7 +217,7 @@
                       "created_at": "2026-07-19T10:04:11Z",
                       "last_active": "2026-07-21T18:22:03Z",
                       "url": "https://dazzling-canyon.example.com",
-                      "terminal_url": "https://dazzling-canyon.xterm.example.com"
+                      "terminal_url": "https://dazzling-canyon-xterm.example.com"
                     }
                   ]
                 }
@@ -680,7 +680,7 @@
         "operationId": "attach",
         "tags": ["terminal"],
         "summary": "Open a shell over a WebSocket",
-        "description": "Upgrades to a WebSocket carrying a PTY inside the sandbox — the same session the page at `https://<name>.xterm.example.com` opens. The sandbox is resumed if it is paused; the ownership check happens first, so this can never wake someone else's VM.\n\n**Framing.** Terminal bytes travel in **binary** frames in both directions, unmodified: PTY output splits multi-byte characters across reads, and a text frame would have to be valid UTF-8. Set `binaryType = 'arraybuffer'` on the client.\n\nControl messages are **text** frames carrying JSON:\n\n    {\"type\":\"resize\",\"rows\":40,\"cols\":120}\n\nSend one immediately after connecting and on every resize.\n\n**Close codes.** `4001` the shell exited normally (the value the exe-ssh terminal-over-HTTPS design reserves for the same meaning); `4002` the host hung the session up — a pause, an idle reap, or a redeploy — which is the signal to offer a reconnect; `4003` the sandbox could not be attached to. `1000` is not sent.\n\n**Authentication.** This is a `GET`, so it takes the session cookie a browser sends automatically; a non-browser client sends `Authorization: Bearer`. Because a browser cannot attach a custom header to a handshake, the CSRF gate is replaced by an `Origin` check on the upgrade itself.",
+        "description": "Upgrades to a WebSocket carrying a PTY inside the sandbox — the same session the page at `https://<name>-xterm.example.com` opens. The sandbox is resumed if it is paused; the ownership check happens first, so this can never wake someone else's VM.\n\n**Framing.** Terminal bytes travel in **binary** frames in both directions, unmodified: PTY output splits multi-byte characters across reads, and a text frame would have to be valid UTF-8. Set `binaryType = 'arraybuffer'` on the client.\n\nControl messages are **text** frames carrying JSON:\n\n    {\"type\":\"resize\",\"rows\":40,\"cols\":120}\n\nSend one immediately after connecting and on every resize.\n\n**Close codes.** `4001` the shell exited normally (the value the exe-ssh terminal-over-HTTPS design reserves for the same meaning); `4002` the host hung the session up — a pause, an idle reap, or a redeploy — which is the signal to offer a reconnect; `4003` the sandbox could not be attached to. `1000` is not sent.\n\n**Authentication.** This is a `GET`, so it takes the session cookie a browser sends automatically; a non-browser client sends `Authorization: Bearer`. Because a browser cannot attach a custom header to a handshake, the CSRF gate is replaced by an `Origin` check on the upgrade itself.",
         "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
         "responses": {
           "101": {
@@ -1727,7 +1727,7 @@
             "type": "string",
             "format": "uri",
             "description": "The browser terminal, when this host serves them.",
-            "example": "https://demo.xterm.example.com"
+            "example": "https://demo-xterm.example.com"
           }
         }
       },

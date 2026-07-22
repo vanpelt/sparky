@@ -438,7 +438,7 @@ func TestControlWhoami(t *testing.T) {
 // reachable from a browser and from HTTP.
 func TestControlUsageDocumentsTheOtherDoors(t *testing.T) {
 	for _, want := range []string{
-		"https://<name>.xterm.<domain>",
+		"https://<name>-xterm.<domain>",
 		"https://api.<domain>",
 		"/docs",
 		"session-token",

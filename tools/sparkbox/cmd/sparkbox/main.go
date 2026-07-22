@@ -117,14 +117,14 @@ func serve(args []string) error {
 		sluiceSocket   = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
 		proxyAddr      = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain    = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
-		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A), and it is the address the browser terminals' *.<xterm-subdomain>.<domain> wildcard is published at. Point it at the same address the wildcard *.<domain> A does")
+		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
 		proxyTLS       = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
 		consolePass    = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
 		consoleSub     = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
 		loginSub       = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
 		userConsoleSub = fs.String("user-console-subdomain", "my", "subdomain serving the per-user console (empty disables it)")
 		apiSub         = fs.String("api-subdomain", "api", "subdomain serving the authenticated REST API and its OpenAPI docs at <api-subdomain>.<domain>/docs (empty disables it); authenticate with a token from 'ssh ctl@<domain> session-token'")
-		xtermSub       = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "subdomain subtree serving browser terminals at <name>.<xterm-subdomain>.<domain> (empty disables them); needs its own wildcard TLS name, arranged by --proxy-tls with CLOUDFLARE_API_TOKEN, and its own wildcard DNS record, published only when --edge-v4 is set as well")
+		xtermSub       = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "name suffix serving browser terminals at <name>-<xterm-subdomain>.<domain> (empty disables them); it is one label on purpose, so the zone's existing *.<domain> wildcard covers it in both DNS and TLS with nothing further to publish. Sandbox and route names ending in -<xterm-subdomain> are refused, since the edge answers them here")
 		sessionTTL     = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
 		tlsProvider    = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail       = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
@@ -261,9 +261,8 @@ func serve(args []string) error {
 	}
 	nodeName, _ := os.Hostname()
 
-	// --edge-v4 feeds two independent DNS publishers — the per-name front-door
-	// A records below and the browser terminals' *.<xterm>.<domain> wildcard —
-	// so parse it once, here, and let a malformed value be reported once too.
+	// --edge-v4 feeds the per-name front-door A records below. Parsed here, once,
+	// so a malformed value is reported once too.
 	var edgeAddrs []netip.Addr
 	if *edgeV4 != "" {
 		if a, perr := netip.ParseAddr(*edgeV4); perr == nil && a.Is4() {
@@ -542,12 +541,12 @@ func serve(args []string) error {
 
 		// Browser terminals: one host per sandbox, so the browser's own origin
 		// isolation keeps one sandbox's page from scripting another's socket.
-		// That costs a second wildcard in both DNS and TLS, because a wildcard
-		// matches exactly one label — see wildcardTLSConfig and
-		// publishXtermWildcard, which are the other two thirds of this feature.
+		// The host is <name>-xterm.<domain> — one label, so it costs no wildcard
+		// of its own in either DNS or TLS. It buys that with a name suffix the
+		// platform has to reserve; see proxy.SetReservedSuffix.
 		var xt *xterm.Handler
 		if xtermLabel != "" {
-			warnXtermSubtreeCollision(xtermLabel, routeStore, log)
+			warnXtermSuffixCollision(xtermLabel, mgr, routeStore, log)
 			xt = xterm.New(xterm.Config{
 				Sandboxes: mgr, Accounts: userStore, Sessions: sessionSigner,
 				UpstreamKey: upstreamKey,
@@ -562,7 +561,7 @@ func serve(args []string) error {
 				Log: log,
 			})
 			px.SetReservedSuffix(xtermLabel, xt.Handler())
-			log.Info("browser terminals enabled", "url", "https://<name>."+xtermLabel+"."+*proxyDomain)
+			log.Info("browser terminals enabled", "url", "https://<name>-"+xtermLabel+"."+*proxyDomain)
 		}
 
 		// The REST API mirrors the ctl@ command surface for callers that have a
@@ -608,15 +607,13 @@ func serve(args []string) error {
 		if *proxyTLS {
 			log.Info("obtaining TLS certificate", "provider", *tlsProvider, "domain", *proxyDomain)
 			names, terr := setupProxyTLS(ctx, proxySrv, tlsParams{
-				provider: *tlsProvider, domain: *proxyDomain, email: *tlsEmail, stateDir: *stateDir,
-				xtermSub: xtermLabel, log: log,
+				provider: *tlsProvider, domain: *proxyDomain, email: *tlsEmail,
+				stateDir: *stateDir, log: log,
 			})
 			if terr != nil {
 				return fmt.Errorf("proxy tls: %w", terr)
 			}
-			// Report what was actually obtained, not what was asked for: the
-			// terminal wildcard is issued non-fatally, and its absence otherwise
-			// surfaces only as a certificate interstitial with no log line.
+			// Report what was actually obtained, not what was asked for.
 			// autocert reports nothing — it issues per-SNI on first request.
 			log.Info("tls certificates managed", "names", names)
 			// Sniff each connection below TLS: a cleartext-HTTP client that
@@ -632,11 +629,9 @@ func serve(args []string) error {
 		} else {
 			go func() { errCh <- proxySrv.ListenAndServe() }()
 		}
-		// The DNS half of the browser terminal, published once and never
-		// removed. Best-effort by design: it declines (loudly, naming the record
-		// an operator would write) whenever it cannot safely act — see
-		// publishXtermWildcard.
-		publishXtermWildcard(ctx, *proxyDomain, xtermLabel, edgeAddrs, log)
+		// No DNS half to publish: <name>-xterm.<domain> is one label, so the
+		// same wildcard record that already answers for every sandbox front door
+		// answers for its terminal too.
 	}
 
 	log.Info("sparkbox up", "driver", *driverName, "ssh", *sshAddr, "api", *apiAddr,
@@ -696,19 +691,28 @@ func warnSubdomainCollision(what, sub string, mgr *host.Manager, rs *routes.Stor
 	}
 }
 
-// warnXtermSubtreeCollision is the same warning for a whole subtree rather than
-// one name. It needs its own scan because route subdomains may contain dots (the
-// advertised `api.myvm` shape), so a row literally named "<something>.xterm" is
-// creatable and is now shadowed by the terminal handler.
-func warnXtermSubtreeCollision(label string, rs *routes.Store, log *slog.Logger) {
+// warnXtermSuffixCollision is the same warning for a family of names rather
+// than one name. Every subdomain ending in "-<label>" now reaches the terminal
+// handler before any route lookup, so a sandbox or route that predates the
+// reservation — or one created under a different --xterm-subdomain, which the
+// stores' own hardcoded "-xterm" cannot know about — goes dark with nothing in
+// the request to explain it. The stores refuse new such names; this reports the
+// ones already on disk.
+func warnXtermSuffixCollision(label string, mgr *host.Manager, rs *routes.Store, log *slog.Logger) {
+	suffix := xterm.ReservedSuffix(strings.ToLower(label))
+	for _, b := range mgr.List() {
+		if strings.HasSuffix(strings.ToLower(b.Name), suffix) {
+			log.Warn("sandbox name ends in the browser-terminal suffix, so its web front door is now unreachable",
+				"sandbox", b.Name, "suffix", suffix)
+		}
+	}
 	all, err := rs.List()
 	if err != nil {
 		return // a startup courtesy, not a precondition
 	}
-	suffix := "." + strings.ToLower(label)
 	for _, rt := range all {
 		if strings.HasSuffix(strings.ToLower(rt.Subdomain), suffix) {
-			log.Warn("browser-terminal subtree collides with an existing route, which is now unreachable",
+			log.Warn("route subdomain ends in the browser-terminal suffix, so it is now unreachable",
 				"subdomain", rt.Subdomain, "sandbox", rt.Sandbox)
 		}
 	}

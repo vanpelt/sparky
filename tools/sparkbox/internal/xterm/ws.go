@@ -82,7 +82,7 @@ const (
 	touchInterval = time.Minute
 )
 
-// ws is the browser entry point: GET /ws on <name>.xterm.<domain>.
+// ws is the browser entry point: GET /ws on <name>-xterm.<domain>.
 //
 // The origin gate runs before the ownership check, not after, and the order is
 // load-bearing: answering a foreign origin 404-for-someone-else's-box but

@@ -285,3 +285,29 @@ func TestRenameSandboxWithoutDefaultRoute(t *testing.T) {
 		t.Fatal("no default route should have been created")
 	}
 }
+
+// A subdomain ending in the browser terminal's suffix is dispatched to the
+// terminal handler by the proxy edge before any route lookup runs, so a row
+// here would be accepted, listed, and then never served. Refusing it at the
+// door is the only way the operator finds out.
+func TestReservedTerminalSuffixIsRefused(t *testing.T) {
+	for _, sub := range []string{"demo-xterm", "web-xterm", "api.demo-xterm"} {
+		if ValidSubdomain(sub) {
+			t.Errorf("ValidSubdomain(%q) = true, want false", sub)
+		}
+	}
+	// Only as a trailing segment. "xterm-web" is served normally, and the
+	// advertised dotted and hyphenated shapes must keep working.
+	for _, sub := range []string{"xterm-web", "xtermite", "web-myvm", "api.myvm", "myvm"} {
+		if !ValidSubdomain(sub) {
+			t.Errorf("ValidSubdomain(%q) = false, want true", sub)
+		}
+	}
+}
+
+func TestUpsertRefusesReservedSuffix(t *testing.T) {
+	s := openTemp(t)
+	if err := s.Upsert(Route{Subdomain: "demo-xterm", Sandbox: "demo", Owner: "alice", Port: DefaultPort}); err == nil {
+		t.Fatal("upsert accepted a subdomain the edge will never route here")
+	}
+}

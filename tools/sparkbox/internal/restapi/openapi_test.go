@@ -262,10 +262,13 @@ func TestSpecForRewritesRelocatedSubtrees(t *testing.T) {
 			}
 		}
 		for _, want := range []string{
-			"https://rest.catnip.sh",   // servers[0].url, and every snippet built from it
-			"<name>.shell.catnip.sh",   // the terminal examples
+			"https://rest.catnip.sh", // servers[0].url, and every snippet built from it
+			// The terminal label is the TAIL of a one-label host, so relabelling
+			// has to reach inside "<name>-xterm.<zone>" and leave the hyphen and
+			// the sandbox name alone.
+			"<name>-shell.catnip.sh",   // the terminal examples
 			"https://signin.catnip.sh", // the sign-in prose
-			"demo.shell.catnip.sh",     // the terminal_url example value
+			"demo-shell.catnip.sh",     // the terminal_url example value
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s does not name %q", b.contentType, want)

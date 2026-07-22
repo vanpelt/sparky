@@ -54,7 +54,7 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  help                     print this list\r\n" +
 	"\r\n" +
 	" the same sandboxes, without ssh\r\n" +
-	"  a shell in a browser tab   https://<name>.xterm.<domain>\r\n" +
+	"  a shell in a browser tab   https://<name>-xterm.<domain>\r\n" +
 	"  these commands over HTTP   https://api.<domain>  — docs at /docs\r\n" +
 	"                             authenticate with a `session-token`:\r\n" +
 	"                             curl -H \"Authorization: Bearer $TOKEN\" https://api.<domain>/v1/sandboxes\r\n"

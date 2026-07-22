@@ -1,4 +1,4 @@
-// Package xterm serves the browser terminal at https://<name>.xterm.<domain>:
+// Package xterm serves the browser terminal at https://<name>-xterm.<domain>:
 // an xterm.js page, the vendored assets it needs, and the WebSocket that
 // bridges it to a real PTY inside that sandbox.
 //
@@ -12,9 +12,11 @@
 //
 // The sandbox is named by DNS, not by a path or a query parameter, so that the
 // browser's own origin isolation does the work: one sandbox per origin means a
-// page served for `a.xterm.<domain>` cannot script the terminal of
-// `b.xterm.<domain>`, and the WebSocket's origin check (ws.go) reduces to
-// "Origin must equal my own host".
+// page served for `a-xterm.<domain>` cannot script the terminal of
+// `b-xterm.<domain>`, and the WebSocket's origin check (ws.go) reduces to
+// "Origin must equal my own host". It is a separate host from the sandbox's own
+// front door `a.<domain>` for the same reason — the guest's app must not be
+// able to script the terminal that shells into it.
 package xterm
 
 import (
@@ -32,10 +34,17 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
-// DefaultSubdomain is the reserved label the edge dispatches on. It is a
-// constant rather than a bare string in main so the flag default, the
+// DefaultSubdomain is the reserved name segment the edge dispatches on: the
+// terminal for sandbox "demo" is served at "demo-<DefaultSubdomain>.<domain>".
+// It is a constant rather than a bare string in main so the flag default, the
 // reserved-name lists and this package cannot drift apart.
 const DefaultSubdomain = "xterm"
+
+// ReservedSuffix is the sandbox- and route-name suffix this package's dispatch
+// claims for a given label. A name ending in it is unreachable over HTTP — the
+// edge sends it to the terminal handler before any route lookup — so the
+// stores refuse to create one.
+func ReservedSuffix(label string) string { return "-" + label }
 
 // Attacher is the slice of *host.Manager a terminal needs: resolve a sandbox,
 // resume it, and mark it active. Stated as an interface so this package's tests
@@ -81,11 +90,12 @@ type Config struct {
 	UpstreamKey xssh.Signer
 
 	// Domain is the base zone ("catnip.sh"). Empty accepts any zone, which is
-	// what a test with Host "demo.xterm.example" wants and what a real
+	// what a test with Host "demo-xterm.example" wants and what a real
 	// deployment never wants — main always sets it.
 	Domain string
-	// Subdomain is the reserved label between the sandbox name and the zone.
-	// Empty takes DefaultSubdomain.
+	// Subdomain is the reserved segment appended to the sandbox name, after a
+	// hyphen, to form the host: "demo-xterm.<zone>". Empty takes
+	// DefaultSubdomain.
 	Subdomain string
 	// LoginURL is where an unauthenticated browser is sent; it comes back to
 	// the URL it asked for. Empty turns the redirect into a plain 401.
@@ -178,28 +188,39 @@ func (h *Handler) Subdomain() string { return h.subdomain }
 
 // SandboxName reads the target sandbox out of a request host.
 //
-// The edge dispatches by suffix, so the host is always <name>.<subdomain>.<zone>
-// and the first label is the name. The zone is checked when configured: without
-// it a request forged with `Host: victim.xterm.evil.example` would still
-// resolve, and while the ownership check would still hold, the WebSocket's
-// origin gate compares against this same host and must not be talked into
-// accepting a foreign one.
+// The edge dispatches by suffix, so the host is always
+// <name>-<subdomain>.<zone>: one label, because that is the only shape a
+// zone's existing *.<zone> wildcard certificate covers (see
+// proxy.SetReservedSuffix for why that matters). The zone is checked when
+// configured: without it a request forged with `Host: victim-xterm.evil.example`
+// would still resolve, and while the ownership check would still hold, the
+// WebSocket's origin gate compares against this same host and must not be
+// talked into accepting a foreign one.
+//
+// Anything before a dot in the first label is rejected rather than trimmed. The
+// edge hands "a.demo" to us for a.demo-xterm.<zone>, and answering that host as
+// "demo" would give one sandbox two origins — which is exactly what the
+// WebSocket origin gate assumes cannot happen.
 func (h *Handler) SandboxName(host string) (string, bool) {
 	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
 		host = hostOnly
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	labels := strings.Split(host, ".")
-	if len(labels) < 2 || labels[1] != h.subdomain {
+	first, zone, found := strings.Cut(host, ".")
+	if !found {
 		return "", false
 	}
-	if h.domain != "" && strings.Join(labels[2:], ".") != h.domain {
+	if h.domain != "" && zone != h.domain {
 		return "", false
 	}
-	if !validSandboxName(labels[0]) {
+	name, ok := strings.CutSuffix(first, "-"+h.subdomain)
+	if !ok {
 		return "", false
 	}
-	return labels[0], true
+	if !validSandboxName(name) {
+		return "", false
+	}
+	return name, true
 }
 
 // validSandboxName mirrors host.Manager's create-time charset. Enforcing it

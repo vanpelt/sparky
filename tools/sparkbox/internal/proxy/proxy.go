@@ -106,9 +106,9 @@ type Server struct {
 	// sandbox route can never shadow them (see SetReserved).
 	reserved map[string]http.Handler
 
-	// reservedSuffix maps a trailing label to the handler that owns the whole
-	// *.<label>.<domain> subtree (the browser terminal). Also checked before
-	// route lookup — see SetReservedSuffix.
+	// reservedSuffix maps a trailing name segment to the handler that owns
+	// every subdomain ending in "-<segment>" (the browser terminal). Also
+	// checked before route lookup — see SetReservedSuffix.
 	reservedSuffix map[string]http.Handler
 
 	// login/session/accounts, if set (via SetAuth), turn on the private-route
@@ -154,26 +154,40 @@ func (s *Server) SetReserved(sub string, h http.Handler) {
 	s.reserved[strings.ToLower(sub)] = h
 }
 
-// SetReservedSuffix dedicates a whole subtree to a built-in handler: every
-// request for <name>.<label>.<domain> is served by h, with <name> recoverable
-// through SuffixName, instead of being looked up as a sandbox route. This is
-// how the browser terminal gets one host per sandbox off a single handler.
+// SetReservedSuffix dedicates a family of subdomains to a built-in handler:
+// every request for <name>-<label>.<domain> is served by h, with <name>
+// recoverable through SuffixName, instead of being looked up as a sandbox
+// route. This is how the browser terminal gets one host per sandbox off a
+// single handler.
 //
-// It cannot be expressed with SetReserved because subdomainOf returns the
-// entire multi-label prefix — "demo.xterm", not "xterm" — so an exact-match map
-// never sees these hosts at all.
+// The separator is a HYPHEN, not a dot, and that is the whole reason this
+// feature is reachable from an ordinary browser. A wildcard matches exactly one
+// label — RFC 4592 in DNS, RFC 6125 in certificates — so a dotted
+// <name>.xterm.<domain> is covered by neither the zone's wildcard record nor
+// its wildcard certificate, and needs a second one of each. Hosted edges that
+// terminate TLS in front of us (Cloudflare's universal certificate is the case
+// that bit us) will not issue that second wildcard without a paid add-on, and
+// the failure lands inside the TLS handshake: the browser shows
+// ERR_SSL_VERSION_OR_CIPHER_MISMATCH and sparkbox logs nothing at all, so it
+// reads like a DNS bug for hours. Keeping the terminal in ONE label puts it
+// under the *.<domain> wildcard that already exists for every sandbox.
+//
+// It cannot be expressed with SetReserved because the name varies per sandbox:
+// subdomainOf returns "demo-xterm", not "xterm", so an exact-match map never
+// sees these hosts at all.
 //
 // Dispatch runs before the route lookup, and that ordering is the security
-// property, not a nicety: routes.ValidSubdomain permits dotted subdomains (the
-// advertised `api.myvm` shape), so a route row literally named "demo.xterm" is
-// creatable today, and a route-first edge would let its owner serve another
-// user's terminal host. For the same reason the entire subtree is claimed —
-// even a deeper "a.b.xterm.<domain>", which h answers for by rejecting the name
-// rather than falling through to a route that could have been squatted.
+// property, not a nicety: routes.ValidSubdomain permits both hyphens and dots
+// (the advertised `web-myvm` and `api.myvm` shapes), so a route row literally
+// named "demo-xterm" is creatable today, and a route-first edge would let its
+// owner serve another user's terminal host. For the same reason any subdomain
+// ENDING in "-<label>" is claimed — even a deeper "a.demo-xterm.<domain>",
+// which h answers for by rejecting the name rather than falling through to a
+// route that could have been squatted.
 //
-// The bare "<label>.<domain>" is deliberately NOT claimed here: it names no
-// sandbox, so it is an ordinary route lookup that 404s unless something is
-// registered for it explicitly. Call before serving.
+// The claim also means a sandbox or route whose own name ends in "-<label>"
+// goes dark; host.Manager and the route store refuse to create one, and main
+// warns about any that predate the reservation. Call before serving.
 func (s *Server) SetReservedSuffix(label string, h http.Handler) {
 	if s.reservedSuffix == nil {
 		s.reservedSuffix = make(map[string]http.Handler)
@@ -181,8 +195,8 @@ func (s *Server) SetReservedSuffix(label string, h http.Handler) {
 	s.reservedSuffix[strings.ToLower(label)] = h
 }
 
-// SuffixName returns the labels that preceded the reserved suffix this request
-// was dispatched on: "demo" for demo.xterm.<domain>. ok is false for any
+// SuffixName returns the name that preceded the reserved suffix this request
+// was dispatched on: "demo" for demo-xterm.<domain>. ok is false for any
 // request that did not arrive through SetReservedSuffix dispatch, which is how
 // such a handler distinguishes "mounted on the edge" from "reached directly"
 // (a test server, a future loopback mount) and can pick its own host parsing.
@@ -192,11 +206,13 @@ func SuffixName(r *http.Request) (string, bool) {
 }
 
 // suffixHandler resolves sub against the reserved-suffix registry, splitting
-// "demo.xterm" into the handler for "xterm" and the name "demo". The reserved
-// label is always the LAST one, so the split is on the final dot.
+// "demo-xterm" into the handler for "xterm" and the name "demo". The reserved
+// segment is always the LAST one, so the split is on the final hyphen — which
+// is also why a sandbox name may contain hyphens ("crafty-axolotl-xterm" splits
+// to "crafty-axolotl") without the two conventions colliding.
 func (s *Server) suffixHandler(sub string) (http.Handler, string, bool) {
-	i := strings.LastIndexByte(sub, '.')
-	if i <= 0 { // no dot, or an empty name — not a subtree host
+	i := strings.LastIndexByte(sub, '-')
+	if i <= 0 { // no hyphen, or an empty name — not a terminal host
 		return nil, "", false
 	}
 	h, ok := s.reservedSuffix[sub[i+1:]]
@@ -341,10 +357,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r)
 		return
 	}
-	// A reserved suffix owns everything under it, so <name>.xterm.<domain>
+	// A reserved suffix owns every name ending in it, so <name>-xterm.<domain>
 	// reaches the terminal handler with <name> attached. Exact reservations are
 	// consulted first (they are the more specific claim), but both must precede
-	// the route lookup or a dotted route row could shadow the subtree.
+	// the route lookup or a route row could shadow the terminal.
 	if h, name, ok := s.suffixHandler(sub); ok {
 		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), suffixKey, name)))
 		return

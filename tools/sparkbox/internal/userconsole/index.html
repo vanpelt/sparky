@@ -547,9 +547,13 @@
   let termSub = "";
 
   // terminalURL is the per-machine terminal page: one origin per machine, which
-  // is what keeps one machine's page from scripting another's socket.
+  // is what keeps one machine's page from scripting another's socket. The
+  // separator is a hyphen so the whole thing is a single label, covered by the
+  // same *.<domain> wildcard certificate this console is served under — a
+  // dotted name needs a second wildcard that hosted TLS front ends generally
+  // will not issue, and fails as an unreadable browser cert error.
   function terminalURL(name) {
-    return location.protocol + "//" + name + "." + termSub + "." + domain() + portSuffix();
+    return location.protocol + "//" + name + "-" + termSub + "." + domain() + portSuffix();
   }
 
   function show(view) {
