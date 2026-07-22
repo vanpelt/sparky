@@ -138,6 +138,42 @@
   @media (max-width: 640px) { .m-foot { grid-template-columns: 1fr; } }
   .m-sect .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
     color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
+  /* the per-VM egress panel spans the full card width under the two-col foot */
+  .m-net { grid-column: 1 / -1; }
+  .net-toggle { background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+    color: hsl(var(--muted-foreground)); display: inline-flex; align-items: center; gap: 4px; }
+  .net-toggle:hover { color: hsl(var(--foreground)); }
+  .net-toggle .caret { transition: transform .12s ease; font-size: 9px; }
+  .net-toggle[aria-expanded="true"] .caret { transform: rotate(90deg); }
+  .dom-list { margin-top: 8px; display: flex; flex-direction: column; gap: 1px; }
+  .dom-row { display: grid; grid-template-columns: 16px minmax(90px, 1.3fr) 1fr 120px;
+    align-items: center; gap: 9px; padding: 3px 6px; border-radius: calc(var(--radius) - 3px);
+    font-size: 12.5px; }
+  .dom-row:hover { background: hsl(var(--muted) / .5); }
+  @media (max-width: 640px) { .dom-row { grid-template-columns: 16px 1fr 100px; }
+    .dom-row .dom-bar { display: none; } }
+  .dom-row .favicon { width: 16px; height: 16px; border-radius: 3px; object-fit: contain;
+    color: hsl(var(--muted-foreground)); }
+  .dom-row .dom-name { font-weight: 600; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; min-width: 0; }
+  .dom-row .dom-name .dom-host { font-weight: 500; color: hsl(var(--muted-foreground));
+    font-size: 11px; margin-left: 5px; }
+  .dom-row .dom-bar { height: 5px; border-radius: 3px; background: hsl(var(--muted));
+    overflow: hidden; }
+  .dom-row .dom-bar-fill { display: block; height: 100%; border-radius: 3px;
+    background: hsl(var(--primary)); }
+  .dom-row .dom-bw { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
+    color: hsl(var(--muted-foreground)); font-size: 11.5px; }
+  .dom-row .dom-bw small { color: hsl(var(--border)); }
+  .dom-empty { font-size: 12px; color: hsl(var(--muted-foreground)); padding: 4px 6px; }
+  .linkish { color: hsl(var(--primary)); cursor: pointer; text-decoration: none; }
+  .linkish:hover { text-decoration: underline; }
+  /* the allowed-domains textarea in the network-rule form */
+  .secret-form textarea { width: 100%; min-height: 70px; resize: vertical; padding: 7px 9px;
+    border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--background)); color: hsl(var(--foreground)); font-size: 12.5px; line-height: 1.5; }
+  .secret-form .grow { flex: 1 1 260px; }
   .env-warn {
     margin: 0 14px 11px; padding: 8px 11px; font-size: 12.5px;
     border: 1px solid hsl(var(--red) / .4); border-radius: calc(var(--radius) - 2px);
@@ -308,6 +344,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="machines">Machines</button>
       <button class="tab" data-tab="secrets">Secrets</button>
+      <button class="tab" data-tab="network">Network</button>
     </div>
 
     <!-- MACHINES TAB -->
@@ -381,6 +418,55 @@
           </table>
         </div>
         <div id="secrets-empty" class="empty hidden">No secrets yet. Add one above, then tag a machine to deliver it.</div>
+      </div>
+    </div>
+
+    <!-- NETWORK TAB -->
+    <div id="tab-network" class="hidden">
+      <div class="card panel">
+        <div class="panel-head">
+          <h2>Network rules</h2>
+          <span class="hint">per-tag egress allowlists — applied to running machines that share a tag</span>
+        </div>
+        <div class="notice">
+          A rule-set is a list of domains a machine may reach. Tag a machine with a rule-set's
+          tag and, while it runs, its egress is <strong>restricted to those domains</strong> (plus
+          its own gateway) — everything else is blocked at the host. Untagged machines are
+          unaffected. Rules take effect within seconds; existing connections may linger briefly.
+        </div>
+        <form id="netrule-form" class="secret-form">
+          <div>
+            <label for="nr-name">Name</label>
+            <input id="nr-name" type="text" autocomplete="off"
+              spellcheck="false" placeholder="CI egress" maxlength="64" />
+            <div class="field-hint">a short label, up to 64 chars</div>
+          </div>
+          <div class="grow">
+            <label for="nr-allow">Allowed domains</label>
+            <textarea id="nr-allow" class="mono" autocomplete="off" spellcheck="false"
+              placeholder="github.com&#10;*.githubusercontent.com&#10;pypi.org"></textarea>
+            <div class="field-hint">one per line — <code class="mono">github.com</code> (apex + subdomains) or <code class="mono">*.example.com</code> (subdomains only) · <a href="#" id="nr-prefill" class="linkish">prefill common trusted domains</a></div>
+          </div>
+          <div>
+            <label for="nr-tags">Tags</label>
+            <input id="nr-tags" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="ci, build" />
+            <div class="field-hint">comma-separated; matches machine tags</div>
+          </div>
+          <button type="submit" class="btn-primary save" id="nr-save">Save rule-set</button>
+        </form>
+        <div id="netrules-disabled" class="notice hidden">
+          Network rules are not enabled on this host.
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Allowed domains</th><th>Tags</th><th>Updated</th><th></th></tr>
+            </thead>
+            <tbody id="netrule-rows"></tbody>
+          </table>
+        </div>
+        <div id="netrules-empty" class="empty hidden">No rule-sets yet. Add one above, then tag a machine to enforce it.</div>
       </div>
     </div>
   </div>
@@ -520,6 +606,56 @@
     if (!prev || now <= prev.t || b.cpu_seconds < prev.s) return null;
     const pct = ((b.cpu_seconds - prev.s) / ((now - prev.t) / 1000)) / (b.vcpus || 1) * 100;
     return Math.max(0, Math.min(100, pct));
+  }
+
+  // Per-VM egress panel state. netOpen holds the machines whose "egress by
+  // domain" panel is expanded; netData caches each one's last bandwidth fetch
+  // so a poll repaint re-renders the open panel from cache instead of blanking
+  // it. lastMachines is the most recent machine list, so a toggle can re-render
+  // without waiting for the next poll.
+  const netOpen = new Set();
+  const netData = {};
+  let lastMachines = [];
+
+  function renderDomains(bw) {
+    if (!bw) return '<div class="dom-empty">loading…</div>';
+    if (bw.error) return '<div class="dom-empty">' + esc(bw.error) + "</div>";
+    const ds = (bw.domains || []).filter((d) => (d.total || 0) > 0);
+    if (!ds.length) return '<div class="dom-empty">no egress recorded yet</div>';
+    const max = ds.reduce((m, d) => Math.max(m, d.total || 0), 1);
+    return ds.map((d) => {
+      const pct = Math.min(100, ((d.total || 0) / max) * 100).toFixed(1);
+      const host = d.display && d.display !== d.domain
+        ? '<span class="dom-host mono">' + esc(d.domain) + "</span>" : "";
+      return '<div class="dom-row">' +
+        '<img class="favicon" src="/api/favicon?domain=' + encodeURIComponent(d.domain) +
+          '" width="16" height="16" loading="lazy" alt="" />' +
+        '<span class="dom-name">' + esc(d.display || d.domain) + host + "</span>" +
+        '<span class="dom-bar"><span class="dom-bar-fill" style="width:' + pct + '%"></span></span>' +
+        '<span class="dom-bw">↓ ' + bytes(d.rx_bytes) + " <small>·</small> ↑ " + bytes(d.tx_bytes) + "</span>" +
+        "</div>";
+    }).join("");
+  }
+
+  // refreshNet fetches one machine's per-domain bandwidth into the cache. A
+  // failure (e.g. metering disabled) is stored as an error the panel renders,
+  // not thrown, so a poll for an open panel never breaks the dashboard.
+  async function refreshNet(name) {
+    try {
+      netData[name] = await api("/api/machines/" + encodeURIComponent(name) + "/bandwidth");
+    } catch (e) {
+      netData[name] = { domains: [], error: e.unauthorized ? "" : e.message };
+    }
+  }
+
+  async function toggleNet(name) {
+    if (netOpen.has(name)) {
+      netOpen.delete(name);
+    } else {
+      netOpen.add(name);
+      if (!netData[name]) await refreshNet(name);
+    }
+    renderMachines(lastMachines);
   }
 
   // editing reports whether the user is mid-interaction with an inline editor
@@ -764,10 +900,27 @@
       "</div>" +
       '<div class="m-foot">' +
         '<div class="m-sect"><div class="label">Tags <span style="text-transform:none;letter-spacing:0">' +
-          "— secrets with a matching tag land in this machine's environment</span></div>" + tagChips(b) + "</div>" +
+          "— secrets and network rules with a matching tag apply to this machine</span></div>" + tagChips(b) + "</div>" +
         '<div class="m-sect"><div class="label">Web routes</div>' + routePanel(b) + "</div>" +
+        netSection(b) +
       "</div>" +
     "</div>";
+  }
+
+  // netSection is the expandable per-VM "egress by domain" panel. Only running
+  // machines have a live tap, so it is shown for them alone; the open state and
+  // cached data live in netOpen/netData so a poll repaint keeps it in place.
+  function netSection(b) {
+    if (b.state !== "running") return "";
+    const open = netOpen.has(b.name);
+    return '<div class="m-sect m-net">' +
+      '<div class="label" style="margin-bottom:0">' +
+        '<button type="button" class="net-toggle" data-netexp="' + esc(b.name) +
+          '" aria-expanded="' + (open ? "true" : "false") + '">' +
+          '<span class="caret">▶</span> Egress by domain</button>' +
+      "</div>" +
+      (open ? '<div class="dom-list">' + renderDomains(netData[b.name]) + "</div>" : "") +
+      "</div>";
   }
 
   function renderMachines(list) {
@@ -814,6 +967,8 @@
       btn.addEventListener("click", () => openPort(btn.dataset.portdlg, btn.dataset.port)));
     wrap.querySelectorAll("button[data-delbox]").forEach((btn) =>
       btn.addEventListener("click", () => openRemove(btn.dataset.delbox, btn.dataset.archived === "1")));
+    wrap.querySelectorAll("button[data-netexp]").forEach((btn) =>
+      btn.addEventListener("click", () => toggleNet(btn.dataset.netexp)));
     reapplyInflight(wrap);
   }
 
@@ -1066,6 +1221,136 @@
     }
   });
 
+  // ---- network rules ----
+
+  function renderNetRules(list) {
+    const rows = $("netrule-rows");
+    rows.innerHTML = "";
+    for (const r of list) {
+      const allow = (r.spec && r.spec.allow) || [];
+      const doms = allow.length
+        ? allow.slice(0, 6).map((d) => '<span class="chip plain mono">' + esc(d) + "</span>").join(" ") +
+          (allow.length > 6 ? ' <span class="muted">+' + (allow.length - 6) + " more</span>" : "")
+        : '<span class="muted">no domains</span>';
+      const tags = (r.tags || []).length
+        ? (r.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
+        : '<span class="muted">– none: applies to no machine</span>';
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="name mono">' + esc(r.name) + "</td>" +
+        '<td><div class="chips">' + doms + "</div></td>" +
+        '<td><div class="chips">' + tags + "</div></td>" +
+        '<td class="age">' + rel(r.updated_at) + "</td>" +
+        '<td class="actions">' +
+          '<button class="btn-outline btn-sm" data-editrule="' + esc(r.name) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm btn-danger" data-delrule="' + esc(r.name) + '">Delete</button></td>';
+      rows.appendChild(tr);
+    }
+    $("netrules-empty").classList.toggle("hidden", list.length > 0);
+    rows.querySelectorAll("button[data-editrule]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const r = list.find((x) => x.name === btn.dataset.editrule);
+        if (!r) return;
+        $("nr-name").value = r.name;
+        $("nr-allow").value = ((r.spec && r.spec.allow) || []).join("\n");
+        $("nr-tags").value = (r.tags || []).join(", ");
+        $("nr-name").focus();
+      }));
+    rows.querySelectorAll("button[data-delrule]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.delrule;
+        if (!confirm("Delete rule-set " + name + "? Machines tagged for it lose these egress restrictions.")) return;
+        mutate("delrule:" + name, btn, async () => {
+          await api("/api/network-rules/" + encodeURIComponent(name), { method: "DELETE" });
+          toast("deleted " + name);
+        });
+      }));
+    reapplyInflight(rows);
+  }
+
+  function netrulesDisabled(off) {
+    $("netrules-disabled").classList.toggle("hidden", !off);
+    $("netrule-form").classList.toggle("hidden", off);
+  }
+
+  // Claude Code's default "Trusted" network domains (per code.claude.com/docs)
+  // plus hivemind.wandb.tools — a one-click starting point for a rule-set.
+  var TRUSTED_DOMAINS = `
+      *.amazonaws.com *.api.aws *.data.mcr.microsoft.com *.datadoghq.com *.datadoghq.eu *.gcr.io
+      *.googleapis.com *.microsoftonline.com *.modelcontextprotocol.io *.nixos.org
+      *.packagecloud.io *.sentry.io *.sourceforge.net *.ubuntu.com accounts.google.com
+      anaconda.com anaconda.org apache.org api.anthropic.com api.bitbucket.org api.github.com
+      api.honeycomb.io api.metacpan.org api.nuget.org api.pub.dev api.rubygems.org
+      api.statsig.com apt.releases.hashicorp.com archive.apache.org
+      archive.releases.hashicorp.com archive.ubuntu.com auth.docker.io
+      avatars.githubusercontent.com azure.com binaries.prisma.sh bitbucket.org
+      browser-intake-us5-datadoghq.com camo.githubusercontent.com cdn.cocoapods.org
+      central.maven.org claude.ai cloud.google.com cocoapods.org code.claude.com
+      codeload.github.com compute.googleapis.com conda.anaconda.org container.googleapis.com
+      continuum.io cpan.org crates.io dev.azure.com developer.android.com developer.apple.com
+      dl.k8s.io docs.claude.com dot.net dotnet.microsoft.com download.docker.com
+      download.eclipse.org download.oracle.com downloads.apache.org downloads.sentry-cdn.com
+      eclipse.org files.pythonhosted.org fonts.googleapis.com fonts.gstatic.com gcloud.google.com
+      gcr.io get.rvm.io ghcr.io gist.github.com github.com gitlab.com golang.org goproxy.io
+      gradle.org hackage.haskell.org hashicorp.com haskell.org hex.pm hivemind.wandb.tools
+      http-intake.logs.datadoghq.com hub.docker.com index.crates.io index.docker.io
+      index.golang.org index.rubygems.org java.com java.net jcenter.bintray.com json-schema.org
+      json.schemastore.org k8s.io kotlinlang.org launchpad.net maven.org mcr.microsoft.com
+      metacpan.org microsoft.com nodejs.org npm.pkg.github.com npmjs.com npmjs.org nuget.org
+      objects.githubusercontent.com ode.js oracle.com packagecloud.io packages.microsoft.com
+      packagist.org pkg-npm.githubusercontent.com pkg.go.dev pkg.stainless.com pkgs.k8s.io
+      platform.claude.com plugins.gradle.org portal.azure.com ppa.launchpad.net
+      production.cloudflare.docker.com proxy.golang.org pub.dev public.ecr.aws pypa.io pypi.org
+      pypi.python.org pythonhosted.org registry-1.docker.io registry.gitlab.com
+      registry.npmjs.org registry.yarnpkg.com release-assets.githubusercontent.com
+      releases.hashicorp.com repo.anaconda.com repo.maven.apache.org repo.maven.org
+      repo.packagist.org repo.spring.io repo1.maven.org rpm.releases.hashicorp.com ruby-lang.org
+      rubyforge.org rubygems.org rubyonrails.org rustup.rs rvm.io security.ubuntu.com sentry.io
+      services.gradle.org sourceforge.net spring.io static.crates.io static.rust-lang.org
+      statsig.anthropic.com statsig.com storage.googleapis.com sum.golang.org swift.org
+      test.pypi.org ubuntu.com visualstudio.com yarnpkg.com yum.oracle.com
+  `.trim().split(/\s+/);
+
+  $("nr-prefill").addEventListener("click", (e) => {
+    e.preventDefault();
+    const ta = $("nr-allow");
+    const merged = ta.value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    const have = new Set(merged);
+    let added = 0;
+    for (const d of TRUSTED_DOMAINS) {
+      if (!have.has(d)) { have.add(d); merged.push(d); added += 1; }
+    }
+    ta.value = merged.join("\n");
+    ta.focus();
+    toast(added ? "added " + added + " trusted domains" : "all trusted domains already listed");
+  });
+
+  $("netrule-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("nr-name").value.trim();
+    const allow = $("nr-allow").value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    const tags = $("nr-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    if (!name) return toast("name is required", true);
+    for (const t of tags) {
+      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+    }
+    const btn = $("nr-save");
+    btn.disabled = true;
+    try {
+      await api("/api/network-rules/" + encodeURIComponent(name),
+        { method: "PUT", body: { allow: allow, tags: tags } });
+      toast(name + " saved — applies to tagged machines within seconds");
+      $("nr-name").value = "";
+      $("nr-allow").value = "";
+      $("nr-tags").value = "";
+      await refresh();
+    } catch (e2) {
+      toast(e2.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // ---- tabs / shell ----
 
   document.querySelectorAll(".tab").forEach((btn) =>
@@ -1073,6 +1358,7 @@
       document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
       $("tab-machines").classList.toggle("hidden", btn.dataset.tab !== "machines");
       $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
+      $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
     }));
 
   $("logout-btn").addEventListener("click", async () => {
@@ -1086,14 +1372,23 @@
 
   async function refresh() {
     try {
-      const [rm, rs, rn] = await Promise.all([
+      const [rm, rs, rn, rnr] = await Promise.all([
         fetch("/api/machines"), fetch("/api/secrets"), fetch("/api/snapshots"),
+        fetch("/api/network-rules"),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
       const machines = await rm.json();
+      lastMachines = Array.isArray(machines) ? machines : [];
+      // Drop expanded panels whose machine is gone or no longer running, then
+      // refresh the survivors' bandwidth so open panels stay live each poll.
+      for (const n of [...netOpen]) {
+        const b = lastMachines.find((x) => x.name === n);
+        if (!b || b.state !== "running") netOpen.delete(n);
+      }
+      await Promise.all([...netOpen].map(refreshNet));
       show("app");
-      renderMachines(Array.isArray(machines) ? machines : []);
+      renderMachines(lastMachines);
       // The "updated" stamp asserts every pane is current; a failed secrets
       // or snapshots fetch keeps a stale table, so it must not re-stamp.
       let fresh = true;
@@ -1116,6 +1411,18 @@
       } else {
         fresh = false;
         toast("snapshots refresh failed: " + (await errText(rn)), true);
+      }
+      // 501 = network rules not enabled on this host; the tab stays with a note.
+      if (rnr.status === 501) {
+        netrulesDisabled(true);
+        renderNetRules([]);
+      } else if (rnr.ok) {
+        netrulesDisabled(false);
+        const rules = await rnr.json();
+        renderNetRules(Array.isArray(rules) ? rules : []);
+      } else {
+        fresh = false;
+        toast("network rules refresh failed: " + (await errText(rnr)), true);
       }
       if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
       if (!timer) timer = setInterval(refresh, 4000);
