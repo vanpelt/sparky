@@ -74,7 +74,7 @@ func TestListAndDelete(t *testing.T) {
 		}
 	}
 	must(s.Upsert(Route{Subdomain: "myvm", Sandbox: "myvm", Owner: "alice", Port: 8000}))
-	must(s.Upsert(Route{Subdomain: "api", Sandbox: "myvm", Owner: "alice", Port: 9000}))
+	must(s.Upsert(Route{Subdomain: "admin-panel", Sandbox: "myvm", Owner: "alice", Port: 9000}))
 	must(s.Upsert(Route{Subdomain: "other", Sandbox: "othervm", Owner: "bob", Port: 8000}))
 
 	rs, err := s.ListBySandbox("myvm")
@@ -89,8 +89,8 @@ func TestListAndDelete(t *testing.T) {
 		t.Fatalf("unexpected owner listing: %+v", rs)
 	}
 
-	must(s.Delete("api"))
-	if _, ok, _ := s.GetBySubdomain("api"); ok {
+	must(s.Delete("admin-panel"))
+	if _, ok, _ := s.GetBySubdomain("admin-panel"); ok {
 		t.Fatal("api route should be gone")
 	}
 
@@ -111,7 +111,7 @@ func TestRenameSandbox(t *testing.T) {
 		}
 	}
 	must(s.Upsert(Route{Subdomain: "myvm", Sandbox: "myvm", Owner: "alice", Port: 8000}))
-	must(s.Upsert(Route{Subdomain: "api", Sandbox: "myvm", Owner: "alice", Port: 9000}))
+	must(s.Upsert(Route{Subdomain: "admin-panel", Sandbox: "myvm", Owner: "alice", Port: 9000}))
 	must(s.SetVisibility("myvm", VisibilityPublic))
 
 	must(s.RenameSandbox("myvm", "newvm"))
@@ -126,7 +126,7 @@ func TestRenameSandbox(t *testing.T) {
 		t.Fatal("old default subdomain should be gone")
 	}
 	// The custom subdomain stayed put but points at the new name.
-	got, ok, err = s.GetBySubdomain("api")
+	got, ok, err = s.GetBySubdomain("admin-panel")
 	must(err)
 	if !ok || got.Sandbox != "newvm" || got.Port != 9000 {
 		t.Fatalf("custom route after rename: ok=%v %+v", ok, got)
@@ -196,7 +196,7 @@ func TestRenameSandboxIsIdempotent(t *testing.T) {
 		}
 	}
 	must(s.Upsert(Route{Subdomain: "myvm", Sandbox: "myvm", Owner: "alice", Port: 8000}))
-	must(s.Upsert(Route{Subdomain: "api", Sandbox: "myvm", Owner: "alice", Port: 9000}))
+	must(s.Upsert(Route{Subdomain: "admin-panel", Sandbox: "myvm", Owner: "alice", Port: 9000}))
 
 	must(s.RenameSandbox("myvm", "newvm"))
 	// Renaming again (the manager's crash-repair path) succeeds and changes
@@ -207,7 +207,7 @@ func TestRenameSandboxIsIdempotent(t *testing.T) {
 	if !ok || got.Sandbox != "newvm" || got.Port != 8000 {
 		t.Fatalf("default route after re-run: ok=%v %+v", ok, got)
 	}
-	got, ok, _ = s.GetBySubdomain("api")
+	got, ok, _ = s.GetBySubdomain("admin-panel")
 	if !ok || got.Sandbox != "newvm" || got.Port != 9000 {
 		t.Fatalf("custom route after re-run: ok=%v %+v", ok, got)
 	}
@@ -242,7 +242,7 @@ func TestRenameSandboxRepairsPartialRename(t *testing.T) {
 	// and a route for the new name already exists (e.g. written against the
 	// renamed record before the repair), but the old rows never moved.
 	must(s.Upsert(Route{Subdomain: "myvm", Sandbox: "myvm", Owner: "alice", Port: 8000}))
-	must(s.Upsert(Route{Subdomain: "api", Sandbox: "myvm", Owner: "alice", Port: 9000}))
+	must(s.Upsert(Route{Subdomain: "admin-panel", Sandbox: "myvm", Owner: "alice", Port: 9000}))
 	must(s.Upsert(Route{Subdomain: "newvm", Sandbox: "newvm", Owner: "alice", Port: 8000}))
 
 	// Renaming again finishes the migration instead of ErrSubdomainTaken.
@@ -252,7 +252,7 @@ func TestRenameSandboxRepairsPartialRename(t *testing.T) {
 	if !ok || got.Sandbox != "newvm" {
 		t.Fatalf("default route after repair: ok=%v %+v", ok, got)
 	}
-	got, ok, _ = s.GetBySubdomain("api")
+	got, ok, _ = s.GetBySubdomain("admin-panel")
 	if !ok || got.Sandbox != "newvm" || got.Port != 9000 {
 		t.Fatalf("custom route after repair: ok=%v %+v", ok, got)
 	}

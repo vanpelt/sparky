@@ -18,51 +18,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// reservedNames are subdomains the gateway and consoles own: a sandbox's name
-// is its default subdomain, so taking one would shadow a platform door. Own
-// copy of users.reserved (users/store.go) per the deliberate-duplication
-// convention — the users package owns handle policy, not sandbox policy.
-var reservedNames = map[string]bool{
-	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
-	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
-	"my": true,
-	// "xterm" is the browser terminal's label and "api" is the REST edge; both
-	// name a door of their own at <label>.<domain>.
-	"xterm": true, "api": true,
-}
-
-// reservedSuffixes are name endings the edge claims before it ever consults a
-// route: the browser terminal for sandbox "demo" is served at
-// "demo-xterm.<domain>", so a sandbox actually NAMED "web-xterm" would have its
-// own front door answered by the terminal handler and be unreachable over HTTP.
-// Refusing the name is the only place that stays fixable — by the time the
-// request arrives the edge cannot tell the two apart.
-//
-// Own copy of the literal rather than xterm.ReservedSuffix: that package
-// imports this one, so the dependency cannot run the other way. It follows the
-// same deliberate-duplication convention as reservedNames above, and
-// cmd/sparkbox warns at startup for any label an operator configured instead.
-var reservedSuffixes = []string{"-xterm"}
-
-// reservedName reports whether name is one the platform has claimed, either
-// outright or by suffix.
-func reservedName(name string) bool {
-	if reservedNames[name] {
-		return true
-	}
-	for _, suffix := range reservedSuffixes {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
-}
+// reservedName reports whether a sandbox may not take this name. A sandbox's
+// name is its default subdomain, so the answer is the platform-wide one:
+// internal/reserved owns the list, and the routes store and the user store ask
+// it the same question. This used to be a local map kept in deliberate sync
+// with users.reserved, which is exactly the arrangement that drifted.
+func reservedName(name string) bool { return reserved.Name(name) }
 
 // Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
 // `new@` path always does; the HTTP API may override). Bounded only by host

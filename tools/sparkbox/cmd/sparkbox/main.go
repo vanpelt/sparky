@@ -536,7 +536,12 @@ func serve(args []string) error {
 			// host nothing serves.
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
 			px.SetReserved(*userConsoleSub, uc.Handler())
-			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain)
+			// The apex has no other job, and the user console is the only page a
+			// visitor who typed the bare domain could have wanted. Set alongside
+			// the mount so the redirect cannot outlive its target.
+			px.SetHome(*userConsoleSub)
+			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain,
+				"apex_redirects_here", *proxyDomain)
 		}
 
 		// Browser terminals: one host per sandbox, so the browser's own origin

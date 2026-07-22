@@ -123,6 +123,10 @@ type Server struct {
 	// recovered/Host port equals it means "dialed the edge directly" — the
 	// default web route — not "forward to guest:<listenPort>".
 	listenPort int
+
+	// home is the subdomain a bare <domain> request is redirected to (see
+	// SetHome). Empty leaves the apex answering a 404.
+	home string
 }
 
 // SetListenPort records the edge's own listen port so targetPort can tell a
@@ -237,6 +241,48 @@ func (s *Server) SetConsole(sub string, h http.Handler) { s.SetReserved(sub, h) 
 // listener.
 func (s *Server) SetIssuer(sub string, h http.Handler) { s.SetReserved(sub, h) }
 
+// SetHome names the subdomain the zone apex sends visitors to. Without it,
+// https://<domain>/ answers "request host is not under <domain>" — technically
+// true and useless, since the apex is the one hostname a person types from
+// memory. Empty (the default) keeps that behaviour. Call before serving.
+//
+// A redirect rather than serving the console at two hostnames: the session
+// cookie, the WebSocket origin gate and every absolute URL the console builds
+// are all scoped to one host, and a second origin serving the same page is a
+// second place for those to disagree.
+func (s *Server) SetHome(sub string) { s.home = strings.ToLower(sub) }
+
+// redirectApex sends a bare <domain> request to the home subdomain, reporting
+// whether it handled the request. Path and query survive, so a link someone
+// trimmed back to the apex still lands where it was going.
+//
+// 302, not 301: this is "where the front page lives for now", and a permanent
+// redirect is cached by browsers past the point where we can take it back.
+func (s *Server) redirectApex(w http.ResponseWriter, r *http.Request) bool {
+	if s.home == "" {
+		return false
+	}
+	h := strings.ToLower(r.Host)
+	port := ""
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
+		h, port = h[:i], h[i:]
+	}
+	if strings.TrimSuffix(h, ".") != s.domain {
+		return false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// Behind a TLS-terminating front end (the tunnel) the connection is plain,
+	// so the header is what knows. Same rule as the terminal's origin check.
+	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+		scheme = strings.ToLower(strings.TrimSpace(strings.Split(fwd, ",")[0]))
+	}
+	http.Redirect(w, r, scheme+"://"+s.home+"."+s.domain+port+r.URL.RequestURI(), http.StatusFound)
+	return true
+}
+
 func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger) *Server {
 	s := &Server{
 		mgr:    mgr,
@@ -348,6 +394,11 @@ func (s *Server) notListeningHint(r *http.Request, port int) template.HTML {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub, ok := s.subdomainOf(r.Host)
 	if !ok {
+		// The apex is not a subdomain, so it lands here rather than in any
+		// lookup below — the one hostname with somewhere better to be.
+		if s.redirectApex(w, r) {
+			return
+		}
 		http.Error(w, "sparkbox: request host is not under "+s.domain, http.StatusNotFound)
 		return
 	}

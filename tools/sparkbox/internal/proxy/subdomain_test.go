@@ -117,3 +117,78 @@ func TestSuffixNameAbsentWithoutDispatch(t *testing.T) {
 		t.Fatalf("SuffixName on an undispatched request = (%q, true), want ok=false", name)
 	}
 }
+
+// The apex is not a subdomain, so it falls out of subdomainOf and would 404
+// with "request host is not under <domain>" — true, and useless for the one
+// hostname a person types from memory.
+func TestApexRedirectsHome(t *testing.T) {
+	s := testServer()
+	s.SetHome("my")
+
+	cases := []struct {
+		host, target, want string
+	}{
+		{"hivemind.tools", "/", "http://my.hivemind.tools/"},
+		{"HIVEMIND.TOOLS", "/", "http://my.hivemind.tools/"},
+		// The trailing dot of a fully-qualified name is still the apex.
+		{"hivemind.tools.", "/", "http://my.hivemind.tools/"},
+		// Path and query survive, so a link trimmed back to the apex still
+		// lands where it was going.
+		{"hivemind.tools", "/machines?tag=prod", "http://my.hivemind.tools/machines?tag=prod"},
+		// A non-default edge port has to come along or the redirect leaves the
+		// server entirely.
+		{"hivemind.tools:8081", "/", "http://my.hivemind.tools:8081/"},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, c.target, nil)
+		req.Host = c.host
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Errorf("%s%s = %d, want 302", c.host, c.target, rec.Code)
+		}
+		if got := rec.Header().Get("Location"); got != c.want {
+			t.Errorf("%s%s -> %q, want %q", c.host, c.target, got, c.want)
+		}
+	}
+}
+
+// Behind a TLS-terminating front end the connection to us is plain, so the
+// scheme has to come from the header or the redirect downgrades every visitor.
+func TestApexRedirectHonoursForwardedProto(t *testing.T) {
+	s := testServer()
+	s.SetHome("my")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "hivemind.tools"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	s.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Location"); got != "https://my.hivemind.tools/" {
+		t.Errorf("Location = %q, want https", got)
+	}
+}
+
+// Only the apex, and only when a home is configured. A foreign host must not be
+// bounced into our zone, and an unconfigured edge keeps its honest 404.
+func TestApexRedirectIsNarrow(t *testing.T) {
+	s := testServer()
+	s.SetHome("my")
+	for _, host := range []string{"evil.com", "nothivemind.tools", "xhivemind.tools"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Host = host
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404", host, rec.Code)
+		}
+	}
+
+	unset := testServer()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "hivemind.tools"
+	unset.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("apex with no home = %d, want 404", rec.Code)
+	}
+}

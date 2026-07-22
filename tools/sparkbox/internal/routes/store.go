@@ -14,11 +14,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 )
 
 // DefaultPort is forwarded to when a route doesn't specify one.
@@ -59,28 +60,16 @@ type Route struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// reservedSuffixes are subdomain endings the edge dispatches to a built-in
-// handler before it ever reaches this store: "<name>-xterm" is the browser
-// terminal for <name>, so a route row ending that way would be created,
-// listed, and silently never served. Refusing it is the only honest answer.
-//
-// Own copy of the literal rather than xterm.ReservedSuffix, which would be an
-// import cycle (that package reaches this one through host.Manager). Same
-// deliberate-duplication convention as host.reservedSuffixes; cmd/sparkbox
-// warns at startup for rows that predate the rule or use a configured label.
-var reservedSuffixes = []string{"-xterm"}
-
 // ValidSubdomain reports whether s is a usable subdomain label.
+//
+// Reserved names are refused here, not merely at the edge. The edge dispatches
+// reserved subdomains and suffixes to built-in handlers *before* it consults
+// this store, so a row at `console`, `api` or `demo-xterm` would be accepted,
+// stored, listed by `ctl routes`, and then never once served — the failure a
+// user cannot diagnose, because everything they can see says it exists. The
+// list lives in internal/reserved, shared with sandbox names and handles.
 func ValidSubdomain(s string) bool {
-	if len(s) > 253 || !subdomainRe.MatchString(s) {
-		return false
-	}
-	for _, suffix := range reservedSuffixes {
-		if strings.HasSuffix(s, suffix) {
-			return false
-		}
-	}
-	return true
+	return len(s) <= 253 && subdomainRe.MatchString(s) && !reserved.Name(s)
 }
 
 type Store struct {

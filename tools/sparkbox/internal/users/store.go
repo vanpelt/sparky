@@ -27,6 +27,8 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 	_ "modernc.org/sqlite"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 )
 
 var (
@@ -48,17 +50,11 @@ var (
 // break every CEL policy written against it.
 var handleRe = regexp.MustCompile(`^[a-z0-9-]{2,32}$`)
 
-// reserved handles would collide with the gateway's own doors and subdomains.
-var reserved = map[string]bool{
-	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
-	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
-	"my":    true, // user console subdomain
-	"xterm": true, // browser-terminal subtree
-	"api":   true, // REST API subdomain
-}
-
-// ValidHandle reports whether h is a claimable handle.
-func ValidHandle(h string) bool { return handleRe.MatchString(h) && !reserved[h] }
+// ValidHandle reports whether h is a claimable handle. Reserved names come from
+// internal/reserved, shared with sandbox names and route subdomains: a handle
+// that collides with a platform door is the same mistake wearing a different
+// hat, and keeping a second copy here is what let the two lists drift.
+func ValidHandle(h string) bool { return handleRe.MatchString(h) && !reserved.Name(h) }
 
 // Key is one SSH public key linked to a user.
 type Key struct {
