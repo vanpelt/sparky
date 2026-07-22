@@ -25,7 +25,13 @@ func (m *Meter) Attach(string) (bool, error)                { return false, ErrU
 func (m *Meter) Detach(string)                              {}
 func (m *Meter) Attached(string) bool                       { return false }
 func (m *Meter) AttachedNames() []string                    { return nil }
+func (m *Meter) Ifaces() map[uint32]string                  { return nil }
 func (m *Meter) Flows() (map[netip.Addr]report.Flow, error) { return nil, ErrUnsupported }
-func (m *Meter) SetEnforce(bool) error                      { return ErrUnsupported }
-func (m *Meter) SyncAllowed([]netip.Addr) error             { return ErrUnsupported }
-func (m *Meter) Close() error                               { return nil }
+func (m *Meter) FlowsByIface() (map[uint32]map[netip.Addr]report.Flow, error) {
+	return nil, ErrUnsupported
+}
+func (m *Meter) SetEnforce(bool) error                     { return ErrUnsupported }
+func (m *Meter) SetEnforceFor(uint32, bool) error          { return ErrUnsupported }
+func (m *Meter) SyncAllowed([]netip.Addr) error            { return ErrUnsupported }
+func (m *Meter) SyncAllowedFor(uint32, []netip.Addr) error { return ErrUnsupported }
+func (m *Meter) Close() error                              { return nil }

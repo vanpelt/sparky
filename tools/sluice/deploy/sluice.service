@@ -8,7 +8,11 @@ ConditionKernelVersion=>=6.6
 [Service]
 Type=simple
 # sluice.env may override the defaults below, e.g.
-#   SLUICE_ARGS=--enforce --deny refused --upstream 10.0.0.53:53
+#   SLUICE_ARGS=--enforce --open-untagged --deny refused --upstream 10.0.0.53:53
+# For the sparkbox tag model, pass --enforce --open-untagged: only VMs whose
+# tags carry a network rule (pushed over the control socket) are filtered;
+# untagged VMs keep unrestricted egress. Drop --open-untagged to enforce the
+# base allowlist on every VM instead.
 # Referenced unbraced so systemd word-splits it (empty -> zero args); see the
 # note in sparkbox.service about ${VAR} vs $VAR.
 EnvironmentFile=-/srv/sparkbox/sluice.env
@@ -18,11 +22,15 @@ EnvironmentFile=-/srv/sparkbox/sluice.env
 User=root
 # Guests reach the resolver at their gateway address (the host end of the tap),
 # so bind the resolver on every interface. The meter auto-discovers sbtap*.
+# --api-listen exposes a root-owned control socket the sparkbox user console
+# reads per-VM bandwidth from and pushes per-tag egress policy to. It lives under
+# /run (tmpfs, recreated each boot) and never leaves the box.
 ExecStart=/usr/local/bin/sluice run \
   --allowlist /srv/sparkbox/allowlist.txt \
   --dns-listen :53 \
   --tap-prefix sbtap \
   --report-interval 60s \
+  --api-listen /run/sluice.sock \
   $SLUICE_ARGS
 Restart=always
 RestartSec=2

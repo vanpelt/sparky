@@ -56,12 +56,14 @@ sudo sluice run --allowlist allowlist.txt --enforce
 | `--dns-listen` | `:53` | resolver bind address (guests dial their gateway IP) |
 | `--upstream` | `1.1.1.1:53,8.8.8.8:53` | real resolvers for allowed names (repeatable) |
 | `--enforce` | `false` | drop egress to addresses the allowlist never resolved |
+| `--open-untagged` | `false` | enforce only taps with a pushed per-tap policy; untagged VMs stay unrestricted |
 | `--tap-prefix` | `sbtap` | attach the meter to interfaces with this prefix |
 | `--allow-ip` | — | always-reachable IP that bypasses DNS (repeatable) |
 | `--deny` | `nxdomain` | reply for blocked names: `nxdomain` or `refused` |
 | `--min-ttl` | `5m` | floor on how long a resolved IP stays reachable |
 | `--report-interval` | `30s` | per-domain bandwidth report period (`0` disables) |
 | `--sync-interval` | `5s` | tap-discovery + allow-set reconcile period |
+| `--api-listen` | — | Unix control socket for per-VM bandwidth + per-tag policy (empty disables) |
 | `--log` | `json` | `json` or `text` |
 
 ### Allowlist syntax
@@ -86,6 +88,32 @@ TOTAL                       1.4MiB   127.7MiB 129.1MiB
 Rows marked `(ip)` are raw-IP flows with no matching DNS record — in enforce
 mode these only appear for pinned infrastructure (the gateway) or `--allow-ip`
 entries, since everything else is dropped.
+
+### Control socket (`--api-listen`)
+
+With `--api-listen /run/sluice.sock`, sluice serves a host-local, root-owned
+control plane over a Unix socket (no auth — reachability is the permission):
+
+- `GET /report.json` — per-tap (per-VM) per-domain bandwidth. Each tap's flows
+  are keyed by its ifindex in the eBPF meter, joined back to domains, and
+  labelled by tap name (`sbtap<idx>`) so a caller can map them to a VM.
+- `PUT /policy` — replace the per-tap allowlists, e.g.
+  `{"taps":{"sbtap3":["github.com","*.githubusercontent.com"]}}`. The `--allowlist`
+  file remains the fleet-wide base; per-tap lists are layered on top and take
+  effect on the next reconcile (a push pokes one immediately). Enforcement is
+  per-tap in the kernel allow-set, so a tag that grants a domain only opens it
+  for VMs carrying that tag.
+
+A tap that appears in a `PUT /policy` body becomes an *enforced* tap. Under
+`--open-untagged`, only enforced taps are filtered; a VM the caller omits (no
+tag carries a rule) keeps unrestricted egress and resolves any name. A policied
+VM resolves only its own allow-set (plus the base) and gets an NXDOMAIN for
+anything else, so DNS failures are honest rather than silent drops. Without
+`--open-untagged`, every tap is enforced against the base allowlist (the classic
+whole-fleet gate).
+
+The sparkbox user console is the intended client: it pushes each running VM's
+tag-derived rules and renders the bandwidth report.
 
 ## Guest configuration
 

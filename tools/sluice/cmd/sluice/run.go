@@ -14,9 +14,11 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/vanpelt/sparky/tools/sluice/internal/allowlist"
+	"github.com/vanpelt/sparky/tools/sluice/internal/control"
 	"github.com/vanpelt/sparky/tools/sluice/internal/dnsproxy"
 	"github.com/vanpelt/sparky/tools/sluice/internal/ipmap"
 	"github.com/vanpelt/sparky/tools/sluice/internal/meter"
+	"github.com/vanpelt/sparky/tools/sluice/internal/policy"
 	"github.com/vanpelt/sparky/tools/sluice/internal/report"
 )
 
@@ -45,11 +47,13 @@ type runOpts struct {
 	tapPrefix      string
 	staticAllowIPs multiFlag
 	enforce        bool
+	openUntagged   bool
 	denyMode       string
 	logFormat      string
 	minTTL         time.Duration
 	syncInterval   time.Duration
 	reportInterval time.Duration
+	apiSocket      string
 }
 
 func runCmd(args []string) int {
@@ -61,11 +65,13 @@ func runCmd(args []string) int {
 	fs.StringVar(&o.tapPrefix, "tap-prefix", "sbtap", "attach the meter to interfaces with this name prefix")
 	fs.Var(&o.staticAllowIPs, "allow-ip", "always-reachable IP, bypassing DNS (repeatable)")
 	fs.BoolVar(&o.enforce, "enforce", false, "drop guest egress to addresses the allowlist never resolved")
+	fs.BoolVar(&o.openUntagged, "open-untagged", false, "only enforce taps that have a per-tap policy pushed over the control socket; taps with none keep unrestricted egress (an untagged sandbox is unlimited). Without this every tap is enforced against the base allowlist")
 	fs.StringVar(&o.denyMode, "deny", "nxdomain", "reply for blocked names: nxdomain|refused")
 	fs.StringVar(&o.logFormat, "log", "json", "log format: json|text")
 	fs.DurationVar(&o.minTTL, "min-ttl", ipmap.DefaultMinTTL, "floor for how long a resolved IP stays reachable")
 	fs.DurationVar(&o.syncInterval, "sync-interval", 5*time.Second, "tap-discovery and allow-set sync period")
 	fs.DurationVar(&o.reportInterval, "report-interval", 30*time.Second, "per-domain bandwidth report period (0 disables)")
+	fs.StringVar(&o.apiSocket, "api-listen", "", "path to a Unix control socket serving per-VM bandwidth + accepting per-tap policy (empty disables)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -85,6 +91,12 @@ func runCmd(args []string) int {
 		return 1
 	}
 	log.Info("allowlist loaded", "rules", list.Len(), "file", o.allowlist)
+
+	// The base file applies to every tap; the control socket layers per-tap
+	// policy on top as VMs' tags change. In open-untagged mode a tap with no
+	// per-tap policy is left unrestricted (untagged sandbox = unlimited egress).
+	pol := policy.New(list)
+	pol.SetDefaultAllow(o.openUntagged)
 
 	im := ipmap.New()
 	im.MinTTL = o.minTTL
@@ -110,7 +122,7 @@ func runCmd(args []string) int {
 		return 2
 	}
 	proxy, err := dnsproxy.New(dnsproxy.Config{
-		Allow: list, IPMap: im, Upstreams: o.upstreams, Deny: deny, Logger: log,
+		Allow: pol, IPMap: im, Upstreams: o.upstreams, Deny: deny, Logger: log,
 	})
 	if err != nil {
 		log.Error("dns proxy", "err", err)
@@ -148,15 +160,40 @@ func runCmd(args []string) int {
 		if err := mtr.SetEnforce(o.enforce); err != nil {
 			log.Error("set enforce", "err", err)
 		}
-		log.Info("eBPF meter loaded", "enforce", o.enforce, "tap_prefix", o.tapPrefix)
+		log.Info("eBPF meter loaded", "enforce", o.enforce, "open_untagged", o.openUntagged, "tap_prefix", o.tapPrefix)
+	}
+
+	// poke lets a policy push trigger an immediate reconcile instead of waiting
+	// for the next sync tick. Buffered + non-blocking so a push never stalls.
+	poke := make(chan struct{}, 1)
+	kick := func() {
+		select {
+		case poke <- struct{}{}:
+		default:
+		}
 	}
 
 	// Background loops.
 	if mtr != nil {
-		go syncLoop(ctx, o, mtr, im, log)
+		go syncLoop(ctx, o, mtr, im, pol, poke, log)
 		if o.reportInterval > 0 {
 			go reportLoop(ctx, o.reportInterval, mtr, im, log)
 		}
+	}
+
+	// Host-local control socket: serves per-VM bandwidth, accepts per-tap policy.
+	if o.apiSocket != "" {
+		var cm control.Meter
+		if mtr != nil {
+			cm = mtr
+		}
+		srv := control.New(cm, im, pol, kick, log)
+		go func() {
+			if err := srv.Serve(ctx, o.apiSocket); err != nil {
+				log.Error("control socket", "path", o.apiSocket, "err", err)
+				cancel()
+			}
+		}()
 	}
 
 	<-ctx.Done()
@@ -173,22 +210,25 @@ func shutdownDNS(servers []*dns.Server) {
 	}
 }
 
-// syncLoop keeps tap attachments and the kernel allow-set current.
-func syncLoop(ctx context.Context, o runOpts, mtr *meter.Meter, im *ipmap.Map, log *slog.Logger) {
+// syncLoop keeps tap attachments and the kernel allow-set current. It also wakes
+// on a poke (a policy push) so new grants apply without waiting for the tick.
+func syncLoop(ctx context.Context, o runOpts, mtr *meter.Meter, im *ipmap.Map, pol *policy.Policy, poke <-chan struct{}, log *slog.Logger) {
 	t := time.NewTicker(o.syncInterval)
 	defer t.Stop()
-	reconcile(o, mtr, im, log) // once immediately
+	reconcile(o, mtr, im, pol, log) // once immediately
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			reconcile(o, mtr, im, log)
+			reconcile(o, mtr, im, pol, log)
+		case <-poke:
+			reconcile(o, mtr, im, pol, log)
 		}
 	}
 }
 
-func reconcile(o runOpts, mtr *meter.Meter, im *ipmap.Map, log *slog.Logger) {
+func reconcile(o runOpts, mtr *meter.Meter, im *ipmap.Map, pol *policy.Policy, log *slog.Logger) {
 	// Attach to any new (or recreated) taps; pin their host (gateway) addresses
 	// so guest→gateway traffic (DNS, metadata, ssh) is never dropped in enforce
 	// mode. Attach re-attaches when a name's tap was torn down and rebuilt under
@@ -208,7 +248,8 @@ func reconcile(o runOpts, mtr *meter.Meter, im *ipmap.Map, log *slog.Logger) {
 			log.Info("attached tap", "iface", name)
 		}
 	}
-	// Detach taps that have gone away, freeing their kernel links.
+	// Detach taps whose VM went away, freeing their kernel links and dropping
+	// their per-ifindex allow-set/counter entries in the meter.
 	for _, name := range mtr.AttachedNames() {
 		if _, ok := present[name]; !ok {
 			mtr.Detach(name)
@@ -216,15 +257,24 @@ func reconcile(o runOpts, mtr *meter.Meter, im *ipmap.Map, log *slog.Logger) {
 		}
 	}
 
-	// Expire stale DNS entries, then mirror the live allow-set into the kernel.
+	// Expire stale DNS entries, then mirror the live policy into the kernel:
+	// the base + pinned infra as the ifindex-0 wildcard, and each tap's own
+	// resolved grants keyed by its ifindex. Enforcement is gated per tap: in
+	// open-untagged mode only taps that carry a per-tap policy are enforced;
+	// otherwise (classic mode) every tap is enforced against the base list.
 	im.Sweep()
 	snap := im.Snapshot()
-	addrs := make([]netip.Addr, len(snap))
-	for i, e := range snap {
-		addrs[i] = e.Addr
+	if err := mtr.SyncAllowed(pol.BaseGrants(snap)); err != nil {
+		log.Warn("sync base allow-set", "err", err)
 	}
-	if err := mtr.SyncAllowed(addrs); err != nil {
-		log.Warn("sync allow-set", "err", err)
+	for ifindex, name := range mtr.Ifaces() {
+		if err := mtr.SyncAllowedFor(ifindex, pol.TapGrants(name, snap)); err != nil {
+			log.Warn("sync tap allow-set", "iface", name, "err", err)
+		}
+		enforced := o.enforce && (!o.openUntagged || pol.IsEnforced(name))
+		if err := mtr.SetEnforceFor(ifindex, enforced); err != nil {
+			log.Warn("set tap enforcement", "iface", name, "err", err)
+		}
 	}
 }
 

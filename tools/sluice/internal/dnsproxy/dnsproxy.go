@@ -23,7 +23,6 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/vanpelt/sparky/tools/sluice/internal/allowlist"
 	"github.com/vanpelt/sparky/tools/sluice/internal/ipmap"
 )
 
@@ -45,9 +44,25 @@ const (
 	DenyREFUSED
 )
 
+// Allower decides whether a name may be resolved and returns the matching
+// pattern for logging. *allowlist.List and *policy.Policy both satisfy it, so
+// the proxy can be driven by a static file or a live, per-tap policy without
+// caring which.
+type Allower interface {
+	Allowed(name string) (bool, string)
+}
+
+// ClientAllower is an Allower that decides per requesting client, so a policied
+// guest is held to its own allowlist while an untagged one resolves freely.
+// *policy.Policy implements it; when the configured Allow also satisfies this
+// interface the proxy passes the client address through.
+type ClientAllower interface {
+	AllowedFor(client netip.Addr, name string) (bool, string)
+}
+
 // Config configures a Proxy.
 type Config struct {
-	Allow     *allowlist.List
+	Allow     Allower
 	IPMap     *ipmap.Map
 	Upstreams []string      // host:port of real resolvers, tried in order
 	Client    Exchanger     // defaults to a UDP *dns.Client
@@ -115,6 +130,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	}
 	q := req.Question[0]
 	client := clientIP(w)
+	clientAddr, _ := netip.ParseAddr(client)
 
 	// Only IN-class A/AAAA/CNAME etc. are meaningful for egress. Other classes
 	// are refused outright rather than forwarded.
@@ -126,7 +142,13 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	}
 
 	name := q.Name
-	allowed, pattern := p.cfg.Allow.Allowed(name)
+	var allowed bool
+	var pattern string
+	if ca, ok := p.cfg.Allow.(ClientAllower); ok {
+		allowed, pattern = ca.AllowedFor(clientAddr, name)
+	} else {
+		allowed, pattern = p.cfg.Allow.Allowed(name)
+	}
 	if !allowed {
 		atomic.AddUint64(&p.stats.Denied, 1)
 		p.log.Info("dns", "decision", "deny", "client", client,

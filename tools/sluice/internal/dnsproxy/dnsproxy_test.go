@@ -207,3 +207,47 @@ func TestNonINClassDenied(t *testing.T) {
 		t.Error("non-IN class must not be forwarded")
 	}
 }
+
+// clientAllower records the client it was asked about and allows only for a
+// specific "policied" address. It implements ClientAllower, so the proxy must
+// prefer AllowedFor over Allowed and thread the query's source address through.
+type clientAllower struct {
+	sawClient netip.Addr
+	allowFor  netip.Addr // this client resolves anything; others resolve nothing
+}
+
+func (c *clientAllower) Allowed(string) (bool, string) { return false, "" } // union path must NOT be used
+func (c *clientAllower) AllowedFor(client netip.Addr, _ string) (bool, string) {
+	c.sawClient = client
+	return client == c.allowFor, ""
+}
+
+func TestPerClientResolutionUsesAllowedFor(t *testing.T) {
+	guest := netip.MustParseAddr("172.30.9.2")
+	ca := &clientAllower{allowFor: guest}
+	up := &fakeUpstream{zone: map[string][]string{"anything.example.": {"9.9.9.9"}}, ttl: 60}
+	p, err := New(Config{
+		Allow: ca, IPMap: ipmap.New(), Upstreams: []string{"x:53"},
+		Client: up, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The policied guest resolves; the proxy saw its address, not the union path.
+	w := &capWriter{from: &net.UDPAddr{IP: net.ParseIP("172.30.9.2"), Port: 5353}}
+	p.ServeDNS(w, query("anything.example", dns.TypeA))
+	if ca.sawClient != guest {
+		t.Fatalf("AllowedFor client = %v, want %v", ca.sawClient, guest)
+	}
+	if w.msg.Rcode != dns.RcodeSuccess || len(w.msg.Answer) == 0 {
+		t.Errorf("policied client should have resolved, got rcode %d / %d answers", w.msg.Rcode, len(w.msg.Answer))
+	}
+
+	// A different client (not the allowed one) is denied by the same per-client path.
+	w2 := &capWriter{from: &net.UDPAddr{IP: net.ParseIP("172.30.4.2"), Port: 5353}}
+	p.ServeDNS(w2, query("anything.example", dns.TypeA))
+	if w2.msg.Rcode != dns.RcodeNameError {
+		t.Errorf("non-policied client rcode = %d, want NXDOMAIN", w2.msg.Rcode)
+	}
+}
