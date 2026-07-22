@@ -532,7 +532,10 @@ func serve(args []string) error {
 		// edge session as private routes.
 		if *userConsoleSub != "" {
 			warnSubdomainCollision("user console", *userConsoleSub, mgr, routeStore, log)
-			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, *proxyTLS, log)
+			// xtermLabel, not *xtermSub: it is already emptied when there is no
+			// proxy edge, and the console's Terminal button must not link to a
+			// host nothing serves.
+			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain)
 		}

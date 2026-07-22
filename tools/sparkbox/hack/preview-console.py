@@ -79,7 +79,7 @@ def _machines(tick):
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
     ]
 
-_ME = {"handle": "van", "operator": True}
+_ME = {"handle": "van", "operator": True, "terminal_subdomain": "xterm"}
 _SECRETS = [
     {"name": "OPENAI_API_KEY", "tags": ["ml", "prod"], "version": 3, "updated_at": _iso(3600)},
     {"name": "DATABASE_URL", "tags": ["prod"], "version": 1, "updated_at": _iso(172800)},

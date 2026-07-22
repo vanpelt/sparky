@@ -81,7 +81,12 @@ type Handler struct {
 	signer   *edgeauth.Signer
 	syncer   OwnerSyncer
 	domain   string // base zone, e.g. "hivemind.tools"
-	secure   bool   // set the Secure flag when clearing the session cookie
+	// xtermSub is --xterm-subdomain, or "" when browser terminals are off.
+	// Nothing here routes to it; it is handed to the SPA so the page can build
+	// the <name>.<xtermSub>.<domain> link itself, and hide the Terminal button
+	// entirely on a host that serves no terminals.
+	xtermSub string
+	secure   bool // set the Secure flag when clearing the session cookie
 	log      *slog.Logger
 	loginURL string // where unauthenticated browsers are sent
 	origin   string // first-party Origin accepted by the CSRF gate
@@ -91,12 +96,13 @@ type Handler struct {
 // the --user-console-subdomain value, "my" by default; empty falls back to
 // "my"). accounts resolves operator status (a *users.Store satisfies it),
 // signer verifies the edge session, and syncer (nil-safe) propagates
-// tag/secret changes to running sandboxes. secure should be true when the
+// tag/secret changes to running sandboxes. xtermSub is --xterm-subdomain
+// ("" when browser terminals are disabled). secure should be true when the
 // proxy edge serves TLS.
 func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Store,
 	netrulesStore *netrules.Store, netSync *netpush.Syncer, favicons *domainmeta.FaviconCache,
 	accounts edgeauth.Accounts, signer *edgeauth.Signer, syncer OwnerSyncer,
-	subdomain, domain string, secure bool, log *slog.Logger) *Handler {
+	subdomain, domain, xtermSub string, secure bool, log *slog.Logger) *Handler {
 	if subdomain == "" {
 		subdomain = "my"
 	}
@@ -109,7 +115,7 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 		mgr: mgr, routes: routeStore, secrets: secretsStore,
 		netrules: netrulesStore, netsync: netSync, favicons: favicons,
 		accounts: accounts, signer: signer, syncer: syncer,
-		domain: domain, secure: secure, log: log,
+		domain: domain, xtermSub: strings.Trim(xtermSub, "."), secure: secure, log: log,
 		loginURL: "https://login." + domain + "/",
 		origin:   "https://" + subdomain + "." + domain,
 	}
@@ -170,11 +176,20 @@ type meResponse struct {
 	Handle   string `json:"handle"`
 	Email    string `json:"email,omitempty"`
 	Operator bool   `json:"operator"`
+	// TerminalSubdomain is the reserved label browser terminals are served
+	// under; the SPA joins it with its own zone to link a machine's terminal.
+	// Omitted when terminals are disabled, which is what hides the button —
+	// a host with no --proxy or no --xterm-subdomain must not offer a link to
+	// a name that resolves nowhere.
+	TerminalSubdomain string `json:"terminal_subdomain,omitempty"`
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
-	writeJSON(w, http.StatusOK, meResponse{Handle: sess.Handle, Email: sess.Email, Operator: sess.Operator})
+	writeJSON(w, http.StatusOK, meResponse{
+		Handle: sess.Handle, Email: sess.Email, Operator: sess.Operator,
+		TerminalSubdomain: h.xtermSub,
+	})
 }
 
 // logout clears the zone-wide session cookie (Domain "."+domain, matching how
