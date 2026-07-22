@@ -1,6 +1,13 @@
 // Package api exposes the control-plane HTTP API. MVP scope: sandbox CRUD +
 // pause/resume on the local host. Bind it to localhost or a private network —
 // there is no auth layer yet.
+//
+// It is legacy, and it must never be mounted on the proxy edge. It takes the
+// owner from a request field, checks nothing, and would hand any caller every
+// sandbox on the host; --api-addr defaults to 127.0.0.1 for exactly that
+// reason. The authenticated surface that belongs on the edge is
+// internal/restapi at api.<domain>, which scopes every call to a verified
+// session through internal/ctlops. Nothing new should be added here.
 package api
 
 import (

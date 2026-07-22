@@ -100,6 +100,39 @@ func TestTagsOps(t *testing.T) {
 	}
 }
 
+// TestSetTagsRefusesAnotherOwnersSandbox is the security regression. A tag row
+// is keyed by sandbox NAME, and a name is the one argument a caller supplies
+// before anything has decided whether it is theirs, so an unscoped
+// replace-the-whole-set let any user delete a stranger's tags — and with them
+// the stranger's secret-env selection and their per-tag egress allowlist, which
+// silently turns a filtered VM into an unfiltered one.
+func TestSetTagsRefusesAnotherOwnersSandbox(t *testing.T) {
+	s := openTemp(t)
+	must(t, s.SetTags("alicebox", "alice", []string{"prod"}))
+
+	if err := s.SetTags("alicebox", "mallory", []string{"probe"}); err == nil {
+		t.Fatal("a cross-owner SetTags succeeded")
+	}
+	// The rollback half of the same attack: SetTags(..., nil) deleted every row
+	// and inserted none, so refusing the write is not enough — the clear has to
+	// be refused too.
+	if err := s.SetTags("alicebox", "mallory", nil); err == nil {
+		t.Fatal("a cross-owner clear succeeded")
+	}
+	tags, err := s.TagsFor("alicebox")
+	must(t, err)
+	if len(tags) != 1 || tags[0] != "prod" {
+		t.Fatalf("alice's tags are now %v, want [prod]", tags)
+	}
+	// The owner's own replace still works, including the clear.
+	must(t, s.SetTags("alicebox", "alice", nil))
+	if tags, _ = s.TagsFor("alicebox"); len(tags) != 0 {
+		t.Fatalf("owner's clear left %v", tags)
+	}
+	// And the name is reusable once it is free, so the refusal cannot wedge it.
+	must(t, s.SetTags("alicebox", "mallory", []string{"probe"}))
+}
+
 func TestRenameSandboxMovesEnv(t *testing.T) {
 	s := openTemp(t)
 	must(t, s.PutSecret("alice", "TOKEN", "v", []string{"web"}))

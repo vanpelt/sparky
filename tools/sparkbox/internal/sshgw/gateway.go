@@ -9,8 +9,6 @@ package sshgw
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +21,7 @@ import (
 	gssh "github.com/gliderlabs/ssh"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -59,43 +58,29 @@ const (
 	authedKeyKey  = "sparkbox-key"
 )
 
-// pauseTimeout bounds ctl pause. Pausing writes the guest's full memory
-// snapshot (GBs for a warm sandbox) — the 15s dial timeout wedged an 8GB
-// guest mid-pause. Sized for the slowest plausible snapshot, not a dial.
-const pauseTimeout = 3 * time.Minute
-
-// archiveTimeout bounds ctl archive/restore. Both move the whole rootfs: archive
-// runs fsck + zerofree + zstd of a 25 GB image then uploads it; restore
-// downloads + decompresses. Sized for a slow link and a full disk, not a dial.
-const archiveTimeout = 15 * time.Minute
-
-// resizeTimeout bounds ctl resize. The work is an e2fsck plus a resize2fs over
-// the whole image, then a cold boot — seconds on a lightly-used disk, minutes
-// on a full one. Sized for the slow case.
-const resizeTimeout = 10 * time.Minute
-
-// maxDiskMB is the largest disk `ctl resize` will hand out (1 TB). Not policy
-// so much as a fat-finger guard: the image is sparse, so an accidental "25000G"
-// would succeed instantly and only bite later, as a guest slowly filling a disk
-// far larger than the host.
-const maxDiskMB int64 = 1024 * 1024
+// The per-command timeout budgets and the resize ceiling are ctlops' —
+// PauseTimeout, ArchiveTimeout, ResizeTimeout, MaxDiskMB. They are not
+// restated here because every transport must apply the same numbers, and two
+// answers to "how long may an archive take" is one answer too many.
 
 type Gateway struct {
-	mgr            *host.Manager
-	users          *users.Store
-	log            *slog.Logger
-	hostKey        xssh.Signer
-	upstreamKey    xssh.Signer // authenticates the gateway into VMs
-	defaultImage   string
-	dialTimeout    time.Duration
-	doors          *frontdoor.Mapper // optional: hostname (dest-IP) routing
-	domain         string            // base domain for user-facing hints, e.g. "hivemind.tools"
-	openSignup     bool              // signup without an invite code
-	invitesPerUser int               // non-operator invite quota; 0 = operator only
-	schedules      *schedule.Store   // optional: platform scheduler store (ctl@ schedule)
-	routes         *routes.Store     // optional: proxy routes, for ctl@ share
-	session        *edgeauth.Signer  // optional: edge session signer, for ctl@ session-token
-	tags           SandboxTagger     // optional: sandbox tag reads/writes; nil disables tagging
+	mgr *host.Manager
+	// ops is the control plane itself: every `ctl@` command is a call into it,
+	// so the ownership check, the timeout budget and the error taxonomy this
+	// channel applies are the same ones api.<domain> and the browser terminal do.
+	ops         *ctlops.Ops
+	users       *users.Store
+	log         *slog.Logger
+	hostKey     xssh.Signer
+	upstreamKey xssh.Signer // authenticates the gateway into VMs
+	dialTimeout time.Duration
+	doors       *frontdoor.Mapper // optional: hostname (dest-IP) routing
+	domain      string            // base domain for user-facing hints, e.g. "hivemind.tools"
+	// xtermSubdomain is the label the browser terminal is served under, used only
+	// to tell a hung-up browser tab where to come back. Empty falls back to the
+	// SSH reconnect wording.
+	xtermSubdomain string
+	openSignup     bool // signup without an invite code
 	// live tracks the interactive sessions attached to each sandbox so they can
 	// be hung up cleanly when it is paused — see livesessions.go.
 	liveMu sync.Mutex
@@ -135,6 +120,15 @@ type GatewayOptions struct {
 	// --tag ml`) and the `ctl@ tags` command. Satisfied by *secrets.Store; nil
 	// disables both.
 	Tags SandboxTagger
+	// XtermSubdomain is the label the browser terminal is served under
+	// ("xterm"), used only so a hung-up terminal tab is told a URL rather than
+	// an ssh command. Empty is fine on a host that serves no terminal.
+	XtermSubdomain string
+	// Ops, if set, is the control-plane core this gateway drives; nil builds one
+	// from the stores above. The integrator passes its own so that the REST API,
+	// the browser terminal and this channel share a single Ops — one job
+	// registry, one audit logger, one lifetime to Close.
+	Ops *ctlops.Ops
 }
 
 // SandboxTagger is the slice of the secrets store the gateway needs to read and
@@ -147,15 +141,56 @@ type SandboxTagger interface {
 }
 
 func New(opts GatewayOptions) *Gateway {
-	return &Gateway{
-		mgr: opts.Manager, users: opts.Users, log: opts.Logger,
+	g := &Gateway{
+		mgr: opts.Manager, ops: opts.Ops, users: opts.Users, log: opts.Logger,
 		hostKey: opts.HostKey, upstreamKey: opts.UpstreamKey,
-		defaultImage: opts.DefaultImage, dialTimeout: 15 * time.Second,
-		doors: opts.Doors, domain: opts.Domain,
-		openSignup: opts.OpenSignup, invitesPerUser: opts.InvitesPerUser,
-		schedules: opts.Schedules,
-		routes:    opts.Routes, session: opts.Session, tags: opts.Tags,
+		dialTimeout: 15 * time.Second,
+		doors:       opts.Doors, domain: opts.Domain,
+		xtermSubdomain: opts.XtermSubdomain,
+		openSignup:     opts.OpenSignup,
 	}
+	if g.ops == nil {
+		g.ops = ctlops.New(opsConfig(opts))
+	}
+	return g
+}
+
+// opsConfig builds a control plane from the gateway's own stores, for callers
+// that have not built one themselves.
+//
+// Every optional store is checked against nil before it is assigned, which is
+// not paperwork: assigning a nil *schedule.Store to an interface field yields a
+// non-nil interface holding a nil pointer, and ctlops decides whether a feature
+// exists by comparing that field to nil. Skipping the check would turn "this
+// host has no scheduler" from a polite refusal into a panic on the first
+// `schedule list`.
+func opsConfig(opts GatewayOptions) ctlops.Config {
+	cfg := ctlops.Config{
+		DefaultImage:   opts.DefaultImage,
+		Domain:         opts.Domain,
+		XtermSubdomain: opts.XtermSubdomain,
+		InvitesPerUser: opts.InvitesPerUser,
+		Log:            opts.Logger,
+	}
+	if opts.Manager != nil {
+		cfg.Sandboxes, cfg.Templates = opts.Manager, opts.Manager
+	}
+	if opts.Users != nil {
+		cfg.Accounts = opts.Users
+	}
+	if opts.Tags != nil {
+		cfg.Tags = opts.Tags
+	}
+	if opts.Schedules != nil {
+		cfg.Schedules = opts.Schedules
+	}
+	if opts.Routes != nil {
+		cfg.Routes = opts.Routes
+	}
+	if opts.Session != nil {
+		cfg.Sessions = opts.Session
+	}
+	return cfg
 }
 
 // Server builds the gliderlabs/ssh server; callers run Serve/ListenAndServe.
@@ -238,26 +273,17 @@ func (g *Gateway) handle(s gssh.Session) {
 			fail(s, log, "create sandbox", err)
 			return
 		}
-		tags := dedupeTags(append(flagged, normalizeTags(bare)...))
-		// Create is the one validator: it owns the name charset, the reserved
-		// subdomain set, and the already-taken check, so a requested name gets
-		// exactly the same treatment as a generated one.
-		name := requestedName
-		if name == "" {
-			name = g.newName()
-		}
-		// Tags first: Create pushes the owner's secret env asynchronously, and
-		// which secrets that picks up is exactly what tags decide. Stamping after
-		// Create would race that push and usually lose.
-		if err := g.applyTags(name, user, tags); err != nil {
+		tags, err := ctlops.NormalizeTags(append(flagged, bare...))
+		if err != nil {
 			fail(s, log, "create sandbox", err)
 			return
 		}
-		if _, err := g.mgr.Create(ctx, name, user, g.defaultImage, 0, 0); err != nil {
-			// Don't strand tag rows for a sandbox that never came into being.
-			if len(tags) > 0 && g.tags != nil {
-				g.tags.SetTags(name, user, nil) //nolint:errcheck // best-effort cleanup
-			}
+		// ctlops.Create is the whole creation: it names the box when the caller
+		// didn't, stamps the tags before Create (the secret-env push is fired
+		// asynchronously and the tags decide its contents) and clears them again
+		// if the create fails.
+		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{Name: requestedName, Tags: tags})
+		if err != nil {
 			g.failStart(s, log, "create sandbox", err)
 			return
 		}
@@ -265,8 +291,13 @@ func (g *Gateway) handle(s gssh.Session) {
 		if len(tags) > 0 {
 			tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
 		}
-		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: ssh %s\r\n", name, tagNote, g.reconnectHint(name, viaDoor))
-		sandboxName = name
+		via := viaGateway
+		if viaDoor {
+			via = viaFrontDoor
+		}
+		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: %s\r\n",
+			box.Name, tagNote, g.reconnectHint(box.Name, via))
+		sandboxName = box.Name
 	}
 
 	box, ok := g.mgr.Get(sandboxName)
@@ -555,23 +586,4 @@ func splitEnv(kv string) (string, string, bool) {
 		}
 	}
 	return "", "", false
-}
-
-// newName returns a fun, unused "adjective-noun" sandbox name. If the random
-// pool keeps colliding with existing sandboxes, it falls back to appending a
-// short hex suffix so a name is always produced.
-func (g *Gateway) newName() string {
-	for i := 0; i < 8; i++ {
-		n := randomName()
-		if _, exists := g.mgr.Get(n); !exists {
-			return n
-		}
-	}
-	return randomName() + "-" + randomSuffix()
-}
-
-func randomSuffix() string {
-	b := make([]byte, 3)
-	rand.Read(b) //nolint:errcheck
-	return hex.EncodeToString(b)
 }

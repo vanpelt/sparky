@@ -1,0 +1,42 @@
+[Unit]
+Description=sluice — DNS allowlist gateway + eBPF egress meter for sparkbox VMs
+After=network-online.target sparkbox-net.service
+Wants=network-online.target
+# The eBPF data plane needs a BPF-capable kernel; TCX attach needs >= 6.6.
+ConditionKernelVersion=>=6.6
+
+[Service]
+Type=simple
+# sluice.env may override the defaults below, e.g.
+#   SLUICE_ARGS=--enforce --open-untagged --deny refused --upstream 10.0.0.53:53
+# For the sparkbox tag model, pass --enforce --open-untagged: only VMs whose
+# tags carry a network rule (pushed over the control socket) are filtered;
+# untagged VMs keep unrestricted egress. Drop --open-untagged to enforce the
+# base allowlist on every VM instead.
+# Referenced unbraced so systemd word-splits it (empty -> zero args); see the
+# note in sparkbox.service about ${VAR} vs $VAR.
+EnvironmentFile=-/srv/sparkbox/sluice.env
+# Root: loading eBPF and attaching to taps needs CAP_BPF + CAP_NET_ADMIN, and
+# binding :53 needs CAP_NET_BIND_SERVICE. Root is simplest; to drop privilege
+# use AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_BIND_SERVICE instead.
+User=root
+# Guests reach the resolver at their gateway address (the host end of the tap),
+# so bind the resolver on every interface. The meter auto-discovers sbtap*.
+# --api-listen exposes a root-owned control socket the sparkbox user console
+# reads per-VM bandwidth from and pushes per-tag egress policy to. It lives under
+# /run (tmpfs, recreated each boot) and never leaves the box.
+ExecStart=/usr/local/bin/sluice run \
+  --allowlist /srv/sparkbox/allowlist.txt \
+  --dns-listen :53 \
+  --tap-prefix sbtap \
+  --report-interval 60s \
+  --api-listen /run/sluice.sock \
+  $SLUICE_ARGS
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+# eBPF maps are locked memory on older kernels.
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

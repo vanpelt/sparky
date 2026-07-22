@@ -27,15 +27,20 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/dnsedge"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/restapi"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
@@ -44,6 +49,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/xterm"
 )
 
 // version is the artifact release tag this binary was built from, stamped by
@@ -107,6 +113,8 @@ func serve(args []string) error {
 		kernelPath     = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir       = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		subnet6        = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
+		guestDNS       = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
+		sluiceSocket   = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
 		proxyAddr      = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain    = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
@@ -115,6 +123,8 @@ func serve(args []string) error {
 		consoleSub     = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
 		loginSub       = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
 		userConsoleSub = fs.String("user-console-subdomain", "my", "subdomain serving the per-user console (empty disables it)")
+		apiSub         = fs.String("api-subdomain", "api", "subdomain serving the authenticated REST API and its OpenAPI docs at <api-subdomain>.<domain>/docs (empty disables it); authenticate with a token from 'ssh ctl@<domain> session-token'")
+		xtermSub       = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "name suffix serving browser terminals at <name>-<xterm-subdomain>.<domain> (empty disables them); it is one label on purpose, so the zone's existing *.<domain> wildcard covers it in both DNS and TLS with nothing further to publish. Sandbox and route names ending in -<xterm-subdomain> are refused, since the edge answers them here")
 		sessionTTL     = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
 		tlsProvider    = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail       = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
@@ -208,6 +218,15 @@ func serve(args []string) error {
 	}
 	defer secretsStore.Close()
 
+	// Network rule-sets (per-tag egress allowlists) live in the same DB, on their
+	// own connection. Independent of sluice: rules can be authored even when the
+	// data plane is down; they take effect once pushed.
+	netrulesStore, err := netrules.Open(filepath.Join(*stateDir, "sparkbox.db"), log)
+	if err != nil {
+		return fmt.Errorf("netrules store: %w", err)
+	}
+	defer netrulesStore.Close()
+
 	var driver vmm.Driver
 	switch *driverName {
 	case "mock":
@@ -215,7 +234,7 @@ func serve(args []string) error {
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin)
+		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin, *guestDNS)
 		if err != nil {
 			return err
 		}
@@ -242,6 +261,17 @@ func serve(args []string) error {
 	}
 	nodeName, _ := os.Hostname()
 
+	// --edge-v4 feeds the per-name front-door A records below. Parsed here, once,
+	// so a malformed value is reported once too.
+	var edgeAddrs []netip.Addr
+	if *edgeV4 != "" {
+		if a, perr := netip.ParseAddr(*edgeV4); perr == nil && a.Is4() {
+			edgeAddrs = append(edgeAddrs, a)
+		} else {
+			log.Warn("ignoring --edge-v4: not an IPv4 address", "value", *edgeV4)
+		}
+	}
+
 	// Front doors: with a delegated IPv6 prefix, every sandbox name maps to a
 	// deterministic public address, so `ssh <name>.<domain>` can route by the
 	// dialed address instead of the SSH username. Username routing keeps
@@ -265,12 +295,8 @@ func serve(args []string) error {
 				// Publish an A at the shared edge alongside the per-name AAAA, or
 				// the AAAA shadows the wildcard A and the name dies over IPv4.
 				var edge netip.Addr
-				if *edgeV4 != "" {
-					if a, perr := netip.ParseAddr(*edgeV4); perr == nil && a.Is4() {
-						edge = a
-					} else {
-						log.Warn("ignoring --edge-v4: not an IPv4 address", "value", *edgeV4)
-					}
+				if len(edgeAddrs) > 0 {
+					edge = edgeAddrs[0]
 				} else {
 					log.Warn("front-door names will not resolve over IPv4", "reason", "no --edge-v4 (per-name AAAA shadows the wildcard A)")
 				}
@@ -319,9 +345,45 @@ func serve(args []string) error {
 	// post-construction so the manager never depends on it at build time.
 	syncer := envsync.New(secretsStore, mgr, upstreamKey, log)
 	mgr.SetEnvSync(syncer)
+
+	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
+	// --sluice-socket is set, which makes the syncer a no-op (rules can still be
+	// authored, just not enforced). Favicons are cached under the state dir.
+	var sluiceClient *netpush.Client
+	if *sluiceSocket != "" {
+		sluiceClient = netpush.NewClient(*sluiceSocket)
+		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
+	}
+	netSyncer := netpush.NewSyncer(sluiceClient, fleet{mgr}, netrulesStore, log)
+	faviconCache := domainmeta.NewFaviconCache(filepath.Join(*stateDir, "favicons"), nil)
+
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
 		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem,
 		"mem_reserve_mb", *memReserve, "overcommit", *memReserve > 0)
+
+	// Browser terminals only exist behind the HTTPS edge, so with no proxy there
+	// is no terminal subdomain to advertise. Threading the empty label through
+	// keeps `ctl whoami`, the REST capabilities and every sandbox's terminal_url
+	// honest rather than pointing at a host that answers nothing.
+	xtermLabel := *xtermSub
+	if *proxyAddr == "" {
+		xtermLabel = ""
+	}
+
+	// One control plane, shared by all three transports. Built here rather than
+	// left to sshgw's nil-Ops fallback because a second Ops would mean a second
+	// job registry and a second reaper goroutine: a job started over REST would
+	// then be invisible to the SSH channel, and only the Ops that owns a reaper
+	// can stop it.
+	ops := ctlops.New(ctlops.Config{
+		Sandboxes: mgr, Templates: mgr, Accounts: userStore,
+		Tags: secretsStore, Schedules: scheduleStore, Routes: routeStore,
+		Sessions:     sessionSigner,
+		DefaultImage: *defaultImage, Domain: *proxyDomain,
+		XtermSubdomain: xtermLabel, InvitesPerUser: *invitesPer,
+		Log: log,
+	})
+	defer ops.Close()
 
 	gw := sshgw.New(sshgw.GatewayOptions{
 		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
@@ -330,6 +392,7 @@ func serve(args []string) error {
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
 		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
+		Ops: ops, XtermSubdomain: xtermLabel,
 	})
 	// The gateway knows which terminals are attached to which sandbox, so it is
 	// what the manager calls to release them when a sandbox is paused.
@@ -359,6 +422,12 @@ func serve(args []string) error {
 	mgr.ResumePinned(ctx)
 
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
+	// Reconcile egress policy to sluice periodically so VM churn (create, resume,
+	// destroy) that bypasses the console's change-time push still converges. The
+	// console also pushes on every rule/tag mutation for immediacy.
+	if netSyncer.Enabled() {
+		go pushLoop(ctx, netSyncer, log)
+	}
 
 	// The platform scheduler wakes sandboxes to run due cron jobs (the honest
 	// answer to background work in a scale-to-zero world). It ticks every 30s so
@@ -459,22 +528,73 @@ func serve(args []string) error {
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
 		// Per-user console: self-service dashboard authenticated by the same
-		// edge session as private routes. Reserved subdomains dispatch before
-		// route lookup, so anything already claiming the name goes dark — the
-		// handle is reserved for new signups, but a sandbox or custom route may
-		// predate the reservation. Warn rather than fail: the operator picks
-		// whether to rename the squatter or move the console.
+		// edge session as private routes.
 		if *userConsoleSub != "" {
-			if _, exists := mgr.Get(*userConsoleSub); exists {
-				log.Warn("user console subdomain collides with an existing sandbox, which is now unreachable over HTTP",
-					"subdomain", *userConsoleSub)
-			} else if rt, found, rerr := routeStore.GetBySubdomain(*userConsoleSub); rerr == nil && found {
-				log.Warn("user console subdomain collides with an existing route, which is now unreachable",
-					"subdomain", *userConsoleSub, "sandbox", rt.Sandbox)
-			}
-			uc := userconsole.New(mgr, routeStore, secretsStore, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, *proxyTLS, log)
+			warnSubdomainCollision("user console", *userConsoleSub, mgr, routeStore, log)
+			// xtermLabel, not *xtermSub: it is already emptied when there is no
+			// proxy edge, and the console's Terminal button must not link to a
+			// host nothing serves.
+			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
 			px.SetReserved(*userConsoleSub, uc.Handler())
-			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain)
+			// The apex has no other job, and the user console is the only page a
+			// visitor who typed the bare domain could have wanted. Set alongside
+			// the mount so the redirect cannot outlive its target.
+			px.SetHome(*userConsoleSub)
+			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain,
+				"apex_redirects_here", *proxyDomain)
+		}
+
+		// Browser terminals: one host per sandbox, so the browser's own origin
+		// isolation keeps one sandbox's page from scripting another's socket.
+		// The host is <name>-xterm.<domain> — one label, so it costs no wildcard
+		// of its own in either DNS or TLS. It buys that with a name suffix the
+		// platform has to reserve; see proxy.SetReservedSuffix.
+		var xt *xterm.Handler
+		if xtermLabel != "" {
+			warnXtermSuffixCollision(xtermLabel, mgr, routeStore, log)
+			xt = xterm.New(xterm.Config{
+				Sandboxes: mgr, Accounts: userStore, Sessions: sessionSigner,
+				UpstreamKey: upstreamKey,
+				Domain:      *proxyDomain, Subdomain: xtermLabel,
+				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
+				// The gateway owns the one live-session registry the manager
+				// closes on pause; a browser terminal that kept its own would be
+				// silently stranded when the reaper pauses its sandbox.
+				Track: func(sandbox string, s xterm.SessionConn, _ bool) func() {
+					return gw.TrackTerminal(sandbox, s)
+				},
+				Log: log,
+			})
+			px.SetReservedSuffix(xtermLabel, xt.Handler())
+			log.Info("browser terminals enabled", "url", "https://<name>-"+xtermLabel+"."+*proxyDomain)
+		}
+
+		// The REST API mirrors the ctl@ command surface for callers that have a
+		// session token but no SSH client. It shares `ops` with the gateway, so
+		// there is exactly one place where ownership, timeout budgets and the
+		// tags-before-create ordering are decided.
+		if *apiSub != "" {
+			warnSubdomainCollision("rest api", *apiSub, mgr, routeStore, log)
+			// A nil Terminal is a typed-nil trap waiting to happen: assigning a
+			// nil *xterm.Handler to the interface would make restapi's own
+			// "not configured" check see a non-nil value and 501 turn into a
+			// panic. Assign only through the non-nil branch.
+			apiCfg := restapi.Config{
+				Ops: ops, Accounts: userStore, Signer: sessionSigner,
+				Subdomain: *apiSub, Domain: *proxyDomain,
+				// The configured labels, not the spec's defaults: every example
+				// in the served document is rewritten from them, so a host that
+				// moved either subtree still hands out copy-paste that works.
+				XtermSubdomain: xtermLabel,
+				LoginURL:       "https://" + *loginSub + "." + *proxyDomain + "/",
+				Log:            log,
+			}
+			if xt != nil {
+				apiCfg.Terminal = terminalBridge{xt}
+			}
+			px.SetReserved(*apiSub, restapi.New(apiCfg).Handler())
+			log.Info("rest api enabled", "url", "https://"+*apiSub+"."+*proxyDomain,
+				"docs", "https://"+*apiSub+"."+*proxyDomain+"/docs")
 		}
 		proxySrv = &http.Server{
 			Addr:    *proxyAddr,
@@ -491,11 +611,16 @@ func serve(args []string) error {
 		}
 		if *proxyTLS {
 			log.Info("obtaining TLS certificate", "provider", *tlsProvider, "domain", *proxyDomain)
-			if err := setupProxyTLS(ctx, proxySrv, tlsParams{
-				provider: *tlsProvider, domain: *proxyDomain, email: *tlsEmail, stateDir: *stateDir,
-			}); err != nil {
-				return fmt.Errorf("proxy tls: %w", err)
+			names, terr := setupProxyTLS(ctx, proxySrv, tlsParams{
+				provider: *tlsProvider, domain: *proxyDomain, email: *tlsEmail,
+				stateDir: *stateDir, log: log,
+			})
+			if terr != nil {
+				return fmt.Errorf("proxy tls: %w", terr)
 			}
+			// Report what was actually obtained, not what was asked for.
+			// autocert reports nothing — it issues per-SNI on first request.
+			log.Info("tls certificates managed", "names", names)
 			// Sniff each connection below TLS: a cleartext-HTTP client that
 			// dialed the HTTPS edge (e.g. http://myvm.hivemind.tools:4444) is
 			// answered with a 308 to the https:// URL instead of the TLS stack's
@@ -509,6 +634,9 @@ func serve(args []string) error {
 		} else {
 			go func() { errCh <- proxySrv.ListenAndServe() }()
 		}
+		// No DNS half to publish: <name>-xterm.<domain> is one label, so the
+		// same wildcard record that already answers for every sandbox front door
+		// answers for its terminal too.
 	}
 
 	log.Info("sparkbox up", "driver", *driverName, "ssh", *sshAddr, "api", *apiAddr,
@@ -537,6 +665,64 @@ func serve(args []string) error {
 	return nil
 }
 
+// terminalBridge lets the REST API serve GET /v1/sandboxes/{name}/terminal from
+// the same WebSocket code path as the browser page, instead of a second copy of
+// the framing, the origin gate and the close codes.
+//
+// The ctlops.Caller is deliberately unused: internal/restapi has already run the
+// owner gate — where the JSON error envelope lives, so a stranger gets the same
+// masked 404 every other endpoint returns rather than an opaque close code — and
+// checking twice in two packages is how the two eventually disagree.
+type terminalBridge struct{ xt *xterm.Handler }
+
+func (t terminalBridge) ServeTerminal(w http.ResponseWriter, r *http.Request, _ ctlops.Caller, sandbox string) {
+	sess, _ := edgeauth.From(r.Context())
+	t.xt.Bridge(w, r, sandbox, sess)
+}
+
+// warnSubdomainCollision reports a reserved subdomain something already answers
+// for. Reserved dispatch runs before route lookup, so the squatter goes dark
+// rather than winning — but a sandbox or custom route may predate the
+// reservation, and which one moves is the operator's call, not ours.
+func warnSubdomainCollision(what, sub string, mgr *host.Manager, rs *routes.Store, log *slog.Logger) {
+	if _, exists := mgr.Get(sub); exists {
+		log.Warn(what+" subdomain collides with an existing sandbox, which is now unreachable over HTTP",
+			"subdomain", sub)
+		return
+	}
+	if rt, found, err := rs.GetBySubdomain(sub); err == nil && found {
+		log.Warn(what+" subdomain collides with an existing route, which is now unreachable",
+			"subdomain", sub, "sandbox", rt.Sandbox)
+	}
+}
+
+// warnXtermSuffixCollision is the same warning for a family of names rather
+// than one name. Every subdomain ending in "-<label>" now reaches the terminal
+// handler before any route lookup, so a sandbox or route that predates the
+// reservation — or one created under a different --xterm-subdomain, which the
+// stores' own hardcoded "-xterm" cannot know about — goes dark with nothing in
+// the request to explain it. The stores refuse new such names; this reports the
+// ones already on disk.
+func warnXtermSuffixCollision(label string, mgr *host.Manager, rs *routes.Store, log *slog.Logger) {
+	suffix := xterm.ReservedSuffix(strings.ToLower(label))
+	for _, b := range mgr.List() {
+		if strings.HasSuffix(strings.ToLower(b.Name), suffix) {
+			log.Warn("sandbox name ends in the browser-terminal suffix, so its web front door is now unreachable",
+				"sandbox", b.Name, "suffix", suffix)
+		}
+	}
+	all, err := rs.List()
+	if err != nil {
+		return // a startup courtesy, not a precondition
+	}
+	for _, rt := range all {
+		if strings.HasSuffix(strings.ToLower(rt.Subdomain), suffix) {
+			log.Warn("route subdomain ends in the browser-terminal suffix, so it is now unreachable",
+				"subdomain", rt.Subdomain, "sandbox", rt.Sandbox)
+		}
+	}
+}
+
 // defaultAudience is the hivemind SaaS URL: the relying party sparkbox exists
 // to federate with today. The audience allowlist defaults closed to it — a
 // relying party enforces its own `aud`, but minting only what we mean to mint
@@ -544,6 +730,38 @@ func serve(args []string) error {
 const defaultAudience = "https://hivemind.wandb.tools"
 
 // splitList parses a comma-separated flag into a trimmed, non-empty list.
+// fleet adapts the host manager to netpush.Fleet: only running sandboxes have a
+// live tap, so paused/archived ones are filtered out here.
+type fleet struct{ mgr *host.Manager }
+
+func (f fleet) List() []netpush.Sandbox {
+	var out []netpush.Sandbox
+	for _, b := range f.mgr.List() {
+		if b.State != vmm.StateRunning {
+			continue
+		}
+		out = append(out, netpush.Sandbox{Name: b.Name, Owner: b.Owner, HostIP: b.HostIP})
+	}
+	return out
+}
+
+// pushLoop reconciles egress policy to sluice on a ticker (and once at start),
+// so fleet changes that skip the console's change-time push still converge.
+func pushLoop(ctx context.Context, s *netpush.Syncer, log *slog.Logger) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		if err := s.Push(ctx); err != nil && ctx.Err() == nil {
+			log.Warn("periodic egress policy push", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

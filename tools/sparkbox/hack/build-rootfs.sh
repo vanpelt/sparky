@@ -105,12 +105,13 @@ cat > "$MNT/usr/local/sbin/sparkbox-netcfg" <<'EOF'
 #!/bin/sh
 # Apply sparkbox guest config (hostname + IPv6) from the kernel cmdline.
 IFACE=eth0
-IP6=""; GW6=""; HOST=""
+IP6=""; GW6=""; HOST=""; DNS=""
 for tok in $(cat /proc/cmdline); do
   case "$tok" in
     sparkbox_ip6=*)  IP6="${tok#sparkbox_ip6=}" ;;
     sparkbox_gw6=*)  GW6="${tok#sparkbox_gw6=}" ;;
     sparkbox_host=*) HOST="${tok#sparkbox_host=}" ;;
+    sparkbox_dns=*)  DNS="${tok#sparkbox_dns=}" ;;
   esac
 done
 
@@ -126,9 +127,16 @@ if [ -n "$HOST" ]; then
 fi
 
 # The kernel ip= arg configures the interface but writes no resolver (Firecracker
-# boots vmlinux with no initrd, so nothing populates /etc/resolv.conf). Egress is
-# NAT'd, so point at public resolvers; skip if something already set one.
-if [ ! -s /etc/resolv.conf ]; then
+# boots vmlinux with no initrd, so nothing populates /etc/resolv.conf). When the
+# host runs the sluice allowlist gateway (tools/sluice) it passes
+# sparkbox_dns=<gateway-ip>; point exclusively at that resolver and force it, even
+# over a resolv.conf the image baked. It only answers allowlisted names, and in
+# enforce mode egress to anything else (including public DNS) is dropped, so a
+# second public nameserver would only add failed lookups. Absent the token, fall
+# back to public resolvers — plain NAT'd egress, no allowlisting.
+if [ -n "$DNS" ]; then
+  printf 'nameserver %s\n' "$DNS" > /etc/resolv.conf
+elif [ ! -s /etc/resolv.conf ]; then
   printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
 fi
 

@@ -16,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
@@ -65,22 +68,30 @@ func (s *syncRecorder) count(owner string) int {
 }
 
 type testConsole struct {
-	h       http.Handler
-	mgr     *host.Manager
-	routes  *routes.Store
-	secrets *secrets.Store
-	signer  *edgeauth.Signer
-	sync    *syncRecorder
+	h        http.Handler
+	mgr      *host.Manager
+	routes   *routes.Store
+	secrets  *secrets.Store
+	netrules *netrules.Store
+	signer   *edgeauth.Signer
+	sync     *syncRecorder
 }
+
+// nilFleet is a Fleet that never lists anything — enough for a no-op Syncer
+// (nil client) whose Fleet is never consulted.
+type nilFleet struct{}
+
+func (nilFleet) List() []netpush.Sandbox { return nil }
 
 func newTestConsole(t *testing.T) *testConsole {
 	t.Helper()
-	return newTestConsoleDomain(t, testDomain)
+	return newTestConsoleDomain(t, testDomain, "xterm")
 }
 
-// newTestConsoleDomain builds the console for an explicit --proxy-domain
-// value, so tests can drive operator-supplied variants like a leading dot.
-func newTestConsoleDomain(t *testing.T, domain string) *testConsole {
+// newTestConsoleDomain builds the console for an explicit --proxy-domain and
+// --xterm-subdomain, so tests can drive operator-supplied variants like a
+// leading dot, or a host with browser terminals switched off.
+func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 	t.Helper()
 	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -113,14 +124,27 @@ func newTestConsoleDomain(t *testing.T, domain string) *testConsole {
 		t.Fatal(err)
 	}
 	signer := edgeauth.NewSigner([]byte("test-oidc-ikm"))
+	// Status matters: edgeauth.Require refuses a session whose account is not
+	// active, so a fake that left it blank would model three disabled users.
 	accounts := fakeAccounts{
-		"alice":   {Handle: "alice", InvitedBy: "bob"},
-		"mallory": {Handle: "mallory", InvitedBy: "bob"},
-		"opsy":    {Handle: "opsy", InvitedBy: users.OperatorInviter},
+		"alice":   {Handle: "alice", Status: users.StatusActive, InvitedBy: "bob"},
+		"mallory": {Handle: "mallory", Status: users.StatusActive, InvitedBy: "bob"},
+		"opsy":    {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
 	}
 	rec := &syncRecorder{}
-	h := New(mgr, routeStore, secretStore, accounts, signer, rec, "my", domain, false, log)
-	return &testConsole{h: h.Handler(), mgr: mgr, routes: routeStore, secrets: secretStore, signer: signer, sync: rec}
+	// netrules shares the same DB file as secrets (that owns sandbox_tags).
+	netStore, err := netrules.Open(filepath.Join(dir, "secrets.db"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { netStore.Close() })
+	// A favicon cache with a stub fetcher so tests never hit the network.
+	favicons := domainmeta.NewFaviconCache(filepath.Join(dir, "favicons"),
+		func(ctx context.Context, reg string) ([]byte, string, bool) { return testPNG, "image/png", true })
+	// A syncer with no sluice socket: Push/Usage are no-ops, so bandwidth is 501.
+	netSync := netpush.NewSyncer(nil, nilFleet{}, netStore, log)
+	h := New(mgr, routeStore, secretStore, netStore, netSync, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
+	return &testConsole{h: h.Handler(), mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, signer: signer, sync: rec}
 }
 
 // session mints a cookie for handle, the browser path the SPA rides.
@@ -188,6 +212,11 @@ var apiEndpoints = []struct{ method, path string }{
 	{"GET", "/api/secrets"},
 	{"PUT", "/api/secrets/SOME_SECRET"},
 	{"DELETE", "/api/secrets/SOME_SECRET"},
+	{"GET", "/api/network-rules"},
+	{"PUT", "/api/network-rules/somerule"},
+	{"DELETE", "/api/network-rules/somerule"},
+	{"GET", "/api/machines/somebox/bandwidth"},
+	{"GET", "/api/favicon"},
 }
 
 func TestEveryEndpointRequiresAuth(t *testing.T) {
@@ -619,7 +648,7 @@ func TestMeAndLogout(t *testing.T) {
 // Domain — an unnormalized "..hivemind.tools" never matches and the session
 // survives — and the CSRF gate must accept the real first-party Origin.
 func TestLeadingDotDomainNormalized(t *testing.T) {
-	tc := newTestConsoleDomain(t, "."+testDomain)
+	tc := newTestConsoleDomain(t, "."+testDomain, "xterm")
 	tc.create(t, "webby", "alice")
 
 	rec := tc.do(t, "POST", "/api/logout", "alice", nil)
@@ -706,5 +735,137 @@ func TestErrorBodyShape(t *testing.T) {
 	}
 	if want := fmt.Sprintf("no sandbox named %q", "nope"); e["error"] != want {
 		t.Fatalf("error body %q, want %q", e["error"], want)
+	}
+}
+
+// testPNG is a minimal PNG so the stub favicon fetcher returns real image bytes.
+var testPNG = []byte{
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+}
+
+func TestNetworkRuleCRUD(t *testing.T) {
+	tc := newTestConsole(t)
+	// Create.
+	rec := tc.do(t, "PUT", "/api/network-rules/CI%20egress", "alice",
+		map[string]any{"allow": []string{"github.com", "*.githubusercontent.com"}, "tags": []string{"ci"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put rule: %d %s", rec.Code, rec.Body.String())
+	}
+	// List returns it in full.
+	rec = tc.do(t, "GET", "/api/network-rules", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d", rec.Code)
+	}
+	var rules []netrules.RuleMeta
+	if err := json.Unmarshal(rec.Body.Bytes(), &rules); err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 || rules[0].Name != "CI egress" || len(rules[0].Spec.Allow) != 2 {
+		t.Fatalf("unexpected rules: %+v", rules)
+	}
+	// A bad pattern is a 400.
+	rec = tc.do(t, "PUT", "/api/network-rules/bad", "alice", map[string]any{"allow": []string{"*"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad pattern: %d, want 400", rec.Code)
+	}
+	// Delete, then delete again is 404.
+	if rec = tc.do(t, "DELETE", "/api/network-rules/CI%20egress", "alice", nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	if rec = tc.do(t, "DELETE", "/api/network-rules/CI%20egress", "alice", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("second delete: %d, want 404", rec.Code)
+	}
+}
+
+func TestNetworkRulesAreOwnerScoped(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.do(t, "PUT", "/api/network-rules/mine", "alice", map[string]any{"allow": []string{"github.com"}, "tags": []string{"ci"}})
+	// mallory sees none of alice's rules...
+	rec := tc.do(t, "GET", "/api/network-rules", "mallory", nil)
+	var rules []netrules.RuleMeta
+	json.Unmarshal(rec.Body.Bytes(), &rules) //nolint:errcheck
+	if len(rules) != 0 {
+		t.Errorf("mallory saw alice's rules: %+v", rules)
+	}
+	// ...and deleting a name she doesn't own is a 404, not a cross-owner delete.
+	if rec := tc.do(t, "DELETE", "/api/network-rules/mine", "mallory", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("cross-owner delete: %d, want 404", rec.Code)
+	}
+	// alice's rule survived.
+	rec = tc.do(t, "GET", "/api/network-rules", "alice", nil)
+	json.Unmarshal(rec.Body.Bytes(), &rules) //nolint:errcheck
+	if len(rules) != 1 {
+		t.Errorf("alice's rule was clobbered: %+v", rules)
+	}
+}
+
+func TestBandwidthDisabledWithoutSluice(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "alices-box", "alice")
+	rec := tc.do(t, "GET", "/api/machines/alices-box/bandwidth", "alice", nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("bandwidth without sluice: %d, want 501", rec.Code)
+	}
+	// Cross-owner is still 404, never 501 (existence not leaked).
+	if rec := tc.do(t, "GET", "/api/machines/alices-box/bandwidth", "mallory", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("cross-owner bandwidth: %d, want 404", rec.Code)
+	}
+}
+
+func TestFaviconServesImageAndFallsBack(t *testing.T) {
+	tc := newTestConsole(t)
+	rec := tc.do(t, "GET", "/api/favicon?domain=github.com", "alice", nil)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("favicon: %d ct=%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if rec.Body.Len() == 0 {
+		t.Error("empty favicon body")
+	}
+	// No domain -> globe fallback, still 200.
+	rec = tc.do(t, "GET", "/api/favicon", "alice", nil)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Errorf("favicon fallback: %d ct=%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestIndexSetsCSP(t *testing.T) {
+	tc := newTestConsole(t)
+	rec := tc.do(t, "GET", "/", "", nil)
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "img-src 'self' data:") || !strings.Contains(csp, "default-src 'self'") {
+		t.Errorf("CSP missing or wrong: %q", csp)
+	}
+}
+
+// TestMeAdvertisesTerminalSubdomain: the SPA builds every Terminal link from
+// this one field, and hides the button when it is absent. Both halves matter —
+// a host with no proxy edge (or --xterm-subdomain "") serves no terminals, and
+// a button linking to a name nothing answers is worse than no button.
+func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
+	var me struct {
+		Handle            string `json:"handle"`
+		TerminalSubdomain string `json:"terminal_subdomain"`
+	}
+	rec := newTestConsole(t).do(t, "GET", "/api/me", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me: status %d (%s)", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Handle != "alice" || me.TerminalSubdomain != "xterm" {
+		t.Fatalf("me = %+v, want handle alice and terminal_subdomain xterm", me)
+	}
+
+	// Terminals off: the field is omitted entirely, not sent empty-but-present.
+	off := newTestConsoleDomain(t, testDomain, "")
+	rec = off.do(t, "GET", "/api/me", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me (terminals off): status %d (%s)", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "terminal_subdomain") {
+		t.Errorf("terminals disabled but /api/me advertised one: %s", rec.Body)
 	}
 }

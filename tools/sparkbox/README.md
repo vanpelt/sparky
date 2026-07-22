@@ -79,6 +79,84 @@ set you@example.com`. Any port works without pre-registering a route: a boot-tim
 the single TLS edge, which recovers the dialed port via `SO_ORIGINAL_DST`. See
 [`docs/authenticated-proxy-design.md`](docs/authenticated-proxy-design.md).
 
+## The same sandboxes, without ssh
+
+Everything `ssh ctl@<domain>` does is also a REST call, and every sandbox also
+has a shell in a browser tab. Both authenticate with the session token above,
+and both run through the same control-plane core (`internal/ctlops`) as the SSH
+channel — one ownership check, one set of timeout budgets, three transports.
+
+```sh
+# `session-token` writes the token to stdout and its notes to stderr, with the
+# ctl channel's CRLF line endings — strip the \r or the header is malformed.
+TOKEN=$(ssh ctl@hivemind.tools session-token | tr -d '\r\n')
+API=https://api.hivemind.tools
+AUTH="Authorization: Bearer $TOKEN"
+
+# who am I, and what does this host actually have configured?
+curl -sH "$AUTH" $API/v1/whoami
+curl -sH "$AUTH" $API/v1/capabilities
+# {"archiving":true,"snapshots":true,"scheduling":true,"tags":true,
+#  "routes":true,"session_tokens":true,"terminal":true}
+
+# create one (unnamed → an adjective-noun name), then list them
+curl -sH "$AUTH" -H 'Content-Type: application/json' \
+     -d '{"tags":["prod"]}' $API/v1/sandboxes
+# {"name":"plucky-panda","state":"running","tags":["prod"],…,
+#  "url":"https://plucky-panda.hivemind.tools",
+#  "terminal_url":"https://plucky-panda-xterm.hivemind.tools"}
+curl -sH "$AUTH" $API/v1/sandboxes          # {"sandboxes":[…]}
+
+# act on one; retype the tag set; free the slot
+curl -sH "$AUTH" -X PUT -H 'Content-Type: application/json' \
+     -d '{"tags":["prod","gpu"]}' $API/v1/sandboxes/plucky-panda/tags
+curl -sH "$AUTH" -X POST $API/v1/sandboxes/plucky-panda/pause
+```
+
+Browsable docs and the machine-readable contract live on the same host:
+`https://api.<domain>/docs`, `/openapi.json`, `/openapi.yaml`. Collections come
+back wrapped (`{"sandboxes":[…]}`) so a field can be added later without
+breaking every parser, and failures past the auth gate are all one envelope —
+`{"error":{"kind","op","code","message"}}` — with a stable `code` to match on
+instead of a message to grep.
+
+Operations that can take minutes (archive, resize, restore) answer
+synchronously when they finish fast and escalate to `202` + a job resource when
+they don't, because no proxy on the path tolerates a fifteen-minute request.
+`Prefer: wait=0` forces the `202` immediately; `Prefer: respond-async` does too;
+either way you poll `/v1/jobs/{id}`. Asking twice for the same work on the same
+sandbox returns the job already running rather than starting a second one, and
+`Idempotency-Key` replays any mutation for 24 hours.
+
+The browser terminal is `https://<name>-xterm.<domain>` — an xterm.js page over
+an authenticated WebSocket into a real PTY in that sandbox, with the same
+resume-on-connect as `ssh <name>@<domain>`. Open it and you get a shell; nothing
+to install, and the sign-in is the same passkey/token flow as any private route.
+One host per sandbox, so the browser's own origin isolation keeps one sandbox's
+page from scripting another's socket. The identical bridge is mounted at
+`wss://api.<domain>/v1/sandboxes/<name>/terminal` for clients that are not
+browsers — bearer token, no `Origin`, subprotocol `sparkbox.terminal.v1`, raw
+binary frames each way.
+
+Pause the sandbox under a live terminal and the session is hung up cleanly: the
+page restores your terminal modes, prints why, and offers Reconnect rather than
+reconnecting on its own and resurrecting the VM the reaper just parked. Typing
+counts as activity (throttled to once a minute); merely having the tab open does
+not, so a forgotten tab cannot pin a sandbox warm forever.
+
+`--api-subdomain` and `--xterm-subdomain` move or disable either surface. See
+[`docs/rest-api-and-xterm-design.md`](docs/rest-api-and-xterm-design.md).
+
+> The terminal host is one label on purpose. A wildcard matches exactly one
+> label — RFC 4592 in DNS, RFC 6125 in certificates — so the dotted
+> `<name>.xterm.<domain>` would need a second wildcard in *both*, and hosted TLS
+> front ends generally will not issue it: Cloudflare's universal certificate is
+> `<domain>, *.<domain>` and stops there, so the deeper name dies inside the TLS
+> handshake with `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` and no sparkbox log line
+> to explain it. `<name>-xterm.<domain>` needs nothing beyond the `*.<domain>`
+> record and certificate every sandbox front door already uses. The cost is a
+> reserved name suffix: sandboxes and routes may not end in `-xterm`.
+
 ## Architecture
 
 ```
@@ -90,7 +168,11 @@ internal/proxy          HTTP edge: <sub>.hivemind.tools -> guest IP:port,
 internal/routes         sqlite route store (subdomain -> sandbox:port),
                         pure-Go modernc.org/sqlite, no cgo
 internal/host           manager: sandbox records, JSON state, idle reaper
-internal/api            control-plane HTTP API (sandbox + route CRUD)
+internal/ctlops         control-plane core: one method per ctl@ command,
+                        shared by the SSH channel, the REST API and the terminal
+internal/restapi        authenticated REST surface at api.<domain> + OpenAPI
+internal/xterm          browser terminal at <name>-xterm.<domain> (WebSocket→PTY)
+internal/api            legacy loopback-only CRUD API — never mount on the edge
 internal/vmm            driver interface
 internal/vmm/mock       fake VMs (in-process ssh servers) — runs anywhere
 internal/vmm/firecracker real microVMs via firecracker-go-sdk — needs /dev/kvm
@@ -147,6 +229,10 @@ host and add `--proxy-tls`. Two providers:
   no per-name issuance and no brush with Let's Encrypt rate limits regardless of
   how many ephemeral sandboxes churn. Needs a scoped `Zone.DNS:Edit` token in
   `CLOUDFLARE_API_TOKEN`; no inbound port 80/443 needed for issuance (DNS-01).
+  That one pair is everything — browser terminals live at
+  `<name>-xterm.hivemind.tools`, a single label, so they are covered by the same
+  wildcard rather than needing one of their own. The startup log line
+  `tls certificates managed` reports what was actually obtained.
 - **`--tls-provider autocert`** — per-host certificates issued on demand via
   TLS-ALPN-01/HTTP-01 (no DNS API needed, but needs `:443` + port `80`
   reachable, and each new subdomain is a separate cert subject to rate limits).

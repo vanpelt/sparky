@@ -58,15 +58,7 @@ func TestParseTagsRejects(t *testing.T) {
 	}
 }
 
-// TestApplyTagsWithoutStoreErrors: a host with no secrets store must say so
-// rather than silently dropping tags the user asked for.
-func TestApplyTagsWithoutStoreErrors(t *testing.T) {
-	gw, _, _ := newDoorGateway(t) // built without Tags
-	if err := gw.applyTags("box", "alice", []string{"ml"}); err == nil {
-		t.Fatal("tagging without a store silently succeeded")
-	}
-	// No tags requested is not an error — the common path must stay quiet.
-	if err := gw.applyTags("box", "alice", nil); err != nil {
-		t.Fatalf("untagged create errored: %v", err)
-	}
-}
+// applyTags is gone: stamping tags before the create is ctlops' job now, and
+// "a host with no secrets store must say so rather than silently dropping tags"
+// is asserted there (TestCreateWithoutTagStore) and again through this channel's
+// rendering in TestControlGolden's "tags without a store" case.

@@ -55,6 +55,13 @@ through Let's Encrypt's ~50-certs/week/domain rate limit.
    - **Grey cloud is required.** sparkbox terminates TLS itself; Cloudflare's
      proxy (orange) would intercept it, and the free plan can't do a wildcard
      edge cert anyway. Grey = traffic hits the box directly.
+   - **Two records is the whole list**, browser terminals included: they are
+     served at `<sandbox>-xterm.hivemind.tools`, one label, which the wildcard
+     already covers. (Hence the hyphen. A wildcard matches exactly one label in
+     DNS (RFC 4592) and in a certificate (RFC 6125), so a dotted
+     `<sandbox>.xterm.hivemind.tools` would need a `*.xterm` record and a
+     `*.xterm` certificate name of its own.) The trade is a reserved suffix:
+     sandbox names and route subdomains may not end in `-xterm`.
    - The `AAAA` value is the **host's own** address from your `/64`.
      `::1` is the natural choice (sparkbox reserves it — VMs start at `::2`).
    - Optional: `A`/`AAAA` `console` → same host for a control-plane hostname;
@@ -110,6 +117,10 @@ On first start it runs the DNS-01 dance (creates a temp TXT via Cloudflare, gets
 the `*.hivemind.tools` cert, caches it under `state/certmagic/`) and auto-renews.
 Then `https://<sandbox>.hivemind.tools` works for every sandbox with a real cert.
 
+That one order is all of it. Browser terminals ride the same certificate,
+because `<sandbox>-xterm.hivemind.tools` is a single label under the wildcard.
+The `tls certificates managed` line at startup reports what it actually holds.
+
 Open firewall ports **443** (edge) and **2222** (SSH gateway). Port 80 is *not*
 needed — DNS-01 doesn't use it.
 
@@ -127,7 +138,8 @@ curl -I https://demo.hivemind.tools    # after creating sandbox "demo"
 - **The wildcard covers one label.** `*.hivemind.tools` (record *and* cert)
   matches `myvm.hivemind.tools` but not `a.b.hivemind.tools`. Default sandbox
   subdomains are single-label, so avoid dotted custom subdomains unless you add
-  records/certs for them.
+  records/certs for them. Nothing built-in needs one — the browser terminal is
+  deliberately `<name>-xterm`, not `<name>.xterm`, for exactly this reason.
 - **Grey cloud, always**, for anything sparkbox serves — otherwise Cloudflare
   terminates TLS and the DNS-01 wildcard cert never gets used.
 - **IPv6-only box?** Then IPv4-only clients can't reach a grey-cloud record. The

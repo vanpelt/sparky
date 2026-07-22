@@ -1,5 +1,40 @@
 # Terminal over HTTPS (exe-ssh-compatible) — design
 
+> **Status (2026-07-21): the routing half of M3 is DONE, for the browser.**
+> `*.xterm.<domain>` now exists — DNS record, second wildcard certificate, and
+> suffix dispatch on the proxy edge — and `https://<name>.xterm.<domain>` serves
+> an xterm.js page over an authenticated WebSocket into a real PTY in that
+> sandbox. See [`rest-api-and-xterm-design.md`](rest-api-and-xterm-design.md)
+> and `internal/xterm`. What is described below — an **exe-ssh-compatible CLI
+> endpoint** with `exe0.`/`v0@` tokens and tmux-backed named sessions — is still
+> unbuilt, and everything it reserves stays reserved:
+>
+> - the `/terminal/…` path prefix on sandbox web routes is still free for it;
+> - close code **4001** already means "the shell exited normally", because
+>   `internal/xterm` deliberately adopted that value rather than giving one code
+>   two meanings on one server. New codes must not collide (4002 = the sandbox
+>   hung up, 4003 = attach failed).
+>
+> The browser terminal authenticates with the ordinary sparkbox edge session, so
+> the "reuse exe-ssh's token scheme verbatim" question below is still open and
+> still unprejudiced: an exe-ssh endpoint can verify `v0@` tokens on its own path
+> without touching what ships today.
+>
+> **What a CLI can do today, without any of this.** The same bridge is mounted a
+> second time at `GET https://api.<domain>/v1/sandboxes/<name>/terminal`, and a
+> WebSocket handshake carrying `Authorization: Bearer $(ssh ctl@<domain>
+> session-token)` gets a PTY there with no cookie and no browser. Send **no**
+> `Origin` header: the gate's rule is that an `Origin`, if present, must name
+> this exact host, and its absence is only allowed to a caller holding a bearer
+> token — which is what a non-browser client is. The framing is
+> deliberately *simpler* than exe-ssh's — raw binary frames for PTY bytes in both
+> directions, a JSON text frame only for `resize`, subprotocol
+> `sparkbox.terminal.v1` — because base64-in-JSON exists in exe-ssh to satisfy a
+> client we do not control. So the remaining reason to build the `exe0.` endpoint
+> is client compatibility (`uvx exe-ssh` working unmodified), not capability:
+> **M1's shell-over-HTTPS goal is met**, and what M2 adds that nothing here has
+> is *persistence* — a tmux session that survives the socket.
+
 ## Problem
 
 Getting an interactive shell into a sandbox today requires the **sparkbox SSH
@@ -111,6 +146,14 @@ Two ways out:
 
 Start with the FQDN form; it needs zero new DNS.
 
+**Resolved (2026-07-21):** the second wildcard was built after all, because the
+browser terminal needs it for a different reason than short commands — one host
+per sandbox is what makes the browser's own origin isolation enforce "this page
+may only talk to this sandbox", which no path-based scheme can. It is published
+automatically when `CLOUDFLARE_API_TOKEN` is set and requested as its own
+non-fatal ACME order; see `cmd/sparkbox/wildcarddns.go` and `tls.go`. An
+exe-ssh CLI endpoint can therefore use *either* form.
+
 ## Security
 
 - **Short TTL** (300s) + **host-bound namespace** blunt replay; consider a
@@ -133,10 +176,18 @@ Start with the FQDN form; it needs zero new DNS.
 1. **M1 — one shot:** token verify + WS-PTY bridge into the guest, single
    ephemeral session, FQDN routing. Proves `uvx exe-ssh dazzling-canyon.catnip.sh`
    lands a real shell over the tunnel.
+   *The capability shipped 2026-07-21 with a different credential and a simpler
+   framing (`internal/xterm`); the `exe0.` token verify and the `/terminal/…`
+   paths that make the upstream client work unmodified did not.*
 2. **M2 — sessions:** tmux-backed named sessions + `/terminal/sessions` + reconnect.
+   *Not built. This is the one thing the browser terminal genuinely does not
+   have: close the tab and the shell is gone. The sandbox itself survives, so
+   `tmux` inside the guest is the user-side workaround today.*
 3. **M3 — ergonomics:** `xterm.` wildcard for bare names and/or a sparkbox client
    wrapper; a `ctl@ expose <name> <sub> <port>` command (also closes the
    unrelated tunnel-mode gap where extra ports need an operator API call).
+   *The `xterm.` wildcard shipped 2026-07-21 (browser terminal). The client
+   wrapper and `ctl@ expose` did not.*
 
 ## Open questions
 
@@ -146,4 +197,8 @@ Start with the FQDN form; it needs zero new DNS.
 - Where PTY resize/`TERM` and scrollback should live if we tmux-wrap (client TERM
   vs tmux TERM).
 - Idle/lifetime policy for tmux sessions vs sparkbox's idle-pause (a detached but
-  live tmux shouldn't by itself pin a sandbox warm).
+  live tmux shouldn't by itself pin a sandbox warm). *The browser terminal
+  answered the non-tmux half of this: being attached keeps nothing warm, but
+  real client input touches the sandbox, throttled to once a minute — not pings,
+  not resizes. A detached tmux would keep a box warm only through the CPU and
+  network the reaper samples anyway, which is the answer we want.*

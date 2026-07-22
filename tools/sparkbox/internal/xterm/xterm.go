@@ -1,0 +1,317 @@
+// Package xterm serves the browser terminal at https://<name>-xterm.<domain>:
+// an xterm.js page, the vendored assets it needs, and the WebSocket that
+// bridges it to a real PTY inside that sandbox.
+//
+// It exists because a shell is the one thing a sandbox is for that a browser
+// could not previously reach. `ssh <name>.<domain>` needs a registered key and
+// a terminal; this needs a tab. The two share everything that matters — the
+// same ownership rule, the same resume-on-connect, the same live-session
+// registry — and differ only in transport, which is the whole design: a
+// browser terminal that took a different path to the guest would be a second
+// place for the ownership check to be forgotten.
+//
+// The sandbox is named by DNS, not by a path or a query parameter, so that the
+// browser's own origin isolation does the work: one sandbox per origin means a
+// page served for `a-xterm.<domain>` cannot script the terminal of
+// `b-xterm.<domain>`, and the WebSocket's origin check (ws.go) reduces to
+// "Origin must equal my own host". It is a separate host from the sandbox's own
+// front door `a.<domain>` for the same reason — the guest's app must not be
+// able to script the terminal that shells into it.
+package xterm
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+
+	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+)
+
+// DefaultSubdomain is the reserved name segment the edge dispatches on: the
+// terminal for sandbox "demo" is served at "demo-<DefaultSubdomain>.<domain>".
+// It is a constant rather than a bare string in main so the flag default, the
+// reserved-name lists and this package cannot drift apart.
+const DefaultSubdomain = "xterm"
+
+// ReservedSuffix is the sandbox- and route-name suffix this package's dispatch
+// claims for a given label. A name ending in it is unreachable over HTTP — the
+// edge sends it to the terminal handler before any route lookup — so the
+// stores refuse to create one.
+func ReservedSuffix(label string) string { return "-" + label }
+
+// Attacher is the slice of *host.Manager a terminal needs: resolve a sandbox,
+// resume it, and mark it active. Stated as an interface so this package's tests
+// run against an in-memory fake with no VM driver — and deliberately narrow, so
+// that nothing here can pause, destroy or re-tag a box.
+type Attacher interface {
+	Get(name string) (*host.Sandbox, bool)
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Touch(name string)
+}
+
+// SessionConn is the slice of a live terminal that the SSH gateway's hang-up
+// path needs: somewhere to write the goodbye, and a way to end the session.
+//
+// It is declared method-for-method identical to sshgw's own (unexported)
+// sessionConn, down to io.ReadWriter rather than an equivalent anonymous
+// interface, because Go's structural satisfaction is by identical types. That
+// identity is the point: the adapter this package registers satisfies both
+// interfaces, so the two packages share one session registry without either
+// importing the other's types. There must be exactly one registry —
+// host.Manager takes a single SessionCloser — and a second would mean pausing a
+// sandbox silently strands every browser terminal attached to it.
+type SessionConn interface {
+	Stderr() io.ReadWriter
+	Close() error
+}
+
+// Config wires the handler. Sandboxes, Sessions and UpstreamKey are required;
+// the rest degrade rather than panic, because a unit test and a
+// minimally-configured host both want that.
+type Config struct {
+	// Sandboxes resolves and resumes the target VM. Satisfied by *host.Manager.
+	Sandboxes Attacher
+	// Accounts resolves operator status. Satisfied by *users.Store; nil means
+	// nobody is an operator, which fails closed.
+	Accounts edgeauth.Accounts
+	// Sessions verifies the edge session token carried by the cookie or a
+	// Bearer header.
+	Sessions *edgeauth.Signer
+	// UpstreamKey authenticates the control plane into the guest's sshd. It is
+	// the same key the SSH gateway dials with — this package opens a second
+	// session over the same trust relationship, it does not invent a new one.
+	UpstreamKey xssh.Signer
+
+	// Domain is the base zone ("catnip.sh"). Empty accepts any zone, which is
+	// what a test with Host "demo-xterm.example" wants and what a real
+	// deployment never wants — main always sets it.
+	Domain string
+	// Subdomain is the reserved segment appended to the sandbox name, after a
+	// hyphen, to form the host: "demo-xterm.<zone>". Empty takes
+	// DefaultSubdomain.
+	Subdomain string
+	// LoginURL is where an unauthenticated browser is sent; it comes back to
+	// the URL it asked for. Empty turns the redirect into a plain 401.
+	LoginURL string
+
+	// Track registers a live terminal with the SSH gateway's session registry
+	// and returns the unregister func — *sshgw.Gateway's tracker, passed as a
+	// function so neither package imports the other. Nil skips registration,
+	// which costs the clean hang-up on pause; tests leave it nil.
+	Track func(sandbox string, s SessionConn, isPTY bool) func()
+
+	Log *slog.Logger
+}
+
+// Handler serves the terminal page, its assets, and the WebSocket bridge.
+type Handler struct {
+	mgr         Attacher
+	accounts    edgeauth.Accounts
+	sessions    *edgeauth.Signer
+	upstreamKey xssh.Signer
+
+	domain    string
+	subdomain string
+	loginURL  string
+
+	track func(sandbox string, s SessionConn, isPTY bool) func()
+	log   *slog.Logger
+
+	// open dials the guest and allocates the PTY. A field rather than a direct
+	// call so bridge_test can attach a fake guest and exercise the framing,
+	// resize clamping and close codes with no VM anywhere.
+	open func(ctx context.Context, box *host.Sandbox, term string, rows, cols int) (PTY, error)
+
+	mux http.Handler
+}
+
+// New builds the handler. It panics on a missing required dependency, at
+// startup and in one place, rather than nil-dereferencing on the first
+// connection an hour later.
+func New(cfg Config) *Handler {
+	if cfg.Sandboxes == nil {
+		panic("xterm: Sandboxes is required")
+	}
+	if cfg.Sessions == nil {
+		panic("xterm: Sessions signer is required")
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
+	}
+	sub := cfg.Subdomain
+	if sub == "" {
+		sub = DefaultSubdomain
+	}
+	h := &Handler{
+		mgr: cfg.Sandboxes, accounts: cfg.Accounts, sessions: cfg.Sessions,
+		upstreamKey: cfg.UpstreamKey,
+		domain:      strings.ToLower(strings.Trim(cfg.Domain, ".")),
+		subdomain:   strings.ToLower(sub),
+		loginURL:    cfg.LoginURL,
+		track:       cfg.Track,
+		log:         cfg.Log,
+	}
+	h.open = h.dialPTY
+
+	require := edgeauth.Require(cfg.Sessions, cfg.Accounts, cfg.LoginURL)
+	mux := http.NewServeMux()
+	// Assets are ungated on purpose: they are vendored MIT libraries with
+	// nothing sandbox-specific in them, and gating them would make the page
+	// render blank rather than redirect while a session expires mid-load.
+	mux.Handle("GET /assets/{file}", http.StripPrefix("/assets", assetServer()))
+	mux.Handle("GET /{$}", require(http.HandlerFunc(h.page)))
+	mux.Handle("GET /ws", require(http.HandlerFunc(h.ws)))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "sparkbox: not found", http.StatusNotFound)
+	})
+	h.mux = mux
+	return h
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+
+// Handler returns h itself, matching the shape main.go already uses to mount
+// the consoles (px.SetReserved(sub, uc.Handler())).
+func (h *Handler) Handler() http.Handler { return h }
+
+// Subdomain is the reserved label this handler answers under, so the edge and
+// the collision warnings in main quote the handler rather than a second copy of
+// the string.
+func (h *Handler) Subdomain() string { return h.subdomain }
+
+// SandboxName reads the target sandbox out of a request host.
+//
+// The edge dispatches by suffix, so the host is always
+// <name>-<subdomain>.<zone>: one label, because that is the only shape a
+// zone's existing *.<zone> wildcard certificate covers (see
+// proxy.SetReservedSuffix for why that matters). The zone is checked when
+// configured: without it a request forged with `Host: victim-xterm.evil.example`
+// would still resolve, and while the ownership check would still hold, the
+// WebSocket's origin gate compares against this same host and must not be
+// talked into accepting a foreign one.
+//
+// Anything before a dot in the first label is rejected rather than trimmed. The
+// edge hands "a.demo" to us for a.demo-xterm.<zone>, and answering that host as
+// "demo" would give one sandbox two origins — which is exactly what the
+// WebSocket origin gate assumes cannot happen.
+func (h *Handler) SandboxName(host string) (string, bool) {
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		host = hostOnly
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	first, zone, found := strings.Cut(host, ".")
+	if !found {
+		return "", false
+	}
+	if h.domain != "" && zone != h.domain {
+		return "", false
+	}
+	name, ok := strings.CutSuffix(first, "-"+h.subdomain)
+	if !ok {
+		return "", false
+	}
+	if !validSandboxName(name) {
+		return "", false
+	}
+	return name, true
+}
+
+// validSandboxName mirrors host.Manager's create-time charset. Enforcing it
+// here keeps a hostile Host header from reaching the manager as a lookup key
+// at all, and it is the same rule, so a name the manager would accept is never
+// rejected here.
+func validSandboxName(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// resolve is the single owner gate every entry point passes through. Missing
+// and not-yours produce the identical answer — a 404 with the message a
+// genuinely absent sandbox gets — so a stranger can neither confirm a name nor,
+// because this runs strictly before EnsureRunning, wake someone else's VM.
+//
+// Strict owner, with no operator bypass, and that is deliberate. Operators do
+// get one on the metadata surfaces (proxy.mayView, the user console), but a PTY
+// is a different class of authority: it hands over the owner's credentials,
+// agent tokens and repos, on a cookie alone, with no SSH key or passkey
+// re-proof. No other door to this feature grants it — ctlops.owned has no
+// operator concept, so the REST terminal 404s, and sshgw's `ssh <name>.<domain>`
+// compares owners with no operator branch either — and openapi.json documents
+// the two as the same session. Three doors, one rule.
+func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) (*host.Sandbox, bool) {
+	name, ok := h.SandboxName(r.Host)
+	if !ok {
+		http.Error(w, "sparkbox: no sandbox named here", http.StatusNotFound)
+		return nil, false
+	}
+	sess, _ := edgeauth.From(r.Context())
+	box, found := h.mgr.Get(name)
+	if !found || box.Owner != sess.Handle {
+		notFound(w, name)
+		return nil, false
+	}
+	return box, true
+}
+
+func notFound(w http.ResponseWriter, name string) {
+	http.Error(w, fmt.Sprintf("sparkbox: no sandbox named %q", name), http.StatusNotFound)
+}
+
+// page serves the terminal itself. It resolves and owner-checks first so a
+// non-owner gets a 404 instead of a page that would only fail at the upgrade —
+// the sandbox's very existence is the secret being kept.
+func (h *Handler) page(w http.ResponseWriter, r *http.Request) {
+	box, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	hdr := w.Header()
+	// First-party CSP. 'unsafe-inline' is needed twice over: the page inlines
+	// its own style and script the way the consoles do, and xterm.js sets
+	// inline styles on every row it renders. connect-src 'self' is what lets
+	// the WebSocket back to this same host through.
+	//
+	// frame-ancestors is spelled out because it does NOT fall back to
+	// default-src, and this is the one document in the product that turns
+	// keystrokes into commands in a root-capable shell. The session cookie's
+	// Domain is ".<zone>", so a page served from a sandbox's own web route —
+	// arbitrary user code on a same-site origin — could frame this page, ride
+	// the visitor's own cookie past the owner check and the Origin gate (the
+	// framed document's origin IS this host), overlay a decoy, and typejack the
+	// shell blind. The page is a full-viewport terminal; nothing ever needs to
+	// embed it.
+	hdr.Set("Content-Security-Policy",
+		"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
+			"script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "+
+			"form-action 'self'; frame-ancestors 'none'")
+	// The pre-CSP spelling of the same rule, for browsers that predate
+	// frame-ancestors. Belt and braces on a rule worth two implementations.
+	hdr.Set("X-Frame-Options", "DENY")
+	hdr.Set("Cache-Control", "no-store")
+	// The page is a shell around a WebSocket, so the sandbox name is the only
+	// state it needs and it comes from the host it was served on — but a
+	// referrer carrying that name to a link the user clicks inside the terminal
+	// would leak which sandbox they are on to a third party.
+	hdr.Set("Referrer-Policy", "no-referrer")
+	hdr.Set("X-Content-Type-Options", "nosniff")
+	h.log.Debug("terminal page", "sandbox", box.Name)
+	indexPage.ServeHTTP(w, r)
+}

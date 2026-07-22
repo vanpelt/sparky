@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Preview the user console (internal/userconsole/index.html) locally with mock data.
+"""Preview a sparkbox HTML page locally with mock data.
 
-The real console talks to a live sparkbox edge (/api/*, edge-session auth), so
-opening index.html on its own just shows the sign-in screen. This server serves
-the *real* index.html with a mock `fetch` injected, so you see the full UI —
-machines in every state, routes, tags, secrets, snapshots — with no backend.
+Every page here talks to a live sparkbox edge (edge-session auth, a WebSocket,
+a spec document), so opening the file on its own shows a sign-in screen or an
+error banner. This server serves the *real* HTML with just enough stubbed out
+that the whole UI renders with no backend.
 
-The file is re-read on every request, so while you edit index.html you just
-refresh the browser to see changes. No dependencies (stdlib only).
+    python3 hack/preview-console.py                   # user console -> :8799
+    python3 hack/preview-console.py docs              # the REST API docs page
+    python3 hack/preview-console.py terminal 9000     # the browser terminal
 
-    python3 hack/preview-console.py            # -> http://localhost:8799
-    python3 hack/preview-console.py 9000        # pick a port
+The page is re-read on every request, so while you edit it you just refresh the
+browser to see changes. No dependencies (stdlib only).
 
 Add ?theme=dark or ?theme=light to force a theme (default follows the OS).
 """
@@ -21,9 +22,29 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-INDEX = os.path.join(HERE, "..", "internal", "userconsole", "index.html")
 SHARED_CSS = os.path.join(HERE, "..", "internal", "webui", "shared.css")
 SHARED_JS = os.path.join(HERE, "..", "internal", "webui", "shared.js")
+
+
+def _pkg(*parts):
+    return os.path.join(HERE, "..", "internal", *parts)
+
+
+# The pages this can preview. `stub` says whether the user console's mock fetch
+# is injected: the docs page needs only its spec (served below) and the terminal
+# needs a WebSocket it cannot have, so both render themselves honestly without
+# it — the terminal shows its own "reconnecting" state, which is a real state
+# worth being able to look at.
+PAGES = {
+    "console": {"index": _pkg("userconsole", "index.html"), "stub": True,
+                "assets": None},
+    "docs": {"index": _pkg("restapi", "docs.html"), "stub": False,
+             "assets": None},
+    "terminal": {"index": _pkg("xterm", "index.html"), "stub": False,
+                 "assets": _pkg("xterm", "assets")},
+}
+PAGE = PAGES["console"]
+INDEX = PAGE["index"]
 
 # ---- mock fleet: one machine per state, plus routes/tags/secrets/snapshots ----
 def _iso(sec_ago):
@@ -58,7 +79,7 @@ def _machines(tick):
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
     ]
 
-_ME = {"handle": "van", "operator": True}
+_ME = {"handle": "van", "operator": True, "terminal_subdomain": "xterm"}
 _SECRETS = [
     {"name": "OPENAI_API_KEY", "tags": ["ml", "prod"], "version": 3, "updated_at": _iso(3600)},
     {"name": "DATABASE_URL", "tags": ["prod"], "version": 1, "updated_at": _iso(172800)},
@@ -68,6 +89,29 @@ _SNAPSHOTS = [
     {"name": "cuda-base", "from_box": "brave-meadow", "created_at": _iso(86400)},
     {"name": "node-lts", "from_box": "dazzling-canyon", "created_at": _iso(432000)},
 ]
+_NETRULES = [
+    {"name": "CI egress", "tags": ["ci", "build"], "version": 2, "updated_at": _iso(1800),
+     "spec": {"allow": ["github.com", "*.githubusercontent.com", "pypi.org",
+                        "*.pythonhosted.org", "registry.npmjs.org", "ghcr.io"]}},
+    {"name": "ML training", "tags": ["ml"], "version": 1, "updated_at": _iso(7200),
+     "spec": {"allow": ["huggingface.co", "*.huggingface.co", "pytorch.org", "anthropic.com"]}},
+]
+def _dom(domain, display, resolved, tx, rx):
+    return {"domain": domain, "display": display, "resolved": resolved,
+            "tx_bytes": tx, "rx_bytes": rx, "total": tx + rx}
+# Per-VM egress breakdown, keyed by machine name (only the running one has live data).
+_BANDWIDTH = {
+    "brave-meadow": {"name": "brave-meadow", "tx_bytes": 812394002, "rx_bytes": 4923847112,
+        "domains": [
+            _dom("github.com", "GitHub", True, 120_000_000, 3_200_000_000),
+            _dom("huggingface.co", "Hugging Face", True, 41_200_000, 902_000_000),
+            _dom("registry.npmjs.org", "npm", True, 8_400_000, 214_000_000),
+            _dom("pypi.org", "PyPI", True, 6_100_000, 173_000_000),
+            _dom("anthropic.com", "Anthropic", True, 22_400_000, 61_000_000),
+            _dom("ghcr.io", "GitHub Container Registry", True, 3_200_000, 44_000_000),
+            _dom("151.101.0.223", "151.101.0.223", False, 900_000, 2_100_000),
+        ]},
+}
 
 # Injected into the page: overrides fetch() so every /api/* call returns mock data.
 _STUB = """
@@ -75,6 +119,7 @@ _STUB = """
 (function () {
   var tick = 0;
   var ME = %(me)s, SECRETS = %(secrets)s, SNAPSHOTS = %(snapshots)s;
+  var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s;
   function machines() {
     tick += 1;
     return %(machines_fn)s(tick);
@@ -89,8 +134,11 @@ _STUB = """
     if (u.indexOf("/api/me") >= 0) return J(ME);
     if (u.indexOf("/api/secrets") >= 0 && m === "GET") return J(SECRETS);
     if (u.indexOf("/api/snapshots") >= 0 && m === "GET") return J(SNAPSHOTS);
+    if (u.indexOf("/api/network-rules") >= 0 && m === "GET") return J(NETRULES);
+    var bw = u.match(/\\/api\\/machines\\/([^/]+)\\/bandwidth/);
+    if (bw && m === "GET") return J(BANDWIDTH[decodeURIComponent(bw[1])] || { name: "", domains: [] });
     if (u.indexOf("/api/machines") >= 0 && m === "GET" &&
-        !/\\/(pause|resume|reboot|archive|pin|unpin|port|tags|rename|snapshot)/.test(u)) return J(machines());
+        !/\\/(pause|resume|reboot|archive|pin|unpin|port|tags|rename|snapshot|bandwidth)/.test(u)) return J(machines());
     return J({ ok: true }); // mutations: pretend success
   };
 })();
@@ -103,13 +151,54 @@ def _machines_js():
         '"cpu_seconds": 1200.0', '"cpu_seconds": 1200 + tick * 3.1') + "; }"
 
 
+_GLOBE_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" '
+    b'stroke="#888" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/>'
+    b'<path d="M1.5 8h13M8 1.5c2 2 2 11 0 13M8 1.5c-2 2-2 11 0 13"/></svg>')
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        # Favicons: proxy DuckDuckGo host-side (as the real console does) so the
+        # preview shows genuine brand marks; globe SVG on any failure.
+        if self.path.startswith("/api/favicon"):
+            from urllib.parse import urlparse, parse_qs
+            import urllib.request
+            domain = (parse_qs(urlparse(self.path).query).get("domain") or [""])[0]
+            body, ctype = _GLOBE_SVG, "image/svg+xml"
+            if domain:
+                try:
+                    with urllib.request.urlopen(
+                            "https://icons.duckduckgo.com/ip3/%s.ico" % domain, timeout=4) as r:
+                        data = r.read()
+                    if data:
+                        body, ctype = data, r.headers.get("Content-Type", "image/x-icon")
+                except Exception:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/api/"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+            return
+        # The docs page is a renderer for the document it fetches, so serving
+        # the real openapi.json is the whole backend it needs. It is the
+        # canonical file, not a copy, so what the preview renders is what ships.
+        if self.path.split("?")[0] in ("/openapi.json", "/openapi.yaml"):
+            self._sendfile(_pkg("restapi", "openapi.json"), "application/json")
+            return
+        # The terminal's vendored xterm.js and its addons, served from the same
+        # /assets/ paths the real handler uses.
+        if PAGE["assets"] and self.path.startswith("/assets/"):
+            name = os.path.basename(self.path.split("?")[0])
+            ctype = "text/css" if name.endswith(".css") else "text/javascript"
+            self._sendfile(os.path.join(PAGE["assets"], name), ctype)
             return
         try:
             html = open(INDEX, encoding="utf-8").read()
@@ -120,12 +209,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             html = html.replace("/*SHARED_CSS*/", open(SHARED_CSS, encoding="utf-8").read(), 1)
             html = html.replace("/*SHARED_JS*/", open(SHARED_JS, encoding="utf-8").read(), 1)
         except OSError as e:
-            self.send_error(500, f"cannot read index.html: {e}")
+            self.send_error(500, f"cannot read {os.path.basename(INDEX)}: {e}")
             return
-        stub = _STUB % {
-            "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
-            "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
-        }
+        stub = ""
+        if PAGE["stub"]:
+            stub = _STUB % {
+                "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
+                "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
+                "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
+            }
         theme = ""
         if "theme=dark" in self.path:
             theme = '<script>document.documentElement.setAttribute("data-theme","dark")</script>'
@@ -143,14 +235,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _sendfile(self, path, ctype):
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except OSError as e:
+            self.send_error(404, str(e))
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):  # quiet
         pass
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8799
+    global PAGE, INDEX
+    args = sys.argv[1:]
+    if args and not args[0].isdigit():
+        name = args.pop(0)
+        if name not in PAGES:
+            sys.exit(f"unknown page {name!r}: pick one of {', '.join(PAGES)}")
+        PAGE = PAGES[name]
+        INDEX = PAGE["index"]
+    port = int(args[0]) if args else 8799
     srv = http.server.HTTPServer(("127.0.0.1", port), Handler)
-    print(f"user-console preview → http://localhost:{port}")
+    print(f"sparkbox page preview → http://localhost:{port}")
     print(f"  serving {os.path.relpath(INDEX)} with mock data (edit + refresh to iterate)")
     print(f"  dark: http://localhost:{port}/?theme=dark   light: http://localhost:{port}/?theme=light")
     try:

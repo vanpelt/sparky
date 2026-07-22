@@ -54,8 +54,8 @@ func TestParseSizeMBRejects(t *testing.T) {
 func TestControlUsageListsEveryCommand(t *testing.T) {
 	for _, cmd := range []string{
 		"list", "pause", "archive", "restore", "resize", "rm", "tags", "pin",
-		"unpin", "snapshot", "fork", "schedule", "whoami", "keys", "email",
-		"share", "session-token", "invite", "help",
+		"unpin", "snapshot", "fork", "schedule", "whoami", "keys", "passkey",
+		"email", "share", "session-token", "invite", "help",
 	} {
 		if !strings.Contains(controlUsage, "  "+cmd) {
 			t.Errorf("ctl usage does not document %q", cmd)

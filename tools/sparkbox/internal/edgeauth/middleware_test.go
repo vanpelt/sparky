@@ -38,8 +38,9 @@ var echoSession = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) 
 func newTestRequire() (*Signer, http.Handler) {
 	s := NewSigner([]byte("k"))
 	accounts := fakeAccounts{
-		"alice": {Handle: "alice", InvitedBy: "someoneelse"},
-		"opsy":  {Handle: "opsy", InvitedBy: users.OperatorInviter},
+		"alice":    {Handle: "alice", Status: users.StatusActive, InvitedBy: "someoneelse"},
+		"opsy":     {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
+		"departed": {Handle: "departed", Status: "disabled", InvitedBy: "someoneelse"},
 	}
 	return s, Require(s, accounts, loginURL)(echoSession)
 }
@@ -93,6 +94,32 @@ func TestRequireResolvesOperator(t *testing.T) {
 	tok, _, _ = s.Mint(Identity{Handle: "ghost"}, time.Hour)
 	if rec := serve(h, asCookie(tok)); rec.Body.String() != "handle=ghost operator=false" {
 		t.Fatalf("unknown account should not be operator: %s", rec.Body)
+	}
+}
+
+// TestRequireRefusesDisabledAccount: status = 'disabled' is the only
+// deprovisioning mechanism the user schema offers, and the SSH and passkey paths
+// both honour it. An outstanding cookie must not outlive it — the session
+// token's MAC key is fleet-wide, so the alternative to checking here is rotating
+// the OIDC key for every user on the host.
+func TestRequireRefusesDisabledAccount(t *testing.T) {
+	s, h := newTestRequire()
+	tok, _, _ := s.Mint(Identity{Handle: "departed"}, time.Hour)
+
+	for name, opt := range map[string]func(*http.Request){
+		"cookie": asCookie(tok), "bearer": asBearer(tok),
+	} {
+		rec := serve(h, opt)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: disabled account got %d, want 403", name, rec.Code)
+		}
+	}
+	// A store that cannot answer is NOT fail-closed: a transient sqlite error
+	// must not sign every visitor out of the whole edge, so an unresolvable
+	// handle keeps working (without operator status).
+	tok, _, _ = s.Mint(Identity{Handle: "ghost"}, time.Hour)
+	if rec := serve(h, asCookie(tok)); rec.Code != http.StatusOK {
+		t.Fatalf("unresolvable account got %d, want 200", rec.Code)
 	}
 }
 

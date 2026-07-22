@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>sparkbox — terminal</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<link rel="stylesheet" href="/assets/xterm.css" />
+<style>
+  /* Design tokens and reset are shared with the two consoles (internal/webui)
+     so the terminal reads as the same product. The chrome stays monochrome;
+     the only chroma outside the terminal grid is the state dot. */
+  /*SHARED_CSS*/
+
+  /* The terminal owns the viewport. dvh, not vh: on mobile Safari the toolbar
+     collapses and a vh-sized grid would leave the last rows under it. */
+  html, body { height: 100%; overflow: hidden; }
+  body { display: grid; grid-template-rows: auto 1fr; height: 100dvh; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* ---------- top bar ---------- */
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 12px; height: 44px; flex: none;
+    border-bottom: 1px solid hsl(var(--border));
+    background: hsl(var(--card));
+    /* The bar sits above a canvas that repaints constantly; isolating it keeps
+       the terminal's compositing out of its way. */
+    position: relative; z-index: 2;
+  }
+  .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  /* The mark does not follow the theme: --primary inverts to near-white in
+     dark mode and the bolt's gold would fall to about 2:1 against it. Pinning
+     the tile dark keeps it constant, the way a real logo is. */
+  .logo {
+    width: 24px; height: 24px; border-radius: 6px; flex: none;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-size: 13px; line-height: 1;
+    text-indent: 0.02em;
+  }
+  .name {
+    font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .spacer { flex: 1 1 auto; }
+
+  /* status pill — one dot, one word, no colour anywhere else */
+  .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: hsl(var(--muted-foreground));
+    white-space: nowrap;
+  }
+  .status .dot {
+    width: 7px; height: 7px; border-radius: 50%; flex: none;
+    background: hsl(var(--muted-foreground));
+  }
+  .status[data-state="ready"] .dot { background: hsl(var(--green)); }
+  .status[data-state="starting"] .dot,
+  .status[data-state="connecting"] .dot { background: hsl(var(--amber)); animation: pulse 1.4s ease-in-out infinite; }
+  .status[data-state="closed"] .dot { background: hsl(var(--muted-foreground)); }
+  .status[data-state="error"] .dot { background: hsl(var(--red)); }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
+  @media (prefers-reduced-motion: reduce) { .status .dot { animation: none } }
+
+  /* background: transparent is not cosmetic — the shared reset leaves it
+     unset, so without it the user agent's own button face shows through and
+     the chrome stops being monochrome in dark mode. */
+  header button {
+    font-size: 12.5px; padding: 5px 10px;
+    background: transparent; color: hsl(var(--foreground));
+  }
+  header .btn-outline { border-color: hsl(var(--border)); }
+  header .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+  header .btn-ghost { border-color: transparent; color: hsl(var(--muted-foreground)); }
+  header .btn-ghost:hover:not(:disabled) { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+  @media (max-width: 560px) { .hide-sm { display: none } }
+
+  /* ---------- terminal ---------- */
+  #screen { position: relative; min-height: 0; background: hsl(var(--background)); }
+  #term { position: absolute; inset: 0; padding: 8px 4px 8px 10px; }
+  .xterm .xterm-viewport { scrollbar-width: thin; }
+  .xterm-viewport::-webkit-scrollbar { width: 10px; }
+  .xterm-viewport::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / .35); border-radius: 5px;
+  }
+
+  /* Overlay for the states where there is nothing to type into yet. It sits
+     over the grid rather than replacing it, so a reconnect does not throw away
+     the scrollback the user still wants to read. */
+  #overlay {
+    position: absolute; inset: 0; z-index: 1;
+    display: grid; place-items: center; padding: 20px;
+    background: hsl(var(--background) / .82); backdrop-filter: blur(2px);
+  }
+  #overlay .card { padding: 20px 22px; max-width: 380px; text-align: center; }
+  #overlay h2 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  #overlay p { margin: 0 0 14px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+  #overlay button { width: 100%; justify-content: center; padding: 7px 12px; font-size: 13px; }
+  .spinner {
+    width: 18px; height: 18px; margin: 0 auto 12px; border-radius: 50%;
+    border: 2px solid hsl(var(--border)); border-top-color: hsl(var(--foreground));
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s } }
+
+  /* ---------- toast (shared helper writes into this) ---------- */
+  #toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(8px);
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+    padding: 8px 14px; border-radius: calc(var(--radius) - 2px); font-size: 13px;
+    opacity: 0; pointer-events: none; transition: .16s ease; z-index: 5;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.err { background: hsl(var(--red)); color: #fff; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">&#9889;&#65039;</div>
+      <span class="name mono" id="sandbox-name">&nbsp;</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="status" id="status" data-state="connecting">
+      <span class="dot"></span><span id="status-text">connecting</span>
+    </span>
+    <button class="btn-ghost hide-sm" id="clear-btn" title="Clear the scrollback">Clear</button>
+    <button class="btn-outline" id="reconnect-btn">Reconnect</button>
+  </header>
+
+  <div id="screen">
+    <div id="term"></div>
+    <div id="overlay" class="hidden">
+      <div class="card">
+        <div class="spinner" id="overlay-spinner"></div>
+        <h2 id="overlay-title">Connecting</h2>
+        <p id="overlay-msg">Opening a shell in your sandbox.</p>
+        <button class="btn-primary hidden" id="overlay-btn">Reconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/assets/xterm.js"></script>
+  <script src="/assets/addon-fit.js"></script>
+  <script src="/assets/addon-web-links.js"></script>
+  <script>
+  (function () {
+    /*SHARED_JS*/
+
+    // The sandbox is named by DNS, not by a query parameter: the server routed
+    // this page here by the host's first label, and reading it back from the
+    // same place keeps the two from ever disagreeing.
+    const SANDBOX = location.hostname.split(".")[0];
+    document.title = SANDBOX + " — sparkbox terminal";
+    $("sandbox-name").textContent = SANDBOX;
+
+    // xterm.js needs concrete colours; the rest of the page reads CSS
+    // variables. Two palettes, picked from the same signal shared.css uses so
+    // the terminal never disagrees with its own chrome.
+    const LIGHT = {
+      background: "#ffffff", foreground: "#18181b", cursor: "#18181b",
+      cursorAccent: "#ffffff", selectionBackground: "#18181b26",
+      black: "#18181b", red: "#c2410c", green: "#15803d", yellow: "#a16207",
+      blue: "#1d4ed8", magenta: "#7e22ce", cyan: "#0e7490", white: "#d4d4d8",
+      brightBlack: "#71717a", brightRed: "#ea580c", brightGreen: "#16a34a",
+      brightYellow: "#ca8a04", brightBlue: "#2563eb", brightMagenta: "#9333ea",
+      brightCyan: "#0891b2", brightWhite: "#fafafa",
+    };
+    const DARK = {
+      background: "#09090b", foreground: "#e4e4e7", cursor: "#e4e4e7",
+      cursorAccent: "#09090b", selectionBackground: "#fafafa33",
+      black: "#27272a", red: "#f87171", green: "#4ade80", yellow: "#fbbf24",
+      blue: "#60a5fa", magenta: "#c084fc", cyan: "#22d3ee", white: "#d4d4d8",
+      brightBlack: "#52525b", brightRed: "#fca5a5", brightGreen: "#86efac",
+      brightYellow: "#fcd34d", brightBlue: "#93c5fd", brightMagenta: "#d8b4fe",
+      brightCyan: "#67e8f9", brightWhite: "#fafafa",
+    };
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    function theme() {
+      const forced = document.documentElement.getAttribute("data-theme");
+      if (forced === "dark") return DARK;
+      if (forced === "light") return LIGHT;
+      return media.matches ? DARK : LIGHT;
+    }
+
+    const term = new Terminal({
+      allowProposedApi: true,
+      cursorBlink: true,
+      convertEol: false,
+      fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+      lineHeight: 1.2,
+      // A generous scrollback: a build log the user scrolls back through is the
+      // most common reason to be in here at all.
+      scrollback: 10000,
+      theme: theme(),
+      macOptionIsMeta: true,
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    term.open($("term"));
+    fit.fit();
+    term.focus();
+    // Two signals, because the chrome has two: the OS preference, and the
+    // data-theme override the shared design system honours. Without the
+    // observer the grid would keep the palette it was built with while the bar
+    // above it flipped, which looks like a rendering bug rather than a theme.
+    const applyTheme = () => { term.options.theme = theme(); };
+    if (media.addEventListener) media.addEventListener("change", applyTheme);
+    new MutationObserver(applyTheme).observe(document.documentElement,
+      { attributes: true, attributeFilter: ["data-theme"] });
+
+    // ---- connection state -------------------------------------------------
+    let ws = null;            // the live socket, if any
+    let ready = false;        // the guest's shell is attached
+    let attempt = 0;          // consecutive failed connects, for the backoff
+    let retryTimer = null;
+    let countdown = null;
+    let everConnected = false;  // a reconnect looks different from a first connect
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    function setStatus(state, text) {
+      $("status").setAttribute("data-state", state);
+      $("status-text").textContent = text;
+    }
+
+    function overlay(title, msg, opts) {
+      opts = opts || {};
+      $("overlay-title").textContent = title;
+      $("overlay-msg").textContent = msg;
+      $("overlay-spinner").className = opts.busy ? "spinner" : "spinner hidden";
+      $("overlay-btn").className = opts.action ? "btn-primary" : "btn-primary hidden";
+      $("overlay-btn").textContent = opts.action || "Reconnect";
+      $("overlay").className = "";
+    }
+    function hideOverlay() { $("overlay").className = "hidden"; }
+
+    // A line written by us, not by the guest. Dim so it never reads as program
+    // output, and \r\n because the terminal is a terminal.
+    function note(msg) { term.write("\r\n\x1b[2m" + msg + "\x1b[0m\r\n"); }
+
+    function sendResize() {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !ready) return;
+      ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
+    }
+
+    // retryIn schedules the next attempt and counts down to it out loud. A
+    // static "reconnecting in 4s" that never changes reads as a frozen page,
+    // which is the opposite of the reassurance it is there to give.
+    function retryIn(ms) {
+      let left = Math.round(ms / 1000);
+      const paint = () => overlay("Disconnected",
+        left > 0 ? "Reconnecting in " + left + "s." : "Reconnecting…",
+        { busy: true, action: "Reconnect now" });
+      paint();
+      clearInterval(countdown);
+      countdown = setInterval(() => {
+        left--;
+        paint();
+        if (left <= 0) clearInterval(countdown);
+      }, 1000);
+      retryTimer = setTimeout(connect, ms);
+    }
+
+    function connect() {
+      clearTimeout(retryTimer);
+      clearInterval(countdown);
+      if (ws) {
+        // Detach the old socket's handlers before closing it. Its onclose
+        // fires asynchronously, by which time `ws` names the *new* socket —
+        // so an attached handler would null that out and schedule a retry on
+        // a connection that is working fine.
+        const old = ws;
+        old.onopen = old.onmessage = old.onclose = old.onerror = null;
+        ws = null;
+        try { old.close(); } catch (e) { /* already gone */ }
+      }
+      ready = false;
+      setStatus("connecting", "connecting");
+      overlay("Connecting", "Opening a shell in your sandbox.", { busy: true });
+
+      // The scrollback survives a reconnect, so mark where the old session
+      // stopped — otherwise the new shell's prompt lands on the stale one's
+      // line and the two read as a single confusing sentence.
+      if (everConnected) note("── new session ──");
+
+      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+      // The session rides the cookie: a browser cannot put a header on a
+      // WebSocket handshake, which is exactly why the server checks Origin.
+      ws = new WebSocket(url, "sparkbox.terminal.v1");
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => { attempt = 0; everConnected = true; };
+
+      ws.onmessage = (ev) => {
+        // Binary is the byte stream; text is out-of-band status. Never the
+        // other way round — PTY output is not guaranteed valid UTF-8 at a
+        // frame boundary, and a text frame that is not would kill the socket.
+        if (typeof ev.data !== "string") { term.write(new Uint8Array(ev.data)); return; }
+        let m;
+        try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m.type === "status" && m.state === "starting") {
+          setStatus("starting", "starting");
+          overlay("Starting your sandbox", m.note || "This can take a moment.", { busy: true });
+        } else if (m.type === "status" && m.state === "ready") {
+          ready = true;
+          setStatus("ready", "connected");
+          hideOverlay();
+          sendResize();
+          term.focus();
+        } else if (m.type === "error") {
+          setStatus("error", "failed");
+          overlay("Couldn't attach", m.message, { action: "Try again" });
+        } else if (m.type === "exit") {
+          note("shell exited with status " + (m.code || 0));
+        }
+      };
+
+      ws.onclose = (ev) => {
+        ready = false;
+        ws = null;
+        // 4001 the shell exited, 4002 the sandbox was hung up (paused, idle,
+        // or the control plane restarted), 4003 we never got in.
+        if (ev.code === 4001) {
+          setStatus("closed", "exited");
+          overlay("Shell exited", "Start a new one whenever you like.", { action: "New shell" });
+          return;
+        }
+        if (ev.code === 4002) {
+          setStatus("closed", "paused");
+          // Deliberately no auto-retry: reconnecting resumes the sandbox, and a
+          // tab left open overnight must not keep resurrecting a machine the
+          // idle reaper just put away.
+          overlay("Sandbox paused", "It went idle. Reconnecting will start it again.", { action: "Reconnect" });
+          return;
+        }
+        if (ev.code === 4003) {
+          setStatus("error", "failed");
+          overlay("Couldn't attach", "The sandbox didn't come up. Try again in a moment.", { action: "Try again" });
+          return;
+        }
+        // Anything else is transient — a dropped link, an edge restart — so
+        // retry on a backoff. Unless the session expired while we were away,
+        // in which case the page reload lands on the login redirect.
+        setStatus("closed", "reconnecting");
+        checkSession().then((expired) => {
+          if (expired) { location.reload(); return; }
+          attempt++;
+          retryIn(Math.min(15000, 500 * Math.pow(2, attempt)));
+        });
+      };
+
+      ws.onerror = () => { /* onclose always follows; it owns the recovery. */ };
+    }
+
+    // checkSession distinguishes "the session expired" from "the network
+    // blipped", by probing the WebSocket path with a plain GET.
+    //
+    // ONLY 401 means expired, and the distinction is load-bearing rather than
+    // pedantic. The auth gate runs first and answers 401; everything past it
+    // answers 403 — including the origin gate, which refuses this very probe,
+    // because fetch() does not put an Origin header on a same-origin GET (per
+    // the Fetch standard, Origin is appended only for CORS-tainted requests and
+    // non-GET methods) and the gate insists on an Origin or a Bearer token.
+    // So 403 here is what a PERFECTLY VALID session looks like. Treating it as
+    // expired reloaded the page on every transient drop, threw away the
+    // scrollback the reconnect logic exists to preserve, and reload-looped
+    // forever behind a proxy that answers the handshake but never upgrades.
+    function checkSession() {
+      return fetch("/ws", { credentials: "same-origin" })
+        .then((r) => r.status === 401)
+        .catch(() => false);
+    }
+
+    // ---- input and sizing -------------------------------------------------
+    term.onData((d) => {
+      if (ws && ws.readyState === WebSocket.OPEN && ready) ws.send(enc.encode(d));
+    });
+    term.onBinary((d) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !ready) return;
+      const b = new Uint8Array(d.length);
+      for (let i = 0; i < d.length; i++) b[i] = d.charCodeAt(i) & 255;
+      ws.send(b);
+    });
+
+    // One debounce for both signals: a drag-resize fires continuously and each
+    // event would otherwise be a TIOCSWINSZ in the guest.
+    let fitTimer = null;
+    function refit() {
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(() => { try { fit.fit(); } catch (e) { /* detached */ } sendResize(); }, 90);
+    }
+    window.addEventListener("resize", refit);
+    if (window.ResizeObserver) new ResizeObserver(refit).observe($("screen"));
+
+    $("reconnect-btn").addEventListener("click", () => { attempt = 0; connect(); });
+    $("overlay-btn").addEventListener("click", () => { attempt = 0; connect(); });
+    $("clear-btn").addEventListener("click", () => { term.clear(); term.focus(); });
+    $("screen").addEventListener("mousedown", () => {
+      // Don't steal a selection the user is making, only a stray click.
+      if (!term.hasSelection()) setTimeout(() => term.focus(), 0);
+    });
+
+    connect();
+  })();
+  </script>
+</body>
+</html>

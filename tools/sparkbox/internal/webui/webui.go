@@ -42,7 +42,17 @@ func newMinifier() *minify.M {
 	// not throwaway markup — tests and tooling (hack/preview-console.py)
 	// depend on attribute quoting and on <head>/<body> tags surviving intact,
 	// so only whitespace/comments get squeezed out, not structure.
-	m.Add("text/html", &html.Minifier{KeepQuotes: true, KeepDocumentTags: true, KeepEndTags: true})
+	//
+	// KeepDefaultAttrVals for a subtler reason: the minifier is entitled to drop
+	// an attribute that merely restates the HTML default, and type="text" is
+	// exactly that. Dropping it is harmless to the DOM and fatal to CSS — an
+	// `input[type=text]` selector stops matching, and every text field silently
+	// falls back to the browser's own white-on-black-page styling while the
+	// password and number fields beside it (whose types are not defaults, so
+	// they survive) still look right. That shipped once; keep the attributes.
+	m.Add("text/html", &html.Minifier{
+		KeepQuotes: true, KeepDocumentTags: true, KeepEndTags: true, KeepDefaultAttrVals: true,
+	})
 	m.AddFunc("text/css", css.Minify)
 	// KeepVarNames: renaming locals saves a few hundred bytes but makes
 	// view-source debugging on these admin/operator consoles useless; we only
