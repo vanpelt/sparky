@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"time"
@@ -144,6 +145,102 @@ func (p *Publisher) flush() {
 	done := make(chan struct{})
 	p.queue <- func() { close(done) }
 	<-done
+}
+
+// wildcardTTL is the TTL on a *.<label> wildcard. Longer than recordTTL on
+// purpose: this record is published once at startup and points at a fixed edge
+// address, so a short TTL would buy no agility and cost a query per lookup.
+const wildcardTTL = 5 * time.Minute
+
+// wildcardDNS is the libdns slice PublishWildcard needs. It reads before it
+// writes, which the per-name Publisher never has to do: per-name records are
+// sparkbox's own bookkeeping, while a zone-wide wildcard is scenery an operator
+// may have configured by hand and must not lose silently.
+type wildcardDNS interface {
+	GetRecords(ctx context.Context, zone string) ([]libdns.Record, error)
+	SetRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error)
+}
+
+// PublishWildcard upserts "*.<label>.<domain>" as A/AAAA records pointing at
+// the shared proxy edge, so every <name>.<label>.<domain> resolves without a
+// per-sandbox record. It is a one-shot startup publish: the record describes
+// the host, not any sandbox, so there is deliberately no Remove — and nothing
+// under the label may ever get a per-name record either, because an explicit
+// record at a name disables the wildcard for that name across all types
+// (RFC 4592), which is the same trap the front-door AAAA already fell into.
+//
+// It handles the direct-IP edge shape only. In a Cloudflare Tunnel deployment
+// the wildcard must instead be a PROXIED CNAME to <tunnel-uuid>.cfargotunnel.com
+// — sparkbox does not know the tunnel's UUID, and the tunnel deploy path
+// deliberately withholds CLOUDFLARE_API_TOKEN from it — so there the record is
+// the operator's to create with `cloudflared tunnel route dns`. An existing
+// CNAME at the name is recognised as exactly that case and left alone.
+func PublishWildcard(ctx context.Context, domain, label, apiToken string, addrs []netip.Addr, log *slog.Logger) error {
+	return publishWildcard(ctx, &cloudflare.Provider{APIToken: apiToken}, domain, label, addrs, log)
+}
+
+func publishWildcard(ctx context.Context, dns wildcardDNS, domain, label string, addrs []netip.Addr, log *slog.Logger) error {
+	name, zone := "*."+label, domain+"."
+	fqdn := name + "." + domain
+
+	recs := make([]libdns.Record, 0, len(addrs))
+	for _, a := range addrs {
+		// Unmap first: a 4-in-6 address reports Is6() and would be published as
+		// an AAAA holding an IPv4 literal, which resolves to nothing.
+		if a = a.Unmap(); a.IsValid() {
+			recs = append(recs, libdns.Address{Name: name, TTL: wildcardTTL, IP: a})
+		}
+	}
+	if len(recs) == 0 {
+		return fmt.Errorf("no usable edge address to publish %s at", fqdn)
+	}
+
+	if existing, err := dns.GetRecords(ctx, zone); err != nil {
+		// Listing is a courtesy check, and Zone:Read is a separate scope from
+		// the Zone.DNS:Edit this feature actually needs — so a failure here
+		// downgrades to publishing blind rather than refusing to publish.
+		log.Warn("could not list zone records; publishing wildcard without a clobber check",
+			"zone", zone, "name", fqdn, "err", err)
+	} else {
+		for _, rec := range existing {
+			rr := rec.RR()
+			if rr.Name != name {
+				continue
+			}
+			if rr.Type == "CNAME" {
+				// The Cloudflare Tunnel shape. Replacing it with an A at our
+				// own edge would take the terminal offline in exactly the
+				// deployment where it was working, and libdns could not even
+				// put it back (it sets Proxied only for a .cfargotunnel.com
+				// target). Leave it and say who owns it.
+				log.Warn("wildcard already exists as a CNAME; leaving it alone",
+					"name", fqdn, "target", rr.Data,
+					"note", "tunnel deployments publish this with `cloudflared tunnel route dns`")
+				return nil
+			}
+			if (rr.Type == "A" || rr.Type == "AAAA") && !publishes(recs, rr) {
+				log.Warn("replacing an existing wildcard record that points elsewhere",
+					"name", fqdn, "type", rr.Type, "was", rr.Data)
+			}
+		}
+	}
+
+	if _, err := dns.SetRecords(ctx, zone, recs); err != nil {
+		return fmt.Errorf("publish %s: %w", fqdn, err)
+	}
+	log.Info("wildcard dns published", "name", fqdn, "records", len(recs), "ttl", wildcardTTL)
+	return nil
+}
+
+// publishes reports whether recs already carries rr's type and data, i.e.
+// whether writing recs leaves that record where it is.
+func publishes(recs []libdns.Record, rr libdns.RR) bool {
+	for _, rec := range recs {
+		if got := rec.RR(); got.Type == rr.Type && got.Data == rr.Data {
+			return true
+		}
+	}
+	return false
 }
 
 // Hook is the per-sandbox lifecycle contract shared by Plumber and Publisher

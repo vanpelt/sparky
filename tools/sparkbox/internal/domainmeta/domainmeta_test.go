@@ -8,11 +8,11 @@ import (
 func TestDisplayName(t *testing.T) {
 	cases := map[string]string{
 		"github.com":        "GitHub",
-		"api.github.com":    "GitHub",          // subdomain -> registrable -> curated
-		"i.ytimg.com":       "YouTube",         // curated on registrable ytimg.com
-		"some-startup.io":   "Some Startup",    // title-case fallback, hyphen split
-		"files.example.org": "Example",         // fallback on registrable's label
-		"93.184.216.34":     "93.184.216.34",   // not a domain -> unchanged
+		"api.github.com":    "GitHub",        // subdomain -> registrable -> curated
+		"i.ytimg.com":       "YouTube",       // curated on registrable ytimg.com
+		"some-startup.io":   "Some Startup",  // title-case fallback, hyphen split
+		"files.example.org": "Example",       // fallback on registrable's label
+		"93.184.216.34":     "93.184.216.34", // not a domain -> unchanged
 	}
 	for in, want := range cases {
 		if got := DisplayName(in); got != want {

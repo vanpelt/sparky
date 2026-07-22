@@ -27,6 +27,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/console"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/dnsedge"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
@@ -39,6 +40,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/restapi"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
@@ -47,6 +49,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/xterm"
 )
 
 // version is the artifact release tag this binary was built from, stamped by
@@ -114,12 +117,14 @@ func serve(args []string) error {
 		sluiceSocket   = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
 		proxyAddr      = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
 		proxyDomain    = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
-		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
+		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A), and it is the address the browser terminals' *.<xterm-subdomain>.<domain> wildcard is published at. Point it at the same address the wildcard *.<domain> A does")
 		proxyTLS       = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
 		consolePass    = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
 		consoleSub     = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
 		loginSub       = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
 		userConsoleSub = fs.String("user-console-subdomain", "my", "subdomain serving the per-user console (empty disables it)")
+		apiSub         = fs.String("api-subdomain", "api", "subdomain serving the authenticated REST API and its OpenAPI docs at <api-subdomain>.<domain>/docs (empty disables it); authenticate with a token from 'ssh ctl@<domain> session-token'")
+		xtermSub       = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "subdomain subtree serving browser terminals at <name>.<xterm-subdomain>.<domain> (empty disables them); needs its own wildcard TLS name, arranged by --proxy-tls with CLOUDFLARE_API_TOKEN, and its own wildcard DNS record, published only when --edge-v4 is set as well")
 		sessionTTL     = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
 		tlsProvider    = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail       = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
@@ -256,6 +261,18 @@ func serve(args []string) error {
 	}
 	nodeName, _ := os.Hostname()
 
+	// --edge-v4 feeds two independent DNS publishers — the per-name front-door
+	// A records below and the browser terminals' *.<xterm>.<domain> wildcard —
+	// so parse it once, here, and let a malformed value be reported once too.
+	var edgeAddrs []netip.Addr
+	if *edgeV4 != "" {
+		if a, perr := netip.ParseAddr(*edgeV4); perr == nil && a.Is4() {
+			edgeAddrs = append(edgeAddrs, a)
+		} else {
+			log.Warn("ignoring --edge-v4: not an IPv4 address", "value", *edgeV4)
+		}
+	}
+
 	// Front doors: with a delegated IPv6 prefix, every sandbox name maps to a
 	// deterministic public address, so `ssh <name>.<domain>` can route by the
 	// dialed address instead of the SSH username. Username routing keeps
@@ -279,12 +296,8 @@ func serve(args []string) error {
 				// Publish an A at the shared edge alongside the per-name AAAA, or
 				// the AAAA shadows the wildcard A and the name dies over IPv4.
 				var edge netip.Addr
-				if *edgeV4 != "" {
-					if a, perr := netip.ParseAddr(*edgeV4); perr == nil && a.Is4() {
-						edge = a
-					} else {
-						log.Warn("ignoring --edge-v4: not an IPv4 address", "value", *edgeV4)
-					}
+				if len(edgeAddrs) > 0 {
+					edge = edgeAddrs[0]
 				} else {
 					log.Warn("front-door names will not resolve over IPv4", "reason", "no --edge-v4 (per-name AAAA shadows the wildcard A)")
 				}
@@ -349,6 +362,30 @@ func serve(args []string) error {
 		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem,
 		"mem_reserve_mb", *memReserve, "overcommit", *memReserve > 0)
 
+	// Browser terminals only exist behind the HTTPS edge, so with no proxy there
+	// is no terminal subdomain to advertise. Threading the empty label through
+	// keeps `ctl whoami`, the REST capabilities and every sandbox's terminal_url
+	// honest rather than pointing at a host that answers nothing.
+	xtermLabel := *xtermSub
+	if *proxyAddr == "" {
+		xtermLabel = ""
+	}
+
+	// One control plane, shared by all three transports. Built here rather than
+	// left to sshgw's nil-Ops fallback because a second Ops would mean a second
+	// job registry and a second reaper goroutine: a job started over REST would
+	// then be invisible to the SSH channel, and only the Ops that owns a reaper
+	// can stop it.
+	ops := ctlops.New(ctlops.Config{
+		Sandboxes: mgr, Templates: mgr, Accounts: userStore,
+		Tags: secretsStore, Schedules: scheduleStore, Routes: routeStore,
+		Sessions:     sessionSigner,
+		DefaultImage: *defaultImage, Domain: *proxyDomain,
+		XtermSubdomain: xtermLabel, InvitesPerUser: *invitesPer,
+		Log: log,
+	})
+	defer ops.Close()
+
 	gw := sshgw.New(sshgw.GatewayOptions{
 		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
@@ -356,6 +393,7 @@ func serve(args []string) error {
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
 		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
+		Ops: ops, XtermSubdomain: xtermLabel,
 	})
 	// The gateway knows which terminals are attached to which sandbox, so it is
 	// what the manager calls to release them when a sandbox is paused.
@@ -491,22 +529,65 @@ func serve(args []string) error {
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
 		// Per-user console: self-service dashboard authenticated by the same
-		// edge session as private routes. Reserved subdomains dispatch before
-		// route lookup, so anything already claiming the name goes dark — the
-		// handle is reserved for new signups, but a sandbox or custom route may
-		// predate the reservation. Warn rather than fail: the operator picks
-		// whether to rename the squatter or move the console.
+		// edge session as private routes.
 		if *userConsoleSub != "" {
-			if _, exists := mgr.Get(*userConsoleSub); exists {
-				log.Warn("user console subdomain collides with an existing sandbox, which is now unreachable over HTTP",
-					"subdomain", *userConsoleSub)
-			} else if rt, found, rerr := routeStore.GetBySubdomain(*userConsoleSub); rerr == nil && found {
-				log.Warn("user console subdomain collides with an existing route, which is now unreachable",
-					"subdomain", *userConsoleSub, "sandbox", rt.Sandbox)
-			}
+			warnSubdomainCollision("user console", *userConsoleSub, mgr, routeStore, log)
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, *proxyTLS, log)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			log.Info("user console enabled", "url", *userConsoleSub+"."+*proxyDomain)
+		}
+
+		// Browser terminals: one host per sandbox, so the browser's own origin
+		// isolation keeps one sandbox's page from scripting another's socket.
+		// That costs a second wildcard in both DNS and TLS, because a wildcard
+		// matches exactly one label — see wildcardTLSConfig and
+		// publishXtermWildcard, which are the other two thirds of this feature.
+		var xt *xterm.Handler
+		if xtermLabel != "" {
+			warnXtermSubtreeCollision(xtermLabel, routeStore, log)
+			xt = xterm.New(xterm.Config{
+				Sandboxes: mgr, Accounts: userStore, Sessions: sessionSigner,
+				UpstreamKey: upstreamKey,
+				Domain:      *proxyDomain, Subdomain: xtermLabel,
+				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
+				// The gateway owns the one live-session registry the manager
+				// closes on pause; a browser terminal that kept its own would be
+				// silently stranded when the reaper pauses its sandbox.
+				Track: func(sandbox string, s xterm.SessionConn, _ bool) func() {
+					return gw.TrackTerminal(sandbox, s)
+				},
+				Log: log,
+			})
+			px.SetReservedSuffix(xtermLabel, xt.Handler())
+			log.Info("browser terminals enabled", "url", "https://<name>."+xtermLabel+"."+*proxyDomain)
+		}
+
+		// The REST API mirrors the ctl@ command surface for callers that have a
+		// session token but no SSH client. It shares `ops` with the gateway, so
+		// there is exactly one place where ownership, timeout budgets and the
+		// tags-before-create ordering are decided.
+		if *apiSub != "" {
+			warnSubdomainCollision("rest api", *apiSub, mgr, routeStore, log)
+			// A nil Terminal is a typed-nil trap waiting to happen: assigning a
+			// nil *xterm.Handler to the interface would make restapi's own
+			// "not configured" check see a non-nil value and 501 turn into a
+			// panic. Assign only through the non-nil branch.
+			apiCfg := restapi.Config{
+				Ops: ops, Accounts: userStore, Signer: sessionSigner,
+				Subdomain: *apiSub, Domain: *proxyDomain,
+				// The configured labels, not the spec's defaults: every example
+				// in the served document is rewritten from them, so a host that
+				// moved either subtree still hands out copy-paste that works.
+				XtermSubdomain: xtermLabel,
+				LoginURL:       "https://" + *loginSub + "." + *proxyDomain + "/",
+				Log:            log,
+			}
+			if xt != nil {
+				apiCfg.Terminal = terminalBridge{xt}
+			}
+			px.SetReserved(*apiSub, restapi.New(apiCfg).Handler())
+			log.Info("rest api enabled", "url", "https://"+*apiSub+"."+*proxyDomain,
+				"docs", "https://"+*apiSub+"."+*proxyDomain+"/docs")
 		}
 		proxySrv = &http.Server{
 			Addr:    *proxyAddr,
@@ -523,11 +604,18 @@ func serve(args []string) error {
 		}
 		if *proxyTLS {
 			log.Info("obtaining TLS certificate", "provider", *tlsProvider, "domain", *proxyDomain)
-			if err := setupProxyTLS(ctx, proxySrv, tlsParams{
+			names, terr := setupProxyTLS(ctx, proxySrv, tlsParams{
 				provider: *tlsProvider, domain: *proxyDomain, email: *tlsEmail, stateDir: *stateDir,
-			}); err != nil {
-				return fmt.Errorf("proxy tls: %w", err)
+				xtermSub: xtermLabel, log: log,
+			})
+			if terr != nil {
+				return fmt.Errorf("proxy tls: %w", terr)
 			}
+			// Report what was actually obtained, not what was asked for: the
+			// terminal wildcard is issued non-fatally, and its absence otherwise
+			// surfaces only as a certificate interstitial with no log line.
+			// autocert reports nothing — it issues per-SNI on first request.
+			log.Info("tls certificates managed", "names", names)
 			// Sniff each connection below TLS: a cleartext-HTTP client that
 			// dialed the HTTPS edge (e.g. http://myvm.hivemind.tools:4444) is
 			// answered with a 308 to the https:// URL instead of the TLS stack's
@@ -541,6 +629,11 @@ func serve(args []string) error {
 		} else {
 			go func() { errCh <- proxySrv.ListenAndServe() }()
 		}
+		// The DNS half of the browser terminal, published once and never
+		// removed. Best-effort by design: it declines (loudly, naming the record
+		// an operator would write) whenever it cannot safely act — see
+		// publishXtermWildcard.
+		publishXtermWildcard(ctx, *proxyDomain, xtermLabel, edgeAddrs, log)
 	}
 
 	log.Info("sparkbox up", "driver", *driverName, "ssh", *sshAddr, "api", *apiAddr,
@@ -567,6 +660,55 @@ func serve(args []string) error {
 	}
 	sshSrv.Close() //nolint:errcheck
 	return nil
+}
+
+// terminalBridge lets the REST API serve GET /v1/sandboxes/{name}/terminal from
+// the same WebSocket code path as the browser page, instead of a second copy of
+// the framing, the origin gate and the close codes.
+//
+// The ctlops.Caller is deliberately unused: internal/restapi has already run the
+// owner gate — where the JSON error envelope lives, so a stranger gets the same
+// masked 404 every other endpoint returns rather than an opaque close code — and
+// checking twice in two packages is how the two eventually disagree.
+type terminalBridge struct{ xt *xterm.Handler }
+
+func (t terminalBridge) ServeTerminal(w http.ResponseWriter, r *http.Request, _ ctlops.Caller, sandbox string) {
+	sess, _ := edgeauth.From(r.Context())
+	t.xt.Bridge(w, r, sandbox, sess)
+}
+
+// warnSubdomainCollision reports a reserved subdomain something already answers
+// for. Reserved dispatch runs before route lookup, so the squatter goes dark
+// rather than winning — but a sandbox or custom route may predate the
+// reservation, and which one moves is the operator's call, not ours.
+func warnSubdomainCollision(what, sub string, mgr *host.Manager, rs *routes.Store, log *slog.Logger) {
+	if _, exists := mgr.Get(sub); exists {
+		log.Warn(what+" subdomain collides with an existing sandbox, which is now unreachable over HTTP",
+			"subdomain", sub)
+		return
+	}
+	if rt, found, err := rs.GetBySubdomain(sub); err == nil && found {
+		log.Warn(what+" subdomain collides with an existing route, which is now unreachable",
+			"subdomain", sub, "sandbox", rt.Sandbox)
+	}
+}
+
+// warnXtermSubtreeCollision is the same warning for a whole subtree rather than
+// one name. It needs its own scan because route subdomains may contain dots (the
+// advertised `api.myvm` shape), so a row literally named "<something>.xterm" is
+// creatable and is now shadowed by the terminal handler.
+func warnXtermSubtreeCollision(label string, rs *routes.Store, log *slog.Logger) {
+	all, err := rs.List()
+	if err != nil {
+		return // a startup courtesy, not a precondition
+	}
+	suffix := "." + strings.ToLower(label)
+	for _, rt := range all {
+		if strings.HasSuffix(strings.ToLower(rt.Subdomain), suffix) {
+			log.Warn("browser-terminal subtree collides with an existing route, which is now unreachable",
+				"subdomain", rt.Subdomain, "sandbox", rt.Sandbox)
+		}
+	}
 }
 
 // defaultAudience is the hivemind SaaS URL: the relying party sparkbox exists

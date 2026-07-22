@@ -123,10 +123,12 @@ func newTestConsoleDomain(t *testing.T, domain string) *testConsole {
 		t.Fatal(err)
 	}
 	signer := edgeauth.NewSigner([]byte("test-oidc-ikm"))
+	// Status matters: edgeauth.Require refuses a session whose account is not
+	// active, so a fake that left it blank would model three disabled users.
 	accounts := fakeAccounts{
-		"alice":   {Handle: "alice", InvitedBy: "bob"},
-		"mallory": {Handle: "mallory", InvitedBy: "bob"},
-		"opsy":    {Handle: "opsy", InvitedBy: users.OperatorInviter},
+		"alice":   {Handle: "alice", Status: users.StatusActive, InvitedBy: "bob"},
+		"mallory": {Handle: "mallory", Status: users.StatusActive, InvitedBy: "bob"},
+		"opsy":    {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
 	}
 	rec := &syncRecorder{}
 	// netrules shares the same DB file as secrets (that owns sandbox_tags).

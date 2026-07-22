@@ -52,7 +52,9 @@ var handleRe = regexp.MustCompile(`^[a-z0-9-]{2,32}$`)
 var reserved = map[string]bool{
 	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
 	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
-	"my": true, // user console subdomain
+	"my":    true, // user console subdomain
+	"xterm": true, // browser-terminal subtree
+	"api":   true, // REST API subdomain
 }
 
 // ValidHandle reports whether h is a claimable handle.
@@ -87,6 +89,16 @@ const OperatorInviter = "operator"
 // IsOperator reports whether the account was operator-blessed via users.conf
 // rather than invited by another user.
 func (u User) IsOperator() bool { return u.InvitedBy == OperatorInviter }
+
+// StatusActive is the only status that authenticates. Setting a row to anything
+// else is the sole deprovisioning mechanism the schema offers — there is no
+// user delete, and RemoveKey refuses the last key — so every path that accepts
+// or issues a credential has to honour it, not just the SSH and passkey ones
+// that read it through Lookup.
+const StatusActive = "active"
+
+// Active reports whether this account may authenticate at all.
+func (u User) Active() bool { return u.Status == StatusActive }
 
 type Store struct {
 	mu sync.Mutex // serialises writes (sqlite is single-writer)

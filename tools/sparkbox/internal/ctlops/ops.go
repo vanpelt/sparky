@@ -1,0 +1,379 @@
+// Package ctlops is the transport-agnostic core of the sparkbox control plane:
+// one method per `ssh ctl@<gateway>` command, taking the caller's handle and
+// typed arguments and returning typed results and one typed error.
+//
+// It exists because the same operation is now reachable three ways — the SSH
+// ctl channel, the REST API at api.<domain>, and the browser terminal's owner
+// gate — and the ownership check, the timeout budget, and the
+// tags-before-create ordering are each things a caller can silently forget.
+// They live here so that no caller can. internal/sshgw keeps argument parsing
+// and text formatting; internal/restapi keeps JSON and status codes; neither
+// keeps policy.
+//
+// ctlops authenticates nothing. The transport has already proved who is asking
+// (an SSH public key, or a verified edge session); ctlops only authorizes.
+package ctlops
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+
+	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+)
+
+// ---------------------------------------------------------------------------
+// Narrow dependency interfaces
+//
+// Each is the slice of a real store that ctlops actually drives, stated as an
+// interface so the package's own tests run against in-memory fakes with no
+// sqlite, no temp dir, and no VM driver. *host.Manager, *users.Store,
+// *secrets.Store, *schedule.Store, *routes.Store and *edgeauth.Signer satisfy
+// them structurally — there are no adapters to write and nothing to keep in
+// sync. Note that every method here is owner-agnostic: ctlops does the
+// ownership check before it calls any of them, which is the whole point.
+// ---------------------------------------------------------------------------
+
+// Sandboxes is the VM-lifecycle slice of host.Manager.
+type Sandboxes interface {
+	Get(name string) (*host.Sandbox, bool)
+	ListByOwner(owner string) []*host.Sandbox
+	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Pause(ctx context.Context, name string) error
+	Archive(ctx context.Context, name string) error
+	Resize(ctx context.Context, name string, sizeMB int64) error
+	Reboot(ctx context.Context, name string) error
+	Rename(ctx context.Context, oldName, newName, owner string) error
+	Destroy(ctx context.Context, name string) error
+	SetPinned(name string, pinned bool) error
+	ResyncEnv(ctx context.Context, name string)
+	Touch(name string)
+	ArchivingEnabled() bool
+}
+
+// Templates is the snapshot/fork slice, separate because a host whose driver
+// cannot archive has snapshots disabled while ordinary sandboxes still work.
+type Templates interface {
+	Snapshots(owner string) []*host.Snapshot
+	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, snapName, owner string) error
+	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
+	Snapshotter() bool
+}
+
+// Accounts is the identity slice of users.Store.
+type Accounts interface {
+	Get(handle string) (users.User, error)
+	Keys(handle string) ([]users.Key, error)
+	AddKey(handle string, key xssh.PublicKey, label, via string) error
+	RemoveKey(handle, fp string) error
+	LinkGitHub(handle, login string) error
+	SetEmail(handle, email string) error
+	Passkeys(handle string) ([]users.Passkey, error)
+	RemovePasskey(handle, idPrefix string) error
+	NewInvite(createdBy string) (string, error)
+	InviteCount(handle string) (int, error)
+}
+
+// Tagger is the tag half of secrets.Store. Deliberately identical to the
+// existing sshgw.SandboxTagger so *secrets.Store keeps satisfying both. Neither
+// method checks ownership — that is exactly why nothing outside ctlops may hold
+// a reference to one.
+type Tagger interface {
+	TagsFor(sandbox string) ([]string, error)
+	SetTags(sandbox, owner string, tags []string) error
+}
+
+// Schedules is the platform-cron store. A nil one makes every schedule
+// operation answer KindDisabled.
+type Schedules interface {
+	Add(e schedule.Entry) (schedule.Entry, error)
+	Get(id string) (schedule.Entry, error)
+	ListByOwner(owner string) ([]schedule.Entry, error)
+	Delete(id string) error
+}
+
+// Routes is the web-route store, driven only by the `share` commands.
+type Routes interface {
+	ListBySandbox(sandbox string) ([]routes.Route, error)
+	SetVisibility(subdomain, visibility string) error
+}
+
+// Minter mints edge session tokens; *edgeauth.Signer satisfies it.
+type Minter interface {
+	Mint(id edgeauth.Identity, ttl time.Duration) (string, time.Time, error)
+}
+
+// GitHubKeys is the github.com dependency, behind an interface so no test in
+// this package ever makes a network call. A nil one defaults to
+// users.FetchGitHubKeys / users.VerifyGitHubKey.
+type GitHubKeys interface {
+	Fetch(ctx context.Context, login string) ([]xssh.PublicKey, error)
+	Verify(ctx context.Context, login string, key xssh.PublicKey) (bool, error)
+}
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
+
+// Config wires the stores. The optional ones are optional in the same way and
+// for the same reasons they are on the Gateway today: a nil store makes its
+// commands answer KindDisabled rather than panic, which is what a unit test and
+// a minimally-configured host both want.
+type Config struct {
+	Sandboxes Sandboxes // required
+	Templates Templates // required
+	Accounts  Accounts  // required
+
+	Tags      Tagger     // nil: tag operations are KindDisabled
+	Schedules Schedules  // nil: schedule operations are KindDisabled
+	Routes    Routes     // nil: share operations are KindDisabled
+	Sessions  Minter     // nil: MintSessionToken is KindDisabled
+	GitHub    GitHubKeys // nil: the real github.com client
+
+	DefaultImage   string // rootfs template new sandboxes get
+	Domain         string // base zone, for the URL fields on results; "" omits them
+	XtermSubdomain string // "xterm" when browser terminals are served; "" omits TerminalURL
+	InvitesPerUser int    // non-operator invite quota; 0 means operators only
+
+	NewName func() string    // nil: the built-in adjective-noun generator
+	Now     func() time.Time // nil: time.Now — injectable so schedule next-run is testable
+	Log     *slog.Logger     // required; one audit line per mutation
+}
+
+// Ops is the control-plane core. One per process; safe for concurrent use
+// because every store it holds already is.
+type Ops struct {
+	boxes     Sandboxes
+	templates Templates
+	accounts  Accounts
+	tags      Tagger
+	schedules Schedules
+	routes    Routes
+	sessions  Minter
+	github    GitHubKeys
+
+	defaultImage   string
+	domain         string
+	xtermSubdomain string
+	invitesPerUser int
+
+	newName func() string
+	now     func() time.Time
+	log     *slog.Logger
+
+	// jobs is the in-memory async registry (jobs.go). It is guarded by its own
+	// mutex rather than the stores' because a job's lifecycle is entirely local
+	// to this process.
+	jobsMu    sync.Mutex
+	jobs      map[string]*Job
+	stop      chan struct{}
+	closeOnce sync.Once
+}
+
+func New(cfg Config) *Ops {
+	o := &Ops{
+		boxes:          cfg.Sandboxes,
+		templates:      cfg.Templates,
+		accounts:       cfg.Accounts,
+		tags:           cfg.Tags,
+		schedules:      cfg.Schedules,
+		routes:         cfg.Routes,
+		sessions:       cfg.Sessions,
+		github:         cfg.GitHub,
+		defaultImage:   cfg.DefaultImage,
+		domain:         normalizeDomain(cfg.Domain),
+		xtermSubdomain: cfg.XtermSubdomain,
+		invitesPerUser: cfg.InvitesPerUser,
+		newName:        cfg.NewName,
+		now:            cfg.Now,
+		log:            cfg.Log,
+		jobs:           map[string]*Job{},
+		stop:           make(chan struct{}),
+	}
+	if o.now == nil {
+		o.now = time.Now
+	}
+	if o.log == nil {
+		// A nil logger would panic on the first audit line, which is a silly way
+		// to lose a control plane; discard instead and let the operator notice
+		// the missing audit trail.
+		o.log = slog.New(slog.DiscardHandler)
+	}
+	if o.github == nil {
+		o.github = realGitHub{}
+	}
+	go o.reapJobs()
+	return o
+}
+
+// Close stops the job reaper. Idempotent.
+func (o *Ops) Close() {
+	o.closeOnce.Do(func() { close(o.stop) })
+}
+
+// normalizeDomain drops a leading dot, because --proxy-domain is written both
+// ways in the wild and ".catnip.sh" would produce "https://box..catnip.sh".
+func normalizeDomain(d string) string {
+	for len(d) > 0 && d[0] == '.' {
+		d = d[1:]
+	}
+	return d
+}
+
+// Caller is who is asking. Handle is already authenticated by the transport.
+// KeyFP is the fingerprint of the SSH key on this session — audit only, echoed
+// by Whoami, and used as the default GitHub proof on the SSH path; it is empty
+// for HTTP callers. Operator status is deliberately NOT a field: ctlops resolves
+// it from the account store when (and only when) a command needs it, so a
+// transport that forgets to populate it cannot widen anyone's authority.
+type Caller struct {
+	Handle string
+	KeyFP  string
+}
+
+// Capabilities reports what this host actually has configured, so a client can
+// avoid provoking a KindDisabled instead of discovering it by trial.
+type Capabilities struct {
+	Archiving     bool `json:"archiving"`
+	Snapshots     bool `json:"snapshots"`
+	Scheduling    bool `json:"scheduling"`
+	Tags          bool `json:"tags"`
+	Routes        bool `json:"routes"`
+	SessionTokens bool `json:"session_tokens"`
+	Terminal      bool `json:"terminal"`
+}
+
+func (o *Ops) Capabilities() Capabilities {
+	return Capabilities{
+		Archiving:     o.boxes != nil && o.boxes.ArchivingEnabled(),
+		Snapshots:     o.templates != nil && o.templates.Snapshotter(),
+		Scheduling:    o.schedules != nil,
+		Tags:          o.tags != nil,
+		Routes:        o.routes != nil,
+		SessionTokens: o.sessions != nil,
+		Terminal:      o.domain != "" && o.xtermSubdomain != "",
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Budgets
+//
+// Exported so both transports and the OpenAPI document quote the same numbers
+// rather than copying them. Every method applies its own budget through
+// withBudget, which is a no-op when ctx already carries an earlier deadline —
+// so a disconnecting client still cancels, and a caller that wants a tighter
+// ceiling can impose one without ctlops fighting it.
+// ---------------------------------------------------------------------------
+
+const (
+	PauseTimeout   = 3 * time.Minute  // a full guest memory snapshot
+	ArchiveTimeout = 15 * time.Minute // fsck + zerofree + zstd of 25 GB, then transfer
+	ResizeTimeout  = 10 * time.Minute // e2fsck + resize2fs + cold boot
+	DialTimeout    = 15 * time.Second // create/attach: reaching a freshly booted guest
+)
+
+// withBudget bounds ctx by d unless the caller already asked for less. Returning
+// the caller's own context in that case is deliberate: a 30-second HTTP handler
+// deadline must win over a 15-minute archive budget, or the handler leaks a
+// goroutine it can no longer answer for.
+func withBudget(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= d {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d)
+}
+
+// ---------------------------------------------------------------------------
+// The owner gate
+// ---------------------------------------------------------------------------
+
+// owned resolves a sandbox the caller may act on. "Does not exist" and "exists
+// but belongs to someone else" return the byte-identical error, from this one
+// line, so a cross-owner probe can never confirm a name — and because every
+// mutating method calls this before touching the manager, it can never wake a
+// stranger's VM either.
+func (o *Ops) owned(op, name string, c Caller) (*host.Sandbox, error) {
+	if name == "" {
+		return nil, Invalid(op, "missing_name", "a sandbox name is required")
+	}
+	box, ok := o.boxes.Get(name)
+	if !ok || box.Owner != c.Handle {
+		return nil, NotFound(op, "sandbox", name)
+	}
+	return box, nil
+}
+
+// ownedSnapshot is the same gate for templates. The manager already keys
+// snapshots by owner, but resolving through the owner's own list keeps the
+// masked message identical to the sandbox one instead of leaving it to whatever
+// the driver happens to say.
+func (o *Ops) ownedSnapshot(op, name string, c Caller) (*host.Snapshot, error) {
+	if name == "" {
+		return nil, Invalid(op, "missing_name", "a snapshot name is required")
+	}
+	for _, s := range o.templates.Snapshots(c.Handle) {
+		if s.Name == name {
+			return s, nil
+		}
+	}
+	return nil, NotFound(op, "snapshot", name)
+}
+
+// ---------------------------------------------------------------------------
+// Result projection
+// ---------------------------------------------------------------------------
+
+// info projects a manager record onto the public shape. SSHAddr, HostIP and
+// GuestV6 are dropped here rather than at the transport, so no future edge can
+// serialize the host's internal topology by forgetting to.
+func (o *Ops) info(b *host.Sandbox) SandboxInfo {
+	si := SandboxInfo{
+		Name:       b.Name,
+		Owner:      b.Owner,
+		State:      string(b.State),
+		Pinned:     b.Pinned,
+		Ballooned:  b.Ballooned,
+		Tags:       []string{},
+		VCPUs:      b.VCPUs,
+		MemMB:      b.MemMB,
+		DiskMB:     b.DiskMB,
+		CreatedAt:  b.CreatedAt,
+		LastActive: b.LastActive,
+	}
+	if o.tags != nil {
+		// A tag-store hiccup must not turn `list` into an error: the tags are
+		// decoration on this record, not its subject.
+		if t, err := o.tags.TagsFor(b.Name); err == nil && len(t) > 0 {
+			si.Tags = t
+		}
+	}
+	if o.domain != "" {
+		si.URL = "https://" + b.Name + "." + o.domain
+		if o.xtermSubdomain != "" {
+			si.TerminalURL = "https://" + b.Name + "." + o.xtermSubdomain + "." + o.domain
+		}
+	}
+	return si
+}
+
+// realGitHub is the default GitHubKeys: the package-level users helpers that
+// actually talk to github.com. Tests always inject a fake, so nothing in this
+// package's own suite reaches the network.
+type realGitHub struct{}
+
+func (realGitHub) Fetch(ctx context.Context, login string) ([]xssh.PublicKey, error) {
+	return users.FetchGitHubKeys(ctx, login)
+}
+
+func (realGitHub) Verify(ctx context.Context, login string, key xssh.PublicKey) (bool, error) {
+	return users.VerifyGitHubKey(ctx, login, key)
+}

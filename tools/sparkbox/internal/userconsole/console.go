@@ -72,10 +72,10 @@ type OwnerSyncer interface {
 // Handler serves the user console UI and its JSON API.
 type Handler struct {
 	mgr      *host.Manager
-	routes   *routes.Store       // optional: nil hides web routes and disables port/visibility
-	secrets  *secrets.Store      // optional: nil disables tags + secrets endpoints
-	netrules *netrules.Store     // optional: nil disables network-rule endpoints (501)
-	netsync  *netpush.Syncer     // optional: nil (or no sluice socket) disables bandwidth + policy push
+	routes   *routes.Store            // optional: nil hides web routes and disables port/visibility
+	secrets  *secrets.Store           // optional: nil disables tags + secrets endpoints
+	netrules *netrules.Store          // optional: nil disables network-rule endpoints (501)
+	netsync  *netpush.Syncer          // optional: nil (or no sluice socket) disables bandwidth + policy push
 	favicons *domainmeta.FaviconCache // optional: nil serves the globe fallback
 	accounts edgeauth.Accounts
 	signer   *edgeauth.Signer

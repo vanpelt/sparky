@@ -55,7 +55,19 @@ func Require(signer *Signer, accounts Accounts, loginURL string) func(http.Handl
 			}
 			sess := Session{Identity: id}
 			if accounts != nil {
-				if u, err := accounts.Get(id.Handle); err == nil {
+				u, err := accounts.Get(id.Handle)
+				// A disabled account's outstanding cookie must stop working
+				// everywhere, not just where the next credential is issued: the
+				// token's MAC key is fleet-wide, so there is nothing else to
+				// revoke short of rotating the OIDC key for every user. A store
+				// error is deliberately NOT fail-closed — a transient sqlite
+				// hiccup would sign every visitor out of the whole edge — so only
+				// a status we positively read as inactive refuses.
+				if err == nil && !u.Active() {
+					http.Error(w, "sparkbox: this account is disabled", http.StatusForbidden)
+					return
+				}
+				if err == nil {
 					sess.Operator = u.IsOperator()
 				}
 			}

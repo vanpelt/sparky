@@ -32,6 +32,10 @@ var reservedNames = map[string]bool{
 	"new": true, "ctl": true, "signup": true, "console": true, "oidc": true,
 	"login": true, "admin": true, "root": true, "sparkbox": true, "www": true,
 	"my": true,
+	// "xterm" is the browser terminal's label: the edge owns the whole
+	// *.xterm.<domain> subtree, and a sandbox called "xterm" would additionally
+	// claim the bare xterm.<domain>. "api" is the REST edge.
+	"xterm": true, "api": true,
 }
 
 // Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
@@ -66,6 +70,38 @@ func (e *CapacityError) Error() string {
 		e.UsedMB, e.RequestedMB, e.BudgetMB)
 }
 
+// NameProblem says why a name was refused, so a transport can answer "you typed
+// it wrong" (400) apart from "somebody already has it" (409).
+type NameProblem int
+
+const (
+	NameInvalid  NameProblem = iota // fails the charset rule
+	NameReserved                    // collides with a subdomain the edge owns
+	NameTaken                       // already in use by an existing object
+)
+
+// NameError reports a name the caller may not use. These three conditions are
+// caller mistakes, not faults, but they used to be bare fmt.Errorf values that
+// every transport reported as a 500 — a client cannot retry its way out of a
+// typo, and the noise hid real faults. The message strings are reproduced
+// exactly as they were so the SSH channel's wording is unchanged.
+type NameError struct {
+	Problem NameProblem
+	Noun    string // "sandbox" or "snapshot"
+	Name    string
+}
+
+func (e *NameError) Error() string {
+	switch e.Problem {
+	case NameReserved:
+		return fmt.Sprintf("%s name %q is reserved", e.Noun, e.Name)
+	case NameTaken:
+		return fmt.Sprintf("%s %q already exists", e.Noun, e.Name)
+	default:
+		return fmt.Sprintf("invalid %s name %q (lowercase alphanumerics and dashes)", e.Noun, e.Name)
+	}
+}
+
 // DiskQuotaError is returned when a create or restore would push an owner's
 // pooled on-disk usage past their per-owner disk budget.
 type DiskQuotaError struct {
@@ -77,6 +113,44 @@ func (e *DiskQuotaError) Error() string {
 	return fmt.Sprintf("disk pool full for %s: %d MB used + %d MB requested exceeds the %d MB pool",
 		e.Owner, e.UsedMB, e.RequestedMB, e.PoolMB)
 }
+
+// MissingError, StateError and DisabledError are the other three shapes a
+// caller's mistake takes, alongside NameError. They exist for the same reason it
+// does: a bare fmt.Errorf reaches every transport as an unclassified fault, so a
+// 500 is what a client gets for a name collision it can never retry its way out
+// of, and the noise buries real faults. The message strings are reproduced
+// exactly as they were, so the SSH channel's wording is unchanged — only the
+// HTTP status and the log level move.
+
+// MissingError reports an object that is not there (or not the caller's; the
+// manager's own checks conflate the two on purpose).
+type MissingError struct {
+	Noun string // "sandbox" or "snapshot"
+	Name string
+}
+
+func (e *MissingError) Error() string { return fmt.Sprintf("%s %q not found", e.Noun, e.Name) }
+
+// StateError reports a well-formed request the current state refuses: renaming
+// an archived sandbox, a subdomain another route already holds, a sandbox that
+// was resumed underneath a rename. Code is the stable token a client switches
+// on, since these have no other machine-readable distinction.
+type StateError struct {
+	Code string
+	Msg  string
+}
+
+func (e *StateError) Error() string { return e.Msg }
+
+// DisabledError reports a capability this host has not configured, as opposed to
+// one that failed. The distinction is what lets a client hide a button rather
+// than discover the gap by watching an operation fail.
+type DisabledError struct {
+	Code string
+	Msg  string
+}
+
+func (e *DisabledError) Error() string { return e.Msg }
 
 type Sandbox struct {
 	Name       string    `json:"name"`
@@ -414,10 +488,10 @@ func NewManager(opts Options) (*Manager, error) {
 
 func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
 	if !nameRe.MatchString(name) {
-		return nil, fmt.Errorf("invalid sandbox name %q (lowercase alphanumerics and dashes)", name)
+		return nil, &NameError{Problem: NameInvalid, Noun: "sandbox", Name: name}
 	}
 	if reservedNames[name] {
-		return nil, fmt.Errorf("sandbox name %q is reserved", name)
+		return nil, &NameError{Problem: NameReserved, Noun: "sandbox", Name: name}
 	}
 	if vcpus <= 0 {
 		vcpus = defaultVCPUs
@@ -428,7 +502,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.boxes[name]; ok {
-		return nil, fmt.Errorf("sandbox %q already exists", name)
+		return nil, &NameError{Problem: NameTaken, Noun: "sandbox", Name: name}
 	}
 	if err := m.admit(owner, memMB, 0, ""); err != nil {
 		return nil, err
@@ -972,13 +1046,13 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 // (schedules, tags, front door) follow best-effort and idempotently.
 func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) error {
 	if m.renamer == nil {
-		return errors.New("rename is not enabled on this host")
+		return &DisabledError{Code: "rename_disabled", Msg: "rename is not enabled on this host"}
 	}
 	if !nameRe.MatchString(newName) {
-		return fmt.Errorf("invalid sandbox name %q (lowercase alphanumerics and dashes)", newName)
+		return &NameError{Problem: NameInvalid, Noun: "sandbox", Name: newName}
 	}
 	if reservedNames[newName] {
-		return fmt.Errorf("sandbox name %q is reserved", newName)
+		return &NameError{Problem: NameReserved, Noun: "sandbox", Name: newName}
 	}
 	m.mu.Lock()
 	if err := m.renameChecks(oldName, newName, owner); err != nil {
@@ -1001,7 +1075,8 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 	}
 	b := m.boxes[oldName]
 	if b.State != vmm.StatePaused {
-		return fmt.Errorf("sandbox %q was resumed mid-rename; try again", oldName)
+		return &StateError{Code: "sandbox_resumed",
+			Msg: fmt.Sprintf("sandbox %q was resumed mid-rename; try again", oldName)}
 	}
 	// Snapshots must go before the dir moves (see the doc comment); dropping
 	// them alone is safe — the next start simply cold-boots.
@@ -1094,13 +1169,14 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 func (m *Manager) renameChecks(oldName, newName, owner string) error {
 	b, ok := m.boxes[oldName]
 	if !ok || b.Owner != owner {
-		return fmt.Errorf("sandbox %q not found", oldName)
+		return &MissingError{Noun: "sandbox", Name: oldName}
 	}
 	if b.State == vmm.StateArchived {
-		return fmt.Errorf("sandbox %q is archived; restore it first, then rename", oldName)
+		return &StateError{Code: "sandbox_archived",
+			Msg: fmt.Sprintf("sandbox %q is archived; restore it first, then rename", oldName)}
 	}
 	if _, exists := m.boxes[newName]; exists {
-		return fmt.Errorf("sandbox %q already exists", newName)
+		return &NameError{Problem: NameTaken, Noun: "sandbox", Name: newName}
 	}
 	if m.routes != nil {
 		r, found, err := m.routes.GetBySubdomain(newName)
@@ -1115,7 +1191,8 @@ func (m *Manager) renameChecks(oldName, newName, owner string) error {
 		// rather than being silently adopted). Renaming again completes the
 		// crashed move: the routes store's RenameSandbox is idempotent.
 		if found && r.Sandbox != oldName && !(r.Sandbox == newName && r.Owner == owner) {
-			return fmt.Errorf("subdomain %q is already taken", newName)
+			return &StateError{Code: "subdomain_taken",
+				Msg: fmt.Sprintf("subdomain %q is already taken", newName)}
 		}
 	}
 	return nil

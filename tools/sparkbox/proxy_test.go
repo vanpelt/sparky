@@ -244,6 +244,27 @@ func TestReservedSubdomainBeatsRouteLookup(t *testing.T) {
 	if code != http.StatusOK || body != "reserved-handler" {
 		t.Fatalf("reserved subdomain not dispatched to handler: %d %q", code, body)
 	}
+
+	// A reserved SUFFIX must beat the route table for the same reason, and the
+	// attack is real rather than theoretical: routes.ValidSubdomain permits
+	// dotted subdomains, so mallory can register the exact host alice's browser
+	// terminal lives on. Route-lookup-first would hand her the shell page.
+	ps.proxy.(*proxy.Server).SetReservedSuffix("xterm", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name, ok := proxy.SuffixName(r)
+		if !ok {
+			t.Error("suffix handler reached without a name in context")
+		}
+		fmt.Fprint(w, "xterm-handler:"+name)
+	}))
+	if err := ps.store.Upsert(routes.Route{
+		Subdomain: "victim.xterm", Sandbox: "taken", Owner: "mallory", Port: 8000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	code, body = ps.get(t, "victim.xterm.hivemind.tools")
+	if code != http.StatusOK || body != "xterm-handler:victim" {
+		t.Fatalf("hostile route shadowed the xterm suffix: %d %q", code, body)
+	}
 }
 
 func TestDefaultRouteCreatedOnCreate(t *testing.T) {

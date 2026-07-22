@@ -47,25 +47,65 @@ const terminalRestore = "" +
 	"\x1b[?7h" + // autowrap back on
 	"\x1b[0m" // default colours and attributes
 
-// sessionConn is the slice of gssh.Session that hanging up needs: somewhere to
+// SessionConn is the slice of gssh.Session that hanging up needs: somewhere to
 // write the goodbye and a way to end the session. Kept narrow so the hang-up
 // path can be tested without standing up a real SSH server.
-type sessionConn interface {
+//
+// It is exported because the browser terminal in internal/xterm must register
+// in *this* registry rather than start a second one: host.Manager takes exactly
+// one SessionCloser, so a second registry would mean pausing a sandbox silently
+// strands every browser terminal attached to it. See TrackTerminal.
+type SessionConn interface {
 	Stderr() io.ReadWriter
 	Close() error
 }
 
+// connectVia records how a tracked session reached its sandbox, because that is
+// what decides whether "reconnect with" can honestly print an ssh(1) command. A
+// browser tab handed one would have nothing to do with it.
+type connectVia int
+
+const (
+	// viaFrontDoor is the hostname-routed SSH form, `ssh <name>.<domain>`. It is
+	// the zero value because it is what every hung-up SSH session has always been
+	// told, whichever way it actually connected.
+	viaFrontDoor connectVia = iota
+	// viaGateway is the username-routed SSH form, `ssh <name>@<domain>`.
+	viaGateway
+	// viaBrowser is the terminal page, `https://<name>.<xterm>.<domain>`.
+	viaBrowser
+)
+
 // liveSession is one tracked interactive session.
 type liveSession struct {
-	sess    sessionConn
+	sess    SessionConn
 	sandbox string
 	isPTY   bool
+	via     connectVia
 }
 
 // trackSession registers a session as attached to a sandbox and returns the
 // function that unregisters it. Safe to call for both PTY and exec sessions.
-func (g *Gateway) trackSession(sandbox string, s sessionConn, isPTY bool) func() {
-	ls := &liveSession{sess: s, sandbox: sandbox, isPTY: isPTY}
+func (g *Gateway) trackSession(sandbox string, s SessionConn, isPTY bool) func() {
+	return g.track(sandbox, s, isPTY, viaFrontDoor)
+}
+
+// TrackSession is trackSession, exported as the seam internal/xterm registers a
+// browser terminal through — its Config.Track field has exactly this shape.
+// Prefer TrackTerminal for a browser: it also picks the reconnect wording.
+func (g *Gateway) TrackSession(sandbox string, s SessionConn, isPTY bool) func() {
+	return g.trackSession(sandbox, s, isPTY)
+}
+
+// TrackTerminal registers a browser terminal. It is always a PTY — that is what
+// a terminal is, and getting it wrong would skip the escape sequences that undo
+// mouse reporting — and its goodbye names a URL rather than an ssh command.
+func (g *Gateway) TrackTerminal(sandbox string, s SessionConn) func() {
+	return g.track(sandbox, s, true, viaBrowser)
+}
+
+func (g *Gateway) track(sandbox string, s SessionConn, isPTY bool, via connectVia) func() {
+	ls := &liveSession{sess: s, sandbox: sandbox, isPTY: isPTY, via: via}
 	g.liveMu.Lock()
 	if g.live == nil {
 		g.live = map[string]map[*liveSession]struct{}{}
@@ -169,8 +209,8 @@ func (g *Gateway) hangUp(ls *liveSession, reason string) {
 		}
 		// \r\n throughout: the client's terminal is in raw mode, so a bare \n
 		// would step down a line without returning to column zero.
-		msg += fmt.Sprintf("\r\nsparkbox: sandbox %q %s — reconnect with: ssh %s\r\n",
-			ls.sandbox, reason, g.reconnectHint(ls.sandbox, true))
+		msg += fmt.Sprintf("\r\nsparkbox: sandbox %q %s — reconnect with: %s\r\n",
+			ls.sandbox, reason, g.reconnectHint(ls.sandbox, ls.via))
 		fmt.Fprint(ls.sess.Stderr(), msg) //nolint:errcheck // best-effort goodbye
 	}()
 	select {
@@ -180,17 +220,23 @@ func (g *Gateway) hangUp(ls *liveSession, reason string) {
 	ls.sess.Close() //nolint:errcheck
 }
 
-// reconnectHint renders the address a user reconnects on. viaDoor picks the
-// front-door hostname form (`ssh <name>.<domain>`) the caller knows the user
-// is already using; otherwise the gateway form (`ssh <name>@<domain>`). With
-// no domain configured there is no concrete address to print, so a <gateway>
-// placeholder stands in.
-func (g *Gateway) reconnectHint(sandbox string, viaDoor bool) string {
+// reconnectHint renders the whole "reconnect with" clause, command included,
+// because the three forms are not interchangeable addresses: an SSH client gets
+// an ssh(1) invocation and a browser tab gets a URL. via picks between the
+// front-door hostname form (`ssh <name>.<domain>`) the caller knows the user is
+// already using, the gateway form (`ssh <name>@<domain>`), and the terminal
+// page. With no domain configured there is no concrete address to print, so a
+// <gateway> placeholder stands in — and a browser falls back to the SSH form
+// rather than inventing a URL that would not resolve.
+func (g *Gateway) reconnectHint(sandbox string, via connectVia) string {
+	if via == viaBrowser && g.domain != "" && g.xtermSubdomain != "" {
+		return "https://" + sandbox + "." + g.xtermSubdomain + "." + g.domain
+	}
 	if g.domain == "" {
-		return sandbox + "@<gateway>"
+		return "ssh " + sandbox + "@<gateway>"
 	}
-	if viaDoor {
-		return sandbox + "." + g.domain
+	if via == viaGateway {
+		return "ssh " + sandbox + "@" + g.domain
 	}
-	return sandbox + "@" + g.domain
+	return "ssh " + sandbox + "." + g.domain
 }

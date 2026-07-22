@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/caddyserver/certmagic v0.25.4
+	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/gliderlabs/ssh v0.3.8

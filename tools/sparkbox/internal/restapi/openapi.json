@@ -1,0 +1,2173 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "sparkbox control API",
+    "version": "1.0.0",
+    "summary": "Everything `ssh ctl@<domain>` does, over HTTPS.",
+    "description": "The sparkbox control plane, owner-scoped.\n\nThis API mirrors the `ssh ctl@example.com …` command surface: the two share one implementation (`internal/ctlops`), so ownership rules, timeout budgets and validation are identical whichever door you come through.\n\n**Authentication.** Every `/v1` endpoint needs an edge session token. Mint one over SSH:\n\n    TOKEN=$(ssh ctl@example.com session-token | tr -d '\\r\\n')\n\nand send it as `Authorization: Bearer $TOKEN`. Browsers signed in at `https://login.example.com` already carry the same value in the `spark_session` cookie, which is scoped to the whole zone.\n\n**Authorization is ownership.** You see and act on your own sandboxes, snapshots, schedules and keys. Someone else's resource answers exactly like one that does not exist — a 404 with the same body — so the API never confirms which names are taken.\n\n**Long operations.** Pausing writes a full guest memory snapshot; archiving compresses and uploads a 25 GB disk. Those calls start a job, wait ten seconds for it, and answer `200`/`201` if it finished or `202` with a job to poll if it did not. Send `Prefer: respond-async` to skip the wait, or `Prefer: wait=30` to widen it. Retrying the same call while its job runs returns the *same* job rather than starting a second one.\n\n**Errors** from `/v1` handlers are always `{\"error\": {\"kind\", \"op\", \"code\", \"message\", …}}`. Switch on `code`: it is a stable token that never changes once shipped. `message` is a complete sentence fit to show a user. The two refusals the *auth gate* raises before a handler runs are the exceptions and are `text/plain`: `401` with no valid session, and `403` on a state-changing call made with the cookie alone and no first-party proof (see `sessionCookie`).",
+    "contact": {
+      "name": "sparkbox",
+      "url": "https://example.com"
+    },
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.example.com",
+      "description": "This host."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "sessionCookie": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "discovery",
+      "description": "The specification and the docs page. Unauthenticated, so you can read how to get a token before you have one."
+    },
+    {
+      "name": "account",
+      "description": "Who you are, your SSH keys, your passkeys, your forwarded email address, session tokens and invites."
+    },
+    {
+      "name": "sandboxes",
+      "description": "Sandbox lifecycle: create, pause, resume, archive, resize, rename, destroy, plus tags and route visibility."
+    },
+    {
+      "name": "snapshots",
+      "description": "Templates taken from a sandbox, and the forks made from them."
+    },
+    {
+      "name": "schedules",
+      "description": "Platform cron: commands the host runs inside a sandbox on a schedule, resuming it if needed."
+    },
+    {
+      "name": "terminal",
+      "description": "The browser terminal's WebSocket, the same one https://<name>.xterm.example.com opens."
+    },
+    {
+      "name": "jobs",
+      "description": "Long operations that outlived their request window."
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "root",
+        "tags": ["discovery"],
+        "summary": "Redirect to the documentation",
+        "description": "A bare visit lands on /docs rather than a 404.",
+        "security": [],
+        "responses": {
+          "303": {
+            "description": "Redirect to /docs.",
+            "headers": {
+              "Location": {
+                "description": "Always `/docs`.",
+                "schema": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "operationId": "docs",
+        "tags": ["discovery"],
+        "summary": "Browsable API reference",
+        "description": "A self-contained HTML page that renders this specification client-side. No CDN, no external fetch.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The documentation page.",
+            "content": {
+              "text/html": {
+                "schema": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi.json",
+        "tags": ["discovery"],
+        "summary": "This document, as JSON",
+        "description": "The canonical specification, with every example host rewritten to this host's zone. A test pins it to the router: an endpoint that is not described here does not exist, and vice versa.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.yaml": {
+      "get": {
+        "operationId": "openapi.yaml",
+        "tags": ["discovery"],
+        "summary": "This document, as YAML",
+        "description": "The same bytes as /openapi.json, re-emitted in key order.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document.",
+            "content": {
+              "application/yaml": {
+                "schema": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "capabilities",
+        "tags": ["account"],
+        "summary": "What this host has configured",
+        "description": "Archiving needs object storage, snapshots need a driver that supports them, scheduling and tagging need their stores. Read this instead of discovering a 501 by trying.",
+        "responses": {
+          "200": {
+            "description": "The host's feature set.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Capabilities" },
+                "example": {
+                  "archiving": true,
+                  "snapshots": true,
+                  "scheduling": true,
+                  "tags": true,
+                  "routes": true,
+                  "session_tokens": true,
+                  "terminal": true
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/whoami": {
+      "get": {
+        "operationId": "whoami",
+        "tags": ["account"],
+        "summary": "The authenticated account",
+        "description": "Mirrors `ssh ctl@example.com whoami`. `key_fp` is empty here: an HTTP request carries no SSH key.",
+        "responses": {
+          "200": {
+            "description": "Your account.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Whoami" },
+                "example": {
+                  "handle": "vanpelt",
+                  "status": "active",
+                  "operator": true,
+                  "email": "me@example.com",
+                  "github_login": "vanpelt",
+                  "subject": "e3b0c44298fc1c14"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/sandboxes": {
+      "get": {
+        "operationId": "list",
+        "tags": ["sandboxes"],
+        "summary": "List your sandboxes",
+        "description": "Every sandbox you own, in creation order. Other owners' sandboxes are not listed and not counted.",
+        "responses": {
+          "200": {
+            "description": "Your sandboxes.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SandboxList" },
+                "example": {
+                  "sandboxes": [
+                    {
+                      "name": "dazzling-canyon",
+                      "owner": "vanpelt",
+                      "state": "running",
+                      "pinned": false,
+                      "tags": ["prod"],
+                      "vcpus": 2,
+                      "mem_mb": 8192,
+                      "disk_mb": 25600,
+                      "created_at": "2026-07-19T10:04:11Z",
+                      "last_active": "2026-07-21T18:22:03Z",
+                      "url": "https://dazzling-canyon.example.com",
+                      "terminal_url": "https://dazzling-canyon.xterm.example.com"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "operationId": "create",
+        "tags": ["sandboxes"],
+        "summary": "Create a sandbox",
+        "description": "The REST form of `ssh new@example.com`. Omit `name` and the platform generates an adjective-noun one.\n\nTags are stamped **before** the VM is created, because creation fires the secret-environment push asynchronously and the tags decide its contents. If creation fails, the tag rows are rolled back.\n\nUnlike the SSH door, there is no way to pass a command: named fields have no ambiguity to resolve.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateRequest" },
+              "example": { "name": "demo", "tags": ["prod", "eu"] }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The sandbox is up.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": {
+            "description": "That name is taken or reserved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RunningLimit" },
+          "503": { "$ref": "#/components/responses/HostAtCapacity" },
+          "507": { "$ref": "#/components/responses/DiskPoolFull" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}": {
+      "get": {
+        "operationId": "get",
+        "tags": ["sandboxes"],
+        "summary": "Read one sandbox",
+        "description": "Does not resume a paused sandbox — reading is never a side effect.",
+        "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
+        "responses": {
+          "200": {
+            "description": "The sandbox.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "rm",
+        "tags": ["sandboxes"],
+        "summary": "Destroy a sandbox",
+        "description": "Irreversible. Cascades to the sandbox's web routes, schedules, tags, front-door DNS record and, if it was archived, the stored object.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Destroyed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" },
+                "example": { "name": "demo", "deleted": true }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/pause": {
+      "post": {
+        "operationId": "pause",
+        "tags": ["sandboxes"],
+        "summary": "Pause a sandbox",
+        "description": "Writes the guest's full memory snapshot and frees its RAM. Resuming restores the running processes exactly. Budget: 3 minutes.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/resume": {
+      "post": {
+        "operationId": "restore",
+        "tags": ["sandboxes"],
+        "summary": "Resume (or restore) a sandbox",
+        "description": "Starts a paused sandbox from its memory snapshot. If the sandbox was archived, this also downloads and decompresses its disk first, which is why the budget is 15 minutes.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Running.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RunningLimit" },
+          "503": { "$ref": "#/components/responses/HostAtCapacity" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/archive": {
+      "post": {
+        "operationId": "archive",
+        "tags": ["sandboxes"],
+        "summary": "Archive a sandbox to object storage",
+        "description": "Checks the filesystem, zeroes free space, compresses the disk and uploads it, then frees the host disk entirely. Resuming restores it. Needs object storage: hosts without it answer 501. Budget: 15 minutes, so this almost always returns 202.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archived.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/resize": {
+      "post": {
+        "operationId": "resize",
+        "tags": ["sandboxes"],
+        "summary": "Grow the root disk",
+        "description": "Grow-only. The sandbox is paused, its memory snapshot is **discarded**, the filesystem is checked and grown, and the guest cold-boots — so anything running inside dies. Send `size` (\"25G\", \"512M\", or a bare number meaning GB) or `size_mb`. Budget: 10 minutes.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ResizeRequest" },
+              "example": { "size": "50G" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resized and rebooted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "507": { "$ref": "#/components/responses/DiskPoolFull" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/reboot": {
+      "post": {
+        "operationId": "reboot",
+        "tags": ["sandboxes"],
+        "summary": "Cold-boot a sandbox",
+        "description": "Discards the memory snapshot and boots the guest fresh. Running processes die; the disk is untouched.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rebooted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/rename": {
+      "post": {
+        "operationId": "rename",
+        "tags": ["sandboxes"],
+        "summary": "Rename a sandbox",
+        "description": "Moves the sandbox's default web route and front-door DNS record with it. The old hostname stops resolving.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RenameRequest" },
+              "example": { "name": "demo-two" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "The new name is taken or reserved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/pin": {
+      "post": {
+        "operationId": "pin",
+        "tags": ["sandboxes"],
+        "summary": "Exempt a sandbox from the idle reaper",
+        "description": "Sets the always-on flag and nothing else. `ssh ctl@example.com pin` also resumes the sandbox; here the two are separate calls, so there is no half-succeeded state to interpret. Resume afterwards if you want it running now.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pinned.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/unpin": {
+      "post": {
+        "operationId": "unpin",
+        "tags": ["sandboxes"],
+        "summary": "Return a sandbox to scale-to-zero",
+        "description": "Clears the always-on flag. The sandbox is paused again once it has been idle for the host's idle timeout.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unpinned.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/tags": {
+      "get": {
+        "operationId": "tags.get",
+        "tags": ["sandboxes"],
+        "summary": "Read a sandbox's tags",
+        "description": "Tags select which of your secrets are pushed into the guest's environment.",
+        "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
+        "responses": {
+          "200": {
+            "description": "The tag set.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Tags" },
+                "example": { "tags": ["eu", "prod"] }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "put": {
+        "operationId": "tags.set",
+        "tags": ["sandboxes"],
+        "summary": "Replace a sandbox's tags",
+        "description": "Replaces the whole set; `[]` clears it. Tags are lowercased, de-duplicated and sorted, and at most 32 are kept. The guest's secret environment is re-pushed immediately rather than at the next resume.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Tags" },
+              "example": { "tags": ["prod", "eu"] }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The tag set as stored.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Tags" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/visibility": {
+      "get": {
+        "operationId": "share.get",
+        "tags": ["sandboxes"],
+        "summary": "List a sandbox's web routes",
+        "description": "Every forwarded hostname pointing at this sandbox, with the port it forwards to and whether it is reachable without signing in.",
+        "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
+        "responses": {
+          "200": {
+            "description": "The routes.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Visibility" },
+                "example": {
+                  "routes": [
+                    {
+                      "subdomain": "demo",
+                      "sandbox": "demo",
+                      "port": 8000,
+                      "visibility": "private",
+                      "url": "https://demo.example.com"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "put": {
+        "operationId": "share.set",
+        "tags": ["sandboxes"],
+        "summary": "Make a sandbox public or private",
+        "description": "Flips **every** route of the sandbox together, matching `ssh ctl@example.com share`. `private` requires a signed-in owner (or operator); `public` serves anyone.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VisibilityRequest" },
+              "example": { "visibility": "public" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The routes as stored, and how many changed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Visibility" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/sandboxes/{name}/terminal": {
+      "get": {
+        "operationId": "attach",
+        "tags": ["terminal"],
+        "summary": "Open a shell over a WebSocket",
+        "description": "Upgrades to a WebSocket carrying a PTY inside the sandbox — the same session the page at `https://<name>.xterm.example.com` opens. The sandbox is resumed if it is paused; the ownership check happens first, so this can never wake someone else's VM.\n\n**Framing.** Terminal bytes travel in **binary** frames in both directions, unmodified: PTY output splits multi-byte characters across reads, and a text frame would have to be valid UTF-8. Set `binaryType = 'arraybuffer'` on the client.\n\nControl messages are **text** frames carrying JSON:\n\n    {\"type\":\"resize\",\"rows\":40,\"cols\":120}\n\nSend one immediately after connecting and on every resize.\n\n**Close codes.** `4001` the shell exited normally (the value the exe-ssh terminal-over-HTTPS design reserves for the same meaning); `4002` the host hung the session up — a pause, an idle reap, or a redeploy — which is the signal to offer a reconnect; `4003` the sandbox could not be attached to. `1000` is not sent.\n\n**Authentication.** This is a `GET`, so it takes the session cookie a browser sends automatically; a non-browser client sends `Authorization: Bearer`. Because a browser cannot attach a custom header to a handshake, the CSRF gate is replaced by an `Origin` check on the upgrade itself.",
+        "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols — the WebSocket is open."
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "The handshake carried an `Origin` that is not this host, or no `Origin` and no `Authorization: Bearer`. Answered before the upgrade, so the body is `text/plain`, not the JSON envelope.",
+            "content": {
+              "text/plain": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "426": {
+            "description": "Not a WebSocket handshake — the `Connection`/`Upgrade` headers are missing. `text/plain`.",
+            "content": {
+              "text/plain": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" },
+          "505": {
+            "description": "The request arrived over HTTP/2, which cannot be hijacked; the terminal needs HTTP/1.1. `text/plain`.",
+            "content": {
+              "text/plain": {
+                "schema": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/snapshots": {
+      "get": {
+        "operationId": "snapshot.list",
+        "tags": ["snapshots"],
+        "summary": "List your snapshots",
+        "description": "Snapshots are keyed by owner, so this can only ever show your own.",
+        "responses": {
+          "200": {
+            "description": "Your snapshots.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SnapshotList" },
+                "example": {
+                  "snapshots": [
+                    {
+                      "name": "base",
+                      "owner": "vanpelt",
+                      "from_sandbox": "demo",
+                      "created_at": "2026-07-20T09:00:00Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "operationId": "snapshot.create",
+        "tags": ["snapshots"],
+        "summary": "Capture a sandbox as a template",
+        "description": "**Pauses the sandbox.** The managed secret-environment block is stripped from the disk, the guest is paused, and the disk is compacted into a template. Name must match `^[a-z0-9][a-z0-9-]{0,40}$` and be unique among your snapshots. Budget: 15 minutes.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SnapshotRequest" },
+              "example": { "sandbox": "demo", "name": "base" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The snapshot.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Snapshot" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "You already have a snapshot by that name. There is no overwrite; delete it first.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/snapshots/{name}": {
+      "delete": {
+        "operationId": "snapshot.rm",
+        "tags": ["snapshots"],
+        "summary": "Delete a snapshot",
+        "description": "Sandboxes already forked from it are unaffected.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SnapshotName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/snapshots/{name}/fork": {
+      "post": {
+        "operationId": "fork",
+        "tags": ["snapshots"],
+        "summary": "Create a sandbox from a snapshot",
+        "description": "A fork is a create with the snapshot as its disk, so it is admitted against the same per-owner running limit and disk pool, and its tags are stamped before it exists for the same reason.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SnapshotName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ForkRequest" },
+              "example": { "name": "demo-fork", "tags": ["dev"] }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new sandbox.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Sandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "That sandbox name is taken or reserved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RunningLimit" },
+          "507": { "$ref": "#/components/responses/DiskPoolFull" }
+        }
+      }
+    },
+    "/v1/schedules": {
+      "get": {
+        "operationId": "schedule.list",
+        "tags": ["schedules"],
+        "summary": "List your schedules",
+        "description": "`next_run` is absent when the stored spec no longer parses.",
+        "responses": {
+          "200": {
+            "description": "Your schedules.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ScheduleList" },
+                "example": {
+                  "schedules": [
+                    {
+                      "id": "sch_7f3a",
+                      "sandbox": "demo",
+                      "spec": "0 3 * * *",
+                      "command": "make nightly",
+                      "next_run": "2026-07-22T03:00:00Z",
+                      "last_exit": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "post": {
+        "operationId": "schedule.add",
+        "tags": ["schedules"],
+        "summary": "Run a command on a schedule",
+        "description": "`spec` is a standard 5-field cron expression or one of the descriptors (`@hourly`, `@daily`, `@every 30m`). The host resumes the sandbox when the entry fires, so scheduling against a paused sandbox is normal.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ScheduleRequest" },
+              "example": {
+                "sandbox": "demo",
+                "spec": "0 3 * * *",
+                "command": "make nightly"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The schedule.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Schedule" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/schedules/{id}": {
+      "delete": {
+        "operationId": "schedule.rm",
+        "tags": ["schedules"],
+        "summary": "Delete a schedule",
+        "description": "Someone else's schedule id answers exactly like one that does not exist.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ScheduleID" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/account/keys": {
+      "get": {
+        "operationId": "keys.list",
+        "tags": ["account"],
+        "summary": "List your SSH keys",
+        "description": "Every key that can open an SSH session as you. `current` is never set here — an HTTP request has no session key.",
+        "responses": {
+          "200": {
+            "description": "Your keys.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/KeyList" },
+                "example": {
+                  "keys": [
+                    {
+                      "fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+                      "label": "laptop",
+                      "via": "seed",
+                      "added_at": "2026-07-01T12:00:00Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "operationId": "keys.add",
+        "tags": ["account"],
+        "summary": "Add an SSH key",
+        "description": "Takes one `authorized_keys` line; its comment becomes the label. Adding a key you already have is a no-op rather than an error. A key already linked to another account is refused with 409.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AddKeyRequest" },
+              "example": {
+                "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0vJ9V7wZ8mB6mQ2mS6h4y8Q6mQ2mS6h4y8Q6mQ2mS6 laptop"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The stored key.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Key" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": {
+            "description": "That key is already linked to another account.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "keys.rm",
+        "tags": ["account"],
+        "summary": "Remove an SSH key",
+        "description": "The fingerprint is a query parameter, not a path segment: it is `SHA256:` plus unpadded base64, whose alphabet includes `/`. Removing your last key is refused — it would lock you out of SSH entirely.",
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "required": true,
+            "description": "The key's `SHA256:…` fingerprint, exactly as listed — **percent-encoded**. The base64 alphabet includes `+` and `/`, and a query decoder reads a bare `+` as a space.",
+            "schema": { "type": "string" },
+            "example": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+          },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "That is your last key.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/account/keys/import-github": {
+      "post": {
+        "operationId": "keys.import-github",
+        "tags": ["account"],
+        "summary": "Import your keys from GitHub",
+        "description": "Fetches `https://github.com/<your linked login>.keys` and adds each key. Keys already linked to a different sparkbox account are reported in `skipped` and the import continues. Link a login first with `POST /v1/account/github`.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "200": {
+            "description": "What was imported.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ImportResult" },
+                "example": {
+                  "login": "vanpelt",
+                  "imported": 2,
+                  "listed": 3,
+                  "skipped": ["SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": {
+            "description": "No GitHub login is linked yet.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "502": {
+            "description": "github.com could not be reached.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/account/github": {
+      "post": {
+        "operationId": "keys.verify-github",
+        "tags": ["account"],
+        "summary": "Link a GitHub login",
+        "description": "Proves the link by finding one of your **already registered** keys on `github.com/<login>.keys`. Name which key with `fingerprint` — over SSH the session key is implied, but an HTTP request has none. A fingerprint that is not yours answers 404, so it cannot be used to test whether a key exists.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/GitHubRequest" },
+              "example": {
+                "login": "vanpelt",
+                "fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Linked; your account as it now stands.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Whoami" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "That key is not listed on the GitHub account.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "502": {
+            "description": "github.com could not be reached.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/account/passkeys": {
+      "get": {
+        "operationId": "passkey.list",
+        "tags": ["account"],
+        "summary": "List your passkeys",
+        "description": "Passkeys are enrolled in the browser at `https://login.example.com`; this API is the audit-and-revoke end.",
+        "responses": {
+          "200": {
+            "description": "Your passkeys.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PasskeyList" },
+                "example": {
+                  "passkeys": [
+                    {
+                      "id": "a91f0c3d55",
+                      "label": "MacBook",
+                      "created_at": "2026-07-19T08:11:00Z",
+                      "last_used_at": "2026-07-21T07:40:00Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/account/passkeys/{id}": {
+      "delete": {
+        "operationId": "passkey.rm",
+        "tags": ["account"],
+        "summary": "Revoke a passkey",
+        "description": "Any unique prefix of the id works. An ambiguous prefix answers 409 with the matching ids in `details.matches`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The passkey id, or any unique prefix of it.",
+            "schema": { "type": "string" },
+            "example": "a91f"
+          },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "The prefix matches more than one passkey.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/account/email": {
+      "get": {
+        "operationId": "email.get",
+        "tags": ["account"],
+        "summary": "Read your forwarded email address",
+        "description": "The address the edge sends upstream as `X-Forwarded-Email` when a private route serves your request.",
+        "responses": {
+          "200": {
+            "description": "The stored address, or an empty string.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Email" },
+                "example": { "email": "me@example.com" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "put": {
+        "operationId": "email.set",
+        "tags": ["account"],
+        "summary": "Set or clear your forwarded email address",
+        "description": "An empty string clears it. This is a PUT rather than a DELETE because \"no address\" is a value the account holds, not the absence of a resource.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Email" },
+              "example": { "email": "me@example.com" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The address as stored.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Email" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/account/tokens": {
+      "post": {
+        "operationId": "session-token",
+        "tags": ["account"],
+        "summary": "Mint an edge session token",
+        "description": "Issues the same credential `ssh ctl@example.com session-token` prints — the one this API authenticates with. Use it to turn a browser session into a scriptable one, or to rotate a script's token before it expires. `ttl` is a Go duration; it defaults to 12h and is silently clamped to 7 days.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TokenRequest" },
+              "example": { "ttl": "24h" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The token. Store it; it cannot be read back.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Token" },
+                "example": {
+                  "token": "spk_v1.eyJoIjoidmFucGVsdCJ9.c2lnbmF0dXJl",
+                  "expires_at": "2026-07-22T18:00:00Z"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/account/invites": {
+      "post": {
+        "operationId": "invite",
+        "tags": ["account"],
+        "summary": "Mint an invite code",
+        "description": "The only operator-gated call in this API. Operators may always mint; everyone else may mint up to the host's per-user quota, which is zero by default. Codes are redeemed at `ssh signup@example.com` and last 7 days.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "201": {
+            "description": "The invite code.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Invite" },
+                "example": {
+                  "code": "spark-lucid-otter-42",
+                  "expires_at": "2026-07-28T18:00:00Z"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Not an operator, or the per-user invite quota is spent.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "get": {
+        "operationId": "jobs.list",
+        "tags": ["jobs"],
+        "summary": "List your jobs",
+        "description": "Newest first. Jobs live in memory: a control-plane restart forgets them, because the restart also killed the work they describe. Finished jobs are readable for an hour.",
+        "responses": {
+          "200": {
+            "description": "Your jobs.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/JobList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "operationId": "jobs.get",
+        "tags": ["jobs"],
+        "summary": "Poll a job",
+        "description": "`result` carries whatever the completed operation would have returned inline; `error` carries the failure in the ordinary error shape.",
+        "parameters": [{ "$ref": "#/components/parameters/JobID" }],
+        "responses": {
+          "200": {
+            "description": "The job.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Job" },
+                "example": {
+                  "id": "9f8b1c2d3e4f5a6b",
+                  "op": "archive",
+                  "resource": { "type": "sandbox", "name": "demo" },
+                  "state": "succeeded",
+                  "created_at": "2026-07-21T18:00:00Z",
+                  "finished_at": "2026-07-21T18:04:31Z",
+                  "href": "/v1/jobs/9f8b1c2d3e4f5a6b"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "jobs.cancel",
+        "tags": ["jobs"],
+        "summary": "Cancel a running job",
+        "description": "Cancels the work's context and waits briefly for it to stop, so the answer usually already reads `canceled`. A job that has already finished is a 409: there is nothing left to cancel, and an archive that completed cannot be un-completed.",
+        "parameters": [
+          { "$ref": "#/components/parameters/JobID" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job, usually settled as `canceled`.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Job" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "That job has already finished.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "spk_v1.<claims>.<hmac>",
+        "description": "An edge session token. Mint one with `ssh ctl@example.com session-token | tr -d '\\r\\n'` (the channel ends the line CRLF, and a stray carriage return in the header is rejected), or `POST /v1/account/tokens` from an existing session."
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "spark_session",
+        "description": "The same token, as the zone-wide cookie a browser gets from `https://login.example.com`. State-changing calls made with the cookie alone must also prove first-party intent — an `Origin` matching this host, or the header `X-Sparkbox-Console: 1` — because the cookie rides every same-site request. Bearer-authenticated calls need neither."
+      }
+    },
+    "parameters": {
+      "SandboxName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "description": "The sandbox name.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "example": "demo"
+      },
+      "SnapshotName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "description": "The snapshot name.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,40}$"
+        },
+        "example": "base"
+      },
+      "ScheduleID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The schedule id, as listed.",
+        "schema": { "type": "string" },
+        "example": "sch_7f3a"
+      },
+      "JobID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The job id, as returned in a 202 or in `href`.",
+        "schema": { "type": "string" },
+        "example": "9f8b1c2d3e4f5a6b"
+      },
+      "Prefer": {
+        "name": "Prefer",
+        "in": "header",
+        "required": false,
+        "description": "`respond-async` to get a 202 immediately without waiting; `wait=<seconds>` to change the sync window from its 10-second default (60 maximum). The applied preference is echoed in `Preference-Applied`.",
+        "schema": { "type": "string" },
+        "example": "respond-async"
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "An opaque key of your choosing. The first response is remembered for 24 hours and replayed verbatim (with `Idempotency-Replayed: true`) if the key comes back. Reusing a key with a different request body is a 422; sending it while the first request is still running is a 409. Server errors are never cached, so a 5xx can always be retried with the same key.",
+        "schema": { "type": "string" },
+        "example": "3f1c9e2a-7b64-4c0e-9a3b-5d2f8c1e6a04"
+      }
+    },
+    "responses": {
+      "Accepted": {
+        "description": "The operation is still running. Poll the job at `Location`.",
+        "headers": {
+          "Location": {
+            "description": "The job resource, e.g. `/v1/jobs/9f8b1c2d3e4f5a6b`.",
+            "schema": { "type": "string" }
+          },
+          "Retry-After": {
+            "description": "Seconds to wait before polling.",
+            "schema": { "type": "integer" }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Job" },
+            "example": {
+              "id": "9f8b1c2d3e4f5a6b",
+              "op": "archive",
+              "resource": { "type": "sandbox", "name": "demo" },
+              "state": "running",
+              "created_at": "2026-07-21T18:00:00Z",
+              "href": "/v1/jobs/9f8b1c2d3e4f5a6b"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No valid session. Send `Authorization: Bearer <token>`.",
+        "content": {
+          "text/plain": {
+            "schema": { "type": "string" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such resource — or it belongs to someone else. The two are deliberately indistinguishable.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "kind": "not_found",
+                "op": "pause",
+                "code": "sandbox_not_found",
+                "message": "no sandbox named \"demo\""
+              }
+            }
+          }
+        }
+      },
+      "Invalid": {
+        "description": "The arguments are malformed.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "kind": "invalid",
+                "op": "resize",
+                "code": "bad_size",
+                "message": "bad size \"25T\" — use e.g. 25G or 512M"
+              }
+            }
+          }
+        }
+      },
+      "Disabled": {
+        "description": "This host has not configured that feature. Check `GET /v1/capabilities` first.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "kind": "disabled",
+                "op": "archive",
+                "code": "archive_disabled",
+                "message": "archiving is not enabled on this host"
+              }
+            }
+          }
+        }
+      },
+      "RunningLimit": {
+        "description": "You are at your per-owner running-sandbox limit. `details.running` lists them.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "kind": "limit",
+                "op": "create",
+                "code": "running_limit",
+                "message": "you already have 3 running sandboxes (max 3): a, b, c",
+                "hint": "Pause one to free a slot.",
+                "details": { "running": ["a", "b", "c"], "max": 3 }
+              }
+            }
+          }
+        }
+      },
+      "HostAtCapacity": {
+        "description": "The host has no RAM budget left. Try again shortly.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "DiskPoolFull": {
+        "description": "Your disk pool is full. Archive or delete a sandbox to reclaim space.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "Every failure has this shape. Switch on `error.code`.",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["kind", "op", "code", "message"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "The broad class of failure, which fixes the status code.",
+                "enum": [
+                  "internal",
+                  "invalid",
+                  "not_found",
+                  "denied",
+                  "conflict",
+                  "disabled",
+                  "limit",
+                  "capacity",
+                  "quota",
+                  "upstream"
+                ]
+              },
+              "op": {
+                "type": "string",
+                "description": "The operation that failed — the same string as the operationId.",
+                "example": "pause"
+              },
+              "code": {
+                "type": "string",
+                "description": "A stable machine token. Never localized, never changed once shipped.",
+                "example": "sandbox_not_found"
+              },
+              "message": {
+                "type": "string",
+                "description": "A complete sentence, fit to show a user unedited."
+              },
+              "hint": {
+                "type": "string",
+                "description": "What to do about it, when there is something to do."
+              },
+              "details": {
+                "type": "object",
+                "description": "Structured facts a client can act on: `running` for a limit, `budget_mb` for capacity, `matches` for an ambiguous passkey prefix.",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      },
+      "Capabilities": {
+        "type": "object",
+        "description": "What this host has configured. A false field means those endpoints answer 501.",
+        "required": [
+          "archiving",
+          "snapshots",
+          "scheduling",
+          "tags",
+          "routes",
+          "session_tokens",
+          "terminal"
+        ],
+        "properties": {
+          "archiving": { "type": "boolean", "description": "Object storage is configured." },
+          "snapshots": { "type": "boolean", "description": "The VM driver can capture templates." },
+          "scheduling": { "type": "boolean", "description": "Platform cron is enabled." },
+          "tags": { "type": "boolean", "description": "The secrets store is open, so tags exist." },
+          "routes": { "type": "boolean", "description": "The HTTP proxy is enabled." },
+          "session_tokens": { "type": "boolean", "description": "Tokens can be minted." },
+          "terminal": { "type": "boolean", "description": "Browser terminals are served." }
+        }
+      },
+      "Sandbox": {
+        "type": "object",
+        "description": "One microVM. Internal topology — its guest address, its host IP — is deliberately not part of this shape.",
+        "required": [
+          "name",
+          "owner",
+          "state",
+          "pinned",
+          "tags",
+          "vcpus",
+          "mem_mb",
+          "created_at",
+          "last_active"
+        ],
+        "properties": {
+          "name": { "type": "string", "example": "demo" },
+          "owner": { "type": "string", "description": "Always you.", "example": "vanpelt" },
+          "state": {
+            "type": "string",
+            "enum": ["running", "paused", "archived"],
+            "description": "`archived` means the disk lives in object storage and a resume must fetch it."
+          },
+          "pinned": {
+            "type": "boolean",
+            "description": "Exempt from the idle reaper."
+          },
+          "ballooned": {
+            "type": "boolean",
+            "description": "The guest has given RAM back to the host and will reclaim it on demand."
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Never null. Selects which secrets reach the guest's environment."
+          },
+          "vcpus": { "type": "integer", "format": "int64", "example": 2 },
+          "mem_mb": { "type": "integer", "format": "int64", "example": 8192 },
+          "disk_mb": { "type": "integer", "format": "int64", "example": 25600 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "last_active": {
+            "type": "string",
+            "format": "date-time",
+            "description": "What the idle reaper measures against. Guest CPU and network activity refresh it, not an attached terminal."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "The sandbox's default web route.",
+            "example": "https://demo.example.com"
+          },
+          "terminal_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "The browser terminal, when this host serves them.",
+            "example": "https://demo.xterm.example.com"
+          }
+        }
+      },
+      "SandboxList": {
+        "type": "object",
+        "required": ["sandboxes"],
+        "properties": {
+          "sandboxes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Sandbox" }
+          }
+        }
+      },
+      "CreateRequest": {
+        "type": "object",
+        "description": "All fields are optional; an empty body creates a default sandbox with a generated name.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Omit to get a generated adjective-noun name."
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Stamped before the VM exists, so the first secret push already has them."
+          },
+          "vcpus": {
+            "type": "integer",
+            "format": "int64",
+            "description": "0 takes the host default (2)."
+          },
+          "mem_mb": {
+            "type": "integer",
+            "format": "int64",
+            "description": "0 takes the host default (8192)."
+          }
+        }
+      },
+      "ResizeRequest": {
+        "type": "object",
+        "description": "Send one of the two. `size` is what `ctl resize` accepts; `size_mb` is for callers that already have a number.",
+        "properties": {
+          "size": {
+            "type": "string",
+            "description": "\"25G\", \"512M\", or a bare number meaning GB.",
+            "example": "50G"
+          },
+          "size_mb": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The new size in MiB. Capped at 1 TB.",
+            "example": 51200
+          }
+        }
+      },
+      "RenameRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "The new name."
+          }
+        }
+      },
+      "Tags": {
+        "type": "object",
+        "required": ["tags"],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "maxItems": 32,
+            "description": "The whole set. Lowercased, de-duplicated and sorted on write."
+          }
+        }
+      },
+      "Route": {
+        "type": "object",
+        "description": "One forwarded hostname.",
+        "required": ["subdomain", "sandbox", "port", "visibility"],
+        "properties": {
+          "subdomain": { "type": "string", "example": "demo" },
+          "sandbox": { "type": "string", "example": "demo" },
+          "port": {
+            "type": "integer",
+            "description": "The guest port this hostname forwards to.",
+            "example": 8000
+          },
+          "visibility": {
+            "type": "string",
+            "enum": ["public", "private"],
+            "description": "`private` requires a signed-in owner or operator."
+          },
+          "url": { "type": "string", "format": "uri", "example": "https://demo.example.com" }
+        }
+      },
+      "Visibility": {
+        "type": "object",
+        "required": ["routes"],
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Route" }
+          },
+          "changed": {
+            "type": "integer",
+            "description": "How many routes this call flipped. Absent on a read."
+          }
+        }
+      },
+      "VisibilityRequest": {
+        "type": "object",
+        "required": ["visibility"],
+        "properties": {
+          "visibility": {
+            "type": "string",
+            "enum": ["public", "private"]
+          }
+        }
+      },
+      "Snapshot": {
+        "type": "object",
+        "required": ["name", "owner", "from_sandbox", "created_at"],
+        "properties": {
+          "name": { "type": "string", "example": "base" },
+          "owner": { "type": "string", "example": "vanpelt" },
+          "from_sandbox": {
+            "type": "string",
+            "description": "The sandbox it was captured from.",
+            "example": "demo"
+          },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SnapshotList": {
+        "type": "object",
+        "required": ["snapshots"],
+        "properties": {
+          "snapshots": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Snapshot" }
+          }
+        }
+      },
+      "SnapshotRequest": {
+        "type": "object",
+        "required": ["sandbox", "name"],
+        "properties": {
+          "sandbox": { "type": "string", "description": "The sandbox to capture. It will be paused." },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,40}$",
+            "description": "Unique among your snapshots."
+          }
+        }
+      },
+      "ForkRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "The new sandbox's name."
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "Schedule": {
+        "type": "object",
+        "required": ["id", "sandbox", "spec", "command", "last_exit"],
+        "properties": {
+          "id": { "type": "string", "example": "sch_7f3a" },
+          "sandbox": { "type": "string", "example": "demo" },
+          "spec": { "type": "string", "example": "0 3 * * *" },
+          "command": { "type": "string", "example": "make nightly" },
+          "next_run": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Absent when the stored spec no longer parses."
+          },
+          "last_run": { "type": "string", "format": "date-time" },
+          "last_exit": {
+            "type": "integer",
+            "description": "The command's exit status on its last run."
+          },
+          "last_error": {
+            "type": "string",
+            "description": "Set when the run could not happen at all, as opposed to running and failing."
+          }
+        }
+      },
+      "ScheduleList": {
+        "type": "object",
+        "required": ["schedules"],
+        "properties": {
+          "schedules": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Schedule" }
+          }
+        }
+      },
+      "ScheduleRequest": {
+        "type": "object",
+        "required": ["sandbox", "spec", "command"],
+        "properties": {
+          "sandbox": { "type": "string", "example": "demo" },
+          "spec": {
+            "type": "string",
+            "description": "A 5-field cron expression, or @hourly / @daily / @every 30m.",
+            "example": "0 3 * * *"
+          },
+          "command": {
+            "type": "string",
+            "description": "Run through the guest's shell.",
+            "example": "make nightly"
+          }
+        }
+      },
+      "Whoami": {
+        "type": "object",
+        "required": ["handle", "status", "operator", "subject"],
+        "properties": {
+          "handle": {
+            "type": "string",
+            "description": "Immutable: it appears in the OIDC subject claim.",
+            "example": "vanpelt"
+          },
+          "status": { "type": "string", "example": "active" },
+          "operator": {
+            "type": "boolean",
+            "description": "True for accounts seeded from the host's users.conf."
+          },
+          "email": { "type": "string", "format": "email" },
+          "github_login": { "type": "string", "example": "vanpelt" },
+          "github_verified_at": { "type": "string", "format": "date-time" },
+          "subject": {
+            "type": "string",
+            "description": "The `sub` claim this host issues for you."
+          },
+          "key_fp": {
+            "type": "string",
+            "description": "The SSH key on this session. Always absent over HTTP."
+          }
+        }
+      },
+      "Key": {
+        "type": "object",
+        "required": ["fingerprint", "via", "added_at"],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "example": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+          },
+          "label": {
+            "type": "string",
+            "description": "The comment from the authorized_keys line.",
+            "example": "laptop"
+          },
+          "via": {
+            "type": "string",
+            "description": "How the key arrived: seed, signup, ctl, github-import.",
+            "example": "ctl"
+          },
+          "added_at": { "type": "string", "format": "date-time" },
+          "current": {
+            "type": "boolean",
+            "description": "The key authenticating this session. Never set over HTTP."
+          }
+        }
+      },
+      "KeyList": {
+        "type": "object",
+        "required": ["keys"],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Key" }
+          }
+        }
+      },
+      "AddKeyRequest": {
+        "type": "object",
+        "required": ["key"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "One authorized_keys line, comment included."
+          }
+        }
+      },
+      "GitHubRequest": {
+        "type": "object",
+        "required": ["fingerprint"],
+        "properties": {
+          "login": {
+            "type": "string",
+            "description": "Omit to re-verify the login already linked."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "Which of YOUR registered keys to prove the link with. It must be listed on github.com/<login>.keys."
+          }
+        }
+      },
+      "ImportResult": {
+        "type": "object",
+        "required": ["login", "imported", "listed", "skipped"],
+        "properties": {
+          "login": { "type": "string" },
+          "imported": {
+            "type": "integer",
+            "description": "Genuinely new keys. Re-running the import is free."
+          },
+          "listed": { "type": "integer", "description": "How many keys GitHub published." },
+          "skipped": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Fingerprints already linked to a different account. Never null."
+          }
+        }
+      },
+      "Passkey": {
+        "type": "object",
+        "required": ["id", "created_at"],
+        "properties": {
+          "id": { "type": "string", "example": "a91f0c3d55" },
+          "label": { "type": "string", "example": "MacBook" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "last_used_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "PasskeyList": {
+        "type": "object",
+        "required": ["passkeys"],
+        "properties": {
+          "passkeys": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Passkey" }
+          }
+        }
+      },
+      "Email": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "An empty string means no address is set."
+          }
+        }
+      },
+      "TokenRequest": {
+        "type": "object",
+        "properties": {
+          "ttl": {
+            "type": "string",
+            "description": "A Go duration. Defaults to 12h, clamped to 168h.",
+            "example": "24h"
+          }
+        }
+      },
+      "Token": {
+        "type": "object",
+        "required": ["token", "expires_at"],
+        "properties": {
+          "token": { "type": "string", "description": "Send as `Authorization: Bearer <token>`." },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Invite": {
+        "type": "object",
+        "required": ["code", "expires_at"],
+        "properties": {
+          "code": { "type": "string" },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Deleted": {
+        "type": "object",
+        "description": "What every removal answers with.",
+        "required": ["name", "deleted"],
+        "properties": {
+          "name": { "type": "string" },
+          "deleted": { "type": "boolean", "const": true }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "description": "A long operation that outlived its request window. In memory only: a control-plane restart forgets it, because the restart also killed the work.",
+        "required": ["id", "op", "resource", "state", "created_at", "href"],
+        "properties": {
+          "id": { "type": "string", "example": "9f8b1c2d3e4f5a6b" },
+          "op": {
+            "type": "string",
+            "description": "The operationId of the call that started it.",
+            "example": "archive"
+          },
+          "resource": {
+            "type": "object",
+            "required": ["type", "name"],
+            "properties": {
+              "type": { "type": "string", "enum": ["sandbox", "snapshot"] },
+              "name": { "type": "string" }
+            }
+          },
+          "state": {
+            "type": "string",
+            "enum": ["running", "succeeded", "failed", "canceled"]
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "finished_at": { "type": "string", "format": "date-time" },
+          "result": {
+            "description": "On success, exactly what the operation would have returned inline.",
+            "type": ["object", "array", "string", "number", "boolean", "null"]
+          },
+          "error": {
+            "description": "On failure, the same error object an inline failure carries.",
+            "type": "object",
+            "additionalProperties": true
+          },
+          "href": { "type": "string", "example": "/v1/jobs/9f8b1c2d3e4f5a6b" }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "required": ["jobs"],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Job" }
+          }
+        }
+      }
+    }
+  }
+}

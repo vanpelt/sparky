@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,22 +22,31 @@ type tlsParams struct {
 	domain   string // base domain, e.g. hivemind.tools
 	email    string // ACME account email (optional but recommended)
 	stateDir string // certs are cached under <stateDir>/{certmagic,autocert}
+	// xtermSub is the label whose subtree serves browser terminals ("xterm").
+	// When set, "*.<xtermSub>.<domain>" is managed as a second wildcard; empty
+	// means browser terminals are off and no extra name is requested.
+	xtermSub string
+	log      *slog.Logger // partial-issuance warnings; nil takes slog.Default()
 }
 
-// setupProxyTLS configures srv.TLSConfig for the chosen provider. For
-// "cloudflare" it obtains (and thereafter auto-renews) a single wildcard
-// certificate via the ACME DNS-01 challenge — this call blocks until the cert
-// is in hand. For "autocert" it wires ACME on-demand per-host certs and starts
-// the :80 challenge/redirect listener.
-func setupProxyTLS(ctx context.Context, srv *http.Server, p tlsParams) error {
+// setupProxyTLS configures srv.TLSConfig for the chosen provider and reports
+// the names it manages. For "cloudflare" it obtains (and thereafter
+// auto-renews) wildcard certificates via the ACME DNS-01 challenge — this call
+// blocks until they are in hand. For "autocert" it wires ACME on-demand
+// per-host certs and starts the :80 challenge/redirect listener, so there is no
+// fixed name list to report and it returns nil.
+func setupProxyTLS(ctx context.Context, srv *http.Server, p tlsParams) ([]string, error) {
+	if p.log == nil {
+		p.log = slog.Default()
+	}
 	switch p.provider {
 	case "cloudflare":
-		cfg, err := wildcardTLSConfig(ctx, p)
+		cfg, managed, err := wildcardTLSConfig(ctx, p)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		srv.TLSConfig = cfg
-		return nil
+		return managed, nil
 	case "autocert":
 		am := &autocert.Manager{
 			Prompt: autocert.AcceptTOS,
@@ -52,22 +62,26 @@ func setupProxyTLS(ctx context.Context, srv *http.Server, p tlsParams) error {
 		srv.TLSConfig = am.TLSConfig()
 		// Port 80 answers ACME HTTP-01 challenges and redirects the rest.
 		go http.ListenAndServe(":80", am.HTTPHandler(nil)) //nolint:errcheck
-		return nil
+		// No name list: HostPolicy already accepts any depth under the domain,
+		// so <name>.xterm.<domain> is issued on first SNI with no extra wiring.
+		return nil, nil
 	default:
-		return fmt.Errorf("unknown --tls-provider %q (want cloudflare | autocert)", p.provider)
+		return nil, fmt.Errorf("unknown --tls-provider %q (want cloudflare | autocert)", p.provider)
 	}
 }
 
-// wildcardTLSConfig obtains and maintains one certificate covering <domain> and
-// *.<domain> from Let's Encrypt using the DNS-01 challenge through Cloudflare.
-// A single wildcard cert means every sandbox subdomain is already covered — no
-// per-name issuance, so no brush with Let's Encrypt's per-name rate limits no
-// matter how many ephemeral sandboxes come and go. Needs a Cloudflare API token
-// (scoped Zone.DNS:Edit) in CLOUDFLARE_API_TOKEN.
-func wildcardTLSConfig(ctx context.Context, p tlsParams) (*tls.Config, error) {
+// wildcardTLSConfig obtains and maintains certificates covering <domain>,
+// *.<domain> and — when browser terminals are enabled — *.<xtermSub>.<domain>,
+// from Let's Encrypt using the DNS-01 challenge through Cloudflare. Wildcards
+// mean every sandbox subdomain is already covered without per-name issuance, so
+// no brush with Let's Encrypt's per-name rate limits no matter how many
+// ephemeral sandboxes come and go. Needs a Cloudflare API token (scoped
+// Zone.DNS:Edit) in CLOUDFLARE_API_TOKEN. It returns the names actually
+// obtained, which is not always what was asked for — see below.
+func wildcardTLSConfig(ctx context.Context, p tlsParams) (*tls.Config, []string, error) {
 	token := os.Getenv("CLOUDFLARE_API_TOKEN")
 	if token == "" {
-		return nil, errors.New("cloudflare TLS needs a scoped Zone.DNS:Edit token in CLOUDFLARE_API_TOKEN")
+		return nil, nil, errors.New("cloudflare TLS needs a scoped Zone.DNS:Edit token in CLOUDFLARE_API_TOKEN")
 	}
 
 	certmagic.Default.Logger = zap.NewNop()
@@ -85,9 +99,34 @@ func wildcardTLSConfig(ctx context.Context, p tlsParams) (*tls.Config, error) {
 	}
 
 	cfg := certmagic.NewDefault()
-	domains := []string{p.domain, "*." + p.domain}
-	if err := cfg.ManageSync(ctx, domains); err != nil {
-		return nil, fmt.Errorf("obtain wildcard cert for %v: %w", domains, err)
+
+	// Two-phase issuance, because the two phases have different consequences.
+	// The base pair is load-bearing: without it the edge has no certificate at
+	// all and there is nothing to serve, so its failure is fatal. ManageSync
+	// blocks until the cert is in hand and its error kills `serve`.
+	base := []string{p.domain, "*." + p.domain}
+	if err := cfg.ManageSync(ctx, base); err != nil {
+		return nil, nil, fmt.Errorf("obtain wildcard cert for %v: %w", base, err)
 	}
-	return cfg.TLSConfig(), nil
+	managed := base
+
+	if p.xtermSub != "" {
+		// A wildcard covers exactly ONE label — RFC 4592 in DNS, RFC 6125 in
+		// certificates — so *.<domain> does not match <name>.xterm.<domain>.
+		// This second wildcard is the only thing that makes a browser terminal
+		// presentable over https; do not delete it as redundant with the first.
+		// Its absence fails inside the TLS handshake, which the user sees as a
+		// full-page certificate interstitial and which produces no sparkbox log
+		// line at all, so the failure reads like a DNS bug for hours.
+		wc := "*." + p.xtermSub + "." + p.domain
+		// Asked for separately, and non-fatally: a zone that cannot validate
+		// this name should cost the operator browser terminals, not turn a
+		// working box into a boot loop on the next restart.
+		if err := cfg.ManageSync(ctx, []string{wc}); err != nil {
+			p.log.Warn("browser terminals will not be reachable over https", "name", wc, "err", err)
+		} else {
+			managed = append(managed, wc)
+		}
+	}
+	return cfg.TLSConfig(), managed, nil
 }

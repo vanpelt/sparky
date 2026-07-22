@@ -55,6 +55,7 @@ const (
 	routeKey           // the routes.Route being served, for error reporting
 	identityKey        // the authenticated visitor (edgeauth.Identity), for header injection
 	portKey            // the original dialed port recovered below TLS (SO_ORIGINAL_DST)
+	suffixKey          // the labels preceding a reserved suffix (see SetReservedSuffix)
 )
 
 // upstreamTransport dials guest apps. It is deliberately not http.DefaultTransport:
@@ -105,6 +106,11 @@ type Server struct {
 	// sandbox route can never shadow them (see SetReserved).
 	reserved map[string]http.Handler
 
+	// reservedSuffix maps a trailing label to the handler that owns the whole
+	// *.<label>.<domain> subtree (the browser terminal). Also checked before
+	// route lookup — see SetReservedSuffix.
+	reservedSuffix map[string]http.Handler
+
 	// login/session/accounts, if set (via SetAuth), turn on the private-route
 	// gate: login serves the browser sign-in at <loginSub>.<domain>, session
 	// verifies the cookie/bearer token, and accounts authorises the handle.
@@ -146,6 +152,58 @@ func (s *Server) SetReserved(sub string, h http.Handler) {
 		s.reserved = make(map[string]http.Handler)
 	}
 	s.reserved[strings.ToLower(sub)] = h
+}
+
+// SetReservedSuffix dedicates a whole subtree to a built-in handler: every
+// request for <name>.<label>.<domain> is served by h, with <name> recoverable
+// through SuffixName, instead of being looked up as a sandbox route. This is
+// how the browser terminal gets one host per sandbox off a single handler.
+//
+// It cannot be expressed with SetReserved because subdomainOf returns the
+// entire multi-label prefix — "demo.xterm", not "xterm" — so an exact-match map
+// never sees these hosts at all.
+//
+// Dispatch runs before the route lookup, and that ordering is the security
+// property, not a nicety: routes.ValidSubdomain permits dotted subdomains (the
+// advertised `api.myvm` shape), so a route row literally named "demo.xterm" is
+// creatable today, and a route-first edge would let its owner serve another
+// user's terminal host. For the same reason the entire subtree is claimed —
+// even a deeper "a.b.xterm.<domain>", which h answers for by rejecting the name
+// rather than falling through to a route that could have been squatted.
+//
+// The bare "<label>.<domain>" is deliberately NOT claimed here: it names no
+// sandbox, so it is an ordinary route lookup that 404s unless something is
+// registered for it explicitly. Call before serving.
+func (s *Server) SetReservedSuffix(label string, h http.Handler) {
+	if s.reservedSuffix == nil {
+		s.reservedSuffix = make(map[string]http.Handler)
+	}
+	s.reservedSuffix[strings.ToLower(label)] = h
+}
+
+// SuffixName returns the labels that preceded the reserved suffix this request
+// was dispatched on: "demo" for demo.xterm.<domain>. ok is false for any
+// request that did not arrive through SetReservedSuffix dispatch, which is how
+// such a handler distinguishes "mounted on the edge" from "reached directly"
+// (a test server, a future loopback mount) and can pick its own host parsing.
+func SuffixName(r *http.Request) (string, bool) {
+	name, ok := r.Context().Value(suffixKey).(string)
+	return name, ok
+}
+
+// suffixHandler resolves sub against the reserved-suffix registry, splitting
+// "demo.xterm" into the handler for "xterm" and the name "demo". The reserved
+// label is always the LAST one, so the split is on the final dot.
+func (s *Server) suffixHandler(sub string) (http.Handler, string, bool) {
+	i := strings.LastIndexByte(sub, '.')
+	if i <= 0 { // no dot, or an empty name — not a subtree host
+		return nil, "", false
+	}
+	h, ok := s.reservedSuffix[sub[i+1:]]
+	if !ok {
+		return nil, "", false
+	}
+	return h, sub[:i], true
 }
 
 // SetConsole reserves a subdomain (e.g. "console") for the operator console,
@@ -281,6 +339,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// belong to built-in handlers and are not sandbox routes.
 	if h, ok := s.reserved[sub]; ok {
 		h.ServeHTTP(w, r)
+		return
+	}
+	// A reserved suffix owns everything under it, so <name>.xterm.<domain>
+	// reaches the terminal handler with <name> attached. Exact reservations are
+	// consulted first (they are the more specific claim), but both must precede
+	// the route lookup or a dotted route row could shadow the subtree.
+	if h, name, ok := s.suffixHandler(sub); ok {
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), suffixKey, name)))
 		return
 	}
 	route, ok, err := s.store.GetBySubdomain(sub)

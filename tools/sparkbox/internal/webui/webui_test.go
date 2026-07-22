@@ -55,6 +55,22 @@ func TestBuildSubstitutesAndMinifies(t *testing.T) {
 	}
 }
 
+// Default attribute values must survive minification: the consoles style their
+// form fields with attribute selectors, so a dropped type="text" leaves every
+// text input matching nothing and rendering in the browser's default white,
+// which is what shipped before KeepDefaultAttrVals was set.
+func TestBuildKeepsDefaultAttributeValues(t *testing.T) {
+	tmpl := []byte(`<!doctype html><html lang="en"><head><title>t</title>
+<style>/*SHARED_CSS*/
+input[type=text] { background: hsl(var(--background)); }</style></head>
+<body><input id="a" type="text" /><script>/*SHARED_JS*/</script></body></html>`)
+
+	body := string(Build(tmpl).raw)
+	if !strings.Contains(body, `type="text"`) {
+		t.Errorf(`type="text" was minified away — input[type=text] selectors will not match; got: %s`, body)
+	}
+}
+
 func TestServeHTTPContentNegotiation(t *testing.T) {
 	p := Build(testTmpl)
 
