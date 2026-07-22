@@ -268,6 +268,17 @@ func (s *Store) TagsFor(sandbox string) ([]string, error) {
 
 // SetTags replaces a sandbox's tag set wholesale (the console sends the full
 // set, so replace is the natural primitive and removal needs no separate op).
+//
+// It refuses a sandbox whose existing rows belong to somebody else. Tag rows
+// are keyed by NAME, and a name is the one argument a caller supplies before
+// anything has decided whether it is theirs — `new+<their-box>@` over SSH, or
+// POST /v1/sandboxes with their name — so an unscoped replace let any user
+// delete a stranger's tags. That is not cosmetic: tags select which of the
+// owner's secrets are pushed into the guest env, and internal/netrules picks
+// the per-tag egress allowlist from them, so a de-tagged VM comes back
+// unfiltered. The owner gate above this one (ctlops resolves the name before
+// stamping) is the first line of defence; this is the one no future caller can
+// forget.
 func (s *Store) SetTags(sandbox, owner string, tags []string) error {
 	if sandbox == "" || owner == "" {
 		return fmt.Errorf("tags need a sandbox and owner")
@@ -285,7 +296,19 @@ func (s *Store) SetTags(sandbox, owner string, tags []string) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.Exec(`DELETE FROM sandbox_tags WHERE sandbox = ?`, sandbox); err != nil {
+	// Inside the transaction, so the check and the replace cannot be separated.
+	var other string
+	switch err := tx.QueryRow(
+		`SELECT owner FROM sandbox_tags WHERE sandbox = ? AND owner <> ? LIMIT 1`,
+		sandbox, owner).Scan(&other); {
+	case err == nil:
+		return fmt.Errorf("sandbox %q is tagged by another owner", sandbox)
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sandbox_tags WHERE sandbox = ? AND owner = ?`,
+		sandbox, owner); err != nil {
 		return err
 	}
 	for _, tag := range tags {

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 )
 
 // DefaultPort is forwarded to when a route doesn't specify one.
@@ -59,8 +61,15 @@ type Route struct {
 }
 
 // ValidSubdomain reports whether s is a usable subdomain label.
+//
+// Reserved names are refused here, not merely at the edge. The edge dispatches
+// reserved subdomains and suffixes to built-in handlers *before* it consults
+// this store, so a row at `console`, `api` or `demo-xterm` would be accepted,
+// stored, listed by `ctl routes`, and then never once served — the failure a
+// user cannot diagnose, because everything they can see says it exists. The
+// list lives in internal/reserved, shared with sandbox names and handles.
 func ValidSubdomain(s string) bool {
-	return len(s) <= 253 && subdomainRe.MatchString(s)
+	return len(s) <= 253 && subdomainRe.MatchString(s) && !reserved.Name(s)
 }
 
 type Store struct {

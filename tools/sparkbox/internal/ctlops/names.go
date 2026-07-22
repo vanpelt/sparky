@@ -1,11 +1,14 @@
-package sshgw
+package ctlops
 
-import "crypto/rand"
+import (
+	"crypto/rand"
+	"encoding/hex"
+)
 
 // Playful "adjective-noun" sandbox names, Docker/Heroku style (e.g.
 // "swift-otter"). All words are lowercase single tokens so a generated name is
 // DNS-safe and doubles as both the SSH username and the proxy subdomain
-// (swift-otter.<domain>). Collisions are handled by the caller.
+// (swift-otter.<domain>). Collisions are handled by GenerateName.
 
 var nameAdjectives = []string{
 	"amber", "brave", "breezy", "bubbly", "clever", "cosmic", "cozy", "crafty",
@@ -28,7 +31,7 @@ var nameNouns = []string{
 }
 
 // randomName returns an "adjective-noun" name. It is not guaranteed unique;
-// callers should check against existing sandboxes and retry (see newName).
+// GenerateName checks it against the manager and retries.
 func randomName() string {
 	return nameAdjectives[randIndex(len(nameAdjectives))] + "-" +
 		nameNouns[randIndex(len(nameNouns))]
@@ -40,4 +43,30 @@ func randIndex(n int) int {
 	b := make([]byte, 2)
 	rand.Read(b) //nolint:errcheck
 	return int(uint16(b[0])<<8|uint16(b[1])) % n
+}
+
+func randomSuffix() string {
+	b := make([]byte, 3)
+	rand.Read(b) //nolint:errcheck
+	return hex.EncodeToString(b)
+}
+
+// GenerateName returns an unused adjective-noun name, falling back to a hex
+// suffix when the pool keeps colliding — a name is always produced, because
+// "if you don't name it, the platform names it" is a control-plane rule rather
+// than an SSH one, and a create that failed for want of a name would be absurd.
+//
+// A configured Config.NewName takes over entirely: whoever injected it owns
+// uniqueness, which is what makes generated names deterministic in tests.
+func (o *Ops) GenerateName() string {
+	if o.newName != nil {
+		return o.newName()
+	}
+	for i := 0; i < 8; i++ {
+		n := randomName()
+		if _, exists := o.boxes.Get(n); !exists {
+			return n
+		}
+	}
+	return randomName() + "-" + randomSuffix()
 }

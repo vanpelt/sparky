@@ -55,6 +55,7 @@ const (
 	routeKey           // the routes.Route being served, for error reporting
 	identityKey        // the authenticated visitor (edgeauth.Identity), for header injection
 	portKey            // the original dialed port recovered below TLS (SO_ORIGINAL_DST)
+	suffixKey          // the labels preceding a reserved suffix (see SetReservedSuffix)
 )
 
 // upstreamTransport dials guest apps. It is deliberately not http.DefaultTransport:
@@ -105,6 +106,11 @@ type Server struct {
 	// sandbox route can never shadow them (see SetReserved).
 	reserved map[string]http.Handler
 
+	// reservedSuffix maps a trailing name segment to the handler that owns
+	// every subdomain ending in "-<segment>" (the browser terminal). Also
+	// checked before route lookup — see SetReservedSuffix.
+	reservedSuffix map[string]http.Handler
+
 	// login/session/accounts, if set (via SetAuth), turn on the private-route
 	// gate: login serves the browser sign-in at <loginSub>.<domain>, session
 	// verifies the cookie/bearer token, and accounts authorises the handle.
@@ -117,6 +123,10 @@ type Server struct {
 	// recovered/Host port equals it means "dialed the edge directly" — the
 	// default web route — not "forward to guest:<listenPort>".
 	listenPort int
+
+	// home is the subdomain a bare <domain> request is redirected to (see
+	// SetHome). Empty leaves the apex answering a 404.
+	home string
 }
 
 // SetListenPort records the edge's own listen port so targetPort can tell a
@@ -148,6 +158,74 @@ func (s *Server) SetReserved(sub string, h http.Handler) {
 	s.reserved[strings.ToLower(sub)] = h
 }
 
+// SetReservedSuffix dedicates a family of subdomains to a built-in handler:
+// every request for <name>-<label>.<domain> is served by h, with <name>
+// recoverable through SuffixName, instead of being looked up as a sandbox
+// route. This is how the browser terminal gets one host per sandbox off a
+// single handler.
+//
+// The separator is a HYPHEN, not a dot, and that is the whole reason this
+// feature is reachable from an ordinary browser. A wildcard matches exactly one
+// label — RFC 4592 in DNS, RFC 6125 in certificates — so a dotted
+// <name>.xterm.<domain> is covered by neither the zone's wildcard record nor
+// its wildcard certificate, and needs a second one of each. Hosted edges that
+// terminate TLS in front of us (Cloudflare's universal certificate is the case
+// that bit us) will not issue that second wildcard without a paid add-on, and
+// the failure lands inside the TLS handshake: the browser shows
+// ERR_SSL_VERSION_OR_CIPHER_MISMATCH and sparkbox logs nothing at all, so it
+// reads like a DNS bug for hours. Keeping the terminal in ONE label puts it
+// under the *.<domain> wildcard that already exists for every sandbox.
+//
+// It cannot be expressed with SetReserved because the name varies per sandbox:
+// subdomainOf returns "demo-xterm", not "xterm", so an exact-match map never
+// sees these hosts at all.
+//
+// Dispatch runs before the route lookup, and that ordering is the security
+// property, not a nicety: routes.ValidSubdomain permits both hyphens and dots
+// (the advertised `web-myvm` and `api.myvm` shapes), so a route row literally
+// named "demo-xterm" is creatable today, and a route-first edge would let its
+// owner serve another user's terminal host. For the same reason any subdomain
+// ENDING in "-<label>" is claimed — even a deeper "a.demo-xterm.<domain>",
+// which h answers for by rejecting the name rather than falling through to a
+// route that could have been squatted.
+//
+// The claim also means a sandbox or route whose own name ends in "-<label>"
+// goes dark; host.Manager and the route store refuse to create one, and main
+// warns about any that predate the reservation. Call before serving.
+func (s *Server) SetReservedSuffix(label string, h http.Handler) {
+	if s.reservedSuffix == nil {
+		s.reservedSuffix = make(map[string]http.Handler)
+	}
+	s.reservedSuffix[strings.ToLower(label)] = h
+}
+
+// SuffixName returns the name that preceded the reserved suffix this request
+// was dispatched on: "demo" for demo-xterm.<domain>. ok is false for any
+// request that did not arrive through SetReservedSuffix dispatch, which is how
+// such a handler distinguishes "mounted on the edge" from "reached directly"
+// (a test server, a future loopback mount) and can pick its own host parsing.
+func SuffixName(r *http.Request) (string, bool) {
+	name, ok := r.Context().Value(suffixKey).(string)
+	return name, ok
+}
+
+// suffixHandler resolves sub against the reserved-suffix registry, splitting
+// "demo-xterm" into the handler for "xterm" and the name "demo". The reserved
+// segment is always the LAST one, so the split is on the final hyphen — which
+// is also why a sandbox name may contain hyphens ("crafty-axolotl-xterm" splits
+// to "crafty-axolotl") without the two conventions colliding.
+func (s *Server) suffixHandler(sub string) (http.Handler, string, bool) {
+	i := strings.LastIndexByte(sub, '-')
+	if i <= 0 { // no hyphen, or an empty name — not a terminal host
+		return nil, "", false
+	}
+	h, ok := s.reservedSuffix[sub[i+1:]]
+	if !ok {
+		return nil, "", false
+	}
+	return h, sub[:i], true
+}
+
 // SetConsole reserves a subdomain (e.g. "console") for the operator console,
 // served by h rather than proxied to a sandbox. Call once before serving.
 func (s *Server) SetConsole(sub string, h http.Handler) { s.SetReserved(sub, h) }
@@ -162,6 +240,48 @@ func (s *Server) SetConsole(sub string, h http.Handler) { s.SetReserved(sub, h) 
 // terminates TLS for the wildcard, so this is two GET handlers, not a new
 // listener.
 func (s *Server) SetIssuer(sub string, h http.Handler) { s.SetReserved(sub, h) }
+
+// SetHome names the subdomain the zone apex sends visitors to. Without it,
+// https://<domain>/ answers "request host is not under <domain>" — technically
+// true and useless, since the apex is the one hostname a person types from
+// memory. Empty (the default) keeps that behaviour. Call before serving.
+//
+// A redirect rather than serving the console at two hostnames: the session
+// cookie, the WebSocket origin gate and every absolute URL the console builds
+// are all scoped to one host, and a second origin serving the same page is a
+// second place for those to disagree.
+func (s *Server) SetHome(sub string) { s.home = strings.ToLower(sub) }
+
+// redirectApex sends a bare <domain> request to the home subdomain, reporting
+// whether it handled the request. Path and query survive, so a link someone
+// trimmed back to the apex still lands where it was going.
+//
+// 302, not 301: this is "where the front page lives for now", and a permanent
+// redirect is cached by browsers past the point where we can take it back.
+func (s *Server) redirectApex(w http.ResponseWriter, r *http.Request) bool {
+	if s.home == "" {
+		return false
+	}
+	h := strings.ToLower(r.Host)
+	port := ""
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
+		h, port = h[:i], h[i:]
+	}
+	if strings.TrimSuffix(h, ".") != s.domain {
+		return false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// Behind a TLS-terminating front end (the tunnel) the connection is plain,
+	// so the header is what knows. Same rule as the terminal's origin check.
+	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+		scheme = strings.ToLower(strings.TrimSpace(strings.Split(fwd, ",")[0]))
+	}
+	http.Redirect(w, r, scheme+"://"+s.home+"."+s.domain+port+r.URL.RequestURI(), http.StatusFound)
+	return true
+}
 
 func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger) *Server {
 	s := &Server{
@@ -274,6 +394,11 @@ func (s *Server) notListeningHint(r *http.Request, port int) template.HTML {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub, ok := s.subdomainOf(r.Host)
 	if !ok {
+		// The apex is not a subdomain, so it lands here rather than in any
+		// lookup below — the one hostname with somewhere better to be.
+		if s.redirectApex(w, r) {
+			return
+		}
 		http.Error(w, "sparkbox: request host is not under "+s.domain, http.StatusNotFound)
 		return
 	}
@@ -281,6 +406,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// belong to built-in handlers and are not sandbox routes.
 	if h, ok := s.reserved[sub]; ok {
 		h.ServeHTTP(w, r)
+		return
+	}
+	// A reserved suffix owns every name ending in it, so <name>-xterm.<domain>
+	// reaches the terminal handler with <name> attached. Exact reservations are
+	// consulted first (they are the more specific claim), but both must precede
+	// the route lookup or a route row could shadow the terminal.
+	if h, name, ok := s.suffixHandler(sub); ok {
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), suffixKey, name)))
 		return
 	}
 	route, ok, err := s.store.GetBySubdomain(sub)

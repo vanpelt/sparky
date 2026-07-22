@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sparkbox — API reference</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  /* Monochrome, dense, and a sibling of the two consoles: same tokens, same
+     reset, same 14px body. The only chroma is the method chips, which carry
+     real meaning (a DELETE should not look like a GET). */
+  /*SHARED_CSS*/
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* ---- layout: fixed rail, scrolling reference ---- */
+  .layout { display: grid; grid-template-columns: 264px minmax(0, 1fr); min-height: 100vh; }
+  aside {
+    position: sticky; top: 0; align-self: start; height: 100vh;
+    border-right: 1px solid hsl(var(--border));
+    display: flex; flex-direction: column; gap: 12px; padding: 18px 14px 12px;
+    background: hsl(var(--background));
+  }
+  main { max-width: 900px; padding: 26px 28px 96px; min-width: 0; }
+
+  /* ---- brand ---- */
+  .brand { display: flex; align-items: center; gap: 10px; padding: 0 4px; }
+  /* Pinned dark in both themes, as on the consoles: --primary inverts to
+     near-white and the bolt's gold would drop to about 2:1 against it. */
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-size: 16px; line-height: 1;
+  }
+  .brand h1 { font-size: 13.5px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .brand .sub { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin: 0; }
+
+  /* ---- search ---- */
+  input[type="search"] {
+    font: inherit; font-size: 13px; width: 100%; padding: 6px 10px;
+    background: hsl(var(--background)); color: hsl(var(--foreground));
+    border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px);
+  }
+  input[type="search"]::placeholder { color: hsl(var(--muted-foreground)); }
+
+  /* ---- rail nav ---- */
+  nav { overflow-y: auto; flex: 1; margin: 0 -6px; padding: 0 6px; }
+  nav .group { margin-bottom: 14px; }
+  nav .group > .label {
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: hsl(var(--muted-foreground)); padding: 0 6px 5px; font-weight: 600;
+  }
+  nav a {
+    display: flex; align-items: center; gap: 7px; text-decoration: none;
+    color: hsl(var(--foreground)); padding: 3px 6px; border-radius: 5px;
+    font-size: 12.5px; line-height: 1.35;
+  }
+  nav a:hover { background: hsl(var(--muted)); }
+  nav a.active { background: hsl(var(--muted)); font-weight: 500; }
+  /* The rail is the densest thing on the page and its longest label
+     ("/sandboxes/{name}/archive") only just fits; a slightly tighter chip and
+     type buy the ~15px that keeps the whole set readable instead of a column of
+     ellipses. */
+  nav a .m { min-width: 38px; padding: 2px 4px; }
+  nav a .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .side-foot {
+    display: flex; gap: 10px; padding: 10px 6px 0; border-top: 1px solid hsl(var(--border));
+    font-size: 11.5px;
+  }
+  .side-foot a { color: hsl(var(--muted-foreground)); text-decoration: none; }
+  .side-foot a:hover { color: hsl(var(--foreground)); text-decoration: underline; }
+
+  /* ---- method chips ---- */
+  .m {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10px; font-weight: 700; letter-spacing: .04em; flex: none;
+    padding: 2px 5px; border-radius: 4px; min-width: 44px; text-align: center;
+    border: 1px solid transparent;
+  }
+  .m-get { color: hsl(var(--blue)); background: hsl(var(--blue) / .12); border-color: hsl(var(--blue) / .25); }
+  .m-post { color: hsl(var(--green)); background: hsl(var(--green) / .12); border-color: hsl(var(--green) / .25); }
+  .m-put { color: hsl(var(--amber)); background: hsl(var(--amber) / .14); border-color: hsl(var(--amber) / .3); }
+  .m-delete { color: hsl(var(--red)); background: hsl(var(--red) / .12); border-color: hsl(var(--red) / .25); }
+
+  /* ---- prose ---- */
+  .prose { font-size: 13.5px; line-height: 1.62; }
+  .prose p { margin: 0 0 10px; }
+  .prose p:last-child { margin-bottom: 0; }
+  .prose code, code.inline {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .89em; background: hsl(var(--muted)); padding: 1px 5px; border-radius: 4px;
+  }
+  .prose pre {
+    background: hsl(var(--muted)); border-radius: calc(var(--radius) - 2px);
+    padding: 10px 12px; overflow-x: auto; margin: 0 0 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px;
+  }
+  .prose pre code { background: none; padding: 0; }
+
+  /* ---- intro ---- */
+  #intro { margin-bottom: 34px; }
+  #intro h2 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  #intro .tagline { color: hsl(var(--muted-foreground)); font-size: 13.5px; margin: 0 0 16px; }
+  .base {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 12px; margin-bottom: 16px; font-size: 12.5px;
+  }
+  .base .k { color: hsl(var(--muted-foreground)); }
+
+  /* ---- operations ---- */
+  .tag-head { margin: 34px 0 12px; }
+  .tag-head h2 {
+    font-size: 12px; letter-spacing: .09em; text-transform: uppercase;
+    color: hsl(var(--muted-foreground)); margin: 0 0 4px; font-weight: 600;
+  }
+  .tag-head p { margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
+
+  article.op { padding: 16px 18px; margin-bottom: 12px; scroll-margin-top: 16px; }
+  article.op > .sig { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  article.op .path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; font-weight: 500; word-break: break-all;
+  }
+  article.op .opid { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin-left: auto; }
+  article.op h3 { font-size: 14.5px; margin: 9px 0 7px; font-weight: 600; letter-spacing: -0.01em; }
+
+  .sec { margin-top: 14px; }
+  .sec > .h {
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600;
+    color: hsl(var(--muted-foreground)); margin-bottom: 6px;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th {
+    text-align: left; font-weight: 500; color: hsl(var(--muted-foreground));
+    padding: 4px 8px 4px 0; border-bottom: 1px solid hsl(var(--border)); font-size: 11.5px;
+  }
+  td { padding: 6px 8px 6px 0; border-bottom: 1px solid hsl(var(--border) / .6); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.n { white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  td.t { white-space: nowrap; color: hsl(var(--muted-foreground)); font-size: 12px; }
+  .req { color: hsl(var(--red)); font-size: 11px; margin-left: 3px; }
+  .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .status { font-weight: 600; }
+  .status.ok { color: hsl(var(--green)); }
+  .status.err { color: hsl(var(--red)); }
+  .status.warn { color: hsl(var(--amber)); }
+
+  /* ---- curl block ---- */
+  .curl { position: relative; }
+  .curl pre {
+    background: hsl(var(--muted)); border-radius: calc(var(--radius) - 2px);
+    padding: 11px 46px 11px 12px; overflow-x: auto; margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; line-height: 1.6;
+  }
+  .curl button { position: absolute; top: 7px; right: 7px; font-size: 11.5px; padding: 3px 8px; }
+  .btn-ghost { background: transparent; border-color: transparent; color: hsl(var(--muted-foreground)); }
+  .btn-ghost:hover:not(:disabled) { background: hsl(var(--border)); color: hsl(var(--foreground)); }
+  button { font-size: 12.5px; padding: 5px 10px; color: hsl(var(--foreground)); background: transparent; }
+
+  .empty { color: hsl(var(--muted-foreground)); font-size: 13px; padding: 30px 0; }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    aside { position: static; height: auto; border-right: none; border-bottom: 1px solid hsl(var(--border)); }
+    nav { max-height: 220px; }
+    main { padding: 20px 16px 64px; }
+  }
+</style>
+</head>
+<body>
+<div id="toast"></div>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <div class="logo">&#9889;</div>
+      <div>
+        <h1>sparkbox</h1>
+        <p class="sub">API reference</p>
+      </div>
+    </div>
+    <input type="search" id="q" placeholder="Search endpoints…" autocomplete="off" spellcheck="false" />
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <a href="/openapi.json">openapi.json</a>
+      <a href="/openapi.yaml">openapi.yaml</a>
+    </div>
+  </aside>
+  <main>
+    <div id="intro"></div>
+    <div id="ops"></div>
+  </main>
+</div>
+<script>
+  /*SHARED_JS*/
+
+  // The whole page is a renderer for the document served at /openapi.json:
+  // there is exactly one description of this API, and the page you are reading
+  // is generated from it rather than written alongside it.
+  (function () {
+    var METHODS = ["get", "post", "put", "delete", "patch"];
+    var spec = null;
+    var ops = [];
+    var base = "";
+
+    // ---- tiny prose renderer -------------------------------------------
+    // The descriptions in the spec use a deliberately small subset of
+    // Markdown — paragraphs, `code`, **bold**, *emphasis*, and four-space code
+    // blocks — so a full parser (which would have to be vendored) buys nothing.
+    function prose(src) {
+      if (!src) return "";
+      var out = [];
+      var blocks = String(src).split("\n\n");
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i];
+        if (/^ {4}/.test(b)) {
+          var code = b.split("\n").map(function (l) { return l.replace(/^ {4}/, ""); }).join("\n");
+          out.push("<pre><code>" + esc(code) + "</code></pre>");
+        } else {
+          out.push("<p>" + inline(b.replace(/\n/g, " ")) + "</p>");
+        }
+      }
+      return out.join("");
+    }
+
+    // Bold is replaced before emphasis, which is what lets the single-asterisk
+    // pattern stay this simple: by the time it runs there are no ** pairs left
+    // for it to tear in half.
+    function inline(s) {
+      return esc(s)
+        .replace(/`([^`]+)`/g, function (_, c) { return "<code>" + c + "</code>"; })
+        .replace(/\*\*([^*]+)\*\*/g, function (_, c) { return "<strong>" + c + "</strong>"; })
+        .replace(/\*([^*]+)\*/g, function (_, c) { return "<em>" + c + "</em>"; });
+    }
+
+    // ---- schema helpers -------------------------------------------------
+    function deref(node) {
+      if (!node) return null;
+      var ref = node["$ref"];
+      if (!ref) return node;
+      var parts = ref.replace(/^#\//, "").split("/");
+      var cur = spec;
+      for (var i = 0; i < parts.length && cur; i++) cur = cur[parts[i]];
+      return cur || null;
+    }
+
+    function refName(node) {
+      if (node && node["$ref"]) return node["$ref"].split("/").pop();
+      return "";
+    }
+
+    // typeName renders a schema as one short phrase. Names of referenced
+    // schemas are kept, because "Sandbox" tells a reader more than "object".
+    function typeName(node) {
+      var named = refName(node);
+      if (named) return named;
+      var s = deref(node);
+      if (!s) return "any";
+      if (s.type === "array") {
+        return "array of " + typeName(s.items || {});
+      }
+      var t = Array.isArray(s.type) ? s.type.join(" | ") : (s.type || "any");
+      if (s.format) t += " (" + s.format + ")";
+      if (s["enum"]) t = s["enum"].map(function (v) { return JSON.stringify(v); }).join(" | ");
+      if (s["const"] !== undefined) t = JSON.stringify(s["const"]);
+      return t;
+    }
+
+    // fieldTable renders an object schema's properties. Anything that is not
+    // an object renders as a single line, because inventing rows for a bare
+    // string would be more noise than information.
+    function fieldTable(node) {
+      var s = deref(node);
+      if (!s) return "";
+      if (s.type === "array") s = deref(s.items) || {};
+      if (!s.properties) {
+        return '<p class="muted" style="font-size:12.5px;margin:0">' + esc(typeName(node)) + "</p>";
+      }
+      var required = s.required || [];
+      var rows = Object.keys(s.properties).map(function (k) {
+        var p = s.properties[k];
+        var isReq = required.indexOf(k) >= 0;
+        var d = deref(p) || {};
+        return "<tr><td class=\"n\">" + esc(k) + (isReq ? '<span class="req">*</span>' : "") +
+          '</td><td class="t">' + esc(typeName(p)) + "</td><td>" +
+          inline(d.description || "") + "</td></tr>";
+      });
+      return "<table><thead><tr><th>field</th><th>type</th><th>description</th></tr></thead><tbody>" +
+        rows.join("") + "</tbody></table>";
+    }
+
+    // ---- operations -----------------------------------------------------
+    function collect() {
+      var paths = spec.paths || {};
+      Object.keys(paths).forEach(function (p) {
+        METHODS.forEach(function (m) {
+          var op = paths[p][m];
+          if (!op) return;
+          ops.push({
+            method: m, path: p, op: op,
+            id: op.operationId,
+            tag: (op.tags && op.tags[0]) || "other",
+            hay: (m + " " + p + " " + (op.operationId || "") + " " + (op.summary || "") +
+              " " + (op.description || "")).toLowerCase()
+          });
+        });
+      });
+    }
+
+    function tagOrder() {
+      var order = (spec.tags || []).map(function (t) { return t.name; });
+      var seen = {};
+      ops.forEach(function (o) { seen[o.tag] = true; });
+      Object.keys(seen).forEach(function (t) { if (order.indexOf(t) < 0) order.push(t); });
+      return order.filter(function (t) { return seen[t]; });
+    }
+
+    function params(o) {
+      return (o.op.parameters || []).map(deref).filter(Boolean);
+    }
+
+    function bodySchema(o) {
+      var rb = deref(o.op.requestBody);
+      if (!rb || !rb.content) return null;
+      var json = rb.content["application/json"];
+      return json ? { schema: json.schema, example: json.example, required: !!rb.required } : null;
+    }
+
+    // ---- curl -----------------------------------------------------------
+    // Every snippet is runnable as printed, against the host serving this
+    // page: the spec's own examples fill the path and query, and the token
+    // comes from an environment variable rather than a placeholder nobody
+    // remembers to replace.
+    function curlFor(o) {
+      var path = o.path;
+      var query = [];
+      params(o).forEach(function (p) {
+        var ex = p.example !== undefined ? p.example : (p.schema && p.schema.example);
+        if (p["in"] === "path") {
+          path = path.replace("{" + p.name + "}", ex === undefined ? p.name : ex);
+        } else if (p["in"] === "query" && p.required) {
+          query.push(encodeURIComponent(p.name) + "=" + encodeURIComponent(ex === undefined ? "" : ex));
+        }
+      });
+      var url = base + path + (query.length ? "?" + query.join("&") : "");
+
+      var lines = ["curl -sS"];
+      if (o.method !== "get") lines.push("-X " + o.method.toUpperCase());
+      lines.push('-H "Authorization: Bearer $SPARKBOX_TOKEN"');
+      var body = bodySchema(o);
+      if (body && body.example !== undefined) {
+        lines.push('-H "Content-Type: application/json"');
+        lines.push("-d '" + JSON.stringify(body.example) + "'");
+      }
+      lines.push(url);
+      return lines.join(" \\\n  ");
+    }
+
+    function statusClass(code) {
+      if (code[0] === "2" || code[0] === "1" || code[0] === "3") return "ok";
+      if (code[0] === "4") return "warn";
+      return "err";
+    }
+
+    function securityNote(o) {
+      var sec = o.op.security !== undefined ? o.op.security : spec.security;
+      if (!sec || !sec.length) return "Open — no session required.";
+      var names = sec.map(function (s) { return Object.keys(s)[0]; });
+      return "Requires " + names.join(" or ") + ".";
+    }
+
+    function renderOp(o) {
+      var html = '<article class="card op" id="op-' + esc(o.id) + '" data-id="' + esc(o.id) + '">';
+      html += '<div class="sig"><span class="m m-' + o.method + '">' + o.method.toUpperCase() +
+        '</span><span class="path">' + esc(o.path) + '</span>' +
+        '<span class="opid mono">' + esc(o.id) + "</span></div>";
+      html += "<h3>" + esc(o.op.summary || "") + "</h3>";
+      if (o.op.description) html += '<div class="prose">' + prose(o.op.description) + "</div>";
+
+      var ps = params(o);
+      if (ps.length) {
+        html += '<div class="sec"><div class="h">Parameters</div><table><thead><tr>' +
+          "<th>name</th><th>in</th><th>type</th><th>description</th></tr></thead><tbody>";
+        ps.forEach(function (p) {
+          html += '<tr><td class="n">' + esc(p.name) + (p.required ? '<span class="req">*</span>' : "") +
+            '</td><td class="t">' + esc(p["in"]) + '</td><td class="t">' +
+            esc(typeName(p.schema || {})) + "</td><td>" + inline(p.description || "") + "</td></tr>";
+        });
+        html += "</tbody></table></div>";
+      }
+
+      var body = bodySchema(o);
+      if (body) {
+        html += '<div class="sec"><div class="h">Request body' +
+          (body.required ? "" : " (optional)") + "</div>" + fieldTable(body.schema) + "</div>";
+      }
+
+      var responses = o.op.responses || {};
+      html += '<div class="sec"><div class="h">Responses</div><table><tbody>';
+      Object.keys(responses).sort().forEach(function (code) {
+        var r = deref(responses[code]) || {};
+        var schema = "";
+        if (r.content) {
+          var ct = Object.keys(r.content)[0];
+          if (ct && r.content[ct].schema) schema = typeName(r.content[ct].schema);
+        }
+        html += '<tr><td class="n"><span class="status ' + statusClass(code) + '">' + esc(code) +
+          '</span></td><td class="t">' + esc(schema) + "</td><td>" +
+          inline(r.description || "") + "</td></tr>";
+      });
+      html += "</tbody></table></div>";
+
+      html += '<div class="sec"><div class="h">Example</div><div class="curl"><pre><code>' +
+        esc(curlFor(o)) + '</code></pre><button class="btn-ghost" data-copy="' +
+        esc(o.id) + '">copy</button></div>' +
+        '<p class="muted" style="font-size:12px;margin:6px 0 0">' + esc(securityNote(o)) + "</p></div>";
+
+      return html + "</article>";
+    }
+
+    function render() {
+      base = (spec.servers && spec.servers[0] && spec.servers[0].url) || "";
+
+      var info = spec.info || {};
+      var intro = "<h2>" + esc(info.title || "sparkbox") + "</h2>";
+      if (info.summary) intro += '<p class="tagline">' + inline(info.summary) + "</p>";
+      intro += '<div class="card base"><span class="k">Base URL</span>' +
+        '<span class="mono">' + esc(base) + '</span>' +
+        '<span class="k">Version</span><span class="mono">' + esc(info.version || "") + "</span></div>";
+      intro += '<div class="prose">' + prose(info.description) + "</div>";
+      $("intro").innerHTML = intro;
+
+      var order = tagOrder();
+      var byTag = {};
+      ops.forEach(function (o) { (byTag[o.tag] = byTag[o.tag] || []).push(o); });
+      var tagDesc = {};
+      (spec.tags || []).forEach(function (t) { tagDesc[t.name] = t.description; });
+
+      var nav = "", main = "";
+      order.forEach(function (tag) {
+        nav += '<div class="group" data-group="' + esc(tag) + '"><div class="label">' + esc(tag) + "</div>";
+        main += '<div class="tag-head" data-group="' + esc(tag) + '"><h2>' + esc(tag) + "</h2>" +
+          (tagDesc[tag] ? "<p>" + esc(tagDesc[tag]) + "</p>" : "") + "</div>";
+        byTag[tag].forEach(function (o) {
+          // The rail drops the version prefix every path shares: with it, all
+          // eleven sandbox routes ellipsize at the same character and the rail
+          // becomes a column of "/v1/sandboxes/{name}/…".
+          nav += '<a href="#op-' + esc(o.id) + '" data-id="' + esc(o.id) +
+            '" title="' + esc(o.method.toUpperCase() + " " + o.path) + '">' +
+            '<span class="m m-' + o.method + '">' + o.method.toUpperCase() + "</span>" +
+            '<span class="nm mono">' + esc(o.path.replace(/^\/v1/, "")) + "</span></a>";
+          main += renderOp(o);
+        });
+        nav += "</div>";
+      });
+      $("nav").innerHTML = nav;
+      $("ops").innerHTML = main + '<p class="empty hidden" id="nomatch">No endpoint matches that.</p>';
+
+      wire();
+      if (location.hash) {
+        var el = document.getElementById(location.hash.slice(1));
+        if (el) el.scrollIntoView();
+      }
+    }
+
+    // ---- interaction ----------------------------------------------------
+    function wire() {
+      $("ops").addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button[data-copy]");
+        if (!btn) return;
+        var pre = btn.parentNode.querySelector("code");
+        copy(pre.textContent);
+      });
+
+      $("q").addEventListener("input", function () {
+        var q = this.value.trim().toLowerCase();
+        var shown = 0;
+        ops.forEach(function (o) {
+          var hit = !q || o.hay.indexOf(q) >= 0;
+          if (hit) shown++;
+          toggle(document.getElementById("op-" + o.id), hit);
+          var link = $("nav").querySelector('a[data-id="' + cssEscape(o.id) + '"]');
+          toggle(link, hit);
+        });
+        // A group heading with nothing under it is noise, in both columns.
+        var groups = {};
+        ops.forEach(function (o) {
+          if (!q || o.hay.indexOf(q) >= 0) groups[o.tag] = true;
+        });
+        Array.prototype.forEach.call(document.querySelectorAll("[data-group]"), function (el) {
+          toggle(el, !!groups[el.getAttribute("data-group")]);
+        });
+        toggle($("nomatch"), shown === 0);
+      });
+
+      // Highlight the operation currently under the top of the viewport.
+      var links = {};
+      Array.prototype.forEach.call($("nav").querySelectorAll("a[data-id]"), function (a) {
+        links[a.getAttribute("data-id")] = a;
+      });
+      var obs = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          var a = links[e.target.getAttribute("data-id")];
+          if (!a) return;
+          if (e.isIntersecting) {
+            Object.keys(links).forEach(function (k) { links[k].classList.remove("active"); });
+            a.classList.add("active");
+          }
+        });
+      }, { rootMargin: "0px 0px -80% 0px" });
+      Array.prototype.forEach.call(document.querySelectorAll("article.op"), function (el) {
+        obs.observe(el);
+      });
+
+      // "/" focuses search, the one shortcut worth having on a reference page.
+      document.addEventListener("keydown", function (ev) {
+        if (ev.key === "/" && document.activeElement !== $("q")) {
+          ev.preventDefault();
+          $("q").focus();
+        }
+      });
+    }
+
+    function toggle(el, on) {
+      if (el) el.classList.toggle("hidden", !on);
+    }
+
+    // Operation ids contain dots ("tags.set"), which an attribute selector
+    // handles fine but a naive id selector would not — hence attribute
+    // lookups everywhere, and this escape for the quoting.
+    function cssEscape(s) {
+      return s.replace(/"/g, '\\"');
+    }
+
+    function copy(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { toast("copied"); },
+          function () { toast("couldn't copy", true); });
+        return;
+      }
+      // Fallback for a page served over plain HTTP in development, where the
+      // async clipboard API is unavailable.
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); toast("copied"); } catch (e) { toast("couldn't copy", true); }
+      document.body.removeChild(ta);
+    }
+
+    fetch("/openapi.json", { headers: { Accept: "application/json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (doc) {
+        spec = doc;
+        collect();
+        render();
+      })
+      .catch(function (err) {
+        $("intro").innerHTML = '<h2>Reference unavailable</h2><p class="tagline">' +
+          esc("Could not load /openapi.json: " + err.message) + "</p>";
+      });
+  })();
+</script>
+</body>
+</html>

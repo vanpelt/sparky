@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Preview the user console (internal/userconsole/index.html) locally with mock data.
+"""Preview a sparkbox HTML page locally with mock data.
 
-The real console talks to a live sparkbox edge (/api/*, edge-session auth), so
-opening index.html on its own just shows the sign-in screen. This server serves
-the *real* index.html with a mock `fetch` injected, so you see the full UI —
-machines in every state, routes, tags, secrets, snapshots — with no backend.
+Every page here talks to a live sparkbox edge (edge-session auth, a WebSocket,
+a spec document), so opening the file on its own shows a sign-in screen or an
+error banner. This server serves the *real* HTML with just enough stubbed out
+that the whole UI renders with no backend.
 
-The file is re-read on every request, so while you edit index.html you just
-refresh the browser to see changes. No dependencies (stdlib only).
+    python3 hack/preview-console.py                   # user console -> :8799
+    python3 hack/preview-console.py docs              # the REST API docs page
+    python3 hack/preview-console.py terminal 9000     # the browser terminal
 
-    python3 hack/preview-console.py            # -> http://localhost:8799
-    python3 hack/preview-console.py 9000        # pick a port
+The page is re-read on every request, so while you edit it you just refresh the
+browser to see changes. No dependencies (stdlib only).
 
 Add ?theme=dark or ?theme=light to force a theme (default follows the OS).
 """
@@ -21,9 +22,29 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-INDEX = os.path.join(HERE, "..", "internal", "userconsole", "index.html")
 SHARED_CSS = os.path.join(HERE, "..", "internal", "webui", "shared.css")
 SHARED_JS = os.path.join(HERE, "..", "internal", "webui", "shared.js")
+
+
+def _pkg(*parts):
+    return os.path.join(HERE, "..", "internal", *parts)
+
+
+# The pages this can preview. `stub` says whether the user console's mock fetch
+# is injected: the docs page needs only its spec (served below) and the terminal
+# needs a WebSocket it cannot have, so both render themselves honestly without
+# it — the terminal shows its own "reconnecting" state, which is a real state
+# worth being able to look at.
+PAGES = {
+    "console": {"index": _pkg("userconsole", "index.html"), "stub": True,
+                "assets": None},
+    "docs": {"index": _pkg("restapi", "docs.html"), "stub": False,
+             "assets": None},
+    "terminal": {"index": _pkg("xterm", "index.html"), "stub": False,
+                 "assets": _pkg("xterm", "assets")},
+}
+PAGE = PAGES["console"]
+INDEX = PAGE["index"]
 
 # ---- mock fleet: one machine per state, plus routes/tags/secrets/snapshots ----
 def _iso(sec_ago):
@@ -58,7 +79,7 @@ def _machines(tick):
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
     ]
 
-_ME = {"handle": "van", "operator": True}
+_ME = {"handle": "van", "operator": True, "terminal_subdomain": "xterm"}
 _SECRETS = [
     {"name": "OPENAI_API_KEY", "tags": ["ml", "prod"], "version": 3, "updated_at": _iso(3600)},
     {"name": "DATABASE_URL", "tags": ["prod"], "version": 1, "updated_at": _iso(172800)},
@@ -166,6 +187,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
             return
+        # The docs page is a renderer for the document it fetches, so serving
+        # the real openapi.json is the whole backend it needs. It is the
+        # canonical file, not a copy, so what the preview renders is what ships.
+        if self.path.split("?")[0] in ("/openapi.json", "/openapi.yaml"):
+            self._sendfile(_pkg("restapi", "openapi.json"), "application/json")
+            return
+        # The terminal's vendored xterm.js and its addons, served from the same
+        # /assets/ paths the real handler uses.
+        if PAGE["assets"] and self.path.startswith("/assets/"):
+            name = os.path.basename(self.path.split("?")[0])
+            ctype = "text/css" if name.endswith(".css") else "text/javascript"
+            self._sendfile(os.path.join(PAGE["assets"], name), ctype)
+            return
         try:
             html = open(INDEX, encoding="utf-8").read()
             # index.html carries /*SHARED_CSS*/ and /*SHARED_JS*/ markers that
@@ -175,13 +209,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             html = html.replace("/*SHARED_CSS*/", open(SHARED_CSS, encoding="utf-8").read(), 1)
             html = html.replace("/*SHARED_JS*/", open(SHARED_JS, encoding="utf-8").read(), 1)
         except OSError as e:
-            self.send_error(500, f"cannot read index.html: {e}")
+            self.send_error(500, f"cannot read {os.path.basename(INDEX)}: {e}")
             return
-        stub = _STUB % {
-            "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
-            "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
-            "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
-        }
+        stub = ""
+        if PAGE["stub"]:
+            stub = _STUB % {
+                "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
+                "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
+                "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
+            }
         theme = ""
         if "theme=dark" in self.path:
             theme = '<script>document.documentElement.setAttribute("data-theme","dark")</script>'
@@ -199,14 +235,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _sendfile(self, path, ctype):
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except OSError as e:
+            self.send_error(404, str(e))
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):  # quiet
         pass
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8799
+    global PAGE, INDEX
+    args = sys.argv[1:]
+    if args and not args[0].isdigit():
+        name = args.pop(0)
+        if name not in PAGES:
+            sys.exit(f"unknown page {name!r}: pick one of {', '.join(PAGES)}")
+        PAGE = PAGES[name]
+        INDEX = PAGE["index"]
+    port = int(args[0]) if args else 8799
     srv = http.server.HTTPServer(("127.0.0.1", port), Handler)
-    print(f"user-console preview → http://localhost:{port}")
+    print(f"sparkbox page preview → http://localhost:{port}")
     print(f"  serving {os.path.relpath(INDEX)} with mock data (edit + refresh to iterate)")
     print(f"  dark: http://localhost:{port}/?theme=dark   light: http://localhost:{port}/?theme=light")
     try:

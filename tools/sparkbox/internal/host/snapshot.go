@@ -42,7 +42,7 @@ func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*S
 		return nil, fmt.Errorf("snapshots are not supported by this driver")
 	}
 	if !snapNameRe.MatchString(snapName) {
-		return nil, fmt.Errorf("invalid snapshot name %q (lowercase alphanumerics and dashes)", snapName)
+		return nil, &NameError{Problem: NameInvalid, Noun: "snapshot", Name: snapName}
 	}
 	image := templateImage(owner, snapName)
 
@@ -54,7 +54,7 @@ func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*S
 	}
 	if _, exists := m.snaps[image]; exists {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("snapshot %q already exists", snapName)
+		return nil, &NameError{Problem: NameTaken, Noun: "snapshot", Name: snapName}
 	}
 	m.mu.Unlock()
 

@@ -85,12 +85,13 @@ func (nilFleet) List() []netpush.Sandbox { return nil }
 
 func newTestConsole(t *testing.T) *testConsole {
 	t.Helper()
-	return newTestConsoleDomain(t, testDomain)
+	return newTestConsoleDomain(t, testDomain, "xterm")
 }
 
-// newTestConsoleDomain builds the console for an explicit --proxy-domain
-// value, so tests can drive operator-supplied variants like a leading dot.
-func newTestConsoleDomain(t *testing.T, domain string) *testConsole {
+// newTestConsoleDomain builds the console for an explicit --proxy-domain and
+// --xterm-subdomain, so tests can drive operator-supplied variants like a
+// leading dot, or a host with browser terminals switched off.
+func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 	t.Helper()
 	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -123,10 +124,12 @@ func newTestConsoleDomain(t *testing.T, domain string) *testConsole {
 		t.Fatal(err)
 	}
 	signer := edgeauth.NewSigner([]byte("test-oidc-ikm"))
+	// Status matters: edgeauth.Require refuses a session whose account is not
+	// active, so a fake that left it blank would model three disabled users.
 	accounts := fakeAccounts{
-		"alice":   {Handle: "alice", InvitedBy: "bob"},
-		"mallory": {Handle: "mallory", InvitedBy: "bob"},
-		"opsy":    {Handle: "opsy", InvitedBy: users.OperatorInviter},
+		"alice":   {Handle: "alice", Status: users.StatusActive, InvitedBy: "bob"},
+		"mallory": {Handle: "mallory", Status: users.StatusActive, InvitedBy: "bob"},
+		"opsy":    {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
 	}
 	rec := &syncRecorder{}
 	// netrules shares the same DB file as secrets (that owns sandbox_tags).
@@ -140,7 +143,7 @@ func newTestConsoleDomain(t *testing.T, domain string) *testConsole {
 		func(ctx context.Context, reg string) ([]byte, string, bool) { return testPNG, "image/png", true })
 	// A syncer with no sluice socket: Push/Usage are no-ops, so bandwidth is 501.
 	netSync := netpush.NewSyncer(nil, nilFleet{}, netStore, log)
-	h := New(mgr, routeStore, secretStore, netStore, netSync, favicons, accounts, signer, rec, "my", domain, false, log)
+	h := New(mgr, routeStore, secretStore, netStore, netSync, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
 	return &testConsole{h: h.Handler(), mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, signer: signer, sync: rec}
 }
 
@@ -645,7 +648,7 @@ func TestMeAndLogout(t *testing.T) {
 // Domain — an unnormalized "..hivemind.tools" never matches and the session
 // survives — and the CSRF gate must accept the real first-party Origin.
 func TestLeadingDotDomainNormalized(t *testing.T) {
-	tc := newTestConsoleDomain(t, "."+testDomain)
+	tc := newTestConsoleDomain(t, "."+testDomain, "xterm")
 	tc.create(t, "webby", "alice")
 
 	rec := tc.do(t, "POST", "/api/logout", "alice", nil)
@@ -833,5 +836,36 @@ func TestIndexSetsCSP(t *testing.T) {
 	csp := rec.Header().Get("Content-Security-Policy")
 	if !strings.Contains(csp, "img-src 'self' data:") || !strings.Contains(csp, "default-src 'self'") {
 		t.Errorf("CSP missing or wrong: %q", csp)
+	}
+}
+
+// TestMeAdvertisesTerminalSubdomain: the SPA builds every Terminal link from
+// this one field, and hides the button when it is absent. Both halves matter —
+// a host with no proxy edge (or --xterm-subdomain "") serves no terminals, and
+// a button linking to a name nothing answers is worse than no button.
+func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
+	var me struct {
+		Handle            string `json:"handle"`
+		TerminalSubdomain string `json:"terminal_subdomain"`
+	}
+	rec := newTestConsole(t).do(t, "GET", "/api/me", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me: status %d (%s)", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Handle != "alice" || me.TerminalSubdomain != "xterm" {
+		t.Fatalf("me = %+v, want handle alice and terminal_subdomain xterm", me)
+	}
+
+	// Terminals off: the field is omitted entirely, not sent empty-but-present.
+	off := newTestConsoleDomain(t, testDomain, "")
+	rec = off.do(t, "GET", "/api/me", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me (terminals off): status %d (%s)", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "terminal_subdomain") {
+		t.Errorf("terminals disabled but /api/me advertised one: %s", rec.Body)
 	}
 }
