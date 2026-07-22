@@ -8,6 +8,7 @@ resume-on-connect. Companion implementation to
 ```
 ssh signup@gateway         → registers your key (invite code + handle)
 ssh new@gateway            → creates a sandbox, tells you its name
+ssh -t new+foo@gateway bar → names it `foo`, tags it `bar` (-t: see below)
 ssh <name>@gateway         → resumes it if suspended, drops you in
 ssh ctl@gateway keys list  → manage your account's SSH keys
 https://<name>.hivemind.tools       → reverse-proxy to a port inside the sandbox
@@ -22,6 +23,19 @@ the *user* is identified purely by their public key (the exe.dev model). HTTP
 subdomain defaults to the sandbox name). Idle sandboxes are automatically
 paused by a reaper and transparently resumed on the next connection — over SSH
 *or* HTTP.
+
+One wrinkle on the `new@` / `new+<name>@` door: the words after it are read as
+**tags**, never as a command, because a freshly created sandbox always gets a
+shell. But `ssh host word` makes your ssh client skip terminal allocation, and
+a shell with no terminal prints no prompt and gives you no line editing — you
+end up typing blind into a pipe. Pass `-t` whenever you pass tags:
+
+```
+ssh -t new+foo@gateway claude   # sandbox `foo`, tagged `claude`, working prompt
+```
+
+Connecting to an existing sandbox (`ssh foo@gateway`) needs no `-t`, and
+`ssh foo@gateway <cmd>` does run `<cmd>` in the guest as you'd expect.
 
 ## Identity
 

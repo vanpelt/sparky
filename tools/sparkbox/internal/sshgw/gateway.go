@@ -471,6 +471,10 @@ func splitNewName(user string) (routeTo, requested string) {
 // accidental second meaning: `ssh new@host claude` both tagged the box and
 // launched claude, and `ssh new@host ml` would tag it and then die on `ml:
 // command not found`. A freshly created sandbox always gets a shell.
+//
+// Caveat we document rather than paper over: passing tags means the client's
+// ssh saw a command word and allocated no PTY, so the shell we open here runs
+// non-interactively — no prompt, no line editing. Callers want `ssh -t`.
 func execsCommand(raw string, tagsOnly bool) bool { return raw != "" && !tagsOnly }
 
 // pipeSession mirrors the client's session (PTY, env, command, window

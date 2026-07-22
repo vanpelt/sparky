@@ -111,6 +111,13 @@ ssh -p 2222 <name>@<host>       # resume + shell in (auto-resumes if paused)
 ssh -p 2222 ctl@<host> help     # account/keys/routes/schedule controls
 ```
 
+Words after `new@` (or `new+<name>@`) are **tags**, not a command — a new
+sandbox always gets a shell. Passing any word also stops ssh from allocating a
+terminal, which leaves you in a shell with no prompt, so add `-t`:
+
+```sh
+ssh -t -p 2222 new+foo@<host> claude   # sandbox `foo` tagged `claude`
+```
 The same commands are also a REST API at `api.<domain>` and each sandbox also
 has a shell in a browser tab at `<name>-xterm.<domain>` — both need the HTTPS
 edge, so see *Day-2* below.
