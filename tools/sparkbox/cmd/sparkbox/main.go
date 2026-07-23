@@ -141,19 +141,11 @@ func serve(args []string) error {
 		nodeNameFlag   = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
 		archFlag       = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
 		noNodeEnrol    = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator still has to run 'ssh ctl@<domain> node approve <name>' — so this is only worth setting on a gateway that will never gain another node")
-		gatewayAddr    = fs.String("gateway", os.Getenv("SPARKBOX_GATEWAY"), "run this machine as a fleet NODE linked to the gateway at host:port, instead of as a gateway itself. The only env-var-defaulted flag here, because a node's provisioning unit carries it as an environment line rather than inside a flag bundle")
+		gatewayAddr    = fs.String("gateway", "", "run this machine as a fleet NODE linked to the gateway at host:port, instead of as a gateway itself. A provisioned node passes it through the unit's GATEWAY_FLAG line, which lands here as an ordinary flag")
 		gatewayPub     = fs.String("gateway-pubkey", "", "node mode: the gateway's PUBLIC upstream authorized_keys line, or a path to a file holding it. Omitted, it is learned from the first welcome and cached under --state-dir")
 		gatewayHostK   = fs.String("gateway-host-key", "", "node mode: pin the gateway's SSH host key (an authorized_keys line or a path to one). Empty trusts the first key offered, remembers it, and refuses any later change")
 	)
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	// Which flags the operator actually typed. Only --gateway needs to know,
-	// and only because it is the one flag that can arrive from the environment.
-	typed := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { typed[f.Name] = true })
-
-	if err := demotionRefusal(*gatewayAddr, typed["gateway"], *usersPath); err != nil {
 		return err
 	}
 	// A node has no accounts of its own — every identity in a fleet lives on the
@@ -172,8 +164,7 @@ func serve(args []string) error {
 	if *gatewayAddr != "" {
 		// Said out loud, because "this host serves nothing" is otherwise
 		// indistinguishable from a crash to whoever is looking at it.
-		log.Info("running as a fleet node, not a gateway",
-			"gateway", *gatewayAddr, "from_env", !typed["gateway"])
+		log.Info("running as a fleet node, not a gateway", "gateway", *gatewayAddr)
 		return serveNode(nodeOptions{
 			gateway: *gatewayAddr, gatewayPub: *gatewayPub, gatewayHostKey: *gatewayHostK,
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
@@ -866,33 +857,6 @@ func warnXtermSuffixCollision(label string, mgr *host.Manager, rs *routes.Store,
 // keeps a stolen token from being replayable anywhere else.
 const defaultAudience = "https://hivemind.wandb.tools"
 
-// demotionRefusal reports why an environment-supplied gateway address must not
-// be honoured, and nil when node mode is a deliberate choice.
-//
-// A gateway that inherits a stray SPARKBOX_GATEWAY silently becomes a node on
-// its next restart: the fork in serve() happens before a single store is
-// opened, so the edge, both consoles, the REST API, the SSH gateway and the
-// OIDC issuer all stop existing, the "--users is required" guard is skipped
-// too, and the only trace is that nothing answers any more. --gateway is the
-// one flag defaulted from the environment, so it is the one flag that can do
-// this.
-//
-// The environment may therefore choose node mode only on a host that is not
-// otherwise configured as a gateway. --users is the tell: it seeds fleet-wide
-// identity, a node has no use for it, and a unit that passes it is a gateway's
-// unit. Typing --gateway on the command line still means node, whatever else is
-// passed — that is what the shipped unit's GATEWAY_FLAG does, alongside the
-// --users line every unit carries unconditionally.
-func demotionRefusal(gatewayAddr string, typedFlag bool, usersPath string) error {
-	if gatewayAddr == "" || typedFlag || usersPath == "" {
-		return nil
-	}
-	return fmt.Errorf("SPARKBOX_GATEWAY=%s in the environment would run this host as a fleet node, "+
-		"but --users %s configures it as a gateway. Unset SPARKBOX_GATEWAY, "+
-		"or pass --gateway on the command line if a node is what you meant",
-		gatewayAddr, usersPath)
-}
-
 // ---------------------------------------------------------------------------
 // The control plane a gateway runs
 // ---------------------------------------------------------------------------
@@ -997,8 +961,15 @@ func (r fleetRoster) join(st fleet.NodeStatus, row nodes.Node) (ctlops.NodeInfo,
 	if err != nil {
 		return ctlops.NodeInfo{}, err
 	}
-	// The local machine's manager knows what it holds; a linked one reports
-	// nothing until it has sent an inventory, so whichever count knows more wins.
+	// held is the ledger's count, and today the ledger only ever has rows for
+	// this machine: a linked node's inventory is cached on its link but nothing
+	// durable is written from it (see fleet.linkInventory), so a sandbox living
+	// on another machine has no placement here at all. RemoveNode refuses on
+	// this number, and refusing on the ledger alone would make that guard say
+	// "holds nothing" about every remote machine in the fleet — which is the one
+	// case it exists for. So the machine's own report counts until the gateway
+	// places sandboxes on nodes itself, and taking the larger of the two means a
+	// node that under-reports still cannot hide a placement the ledger knows of.
 	if st.Sandboxes > held {
 		held = st.Sandboxes
 	}

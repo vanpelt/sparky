@@ -513,6 +513,11 @@ func (c *nodeClient) sendInventory(ctx context.Context, conn *Conn) {
 	// Reported, never acted on: a name the gateway does not place here is a
 	// disagreement for an operator to resolve, and deleting a rootfs over one
 	// would be the fleet destroying user data on its own initiative.
+	//
+	// Nothing can reach this line yet — the gateway acks every inventory empty
+	// until reconciliation lands (M2, see InventoryAck) — so it is the node half
+	// of that contract waiting for the gateway half, not a warning anyone has
+	// seen.
 	if len(ack.Orphaned) > 0 || len(ack.Quarantined) > 0 {
 		c.log.Warn("the gateway disagrees about what this node holds",
 			"orphaned", ack.Orphaned, "quarantined", ack.Quarantined)

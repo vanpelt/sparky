@@ -236,6 +236,16 @@ func wireSentence(s string, max int) string {
 	return s
 }
 
+// wireExit and wireStatus below bound the two numbers a peer authors that this
+// host then acts on. Both are clamped a SECOND time, on the way out, by
+// (*Error).ExitCode and (*Error).HTTPStatus — and those accessors are the
+// enforcing layer, because every consumer goes through them whatever built the
+// *Error, while this pair only covers the one path that crosses a link. Neither
+// clamp is redundant and neither is the one to delete: the accessors make the
+// invariant true everywhere, and these make it true of the value actually stored,
+// so a log line or a test that reads e.Status raw sees the same bounded number
+// the edge will answer with.
+//
 // wireExit bounds the ctl@ process's exit status. Zero is the field's own "use
 // the Kind's" sentinel, so an out-of-range code falls back to the Kind rather
 // than to a number of this function's choosing — the classification crossed the
@@ -300,10 +310,19 @@ func hostFromWire(h *WireHostError) error {
 	}
 	switch h.Type {
 	case hostLimit:
-		// Both renderers count Running to say "you already have N running" and
-		// the SSH one dereferences Running[0] to suggest what to pause. With no
-		// names there is no advice to give, only a panic or a sentence about
-		// zero sandboxes, and a cap of zero is not a cap anyone hit.
+		// The rule: a limit refusal whose names did not survive scrubbing, or
+		// whose cap is not a cap anyone could have hit, arrives with no typed
+		// cause at all.
+		//
+		// It is no longer load-bearing against a panic — sshgw.failStart guards
+		// its Running[0] and xterm.startFailure only joins the slice — and it is
+		// lossy: a genuine "max 3 running" from another machine that arrives with
+		// an unprintable name list is downgraded here to the generic rendering.
+		// It stays because the typed cause exists only to select the friendlier
+		// branch, the one that names a sandbox to pause. With no names that
+		// branch has nothing to say that the Kind, Msg and Hint travelling beside
+		// it do not already say, and "you already have 0 running sandboxes" is a
+		// sentence no reader can act on.
 		running := safeNames(h.Running)
 		if len(running) == 0 || h.Max < 1 || h.Max > maxWireCount {
 			return nil

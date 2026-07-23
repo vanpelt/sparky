@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -23,7 +22,11 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// validName reports whether a sandbox name is well formed. The charset is the
+// platform's one label rule and lives in internal/reserved with the claimed
+// list, because the node roster and the browser terminal each used to carry
+// their own copy of exactly this expression.
+func validName(name string) bool { return reserved.ValidLabel(name) }
 
 // reservedName reports whether a sandbox may not take this name. A sandbox's
 // name is its default subdomain, so the answer is the platform-wide one:
@@ -398,9 +401,10 @@ type Options struct {
 	HostVCPUs int64
 	// FrontDoor, if set, gets Ensure/Remove calls as sandboxes come and go.
 	FrontDoor FrontDoor
-	// Observer, if set, is told about every sandbox record change. Also
-	// installable after construction (SetObserver), since the thing doing the
-	// mirroring usually outlives neither the manager nor the process alone.
+	// Observer, if set, is told about every sandbox record change. This is the
+	// only way to install one: whatever mirrors this host is built before the
+	// manager is, and a second wiring path would be a manager that emits
+	// nothing because the field was set on the wrong side of a boot.
 	Observer Observer
 	// Archive is the object store for archived rootfs artifacts. Nil (or a driver
 	// without vmm.Archivable) disables the archive/restore lifecycle.
@@ -545,7 +549,7 @@ func NewManager(opts Options) (*Manager, error) {
 }
 
 func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
-	if !nameRe.MatchString(name) {
+	if !validName(name) {
 		return nil, &NameError{Problem: NameInvalid, Noun: "sandbox", Name: name}
 	}
 	if reservedName(name) {
@@ -898,15 +902,6 @@ func (m *Manager) SetSessions(c SessionCloser) {
 	m.sessions = c
 }
 
-// SetObserver installs the change hook after construction, for the same reason
-// SetSessions exists: whatever is mirroring this host is usually built from the
-// manager and so cannot be handed to it at construction time.
-func (m *Manager) SetObserver(o Observer) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.observer = o
-}
-
 // SetGatewayPublicKey installs the authorized_keys line new guests trust. A
 // host that knows it at startup passes Options.GatewayPublicKey; a host that
 // learns it from somewhere else — a machine whose gateway is another process,
@@ -1180,7 +1175,7 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 	if m.renamer == nil {
 		return &DisabledError{Code: "rename_disabled", Msg: "rename is not enabled on this host"}
 	}
-	if !nameRe.MatchString(newName) {
+	if !validName(newName) {
 		return &NameError{Problem: NameInvalid, Noun: "sandbox", Name: newName}
 	}
 	if reservedName(newName) {

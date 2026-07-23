@@ -488,18 +488,17 @@ func (n *noiseLimiter) take(now time.Time) (dropped int, ok bool) {
 
 // warn writes one line at Warn level if the bucket allows it.
 func (n *noiseLimiter) warn(log *slog.Logger, msg string, args ...any) {
-	dropped, ok := n.take(time.Now())
-	if !ok {
-		return
-	}
-	if dropped > 0 {
-		args = append(args, "suppressed_since", dropped)
-	}
-	log.Warn(msg, args...)
+	n.emit(log.Warn, msg, args)
 }
 
 // info writes one line at Info level if the bucket allows it.
 func (n *noiseLimiter) info(log *slog.Logger, msg string, args ...any) {
+	n.emit(log.Info, msg, args)
+}
+
+// emit spends a token and, if it got one, writes the line through the level the
+// caller picked — appending the count of what was dropped behind it.
+func (n *noiseLimiter) emit(write func(string, ...any), msg string, args []any) {
 	dropped, ok := n.take(time.Now())
 	if !ok {
 		return
@@ -507,7 +506,7 @@ func (n *noiseLimiter) info(log *slog.Logger, msg string, args ...any) {
 	if dropped > 0 {
 		args = append(args, "suppressed_since", dropped)
 	}
-	log.Info(msg, args...)
+	write(msg, args...)
 }
 
 // reset refills the bucket. Only a test calls it, so that what it measures is

@@ -128,11 +128,36 @@ func (n *fakeNode) setOnline(v bool) {
 	n.online = v
 }
 
-func (n *fakeNode) Snapshot() ([]*host.Sandbox, []*host.Snapshot) {
+func (n *fakeNode) Box(name string) (*host.Sandbox, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.boxes, n.snaps
+	for _, b := range n.boxes {
+		if b.Name == name {
+			return b, true
+		}
+	}
+	return nil, false
 }
+
+func (n *fakeNode) Boxes() []*host.Sandbox {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.boxes
+}
+
+func (n *fakeNode) Templates() []*host.Snapshot {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.snaps
+}
+
+// A machine held directly in this process has no link to hang up and no
+// last-seen to report, which is exactly what the local node answers too.
+func (n *fakeNode) LastSeen() time.Time { return time.Time{} }
+
+func (n *fakeNode) Hangup(string, string) { n.record("hangup") }
+
+func (n *fakeNode) Revoke(string, error) { n.record("revoke") }
 
 func (n *fakeNode) record(op string) {
 	n.mu.Lock()
@@ -822,16 +847,5 @@ func TestDialContextOnAnOfflineMachine(t *testing.T) {
 func TestFleetNeedsALocalMachine(t *testing.T) {
 	if _, err := fleet.New(fleet.Options{Log: discardLog()}); err == nil {
 		t.Fatal("a fleet with nowhere to put anything was built")
-	}
-}
-
-func TestLocalManagerRecoversTheConcreteManager(t *testing.T) {
-	mgr := newManager(t, host.Options{})
-	got, ok := fleet.LocalManager(fleet.Local("boxa", mgr))
-	if !ok || got != mgr {
-		t.Fatalf("LocalManager = (%p, %v), want (%p, true)", got, ok, mgr)
-	}
-	if _, ok := fleet.LocalManager(newFakeNode("boxb")); ok {
-		t.Fatal("another machine was presented as this one")
 	}
 }

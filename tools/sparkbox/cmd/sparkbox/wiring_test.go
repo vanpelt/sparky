@@ -195,67 +195,6 @@ func TestGatewayOpsApprovesAnEnrolledNode(t *testing.T) {
 	}
 }
 
-// TestStrayGatewayEnvIsRefused: --gateway is the one flag defaulted from the
-// environment, and node mode forks before a single store is opened. An
-// inherited SPARKBOX_GATEWAY would therefore convert a gateway into a node on
-// its next restart, taking the edge, both consoles, the REST API, the SSH
-// gateway and the OIDC issuer with it, silently.
-func TestStrayGatewayEnvIsRefused(t *testing.T) {
-	t.Setenv("SPARKBOX_GATEWAY", "127.0.0.1:9")
-
-	// Only the flags that decide the fork; the rest keep their defaults. The
-	// users file is never read, because the refusal comes first.
-	done := make(chan error, 1)
-	go func() {
-		done <- serve([]string{
-			"--driver", "mock",
-			"--state-dir", t.TempDir(),
-			"--users", filepath.Join(t.TempDir(), "users.conf"),
-		})
-	}()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("serve accepted a gateway demoted by the environment")
-		}
-		if !strings.Contains(err.Error(), "SPARKBOX_GATEWAY") {
-			t.Errorf("refusal is %q; it must name the environment variable that caused it", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("serve did not refuse: a stray SPARKBOX_GATEWAY started this gateway as a node")
-	}
-}
-
-// TestDemotionRefusalLeavesTheDeliberateCasesAlone: the guard must refuse
-// exactly one combination. The shipped node unit is the case that matters —
-// it asks for node mode on the command line while passing the same --users line
-// every unit carries unconditionally — and refusing that would take every node
-// in the fleet down instead.
-func TestDemotionRefusalLeavesTheDeliberateCasesAlone(t *testing.T) {
-	for _, tc := range []struct {
-		what      string
-		gateway   string
-		typedFlag bool
-		users     string
-		wantErr   bool
-	}{
-		{what: "the shipped node unit: --gateway typed, --users passed anyway",
-			gateway: "gw:2222", typedFlag: true, users: "/srv/sparkbox/users.conf"},
-		{what: "a node provisioned by environment line, with no gateway flags",
-			gateway: "gw:2222"},
-		{what: "a gateway, with nothing in the environment",
-			users: "/srv/sparkbox/users.conf"},
-		{what: "a gateway that inherited SPARKBOX_GATEWAY",
-			gateway: "gw:2222", users: "/srv/sparkbox/users.conf", wantErr: true},
-	} {
-		err := demotionRefusal(tc.gateway, tc.typedFlag, tc.users)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("%s: refusal = %v, want error: %v", tc.what, err, tc.wantErr)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // The operator's ceremony, against the control plane this package assembles
 // ---------------------------------------------------------------------------

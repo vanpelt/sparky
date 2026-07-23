@@ -42,9 +42,13 @@ func Unreachable(op, sandbox, node string) *ctlops.Error {
 	}
 }
 
-// IsNodeUnreachable reports whether err is (or wraps) a node outage. The edge
-// and both consoles branch on it to say "the machine holding this is offline"
-// instead of the 502 they show when a guest app is not listening.
+// IsNodeUnreachable reports whether err is (or wraps) a node outage.
+//
+// Nothing branches on it yet: the edge still renders a node outage as the
+// generic 502 it shows when a guest app is not listening. Telling the two apart
+// there — "the machine holding this is offline" — is M2 work, and this is the
+// predicate it will ask, kept here so the answer is not re-derived from the
+// Code string at each call site.
 func IsNodeUnreachable(err error) bool {
 	var e *ctlops.Error
 	return errors.As(err, &e) && e.Code == codeUnreachable

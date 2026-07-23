@@ -215,27 +215,10 @@ func TestOpsConfigPrefersFleetOverManager(t *testing.T) {
 	if cfg.Templates != interface{}(flt) {
 		t.Errorf("snapshots read %T, want the fleet", cfg.Templates)
 	}
-
-	// And a Fleet that cannot answer the wider control-plane interfaces has no
-	// reconciliation available, so it must not quietly produce the split.
-	defer func() {
-		if recover() == nil {
-			t.Error("a Fleet too narrow to back the control plane was accepted, leaving ctl@ on the local manager")
-		}
-	}()
-	opsConfig(GatewayOptions{Manager: mgr, Fleet: narrowFleet{}})
+	// The other half of this — a Fleet too narrow to back the control plane —
+	// has no test because it has no runtime: GatewayOptions.Fleet is
+	// sshgw.FleetSandboxes, so such a value does not compile.
 }
-
-// narrowFleet satisfies the gateway's own Sandboxes slice and nothing wider.
-type narrowFleet struct{}
-
-func (narrowFleet) Get(string) (*host.Sandbox, bool) { return nil, false }
-func (narrowFleet) List() []*host.Sandbox            { return nil }
-func (narrowFleet) EnsureRunning(context.Context, string) (*host.Sandbox, error) {
-	return nil, errors.New("no")
-}
-func (narrowFleet) Touch(string)          {}
-func (narrowFleet) RecordKey(_, _ string) {}
 
 func newTestManager(t *testing.T) *host.Manager {
 	t.Helper()

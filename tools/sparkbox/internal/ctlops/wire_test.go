@@ -237,13 +237,28 @@ func TestWireDetailsAreFloats(t *testing.T) {
 // TestWireParseKind: Kind rides as a string precisely so an insertion into the
 // iota block cannot renumber a released wire format, which only works if the
 // mapping is total in both directions.
+//
+// The coverage is derived from kindNames rather than listed here, so a Kind
+// appended to the iota block is exercised the moment it is named — and caught by
+// the gap check below if it never is, which is the case a hardcoded list of
+// constants silently passed.
 func TestWireParseKind(t *testing.T) {
-	all := []Kind{KindInternal, KindInvalid, KindNotFound, KindDenied, KindConflict,
-		KindDisabled, KindLimit, KindCapacity, KindQuota, KindUpstream}
-	for _, k := range all {
-		got, ok := ParseKind(k.String())
+	if len(kindNames) != int(kindCount) {
+		t.Fatalf("kindNames names %d of %d Kinds — an unnamed Kind stringifies as "+
+			"\"internal\" and crosses a node link as a 500", len(kindNames), kindCount)
+	}
+	for i, name := range kindNames {
+		k := Kind(i)
+		if name == "" {
+			t.Errorf("Kind(%d) has no wire token", i)
+			continue
+		}
+		if k.String() != name {
+			t.Errorf("Kind(%d).String() = %q, want %q", i, k.String(), name)
+		}
+		got, ok := ParseKind(name)
 		if !ok || got != k {
-			t.Errorf("ParseKind(%q) = %v/%v, want %v/true", k.String(), got, ok, k)
+			t.Errorf("ParseKind(%q) = %v/%v, want %v/true", name, got, ok, k)
 		}
 	}
 

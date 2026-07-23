@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -95,9 +96,7 @@ func (f *Fleet) linkUp(n *linkNode) func() {
 
 	if dup {
 		f.log.Info("node reconnected; superseding the previous link", "node", name)
-		if prev, ok := old.(*linkNode); ok {
-			prev.client.Hangup(nodelink.CodeSuperseded, "a newer link for this node replaced this one")
-		}
+		old.Hangup(nodelink.CodeSuperseded, "a newer link for this node replaced this one")
 	}
 	return func() {
 		f.mu.Lock()
@@ -136,12 +135,7 @@ func (f *Fleet) EvictNode(name, reason string) bool {
 		return false
 	}
 	f.log.Info("node link revoked", "node", name, "reason", reason)
-	// A Node that is not a link is one something in this process attached
-	// directly; there is no connection to close and dropping it from the map was
-	// the whole of its eviction.
-	if l, ok := n.(*linkNode); ok {
-		l.client.Revoke(nodelink.CodeRevoked, revoked(name, reason))
-	}
+	n.Revoke(nodelink.CodeRevoked, revoked(name, reason))
 	return true
 }
 
@@ -201,7 +195,7 @@ func (f *Fleet) Nodes() []NodeStatus {
 
 func (f *Fleet) statusOf(n Node, local bool) NodeStatus {
 	facts := n.Facts()
-	boxes, _ := n.Snapshot()
+	boxes := n.Boxes()
 	running := 0
 	for _, b := range boxes {
 		if b.State == vmm.StateRunning {
@@ -223,10 +217,8 @@ func (f *Fleet) statusOf(n Node, local bool) NodeStatus {
 	// disabled rows exist only in the roster, which is where a listing that
 	// wants to show them reads them from.
 	st.Status = nodes.StatusApproved
-	if l, ok := n.(*linkNode); ok {
-		if t := l.client.LastSeen(); !t.IsZero() {
-			st.LastSeen = &t
-		}
+	if t := n.LastSeen(); !t.IsZero() {
+		st.LastSeen = &t
 	}
 	return st
 }
@@ -245,35 +237,35 @@ func (l *linkNode) Name() string { return l.client.Name() }
 
 func (l *linkNode) Online() bool { return l.client.Online() }
 
+func (l *linkNode) LastSeen() time.Time { return l.client.LastSeen() }
+
+func (l *linkNode) Hangup(code, msg string) { l.client.Hangup(code, msg) }
+
+func (l *linkNode) Revoke(code string, reason error) { l.client.Revoke(code, reason) }
+
 // Facts are what the machine said about itself when it connected, with the name
-// taken from the roster rather than from the hello.
+// taken from the roster rather than from the hello: the roster row is what the
+// SSH key resolved to, and the hello's own name is advisory.
 func (l *linkNode) Facts() Facts {
 	h := l.client.Hello()
-	return Facts{
-		Node:        l.client.Name(),
-		Arch:        h.Arch,
-		OS:          h.OS,
-		Release:     h.Release,
-		Version:     h.Version,
-		Driver:      h.Driver,
-		GuestSubnet: h.GuestSubnet,
-		Archiving:   h.Archiving,
-		Snapshots:   h.Snapshots,
-		Images:      h.Images,
-		StartedAt:   h.StartedAt,
-	}
+	h.Node = l.client.Name()
+	return h
 }
 
 func (l *linkNode) Capacity() host.NodeCapacity { return l.client.Capacity() }
 
-// Snapshot answers with nothing on purpose.
+// Box, Boxes and Templates answer with nothing on purpose.
 //
 // The link caches every row the node reports, but projecting those rows into
 // the records the gateway serves is what makes a remote sandbox visible in a
 // listing — and a sandbox visible before the ledger can place one would be a
 // record no authorization decision could be made about. The projection lands
 // with the placement it belongs to.
-func (l *linkNode) Snapshot() ([]*host.Sandbox, []*host.Snapshot) { return nil, nil }
+func (l *linkNode) Box(string) (*host.Sandbox, bool) { return nil, false }
+
+func (l *linkNode) Boxes() []*host.Sandbox { return nil }
+
+func (l *linkNode) Templates() []*host.Snapshot { return nil }
 
 // notYet is the answer to every operation that would have to cross the link.
 //

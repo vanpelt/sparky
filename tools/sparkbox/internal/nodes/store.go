@@ -18,12 +18,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"regexp"
 	"sync"
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 	_ "modernc.org/sqlite"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 )
 
 // Approval statuses. A row is born pending; approving it is the only thing that
@@ -52,14 +53,12 @@ var (
 	ErrBadName = errors.New("invalid node name")
 )
 
-// nameRe bounds a node name to one DNS label's worth of characters: node names
-// appear in the gateway's synthetic sandbox addresses (<sandbox>.<node>.…), so
-// anything that is not label-safe there would produce an address nothing can
-// parse.
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-
-// ValidName reports whether s is usable as a node name.
-func ValidName(s string) bool { return nameRe.MatchString(s) }
+// ValidName reports whether s is usable as a node name. It is the platform's
+// one label rule: node names appear in the gateway's synthetic sandbox
+// addresses (<sandbox>.<node>.…), so anything that is not label-safe there
+// would produce an address nothing can parse — the same reason a sandbox name
+// is bounded the same way, which is why both ask internal/reserved.
+func ValidName(s string) bool { return reserved.ValidLabel(s) }
 
 // Node is one machine in the fleet.
 //
@@ -126,33 +125,6 @@ func Open(path string) (*Store, error) {
 	}
 	return &Store{db: db}, nil
 }
-
-// addColumnIfMissing runs ALTER TABLE ADD COLUMN unless the column already
-// exists (sqlite has no ADD COLUMN IF NOT EXISTS, and a bare ALTER errors on
-// the second boot).
-func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return err
-		}
-		if name == column {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
-	return err
-}
-
-var _ = addColumnIfMissing // referenced by the first future migration
 
 func (s *Store) Close() error { return s.db.Close() }
 

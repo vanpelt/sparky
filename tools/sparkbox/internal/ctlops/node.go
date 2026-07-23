@@ -138,7 +138,7 @@ func (o *Ops) RemoveNode(ctx context.Context, c Caller, name string) error {
 		// decides what to do with them.
 		return &Error{
 			Kind: KindConflict, Op: op, Code: "node_has_sandboxes",
-			Msg: fmt.Sprintf("node %q still holds %s.", name, countSandboxes(n.Sandboxes)),
+			Msg: fmt.Sprintf("node %q still holds %s.", name, CountSandboxes(n.Sandboxes)),
 			Hint: "Move or delete them first — removing the node would strand them on a machine " +
 				"the fleet no longer knows about.",
 			Details:  map[string]any{"sandboxes": n.Sandboxes},
@@ -185,9 +185,14 @@ func (o *Ops) operatorOnly(op string, c Caller, sentence string) error {
 	return nil
 }
 
-// countSandboxes renders the count with its noun. "1 sandboxes" in a refusal is
+// CountSandboxes renders the count with its noun. "1 sandboxes" in a refusal is
 // the kind of sloppiness that makes an operator distrust the number itself.
-func countSandboxes(n int) string {
+//
+// Exported because the same phrase is the sandbox column of `node ls` in sshgw,
+// and an operator reads that column and this refusal side by side — one is the
+// answer to the other. Two spellings of the count would read as two different
+// numbers.
+func CountSandboxes(n int) string {
 	if n == 1 {
 		return "1 sandbox"
 	}

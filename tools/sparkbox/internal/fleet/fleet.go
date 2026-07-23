@@ -69,12 +69,12 @@ func New(opts Options) (*Fleet, error) {
 	if opts.Local == nil {
 		return nil, errors.New("fleet: a local manager is required")
 	}
+	// Resolved once, here, and handed to Local rather than resolved again: the
+	// manager's own node name is never empty (host.NewManager coerces it), so
+	// this is the whole ladder.
 	name := opts.LocalName
 	if name == "" {
 		name = opts.Local.NodeName()
-	}
-	if name == "" {
-		name = "local"
 	}
 	arch := opts.LocalArch
 	if arch == "" {
@@ -193,6 +193,11 @@ func (f *Fleet) adoptLocal() error {
 // Detaching is idempotent and only ever removes the node it was minted for, so
 // a link that is superseded while it is shutting down cannot unregister its
 // replacement.
+//
+// It is the entry point for a Node this process holds directly — a test's
+// in-memory machine, or an embedder's — and not the one a real link takes:
+// ServeLink registers through linkUp, which answers a duplicate name the other
+// way round (see link.go). Nothing in cmd/sparkbox calls this.
 func (f *Fleet) Attach(n Node) (detach func(), err error) {
 	name := n.Name()
 	if name == "" {
@@ -302,6 +307,11 @@ func (f *Fleet) route(op, name string) (Node, error) {
 	return n, nil
 }
 
+// rowFor reads one name's ledger row. It takes no "nothing is linked" shortcut
+// the way the listing reads do: NodeOf must still answer with the machine a row
+// names even when that machine is not connected, exactly as route must still
+// raise Unreachable rather than "not found". The shortcut belongs to the
+// callers that would discard the row anyway — see Get.
 func (f *Fleet) rowFor(name string) (placement.Row, bool) {
 	if f.index == nil {
 		return placement.Row{}, false
@@ -366,8 +376,7 @@ func (f *Fleet) remoteRows(rows []placement.Row) []*host.Sandbox {
 		cache, seen := byNode[row.Node]
 		if !seen {
 			cache = map[string]*host.Sandbox{}
-			boxes, _ := n.Snapshot()
-			for _, b := range boxes {
+			for _, b := range n.Boxes() {
 				cache[b.Name] = b
 			}
 			byNode[row.Node] = cache
@@ -429,19 +438,37 @@ func (f *Fleet) remoteByOwner(owner string) []*host.Sandbox {
 // first and its answer is authoritative, so a single-box deployment never
 // reads a cache, never sees a stale record and never touches the ledger. The
 // index exists for other machines' sandboxes and for name allocation.
+//
+// It asks the holding machine for one record rather than for its inventory.
+// This read sits under every authorized operation (ctlops.owned) and every
+// browser terminal request, and a machine may hold MaxSandboxesPerNode of them,
+// so a whole-inventory copy per lookup is the wrong shape however small the
+// fleet is today. The quarantine and node-match rules are remoteRows' — a name
+// two machines claim is served by neither.
 func (f *Fleet) Get(name string) (*host.Sandbox, bool) {
 	if b, ok := f.localMgr.Get(name); ok {
 		return b, true
 	}
+	// Nothing linked means nothing to render whatever the ledger holds, and a
+	// box that has a ledger but has not been joined to anything is the ordinary
+	// single-machine deployment: it should not read sqlite on every lookup of a
+	// name it does not hold.
+	if !f.hasRemote() {
+		return nil, false
+	}
 	row, ok := f.rowFor(name)
+	if !ok || row.Node == f.localName || row.State == placement.StateQuarantine {
+		return nil, false
+	}
+	n, ok := f.nodeByName(row.Node)
 	if !ok {
 		return nil, false
 	}
-	boxes := f.remoteRows([]placement.Row{row})
-	if len(boxes) == 0 {
+	b, ok := n.Box(name)
+	if !ok {
 		return nil, false
 	}
-	return boxes[0], true
+	return f.serve(b, row, n.Online()), true
 }
 
 func (f *Fleet) List() []*host.Sandbox {
@@ -474,15 +501,21 @@ func (f *Fleet) ListByOwner(owner string) []*host.Sandbox {
 // ledger's PRIMARY KEY decides, so two concurrent creates cannot both win, and
 // there is no read-then-write window between checking a name and taking it.
 func (f *Fleet) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
-	return f.createOn(ctx, f.local, name, owner, image, vcpus, memMB)
+	return f.placed(f.local, name, owner, image, func() (*host.Sandbox, error) {
+		return f.local.Create(ctx, name, owner, image, vcpus, memMB)
+	})
 }
 
-func (f *Fleet) createOn(ctx context.Context, n Node, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
+// placed is the reserve/build/undo sequence both ways of making a sandbox
+// follow: take the name in the ledger first, then ask the machine, and hand the
+// name back if the machine says no. Create and Fork differ only in what build
+// does and in which machine it runs on.
+func (f *Fleet) placed(n Node, name, owner, image string, build func() (*host.Sandbox, error)) (*host.Sandbox, error) {
 	release, err := f.reserve(name, owner, image, n)
 	if err != nil {
 		return nil, err
 	}
-	b, err := n.Create(ctx, name, owner, image, vcpus, memMB)
+	b, err := build()
 	if err != nil {
 		release()
 		return nil, err
@@ -732,8 +765,7 @@ func (f *Fleet) Snapshots(owner string) []*host.Snapshot {
 	out := f.localMgr.Snapshots(owner)
 	var remote []*host.Snapshot
 	for _, n := range f.linked() {
-		_, snaps := n.Snapshot()
-		for _, s := range snaps {
+		for _, s := range n.Templates() {
 			if s.Owner != owner {
 				continue
 			}
@@ -768,16 +800,9 @@ func (f *Fleet) DeleteSnapshot(ctx context.Context, snapName, owner string) erro
 // forked there, and it is architecture-pinned by construction.
 func (f *Fleet) Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error) {
 	n, image := f.templateNode(owner, snapName)
-	release, err := f.reserve(newName, owner, image, n)
-	if err != nil {
-		return nil, err
-	}
-	b, err := n.Fork(ctx, snapName, newName, owner, vcpus, memMB)
-	if err != nil {
-		release()
-		return nil, err
-	}
-	return b, nil
+	return f.placed(n, newName, owner, image, func() (*host.Sandbox, error) {
+		return n.Fork(ctx, snapName, newName, owner, vcpus, memMB)
+	})
 }
 
 // templateNode resolves the machine holding an owner's template, and the
@@ -789,8 +814,7 @@ func (f *Fleet) templateNode(owner, snapName string) (Node, string) {
 		return f.local, s.Image
 	}
 	for _, n := range f.linked() {
-		_, snaps := n.Snapshot()
-		for _, s := range snaps {
+		for _, s := range n.Templates() {
 			if s.Owner == owner && s.Name == snapName {
 				return n, s.Image
 			}

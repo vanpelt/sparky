@@ -32,6 +32,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 )
 
 // DefaultSubdomain is the reserved name segment the edge dispatches on: the
@@ -227,30 +228,15 @@ func (h *Handler) SandboxName(host string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if !validSandboxName(name) {
+	// The manager's own create-time charset, asked of the one predicate that
+	// owns it rather than re-implemented here. Enforcing it keeps a hostile Host
+	// header from reaching the manager as a lookup key at all, and because it is
+	// literally the same rule, a name the manager would accept can never be
+	// rejected here.
+	if !reserved.ValidLabel(name) {
 		return "", false
 	}
 	return name, true
-}
-
-// validSandboxName mirrors host.Manager's create-time charset. Enforcing it
-// here keeps a hostile Host header from reaching the manager as a lookup key
-// at all, and it is the same rule, so a name the manager would accept is never
-// rejected here.
-func validSandboxName(s string) bool {
-	if s == "" || len(s) > 63 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '-' && i > 0:
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // resolve is the single owner gate every entry point passes through. Missing

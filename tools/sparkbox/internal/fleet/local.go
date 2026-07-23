@@ -24,27 +24,14 @@ type localNode struct {
 
 // Local adapts a *host.Manager to Node. name is what the fleet calls this
 // machine; empty falls back to the manager's own node name, which is the
-// string it already stamps on every record it creates.
+// string it already stamps on every record it creates. That fallback cannot be
+// empty either — host.NewManager coerces its own node name to "local" — so the
+// literal lives there and nowhere else.
 func Local(name string, mgr *host.Manager) Node {
 	if name == "" {
 		name = mgr.NodeName()
 	}
-	if name == "" {
-		name = "local"
-	}
 	return &localNode{name: name, mgr: mgr, startedAt: time.Now()}
-}
-
-// LocalManager recovers the concrete manager behind a local Node. The gateway
-// still needs it for the things that are node-local by construction — the
-// metadata service's guest-IP lookup, the legacy loopback API — and must not
-// reach them through the fleet.
-func LocalManager(n Node) (*host.Manager, bool) {
-	l, ok := n.(*localNode)
-	if !ok {
-		return nil, false
-	}
-	return l.mgr, true
 }
 
 func (l *localNode) Name() string { return l.name }
@@ -52,14 +39,27 @@ func (l *localNode) Name() string { return l.name }
 // Online is true by definition: this is the process asking.
 func (l *localNode) Online() bool { return true }
 
+// LastSeen is zero because this machine cannot go quiet: a last-seen time is
+// what an operator reads to tell how long ago a link stopped answering, and
+// this one is the process rendering the answer.
+func (l *localNode) LastSeen() time.Time { return time.Time{} }
+
+// Hangup and Revoke do nothing: there is no link to this machine to end, and
+// dropping it from the fleet's map is the whole of what could be done to it.
+func (l *localNode) Hangup(string, string) {}
+
+func (l *localNode) Revoke(string, error) {}
+
 // Facts fills in what a manager can answer about its own machine. Version,
 // Driver, Images and GuestSubnet stay empty because the manager genuinely does
 // not know them — they are flags and directory listings the process that built
 // it holds — and an invented value here would be reported to an operator as
-// fact.
+// fact. Protocol is this build's, which is a fact about this process and not a
+// guess about another machine.
 func (l *localNode) Facts() Facts {
 	c := l.mgr.Capacity()
 	return Facts{
+		Protocol:  nodelink.Protocol,
 		Node:      l.name,
 		Arch:      c.Arch,
 		OS:        runtime.GOOS,
@@ -70,9 +70,11 @@ func (l *localNode) Facts() Facts {
 	}
 }
 
-func (l *localNode) Snapshot() ([]*host.Sandbox, []*host.Snapshot) {
-	return l.mgr.List(), l.mgr.AllSnapshots()
-}
+func (l *localNode) Box(name string) (*host.Sandbox, bool) { return l.mgr.Get(name) }
+
+func (l *localNode) Boxes() []*host.Sandbox { return l.mgr.List() }
+
+func (l *localNode) Templates() []*host.Snapshot { return l.mgr.AllSnapshots() }
 
 func (l *localNode) Capacity() host.NodeCapacity { return l.mgr.Capacity() }
 

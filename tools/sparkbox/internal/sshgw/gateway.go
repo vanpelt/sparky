@@ -94,6 +94,24 @@ type Sandboxes interface {
 	RecordKey(name, fp string)
 }
 
+// FleetSandboxes is everything a fleet router has to be before it can stand in
+// for the local manager: the interactive slice above, plus the two the control
+// plane reads.
+//
+// All three are demanded here, in the field type, rather than asserted for at
+// wiring time. A gateway whose sandbox lookups go through the fleet while its
+// control plane reads the local manager has two answers to "who owns this box
+// and where does it live": `ssh <name>@` would resume a sandbox on whichever
+// machine holds it, and `ctl@ pause <name>` would look for it here and report it
+// gone. Nothing can reconcile that afterwards, so a router too narrow to back
+// the control plane must fail to compile rather than produce the split.
+// *fleet.Fleet satisfies it.
+type FleetSandboxes interface {
+	Sandboxes
+	ctlops.Sandboxes
+	ctlops.Templates
+}
+
 // Dialer opens the raw connection to a guest port; it is
 // net.Dialer.DialContext's shape. Nil means the host network, which is what a
 // single-box deployment has always done.
@@ -144,7 +162,7 @@ type GatewayOptions struct {
 	// Fleet, if set, replaces Manager on every sandbox lookup and resume this
 	// channel performs, so a sandbox held by another machine is
 	// indistinguishable from a local one.
-	Fleet Sandboxes
+	Fleet FleetSandboxes
 	// Dial, if set, opens upstream connections to guests through it rather than
 	// the host network — the seam a fleet's reverse tunnel plugs into.
 	Dial         Dialer
@@ -261,22 +279,13 @@ func opsConfig(opts GatewayOptions) ctlops.Config {
 	if opts.Manager != nil {
 		cfg.Sandboxes, cfg.Templates = opts.Manager, opts.Manager
 	}
-	// The fleet wins wherever both are set, for the same reason it wins in New:
-	// a gateway whose sandbox lookups go through the fleet while its control
-	// plane reads the local manager has two answers to "who owns this box and
-	// where does it live". `ssh <name>@` would resume a sandbox on whichever
-	// machine holds it and `ctl@ pause <name>` would look for it here and
-	// report it gone. A Fleet too narrow to back a control plane cannot be
-	// reconciled at all, so refuse rather than silently fall back to the split:
-	// the only callers are this package's own wiring, and a wiring mistake is
-	// better found at startup than by a user whose sandbox went missing.
+	// The fleet wins wherever both are set, for the same reason it wins in New
+	// and the reason FleetSandboxes asks for the control-plane methods at all:
+	// a control plane reading the local manager while lookups go through the
+	// fleet is a sandbox that resumes on one machine and cannot be paused from
+	// the other.
 	if opts.Fleet != nil {
-		boxes, okBoxes := opts.Fleet.(ctlops.Sandboxes)
-		templates, okTemplates := opts.Fleet.(ctlops.Templates)
-		if !okBoxes || !okTemplates {
-			panic("sshgw: GatewayOptions.Fleet cannot back the control plane; build ctlops.Ops from it and pass Ops")
-		}
-		cfg.Sandboxes, cfg.Templates = boxes, templates
+		cfg.Sandboxes, cfg.Templates = opts.Fleet, opts.Fleet
 	}
 	if opts.Users != nil {
 		cfg.Accounts = opts.Users
@@ -293,16 +302,10 @@ func opsConfig(opts GatewayOptions) ctlops.Config {
 	if opts.Session != nil {
 		cfg.Sessions = opts.Session
 	}
-	// The roster the node door authenticates against also backs the `ctl@ node`
-	// commands, when it can. A gateway that enrols machines while its control
-	// plane answers "this host is not a fleet gateway" can never approve one, so
-	// the two must not be wired separately. Only some rosters can do both:
-	// ctlops needs the roster joined to the live fleet, which no single store
-	// can produce alone (cmd/sparkbox builds that join and passes its own Ops),
-	// so this is a probe rather than a requirement.
-	if roster, ok := opts.Nodes.(ctlops.NodeRoster); ok {
-		cfg.Nodes = roster
-	}
+	// cfg.Nodes is deliberately not filled in from opts.Nodes. The `ctl@ node`
+	// commands need the roster joined to the live fleet — which machine is
+	// answering, and what removing it would strand — and no store can produce
+	// that join alone. Whoever builds it (cmd/sparkbox) passes its own Ops.
 	return cfg
 }
 
@@ -815,12 +818,13 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 		fmt.Fprintf(s.Stderr(),
 			"sparkbox: you already have %d running sandboxes (max %d)%s\r\n",
 			len(limit.Running), limit.Max, namesOrNothing(limit.Running))
-		// The example only exists when there is a name to put in it. In a fleet
-		// this error can come back off the wire — another machine's refusal,
-		// rebuilt from JSON that machine authored — so the running set is not
-		// something this gateway produced and may be absent or empty. Indexing
-		// it unconditionally panicked the session goroutine on a frame a node
-		// controls, which is a gateway a node can crash.
+		// The example only exists when there is a name to put in it. Nothing
+		// reaches here with an empty set today: host.Manager.admit only mints a
+		// LimitError once it has collected at least one running name, and
+		// ctlops.hostFromWire drops the typed cause entirely when a node's
+		// refusal arrives with no name that survives scrubbing. This is defence
+		// in depth behind those two, not the thing standing between a node and a
+		// panicked session goroutine — that was closed at the wire.
 		if len(limit.Running) > 0 {
 			fmt.Fprintf(s.Stderr(), "Pause one to free a slot, e.g.:  ssh %s@%s pause %s\r\n",
 				ControlUser, g.domainHint(), limit.Running[0])

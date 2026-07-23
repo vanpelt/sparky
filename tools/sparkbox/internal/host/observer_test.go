@@ -187,14 +187,13 @@ func TestObserverSeesEveryTransition(t *testing.T) {
 	}
 }
 
-// TestObserverGetsACopy covers the post-construction setter and the hand-off:
-// an observer holding a record must not be holding the manager's, or anything
-// it does with it — stamping a node name, say — rewrites live state.
+// TestObserverGetsACopy covers the hand-off: an observer holding a record must
+// not be holding the manager's, or anything it does with it — stamping a node
+// name, say — rewrites live state.
 func TestObserverGetsACopy(t *testing.T) {
 	ctx := context.Background()
 	rec := &recorder{}
-	m := newTestManager(t, host.Options{})
-	m.SetObserver(rec)
+	m := newTestManager(t, host.Options{Observer: rec})
 
 	if _, err := m.Create(ctx, "box", "alice", "ubuntu", 1, 512); err != nil {
 		t.Fatal(err)

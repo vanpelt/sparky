@@ -45,22 +45,17 @@ const (
 	tokenSalt    = "sparkbox-console/v1"
 )
 
+// Local names for the dashboard probe budgets, which are stated once in
+// internal/webui so both consoles time a fleet the same way. probeTimeout also
+// bounds the balloon read below; tunneledProbeTimeout is spent inside
+// webui.Probe.Listening.
 const (
-	// probeTimeout bounds the per-route TCP dial that checks whether anything
-	// is listening on a forwarded port. Guest IPs are on a local bridge, so a
-	// live listener answers in microseconds; anything slower is effectively
-	// down.
-	probeTimeout = 300 * time.Millisecond
-	// tunneledProbeTimeout is the same ceiling for a sandbox on another
-	// machine, where the question costs a round trip to that machine before its
-	// bridge is even touched. It applies per sandbox and only to the remote
-	// ones: a box with no fleet must not pay a 2s worst case to learn what it
-	// has always learned in 300ms.
-	tunneledProbeTimeout = 2 * time.Second
+	probeTimeout         = webui.ProbeTimeout
+	tunneledProbeTimeout = webui.TunneledProbeTimeout
 )
 
 // Dialer is net.Dialer.DialContext's shape — see SetDialer.
-type Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
+type Dialer = webui.Dialer
 
 // Sandboxes is the sandbox lifecycle and inventory this console drives. It is
 // an interface so the console can be handed the fleet router instead of one
@@ -89,11 +84,10 @@ var _ Sandboxes = (*host.Manager)(nil)
 type Handler struct {
 	// mgr is this machine's own manager. It is kept alongside boxes because the
 	// balloon and snapshot reads below can only be answered by the machine
-	// running the VM — they are not routable, and asking about a sandbox that
-	// lives elsewhere simply reports nothing.
+	// running the VM — they are not routable, so a sandbox that lives elsewhere
+	// is skipped rather than asked.
 	mgr    *host.Manager
 	boxes  Sandboxes
-	node   string          // this machine's name, for telling local rows from remote ones
 	store  *routes.Store   // optional: nil hides web routes from the UI
 	sched  *schedule.Store // optional: nil hides the next-wake column
 	domain string          // base domain for building route URLs, e.g. "hivemind.tools"
@@ -101,7 +95,9 @@ type Handler struct {
 	token  string // expected cookie value, derived from the password
 	secure bool   // set the Secure flag on the auth cookie (proxy terminates TLS)
 
-	dial Dialer // nil probes over the host network
+	// probe carries this machine's name and the fleet dialer: together they
+	// decide which rows are remote and how long their port probes may take.
+	probe webui.Probe
 
 	capacities func() []host.NodeCapacity // every machine's resource picture
 }
@@ -119,7 +115,7 @@ func New(mgr *host.Manager, store *routes.Store, domain, password string, secure
 		token: deriveToken(password), secure: secure,
 	}
 	if mgr != nil {
-		h.node = mgr.NodeName()
+		h.probe.Node = mgr.NodeName()
 	}
 	h.capacities = func() []host.NodeCapacity { return []host.NodeCapacity{h.mgr.Capacity()} }
 	return h
@@ -140,12 +136,9 @@ func (h *Handler) SetSandboxes(s Sandboxes) { h.boxes = s }
 func (h *Handler) SetCapacities(f func() []host.NodeCapacity) { h.capacities = f }
 
 // SetDialer routes the listening-port probe through d instead of dialing the
-// guest's address on the host network. It matters for more than reachability:
-// every machine in a fleet hands out the same 172.30.x.y guest addresses, so a
-// gateway probing a remote sandbox's address directly would answer with
-// whatever its OWN sandbox at that address is doing — a green badge for a port
-// nobody is listening on.
-func (h *Handler) SetDialer(d Dialer) { h.dial = d }
+// guest's address on the host network — see webui.Probe.Dial for why a fleet
+// cannot be probed directly.
+func (h *Handler) SetDialer(d Dialer) { h.probe.Dial = d }
 
 // deriveToken maps a password to the opaque cookie value. Same password in,
 // same token out, so validation needs no server-side session store.
@@ -253,36 +246,21 @@ type sandboxView struct {
 	MemUsedMB *int64 `json:"mem_used_mb,omitempty"`
 }
 
-// public copies a record for the wire with its addresses dropped. The page has
-// never shown them, and once the console is pointed at the fleet they are the
-// synthetic <sandbox>.<node>.sandbox.invalid names the gateway mints for
-// sandboxes on other machines: guaranteed not to resolve, meaningless to a
-// browser, and an invitation for something to dial them. ctlops.info drops the
-// same three fields for the same reason. nil in, nil out — the callers below
-// hand it whatever Get returned.
-func public(b *host.Sandbox) *host.Sandbox {
-	if b == nil {
-		return nil
-	}
-	c := *b
-	c.SSHAddr, c.HostIP, c.GuestV6 = "", "", ""
-	return &c
-}
-
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	boxes := h.boxes.List()
 	views := make([]sandboxView, len(boxes))
 	now := time.Now()
 	var wg sync.WaitGroup
 	for i, b := range boxes {
-		views[i] = sandboxView{Sandbox: public(b), Routes: []routeStatus{}}
+		remote := h.probe.Remote(b)
+		views[i] = sandboxView{Sandbox: webui.Public(b), Routes: []routeStatus{}}
 		views[i].NextWake, views[i].Schedules = h.nextWake(b.Name, now)
 		// Read the guest's real memory use concurrently (balloon stats); bounded
-		// by probeTimeout so one slow VM can't stall the dashboard. The read is
-		// this machine's manager either way — a balloon can only be asked of the
-		// host running the VM — so it never crosses a machine and never needs
-		// the wider tunneled budget.
-		if b.State == vmm.StateRunning {
+		// by probeTimeout so one slow VM can't stall the dashboard. Only for the
+		// sandboxes on this machine: a balloon can only be asked of the host
+		// running the VM, so a remote name would just miss in the local
+		// manager's map and report nothing.
+		if b.State == vmm.StateRunning && !remote {
 			wg.Add(1)
 			go func(name string, dst **int64) {
 				defer wg.Done()
@@ -311,7 +289,6 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		if b.State != vmm.StateRunning || b.HostIP == "" {
 			continue
 		}
-		remote := h.isRemote(b)
 		for j := range views[i].Routes {
 			wg.Add(1)
 			go func(addr string, listening *bool) {
@@ -324,31 +301,10 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, views)
 }
 
-// isRemote reports whether a sandbox lives on another machine. A record with no
-// node at all is one this machine's manager wrote before nodes were named, so
-// it is ours.
-func (h *Handler) isRemote(b *host.Sandbox) bool { return b.Node != "" && b.Node != h.node }
-
-// listening reports whether anything accepts a connection at addr. A refusal
-// and a timeout are the same answer here — the badge says "something is
-// serving this port", and nothing else about the failure reaches the page.
+// listening is the shared port probe (webui.Probe) bound to this console's
+// dialer and node.
 func (h *Handler) listening(ctx context.Context, addr string, remote bool) bool {
-	budget := probeTimeout
-	if remote {
-		budget = tunneledProbeTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-	dial := h.dial
-	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
-	}
-	conn, err := dial(ctx, "tcp", addr)
-	if err != nil {
-		return false
-	}
-	conn.Close() //nolint:errcheck
-	return true
+	return h.probe.Listening(ctx, addr, remote)
 }
 
 // nextWake returns the soonest upcoming scheduled fire for a sandbox and the
@@ -402,7 +358,7 @@ func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("console paused sandbox", "name", name)
 	box, _ := h.boxes.Get(name)
-	writeJSON(w, http.StatusOK, public(box))
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
@@ -413,7 +369,7 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.Info("console resumed sandbox", "name", name)
-	writeJSON(w, http.StatusOK, public(box))
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 // destroy permanently removes a sandbox: its VM and local disk, and — when the
@@ -441,7 +397,7 @@ func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("console archived sandbox", "name", name)
 	box, _ := h.boxes.Get(name)
-	writeJSON(w, http.StatusOK, public(box))
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 type snapshotReq struct {
@@ -503,7 +459,7 @@ func (h *Handler) fork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.Info("console forked snapshot", "snapshot", r.PathValue("snapshot"), "into", req.Name)
-	writeJSON(w, http.StatusCreated, public(box))
+	writeJSON(w, http.StatusCreated, webui.Public(box))
 }
 
 func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -535,7 +491,7 @@ func (h *Handler) pin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.Info("console pinned sandbox", "name", name)
-	writeJSON(w, http.StatusOK, public(box))
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
@@ -546,7 +502,7 @@ func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("console unpinned sandbox", "name", name)
 	box, _ := h.boxes.Get(name)
-	writeJSON(w, http.StatusOK, public(box))
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 func statusFor(err error) int {

@@ -99,10 +99,9 @@ func nodeLine(n ctlops.NodeInfo) string {
 	if arch == "" {
 		arch = "-"
 	}
-	boxes := fmt.Sprintf("%d sandboxes", n.Sandboxes)
-	if n.Sandboxes == 1 {
-		boxes = "1 sandbox"
-	}
+	// Shared with the `node rm` refusal, which quotes the same count back at the
+	// operator who just read this column.
+	boxes := ctlops.CountSandboxes(n.Sandboxes)
 	name := n.Name
 	if n.Local {
 		// The gateway is in its own listing because a fleet's capacity includes

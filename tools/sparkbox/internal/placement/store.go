@@ -24,7 +24,11 @@ import (
 )
 
 // A row's State says whether the gateway's picture of a name still matches the
-// fleet's. Reconcile writes it; nothing authorizes on it.
+// fleet's. Nothing authorizes on it, and nothing writes anything but StateOK
+// yet: reconciliation — the loop that compares a node's inventory against the
+// rows placed on it — is M2, and this is the vocabulary it is contracted to
+// use. Only StateQuarantine is read today, by the listing paths, which refuse
+// to serve a row two machines claim.
 const (
 	StateOK         = ""           // the owning node has it and agrees
 	StateOrphaned   = "orphaned"   // the node is up and does not have it
@@ -99,35 +103,6 @@ func Open(path string) (*Store, error) {
 	}
 	return &Store{db: db}, nil
 }
-
-// addColumnIfMissing runs ALTER TABLE ADD COLUMN unless the column already
-// exists. sqlite has no ADD COLUMN IF NOT EXISTS, and a bare ALTER errors on
-// the second boot, so we consult table_info first. Unused until the first
-// schema migration; kept as this store's own copy per the deliberate
-// per-package duplication convention.
-func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return err
-		}
-		if name == column {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
-	return err
-}
-
-var _ = addColumnIfMissing // referenced by the first future migration
 
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -218,7 +193,8 @@ func (s *Store) Rename(old, new string) error {
 }
 
 // SetNode repoints a name at another machine. Migration only — a sandbox's
-// rootfs does not move on its own, so this is an operator moving it.
+// rootfs does not move on its own, so this is an operator moving it. Part of
+// the M2 reconcile contract: nothing in the gateway calls it yet.
 func (s *Store) SetNode(name, node string) error {
 	if node == "" {
 		return fmt.Errorf("placement needs a node")
@@ -229,6 +205,9 @@ func (s *Store) SetNode(name, node string) error {
 // SetRowState records what reconciliation last found. It is a cache, so a
 // missing row is a lost race with a destroy rather than an error worth
 // escalating — but the caller is told, because it is also how a typo surfaces.
+//
+// Nothing calls it yet: the reconcile loop that would is M2, and this is the
+// write half of the contract its state vocabulary belongs to.
 func (s *Store) SetRowState(name, state string) error {
 	return s.update(`UPDATE placements SET state = ?, updated_at = ? WHERE name = ?`, state, time.Now().UTC(), name)
 }

@@ -573,7 +573,14 @@ type InventoryMsg struct {
 
 // InventoryAck tells a node what the gateway made of its inventory: names it
 // claims but the ledger does not place on it, and names two machines claim.
-// Both are reported rather than acted on — nothing is deleted on a node's say-so.
+// Both are reported rather than acted on — nothing is deleted on a node's
+// say-so.
+//
+// The gateway sends both fields empty today. Filling them is reconciliation,
+// which is M2: until a sandbox can be placed on another machine there is no
+// gateway-authored row for a node's inventory to disagree with, and adopting
+// names out of one would invent placements nobody asked for. This is the shape
+// that answer will take, pinned now so both halves are written against it.
 type InventoryAck struct {
 	Orphaned    []string `json:"orphaned,omitempty"`
 	Quarantined []string `json:"quarantined,omitempty"`
