@@ -11,9 +11,18 @@ import "time"
 // ---------------------------------------------------------------------------
 
 type SandboxInfo struct {
-	Name        string    `json:"name"`
-	Owner       string    `json:"owner"`
-	State       string    `json:"state"`
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+	State string `json:"state"`
+	// Node names the machine whose driver runs this VM. It is the first
+	// internal-topology field info() deliberately does NOT drop: a user needs to
+	// know which machine their sandbox is on to reason about its arch, its
+	// accelerators and its outages, and unlike a guest address a node name is
+	// not dialable. omitempty keeps a single-box payload byte-identical.
+	Node string `json:"node,omitempty"`
+	// Unreachable reports that the node holding this sandbox is not answering
+	// the control plane. The sandbox is very likely still running.
+	Unreachable bool      `json:"unreachable,omitempty"`
 	Pinned      bool      `json:"pinned"`
 	Ballooned   bool      `json:"ballooned,omitempty"`
 	Tags        []string  `json:"tags"` // never nil

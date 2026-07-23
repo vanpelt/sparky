@@ -9,7 +9,7 @@ import "testing"
 func TestLiveDoorsAreReserved(t *testing.T) {
 	for _, n := range []string{
 		"console", "my", "api", "login", "oidc", "xterm", // proxy edge
-		"new", "ctl", "signup", // ssh gateway usernames
+		"new", "ctl", "signup", "node", // ssh gateway usernames
 	} {
 		if !Name(n) {
 			t.Errorf("Name(%q) = false — something answers there today", n)

@@ -23,6 +23,14 @@ const testPassword = "s3cret-pw"
 
 func newTestConsole(t *testing.T) (http.Handler, *host.Manager, *routes.Store) {
 	t.Helper()
+	h, mgr, store := newTestHandler(t)
+	return h.Handler(), mgr, store
+}
+
+// newTestHandler is newTestConsole before the mux is built, for the tests that
+// install a router or a dialer on the handler itself.
+func newTestHandler(t *testing.T) (*Handler, *host.Manager, *routes.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	hostKey, err := sshgw.LoadOrCreateKey(dir, "gateway_host_key")
@@ -50,7 +58,7 @@ func newTestConsole(t *testing.T) (http.Handler, *host.Manager, *routes.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(mgr, store, "hivemind.tools", testPassword, false, log).Handler(), mgr, store
+	return New(mgr, store, "hivemind.tools", testPassword, false, log), mgr, store
 }
 
 // login returns the session cookie for the given password.
@@ -223,6 +231,43 @@ func TestConsoleClusterCapacity(t *testing.T) {
 	}
 	if n.UsedVCPUs != 2 || n.UsedMemMB != 1024 || n.Running != 1 || n.Sandboxes != 1 {
 		t.Fatalf("unexpected node usage: %+v", n)
+	}
+}
+
+// The cluster payload has always been a list, so a fleet is the same document
+// with more entries and the page's own nodes.reduce does the aggregating. What
+// has to hold is that the endpoint asks whoever was installed rather than the
+// local manager — including for a machine that is currently offline, which no
+// manager could report on.
+func TestConsoleClusterReportsEveryNode(t *testing.T) {
+	h := New(nil, nil, "hivemind.tools", testPassword, false, slog.New(slog.DiscardHandler))
+	h.SetCapacities(func() []host.NodeCapacity {
+		return []host.NodeCapacity{
+			{Node: "gw", Arch: "arm64", TotalMemMB: 16384, Online: true},
+			{Node: "nodeb", Arch: "amd64", TotalMemMB: 65536, Online: false},
+		}
+	})
+	srv := h.Handler()
+
+	req := httptest.NewRequest("GET", "/api/cluster", nil)
+	req.AddCookie(login(t, srv, testPassword))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cluster: status %d, want 200", rec.Code)
+	}
+	var c clusterResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &c); err != nil {
+		t.Fatalf("decode cluster: %v", err)
+	}
+	if len(c.Nodes) != 2 {
+		t.Fatalf("cluster returned %d nodes, want 2: %+v", len(c.Nodes), c.Nodes)
+	}
+	if c.Nodes[0].Node != "gw" || !c.Nodes[0].Online {
+		t.Fatalf("first node = %+v, want an online gw", c.Nodes[0])
+	}
+	if c.Nodes[1].Node != "nodeb" || c.Nodes[1].Arch != "amd64" || c.Nodes[1].Online {
+		t.Fatalf("second node = %+v, want an offline amd64 nodeb", c.Nodes[1])
 	}
 }
 

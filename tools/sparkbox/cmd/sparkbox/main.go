@@ -32,6 +32,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
@@ -39,6 +40,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/restapi"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -135,6 +137,8 @@ func serve(args []string) error {
 		dnsAnswer      = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
 		openSignup     = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
 		invitesPer     = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
+		nodeNameFlag   = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
+		archFlag       = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -259,7 +263,27 @@ func serve(args []string) error {
 	if hostMem == 0 {
 		hostMem = detectHostMemMB()
 	}
-	nodeName, _ := os.Hostname()
+	// This machine's name in the fleet. The hostname stays the default because
+	// it is already the `box` claim in every id token this host has ever issued
+	// — externally observable, so a fleet-wide rename to something tidier like
+	// "local" would break relying parties that pinned it.
+	nodeName := *nodeNameFlag
+	if nodeName == "" {
+		nodeName, _ = os.Hostname()
+	}
+	if nodeName == "" {
+		nodeName = "local"
+	}
+
+	// The placement ledger: which machine holds which sandbox name. It is a
+	// sixth writer on the same sqlite file, and on a single-box deployment its
+	// only job is being the name allocator — the local manager stays the truth
+	// for everything it holds.
+	placeStore, err := placement.Open(filepath.Join(*stateDir, "sparkbox.db"))
+	if err != nil {
+		return fmt.Errorf("placement store: %w", err)
+	}
+	defer placeStore.Close()
 
 	// --edge-v4 feeds the per-name front-door A records below. Parsed here, once,
 	// so a malformed value is reported once too.
@@ -323,6 +347,8 @@ func serve(args []string) error {
 		ActivityNetBytes:   uint64(*activityNetKB) * 1024,
 		ArchivePrefix:      *archivePrefix,
 		NodeName:           nodeName,
+		Arch:               *archFlag,
+		Release:            version,
 		HostVCPUs:          int64(runtime.NumCPU()),
 	}
 	if doorHooks != nil {
@@ -339,11 +365,27 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// The fleet router stands between every control-plane surface and the
+	// machine that actually holds a sandbox. With no other machine linked it is
+	// this manager with a ledger bolted on: the local answer is authoritative
+	// for everything local, so a single-box deployment behaves exactly as it did
+	// before this existed.
+	flt, err := fleet.New(fleet.Options{
+		Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
+		Index: placeStore, Log: log,
+	})
+	if err != nil {
+		return fmt.Errorf("fleet: %w", err)
+	}
+	defer flt.Close()
+
 	// Secret-env propagation: the syncer rewrites a sandbox's managed
 	// /etc/environment block over SSH when it reaches running (create, resume,
 	// restore, fork) and when the console changes a tag or secret. Installed
 	// post-construction so the manager never depends on it at build time.
 	syncer := envsync.New(secretsStore, mgr, upstreamKey, log)
+	syncer.SetDialer(flt.DialContext)
 	mgr.SetEnvSync(syncer)
 
 	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
@@ -354,7 +396,7 @@ func serve(args []string) error {
 		sluiceClient = netpush.NewClient(*sluiceSocket)
 		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
 	}
-	netSyncer := netpush.NewSyncer(sluiceClient, fleet{mgr}, netrulesStore, log)
+	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, netrulesStore, log)
 	faviconCache := domainmeta.NewFaviconCache(filepath.Join(*stateDir, "favicons"), nil)
 
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
@@ -376,7 +418,7 @@ func serve(args []string) error {
 	// then be invisible to the SSH channel, and only the Ops that owns a reaper
 	// can stop it.
 	ops := ctlops.New(ctlops.Config{
-		Sandboxes: mgr, Templates: mgr, Accounts: userStore,
+		Sandboxes: flt, Templates: flt, Accounts: userStore,
 		Tags: secretsStore, Schedules: scheduleStore, Routes: routeStore,
 		Sessions:     sessionSigner,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
@@ -386,7 +428,8 @@ func serve(args []string) error {
 	defer ops.Close()
 
 	gw := sshgw.New(sshgw.GatewayOptions{
-		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
+		Manager: mgr, Fleet: flt, Dial: flt.DialContext,
+		Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
 		Doors: doors, Domain: *proxyDomain,
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
@@ -397,6 +440,8 @@ func serve(args []string) error {
 	// The gateway knows which terminals are attached to which sandbox, so it is
 	// what the manager calls to release them when a sandbox is paused.
 	mgr.SetSessions(gw)
+
+	warnDoorNameCollision(sshgw.NodeUser, mgr, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -434,7 +479,13 @@ func serve(args []string) error {
 	// minute-granularity crons fire promptly; the gateway is its exec runner.
 	go schedule.NewScheduler(scheduleStore, gw, log).Run(ctx, 30*time.Second)
 
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}
+	// The legacy loopback API goes through the fleet like every other surface.
+	// Not to reach other machines — it is unauthenticated and stays bound to
+	// 127.0.0.1 — but because its create and destroy allocate and release
+	// sandbox names, and the placement ledger is where names are allocated. A
+	// create that skipped it would take a name nothing recorded; a destroy that
+	// skipped it would reserve one forever.
+	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(flt, routeStore, *defaultImage, log).Handler()}
 	sshSrv := gw.Server(*sshAddr)
 
 	errCh := make(chan error, 5)
@@ -484,7 +535,8 @@ func serve(args []string) error {
 
 	var proxySrv *http.Server
 	if *proxyAddr != "" {
-		px := proxy.New(mgr, routeStore, *proxyDomain, log)
+		px := proxy.New(flt, routeStore, *proxyDomain, log)
+		px.SetDialer(flt.DialContext)
 		// The issuer rides on the existing proxy edge: wildcard DNS already
 		// resolves oidc.<domain> to this host and autocert already issues a cert
 		// per SNI, so serving it is two GET handlers and no new listener.
@@ -524,6 +576,13 @@ func serve(args []string) error {
 		if consolePw != "" {
 			consoleH := console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log)
 			consoleH.SetSchedules(scheduleStore)
+			// The manager it was built with stays for the balloon reads, which
+			// only the machine running a VM can answer; everything else — the
+			// listing and every lifecycle action — goes through the fleet, so
+			// the placement ledger sees every name the console takes or frees.
+			consoleH.SetSandboxes(flt)
+			consoleH.SetCapacities(flt.Capacities)
+			consoleH.SetDialer(flt.DialContext)
 			px.SetConsole(*consoleSub, consoleH.Handler())
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
@@ -535,6 +594,11 @@ func serve(args []string) error {
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			// Same split as the operator console: the manager answers the
+			// balloon and CPU reads for this machine's own VMs, the fleet
+			// answers everything an owner can act on.
+			uc.SetSandboxes(flt)
+			uc.SetDialer(flt.DialContext)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			// The apex has no other job, and the user console is the only page a
 			// visitor who typed the bare domain could have wanted. Set alongside
@@ -553,9 +617,9 @@ func serve(args []string) error {
 		if xtermLabel != "" {
 			warnXtermSuffixCollision(xtermLabel, mgr, routeStore, log)
 			xt = xterm.New(xterm.Config{
-				Sandboxes: mgr, Accounts: userStore, Sessions: sessionSigner,
-				UpstreamKey: upstreamKey,
-				Domain:      *proxyDomain, Subdomain: xtermLabel,
+				Sandboxes: flt, Accounts: userStore, Sessions: sessionSigner,
+				UpstreamKey: upstreamKey, Dial: flt.DialContext,
+				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
 				// The gateway owns the one live-session registry the manager
 				// closes on pause; a browser terminal that kept its own would be
@@ -696,6 +760,19 @@ func warnSubdomainCollision(what, sub string, mgr *host.Manager, rs *routes.Stor
 	}
 }
 
+// warnDoorNameCollision reports a sandbox holding the name of an SSH gateway
+// door. Username routing resolves the gateway's own doors before it looks for a
+// sandbox, so the squatter goes dark rather than winning — and unlike the HTTP
+// surfaces this one has no subdomain flag to move it to. A sandbox may predate
+// the reservation (names are validated at create and rename time only), so
+// renaming it is the operator's call.
+func warnDoorNameCollision(door string, mgr *host.Manager, log *slog.Logger) {
+	if _, exists := mgr.Get(door); exists {
+		log.Warn("a sandbox is named after an ssh gateway door, so it is unreachable as ssh "+door+"@<domain>",
+			"sandbox", door)
+	}
+}
+
 // warnXtermSuffixCollision is the same warning for a family of names rather
 // than one name. Every subdomain ending in "-<label>" now reaches the terminal
 // handler before any route lookup, so a sandbox or route that predates the
@@ -729,12 +806,16 @@ func warnXtermSuffixCollision(label string, mgr *host.Manager, rs *routes.Store,
 // keeps a stolen token from being replayable anywhere else.
 const defaultAudience = "https://hivemind.wandb.tools"
 
-// splitList parses a comma-separated flag into a trimmed, non-empty list.
-// fleet adapts the host manager to netpush.Fleet: only running sandboxes have a
-// live tap, so paused/archived ones are filtered out here.
-type fleet struct{ mgr *host.Manager }
+// netpushFleet adapts the host manager to netpush.Fleet: only running sandboxes
+// have a live tap, so paused/archived ones are filtered out here.
+//
+// It stays on the local manager rather than the fleet router on purpose: sluice
+// runs once per machine, enforces against that machine's own taps, and its PUT
+// /policy replaces the whole set — feeding it another machine's sandboxes would
+// describe taps that do not exist here.
+type netpushFleet struct{ mgr *host.Manager }
 
-func (f fleet) List() []netpush.Sandbox {
+func (f netpushFleet) List() []netpush.Sandbox {
 	var out []netpush.Sandbox
 	for _, b := range f.mgr.List() {
 		if b.State != vmm.StateRunning {
@@ -762,6 +843,7 @@ func pushLoop(ctx context.Context, s *netpush.Syncer, log *slog.Logger) {
 	}
 }
 
+// splitList parses a comma-separated flag into a trimmed, non-empty list.
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

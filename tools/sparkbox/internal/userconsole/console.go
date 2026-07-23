@@ -47,11 +47,48 @@ var indexTemplate []byte
 // minified, and pre-gzipped once at package init — see internal/webui.
 var indexPage = webui.Build(indexTemplate)
 
-// probeTimeout bounds the per-route TCP dial that checks whether anything is
-// listening on a forwarded port, and the per-sandbox mem/CPU stat reads.
-// Guest IPs are on a local bridge, so a live listener answers in
-// microseconds; anything slower is effectively down.
-const probeTimeout = 300 * time.Millisecond
+const (
+	// probeTimeout bounds the per-route TCP dial that checks whether anything
+	// is listening on a forwarded port, and the per-sandbox mem/CPU stat
+	// reads. Guest IPs are on a local bridge, so a live listener answers in
+	// microseconds; anything slower is effectively down.
+	probeTimeout = 300 * time.Millisecond
+	// tunneledProbeTimeout is the same ceiling for a sandbox on another
+	// machine, where the question costs a round trip to that machine before its
+	// bridge is even touched. It applies per sandbox and only to the remote
+	// ones: a box with no fleet must not pay a 2s worst case to learn what it
+	// has always learned in 300ms.
+	tunneledProbeTimeout = 2 * time.Second
+)
+
+// Dialer is net.Dialer.DialContext's shape — see SetDialer.
+type Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// Sandboxes is the sandbox lifecycle and inventory this console drives. It is
+// an interface so the console can be handed the fleet router instead of one
+// machine's manager: sandbox names are allocated fleet-wide in the placement
+// ledger, so a destroy that went straight to the local manager would leave the
+// name reserved forever, and a rename or a fork would take a name no row ever
+// recorded. Satisfied structurally by both *host.Manager and *fleet.Fleet
+// (importing neither), and on a one-machine deployment the fleet is the
+// manager, so the console behaves exactly as it did before it existed.
+type Sandboxes interface {
+	Get(name string) (*host.Sandbox, bool)
+	ListByOwner(owner string) []*host.Sandbox
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Pause(ctx context.Context, name string) error
+	Archive(ctx context.Context, name string) error
+	Destroy(ctx context.Context, name string) error
+	Reboot(ctx context.Context, name string) error
+	Rename(ctx context.Context, oldName, newName, owner string) error
+	SetPinned(name string, pinned bool) error
+	Snapshots(owner string) []*host.Snapshot
+	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, snapName, owner string) error
+	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
+}
+
+var _ Sandboxes = (*host.Manager)(nil)
 
 // Action budgets copy the gateway's (internal/sshgw): pausing writes the
 // guest's full memory snapshot, and archive/restore/snapshot move the whole
@@ -71,7 +108,13 @@ type OwnerSyncer interface {
 
 // Handler serves the user console UI and its JSON API.
 type Handler struct {
+	// mgr is this machine's own manager. It is kept alongside boxes because the
+	// balloon and CPU reads below can only be answered by the machine running
+	// the VM — they are not routable, and asking about a sandbox that lives
+	// elsewhere simply reports nothing.
 	mgr      *host.Manager
+	boxes    Sandboxes
+	node     string                   // this machine's name, for telling local rows from remote ones
 	routes   *routes.Store            // optional: nil hides web routes and disables port/visibility
 	secrets  *secrets.Store           // optional: nil disables tags + secrets endpoints
 	netrules *netrules.Store          // optional: nil disables network-rule endpoints (501)
@@ -90,6 +133,8 @@ type Handler struct {
 	log      *slog.Logger
 	loginURL string // where unauthenticated browsers are sent
 	origin   string // first-party Origin accepted by the CSRF gate
+
+	dial Dialer // nil probes over the host network
 }
 
 // New builds a user-console handler for <subdomain>.<domain> (subdomain is
@@ -111,15 +156,35 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 	// the logout cookie Domain, login URL, and CSRF origin match the ones
 	// login built.
 	domain = strings.TrimPrefix(domain, ".")
-	return &Handler{
-		mgr: mgr, routes: routeStore, secrets: secretsStore,
+	h := &Handler{
+		mgr: mgr, boxes: mgr, routes: routeStore, secrets: secretsStore,
 		netrules: netrulesStore, netsync: netSync, favicons: favicons,
 		accounts: accounts, signer: signer, syncer: syncer,
 		domain: domain, xtermSub: strings.Trim(xtermSub, "."), secure: secure, log: log,
 		loginURL: "https://login." + domain + "/",
 		origin:   "https://" + subdomain + "." + domain,
 	}
+	if mgr != nil {
+		h.node = mgr.NodeName()
+	}
+	return h
 }
+
+// SetSandboxes points the console's lifecycle actions and its listing at the
+// fleet router rather than straight at this machine's manager, so an action
+// reaches the machine that actually holds the sandbox and every name it takes
+// or releases is recorded in the placement ledger. Unset, the console drives
+// the manager it was built with — which is what a one-machine deployment wants
+// and what every test builds.
+func (h *Handler) SetSandboxes(s Sandboxes) { h.boxes = s }
+
+// SetDialer routes the listening-port probe through d instead of dialing the
+// guest's address on the host network. It matters for more than reachability:
+// every machine in a fleet hands out the same 172.30.x.y guest addresses, so a
+// gateway probing a remote sandbox's address directly would answer with
+// whatever its OWN sandbox at that address is doing — a green badge on
+// somebody else's port.
+func (h *Handler) SetDialer(d Dialer) { h.dial = d }
 
 func (h *Handler) Handler() http.Handler {
 	auth := edgeauth.Require(h.signer, h.accounts, h.loginURL)
@@ -230,13 +295,29 @@ type sandboxView struct {
 	EnvUndecryptable bool          `json:"env_undecryptable,omitempty"`
 }
 
+// public copies a record for the wire with its addresses dropped. The page has
+// never shown them, and once the console is pointed at the fleet they are the
+// synthetic <sandbox>.<node>.sandbox.invalid names the gateway mints for
+// sandboxes on other machines: guaranteed not to resolve, meaningless to a
+// browser, and an invitation for something to dial them. ctlops.info drops the
+// same three fields for the same reason. nil in, nil out — the callers below
+// hand it whatever Get returned.
+func public(b *host.Sandbox) *host.Sandbox {
+	if b == nil {
+		return nil
+	}
+	c := *b
+	c.SSHAddr, c.HostIP, c.GuestV6 = "", "", ""
+	return &c
+}
+
 func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
-	boxes := h.mgr.ListByOwner(sess.Handle)
+	boxes := h.boxes.ListByOwner(sess.Handle)
 	views := make([]sandboxView, len(boxes))
 	var wg sync.WaitGroup
 	for i, b := range boxes {
-		views[i] = sandboxView{Sandbox: b, Routes: []routeStatus{}, Tags: []string{}}
+		views[i] = sandboxView{Sandbox: public(b), Routes: []routeStatus{}, Tags: []string{}}
 		if h.secrets != nil {
 			if tags, err := h.secrets.TagsFor(b.Name); err != nil {
 				h.log.Warn("tag list failed", "sandbox", b.Name, "err", err)
@@ -250,7 +331,10 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Read the guest's real memory use and cumulative CPU time concurrently;
-		// bounded by probeTimeout so one slow VM can't stall the dashboard.
+		// bounded by probeTimeout so one slow VM can't stall the dashboard. Both
+		// reads are this machine's manager either way — a balloon and a VMM
+		// process can only be asked of the host running them — so they never
+		// cross a machine and never need the wider tunneled budget.
 		if b.State == vmm.StateRunning {
 			wg.Add(1)
 			go func(name string, mem **int64, cpu **float64) {
@@ -277,24 +361,50 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 			views[i].Routes = append(views[i].Routes, routeStatus{Subdomain: rt.Subdomain, Port: rt.Port, Visibility: rt.Visibility})
 		}
 		// Probe every forwarded port of a running sandbox concurrently; the
-		// whole fan-out is bounded by probeTimeout, not routes × timeout.
+		// whole fan-out is bounded by one probe budget, not routes × timeout.
+		// b, not the view, carries the address: the view's copy has had it
+		// dropped on the way to the browser.
 		if b.State != vmm.StateRunning || b.HostIP == "" {
 			continue
 		}
+		remote := h.isRemote(b)
 		for j := range views[i].Routes {
 			wg.Add(1)
 			go func(addr string, listening *bool) {
 				defer wg.Done()
-				conn, err := net.DialTimeout("tcp", addr, probeTimeout)
-				if err == nil {
-					conn.Close()
-					*listening = true
-				}
+				*listening = h.listening(r.Context(), addr, remote)
 			}(net.JoinHostPort(b.HostIP, strconv.Itoa(views[i].Routes[j].Port)), &views[i].Routes[j].Listening)
 		}
 	}
 	wg.Wait()
 	writeJSON(w, http.StatusOK, views)
+}
+
+// isRemote reports whether a sandbox lives on another machine. A record with no
+// node at all is one this machine's manager wrote before nodes were named, so
+// it is ours.
+func (h *Handler) isRemote(b *host.Sandbox) bool { return b.Node != "" && b.Node != h.node }
+
+// listening reports whether anything accepts a connection at addr. A refusal
+// and a timeout are the same answer here — the badge says "something is
+// serving this port", and nothing else about the failure reaches the page.
+func (h *Handler) listening(ctx context.Context, addr string, remote bool) bool {
+	budget := probeTimeout
+	if remote {
+		budget = tunneledProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	dial := h.dial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	conn, err := dial(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	conn.Close() //nolint:errcheck
+	return true
 }
 
 // ownedBox resolves the {name} path value to a sandbox the session may act
@@ -304,7 +414,7 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ownedBox(r *http.Request) (box *host.Sandbox, name string, ok bool) {
 	name = r.PathValue("name")
 	sess, _ := edgeauth.From(r.Context())
-	box, found := h.mgr.Get(name)
+	box, found := h.boxes.Get(name)
 	if !found || (box.Owner != sess.Handle && !sess.Operator) {
 		return nil, name, false
 	}
@@ -329,13 +439,13 @@ func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)
 	defer cancel()
-	if err := h.mgr.Pause(ctx, name); err != nil {
+	if err := h.boxes.Pause(ctx, name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console paused sandbox", "name", name, "handle", handleFrom(r))
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 // resume also restores an archived sandbox (EnsureRunning folds restore in),
@@ -349,13 +459,13 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	box, err := h.mgr.EnsureRunning(ctx, name)
+	box, err := h.boxes.EnsureRunning(ctx, name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console resumed sandbox", "name", name, "handle", handleFrom(r))
-	writeJSON(w, http.StatusOK, box)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 // destroy permanently removes a sandbox: its VM and local disk, and — when the
@@ -371,7 +481,7 @@ func (h *Handler) destroy(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	if err := h.mgr.Destroy(ctx, name); err != nil {
+	if err := h.boxes.Destroy(ctx, name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -390,13 +500,13 @@ func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	if err := h.mgr.Archive(ctx, name); err != nil {
+	if err := h.boxes.Archive(ctx, name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console archived sandbox", "name", name, "handle", handleFrom(r))
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 // pin marks a sandbox always-on and resumes it so its in-guest daemons start
@@ -407,20 +517,20 @@ func (h *Handler) pin(w http.ResponseWriter, r *http.Request) {
 		notFoundBox(w, name)
 		return
 	}
-	if err := h.mgr.SetPinned(name, true); err != nil {
+	if err := h.boxes.SetPinned(name, true); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	box, err := h.mgr.EnsureRunning(ctx, name)
+	box, err := h.boxes.EnsureRunning(ctx, name)
 	if err != nil {
 		// The flag stuck; it just isn't warm yet. Surface the reason.
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console pinned sandbox", "name", name, "handle", handleFrom(r))
-	writeJSON(w, http.StatusOK, box)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
@@ -429,13 +539,13 @@ func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
 		notFoundBox(w, name)
 		return
 	}
-	if err := h.mgr.SetPinned(name, false); err != nil {
+	if err := h.boxes.SetPinned(name, false); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console unpinned sandbox", "name", name, "handle", handleFrom(r))
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 type snapshotReq struct {
@@ -458,7 +568,7 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	snap, err := h.mgr.Snapshot(ctx, name, req.SnapshotName, box.Owner)
+	snap, err := h.boxes.Snapshot(ctx, name, req.SnapshotName, box.Owner)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
@@ -487,13 +597,13 @@ func (h *Handler) rename(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)
 	defer cancel()
-	if err := h.mgr.Rename(ctx, name, req.NewName, box.Owner); err != nil {
+	if err := h.boxes.Rename(ctx, name, req.NewName, box.Owner); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console renamed sandbox", "old", name, "new", req.NewName, "handle", handleFrom(r))
-	box, _ = h.mgr.Get(req.NewName)
-	writeJSON(w, http.StatusOK, box)
+	box, _ = h.boxes.Get(req.NewName)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 // reboot cold-restarts the guest — the only way already-running processes
@@ -506,13 +616,13 @@ func (h *Handler) reboot(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)
 	defer cancel()
-	if err := h.mgr.Reboot(ctx, name); err != nil {
+	if err := h.boxes.Reboot(ctx, name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console rebooted sandbox", "name", name, "handle", handleFrom(r))
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, public(box))
 }
 
 type portReq struct {
@@ -626,7 +736,7 @@ func (h *Handler) setVisibility(w http.ResponseWriter, r *http.Request) {
 // listSnapshots lists the session's own snapshots — owner-scoped, unlike the
 // operator console's AllSnapshots.
 func (h *Handler) listSnapshots(w http.ResponseWriter, r *http.Request) {
-	snaps := h.mgr.Snapshots(handleFrom(r))
+	snaps := h.boxes.Snapshots(handleFrom(r))
 	if snaps == nil {
 		snaps = []*host.Snapshot{}
 	}
@@ -653,20 +763,20 @@ func (h *Handler) fork(w http.ResponseWriter, r *http.Request) {
 	snap := r.PathValue("snapshot")
 	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)
 	defer cancel()
-	box, err := h.mgr.Fork(ctx, snap, req.Name, handleFrom(r), 0, 0)
+	box, err := h.boxes.Fork(ctx, snap, req.Name, handleFrom(r), 0, 0)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("user console forked snapshot", "snapshot", snap, "into", req.Name, "handle", handleFrom(r))
-	writeJSON(w, http.StatusCreated, box)
+	writeJSON(w, http.StatusCreated, public(box))
 }
 
 func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	snap := r.PathValue("snapshot")
 	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)
 	defer cancel()
-	if err := h.mgr.DeleteSnapshot(ctx, snap, handleFrom(r)); err != nil {
+	if err := h.boxes.DeleteSnapshot(ctx, snap, handleFrom(r)); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}

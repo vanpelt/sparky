@@ -1695,6 +1695,15 @@
             "enum": ["running", "paused", "archived"],
             "description": "`archived` means the disk lives in object storage and a resume must fetch it."
           },
+          "node": {
+            "type": "string",
+            "description": "The machine this sandbox runs on.",
+            "example": "local"
+          },
+          "unreachable": {
+            "type": "boolean",
+            "description": "The machine holding this sandbox is not answering the control plane right now. It is very likely still running."
+          },
           "pinned": {
             "type": "boolean",
             "description": "Exempt from the idle reaper."

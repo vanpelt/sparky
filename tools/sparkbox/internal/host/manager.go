@@ -208,6 +208,17 @@ type Sandbox struct {
 	// (see NewManager) instead of stranding the rootfs under the other name.
 	// Empty except inside that window.
 	RenamedFrom string `json:"renamed_from,omitempty"`
+	// Node names the machine whose driver runs this VM. A node's own manager
+	// writes its own name here; a gateway routing across a fleet overwrites it
+	// from its placement ledger, which is the only authorization input.
+	Node string `json:"node,omitempty"`
+	// Unreachable is set only by a gateway routing across a fleet, never by a
+	// node's own manager: it means the machine holding this sandbox is not
+	// answering the control plane. There is deliberately no fourth vmm.State —
+	// every `b.State ==` switch in host, envsync, netpush and both consoles
+	// treats "not running" as "safe to ignore", which is right, and a fourth
+	// value would have to be handled in all of them.
+	Unreachable bool `json:"unreachable,omitempty"`
 }
 
 // ScheduleCleaner drops a sandbox's platform-scheduler entries when it is
@@ -263,6 +274,27 @@ type SessionCloser interface {
 	CloseSandboxSessions(sandbox, reason string) int
 }
 
+// Observer is told about every change to a sandbox record, so a process that
+// mirrors this host's inventory somewhere else can follow along instead of
+// polling. Optional: nil on a host nobody is mirroring, which is every
+// single-box deployment.
+//
+// It is a separate hook from SessionCloser rather than more methods on it
+// because CloseSandboxSessions fires from exactly one place — the pause path —
+// so a SessionCloser could only ever report pauses.
+//
+// Implementations MUST return without blocking: these fire from lifecycle
+// methods that hold the manager's lock, and a slow observer would stall every
+// other sandbox on the host.
+type Observer interface {
+	// SandboxChanged carries a copy of the record after the change. reason is
+	// the transition ("created", "paused", "renamed", …), not the sentence a
+	// human reads.
+	SandboxChanged(b *Sandbox, reason string)
+	// SandboxGone reports a record that no longer exists.
+	SandboxGone(name string)
+}
+
 // ObjectStore is where archived sandbox rootfs artifacts are parked and fetched
 // back (see internal/objstore). Optional — nil disables archiving, and the
 // manager also needs the driver to implement vmm.Archivable. Keys are
@@ -299,6 +331,7 @@ type Manager struct {
 	tags        TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
 	envSync     EnvPusher               // optional: secret-env push when a sandbox reaches running
 	sessions    SessionCloser           // optional: hang up attached sessions when a sandbox pauses
+	observer    Observer                // optional: relay record changes to whoever mirrors this host
 	maxPerOwner int                     // max running sandboxes per owner; 0 = unlimited
 	memAdmitPct int                     // RAM admission threshold as % of host; 0 = disabled
 	hostMemMB   int64                   // host RAM in MB for admission; 0 = disabled
@@ -306,6 +339,8 @@ type Manager struct {
 	diskPoolMB  int64                   // per-owner pooled-disk budget in MB; 0 = disabled
 	archivePfx  string                  // object-key prefix for archives (default "archives")
 	nodeName    string                  // this host's name in capacity reports
+	nodeArch    string                  // this host's CPU architecture in capacity reports
+	nodeRelease string                  // this host's sparkbox release tag in capacity reports
 	hostVCPUs   int64                   // host logical CPUs for capacity reports; 0 = unknown
 	actCPUPct   float64                 // activity floor: % of one core over a sample; 0 = off
 	actNetBytes uint64                  // activity floor: bytes per sample; 0 = off
@@ -352,10 +387,21 @@ type Options struct {
 	MemReserveMB int64
 	// NodeName identifies this host in capacity reports (defaults to "local").
 	NodeName string
+	// Arch and Release describe this host in capacity reports: the CPU
+	// architecture its sandboxes will run on and the sparkbox release it boots
+	// them from. Both are empty when unknown — a fleet aggregating capacities
+	// needs them to tell an arm64 box from an amd64 one, and a single-box
+	// deployment has no use for either.
+	Arch    string
+	Release string
 	// HostVCPUs is the host's logical CPU count for capacity reports (0 = unknown).
 	HostVCPUs int64
 	// FrontDoor, if set, gets Ensure/Remove calls as sandboxes come and go.
 	FrontDoor FrontDoor
+	// Observer, if set, is told about every sandbox record change. Also
+	// installable after construction (SetObserver), since the thing doing the
+	// mirroring usually outlives neither the manager nor the process alone.
+	Observer Observer
 	// Archive is the object store for archived rootfs artifacts. Nil (or a driver
 	// without vmm.Archivable) disables the archive/restore lifecycle.
 	Archive ObjectStore
@@ -406,8 +452,11 @@ func NewManager(opts Options) (*Manager, error) {
 		reserveMB:   opts.MemReserveMB,
 		diskPoolMB:  opts.DiskPoolMBPerOwner,
 		nodeName:    opts.NodeName,
+		nodeArch:    opts.Arch,
+		nodeRelease: opts.Release,
 		hostVCPUs:   opts.HostVCPUs,
 		frontDoor:   opts.FrontDoor,
+		observer:    opts.Observer,
 	}
 	if m.archivePfx == "" {
 		m.archivePfx = "archives"
@@ -466,6 +515,21 @@ func NewManager(opts Options) (*Manager, error) {
 		}
 		b.RenamedFrom = ""
 	}
+	// Records written before this host had a name in them carry none. Backfill,
+	// or every pre-existing sandbox on a live box looks like it belongs to no
+	// machine at all. Unreachable is a routing verdict some other process makes
+	// about this one, so it is never loaded off disk.
+	for _, b := range m.boxes {
+		if b.Node == "" {
+			b.Node = m.nodeName
+		}
+		b.Unreachable = false
+	}
+	for _, s := range m.snaps {
+		if s.Node == "" {
+			s.Node = m.nodeName
+		}
+	}
 	// Driver state does not survive process restarts in the mock driver, and
 	// firecracker VMs died with the previous process too. Mark everything
 	// paused; Resume recreates on demand.
@@ -495,6 +559,15 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// A guest whose authorized_keys is empty is a VM nobody can log into, and
+	// nothing later in the lifecycle can repair it — so refuse the boot instead
+	// of spending a rootfs on it. Checked here rather than up with the name
+	// rules because the key can be replaced at any time (SetGatewayPublicKey)
+	// and so must be read under the lock.
+	if m.gwPubKey == "" {
+		return nil, &DisabledError{Code: "no_gateway_key",
+			Msg: "this node has not yet learned the gateway's key; it will once the link is up"}
+	}
 	if _, ok := m.boxes[name]; ok {
 		return nil, &NameError{Problem: NameTaken, Noun: "sandbox", Name: name}
 	}
@@ -513,6 +586,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
 		State: inst.State, SSHAddr: inst.SSHAddr, SSHUser: inst.SSHUser,
 		HostIP: inst.HostIP, GuestV6: inst.GuestV6, CreatedAt: now, LastActive: now,
+		Node: m.nodeName,
 	}
 	m.boxes[name] = b
 	// Fresh tap and VMM process, so the counters start at zero and the first
@@ -534,6 +608,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	// Unconditional push on create also covers forks: a forked rootfs carries
 	// the template's managed env block, and this rewrite is what replaces it.
 	m.pushEnv(ctx, copyOf(b))
+	m.observe(b, "created")
 	return copyOf(b), m.save()
 }
 
@@ -667,6 +742,11 @@ func (m *Manager) ListByOwner(owner string) []*Sandbox {
 	return out
 }
 
+// NodeName is what this host calls itself — the name it stamps on the sandboxes
+// it creates and reports in its capacity. Lock-free: it is written once, in
+// NewManager.
+func (m *Manager) NodeName() string { return m.nodeName }
+
 // NodeCapacity is one host's resource picture: what the box has, what the
 // admission controller will hand out, and what running sandboxes have claimed.
 // Sparkbox is single-host today, but capacity is reported per node so a
@@ -693,6 +773,16 @@ type NodeCapacity struct {
 	DiskPoolMBPerOwner int64 `json:"disk_pool_mb_per_owner"`
 	Running            int   `json:"running"`
 	Sandboxes          int   `json:"sandboxes"`
+	// Arch and Release say what kind of machine this is: an aggregator showing
+	// several nodes at once needs them to explain why a sandbox landed where it
+	// did. Empty when the host didn't say.
+	Arch    string `json:"arch,omitempty"`
+	Release string `json:"release,omitempty"`
+	// Online and LastSeenAt are filled in by whoever aggregates capacities from
+	// several machines; a manager reporting on itself is online by definition
+	// and leaves LastSeenAt nil, since "now" carries no information.
+	Online     bool       `json:"online"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
 // Capacity reports this node's resources. Used* counts only running sandboxes,
@@ -702,6 +792,9 @@ func (m *Manager) Capacity() NodeCapacity {
 	defer m.mu.Unlock()
 	c := NodeCapacity{
 		Node:               m.nodeName,
+		Arch:               m.nodeArch,
+		Release:            m.nodeRelease,
+		Online:             true,
 		TotalVCPUs:         m.hostVCPUs,
 		TotalMemMB:         m.hostMemMB,
 		ReserveMemMB:       m.reserveMB,
@@ -776,6 +869,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		// The rootfs survived pause/archive/host-restart, but the env may have
 		// changed while the box was down — reconcile on every return to running.
 		m.pushEnv(ctx, copyOf(b))
+		m.observe(b, "resumed")
 	}
 	// Activity returns a ballooned-down sandbox to full RAM (whether it was
 	// just resumed or was warm-but-ballooned).
@@ -802,6 +896,47 @@ func (m *Manager) SetSessions(c SessionCloser) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions = c
+}
+
+// SetObserver installs the change hook after construction, for the same reason
+// SetSessions exists: whatever is mirroring this host is usually built from the
+// manager and so cannot be handed to it at construction time.
+func (m *Manager) SetObserver(o Observer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.observer = o
+}
+
+// SetGatewayPublicKey installs the authorized_keys line new guests trust. A
+// host that knows it at startup passes Options.GatewayPublicKey; a host that
+// learns it from somewhere else — a machine whose gateway is another process,
+// which cannot be asked before it is reachable — sets it here, and Create
+// refuses until it is set rather than booting a VM nobody can log into.
+func (m *Manager) SetGatewayPublicKey(line string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gwPubKey = line
+}
+
+// observe hands the Observer, if one is installed, a copy of a record that just
+// changed. Callers hold m.mu — both the hook and the record are read under it,
+// so an observer never sees a half-written record — which is also why the
+// contract says implementations must not block.
+func (m *Manager) observe(b *Sandbox, reason string) {
+	if m.observer == nil {
+		return
+	}
+	m.observer.SandboxChanged(copyOf(b), reason)
+}
+
+// observeName is observe for the paths that finish with the lock released:
+// Resize and Reboot both end in EnsureRunning, which takes it.
+func (m *Manager) observeName(name, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.boxes[name]; ok {
+		m.observe(b, reason)
+	}
 }
 
 // pushEnv fires the env-sync hook for a sandbox that just reached running.
@@ -889,6 +1024,7 @@ func (m *Manager) pause(ctx context.Context, name, reason string) error {
 	// Re-priming costs one tick and keeps that from reading as a rate.
 	delete(m.vitals, name)
 	m.log.Info("sandbox paused", "name", name)
+	m.observe(b, "paused")
 	return m.save()
 }
 
@@ -969,6 +1105,7 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 		return fmt.Errorf("resize %s: %w", name, err)
 	}
 	m.log.Info("sandbox disk resized", "name", name, "size_mb", sizeMB)
+	m.observeName(name, "resized")
 	return nil
 }
 
@@ -1020,6 +1157,7 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 		return fmt.Errorf("reboot %s: %w", name, err)
 	}
 	m.log.Info("sandbox rebooted", "name", name)
+	m.observeName(name, "rebooted")
 	return nil
 }
 
@@ -1154,6 +1292,7 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 		m.frontDoor.Ensure(ctx, newName)
 	}
 	m.log.Info("sandbox renamed", "old", oldName, "new", newName, "owner", b.Owner)
+	m.observe(b, "renamed")
 	return nil
 }
 
@@ -1276,6 +1415,7 @@ func (m *Manager) Archive(ctx context.Context, name string) error {
 	// budget (in object storage) — count its compressed size, not 0.
 	b.DiskMB = archiveMB
 	m.log.Info("sandbox archived", "name", name, "key", key, "archive_mb", archiveMB)
+	m.observe(b, "archived")
 	return m.save()
 }
 
@@ -1308,6 +1448,7 @@ func (m *Manager) restore(ctx context.Context, name, key string) error {
 	b.State = vmm.StatePaused // rootfs present, no snapshot → resumeOrRecreate cold-boots it
 	b.ArchiveKey = ""
 	b.ArchivedAt = time.Time{}
+	m.observe(b, "restored")
 	err := m.save()
 	m.mu.Unlock()
 	if err != nil {
@@ -1386,6 +1527,11 @@ func (m *Manager) SetPinned(name string, pinned bool) error {
 	}
 	b.Pinned = pinned
 	m.log.Info("sandbox pin changed", "name", name, "pinned", pinned)
+	if pinned {
+		m.observe(b, "pinned")
+	} else {
+		m.observe(b, "unpinned")
+	}
 	return m.save()
 }
 
@@ -1445,6 +1591,9 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 		m.frontDoor.Remove(ctx, name)
 	}
 	m.log.Info("sandbox destroyed", "name", name)
+	if m.observer != nil {
+		m.observer.SandboxGone(name)
+	}
 	return m.save()
 }
 
@@ -1555,6 +1704,7 @@ func (m *Manager) applyVitals(ctx context.Context, name string, cur vitalsSample
 		m.deflate(ctx, b)
 		m.log.Debug("sandbox active by vitals", "name", name,
 			"cpu_pct", cpuPct, "net_bytes", netDelta, "elapsed", elapsed)
+		m.observe(b, "touched")
 	}
 	m.save() //nolint:errcheck
 }
@@ -1669,6 +1819,7 @@ func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 		changed = true
 	}
 	if changed {
+		m.observe(b, "disk")
 		m.save() //nolint:errcheck
 	}
 }
@@ -1693,6 +1844,7 @@ func (m *Manager) balloonDown(ctx context.Context, name string) error {
 	}
 	b.Ballooned = true
 	m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
+	m.observe(b, "ballooned")
 	return m.save()
 }
 
@@ -1707,6 +1859,7 @@ func (m *Manager) deflate(ctx context.Context, b *Sandbox) {
 	}
 	b.Ballooned = false
 	m.log.Info("deflated balloon on activity", "name", b.Name)
+	m.observe(b, "deflated")
 }
 
 func (m *Manager) load() error {

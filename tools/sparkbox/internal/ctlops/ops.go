@@ -334,20 +334,23 @@ func (o *Ops) ownedSnapshot(op, name string, c Caller) (*host.Snapshot, error) {
 
 // info projects a manager record onto the public shape. SSHAddr, HostIP and
 // GuestV6 are dropped here rather than at the transport, so no future edge can
-// serialize the host's internal topology by forgetting to.
+// serialize the host's internal topology by forgetting to. Node and Unreachable
+// are the deliberate exceptions — see SandboxInfo.
 func (o *Ops) info(b *host.Sandbox) SandboxInfo {
 	si := SandboxInfo{
-		Name:       b.Name,
-		Owner:      b.Owner,
-		State:      string(b.State),
-		Pinned:     b.Pinned,
-		Ballooned:  b.Ballooned,
-		Tags:       []string{},
-		VCPUs:      b.VCPUs,
-		MemMB:      b.MemMB,
-		DiskMB:     b.DiskMB,
-		CreatedAt:  b.CreatedAt,
-		LastActive: b.LastActive,
+		Name:        b.Name,
+		Owner:       b.Owner,
+		State:       string(b.State),
+		Node:        b.Node,
+		Unreachable: b.Unreachable,
+		Pinned:      b.Pinned,
+		Ballooned:   b.Ballooned,
+		Tags:        []string{},
+		VCPUs:       b.VCPUs,
+		MemMB:       b.MemMB,
+		DiskMB:      b.DiskMB,
+		CreatedAt:   b.CreatedAt,
+		LastActive:  b.LastActive,
 	}
 	if o.tags != nil {
 		// A tag-store hiccup must not turn `list` into an error: the tags are

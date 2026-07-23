@@ -160,13 +160,17 @@ var notFoundMsg = map[string]string{
 	"passkey":  "no passkey matches %q — see `passkey list`",
 	"route":    "no route %q",
 	"job":      "no job %q",
+	"node":     "no node named %q",
 }
 
 // NotFound is the ONE constructor for the masked answer. Existence and
 // ownership share it, from a single line of code per object kind, so there is
 // no second path on which a distinguishing 403 could appear.
 //
-// kind is "sandbox" | "snapshot" | "schedule" | "key" | "passkey" | "route".
+// kind is "sandbox" | "snapshot" | "schedule" | "key" | "passkey" | "route" |
+// "job" | "node" — the keys of notFoundMsg. An unlisted kind still works, on a
+// generic phrasing, so a new object kind cannot accidentally take a second
+// code path; adding it to the table is what buys it the wire wording.
 func NotFound(op, kind, name string) *Error {
 	format, ok := notFoundMsg[kind]
 	if !ok {
@@ -356,6 +360,42 @@ func AsError(op string, err error) *Error {
 func IsKind(err error, k Kind) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Kind == k
+}
+
+// ParseKind is the inverse of Kind.String(). The string form is what crosses the
+// node link precisely because the Kind constants are iota-ordered: a future
+// insertion would silently renumber a wire format already in the field. New
+// Kinds are APPEND-ONLY, and adding one also means editing
+// components.schemas.Error's `kind` enum in internal/restapi/openapi.json.
+//
+// An unrecognised string answers (KindInternal, false) rather than an error: a
+// peer that has learned a Kind this build has not still raised a failure this
+// build must render, and a 500 is the honest rendering of one it cannot
+// classify.
+func ParseKind(s string) (Kind, bool) {
+	switch s {
+	case "internal":
+		return KindInternal, true
+	case "invalid":
+		return KindInvalid, true
+	case "not_found":
+		return KindNotFound, true
+	case "denied":
+		return KindDenied, true
+	case "conflict":
+		return KindConflict, true
+	case "disabled":
+		return KindDisabled, true
+	case "limit":
+		return KindLimit, true
+	case "capacity":
+		return KindCapacity, true
+	case "quota":
+		return KindQuota, true
+	case "upstream":
+		return KindUpstream, true
+	}
+	return KindInternal, false
 }
 
 func joinNames(in []string) string {

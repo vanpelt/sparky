@@ -107,6 +107,14 @@ type Config struct {
 	// which costs the clean hang-up on pause; tests leave it nil.
 	Track func(sandbox string, s SessionConn, isPTY bool) func()
 
+	// Dial opens the TCP connection to the guest's sshd. Nil dials
+	// box.SSHAddr over the host network, which is what a single-box
+	// deployment and every unit test want — so unlike Sandboxes and Sessions
+	// it is deliberately not on New's panic-on-missing list. A fleet passes
+	// its own dialer here, and a sandbox on another machine is then reached
+	// over that machine's link instead of a host route that does not exist.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
 	Log *slog.Logger
 }
 
@@ -122,6 +130,7 @@ type Handler struct {
 	loginURL  string
 
 	track func(sandbox string, s SessionConn, isPTY bool) func()
+	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
 	log   *slog.Logger
 
 	// open dials the guest and allocates the PTY. A field rather than a direct
@@ -156,6 +165,7 @@ func New(cfg Config) *Handler {
 		subdomain:   strings.ToLower(sub),
 		loginURL:    cfg.LoginURL,
 		track:       cfg.Track,
+		dial:        cfg.Dial,
 		log:         cfg.Log,
 	}
 	h.open = h.dialPTY

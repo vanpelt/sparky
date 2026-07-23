@@ -57,7 +57,7 @@ type sshPTY struct {
 // pre-resume copy has it cleared while paused, which is the classic way to get
 // an empty address here.
 func (h *Handler) dialPTY(ctx context.Context, box *host.Sandbox, term string, rows, cols int) (PTY, error) {
-	client, err := sshgw.DialUpstream(ctx, box.SSHAddr, box.SSHUser, h.upstreamKey)
+	client, err := sshgw.DialUpstreamVia(ctx, h.dial, box.SSHAddr, box.SSHUser, h.upstreamKey)
 	if err != nil {
 		return nil, fmt.Errorf("dial guest: %w", err)
 	}

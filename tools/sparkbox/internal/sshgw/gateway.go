@@ -45,6 +45,14 @@ const ControlUser = "ctl"
 // check lets a stranger through here and nowhere else.
 const SignupUser = "signup"
 
+// NodeUser is the reserved SSH username a fleet node connects as:
+// `ssh node@gateway sparkbox-link/1`. It is deliberately absent from
+// ReservedUsers: cmd/sparkbox iterates that slice to mint a front-door IPv6 and
+// publish a public DNS record per entry, and resolveDoor matches a connection
+// back to a door by destination IP — so joining it would publish
+// node.<domain> and let anyone reach the fleet control door by address.
+const NodeUser = "node"
+
 // ReservedUsers are the gateway's own doors. No sandbox may be named one of
 // these (they'd be unreachable), and each gets a front-door address before any
 // sandbox exists.
@@ -53,9 +61,12 @@ var ReservedUsers = []string{NewSandboxUser, ControlUser, SignupUser}
 // authedUserKey holds the handle the presented key belongs to; it is unset for
 // an unregistered key at the signup door. authedKeyKey holds the key itself,
 // which signup needs to register and every session needs for `key_fp`.
+// authedNodeKey holds the roster row a node door's key belongs to, kept apart
+// from the user keys so a node identity can never satisfy a user lookup.
 const (
 	authedUserKey = "sparkbox-user"
 	authedKeyKey  = "sparkbox-key"
+	authedNodeKey = "sparkbox-node"
 )
 
 // The per-command timeout budgets and the resize ceiling are ctlops' —
@@ -63,8 +74,28 @@ const (
 // restated here because every transport must apply the same numbers, and two
 // answers to "how long may an archive take" is one answer too many.
 
+// Sandboxes is the slice of the sandbox store the interactive `ssh
+// <name>@gateway` path drives directly. It deliberately does not go through
+// ctlops, because this path must also record the connecting key and dial the
+// guest, neither of which is a control-plane operation. *host.Manager
+// satisfies it, and so does a fleet router that answers for sandboxes living
+// on another machine.
+type Sandboxes interface {
+	Get(name string) (*host.Sandbox, bool)
+	List() []*host.Sandbox
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Touch(name string)
+	RecordKey(name, fp string)
+}
+
+// Dialer opens the raw connection to a guest port; it is
+// net.Dialer.DialContext's shape. Nil means the host network, which is what a
+// single-box deployment has always done.
+type Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
 type Gateway struct {
-	mgr *host.Manager
+	mgr  Sandboxes
+	dial Dialer
 	// ops is the control plane itself: every `ctl@` command is a call into it,
 	// so the ownership check, the timeout budget and the error taxonomy this
 	// channel applies are the same ones api.<domain> and the browser terminal do.
@@ -88,7 +119,17 @@ type Gateway struct {
 }
 
 type GatewayOptions struct {
-	Manager      *host.Manager
+	// Manager is the local machine's sandbox store. It stays a concrete type
+	// because opsConfig builds the control plane out of it, and it remains the
+	// sandbox lookup unless Fleet is set.
+	Manager *host.Manager
+	// Fleet, if set, replaces Manager on every sandbox lookup and resume this
+	// channel performs, so a sandbox held by another machine is
+	// indistinguishable from a local one.
+	Fleet Sandboxes
+	// Dial, if set, opens upstream connections to guests through it rather than
+	// the host network — the seam a fleet's reverse tunnel plugs into.
+	Dial         Dialer
 	Users        *users.Store
 	HostKey      xssh.Signer
 	UpstreamKey  xssh.Signer
@@ -142,12 +183,23 @@ type SandboxTagger interface {
 
 func New(opts GatewayOptions) *Gateway {
 	g := &Gateway{
-		mgr: opts.Manager, ops: opts.Ops, users: opts.Users, log: opts.Logger,
+		ops: opts.Ops, users: opts.Users, log: opts.Logger,
 		hostKey: opts.HostKey, upstreamKey: opts.UpstreamKey,
+		dial:        opts.Dial,
 		dialTimeout: 15 * time.Second,
 		doors:       opts.Doors, domain: opts.Domain,
 		xtermSubdomain: opts.XtermSubdomain,
 		openSignup:     opts.OpenSignup,
+	}
+	// Both assignments go through a nil check for the reason opsConfig
+	// documents below: a nil *host.Manager stored in an interface field is not
+	// a nil interface, so an unset store would arrive as something that looks
+	// present and panics on first use.
+	if opts.Manager != nil {
+		g.mgr = opts.Manager
+	}
+	if opts.Fleet != nil {
+		g.mgr = opts.Fleet
 	}
 	if g.ops == nil {
 		g.ops = ctlops.New(opsConfig(opts))
@@ -174,6 +226,23 @@ func opsConfig(opts GatewayOptions) ctlops.Config {
 	}
 	if opts.Manager != nil {
 		cfg.Sandboxes, cfg.Templates = opts.Manager, opts.Manager
+	}
+	// The fleet wins wherever both are set, for the same reason it wins in New:
+	// a gateway whose sandbox lookups go through the fleet while its control
+	// plane reads the local manager has two answers to "who owns this box and
+	// where does it live". `ssh <name>@` would resume a sandbox on whichever
+	// machine holds it and `ctl@ pause <name>` would look for it here and
+	// report it gone. A Fleet too narrow to back a control plane cannot be
+	// reconciled at all, so refuse rather than silently fall back to the split:
+	// the only callers are this package's own wiring, and a wiring mistake is
+	// better found at startup than by a user whose sandbox went missing.
+	if opts.Fleet != nil {
+		boxes, okBoxes := opts.Fleet.(ctlops.Sandboxes)
+		templates, okTemplates := opts.Fleet.(ctlops.Templates)
+		if !okBoxes || !okTemplates {
+			panic("sshgw: GatewayOptions.Fleet cannot back the control plane; build ctlops.Ops from it and pass Ops")
+		}
+		cfg.Sandboxes, cfg.Templates = boxes, templates
 	}
 	if opts.Users != nil {
 		cfg.Accounts = opts.Users
@@ -405,9 +474,50 @@ func (g *Gateway) domainHint() string {
 	return "<domain>"
 }
 
-// dialUpstream connects to the VM's sshd with the gateway's upstream key.
+// dialUpstream connects to the VM's sshd with the gateway's upstream key,
+// through the fleet dialer when one was supplied.
 func (g *Gateway) dialUpstream(ctx context.Context, addr, user string) (*xssh.Client, error) {
-	return DialUpstream(ctx, addr, user, g.upstreamKey)
+	return DialUpstreamVia(ctx, g.dial, addr, user, g.upstreamKey)
+}
+
+// handshakeTimeout bounds the SSH handshake on an established connection.
+// ClientConfig.Timeout does not: it is handed to ssh.Dial's own net dial and
+// is never consulted again, so a peer that accepts the TCP connection and then
+// says nothing would otherwise block the handshake read forever.
+const handshakeTimeout = 10 * time.Second
+
+// localDialTimeout is one connect attempt's budget for a guest on this
+// machine's own network. It is the number the gateway has always used, and the
+// retry loop below is built around it: three seconds per try is what lets a
+// guest whose sshd is still coming up be re-probed several times inside the
+// caller's 15s budget rather than once.
+const localDialTimeout = 3 * time.Second
+
+// fleetDialTimeout is one connect attempt's budget for an address the supplied
+// dialer resolves itself, which in this tree means opening a stream over
+// another machine's reverse tunnel. That crosses the internet before any guest
+// is touched, so it gets the room a tap device three hops away does not need.
+const fleetDialTimeout = 10 * time.Second
+
+// dialAttemptTimeout picks the per-attempt connect budget from the address.
+// RFC 6761 reserves the .invalid TLD precisely so it can never name a real
+// host, which makes it the reliable tell: an address in it resolves to nothing
+// on this network and only the caller's own dialer knows what it means —
+// internal/fleet mints "<sandbox>.<node>.sandbox.invalid" for a guest held by
+// another machine. Anything else is an address this machine can dial itself.
+//
+// The classification is by address rather than by "was a dialer supplied"
+// because the fleet dialer is installed on every deployment, single-box
+// included, where it falls through to the host network for all but these names.
+func dialAttemptTimeout(addr string) time.Duration {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		h = addr
+	}
+	if strings.HasSuffix(h, ".invalid") {
+		return fleetDialTimeout
+	}
+	return localDialTimeout
 }
 
 // DialUpstream connects to a VM's sshd as user, authenticating with key, and
@@ -417,26 +527,68 @@ func (g *Gateway) dialUpstream(ctx context.Context, addr, user string) (*xssh.Cl
 // the guest directly rather than ride RunInSandbox (whose first act is
 // EnsureRunning, which would wake a paused box).
 func DialUpstream(ctx context.Context, addr, user string, key xssh.Signer) (*xssh.Client, error) {
+	return DialUpstreamVia(ctx, nil, addr, user, key)
+}
+
+// DialUpstreamVia is DialUpstream with the TCP dial supplied by the caller, so
+// a sandbox held by another machine can be reached through that machine's
+// tunnel instead of the host network. dial is called afresh on every retry;
+// nil dials the host network directly.
+//
+// The gateway used to provision every VM and own the only route to it, which
+// is why the host key is ignored. Once another machine sits in the path it can
+// impersonate its own guests — accepted, because a machine that lies can only
+// lie about the sandboxes it already runs — but the old premise that there is
+// no other route no longer holds.
+func DialUpstreamVia(ctx context.Context, dial Dialer, addr, user string, key xssh.Signer) (*xssh.Client, error) {
 	cfg := &xssh.ClientConfig{
 		User: user,
 		Auth: []xssh.AuthMethod{xssh.PublicKeys(key)},
 		// The gateway provisions the VM and owns the only route to it; there
 		// is no prior host key to verify against on first boot.
 		HostKeyCallback: xssh.InsecureIgnoreHostKey(), //nolint:gosec
-		Timeout:         3 * time.Second,
+		// Timeout is left unset on purpose. It bounds ssh.Dial's own net dial,
+		// and we dial ourselves so the caller's ctx reaches the connect — an
+		// improvement over the net.DialTimeout this used to call, which no
+		// cancellation could interrupt. The two budgets that do apply are
+		// dialAttemptTimeout on the connect and handshakeTimeout on the
+		// handshake, neither of which ClientConfig can express.
 	}
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	// The connect budget belongs to one attempt, not to the loop: the caller's
+	// ctx bounds how long we keep retrying a booting guest, so arming the whole
+	// thing with it would let a single wedged connect eat the lot. Cancelling
+	// right after the call is safe because a Dialer's ctx governs the dial and
+	// not the connection it returns, which is net.Dialer.DialContext's contract
+	// and the one the fleet dialer documents keeping.
+	attempt := dialAttemptTimeout(addr)
 	var lastErr error
 	for {
-		conn, err := net.DialTimeout("tcp", addr, cfg.Timeout)
+		dialCtx, cancelDial := context.WithTimeout(ctx, attempt)
+		conn, err := dial(dialCtx, "tcp", addr)
+		cancelDial()
 		if err == nil {
+			_ = conn.SetDeadline(handshakeDeadline(ctx))
 			c, chans, reqs, err := xssh.NewClientConn(conn, addr, cfg)
 			if err == nil {
+				_ = conn.SetDeadline(time.Time{})
 				return xssh.NewClient(c, chans, reqs), nil
 			}
 			conn.Close()
 			lastErr = err
 		} else {
 			lastErr = err
+			// Retrying exists because a freshly booted guest's sshd is not up
+			// yet, which is something only this machine's network can tell us.
+			// A dialer that refused the channel outright has already given a
+			// final answer, so hammering it for the rest of the dial budget
+			// only delays the message the user is going to get anyway.
+			var oce *xssh.OpenChannelError
+			if errors.As(err, &oce) {
+				return nil, fmt.Errorf("vm ssh not reachable: %w", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -444,6 +596,16 @@ func DialUpstream(ctx context.Context, addr, user string, key xssh.Signer) (*xss
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// handshakeDeadline is the earlier of the handshake budget and whatever the
+// caller has left, so a stalled peer never outlives the request that wanted it.
+func handshakeDeadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(handshakeTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		return d
+	}
+	return deadline
 }
 
 // splitNewName reads `new+myvm` as "the new@ door, and call it myvm", returning
