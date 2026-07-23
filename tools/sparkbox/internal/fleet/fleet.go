@@ -148,9 +148,10 @@ func (f *Fleet) adoptLocal() error {
 			// is an authorization input, and inventing one here would be the
 			// gateway handing a sandbox to somebody. Leaving it unplaced costs
 			// nothing this machine needs: the local manager answers every read
-			// and every operation on it first, and it is still the local
-			// manager that refuses a second sandbox by that name — the way the
-			// name was defended before there was a ledger at all. What the
+			// and every operation on it first, and the name is still defended
+			// both ways — the local manager refuses a second sandbox by that
+			// name here, and heldLocally refuses to hand it to another machine,
+			// which the ledger cannot do for a row that does not exist. What the
 			// deployment loses is the ability to place that one name on
 			// another machine, which is worth a loud log and no more.
 			f.log.Error("a sandbox on this machine has no owner and cannot be placed",
@@ -489,10 +490,33 @@ func (f *Fleet) createOn(ctx context.Context, n Node, name, owner, image string,
 	return b, nil
 }
 
+// heldLocally reports whether this machine's manager already has a sandbox by
+// this name, archived ones included — anything holding a rootfs here holds the
+// name with it.
+//
+// It exists for the one case the ledger cannot answer. Every local sandbox
+// normally has a row, so the PRIMARY KEY refuses on its own; a record adoption
+// could not place (see adoptLocal) has none, and a name with no row is a free
+// name as far as the ledger is concerned. Only the local manager knows better,
+// and only it is asked — a remote machine's inventory is a cache, so trusting it
+// to veto a name would make a stale entry into a name nobody can use.
+func (f *Fleet) heldLocally(name string) bool {
+	_, ok := f.localMgr.Get(name)
+	return ok
+}
+
 // reserve claims a name and returns the undo. The undo must run on every
 // failure path: a name reserved for a sandbox that was never built is a name
 // nobody can ever use again.
 func (f *Fleet) reserve(name, owner, image string, n Node) (release func(), err error) {
+	// Placing on another machine is decided by the ledger alone — the manager
+	// that would refuse the name never gets asked — so an unplaced local name
+	// has to be defended here or the fleet ends up with that name on two
+	// machines at once. A placement here needs no such guard: the local manager
+	// refuses it a moment later, with its own wording, exactly as it always has.
+	if n.Name() != f.localName && f.heldLocally(name) {
+		return nil, &host.NameError{Problem: host.NameTaken, Noun: "sandbox", Name: name}
+	}
 	if f.index == nil {
 		return func() {}, nil
 	}
@@ -561,6 +585,12 @@ func (f *Fleet) Rename(ctx context.Context, oldName, newName, owner string) erro
 	n, err := f.route("rename", oldName)
 	if err != nil {
 		return err
+	}
+	// Renaming another machine's sandbox onto a name this one holds is the same
+	// hole reserve guards: the ledger is the only thing consulted, and a name it
+	// has no row for reads as free. See heldLocally.
+	if n.Name() != f.localName && f.heldLocally(newName) {
+		return &host.NameError{Problem: host.NameTaken, Noun: "sandbox", Name: newName}
 	}
 	moved := false
 	if f.index != nil {

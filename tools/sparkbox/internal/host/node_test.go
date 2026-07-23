@@ -20,42 +20,37 @@ func writeState(t *testing.T, dir, file, body string) {
 	}
 }
 
-// TestLoadBackfillsNodeName pins the upgrade path: a box that has been running
+// TestLoadStampsNodeName pins the upgrade path: a box that has been running
 // since before records carried a node name must not come back belonging to no
-// machine at all, and a name someone else already wrote must survive.
-func TestLoadBackfillsNodeName(t *testing.T) {
+// machine at all — and a record carrying some other machine's name must not
+// keep it either, because everything in this state dir is run by this manager's
+// own driver whatever the file says.
+func TestLoadStampsNodeName(t *testing.T) {
 	dir := t.TempDir()
 	writeState(t, dir, "sandboxes.json", `{
 	  "old":     {"name":"old","owner":"alice","image":"ubuntu","state":"paused"},
 	  "flagged": {"name":"flagged","owner":"alice","image":"ubuntu","state":"paused","unreachable":true},
-	  "kept":    {"name":"kept","owner":"bob","image":"ubuntu","state":"paused","node":"nodec"}
+	  "stale":   {"name":"stale","owner":"bob","image":"ubuntu","state":"paused","node":"nodec"}
 	}`)
 	writeState(t, dir, "snapshots.json", `{
 	  "snap-alice-golden": {"name":"golden","owner":"alice","image":"snap-alice-golden","from_box":"old"},
-	  "snap-bob-golden":   {"name":"golden","owner":"bob","image":"snap-bob-golden","from_box":"kept","node":"nodec"}
+	  "snap-bob-golden":   {"name":"golden","owner":"bob","image":"snap-bob-golden","from_box":"stale","node":"nodec"}
 	}`)
 
 	m := newManagerInDir(t, dir, host.Options{NodeName: "nodeb"})
 
-	for _, tc := range []struct {
-		box  string
-		node string
-	}{
-		{"old", "nodeb"},
-		{"flagged", "nodeb"},
-		{"kept", "nodec"},
-	} {
-		b, ok := m.Get(tc.box)
+	for _, box := range []string{"old", "flagged", "stale"} {
+		b, ok := m.Get(box)
 		if !ok {
-			t.Fatalf("%s missing after load", tc.box)
+			t.Fatalf("%s missing after load", box)
 		}
-		if b.Node != tc.node {
-			t.Errorf("%s node = %q, want %q", tc.box, b.Node, tc.node)
+		if b.Node != "nodeb" {
+			t.Errorf("%s node = %q, want %q", box, b.Node, "nodeb")
 		}
 		// Unreachable is a verdict a routing layer makes about a machine it
 		// cannot reach; loading one off disk would resurrect a stale outage.
 		if b.Unreachable {
-			t.Errorf("%s came back unreachable", tc.box)
+			t.Errorf("%s came back unreachable", box)
 		}
 	}
 
@@ -63,11 +58,49 @@ func TestLoadBackfillsNodeName(t *testing.T) {
 	for _, s := range append(m.Snapshots("alice"), m.Snapshots("bob")...) {
 		snaps[s.Image] = s.Node
 	}
-	if got := snaps["snap-alice-golden"]; got != "nodeb" {
-		t.Errorf("unnamed snapshot node = %q, want %q", got, "nodeb")
+	for image, node := range snaps {
+		if node != "nodeb" {
+			t.Errorf("snapshot %s node = %q, want %q", image, node, "nodeb")
+		}
 	}
-	if got := snaps["snap-bob-golden"]; got != "nodec" {
-		t.Errorf("named snapshot node = %q, want %q", got, "nodec")
+	if len(snaps) != 2 {
+		t.Errorf("loaded %d snapshots, want 2", len(snaps))
+	}
+}
+
+// TestRenamingTheHostReclassifiesItsRecords covers the operational move that
+// produced the stale names above: --node-name changed, or the hostname it
+// defaults to did. Everything here is still here, so a record must come back
+// under the new name — a gateway reads Node to decide local from remote, and a
+// record claiming a machine that no longer exists is routed over a link that
+// will never be there.
+func TestRenamingTheHostReclassifiesItsRecords(t *testing.T) {
+	dir := t.TempDir()
+	before := newManagerInDir(t, dir, host.Options{NodeName: "boxa"})
+	if _, err := before.Create(context.Background(), "brave-otter", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.Snapshot(context.Background(), "brave-otter", "golden", "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	after := newManagerInDir(t, dir, host.Options{NodeName: "boxb"})
+
+	b, ok := after.Get("brave-otter")
+	if !ok {
+		t.Fatal("brave-otter missing after the rename")
+	}
+	if b.Node != "boxb" {
+		t.Errorf("node = %q, want %q — the record still names the machine's old self", b.Node, "boxb")
+	}
+	snaps := after.Snapshots("alice")
+	if len(snaps) != 1 || snaps[0].Node != "boxb" {
+		t.Errorf("snapshots = %+v, want one on boxb", snaps)
+	}
+	// And the correction is durable: the next process reads it back off disk.
+	again := newManagerInDir(t, dir, host.Options{NodeName: "boxb"})
+	if b, ok := again.Get("brave-otter"); !ok || b.Node != "boxb" {
+		t.Errorf("reloaded node = %q ok=%v, want %q", b.Node, ok, "boxb")
 	}
 }
 

@@ -23,15 +23,114 @@ var ErrLinkClosed = errors.New("node link closed")
 // context and the frame's deadline, never from the link.
 type Handler func(ctx context.Context, body json.RawMessage) (any, error)
 
-// Conn is one framed control channel: a reader goroutine, a table of waiters
-// keyed by request ID, and a mutex-guarded encoder. It is transport-agnostic
-// on purpose — the SSH session it rides in production is nothing more than an
-// io.Reader and an io.Writer to it.
+// The two ceilings a link answers requests under, and why there are two.
+//
+// A slot is a goroutine plus the frame body it holds, so both numbers are memory
+// bounds before they are anything else, and neither is a queue depth: a request
+// that arrives with no slot free is answered CodeNodeBusy rather than parked,
+// because silent backpressure only moves the failure to somewhere the caller
+// cannot see it.
+//
+// They are split because the work behind them fails differently.
+//
+// Bulk work — copying a rootfs, streaming an archive to object storage, forking
+// a template — serializes on one machine's disk. Eight at once is already past
+// the point where more means faster, so MaxInFlightOps stays where it was and
+// the ninth archive is told to come back in a moment. That refusal is true.
+//
+// Everything else is somebody at a terminal. `ssh box@gateway` resumes a paused
+// sandbox through this link, and a node holding a hundred of them can easily
+// have more than eight people arrive at once — a morning, a CI fan-out, a
+// gateway restart that resumes what it finds. Refusing those for want of a slot
+// would refuse them with the WRONG REASON: nothing on that machine is exhausted,
+// and when something genuinely is, the node's own host.Manager answers with a
+// *host.CapacityError naming the megabytes it could not find. A transport
+// ceiling must never pre-empt that, so the ceiling for user-facing work is set
+// where a real machine's hardware refuses first.
+//
+// The worst case a hostile peer can pin is (MaxInFlightSessionOps +
+// MaxInFlightOps) frame bodies, and a body is bounded by MaxFrameBytes — 72 MiB
+// on a machine that runs virtual machines, from a peer that has already
+// authenticated as this gateway's node or as this node's gateway.
+const MaxInFlightSessionOps = 64
+
+// bulkOps are the request types that hold a disk for a long time. It is an
+// exception list rather than a classification of every verb: a request type
+// nobody has thought about is a user waiting for it, which is the side to err
+// on, and a new long-running verb is one line here.
+var bulkOps = map[string]bool{
+	TypeCreate:         true,
+	TypeArchive:        true,
+	TypeResize:         true,
+	TypeSnapshotCreate: true,
+	TypeSnapshotFork:   true,
+}
+
+// busyLogEvery bounds how often a link says out loud that it is at a ceiling.
+//
+// The refusal itself is per-request and stays that way — every caller gets its
+// own typed answer. The LINE is one machine-level fact, and a peer that keeps
+// asking while the ceiling holds would otherwise write one per frame: a
+// five-hundred-frame flood produced four hundred and ninety-two lines, which is
+// a peer being handed the gateway's disk. So the first refusal in a window is
+// logged at once — an operator learns immediately — and the rest are counted
+// into the next line.
+const busyLogEvery = 30 * time.Second
+
+// busySignal aggregates refusals at a ceiling into a bounded number of lines.
+type busySignal struct {
+	mu sync.Mutex
+	// n counts refusals not yet spoken for, since is when that count started,
+	// and last is when a line was written.
+	n     int
+	since time.Time
+	last  time.Time
+}
+
+// record folds one refusal in and reports whether it is time to say something.
+// The count it returns covers every refusal since the previous line, this one
+// included, so no refusal is invisible for longer than one window. The window is
+// the caller's because the two conditions this type is used for are read at
+// different rates — see tooManySandboxes.
+func (b *busySignal) record(now time.Time, every time.Duration) (refused int, window time.Duration, say bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.n++
+	if b.since.IsZero() {
+		b.since = now
+	}
+	if !b.last.IsZero() && now.Sub(b.last) < every {
+		return 0, 0, false
+	}
+	refused, window = b.n, now.Sub(b.since)
+	b.n, b.since, b.last = 0, time.Time{}, now
+	return refused, window, true
+}
+
+// Conn is one framed control channel: a reader goroutine, a writer goroutine, a
+// table of waiters keyed by request ID, and two bounded pools of slots for the
+// requests it answers. It is transport-agnostic on purpose — the SSH session it
+// rides in production is nothing more than an io.Reader and an io.Writer to it.
 type Conn struct {
-	enc      *encoder
+	out      *writer
 	dec      *decoder
 	log      *slog.Logger
 	idPrefix string
+
+	// slots and bulkSlots bound how many of this peer's requests may be in
+	// flight at once, split by what the work behind them costs — see
+	// MaxInFlightSessionOps. Buffered channels rather than a semaphore type
+	// because the interesting operation is the one that must NOT wait: a full
+	// pool is answered, not queued. They are independent, so a machine whose
+	// disk is saturated still answers everybody arriving at a terminal.
+	slots     chan struct{}
+	bulkSlots chan struct{}
+	// busy rate-limits the log line the two pools share. The refusals are not
+	// rate-limited; only what is said about them is.
+	busy busySignal
+	// now is the clock the rate limit is measured on, so a test can drive a
+	// window without waiting one out.
+	now func() time.Time
 
 	// closeOnce guards the underlying transport, which Close and a ctx
 	// cancellation both race to shut.
@@ -58,17 +157,23 @@ func NewConn(r io.Reader, w io.Writer, idPrefix string, log *slog.Logger) *Conn 
 		log = slog.New(slog.DiscardHandler)
 	}
 	c := &Conn{
-		enc:      newEncoder(w),
-		dec:      newDecoder(r),
-		log:      log,
-		idPrefix: idPrefix,
-		pending:  map[string]chan *Frame{},
-		inflight: map[string]context.CancelFunc{},
-		handlers: map[string]Handler{},
-		events:   map[string]func(json.RawMessage){},
-		base:     context.Background(),
-		done:     make(chan struct{}),
+		dec:       newDecoder(r),
+		log:       log,
+		idPrefix:  idPrefix,
+		slots:     make(chan struct{}, MaxInFlightSessionOps),
+		bulkSlots: make(chan struct{}, MaxInFlightOps),
+		now:       time.Now,
+		pending:   map[string]chan *Frame{},
+		inflight:  map[string]context.CancelFunc{},
+		handlers:  map[string]Handler{},
+		events:    map[string]func(json.RawMessage){},
+		base:      context.Background(),
+		done:      make(chan struct{}),
 	}
+	// The writer reports a dead socket through Fail, so a peer that stopped
+	// reading wakes every waiter with the write's own error rather than leaving
+	// each to discover it when its deadline expires.
+	c.out = newWriter(w, c.Fail)
 	// A duplex transport is usually one object presented twice (an SSH channel, a
 	// net.Pipe half); a node's session presents two. Collect whichever halves can
 	// be shut, and only once, so Close does not report a second close as a fault.
@@ -97,6 +202,12 @@ func (c *Conn) SetBaseContext(ctx context.Context) {
 // Handle registers the answer to one request type. Unregistered types are
 // answered with an invalid-request error rather than silence, so a version skew
 // reads as a sentence in a log instead of a hung caller.
+//
+// Every handler but one runs on a goroutine drawn from one of the two pools
+// described above MaxInFlightSessionOps — the bulk pool if its type is listed in
+// bulkOps, the session pool otherwise — so it may take as long as its deadline
+// allows. The exception is TypePing, which runs on the read goroutine — see
+// dispatch for why — and must therefore do nothing but echo.
 func (c *Conn) Handle(typ string, fn Handler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -137,6 +248,9 @@ func (c *Conn) Serve(ctx context.Context) error {
 // Request sends one and waits for its reply. The wait ends on the reply, on the
 // caller's context, or on the link's death — never on nothing, which is the
 // only reason a control plane can afford to sit behind a network hop at all.
+// That holds for the send as much as for the wait: the frame is handed to the
+// writer goroutine under the same context, so a peer that has stopped reading
+// costs this caller its deadline and nothing else.
 func (c *Conn) Request(ctx context.Context, typ string, body, out any) error {
 	raw, err := marshalBody(body)
 	if err != nil {
@@ -173,7 +287,7 @@ func (c *Conn) Request(ctx context.Context, typ string, body, out any) error {
 		c.mu.Unlock()
 	}()
 
-	if err := c.enc.encode(f); err != nil {
+	if err := c.out.send(ctx, f); err != nil {
 		// A write that fails because the link is gone reports the link's reason,
 		// not the socket's: "that machine is offline" is what a caller can act on,
 		// and io.EOF is what it would have to translate.
@@ -206,12 +320,17 @@ func (c *Conn) Request(ctx context.Context, typ string, body, out any) error {
 // the system — touch and record_key — go this way because making either of them
 // a round trip would put a network hop inside every SSH session teardown and
 // every browser keystroke batch.
+//
+// It never waits. An event whose caller is a manager lock, a reaper hook or the
+// ping loop on its way to hanging up must not be parkable by the peer it is
+// about — so a backlogged link reports ErrLinkBacklogged and the caller decides,
+// which for every caller in this tree means a log line and a resync.
 func (c *Conn) Event(typ string, body any) error {
 	raw, err := marshalBody(body)
 	if err != nil {
 		return err
 	}
-	return c.enc.encode(&Frame{Type: typ, Body: raw})
+	return c.out.post(&Frame{Type: typ, Body: raw})
 }
 
 // Fail records the error pending and future requests report. It is how the
@@ -248,6 +367,10 @@ func (c *Conn) Close() error {
 	c.Fail(ErrLinkClosed)
 	var err error
 	c.closeOnce.Do(func() {
+		// The writer gets its moment first: the frame most likely to be queued
+		// when a link is closed is the bye that explains why, and a peer that
+		// never receives it has to wait out a grace period to infer it.
+		c.out.shutdown()
 		for _, cl := range c.closers {
 			if cerr := cl.Close(); cerr != nil && err == nil {
 				err = cerr
@@ -265,8 +388,9 @@ func (c *Conn) nextID() string {
 }
 
 // dispatch routes one frame. A reply is delivered inline — the waiter is
-// already parked on a buffered channel — while a request gets its own goroutine
-// so a slow operation cannot stall the frames behind it.
+// already parked on a buffered channel — while a request gets one of a bounded
+// number of goroutines, so a slow operation cannot stall the frames behind it
+// and a fast peer cannot mint goroutines faster than they finish.
 func (c *Conn) dispatch(f *Frame) {
 	switch {
 	case f.Type == TypeReply:
@@ -286,8 +410,35 @@ func (c *Conn) dispatch(f *Frame) {
 		default:
 			c.log.Debug("nodelink: duplicate reply dropped", "id", f.ID)
 		}
+	case f.Type == TypePing && f.ID != "":
+		// The liveness probe is answered on the read goroutine itself, and it is
+		// the only request type that is. Two structural reasons, both about not
+		// letting load look like death: a machine working at its op ceiling must
+		// still be able to prove it is alive, and refusing a ping for want of a
+		// slot would have the gateway hang up on a node whose only fault is
+		// being busy; and a peer that floods pings must not be able to mint a
+		// goroutine per frame. A ping handler is a bounded echo by contract —
+		// PingReq in, PingReq out — so nothing it does can stall what is behind
+		// it, and the reply it produces is queued rather than written here.
+		c.serveRequest(f)
 	case f.ID != "":
-		go c.serveRequest(f)
+		pool, limit, what := c.slots, MaxInFlightSessionOps, "requests"
+		if bulkOps[f.Type] {
+			pool, limit, what = c.bulkSlots, MaxInFlightOps, "long operations (archives, clones, resizes)"
+		}
+		select {
+		case pool <- struct{}{}:
+			go func() {
+				defer func() { <-pool }()
+				c.serveRequest(f)
+			}()
+		default:
+			// Refused, not queued and not dropped. Silent backpressure would
+			// leave the caller waiting out a deadline it cannot see, and a drop
+			// would leave it waiting forever; a typed refusal is something a
+			// gateway can retry, place elsewhere, or show to a person.
+			c.refuseBusy(f, limit, what)
+		}
 	case f.Type == TypeCancel:
 		c.cancelInflight(f)
 	default:
@@ -298,6 +449,23 @@ func (c *Conn) dispatch(f *Frame) {
 			fn(f.Body)
 		}
 	}
+}
+
+// refuseBusy answers one request that found its pool full, and says so at a
+// bounded rate. The answer is per-request; the line is per-window, because the
+// caller needs an error and the operator needs a fact.
+func (c *Conn) refuseBusy(f *Frame, limit int, what string) {
+	if refused, window, say := c.busy.record(c.now(), busyLogEvery); say {
+		c.log.Warn("nodelink: refusing requests at the in-flight ceiling",
+			"type", f.Type, "max", limit, "refused", refused, "over", window.Round(time.Millisecond))
+	}
+	c.reply(f, nil, &ctlops.Error{
+		Kind: ctlops.KindCapacity,
+		Op:   f.Type,
+		Code: CodeNodeBusy,
+		Msg: fmt.Sprintf("that machine is already running %d %s for this gateway; try again in a moment",
+			limit, what),
+	})
 }
 
 func (c *Conn) serveRequest(f *Frame) {
@@ -334,9 +502,11 @@ func (c *Conn) serveRequest(f *Frame) {
 	c.reply(f, out, err)
 }
 
-// reply answers one request. A send failure means the link died while the work
-// ran, which is not an error in the operation: the far side is gone, the reply
-// is discarded, and — deliberately — nothing is rolled back.
+// reply answers one request. A send failure means the link died or fell far
+// enough behind that its queue is full while the work ran, which is not an error
+// in the operation: the far side is not listening, the reply is discarded, its
+// caller's deadline is the backstop, and — deliberately — nothing is rolled
+// back.
 func (c *Conn) reply(req *Frame, out any, err error) {
 	f := &Frame{ID: req.ID, Type: TypeReply}
 	if err != nil {
@@ -349,7 +519,7 @@ func (c *Conn) reply(req *Frame, out any, err error) {
 			f.Body = raw
 		}
 	}
-	if serr := c.enc.encode(f); serr != nil {
+	if serr := c.out.post(f); serr != nil {
 		c.log.Debug("nodelink: reply not delivered", "type", req.Type, "err", serr)
 	}
 }

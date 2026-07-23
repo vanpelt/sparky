@@ -2,6 +2,8 @@ package nodelink
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +58,11 @@ const (
 	// StreamDialTimeout bounds the node's own TCP dial into a guest.
 	StreamDialTimeout = 10 * time.Second
 	// MaxLiveStreams and MaxInFlightOps bound what one link may ask of a node.
+	// MaxInFlightOps is a ceiling on concurrency, not a queue depth: a request
+	// that arrives while every slot is held is answered CodeNodeBusy rather
+	// than parked, because a peer — hostile, or merely a gateway with a stuck
+	// operator script — would otherwise mint one goroutine holding one frame
+	// body per line it can write, and MaxFrameBytes is a megabyte.
 	MaxLiveStreams = 512
 	MaxInFlightOps = 8
 	// LinkMargin is subtracted from a caller's remaining budget before it rides
@@ -114,27 +121,268 @@ type Frame struct {
 	Err        *ctlops.WireError `json:"err,omitempty"`
 }
 
-// encoder serialises one direction of the link. json.Encoder.Encode appends
-// exactly one newline and escapes any embedded one, so a frame is always a
-// line; the mutex is what keeps two goroutines' frames from interleaving
-// halfway through that line.
+// encoder renders frames. json.Encoder.Encode appends exactly one newline and
+// escapes any embedded one, so a frame is always a line; the mutex is what
+// keeps two goroutines' frames from interleaving halfway through that line.
+//
+// It encodes into a buffer of its own rather than straight at the transport,
+// and the mutex is therefore held only for as long as marshalling takes —
+// never across a write. See writer for why that distinction is the difference
+// between a live link and a wedged one.
 type encoder struct {
 	mu  sync.Mutex
+	buf bytes.Buffer
 	enc *json.Encoder
+	w   io.Writer
 }
 
 func newEncoder(w io.Writer) *encoder {
-	e := json.NewEncoder(w)
+	e := &encoder{w: w}
+	e.enc = json.NewEncoder(&e.buf)
 	// The link carries sandbox names, owners and error sentences, never HTML.
 	// Escaping < and > here would only make the wire harder to read in a log.
-	e.SetEscapeHTML(false)
-	return &encoder{enc: e}
+	e.enc.SetEscapeHTML(false)
+	return e
 }
 
-func (e *encoder) encode(f *Frame) error {
+// line renders one frame as the bytes that go on the wire.
+func (e *encoder) line(f *Frame) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.enc.Encode(f)
+	e.buf.Reset()
+	if err := e.enc.Encode(f); err != nil {
+		return nil, err
+	}
+	// Cloned because the buffer is reused by the next frame, and the line is
+	// about to be handed to a goroutine that has not written it yet.
+	return bytes.Clone(e.buf.Bytes()), nil
+}
+
+// writeLine puts an already-rendered line on the transport. It takes no lock,
+// deliberately: its only caller is the single writer goroutine, and a lock held
+// here is exactly the mistake the rest of this file is arranged to prevent.
+func (e *encoder) writeLine(line []byte) error {
+	_, err := e.w.Write(line)
+	return err
+}
+
+// encode renders and writes one frame on the calling goroutine. It is for the
+// door — the refusal and the bye written onto a session the same goroutine is
+// about to close, where there is no second writer to interleave with and
+// nothing else alive to park. Every frame on a live link goes through writer.
+func (e *encoder) encode(f *Frame) error {
+	line, err := e.line(f)
+	if err != nil {
+		return err
+	}
+	return e.writeLine(line)
+}
+
+// ErrLinkBacklogged is what a frame nobody is waiting on reports when the
+// transport is so far behind that the queue is full. It is an answer rather
+// than a silent drop: the emitter logs it, and a caller that cares can resync.
+var ErrLinkBacklogged = errors.New("nodelink: the link's write queue is full")
+
+const (
+	// writeQueueDepth bounds how many frames may wait for the transport at
+	// once. A healthy link's backlog is one frame; this is sized for the burst
+	// a reconnect makes — a full inventory, a heartbeat, and every reply in
+	// flight — and it is finite because the only alternative to refusing a
+	// frame is holding the goroutine that offered it.
+	writeQueueDepth = 128
+	// flushGrace is how long Close lets the writer put its backlog on the wire
+	// before the transport is shut underneath it. It exists for one frame: the
+	// bye that says why a link is ending, which a peer that never receives it
+	// has to wait out a grace period to infer. A peer that is reading drains in
+	// microseconds; a peer that is not is the exact case this design exists to
+	// survive, so the wait is short and unconditional rather than a promise.
+	flushGrace = 250 * time.Millisecond
+)
+
+// writer owns one direction of a live link.
+//
+// Every frame is rendered by its caller and handed to a single goroutine that
+// does nothing but write, and no lock is held while that write runs. This is
+// not tidiness. The transport in production is an SSH channel: once a peer
+// stops reading, roughly 2 MiB rides unacknowledged and then Write parks, with
+// no deadline and no context, for as long as the peer cares to stay quiet. A
+// mutex held across that write would put the ping loop, the hangup and every
+// reply behind a machine that has merely gone silent — which would make the one
+// mechanism that notices a dead node the first casualty of one. Handing the
+// write to a goroutine is also what lets a caller keep its own context: it
+// abandons the frame, rather than the frame keeping it.
+type writer struct {
+	enc *encoder
+	q   chan []byte
+
+	// started is closed when the goroutine exists; dead when it has gone. The
+	// pair is what lets shutdown tell "nothing was ever written on this link"
+	// from "the backlog is still going out".
+	start   sync.Once
+	started chan struct{}
+	stopped sync.Once
+	stop    chan struct{}
+	dead    chan struct{}
+
+	// fail carries a write error to the rest of the link. A socket that cannot
+	// be written to is dead however healthy its reading half looks — a
+	// half-open TCP accepts reads forever — so the waiters are told at once
+	// instead of each discovering it by deadline.
+	fail func(error)
+
+	mu  sync.Mutex
+	err error
+}
+
+func newWriter(w io.Writer, fail func(error)) *writer {
+	if fail == nil {
+		fail = func(error) {}
+	}
+	return &writer{
+		enc:     newEncoder(w),
+		q:       make(chan []byte, writeQueueDepth),
+		started: make(chan struct{}),
+		stop:    make(chan struct{}),
+		dead:    make(chan struct{}),
+		fail:    fail,
+	}
+}
+
+// send queues one frame, waiting for room when the transport is behind. The
+// wait ends on ctx or on the writer's death and never on nothing, which is the
+// whole reason a caller may sit behind a network hop: its context is the only
+// thing standing between it and a peer that has stopped reading.
+func (w *writer) send(ctx context.Context, f *Frame) error {
+	line, err := w.enc.line(f)
+	if err != nil {
+		return err
+	}
+	w.run()
+	select {
+	case <-w.dead:
+		return w.reason()
+	default:
+	}
+	select {
+	case w.q <- line:
+		return nil
+	case <-w.dead:
+		return w.reason()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// post queues one frame or says it could not, without ever waiting. Everything
+// nobody is blocked on goes out this way — events, and the replies handlers
+// produce — because the goroutine offering one is a heartbeat, a reaper hook,
+// or the read loop itself, and none of them may be parked by a quiet peer.
+func (w *writer) post(f *Frame) error {
+	line, err := w.enc.line(f)
+	if err != nil {
+		return err
+	}
+	w.run()
+	select {
+	case <-w.dead:
+		return w.reason()
+	default:
+	}
+	select {
+	case w.q <- line:
+		return nil
+	case <-w.dead:
+		return w.reason()
+	default:
+		return ErrLinkBacklogged
+	}
+}
+
+// run starts the writer on first use — lazily, so a Conn that never writes a
+// frame costs no goroutine at all.
+func (w *writer) run() {
+	w.start.Do(func() {
+		close(w.started)
+		go w.loop()
+	})
+}
+
+// loop is the only goroutine that ever touches the transport. It holds nothing
+// anyone else needs, so a write that never returns costs this goroutine and
+// this goroutine alone.
+func (w *writer) loop() {
+	defer close(w.dead)
+	for {
+		select {
+		case line := <-w.q:
+			if err := w.write(line); err != nil {
+				return
+			}
+		case <-w.stop:
+			w.drain()
+			return
+		}
+	}
+}
+
+func (w *writer) write(line []byte) error {
+	err := w.enc.writeLine(line)
+	if err != nil {
+		w.mu.Lock()
+		if w.err == nil {
+			w.err = err
+		}
+		w.mu.Unlock()
+		w.fail(err)
+	}
+	return err
+}
+
+// drain puts what is already queued on the wire on the way out. The last frame
+// either side sends is usually the bye that explains the close, and dropping it
+// would turn a planned hangup into a silence the peer has to wait out.
+func (w *writer) drain() {
+	for {
+		select {
+		case line := <-w.q:
+			if err := w.write(line); err != nil {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// shutdown stops the writer and gives it flushGrace to finish the backlog.
+// Bounded, because the peer this matters most for — the one being hung up on —
+// is also the one most likely not to be reading.
+func (w *writer) shutdown() {
+	w.stopped.Do(func() { close(w.stop) })
+	select {
+	case <-w.started:
+	default:
+		// Nothing was ever written on this link, so there is nothing to flush
+		// and no goroutine that will ever close dead.
+		return
+	}
+	t := time.NewTimer(flushGrace)
+	defer t.Stop()
+	select {
+	case <-w.dead:
+	case <-t.C:
+	}
+}
+
+// reason is why a frame could not be queued. ErrLinkClosed is the fallback
+// because a writer that stopped without a write error stopped on Close.
+func (w *writer) reason() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return w.err
+	}
+	return ErrLinkClosed
 }
 
 // decoder reads frames off the other direction. bufio.Scanner is used for its
@@ -234,6 +482,14 @@ const (
 	CodeSuperseded    = "superseded"
 	CodeShuttingDown  = "shutting_down"
 	CodeProtocolError = "protocol_error"
+
+	// CodeNodeBusy answers a request that arrived while every one of a link's
+	// MaxInFlightOps slots was held. It rides as a capacity refusal because
+	// that is what it is — the far machine has no room for this work right now
+	// — and because a caller told "busy" can retry or place the work
+	// elsewhere, where one silently queued can only wait out a deadline it
+	// cannot see.
+	CodeNodeBusy = "node_busy"
 )
 
 // --- liveness ---

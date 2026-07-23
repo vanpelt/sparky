@@ -515,20 +515,20 @@ func NewManager(opts Options) (*Manager, error) {
 		}
 		b.RenamedFrom = ""
 	}
-	// Records written before this host had a name in them carry none. Backfill,
-	// or every pre-existing sandbox on a live box looks like it belongs to no
-	// machine at all. Unreachable is a routing verdict some other process makes
-	// about this one, so it is never loaded off disk.
+	// Every record in this state dir is this machine's own — it is the machine
+	// holding the rootfs — so the node name is stamped rather than filled in
+	// only when missing. Records written before hosts had a name carry none;
+	// records written before the host was renamed (--node-name, or a hostname
+	// that moved) carry the old one, and a name nothing answers to reads as
+	// another machine to a gateway, which then routes every one of them over a
+	// link instead of into this process. Unreachable is a routing verdict some
+	// other process makes about this one, so it is never loaded off disk.
 	for _, b := range m.boxes {
-		if b.Node == "" {
-			b.Node = m.nodeName
-		}
+		b.Node = m.nodeName
 		b.Unreachable = false
 	}
 	for _, s := range m.snaps {
-		if s.Node == "" {
-			s.Node = m.nodeName
-		}
+		s.Node = m.nodeName
 	}
 	// Driver state does not survive process restarts in the mock driver, and
 	// firecracker VMs died with the previous process too. Mark everything

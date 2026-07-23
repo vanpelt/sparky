@@ -102,8 +102,15 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // ExitCode is the ctl@ contract in one place: 2 means the invocation was wrong,
 // 1 means it was right and failed.
+//
+// The override is honoured only inside [1, 255]. FromWire already bounds what a
+// node can put there, but this is the accessor every caller of a *Error goes
+// through, wherever that error came from, so pinning the invariant here is what
+// makes it true for an error built by some future in-process path as well —
+// rather than true only for the one boundary somebody remembered. Outside the
+// window the Kind decides, which is the same answer as an absent override.
 func (e *Error) ExitCode() int {
-	if e.Exit != 0 {
+	if e.Exit >= 1 && e.Exit <= 255 {
 		return e.Exit
 	}
 	if e.Kind == KindInvalid {
@@ -119,8 +126,15 @@ func (e *Error) ExitCode() int {
 const statusClientClosed = 499
 
 // HTTPStatus is the REST edge's contract in one place.
+//
+// The override is honoured only inside the error range, for the same reason
+// ExitCode bounds its own: this is what restapi.fail hands to WriteHeader, and
+// WriteHeader panics outside [100, 999] — a killed request — while a 2xx or a
+// 3xx inside it is worse than a panic, because it makes a failure read as a
+// success to every API client. A status this method cannot honour falls through
+// to the Kind, which is the classification the caller actually made.
 func (e *Error) HTTPStatus() int {
-	if e.Status != 0 {
+	if e.Status >= 400 && e.Status <= 599 {
 		return e.Status
 	}
 	switch e.Kind {

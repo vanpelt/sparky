@@ -25,6 +25,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
@@ -63,10 +64,15 @@ var ReservedUsers = []string{NewSandboxUser, ControlUser, SignupUser}
 // which signup needs to register and every session needs for `key_fp`.
 // authedNodeKey holds the roster row a node door's key belongs to, kept apart
 // from the user keys so a node identity can never satisfy a user lookup.
+// rawConnKey holds the connection's own net.Conn, which is the only handle
+// anything here has on a peer that has not opened a session yet — see the node
+// door's admission watchdog. probationKey holds that watchdog's disarm.
 const (
 	authedUserKey = "sparkbox-user"
 	authedKeyKey  = "sparkbox-key"
 	authedNodeKey = "sparkbox-node"
+	rawConnKey    = "sparkbox-rawconn"
+	probationKey  = "sparkbox-probation"
 )
 
 // The per-command timeout budgets and the resize ceiling are ctlops' —
@@ -112,6 +118,18 @@ type Gateway struct {
 	// SSH reconnect wording.
 	xtermSubdomain string
 	openSignup     bool // signup without an invite code
+	// nodes and joiner are the fleet door: the roster the connecting key is
+	// resolved against, and whatever owns a link once it is admitted. Both nil
+	// on a single-box deployment, which is what keeps that door shut.
+	nodes  NodeRoster
+	joiner NodeJoiner
+	// nodeEnrol lets an unknown key at the node door record itself as pending.
+	// It grants nothing on its own — see nodedoor.go.
+	nodeEnrol bool
+	// admissionBudget is how long a machine the gateway has not approved may
+	// hold a connection open. New sets nodeAdmissionBudget; a test shortens it
+	// before the listener starts, so nothing ever reads it concurrently.
+	admissionBudget time.Duration
 	// live tracks the interactive sessions attached to each sandbox so they can
 	// be hung up cleanly when it is paused — see livesessions.go.
 	liveMu sync.Mutex
@@ -165,6 +183,18 @@ type GatewayOptions struct {
 	// ("xterm"), used only so a hung-up terminal tab is told a URL rather than
 	// an ssh command. Empty is fine on a host that serves no terminal.
 	XtermSubdomain string
+	// Nodes, if set, is the fleet's node roster and opens the `node@` door.
+	// Nil keeps it shut, which is a single-box deployment.
+	Nodes NodeRoster
+	// NodeJoiner is what owns an admitted link. Satisfied by *fleet.Fleet; the
+	// door stays shut without it, since a link nothing serves is worse than no
+	// door at all.
+	NodeJoiner NodeJoiner
+	// NodeEnrol lets an unknown key at the node door record itself as pending,
+	// the way an unknown key at the signup door may register. It is on by
+	// default in cmd/sparkbox because an operator still has to approve the row
+	// before it can carry anything.
+	NodeEnrol bool
 	// Ops, if set, is the control-plane core this gateway drives; nil builds one
 	// from the stores above. The integrator passes its own so that the REST API,
 	// the browser terminal and this channel share a single Ops — one job
@@ -188,8 +218,12 @@ func New(opts GatewayOptions) *Gateway {
 		dial:        opts.Dial,
 		dialTimeout: 15 * time.Second,
 		doors:       opts.Doors, domain: opts.Domain,
-		xtermSubdomain: opts.XtermSubdomain,
-		openSignup:     opts.OpenSignup,
+		xtermSubdomain:  opts.XtermSubdomain,
+		openSignup:      opts.OpenSignup,
+		nodes:           opts.Nodes,
+		joiner:          opts.NodeJoiner,
+		nodeEnrol:       opts.NodeEnrol,
+		admissionBudget: nodeAdmissionBudget,
 	}
 	// Both assignments go through a nil check for the reason opsConfig
 	// documents below: a nil *host.Manager stored in an interface field is not
@@ -259,19 +293,70 @@ func opsConfig(opts GatewayOptions) ctlops.Config {
 	if opts.Session != nil {
 		cfg.Sessions = opts.Session
 	}
+	// The roster the node door authenticates against also backs the `ctl@ node`
+	// commands, when it can. A gateway that enrols machines while its control
+	// plane answers "this host is not a fleet gateway" can never approve one, so
+	// the two must not be wired separately. Only some rosters can do both:
+	// ctlops needs the roster joined to the live fleet, which no single store
+	// can produce alone (cmd/sparkbox builds that join and passes its own Ops),
+	// so this is a probe rather than a requirement.
+	if roster, ok := opts.Nodes.(ctlops.NodeRoster); ok {
+		cfg.Nodes = roster
+	}
 	return cfg
 }
 
 // Server builds the gliderlabs/ssh server; callers run Serve/ListenAndServe.
+//
+// It sets no IdleTimeout and no MaxTimeout. That absence is what lets a node's
+// link live for weeks — gliderlabs enforces both per session, so either one
+// would cut every linked machine loose on a schedule — and a test pins it. The
+// bound a machine the gateway has *not* approved lives under is armed
+// per-connection instead, by g.probate below, so it can never reach a link the
+// operator blessed.
 func (g *Gateway) Server(addr string) *gssh.Server {
 	srv := &gssh.Server{
 		Addr:    addr,
 		Handler: g.handle,
+		// The raw connection is stashed before the handshake because it is the
+		// only thing that can hang up on a peer which authenticates and then
+		// does nothing at all. Nothing reads it unless the node door arms the
+		// watchdog below, so this costs a map entry and changes no behaviour.
+		ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
+			ctx.SetValue(rawConnKey, conn)
+			return conn
+		},
 		PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
 			ctx.SetValue(authedKeyKey, key)
 			if user, ok := g.users.Lookup(key); ok {
 				ctx.SetValue(authedUserKey, user)
 				return true
+			}
+			// A machine's key is resolved after a user's, so a key that is both
+			// is its user everywhere except at this door. Status is not checked
+			// here but in handleNodeLink: a pending node has to get far enough
+			// to be told that it is pending.
+			if g.nodeDoorOpen() && g.isNodeDoor(ctx.User(), ctx.LocalAddr()) {
+				if n, ok := g.nodes.Lookup(key); ok {
+					ctx.SetValue(authedNodeKey, n)
+					// Approval is what buys an unbounded connection. Anything
+					// else here is a machine that is about to be refused, and a
+					// refused machine must not be able to hold the door open by
+					// simply never letting go of it.
+					if n.Status != nodes.StatusApproved {
+						g.probate(ctx)
+					}
+					return true
+				}
+				// An unknown key at the node door may enrol and do nothing
+				// else, exactly as an unknown key at the signup door may
+				// register and nothing else. With enrolment refused it falls
+				// through to the same rejection, and the same log line, as an
+				// unknown key anywhere else.
+				if g.nodeEnrol {
+					g.probate(ctx)
+					return true
+				}
 			}
 			// An unregistered key gets through to the signup door and nowhere
 			// else: registering it is precisely what that door is for. Every
@@ -316,6 +401,12 @@ func (g *Gateway) handle(s gssh.Session) {
 	}
 	if sandboxName == ControlUser {
 		g.handleControl(s, user, log)
+		return
+	}
+	// Before the handle guard below, deliberately: a node is a machine and has
+	// no account, so requiring one here would refuse every link.
+	if sandboxName == NodeUser && g.nodeDoorOpen() {
+		g.handleNodeLink(s, log)
 		return
 	}
 	// Only the signup door admits an unregistered key; anything else reaching
@@ -722,10 +813,21 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 	if errors.As(err, &limit) {
 		log.Info("start refused: per-owner limit", "running", limit.Running)
 		fmt.Fprintf(s.Stderr(),
-			"sparkbox: you already have %d running sandboxes (max %d): %s\r\n"+
-				"Pause one to free a slot, e.g.:  ssh %s@%s pause %s\r\n",
-			len(limit.Running), limit.Max, strings.Join(limit.Running, ", "),
-			ControlUser, g.domainHint(), limit.Running[0])
+			"sparkbox: you already have %d running sandboxes (max %d)%s\r\n",
+			len(limit.Running), limit.Max, namesOrNothing(limit.Running))
+		// The example only exists when there is a name to put in it. In a fleet
+		// this error can come back off the wire — another machine's refusal,
+		// rebuilt from JSON that machine authored — so the running set is not
+		// something this gateway produced and may be absent or empty. Indexing
+		// it unconditionally panicked the session goroutine on a frame a node
+		// controls, which is a gateway a node can crash.
+		if len(limit.Running) > 0 {
+			fmt.Fprintf(s.Stderr(), "Pause one to free a slot, e.g.:  ssh %s@%s pause %s\r\n",
+				ControlUser, g.domainHint(), limit.Running[0])
+		} else {
+			fmt.Fprintf(s.Stderr(), "Pause one to free a slot:  ssh %s@%s list\r\n",
+				ControlUser, g.domainHint())
+		}
 		s.Exit(1) //nolint:errcheck
 		return
 	}
@@ -739,6 +841,16 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 		return
 	}
 	fail(s, log, what, err)
+}
+
+// namesOrNothing renders a sandbox list as ": a, b" or as nothing at all, so
+// the sentence above reads properly either way rather than trailing a colon
+// into empty space.
+func namesOrNothing(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return ": " + strings.Join(names, ", ")
 }
 
 func splitEnv(kv string) (string, string, bool) {

@@ -51,6 +51,13 @@ type Config struct {
 	UsersPath string
 	// ProxyDomain is the base domain for web routes (hivemind.tools).
 	ProxyDomain string
+	// Gateway, when set, provisions this host as a fleet NODE linked to the
+	// gateway at that host:port rather than as a gateway of its own. It changes
+	// what gets laid down, not just what gets passed: a node has no accounts, so
+	// the users.conf seed — which hard-fails without an operator key — is not
+	// merely unnecessary but wrong to demand of a machine that will never
+	// authenticate anyone.
+	Gateway string
 
 	// --- setup only ---
 	// ArtifactBase overrides DefaultArtifactBase.

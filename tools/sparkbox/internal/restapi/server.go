@@ -252,6 +252,12 @@ func (h *Handler) routes() []route {
 		{"POST", "/v1/account/tokens", "session-token", authMutate, h.mintToken},
 		{"POST", "/v1/account/invites", "invite", authMutate, h.invite},
 
+		// The fleet's machines. Operator-gated inside ctlops, like invites, so
+		// there is no second authorization path here.
+		{"GET", "/v1/nodes", "nodes.list", authRead, h.listNodes},
+		{"POST", "/v1/nodes/{name}/approve", "nodes.approve", authMutate, h.approveNode},
+		{"DELETE", "/v1/nodes/{name}", "nodes.rm", authMutate, h.removeNode},
+
 		// Jobs — where the long operations live once they escalate.
 		{"GET", "/v1/jobs", "jobs.list", authRead, h.listJobs},
 		{"GET", "/v1/jobs/{id}", "jobs.get", authRead, h.getJob},

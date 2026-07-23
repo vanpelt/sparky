@@ -318,6 +318,13 @@ func stepUsersConf() Step {
 	return Step{
 		Name: "users.conf",
 		Satisfied: func(e *Env) (bool, string, error) {
+			// A fleet node holds no accounts — every identity lives on the
+			// gateway — and this step hard-fails without an operator key, so on
+			// a node it would turn a perfectly good provisioning run into a
+			// demand for a key that would never be used.
+			if e.Cfg.Gateway != "" {
+				return true, "skipped (fleet node; accounts live on the gateway)", nil
+			}
 			b, err := os.ReadFile(e.Cfg.UsersPath)
 			if err != nil {
 				return false, "", nil
@@ -536,6 +543,14 @@ func (e *Env) renderEnvFile() string {
 	if e.Manifest.RootfsLogin != "" {
 		login = "--default-login-user=" + e.Manifest.RootfsLogin
 	}
+	// A whole flag bundle rather than one --gateway, because turning a host into
+	// a node usually comes with a --node-name and sometimes a --gateway-host-key
+	// pin, and an operator who has to edit this file anyway should not have to
+	// wait for a new variable to carry each of them.
+	gateway := ""
+	if e.Cfg.Gateway != "" {
+		gateway = "--gateway " + e.Cfg.Gateway
+	}
 	var b strings.Builder
 	b.WriteString("# sparkbox host config, sourced by sparkbox.service + sparkbox-net.service.\n")
 	b.WriteString("# Flags MUST be referenced unbraced in the units ($TLS_FLAGS, not ${TLS_FLAGS}).\n")
@@ -548,6 +563,10 @@ func (e *Env) renderEnvFile() string {
 	b.WriteString("OVERCOMMIT_FLAGS=--mem-reserve-mb 1024 --max-running-per-owner 50\n")
 	b.WriteString("# HTTPS edge: set e.g. TLS_FLAGS=--proxy-addr :443 --proxy-tls --tls-provider autocert --tls-email you@example.com\n")
 	b.WriteString("TLS_FLAGS=\n")
+	b.WriteString("# Fleet node: set e.g. GATEWAY_FLAG=--gateway gw.example.com:2222 --node-name box-b\n")
+	b.WriteString("# to run this host as a node of that gateway instead of as a gateway itself.\n")
+	b.WriteString("# Everything above (TLS, proxy, console) is then ignored: a node serves no edge.\n")
+	fmt.Fprintf(&b, "GATEWAY_FLAG=%s\n", gateway)
 	b.WriteString("# Operator console: uncomment to enable console.<domain>.\n")
 	b.WriteString("# SPARKBOX_CONSOLE_PASSWORD=change-me\n")
 	return b.String()

@@ -417,6 +417,72 @@ func TestBootSurvivesAnOwnerlessSandbox(t *testing.T) {
 	}
 }
 
+// An unplaced local name — the ownerless record adoptLocal has to skip — has no
+// ledger row, so the ledger alone will hand it to another machine and the fleet
+// ends up with one name on two machines. Fork and Rename are the two ways in:
+// both place by asking a machine other than the one that holds the name, so the
+// manager that would refuse never gets asked.
+func TestAnUnplacedLocalNameIsDefendedFleetWide(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	index := newIndex(t)
+	if _, err := mgr.Create(context.Background(), "legacy", "", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	f := newFleet(t, mgr, index)
+
+	nodeb := newFakeNode("boxb")
+	nodeb.snaps = []*host.Snapshot{{
+		Name: "golden", Owner: "alice", Image: "snap-alice-golden", FromBox: "far-away",
+	}}
+	attach(t, f, nodeb, &host.Sandbox{
+		Name: "far-away", Owner: "alice", Image: "ubuntu", State: vmm.StateRunning,
+	})
+	place(t, index, "far-away", "alice", "boxb")
+
+	_, err := f.Fork(context.Background(), "golden", "legacy", "alice", 1, 512)
+	var name *host.NameError
+	if !errors.As(err, &name) || name.Problem != host.NameTaken || name.Name != "legacy" {
+		t.Fatalf("fork onto an unplaced local name: want a taken-name error, got %v", err)
+	}
+	if nodeb.took("fork") {
+		t.Fatal("the other machine was asked to build a sandbox this one already has by that name")
+	}
+
+	if err := f.Rename(context.Background(), "far-away", "legacy", "alice"); !errors.As(err, &name) ||
+		name.Problem != host.NameTaken || name.Name != "legacy" {
+		t.Fatalf("rename onto an unplaced local name: want a taken-name error, got %v", err)
+	}
+	if nodeb.took("rename") {
+		t.Fatal("the other machine was asked to rename onto a name this one holds")
+	}
+
+	// Neither refusal may leave a row behind, and the local sandbox is untouched.
+	if _, ok, err := index.Get("legacy"); err != nil || ok {
+		t.Fatalf("a refused placement stranded a row: ok=%v err=%v", ok, err)
+	}
+	if _, ok := mgr.Get("legacy"); !ok {
+		t.Fatal("the local sandbox lost its name")
+	}
+	row, ok, err := index.Get("far-away")
+	if err != nil || !ok || row.Node != "boxb" {
+		t.Fatalf("the other machine's row moved anyway: ok=%v err=%v row=%+v", ok, err, row)
+	}
+
+	// The guard is about names this machine holds, not about remote placement:
+	// a free name still forks.
+	if _, err := f.Fork(context.Background(), "golden", "fresh", "alice", 1, 512); err == nil {
+		t.Fatal("fakeNode reported a successful fork")
+	} else if errors.As(err, &name) {
+		t.Fatalf("a free name was refused as taken: %v", err)
+	}
+	if !nodeb.took("fork") {
+		t.Fatal("a free name never reached the machine holding the template")
+	}
+	if _, ok, err := index.Get("fresh"); err != nil || ok {
+		t.Fatalf("the failed fork stranded a row: ok=%v err=%v", ok, err)
+	}
+}
+
 // The gateway always builds a ledger, so "no other machine is linked" — the
 // ordinary single-box deployment — must not pay for one. Listings are the
 // highest-traffic reads in the system and there is nothing a row can produce

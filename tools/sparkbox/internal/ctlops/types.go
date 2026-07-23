@@ -61,6 +61,30 @@ type RouteInfo struct {
 	URL        string `json:"url,omitempty"`
 }
 
+// NodeInfo is one machine in the fleet as an operator sees it: the roster row
+// joined to the live link.
+//
+// The node's public key itself is deliberately absent. FP is what an operator
+// compares out of band before approving, and it is the only part of the
+// credential anybody has a use for — the key is the roster's alone.
+type NodeInfo struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`          // pending | approved | disabled
+	Online  bool   `json:"online"`          // a link is attached right now
+	Local   bool   `json:"local,omitempty"` // the gateway's own machine
+	FP      string `json:"fingerprint"`     // SHA256:… of the node's key
+	Arch    string `json:"arch,omitempty"`  // node-authored, display only
+	Release string `json:"release,omitempty"`
+	// Sandboxes is how many placements this machine still holds. It is the one
+	// number that decides whether removing the node is safe, so it is part of
+	// the listing rather than something a client has to derive by cross-
+	// referencing every sandbox.
+	Sandboxes  int        `json:"sandboxes"`
+	ApprovedBy string     `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	LastSeen   *time.Time `json:"last_seen,omitempty"`
+}
+
 type Whoami struct {
 	Handle           string     `json:"handle"`
 	Status           string     `json:"status"`
