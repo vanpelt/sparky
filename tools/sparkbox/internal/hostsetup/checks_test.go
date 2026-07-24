@@ -121,6 +121,8 @@ func TestChecks(t *testing.T) {
 		{"virt vmx", checkVirt, fakeProbe{files: map[string]string{"/proc/cpuinfo": "flags: fpu vme vmx"}}, Pass},
 		{"virt svm", checkVirt, fakeProbe{files: map[string]string{"/proc/cpuinfo": "flags: fpu svm"}}, Pass},
 		{"virt none", checkVirt, fakeProbe{files: map[string]string{"/proc/cpuinfo": "flags: fpu vme"}}, Fail},
+		{"virt arm64 kvm", checkVirt, fakeProbe{goarch: "arm64", files: map[string]string{"/dev/kvm": ""}}, Pass},
+		{"virt arm64 no kvm", checkVirt, fakeProbe{goarch: "arm64"}, Fail},
 		{"ip_forward on", checkIPForward, fakeProbe{sysctls: map[string]string{"net.ipv4.ip_forward": "1"}}, Pass},
 		{"ip_forward off", checkIPForward, fakeProbe{sysctls: map[string]string{"net.ipv4.ip_forward": "0"}}, Warn},
 		{"rp_filter strict", checkRPFilter, fakeProbe{sysctls: map[string]string{"net.ipv4.conf.all.rp_filter": "1"}}, Pass},
@@ -180,6 +182,19 @@ func TestAnyFailAndReport(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q\n%s", want, out)
 		}
+	}
+}
+
+func TestCheckVirtARM64ReportsArchitectureSignal(t *testing.T) {
+	got := checkVirt(fakeProbe{
+		goarch: "arm64",
+		files:  map[string]string{"/dev/kvm": ""},
+	}, Config{})
+	if got.Status != Pass {
+		t.Fatalf("status = %v, want PASS (detail %q)", got.Status, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "ARM64") || !strings.Contains(got.Detail, "/dev/kvm") {
+		t.Fatalf("detail = %q, want ARM64 /dev/kvm explanation", got.Detail)
 	}
 }
 

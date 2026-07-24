@@ -170,6 +170,17 @@ func checkKVM(p Probe, _ Config) Result {
 }
 
 func checkVirt(p Probe, _ Config) Result {
+	// ARM64 does not advertise x86's vmx/svm flags. A usable /dev/kvm is the
+	// architecture-appropriate signal that the host exposed virtualization;
+	// checkKVM separately reports writability for the current user.
+	if p.GOARCH() == "arm64" {
+		if _, err := p.Stat("/dev/kvm"); err != nil {
+			return fail("/dev/kvm missing on arm64",
+				"enable nested virtualization; ARM64 reports availability through /dev/kvm, not vmx/svm CPU flags")
+		}
+		return pass("/dev/kvm present (ARM64 does not use vmx/svm CPU flags)")
+	}
+
 	b, err := p.ReadFile("/proc/cpuinfo")
 	if err != nil {
 		return warn("could not read /proc/cpuinfo", "check the host manually for VT-x/AMD-V")

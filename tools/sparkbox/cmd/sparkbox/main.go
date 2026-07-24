@@ -234,7 +234,10 @@ func serve(args []string) error {
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = newFirecrackerDriver(*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin, *guestDNS)
+		driver, err = newFirecrackerDriver(
+			*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin, *guestDNS,
+			sshgw.PublicKeyLine(upstreamKey),
+		)
 		if err != nil {
 			return err
 		}

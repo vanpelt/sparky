@@ -3,13 +3,12 @@
 // Package firecracker implements vmm.Driver on real Firecracker microVMs via
 // the official firecracker-go-sdk. It requires /dev/kvm, root (for tap device
 // setup), a vmlinux kernel, and per-image ext4 rootfs templates produced by
-// hack/build-rootfs.sh (which bakes in the gateway's SSH public key).
+// hack/build-rootfs.sh. Before each guest boots, the driver replaces the
+// template's baked fleet key with the active gateway's upstream public key.
 //
-// MVP status: written against firecracker-go-sdk v1.0.0 and compiles, but
-// this container has no KVM — it has NOT been exercised end to end yet. See
-// docs/deploy-hetzner.md for bring-up on a real host. Known gaps vs
-// production: no jailer, no balloon management, no UFFD lazy restore, no I/O
-// rate limits.
+// This driver has been exercised end to end on both a Linux KVM host and the
+// nested ARM64 macOS gateway proof of concept. Known gaps vs production: no
+// jailer, no balloon management, no UFFD lazy restore, no I/O rate limits.
 package firecracker
 
 import (
@@ -29,6 +28,7 @@ import (
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
+	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
@@ -52,6 +52,10 @@ type Options struct {
 	// template's baked authorized_keys (our images declare it via the
 	// sparkbox.login-user label; see hack/build-rootfs.sh). Empty defaults root.
 	LoginUser string
+	// AuthorizedKey is the active gateway upstream public key. Each cloned
+	// rootfs is patched before boot so standalone gateways with locally
+	// generated keys do not depend on the fleet key baked into the release.
+	AuthorizedKey string
 	// GuestDNS points guests at a specific resolver via the sparkbox_dns kernel
 	// arg, honoured by the guest sparkbox-netcfg hook. The literal "gateway"
 	// expands per-VM to the guest's own gateway (172.30.<idx>.1), where the
@@ -82,6 +86,13 @@ func New(opts Options) (*Driver, error) {
 	}
 	if opts.Subnet == "" {
 		opts.Subnet = "172.30.0.0"
+	}
+	if opts.AuthorizedKey != "" {
+		key, _, _, rest, err := xssh.ParseAuthorizedKey([]byte(opts.AuthorizedKey))
+		if err != nil || len(strings.TrimSpace(string(rest))) != 0 {
+			return nil, fmt.Errorf("gateway upstream public key is invalid")
+		}
+		opts.AuthorizedKey = strings.TrimSpace(string(xssh.MarshalAuthorizedKey(key)))
 	}
 	if err := validateGuestDNS(opts.GuestDNS); err != nil {
 		return nil, err
@@ -218,6 +229,9 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		if out, err := exec.CommandContext(ctx, "cp", "--reflink=auto", template, rootfs).CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("copy rootfs: %v: %s", err, out)
 		}
+	}
+	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, d.opts.AuthorizedKey); err != nil {
+		return nil, fmt.Errorf("install gateway key: %w", err)
 	}
 
 	idx, err := d.freeSlot()
@@ -873,6 +887,78 @@ func compact(ctx context.Context, path string) error {
 	}
 	if o, err := exec.CommandContext(ctx, "zerofree", path).CombinedOutput(); err != nil {
 		return fmt.Errorf("zerofree %s: %v: %s", path, err, o)
+	}
+	return nil
+}
+
+type loginIdentity struct {
+	home     string
+	uid, gid int
+}
+
+func rootfsLoginIdentity(passwd []byte, user string) (loginIdentity, error) {
+	if user == "" {
+		user = "root"
+	}
+	for _, line := range strings.Split(string(passwd), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 || fields[0] != user {
+			continue
+		}
+		uid, uerr := strconv.Atoi(fields[2])
+		gid, gerr := strconv.Atoi(fields[3])
+		home := filepath.Clean(fields[5])
+		if uerr != nil || gerr != nil || !filepath.IsAbs(home) || home == "/" {
+			return loginIdentity{}, fmt.Errorf("invalid passwd entry for %q", user)
+		}
+		return loginIdentity{home: home, uid: uid, gid: gid}, nil
+	}
+	return loginIdentity{}, fmt.Errorf("login user %q not found in guest /etc/passwd", user)
+}
+
+func installAuthorizedKey(ctx context.Context, rootfs, loginUser, key string) (retErr error) {
+	if key == "" {
+		return nil
+	}
+	mnt, err := os.MkdirTemp("", "sparkbox-key-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(mnt) //nolint:errcheck
+	if out, err := exec.CommandContext(ctx, "mount", "-o", "loop", rootfs, mnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount %s: %v: %s", rootfs, err, out)
+	}
+	defer func() {
+		if out, err := exec.Command("umount", mnt).CombinedOutput(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("umount %s: %v: %s", mnt, err, out)
+		}
+	}()
+
+	passwd, err := os.ReadFile(filepath.Join(mnt, "etc", "passwd"))
+	if err != nil {
+		return err
+	}
+	identity, err := rootfsLoginIdentity(passwd, loginUser)
+	if err != nil {
+		return err
+	}
+	home := filepath.Join(mnt, strings.TrimPrefix(identity.home, "/"))
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(sshDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chown(sshDir, identity.uid, identity.gid); err != nil {
+		return err
+	}
+	authorizedKeys := filepath.Join(sshDir, "authorized_keys")
+	if err := os.WriteFile(authorizedKeys, []byte(key+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chown(authorizedKeys, identity.uid, identity.gid); err != nil {
+		return err
 	}
 	return nil
 }

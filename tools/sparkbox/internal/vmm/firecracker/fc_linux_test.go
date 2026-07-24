@@ -76,6 +76,42 @@ func touch(t *testing.T, d *Driver, name string, files ...string) {
 	}
 }
 
+func TestRootfsLoginIdentity(t *testing.T) {
+	passwd := []byte("root:x:0:0:root:/root:/bin/bash\nsparky:x:1000:1001::/home/sparky:/bin/bash\n")
+
+	got, err := rootfsLoginIdentity(passwd, "sparky")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.home != "/home/sparky" || got.uid != 1000 || got.gid != 1001 {
+		t.Fatalf("identity = %+v", got)
+	}
+
+	got, err = rootfsLoginIdentity(passwd, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.home != "/root" || got.uid != 0 || got.gid != 0 {
+		t.Fatalf("default identity = %+v", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		passwd string
+		user   string
+	}{
+		{"missing user", string(passwd), "nobody"},
+		{"bad uid", "sparky:x:nope:1000::/home/sparky:/bin/sh\n", "sparky"},
+		{"unsafe home", "sparky:x:1000:1000::/:/bin/sh\n", "sparky"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := rootfsLoginIdentity([]byte(tc.passwd), tc.user); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestDropSnapshots(t *testing.T) {
 	d := newTestDriver(t)
 	touch(t, d, "box", "rootfs.ext4", "mem.snap", "state.snap")

@@ -1,0 +1,62 @@
+ARG GO_IMAGE=docker.io/library/golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+FROM ${GO_IMAGE} AS build
+
+ARG SPARKBOX_VERSION=dev
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${SPARKBOX_VERSION}" \
+      -o /out/sparkbox ./cmd/sparkbox
+
+FROM ${UBUNTU_IMAGE}
+
+ENV container=container
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      dbus \
+      e2fsprogs \
+      iproute2 \
+      iptables \
+      systemd \
+      systemd-sysv \
+      util-linux \
+      xfsprogs \
+      zerofree \
+      zstd \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Follow Apple's container-machine systemd image pattern. Machine identity is
+# generated on first boot; units that assume hardware or a traditional login
+# session are masked in this VM-shaped environment.
+RUN truncate -s 0 /etc/machine-id \
+    && mkdir -p /var/lib/dbus \
+    && truncate -s 0 /var/lib/dbus/machine-id \
+    && systemctl set-default multi-user.target \
+    && systemctl mask \
+      console-getty.service \
+      dev-hugepages.mount \
+      sys-fs-fuse-connections.mount \
+      systemd-tmpfiles-setup.service \
+      systemd-update-utmp.service
+
+COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
+COPY macos/gateway-verify.sh /usr/local/sbin/sparkbox-poc-verify
+
+RUN chmod 0755 /usr/local/bin/sparkbox /usr/local/sbin/sparkbox-poc-verify \
+    && printf '%s\n' 'sparkbox-macos-nested-poc=1' > /etc/sparkbox-poc
+
+LABEL io.sparkbox.macos-nested-poc="true"
+
+CMD ["/sbin/init"]
