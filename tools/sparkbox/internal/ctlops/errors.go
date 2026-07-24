@@ -198,6 +198,10 @@ var notFoundMsg = map[string]string{
 	"route":    "no route %q",
 	"job":      "no job %q",
 	"node":     "no node named %q",
+	// Keyed on the fingerprint, so it cannot borrow the sentence above: an
+	// operator who mistypes a fingerprint and reads `no node named "SHA256:…"`
+	// will go looking for a node whose *name* is a fingerprint.
+	"node_fp": "no node in this fleet holds the key %s",
 }
 
 // NotFound is the ONE constructor for the masked answer. Existence and

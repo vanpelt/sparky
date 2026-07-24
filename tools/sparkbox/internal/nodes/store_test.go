@@ -120,9 +120,14 @@ func TestEnrollRejectsBadNames(t *testing.T) {
 
 func TestEnrolmentIsBounded(t *testing.T) {
 	s := openTemp(t)
+	var first Node
 	for i := 0; i < MaxPending; i++ {
-		if _, err := s.Enroll(fmt.Sprintf("node-%d", i), newKey(t)); err != nil {
+		row, err := s.Enroll(fmt.Sprintf("node-%d", i), newKey(t))
+		if err != nil {
 			t.Fatalf("enrolment %d: %v", i, err)
+		}
+		if i == 0 {
+			first = row
 		}
 	}
 	if _, err := s.Enroll("one-too-many", newKey(t)); !errors.Is(err, ErrTooManyPending) {
@@ -130,7 +135,7 @@ func TestEnrolmentIsBounded(t *testing.T) {
 	}
 	// Approving one frees a slot: the ceiling is on the approval queue, not on
 	// the fleet.
-	if err := s.Approve("node-0", "vanpelt"); err != nil {
+	if err := s.ApproveFP(first.FP, "vanpelt"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Enroll("one-too-many", newKey(t)); err != nil {
@@ -141,11 +146,12 @@ func TestEnrolmentIsBounded(t *testing.T) {
 func TestApproveStampsTheOperator(t *testing.T) {
 	s := openTemp(t)
 	key := newKey(t)
-	if _, err := s.Enroll("node-b", key); err != nil {
+	row, err := s.Enroll("node-b", key)
+	if err != nil {
 		t.Fatal(err)
 	}
 	before := time.Now().UTC().Add(-time.Second)
-	if err := s.Approve("node-b", "vanpelt"); err != nil {
+	if err := s.ApproveFP(row.FP, "vanpelt"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Get("node-b")
@@ -153,13 +159,59 @@ func TestApproveStampsTheOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Status != StatusApproved || got.ApprovedBy != "vanpelt" {
-		t.Errorf("after Approve: %+v, want approved by vanpelt", got)
+		t.Errorf("after ApproveFP: %+v, want approved by vanpelt", got)
 	}
 	if got.ApprovedAt == nil || got.ApprovedAt.Before(before) {
 		t.Errorf("ApprovedAt = %v, want a stamp after %v", got.ApprovedAt, before)
 	}
-	if err := s.Approve("ghost", "vanpelt"); !errors.Is(err, ErrNoSuchNode) {
-		t.Errorf("Approve(ghost) = %v, want ErrNoSuchNode", err)
+	if err := s.ApproveFP(xssh.FingerprintSHA256(newKey(t)), "vanpelt"); !errors.Is(err, ErrNoSuchNode) {
+		t.Errorf("ApproveFP(a key nobody enrolled) = %v, want ErrNoSuchNode", err)
+	}
+}
+
+// The node's NAME is not a way in. Approval is keyed on the fingerprint
+// precisely so that a name — which the enrolling machine chooses for itself —
+// cannot carry the operator's decision, and a store that quietly accepted one
+// would put that back.
+func TestApproveRefusesANameAndTheEmptyString(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.Enroll("node-b", newKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"node-b", ""} {
+		if err := s.ApproveFP(ref, "vanpelt"); !errors.Is(err, ErrNoSuchNode) {
+			t.Errorf("ApproveFP(%q) = %v, want ErrNoSuchNode", ref, err)
+		}
+	}
+	got, err := s.Get("node-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusPending {
+		t.Errorf("status = %q, want it still pending", got.Status)
+	}
+}
+
+// GetByFP is the lookup an operator's approval resolves through, so it must
+// answer for the key it was given and for nothing else.
+func TestGetByFP(t *testing.T) {
+	s := openTemp(t)
+	row, err := s.Enroll("node-b", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetByFP(row.FP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "node-b" {
+		t.Errorf("GetByFP = %q, want node-b", got.Name)
+	}
+	if _, err := s.GetByFP(""); !errors.Is(err, ErrNoSuchNode) {
+		t.Errorf("GetByFP(\"\") = %v, want ErrNoSuchNode", err)
+	}
+	if _, err := s.GetByFP(row.FP[:20]); !errors.Is(err, ErrNoSuchNode) {
+		t.Errorf("GetByFP(prefix) = %v, want ErrNoSuchNode — a prefix is not a fingerprint", err)
 	}
 }
 
@@ -240,10 +292,11 @@ func TestSeenRecordsNodeAuthoredFacts(t *testing.T) {
 func TestRemoveLetsAKeyEnrolAgain(t *testing.T) {
 	s := openTemp(t)
 	key := newKey(t)
-	if _, err := s.Enroll("node-b", key); err != nil {
+	row, err := s.Enroll("node-b", key)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Approve("node-b", "vanpelt"); err != nil {
+	if err := s.ApproveFP(row.FP, "vanpelt"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Remove("node-b"); err != nil {
@@ -357,10 +410,11 @@ func TestReopenIsANoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := newKey(t)
-	if _, err := first.Enroll("node-b", key); err != nil {
+	row, err := first.Enroll("node-b", key)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Approve("node-b", "vanpelt"); err != nil {
+	if err := first.ApproveFP(row.FP, "vanpelt"); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {

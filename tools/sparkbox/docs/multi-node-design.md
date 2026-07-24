@@ -304,6 +304,9 @@ Settled 2026-07-22, before any code:
    is then the same code path as the fleet, not a special case.
 3. **Node admission: pubkey-in-roster + an operator `ctl@ node approve`.** It
    mirrors the invite flow users already go through, and it means a leaked
-   pre-shared token cannot enrol a node on its own.
+   pre-shared token cannot enrol a node on its own. Approval names the key by
+   its fingerprint and never the node's name: a node picks its own name at
+   enrolment, so whoever enrols a name first holds it, and an approval keyed on
+   one would bless whichever machine got there first.
 
 Still open: whether fleet-wide per-owner caps land at M2 or wait for M5.

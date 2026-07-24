@@ -231,7 +231,7 @@ Refusals are a `reply` carrying `Err`, followed by a `bye` and a close. Codes (a
 
 | code | meaning |
 |---|---|
-| `node_pending` | key enrolled, awaiting `ssh ctl@<gw> node approve <name>` (also the answer to the very first hello, which performs the enrolment) |
+| `node_pending` | key enrolled, awaiting `ssh ctl@<gw> node approve <SHA256:...>` (also the answer to the very first hello, which performs the enrolment). Keyed on the fingerprint, never the name — a node names itself, so a name cannot carry an approval |
 | `node_disabled` | roster row status is `disabled` |
 | `node_name_taken` | that node name is registered to a different key |
 | `node_name_mismatch` | `hello.node` != the roster row's name (the row is authoritative) |
@@ -2060,7 +2060,7 @@ placement row intact; the gateway process does not exit. Plus a guard test that 
 `RunClient` as §3.3, including the `keepalive@openssh.com` `SendRequest` on the heartbeat cadence (the
 only half-open detector on the node side) and the **dedicated** stream accept goroutine (registered here
 even though `ServeStreams`' resolver rejects everything until W21). Backoff 1s→60s ±20% jitter. Logs
-`node_pending` at Info with the exact `ssh ctl@<gw> node approve <name>` command, not at Error — a
+`node_pending` at Info with the exact `ssh ctl@<gw> node approve <SHA256:...>` command, not at Error — a
 gateway restart is routine. `Emitter` installs as both `host.Observer` and `host.SessionCloser`.
 
 **Acceptance:** `go test ./internal/nodelink/ -race`. A real gateway (the sshgw node door on a loopback
@@ -2132,7 +2132,9 @@ subcommand). `controlUsage` (control.go:15-63) gains a `node` block under `other
 
 **Acceptance:** `go test ./internal/ctlops/ ./internal/sshgw/ ./internal/restapi/`. Golden rows for
 `node` with no args, `node ls` as a non-operator (Denied, exit 1, one sentence), `node ls` as an
-operator, `node approve` with no name (exit 2), `node approve ghost` (the `no node named %q` phrasing),
+operator, `node approve` with no fingerprint (exit 2), `node approve <an unenrolled fingerprint>` (the
+`no node in this fleet holds the key %s` phrasing), `node approve <a name>` (refused as malformed, and
+without echoing the fingerprint that holds that name),
 `node rm` with placements outstanding (conflict), and `node wat` (exit 2); the three `controlUsage`
 assertions at control_golden_test.go:225/228/231 updated;
 `TestControlUsageDocumentsTheOtherDoors` (no bare `\n`) still passes. openapi_test.go's four spec-parity

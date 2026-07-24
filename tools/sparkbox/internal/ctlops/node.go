@@ -13,6 +13,7 @@ package ctlops
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // notAFleet is the KindDisabled sentence every node command answers on a host
@@ -77,11 +78,24 @@ func (o *Ops) ListNodes(ctx context.Context, c Caller) ([]NodeInfo, error) {
 	return list, nil
 }
 
-// ApproveNode blesses an enrolled machine. It is idempotent — approving an
-// already-approved node re-stamps who approved it and answers with the row —
-// because the operator's mental model is "make sure this is approved", and a
-// failure there would only invite them to remove and re-enrol a working node.
-func (o *Ops) ApproveNode(ctx context.Context, c Caller, name string) (NodeInfo, error) {
+// ApproveNode blesses an enrolled machine, keyed on the fingerprint of the key
+// that machine authenticates with.
+//
+// The fingerprint rather than the name is the security of the whole ceremony.
+// A node picks its own name at enrolment and the gateway has nothing to check
+// it against, so approving a name means trusting a string a stranger chose: a
+// stranger who enrols `gpu-01` before the real gpu-01 comes up holds that name,
+// the real machine is refused with ErrNameTaken, and the operator who was told
+// to expect `gpu-01` approves the wrong machine. A fingerprint cannot be
+// claimed that way — it is derived from the key — so the operator reads it off
+// the machine's own console, compares it against `node ls`, and what they type
+// can only ever bless the machine holding that key.
+//
+// It is idempotent — approving an already-approved node re-stamps who approved
+// it and answers with the row — because the operator's mental model is "make
+// sure this is approved", and a failure there would only invite them to remove
+// and re-enrol a working node.
+func (o *Ops) ApproveNode(ctx context.Context, c Caller, fp string) (NodeInfo, error) {
 	const op = "nodes.approve"
 	if o.nodes == nil {
 		return NodeInfo{}, Disabled(op, notAFleet)
@@ -89,20 +103,21 @@ func (o *Ops) ApproveNode(ctx context.Context, c Caller, name string) (NodeInfo,
 	if err := o.operatorOnly(op, c, "only operators can approve a machine into this fleet."); err != nil {
 		return NodeInfo{}, err
 	}
-	if name == "" {
-		return NodeInfo{}, Invalid(op, "missing_name", "a node name is required")
-	}
-	// Resolved before the write so an unknown name gets the same
-	// `no node named %q` sentence every other missing object gets, rather than
-	// whatever the roster store happens to say.
-	if _, err := o.node(op, name); err != nil {
+	canon, err := canonicalFP(op, fp)
+	if err != nil {
 		return NodeInfo{}, err
 	}
-	n, err := o.nodes.ApproveNode(name, c.Handle)
+	// Resolved before the write so an unknown fingerprint gets the same masked
+	// sentence every other missing object gets, rather than whatever the roster
+	// store happens to say.
+	if _, err := o.nodeByFP(op, canon); err != nil {
+		return NodeInfo{}, err
+	}
+	n, err := o.nodes.ApproveNode(canon, c.Handle)
 	if err != nil {
 		return NodeInfo{}, Fail(op, err)
 	}
-	o.log.Info("node approved", "node", name, "by", c.Handle, "fp", n.FP)
+	o.log.Info("node approved", "node", n.Name, "by", c.Handle, "fp", n.FP)
 	return n, nil
 }
 
@@ -169,6 +184,92 @@ func (o *Ops) node(op, name string) (NodeInfo, error) {
 		}
 	}
 	return NodeInfo{}, NotFound(op, "node", name)
+}
+
+// nodeByFP resolves one roster row by the fingerprint of its key, through the
+// same listing the operator compares against.
+//
+// A row with no fingerprint is never a candidate. That is this gateway's own
+// entry: it holds no roster row and no key, and is not a machine anybody
+// approves. Skipping it explicitly means a caller that reaches here with an
+// empty fingerprint gets a not-found rather than the local node.
+func (o *Ops) nodeByFP(op, fp string) (NodeInfo, error) {
+	list, err := o.nodes.ListNodes()
+	if err != nil {
+		return NodeInfo{}, Fail(op, err)
+	}
+	for _, n := range list {
+		if n.FP != "" && n.FP == fp {
+			return n, nil
+		}
+	}
+	return NodeInfo{}, NotFound(op, "node_fp", fp)
+}
+
+// fpPrefix is the hash label every SSH fingerprint on this platform carries.
+const fpPrefix = "SHA256:"
+
+// fpBodyLen is how many characters follow that label: SHA-256 is 32 bytes, and
+// unpadded base64 encodes 32 bytes in 43 characters.
+const fpBodyLen = 43
+
+// canonicalFP normalises what an operator typed into the `SHA256:…` form the
+// roster stores, and refuses anything that is not a fingerprint at all.
+//
+// The label is optional because it is the invariant half of every fingerprint
+// here, and an operator who copied only the interesting part has not made a
+// mistake worth an exit 2. The body is passed through untouched: it is base64,
+// whose alphabet is case-sensitive, so "helpfully" folding its case would turn
+// a correct paste into a not-found.
+//
+// The shape is checked rather than left to the lookup because the failure this
+// guards is an operator typing a name — the thing that used to work — and
+// `no node in this fleet holds the key gpu-01` explains nothing. What they need
+// to be told is that the name was never the safe thing to approve.
+func canonicalFP(op, s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", Invalid(op, "missing_fingerprint", "a node fingerprint is required")
+	}
+	body := strings.TrimPrefix(s, fpPrefix)
+	if len(body) == len(s) {
+		// Tolerate the label in any case, but only as a label: a body that
+		// merely starts with those letters is not one.
+		if len(s) > len(fpPrefix) && strings.EqualFold(s[:len(fpPrefix)], fpPrefix) {
+			body = s[len(fpPrefix):]
+		}
+	}
+	if !validFPBody(body) {
+		return "", &Error{
+			Kind: KindInvalid, Op: op, Code: "bad_fingerprint",
+			Msg: fmt.Sprintf("%q is not an SSH key fingerprint. A machine is approved by the key it "+
+				"holds, not by the name it asked for — the name is chosen by whoever is enrolling, so "+
+				"approving one would trust a stranger's word. Read the fingerprint off the machine "+
+				"itself (it prints one at startup), check it against `node ls`, and approve that.", s),
+			Hint:     "Fingerprints look like SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU.",
+			Verbatim: true,
+		}
+	}
+	return fpPrefix + body, nil
+}
+
+// validFPBody reports whether s is exactly the unpadded-base64 body of a
+// SHA-256 fingerprint. Length is part of the check: a prefix of one is not a
+// fingerprint, and accepting prefixes would mean an operator could approve a
+// machine having compared only the first few characters of its key — which is
+// the property this whole change exists to establish.
+func validFPBody(s string) bool {
+	if len(s) != fpBodyLen {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '+', r == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // operatorOnly resolves the operator bit from the account store, exactly as

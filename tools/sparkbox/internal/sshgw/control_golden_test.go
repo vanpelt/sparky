@@ -121,9 +121,9 @@ func (f *fakeRoster) ListNodes() ([]ctlops.NodeInfo, error) {
 	return append([]ctlops.NodeInfo(nil), f.nodes...), nil
 }
 
-func (f *fakeRoster) ApproveNode(name, by string) (ctlops.NodeInfo, error) {
+func (f *fakeRoster) ApproveNode(fp, by string) (ctlops.NodeInfo, error) {
 	for i := range f.nodes {
-		if f.nodes[i].Name == name {
+		if f.nodes[i].FP != "" && f.nodes[i].FP == fp {
 			f.nodes[i].Status, f.nodes[i].ApprovedBy = "approved", by
 			return f.nodes[i], nil
 		}
@@ -141,14 +141,24 @@ func (f *fakeRoster) RemoveNode(name string) error {
 	return errors.New("no such node")
 }
 
+// The fixture's fingerprints, full length: `node approve` checks the shape of
+// what it is given, so a short stand-in would be refused as malformed rather
+// than looked up.
+const (
+	fpNodeB    = "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	fpNewcomer = "SHA256:ccccccccccccccccccccccccccccccccccccccccccc"
+	// fpNobody is well-formed and belongs to no row.
+	fpNobody = "SHA256:ddddddddddddddddddddddddddddddddddddddddddd"
+)
+
 // testRoster is the fleet every ctl@ node row is rendered against: this
 // gateway, an approved machine holding sandboxes, and one that has enrolled and
 // is waiting to be let in.
 func testRoster() *fakeRoster {
 	return &fakeRoster{nodes: []ctlops.NodeInfo{
 		{Name: "here", Status: "approved", Online: true, Local: true, Arch: "arm64", Sandboxes: 1},
-		{Name: "node-b", Status: "approved", Online: true, FP: "SHA256:bbbb", Arch: "amd64", Sandboxes: 2},
-		{Name: "newcomer", Status: "pending", FP: "SHA256:cccc"},
+		{Name: "node-b", Status: "approved", Online: true, FP: fpNodeB, Arch: "amd64", Sandboxes: 2},
+		{Name: "newcomer", Status: "pending", FP: fpNewcomer},
 	}}
 }
 
@@ -446,16 +456,27 @@ func TestControlGolden(t *testing.T) {
 	}, {
 		name: "node ls as an operator", handle: "opsy", args: []string{"node", "ls"},
 		wantOut: "here (this gateway)          approved  online   arm64    1 sandbox\r\n" +
-			"node-b                       approved  online   amd64    2 sandboxes   SHA256:bbbb\r\n" +
-			"newcomer                     pending   offline  -        0 sandboxes   SHA256:cccc\r\n",
+			"node-b                       approved  online   amd64    2 sandboxes   " + fpNodeB + "\r\n" +
+			"newcomer                     pending   offline  -        0 sandboxes   " + fpNewcomer + "\r\n",
 		wantExit: 0,
 	}, {
-		name: "node approve without a name", handle: "opsy", args: []string{"node", "approve"},
-		wantErr: "usage: ssh ctl@<gateway> node approve <name>\r\n", wantExit: 2,
+		name: "node approve without a fingerprint", handle: "opsy", args: []string{"node", "approve"},
+		wantErr: "usage: ssh ctl@<gateway> node approve <SHA256:...>\r\n" +
+			"Approve a machine by the fingerprint of its key, which it prints at startup — compare that against `node ls` first.\r\n", wantExit: 2,
 	}, {
 		name: "node approve of a machine that never enrolled", handle: "opsy",
-		args:    []string{"node", "approve", "ghost"},
-		wantErr: "sparkbox: no node named \"ghost\"\r\n", wantExit: 1,
+		args:    []string{"node", "approve", fpNobody},
+		wantErr: "sparkbox: no node in this fleet holds the key " + fpNobody + "\r\n", wantExit: 1,
+	}, {
+		// A name is not a way in, even a name that IS on the roster. The
+		// refusal must not answer with the fingerprint that holds it: that
+		// would turn the ceremony into a paste nobody compared.
+		name: "node approve by name", handle: "opsy",
+		args: []string{"node", "approve", "newcomer"},
+		wantErr: "sparkbox: \"newcomer\" is not an SSH key fingerprint. A machine is approved by the key it " +
+			"holds, not by the name it asked for — the name is chosen by whoever is enrolling, so approving " +
+			"one would trust a stranger's word. Read the fingerprint off the machine itself (it prints one " +
+			"at startup), check it against `node ls`, and approve that.\r\n", wantExit: 2,
 	}, {
 		// The count is the message: removing the row would not delete those
 		// sandboxes, only strand them.
@@ -577,8 +598,8 @@ func TestControlNodeOnASingleBox(t *testing.T) {
 func TestControlNodeApproveAndRemove(t *testing.T) {
 	st := newCtlStack(t)
 
-	s := st.run(t, "opsy", "node", "approve", "newcomer")
-	if s.code != 0 || s.out.String() != "approved newcomer (SHA256:cccc) — it can carry sandboxes now\r\n" {
+	s := st.run(t, "opsy", "node", "approve", fpNewcomer)
+	if s.code != 0 || s.out.String() != "approved newcomer ("+fpNewcomer+") — it can carry sandboxes now\r\n" {
 		t.Fatalf("approve = exit %d, stdout %q, stderr %q", s.code, s.out.String(), s.stderr.String())
 	}
 	if st.roster.nodes[2].Status != "approved" || st.roster.nodes[2].ApprovedBy != "opsy" {

@@ -25,9 +25,9 @@ func (r *liveRoster) ListNodes() ([]NodeInfo, error) {
 	return append([]NodeInfo(nil), r.list...), nil
 }
 
-func (r *liveRoster) ApproveNode(name, by string) (NodeInfo, error) {
+func (r *liveRoster) ApproveNode(fp, by string) (NodeInfo, error) {
 	for i := range r.list {
-		if r.list[i].Name == name {
+		if r.list[i].FP != "" && r.list[i].FP == fp {
 			r.list[i].Status = "approved"
 			r.list[i].ApprovedBy = by
 			return r.list[i], nil

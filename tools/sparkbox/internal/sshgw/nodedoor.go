@@ -256,7 +256,7 @@ func (g *Gateway) enrolNode(key xssh.PublicKey, hello nodelink.Hello, log *slog.
 	// greps for when the machine they just brought up has not appeared, so it is
 	// deliberately not rate-limited.
 	log.Info("node enrolled and awaiting approval", "node", row.Name, "fp", row.FP,
-		"approve_with", fmt.Sprintf("ssh %s@%s node approve %s", ControlUser, g.domainHint(), row.Name))
+		"approve_with", fmt.Sprintf("ssh %s@%s node approve %s", ControlUser, g.domainHint(), row.FP))
 	g.noteContact(row, hello, log)
 	return nodes.Node{}, g.pendingRefusal(row)
 }
@@ -425,8 +425,8 @@ func disarmProbation(ctx gssh.Context) {
 func (g *Gateway) pendingRefusal(row nodes.Node) *ctlops.Error {
 	return nodelink.Refusal(nodelink.CodeNodePending,
 		"node %q (%s) is waiting for approval. An operator runs:  ssh %s@%s node approve %s  "+
-			"— after checking that `node ls` lists this machine's fingerprint against that name.",
-		row.Name, row.FP, ControlUser, g.domainHint(), row.Name)
+			"— after checking that fingerprint against the one this machine printed at startup.",
+		row.Name, row.FP, ControlUser, g.domainHint(), row.FP)
 }
 
 // doorNoise bounds the log lines a machine this gateway has not approved can

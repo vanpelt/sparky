@@ -994,8 +994,11 @@ func (r fleetRoster) held(node string) (int, error) {
 	return len(rows), nil
 }
 
-func (r fleetRoster) ApproveNode(name, by string) (ctlops.NodeInfo, error) {
-	if err := r.roster.Approve(name, by); err != nil {
+// ApproveNode blesses the machine holding the key with this fingerprint. It is
+// keyed on the fingerprint rather than the name for the reason ctlops.ApproveNode
+// documents: a node names itself, so a name cannot carry an approval.
+func (r fleetRoster) ApproveNode(fp, by string) (ctlops.NodeInfo, error) {
+	if err := r.roster.ApproveFP(fp, by); err != nil {
 		return ctlops.NodeInfo{}, err
 	}
 	list, err := r.ListNodes()
@@ -1003,7 +1006,7 @@ func (r fleetRoster) ApproveNode(name, by string) (ctlops.NodeInfo, error) {
 		return ctlops.NodeInfo{}, err
 	}
 	for _, n := range list {
-		if n.Name == name {
+		if n.FP != "" && n.FP == fp {
 			return n, nil
 		}
 	}

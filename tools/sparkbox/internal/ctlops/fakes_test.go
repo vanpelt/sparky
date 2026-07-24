@@ -538,13 +538,13 @@ func (f *fakeNodes) ListNodes() ([]NodeInfo, error) {
 	return append([]NodeInfo(nil), f.list...), nil
 }
 
-func (f *fakeNodes) ApproveNode(name, by string) (NodeInfo, error) {
-	f.c.add("ApproveNode %s by=%s", name, by)
+func (f *fakeNodes) ApproveNode(fp, by string) (NodeInfo, error) {
+	f.c.add("ApproveNode %s by=%s", fp, by)
 	if f.err != nil {
 		return NodeInfo{}, f.err
 	}
 	for i := range f.list {
-		if f.list[i].Name == name {
+		if f.list[i].FP != "" && f.list[i].FP == fp {
 			f.list[i].Status = "approved"
 			f.list[i].ApprovedBy = by
 			return f.list[i], nil
@@ -617,13 +617,25 @@ type rig struct {
 func (r *rig) withNodes() *fakeNodes {
 	n := &fakeNodes{c: r.calls, list: []NodeInfo{
 		{Name: "here", Status: "approved", Online: true, Local: true, Arch: "arm64", Sandboxes: 1},
-		{Name: "node-b", Status: "approved", Online: true, FP: "SHA256:bbbb", Arch: "amd64", Sandboxes: 2},
-		{Name: "newcomer", Status: "pending", FP: "SHA256:cccc"},
+		{Name: "node-b", Status: "approved", Online: true, FP: fpNodeB, Arch: "amd64", Sandboxes: 2},
+		{Name: "newcomer", Status: "pending", FP: fpNewcomer},
 	}}
 	r.nodes = n
 	r.ops.nodes = n
 	return n
 }
+
+// The roster fixture's fingerprints, full length. ApproveNode checks the shape
+// of what it is given before it looks anything up — a prefix is not a
+// fingerprint, and neither is a name — so a short stand-in here would be
+// rejected as malformed long before it reached the roster, and every node test
+// would be asserting against the wrong refusal.
+const (
+	fpNodeB    = "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	fpNewcomer = "SHA256:ccccccccccccccccccccccccccccccccccccccccccc"
+	// fpNobody is well-formed and belongs to no row in the fixture.
+	fpNobody = "SHA256:ddddddddddddddddddddddddddddddddddddddddddd"
+)
 
 // testKey is a fixed public key so fingerprints are stable across runs.
 const testKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJmoo1J5B5cKpVXFRc2A7lZ5m6BqDkVL1kJvbjRJgqQK alice@laptop"

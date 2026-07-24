@@ -314,7 +314,14 @@ func (fs *fleetStack) join(t *testing.T, n *nodeSide) {
 		t.Fatal("an unapproved machine joined the fleet; enrolling must grant nothing")
 	}
 
-	if err := fs.roster.Approve(n.name, "tester"); err != nil {
+	// Approval is keyed on the key's fingerprint, not the name — which is the
+	// operator ceremony too: read the fingerprint off the row, compare it to the
+	// one the machine printed, approve that.
+	row, err := fs.roster.Get(n.name)
+	if err != nil {
+		t.Fatalf("reading the pending row for %s: %v", n.name, err)
+	}
+	if err := fs.roster.ApproveFP(row.FP, "tester"); err != nil {
 		t.Fatalf("approving %s: %v", n.name, err)
 	}
 	waitFor(t, "the fleet to see node-b online", func() bool { return fs.flt.Online(n.name) })

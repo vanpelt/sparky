@@ -55,7 +55,13 @@ func (g *Gateway) controlNode(s gssh.Session, c ctlops.Caller, args []string, lo
 		s.Exit(0) //nolint:errcheck
 	case "approve":
 		if len(args) < 2 {
-			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> node approve <name>\r\n", ControlUser)
+			// The usage line names the fingerprint and says where to read it,
+			// because the obvious guess is the name in the line above it and
+			// the whole point of this command is that the name is not enough.
+			fmt.Fprintf(s.Stderr(),
+				"usage: ssh %s@<gateway> node approve <SHA256:...>\r\n"+
+					"Approve a machine by the fingerprint of its key, which it prints at startup — "+
+					"compare that against `node ls` first.\r\n", ControlUser)
 			s.Exit(2) //nolint:errcheck
 			return
 		}

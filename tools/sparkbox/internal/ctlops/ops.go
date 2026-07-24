@@ -116,9 +116,11 @@ type Routes interface {
 // because the row carries the key the node proves possession of, which has no
 // rendering anywhere. Whoever wires this joins the roster to the live fleet;
 // ctlops applies the policy.
+// ApproveNode takes the fingerprint of the node's key, not its name: a name is
+// node-authored and so cannot carry an approval. See Ops.ApproveNode.
 type NodeRoster interface {
 	ListNodes() ([]NodeInfo, error)
-	ApproveNode(name, by string) (NodeInfo, error)
+	ApproveNode(fp, by string) (NodeInfo, error)
 	RemoveNode(name string) error
 }
 

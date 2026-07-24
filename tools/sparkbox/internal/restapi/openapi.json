@@ -1386,14 +1386,21 @@
         }
       }
     },
-    "/v1/nodes/{name}/approve": {
+    "/v1/nodes/approve": {
       "post": {
         "operationId": "nodes.approve",
         "tags": ["nodes"],
         "summary": "Let an enrolled machine into the fleet",
-        "description": "Operators only. This is the whole trust ceremony: compare the fingerprint from `GET /v1/nodes` against the one the machine printed at boot, then approve. Idempotent — approving an already-approved node re-records who approved it.",
+        "description": "Operators only. This is the whole trust ceremony: compare the fingerprint from `GET /v1/nodes` against the one the machine printed at boot, then approve **that fingerprint**.\n\nThe machine is named by its key, never by its `name`. A node chooses its own name at enrolment and the gateway has nothing to check it against, so approving a name would trust a string a stranger picked — whoever enrols a name first holds it, and the machine you were expecting is refused as a duplicate. A fingerprint cannot be claimed that way.\n\nIdempotent — approving an already-approved node re-records who approved it.",
         "parameters": [
-          { "$ref": "#/components/parameters/NodeName" },
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "required": true,
+            "description": "The node's `SHA256:…` fingerprint, exactly as `GET /v1/nodes` lists it — **percent-encoded**. The base64 alphabet includes `+` and `/`, and a query decoder reads a bare `+` as a space. The `SHA256:` prefix may be omitted. Prefixes are not accepted: the full fingerprint is the point.",
+            "schema": { "type": "string" },
+            "example": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+          },
           { "$ref": "#/components/parameters/IdempotencyKey" }
         ],
         "responses": {

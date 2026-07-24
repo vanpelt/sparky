@@ -310,9 +310,15 @@ func TestNodeEnrolsOnceAndIsRefused(t *testing.T) {
 		t.Errorf("refusal code = %q, want %q", reply.Err.Code, nodelink.CodeNodePending)
 	}
 	// The sentence carries the command that unblocks the node, because the
-	// node's log line is the only place anyone will look for it.
-	if !strings.Contains(reply.Err.Msg, "node approve node-b") {
+	// node's log line is the only place anyone will look for it — and it must
+	// carry the FINGERPRINT form. This string is what an operator copies, so a
+	// name here would hand them the one command that cannot be trusted.
+	fp := xssh.FingerprintSHA256(key.PublicKey())
+	if !strings.Contains(reply.Err.Msg, "node approve "+fp) {
 		t.Errorf("refusal does not say how to approve the node: %q", reply.Err.Msg)
+	}
+	if strings.Contains(reply.Err.Msg, "node approve node-b") {
+		t.Errorf("refusal offers approval by name: %q", reply.Err.Msg)
 	}
 
 	row, err := s.roster.Get("node-b")
@@ -400,7 +406,7 @@ func TestUnknownKeyRefusedIdenticallyElsewhere(t *testing.T) {
 func (s *nodeStack) approved(t *testing.T, key xssh.Signer, name string) *link {
 	t.Helper()
 	s.open(t, key).hello(t, name)
-	if err := s.roster.Approve(name, "operator"); err != nil {
+	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
 		t.Fatal(err)
 	}
 	l := s.open(t, key)
@@ -417,7 +423,7 @@ func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.Approve("node-b", "operator"); err != nil {
+	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -701,7 +707,7 @@ func TestApprovedNodeIsNeverRecycled(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.Approve("node-b", "operator"); err != nil {
+	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
 		t.Fatal(err)
 	}
 	waiting := s.fillEnrolmentQueue(t)

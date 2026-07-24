@@ -166,15 +166,21 @@ func TestGatewayOpsApprovesAnEnrolledNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fx.roster.Enroll("node-b", key.PublicKey()); err != nil {
+	enrolled, err := fx.roster.Enroll("node-b", key.PublicKey())
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	opsy := ctlops.Caller{Handle: "opsy"}
 	ctx := context.Background()
-	row, err := ops.ApproveNode(ctx, opsy, "node-b")
+	// By fingerprint, which is what the production adapter has to key on: a node
+	// names itself, so approving a name would trust a string a stranger chose.
+	row, err := ops.ApproveNode(ctx, opsy, enrolled.FP)
 	if err != nil {
 		t.Fatalf("approving an enrolled node: %v", err)
+	}
+	if _, err := ops.ApproveNode(ctx, opsy, "node-b"); err == nil {
+		t.Error("the wired-up roster approved a machine by name")
 	}
 	if row.Status != nodes.StatusApproved || row.FP == "" {
 		t.Errorf("approved row = %+v, want an approved status and the fingerprint the operator compared", row)
@@ -359,7 +365,14 @@ func (fw *fleetWiring) join(t *testing.T) {
 	if fw.stores.Fleet.Online(name) {
 		t.Fatal("an unapproved machine joined the fleet; enrolling must grant nothing")
 	}
-	if out := fw.ctl(t, "node approve "+name); !strings.Contains(out, "approved "+name) {
+	// The operator ceremony, driven through the real ctl@ channel: read the
+	// fingerprint off the pending row, compare it to the one the machine
+	// printed, approve that. The name is never what is typed.
+	row, err := fw.roster.Get(name)
+	if err != nil {
+		t.Fatalf("reading the pending row for %s: %v", name, err)
+	}
+	if out := fw.ctl(t, "node approve "+row.FP); !strings.Contains(out, "approved "+name) {
 		t.Fatalf("ctl node approve said %q", out)
 	}
 	waitFor(t, "the fleet to see "+name+" online", func() bool { return fw.stores.Fleet.Online(name) })

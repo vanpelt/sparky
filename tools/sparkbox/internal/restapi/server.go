@@ -255,7 +255,7 @@ func (h *Handler) routes() []route {
 		// The fleet's machines. Operator-gated inside ctlops, like invites, so
 		// there is no second authorization path here.
 		{"GET", "/v1/nodes", "nodes.list", authRead, h.listNodes},
-		{"POST", "/v1/nodes/{name}/approve", "nodes.approve", authMutate, h.approveNode},
+		{"POST", "/v1/nodes/approve", "nodes.approve", authMutate, h.approveNode},
 		{"DELETE", "/v1/nodes/{name}", "nodes.rm", authMutate, h.removeNode},
 
 		// Jobs — where the long operations live once they escalate.

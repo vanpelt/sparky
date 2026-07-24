@@ -11,6 +11,12 @@
 // pending until an operator approves it out of band, having compared the
 // fingerprint. That is the whole trust ceremony: the key is the identity, the
 // name is a label, and approval is a human saying yes.
+//
+// Approval is keyed on the fingerprint (ApproveFP) and never on the name, which
+// is what makes the sentence above true rather than aspirational. The name in a
+// row is whatever the machine asked to be called; approving one would trust a
+// string a stranger chose, and a stranger who enrols a name before the machine
+// an operator is expecting gets blessed in its place.
 package nodes
 
 import (
@@ -119,6 +125,7 @@ func Open(path string) (*Store, error) {
 			last_seen   TIMESTAMP
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS nodes_wire ON nodes(wire);
+		CREATE UNIQUE INDEX IF NOT EXISTS nodes_fp ON nodes(fp);
 	`); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
@@ -226,14 +233,30 @@ func (s *Store) Enroll(name string, key xssh.PublicKey) (Node, error) {
 	return n, tx.Commit()
 }
 
-// Approve blesses a pending node. by is the operator's handle, recorded so the
+// ApproveFP blesses a pending node, keyed on the fingerprint of the key that
+// node proves possession of. by is the operator's handle, recorded so the
 // roster answers "who let this machine in" months later.
-func (s *Store) Approve(name, by string) error {
+//
+// The fingerprint rather than the name is the whole security of the ceremony. A
+// name is chosen by the machine enrolling — the gateway has no way to check it
+// against anything — so `approve gpu-01` asks an operator to trust a string a
+// stranger picked, and a stranger who enrols the name first is the one who gets
+// blessed. A fingerprint is derived from the key itself and cannot be claimed:
+// the operator reads it off the machine's own console, compares it against the
+// roster, and what they type can only ever approve the machine holding that key.
+//
+// An empty fp is refused rather than run as a query. The gateway's own entry in
+// a listing carries no fingerprint, and a WHERE that matched the empty string
+// would let a malformed call bless whatever row happened to have one.
+func (s *Store) ApproveFP(fp, by string) error {
+	if fp == "" {
+		return ErrNoSuchNode
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, err := s.db.Exec(
-		`UPDATE nodes SET status = ?, approved_by = ?, approved_at = ? WHERE name = ?`,
-		StatusApproved, by, time.Now().UTC(), name)
+		`UPDATE nodes SET status = ?, approved_by = ?, approved_at = ? WHERE fp = ?`,
+		StatusApproved, by, time.Now().UTC(), fp)
 	if err != nil {
 		return err
 	}
@@ -241,6 +264,18 @@ func (s *Store) Approve(name, by string) error {
 		return ErrNoSuchNode
 	}
 	return nil
+}
+
+// GetByFP returns the row whose key has this fingerprint.
+func (s *Store) GetByFP(fp string) (Node, error) {
+	if fp == "" {
+		return Node{}, ErrNoSuchNode
+	}
+	n, err := s.get(`SELECT `+cols+` FROM nodes WHERE fp = ?`, fp)
+	if err == sql.ErrNoRows {
+		return Node{}, ErrNoSuchNode
+	}
+	return n, err
 }
 
 // Remove deletes a row. The node may enrol again afterwards — removal revokes

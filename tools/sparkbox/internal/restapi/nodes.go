@@ -27,9 +27,19 @@ func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodeList{Nodes: list})
 }
 
+// approveNode identifies the machine by the fingerprint of its key rather than
+// by its name — see ctlops.ApproveNode for why a node-authored name cannot
+// carry an approval.
+//
+// That moves it off `/v1/nodes/{name}/approve` and onto a query parameter, for
+// the reason removeKey documents: a fingerprint is `SHA256:` plus unpadded
+// base64, whose alphabet includes '/', so as a path segment it would need
+// percent-encoding that the proxies on this path normalize straight back into a
+// separator.
 func (h *Handler) approveNode(w http.ResponseWriter, r *http.Request) {
 	const op = "nodes.approve"
-	n, err := h.ops.ApproveNode(r.Context(), caller(r), r.PathValue("name"))
+	fp := r.URL.Query().Get("fingerprint")
+	n, err := h.ops.ApproveNode(r.Context(), caller(r), fp)
 	if err != nil {
 		h.fail(w, r, op, err)
 		return
