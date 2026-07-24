@@ -192,12 +192,12 @@ type Sandbox struct {
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
 	ArchiveKey string    `json:"archive_key,omitempty"`
 	ArchivedAt time.Time `json:"archived_at,omitempty"`
-	// DiskMB is this sandbox's durable on-host disk footprint: blocks allocated
-	// to its rootfs, i.e. the bytes an archive would carry. The memory snapshot
-	// is deliberately excluded — it is regenerable, exists only while paused, and
-	// at the size of the guest's RAM ceiling it would dwarf the real data.
+	// DiskMB is this sandbox's durable root-filesystem usage. Host representation
+	// details (sparse holes and shared reflink extents) and the regenerable
+	// memory snapshot are deliberately excluded. For an archived box it is the
+	// stored archive size because there is no live filesystem to measure.
 	// Refreshed by the reaper and summed per owner for the pooled-disk admission
-	// check. 0 for an archived box (its archive counts against the pool instead).
+	// check.
 	DiskMB int64 `json:"disk_mb,omitempty"`
 	// DiskTotalMB is the guest's hard disk ceiling — the size of its rootfs
 	// filesystem, which it cannot grow past. Discovered from the image rather
@@ -412,7 +412,7 @@ type Options struct {
 	// ArchivePrefix is the object-key prefix archives are written under
 	// (default "archives"): <prefix>/<owner>/<name>.ext4.zst.
 	ArchivePrefix string
-	// DiskPoolMBPerOwner caps an owner's pooled on-disk usage across all their
+	// DiskPoolMBPerOwner caps an owner's pooled durable usage across all their
 	// sandboxes + archives (0 = unlimited). Soft accounting, enforced at
 	// create/restore — see admit.
 	DiskPoolMBPerOwner int64
@@ -647,10 +647,9 @@ func (m *Manager) admit(owner string, memMB, reqDiskMB int64, exclude string) er
 			return &CapacityError{RequestedMB: cost, UsedMB: used, BudgetMB: budget}
 		}
 	}
-	// Pooled per-owner disk (soft accounting): the sum of an owner's on-disk
-	// footprints — running/paused rootfs + snapshots, plus archived boxes'
-	// object-storage size — must stay under their pool. Conservative: reflink-
-	// shared base blocks are counted per box, so this over-counts, never under.
+	// Pooled per-owner disk (soft accounting): the sum of each running/paused
+	// root filesystem's used blocks plus archived boxes' object-storage size
+	// must stay under the owner's pool.
 	if m.diskPoolMB > 0 {
 		var used int64
 		for _, b := range m.boxes {
@@ -770,8 +769,8 @@ type NodeCapacity struct {
 	EffectiveMemMB int64 `json:"effective_mem_mb"`
 	// ReserveMemMB is the per-VM working-set floor; 0 means overcommit is off.
 	ReserveMemMB int64 `json:"reserve_mem_mb"`
-	// UsedDiskMB is the summed on-disk footprint of all sandboxes on this node
-	// (rootfs deltas + snapshots + archived boxes' object-storage size).
+	// UsedDiskMB is the summed durable usage of all sandboxes on this node
+	// (used root-filesystem blocks + archived boxes' object-storage size).
 	// DiskPoolMBPerOwner is the per-owner pooled budget (0 = unlimited).
 	UsedDiskMB         int64 `json:"used_disk_mb"`
 	DiskPoolMBPerOwner int64 `json:"disk_pool_mb_per_owner"`
@@ -1772,8 +1771,8 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 	}
 }
 
-// RefreshDiskUsage re-measures every non-archived sandbox's on-host footprint
-// for pooled accounting. Called each reaper tick (when a disk pool is set) and
+// RefreshDiskUsage re-measures every non-archived sandbox's durable filesystem
+// usage for pooled accounting. Called each reaper tick and
 // available for on-demand refresh. Archived boxes keep their fixed archive size.
 func (m *Manager) RefreshDiskUsage(ctx context.Context) {
 	if m.diskReport == nil {
@@ -1786,10 +1785,9 @@ func (m *Manager) RefreshDiskUsage(ctx context.Context) {
 	}
 }
 
-// refreshDiskUsage measures a sandbox's current on-host footprint (rootfs +
-// snapshot) via the driver and updates its DiskMB for pooled accounting. The
-// driver call is made without m.mu held (a `du` can be slow); the brief locked
-// section only stores the result.
+// refreshDiskUsage measures a sandbox's current durable filesystem usage via
+// the driver and updates its DiskMB for pooled accounting. The driver call is
+// made without m.mu held; the brief locked section only stores the result.
 func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 	if m.diskReport == nil {
 		return
@@ -1799,7 +1797,7 @@ func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 		return
 	}
 	// Ceiling is best-effort and independent: a driver that can't report it just
-	// leaves the consoles showing a bare footprint with no meter.
+	// leaves the consoles showing a bare usage figure with no meter.
 	capMB, capErr := m.diskReport.DiskCapacityMB(ctx, name)
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -83,6 +83,25 @@ rootfs's `/etc/passwd`, and the resulting `authorized_keys` ownership and mode
 are set inside the mounted image. This keeps fleet and standalone gateways
 aligned with the key they actually loaded.
 
+## Storage-accounting finding
+
+The first macOS run showed `macpoc` as using 25 GiB of its 25 GiB disk even
+though the guest's `df` reported only about 2.4 GiB used. Two representation
+details combined to produce that result:
+
+- setup's streaming Go decompressor wrote every decoded zero byte, materializing
+  the sparse 25 GiB rootfs template on XFS; and
+- Firecracker's disk reporter used host-side `du`, which counts materialized
+  and shared reflink blocks rather than guest filesystem usage.
+
+Compressed artifacts now preserve all-zero ranges as sparse holes while they
+are installed. The Firecracker reporter reads the ext4 superblock's total,
+free, and metadata-overhead counters, matching the guest `df` semantics without
+running filesystem-mutating tools against a live image. The existing PoC
+template remains physically materialized until it is recreated or compacted,
+but its user-console meter no longer reports that host representation as guest
+usage.
+
 ## Verification
 
 - `go test ./...`

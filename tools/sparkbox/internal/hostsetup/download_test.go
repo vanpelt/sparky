@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -74,7 +76,13 @@ func TestDownloadVerify(t *testing.T) {
 // is verified over the compressed wire bytes, only the decompressed file lands
 // on disk, and an existing decompressed file short-circuits the re-download.
 func TestDownloadVerifyDecompresses(t *testing.T) {
+	// Model a sparse ext4 image: some real data, a large free-space run, more
+	// data, then free space through EOF. The trailing run also proves finish()
+	// preserves the apparent size after its final seek.
 	raw := bytes.Repeat([]byte("ext4-blocks"), 1000)
+	raw = append(raw, make([]byte, 4<<20)...)
+	raw = append(raw, bytes.Repeat([]byte("more-blocks"), 1000)...)
+	raw = append(raw, make([]byte, 2<<20)...)
 	zbytes := compressZstd(t, raw)
 	gbytes := compressGzip(t, raw)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +105,20 @@ func TestDownloadVerifyDecompresses(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "universal.ext4")); !bytes.Equal(got, raw) {
 		t.Fatal("zstd content mismatch")
+	}
+	fi, err := os.Stat(filepath.Join(dir, "universal.ext4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The setup binary and destination are Linux/XFS even for a macOS host.
+	// APFS eagerly allocates an intervening seek range once a later extent is
+	// written, so only assert physical sparseness on the target OS.
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && runtime.GOOS == "linux" {
+		allocated := st.Blocks * 512
+		if allocated >= fi.Size()/2 {
+			t.Fatalf("decompressed rootfs was materialized: %d allocated bytes for %d apparent bytes",
+				allocated, fi.Size())
+		}
 	}
 	if _, err := os.Stat(a.Dest); !os.IsNotExist(err) {
 		t.Fatal("compressed form must never land on disk")
@@ -125,6 +147,47 @@ func TestDownloadVerifyDecompresses(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "bad.ext4")); !os.IsNotExist(err) {
 		t.Fatal("mismatched download must not leave a partial file")
+	}
+}
+
+func TestSparseFileWriterCreatesHoles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sparse")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &sparseFileWriter{f: f}
+	data := bytes.Repeat([]byte("data"), 32*1024)
+	zeroes := make([]byte, 4<<20)
+	for _, part := range [][]byte{data, zeroes, data, zeroes} {
+		if _, err := w.Write(part); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Join([][]byte{data, zeroes, data, zeroes}, nil)
+	if !bytes.Equal(got, want) {
+		t.Fatal("sparse writer changed file content")
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && runtime.GOOS == "linux" {
+		allocated := st.Blocks * 512
+		if allocated >= fi.Size()/2 {
+			t.Fatalf("sparse writer materialized zero runs: %d allocated bytes for %d apparent bytes",
+				allocated, fi.Size())
+		}
 	}
 }
 

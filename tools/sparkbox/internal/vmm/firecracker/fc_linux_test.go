@@ -4,6 +4,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -120,6 +121,66 @@ func TestInstallAuthorizedKeyReportsParseFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ssh:") {
 		t.Fatalf("error %q does not preserve the SSH parser reason", err)
+	}
+}
+
+func TestDiskUsageReadsExt4UsedBlocks(t *testing.T) {
+	d := newTestDriver(t)
+	dir := d.vmDir("box")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := d.rootfsPath("box")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Match the live macOS PoC geometry: a 25 GiB filesystem with only about
+	// 2.9 GiB in use. Materialize the outer file sparsely to prove the result
+	// comes from ext4 counters rather than host allocation.
+	const blocks = uint32(6_553_600)
+	const free = uint32(5_789_327)
+	const overhead = uint32(146_887)
+	if err := f.Truncate(int64(blocks) * 4096); err != nil {
+		t.Fatal(err)
+	}
+	sb := make([]byte, 1024)
+	binary.LittleEndian.PutUint32(sb[0x04:0x08], blocks)
+	binary.LittleEndian.PutUint32(sb[0x0c:0x10], free)
+	binary.LittleEndian.PutUint32(sb[0x18:0x1c], 2) // 1024 << 2 = 4096
+	binary.LittleEndian.PutUint16(sb[0x38:0x3a], 0xef53)
+	binary.LittleEndian.PutUint32(sb[0x248:0x24c], overhead)
+	if _, err := f.WriteAt(sb, 1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := d.DiskUsageMB(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = int64(2_411)
+	if got != want {
+		t.Fatalf("DiskUsageMB = %d, want %d", got, want)
+	}
+	capacity, err := d.DiskCapacityMB(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity != 25_600 {
+		t.Fatalf("DiskCapacityMB = %d, want 25600", capacity)
+	}
+}
+
+func TestExt4UsageRejectsInvalidSuperblock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-ext4")
+	if err := os.WriteFile(path, make([]byte, 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ext4UsageMB(path); err == nil || !strings.Contains(err.Error(), "magic") {
+		t.Fatalf("ext4UsageMB error = %v, want invalid-magic diagnostic", err)
 	}
 }
 

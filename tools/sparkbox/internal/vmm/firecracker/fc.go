@@ -13,6 +13,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -615,40 +616,87 @@ func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
 	return nil
 }
 
-// DiskUsageMB implements vmm.DiskReporter: the VM dir's on-host footprint
-// (rootfs write delta + any memory snapshot), in MiB. A missing dir (archived /
-// destroyed) is zero, not an error.
-// DiskUsageMB implements vmm.DiskReporter: blocks actually allocated to the
-// sandbox's rootfs image.
+// DiskUsageMB implements vmm.DiskReporter: blocks used *inside* the sandbox's
+// ext4 filesystem. A missing image (archived / destroyed) is zero, not an
+// error.
 //
-// Deliberately the rootfs alone, not the whole VM directory. mem.snap is a
-// memory dump the size of the guest's RAM ceiling (8 GiB on a paused 8 GiB box)
-// that exists only while paused and is discarded on the next cold boot — it
-// dwarfs the real data and swamps both the console figure and the pooled quota
-// with something the user never put there. What this reports is the sandbox's
-// durable content: the bytes an archive would carry.
+// Host-side `du` is not this measurement. It counts shared reflink extents once
+// for every clone, and a decompressor that materializes the template's zeroes
+// makes an almost-empty 25 GiB filesystem look 25 GiB full. Reading the ext4
+// superblock gives the value users expect beside the filesystem's hard ceiling
+// and makes pooled accounting independent of sparse/reflink representation.
 //
-// The image is sparse (a reflink copy of the template, filled in as the guest
-// writes), so `du` without --apparent-size is what distinguishes a box holding
-// 3 GB of data from one holding 20.
-func (d *Driver) DiskUsageMB(ctx context.Context, name string) (int64, error) {
+// Deliberately ignore mem.snap: it is a transient host implementation detail,
+// not durable sandbox storage, and is discarded on the next cold boot.
+func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
 	rootfs := d.rootfsPath(name)
 	if _, err := os.Stat(rootfs); err != nil {
 		return 0, nil
 	}
-	out, err := exec.CommandContext(ctx, "du", "-sk", rootfs).Output()
+	return ext4UsageMB(rootfs)
+}
+
+// ext4UsageMB reads the primary ext4 superblock directly and follows statfs(2):
+// used = total - filesystem metadata overhead - free. Firecracker owns the
+// image and may have it mounted in a guest, so invoking e2fsck/debugfs here
+// would be unsafe; a fixed-size read is passive and gives a sufficiently fresh
+// best-effort counter for the periodic console measurement.
+func ext4UsageMB(path string) (int64, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	fields := strings.Fields(string(out))
-	if len(fields) == 0 {
-		return 0, nil
+	defer f.Close()
+
+	const (
+		superOffset      = 1024
+		superSize        = 1024
+		ext4Magic        = 0xef53
+		incompat64Bit    = 0x80
+		roCompatBigalloc = 0x200
+		maxLogBlockSize  = 6 // 1024 << 6 == ext4's 64 KiB maximum
+		bytesPerMiB      = 1024 * 1024
+		maxSignedInt64   = uint64(1<<63 - 1)
+	)
+	sb := make([]byte, superSize)
+	if _, err := f.ReadAt(sb, superOffset); err != nil {
+		return 0, fmt.Errorf("read ext4 superblock: %w", err)
 	}
-	kb, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil {
-		return 0, err
+	if magic := binary.LittleEndian.Uint16(sb[0x38:0x3a]); magic != ext4Magic {
+		return 0, fmt.Errorf("rootfs has invalid ext4 magic %#x", magic)
 	}
-	return kb / 1024, nil
+	logBlockSize := binary.LittleEndian.Uint32(sb[0x18:0x1c])
+	if logBlockSize > maxLogBlockSize {
+		return 0, fmt.Errorf("rootfs has invalid ext4 block-size shift %d", logBlockSize)
+	}
+	blocks := uint64(binary.LittleEndian.Uint32(sb[0x04:0x08]))
+	free := uint64(binary.LittleEndian.Uint32(sb[0x0c:0x10]))
+	incompat := binary.LittleEndian.Uint32(sb[0x60:0x64])
+	roCompat := binary.LittleEndian.Uint32(sb[0x64:0x68])
+	if roCompat&roCompatBigalloc != 0 {
+		return 0, fmt.Errorf("rootfs ext4 bigalloc is not supported for disk accounting")
+	}
+	if incompat&incompat64Bit != 0 {
+		blocks |= uint64(binary.LittleEndian.Uint32(sb[0x150:0x154])) << 32
+		free |= uint64(binary.LittleEndian.Uint32(sb[0x158:0x15c])) << 32
+	}
+	if free > blocks {
+		return 0, fmt.Errorf("rootfs ext4 free blocks %d exceed total blocks %d", free, blocks)
+	}
+	blockSize := uint64(1024) << logBlockSize
+	usedBlocks := blocks - free
+	// s_overhead_last is the number of filesystem-metadata blocks excluded
+	// from statfs.f_blocks and therefore from `df`'s used figure.
+	overhead := uint64(binary.LittleEndian.Uint32(sb[0x248:0x24c]))
+	if overhead > usedBlocks {
+		return 0, fmt.Errorf("rootfs ext4 overhead blocks %d exceed occupied blocks %d",
+			overhead, usedBlocks)
+	}
+	usedBlocks -= overhead
+	if usedBlocks > maxSignedInt64/blockSize {
+		return 0, fmt.Errorf("rootfs ext4 used-block count overflows int64")
+	}
+	return int64(usedBlocks * blockSize / bytesPerMiB), nil
 }
 
 // ResizeDisk implements vmm.DiskResizer: grow a stopped sandbox's rootfs to
