@@ -122,7 +122,7 @@ func TestChecks(t *testing.T) {
 		{"virt svm", checkVirt, fakeProbe{files: map[string]string{"/proc/cpuinfo": "flags: fpu svm"}}, Pass},
 		{"virt none", checkVirt, fakeProbe{files: map[string]string{"/proc/cpuinfo": "flags: fpu vme"}}, Fail},
 		{"virt arm64 kvm", checkVirt, fakeProbe{goarch: "arm64", files: map[string]string{"/dev/kvm": ""}}, Pass},
-		{"virt arm64 no kvm", checkVirt, fakeProbe{goarch: "arm64"}, Fail},
+		{"virt arm64 no duplicate kvm failure", checkVirt, fakeProbe{goarch: "arm64"}, Pass},
 		{"ip_forward on", checkIPForward, fakeProbe{sysctls: map[string]string{"net.ipv4.ip_forward": "1"}}, Pass},
 		{"ip_forward off", checkIPForward, fakeProbe{sysctls: map[string]string{"net.ipv4.ip_forward": "0"}}, Warn},
 		{"rp_filter strict", checkRPFilter, fakeProbe{sysctls: map[string]string{"net.ipv4.conf.all.rp_filter": "1"}}, Pass},
@@ -195,6 +195,17 @@ func TestCheckVirtARM64ReportsArchitectureSignal(t *testing.T) {
 	}
 	if !strings.Contains(got.Detail, "ARM64") || !strings.Contains(got.Detail, "/dev/kvm") {
 		t.Fatalf("detail = %q, want ARM64 /dev/kvm explanation", got.Detail)
+	}
+}
+
+func TestNodeChecksSkipGatewayIdentityFiles(t *testing.T) {
+	cfg := Config{Gateway: "gateway.example:2222"}
+	p := fakeProbe{}
+	if got := checkFleetKeys(p, cfg); got.Status != Pass {
+		t.Fatalf("fleet keys on node = %v (%q), want PASS", got.Status, got.Detail)
+	}
+	if got := checkUsers(p, cfg); got.Status != Pass {
+		t.Fatalf("users.conf on node = %v (%q), want PASS", got.Status, got.Detail)
 	}
 }
 

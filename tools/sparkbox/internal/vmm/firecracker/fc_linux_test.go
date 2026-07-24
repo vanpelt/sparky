@@ -3,6 +3,7 @@
 package firecracker
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -109,6 +110,16 @@ func TestRootfsLoginIdentity(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestInstallAuthorizedKeyReportsParseFailure(t *testing.T) {
+	err := installAuthorizedKey(context.Background(), "/not-mounted", "sparky", "not-an-ssh-key")
+	if err == nil {
+		t.Fatal("expected invalid gateway key to fail before mounting")
+	}
+	if !strings.Contains(err.Error(), "ssh:") {
+		t.Fatalf("error %q does not preserve the SSH parser reason", err)
 	}
 }
 

@@ -43,13 +43,14 @@ RUN apt-get update \
 RUN truncate -s 0 /etc/machine-id \
     && mkdir -p /var/lib/dbus \
     && truncate -s 0 /var/lib/dbus/machine-id \
-    && systemctl set-default multi-user.target \
-    && systemctl mask \
+    && ln -sfn /lib/systemd/system/multi-user.target /etc/systemd/system/default.target \
+    && for unit in \
       console-getty.service \
       dev-hugepages.mount \
       sys-fs-fuse-connections.mount \
       systemd-tmpfiles-setup.service \
-      systemd-update-utmp.service
+      systemd-update-utmp.service; \
+      do ln -sfn /dev/null "/etc/systemd/system/${unit}"; done
 
 COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
 COPY macos/gateway-verify.sh /usr/local/sbin/sparkbox-poc-verify

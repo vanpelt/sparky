@@ -272,7 +272,6 @@ func serve(args []string) error {
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
 			*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin, *guestDNS,
-			sshgw.PublicKeyLine(upstreamKey),
 		)
 		if err != nil {
 			return err

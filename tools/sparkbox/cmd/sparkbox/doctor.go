@@ -23,6 +23,7 @@ func doctor(args []string) error {
 	imageDir := fs.String("image-dir", "", "rootfs template dir (default <root>/data/images)")
 	defaultImage := fs.String("default-image", cfg.DefaultImage, "rootfs template basename")
 	users := fs.String("users", "", "users.conf path (default <root>/users.conf)")
+	gateway := fs.String("gateway", cfg.Gateway, "fleet gateway host:port; diagnose this machine as a node")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: sparkbox doctor [flags]\n\nReports whether this host is ready to run sparkbox.")
 		fs.PrintDefaults()
@@ -32,6 +33,7 @@ func doctor(args []string) error {
 	}
 
 	cfg = applyPaths(cfg, *root, *stateDir, *keyDir, *kernel, *imageDir, *defaultImage, *users)
+	cfg.Gateway = *gateway
 
 	results := hostsetup.RunChecks(hostsetup.System(), cfg, hostsetup.DefaultChecks())
 	fmt.Println("sparkbox doctor —", cfg.Root)

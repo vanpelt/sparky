@@ -97,5 +97,34 @@ aligned with the key they actually loaded.
 Raw timestamped evidence is generated beneath `macos/out/results/` and is
 intentionally ignored by Git.
 
+## Fleet integration
+
+After the multi-node gateway/node work landed on `main`, the macOS branch was
+rebased onto that architecture and revalidated on 2026-07-24.
+
+- Firecracker now installs `vmm.Config.GatewayPublicKey` per guest creation
+  instead of capturing a standalone gateway key when the driver is built. This
+  is required for a fleet node, which learns and caches the gateway key only
+  after its enrollment handshake.
+- `sparkbox setup --gateway <host:port> [--node-name <name>]` provisions a
+  Linux host directly as a fleet node, while `sparkbox doctor --gateway
+  <host:port>` diagnoses the node layout without requiring gateway-only fleet
+  keys or `users.conf`.
+- A fresh macOS PoC machine can select that role with
+  `SPARKBOX_FLEET_GATEWAY=<host:port>` and an optional
+  `SPARKBOX_NODE_NAME=<name>` when running `./macos/poc.sh provision`.
+- A temporary real Firecracker-capable node process inside the Apple Container
+  machine enrolled at the live gateway, waited for fingerprint approval,
+  received the gateway upstream key, and reported online as `arm64`. Its test
+  enrollment and transient state were removed afterward.
+- The complete Go suite, the pinned Linux/ARM64 tests, the gateway OCI build,
+  and the full nested M3 smoke suite passed against the merged fleet-aware
+  source.
+
+The merged multi-node change is its M0/M1 slice: enrollment, trust, heartbeat,
+and capacity reporting work. Scheduling and serving remote sandboxes still
+depend on the later multi-node lifecycle/data-plane milestones; that is an
+upstream fleet limitation rather than a macOS virtualization blocker.
+
 M4 pause/resume, snapshot/archive, dirty-shutdown recovery, ten-guest latency,
 and memory measurements remain separate reliability work as planned.

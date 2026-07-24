@@ -23,6 +23,8 @@ DATA_VOLUME_GB="${SPARKBOX_DATA_VOLUME_GB:-40}"
 PROXY_DOMAIN="${SPARKBOX_PROXY_DOMAIN:-sparkbox.test}"
 OPERATOR_HANDLE="${SPARKBOX_OPERATOR_HANDLE:-operator}"
 OPERATOR_KEY_FILE="${SPARKBOX_OPERATOR_KEY_FILE:-${HOME}/.ssh/id_ed25519.pub}"
+FLEET_GATEWAY="${SPARKBOX_FLEET_GATEWAY:-}"
+NODE_NAME="${SPARKBOX_NODE_NAME:-sparkbox-poc}"
 SERVICE_WAIT_SECONDS="${SPARKBOX_SERVICE_WAIT_SECONDS:-90}"
 
 GO_IMAGE="docker.io/library/golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a"
@@ -58,6 +60,8 @@ Environment overrides:
   SPARKBOX_OPERATOR_KEY_FILE     public key to seed (default ~/.ssh/id_ed25519.pub)
   SPARKBOX_OPERATOR_PRIVATE_KEY_FILE
                                  matching private key for smoke (default public key path without .pub)
+  SPARKBOX_FLEET_GATEWAY          gateway host:port; provision as a fleet node when set
+  SPARKBOX_NODE_NAME              fleet node name (default sparkbox-poc)
   SPARKBOX_SERVICE_WAIT_SECONDS  start readiness timeout (default 90)
 EOF
 }
@@ -337,8 +341,6 @@ run_gateway_preflight() {
 write_provision_manifest() {
   local destination="$1"
   local operator_key="$2"
-  local key_sha256
-  key_sha256="$(printf '%s' "${operator_key}" | shasum -a 256 | awk '{print $1}')"
 
   {
     printf 'machine_name=%s\n' "${MACHINE_NAME}"
@@ -347,9 +349,17 @@ write_provision_manifest() {
     printf 'proxy_domain=%s\n' "${PROXY_DOMAIN}"
     printf 'data_volume_gb=%s\n' "${DATA_VOLUME_GB}"
     printf 'swap_gb=0\n'
-    printf 'operator_handle=%s\n' "${OPERATOR_HANDLE}"
-    printf 'operator_key_file=%s\n' "${OPERATOR_KEY_FILE}"
-    printf 'operator_key_sha256=%s\n' "${key_sha256}"
+    if [[ -n "${FLEET_GATEWAY}" ]]; then
+      printf 'role=fleet-node\n'
+      printf 'fleet_gateway=%s\n' "${FLEET_GATEWAY}"
+      printf 'node_name=%s\n' "${NODE_NAME}"
+    else
+      printf 'role=standalone-gateway\n'
+      printf 'operator_handle=%s\n' "${OPERATOR_HANDLE}"
+      printf 'operator_key_file=%s\n' "${OPERATOR_KEY_FILE}"
+      printf 'operator_key_sha256=%s\n' \
+        "$(printf '%s' "${operator_key}" | shasum -a 256 | awk '{print $1}')"
+    fi
   } > "${destination}"
 }
 
@@ -373,10 +383,15 @@ EOF
 }
 
 capture_gateway_health() {
+  local doctor_args=()
+  if [[ -n "${FLEET_GATEWAY}" ]]; then
+    doctor_args=(--gateway "${FLEET_GATEWAY}")
+  fi
+  container machine run --name "${MACHINE_NAME}" --root \
+    /usr/local/bin/sparkbox doctor "${doctor_args[@]}"
+  echo
   run_machine_script <<'EOF'
 set -euo pipefail
-/usr/local/bin/sparkbox doctor
-echo
 echo "== services =="
 systemctl is-active sparkbox-net.service sparkbox.service
 systemctl is-enabled sparkbox-net.service sparkbox.service
@@ -393,15 +408,41 @@ EOF
 provision_machine() {
   run_doctor || die "host doctor failed"
   require_owned_machine >/dev/null
-  [[ -f "${OPERATOR_KEY_FILE}" ]] \
-    || die "operator public key not found: ${OPERATOR_KEY_FILE}"
-  [[ "${OPERATOR_HANDLE}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] \
-    || die "invalid SPARKBOX_OPERATOR_HANDLE: ${OPERATOR_HANDLE}"
+  local operator_key=""
+  if [[ -n "${FLEET_GATEWAY}" ]]; then
+    [[ "${FLEET_GATEWAY}" =~ ^[^[:space:]]+:[0-9]+$ ]] \
+      || die "SPARKBOX_FLEET_GATEWAY must be host:port"
+    [[ "${NODE_NAME}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] \
+      || die "invalid SPARKBOX_NODE_NAME: ${NODE_NAME}"
+  else
+    [[ -f "${OPERATOR_KEY_FILE}" ]] \
+      || die "operator public key not found: ${OPERATOR_KEY_FILE}"
+    [[ "${OPERATOR_HANDLE}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] \
+      || die "invalid SPARKBOX_OPERATOR_HANDLE: ${OPERATOR_HANDLE}"
+    operator_key="$(<"${OPERATOR_KEY_FILE}")"
+    [[ "${operator_key}" == ssh-* ]] \
+      || die "${OPERATOR_KEY_FILE} does not contain a supported SSH public key"
+  fi
 
-  local operator_key
-  operator_key="$(<"${OPERATOR_KEY_FILE}")"
-  [[ "${operator_key}" == ssh-* ]] \
-    || die "${OPERATOR_KEY_FILE} does not contain a supported SSH public key"
+  # setup deliberately preserves an existing sparkbox.env so operator TLS and
+  # console edits survive idempotent reruns. Refuse an implicit role switch
+  # here rather than reporting success while leaving the old role active.
+  local existing_env existing_gateway_flag requested_gateway_flag=""
+  existing_env="$(
+    container machine run --name "${MACHINE_NAME}" --root \
+      /bin/cat /srv/sparkbox/sparkbox.env 2>/dev/null || true
+  )"
+  if [[ -n "${FLEET_GATEWAY}" ]]; then
+    requested_gateway_flag="--gateway ${FLEET_GATEWAY} --node-name ${NODE_NAME}"
+  fi
+  if [[ -n "${existing_env}" ]]; then
+    existing_gateway_flag="$(
+      sed -n 's/^GATEWAY_FLAG=//p' <<<"${existing_env}" | tail -1
+    )"
+    if [[ "${existing_gateway_flag}" != "${requested_gateway_flag}" ]]; then
+      die "existing machine role/config differs (GATEWAY_FLAG=${existing_gateway_flag:-<standalone>}); destroy and recreate before switching roles"
+    fi
+  fi
 
   local timestamp result_dir
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -414,30 +455,43 @@ provision_machine() {
   cp "${OUT_DIR}/inputs.txt" "${result_dir}/build-inputs.txt"
   cp "${OUT_DIR}/kernel-manifest.txt" "${result_dir}/kernel-manifest.txt"
 
-  # `container machine run` does not preserve spaces inside a single argument,
-  # so transport the public key over stdin and give setup an in-VM path.
-  local remote_key_path="/run/sparkbox-poc-operator.pub"
-  printf '%s\n' "${operator_key}" \
-    | container machine run --name "${MACHINE_NAME}" --root --interactive \
-      /usr/bin/tee "${remote_key_path}" \
-    >/dev/null
-  container machine run --name "${MACHINE_NAME}" --root \
-    /bin/chmod 0600 "${remote_key_path}"
+  local remote_key_path=""
+  local setup_args=(
+    /usr/local/bin/sparkbox setup
+    --release "${SPARKBOX_RELEASE}"
+    --proxy-domain "${PROXY_DOMAIN}"
+    --data-volume-gb "${DATA_VOLUME_GB}"
+    --swap-gb 0
+  )
+  if [[ -n "${FLEET_GATEWAY}" ]]; then
+    setup_args+=(--gateway "${FLEET_GATEWAY}" --node-name "${NODE_NAME}")
+  else
+    # `container machine run` does not preserve spaces inside a single
+    # argument, so transport the public key over stdin and give setup an
+    # in-VM path.
+    remote_key_path="/run/sparkbox-poc-operator.pub"
+    printf '%s\n' "${operator_key}" \
+      | container machine run --name "${MACHINE_NAME}" --root --interactive \
+        /usr/bin/tee "${remote_key_path}" \
+      >/dev/null
+    container machine run --name "${MACHINE_NAME}" --root \
+      /bin/chmod 0600 "${remote_key_path}"
+    setup_args+=(
+      --operator-handle "${OPERATOR_HANDLE}"
+      --operator-key "${remote_key_path}"
+    )
+  fi
 
   echo "provisioning ${MACHINE_NAME} with Sparkbox ${SPARKBOX_RELEASE}"
   local setup_status=0
   container machine run --name "${MACHINE_NAME}" --root \
-    /usr/local/bin/sparkbox setup \
-      --release "${SPARKBOX_RELEASE}" \
-      --operator-handle "${OPERATOR_HANDLE}" \
-      --operator-key "${remote_key_path}" \
-      --proxy-domain "${PROXY_DOMAIN}" \
-      --data-volume-gb "${DATA_VOLUME_GB}" \
-      --swap-gb 0 \
+    "${setup_args[@]}" \
     2>&1 | tee "${result_dir}/sparkbox-setup.txt" \
     || setup_status="$?"
-  container machine run --name "${MACHINE_NAME}" --root \
-    /bin/rm -f "${remote_key_path}"
+  if [[ -n "${remote_key_path}" ]]; then
+    container machine run --name "${MACHINE_NAME}" --root \
+      /bin/rm -f "${remote_key_path}"
+  fi
   [[ "${setup_status}" -eq 0 ]] || return "${setup_status}"
 
   echo
@@ -450,7 +504,13 @@ provision_machine() {
     > "${result_dir}/sparkbox-journal.txt"
 
   echo
-  echo "Sparkbox gateway is provisioned"
+  if [[ -n "${FLEET_GATEWAY}" ]]; then
+    echo "Sparkbox fleet node is provisioned"
+    echo "  node:     ${NODE_NAME}"
+    echo "  gateway:  ${FLEET_GATEWAY}"
+  else
+    echo "Sparkbox gateway is provisioned"
+  fi
   echo "  machine:  ${MACHINE_NAME}"
   echo "  evidence: ${result_dir}"
 }
@@ -491,6 +551,11 @@ if mountpoint -q /srv/sparkbox/data; then
 else
   echo "not mounted"
 fi
+role="standalone-gateway"
+if grep -q '^GATEWAY_FLAG=--gateway' /srv/sparkbox/sparkbox.env 2>/dev/null; then
+  role="fleet-node"
+fi
+printf "role:     %s\n" "${role}"
 printf "services: "
 service_states="$(systemctl is-active sparkbox-net.service sparkbox.service 2>/dev/null || true)"
 printf '%s\n' "${service_states}" | paste -sd " " -
@@ -616,8 +681,12 @@ destroy_all() {
     echo "machine ${MACHINE_NAME} does not exist"
   fi
 
-  container image delete --force "${GATEWAY_IMAGE}"
-  echo "deleted local image ${GATEWAY_IMAGE} (if present)"
+  if container image inspect "${GATEWAY_IMAGE}" >/dev/null 2>&1; then
+    container image delete --force "${GATEWAY_IMAGE}"
+    echo "deleted local image ${GATEWAY_IMAGE}"
+  else
+    echo "local image ${GATEWAY_IMAGE} does not exist"
+  fi
 
   if [[ -d "${OUT_DIR}" ]] && [[ "${OUT_DIR}" == "${SCRIPT_DIR}/out" ]]; then
     rm -rf -- "${OUT_DIR}"
@@ -657,6 +726,10 @@ case "${command_name}" in
     ;;
   smoke)
     [[ "$#" -eq 1 ]] || die "smoke takes no arguments"
+    if container machine run --name "${MACHINE_NAME}" --root \
+      /usr/bin/grep -q '^GATEWAY_FLAG=--gateway' /srv/sparkbox/sparkbox.env; then
+      die "smoke exercises a standalone gateway; this machine is configured as a fleet node"
+    fi
     "${SMOKE_SCRIPT}"
     ;;
   destroy)

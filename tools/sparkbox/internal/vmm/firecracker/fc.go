@@ -4,7 +4,7 @@
 // the official firecracker-go-sdk. It requires /dev/kvm, root (for tap device
 // setup), a vmlinux kernel, and per-image ext4 rootfs templates produced by
 // hack/build-rootfs.sh. Before each guest boots, the driver replaces the
-// template's baked fleet key with the active gateway's upstream public key.
+// template's baked fleet key with the gateway public key in vmm.Config.
 //
 // This driver has been exercised end to end on both a Linux KVM host and the
 // nested ARM64 macOS gateway proof of concept. Known gaps vs production: no
@@ -52,10 +52,6 @@ type Options struct {
 	// template's baked authorized_keys (our images declare it via the
 	// sparkbox.login-user label; see hack/build-rootfs.sh). Empty defaults root.
 	LoginUser string
-	// AuthorizedKey is the active gateway upstream public key. Each cloned
-	// rootfs is patched before boot so standalone gateways with locally
-	// generated keys do not depend on the fleet key baked into the release.
-	AuthorizedKey string
 	// GuestDNS points guests at a specific resolver via the sparkbox_dns kernel
 	// arg, honoured by the guest sparkbox-netcfg hook. The literal "gateway"
 	// expands per-VM to the guest's own gateway (172.30.<idx>.1), where the
@@ -86,13 +82,6 @@ func New(opts Options) (*Driver, error) {
 	}
 	if opts.Subnet == "" {
 		opts.Subnet = "172.30.0.0"
-	}
-	if opts.AuthorizedKey != "" {
-		key, _, _, rest, err := xssh.ParseAuthorizedKey([]byte(opts.AuthorizedKey))
-		if err != nil || len(strings.TrimSpace(string(rest))) != 0 {
-			return nil, fmt.Errorf("gateway upstream public key is invalid")
-		}
-		opts.AuthorizedKey = strings.TrimSpace(string(xssh.MarshalAuthorizedKey(key)))
 	}
 	if err := validateGuestDNS(opts.GuestDNS); err != nil {
 		return nil, err
@@ -230,7 +219,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 			return nil, fmt.Errorf("copy rootfs: %v: %s", err, out)
 		}
 	}
-	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, d.opts.AuthorizedKey); err != nil {
+	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
 		return nil, fmt.Errorf("install gateway key: %w", err)
 	}
 
@@ -920,6 +909,14 @@ func installAuthorizedKey(ctx context.Context, rootfs, loginUser, key string) (r
 	if key == "" {
 		return nil
 	}
+	publicKey, _, _, rest, err := xssh.ParseAuthorizedKey([]byte(key))
+	if err != nil {
+		return fmt.Errorf("gateway upstream public key is invalid: %w", err)
+	}
+	if len(strings.TrimSpace(string(rest))) != 0 {
+		return errors.New("gateway upstream public key is invalid: trailing data")
+	}
+	key = strings.TrimSpace(string(xssh.MarshalAuthorizedKey(publicKey)))
 	mnt, err := os.MkdirTemp("", "sparkbox-key-")
 	if err != nil {
 		return err

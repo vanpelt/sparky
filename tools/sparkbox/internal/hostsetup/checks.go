@@ -170,15 +170,11 @@ func checkKVM(p Probe, _ Config) Result {
 }
 
 func checkVirt(p Probe, _ Config) Result {
-	// ARM64 does not advertise x86's vmx/svm flags. A usable /dev/kvm is the
-	// architecture-appropriate signal that the host exposed virtualization;
-	// checkKVM separately reports writability for the current user.
+	// ARM64 does not advertise x86's vmx/svm flags. checkKVM immediately before
+	// this check already reports whether /dev/kvm exists and is writable, so
+	// avoid repeating the same failure here.
 	if p.GOARCH() == "arm64" {
-		if _, err := p.Stat("/dev/kvm"); err != nil {
-			return fail("/dev/kvm missing on arm64",
-				"enable nested virtualization; ARM64 reports availability through /dev/kvm, not vmx/svm CPU flags")
-		}
-		return pass("/dev/kvm present (ARM64 does not use vmx/svm CPU flags)")
+		return pass("not applicable (ARM64 availability is reported by the /dev/kvm check)")
 	}
 
 	b, err := p.ReadFile("/proc/cpuinfo")
@@ -252,6 +248,9 @@ func checkRootfs(p Probe, cfg Config) Result {
 }
 
 func checkFleetKeys(p Probe, cfg Config) Result {
+	if cfg.Gateway != "" {
+		return pass("not used on fleet node (node identity is generated locally)")
+	}
 	dir := cfg.keyDir()
 	var missing []string
 	for _, f := range fleetKeyFiles {
@@ -270,6 +269,9 @@ func checkFleetKeys(p Probe, cfg Config) Result {
 }
 
 func checkUsers(p Probe, cfg Config) Result {
+	if cfg.Gateway != "" {
+		return pass("not used on fleet node (accounts live on gateway)")
+	}
 	b, err := p.ReadFile(cfg.UsersPath)
 	if err != nil {
 		return fail("no users.conf at "+cfg.UsersPath,

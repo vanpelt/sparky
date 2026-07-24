@@ -550,6 +550,9 @@ func (e *Env) renderEnvFile() string {
 	gateway := ""
 	if e.Cfg.Gateway != "" {
 		gateway = "--gateway " + e.Cfg.Gateway
+		if e.Cfg.NodeName != "" {
+			gateway += " --node-name " + e.Cfg.NodeName
+		}
 	}
 	var b strings.Builder
 	b.WriteString("# sparkbox host config, sourced by sparkbox.service + sparkbox-net.service.\n")
@@ -573,6 +576,20 @@ func (e *Env) renderEnvFile() string {
 }
 
 func (e *Env) printConnect() {
+	if e.Cfg.Gateway != "" {
+		name := e.Cfg.NodeName
+		if name == "" {
+			name = "<this-hostname>"
+		}
+		e.logf("\n== sparkbox fleet node is provisioned ==\n")
+		e.logf("  node:              %s\n", name)
+		e.logf("  gateway:           %s\n", e.Cfg.Gateway)
+		e.logf("  enrollment:        compare this node's logged fingerprint with `ssh ctl@<gateway> node ls`\n")
+		e.logf("  approve at gateway: ssh ctl@<gateway> node approve <SHA256:...>\n")
+		e.logf("  health check:      sparkbox doctor --gateway %s\n", e.Cfg.Gateway)
+		e.logf("  logs:              journalctl -u sparkbox -f\n")
+		return
+	}
 	port := "2222"
 	if e.Cfg.MoveAdminSSH {
 		port = "22"
