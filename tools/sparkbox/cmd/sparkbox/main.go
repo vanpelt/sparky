@@ -32,13 +32,16 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/restapi"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -135,14 +138,47 @@ func serve(args []string) error {
 		dnsAnswer      = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
 		openSignup     = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
 		invitesPer     = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
+		nodeNameFlag   = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
+		archFlag       = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
+		noNodeEnrol    = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator still has to run 'ssh ctl@<domain> node approve <name>' — so this is only worth setting on a gateway that will never gain another node")
+		gatewayAddr    = fs.String("gateway", "", "run this machine as a fleet NODE linked to the gateway at host:port, instead of as a gateway itself. A provisioned node passes it through the unit's GATEWAY_FLAG line, which lands here as an ordinary flag")
+		gatewayPub     = fs.String("gateway-pubkey", "", "node mode: the gateway's PUBLIC upstream authorized_keys line, or a path to a file holding it. Omitted, it is learned from the first welcome and cached under --state-dir")
+		gatewayHostK   = fs.String("gateway-host-key", "", "node mode: pin the gateway's SSH host key (an authorized_keys line or a path to one). Empty trusts the first key offered, remembers it, and refuses any later change")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *usersPath == "" {
+	// A node has no accounts of its own — every identity in a fleet lives on the
+	// gateway — so the seed file is required of everything except a node.
+	if *usersPath == "" && *gatewayAddr == "" {
 		return errors.New("--users is required")
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	// Node mode forks here, before a single store is opened. Nothing below this
+	// line runs on a node: the users, secrets, routes, schedules, netrules,
+	// placement and roster stores, the OIDC issuer, the SSH gateway, the HTTP
+	// edge and both consoles are all fleet-wide surfaces, and a fleet has exactly
+	// one of each. The surest way for a node never to hold one is never to reach
+	// the line that opens it.
+	if *gatewayAddr != "" {
+		// Said out loud, because "this host serves nothing" is otherwise
+		// indistinguishable from a crash to whoever is looking at it.
+		log.Info("running as a fleet node, not a gateway", "gateway", *gatewayAddr)
+		return serveNode(nodeOptions{
+			gateway: *gatewayAddr, gatewayPub: *gatewayPub, gatewayHostKey: *gatewayHostK,
+			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
+			driverName: *driverName, stateDir: *stateDir, keyDir: *keyDir,
+			kernelPath: *kernelPath, imageDir: *imageDir,
+			defaultLogin: *defaultLogin, subnet6: *subnet6, guestDNS: *guestDNS,
+			sluiceSocket: *sluiceSocket,
+			idleBalloon:  *idleBalloon, idleTimeout: *idleTimeout,
+			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
+			maxPerOwner: *maxPerOwner, memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
+			memReserve: *memReserve, diskPool: *diskPool,
+			log: log,
+		})
+	}
 
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
 		return err
@@ -262,7 +298,28 @@ func serve(args []string) error {
 	if hostMem == 0 {
 		hostMem = detectHostMemMB()
 	}
-	nodeName, _ := os.Hostname()
+	nodeName := nodeNameOr(*nodeNameFlag)
+
+	// The placement ledger: which machine holds which sandbox name. It is a
+	// sixth writer on the same sqlite file, and on a single-box deployment its
+	// only job is being the name allocator — the local manager stays the truth
+	// for everything it holds.
+	placeStore, err := placement.Open(filepath.Join(*stateDir, "sparkbox.db"))
+	if err != nil {
+		return fmt.Errorf("placement store: %w", err)
+	}
+	defer placeStore.Close()
+
+	// The node roster: which machines may link to this gateway. It is separate
+	// from the users store on purpose — a node is a machine, not an account —
+	// and it is opened unconditionally because the `node@` door is what a new
+	// machine knocks on, and a gateway with no roster could not even tell it to
+	// come back once an operator has approved it.
+	nodeStore, err := nodes.Open(filepath.Join(*stateDir, "sparkbox.db"))
+	if err != nil {
+		return fmt.Errorf("node roster: %w", err)
+	}
+	defer nodeStore.Close()
 
 	// --edge-v4 feeds the per-name front-door A records below. Parsed here, once,
 	// so a malformed value is reported once too.
@@ -326,6 +383,8 @@ func serve(args []string) error {
 		ActivityNetBytes:   uint64(*activityNetKB) * 1024,
 		ArchivePrefix:      *archivePrefix,
 		NodeName:           nodeName,
+		Arch:               *archFlag,
+		Release:            version,
 		HostVCPUs:          int64(runtime.NumCPU()),
 	}
 	if doorHooks != nil {
@@ -342,11 +401,27 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// The fleet router stands between every control-plane surface and the
+	// machine that actually holds a sandbox. With no other machine linked it is
+	// this manager with a ledger bolted on: the local answer is authoritative
+	// for everything local, so a single-box deployment behaves exactly as it did
+	// before this existed.
+	flt, err := fleet.New(fleet.Options{
+		Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
+		Index: placeStore, Log: log,
+	})
+	if err != nil {
+		return fmt.Errorf("fleet: %w", err)
+	}
+	defer flt.Close()
+
 	// Secret-env propagation: the syncer rewrites a sandbox's managed
 	// /etc/environment block over SSH when it reaches running (create, resume,
 	// restore, fork) and when the console changes a tag or secret. Installed
 	// post-construction so the manager never depends on it at build time.
 	syncer := envsync.New(secretsStore, mgr, upstreamKey, log)
+	syncer.SetDialer(flt.DialContext)
 	mgr.SetEnvSync(syncer)
 
 	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
@@ -357,7 +432,7 @@ func serve(args []string) error {
 		sluiceClient = netpush.NewClient(*sluiceSocket)
 		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
 	}
-	netSyncer := netpush.NewSyncer(sluiceClient, fleet{mgr}, netrulesStore, log)
+	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, netrulesStore, log)
 	faviconCache := domainmeta.NewFaviconCache(filepath.Join(*stateDir, "favicons"), nil)
 
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
@@ -378,10 +453,10 @@ func serve(args []string) error {
 	// job registry and a second reaper goroutine: a job started over REST would
 	// then be invisible to the SSH channel, and only the Ops that owns a reaper
 	// can stop it.
-	ops := ctlops.New(ctlops.Config{
-		Sandboxes: mgr, Templates: mgr, Accounts: userStore,
-		Tags: secretsStore, Schedules: scheduleStore, Routes: routeStore,
-		Sessions:     sessionSigner,
+	ops := newGatewayOps(gatewayStores{
+		Fleet: flt, Placement: placeStore, Roster: nodeStore,
+		Users: userStore, Secrets: secretsStore,
+		Schedules: scheduleStore, Routes: routeStore, Sessions: sessionSigner,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
 		XtermSubdomain: xtermLabel, InvitesPerUser: *invitesPer,
 		Log: log,
@@ -389,17 +464,21 @@ func serve(args []string) error {
 	defer ops.Close()
 
 	gw := sshgw.New(sshgw.GatewayOptions{
-		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
+		Manager: mgr, Fleet: flt, Dial: flt.DialContext,
+		Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
 		Doors: doors, Domain: *proxyDomain,
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
 		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
 		Ops: ops, XtermSubdomain: xtermLabel,
+		Nodes: nodeStore, NodeJoiner: flt, NodeEnrol: !*noNodeEnrol,
 	})
 	// The gateway knows which terminals are attached to which sandbox, so it is
 	// what the manager calls to release them when a sandbox is paused.
 	mgr.SetSessions(gw)
+
+	warnDoorNameCollision(sshgw.NodeUser, mgr, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -437,7 +516,13 @@ func serve(args []string) error {
 	// minute-granularity crons fire promptly; the gateway is its exec runner.
 	go schedule.NewScheduler(scheduleStore, gw, log).Run(ctx, 30*time.Second)
 
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(mgr, routeStore, *defaultImage, log).Handler()}
+	// The legacy loopback API goes through the fleet like every other surface.
+	// Not to reach other machines — it is unauthenticated and stays bound to
+	// 127.0.0.1 — but because its create and destroy allocate and release
+	// sandbox names, and the placement ledger is where names are allocated. A
+	// create that skipped it would take a name nothing recorded; a destroy that
+	// skipped it would reserve one forever.
+	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(flt, routeStore, *defaultImage, log).Handler()}
 	sshSrv := gw.Server(*sshAddr)
 
 	errCh := make(chan error, 5)
@@ -487,7 +572,8 @@ func serve(args []string) error {
 
 	var proxySrv *http.Server
 	if *proxyAddr != "" {
-		px := proxy.New(mgr, routeStore, *proxyDomain, log)
+		px := proxy.New(flt, routeStore, *proxyDomain, log)
+		px.SetDialer(flt.DialContext)
 		// The issuer rides on the existing proxy edge: wildcard DNS already
 		// resolves oidc.<domain> to this host and autocert already issues a cert
 		// per SNI, so serving it is two GET handlers and no new listener.
@@ -527,6 +613,13 @@ func serve(args []string) error {
 		if consolePw != "" {
 			consoleH := console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log)
 			consoleH.SetSchedules(scheduleStore)
+			// The manager it was built with stays for the balloon reads, which
+			// only the machine running a VM can answer; everything else — the
+			// listing and every lifecycle action — goes through the fleet, so
+			// the placement ledger sees every name the console takes or frees.
+			consoleH.SetSandboxes(flt)
+			consoleH.SetCapacities(flt.Capacities)
+			consoleH.SetDialer(flt.DialContext)
 			px.SetConsole(*consoleSub, consoleH.Handler())
 			log.Info("operator console enabled", "url", *consoleSub+"."+*proxyDomain)
 		}
@@ -538,6 +631,11 @@ func serve(args []string) error {
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			// Same split as the operator console: the manager answers the
+			// balloon and CPU reads for this machine's own VMs, the fleet
+			// answers everything an owner can act on.
+			uc.SetSandboxes(flt)
+			uc.SetDialer(flt.DialContext)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			// The apex has no other job, and the user console is the only page a
 			// visitor who typed the bare domain could have wanted. Set alongside
@@ -556,9 +654,9 @@ func serve(args []string) error {
 		if xtermLabel != "" {
 			warnXtermSuffixCollision(xtermLabel, mgr, routeStore, log)
 			xt = xterm.New(xterm.Config{
-				Sandboxes: mgr, Accounts: userStore, Sessions: sessionSigner,
-				UpstreamKey: upstreamKey,
-				Domain:      *proxyDomain, Subdomain: xtermLabel,
+				Sandboxes: flt, Accounts: userStore, Sessions: sessionSigner,
+				UpstreamKey: upstreamKey, Dial: flt.DialContext,
+				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
 				// The gateway owns the one live-session registry the manager
 				// closes on pause; a browser terminal that kept its own would be
@@ -683,6 +781,23 @@ func (t terminalBridge) ServeTerminal(w http.ResponseWriter, r *http.Request, _ 
 	t.xt.Bridge(w, r, sandbox, sess)
 }
 
+// nodeNameOr resolves this machine's name in the fleet from --node-name.
+//
+// The hostname stays the default because it is already the `box` claim in every
+// id token this host has ever issued — externally observable, so a fleet-wide
+// rename to something tidier like "local" would break relying parties that
+// pinned it. Both modes resolve it through here so a machine cannot introduce
+// itself to a gateway under one name and stamp another into its own tokens.
+func nodeNameOr(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if h, _ := os.Hostname(); h != "" {
+		return h
+	}
+	return "local"
+}
+
 // warnSubdomainCollision reports a reserved subdomain something already answers
 // for. Reserved dispatch runs before route lookup, so the squatter goes dark
 // rather than winning — but a sandbox or custom route may predate the
@@ -696,6 +811,19 @@ func warnSubdomainCollision(what, sub string, mgr *host.Manager, rs *routes.Stor
 	if rt, found, err := rs.GetBySubdomain(sub); err == nil && found {
 		log.Warn(what+" subdomain collides with an existing route, which is now unreachable",
 			"subdomain", sub, "sandbox", rt.Sandbox)
+	}
+}
+
+// warnDoorNameCollision reports a sandbox holding the name of an SSH gateway
+// door. Username routing resolves the gateway's own doors before it looks for a
+// sandbox, so the squatter goes dark rather than winning — and unlike the HTTP
+// surfaces this one has no subdomain flag to move it to. A sandbox may predate
+// the reservation (names are validated at create and rename time only), so
+// renaming it is the operator's call.
+func warnDoorNameCollision(door string, mgr *host.Manager, log *slog.Logger) {
+	if _, exists := mgr.Get(door); exists {
+		log.Warn("a sandbox is named after an ssh gateway door, so it is unreachable as ssh "+door+"@<domain>",
+			"sandbox", door)
 	}
 }
 
@@ -732,12 +860,199 @@ func warnXtermSuffixCollision(label string, mgr *host.Manager, rs *routes.Store,
 // keeps a stolen token from being replayable anywhere else.
 const defaultAudience = "https://hivemind.wandb.tools"
 
-// splitList parses a comma-separated flag into a trimmed, non-empty list.
-// fleet adapts the host manager to netpush.Fleet: only running sandboxes have a
-// live tap, so paused/archived ones are filtered out here.
-type fleet struct{ mgr *host.Manager }
+// ---------------------------------------------------------------------------
+// The control plane a gateway runs
+// ---------------------------------------------------------------------------
 
-func (f fleet) List() []netpush.Sandbox {
+// gatewayStores are the fleet-wide stores the control plane is assembled from.
+// They are a struct rather than a dozen parameters so the assembly below reads
+// as the wiring diagram it is.
+type gatewayStores struct {
+	Fleet     *fleet.Fleet
+	Placement *placement.Store
+	Roster    *nodes.Store
+	Users     *users.Store
+	Secrets   *secrets.Store
+	Schedules *schedule.Store
+	Routes    *routes.Store
+	Sessions  *edgeauth.Signer
+
+	DefaultImage   string
+	Domain         string
+	XtermSubdomain string
+	InvitesPerUser int
+	Log            *slog.Logger
+}
+
+// newGatewayOps builds the one ctlops.Ops every transport on this host shares.
+//
+// It is a function rather than a literal inside serve() because the wiring *is*
+// the feature, and a missing field here is silent: ctlops decides whether a
+// capability exists by comparing a store against nil, so dropping Nodes turns
+// `ssh ctl@<gw> node ls` into "this host is not a fleet gateway" on a machine
+// that is plainly running one — with nothing else in the process noticing, and
+// therefore no node ever approvable. A test builds exactly this value and asks
+// the Ops whether it is a fleet, so the field cannot go missing again.
+func newGatewayOps(s gatewayStores) *ctlops.Ops {
+	return ctlops.New(ctlops.Config{
+		Sandboxes: s.Fleet, Templates: s.Fleet, Accounts: s.Users,
+		Tags: s.Secrets, Schedules: s.Schedules, Routes: s.Routes,
+		Sessions: s.Sessions,
+		// The roster reaches the control plane joined to the live fleet, which
+		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
+		// cannot say whether a machine is answering, and the fleet alone cannot
+		// say which fingerprint an operator compared before approving it.
+		Nodes:        fleetRoster{roster: s.Roster, index: s.Placement, flt: s.Fleet},
+		DefaultImage: s.DefaultImage, Domain: s.Domain,
+		XtermSubdomain: s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
+		Log: s.Log,
+	})
+}
+
+// fleetRoster answers the operator's two questions about a machine that neither
+// store can answer alone: is it answering right now (the fleet knows), and what
+// would removing it strand (the placement ledger knows). The roster row carries
+// the rest — the fingerprint, who approved it and when.
+type fleetRoster struct {
+	roster *nodes.Store
+	index  *placement.Store
+	flt    *fleet.Fleet
+}
+
+func (r fleetRoster) ListNodes() ([]ctlops.NodeInfo, error) {
+	rows, err := r.roster.List()
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]nodes.Node, len(rows))
+	for _, row := range rows {
+		byName[row.Name] = row
+	}
+
+	var out []ctlops.NodeInfo
+	linked := map[string]bool{}
+	for _, st := range r.flt.Nodes() {
+		info, err := r.join(st, byName[st.Name])
+		if err != nil {
+			return nil, err
+		}
+		linked[st.Name] = true
+		out = append(out, info)
+	}
+	// A roster row with no link is a machine waiting for approval, or one that
+	// was approved and is not answering. Both are exactly what an operator
+	// opened this listing to see.
+	for _, row := range rows {
+		if linked[row.Name] {
+			continue
+		}
+		held, err := r.held(row.Name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ctlops.NodeInfo{
+			Name: row.Name, Status: row.Status, FP: row.FP,
+			Arch: row.Arch, Release: row.Release, Sandboxes: held,
+			ApprovedBy: row.ApprovedBy, ApprovedAt: row.ApprovedAt, LastSeen: row.LastSeen,
+		})
+	}
+	return out, nil
+}
+
+func (r fleetRoster) join(st fleet.NodeStatus, row nodes.Node) (ctlops.NodeInfo, error) {
+	held, err := r.held(st.Name)
+	if err != nil {
+		return ctlops.NodeInfo{}, err
+	}
+	// held is the ledger's count, and today the ledger only ever has rows for
+	// this machine: a linked node's inventory is cached on its link but nothing
+	// durable is written from it (see fleet.linkInventory), so a sandbox living
+	// on another machine has no placement here at all. RemoveNode refuses on
+	// this number, and refusing on the ledger alone would make that guard say
+	// "holds nothing" about every remote machine in the fleet — which is the one
+	// case it exists for. So the machine's own report counts until the gateway
+	// places sandboxes on nodes itself, and taking the larger of the two means a
+	// node that under-reports still cannot hide a placement the ledger knows of.
+	if st.Sandboxes > held {
+		held = st.Sandboxes
+	}
+	info := ctlops.NodeInfo{
+		Name: st.Name, Status: st.Status, Online: st.Online, Local: st.Local,
+		Arch: st.Arch, Release: st.Release, Sandboxes: held, LastSeen: st.LastSeen,
+	}
+	if row.Name != "" {
+		info.Status, info.FP = row.Status, row.FP
+		info.ApprovedBy, info.ApprovedAt = row.ApprovedBy, row.ApprovedAt
+	}
+	return info, nil
+}
+
+// held is how many names the ledger still places on a machine — the number that
+// decides whether removing it would strand anything.
+func (r fleetRoster) held(node string) (int, error) {
+	rows, err := r.index.ByNode(node)
+	if err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+// ApproveNode blesses the machine holding the key with this fingerprint. It is
+// keyed on the fingerprint rather than the name for the reason ctlops.ApproveNode
+// documents: a node names itself, so a name cannot carry an approval.
+func (r fleetRoster) ApproveNode(fp, by string) (ctlops.NodeInfo, error) {
+	if err := r.roster.ApproveFP(fp, by); err != nil {
+		return ctlops.NodeInfo{}, err
+	}
+	list, err := r.ListNodes()
+	if err != nil {
+		return ctlops.NodeInfo{}, err
+	}
+	for _, n := range list {
+		if n.FP != "" && n.FP == fp {
+			return n, nil
+		}
+	}
+	return ctlops.NodeInfo{}, nodes.ErrNoSuchNode
+}
+
+func (r fleetRoster) RemoveNode(name string) error { return r.roster.Remove(name) }
+
+// EvictNode closes the link a machine is holding right now. It is the other
+// half of taking an approval away, and it is only half a line here because the
+// fleet this adapter is already joined to is the thing that owns the link.
+//
+// Without it the durable half of a revocation happens and the live half does
+// not: approval is read once, at the door (sshgw.admitNode), so a machine that
+// is already connected keeps its control channel, keeps reporting capacity into
+// the fleet's totals and keeps its data channels for as long as it cares to —
+// on a gateway whose operator has been told it is gone.
+func (r fleetRoster) EvictNode(name, reason string) bool { return r.flt.EvictNode(name, reason) }
+
+// The interfaces this adapter must satisfy, checked by the compiler.
+//
+// NodeEvicter is the one that matters here. ctlops discovers it with a runtime
+// type assertion, because a roster that cannot reach a link is still a perfectly
+// good roster — which means a gateway that stopped satisfying it would keep
+// building, keep passing its tests and silently stop closing links. This line is
+// what turns that into a compile error. Every optional interface the control
+// plane asserts for against a value this package supplies belongs on this list,
+// and it is the whole list today: NodeEvicter is the only one ctlops has.
+var (
+	_ ctlops.NodeRoster  = fleetRoster{}
+	_ ctlops.NodeEvicter = fleetRoster{}
+)
+
+// netpushFleet adapts the host manager to netpush.Fleet: only running sandboxes
+// have a live tap, so paused/archived ones are filtered out here.
+//
+// It stays on the local manager rather than the fleet router on purpose: sluice
+// runs once per machine, enforces against that machine's own taps, and its PUT
+// /policy replaces the whole set — feeding it another machine's sandboxes would
+// describe taps that do not exist here.
+type netpushFleet struct{ mgr *host.Manager }
+
+func (f netpushFleet) List() []netpush.Sandbox {
 	var out []netpush.Sandbox
 	for _, b := range f.mgr.List() {
 		if b.State != vmm.StateRunning {
@@ -765,6 +1080,7 @@ func pushLoop(ctx context.Context, s *netpush.Syncer, log *slog.Logger) {
 	}
 }
 
+// splitList parses a comma-separated flag into a trimmed, non-empty list.
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

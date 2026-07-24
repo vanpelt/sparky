@@ -11,6 +11,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -21,14 +22,37 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 )
 
+// Sandboxes is the sandbox lifecycle this API drives. It is an interface for
+// one reason, and it is not extensibility: sandbox names are allocated
+// fleet-wide in the placement ledger, so a create or a destroy that went
+// straight to one machine's manager would leave that ledger wrong — a created
+// name with no row behind it, a destroyed name reserved to nobody forever. This
+// endpoint predates the fleet and is loopback-only, but "unauthenticated" is
+// not a licence to corrupt the index every other surface allocates against.
+// Satisfied structurally by both *host.Manager and *fleet.Fleet (importing
+// neither), and on a one-machine deployment the fleet is the manager.
+type Sandboxes interface {
+	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
+	Get(name string) (*host.Sandbox, bool)
+	List() []*host.Sandbox
+	Destroy(ctx context.Context, name string) error
+	Pause(ctx context.Context, name string) error
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Archive(ctx context.Context, name string) error
+	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
+	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
+}
+
+var _ Sandboxes = (*host.Manager)(nil)
+
 type Server struct {
-	mgr          *host.Manager
+	mgr          Sandboxes
 	routes       *routes.Store
 	log          *slog.Logger
 	defaultImage string
 }
 
-func New(mgr *host.Manager, store *routes.Store, defaultImage string, log *slog.Logger) *Server {
+func New(mgr Sandboxes, store *routes.Store, defaultImage string, log *slog.Logger) *Server {
 	return &Server{mgr: mgr, routes: store, log: log, defaultImage: defaultImage}
 }
 

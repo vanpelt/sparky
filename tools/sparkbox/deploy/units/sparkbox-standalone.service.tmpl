@@ -10,8 +10,12 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 # Non-secret host config: PROXY_DOMAIN plus optional flag bundles
-# (LOGIN_USER_FLAG, TLS_FLAGS, SUBNET6_FLAG, OVERCOMMIT_FLAGS) and an optional
-# SPARKBOX_CONSOLE_PASSWORD. These MUST be referenced unbraced ($TLS_FLAGS, not
+# (LOGIN_USER_FLAG, TLS_FLAGS, SUBNET6_FLAG, OVERCOMMIT_FLAGS, GATEWAY_FLAG) and
+# an optional SPARKBOX_CONSOLE_PASSWORD. Setting GATEWAY_FLAG=--gateway <host:port>
+# runs this machine as a fleet NODE instead: it holds VMs for that gateway and
+# serves no edge of its own, so every other flag on this line is ignored (the
+# --users seed included, which is why passing it unconditionally is harmless).
+# These MUST be referenced unbraced ($TLS_FLAGS, not
 # ${TLS_FLAGS}): systemd splits $VAR at whitespace (empty -> zero args) but
 # treats ${VAR} as one argument (empty -> one empty arg, which terminates Go's
 # flag parsing and silently drops everything after it).
@@ -28,7 +32,7 @@ ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
   --default-image {{.DefaultImage}} \
   --users {{.UsersPath}} \
   --ssh-addr {{.SSHAddr}} --api-addr 127.0.0.1:8080 \
-  --proxy-addr {{.ProxyAddr}} --proxy-domain ${PROXY_DOMAIN} $LOGIN_USER_FLAG $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
+  --proxy-addr {{.ProxyAddr}} --proxy-domain ${PROXY_DOMAIN} $LOGIN_USER_FLAG $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS $GATEWAY_FLAG
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

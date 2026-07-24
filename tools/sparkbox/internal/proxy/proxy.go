@@ -58,7 +58,7 @@ const (
 	suffixKey          // the labels preceding a reserved suffix (see SetReservedSuffix)
 )
 
-// upstreamTransport dials guest apps. It is deliberately not http.DefaultTransport:
+// newUpstreamTransport dials guest apps. It is deliberately not http.DefaultTransport:
 //
 //   - MaxIdleConnsPerHost defaults to 2, which for a proxy means the third
 //     concurrent request to the same guest pays a fresh TCP handshake. A single
@@ -70,14 +70,42 @@ const (
 //     Accept-Encoding reaches the app verbatim and the app's encoded bytes reach
 //     the client untouched — no transparent gunzip that would desynchronise
 //     Content-Encoding from the body.
-var upstreamTransport = &http.Transport{
-	DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-	MaxIdleConns:          256,
-	MaxIdleConnsPerHost:   64,
-	IdleConnTimeout:       90 * time.Second,
-	ExpectContinueTimeout: time.Second,
-	DisableCompression:    true,
+//
+// It is built per Server rather than shared package-wide because the idle
+// connection pool is keyed on the target host string alone: two Servers with
+// different dialers sharing one transport would hand each other's pooled
+// connections out.
+//
+// The result must stay a concrete *http.Transport and must never be wrapped in
+// a RoundTripper: httputil.ReverseProxy's 101-upgrade path requires the
+// response Body to implement io.ReadWriteCloser, and only *http.Transport
+// returns one — a wrapper turns every WebSocket into "101 switching protocols
+// response with non-writable body".
+func newUpstreamTransport(dial Dialer) *http.Transport {
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	}
+	return &http.Transport{
+		DialContext:           dial,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		DisableCompression:    true,
+	}
 }
+
+// Resumer is the one manager method the edge drives: every request is a
+// resume-on-connect. It is an interface rather than *host.Manager so the edge
+// can be handed a fleet router that forwards to whichever machine holds the
+// sandbox; a single-box deployment passes its *host.Manager and nothing about
+// the path changes.
+type Resumer interface {
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+}
+
+// Dialer is net.Dialer.DialContext's shape — see SetDialer.
+type Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
 
 // Accounts is the slice of the user store the edge needs to authorise a
 // visitor: resolving a handle to its operator status and email. *users.Store
@@ -95,11 +123,15 @@ func WithOriginalPort(ctx context.Context, port int) context.Context {
 }
 
 type Server struct {
-	mgr    *host.Manager
+	mgr    Resumer
 	store  *routes.Store
 	domain string // base domain, e.g. "hivemind.tools"
 	log    *slog.Logger
 	rp     *httputil.ReverseProxy
+
+	// transport carries every upstream request and owns the idle-connection
+	// pool. SetDialer replaces it wholesale.
+	transport *http.Transport
 
 	// reserved maps subdomains owned by built-in handlers (operator console,
 	// OIDC issuer, login, user console) — checked before route lookup, so a
@@ -283,15 +315,16 @@ func (s *Server) redirectApex(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger) *Server {
+func New(mgr Resumer, store *routes.Store, domain string, log *slog.Logger) *Server {
 	s := &Server{
-		mgr:    mgr,
-		store:  store,
-		domain: strings.ToLower(strings.TrimPrefix(domain, ".")),
-		log:    log,
+		mgr:       mgr,
+		store:     store,
+		domain:    strings.ToLower(strings.TrimPrefix(domain, ".")),
+		log:       log,
+		transport: newUpstreamTransport(nil),
 	}
 	s.rp = &httputil.ReverseProxy{
-		Transport: upstreamTransport,
+		Transport: s.transport,
 		// -1 means "flush after every write", i.e. no response buffering at all.
 		// The stdlib default only streams eagerly for text/event-stream and for
 		// unknown-length bodies, which quietly stalls anything else that trickles:
@@ -368,6 +401,16 @@ func New(mgr *host.Manager, store *routes.Store, domain string, log *slog.Logger
 		},
 	}
 	return s
+}
+
+// SetDialer routes upstream connections through d instead of a plain TCP dial,
+// which is how a sandbox living on another machine is reached: the dialer sees
+// the synthetic host name in the target URL and turns it into a stream to that
+// machine. It rebuilds the transport, dropping any pooled connections with it,
+// so call it before the server starts serving.
+func (s *Server) SetDialer(d Dialer) {
+	s.transport = newUpstreamTransport(d)
+	s.rp.Transport = s.transport
 }
 
 // notListeningHint is the advice on the 502 page, and the closest thing sparkbox
@@ -465,6 +508,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HostIP is whatever the record says, and for a sandbox on another machine
+	// that is a synthetic per-sandbox name rather than an address. Both the dial
+	// and the idle-connection pool are keyed on this string, and that is load
+	// bearing: every machine mints the same guest IPs, so a shared address would
+	// let one machine's request be answered over a pooled connection to
+	// another's sandbox — a cross-tenant bleed with no error and no log line.
+	// The guest never sees the name: Rewrite restores the client's Host.
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(box.HostIP, strconv.Itoa(port))}
 	// Report the actually-forwarded port in any upstream error, not the route's
 	// default, since an any-port URL can override it.

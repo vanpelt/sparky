@@ -27,31 +27,54 @@ const (
 	KindCapacity             // the host RAM admission budget
 	KindQuota                // the per-owner disk pool
 	KindUpstream             // an external dependency (github.com) failed
+
+	// kindCount is the sentinel a new Kind is appended in front of. It exists so
+	// a test can assert that kindNames names every Kind: a Kind added to this
+	// block and forgotten in the table would otherwise stringify as "internal"
+	// and cross a node link as a 500, which is precisely the failure the two
+	// hand-maintained tables used to allow.
+	kindCount
 )
 
-func (k Kind) String() string {
-	switch k {
-	case KindInvalid:
-		return "invalid"
-	case KindNotFound:
-		return "not_found"
-	case KindDenied:
-		return "denied"
-	case KindConflict:
-		return "conflict"
-	case KindDisabled:
-		return "disabled"
-	case KindLimit:
-		return "limit"
-	case KindCapacity:
-		return "capacity"
-	case KindQuota:
-		return "quota"
-	case KindUpstream:
-		return "upstream"
-	default:
-		return "internal"
+// kindNames is the ONE table of Kind's wire form. Kind.String() reads it and
+// ParseKind inverts it, so the two directions cannot disagree about a Kind the
+// way two hand-written switches could.
+//
+// These tokens are a released wire format: rename one and every peer running an
+// older build classifies that failure as internal. Add, never rename.
+var kindNames = [...]string{
+	KindInternal: "internal",
+	KindInvalid:  "invalid",
+	KindNotFound: "not_found",
+	KindDenied:   "denied",
+	KindConflict: "conflict",
+	KindDisabled: "disabled",
+	KindLimit:    "limit",
+	KindCapacity: "capacity",
+	KindQuota:    "quota",
+	KindUpstream: "upstream",
+}
+
+// kindByName is kindNames inverted once at package load rather than scanned per
+// call: FromWire runs on every failure that crosses a link.
+var kindByName = func() map[string]Kind {
+	m := make(map[string]Kind, len(kindNames))
+	for i, name := range kindNames {
+		if name != "" {
+			m[name] = Kind(i)
+		}
 	}
+	return m
+}()
+
+// String is total: a Kind with no token — one appended to the iota block and
+// left out of the table — reads as "internal", which is how every other
+// unclassifiable failure reads.
+func (k Kind) String() string {
+	if k < 0 || int(k) >= len(kindNames) || kindNames[k] == "" {
+		return kindNames[KindInternal]
+	}
+	return kindNames[k]
 }
 
 // Error is the single failure type every Ops method returns.
@@ -102,8 +125,15 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // ExitCode is the ctl@ contract in one place: 2 means the invocation was wrong,
 // 1 means it was right and failed.
+//
+// The override is honoured only inside [1, 255]. FromWire already bounds what a
+// node can put there, but this is the accessor every caller of a *Error goes
+// through, wherever that error came from, so pinning the invariant here is what
+// makes it true for an error built by some future in-process path as well —
+// rather than true only for the one boundary somebody remembered. Outside the
+// window the Kind decides, which is the same answer as an absent override.
 func (e *Error) ExitCode() int {
-	if e.Exit != 0 {
+	if e.Exit >= 1 && e.Exit <= 255 {
 		return e.Exit
 	}
 	if e.Kind == KindInvalid {
@@ -119,8 +149,15 @@ func (e *Error) ExitCode() int {
 const statusClientClosed = 499
 
 // HTTPStatus is the REST edge's contract in one place.
+//
+// The override is honoured only inside the error range, for the same reason
+// ExitCode bounds its own: this is what restapi.fail hands to WriteHeader, and
+// WriteHeader panics outside [100, 999] — a killed request — while a 2xx or a
+// 3xx inside it is worse than a panic, because it makes a failure read as a
+// success to every API client. A status this method cannot honour falls through
+// to the Kind, which is the classification the caller actually made.
 func (e *Error) HTTPStatus() int {
-	if e.Status != 0 {
+	if e.Status >= 400 && e.Status <= 599 {
 		return e.Status
 	}
 	switch e.Kind {
@@ -160,13 +197,21 @@ var notFoundMsg = map[string]string{
 	"passkey":  "no passkey matches %q — see `passkey list`",
 	"route":    "no route %q",
 	"job":      "no job %q",
+	"node":     "no node named %q",
+	// Keyed on the fingerprint, so it cannot borrow the sentence above: an
+	// operator who mistypes a fingerprint and reads `no node named "SHA256:…"`
+	// will go looking for a node whose *name* is a fingerprint.
+	"node_fp": "no node in this fleet holds the key %s",
 }
 
 // NotFound is the ONE constructor for the masked answer. Existence and
 // ownership share it, from a single line of code per object kind, so there is
 // no second path on which a distinguishing 403 could appear.
 //
-// kind is "sandbox" | "snapshot" | "schedule" | "key" | "passkey" | "route".
+// kind is "sandbox" | "snapshot" | "schedule" | "key" | "passkey" | "route" |
+// "job" | "node" — the keys of notFoundMsg. An unlisted kind still works, on a
+// generic phrasing, so a new object kind cannot accidentally take a second
+// code path; adding it to the table is what buys it the wire wording.
 func NotFound(op, kind, name string) *Error {
 	format, ok := notFoundMsg[kind]
 	if !ok {
@@ -356,6 +401,25 @@ func AsError(op string, err error) *Error {
 func IsKind(err error, k Kind) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Kind == k
+}
+
+// ParseKind is the inverse of Kind.String(), derived from the same table rather
+// than restated. The string form is what crosses the node link precisely because
+// the Kind constants are iota-ordered: a future insertion would silently
+// renumber a wire format already in the field. New Kinds are APPEND-ONLY, and
+// adding one also means naming it in kindNames and editing
+// components.schemas.Error's `kind` enum in internal/restapi/openapi.json.
+//
+// An unrecognised string answers (KindInternal, false) rather than an error: a
+// peer that has learned a Kind this build has not still raised a failure this
+// build must render, and a 500 is the honest rendering of one it cannot
+// classify.
+func ParseKind(s string) (Kind, bool) {
+	k, ok := kindByName[s]
+	if !ok {
+		return KindInternal, false
+	}
+	return k, true
 }
 
 func joinNames(in []string) string {

@@ -1,9 +1,11 @@
-// Package webui holds the design system shared by sparkbox's two embedded
-// single-page consoles (internal/console, internal/userconsole) and the
-// build-and-serve pipeline for them: compose a page template against the
-// shared CSS/JS, minify the result, and pre-gzip it — all at package init,
-// so it "just happens" whenever the binary is built and started, with no
-// separate generate step to keep in sync or forget in CI.
+// Package webui holds what sparkbox's two embedded single-page consoles
+// (internal/console, internal/userconsole) share. Mostly that is the design
+// system and the build-and-serve pipeline for it: compose a page template
+// against the shared CSS/JS, minify the result, and pre-gzip it — all at
+// package init, so it "just happens" whenever the binary is built and started,
+// with no separate generate step to keep in sync or forget in CI. It also
+// holds the server-side policy both dashboards answer a listing with — see
+// dashboard.go.
 package webui
 
 import (

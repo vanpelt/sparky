@@ -11,9 +11,18 @@ import "time"
 // ---------------------------------------------------------------------------
 
 type SandboxInfo struct {
-	Name        string    `json:"name"`
-	Owner       string    `json:"owner"`
-	State       string    `json:"state"`
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+	State string `json:"state"`
+	// Node names the machine whose driver runs this VM. It is the first
+	// internal-topology field info() deliberately does NOT drop: a user needs to
+	// know which machine their sandbox is on to reason about its arch, its
+	// accelerators and its outages, and unlike a guest address a node name is
+	// not dialable. omitempty keeps a single-box payload byte-identical.
+	Node string `json:"node,omitempty"`
+	// Unreachable reports that the node holding this sandbox is not answering
+	// the control plane. The sandbox is very likely still running.
+	Unreachable bool      `json:"unreachable,omitempty"`
 	Pinned      bool      `json:"pinned"`
 	Ballooned   bool      `json:"ballooned,omitempty"`
 	Tags        []string  `json:"tags"` // never nil
@@ -50,6 +59,30 @@ type RouteInfo struct {
 	Port       int    `json:"port"`
 	Visibility string `json:"visibility"`
 	URL        string `json:"url,omitempty"`
+}
+
+// NodeInfo is one machine in the fleet as an operator sees it: the roster row
+// joined to the live link.
+//
+// The node's public key itself is deliberately absent. FP is what an operator
+// compares out of band before approving, and it is the only part of the
+// credential anybody has a use for — the key is the roster's alone.
+type NodeInfo struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`          // pending | approved | disabled
+	Online  bool   `json:"online"`          // a link is attached right now
+	Local   bool   `json:"local,omitempty"` // the gateway's own machine
+	FP      string `json:"fingerprint"`     // SHA256:… of the node's key
+	Arch    string `json:"arch,omitempty"`  // node-authored, display only
+	Release string `json:"release,omitempty"`
+	// Sandboxes is how many placements this machine still holds. It is the one
+	// number that decides whether removing the node is safe, so it is part of
+	// the listing rather than something a client has to derive by cross-
+	// referencing every sandbox.
+	Sandboxes  int        `json:"sandboxes"`
+	ApprovedBy string     `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	LastSeen   *time.Time `json:"last_seen,omitempty"`
 }
 
 type Whoami struct {

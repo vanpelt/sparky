@@ -101,6 +101,10 @@
   .badge.wake { color: hsl(var(--muted-foreground)); margin-left: 6px; font-variant-numeric: tabular-nums; }
   .badge.ballooned { color: hsl(var(--blue)); border-color: hsl(var(--blue) / .35); margin-left: 6px; }
   .badge.ballooned .dot { background: hsl(var(--blue)); }
+  /* offline is about the MACHINE, not the sandbox: the VM is almost certainly
+     still running, we just cannot reach the node that holds it. */
+  .badge.offline { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); margin-left: 6px; }
+  .badge.offline .dot { background: hsl(var(--red)); }
 
   /* route chips */
   .route {
@@ -211,7 +215,7 @@
         <table>
           <thead>
             <tr>
-              <th>Name</th><th>Status</th><th>Owner</th><th>Image</th>
+              <th>Name</th><th>Status</th><th>Owner</th><th>Image</th><th>Node</th>
               <th>Resources</th><th>Disk</th><th>Network</th><th>Web routes</th><th>Last active</th><th></th>
             </tr>
           </thead>
@@ -477,6 +481,12 @@
       const balloonBadge = b.ballooned
         ? '<span class="badge ballooned"><span class="dot"></span>ballooned</span>'
         : "";
+      // The state of an unreachable row is the last thing its node reported, so
+      // say which half of the answer is stale rather than letting a green
+      // "running" imply the control plane just checked.
+      const offBadge = b.unreachable
+        ? '<span class="badge offline" title="the machine holding this sandbox is not answering the control plane; the sandbox itself is very likely still running"><span class="dot"></span>node offline</span>'
+        : "";
       // Show real RAM use against the ceiling when the guest reports it — the
       // overcommit story in one number (e.g. "0.3 / 8 GB").
       const mem = typeof b.mem_used_mb === "number"
@@ -484,9 +494,10 @@
         : gb(b.mem_mb);
       tr.innerHTML =
         '<td class="name">' + esc(b.name) + "</td>" +
-        "<td>" + badge(b.state) + pinBadge + balloonBadge + wakeChip(b) + "</td>" +
+        "<td>" + badge(b.state) + pinBadge + balloonBadge + offBadge + wakeChip(b) + "</td>" +
         '<td class="owner">' + esc(b.owner || "–") + "</td>" +
         '<td class="owner">' + esc(b.image || "–") + "</td>" +
+        '<td class="owner">' + esc(b.node || "–") + "</td>" +
         '<td class="spec">' + (b.vcpus || 1) + " vCPU · " + mem + " GB</td>" +
         '<td class="spec" title="rootfs bytes in use / the guest\'s hard ceiling (memory snapshot excluded)">' +
           (b.state === "archived" ? "parked"

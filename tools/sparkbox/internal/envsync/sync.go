@@ -74,13 +74,22 @@ var reservedEnvNames = map[string]bool{
 	"LD_LIBRARY_PATH": true,
 }
 
+// Lister is the one manager method the syncer drives: the fan-out in
+// SyncOwner. It is an interface rather than *host.Manager so a fleet router
+// can stand in and an owner's sandboxes on other machines get their secrets
+// too; *host.Manager satisfies it, so a single-box deployment is unchanged.
+type Lister interface {
+	List() []*host.Sandbox
+}
+
 // Syncer delivers secret environments into guests. It implements
 // host.EnvPusher, so the manager fires it after Create and EnsureRunning;
 // the console fires SyncOwner after tag/secret mutations.
 type Syncer struct {
 	store       *secrets.Store
-	mgr         *host.Manager
+	mgr         Lister
 	upstreamKey xssh.Signer
+	dial        sshgw.Dialer // nil dials the guest over the host network
 	log         *slog.Logger
 	wg          sync.WaitGroup // in-flight SyncOwner pushes (tests wait on it)
 
@@ -108,7 +117,7 @@ var (
 	_ host.EnvStripper = (*Syncer)(nil)
 )
 
-func New(store *secrets.Store, mgr *host.Manager, upstreamKey xssh.Signer, log *slog.Logger) *Syncer {
+func New(store *secrets.Store, mgr Lister, upstreamKey xssh.Signer, log *slog.Logger) *Syncer {
 	return &Syncer{
 		store: store, mgr: mgr, upstreamKey: upstreamKey, log: log,
 		boxes: make(map[string]*boxState),
@@ -118,6 +127,14 @@ func New(store *secrets.Store, mgr *host.Manager, upstreamKey xssh.Signer, log *
 		shell:   "/usr/bin/sudo -n /bin/sh", // login user has NOPASSWD sudo; -n fails loud instead of hanging
 	}
 }
+
+// SetDialer routes delivery through d instead of a plain TCP dial to the
+// guest, so a sandbox on another machine still receives its environment. It is
+// post-construction, matching the mgr.SetEnvSync idiom on the other side of
+// the same wiring, because the syncer is built before the thing that dials for
+// it. Call it before the first push; nothing here is guarded, since main wires
+// it once at startup.
+func (s *Syncer) SetDialer(d sshgw.Dialer) { s.dial = d }
 
 // boxState returns name's delivery state, creating it on first use.
 func (s *Syncer) boxState(name string) *boxState {
@@ -255,7 +272,7 @@ func (s *Syncer) deliverBlock(ctx context.Context, box *host.Sandbox, block stri
 		defer cancel()
 	}
 
-	client, err := sshgw.DialUpstream(ctx, box.SSHAddr, box.SSHUser, s.upstreamKey)
+	client, err := sshgw.DialUpstreamVia(ctx, s.dial, box.SSHAddr, box.SSHUser, s.upstreamKey)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", box.Name, err)
 	}

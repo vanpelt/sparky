@@ -32,6 +32,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 )
 
 // DefaultSubdomain is the reserved name segment the edge dispatches on: the
@@ -107,6 +108,14 @@ type Config struct {
 	// which costs the clean hang-up on pause; tests leave it nil.
 	Track func(sandbox string, s SessionConn, isPTY bool) func()
 
+	// Dial opens the TCP connection to the guest's sshd. Nil dials
+	// box.SSHAddr over the host network, which is what a single-box
+	// deployment and every unit test want — so unlike Sandboxes and Sessions
+	// it is deliberately not on New's panic-on-missing list. A fleet passes
+	// its own dialer here, and a sandbox on another machine is then reached
+	// over that machine's link instead of a host route that does not exist.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
 	Log *slog.Logger
 }
 
@@ -122,6 +131,7 @@ type Handler struct {
 	loginURL  string
 
 	track func(sandbox string, s SessionConn, isPTY bool) func()
+	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
 	log   *slog.Logger
 
 	// open dials the guest and allocates the PTY. A field rather than a direct
@@ -156,6 +166,7 @@ func New(cfg Config) *Handler {
 		subdomain:   strings.ToLower(sub),
 		loginURL:    cfg.LoginURL,
 		track:       cfg.Track,
+		dial:        cfg.Dial,
 		log:         cfg.Log,
 	}
 	h.open = h.dialPTY
@@ -217,30 +228,15 @@ func (h *Handler) SandboxName(host string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if !validSandboxName(name) {
+	// The manager's own create-time charset, asked of the one predicate that
+	// owns it rather than re-implemented here. Enforcing it keeps a hostile Host
+	// header from reaching the manager as a lookup key at all, and because it is
+	// literally the same rule, a name the manager would accept can never be
+	// rejected here.
+	if !reserved.ValidLabel(name) {
 		return "", false
 	}
 	return name, true
-}
-
-// validSandboxName mirrors host.Manager's create-time charset. Enforcing it
-// here keeps a hostile Host header from reaching the manager as a lookup key
-// at all, and it is the same rule, so a name the manager would accept is never
-// rejected here.
-func validSandboxName(s string) bool {
-	if s == "" || len(s) > 63 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '-' && i > 0:
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // resolve is the single owner gate every entry point passes through. Missing
