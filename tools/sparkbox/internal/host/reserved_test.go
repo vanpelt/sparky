@@ -10,7 +10,7 @@ import "testing"
 // The list itself lives in internal/reserved and is exercised there; what this
 // pins is that sandbox naming actually consults it, in both directions.
 func TestSandboxNamesConsultTheReservedList(t *testing.T) {
-	for _, n := range []string{"xterm", "api", "my", "console", "login", "oidc", "new", "ctl", "signup", "docs", "web-xterm"} {
+	for _, n := range []string{"xterm", "api", "my", "console", "login", "oidc", "new", "ctl", "signup", "node", "docs", "web-xterm"} {
 		if !reservedName(n) {
 			t.Errorf("reservedName(%q) = false, want true", n)
 		}

@@ -56,6 +56,10 @@
     {
       "name": "jobs",
       "description": "Long operations that outlived their request window."
+    },
+    {
+      "name": "nodes",
+      "description": "The machines this gateway runs sandboxes on. Operators only: a node name is fleet topology, and approving one lets that machine run other people's sandboxes."
     }
   ],
   "paths": {
@@ -1329,6 +1333,142 @@
         }
       }
     },
+    "/v1/nodes": {
+      "get": {
+        "operationId": "nodes.list",
+        "tags": ["nodes"],
+        "summary": "List the machines in this fleet",
+        "description": "Operators only. Includes this gateway, which is listed with `local: true` and no fingerprint. A machine that has enrolled itself is `pending` until an operator compares its fingerprint out of band and approves it. On a host that is not a fleet gateway this answers 501.",
+        "responses": {
+          "200": {
+            "description": "The fleet.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NodeList" },
+                "example": {
+                  "nodes": [
+                    {
+                      "name": "gateway",
+                      "status": "approved",
+                      "online": true,
+                      "local": true,
+                      "fingerprint": "",
+                      "arch": "arm64",
+                      "sandboxes": 4
+                    },
+                    {
+                      "name": "node-b",
+                      "status": "approved",
+                      "online": true,
+                      "fingerprint": "SHA256:5vK0m0mVQ0m3vJb0S5m1x0d6yQ2n8h4pQ9r1t3u5w7y",
+                      "arch": "amd64",
+                      "release": "2026-07-20-1200",
+                      "sandboxes": 2,
+                      "approved_by": "vanpelt",
+                      "approved_at": "2026-07-21T10:00:00Z",
+                      "last_seen": "2026-07-22T09:30:00Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Not an operator.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/nodes/approve": {
+      "post": {
+        "operationId": "nodes.approve",
+        "tags": ["nodes"],
+        "summary": "Let an enrolled machine into the fleet",
+        "description": "Operators only. This is the whole trust ceremony: compare the fingerprint from `GET /v1/nodes` against the one the machine printed at boot, then approve **that fingerprint**.\n\nThe machine is named by its key, never by its `name`. A node chooses its own name at enrolment and the gateway has nothing to check it against, so approving a name would trust a string a stranger picked — whoever enrols a name first holds it, and the machine you were expecting is refused as a duplicate. A fingerprint cannot be claimed that way.\n\nIdempotent — approving an already-approved node re-records who approved it.",
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "required": true,
+            "description": "The node's `SHA256:…` fingerprint, exactly as `GET /v1/nodes` lists it — **percent-encoded**. The base64 alphabet includes `+` and `/`, and a query decoder reads a bare `+` as a space. The `SHA256:` prefix may be omitted. Prefixes are not accepted: the full fingerprint is the point.",
+            "schema": { "type": "string" },
+            "example": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+          },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The node, now approved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Node" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Not an operator.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/nodes/{name}": {
+      "delete": {
+        "operationId": "nodes.rm",
+        "tags": ["nodes"],
+        "summary": "Drop a machine from the fleet",
+        "description": "Operators only. Refused with 409 while the node still holds sandboxes: they live on that machine's disk, so removing the row would not delete them, it would strand them under a name nothing in the fleet claims. Removal revokes the approval rather than banning the key — the machine may enrol again and wait.",
+        "parameters": [
+          { "$ref": "#/components/parameters/NodeName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Not an operator.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "The node still holds sandboxes, or it is this gateway itself. `details.sandboxes` is the count.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
     "/v1/jobs": {
       "get": {
         "operationId": "jobs.list",
@@ -1446,6 +1586,17 @@
           "pattern": "^[a-z0-9][a-z0-9-]{0,40}$"
         },
         "example": "base"
+      },
+      "NodeName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "description": "The node name, as listed. It is the name the roster holds, not whatever the machine last called itself.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "example": "node-b"
       },
       "ScheduleID": {
         "name": "id",
@@ -1661,7 +1812,8 @@
           "tags",
           "routes",
           "session_tokens",
-          "terminal"
+          "terminal",
+          "fleet"
         ],
         "properties": {
           "archiving": { "type": "boolean", "description": "Object storage is configured." },
@@ -1670,7 +1822,8 @@
           "tags": { "type": "boolean", "description": "The secrets store is open, so tags exist." },
           "routes": { "type": "boolean", "description": "The HTTP proxy is enabled." },
           "session_tokens": { "type": "boolean", "description": "Tokens can be minted." },
-          "terminal": { "type": "boolean", "description": "Browser terminals are served." }
+          "terminal": { "type": "boolean", "description": "Browser terminals are served." },
+          "fleet": { "type": "boolean", "description": "This host is a gateway other machines can join, so the node endpoints answer. It says nothing about whether any machine has joined." }
         }
       },
       "Sandbox": {
@@ -1694,6 +1847,15 @@
             "type": "string",
             "enum": ["running", "paused", "archived"],
             "description": "`archived` means the disk lives in object storage and a resume must fetch it."
+          },
+          "node": {
+            "type": "string",
+            "description": "The machine this sandbox runs on.",
+            "example": "local"
+          },
+          "unreachable": {
+            "type": "boolean",
+            "description": "The machine holding this sandbox is not answering the control plane right now. It is very likely still running."
           },
           "pinned": {
             "type": "boolean",
@@ -2119,6 +2281,56 @@
         "properties": {
           "name": { "type": "string" },
           "deleted": { "type": "boolean", "const": true }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "description": "One machine in the fleet: the roster row joined to the live link. The machine's public key is not part of this shape — the fingerprint is the only part of it anybody has a use for.",
+        "required": ["name", "status", "online", "fingerprint", "sandboxes"],
+        "properties": {
+          "name": { "type": "string", "example": "node-b" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "approved", "disabled"],
+            "description": "`pending` means the machine has offered its key and is waiting for an operator. It runs nothing until it is approved."
+          },
+          "online": {
+            "type": "boolean",
+            "description": "A link is attached right now. An offline node's sandboxes are very likely still running; the control plane simply cannot reach them."
+          },
+          "local": {
+            "type": "boolean",
+            "description": "This gateway itself. It has no roster row, no fingerprint, and cannot be removed."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "SHA256 of the machine's key — what an operator compares out of band before approving. Empty for this gateway.",
+            "example": "SHA256:5vK0m0mVQ0m3vJb0S5m1x0d6yQ2n8h4pQ9r1t3u5w7y"
+          },
+          "arch": {
+            "type": "string",
+            "description": "Node-authored, display only.",
+            "example": "amd64"
+          },
+          "release": { "type": "string", "description": "Node-authored, display only." },
+          "sandboxes": {
+            "type": "integer",
+            "description": "Placements this machine still holds — across all owners, which is why this endpoint is operator-only.",
+            "example": 2
+          },
+          "approved_by": { "type": "string", "example": "vanpelt" },
+          "approved_at": { "type": "string", "format": "date-time" },
+          "last_seen": { "type": "string", "format": "date-time" }
+        }
+      },
+      "NodeList": {
+        "type": "object",
+        "required": ["nodes"],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Node" }
+          }
         }
       },
       "Job": {

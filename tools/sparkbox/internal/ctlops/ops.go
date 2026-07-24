@@ -107,6 +107,23 @@ type Routes interface {
 	SetVisibility(subdomain, visibility string) error
 }
 
+// NodeRoster is the fleet's node registry. Nil makes every node operation
+// answer KindDisabled, which is what a single-box deployment is.
+//
+// It returns NodeInfo rather than a roster row because the roster alone cannot
+// answer the two questions an operator actually asks — is that machine
+// answering, and how many sandboxes would I strand by removing it — and
+// because the row carries the key the node proves possession of, which has no
+// rendering anywhere. Whoever wires this joins the roster to the live fleet;
+// ctlops applies the policy.
+// ApproveNode takes the fingerprint of the node's key, not its name: a name is
+// node-authored and so cannot carry an approval. See Ops.ApproveNode.
+type NodeRoster interface {
+	ListNodes() ([]NodeInfo, error)
+	ApproveNode(fp, by string) (NodeInfo, error)
+	RemoveNode(name string) error
+}
+
 // Minter mints edge session tokens; *edgeauth.Signer satisfies it.
 type Minter interface {
 	Mint(id edgeauth.Identity, ttl time.Duration) (string, time.Time, error)
@@ -137,6 +154,7 @@ type Config struct {
 	Schedules Schedules  // nil: schedule operations are KindDisabled
 	Routes    Routes     // nil: share operations are KindDisabled
 	Sessions  Minter     // nil: MintSessionToken is KindDisabled
+	Nodes     NodeRoster // nil: node operations are KindDisabled
 	GitHub    GitHubKeys // nil: the real github.com client
 
 	DefaultImage   string // rootfs template new sandboxes get
@@ -159,6 +177,7 @@ type Ops struct {
 	schedules Schedules
 	routes    Routes
 	sessions  Minter
+	nodes     NodeRoster
 	github    GitHubKeys
 
 	defaultImage   string
@@ -188,6 +207,7 @@ func New(cfg Config) *Ops {
 		schedules:      cfg.Schedules,
 		routes:         cfg.Routes,
 		sessions:       cfg.Sessions,
+		nodes:          cfg.Nodes,
 		github:         cfg.GitHub,
 		defaultImage:   cfg.DefaultImage,
 		domain:         normalizeDomain(cfg.Domain),
@@ -250,6 +270,10 @@ type Capabilities struct {
 	Routes        bool `json:"routes"`
 	SessionTokens bool `json:"session_tokens"`
 	Terminal      bool `json:"terminal"`
+	// Fleet reports that this host is a gateway other machines can join, which
+	// is what makes the node commands answerable. It says nothing about whether
+	// any machine actually has joined — that is what `nodes.list` is for.
+	Fleet bool `json:"fleet"`
 }
 
 func (o *Ops) Capabilities() Capabilities {
@@ -261,6 +285,7 @@ func (o *Ops) Capabilities() Capabilities {
 		Routes:        o.routes != nil,
 		SessionTokens: o.sessions != nil,
 		Terminal:      o.domain != "" && o.xtermSubdomain != "",
+		Fleet:         o.nodes != nil,
 	}
 }
 
@@ -334,20 +359,23 @@ func (o *Ops) ownedSnapshot(op, name string, c Caller) (*host.Snapshot, error) {
 
 // info projects a manager record onto the public shape. SSHAddr, HostIP and
 // GuestV6 are dropped here rather than at the transport, so no future edge can
-// serialize the host's internal topology by forgetting to.
+// serialize the host's internal topology by forgetting to. Node and Unreachable
+// are the deliberate exceptions — see SandboxInfo.
 func (o *Ops) info(b *host.Sandbox) SandboxInfo {
 	si := SandboxInfo{
-		Name:       b.Name,
-		Owner:      b.Owner,
-		State:      string(b.State),
-		Pinned:     b.Pinned,
-		Ballooned:  b.Ballooned,
-		Tags:       []string{},
-		VCPUs:      b.VCPUs,
-		MemMB:      b.MemMB,
-		DiskMB:     b.DiskMB,
-		CreatedAt:  b.CreatedAt,
-		LastActive: b.LastActive,
+		Name:        b.Name,
+		Owner:       b.Owner,
+		State:       string(b.State),
+		Node:        b.Node,
+		Unreachable: b.Unreachable,
+		Pinned:      b.Pinned,
+		Ballooned:   b.Ballooned,
+		Tags:        []string{},
+		VCPUs:       b.VCPUs,
+		MemMB:       b.MemMB,
+		DiskMB:      b.DiskMB,
+		CreatedAt:   b.CreatedAt,
+		LastActive:  b.LastActive,
 	}
 	if o.tags != nil {
 		// A tag-store hiccup must not turn `list` into an error: the tags are

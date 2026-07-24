@@ -43,6 +43,7 @@ var names = map[string]bool{
 	"new":     true, // ssh new@<domain>      — create a sandbox
 	"ctl":     true, // ssh ctl@<domain>      — control plane
 	"signup":  true, // ssh signup@<domain>   — register
+	"node":    true, // ssh node@<domain>     — a node joins the fleet
 
 	// Identity of the platform itself.
 	"sparkbox":      true,

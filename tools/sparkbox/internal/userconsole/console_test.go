@@ -69,6 +69,7 @@ func (s *syncRecorder) count(owner string) int {
 
 type testConsole struct {
 	h        http.Handler
+	handler  *Handler // the same console before its mux, for the Set* seams
 	mgr      *host.Manager
 	routes   *routes.Store
 	secrets  *secrets.Store
@@ -144,7 +145,7 @@ func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 	// A syncer with no sluice socket: Push/Usage are no-ops, so bandwidth is 501.
 	netSync := netpush.NewSyncer(nil, nilFleet{}, netStore, log)
 	h := New(mgr, routeStore, secretStore, netStore, netSync, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
-	return &testConsole{h: h.Handler(), mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, signer: signer, sync: rec}
+	return &testConsole{h: h.Handler(), handler: h, mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, signer: signer, sync: rec}
 }
 
 // session mints a cookie for handle, the browser path the SPA rides.

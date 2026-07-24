@@ -238,6 +238,10 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		"RemoveKey": true, "ImportGitHubKeys": true, "VerifyGitHub": true,
 		"RemovePasskey": true, "MintSessionToken": true, "Invite": true,
 		"Go": true, "Await": true,
+		// The node commands take a machine's name, not a resource anybody owns:
+		// a node belongs to the fleet, so they are operator-gated instead of
+		// owner-gated — see TestNodeCommandsAreOperatorGated.
+		"ListNodes": true, "ApproveNode": true, "RemoveNode": true,
 	}
 	covered := map[string]bool{}
 	for _, tc := range ownCases() {
@@ -258,5 +262,264 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		t.Errorf("methods with no ownership classification: %v\n"+
 			"add them to ownCases() if they take a resource name, or to notResourceScoped if they don't",
 			missing)
+	}
+}
+
+// TestNodeCommandsAreOperatorGated is the node half of what
+// TestInviteIsTheOnlyOperatorGate pins for invites: operator status is resolved
+// from the account store inside each method, so a transport cannot assert it —
+// Caller has no operator field to assert with. Listing is gated too, because a
+// node name is fleet topology.
+func TestNodeCommandsAreOperatorGated(t *testing.T) {
+	ctx := context.Background()
+	opsy := Caller{Handle: "opsy"}
+
+	for _, tc := range []struct {
+		method string
+		run    func(r *rig, c Caller) error
+	}{
+		{"ListNodes", func(r *rig, c Caller) error { _, err := r.ops.ListNodes(ctx, c); return err }},
+		{"ApproveNode", func(r *rig, c Caller) error {
+			_, err := r.ops.ApproveNode(ctx, c, fpNewcomer)
+			return err
+		}},
+		{"RemoveNode", func(r *rig, c Caller) error { return r.ops.RemoveNode(ctx, c, "newcomer") }},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			r := newRig(t)
+			r.withNodes()
+
+			err := tc.run(r, alice())
+			if !IsKind(err, KindDenied) {
+				t.Fatalf("%s as a non-operator = %v, want KindDenied", tc.method, err)
+			}
+			var e *Error
+			errors.As(err, &e)
+			if e.Code != "not_operator" || e.HTTPStatus() != 403 || e.ExitCode() != 1 {
+				t.Errorf("got %s/%d/exit %d, want not_operator/403/exit 1",
+					e.Code, e.HTTPStatus(), e.ExitCode())
+			}
+			// The refusal is a complete sentence the ctl channel prints as-is.
+			if !e.Verbatim || !strings.HasSuffix(e.Msg, ".") {
+				t.Errorf("refusal %q is not a curated sentence (verbatim=%v)", e.Msg, e.Verbatim)
+			}
+			// A refused caller must not have reached the roster at all.
+			for _, c := range r.calls.mutating() {
+				t.Errorf("a non-operator's %s reached the roster: %s", tc.method, c)
+			}
+
+			r.calls.reset()
+			if err := tc.run(r, opsy); err != nil {
+				t.Fatalf("%s as an operator: %v", tc.method, err)
+			}
+		})
+	}
+}
+
+// TestNodeCommandsWithoutAFleet: a host with no roster answers KindDisabled to
+// everyone, operator or not, and never consults the account store to decide it.
+func TestNodeCommandsWithoutAFleet(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+
+	if r.ops.Capabilities().Fleet {
+		t.Fatal("a host with no roster reported itself a fleet gateway")
+	}
+	_, err := r.ops.ListNodes(ctx, Caller{Handle: "opsy"})
+	if !IsKind(err, KindDisabled) {
+		t.Fatalf("ListNodes with no roster = %v, want KindDisabled", err)
+	}
+	var e *Error
+	errors.As(err, &e)
+	if e.Msg != "this host is not a fleet gateway." || e.Code != "nodes_disabled" {
+		t.Errorf("got %q/%s, want the fleet-gateway sentence and nodes_disabled", e.Msg, e.Code)
+	}
+	if _, err := r.ops.ApproveNode(ctx, Caller{Handle: "opsy"}, fpNodeB); !IsKind(err, KindDisabled) {
+		t.Errorf("ApproveNode with no roster = %v, want KindDisabled", err)
+	}
+	if err := r.ops.RemoveNode(ctx, Caller{Handle: "opsy"}, "node-b"); !IsKind(err, KindDisabled) {
+		t.Errorf("RemoveNode with no roster = %v, want KindDisabled", err)
+	}
+}
+
+// TestRemoveNodeRefusesWhileItHoldsSandboxes: the row is a name, the sandboxes
+// are on that machine's disk. Dropping the row would not delete them, it would
+// only strand them under a name nothing in the fleet claims.
+func TestRemoveNodeRefusesWhileItHoldsSandboxes(t *testing.T) {
+	ctx := context.Background()
+	opsy := Caller{Handle: "opsy"}
+	r := newRig(t)
+	roster := r.withNodes()
+
+	err := r.ops.RemoveNode(ctx, opsy, "node-b")
+	if !IsKind(err, KindConflict) {
+		t.Fatalf("RemoveNode with placements = %v, want KindConflict", err)
+	}
+	var e *Error
+	errors.As(err, &e)
+	if e.Code != "node_has_sandboxes" || e.HTTPStatus() != 409 {
+		t.Errorf("got %s/%d, want node_has_sandboxes/409", e.Code, e.HTTPStatus())
+	}
+	if !strings.Contains(e.Msg, "2 sandboxes") {
+		t.Errorf("refusal %q does not name the count", e.Msg)
+	}
+	if e.Details["sandboxes"] != 2 {
+		t.Errorf("details = %v, want the count a client can render", e.Details)
+	}
+	if len(roster.list) != 3 {
+		t.Fatal("a refused removal still dropped the row")
+	}
+
+	// This gateway is in its own listing and cannot remove itself, whatever it
+	// is holding.
+	err = r.ops.RemoveNode(ctx, opsy, "here")
+	if !IsKind(err, KindConflict) {
+		t.Fatalf("RemoveNode of the local machine = %v, want KindConflict", err)
+	}
+	errors.As(err, &e)
+	if e.Code != "node_is_local" {
+		t.Errorf("code = %s, want node_is_local", e.Code)
+	}
+
+	// An idle machine goes.
+	if err := r.ops.RemoveNode(ctx, opsy, "newcomer"); err != nil {
+		t.Fatalf("RemoveNode of an idle machine: %v", err)
+	}
+	if len(roster.list) != 2 {
+		t.Fatalf("roster still holds %d rows", len(roster.list))
+	}
+}
+
+// TestNodeCommandsMaskAnUnknownName: an operator naming a machine that is not
+// there gets the same `no node named %q` sentence every other missing object
+// gets, from the same constructor, and the roster is never written.
+func TestNodeCommandsMaskAnUnknownName(t *testing.T) {
+	ctx := context.Background()
+	opsy := Caller{Handle: "opsy"}
+	r := newRig(t)
+	r.withNodes()
+
+	// The two commands are keyed on different things, so they mask different
+	// things: `rm` names a machine an operator has already decided about, while
+	// `approve` names the key it is about to trust and never a name.
+	for _, tc := range []struct {
+		name    string
+		wantMsg string
+		run     func() error
+	}{
+		{"approve", "no node in this fleet holds the key " + fpNobody,
+			func() error { _, err := r.ops.ApproveNode(ctx, opsy, fpNobody); return err }},
+		{"rm", `no node named "ghost"`,
+			func() error { return r.ops.RemoveNode(ctx, opsy, "ghost") }},
+	} {
+		r.calls.reset()
+		err := tc.run()
+		if !IsKind(err, KindNotFound) {
+			t.Fatalf("node %s of something absent = %v, want KindNotFound", tc.name, err)
+		}
+		var e *Error
+		errors.As(err, &e)
+		if e.Msg != tc.wantMsg || !e.Verbatim {
+			t.Errorf("node %s said %q, want %q", tc.name, e.Msg, tc.wantMsg)
+		}
+		for _, c := range r.calls.mutating() {
+			t.Errorf("node %s of an unknown machine reached the roster: %s", tc.name, c)
+		}
+	}
+
+	// A missing argument is a malformed invocation, not a missing machine: exit 2.
+	if err := r.ops.RemoveNode(ctx, opsy, ""); !IsKind(err, KindInvalid) {
+		t.Errorf("RemoveNode with no name = %v, want KindInvalid", err)
+	}
+	if _, err := r.ops.ApproveNode(ctx, opsy, ""); !IsKind(err, KindInvalid) {
+		t.Errorf("ApproveNode with no fingerprint = %v, want KindInvalid", err)
+	}
+}
+
+// TestApproveNodeRefusesAName is the point of the whole thing: a node picks its
+// own name at enrolment, so a name cannot carry an operator's approval. Whoever
+// enrols `gpu-01` first holds it, and the machine the operator was told to
+// expect is refused as a duplicate — so an approval keyed on the name blesses
+// whichever machine got there first.
+//
+// The refusal must not resolve the name to the fingerprint that currently holds
+// it. Printing it would turn the ceremony into a paste the operator never
+// compared against the machine, which is the thing being prevented.
+func TestApproveNodeRefusesAName(t *testing.T) {
+	ctx := context.Background()
+	opsy := Caller{Handle: "opsy"}
+	r := newRig(t)
+	r.withNodes()
+
+	for _, ref := range []string{
+		"newcomer",              // a real, pending row — by name
+		"node-b",                // a real, approved row — by name
+		fpNewcomer[:20],         // a prefix of a real fingerprint
+		"SHA256:",               // the label alone
+		"sha256:not-base64-!!!", // right label, wrong body
+	} {
+		r.calls.reset()
+		_, err := r.ops.ApproveNode(ctx, opsy, ref)
+		if !IsKind(err, KindInvalid) {
+			t.Errorf("ApproveNode(%q) = %v, want KindInvalid", ref, err)
+			continue
+		}
+		var e *Error
+		errors.As(err, &e)
+		if e.Code != "bad_fingerprint" {
+			t.Errorf("ApproveNode(%q) code = %q, want bad_fingerprint", ref, e.Code)
+		}
+		if strings.Contains(e.Msg, fpNewcomer) || strings.Contains(e.Msg, fpNodeB) {
+			t.Errorf("ApproveNode(%q) leaked the fingerprint that holds the name: %q", ref, e.Msg)
+		}
+		for _, c := range r.calls.mutating() {
+			t.Errorf("ApproveNode(%q) reached the roster: %s", ref, c)
+		}
+	}
+}
+
+// TestApproveNodeAcceptsTheFingerprint covers the forms an operator actually
+// types: the fingerprint as `node ls` prints it, and the body alone for someone
+// who copied only the interesting half.
+func TestApproveNodeAcceptsTheFingerprint(t *testing.T) {
+	ctx := context.Background()
+	opsy := Caller{Handle: "opsy"}
+
+	for _, ref := range []string{
+		fpNewcomer,
+		strings.TrimPrefix(fpNewcomer, "SHA256:"),
+		"  " + fpNewcomer + "  ",
+		"sha256:" + strings.TrimPrefix(fpNewcomer, "SHA256:"),
+	} {
+		r := newRig(t)
+		nodes := r.withNodes()
+		got, err := r.ops.ApproveNode(ctx, opsy, ref)
+		if err != nil {
+			t.Errorf("ApproveNode(%q) = %v", ref, err)
+			continue
+		}
+		if got.Name != "newcomer" || got.Status != "approved" {
+			t.Errorf("ApproveNode(%q) = %+v, want newcomer approved", ref, got)
+		}
+		// The roster is always handed the canonical form, whatever was typed:
+		// it is a database key, and two spellings of it would be two rows.
+		if nodes.list[2].FP != fpNewcomer {
+			t.Errorf("roster fingerprint = %q, want %q", nodes.list[2].FP, fpNewcomer)
+		}
+	}
+}
+
+// The gateway's own entry carries no fingerprint. Nothing an operator can type
+// may match it — an empty-string match would make a malformed call approve the
+// local machine.
+func TestApproveNodeNeverMatchesTheLocalRow(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	r.withNodes()
+	if _, err := r.ops.ApproveNode(ctx, Caller{Handle: "opsy"}, `""`); !IsKind(err, KindInvalid) {
+		t.Errorf("ApproveNode of an empty-ish fingerprint = %v, want KindInvalid", err)
+	}
+	for _, c := range r.calls.mutating() {
+		t.Errorf("it reached the roster: %s", c)
 	}
 }

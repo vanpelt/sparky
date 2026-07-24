@@ -54,6 +54,9 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  share <name> [public|private]  show or set who can reach a sandbox's URLs\r\n" +
 	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
 	"  invite                   mint a single-use invite code\r\n" +
+	"  node ls                  list the machines in this fleet (operators)\r\n" +
+	"  node approve <SHA256:...>  let the machine holding that key carry sandboxes (operators)\r\n" +
+	"  node rm <name>           drop a machine from the fleet (operators)\r\n" +
 	"  help                     print this list\r\n" +
 	"\r\n" +
 	" the same sandboxes, without ssh\r\n" +
@@ -223,6 +226,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlSessionToken(s, c, args[1:], log)
 	case "invite":
 		g.controlInvite(s, c, log)
+	case "node":
+		g.controlNode(s, c, args[1:], log)
 	case "help", "-h", "--help":
 		// Asked for, so it goes to stdout and exits 0 — unlike the same text
 		// printed as an error for a bad command.

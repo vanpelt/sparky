@@ -24,6 +24,9 @@ type Snapshot struct {
 	Image     string    `json:"image"`      // template basename in the image dir (snap-<owner>-<name>)
 	FromBox   string    `json:"from_box"`   // the sandbox it was taken from
 	CreatedAt time.Time `json:"created_at"` //nolint:tagliatelle
+	// Node names the machine holding the template file. A snapshot is a reflink
+	// source on one machine's disk, so it can only be forked there.
+	Node string `json:"node,omitempty"`
 }
 
 // templateImage derives the reflink-able template name for an owner's snapshot.
@@ -73,7 +76,10 @@ func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*S
 		return nil, fmt.Errorf("snapshot %q: %w", snapName, err)
 	}
 
-	snap := &Snapshot{Name: snapName, Owner: owner, Image: image, FromBox: box, CreatedAt: time.Now().UTC()}
+	snap := &Snapshot{
+		Name: snapName, Owner: owner, Image: image, FromBox: box,
+		CreatedAt: time.Now().UTC(), Node: m.nodeName,
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.snaps[image] = snap

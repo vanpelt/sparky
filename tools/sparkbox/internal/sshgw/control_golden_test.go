@@ -14,6 +14,7 @@ package sshgw
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +27,7 @@ import (
 	gssh "github.com/gliderlabs/ssh"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -108,18 +110,78 @@ func (s *ctlSession) Exit(code int) error {
 // The stack under test
 // ---------------------------------------------------------------------------
 
+// fakeRoster is a node roster in a slice. It is not the real store on purpose:
+// what these rows have to exercise — a machine that is online, one still
+// waiting for approval, one that would strand sandboxes if it were removed — is
+// a join of the roster and the live fleet that no single store can produce on
+// its own, and the ctl@ rendering is what this file is about.
+type fakeRoster struct{ nodes []ctlops.NodeInfo }
+
+func (f *fakeRoster) ListNodes() ([]ctlops.NodeInfo, error) {
+	return append([]ctlops.NodeInfo(nil), f.nodes...), nil
+}
+
+func (f *fakeRoster) ApproveNode(fp, by string) (ctlops.NodeInfo, error) {
+	for i := range f.nodes {
+		if f.nodes[i].FP != "" && f.nodes[i].FP == fp {
+			f.nodes[i].Status, f.nodes[i].ApprovedBy = "approved", by
+			return f.nodes[i], nil
+		}
+	}
+	return ctlops.NodeInfo{}, errors.New("no such node")
+}
+
+func (f *fakeRoster) RemoveNode(name string) error {
+	for i := range f.nodes {
+		if f.nodes[i].Name == name {
+			f.nodes = append(f.nodes[:i:i], f.nodes[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("no such node")
+}
+
+// The fixture's fingerprints, full length: `node approve` checks the shape of
+// what it is given, so a short stand-in would be refused as malformed rather
+// than looked up.
+const (
+	fpNodeB    = "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	fpNewcomer = "SHA256:ccccccccccccccccccccccccccccccccccccccccccc"
+	// fpNobody is well-formed and belongs to no row.
+	fpNobody = "SHA256:ddddddddddddddddddddddddddddddddddddddddddd"
+)
+
+// testRoster is the fleet every ctl@ node row is rendered against: this
+// gateway, an approved machine holding sandboxes, and one that has enrolled and
+// is waiting to be let in.
+func testRoster() *fakeRoster {
+	return &fakeRoster{nodes: []ctlops.NodeInfo{
+		{Name: "here", Status: "approved", Online: true, Local: true, Arch: "arm64", Sandboxes: 1},
+		{Name: "node-b", Status: "approved", Online: true, FP: fpNodeB, Arch: "amd64", Sandboxes: 2},
+		{Name: "newcomer", Status: "pending", FP: fpNewcomer},
+	}}
+}
+
 // ctlStack is a gateway wired to real stores on a temp dir and the mock VM
 // driver. It deliberately has no secrets store, so the "tagging is not enabled"
 // rendering is exercised rather than assumed.
 type ctlStack struct {
-	gw    *Gateway
-	mgr   *host.Manager
-	users *users.Store
-	key   gssh.PublicKey
-	log   *slog.Logger
+	gw     *Gateway
+	mgr    *host.Manager
+	users  *users.Store
+	roster *fakeRoster
+	key    gssh.PublicKey
+	log    *slog.Logger
 }
 
 func newCtlStack(t *testing.T) *ctlStack {
+	t.Helper()
+	return newCtlStackWith(t, testRoster())
+}
+
+// newCtlStackWith builds the stack against a given roster; a nil one is a
+// single-box host, where every node command is KindDisabled.
+func newCtlStackWith(t *testing.T, roster *fakeRoster) *ctlStack {
 	t.Helper()
 	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -162,9 +224,11 @@ func newCtlStack(t *testing.T) *ctlStack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []string{"alice", "mallory"} {
+	// opsy is seeded rather than invited, which is the only thing that makes an
+	// operator — the node commands are the second operator gate in the tree.
+	for _, h := range []string{"alice", "mallory", "opsy"} {
 		k := pub
-		if h == "mallory" {
+		if h != "alice" {
 			// A second, distinct key: the store refuses to link one key twice.
 			s, err := LoadOrCreateKey(dir, h+"_key")
 			if err != nil {
@@ -175,17 +239,33 @@ func newCtlStack(t *testing.T) *ctlStack {
 				t.Fatal(err)
 			}
 		}
-		if err := userStore.Create(h, k, h+"@example.test", "signup", "someone"); err != nil {
+		invitedBy := "someone"
+		if h == "opsy" {
+			invitedBy = users.OperatorInviter
+		}
+		if err := userStore.Create(h, k, h+"@example.test", "signup", invitedBy); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	gw := New(GatewayOptions{
+	opts := GatewayOptions{
 		Manager: mgr, Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		Logger: log, Domain: "hivemind.tools",
 		Routes: routeStore, Schedules: schedStore,
-	})
-	return &ctlStack{gw: gw, mgr: mgr, users: userStore, key: pub, log: log}
+	}
+	// The control plane is built from the gateway's own wiring and then given a
+	// roster, so every other row in the golden table is rendered by exactly the
+	// Ops the gateway would have built for itself.
+	cfg := opsConfig(opts)
+	if roster != nil {
+		cfg.Nodes = roster
+	}
+	ops := ctlops.New(cfg)
+	t.Cleanup(ops.Close)
+	opts.Ops = ops
+
+	gw := New(opts)
+	return &ctlStack{gw: gw, mgr: mgr, users: userStore, roster: roster, key: pub, log: log}
 }
 
 // run drives one ctl command as handle, returning the session it wrote into.
@@ -365,6 +445,49 @@ func TestControlGolden(t *testing.T) {
 	}, {
 		name: "session-token on a host without an edge signer", handle: "alice", args: []string{"session-token"},
 		wantErr: "sparkbox: authenticated forwarding isn't enabled on this host.\r\n", wantExit: 1,
+	}, {
+		// `node` with no subcommand is `node ls`, so a non-operator meets the
+		// same one-sentence refusal either way: a node name is fleet topology.
+		name: "node with no subcommand", handle: "alice", args: []string{"node"},
+		wantErr: "sparkbox: only operators can list the machines in this fleet.\r\n", wantExit: 1,
+	}, {
+		name: "node ls as a non-operator", handle: "alice", args: []string{"node", "ls"},
+		wantErr: "sparkbox: only operators can list the machines in this fleet.\r\n", wantExit: 1,
+	}, {
+		name: "node ls as an operator", handle: "opsy", args: []string{"node", "ls"},
+		wantOut: "here (this gateway)          approved  online   arm64    1 sandbox\r\n" +
+			"node-b                       approved  online   amd64    2 sandboxes   " + fpNodeB + "\r\n" +
+			"newcomer                     pending   offline  -        0 sandboxes   " + fpNewcomer + "\r\n",
+		wantExit: 0,
+	}, {
+		name: "node approve without a fingerprint", handle: "opsy", args: []string{"node", "approve"},
+		wantErr: "usage: ssh ctl@<gateway> node approve <SHA256:...>\r\n" +
+			"Approve a machine by the fingerprint of its key, which it prints at startup — compare that against `node ls` first.\r\n", wantExit: 2,
+	}, {
+		name: "node approve of a machine that never enrolled", handle: "opsy",
+		args:    []string{"node", "approve", fpNobody},
+		wantErr: "sparkbox: no node in this fleet holds the key " + fpNobody + "\r\n", wantExit: 1,
+	}, {
+		// A name is not a way in, even a name that IS on the roster. The
+		// refusal must not answer with the fingerprint that holds it: that
+		// would turn the ceremony into a paste nobody compared.
+		name: "node approve by name", handle: "opsy",
+		args: []string{"node", "approve", "newcomer"},
+		wantErr: "sparkbox: \"newcomer\" is not an SSH key fingerprint. A machine is approved by the key it " +
+			"holds, not by the name it asked for — the name is chosen by whoever is enrolling, so approving " +
+			"one would trust a stranger's word. Read the fingerprint off the machine itself (it prints one " +
+			"at startup), check it against `node ls`, and approve that.\r\n", wantExit: 2,
+	}, {
+		// The count is the message: removing the row would not delete those
+		// sandboxes, only strand them.
+		name: "node rm while it still holds sandboxes", handle: "opsy", args: []string{"node", "rm", "node-b"},
+		wantErr: "sparkbox: node \"node-b\" still holds 2 sandboxes.\r\n", wantExit: 1,
+	}, {
+		name: "node rm without a name", handle: "opsy", args: []string{"node", "rm"},
+		wantErr: "usage: ssh ctl@<gateway> node rm <name>\r\n", wantExit: 2,
+	}, {
+		name: "node with an unknown subcommand", handle: "opsy", args: []string{"node", "wat"},
+		wantErr: "unknown node command \"wat\"\r\n" + controlUsage, wantExit: 2,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := st.run(t, tc.handle, tc.args...)
@@ -451,5 +574,51 @@ func TestControlUsageDocumentsTheOtherDoors(t *testing.T) {
 		if strings.Contains(line, "\n") {
 			t.Errorf("usage line has a bare \\n: %q", line)
 		}
+	}
+}
+
+// TestControlNodeOnASingleBox: a host nobody can join answers every node
+// command with the same sentence, including the ones whose arguments are wrong,
+// so an operator learns what the host is rather than what they typed.
+func TestControlNodeOnASingleBox(t *testing.T) {
+	st := newCtlStackWith(t, nil)
+	const want = "sparkbox: this host is not a fleet gateway.\r\n"
+	for _, args := range [][]string{
+		{"node"}, {"node", "ls"}, {"node", "approve", "node-b"}, {"node", "rm"}, {"node", "wat"},
+	} {
+		s := st.run(t, "opsy", args...)
+		if s.stderr.String() != want || s.code != 1 {
+			t.Errorf("%v = exit %d, stderr %q; want exit 1 and %q", args, s.code, s.stderr.String(), want)
+		}
+	}
+}
+
+// TestControlNodeApproveAndRemove is the happy path the table cannot hold: both
+// mutate the roster, so they run on their own stack.
+func TestControlNodeApproveAndRemove(t *testing.T) {
+	st := newCtlStack(t)
+
+	s := st.run(t, "opsy", "node", "approve", fpNewcomer)
+	if s.code != 0 || s.out.String() != "approved newcomer ("+fpNewcomer+") — it can carry sandboxes now\r\n" {
+		t.Fatalf("approve = exit %d, stdout %q, stderr %q", s.code, s.out.String(), s.stderr.String())
+	}
+	if st.roster.nodes[2].Status != "approved" || st.roster.nodes[2].ApprovedBy != "opsy" {
+		t.Errorf("roster row after approve = %+v", st.roster.nodes[2])
+	}
+
+	// A machine holding nothing can go; the sentence says it may come back,
+	// because removal revokes the approval rather than banning the key.
+	s = st.run(t, "opsy", "node", "rm", "newcomer")
+	if s.code != 0 || s.out.String() != "removed node \"newcomer\" — it may enrol again and wait for approval\r\n" {
+		t.Fatalf("rm = exit %d, stdout %q, stderr %q", s.code, s.out.String(), s.stderr.String())
+	}
+	if len(st.roster.nodes) != 2 {
+		t.Errorf("roster still holds %d rows", len(st.roster.nodes))
+	}
+
+	// A non-operator reaches neither.
+	s = st.run(t, "alice", "node", "rm", "node-b")
+	if s.code != 1 || len(st.roster.nodes) != 2 {
+		t.Errorf("a non-operator's rm = exit %d, roster %d rows", s.code, len(st.roster.nodes))
 	}
 }

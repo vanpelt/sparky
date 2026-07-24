@@ -45,20 +45,61 @@ const (
 	tokenSalt    = "sparkbox-console/v1"
 )
 
-// probeTimeout bounds the per-route TCP dial that checks whether anything is
-// listening on a forwarded port. Guest IPs are on a local bridge, so a live
-// listener answers in microseconds; anything slower is effectively down.
-const probeTimeout = 300 * time.Millisecond
+// Local names for the dashboard probe budgets, which are stated once in
+// internal/webui so both consoles time a fleet the same way. probeTimeout also
+// bounds the balloon read below; tunneledProbeTimeout is spent inside
+// webui.Probe.Listening.
+const (
+	probeTimeout         = webui.ProbeTimeout
+	tunneledProbeTimeout = webui.TunneledProbeTimeout
+)
+
+// Dialer is net.Dialer.DialContext's shape — see SetDialer.
+type Dialer = webui.Dialer
+
+// Sandboxes is the sandbox lifecycle and inventory this console drives. It is
+// an interface so the console can be handed the fleet router instead of one
+// machine's manager: sandbox names are allocated fleet-wide in the placement
+// ledger, so a destroy that went straight to the local manager would leave the
+// name reserved forever and a fork would take a name no row ever recorded.
+// Satisfied structurally by both *host.Manager and *fleet.Fleet (importing
+// neither), and on a one-machine deployment the fleet is the manager, so the
+// console behaves exactly as it did before it existed.
+type Sandboxes interface {
+	Get(name string) (*host.Sandbox, bool)
+	List() []*host.Sandbox
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Pause(ctx context.Context, name string) error
+	Archive(ctx context.Context, name string) error
+	Destroy(ctx context.Context, name string) error
+	SetPinned(name string, pinned bool) error
+	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, snapName, owner string) error
+	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
+}
+
+var _ Sandboxes = (*host.Manager)(nil)
 
 // Handler serves the console UI and its JSON API.
 type Handler struct {
+	// mgr is this machine's own manager. It is kept alongside boxes because the
+	// balloon and snapshot reads below can only be answered by the machine
+	// running the VM — they are not routable, so a sandbox that lives elsewhere
+	// is skipped rather than asked.
 	mgr    *host.Manager
+	boxes  Sandboxes
 	store  *routes.Store   // optional: nil hides web routes from the UI
 	sched  *schedule.Store // optional: nil hides the next-wake column
 	domain string          // base domain for building route URLs, e.g. "hivemind.tools"
 	log    *slog.Logger
 	token  string // expected cookie value, derived from the password
 	secure bool   // set the Secure flag on the auth cookie (proxy terminates TLS)
+
+	// probe carries this machine's name and the fleet dialer: together they
+	// decide which rows are remote and how long their port probes may take.
+	probe webui.Probe
+
+	capacities func() []host.NodeCapacity // every machine's resource picture
 }
 
 // SetSchedules attaches the platform-scheduler store so the dashboard can show
@@ -69,8 +110,35 @@ func (h *Handler) SetSchedules(s *schedule.Store) { h.sched = s }
 // so an unset password disables the console entirely rather than shipping an
 // empty-password login. secure should be true when the proxy edge serves TLS.
 func New(mgr *host.Manager, store *routes.Store, domain, password string, secure bool, log *slog.Logger) *Handler {
-	return &Handler{mgr: mgr, store: store, domain: domain, log: log, token: deriveToken(password), secure: secure}
+	h := &Handler{
+		mgr: mgr, boxes: mgr, store: store, domain: domain, log: log,
+		token: deriveToken(password), secure: secure,
+	}
+	if mgr != nil {
+		h.probe.Node = mgr.NodeName()
+	}
+	h.capacities = func() []host.NodeCapacity { return []host.NodeCapacity{h.mgr.Capacity()} }
+	return h
 }
+
+// SetSandboxes points the console's lifecycle actions and its listing at the
+// fleet router rather than straight at this machine's manager, so an action
+// reaches the machine that actually holds the sandbox and every name it takes
+// or releases is recorded in the placement ledger. Unset, the console drives
+// the manager it was built with — which is what a one-machine deployment wants
+// and what every test builds.
+func (h *Handler) SetSandboxes(s Sandboxes) { h.boxes = s }
+
+// SetCapacities replaces the cluster endpoint's one-machine answer with the
+// fleet's. The page has always summed over the array it is handed, so pointing
+// this at the fleet is the whole of the multi-machine capacity story on the
+// front end.
+func (h *Handler) SetCapacities(f func() []host.NodeCapacity) { h.capacities = f }
+
+// SetDialer routes the listening-port probe through d instead of dialing the
+// guest's address on the host network — see webui.Probe.Dial for why a fleet
+// cannot be probed directly.
+func (h *Handler) SetDialer(d Dialer) { h.probe.Dial = d }
 
 // deriveToken maps a password to the opaque cookie value. Same password in,
 // same token out, so validation needs no server-side session store.
@@ -179,16 +247,20 @@ type sandboxView struct {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	boxes := h.mgr.List()
+	boxes := h.boxes.List()
 	views := make([]sandboxView, len(boxes))
 	now := time.Now()
 	var wg sync.WaitGroup
 	for i, b := range boxes {
-		views[i] = sandboxView{Sandbox: b, Routes: []routeStatus{}}
+		remote := h.probe.Remote(b)
+		views[i] = sandboxView{Sandbox: webui.Public(b), Routes: []routeStatus{}}
 		views[i].NextWake, views[i].Schedules = h.nextWake(b.Name, now)
 		// Read the guest's real memory use concurrently (balloon stats); bounded
-		// by probeTimeout so one slow VM can't stall the dashboard.
-		if b.State == vmm.StateRunning {
+		// by probeTimeout so one slow VM can't stall the dashboard. Only for the
+		// sandboxes on this machine: a balloon can only be asked of the host
+		// running the VM, so a remote name would just miss in the local
+		// manager's map and report nothing.
+		if b.State == vmm.StateRunning && !remote {
 			wg.Add(1)
 			go func(name string, dst **int64) {
 				defer wg.Done()
@@ -211,7 +283,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 			views[i].Routes = append(views[i].Routes, routeStatus{Subdomain: rt.Subdomain, Port: rt.Port, Visibility: rt.Visibility})
 		}
 		// Probe every forwarded port of a running sandbox concurrently; the
-		// whole fan-out is bounded by probeTimeout, not routes × timeout.
+		// whole fan-out is bounded by one probe budget, not routes × timeout.
+		// b, not the view, carries the address: the view's copy has had it
+		// dropped on the way to the browser.
 		if b.State != vmm.StateRunning || b.HostIP == "" {
 			continue
 		}
@@ -219,16 +293,18 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			go func(addr string, listening *bool) {
 				defer wg.Done()
-				conn, err := net.DialTimeout("tcp", addr, probeTimeout)
-				if err == nil {
-					conn.Close()
-					*listening = true
-				}
+				*listening = h.listening(r.Context(), addr, remote)
 			}(net.JoinHostPort(b.HostIP, strconv.Itoa(views[i].Routes[j].Port)), &views[i].Routes[j].Listening)
 		}
 	}
 	wg.Wait()
 	writeJSON(w, http.StatusOK, views)
+}
+
+// listening is the shared port probe (webui.Probe) bound to this console's
+// dialer and node.
+func (h *Handler) listening(ctx context.Context, addr string, remote bool) bool {
+	return h.probe.Listening(ctx, addr, remote)
 }
 
 // nextWake returns the soonest upcoming scheduled fire for a sandbox and the
@@ -259,8 +335,9 @@ func (h *Handler) nextWake(sandbox string, now time.Time) (*time.Time, int) {
 	return &soonest, len(entries)
 }
 
-// clusterResponse reports capacity as a list of nodes so the payload shape
-// already fits a future multi-box deployment (today it has exactly one entry).
+// clusterResponse reports capacity as a list of nodes, which is why the shape
+// survived the fleet arriving unchanged: a single-box deployment is the
+// one-element case, not a different payload.
 type clusterResponse struct {
 	Domain string              `json:"domain"`
 	Nodes  []host.NodeCapacity `json:"nodes"`
@@ -269,30 +346,30 @@ type clusterResponse struct {
 func (h *Handler) cluster(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, clusterResponse{
 		Domain: h.domain,
-		Nodes:  []host.NodeCapacity{h.mgr.Capacity()},
+		Nodes:  h.capacities(),
 	})
 }
 
 func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := h.mgr.Pause(r.Context(), name); err != nil {
+	if err := h.boxes.Pause(r.Context(), name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("console paused sandbox", "name", name)
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	box, err := h.mgr.EnsureRunning(r.Context(), name)
+	box, err := h.boxes.EnsureRunning(r.Context(), name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("console resumed sandbox", "name", name)
-	writeJSON(w, http.StatusOK, box)
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 // destroy permanently removes a sandbox: its VM and local disk, and — when the
@@ -301,7 +378,7 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 // the console gates it behind a confirmation modal.
 func (h *Handler) destroy(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := h.mgr.Destroy(r.Context(), name); err != nil {
+	if err := h.boxes.Destroy(r.Context(), name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -314,13 +391,13 @@ func (h *Handler) destroy(w http.ResponseWriter, r *http.Request) {
 // transparently), so the UI reuses the resume button for archived rows.
 func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := h.mgr.Archive(r.Context(), name); err != nil {
+	if err := h.boxes.Archive(r.Context(), name); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("console archived sandbox", "name", name)
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 type snapshotReq struct {
@@ -331,7 +408,7 @@ type snapshotReq struct {
 // the sandbox's owner).
 func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	box, ok := h.mgr.Get(name)
+	box, ok := h.boxes.Get(name)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
@@ -341,7 +418,7 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "malformed request")
 		return
 	}
-	snap, err := h.mgr.Snapshot(r.Context(), name, req.SnapshotName, box.Owner)
+	snap, err := h.boxes.Snapshot(r.Context(), name, req.SnapshotName, box.Owner)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
@@ -350,6 +427,10 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, snap)
 }
 
+// listSnapshots is every owner's templates on THIS machine. A template is a
+// reflink source in one machine's image directory and can only be forked where
+// it lies, so there is no fleet-wide listing to ask for; a remote machine's
+// templates are its operator's business until the fleet grows one.
 func (h *Handler) listSnapshots(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, h.mgr.AllSnapshots())
 }
@@ -372,13 +453,13 @@ func (h *Handler) fork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name and owner are required")
 		return
 	}
-	box, err := h.mgr.Fork(r.Context(), r.PathValue("snapshot"), req.Name, req.Owner, 0, 0)
+	box, err := h.boxes.Fork(r.Context(), r.PathValue("snapshot"), req.Name, req.Owner, 0, 0)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("console forked snapshot", "snapshot", r.PathValue("snapshot"), "into", req.Name)
-	writeJSON(w, http.StatusCreated, box)
+	writeJSON(w, http.StatusCreated, webui.Public(box))
 }
 
 func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +468,7 @@ func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "malformed request")
 		return
 	}
-	if err := h.mgr.DeleteSnapshot(r.Context(), r.PathValue("snapshot"), req.Owner); err != nil {
+	if err := h.boxes.DeleteSnapshot(r.Context(), r.PathValue("snapshot"), req.Owner); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -399,29 +480,29 @@ func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 // running immediately. unpin clears the flag, letting the reaper pause it again.
 func (h *Handler) pin(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := h.mgr.SetPinned(name, true); err != nil {
+	if err := h.boxes.SetPinned(name, true); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	box, err := h.mgr.EnsureRunning(r.Context(), name)
+	box, err := h.boxes.EnsureRunning(r.Context(), name)
 	if err != nil {
 		// The flag stuck; it just isn't warm yet. Surface the reason.
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("console pinned sandbox", "name", name)
-	writeJSON(w, http.StatusOK, box)
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 func (h *Handler) unpin(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := h.mgr.SetPinned(name, false); err != nil {
+	if err := h.boxes.SetPinned(name, false); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
 	h.log.Info("console unpinned sandbox", "name", name)
-	box, _ := h.mgr.Get(name)
-	writeJSON(w, http.StatusOK, box)
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, webui.Public(box))
 }
 
 func statusFor(err error) int {
