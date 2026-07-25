@@ -118,17 +118,21 @@ machine_is_owned() {
 }
 
 require_owned_machine() {
-  local inspect_json
+  local inspect_json machine_status
 
+  # The status must be read in an else branch: after `fi`, `$?` is the `if`
+  # statement's own status (always 0), which would swallow the "does not
+  # exist" case behind the misleading list-failure message.
   if machine_exists; then
     inspect_json="$(machine_inspect)"
     machine_is_owned "${inspect_json}" \
       || die "${MACHINE_NAME} exists but is not owned by this PoC"
     printf '%s\n' "${inspect_json}"
     return
+  else
+    machine_status="$?"
   fi
 
-  local machine_status="$?"
   [[ "${machine_status}" -eq 1 ]] || die "could not list container machines"
   die "${MACHINE_NAME} does not exist; run ./macos/poc.sh create"
 }
@@ -535,8 +539,12 @@ status_machine() {
     "image:    \(.image.reference)\n" +
     "home:     \(.homeMount)"' <<<"${inspect_json}"
 
+  # Exit non-zero when the machine is not up. There is nothing further to
+  # report, and callers (smoke.sh's readiness guard) rely on the status to tell
+  # "ready" from "exists but stopped" — returning 0 here made that guard dead.
   if [[ "${machine_state}" != "running" ]]; then
-    return
+    echo "${MACHINE_NAME} is ${machine_state}; run ./macos/poc.sh start" >&2
+    return 1
   fi
 
   echo

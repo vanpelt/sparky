@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -73,8 +74,36 @@ type Driver struct {
 	mu      sync.Mutex
 	opts    Options
 	vms     map[string]*vmState
-	prefix6 net.IP // parsed /64 network address; nil disables IPv6
-	uplink6 string // iface backing the v6 default route, for per-guest proxy NDP
+	// creating holds the names of Creates that have released d.mu to do their
+	// rootfs disk work. A name is in exactly one of creating and vms.
+	creating map[string]bool
+	prefix6  net.IP // parsed /64 network address; nil disables IPv6
+	uplink6  string // iface backing the v6 default route, for per-guest proxy NDP
+}
+
+// reserveName claims cfg.Name for an in-flight Create so no second Create
+// prepares the same rootfs concurrently, and so the name is still refused
+// while d.mu is released.
+func (d *Driver) reserveName(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.creating == nil {
+		d.creating = map[string]bool{}
+	}
+	if _, ok := d.vms[name]; ok {
+		return fmt.Errorf("vm %q already exists", name)
+	}
+	if d.creating[name] {
+		return fmt.Errorf("vm %q is already being created", name)
+	}
+	d.creating[name] = true
+	return nil
+}
+
+func (d *Driver) releaseName(name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.creating, name)
 }
 
 func New(opts Options) (*Driver, error) {
@@ -87,7 +116,7 @@ func New(opts Options) (*Driver, error) {
 	if err := validateGuestDNS(opts.GuestDNS); err != nil {
 		return nil, err
 	}
-	d := &Driver{opts: opts, vms: map[string]*vmState{}}
+	d := &Driver{opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{}}
 	if opts.Subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
 		if err != nil {
@@ -201,11 +230,16 @@ func (d *Driver) addr6(off int) string {
 }
 
 func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if _, ok := d.vms[cfg.Name]; ok {
-		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
+	// Preparing the rootfs means a template copy and a loop mount that may
+	// replay an ext4 journal on a 25 GiB image — far too slow to hold the
+	// driver-wide lock through, especially on a restart recreating every
+	// sandbox in turn. Reserve the name instead, do the disk work unlocked,
+	// then take d.mu for the slot bookkeeping and boot.
+	if err := d.reserveName(cfg.Name); err != nil {
+		return nil, err
 	}
+	defer d.releaseName(cfg.Name)
+
 	dir := d.vmDir(cfg.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -222,6 +256,14 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 	}
 	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
 		return nil, fmt.Errorf("install gateway key: %w", err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Re-check under the lock: reserveName only excludes a second Create, and
+	// Restore could have registered this name while the disk work ran.
+	if _, ok := d.vms[cfg.Name]; ok {
+		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
 	}
 
 	idx, err := d.freeSlot()
@@ -633,18 +675,23 @@ func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
 	if _, err := os.Stat(rootfs); err != nil {
 		return 0, nil
 	}
-	return ext4UsageMB(rootfs)
+	used, _, err := ext4DiskMB(rootfs)
+	return used, err
 }
 
-// ext4UsageMB reads the primary ext4 superblock directly and follows statfs(2):
-// used = total - filesystem metadata overhead - free. Firecracker owns the
-// image and may have it mounted in a guest, so invoking e2fsck/debugfs here
-// would be unsafe; a fixed-size read is passive and gives a sufficiently fresh
+// ext4DiskMB reads the primary ext4 superblock directly and follows statfs(2):
+// capacity = total blocks - filesystem metadata overhead, used = capacity -
+// free. Both come from the same superblock read so the console's meter has a
+// numerator and denominator on the same basis — measuring used against the raw
+// image size instead would leave a genuinely full guest short of 100% by
+// however much metadata the filesystem holds. Firecracker owns the image and
+// may have it mounted in a guest, so invoking e2fsck/debugfs here would be
+// unsafe; a fixed-size read is passive and gives a sufficiently fresh
 // best-effort counter for the periodic console measurement.
-func ext4UsageMB(path string) (int64, error) {
+func ext4DiskMB(path string) (usedMB, capacityMB int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer f.Close()
 
@@ -660,43 +707,46 @@ func ext4UsageMB(path string) (int64, error) {
 	)
 	sb := make([]byte, superSize)
 	if _, err := f.ReadAt(sb, superOffset); err != nil {
-		return 0, fmt.Errorf("read ext4 superblock: %w", err)
+		return 0, 0, fmt.Errorf("read ext4 superblock: %w", err)
 	}
 	if magic := binary.LittleEndian.Uint16(sb[0x38:0x3a]); magic != ext4Magic {
-		return 0, fmt.Errorf("rootfs has invalid ext4 magic %#x", magic)
+		return 0, 0, fmt.Errorf("rootfs has invalid ext4 magic %#x", magic)
 	}
 	logBlockSize := binary.LittleEndian.Uint32(sb[0x18:0x1c])
 	if logBlockSize > maxLogBlockSize {
-		return 0, fmt.Errorf("rootfs has invalid ext4 block-size shift %d", logBlockSize)
+		return 0, 0, fmt.Errorf("rootfs has invalid ext4 block-size shift %d", logBlockSize)
 	}
 	blocks := uint64(binary.LittleEndian.Uint32(sb[0x04:0x08]))
 	free := uint64(binary.LittleEndian.Uint32(sb[0x0c:0x10]))
 	incompat := binary.LittleEndian.Uint32(sb[0x60:0x64])
 	roCompat := binary.LittleEndian.Uint32(sb[0x64:0x68])
 	if roCompat&roCompatBigalloc != 0 {
-		return 0, fmt.Errorf("rootfs ext4 bigalloc is not supported for disk accounting")
+		return 0, 0, fmt.Errorf("rootfs ext4 bigalloc is not supported for disk accounting")
 	}
 	if incompat&incompat64Bit != 0 {
 		blocks |= uint64(binary.LittleEndian.Uint32(sb[0x150:0x154])) << 32
 		free |= uint64(binary.LittleEndian.Uint32(sb[0x158:0x15c])) << 32
 	}
 	if free > blocks {
-		return 0, fmt.Errorf("rootfs ext4 free blocks %d exceed total blocks %d", free, blocks)
+		return 0, 0, fmt.Errorf("rootfs ext4 free blocks %d exceed total blocks %d", free, blocks)
 	}
 	blockSize := uint64(1024) << logBlockSize
 	usedBlocks := blocks - free
 	// s_overhead_last is the number of filesystem-metadata blocks excluded
-	// from statfs.f_blocks and therefore from `df`'s used figure.
+	// from statfs.f_blocks, and therefore from both `df`'s used figure and its
+	// total.
 	overhead := uint64(binary.LittleEndian.Uint32(sb[0x248:0x24c]))
 	if overhead > usedBlocks {
-		return 0, fmt.Errorf("rootfs ext4 overhead blocks %d exceed occupied blocks %d",
+		return 0, 0, fmt.Errorf("rootfs ext4 overhead blocks %d exceed occupied blocks %d",
 			overhead, usedBlocks)
 	}
 	usedBlocks -= overhead
-	if usedBlocks > maxSignedInt64/blockSize {
-		return 0, fmt.Errorf("rootfs ext4 used-block count overflows int64")
+	capacityBlocks := blocks - overhead
+	if capacityBlocks > maxSignedInt64/blockSize {
+		return 0, 0, fmt.Errorf("rootfs ext4 block count overflows int64")
 	}
-	return int64(usedBlocks * blockSize / bytesPerMiB), nil
+	return int64(usedBlocks * blockSize / bytesPerMiB),
+		int64(capacityBlocks * blockSize / bytesPerMiB), nil
 }
 
 // ResizeDisk implements vmm.DiskResizer: grow a stopped sandbox's rootfs to
@@ -750,17 +800,20 @@ func exitCode(err error) int {
 	return -1
 }
 
-// DiskCapacityMB implements vmm.DiskReporter: the rootfs image's *apparent*
-// size, which is the guest's hard ceiling — the ext4 filesystem is exactly this
-// big and the guest cannot grow past it. Discovered per sandbox rather than
-// configured, so boxes created from differently-sized templates each report
-// their own ceiling. 0 when the image is missing.
+// DiskCapacityMB implements vmm.DiskReporter: the guest's hard ceiling, read
+// from the same superblock as DiskUsageMB so the two agree — the space `df`
+// inside the guest calls the filesystem total, which is the image minus the
+// metadata overhead the guest can never spend. Discovered per sandbox rather
+// than configured, so boxes created from differently-sized templates each
+// report their own ceiling. 0 when the image is missing; an image that is
+// present but unreadable is an error, as it is for DiskUsageMB.
 func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
-	fi, err := os.Stat(d.rootfsPath(name))
-	if err != nil {
+	rootfs := d.rootfsPath(name)
+	if _, err := os.Stat(rootfs); err != nil {
 		return 0, nil
 	}
-	return fi.Size() / (1024 * 1024), nil
+	_, capacity, err := ext4DiskMB(rootfs)
+	return capacity, err
 }
 
 // --- Renamer + Rebooter + CPUStatser: the user-console capabilities --------
@@ -978,8 +1031,26 @@ func installAuthorizedKey(ctx context.Context, rootfs, loginUser, key string) (r
 			retErr = fmt.Errorf("umount %s: %v: %s", mnt, err, out)
 		}
 	}()
+	return writeAuthorizedKey(mnt, loginUser, key)
+}
 
-	passwd, err := os.ReadFile(filepath.Join(mnt, "etc", "passwd"))
+// writeAuthorizedKey puts key in the login user's authorized_keys inside an
+// already-mounted guest rootfs.
+//
+// Everything here touches a filesystem the guest owns and can have rewritten
+// arbitrarily, so it goes through os.Root: every path resolves beneath mnt,
+// and a symlink that would escape it (any absolute one, or a relative one
+// climbing past the root) is refused rather than followed onto the host.
+// Without that a guest could point ~/.ssh at /etc/ssh and have the root-owned
+// gateway chown and write *host* files on its next cold boot.
+func writeAuthorizedKey(mnt, loginUser, key string) error {
+	root, err := os.OpenRoot(mnt)
+	if err != nil {
+		return fmt.Errorf("open rootfs %s: %w", mnt, err)
+	}
+	defer root.Close() //nolint:errcheck
+
+	passwd, err := root.ReadFile("etc/passwd")
 	if err != nil {
 		return err
 	}
@@ -987,25 +1058,106 @@ func installAuthorizedKey(ctx context.Context, rootfs, loginUser, key string) (r
 	if err != nil {
 		return err
 	}
-	home := filepath.Join(mnt, strings.TrimPrefix(identity.home, "/"))
-	sshDir := filepath.Join(home, ".ssh")
-	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+	home := strings.TrimPrefix(identity.home, "/")
+	if err := ensureGuestDir(root, home, 0o755, identity); err != nil {
 		return err
 	}
-	if err := os.Chmod(sshDir, 0o700); err != nil {
+	// ~/.ssh is the exception to ensureGuestDir's leave-it-alone rule: sshd's
+	// StrictModes ignores authorized_keys in a directory the login user does
+	// not own or that anyone else can write, so these two are enforced even on
+	// a directory the guest already had.
+	sshDir := path.Join(home, ".ssh")
+	if err := ensureGuestDir(root, sshDir, 0o700, identity); err != nil {
 		return err
 	}
-	if err := os.Chown(sshDir, identity.uid, identity.gid); err != nil {
+	if err := root.Chmod(sshDir, 0o700); err != nil {
 		return err
 	}
-	authorizedKeys := filepath.Join(sshDir, "authorized_keys")
-	if err := os.WriteFile(authorizedKeys, []byte(key+"\n"), 0o600); err != nil {
+	if err := root.Lchown(sshDir, identity.uid, identity.gid); err != nil {
 		return err
 	}
-	if err := os.Chown(authorizedKeys, identity.uid, identity.gid); err != nil {
+
+	// A read failure is not fatal: absent is the common case, and a dangling
+	// symlink or a directory sitting in authorized_keys' place is the guest's
+	// own mess — either way the gateway key still has to land. Replace whatever
+	// is there rather than writing through it.
+	authorizedKeys := path.Join(sshDir, "authorized_keys")
+	existing, _ := root.ReadFile(authorizedKeys) //nolint:errcheck
+	if err := root.RemoveAll(authorizedKeys); err != nil {
 		return err
 	}
-	return nil
+	if err := root.WriteFile(authorizedKeys, mergeAuthorizedKeys(existing, key), 0o600); err != nil {
+		return err
+	}
+	return root.Lchown(authorizedKeys, identity.uid, identity.gid)
+}
+
+// ensureGuestDir makes name a real directory inside the guest rootfs.
+//
+// A directory that is already there is left exactly as it is — mode and
+// ownership included, since a guest may legitimately run a 0750 home and it is
+// not our place to widen it. Anything else is replaced: a regular file, or the
+// symlink a guest plants to aim our writes somewhere it prefers. A directory we
+// create gets perm and the login user, because a root-owned home is precisely
+// what makes sshd's StrictModes refuse the account later.
+func ensureGuestDir(root *os.Root, name string, perm os.FileMode, identity loginIdentity) error {
+	switch fi, err := root.Lstat(name); {
+	case err == nil && fi.IsDir():
+		return nil
+	case err == nil:
+		if err := root.Remove(name); err != nil {
+			return err
+		}
+	case !os.IsNotExist(err):
+		return err
+	}
+	if err := root.MkdirAll(name, perm); err != nil {
+		return err
+	}
+	if err := root.Chmod(name, perm); err != nil {
+		return err
+	}
+	return root.Lchown(name, identity.uid, identity.gid)
+}
+
+// mergeAuthorizedKeys adds the gateway key to a guest's existing
+// authorized_keys instead of replacing the file. Create is not only the
+// first-boot path — the manager re-runs it whenever a resume fails — so
+// overwriting would silently drop keys the user added inside their own
+// sandbox. Duplicates of the gateway key itself are collapsed, comparing the
+// parsed key so a differing comment or option prefix is not mistaken for a
+// second key.
+func mergeAuthorizedKeys(existing []byte, key string) []byte {
+	var out []string
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if sameAuthorizedKey(line, key) {
+			continue
+		}
+		out = append(out, line)
+	}
+	out = append(out, key)
+	return []byte(strings.Join(out, "\n") + "\n")
+}
+
+// sameAuthorizedKey reports whether two authorized_keys lines carry the same
+// public key. Both sides are reduced to the bare type-and-blob form so a
+// differing comment or option prefix is not read as a second key — the gateway
+// key arrives with a comment on it, and a line that already holds it will have
+// whatever comment the last write left behind.
+func sameAuthorizedKey(a, b string) bool {
+	normalize := func(line string) (string, bool) {
+		pub, _, _, _, err := xssh.ParseAuthorizedKey([]byte(line))
+		if err != nil {
+			return "", false
+		}
+		return strings.TrimSpace(string(xssh.MarshalAuthorizedKey(pub))), true
+	}
+	na, aok := normalize(a)
+	nb, bok := normalize(b)
+	return aok && bok && na == nb
 }
 
 // sanitizeTemplate strips a rootfs of its per-guest identity so every fork gets

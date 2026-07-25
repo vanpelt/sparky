@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hostsetup"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 )
 
 // setup provisions an arbitrary Linux host into a running sparkbox service:
@@ -57,10 +59,37 @@ func setup(args []string) error {
 	if cfg.Gateway != "" && cfg.MoveAdminSSH {
 		return fmt.Errorf("--move-admin-ssh cannot be used with --gateway; a fleet node has no inbound Sparkbox SSH gateway")
 	}
+	if err := validateNodeFlags(cfg.Gateway, cfg.NodeName); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	env := hostsetup.NewEnv(ctx, cfg, hostsetup.NewExecRunner(), hostsetup.NewHTTPFetcher(), os.Stdout)
 	return hostsetup.Provision(env)
+}
+
+// validateNodeFlags rejects fleet-node settings that setup cannot faithfully
+// write down. Both land in sparkbox.env's GATEWAY_FLAG bundle, which the units
+// reference unquoted so systemd word-splits it into argv — so a value carrying
+// whitespace does not reach the daemon as one argument, it becomes extra
+// arguments and the service dies on an opaque flag-parse error at boot rather
+// than here. The gateway itself already refuses a malformed node name when the
+// link opens (nodelink.CodeBadNodeName); this is the same rule applied before
+// the host is provisioned around it.
+func validateNodeFlags(gateway, nodeName string) error {
+	if gateway != "" && strings.ContainsAny(gateway, " \t\n") {
+		return fmt.Errorf("invalid --gateway %q: expected host:port with no whitespace", gateway)
+	}
+	if nodeName == "" {
+		return nil
+	}
+	if gateway == "" {
+		return fmt.Errorf("--node-name %q needs --gateway; without it this host is provisioned as a gateway, which has no node name", nodeName)
+	}
+	if !nodes.ValidName(nodeName) {
+		return fmt.Errorf("invalid --node-name %q: lowercase letters, digits and hyphens only, starting with a letter or digit, at most 63 characters", nodeName)
+	}
+	return nil
 }

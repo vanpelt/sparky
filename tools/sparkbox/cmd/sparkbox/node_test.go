@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,4 +273,53 @@ func testNodeManager(t *testing.T, dir string) *host.Manager {
 		t.Fatal(err)
 	}
 	return mgr
+}
+
+// Both fleet-node flags ride into sparkbox.env's GATEWAY_FLAG bundle, which
+// systemd word-splits, so setup has to reject anything that would not survive
+// the round trip as a single argument — a service that fails to parse its own
+// ExecStart at boot is far harder to diagnose than a flag error here.
+func TestValidateNodeFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gateway  string
+		nodeName string
+		wantErr  string
+	}{
+		{name: "gateway only", gateway: "gw.example:2222"},
+		{name: "gateway and node name", gateway: "gw.example:2222", nodeName: "mac-studio"},
+		{name: "neither"},
+		{
+			name: "node name with a space", gateway: "gw.example:2222", nodeName: "mac studio",
+			wantErr: "invalid --node-name",
+		},
+		{
+			name: "node name that looks like a flag", gateway: "gw.example:2222", nodeName: "-rf",
+			wantErr: "invalid --node-name",
+		},
+		{
+			name: "uppercase node name", gateway: "gw.example:2222", nodeName: "MacStudio",
+			wantErr: "invalid --node-name",
+		},
+		{
+			name: "node name without a gateway", nodeName: "mac-studio",
+			wantErr: "needs --gateway",
+		},
+		{
+			name: "gateway with a space", gateway: "gw.example:2222 --console-password hunter2",
+			wantErr: "invalid --gateway",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateNodeFlags(tc.gateway, tc.nodeName)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("expected an error containing %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
 }
