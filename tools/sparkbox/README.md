@@ -328,7 +328,7 @@ release only goes public once **both** arches land, so `setup` can never resolve
 a half-populated `latest`.
 
 ```sh
-git tag v0.3.0 && git push origin v0.3.0    # cut a release
+git tag v0.4.0 && git push origin v0.4.0    # cut a release
 gh workflow run "sparkbox release"          # ad-hoc dev-<ts> prerelease (doesn't move `latest`)
 ```
 

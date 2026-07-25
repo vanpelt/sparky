@@ -14,7 +14,7 @@ SMOKE_SCRIPT="${SCRIPT_DIR}/smoke.sh"
 
 MIN_CONTAINER_VERSION="1.1.0"
 MIN_MACOS_VERSION="15.0"
-SPARKBOX_RELEASE="${SPARKBOX_RELEASE:-v0.3.0}"
+SPARKBOX_RELEASE="${SPARKBOX_RELEASE:-v0.4.0}"
 MACHINE_CPUS="${SPARKBOX_CPUS:-8}"
 MACHINE_MEMORY="${SPARKBOX_MEMORY:-24G}"
 BUILD_CPUS="${SPARKBOX_BUILD_CPUS:-8}"
@@ -54,7 +54,7 @@ Environment overrides:
   SPARKBOX_KERNEL_BUILD_MEMORY   kernel build memory (default 16G)
   SPARKBOX_GATEWAY_BUILD_MEMORY  gateway image build memory (default 8G)
   SPARKBOX_DATA_VOLUME_GB        required free space (default 40)
-  SPARKBOX_RELEASE               pinned setup artifact release (default v0.3.0)
+  SPARKBOX_RELEASE               pinned setup artifact release (default v0.4.0)
   SPARKBOX_PROXY_DOMAIN          gateway proxy domain (default sparkbox.test)
   SPARKBOX_OPERATOR_HANDLE       operator account handle (default operator)
   SPARKBOX_OPERATOR_KEY_FILE     public key to seed (default ~/.ssh/id_ed25519.pub)
