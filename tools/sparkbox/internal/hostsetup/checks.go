@@ -170,6 +170,13 @@ func checkKVM(p Probe, _ Config) Result {
 }
 
 func checkVirt(p Probe, _ Config) Result {
+	// ARM64 does not advertise x86's vmx/svm flags. checkKVM immediately before
+	// this check already reports whether /dev/kvm exists and is writable, so
+	// avoid repeating the same failure here.
+	if p.GOARCH() == "arm64" {
+		return pass("not applicable (ARM64 availability is reported by the /dev/kvm check)")
+	}
+
 	b, err := p.ReadFile("/proc/cpuinfo")
 	if err != nil {
 		return warn("could not read /proc/cpuinfo", "check the host manually for VT-x/AMD-V")
@@ -241,6 +248,9 @@ func checkRootfs(p Probe, cfg Config) Result {
 }
 
 func checkFleetKeys(p Probe, cfg Config) Result {
+	if cfg.Gateway != "" {
+		return pass("not used on fleet node (node identity is generated locally)")
+	}
 	dir := cfg.keyDir()
 	var missing []string
 	for _, f := range fleetKeyFiles {
@@ -259,6 +269,9 @@ func checkFleetKeys(p Probe, cfg Config) Result {
 }
 
 func checkUsers(p Probe, cfg Config) Result {
+	if cfg.Gateway != "" {
+		return pass("not used on fleet node (accounts live on gateway)")
+	}
 	b, err := p.ReadFile(cfg.UsersPath)
 	if err != nil {
 		return fail("no users.conf at "+cfg.UsersPath,

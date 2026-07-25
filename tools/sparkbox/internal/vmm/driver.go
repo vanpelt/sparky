@@ -103,12 +103,13 @@ type Archivable interface {
 	RemoveTemplate(ctx context.Context, image string) error
 }
 
-// DiskReporter is an optional Driver capability: reporting a sandbox's on-host
-// disk footprint and its ceiling, in MiB. Feeds the pooled per-owner accounting
-// and the consoles' disk meter. Best-effort; drivers without it are not counted.
+// DiskReporter is an optional Driver capability: reporting a sandbox's durable
+// disk usage and its ceiling, in MiB. Feeds the pooled per-owner accounting and
+// the consoles' disk meter. Best-effort; drivers without it are not counted.
 type DiskReporter interface {
-	// DiskUsageMB is the sandbox's durable on-host footprint: blocks allocated
-	// to its rootfs, excluding any regenerable memory snapshot.
+	// DiskUsageMB is the durable storage used by the sandbox's root filesystem,
+	// excluding representation details such as shared/sparse host extents and
+	// any regenerable memory snapshot.
 	DiskUsageMB(ctx context.Context, name string) (int64, error)
 	// DiskCapacityMB is the guest's hard disk ceiling — the size of the rootfs
 	// filesystem, which it cannot grow past. 0 when unknown.

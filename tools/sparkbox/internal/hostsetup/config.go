@@ -58,6 +58,9 @@ type Config struct {
 	// merely unnecessary but wrong to demand of a machine that will never
 	// authenticate anyone.
 	Gateway string
+	// NodeName is the stable fleet node name written alongside Gateway. Empty
+	// lets sparkbox serve use the machine hostname.
+	NodeName string
 
 	// --- setup only ---
 	// ArtifactBase overrides DefaultArtifactBase.

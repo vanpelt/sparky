@@ -1,6 +1,7 @@
 package hostsetup
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -14,6 +15,74 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// sparseFileWriter preserves long zero ranges as holes while a compressed
+// rootfs is streamed to disk. os.Create + io.Copy materializes every decoded
+// zero byte, turning a mostly-empty 25 GiB ext4 image into a 25 GiB allocation.
+// That is especially painful on the macOS PoC's deliberately small XFS volume,
+// but wastes space on every host.
+//
+// We only seek over 64 KiB blocks that are entirely zero: mixed blocks are
+// written normally, keeping this cheap while recovering the large free-space
+// runs in an ext4 image. finish truncates after a trailing hole because seek
+// alone does not extend a regular file.
+type sparseFileWriter struct {
+	f           *os.File
+	zeros       []byte
+	logicalSize int64
+}
+
+// readerOnly hides an optional io.WriterTo implementation on a decompressor.
+// Some decoders otherwise hand the destination a whole frame in one Write;
+// one non-zero byte would then materialize all of its free-space zeroes.
+type readerOnly struct{ io.Reader }
+
+func (w *sparseFileWriter) Write(p []byte) (int, error) {
+	const blockSize = 64 * 1024
+	isZero := func(block []byte) bool {
+		if len(w.zeros) < len(block) {
+			w.zeros = make([]byte, len(block))
+		}
+		return bytes.Equal(block, w.zeros[:len(block)])
+	}
+
+	consumed := 0
+	for consumed < len(p) {
+		firstEnd := min(consumed+blockSize, len(p))
+		zeroRun := isZero(p[consumed:firstEnd])
+		runEnd := firstEnd
+		for runEnd < len(p) {
+			nextEnd := min(runEnd+blockSize, len(p))
+			if isZero(p[runEnd:nextEnd]) != zeroRun {
+				break
+			}
+			runEnd = nextEnd
+		}
+		runLen := runEnd - consumed
+		if zeroRun {
+			if _, err := w.f.Seek(int64(runLen), io.SeekCurrent); err != nil {
+				return consumed, err
+			}
+			w.logicalSize += int64(runLen)
+			consumed = runEnd
+			continue
+		}
+		n, err := w.f.Write(p[consumed:runEnd])
+		w.logicalSize += int64(n)
+		consumed += n
+		if err != nil {
+			return consumed, err
+		}
+		if n != runLen {
+			return consumed, io.ErrShortWrite
+		}
+	}
+	return consumed, nil
+}
+
+func (w *sparseFileWriter) finish() error {
+	return w.f.Truncate(w.logicalSize)
+}
 
 // Fetcher retrieves a URL's body. The real implementation is an http.Client;
 // tests use an httptest server or a canned in-memory fetcher.
@@ -128,7 +197,16 @@ func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool
 	if err != nil {
 		return false, err
 	}
-	if _, err := io.Copy(out, src); err != nil {
+	if wrap != nil {
+		sparse := &sparseFileWriter{f: out}
+		_, err = io.CopyBuffer(sparse, readerOnly{src}, make([]byte, 1024*1024))
+		if err == nil {
+			err = sparse.finish()
+		}
+	} else {
+		_, err = io.Copy(out, src)
+	}
+	if err != nil {
 		out.Close()
 		os.Remove(tmp)
 		return false, err

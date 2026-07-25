@@ -179,3 +179,13 @@ func TestEnvFileContents(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeEnvFileContents(t *testing.T) {
+	e, _ := testEnv(t, false)
+	e.Cfg.Gateway = "gateway.example:2222"
+	e.Cfg.NodeName = "mac-studio"
+	out := e.renderEnvFile()
+	if !strings.Contains(out, "GATEWAY_FLAG=--gateway gateway.example:2222 --node-name mac-studio") {
+		t.Fatalf("node env file missing gateway flags:\n%s", out)
+	}
+}
