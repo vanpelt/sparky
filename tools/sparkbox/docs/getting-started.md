@@ -43,6 +43,15 @@ scp sparkbox root@<host>:/usr/local/bin/sparkbox
 fetches the *kernel*, *firecracker*, and *rootfs* — it does not need to build
 anything on the host.)
 
+It does not matter where the binary lands: `setup` installs *itself* to
+`/usr/local/bin/sparkbox` — the path the systemd unit runs — so
+`curl`-ing it into `$PWD` and running `sudo ./sparkbox setup` is enough. Pass
+`--bin-path` to install it elsewhere (the unit follows), or `--bin-path ""` to
+manage the binary yourself. If the destination already holds a *newer* sparkbox,
+the install is refused unless you pass `--force`, and when the binary changes
+under a running gateway `setup` restarts the service so the new build actually
+takes effect.
+
 ## 2. Preflight
 
 ```sh
@@ -52,8 +61,11 @@ sparkbox doctor
 
 `doctor` reports **PASS / WARN / FAIL** for every prerequisite — KVM, CPU
 virtualization, IP forwarding, the guest kernel, the rootfs template, the fleet
-keys, `users.conf`, disk space, the NAT rules, and whether the service is
-running — each with a one-line fix. Before provisioning, the two that must pass
+keys, `users.conf`, disk space, the NAT rules, whether the service is genuinely
+*alive* (it samples the unit twice ~10s apart, so a gateway restarting every two
+seconds reads as a FAIL with its journal inlined, not as "active"), and whether
+the running service, the installed binary and `--release` are the same version —
+each with a one-line fix. Before provisioning, the two that must pass
 are **kvm device** and **hardware virtualization**; everything else `setup`
 puts in place. It exits non-zero if anything FAILs, so it drops into CI too.
 

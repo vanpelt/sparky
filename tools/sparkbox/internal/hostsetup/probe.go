@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Probe abstracts every read-only interaction a check makes with the host, so
@@ -34,6 +35,12 @@ type Probe interface {
 	Run(name string, args ...string) (string, error)
 	// DiskFreeBytes reports free space on the filesystem backing path.
 	DiskFreeBytes(path string) (uint64, error)
+	// Sleep waits. It is on the Probe — the one thing a check is allowed to
+	// touch the outside world with — because the service liveness check has to
+	// sample the unit twice with a gap in between, and a test must be able to
+	// drive that gap without waiting one out. Config.ServiceSettle carries the
+	// duration; a zero duration means the check never calls this at all.
+	Sleep(d time.Duration)
 }
 
 // sysProbe is the real, host-backed Probe.
@@ -75,3 +82,5 @@ func (sysProbe) Run(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return string(bytes.TrimSpace(out)), err
 }
+
+func (sysProbe) Sleep(d time.Duration) { time.Sleep(d) }

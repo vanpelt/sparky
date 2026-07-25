@@ -25,7 +25,7 @@ User=root
 # Standalone host: fleet keys are generated locally into the state dir on first
 # start (LoadOrCreateKey) — no Secret Manager, and no fleet key-dir/require-keys
 # flags (those are for a tmpfs-fed fleet host).
-ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
+ExecStart={{.BinPath}} serve --driver firecracker \
   --state-dir {{.StateDir}} \
   --kernel {{.KernelPath}} \
   --image-dir {{.ImageDir}} \

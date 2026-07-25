@@ -35,6 +35,8 @@ func setup(args []string) error {
 	gateway := fs.String("gateway", cfg.Gateway, "fleet gateway host:port; provision this machine as a node instead of a gateway")
 	nodeName := fs.String("node-name", cfg.NodeName, "fleet node name (default: hostname; only used with --gateway)")
 	moveAdminSSH := fs.Bool("move-admin-ssh", false, "relocate the host's own sshd to :2222 so the gateway can own :22 (DANGEROUS over an SSH session — keep another shell open)")
+	binPath := fs.String("bin-path", cfg.BinPath, "where to install this sparkbox binary; the systemd unit's ExecStart runs it (empty skips the install)")
+	force := fs.Bool("force", false, "overwrite a --bin-path binary that reports a NEWER version than this one")
 	dryRun := fs.Bool("dry-run", false, "print the plan and change nothing")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: sparkbox setup [flags]\n\nProvisions this Linux host into a running Sparkbox gateway or fleet node.")
@@ -55,6 +57,15 @@ func setup(args []string) error {
 	cfg.Gateway = *gateway
 	cfg.NodeName = *nodeName
 	cfg.MoveAdminSSH = *moveAdminSSH
+	// Assigned after applyPaths, which rebuilds cfg from DefaultConfigAt when
+	// --root moves: the install path is absolute and does not hang off the
+	// sparkbox home, so it must not be re-derived away.
+	cfg.BinPath = *binPath
+	cfg.Force = *force
+	// The release tag this binary was linked with (main.version): setup installs
+	// *itself*, so this is the version that ends up on the host, and doctor
+	// compares it with the running service and the requested release.
+	cfg.Version = version
 	cfg.DryRun = *dryRun
 	if cfg.Gateway != "" && cfg.MoveAdminSSH {
 		return fmt.Errorf("--move-admin-ssh cannot be used with --gateway; a fleet node has no inbound Sparkbox SSH gateway")

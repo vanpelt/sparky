@@ -292,10 +292,14 @@ sparkbox doctor        # is this host ready? (PASS/WARN/FAIL per prerequisite)
 sudo sparkbox setup --proxy-domain yourdomain.tools   # provision + start (idempotent; --dry-run to preview)
 ```
 
-`setup` fetches a prebuilt release (guest kernel, firecracker, rootfs — all
+`setup` installs the binary you ran it from to `/usr/local/bin/sparkbox`
+(`--bin-path`) so the unit runs exactly the build that provisioned the host,
+fetches a prebuilt release (guest kernel, firecracker, rootfs — all
 sha256-verified), lays down an XFS reflink volume, seeds your operator SSH key,
-installs the systemd units, and starts the gateway; `doctor` diagnoses a host at
-any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
+installs the systemd units, and starts the gateway. It then verifies the result
+and **exits non-zero** if the gateway is not alive: a crash-looping service is a
+FAIL carrying the tail of its journal, not a PASS. `doctor` runs the same
+battery at any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
 fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
 

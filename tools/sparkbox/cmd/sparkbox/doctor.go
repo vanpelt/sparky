@@ -24,6 +24,8 @@ func doctor(args []string) error {
 	defaultImage := fs.String("default-image", cfg.DefaultImage, "rootfs template basename")
 	users := fs.String("users", "", "users.conf path (default <root>/users.conf)")
 	gateway := fs.String("gateway", cfg.Gateway, "fleet gateway host:port; diagnose this machine as a node")
+	binPath := fs.String("bin-path", cfg.BinPath, "sparkbox binary the systemd unit runs (checked for version skew against the live service)")
+	release := fs.String("release", "", "release tag this host is supposed to be running; skew from the installed binary is reported (default: no assertion)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: sparkbox doctor [flags]\n\nReports whether this host is ready to run sparkbox.")
 		fs.PrintDefaults()
@@ -34,6 +36,11 @@ func doctor(args []string) error {
 
 	cfg = applyPaths(cfg, *root, *stateDir, *keyDir, *kernel, *imageDir, *defaultImage, *users)
 	cfg.Gateway = *gateway
+	// Set after applyPaths: --root rebuilds cfg from the default layout, and the
+	// install path is absolute rather than derived from the sparkbox home.
+	cfg.BinPath = *binPath
+	cfg.Release = *release // empty (or "latest") asserts nothing
+	cfg.Version = version
 
 	results := hostsetup.RunChecks(hostsetup.System(), cfg, hostsetup.DefaultChecks())
 	fmt.Println("sparkbox doctor —", cfg.Root)

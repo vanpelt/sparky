@@ -1,0 +1,165 @@
+name: sparkbox CI
+
+# Until now nothing in .github/workflows ran `go test` — build-artifacts.yml
+# only *builds* a release, and pages.yml is unrelated. Every acceptance
+# criterion in docs/forward-plan.md was therefore honour-system, and two
+# shipped bugs prove the cost: F0 (`setup` never installed the sparkbox binary,
+# so a "successful" provision left the unit ExecStarting a file that did not
+# exist) and F7 (`setup` printed PASS over a crash-looping service and exited
+# 0). See docs/onboarding-notes.md.
+#
+# Two jobs:
+#
+#   test   go build + go vet + go test -race + gofmt on the nested
+#          tools/sparkbox module. Fast, hermetic (89 test files, no network, no
+#          ports, no external binaries), ~1 minute.
+#
+#   smoke  actually provisions a host with `sparkbox setup` against a stub
+#          release and asserts the result. This is the job that would have
+#          caught F0 and F7. It is honest about what a hosted runner cannot do
+#          — see the long comment on the job.
+#
+# Deliberately NO `paths:` filter. A path filter would make this workflow skip
+# entirely on PRs that touch nothing under tools/sparkbox, and a skipped
+# workflow reports no status at all — so a required check would either block
+# forever or, worse, be left un-required and silently stop guarding. A couple of
+# wasted runner-minutes on a docs-only PR is the cheaper failure mode, and it is
+# the same "no silent caps" rule the smoke job follows.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  # Supersede in-flight runs of the same branch/PR, but never cancel main.
+  group: sparkbox-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- test -----
+  test:
+    name: build, vet, test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        # tools/sparkbox is its own module (there is no go.work at the repo
+        # root), so every step needs to run from inside it.
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same two lines as build-artifacts.yml, on purpose: the toolchain that
+      # tests the code and the toolchain that ships it must not drift.
+      # go-version-file reads the `go` directive out of the module itself.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files; run \`gofmt -w\` on:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race needs cgo, so CGO_ENABLED stays at its default 1 here even though
+      # the release build deliberately uses CGO_ENABLED=0 — the race detector is
+      # the whole point of running the suite in CI rather than trusting a build.
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      # Cross-compilation is a shipping requirement (linux/amd64 + linux/arm64
+      # today, darwin/arm64 for Workstream B) and it breaks silently: a
+      # //go:build linux file referenced from portable code compiles fine here
+      # and fails only at release time. Cheap to check, so check it.
+      - name: cross-compile matrix
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            echo "-> $target"
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -o /dev/null ./cmd/sparkbox
+          done
+
+  # --------------------------------------------------------------- smoke -----
+  smoke:
+    name: provision smoke
+    needs: test
+    # aarch64 on purpose, and it is free for public repos. checkVirt
+    # (internal/hostsetup/checks.go) hard-FAILs on amd64 when /proc/cpuinfo has
+    # no vmx/svm — and Provision aborts on any preflight FAIL outside
+    # --dry-run — so on a hosted x86 runner (no nested virt) the real `setup`
+    # could never start. On arm64 checkVirt is not applicable and the run
+    # proceeds. This is also the arch the DGX gateway actually runs.
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      # Stamp the version the same way hack/stage-artifacts.sh does, so the
+      # smoke can assert the plan's literal acceptance criterion: "on a clean
+      # host it installs its own binary and `sparkbox version` on the host
+      # matches the release".
+      - name: Build the binary under test
+        env:
+          RELEASE: v0-smoke
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.version=$RELEASE" \
+            -o "$RUNNER_TEMP/sparkbox" ./cmd/sparkbox
+          "$RUNNER_TEMP/sparkbox" version
+
+      # Phase 1 runs on the bare runner because that is the strongest place to
+      # assert it: --dry-run must be safe on a machine that fails preflight, has
+      # no root, no systemd and no /dev/kvm. It calls each step's Satisfied+Plan
+      # and nothing else, so if any of them ever mutates the host, this fails.
+      - name: setup --dry-run (plan + proves it changes nothing)
+        env:
+          SPARKBOX_BIN: ${{ runner.temp }}/sparkbox
+          RELEASE: v0-smoke
+        run: ./hack/smoke-setup.sh dry
+
+      # Phase 2: a real `setup` in a privileged systemd container.
+      #
+      # What this genuinely proves: every provisioning step runs against a real
+      # PID-1 systemd and a real journal — artifacts are fetched and
+      # sha256-verified, users.conf is seeded, both units are installed and
+      # started, the binary lands at --bin-path and reports the right version
+      # (F0), the service stays up across a settle window measured by NRestarts
+      # and the main PID's start timestamp (F7), the SSH control door and the
+      # HTTP edge answer, and a second run is idempotent. It then breaks the
+      # host on purpose (occupies :8080) and requires the probe to say so.
+      #
+      # What it does NOT prove, and the script prints each of these as a SKIP:
+      # no microVM is ever booted. Hosted runners have no nested virtualization,
+      # so /dev/kvm is a placeholder file and firecracker/vmlinux/rootfs are
+      # stubs — checkKVM, the firecracker driver and the unit's
+      # ConditionPathExists all only *stat* that path. Sandbox lifecycle stays
+      # covered by the in-process mock-driver e2e tests. Also untested here:
+      # TLS/ACME, the tunnel and tailnet edges, --subnet6, sluice, archiving,
+      # --move-admin-ssh, the swapfile step, and anything on darwin.
+      - name: Real setup in a systemd container
+        env:
+          SPARKBOX_BIN: ${{ runner.temp }}/sparkbox
+          RELEASE: v0-smoke
+        run: ./hack/smoke-container.sh

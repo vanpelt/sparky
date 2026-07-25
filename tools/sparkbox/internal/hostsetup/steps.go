@@ -26,6 +26,7 @@ type Env struct {
 	Cfg      Config
 	Run      Runner
 	Fetch    Fetcher
+	Probe    Probe
 	Log      io.Writer
 	Manifest Manifest
 
@@ -36,13 +37,45 @@ type Env struct {
 	SwapPath   string // /swapfile
 	SSHDConfD  string // /etc/ssh/sshd_config.d
 	HomeDir    string // operator-key auto-detect root (~)
+	// SelfPath is the binary running this setup — the thing stepInstallBinary
+	// copies to Cfg.BinPath. It is a field, filled once in NewEnv, rather than
+	// an os.Executable() call inside the step, because inside a test that call
+	// answers "the go test binary" and the step would happily hash and install
+	// *that*.
+	SelfPath string
+
+	// BinaryInstalled records that stepInstallBinary replaced the binary on
+	// disk. Steps talk to each other through the shared Env (stepResolveRelease
+	// already publishes the manifest this way); this flag exists because a
+	// running service keeps executing the *old* inode after the rename, so
+	// enable-services has to restart rather than merely start it.
+	BinaryInstalled bool
+
+	// UnitsChanged records that stepSystemdUnits (re)wrote a unit file. Same
+	// contract as BinaryInstalled and for the same reason: systemd serves the
+	// text it parsed at the last daemon-reload, and a running unit keeps the
+	// ExecStart it started with, so enable-services has to reload and restart
+	// rather than find the unit "already active" and walk away.
+	UnitsChanged bool
 }
 
 // NewEnv builds an Env with the real on-host system paths.
 func NewEnv(ctx context.Context, cfg Config, run Runner, fetch Fetcher, log io.Writer) *Env {
 	home, _ := os.UserHomeDir()
+	// EvalSymlinks so a symlinked invocation (/usr/bin/sparkbox -> …) installs
+	// the real binary rather than hashing and copying the link's target path
+	// under a different identity. Both errors are swallowed the way HomeDir's
+	// is: the install step reports a missing SelfPath far more usefully than a
+	// constructor that cannot return one.
+	self, _ := os.Executable()
+	if self != "" {
+		if resolved, err := filepath.EvalSymlinks(self); err == nil {
+			self = resolved
+		}
+	}
 	return &Env{
 		Ctx: ctx, Cfg: cfg, Run: run, Fetch: fetch, Log: log,
+		Probe:      System(),
 		SystemdDir: "/etc/systemd/system",
 		SysctlDir:  "/etc/sysctl.d",
 		SbinDir:    "/usr/local/sbin",
@@ -50,6 +83,7 @@ func NewEnv(ctx context.Context, cfg Config, run Runner, fetch Fetcher, log io.W
 		SwapPath:   "/swapfile",
 		SSHDConfD:  "/etc/ssh/sshd_config.d",
 		HomeDir:    home,
+		SelfPath:   self,
 	}
 }
 
@@ -77,8 +111,11 @@ func (e *Env) run(name string, args ...string) ([]byte, error) {
 // order. In --dry-run it prints the plan and mutates nothing. On success (real
 // run) it prints a verification report and connect instructions.
 func Provision(e *Env) error {
+	if e.Probe == nil {
+		e.Probe = System()
+	}
 	// Preflight: the host-capability subset must pass before we touch anything.
-	pre := RunChecks(System(), e.Cfg, preflightChecks())
+	pre := RunChecks(e.Probe, e.Cfg, preflightChecks())
 	if AnyFail(pre) {
 		if e.Cfg.DryRun {
 			e.logf("preflight (advisory in --dry-run):\n")
@@ -122,11 +159,32 @@ func Provision(e *Env) error {
 		return nil
 	}
 
-	// Verify and print how to connect.
+	// Verify, and let the verdict decide the exit code. Printing the report and
+	// then returning nil regardless — which is what this used to do — is how
+	// `setup` came to announce "== sparkbox is provisioned ==" over a gateway
+	// that had never once stayed up (F7). An operator who sees that walks away.
 	e.logf("\n== verify ==\n")
-	PrintResults(e.Log, RunChecks(System(), e.Cfg, DefaultChecks()))
+	res := RunChecks(e.Probe, e.Cfg, DefaultChecks())
+	PrintResults(e.Log, res)
+	if AnyFail(res) {
+		e.logf("\n== sparkbox is NOT healthy ==\n")
+		e.logf("  every provisioning step ran, but the checks above found a hard failure.\n")
+		e.logf("  logs: journalctl -u sparkbox -n 100 --no-pager\n")
+		e.logf("  re-check after fixing: sparkbox doctor\n")
+		return fmt.Errorf("provisioning completed but the host is not healthy: %d check(s) FAILED (see above)", countFail(res))
+	}
 	e.printConnect()
 	return nil
+}
+
+func countFail(results []Result) int {
+	n := 0
+	for _, r := range results {
+		if r.Status == Fail {
+			n++
+		}
+	}
+	return n
 }
 
 func suffix(note string) string {
@@ -154,6 +212,10 @@ func allSteps() []Step {
 	return []Step{
 		stepSwap(),
 		stepResolveRelease(),
+		// Before the multi-GB artifact download (a read-only /usr/local/bin
+		// should fail in seconds, not after a rootfs), and necessarily before
+		// the unit that names the installed path is written or started.
+		stepInstallBinary(),
 		stepDataVolume(),
 		stepFetchArtifacts(),
 		stepUsersConf(),
@@ -233,6 +295,91 @@ func stepResolveRelease() Step {
 				e.Cfg.DefaultImage = m.RootfsName
 			}
 			e.logf("   release %s (rootfs %s, login user %s)\n", tag, m.RootfsName, m.RootfsLogin)
+			return nil
+		},
+	}
+}
+
+// stepInstallBinary copies the running sparkbox binary to Cfg.BinPath — the
+// path the systemd unit's ExecStart names.
+//
+// Nothing used to do this. The unit hardcoded /usr/local/bin/sparkbox while
+// setup only ever fetched the kernel, firecracker and the rootfs, so following
+// the README literally (curl the binary into $PWD, `sudo ./sparkbox setup`)
+// produced a unit pointing at a file that did not exist. Where a *stale* binary
+// happened to be there already it was worse: setup succeeded, the service came
+// up, and the box quietly ran the previous release.
+//
+// The copy is tmp-file + rename rather than a write in place because the
+// destination is very likely open and executing: rename swaps the directory
+// entry atomically, the running process keeps the old inode until it is
+// restarted (which enable-services then does), and no reader ever sees a
+// half-written binary. The sha comparison is what keeps a re-run from churning
+// the file under a live service for no reason.
+func stepInstallBinary() Step {
+	return Step{
+		Name: "install-binary",
+		Satisfied: func(e *Env) (bool, string, error) {
+			if e.Cfg.BinPath == "" {
+				return true, "skipped (no --bin-path)", nil
+			}
+			if e.SelfPath == "" {
+				return false, "", fmt.Errorf("cannot locate the running binary (os.Executable failed); " +
+					"install it manually and re-run with --bin-path \"\" to skip this step")
+			}
+			// Setup run *from* the install path: the file is already what we
+			// would copy, and copying it onto itself is pointless work on a
+			// binary that may be executing.
+			if same, err := sameFile(e.SelfPath, e.Cfg.BinPath); err != nil {
+				return false, "", err
+			} else if same {
+				return true, "running from " + e.Cfg.BinPath, nil
+			}
+			src, err := sha256File(e.SelfPath)
+			if err != nil {
+				return false, "", fmt.Errorf("hash %s: %w", e.SelfPath, err)
+			}
+			// sha256File answers "" for a missing destination, so a fresh host
+			// simply falls through to "not satisfied".
+			dst, err := sha256File(e.Cfg.BinPath)
+			if err != nil {
+				return false, "", fmt.Errorf("hash %s: %w", e.Cfg.BinPath, err)
+			}
+			if dst != "" && dst == src {
+				return true, "identical binary at " + e.Cfg.BinPath, nil
+			}
+			return false, "", nil
+		},
+		Plan: func(e *Env) string {
+			return fmt.Sprintf("install this sparkbox binary (%s) to %s", orUnknown(e.Cfg.Version), e.Cfg.BinPath)
+		},
+		Apply: func(e *Env) error {
+			dest := e.Cfg.BinPath
+			// Refuse a downgrade. Re-running last month's installer on an
+			// upgraded host would otherwise roll the gateway back silently —
+			// the same class of surprise as F0 itself, pointed the other way.
+			// The destination's version is read by running it, which is the
+			// only honest source: the file could be any build, or not sparkbox
+			// at all (binaryVersion answers "" for all of those, and an
+			// uncomparable pair is reported and then overwritten, because
+			// refusing on an unfamiliar version string would strand the host).
+			if !e.Cfg.Force {
+				have := binaryVersion(e.probeRun, dest)
+				cmp, ok := compareVersions(have, e.Cfg.Version)
+				switch {
+				case ok && cmp > 0:
+					return fmt.Errorf("%s is version %s, newer than this binary (%s); "+
+						"run the %s installer instead, or pass --force to overwrite it",
+						dest, have, e.Cfg.Version, have)
+				case have != "" && !ok:
+					e.logf("   %s reports version %q — not comparable with %q, overwriting\n", dest, have, orUnknown(e.Cfg.Version))
+				}
+			}
+			if err := installFile(e.SelfPath, dest); err != nil {
+				return err
+			}
+			e.BinaryInstalled = true
+			e.logf("   installed %s → %s (%s)\n", e.SelfPath, dest, orUnknown(e.Cfg.Version))
 			return nil
 		},
 	}
@@ -406,32 +553,70 @@ func stepNetAssets() Step {
 	}
 }
 
+// wantedUnits is what this config's units should contain, in write order. Both
+// the Satisfied comparison and Apply read it, so "what we would install" and
+// "what we compare against" cannot drift.
+func wantedUnits(cfg Config) ([][2]string, error) {
+	svc, err := renderService(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return [][2]string{
+		{"sparkbox.service", svc},
+		{"sparkbox-net.service", string(deploy.NetService)},
+	}, nil
+}
+
 func stepSystemdUnits() Step {
 	return Step{
 		Name: "systemd-units",
+		// "The files exist" is not the same claim as "the files say what this
+		// config asks for". Existence alone meant a second `sparkbox setup
+		// --bin-path /opt/sparkbox` left ExecStart pointing at the *old* path
+		// (install-binary duly wrote the new binary somewhere the unit never ran
+		// from), and it meant every unit fix shipped in a release stopped at the
+		// first host that had ever been provisioned — the same silent staleness
+		// as F0. So compare the rendered content, byte for byte.
 		Satisfied: func(e *Env) (bool, string, error) {
-			_, a := os.Stat(filepath.Join(e.SystemdDir, "sparkbox.service"))
-			_, b := os.Stat(filepath.Join(e.SystemdDir, "sparkbox-net.service"))
-			if a == nil && b == nil {
-				return true, "units installed", nil
+			units, err := wantedUnits(e.Cfg)
+			if err != nil {
+				return false, "", err
 			}
-			return false, "", nil
+			for _, u := range units {
+				got, err := os.ReadFile(filepath.Join(e.SystemdDir, u[0]))
+				if err != nil {
+					// Missing (fresh host) or unreadable: either way Apply is the
+					// answer, and it reports a write failure far better than a
+					// Satisfied that refuses to run.
+					return false, "", nil
+				}
+				if string(got) != u[1] {
+					return false, "", nil
+				}
+			}
+			return true, "units installed and current", nil
 		},
 		Plan: func(e *Env) string {
-			return "install sparkbox.service (standalone) + sparkbox-net.service"
+			return "install sparkbox.service (standalone, ExecStart " + e.Cfg.binPath() + ") + sparkbox-net.service"
 		},
 		Apply: func(e *Env) error {
 			if err := os.MkdirAll(e.SystemdDir, 0o755); err != nil {
 				return err
 			}
-			svc, err := renderService(e.Cfg)
+			units, err := wantedUnits(e.Cfg)
 			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(filepath.Join(e.SystemdDir, "sparkbox.service"), []byte(svc), 0o644); err != nil {
-				return err
+			for _, u := range units {
+				if err := os.WriteFile(filepath.Join(e.SystemdDir, u[0]), []byte(u[1]), 0o644); err != nil {
+					return err
+				}
 			}
-			return os.WriteFile(filepath.Join(e.SystemdDir, "sparkbox-net.service"), deploy.NetService, 0o644)
+			// systemd is still holding the previous text until daemon-reload, and
+			// a running unit keeps its old ExecStart until it is restarted; both
+			// are enable-services' job, so tell it the units moved.
+			e.UnitsChanged = true
+			return nil
 		},
 	}
 }
@@ -473,14 +658,29 @@ func stepEnableServices() Step {
 	return Step{
 		Name: "enable-services",
 		Satisfied: func(e *Env) (bool, string, error) {
-			out, _ := e.run("systemctl", "is-active", "sparkbox.service")
+			// An already-active unit is NOT satisfied once the binary under it
+			// changed: the running process holds the old inode until something
+			// restarts it, which is exactly how a "v0.4.0 setup" left a live
+			// v0.3.0 gateway behind. A rewritten unit file is the same problem
+			// one level up — the live process still runs the old ExecStart (the
+			// old --bin-path included). Apply below turns both into a restart.
+			if e.BinaryInstalled || e.UnitsChanged {
+				return false, "", nil
+			}
+			// Deliberately a single is-active sample rather than the full
+			// liveness probe: this runs on every setup (dry runs included) and
+			// the settle window would tax them all, while restarting a
+			// crash-looping unit does not fix anything. Liveness is judged once,
+			// authoritatively, by the verify pass at the end of Provision —
+			// which now decides the exit code.
+			out, _ := e.run("systemctl", "is-active", serviceUnit)
 			if strings.TrimSpace(string(out)) == "active" {
-				return true, "sparkbox.service active", nil
+				return true, serviceUnit + " active", nil
 			}
 			return false, "", nil
 		},
 		Plan: func(e *Env) string {
-			return "systemctl daemon-reload; enable --now sparkbox-net.service + sparkbox.service"
+			return "systemctl daemon-reload; enable --now sparkbox-net.service + " + serviceUnit
 		},
 		Apply: func(e *Env) error {
 			if _, err := e.run("systemctl", "daemon-reload"); err != nil {
@@ -489,13 +689,100 @@ func stepEnableServices() Step {
 			if _, err := e.run("systemctl", "enable", "--now", "sparkbox-net.service"); err != nil {
 				return err
 			}
-			_, err := e.run("systemctl", "enable", "--now", "sparkbox.service")
-			return err
+			if _, err := e.run("systemctl", "enable", "--now", serviceUnit); err != nil {
+				return err
+			}
+			// `enable --now` is a no-op on a unit that is already running, so a
+			// swapped binary — or a rewritten unit — needs an explicit restart to
+			// actually take effect. Unconditional after a change (rather than
+			// only when it was already active) because "was it running a moment
+			// ago" is a race we would lose silently; one extra restart of a
+			// just-started unit is cheap.
+			if e.BinaryInstalled || e.UnitsChanged {
+				what := "binary"
+				if e.UnitsChanged {
+					what = "unit"
+					if e.BinaryInstalled {
+						what = "binary + unit"
+					}
+				}
+				e.logf("   %s changed — restarting %s so it runs the new build\n", what, serviceUnit)
+				if _, err := e.run("systemctl", "restart", serviceUnit); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// probeRun adapts the Runner to the (string, error) shape binaryVersion wants,
+// so setup asks the destination binary its version through the same injected
+// Runner every other shell-out uses and a test can can the answer.
+func (e *Env) probeRun(name string, args ...string) (string, error) {
+	out, err := e.run(name, args...)
+	return strings.TrimSpace(string(out)), err
+}
+
+// sameFile reports whether two paths are the same file on disk (the setup
+// binary already living at the install path). A missing destination is not an
+// error — it is the fresh-host case.
+func sameFile(a, b string) (bool, error) {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false, err
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return os.SameFile(fa, fb), nil
+}
+
+// installFile copies src over dest atomically: a temp file in the DESTINATION
+// directory (so the rename never crosses a filesystem — /tmp usually is one),
+// chmod before the rename (so the destination is never briefly present and
+// non-executable, which systemd could catch), then rename. Every failure path
+// removes the temp file: a stray sparkbox.tmp in /usr/local/bin is exactly the
+// kind of half-state a failed provision must not leave behind.
+func installFile(src, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dest + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
 
 // operatorKeyLine resolves the operator's public key (explicit path, literal
 // "ssh-..." text, or an auto-detected ~/.ssh/*.pub) into a validated

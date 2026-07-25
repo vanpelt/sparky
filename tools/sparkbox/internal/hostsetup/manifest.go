@@ -84,7 +84,9 @@ func ManifestURL(base, release string) string {
 
 // Artifacts computes the download set for a release: kernel, firecracker, and
 // the rootfs. sparkbox itself is NOT fetched — the running binary is already
-// sparkbox. Everything resolves against m.Release (the concrete tag the
+// sparkbox, and stepInstallBinary copies *it* to Config.BinPath rather than
+// downloading a second copy that could differ from the one being run.
+// Everything resolves against m.Release (the concrete tag the
 // manifest reported), never "latest": a release published mid-setup would
 // otherwise hand us a kernel and a rootfs from different builds.
 func (m Manifest) Artifacts(base string, cfg Config) []Artifact {

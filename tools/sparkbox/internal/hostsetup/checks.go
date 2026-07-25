@@ -39,6 +39,12 @@ type Result struct {
 	Status Status
 	Detail string
 	Hint   string
+	// Output is multi-line supporting evidence (today: the tail of the unit's
+	// journal behind a crash-loop FAIL), printed indented under the result. It
+	// is a separate field rather than newlines inside Detail because
+	// PrintResults aligns Detail against the name column — a newline there
+	// prints flush-left and wrecks the report.
+	Output string
 }
 
 // Check is a named, pure diagnostic: it reads the host only through the Probe,
@@ -71,6 +77,9 @@ func DefaultChecks() []Check {
 		{"disk space", checkDisk},
 		{"sandbox NAT rules", checkNAT},
 		{"sparkbox service", checkService},
+		// Last: it reads the running service's PID, so it wants the liveness
+		// check's verdict already on screen above it.
+		{"sparkbox version", checkVersions},
 	}
 }
 
@@ -121,6 +130,15 @@ func PrintResults(w io.Writer, results []Result) {
 		fmt.Fprintf(w, "  [%s] %-*s  %s\n", r.Status, width, r.Name, r.Detail)
 		if r.Status != Pass && r.Hint != "" {
 			fmt.Fprintf(w, "         %-*s  ↳ %s\n", width, "", r.Hint)
+		}
+		// Evidence is inlined so the operator sees the actual error (e.g.
+		// "bind: address already in use") without running a second command —
+		// the whole point of the crash-loop FAIL.
+		for _, line := range strings.Split(strings.TrimRight(r.Output, "\n"), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			fmt.Fprintf(w, "         %-*s  │ %s\n", width, "", line)
 		}
 	}
 	fmt.Fprintf(w, "\n  %d passed, %d warnings, %d failed\n", pass, warn, fail)
@@ -338,20 +356,200 @@ func checkNAT(p Probe, _ Config) Result {
 	return pass("SPARKBOX_EDGE chain present")
 }
 
-func checkService(p Probe, _ Config) Result {
-	// `systemctl is-active` exits non-zero for inactive units, so read the
-	// output rather than treating the error as fatal. Only the known one-word
-	// states are meaningful; anything else (e.g. "System has not been booted
-	// with systemd") means we can't tell, so report it as unknown, not a state.
-	out, _ := p.Run("systemctl", "is-active", "sparkbox.service")
-	switch firstLine(strings.TrimSpace(out)) {
-	case "active":
-		return pass("active")
-	case "inactive", "failed", "activating", "deactivating":
-		return warn(out, "start it with `systemctl start sparkbox` (after `sparkbox setup`)")
-	default:
-		return warn("unknown", "not provisioned yet? run `sparkbox setup`, then this reports the live state")
+// checkService proves the gateway is *alive*, not merely that systemd currently
+// labels it active.
+//
+// The old check was a single `systemctl is-active`. Because the unit restarts
+// forever with a two-second backoff and no start-rate limit, that reported
+// "active" over a gateway that had been dying on `bind: address already in use`
+// every two seconds since it was installed — and `setup` printed
+// "== sparkbox is provisioned ==" on top of it. (Sampling twice is not
+// paranoia: during one such loop consecutive samples read "active" and
+// "activating".)
+//
+// So: sample the unit, wait Config.ServiceSettle, sample again. If the main
+// process was replaced in between — a climbing NRestarts, a moved start
+// timestamp, a sample caught in the restart backoff (SubState=auto-restart), or
+// a unit that was active and is activating again — the service is crash-looping
+// and that is a FAIL, with the tail of its journal inlined so the operator reads
+// the real error here.
+func checkService(p Probe, cfg Config) Result {
+	first := showService(p)
+
+	// `systemctl show` exits 0 even for a unit that does not exist, so an error
+	// here means systemctl itself could not answer (not installed, no dbus, not
+	// booted with systemd). We genuinely cannot tell, so say so.
+	if first.load == "" && first.active == "" {
+		detail := "unknown"
+		if first.err != nil && first.raw != "" {
+			detail = firstLine(first.raw)
+		}
+		return warn(detail, "could not query systemd; on a systemd host run `sparkbox setup`, then this reports live state")
 	}
+	if first.load != "loaded" {
+		return warn(fmt.Sprintf("unit %s (LoadState=%s)", serviceUnit, orDash(first.load)),
+			"not provisioned yet? run `sparkbox setup` to install and start "+serviceUnit)
+	}
+
+	switch first.active {
+	case "failed":
+		return failWithJournal(p, fmt.Sprintf("%s failed (%s)", serviceUnit, orDash(first.sub)),
+			"the gateway is down; the journal below has the reason — fix it, then `systemctl start sparkbox`")
+	case "inactive", "deactivating":
+		return warn(fmt.Sprintf("%s %s (%s)", serviceUnit, first.active, orDash(first.sub)),
+			"start it with `systemctl start sparkbox` (after `sparkbox setup`)")
+	case "active", "activating":
+		// fall through to the liveness comparison below
+	default:
+		return warn("unknown state "+orDash(first.active),
+			"not provisioned yet? run `sparkbox setup`, then this reports the live state")
+	}
+
+	// Only now is a wait worth paying for: the unit exists and claims to be
+	// running, which is exactly the case the single sample got wrong. Every
+	// path above returns immediately, so a doctor run on a machine with no
+	// systemd stays instant.
+	if cfg.ServiceSettle > 0 {
+		p.Sleep(cfg.ServiceSettle)
+	}
+	second := showService(p)
+
+	if looped, why := restarted(first, second); looped {
+		return failWithJournal(p, fmt.Sprintf("%s is crash-looping: %s", serviceUnit, why),
+			"the gateway restarts faster than it can serve; the journal below has the reason (a busy port is the usual one)")
+	}
+	// SubState is evidence, not decoration. A sample taken inside the RestartSec
+	// gap reads ActiveState=activating SubState=auto-restart with no main process
+	// — systemd's own `Active: activating (auto-restart)` — and *neither* restart
+	// signal moves across it: ExecMainStartTimestampMonotonic still holds the last
+	// start (it only advances when a new main process starts) and NRestarts is
+	// bumped when the restart is issued, not when the unit enters the backoff. So
+	// a gateway that dies in the last two seconds of the settle window used to
+	// fall through and print the self-contradicting "active (auto-restart),
+	// stable" — F7 verbatim on a host whose systemd is older than v235 (no
+	// NRestarts at all) or whose loop happened to straddle the window's end.
+	if first.sub == "auto-restart" || second.sub == "auto-restart" {
+		return failWithJournal(p, fmt.Sprintf("%s is crash-looping: systemd has it in a restart backoff (SubState=auto-restart)", serviceUnit),
+			"the gateway restarts faster than it can serve; the journal below has the reason (a busy port is the usual one)")
+	}
+	switch second.active {
+	case "failed":
+		return failWithJournal(p, fmt.Sprintf("%s failed during the settle window (%s)", serviceUnit, orDash(second.sub)),
+			"the gateway died while we watched it; the journal below has the reason")
+	case "inactive", "deactivating":
+		return failWithJournal(p, fmt.Sprintf("%s went %s during the settle window", serviceUnit, second.active),
+			"the gateway stopped while we watched it; the journal below has the reason")
+	case "activating":
+		// It was up when we started watching and is starting again now: the
+		// process we sampled first is gone. That is a restart even when the
+		// replacement has not come up far enough to move the start timestamp,
+		// which is the other way the fall-through below produced a PASS.
+		if first.active == "active" {
+			return failWithJournal(p, fmt.Sprintf("%s restarted during the settle window (now %s/%s)", serviceUnit, second.active, orDash(second.sub)),
+				"the gateway was running and is starting again; the journal below has the reason it went down")
+		}
+	}
+	if first.active == "activating" && second.active == "activating" {
+		return warn(fmt.Sprintf("%s still starting after %s (%s)", serviceUnit, cfg.ServiceSettle, orDash(second.sub)),
+			"give it a moment and re-run `sparkbox doctor`; if it never leaves activating, read `journalctl -u sparkbox`")
+	}
+	detail := fmt.Sprintf("active (%s), stable", orDash(second.sub))
+	if cfg.ServiceSettle > 0 {
+		detail = fmt.Sprintf("active (%s), stable across a %s window", orDash(second.sub), cfg.ServiceSettle)
+	}
+	if second.restarts != "" && second.restarts != "0" {
+		// Restarts that stopped climbing are history, not a fault, but they are
+		// worth showing: they are how an operator learns the box had a bad boot.
+		detail += fmt.Sprintf(" (%s lifetime restarts)", second.restarts)
+	}
+	return pass(detail)
+}
+
+// checkVersions compares the three sparkbox versions that must agree on a
+// healthy host: the binary installed at BinPath, the one the *running service*
+// is actually executing, and the release the operator asked for.
+//
+// This is the check that would have caught the DGX: a "v0.4.0" setup left a
+// stale v0.3.0 at /usr/local/bin/sparkbox, and everything else reported healthy
+// while the gateway silently lacked every feature the release was cut for.
+// The running version is read through /proc/<pid>/exe rather than BinPath
+// because that is the inode the process actually holds — after an in-place
+// upgrade the two differ until the unit is restarted, which is the whole point.
+//
+// A skew is a WARN, not a FAIL: the host is running, just not what was asked
+// for. Anything that cannot be compared (a hand-built "dev" binary, the default
+// `--release latest`) is skipped rather than warned about, or every developer
+// machine would warn forever.
+func checkVersions(p Probe, cfg Config) Result {
+	if cfg.BinPath == "" {
+		return pass("not checked (no --bin-path)")
+	}
+	if _, err := p.Stat(cfg.BinPath); err != nil {
+		return warn("no sparkbox binary at "+cfg.BinPath,
+			"the systemd unit's ExecStart points there; `sparkbox setup` installs the binary it runs from")
+	}
+	onDisk := binaryVersion(p.Run, cfg.BinPath)
+
+	running := ""
+	if s := showService(p); isPID(s.mainPID) {
+		running = binaryVersion(p.Run, "/proc/"+s.mainPID+"/exe")
+	}
+
+	parts := []string{fmt.Sprintf("binary %s %s", cfg.BinPath, orUnknown(onDisk))}
+	if running != "" {
+		parts = append(parts, "running "+running)
+	}
+	if concreteVersion(cfg.Release) {
+		parts = append(parts, "requested "+cfg.Release)
+	}
+	detail := strings.Join(parts, ", ")
+
+	var skew []string
+	if concreteVersion(onDisk) && concreteVersion(running) && onDisk != running {
+		skew = append(skew, fmt.Sprintf("the running service is %s but %s is %s (restart it: `systemctl restart sparkbox`)", running, cfg.BinPath, onDisk))
+	}
+	if concreteVersion(cfg.Release) && concreteVersion(onDisk) && cfg.Release != onDisk {
+		skew = append(skew, fmt.Sprintf("%s is %s but the requested release is %s (re-run `sparkbox setup` with the %s binary)", cfg.BinPath, onDisk, cfg.Release, cfg.Release))
+	}
+	if len(skew) > 0 {
+		return warn(detail, strings.Join(skew, "; "))
+	}
+	return pass(detail)
+}
+
+// failWithJournal builds a FAIL carrying the tail of the unit's journal, so the
+// operator sees the actual error without running a second command. journalctl
+// needs privilege to read the system journal and doctor is routinely run
+// unprivileged (checkRoot is only a WARN), so a refusal is reported as such
+// rather than silently reading as "no evidence".
+func failWithJournal(p Probe, detail, hint string) Result {
+	r := fail(detail, hint)
+	out, err := p.Run("journalctl", "-u", serviceUnit, "-n", "20", "--no-pager")
+	switch {
+	case strings.TrimSpace(out) != "":
+		r.Output = out
+	case err != nil:
+		r.Output = "(journal unavailable: " + err.Error() + " — re-run as root, or `journalctl -u sparkbox -n 50`)"
+	default:
+		r.Output = "(no journal entries for " + serviceUnit + ")"
+	}
+	return r
+}
+
+func isPID(s string) bool { return s != "" && s != "0" }
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "(version unknown)"
+	}
+	return s
 }
 
 func firstLine(s string) string {
