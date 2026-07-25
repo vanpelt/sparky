@@ -121,8 +121,32 @@ and allow the in-place path when the machine holds no state.
 The DGX predates `sparkbox setup`: flat
 `/srv/sparkbox/{state,images,vmlinux,users.conf}`. `setup` lays down
 `<root>/data/state` + `<root>/data/images` on an XFS reflink volume. Nothing
-detects or migrates the old shape — re-running `setup` over it provisions a
-*second*, empty gateway beside the live one's data. Should adopt or refuse.
+detects or migrates the old shape.
+
+Confirmed live. `setup --dry-run` against the running v0.3.0 DGX gateway:
+
+```
+  - swapfile         → create 16G /swapfile (overcommit safety valve) + swapon + fstab
+  - resolve-release  → resolve "v0.4.0" …
+  - data-volume      → 300G XFS reflink volume at /srv/sparkbox/data (+ state/ images/)
+  - fetch-artifacts  → download + sha256-verify vmlinux, firecracker, rootfs (decompress)
+  - users.conf       ✓ already satisfied (2 user(s))
+  - host-config      → write /srv/sparkbox/sparkbox.env
+  - net-rules        ✓ already satisfied (scripts + sysctl installed)
+  - systemd-units    ✓ already satisfied (units installed)
+  - admin-ssh        ✓ already satisfied (skipped …)
+  - enable-services  ✓ already satisfied (sparkbox.service active)
+```
+
+Every `Satisfied` probe is a bare existence check (`stat` the unit file, `is-active`
+the service), so the presence of a *differently shaped* install reads as "done".
+Applying this plan would have built a new 300G volume and downloaded fresh
+artifacts into it while leaving the old units pointed at `/srv/sparkbox/state` —
+a half-migrated host with two data roots and no error anywhere.
+
+**Fix:** the `Satisfied` probes should verify the install *matches this config*
+(unit's `--state-dir` equals `cfg.StateDir`, etc.), not merely that something
+exists. Then either adopt a legacy layout or refuse with instructions.
 
 ## F5 — certmagic is the real teardown hazard
 
