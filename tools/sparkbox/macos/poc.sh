@@ -383,12 +383,15 @@ EOF
 }
 
 capture_gateway_health() {
-  local doctor_args=()
   if [[ -n "${FLEET_GATEWAY}" ]]; then
-    doctor_args=(--gateway "${FLEET_GATEWAY}")
+    container machine run --name "${MACHINE_NAME}" --root \
+      /usr/local/bin/sparkbox doctor --gateway "${FLEET_GATEWAY}"
+  else
+    # Bash 3.2 (the macOS system shell) treats "${empty_array[@]}" as an
+    # unbound variable under set -u. Keep the no-argument path explicit.
+    container machine run --name "${MACHINE_NAME}" --root \
+      /usr/local/bin/sparkbox doctor
   fi
-  container machine run --name "${MACHINE_NAME}" --root \
-    /usr/local/bin/sparkbox doctor "${doctor_args[@]}"
   echo
   run_machine_script <<'EOF'
 set -euo pipefail
