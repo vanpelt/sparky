@@ -45,7 +45,19 @@ Commands:
   stop           Stop sparkbox-poc without deleting its state
   start          Start sparkbox-poc and wait for Sparkbox readiness
   smoke          Run the L2 SSH/network/metadata/proxy smoke test
-  destroy --yes  Delete only sparkbox-poc, its local image, and macos/out
+  destroy        Tear down by cost tier; always needs --yes (see below)
+
+Teardown (./macos/poc.sh destroy [targets] --yes):
+  --machine      delete sparkbox-poc and its state       (default; seconds to redo)
+  --image        delete the local gateway OCI image      (minutes: a container build)
+  --kernel       delete the compiled outer kernel in macos/out
+                                                         (very expensive: a full
+                                                          in-container Linux build)
+  --all          all three, plus the rest of macos/out (inputs + results evidence)
+
+  With no target, destroy --yes deletes only the machine. The kernel is pinned
+  and byte-reproducible, so rebuilding it produces the identical file — deleting
+  it buys nothing and costs an hour.
 
 Environment overrides:
   SPARKBOX_CPUS                  outer machine CPUs (default 8)
@@ -412,6 +424,90 @@ stat -c "%n %s bytes" /srv/sparkbox/vmlinux /srv/sparkbox/data/images/*.ext4
 EOF
 }
 
+# describe_role renders a GATEWAY_FLAG value as the role an operator thinks in.
+# An empty flag is not "no role"; it is the standalone gateway, which is the
+# thing the message has to say out loud or the refusal reads as a parse error.
+describe_role() {
+  if [[ -z "$1" ]]; then
+    printf 'a standalone gateway'
+  else
+    printf 'a fleet node (%s)' "$1"
+  fi
+}
+
+# machine_sandbox_count prints how many sandboxes this machine still carries.
+#
+# Conservative by construction, because the only safe error here is
+# over-counting: it sums persisted VM directories, persisted manager records
+# and live firecracker processes, and it looks for the first two under EVERY
+# state directory below /srv/sparkbox rather than the one this script expects.
+# A layout it does not recognise therefore reads as occupied, not as empty, and
+# a machine it cannot inspect at all makes the caller refuse (a non-numeric or
+# empty answer is not zero).
+machine_sandbox_count() {
+  run_machine_script <<'EOF'
+set -uo pipefail
+count=0
+# One directory per sandbox the firecracker driver has ever materialised.
+while IFS= read -r dir; do
+  n="$(find "${dir}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+  count=$((count + n))
+done < <(find /srv/sparkbox -maxdepth 4 -type d -name fc-vms 2>/dev/null)
+# Manager records outlive a stopped VM's directory, and an archived sandbox has
+# a record and no directory at all. grep -c counts matching LINES, which for a
+# single-line JSON document is 0 or 1 — enough, since the caller only asks
+# whether the total is zero.
+while IFS= read -r file; do
+  n="$(grep -c '"name"' "${file}" 2>/dev/null || true)"
+  count=$((count + ${n:-0}))
+done < <(find /srv/sparkbox -maxdepth 4 -type f -name sandboxes.json 2>/dev/null)
+# Anything live right now, in case its state lives somewhere unexpected.
+for comm in /proc/[0-9]*/comm; do
+  [[ -r "${comm}" ]] || continue
+  read -r name < "${comm}" || true
+  [[ "${name:-}" == firecracker ]] && count=$((count + 1))
+done
+printf '%s\n' "${count}"
+EOF
+}
+
+# switch_machine_role changes a provisioned machine between standalone gateway
+# and fleet node in place, or refuses and says why.
+#
+# The change itself is one line in sparkbox.env, so destroying the machine to
+# make it is pure waste — and under the old teardown it also took the compiled
+# outer kernel with it. What makes the switch unsafe is not the flag but the
+# state underneath: a gateway's users DB, routes, invite codes and fleet
+# secrets are meaningless on a node, and the sandboxes on it belong to accounts
+# that would stop existing. With no sandboxes there is nothing to strand, so the
+# switch proceeds; with any, or with no way to prove there are none, it refuses.
+switch_machine_role() {
+  local from="$1" to="$2" count=""
+
+  count="$(machine_sandbox_count 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ "${count}" =~ ^[0-9]+$ ]] \
+    || die "cannot switch ${MACHINE_NAME} from $(describe_role "${from}") to $(describe_role "${to}"): could not count the sandboxes on it, so it cannot be shown to be empty. Start the machine and retry, or destroy it (./macos/poc.sh destroy --machine --yes) and provision again"
+  if [[ "${count}" -ne 0 ]]; then
+    die "refusing to switch ${MACHINE_NAME} from $(describe_role "${from}") to $(describe_role "${to}") while it carries ${count} sandbox(es): a gateway's users DB, routes and fleet secrets are meaningless on a node, and those sandboxes belong to accounts that would stop existing. Destroy the sandboxes first, or the machine (./macos/poc.sh destroy --machine --yes), which keeps the image and the kernel"
+  fi
+
+  echo "switching ${MACHINE_NAME} from $(describe_role "${from}") to $(describe_role "${to}") (no sandboxes on it)"
+  # setup writes sparkbox.env only when there is none, so the file is moved
+  # aside rather than edited: setup then renders the whole thing from the new
+  # flags. The operator's own lines (TLS_FLAGS, the console password) go with
+  # it, which is why it is a backup and not a delete.
+  run_machine_script <<'EOF'
+set -euo pipefail
+env_file=/srv/sparkbox/sparkbox.env
+if [[ -f "${env_file}" ]]; then
+  backup="${env_file}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "${env_file}" "${backup}"
+  echo "  moved ${env_file} to ${backup}"
+fi
+EOF
+  echo "  gateway state (fleet keys, certificates, sqlite) is left untouched"
+}
+
 provision_machine() {
   run_doctor || die "host doctor failed"
   require_owned_machine >/dev/null
@@ -432,8 +528,9 @@ provision_machine() {
   fi
 
   # setup deliberately preserves an existing sparkbox.env so operator TLS and
-  # console edits survive idempotent reruns. Refuse an implicit role switch
-  # here rather than reporting success while leaving the old role active.
+  # console edits survive idempotent reruns. That also means setup alone cannot
+  # change GATEWAY_FLAG: it would report success while leaving the old role
+  # live. So the role change is handled here, before setup runs.
   local existing_env existing_gateway_flag requested_gateway_flag=""
   existing_env="$(
     container machine run --name "${MACHINE_NAME}" --root \
@@ -447,7 +544,7 @@ provision_machine() {
       sed -n 's/^GATEWAY_FLAG=//p' <<<"${existing_env}" | tail -1
     )"
     if [[ "${existing_gateway_flag}" != "${requested_gateway_flag}" ]]; then
-      die "existing machine role/config differs (GATEWAY_FLAG=${existing_gateway_flag:-<standalone>}); destroy and recreate before switching roles"
+      switch_machine_role "${existing_gateway_flag}" "${requested_gateway_flag}"
     fi
   fi
 
@@ -675,33 +772,98 @@ create_machine() {
   echo "  evidence: ${result_dir}"
 }
 
+# The kernel build products under macos/out, listed apart from the rest of the
+# directory (inputs.txt, results/) because they are the expensive tier.
+KERNEL_ARTIFACTS=(vmlinux-kvm kernel.config kernel-manifest.txt downloads)
+
+# destroy_all tears down by cost tier. The tiers are separate because their
+# costs differ by orders of magnitude: the machine is seconds to recreate, the
+# gateway image is a multi-minute container build, and the outer kernel is an
+# 8-CPU in-container Linux compile.
+#
+# The kernel is also the one artifact where deleting it buys nothing at all:
+# kernel/build.sh pins the source tarball and Apple's config by SHA-256 and
+# already reuses a verified vmlinux-kvm, so a rebuild reproduces the same bytes
+# an hour later. `--yes` used to mean all three tiers, which is how a role
+# change — one line in sparkbox.env — ended up costing a kernel build. It now
+# means the cheap tier unless a target says otherwise.
 destroy_all() {
-  [[ "${1:-}" == "--yes" ]] || die "destroy is destructive; rerun with: ./macos/poc.sh destroy --yes"
-  require_container_runtime
+  local confirmed=0 targeted=0
+  local want_machine=0 want_image=0 want_kernel=0 want_rest=0
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --yes) confirmed=1 ;;
+      --machine) want_machine=1; targeted=1 ;;
+      --image) want_image=1; targeted=1 ;;
+      --kernel) want_kernel=1; targeted=1 ;;
+      --all)
+        want_machine=1
+        want_image=1
+        want_kernel=1
+        want_rest=1
+        targeted=1
+        ;;
+      *) die "unknown destroy option ${arg}; usage: ./macos/poc.sh destroy [--machine] [--image] [--kernel] [--all] --yes" ;;
+    esac
+  done
+  [[ "${targeted}" -eq 1 ]] || want_machine=1
+  [[ "${confirmed}" -eq 1 ]] \
+    || die "destroy is destructive; rerun with --yes. Targets: --machine (the default) --image --kernel --all"
 
-  if machine_exists; then
-    local inspect_json
-    inspect_json="$(machine_inspect)"
-    machine_is_owned "${inspect_json}" \
-      || die "refusing to delete unexpected machine ${MACHINE_NAME}"
-    container machine delete "${MACHINE_NAME}"
-    echo "deleted machine ${MACHINE_NAME}"
-  else
-    local machine_status="$?"
-    [[ "${machine_status}" -eq 1 ]] || die "could not list container machines"
-    echo "machine ${MACHINE_NAME} does not exist"
+  if [[ "${want_machine}" -eq 1 ]] || [[ "${want_image}" -eq 1 ]]; then
+    require_container_runtime
   fi
 
-  if container image inspect "${GATEWAY_IMAGE}" >/dev/null 2>&1; then
-    container image delete --force "${GATEWAY_IMAGE}"
-    echo "deleted local image ${GATEWAY_IMAGE}"
-  else
-    echo "local image ${GATEWAY_IMAGE} does not exist"
+  if [[ "${want_machine}" -eq 1 ]]; then
+    if machine_exists; then
+      local inspect_json
+      inspect_json="$(machine_inspect)"
+      machine_is_owned "${inspect_json}" \
+        || die "refusing to delete unexpected machine ${MACHINE_NAME}"
+      container machine delete "${MACHINE_NAME}"
+      echo "deleted machine ${MACHINE_NAME}"
+    else
+      local machine_status="$?"
+      [[ "${machine_status}" -eq 1 ]] || die "could not list container machines"
+      echo "machine ${MACHINE_NAME} does not exist"
+    fi
   fi
 
-  if [[ -d "${OUT_DIR}" ]] && [[ "${OUT_DIR}" == "${SCRIPT_DIR}/out" ]]; then
+  if [[ "${want_image}" -eq 1 ]]; then
+    if container image inspect "${GATEWAY_IMAGE}" >/dev/null 2>&1; then
+      container image delete --force "${GATEWAY_IMAGE}"
+      echo "deleted local image ${GATEWAY_IMAGE}"
+    else
+      echo "local image ${GATEWAY_IMAGE} does not exist"
+    fi
+  fi
+
+  if [[ "${want_kernel}" -eq 1 ]] && [[ "${OUT_DIR}" == "${SCRIPT_DIR}/out" ]]; then
+    local artifact removed=0
+    for artifact in "${KERNEL_ARTIFACTS[@]}"; do
+      if [[ -e "${OUT_DIR}/${artifact}" ]]; then
+        rm -rf -- "${OUT_DIR:?}/${artifact}"
+        removed=1
+      fi
+    done
+    if [[ "${removed}" -eq 1 ]]; then
+      echo "deleted the compiled outer kernel in ${OUT_DIR} (rebuild: ./macos/poc.sh build)"
+    else
+      echo "no compiled outer kernel in ${OUT_DIR}"
+    fi
+  fi
+
+  # Everything else under macos/out: inputs.txt and the results/ evidence
+  # bundles that create/provision wrote. Only --all reaches these, because they
+  # are the record of what was run and nothing regenerates them.
+  if [[ "${want_rest}" -eq 1 ]] && [[ -d "${OUT_DIR}" ]] && [[ "${OUT_DIR}" == "${SCRIPT_DIR}/out" ]]; then
     rm -rf -- "${OUT_DIR}"
-    echo "deleted generated output ${OUT_DIR}"
+    echo "deleted generated output ${OUT_DIR} (including the results/ evidence bundles)"
+  fi
+
+  if [[ "${want_kernel}" -eq 0 ]] && [[ -s "${KERNEL_PATH}" ]]; then
+    echo "kept the outer kernel ${KERNEL_PATH} (delete it with --kernel)"
   fi
 }
 
@@ -744,8 +906,8 @@ case "${command_name}" in
     "${SMOKE_SCRIPT}"
     ;;
   destroy)
-    [[ "$#" -le 2 ]] || die "usage: ./macos/poc.sh destroy --yes"
-    destroy_all "${2:-}"
+    shift
+    destroy_all "$@"
     ;;
   -h|--help|help)
     usage

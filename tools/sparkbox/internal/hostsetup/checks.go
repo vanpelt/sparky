@@ -77,6 +77,10 @@ func DefaultChecks() []Check {
 		{"disk space", checkDisk},
 		{"sandbox NAT rules", checkNAT},
 		{"sparkbox service", checkService},
+		// After the liveness verdict: it reads the running gateway's command
+		// line, so its "running service" / "service not running" wording only
+		// makes sense once the reader has seen whether the service is up.
+		{"egress control", checkEgress},
 		// Last: it reads the running service's PID, so it wants the liveness
 		// check's verdict already on screen above it.
 		{"sparkbox version", checkVersions},
@@ -346,14 +350,285 @@ func checkDisk(p Probe, cfg Config) Result {
 	return pass(fmt.Sprintf("%.0f GiB free on %s", gib, path))
 }
 
-func checkNAT(p Probe, _ Config) Result {
-	// The boot unit installs the SPARKBOX_EDGE chain (deploy/sparkbox-net.sh).
-	out, err := p.Run("iptables", "-t", "nat", "-nL", "SPARKBOX_EDGE")
-	if err != nil || !strings.Contains(out, "SPARKBOX_EDGE") {
-		return warn("SPARKBOX_EDGE chain not found",
-			"sandbox NAT/any-port rules install with `sparkbox setup` (sparkbox-net.service)")
+// checkNAT reports whether this host has the packet-filter rules sandboxes
+// need, and the any-port forwarding chain THIS host's mode actually builds.
+//
+// It used to assert the SPARKBOX_EDGE chain unconditionally. But
+// deploy/sparkbox-net.sh only builds that chain in uplink-REDIRECT mode
+// (SPARKBOX_EDGE_REDIRECT=1); with a dedicated edge IP — the mode the DGX runs
+// and docs/dedicated-edge-ip-cutover.md recommends — it builds SPARKBOX_TNET
+// with DNAT rules instead and never creates SPARKBOX_EDGE at all. So a
+// perfectly healthy gateway reported "[WARN] sandbox NAT rules  SPARKBOX_EDGE
+// chain not found" on every single run, and the remedy it suggested
+// ("rules install with `sparkbox setup`") re-installed the same script that
+// deliberately skips that chain (F8). A check that cries wolf forever is worse
+// than no check: it teaches the operator to skim the report.
+//
+// The mode is not knowable from iptables, only from the variables the script
+// reads — so this reads them from the same place the script does. A Check may
+// only touch the host through the Probe, and Probe.ReadFile is exactly that:
+// sparkbox-net.service sources sparkbox.env via EnvironmentFile=, so parsing
+// that file gives the check the script's own inputs rather than a guess.
+//
+// It also asserts what the check's NAME has always claimed and never verified:
+// the POSTROUTING MASQUERADE that gives every sandbox its egress. Neither
+// any-port chain has anything to do with that, and its absence is the failure
+// that actually kills sandboxes.
+func checkNAT(p Probe, cfg Config) Result {
+	mode := readNATMode(p, cfg)
+	// Read one built-in chain first. If iptables cannot be run at all — absent,
+	// or (far more often) doctor running unprivileged, since checkRoot is only a
+	// WARN — then every question below answers "no" for a reason that has
+	// nothing to do with the rules, and reporting a missing MASQUERADE on a host
+	// that has one is the same lie in a new place.
+	//
+	// The error alone is the test, deliberately. Probe.Run is CombinedOutput, and
+	// an unprivileged iptables is not silent: it prints "iptables v1.8.10
+	// (nf_tables): Could not fetch rule set generation id: Permission denied (you
+	// must be root)" and exits 4. Guarding on an EMPTY output as well only caught
+	// the binary-is-absent case and let the far commoner privilege case straight
+	// through, so `sparkbox doctor` as a normal user on a healthy gateway
+	// announced that its sandbox egress NAT was missing. Listing a built-in nat
+	// chain does not fail on a working host, so err != nil is enough.
+	postrouting, err := p.Run("iptables", "-t", "nat", "-nL", "POSTROUTING")
+	if err != nil {
+		return warn("could not read the nat table ("+err.Error()+")",
+			"reading iptables needs privilege — re-run `sparkbox doctor` as root")
 	}
-	return pass("SPARKBOX_EDGE chain present")
+	masq := strings.Contains(postrouting, guestSubnet)
+	edge := natChainExists(p, edgeChain)
+	tnet := natChainExists(p, tnetChain)
+
+	var missing, found, unexpected []string
+	if masq {
+		found = append(found, "sandbox MASQUERADE ("+guestSubnet+")")
+	} else {
+		missing = append(missing, "the "+guestSubnet+" POSTROUTING MASQUERADE that carries all sandbox egress")
+	}
+	switch {
+	case !mode.known:
+		// No sparkbox.env to read: this host was provisioned by hand, or --root
+		// points somewhere else, or doctor is running before setup ever did.
+		// Demanding a specific chain here is exactly the mistake this check is
+		// being fixed for, so report what is actually there and say plainly that
+		// the mode could not be determined.
+		switch {
+		case edge:
+			found = append(found, edgeChain+" present")
+		case tnet:
+			found = append(found, tnetChain+" present")
+		default:
+			missing = append(missing, "any-port forwarding (neither "+edgeChain+" nor "+tnetChain+")")
+		}
+	default:
+		if mode.redirect {
+			if edge {
+				found = append(found, edgeChain+" (uplink REDIRECT mode)")
+			} else {
+				missing = append(missing, edgeChain+" (SPARKBOX_EDGE_REDIRECT is on)")
+			}
+		} else if edge {
+			// The script SKIPS building this chain in tunnel mode; it never
+			// flushes one that is already there, and it never removes the
+			// PREROUTING hook. So a host flipped from redirect to tunnel mode
+			// keeps hijacking uplink TCP until it is rebooted or cleaned by hand.
+			unexpected = append(unexpected, edgeChain+" is still installed although SPARKBOX_EDGE_REDIRECT is off")
+		}
+		if mode.tnet {
+			if tnet {
+				found = append(found, tnetChain+" ("+mode.why+")")
+			} else {
+				missing = append(missing, tnetChain+" ("+mode.why+")")
+			}
+		}
+		if !mode.redirect && !mode.tnet {
+			// A legitimate configuration: behind a reverse tunnel with no
+			// dedicated edge IP, web traffic arrives on loopback and no
+			// forwarding chain is wanted. Saying so is the point — the old check
+			// called this a fault.
+			found = append(found, "any-port forwarding off (no uplink REDIRECT, no edge IP)")
+		}
+	}
+
+	detail := strings.Join(found, "; ")
+	if len(missing) == 0 && len(unexpected) == 0 {
+		if !mode.known {
+			return pass(detail + "; mode not determined (no " + cfg.envPath() + ")")
+		}
+		return pass(detail)
+	}
+	var hints []string
+	if len(unexpected) > 0 {
+		hints = append(hints, "the packet-filter script only skips a stale chain, it never tears one down — "+
+			"drop its PREROUTING hook and `iptables -t nat -F "+edgeChain+"`, or reboot")
+	}
+	if len(missing) > 0 {
+		if mode.known {
+			hints = append(hints, "these install with `sparkbox setup` and are rebuilt at every boot by "+
+				"sparkbox-net.service — `systemctl status sparkbox-net` for why they were not")
+		} else {
+			hints = append(hints, "there is no "+cfg.envPath()+", so the any-port mode cannot be determined: "+
+				"run `sparkbox setup` (with --edge-ip <ip> for a dedicated edge address), or point --root at "+
+				"this host's sparkbox home")
+		}
+	}
+	return warn(strings.Join(append(unexpected, missing...), "; "), strings.Join(hints, "; "))
+}
+
+// The two chains deploy/sparkbox-net.sh can build, named once so the check and
+// the script cannot drift apart again (which is what F8 was).
+const (
+	edgeChain = "SPARKBOX_EDGE" // uplink REDIRECT mode
+	tnetChain = "SPARKBOX_TNET" // dedicated edge IP / tailnet mode
+)
+
+// natSelectors is which any-port chains this host's sparkbox.env asks for.
+type natSelectors struct {
+	// known is false when sparkbox.env could not be read at all, in which case
+	// neither flag below means anything.
+	known    bool
+	redirect bool   // SPARKBOX_EDGE_REDIRECT: build SPARKBOX_EDGE
+	tnet     bool   // SPARKBOX_EDGE_IP or SPARKBOX_TAILNET_IF: build SPARKBOX_TNET
+	why      string // which variable turned tnet on, for the report
+}
+
+// readNATMode mirrors deploy/sparkbox-net.sh's own selectors, exactly.
+//
+// The two are NOT mutually exclusive: the tailnet block sits outside the
+// `if SPARKBOX_EDGE_REDIRECT` fence, so a host with both set builds both chains
+// and a check written as if/else would be wrong on it.
+//
+// The shell writes "${SPARKBOX_EDGE_REDIRECT:-1}" != 1, and `:-` substitutes
+// the default for an EMPTY value as well as a missing one. So a bare
+// `SPARKBOX_EDGE_REDIRECT=` line means the redirect is ON. Only a literal
+// non-"1" value turns it off.
+func readNATMode(p Probe, cfg Config) natSelectors {
+	b, err := p.ReadFile(cfg.envPath())
+	if err != nil {
+		return natSelectors{}
+	}
+	kv, err := parseEnv(strings.NewReader(string(b)))
+	if err != nil {
+		return natSelectors{}
+	}
+	m := natSelectors{known: true, redirect: kv["SPARKBOX_EDGE_REDIRECT"] == "" || kv["SPARKBOX_EDGE_REDIRECT"] == "1"}
+	switch {
+	case kv["SPARKBOX_EDGE_IP"] != "":
+		m.tnet, m.why = true, "dedicated edge IP "+kv["SPARKBOX_EDGE_IP"]
+	case kv["SPARKBOX_TAILNET_IF"] != "":
+		m.tnet, m.why = true, "tailnet interface "+kv["SPARKBOX_TAILNET_IF"]
+	}
+	return m
+}
+
+// natChainExists reports whether a nat chain is installed. Substring matching
+// on `iptables -nL` output rather than parsing it: the question is only "is the
+// chain there", and a rule-by-rule parser for a format that differs between
+// iptables-legacy and -nft would be more code with more ways to be wrong.
+func natChainExists(p Probe, chain string) bool {
+	out, err := p.Run("iptables", "-t", "nat", "-nL", chain)
+	return err == nil && strings.Contains(out, chain)
+}
+
+// checkEgress reports whether this gateway actually has per-VM egress control.
+//
+// It is the F2 headline. A gateway with no --sluice-socket wires a nil syncer
+// (cmd/sparkbox/main.go) and one with no --guest-dns leaves guests on public
+// DNS: in either case every sandbox reaches the whole internet, no error is
+// logged, no check failed, and nothing anywhere says so. "Silently loses egress
+// filtering" is not a state a diagnostic tool should be unable to report.
+//
+// The gateway's OWN command line is the truth, not this config: doctor is
+// routinely run with no flags at all, and on an upgraded host the operator's
+// sparkbox.env bundles still override whatever setup templated. /proc/<pid>/cmdline
+// is what the daemon is running with, bundles and all — the same reason
+// checkVersions reads /proc/<pid>/exe rather than trusting BinPath.
+//
+// TODO(sluice): `setup` cannot install sluice yet, so this check can only
+// report. tools/sluice is a separate Go module (github.com/vanpelt/sparky/tools/sluice,
+// with a committed eBPF object) that the release pipeline does not build:
+// hack/stage-artifacts.sh stages only sparkbox, vmlinux, firecracker and the
+// rootfs, and the manifest has no SHA256_SLUICE, so there is no asset to fetch
+// and inventing a URL for one would be worse than saying this. Publishing
+// sluice-linux-<arch> (plus adding tools/sluice to CI, which never builds it
+// today) unblocks a real --sluice step; the flags it would need — --guest-dns
+// and --sluice-socket — are already here.
+func checkEgress(p Probe, cfg Config) Result {
+	flags, source := gatewayFlags(p, cfg)
+	socket, guestDNS := flags["--sluice-socket"], flags["--guest-dns"]
+
+	switch {
+	case socket == "" && guestDNS == "":
+		return warn("this gateway has no egress control — every sandbox reaches the whole internet ("+source+")",
+			"that is the default and it is silent: sandboxes are unfiltered. To enable it, run sluice on this host and "+
+				"re-run `sparkbox setup --sluice-socket /run/sluice.sock --guest-dns <resolver-ip>` (setup cannot install sluice itself yet)")
+	case socket == "":
+		return warn("guests resolve through "+guestDNS+" but no --sluice-socket: the gateway pushes no egress policy ("+source+")",
+			"add --sluice-socket /run/sluice.sock so the gateway can program the allowlist; without it the resolver enforces only its own defaults")
+	case guestDNS == "":
+		return warn("--sluice-socket "+socket+" is set but --guest-dns is not: guests are on public DNS and bypass the allowlist ("+source+")",
+			"add --guest-dns <resolver-ip> (the address sluice's DNS listener binds, e.g. 172.30.0.53) — the socket alone enforces nothing")
+	}
+	// Both halves are configured; the remaining question is whether the daemon
+	// on the other end of the socket is actually there. A socket path that does
+	// not exist means every policy push fails and the gateway carries on.
+	if _, err := p.Stat(socket); err != nil {
+		return warn("--sluice-socket "+socket+" does not exist — sluice is not running ("+source+")",
+			"start it (`systemctl status sluice`); until it answers, the gateway's egress policy pushes go nowhere and sandboxes are unfiltered")
+	}
+	return pass("sluice at " + socket + ", guests resolve through " + guestDNS + " (" + source + ")")
+}
+
+// gatewayFlags reads the flags the running gateway was started with, falling
+// back to this config when there is no live process to ask.
+//
+// The returned label names which of the two it is, because the difference
+// matters to the operator: "configured" is a claim about what the next start
+// will do, "running" is a fact about now.
+func gatewayFlags(p Probe, cfg Config) (map[string]string, string) {
+	if s := showService(p); isPID(s.mainPID) {
+		if b, err := p.ReadFile("/proc/" + s.mainPID + "/cmdline"); err == nil && len(b) > 0 {
+			// /proc/<pid>/cmdline is NUL-separated with a trailing NUL, which is
+			// better than a shell would give us: every argument is already split
+			// exactly as the kernel received it, so a value containing spaces
+			// cannot be mis-parsed here.
+			return flagPairs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")), "running service"
+		}
+	}
+	return flagPairs(optionalFlagArgs(cfg)), "configured, service not running"
+}
+
+// optionalFlagArgs re-splits the rendered unit flags into argv words, so the
+// fallback above reads the same shape as a real command line.
+func optionalFlagArgs(cfg Config) []string {
+	var out []string
+	for _, line := range optionalFlags(cfg) {
+		out = append(out, strings.Fields(line)...)
+	}
+	return out
+}
+
+// flagPairs collects "--flag value" and "--flag=value" from an argv slice. A
+// flag with no value (--proxy-tls) maps to "true" so presence is testable.
+func flagPairs(argv []string) map[string]string {
+	out := map[string]string{}
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if !strings.HasPrefix(a, "--") {
+			continue
+		}
+		if name, val, ok := strings.Cut(a, "="); ok {
+			out[name] = val
+			continue
+		}
+		if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "--") {
+			out[a] = argv[i+1]
+			i++
+			continue
+		}
+		out[a] = "true"
+	}
+	return out
 }
 
 // checkService proves the gateway is *alive*, not merely that systemd currently

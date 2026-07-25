@@ -197,8 +197,15 @@ func TestChecks(t *testing.T) {
 		{"users bad key", checkUsers, fakeProbe{files: map[string]string{"/srv/sparkbox/users.conf": "me not-a-key"}}, Fail},
 		{"disk ample", checkDisk, fakeProbe{files: map[string]string{"/srv/sparkbox/data/": ""}, diskFree: 200 << 30}, Pass},
 		{"disk low", checkDisk, fakeProbe{files: map[string]string{"/srv/sparkbox/data/": ""}, diskFree: 5 << 30}, Warn},
-		{"nat present", checkNAT, fakeProbe{runs: map[string]runResult{"iptables -t nat -nL SPARKBOX_EDGE": {out: "Chain SPARKBOX_EDGE (1 references)"}}}, Pass},
-		{"nat absent", checkNAT, fakeProbe{}, Warn},
+		{"nat present", checkNAT, fakeProbe{
+			files: map[string]string{"/srv/sparkbox/sparkbox.env": "PROXY_PORT=8081\n"},
+			runs: map[string]runResult{
+				natList("POSTROUTING"): {out: "MASQUERADE  all  --  172.30.0.0/16  0.0.0.0/0"},
+				natList(edgeChain):     {out: "Chain SPARKBOX_EDGE (1 references)"},
+			},
+		}, Pass},
+		{"nat table unreadable", checkNAT, fakeProbe{}, Warn},
+		{"egress unconfigured", checkEgress, fakeProbe{}, Warn},
 		{"service active", checkService, fakeProbe{runs: map[string]runResult{showCmd: {out: unitState("active", "running", "0", "42", "9000")}}}, Pass},
 		{"service inactive", checkService, fakeProbe{runs: map[string]runResult{showCmd: {out: unitState("inactive", "dead", "0", "0", "0")}}}, Warn},
 		{"service failed", checkService, fakeProbe{runs: map[string]runResult{showCmd: {out: unitState("failed", "failed", "3", "0", "0")}}}, Fail},
@@ -222,6 +229,303 @@ func TestChecks(t *testing.T) {
 			}
 			if got.Status != Pass && got.Hint == "" {
 				t.Errorf("non-pass result should carry a remediation hint")
+			}
+		})
+	}
+}
+
+// natList is the exact command line checkNAT issues, built once so a change to
+// the probe cannot silently orphan every fixture below.
+func natList(chain string) string { return "iptables -t nat -nL " + chain }
+
+// TestNATChainMatchesTheHostsMode is the F8 regression.
+//
+// The old check asserted SPARKBOX_EDGE unconditionally, so the live DGX — which
+// runs a dedicated edge IP and therefore builds SPARKBOX_TNET instead, and
+// never SPARKBOX_EDGE — reported "[WARN] sandbox NAT rules  SPARKBOX_EDGE chain
+// not found" on every run, with a remedy that could not possibly help.
+func TestNATChainMatchesTheHostsMode(t *testing.T) {
+	cfg := Config{Root: "/srv/sparkbox"}
+	const envPath = "/srv/sparkbox/sparkbox.env"
+	const masq = "MASQUERADE  all  --  172.30.0.0/16  0.0.0.0/0"
+
+	// The DGX's own chain, verbatim from docs/onboarding-notes.md F8.
+	const tnetRules = "Chain SPARKBOX_TNET (1 references)\n" +
+		"RETURN  tcp dpt:2222\n" +
+		"DNAT    tcp dpts:1024:65535 to:10.66.0.1:443\n" +
+		"DNAT    tcp dpt:22 to:10.66.0.1:2222\n"
+
+	tests := []struct {
+		name    string
+		env     string   // sparkbox.env contents; "" means the file is absent
+		chains  []string // nat chains that exist on this host
+		want    Status
+		mention string
+	}{
+		{
+			name:    "dedicated edge IP wants SPARKBOX_TNET, not SPARKBOX_EDGE",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  []string{tnetChain},
+			want:    Pass,
+			mention: "10.66.0.1",
+		},
+		{
+			name:    "uplink redirect mode wants SPARKBOX_EDGE",
+			env:     "PROXY_PORT=8081\n",
+			chains:  []string{edgeChain},
+			want:    Pass,
+			mention: "REDIRECT",
+		},
+		{
+			// ${SPARKBOX_EDGE_REDIRECT:-1} substitutes the default for an EMPTY
+			// value too, so a bare assignment means the redirect is ON. Reading
+			// it as "off" would flip the verdict on a common hand-edit.
+			name:    "an empty SPARKBOX_EDGE_REDIRECT still means redirect mode",
+			env:     "SPARKBOX_EDGE_REDIRECT=\n",
+			chains:  []string{edgeChain},
+			want:    Pass,
+			mention: "REDIRECT",
+		},
+		{
+			name:    "tunnel mode with no edge IP expects neither chain",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\n",
+			chains:  nil,
+			want:    Pass,
+			mention: "any-port forwarding off",
+		},
+		{
+			name:    "missing SPARKBOX_TNET in edge-IP mode is reported",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  nil,
+			want:    Warn,
+			mention: tnetChain,
+		},
+		{
+			name:    "missing SPARKBOX_EDGE in redirect mode is reported",
+			env:     "PROXY_PORT=8081\n",
+			chains:  nil,
+			want:    Warn,
+			mention: edgeChain,
+		},
+		{
+			// Both selectors set: the tailnet block sits outside the redirect
+			// fence in the shell, so both chains are built and both are wanted.
+			name:    "both modes at once wants both chains",
+			env:     "SPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  []string{edgeChain, tnetChain},
+			want:    Pass,
+			mention: tnetChain,
+		},
+		{
+			// The script skips building SPARKBOX_EDGE in tunnel mode but never
+			// flushes an existing one or removes its PREROUTING hook, so a host
+			// mid-flip keeps hijacking uplink TCP until it is rebooted.
+			name:    "a stale SPARKBOX_EDGE left over from redirect mode is reported",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  []string{edgeChain, tnetChain},
+			want:    Warn,
+			mention: "still installed",
+		},
+		{
+			name:    "the interface-scoped tailnet mode is recognised too",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_TAILNET_IF=tailscale0\n",
+			chains:  []string{tnetChain},
+			want:    Pass,
+			mention: "tailscale0",
+		},
+		{
+			// No sparkbox.env at all: the mode is genuinely unknowable, so the
+			// check must report what it found and say so rather than demand a
+			// chain — demanding one is precisely the F8 mistake.
+			name:    "no sparkbox.env cannot determine the mode",
+			env:     "",
+			chains:  []string{tnetChain},
+			want:    Pass,
+			mention: "mode not determined",
+		},
+		{
+			name:    "no sparkbox.env and no chains at all still warns",
+			env:     "",
+			chains:  nil,
+			want:    Warn,
+			mention: "neither",
+		},
+		{
+			// The rule the check's NAME has always claimed and never verified.
+			// Neither any-port chain carries sandbox egress; this does.
+			name:    "a missing sandbox MASQUERADE is a fault in every mode",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  []string{tnetChain, "no-masquerade"},
+			want:    Warn,
+			mention: "MASQUERADE",
+		},
+		{
+			// doctor is routinely run unprivileged (checkRoot is only a WARN),
+			// and iptables then answers nothing for every chain. Reporting that
+			// as missing rules would be the same lie in a new place.
+			name:    "iptables that cannot be read says so rather than blaming the rules",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  []string{"no-iptables"},
+			want:    Warn,
+			mention: "could not read the nat table",
+		},
+		{
+			// The case the guard above is actually FOR, and the one it used to
+			// miss: iptables is present, runs, and refuses. Probe.Run is
+			// CombinedOutput, so the "you must be root" line lands in the output
+			// and a guard that also demanded an EMPTY output fell straight
+			// through to "this host has no sandbox MASQUERADE" — a healthy
+			// gateway told its egress NAT was gone.
+			name:    "iptables refusing an unprivileged doctor is not a missing rule",
+			env:     "SPARKBOX_EDGE_REDIRECT=0\nSPARKBOX_EDGE_IP=10.66.0.1\n",
+			chains:  []string{"iptables-denied"},
+			want:    Warn,
+			mention: "could not read the nat table",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fakeProbe{files: map[string]string{}, runs: map[string]runResult{}}
+			if tt.env != "" {
+				p.files[envPath] = tt.env
+			}
+			postrouting := "Chain POSTROUTING (policy ACCEPT)\n" + masq
+			iptables := true
+			for _, c := range tt.chains {
+				switch c {
+				case "no-masquerade":
+					// iptables answers, the rule simply is not there.
+					postrouting = "Chain POSTROUTING (policy ACCEPT)\n"
+				case "no-iptables":
+					iptables = false
+				case "iptables-denied":
+					// Verbatim from iptables 1.8.10 (nf_tables) on Ubuntu 24.04,
+					// exit 4, on stderr — which CombinedOutput folds into the
+					// output the check reads.
+					iptables = false
+					p.runs[natList("POSTROUTING")] = runResult{
+						out: "iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Permission denied (you must be root)",
+						err: os.ErrPermission,
+					}
+				case tnetChain:
+					p.runs[natList(c)] = runResult{out: tnetRules}
+				default:
+					p.runs[natList(c)] = runResult{out: "Chain " + c + " (1 references)"}
+				}
+			}
+			if iptables {
+				p.runs[natList("POSTROUTING")] = runResult{out: postrouting}
+			}
+			got := checkNAT(p, cfg)
+			if got.Status != tt.want {
+				t.Fatalf("status = %v, want %v (detail %q)", got.Status, tt.want, got.Detail)
+			}
+			if !strings.Contains(got.Detail, tt.mention) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tt.mention)
+			}
+			if got.Status != Pass && got.Hint == "" {
+				t.Error("non-pass result should carry a remediation hint")
+			}
+			// The old check's failure mode was not just the wrong verdict, it
+			// was naming a chain this host will never have. Nothing may demand
+			// SPARKBOX_EDGE of a host whose mode does not build it.
+			if tt.env != "" && strings.Contains(tt.env, "SPARKBOX_EDGE_REDIRECT=0") &&
+				strings.Contains(got.Hint, "SPARKBOX_EDGE chain not found") {
+				t.Errorf("tunnel-mode host must not be told to install %s: %q", edgeChain, got.Hint)
+			}
+		})
+	}
+}
+
+// TestEgressControlReportsAGatewayWithNone is the F2 headline: a gateway
+// without sluice (or with sluice but guests on public DNS) reaches the whole
+// internet, and until now nothing anywhere said so.
+func TestEgressControlReportsAGatewayWithNone(t *testing.T) {
+	const sock = "/run/sluice.sock"
+	// A running gateway's argv, NUL-separated exactly as /proc/<pid>/cmdline is.
+	cmdline := func(args ...string) string { return strings.Join(args, "\x00") + "\x00" }
+
+	tests := []struct {
+		name    string
+		cmd     string // /proc/<pid>/cmdline; "" means the service is not running
+		cfg     Config
+		sockets []string
+		want    Status
+		mention string
+	}{
+		{
+			name:    "a fresh gateway has no egress control and says so",
+			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--driver", "firecracker"),
+			want:    Warn,
+			mention: "no egress control",
+		},
+		{
+			name:    "sluice wired both ways and answering",
+			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--sluice-socket", sock, "--guest-dns", "172.30.0.53"),
+			sockets: []string{sock},
+			want:    Pass,
+			mention: "172.30.0.53",
+		},
+		{
+			// The half that is easiest to get wrong: sluice is running and
+			// enforcing nothing, because guests never ask it anything.
+			name:    "a socket with guests on public DNS is not egress control",
+			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--sluice-socket", sock),
+			sockets: []string{sock},
+			want:    Warn,
+			mention: "bypass the allowlist",
+		},
+		{
+			name:    "guest-dns without a socket pushes no policy",
+			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--guest-dns", "gateway"),
+			want:    Warn,
+			mention: "no --sluice-socket",
+		},
+		{
+			// Configured, but nothing is listening: every policy push fails and
+			// the gateway carries on regardless.
+			name:    "a socket that does not exist means sluice is not running",
+			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--sluice-socket", sock, "--guest-dns", "172.30.0.53"),
+			want:    Warn,
+			mention: "not running",
+		},
+		{
+			// --flag=value is as valid on a command line as "--flag value".
+			name:    "the =value form is understood",
+			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--sluice-socket="+sock, "--guest-dns=172.30.0.53"),
+			sockets: []string{sock},
+			want:    Pass,
+			mention: sock,
+		},
+		{
+			// No live process to ask: fall back to this config, and label the
+			// answer as a claim about the next start rather than a fact.
+			name:    "with no running service the config is reported as configured",
+			cfg:     Config{SluiceSocket: sock, GuestDNS: "172.30.0.53"},
+			sockets: []string{sock},
+			want:    Pass,
+			mention: "service not running",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fakeProbe{files: map[string]string{}, runs: map[string]runResult{}}
+			for _, s := range tt.sockets {
+				p.files[s] = ""
+			}
+			if tt.cmd != "" {
+				p.runs[showCmd] = runResult{out: unitState("active", "running", "0", "99", "9000")}
+				p.files["/proc/99/cmdline"] = tt.cmd
+			}
+			got := checkEgress(p, tt.cfg)
+			if got.Status != tt.want {
+				t.Fatalf("status = %v, want %v (detail %q)", got.Status, tt.want, got.Detail)
+			}
+			if !strings.Contains(got.Detail, tt.mention) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tt.mention)
+			}
+			if got.Status != Pass && got.Hint == "" {
+				t.Error("non-pass result should carry a remediation hint")
 			}
 		})
 	}

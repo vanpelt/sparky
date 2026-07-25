@@ -251,7 +251,7 @@ Provide deliberately small subcommands:
 ./macos/poc.sh stop
 ./macos/poc.sh start
 ./macos/poc.sh smoke
-./macos/poc.sh destroy --yes
+./macos/poc.sh destroy [--machine] [--image] [--kernel] [--all] --yes
 ```
 
 Behavior:
@@ -281,9 +281,19 @@ sparkbox setup \
   Sparkbox service state, and current L2 sandbox count.
 - `start` boots the machine through `container machine run` and waits for
   `sparkbox.service` readiness.
-- `destroy` is the only destructive operation and requires `--yes`. It removes
-  the named machine and local generated image/kernel output but never prunes
-  unrelated Apple Container data.
+- `destroy` is the only destructive operation and requires `--yes`. It never
+  prunes unrelated Apple Container data, and it tears down **by cost tier**
+  rather than all at once: `--machine` (the default — seconds to recreate),
+  `--image` (a multi-minute container build), `--kernel` (an 8-CPU
+  in-container Linux compile, reproducing bytes that are already pinned and
+  checksummed), or `--all` for every tier plus `macos/out`'s inputs and
+  `results/` evidence. A bare `destroy --yes` deletes only the machine.
+- `provision` switches a machine between standalone gateway and fleet node
+  **in place** when the machine carries no sandboxes — the change is one line in
+  `sparkbox.env`, which `setup` will not rewrite on its own, so `poc.sh` backs
+  the file up and lets `setup` render it fresh. It still refuses when sandboxes
+  are present, or when it cannot prove there are none, because a gateway's users
+  DB, routes and fleet secrets are meaningless on a node.
 
 Defaults for this 64 GiB M4 Max test host are 8 vCPUs and 24 GiB of outer
 memory. Both remain environment-variable overrides.

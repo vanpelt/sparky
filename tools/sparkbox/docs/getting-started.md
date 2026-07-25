@@ -185,7 +185,78 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   newcomers register with `ssh signup@<host>`.
 - **Health + logs.** `sparkbox doctor` any time; `journalctl -u sparkbox -f`.
 - **Re-provision / upgrade.** Drop in a newer `sparkbox` binary and re-run
-  `sparkbox setup` — idempotent, and `--release <tag>` pins the artifacts.
+  `sparkbox setup` — idempotent, and `--release <tag>` pins the artifacts. If
+  you are rebuilding the *host* rather than upgrading it in place, read the next
+  section first: the certificate cache is the one thing you cannot re-create on
+  demand.
+
+### Rebuilding a host: keep the certificate cache
+
+Everything on a sparkbox host is reproducible from the release except its
+certificates. Under `--tls-provider cloudflare` the edge holds one Let's Encrypt
+wildcard covering `<domain>` and `*.<domain>`, and Let's Encrypt caps
+**duplicate certificates at five per week** — the same names, over and over, is
+exactly what a rebuild asks for. The wildcard is what keeps sandbox churn off
+the rate limits; it is also what makes *host* churn hit them, because every
+rebuild requests that identical pair.
+
+Running out is not a graceful degradation. `sparkbox serve` obtains the
+certificate **synchronously at startup** and exits if it cannot, so the sixth
+rebuild in a rolling week takes down sandbox routes, the console, the REST API
+and browser terminals together, until the window rolls forward — up to seven
+days. There is no staging-CA flag to rehearse against today, so the cache is the
+whole mitigation.
+
+The cache is a plain directory: `<state-dir>/certmagic` (or
+`<state-dir>/autocert` under `--tls-provider autocert`). It also holds the ACME
+account key, so preserving it keeps the account too. Save it before you wipe
+anything, and restore it before the gateway starts:
+
+```sh
+# BEFORE the rebuild — and keep a copy off the host
+sudo systemctl stop sparkbox
+sudo tar czf ~/sparkbox-certs-$(date +%Y%m%d).tgz \
+  -C /srv/sparkbox/data/state certmagic
+
+# ... reimage / reinstall / re-run `sparkbox setup` ...
+
+# AFTER: restore into the state dir the unit actually uses, then start
+sudo systemctl stop sparkbox
+sudo tar xzf ~/sparkbox-certs-<date>.tgz -C /srv/sparkbox/data/state
+sudo chown -R root:root /srv/sparkbox/data/state/certmagic
+sudo chmod 700 /srv/sparkbox/data/state/certmagic
+sudo systemctl start sparkbox
+journalctl -u sparkbox -n 30 | grep 'tls certificates managed'
+```
+
+A restored cache is used as-is: the certificate is read off disk, found still
+valid, and nothing is requested. The success line is
+`tls certificates managed names="[<domain> *.<domain>]"` with no ACME order
+logged above it — if you see an order, the cache did not land where the gateway
+looks.
+
+Two things to get right:
+
+- **The state dir.** Restore into the path the *installed unit* names, not the
+  one you remember: `systemctl cat sparkbox | grep -- --state-dir`. A host
+  provisioned before the `data/` layout keeps its cache at
+  `/srv/sparkbox/state/certmagic`. Restoring one directory over from where the
+  gateway looks fails silently — it just issues a new certificate.
+- **Permissions.** The gateway runs as root, so it can read the cache whatever
+  you restore it as; the `chown`/`chmod` above are there because the directory
+  holds the certificate's private key and the ACME account key, and an
+  unprivileged `tar x` (or a copy through a shared directory) can leave both
+  readable by everyone on the host.
+
+`sparkbox setup` refuses outright to point the gateway at a different state
+directory while a live one (cert cache included) sits elsewhere on the host. The
+only way past it is `--adopt-legacy`, which means "use the directory that is
+already there" — there is no flag that provisions onto the new path anyway; to
+do that you migrate by hand, and the refusal prints the exact commands. That
+guard only covers the case where `setup` itself moves the layout out from under
+a live cache — reimaging the box, deleting the VM, or building a fresh instance
+is entirely outside its reach, which is why the backup above is the procedure
+and the guard is only a backstop.
 
 ## Local dev (no KVM)
 

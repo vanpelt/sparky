@@ -368,8 +368,68 @@ TOKEN=$(ssh -p 2222 ctl@<host> session-token | tr -d '\r\n')
 curl -H "Authorization: Bearer $TOKEN" https://api.catnip.sh/v1/sandboxes
 ```
 
+## 7. Rebuilding this box (keep `/srv/sparkbox/state`)
+
+Everything above is reproducible from pinned inputs. `/srv/sparkbox/state` is
+not, and on this box it is where three unrecoverable things live. Save it before
+any rebuild, reimage or disk swap:
+
+```sh
+sudo systemctl stop sparkbox
+sudo tar czf ~/sparkbox-state-$(date +%Y%m%d).tgz -C /srv/sparkbox state
+# keep a copy OFF the box
+```
+
+Note the path: this box predates `sparkbox setup`'s `data/` layout, so its state
+dir is the flat `/srv/sparkbox/state` (`SPARKBOX_STATE_DIR` in §4), not
+`/srv/sparkbox/data/state`. Restore into whichever one the running unit names.
+
+What is in there, in order of how badly you want it back:
+
+1. **`state/certmagic/`** — the Let's Encrypt wildcard for `catnip.sh` +
+   `*.catnip.sh` and the ACME account key. This box issues it over DNS-01
+   (§5c), and Let's Encrypt allows **five duplicate certificates per week**. The
+   wildcard is what keeps sandbox churn off the rate limits; it is also what
+   makes *box* churn hit them, because every rebuild asks for the same two
+   names. And `serve` obtains the certificate synchronously at startup and exits
+   if it cannot, so the sixth rebuild in a rolling week does not degrade — it
+   takes the whole edge down (sandbox routes, `api.`, `console.`, terminals,
+   and the tunnel origin behind them) for up to seven days.
+2. **`state/gateway_upstream_key.pem`** — the key baked into every rootfs
+   template in §2. Lose it and the freshly generated one is not the one the
+   templates trust, so `ssh <name>@` into every existing and every newly cloned
+   sandbox fails until you re-derive the `.pub` and rebuild the templates.
+3. **`state/gateway_host_key.pem`**, **`state/oidc_signing_key.pem`** and
+   **`state/sparkbox.db`** — the identity fleet nodes pinned on first contact,
+   the key that signs guest id tokens *and* derives both the session-token MAC
+   and the KEK that user secrets are sealed under, and the database holding
+   users, keyrings, routes, tags, secrets, schedules and the node roster. A new
+   host key makes every enrolled node refuse the gateway it already trusted; a
+   new OIDC key invalidates every outstanding session token and makes the sealed
+   secrets in the DB undecryptable even though the rows survive.
+
+Restore the archive, put ownership back (root reads it regardless — the point is
+that the directory holds five private keys and an unprivileged `tar x` can leave
+them world-readable), and start:
+
+```sh
+sudo systemctl stop sparkbox
+sudo tar xzf ~/sparkbox-state-<date>.tgz -C /srv/sparkbox
+sudo chown -R root:root /srv/sparkbox/state
+sudo chmod 700 /srv/sparkbox/state
+sudo systemctl start sparkbox
+journalctl -u sparkbox -n 30 | grep 'tls certificates managed'
+```
+
+`tls certificates managed names="[catnip.sh *.catnip.sh]"` with no ACME order
+logged above it means the cache was found and nothing was requested. An order
+means the restore did not land where the gateway looks.
+
 ## Gotchas
 
+- **Rebuilding the box costs a certificate if you do not carry
+  `state/certmagic/` across.** Five duplicates per week, and the edge does not
+  come up without one — see §7.
 - **Guest apps must be *enabled*, not just started, to survive a reboot.** A
   host reboot cold-boots each sandbox from its persisted disk (the in-memory
   snapshot is gone), so a manually-`start`ed server won't come back. `systemctl

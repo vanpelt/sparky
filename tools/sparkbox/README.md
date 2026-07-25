@@ -227,7 +227,11 @@ host and add `--proxy-tls`. Two providers:
   auto-renews it (via [CertMagic](https://github.com/caddyserver/certmagic) +
   the Cloudflare libdns provider). One cert covers every sandbox subdomain, so
   no per-name issuance and no brush with Let's Encrypt rate limits regardless of
-  how many ephemeral sandboxes churn. Needs a scoped `Zone.DNS:Edit` token in
+  how many ephemeral sandboxes churn — but *rebuilding the host* does brush one:
+  the wildcard is the same certificate every time, and duplicates are capped at
+  five per week, so back up `<state-dir>/certmagic` before you wipe anything
+  ([getting-started](docs/getting-started.md#rebuilding-a-host-keep-the-certificate-cache)).
+  Needs a scoped `Zone.DNS:Edit` token in
   `CLOUDFLARE_API_TOKEN`; no inbound port 80/443 needed for issuance (DNS-01).
   That one pair is everything — browser terminals live at
   `<name>-xterm.hivemind.tools`, a single label, so they are covered by the same
@@ -302,6 +306,54 @@ FAIL carrying the tail of its journal, not a PASS. `doctor` runs the same
 battery at any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
 fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
+
+### Adding a second machine
+
+A second host joins an existing gateway as a **node**. Provision the gateway
+first, exactly as above, then run `setup` on the new machine with `--gateway`:
+
+```sh
+sudo sparkbox setup --gateway <gateway-host>:2222 --node-name laptop
+```
+
+`--gateway` is the whole difference: instead of standing up a gateway of its
+own, the machine mints a node key, dials *out* to that address (so a node behind
+NAT needs no inbound anything), enrolls, and parks as **pending**. Nothing is
+trusted yet. It logs its own identity at startup and then the exact command that
+unblocks it:
+
+```
+node identity  node=laptop fingerprint=SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+this node is enrolled and waiting for approval  node=laptop gateway=10.66.0.1:2222
+  ssh ctl@catnip.sh node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+  — after checking that fingerprint against the one this machine printed at startup.
+```
+
+On the gateway, as an operator, read the roster and approve — by **fingerprint**,
+never by name, because a node chooses its own name and only the key is evidence:
+
+```sh
+ssh ctl@<gateway> node ls        # name, status, presence, arch, sandbox count, fingerprint
+ssh ctl@<gateway> node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+ssh ctl@<gateway> node rm laptop # drop one; refused while it still holds sandboxes
+```
+
+Compare the fingerprint against the one the node printed before you say yes —
+that out-of-band comparison is the entire trust decision. The node retries on
+its own backoff (~30s), so approval needs no restart: it reconnects, logs
+`linked to the gateway`, and starts heartbeating. The same roster is
+`GET /v1/nodes` over the REST API.
+
+> **What a fleet is at v0.4.0.** What shipped is the **link layer** — enrollment,
+> trust, roster, heartbeat, capacity and architecture reporting, all surviving a
+> restart on either side. **No sandbox lands on a remote node yet.** `ssh
+> new@<gateway>` always creates on the gateway itself: `Fleet.Create` has no
+> placement step and there is no `--node` override. Remote lifecycle is the next
+> milestone, and the data plane that makes a remote sandbox indistinguishable
+> from a local one is the one after. So a fleet today is a trusted roster of
+> machines, not a scheduler — worth knowing before you add a node expecting your
+> laptop to start running sandboxes. The blueprint for both milestones is
+> [`docs/multi-node-implementation.md`](docs/multi-node-implementation.md).
 
 ## Real microVMs
 
@@ -384,4 +436,10 @@ to flatten a prebuilt one instead).
       of being left wedged against a VM that stopped answering
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
 - [ ] KSM host tuning + cgroup cpu.max; jailer, I/O limits; net isolation
-- [ ] Multi-host: capacity reporting + best-fit placement (flyd pattern)
+- [x] Fleet link layer: a second machine joins with `setup --gateway host:port`,
+      enrolls by its own key, is approved by fingerprint (`ctl node approve`),
+      and reports arch + capacity over a heartbeat — see *Adding a second
+      machine*. The roster is real; the scheduler is not (next item)
+- [ ] Multi-host placement: remote create/pause/resume and best-fit scheduling
+      (flyd pattern). Until this lands every sandbox runs on the gateway,
+      whatever the roster says

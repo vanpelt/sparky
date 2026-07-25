@@ -98,6 +98,20 @@ HAVE_A1=0
 SETUP_HELP=$("$SPARKBOX_BIN" setup -h 2>&1)
 case "$SETUP_HELP" in *-bin-path*) HAVE_A1=1 ;; esac
 
+# The same trick for A2 (addressable binds + the port preflight). --api-addr is
+# the gate: it is the flag half of the templated addresses, and the API port is
+# what the F7 negative fixture below has to occupy. Before A2 the unit hardcoded
+# 127.0.0.1:8080; after it, the default is 127.0.0.1:8079, and squatting the
+# wrong one would make that fixture silently prove nothing — the same class of
+# mistake as F7 itself.
+HAVE_A2=0
+case "$SETUP_HELP" in *-api-addr*) HAVE_A2=1 ;; esac
+if [ "$HAVE_A2" = 1 ]; then
+  API_PORT=${API_PORT:-8079}
+else
+  API_PORT=${API_PORT:-8080}
+fi
+
 # ---------------------------------------------------------------------------
 # dry phase
 # ---------------------------------------------------------------------------
@@ -138,6 +152,16 @@ dry_phase() {
       "plan names the binary-install step (F0)"
   else
     skip "binary-install step not in the plan — A1 (--bin-path / stepInstallBinary) has not landed on this ref. This is F0: setup will provision a host whose unit ExecStarts a binary nothing ever installed."
+  fi
+
+  # A2's preflight is REPORTED in a dry run, never attempted: opening a socket
+  # is a mutation like any other, and on a live host probing the gateway's own
+  # addresses would report a wall of phantom conflicts.
+  if [ "$HAVE_A2" = 1 ]; then
+    assert_grep "$out" 'port-preflight .*would probe' "plan reports the port preflight without running it"
+    assert_grep "$out" "127\\.0\\.0\\.1:$API_PORT" "the plan names the control-API address it would probe"
+  else
+    skip "no port preflight in the plan — A2 has not landed on this ref. This is F1: a busy port is only discovered when the service fails to bind at boot."
   fi
 
   assert_grep "$out" 'dry run — nothing was changed\.' "dry run announces it changed nothing"
@@ -442,31 +466,55 @@ full_phase() {
 
   # ------------------------------------------------------- F7 negative fixture
   # Break it on purpose and confirm the probe SAYS SO. This is the assertion
-  # that would have failed on 2026-07-25: with :8080 occupied the gateway
+  # that would have failed on 2026-07-25: with the API port occupied the gateway
   # crash-loops, and both `setup` and `doctor` reported PASS and exited 0.
-  say "F7 negative fixture — occupy the API port and expect a crash loop"
-  # Order matters: the gateway currently HOLDS :8080, so the squatter has to
-  # take the port while the service is stopped. (A restart-then-squat sequence
-  # just makes python fail to bind, and the fixture silently proves nothing —
-  # which is the same class of mistake as F7 itself.)
+  say "F7 negative fixture — occupy the API port (:$API_PORT) and expect a crash loop"
+  # Order matters: the gateway currently HOLDS the API port, so the squatter has
+  # to take it while the service is stopped. (A restart-then-squat sequence just
+  # makes python fail to bind, and the fixture silently proves nothing — which
+  # is the same class of mistake as F7 itself.)
   systemctl stop sparkbox.service 2>/dev/null
-  python3 -m http.server 8080 --bind 127.0.0.1 >"$WORK/squat.log" 2>&1 &
+  python3 -m http.server "$API_PORT" --bind 127.0.0.1 >"$WORK/squat.log" 2>&1 &
   local squat=$!
   for _ in $(seq 1 30); do
-    curl -fsS -o /dev/null "http://127.0.0.1:8080/" 2>/dev/null && break
+    curl -fsS -o /dev/null "http://127.0.0.1:$API_PORT/" 2>/dev/null && break
     sleep 0.2
   done
-  if ! curl -fsS -o /dev/null "http://127.0.0.1:8080/" 2>/dev/null; then
-    bad "could not occupy :8080 — the F7 fixture proves nothing"
+  if ! curl -fsS -o /dev/null "http://127.0.0.1:$API_PORT/" 2>/dev/null; then
+    bad "could not occupy :$API_PORT — the F7 fixture proves nothing"
     cat "$WORK/squat.log"
     systemctl start sparkbox.service 2>/dev/null
     return
   fi
-  info ":8080 is occupied by a squatter; starting the gateway into the conflict"
+
+  # ------------------------------------------------------- A2 port preflight --
+  # With a stranger on the API port and our service stopped, `setup` must refuse
+  # BEFORE it writes anything, naming the address and the process — rather than
+  # completing and leaving the gateway to discover the conflict at boot.
+  if [ "$HAVE_A2" = 1 ]; then
+    say "A2 — setup refuses to provision into a port conflict"
+    "$SPARKBOX_BIN" "${args[@]}" >"$WORK/setup-busy.txt" 2>&1
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      ok "setup exits non-zero when :$API_PORT is taken (exit $rc)"
+    else
+      bad "A2 REGRESSION: setup exited 0 with :$API_PORT held by another process"
+    fi
+    assert_grep "$WORK/setup-busy.txt" "127\.0\.0\.1:$API_PORT" "the failure names the busy address"
+    if grep -Eq 'python|pid' "$WORK/setup-busy.txt"; then
+      ok "the failure names the owning process"
+    else
+      skip "setup did not name the owning process — \`ss\`/\`lsof\` may not be installed in this container"
+    fi
+  else
+    skip "F1 IS LIVE ON THIS REF: setup has no --api-addr and no port preflight, so a busy port is only discovered at first boot. A2 is what changes this."
+  fi
+
+  info ":$API_PORT is occupied by a squatter; starting the gateway into the conflict"
   systemctl start sparkbox.service 2>/dev/null
   verdict=$(liveness_verdict)
   if [ "$verdict" = crashloop ]; then
-    ok "probe correctly reports a crash loop when :8080 is occupied"
+    ok "probe correctly reports a crash loop when :$API_PORT is occupied"
     # Captured, not piped into grep -q — see the SETUP_HELP note above.
     local jrnl; jrnl=$(journalctl -u sparkbox.service -n 20 --no-pager 2>/dev/null)
     case "$jrnl" in
@@ -474,7 +522,7 @@ full_phase() {
       *) info "journal did not name the port conflict (root may be needed to read it)" ;;
     esac
   else
-    bad "probe reported '$verdict' over an occupied :8080 — it cannot detect a crash loop"
+    bad "probe reported '$verdict' over an occupied :$API_PORT — it cannot detect a crash loop"
     dump_journal
   fi
 

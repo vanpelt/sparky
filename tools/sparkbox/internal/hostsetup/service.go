@@ -11,6 +11,12 @@ import (
 // enable-services step read this.
 const serviceUnit = "sparkbox.service"
 
+// netUnit is the boot unit that builds the host packet filter (it runs
+// deploy/sparkbox-net.sh). Named here for the same reason as serviceUnit: the
+// steps that install it, the step that restarts it and the plan line that
+// promises both have to agree on one string.
+const netUnit = "sparkbox-net.service"
+
 // serviceShowProps is the property list the liveness probe asks systemd for.
 //
 // ActiveState alone is a *state* sample, not liveness: the unit sets
