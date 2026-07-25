@@ -151,6 +151,19 @@ the only real change is one line in `sparkbox.env`. Defensible as a guard (a
 gateway's users DB and secrets are meaningless on a node) but it should say why
 and allow the in-place path when the machine holds no state.
 
+## F3b — `destroy` also deletes the expensive, reproducible kernel
+
+`poc.sh destroy --yes` removes the machine, the local image **and all of
+`macos/out`** — which is where the compiled outer kernel lives. The kernel is
+the single most expensive artifact in the whole flow and is byte-reproducible
+from pinned, checksummed inputs, so throwing it away to change a machine's role
+is pure waste. We sidestepped it by calling `container machine delete` directly
+and keeping `out/`.
+
+Teardown granularity should match cost: machine (cheap, seconds) / image
+(minutes) / kernel (very expensive) are three different decisions, not one
+`--yes`.
+
 ## F4 — legacy layout vs `setup` layout diverge silently
 
 The DGX predates `sparkbox setup`: flat
@@ -259,6 +272,51 @@ chain not found` on every run, and the suggested remedy ("rules install with
 Onboarding a second machine means reading `docs/multi-node-implementation.md`, a
 1000-line implementation blueprint, to discover
 `sparkbox setup --gateway host:port --node-name x`.
+
+---
+
+---
+
+# Part 3 — what the fleet actually does at v0.4.0
+
+Verified live: DGX `sparky` as gateway, the laptop's nested machine as node
+`laptop`, linked over the tailnet at `10.66.0.1:2222`.
+
+**Works end to end.** The node dials out, enrolls, and parks as `pending`. Its
+own console prints the fingerprint *and the exact approval command*:
+
+```
+this node is enrolled and waiting for approval  node=laptop gateway=10.66.0.1:2222
+  ssh ctl@catnip.sh node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+  — after checking that fingerprint against the one this machine printed at startup.
+```
+
+That fingerprint matched `node ls` exactly, `node approve` took it, and the node
+reconnected on its own backoff (~30s) to `linked to the gateway … heartbeat_s=15`.
+The roster then shows both machines with arch and sandbox counts. The whole
+ceremony is genuinely well-built — clear, self-documenting, no guesswork. It is
+the nicest part of the onboarding story and should be the model for the rest.
+
+**Does not work yet, by design.** No sandbox can land on a remote node.
+`Fleet.Create` (fleet.go:503) hardcodes `f.local`:
+
+```go
+return f.placed(f.local, name, owner, image, func() (*host.Sandbox, error) {
+    return f.local.Create(ctx, name, owner, image, vcpus, memMB)
+})
+```
+
+The only call passing a chosen node is Fork (fleet.go:803). There is no
+scheduler and no `--node` override — `docs/multi-node-implementation.md:1051`
+marks explicit placement as **M2**, and line 2039 states plainly that "at M1 the
+Fleet still serves only local rows". A new sandbox therefore always lands on the
+gateway; confirmed — `fedtest` went to `sparky` while `laptop` sat at 0.
+
+So what shipped is the **link layer** (M0+M1): enrollment, trust, roster,
+heartbeat, capacity and arch reporting. Remote lifecycle is M2 and the data
+plane that makes a remote sandbox indistinguishable is M3. Worth stating clearly
+in the release notes, because "federated nodes" reads as "sandboxes run on my
+laptop now", and that is the next two milestones, not this one.
 
 ---
 
