@@ -71,6 +71,41 @@ egress control, and nothing in `setup` says so.
 
 # Part 2 — friction where the binary *is* the entry point
 
+## F0 — `setup` never installs the sparkbox binary
+
+The headline finding. `internal/hostsetup` has no step, flag or constant for
+installing `sparkbox` itself — it downloads `vmlinux`, `firecracker` and the
+rootfs, then writes a unit whose `ExecStart` is a hardcoded
+`/usr/local/bin/sparkbox` that nothing ever put there.
+
+Follow the README quick-start literally:
+
+```sh
+curl -fsSLo sparkbox …/sparkbox-linux-$arch
+chmod +x sparkbox && sudo ./sparkbox setup --release v0.4.0
+```
+
+…and the binary lives in `$PWD`, while the unit points at
+`/usr/local/bin/sparkbox`. On a genuinely fresh host that file does not exist,
+the service cannot start — and because of **F7** `setup` still prints
+`[PASS] sparkbox service active` and `== sparkbox is provisioned ==`.
+
+On the DGX it failed the other way, which is worse than a crash: a *stale*
+`/usr/local/bin/sparkbox` from a previous release was already there, so the
+service came up happily running **v0.3.0** after a successful "v0.4.0" setup.
+Everything looked healthy. The tell was `ctl node ls` → `unknown command
+"node"`, because v0.3.0 predates the fleet work — i.e. the freshly "installed"
+v0.4.0 gateway silently had none of the features we cut the release for.
+
+**Fix:** `setup` should `os.Executable()` itself into `/usr/local/bin/sparkbox`
+(atomically, via a temp file + rename) unless the destination is already the
+identical build, and `doctor` should compare the running service's version
+against the binary's. This single change is also what makes the macOS story
+possible — the darwin binary would install the linux binary into the machine it
+provisions.
+
+
+
 ## F1 — `setup` can't bind the edge to a specific address
 
 `deploy/units/sparkbox-standalone.service.tmpl` +
@@ -229,8 +264,10 @@ Onboarding a second machine means reading `docs/multi-node-implementation.md`, a
 
 # Work ranking
 
+0. **F0** — `setup` must install the binary it is running. Without this the
+   "download one binary and run setup" story is not true on any host.
 0. **F7** — `setup` must not print "provisioned" over a crash-looping service.
-   Found the hard way; everything else is cosmetic next to this.
+   F0 and F7 compound: the first breaks the install, the second hides it.
 1. **Ship `sparkbox-darwin-arm64`** — nothing else in Part 1 can start without it.
 2. **Ship the pinned macOS outer kernel as a release artifact** — kills the
    from-source kernel build on the user's laptop.
