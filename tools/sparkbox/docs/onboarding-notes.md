@@ -148,12 +148,75 @@ a half-migrated host with two data roots and no error anywhere.
 (unit's `--state-dir` equals `cfg.StateDir`, etc.), not merely that something
 exists. Then either adopt a legacy layout or refuse with instructions.
 
+## F4b — `setup` adds a second swapfile beside the distro's
+
+Ubuntu already had a 16G `/swap.img`; `stepSwap` created its own 16G
+`/swapfile` next to it and added a second fstab line:
+
+```
+NAME      TYPE SIZE USED PRIO
+/swap.img file  16G   1M   -2
+/swapfile file  16G   0B   -3
+```
+
+32G of swap on a host that asked for 16. The probe should look for *any* active
+swap of sufficient size, not for its own path.
+
 ## F5 — certmagic is the real teardown hazard
 
 Wiping a gateway drops `state/certmagic/`, and `*.catnip.sh` is DNS-01 issued
 under Let's Encrypt's 5-duplicate-certs-per-week cap. Nothing warns you.
 Preserving `state/certmagic/` across a rebuild is cheap and should be the
 documented default.
+
+## F7 — `setup` reported PASS on a gateway in a permanent crash loop
+
+The most serious finding of the rebuild. `setup` finished with
+
+```
+  [PASS] sparkbox service         active
+  13 passed, 2 warnings, 0 failed
+== sparkbox is provisioned ==
+```
+
+while the gateway was in fact restarting every ~2 seconds:
+
+```
+level=INFO msg="sparkbox up" … api=127.0.0.1:8080 …
+sparkbox: listen tcp 127.0.0.1:8080: bind: address already in use
+```
+
+The unit sets `Restart=always` + `StartLimitIntervalSec=0` (deliberately — see
+F1: the gateway crash-loops until `:22`/`:2222` is free), so
+`systemctl is-active` returns `active` at essentially any sampled instant of a
+crash loop. The check `checks.go` performs is exactly that `is-active`.
+
+A provisioning tool that prints "provisioned" over a dead service is worse than
+one that fails, because the operator walks away.
+
+**Fix:** the service check must prove *liveness*, not state — poll the API
+listener, or compare `NRestarts` before/after a short settle window, or read the
+unit's `ExecMainStartTimestamp` twice. Cheap and decisive.
+
+## F8 — `doctor` warns forever on a correctly-configured tunnel-mode host
+
+`checks.go:333` looks for the `SPARKBOX_EDGE` nat chain. But
+`deploy/sparkbox-net.sh` only builds that chain in uplink-REDIRECT mode
+(`SPARKBOX_EDGE_REDIRECT=1`); in dedicated-edge-IP / tunnel mode — the mode the
+DGX runs, and the one `docs/dedicated-edge-ip-cutover.md` recommends — it builds
+**`SPARKBOX_TNET`** instead, with DNAT rules rather than REDIRECT:
+
+```
+Chain SPARKBOX_TNET (1 references)
+RETURN  tcp dpt:2222
+DNAT    tcp dpts:1024:65535 to:10.66.0.1:443
+DNAT    tcp dpt:22 to:10.66.0.1:2222
+```
+
+So a perfectly healthy host reports `[WARN] sandbox NAT rules  SPARKBOX_EDGE
+chain not found` on every run, and the suggested remedy ("rules install with
+`sparkbox setup`") is a no-op. The check should branch on `SPARKBOX_EDGE_IP` /
+`SPARKBOX_EDGE_REDIRECT` and look for whichever chain that mode builds.
 
 ## F6 — the README doesn't know about fleets
 
@@ -166,6 +229,8 @@ Onboarding a second machine means reading `docs/multi-node-implementation.md`, a
 
 # Work ranking
 
+0. **F7** — `setup` must not print "provisioned" over a crash-looping service.
+   Found the hard way; everything else is cosmetic next to this.
 1. **Ship `sparkbox-darwin-arm64`** — nothing else in Part 1 can start without it.
 2. **Ship the pinned macOS outer kernel as a release artifact** — kills the
    from-source kernel build on the user's laptop.
