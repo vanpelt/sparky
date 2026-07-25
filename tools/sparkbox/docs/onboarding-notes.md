@@ -85,8 +85,17 @@ It *is* reachable, but only by accident: `$OVERCOMMIT_FLAGS`, `$TLS_FLAGS` and
 package lets a repeated flag win last. So `--ssh-addr 10.66.0.1:2222` stuffed
 into `TLS_FLAGS` works — while reading like a mistake.
 
-**Fix:** template `SSHAddr`/`ProxyAddr` off real `setup` flags, or add an
-honestly-named `EXTRA_FLAGS` bundle.
+Worse, `--api-addr 127.0.0.1:8080` is hardcoded with **no** bundle after it that
+could override... except the same trailing bundles, by the same accident. And
+`:8080` is a genuinely bad default on a workstation-class host: on the DGX it is
+already held by an unrelated python process, so a fresh `setup` there produces a
+gateway whose REST API silently loses a port race at boot. The live host uses
+`:8079`.
+
+**Fix:** template `SSHAddr`/`ProxyAddr`/`APIAddr` off real `setup` flags
+(`--ssh-addr`, `--proxy-addr`, `--api-addr`), or add an honestly-named
+`EXTRA_FLAGS` bundle. Also probe the chosen ports during `setup` preflight and
+fail loudly rather than at first boot.
 
 ## F2 — whole subsystems have no `setup` flags
 
