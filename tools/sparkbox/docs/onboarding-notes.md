@@ -130,6 +130,24 @@ talking. It stays **opt-in**: turning egress filtering on changes what running
 sandboxes can reach, so the unfiltered default remains, and `doctor` plus the
 `setup` banner both say so in words.
 
+**Open: `--sluice` cannot yet reproduce the DGX's own sluice.** Found while
+redeploying for v0.4.1. That box does not let sluice bind the wildcard `:53` —
+the gateway's edge DNS responder is already there — so its resolver lives on a
+dedicated `172.30.0.53/32` dummy interface, and its hand-written unit carries
+two things `units/sluice.service.tmpl` does not:
+
+- an `ExecStartPre` that creates the `sluicedns` dummy link and puts the address
+  on it, without which the daemon binds an address that does not exist yet
+- `--allow-ip 172.30.0.53`, so a guest can reach the resolver it was pointed at
+
+Rendering the template over that unit would drop both, and the failure would
+surface at the next boot rather than in the run that caused it. So the v0.4.1
+redeploy passed `--guest-dns` and `--sluice-socket` (the gateway half, which
+`setup` gets right) and deliberately NOT `--sluice`, which leaves a
+hand-installed daemon alone by design. Closing it means templating the resolver
+address the same way the edge's `--edge-ip` already is — the two are the same
+problem, one component apart.
+
 Two things settled before shipping a prebuilt binary, because a wrong answer
 here is an asset that installs cleanly and fails to load on somebody's kernel:
 
