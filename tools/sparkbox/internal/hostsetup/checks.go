@@ -358,8 +358,8 @@ func checkAgentTools(p Probe, cfg Config) Result {
 		return warn("could not read "+path+" (debugfs not available?)",
 			"install e2fsprogs so this can be checked; the refresher needs it too")
 	}
-	stamp := strings.TrimSpace(firstLine(out))
-	if !strings.Contains(stamp, "claude=") {
+	stamp := stampLine(out)
+	if stamp == "" {
 		return warn("the rootfs template carries no agent CLIs — every sandbox created from it has no claude, codex or hivemind",
 			"run "+filepath.Join("/usr/local/sbin", refreshToolsScript)+" (or `sparkbox setup`, which installs and runs it) — "+
 				"this is also what a template replaced by a release upgrade looks like")

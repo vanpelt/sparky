@@ -23,9 +23,11 @@ func agentToolsEnv(t *testing.T, stamped bool) (*Env, *fakeRunner) {
 	if err := os.WriteFile(e.Cfg.rootfsPath(), []byte("ext4 bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stamp := ""
+	// Both fixtures carry debugfs's real stderr banner, which combined output
+	// puts in front of anything on stdout — see stampLine.
+	stamp := "debugfs 1.47.0 (5-Feb-2023)\n" + templateToolsStamp + ": File not found by ext2_lookup"
 	if stamped {
-		stamp = "claude=2.1.212 codex=rust-v0.145.0 hivemind=1.0.5 identity=2 agentenv=1"
+		stamp = "debugfs 1.47.0 (5-Feb-2023)\nclaude=2.1.212 codex=rust-v0.145.0 hivemind=1.0.5 identity=2 agentenv=1"
 	}
 	r := runnerWith(map[string]string{
 		"systemctl daemon-reload":                                         "",
@@ -208,8 +210,14 @@ func TestCheckAgentToolsReportsAnEmptyTemplate(t *testing.T) {
 
 	// A stamped one passes, and reports the versions it found rather than a bare
 	// "ok" — the stamp is the evidence.
+	//
+	// The fixture is what debugfs REALLY prints, banner included. That banner
+	// goes to stderr and both readers take combined output, so an implementation
+	// that read "the first line" would find "debugfs 1.47.0" here and warn about
+	// a template that is perfectly baked — which is how this was caught, on a
+	// live box, after the check was written.
 	stamp := "claude=2.1.212 codex=rust-v0.145.0 hivemind=1.0.5 identity=2 agentenv=1"
-	ok := newScriptedProbe(map[string][]string{cmd: {stamp}})
+	ok := newScriptedProbe(map[string][]string{cmd: {"debugfs 1.47.0 (5-Feb-2023)\n" + stamp}})
 	ok.fakeProbe = onDisk
 	if got := checkAgentTools(ok, cfg); got.Status != Pass || !strings.Contains(got.Detail, "claude=") {
 		t.Errorf("a stamped template should pass with its versions: %v %q", got.Status, got.Detail)

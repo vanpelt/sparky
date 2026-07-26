@@ -120,7 +120,28 @@ func templateHasTools(e *Env) bool {
 		return false
 	}
 	out, _ := e.run("debugfs", "-R", "cat "+templateToolsStamp, img)
-	return strings.Contains(string(out), "claude=")
+	return stampLine(string(out)) != ""
+}
+
+// stampLine picks the version tuple out of debugfs's output.
+//
+// Line-scanned rather than "the first line", because debugfs writes a version
+// banner ("debugfs 1.47.0 (5-Feb-2023)") to STDERR and both readers here take
+// COMBINED output — so the stamp is generally not the first line, and which
+// stream lands first is not even ordered. Reading line one would have made
+// doctor warn "this template carries no agent CLIs" about every correctly baked
+// template on the box, which is the same genus of wrong report this whole change
+// set out to remove.
+//
+// Returns "" when no line carries the tuple, which is both "the file is not
+// there" (debugfs says so on stderr and exits 0) and "debugfs could not run".
+func stampLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); strings.Contains(line, "claude=") {
+			return line
+		}
+	}
+	return ""
 }
 
 func stepAgentTools() Step {
