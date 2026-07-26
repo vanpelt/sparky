@@ -11,11 +11,21 @@ name: sparkbox release
 #   image      Depot builds tools/sparkbox/images/ for both platforms at once and
 #              pushes one multi-arch tag to GHCR
 #   artifacts  a matrix of NATIVE runners (ubuntu-24.04 / ubuntu-24.04-arm) each
-#              build the guest kernel + the sparkbox binary, pull their arch's
-#              image variant, flatten it into an ext4 template, and upload their
-#              assets to the draft. No emulation anywhere.
-#   publish    flip the draft live once BOTH arches landed, so a release is never
-#              half-populated — `setup` resolving "latest" can't catch a torn one
+#              build the guest kernel + the sparkbox binary + the sluice egress
+#              gateway, pull their arch's image variant, flatten it into an ext4
+#              template, and upload their assets to the draft. No emulation
+#              anywhere.
+#   macos-kernel
+#              compiles the macOS OUTER kernel (KVM-capable arm64 Linux, the
+#              thing Apple's `container machine` boots) natively on an arm64
+#              runner, so a Mac downloads it instead of spending an onboarding
+#              step compiling Linux
+#   darwin     cross-builds sparkbox-darwin-arm64 on a plain ubuntu runner and
+#              derives manifest-darwin-arm64.env from the linux arm64 one plus
+#              the outer kernel's checksum
+#   publish    flip the draft live once EVERY platform landed, so a release is
+#              never half-populated — `setup` resolving "latest" can't catch a
+#              torn one
 #
 # Triggers: push a `v*` tag to cut a real release; workflow_dispatch for ad-hoc
 # builds (these default to a `dev-<timestamp>` prerelease, which does NOT move
@@ -47,6 +57,10 @@ on:
         description: "Rootfs ext4 size in MB (per-sandbox disk ceiling; thin CoW). 25600 = 25 GiB (exe.dev parity)."
         required: false
         default: "25600"
+      kernel_repro_check:
+        description: "Build the macOS outer kernel twice at different -j and fail if the SHA-256s differ (always on for v* tags)"
+        type: boolean
+        default: false
 
 concurrency:
   group: sparkbox-release-${{ github.ref }}
@@ -58,6 +72,14 @@ permissions:
 env:
   FIRECRACKER_VERSION: v1.16.1
   KERNEL_VERSION: 6.1.155
+  # The macOS OUTER kernel, which is a different kernel from KERNEL_VERSION
+  # above: that one is the 6.1 guest kernel a firecracker microVM boots, this is
+  # the 6.14 KVM-capable Image Apple's `container machine` boots so that
+  # firecracker can exist inside it at all. Keeping the version here rather than
+  # only in build.sh is what lets the cache key bust on a bump without anyone
+  # editing the key.
+  MACOS_KERNEL_VERSION: 6.14.9
+  MACOS_KERNEL_ASSET: vmlinux-macos-arm64
   DEPOT_PROJECT: h0htfmz04l
   IMAGE_REPO: ghcr.io/${{ github.repository }}/universal
   ROOTFS_NAME: ${{ inputs.rootfs_name || 'universal' }}
@@ -107,13 +129,34 @@ jobs:
             exit 0
           fi
           cat > notes.md <<EOF
-          Artifacts for linux/amd64 and linux/arm64. Provision a host with:
+          Artifacts for linux/amd64, linux/arm64 and darwin/arm64. Provision a
+          Linux host with:
 
           \`\`\`sh
           arch=\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
           curl -fsSLo sparkbox https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE}/sparkbox-linux-\$arch
           chmod +x sparkbox && sudo ./sparkbox setup --release ${RELEASE}
           \`\`\`
+
+          \`sluice-linux-\$arch\` is the per-VM egress gateway (DNS allowlist +
+          eBPF meter/enforcer). Add \`--sluice\` to the setup line above to
+          have it installed, checksum-verified and enabled; without it every
+          sandbox reaches the whole internet, which \`sparkbox doctor\` will
+          tell you.
+
+          \`sparkbox-darwin-arm64\` (Apple Silicon) ships alongside them, pinned
+          by \`manifest-darwin-arm64.env\` to the same linux/arm64 artifacts it
+          will provision into a nested machine. Host provisioning on macOS is
+          still being built — until it lands, the Mac binary answers
+          \`version\` and nothing else useful.
+
+          \`vmlinux-macos-arm64\` is the outer KVM kernel the nested machine
+          boots (Apple's stock machine kernel has none, so no nested virt).
+          Its \`SHA256_OUTER_KERNEL\` in the darwin manifest says *this is the
+          file we published* — verify your download against it. It is not a
+          claim that rebuilding \`macos/kernel/build.sh\` reproduces these
+          bytes: the builder's compiler version is baked into the kernel
+          banner and the Ubuntu archive supplying it is not pinned.
           EOF
           gh release create "$RELEASE" --draft --target "$GITHUB_SHA" \
             --title "sparkbox $RELEASE" --notes-file notes.md
@@ -172,10 +215,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Both go.sums, because this job compiles BOTH modules: stage-artifacts.sh
+      # builds tools/sparkbox and then tools/sluice. The toolchain is pinned by
+      # sparkbox's go directive (1.25.x), which builds sluice's declared 1.24.7
+      # fine — a newer toolchain compiling an older directive is the supported
+      # direction — while listing only one go.sum would silently cache half the
+      # dependency graph.
       - uses: actions/setup-go@v5
         with:
           go-version-file: tools/sparkbox/go.mod
-          cache-dependency-path: tools/sparkbox/go.sum
+          cache-dependency-path: |
+            tools/sparkbox/go.sum
+            tools/sluice/go.sum
 
       - name: Install zstd
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
@@ -278,9 +329,233 @@ jobs:
             ( cd "$OUT_DIR" && du -h -- * | awk '{print "- `"$2"` ("$1")"}' )
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ----------------------------------------------------------- macos-kernel --
+  #
+  # The macOS outer kernel. Until this job existed, `macos/kernel/build.sh` ran
+  # on the user's laptop: download 149MB of Linux source, apply Apple's
+  # config-arm64 plus our fragment, and compile — as an ONBOARDING step, before
+  # anything sparkbox-shaped had happened. Every input is pinned by hash or
+  # digest, so it belongs here: built once, downloaded and checksum-verified
+  # thereafter (macos/kernel/fetch.sh).
+  #
+  # NATIVE arm64, and not for speed. build.sh passes no ARCH= (kbuild derives
+  # SUBARCH from uname -m), so a cross build configures for x86 and dies copying
+  # arch/arm64/boot/Image. And even with cross plumbing added,
+  # gcc-13-aarch64-linux-gnu is a different package build than native gcc-13, so
+  # CONFIG_CC_VERSION_TEXT — which is compiled into the kernel banner — would
+  # differ from every kernel we have ever shipped.
+  #
+  # Its own job, not a leg of the artifacts matrix: it shares no step with that
+  # matrix (no image pull, no ext4, no firecracker, no zstd, no gateway pubkey),
+  # it runs concurrently with the ~40-minute linux legs so its ~25 minutes cost
+  # nothing in wall clock, and a Mac wants nothing else the matrix produces.
+  macos-kernel:
+    needs: prepare
+    runs-on: ubuntu-24.04-arm # free for public repos; native aarch64
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    env:
+      # Build twice at different -j and compare, always for a real release.
+      #
+      # What this proves and what it does not, precisely, because the difference
+      # is the whole reason B2 was flagged as a risk: it proves the build is a
+      # pure function of its inputs, and it exercises -j, the one input build.sh
+      # does not pin. It does NOT prove the kernel is reproducible across time.
+      # Nothing run inside a single job can: the same job's two passes see the
+      # same Ubuntu archive, and the archive is the unpinned input —
+      # `apt-get install build-essential` takes whatever gcc/binutils is current,
+      # and their version strings are compiled into the kernel banner, so a
+      # packaging-only revision moves the SHA-256 with zero behaviour change.
+      #
+      # Hence the published checksum is an INTEGRITY claim (this is the file
+      # this release shipped, verify your download against it) and not an
+      # IDENTITY one (rebuild and you get these bytes). The full argument is at
+      # the top of macos/kernel/build.sh.
+      SPARKBOX_KERNEL_REPRO_CHECK: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.kernel_repro_check) && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The 149MB source tarball and Apple's config are pinned by SHA-256 and
+      # re-verified on reuse, so caching them is pure win and independent of any
+      # change to the build. Separate key from the compiled kernel on purpose:
+      # editing the fragment must not re-download Linux.
+      - name: Cache the pinned kernel sources
+        uses: actions/cache@v4
+        with:
+          path: tools/sparkbox/macos/out/downloads
+          key: macos-kernel-src-${{ env.MACOS_KERNEL_VERSION }}
+
+      # Deliberately NOT used on a `v*` tag. A cache hit skips the compile, and
+      # a release that ships a kernel nobody re-derived is exactly the thing
+      # this job exists to stop being true of the laptop build. Dev and dispatch
+      # runs keep the cache, because there the point is the plumbing.
+      - name: Cache the built kernel (non-release runs only)
+        id: kernel-cache
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            tools/sparkbox/macos/out/vmlinux-kvm
+            tools/sparkbox/macos/out/kernel.config
+            tools/sparkbox/macos/out/kernel-manifest.txt
+          key: macos-kernel-arm64-${{ env.MACOS_KERNEL_VERSION }}-${{ hashFiles('tools/sparkbox/macos/kernel/build.sh', 'tools/sparkbox/macos/kernel/sparkbox-arm64.fragment') }}
+
+      - name: Build the macOS outer kernel
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        # SPARKBOX_CONTAINER_CMD=docker: build.sh defaults to Apple's `container`
+        # CLI on macOS and docker elsewhere, and the flag spellings differ
+        # (--arch vs --platform), so the runtime is chosen once, here.
+        env:
+          SPARKBOX_CONTAINER_CMD: docker
+        run: ./macos/kernel/build.sh
+
+      - name: Report what this build actually claims
+        run: |
+          cat macos/out/kernel-manifest.txt
+          sha=$(sha256sum macos/out/vmlinux-kvm | cut -d' ' -f1)
+          status=$(sed -n 's/^known_good_status=//p' macos/out/kernel-manifest.txt)
+          repro=$(sed -n 's/^repro_checked=//p' macos/out/kernel-manifest.txt)
+          {
+            echo "### macOS outer kernel"
+            echo "- \`${MACOS_KERNEL_ASSET}\` sha256 \`${sha}\`"
+            echo "- determinism check (two builds, different \`-j\`): \`${repro:-cached}\`"
+            echo "- vs the recorded known-good build: \`${status:-cached}\`"
+            echo
+            echo "This checksum is an **integrity** claim — the file this release"
+            echo "published — not an identity claim. The builder's gcc/binutils"
+            echo "versions are compiled into the kernel banner and the Ubuntu"
+            echo "archive supplying them is not pinned, so a packaging-only"
+            echo "compiler revision changes these bytes with no behaviour change."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A drift is reported, never fatal: failing a release because Ubuntu
+          # revved gcc would be treating a snapshot as a law. build.sh has
+          # already printed the observed compiler next to both hashes.
+          if [ "$status" = drift ]; then
+            echo "::warning title=macOS kernel drifted from the known-good build::sha256 $sha; see the job log for the compiler version, then update KNOWN_GOOD_KERNEL_SHA256 in macos/kernel/build.sh"
+          fi
+
+      - name: Upload assets to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
+        run: |
+          # The asset is renamed on the way out: on disk it is the vmlinux-kvm
+          # that `container machine create --kernel` wants, but a release's asset
+          # namespace is flat and shared with the GUEST kernel (vmlinux-arm64),
+          # so it has to say which of the two it is.
+          cp macos/out/vmlinux-kvm "$RUNNER_TEMP/$MACOS_KERNEL_ASSET"
+          # The resolved .config rides along because it is the cheap tripwire for
+          # the drift above: CONFIG_CC_VERSION_TEXT lives in it, so it explains a
+          # changed kernel hash without anyone rebuilding anything.
+          cp macos/out/kernel.config "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.config"
+          gh release upload "$RELEASE" \
+            "$RUNNER_TEMP/$MACOS_KERNEL_ASSET" \
+            "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.config" --clobber
+
+  # ----------------------------------------------------------------- darwin --
+  #
+  # Its OWN job, not a third leg of the artifacts matrix. Every step of that
+  # matrix exists to produce things a Mac does not want: ~15 minutes compiling a
+  # guest kernel, a multi-GB image pull, a loop-mounted ext4, zstd, firecracker,
+  # the fleet gateway pubkey, and the disk gymnastics that keep all of it under
+  # a runner's ceiling. A darwin leg would have needed an `if:` guard on eight
+  # of those steps — the kind of guard that rots the first time somebody edits
+  # the matrix — or would have burned a full arm64 runner to emit a 20MB static
+  # binary. Here it is one `go build` on the cheapest runner there is.
+  #
+  # `needs: artifacts` because the darwin manifest is DERIVED from the linux
+  # arm64 one rather than recomputing the shas it shares with it, so it cannot
+  # be written until that leg has uploaded. Costs a couple of minutes tacked
+  # onto the end of a ~40-minute run; buys the guarantee that a Mac and the
+  # machine it provisions can never disagree about what a tag contains.
+  #
+  # `needs: macos-kernel` for the same reason, one level further out: the
+  # manifest records SHA256_OUTER_KERNEL, and it is computed over the file that
+  # actually landed on the release rather than over a local copy, so the
+  # checksum a Mac verifies against is a checksum of the bytes it will receive.
+  #
+  # Intel Macs are deliberately not built — see the long note in
+  # hack/stage-darwin-artifacts.sh. A darwin/amd64 binary is one more `go
+  # build`, but macOS host provisioning needs Apple Silicon nested virt, so it
+  # would be a download whose every useful path exits non-zero.
+  darwin:
+    needs: [prepare, artifacts, macos-kernel]
+    # GOOS=darwin cross-compiles from anywhere, and a macos runner bills at a
+    # 10x multiplier for a build that needs nothing from macOS. The trade is
+    # CGO_ENABLED=0 (cgo would want the macOS SDK) — which is what every linux
+    # asset already ships as anyway.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      # The draft is not public, but the token that opened it can read it back.
+      # Both inputs are pulled back OFF the release rather than rebuilt or
+      # passed between jobs: what gets checksummed into the darwin manifest is
+      # then, by construction, the bytes a Mac will actually download.
+      - name: Fetch this release's linux/arm64 manifest and the macOS kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/guest"
+          gh release download "$RELEASE" --pattern manifest-arm64.env \
+            --dir "$RUNNER_TEMP/guest" --clobber
+          cat "$RUNNER_TEMP/guest/manifest-arm64.env"
+          gh release download "$RELEASE" --pattern "$MACOS_KERNEL_ASSET" \
+            --dir "$RUNNER_TEMP/guest" --clobber
+          sha256sum "$RUNNER_TEMP/guest/$MACOS_KERNEL_ASSET"
+
+      - name: Stage darwin/arm64 artifacts
+        env:
+          RELEASE: ${{ needs.prepare.outputs.release }}
+          OUT_DIR: ${{ runner.temp }}/release-darwin
+          GUEST_MANIFEST: ${{ runner.temp }}/guest/manifest-arm64.env
+          OUTER_KERNEL_ASSET: ${{ env.MACOS_KERNEL_ASSET }}
+          OUTER_KERNEL: ${{ runner.temp }}/guest/${{ env.MACOS_KERNEL_ASSET }}
+          REPO_DIR: ${{ github.workspace }}
+        run: ./hack/stage-darwin-artifacts.sh
+
+      - name: Upload assets to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
+          OUT_DIR: ${{ runner.temp }}/release-darwin
+        run: |
+          gh release upload "$RELEASE" "$OUT_DIR"/* --clobber
+          {
+            echo "### darwin/arm64 assets"
+            ( cd "$OUT_DIR" && du -h -- * | awk '{print "- `"$2"` ("$1")"}' )
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ---------------------------------------------------------------- publish --
   publish:
-    needs: [prepare, artifacts]
+    # darwin is in `needs` on purpose: a release that goes live without it is
+    # exactly the half-populated state the draft gate exists to prevent, and
+    # /releases/latest/download/sparkbox-darwin-arm64 would 404 for anyone
+    # following the notes. The cost of the coupling is that a broken darwin
+    # build blocks the linux release — acceptable, because it is the same
+    # compile go.yml already gates on every push, so it failing here means
+    # something is broken for everybody, not just for Macs.
+    #
+    # macos-kernel is listed even though `darwin` already depends on it. The
+    # redundancy is the point: this list is the definition of "the release is
+    # complete", and it must not become wrong because somebody later decouples
+    # the darwin manifest from the kernel.
+    needs: [prepare, artifacts, darwin, macos-kernel]
     runs-on: ubuntu-latest
     permissions:
       contents: write

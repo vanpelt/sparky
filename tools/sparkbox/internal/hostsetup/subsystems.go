@@ -55,8 +55,11 @@ func optionalFlags(c Config) []string {
 	}
 	add("--tls-provider", c.TLSProvider)
 	add("--tls-email", c.TLSEmail)
-	add("--guest-dns", c.GuestDNS)
-	add("--sluice-socket", c.SluiceSocket)
+	// Through the resolvers, not the raw fields: --sluice supplies both of these
+	// when they were not named, and a unit rendered from the raw fields would
+	// install the daemon and then never talk to it.
+	add("--guest-dns", c.guestDNS())
+	add("--sluice-socket", c.sluiceSocket())
 	add("--archive-remote", c.ArchiveRemote)
 	add("--archive-bucket", c.ArchiveBucket)
 	return out
@@ -80,8 +83,8 @@ func validateSubsystems(cfg Config) error {
 		{"--dns-answer", cfg.DNSAnswer},
 		{"--tls-provider", cfg.TLSProvider},
 		{"--tls-email", cfg.TLSEmail},
-		{"--guest-dns", cfg.GuestDNS},
-		{"--sluice-socket", cfg.SluiceSocket},
+		{"--guest-dns", cfg.guestDNS()},
+		{"--sluice-socket", cfg.sluiceSocket()},
 		{"--archive-remote", cfg.ArchiveRemote},
 		{"--archive-bucket", cfg.ArchiveBucket},
 		{"--edge-ip", cfg.EdgeIP},
@@ -129,11 +132,14 @@ func validateSubsystems(cfg Config) error {
 	// The guest resolver is an IP or the "gateway" sentinel; a hostname is
 	// refused by the firecracker driver at VM-create time, which is far too late
 	// to be a useful error.
-	if cfg.GuestDNS != "" && cfg.GuestDNS != "gateway" && net.ParseIP(cfg.GuestDNS) == nil {
-		return fmt.Errorf("invalid --guest-dns %q: expected an IP address (e.g. 172.30.0.53, the sluice resolver) or the literal \"gateway\"", cfg.GuestDNS)
+	if d := cfg.guestDNS(); d != "" && d != "gateway" && net.ParseIP(d) == nil {
+		return fmt.Errorf("invalid --guest-dns %q: expected an IP address (e.g. 172.30.0.53, the sluice resolver) or the literal \"gateway\"", d)
 	}
-	if cfg.SluiceSocket != "" && !strings.HasPrefix(cfg.SluiceSocket, "/") {
-		return fmt.Errorf("invalid --sluice-socket %q: expected an absolute path (e.g. /run/sluice.sock)", cfg.SluiceSocket)
+	if s := cfg.sluiceSocket(); s != "" && !strings.HasPrefix(s, "/") {
+		return fmt.Errorf("invalid --sluice-socket %q: expected an absolute path (e.g. /run/sluice.sock)", s)
+	}
+	if err := validateSluice(cfg); err != nil {
+		return err
 	}
 
 	// The edge address is written into sparkbox.env and interpolated straight
@@ -141,6 +147,73 @@ func validateSubsystems(cfg Config) error {
 	// where a typo is a boot-time shell error nobody reads.
 	if cfg.EdgeIP != "" && net.ParseIP(cfg.EdgeIP) == nil {
 		return fmt.Errorf("invalid --edge-ip %q: expected a bare IP address to give the edge its own /32 (e.g. 10.66.0.1)", cfg.EdgeIP)
+	}
+	return nil
+}
+
+// validateSluice rejects --sluice combinations that would install a daemon
+// which cannot start, or which starts and filters nothing.
+//
+// Both failure modes are quiet, which is why they are refused here rather than
+// discovered on the box: sluice's unit sets Restart=always, so a resolver that
+// cannot bind is a permanent restart loop that `systemctl is-active` calls
+// "active"; and a resolver nobody is pointed at is an egress filter with no
+// traffic through it, which reports healthy in every way.
+func validateSluice(cfg Config) error {
+	if !cfg.Sluice {
+		// --sluice-dns-addr without --sluice is a typo with a plausible
+		// reading ("surely that turns it on"), and its actual effect is
+		// nothing at all. Say so rather than ignoring it.
+		if strings.TrimSpace(cfg.SluiceDNSAddr) != "" {
+			return fmt.Errorf("--sluice-dns-addr %s has no effect without --sluice: nothing installs the resolver it would bind",
+				cfg.SluiceDNSAddr)
+		}
+		return nil
+	}
+	// The addresses are ExecStart words in the sluice unit, same rule as every
+	// other one. validateAddrs parses this one (it is in addrFlags), so this is
+	// only the whitespace half.
+	if strings.ContainsAny(cfg.SluiceDNSAddr, " \t\n") {
+		return fmt.Errorf("invalid --sluice-dns-addr %q: expected host:port with no whitespace", cfg.SluiceDNSAddr)
+	}
+
+	// Two DNS servers, one host. sparkbox's own wildcard responder (--dns-addr)
+	// answers *.<domain> for the edge; sluice's answers the allowlist for
+	// guests. They are different servers with different jobs, and on the DGX
+	// they collided on :53 — which is why that box ended up giving the sluice
+	// resolver a dedicated 172.30.0.53 on a dummy interface and passing
+	// --guest-dns as that literal.
+	//
+	// addrsOverlap is the same predicate the port preflight uses: a wildcard on
+	// either side collides with everything, otherwise the hosts must match.
+	// (The preflight would catch this too, but only after the multi-GB
+	// download, and only as "address in use" without saying which of our own
+	// two servers is the other one.)
+	if sd := cfg.sluiceDNSAddr(); sd != "" && cfg.dnsAddr() != "" {
+		sh, sp, serr := splitAddr(sd)
+		eh, ep, eerr := splitAddr(cfg.dnsAddr())
+		if serr == nil && eerr == nil && sp == ep && addrsOverlap(sh, eh) {
+			return fmt.Errorf("--sluice-dns-addr %s collides with --dns-addr %s: "+
+				"they are two different DNS servers (sluice answers the guest allowlist, the sparkbox responder answers *.%s) "+
+				"and only one can hold the port. Give sluice an address of its own, e.g. --sluice-dns-addr 172.30.0.53:53 "+
+				"(guests are then handed 172.30.0.53 automatically, and sparkbox-net.sh puts that address on a dummy "+
+				"interface at boot so the bind has something to bind to)",
+				sd, cfg.dnsAddr(), cfg.ProxyDomain)
+		}
+	}
+
+	// A concrete resolver address that no guest can reach is an allowlist that
+	// silently never applies: the guest gets the IP in its kernel args, its
+	// resolver times out, and the sandbox looks like it has no network rather
+	// than a filtered one. 127.0.0.0/8 is the way to get there by accident,
+	// because it is what "bind it privately" looks like on every other flag in
+	// this file — and a guest's loopback is its own.
+	if host, _, err := splitAddr(cfg.sluiceDNSAddr()); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return fmt.Errorf("invalid --sluice-dns-addr %s: guests reach the resolver across their tap, and %s is the loopback of whichever machine asks — "+
+				"no guest can ever reach it. Use the wildcard (:53), or an address the host holds on a guest-facing interface (e.g. 172.30.0.53:53)",
+				cfg.sluiceDNSAddr(), host)
+		}
 	}
 	return nil
 }

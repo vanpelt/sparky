@@ -1,25 +1,38 @@
-ARG GO_IMAGE=docker.io/library/golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a
+# The nested macOS gateway image.
+#
+# This image deliberately contains NO sparkbox binary.
+#
+# It used to build one: a golang stage compiled ./cmd/sparkbox from the working
+# tree and baked the result at /usr/local/bin/sparkbox. That had two costs. It
+# made every macOS onboarding require the git repo, a Go toolchain and network
+# access for `go mod download` — none of which someone who downloaded a released
+# binary has. And, the bug we actually hit, it decoupled the machine's control
+# plane from the release it provisions: a machine built at v0.3.0-5-g18bfe3b was
+# provisioned with `--release v0.4.0`, so it fetched v0.4.0's kernel, firecracker
+# and rootfs and drove them with a v0.3.0-era sparkbox. The evidence bundle
+# recorded both numbers and nothing compared them.
+#
+# Since A1, `sparkbox setup` installs the binary it is running from (see
+# stepInstallBinary). So the machine does not need a baked one: poc.sh runs
+# /usr/local/sbin/sparkbox-bootstrap in the machine, which downloads the
+# released sparkbox-linux-<arch> for the tag being provisioned and verifies it
+# against SHA256_SPARKBOX in that same release's manifest, and then runs `setup`
+# from the staged copy. The binary and the artifacts it fetches are the same
+# release by construction, and there is no second copy that could differ.
+#
+# Consequence for the build context: this file needs only the two scripts beside
+# it, never the Go module. poc.sh therefore builds it from a two-file staging
+# directory (macos/out/image-context) rather than from tools/sparkbox.
 ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
-
-FROM ${GO_IMAGE} AS build
-
-ARG SPARKBOX_VERSION=dev
-WORKDIR /src
-
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-    go build -trimpath \
-      -ldflags="-s -w -X main.version=${SPARKBOX_VERSION}" \
-      -o /out/sparkbox ./cmd/sparkbox
 
 FROM ${UBUNTU_IMAGE}
 
 ENV container=container
 ENV DEBIAN_FRONTEND=noninteractive
 
+# curl + ca-certificates are load-bearing, not conveniences: sparkbox-bootstrap
+# fetches the release manifest and binary over HTTPS with them, and
+# gateway-verify.sh proves that path works before anything depends on it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -52,10 +65,11 @@ RUN truncate -s 0 /etc/machine-id \
       systemd-update-utmp.service; \
       do ln -sfn /dev/null "/etc/systemd/system/${unit}"; done
 
-COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
-COPY macos/gateway-verify.sh /usr/local/sbin/sparkbox-poc-verify
+COPY gateway-verify.sh /usr/local/sbin/sparkbox-poc-verify
+COPY sparkbox-bootstrap.sh /usr/local/sbin/sparkbox-bootstrap
 
-RUN chmod 0755 /usr/local/bin/sparkbox /usr/local/sbin/sparkbox-poc-verify \
+RUN chmod 0755 /usr/local/sbin/sparkbox-poc-verify /usr/local/sbin/sparkbox-bootstrap \
+    && mkdir -p /var/lib/sparkbox-bootstrap \
     && printf '%s\n' 'sparkbox-macos-nested-poc=1' > /etc/sparkbox-poc
 
 LABEL io.sparkbox.macos-nested-poc="true"

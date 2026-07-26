@@ -13,6 +13,7 @@
 package hostsetup
 
 import (
+	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,7 +23,9 @@ import (
 // publishes to. Assets are a flat, arch-suffixed namespace under
 // <base>/download/<tag>/ (or <base>/latest/download/ for the newest
 // non-prerelease): manifest-<arch>.env, vmlinux-<arch>, firecracker-<arch>,
-// <rootfs>-<arch>.ext4.zst, sparkbox-linux-<arch>.
+// <rootfs>-<arch>.ext4.zst, sparkbox-linux-<arch> — plus, for Apple Silicon,
+// sparkbox-darwin-arm64 and its own manifest-darwin-arm64.env (see
+// Manifest for why the Mac reads a different file rather than this one).
 const DefaultArtifactBase = "https://github.com/vanpelt/sparky/releases"
 
 // The gateway's default listen addresses. Every one of them is settable now
@@ -53,6 +56,39 @@ const (
 	// gateway adminSSHAddr instead.
 	defaultSSHAddr = ":2222"
 	adminSSHAddr   = ":22"
+	// defaultSluiceDNSAddr is where sluice's allowlist resolver binds when
+	// --sluice is asked for and --sluice-dns-addr is not. The wildcard is right
+	// for the common case: guests are handed their own tap's host-side address
+	// as a resolver, and there is one of those per VM, so the resolver has to
+	// answer on all of them. A host that ALSO runs sparkbox's own wildcard DNS
+	// responder cannot leave it here — see validateSluice.
+	defaultSluiceDNSAddr = ":53"
+	// defaultSluiceSocket is the control socket the gateway pushes per-tag
+	// egress policy to and reads per-VM byte counters from. /run is tmpfs, so it
+	// is recreated every boot and never leaves the box.
+	defaultSluiceSocket = "/run/sluice.sock"
+)
+
+// Sluice's on-host paths. Not flags: unlike the sparkbox binary (whose
+// --bin-path exists because setup installs the file it is *running*, which an
+// operator may keep anywhere), these are files only setup ever writes, only the
+// sluice unit ever reads, and both renderings come from here.
+const (
+	sluiceBinPath   = "/usr/local/bin/sluice"
+	sluiceUnit      = "sluice.service"
+	sluiceTapPrefix = "sbtap"
+	// minSluiceKernel is the host kernel sluice's meter needs. It attaches its
+	// TC programs with a TCX link (link.AttachTCX), which landed in 6.6; on
+	// anything older Load succeeds and Attach fails, so the daemon comes up,
+	// meters nothing, enforces nothing and stays "active".
+	//
+	// The unit carries ConditionKernelVersion=>=6.6 as well, and that is NOT
+	// enough on its own: systemd SKIPS a unit whose condition fails and
+	// `systemctl start` on a skipped unit exits 0. Installing on a 6.1 host
+	// would therefore have printed a clean provisioning report over an egress
+	// filter that never ran — F7 with a different cause. So setup refuses.
+	minSluiceKernelMajor = 6
+	minSluiceKernelMinor = 6
 )
 
 // Config is the shared configuration for both doctor and setup. Its zero value
@@ -146,9 +182,30 @@ type Config struct {
 	// guests are left on public DNS.
 	GuestDNS string
 	// SluiceSocket is the sluice control socket (/run/sluice.sock). Empty leaves
-	// the gateway's egress syncer a silent no-op. See checkEgress: setup cannot
-	// install sluice itself yet.
+	// the gateway's egress syncer a silent no-op — unless Sluice is set, which
+	// defaults it (see Config.sluiceSocket).
 	SluiceSocket string
+	// Sluice installs and enables the sluice egress gateway itself: fetch
+	// sluice-linux-<arch> from the release, seed an allowlist, write the unit,
+	// start it. Off by default, because turning egress filtering on is a change
+	// to what a host's sandboxes can reach and must be asked for.
+	//
+	// It is the flag `--sluice-socket` was waiting for. Until a release
+	// published a sluice binary there was no honest way to install one, so setup
+	// could only offer to *talk* to a daemon somebody else had put there, and
+	// doctor could only report the resulting silence (checkEgress).
+	//
+	// Setting it also supplies SluiceSocket and GuestDNS when those are unset:
+	// a gateway with the daemon running and neither flag pushes no policy and
+	// leaves guests on public DNS, which is an egress filter that filters
+	// nothing. See Config.sluiceSocket and Config.guestDNS.
+	Sluice bool
+	// SluiceDNSAddr is where sluice's allowlist resolver binds. Empty means
+	// defaultSluiceDNSAddr (:53) when Sluice is set, and nothing at all when it
+	// is not. A gateway that also runs sparkbox's own wildcard responder
+	// (--dns-addr) needs a concrete address here — the DGX gave it a dedicated
+	// 172.30.0.53 on a dummy interface for exactly that reason.
+	SluiceDNSAddr string
 	// ArchiveRemote / ArchiveBucket enable sandbox archiving to object storage
 	// through the host's rclone.conf. Both are required — objstore.New returns a
 	// nil store when either is empty, so half a configuration silently disables
@@ -345,6 +402,111 @@ func (c Config) apiAddr() string {
 // dnsAddr is empty when the wildcard DNS responder is not wanted, and the unit
 // then omits --dns-addr entirely rather than passing it empty.
 func (c Config) dnsAddr() string { return strings.TrimSpace(c.DNSAddr) }
+
+// --- sluice ------------------------------------------------------------------
+//
+// The three resolvers below are the ONE place --sluice's implications are
+// worked out, and everything downstream reads them: the rendered sluice unit,
+// the gateway's --guest-dns/--sluice-socket flags, the port preflight, the
+// plan text and the validator. Deriving in a step (or in cmd/sparkbox) instead
+// would have meant the unit and the preflight disagreeing about which address
+// is about to be bound, which is the class of bug F1 was.
+
+// sluiceDNSAddr is where sluice's allowlist resolver binds, and "" when sluice
+// is not being installed — so validateAddrs and the port preflight skip it by
+// the same "empty means off" rule --dns-addr already uses.
+func (c Config) sluiceDNSAddr() string {
+	if !c.Sluice {
+		return ""
+	}
+	if a := strings.TrimSpace(c.SluiceDNSAddr); a != "" {
+		return a
+	}
+	return defaultSluiceDNSAddr
+}
+
+// sluiceSocket is the control socket path the gateway pushes policy to. An
+// explicit --sluice-socket wins (a host may already run sluice from somewhere
+// else); --sluice supplies the default; otherwise there is none and the
+// gateway's egress syncer stays a no-op.
+func (c Config) sluiceSocket() string {
+	if s := strings.TrimSpace(c.SluiceSocket); s != "" {
+		return s
+	}
+	if c.Sluice {
+		return defaultSluiceSocket
+	}
+	return ""
+}
+
+// guestDNS is the resolver handed to guests through the sparkbox_dns kernel
+// arg. --sluice implies one, because a filter guests do not resolve through is
+// not a filter: they keep using whatever public resolver the image ships with
+// and never meet the allowlist at all. checkEgress reports precisely that state
+// on hosts that got there by hand.
+//
+// The derivation follows the address sluice will bind. A concrete one
+// (172.30.0.53) is what guests must be pointed at literally; a wildcard means
+// the resolver answers on every interface — including the host end of each
+// guest's own tap — so "gateway" is right, and it has the advantage of needing
+// no extra address to exist on the box at all.
+func (c Config) guestDNS() string {
+	if d := strings.TrimSpace(c.GuestDNS); d != "" {
+		return d
+	}
+	if !c.Sluice {
+		return ""
+	}
+	if host, _, err := splitAddr(c.sluiceDNSAddr()); err == nil && !isWildcardHost(host) {
+		return host
+	}
+	return "gateway"
+}
+
+// sluiceResolverIP is the concrete IP sluice's resolver binds, when it has one
+// this host must actually hold — and "" for every other shape.
+//
+// It exists because recommending an address is not the same as creating it.
+// validateSluice tells an operator whose gateway already runs the wildcard DNS
+// responder to give sluice `--sluice-dns-addr 172.30.0.53:53`, guestDNS then
+// hands guests that literal, and NOTHING put 172.30.0.53 on the box: the bind
+// failed with EADDRNOTAVAIL, the port preflight steps over that error by
+// design, systemd's `enable --now` returned 0 at the fork, and Restart=always
+// looped forever while `setup` printed a green report. So sparkbox-net.sh now
+// creates the address on a dummy interface (SLUICE_DNS_IP), exactly as it
+// already does for a dedicated --edge-ip, and this is the derivation both the
+// fresh-host render and the reconcile read.
+//
+// A wildcard (:53) needs no address of its own — it binds everything the host
+// already has — and a loopback one is refused outright by validateSluice, so
+// the only case left is the concrete one.
+func (c Config) sluiceResolverIP() string {
+	if !c.Sluice {
+		return ""
+	}
+	host, _, err := splitAddr(c.sluiceDNSAddr())
+	if err != nil || isWildcardHost(host) {
+		return ""
+	}
+	if net.ParseIP(host) == nil {
+		// A hostname would have to be resolved to be added to an interface, and
+		// resolving it here would bake today's answer into a boot script.
+		return ""
+	}
+	return host
+}
+
+// sluiceEnvPath is the EnvironmentFile the sluice unit sources for SLUICE_ARGS.
+func (c Config) sluiceEnvPath() string { return filepath.Join(c.Root, "sluice.env") }
+
+// sluiceAllowlistPath is the allowlist sluice resolves against. Mandatory, and
+// the exit code says which kind of "missing" it was: sluice exits 1 when the
+// path its --allowlist names cannot be opened (the case this seed prevents) and
+// 2 only when the FLAG itself is empty, which the rendered unit cannot produce
+// because it always templates this path. So a host that never got the seed
+// crash-loops with status=1/FAILURE, not 2 — worth knowing when reading its
+// journal.
+func (c Config) sluiceAllowlistPath() string { return filepath.Join(c.Root, "allowlist.txt") }
 
 // proxyPortNum is the port half of the edge address, and the single derivation
 // point for sparkbox.env's PROXY_PORT.

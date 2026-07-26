@@ -1,3 +1,10 @@
+# Hand-install reference unit. `sparkbox setup --sluice` does NOT read this
+# file: tools/sluice is a separate Go module and go:embed cannot cross a module
+# boundary, so sparkbox carries its own templated near-copy at
+# tools/sparkbox/deploy/units/sluice.service.tmpl. If you change one, change the
+# other. The differences are deliberate — the sparkbox copy templates every path
+# and the DNS listen address, because a gateway that also runs sparkbox's own
+# wildcard DNS responder cannot leave sluice on the wildcard :53.
 [Unit]
 Description=sluice — DNS allowlist gateway + eBPF egress meter for sparkbox VMs
 After=network-online.target sparkbox-net.service

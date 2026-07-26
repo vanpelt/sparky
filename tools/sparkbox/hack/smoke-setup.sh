@@ -106,6 +106,24 @@ case "$SETUP_HELP" in *-bin-path*) HAVE_A1=1 ;; esac
 # mistake as F7 itself.
 HAVE_A2=0
 case "$SETUP_HELP" in *-api-addr*) HAVE_A2=1 ;; esac
+
+# And the same for the sluice install step. Before it, a release published no
+# sluice binary and `setup` could only point --sluice-socket at a daemon
+# somebody had installed by hand; the flag's presence in --help is how this
+# script tells the two worlds apart.
+#
+# The glob has to match the WHOLE line, not a substring: `-sluice` is a prefix
+# of `-sluice-socket`, which has existed since A5, so a plain *-sluice* would
+# report the install step as landed on every ref that only has the socket flag
+# — exactly the false positive these guards exist to avoid. Hence the embedded
+# newlines, and the leading one so a first-line match is still bounded.
+#
+# And still `case`, not `printf | grep -qx`: that is the SIGPIPE trap described
+# above, and it bit this very line — grep -q exited on the match, printf took
+# SIGPIPE, pipefail made the pipeline 141, and the probe reported "not found"
+# for a flag that was right there in the help text.
+HAVE_SLUICE=0
+case $'\n'"$SETUP_HELP" in *$'\n  -sluice\n'*) HAVE_SLUICE=1 ;; esac
 if [ "$HAVE_A2" = 1 ]; then
   API_PORT=${API_PORT:-8079}
 else
@@ -174,6 +192,42 @@ dry_phase() {
   else
     ok "--dry-run created nothing under $DRY_ROOT"
   fi
+
+  # The egress gateway. Two things are asserted and they are opposites, which
+  # is the point: WITHOUT --sluice the plan must say out loud that sandboxes
+  # are unfiltered (that is the default, and its whole danger is that it is
+  # silent), and WITH it the plan must name the install and the resolver
+  # address it is about to bind.
+  if [ "$HAVE_SLUICE" = 1 ]; then
+    assert_grep "$out" '^  - sluice .*skipped' "plan says the default installs no egress control"
+    assert_grep "$out" 'whole internet' "plan says unfiltered sandboxes reach everything"
+
+    local sout=$WORK/dry-sluice.txt
+    rm -rf "$DRY_ROOT"
+    "$SPARKBOX_BIN" setup --dry-run --sluice \
+      --root "$DRY_ROOT" \
+      --release "$RELEASE" \
+      --artifact-base "http://127.0.0.1:$STUB_PORT" \
+      --operator-key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0000000000000000000000000000000000000000 smoke@ci" \
+      --swap-gb 0 --data-volume-gb 2 --proxy-domain "$DOMAIN" \
+      >"$sout" 2>&1
+    local src=$?
+    cat "$sout"
+    if [ $src -eq 0 ]; then ok "setup --dry-run --sluice exit 0"; else bad "setup --dry-run --sluice exit $src"; fi
+    assert_grep "$sout" '^  - sluice .*install sluice to' "plan names the sluice install"
+    assert_grep "$sout" 'allowlist\.txt' "plan names the allowlist it would seed"
+    # :53 is the likeliest busy port on any host (systemd-resolved), and the
+    # unit is Restart=always — so losing that bind is a permanent loop that
+    # `systemctl is-active` calls "active". The preflight has to cover it.
+    assert_grep "$sout" 'sluice-dns-addr' "plan probes the address sluice's resolver would bind"
+    if [ -e "$DRY_ROOT" ]; then
+      bad "--dry-run --sluice created $DRY_ROOT"
+    else
+      ok "--dry-run --sluice created nothing"
+    fi
+  else
+    skip "no --sluice flag — the sluice install step has not landed on this ref. This is the F2 gap: a gateway can be told to talk to an egress filter but not to install one, so every sandbox reaches the whole internet."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -204,14 +258,33 @@ EOF
   zstd -q -f "$WORK/universal.ext4" -o "$d/universal-$ARCH.ext4.zst"
   rm -f "$WORK/universal.ext4"
 
+  # The egress gateway. A stub, like firecracker above: nothing in setup runs
+  # it — the install step fetches, sha-verifies, chmods and writes a unit — and
+  # the eBPF data plane is unreachable from a hosted runner anyway. What this
+  # DOES keep honest is the manifest: build_stub_release mirrors
+  # hack/stage-artifacts.sh key for key, so an asset that ships in a real
+  # release and not here would let a broken fetch path pass the smoke.
+  cat >"$d/sluice-linux-$ARCH" <<'EOF'
+#!/bin/sh
+echo "sluice stub"
+EOF
+  chmod +x "$d/sluice-linux-$ARCH"
+
   sha() { sha256sum "$1" | cut -d' ' -f1; }
+  # Mirrors hack/stage-artifacts.sh key for key. PLATFORM matters: setup
+  # refuses a manifest built for another OS, and the unqualified
+  # manifest-<arch>.env name means linux.
   cat >"$d/manifest-$ARCH.env" <<EOF
 RELEASE=$RELEASE
 ARCH=$ARCH
+PLATFORM=linux
 FIRECRACKER_VERSION=v1.16.1
 SHA256_VMLINUX=$(sha "$d/vmlinux-$ARCH")
 SHA256_FIRECRACKER=$(sha "$d/firecracker-$ARCH")
+SPARKBOX_ASSET=sparkbox-linux-$ARCH
 SHA256_SPARKBOX=$(sha "$SPARKBOX_BIN")
+SLUICE_ASSET=sluice-linux-$ARCH
+SHA256_SLUICE=$(sha "$d/sluice-linux-$ARCH")
 ROOTFS_NAME=universal
 ROOTFS_ASSET=universal-$ARCH.ext4.zst
 SHA256_ROOTFS=$(sha "$d/universal-$ARCH.ext4.zst")

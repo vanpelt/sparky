@@ -373,27 +373,43 @@ the gateway key into `/home/sparky`, the release manifest carries
 
 ## Releases
 
-Artifacts ship as **GitHub Releases, built for linux/amd64 and linux/arm64** —
-the same tag provisions an x86 cloud VM or an aarch64 DGX Spark. Push a `v*` tag
-and [`.github/workflows/build-artifacts.yml`](../../.github/workflows/build-artifacts.yml)
-does the rest: Depot builds the `images/Dockerfile` base for both platforms and
-pushes one multi-arch tag to GHCR, then a matrix of native runners
+Artifacts ship as **GitHub Releases, built for linux/amd64, linux/arm64 and
+darwin/arm64** — the same tag provisions an x86 cloud VM, an aarch64 DGX Spark
+or an Apple Silicon Mac. Push a `v*` tag and
+[`.github/workflows/build-artifacts.yml`](../../.github/workflows/build-artifacts.yml)
+does the rest: Depot builds the `images/Dockerfile` base for both linux platforms
+and pushes one multi-arch tag to GHCR, then a matrix of native runners
 (`ubuntu-24.04` / `ubuntu-24.04-arm`) each compile the guest kernel, build the
-`sparkbox` binary, and flatten their arch's image into an ext4 template. The
-release only goes public once **both** arches land, so `setup` can never resolve
-a half-populated `latest`.
+`sparkbox` and `sluice` binaries, and flatten their arch's image into an ext4
+template; alongside them a native arm64 runner compiles the macOS *outer* kernel
+once, and a cheap cross-compile leg emits the Mac's own binary and manifest. The
+release only goes public once **every** platform lands, so `setup` can never
+resolve a half-populated `latest`.
 
 ```sh
 git tag v0.4.0 && git push origin v0.4.0    # cut a release
 gh workflow run "sparkbox release"          # ad-hoc dev-<ts> prerelease (doesn't move `latest`)
 ```
 
-Assets are flat and arch-suffixed — `sparkbox-linux-<arch>`, `vmlinux-<arch>`,
-`firecracker-<arch>`, `universal-<arch>.ext4.zst`, `manifest-<arch>.env` — and
-`sparkbox setup` picks its own arch's set, pinned to the tag the manifest names.
+A release's asset namespace is flat, so every name carries the platform it is
+for. `sparkbox setup` picks its own set, pinned to the tag the manifest names:
+
+| Asset | What | Who fetches it |
+| --- | --- | --- |
+| `sparkbox-linux-<arch>` | control-plane binary | curl'd by the operator; `setup` then installs the binary it is *running* |
+| `sluice-linux-<arch>` | egress gateway (DNS allowlist + eBPF meter) | `setup --sluice`, on either platform — it is a linux daemon even when a Mac puts it inside the nested machine |
+| `vmlinux-<arch>` | **guest** kernel a microVM boots | `setup` |
+| `firecracker-<arch>` | the VMM | `setup` |
+| `universal-<arch>.ext4.zst` | guest rootfs template | `setup` |
+| `manifest-<arch>.env` | sha256s + metadata; unqualified name means **linux** | `setup`, `macos/sparkbox-bootstrap.sh` |
+| `sparkbox-darwin-arm64` | the binary a Mac runs | the operator on macOS |
+| `manifest-darwin-arm64.env` | the Mac's manifest — repeats the linux arm64 checksums it provisions, plus `MACHINE_SPARKBOX_ASSET` and `OUTER_KERNEL_ASSET` | `setup` on darwin, `macos/kernel/fetch.sh` |
+| `vmlinux-macos-arm64` (+ `.config`) | the **outer** KVM kernel Apple's `container machine` boots — a different kernel from `vmlinux-<arch>` | `macos/kernel/fetch.sh` |
+
 To build a release by hand on a build host, `hack/stage-artifacts.sh` stages one
-arch into `OUT_DIR` (blank `IMAGE` = build the base image locally; set `IMAGE=`
-to flatten a prebuilt one instead).
+linux arch into `OUT_DIR` (blank `IMAGE` = build the base image locally; set
+`IMAGE=` to flatten a prebuilt one instead), and `hack/stage-darwin-artifacts.sh`
+derives the darwin pair from the arm64 manifest that produced.
 
 ## Status / roadmap
 

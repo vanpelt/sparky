@@ -14,6 +14,13 @@ name: sparkbox CI
 #          tools/sparkbox module. Fast, hermetic (89 test files, no network, no
 #          ports, no external binaries), ~1 minute.
 #
+#   sluice actually the same three commands against tools/sluice, the OTHER Go
+#          module in this repo. It had no CI at all: nothing built it, nothing
+#          vetted it, and `gofmt -l` had been dirty for long enough that wiring
+#          this job required a formatting fix first. A release now publishes
+#          sluice-linux-<arch>, so a module nobody compiles is a module that
+#          breaks at tag time.
+#
 #   smoke  actually provisions a host with `sparkbox setup` against a stub
 #          release and asserts the result. This is the job that would have
 #          caught F0 and F7. It is honest about what a hosted runner cannot do
@@ -95,6 +102,166 @@ jobs:
               go build -o /dev/null ./cmd/sparkbox
           done
 
+      # hack/stage-darwin-artifacts.sh is otherwise run ONLY by the release
+      # workflow, which fires only on a `v*` tag — so a typo in it surfaces
+      # while cutting a release, at the worst possible moment. It needs no
+      # kernel build, no rootfs and no registry, just a linux arm64 manifest to
+      # derive from and the outer kernel's bytes to checksum, so run it here on
+      # every push against synthetic versions of both.
+      # (Writing it caught exactly this class of bug: an apostrophe inside a
+      # ${VAR:?message} opened a quote that swallowed thirty lines, and
+      # `bash -n` still passed because the result was valid syntax.)
+      #
+      # Both of the script's REQUIRED inputs are supplied here on purpose, and
+      # this list has to track the script. When B2 added the outer kernel, the
+      # script grew a hard `OUTER_KERNEL=${OUTER_KERNEL:?...}` and this step did
+      # not, so it failed on every push with
+      #   stage-darwin-artifacts.sh: line 76: OUTER_KERNEL: set OUTER_KERNEL: …
+      # A guard that is red for everyone is a guard nobody reads, and the one
+      # thing it exists to catch — release-only breakage — is exactly what a
+      # permanently-red step hides.
+      - name: stage darwin release assets against a synthetic manifest
+        run: |
+          set -euo pipefail
+          guest="$RUNNER_TEMP/guest"; out="$RUNNER_TEMP/darwin-out"
+          mkdir -p "$guest"
+          # Stands in for the vmlinux-macos-arm64 the macos-kernel job uploads.
+          # Its CONTENT is irrelevant — the script only sha256s it, exactly as
+          # it does in the release, because the checksum a Mac verifies must be
+          # of the bytes the release actually published. Compiling a real 6.14
+          # kernel here to hash 32 bytes of it would cost 25 arm64 minutes on
+          # every push.
+          printf 'not a kernel, only its checksum is used\n' \
+            >"$guest/vmlinux-macos-arm64"
+          printf '%s\n' \
+            'RELEASE=v0-cistage' \
+            'ARCH=arm64' \
+            'PLATFORM=linux' \
+            'FIRECRACKER_VERSION=v1.16.1' \
+            'SHA256_VMLINUX=1111' \
+            'SHA256_FIRECRACKER=2222' \
+            'SPARKBOX_ASSET=sparkbox-linux-arm64' \
+            'SHA256_SPARKBOX=3333' \
+            'SLUICE_ASSET=sluice-linux-arm64' \
+            'SHA256_SLUICE=5555' \
+            'ROOTFS_NAME=universal' \
+            'ROOTFS_ASSET=universal-arm64.ext4.zst' \
+            'SHA256_ROOTFS=4444' \
+            'ROOTFS_LOGIN_USER=sparky' \
+            'GATEWAY_PUBKEY="ssh-ed25519 AAAA ci@stage"' \
+            >"$guest/manifest-arm64.env"
+          OUT_DIR="$out" RELEASE=v0-cistage GUEST_MANIFEST="$guest/manifest-arm64.env" \
+            OUTER_KERNEL_ASSET=vmlinux-macos-arm64 \
+            OUTER_KERNEL="$guest/vmlinux-macos-arm64" \
+            REPO_DIR="$GITHUB_WORKSPACE" ./hack/stage-darwin-artifacts.sh
+          # The two assets a Mac fetches, and the three derivations that make
+          # the darwin manifest more than a copy: its own PLATFORM, its own
+          # SHA256_SPARKBOX (the darwin build), and the linux binary it will
+          # install into the machine carried across under MACHINE_*.
+          test -s "$out/sparkbox-darwin-arm64"
+          m="$out/manifest-darwin-arm64.env"
+          grep -qx 'PLATFORM=darwin' "$m"
+          grep -qx 'SPARKBOX_ASSET=sparkbox-darwin-arm64' "$m"
+          grep -qx 'MACHINE_SPARKBOX_ASSET=sparkbox-linux-arm64' "$m"
+          grep -qx 'SHA256_MACHINE_SPARKBOX=3333' "$m"
+          grep -qx 'SHA256_ROOTFS=4444' "$m"
+          # sluice is a linux binary on either platform — a Mac installs it into
+          # the machine it provisions, exactly as it does the rootfs — so the
+          # key crosses over verbatim rather than being renamed MACHINE_*.
+          grep -qx 'SLUICE_ASSET=sluice-linux-arm64' "$m"
+          grep -qx 'SHA256_SLUICE=5555' "$m"
+          # The outer kernel is the one darwin-only asset with a producer in a
+          # DIFFERENT job (macos-kernel), so the name has to be asserted here
+          # rather than inferred: a rename on either side is a 404 in
+          # macos/kernel/fetch.sh, which reads OUTER_KERNEL_ASSET out of this
+          # very file. Both checksums must be real sha256s — downloadVerify and
+          # fetch.sh both treat an empty one as "do not verify".
+          grep -qx 'OUTER_KERNEL_ASSET=vmlinux-macos-arm64' "$m"
+          grep -q  '^SHA256_OUTER_KERNEL=[0-9a-f]\{64\}$' "$m"
+          grep -q  '^SHA256_SPARKBOX=[0-9a-f]\{64\}$' "$m"
+          file "$out/sparkbox-darwin-arm64"
+
+  # -------------------------------------------------------------- sluice -----
+  #
+  # tools/sluice is the repo's SECOND Go module (there is no go.work at the
+  # root), and until now literally nothing in CI entered the directory: no
+  # build, no vet, no test, and no release asset. The doctor egress check
+  # carried a TODO saying so. That is now the wrong shape of gap to leave open,
+  # because `sparkbox setup --sluice` downloads sluice-linux-<arch> from a
+  # release and installs it as root — a binary the release pipeline compiles on
+  # every tag is a binary CI has to be able to compile on every push.
+  #
+  # Its own job rather than more steps on `test`: a second module needs its own
+  # setup-go (tools/sluice declares go 1.24.7 where sparkbox declares 1.25.0,
+  # and cache-dependency-path must point at ITS go.sum or the cache is a lie),
+  # and a red sluice must be legible as "sluice broke" rather than as a failed
+  # step buried in the sparkbox job.
+  #
+  # NO clang, no bpf2go, no llvm anywhere. internal/meter/sluice_bpfel.o is a
+  # committed, //go:embed-ed artifact, so the whole tool is one `go build`.
+  # See the feasibility note in hack/stage-artifacts.sh for why that object is
+  # neither arch- nor kernel-version-specific.
+  sluice:
+    name: sluice build, vet, test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tools/sluice
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sluice/go.mod
+          cache-dependency-path: tools/sluice/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files; run \`gofmt -w\` on:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      # The exact two builds hack/stage-artifacts.sh performs for a release,
+      # with the same CGO_ENABLED=0 (the meter is pure Go over
+      # github.com/cilium/ebpf; nothing here needs cgo). A release-time-only
+      # compile is a compile that first fails while cutting a tag.
+      - name: cross-compile the release targets
+        run: |
+          for arch in amd64 arm64; do
+            echo "-> linux/$arch"
+            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -o /dev/null ./cmd/sluice
+          done
+
+      # Say plainly what this job does NOT prove, the same way the smoke job
+      # does. The eBPF half of sluice is the half CI cannot reach: loading the
+      # program needs CAP_BPF and a non-trivial memlock rlimit, ATTACHING it
+      # needs CAP_NET_ADMIN and real sbtap devices, and the TCX link the meter
+      # uses needs a host kernel >= 6.6. internal/meter's tests are
+      # //go:build linux and skip themselves without root, so what is green
+      # above is: the DNS proxy, the allowlist matcher, the ip↔name table, the
+      # policy model, the control socket, the report format — and that the
+      # binary compiles for both release arches.
+      - name: what this job does not prove
+        run: |
+          echo "SKIP: eBPF load/attach (needs root, CAP_BPF, real sbtap taps, kernel >= 6.6)"
+          echo "SKIP: :53 DNS interception end to end (needs a guest on a tap)"
+          echo "the release asset's runtime floor is checked host-side by"
+          echo "hostsetup's sluice step and reported by \`sparkbox doctor\`."
+
   # --------------------------------------------------------------- smoke -----
   smoke:
     name: provision smoke
@@ -156,8 +323,19 @@ jobs:
       # stubs — checkKVM, the firecracker driver and the unit's
       # ConditionPathExists all only *stat* that path. Sandbox lifecycle stays
       # covered by the in-process mock-driver e2e tests. Also untested here:
-      # TLS/ACME, the tunnel and tailnet edges, --subnet6, sluice, archiving,
+      # TLS/ACME, the tunnel and tailnet edges, --subnet6, archiving,
       # --move-admin-ssh, the swapfile step, and anything on darwin.
+      #
+      # sluice is a partial: the dry phase asserts both halves of --sluice (the
+      # default says out loud that sandboxes are unfiltered; the flag plans the
+      # install, the allowlist seed and the resolver port probe), the stub
+      # release publishes a sluice asset so the manifest cannot drift from
+      # stage-artifacts.sh, and the fetch/verify/seed/render path is covered by
+      # hostsetup's unit tests. What is NOT reached from any hosted runner is
+      # the eBPF data plane itself — loading needs CAP_BPF and attaching needs
+      # real sbtap devices — so `--sluice` is deliberately not turned on for the
+      # real container run: it would prove the daemon starts and nothing about
+      # whether it filters, at the cost of a flaky :53 bind.
       - name: Real setup in a systemd container
         env:
           SPARKBOX_BIN: ${{ runner.temp }}/sparkbox

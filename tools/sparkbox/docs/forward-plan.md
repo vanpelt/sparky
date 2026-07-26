@@ -87,6 +87,21 @@ host matches the release.
   `--dns-*`, `--tls-provider` and `--ssh-advertise-port` become real flags that
   write into the unit; the DGX's config should be reproducible from flags alone.
 
+  **Done.** The blocker A4 recorded (`tools/sluice` is a second Go module that
+  no CI built and no release published, so there was nothing to fetch) is
+  cleared: `hack/stage-artifacts.sh` builds and stages `sluice-linux-<arch>`
+  with a `SHA256_SLUICE` manifest key, `go.yml` gained a `sluice` job, and
+  `setup --sluice` fetches, sha-verifies, seeds `allowlist.txt` + `sluice.env`,
+  renders `sluice.service` and enables it — implying `--sluice-socket` and
+  `--guest-dns` so the pair cannot be installed-but-not-talking. Shipping a
+  prebuilt binary is sound because the embedded eBPF object needs no clang and
+  is neither arch- nor kernel-version-specific (`EM_BPF` bytecode, and
+  `core_relo_len = 0` — zero CO-RE relocations). The one real floor is a **host
+  kernel >= 6.6** for the TCX attach, which `setup` refuses below and `doctor`
+  reports, because a `ConditionKernelVersion` alone makes systemd *skip* the
+  unit while `systemctl start` still exits 0. Egress filtering stays opt-in:
+  the unfiltered default is unchanged and now stated in three places.
+
 ### A5 — docs and teardown ergonomics — **size S, priority 4**
 
 - **F5** — document preserving `state/certmagic/` across a rebuild, and have
@@ -130,17 +145,39 @@ Decide: does the darwin binary get its own manifest, or a shared one? Recommend
 a `manifest-darwin-arm64.env` listing the *linux* assets it will install into
 the guest, so the darwin side pins exactly what it provisions.
 
-### B2 — ship the macOS outer kernel as a release asset — **size M, priority 2**
+### B2 — ship the macOS outer kernel as a release asset — **size M, priority 2** — **DONE**
 
-`macos/kernel/build.sh` compiles Linux 6.14.9 + Apple's `config-arm64` 0.5.0 +
-our fragment **on the user's laptop**. It is fully pinned and checksummed
-(known-good SHA-256
-`7bb865dfc2dfb6578d41a9fb2d044299c626377ff69c540b15108afb75dd080c`), so it
-belongs in CI, built once, as `vmlinux-macos-arm64`. Nobody should compile a
-kernel as an onboarding step.
+`macos/kernel/build.sh` compiled Linux 6.14.9 + Apple's `config-arm64` 0.5.0 +
+our fragment **on the user's laptop**. It is fully pinned, so it now belongs in
+CI, built once, as `vmlinux-macos-arm64`. Nobody should compile a kernel as an
+onboarding step.
 
-Gate: confirm the kernel is byte-reproducible in CI before trusting the
-checksum as an identity.
+Shipped: a `macos-kernel` job on a native `ubuntu-24.04-arm` runner publishes
+`vmlinux-macos-arm64` (+ its resolved `.config`); `manifest-darwin-arm64.env`
+carries `OUTER_KERNEL_ASSET` / `SHA256_OUTER_KERNEL`; `macos/kernel/fetch.sh`
+downloads and verifies it and is now the default path, with
+`SPARKBOX_KERNEL_SOURCE=build` as the escape hatch.
+
+**The reproducibility gate resolved the other way, deliberately.** The
+checksum is published as an **integrity** claim — *this is the file the release
+shipped, verify your download against it* — and **not** as an identity claim.
+Byte-reproducibility across time is not achievable here at reasonable cost:
+`build.sh` installs its toolchain with a bare `apt-get install build-essential`,
+and the compiler is not merely used but *embedded* — the resolved config carries
+`CONFIG_CC_VERSION_TEXT="gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"` and the
+same string, plus the binutils version, is compiled into the kernel banner. A
+packaging-only Ubuntu revision moves the SHA-256 with zero codegen change.
+Pinning the archive as well (snapshot.ubuntu.com) would buy an identity claim at
+the price of a builder that can never take a compiler security fix, and would
+still not be a proof.
+
+What CI *does* prove, and gates on, is the narrower true claim: the build is a
+pure function of its inputs. On every `v*` tag the kernel is built **twice at
+different `-j`** and the job fails if the two hashes differ — which also settles
+the one input `build.sh` does not pin. The recorded known-good hash survives as
+a *witness*: a mismatch prints the observed compiler alongside both hashes and
+raises a CI warning, but does not fail the release, because failing a release
+because Ubuntu revved gcc is treating a snapshot as a law.
 
 ### B3 — build the machine image from the released binary — **size S, priority 3**
 
@@ -250,8 +287,18 @@ are the difference between a tool that installs and one that appears to.
 2. **W23 is where latent address leaks surface**, all at once, late. Expect the
    remote pass to fail in places nobody suspected — that is the test doing its
    job, and it is why W23 must not be deferred out of M3.
-3. **B2's kernel reproducibility** is assumed, not proven. Verify before
-   treating the checksum as an identity.
+3. ~~**B2's kernel reproducibility** is assumed, not proven. Verify before
+   treating the checksum as an identity.~~ **Settled: it is not reproducible
+   across time, and we no longer claim it is.** The builder's gcc and binutils
+   versions are compiled into the kernel banner while the Ubuntu archive that
+   supplies them is unpinned, so a packaging-only compiler revision changes the
+   bytes. `SHA256_OUTER_KERNEL` is therefore an integrity check on the published
+   file, not an identity anyone can re-derive; CI instead gates on determinism
+   *within* a toolchain (two builds at different `-j` must match) and reports
+   drift from the known-good witness without failing on it. Details in B2 above
+   and at the top of `macos/kernel/build.sh`. The residual risk is now the
+   honest one: **if the release pipeline ever loses that asset, a Mac has no
+   fallback but to compile**, so `macos/kernel/build.sh` must keep working.
 4. **No `go test` in CI today** means every acceptance criterion in the
    blueprint is honour-system. A6 should land before C starts in earnest.
 5. **Mixed-version fleets** are unhandled: nodes report a release tag but

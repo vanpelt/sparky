@@ -112,7 +112,9 @@ secret and are never published.
 ```sh
 git tag v1 && git push origin v1
 # -> https://github.com/vanpelt/sparky/releases/tag/v1 with sparkbox-linux-<arch>,
-#    vmlinux-<arch>, firecracker-<arch>, universal-<arch>.ext4.zst, manifest-<arch>.env
+#    sluice-linux-<arch>, vmlinux-<arch>, firecracker-<arch>,
+#    universal-<arch>.ext4.zst, manifest-<arch>.env
+#    (plus darwin/arm64 assets a linux host never touches — see the README)
 ```
 
 One-time setting — the fleet gateway *public* key that gets baked into the

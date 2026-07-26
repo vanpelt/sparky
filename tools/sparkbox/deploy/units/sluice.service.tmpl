@@ -1,0 +1,56 @@
+[Unit]
+Description=sluice — DNS allowlist gateway + eBPF egress meter for sparkbox VMs
+After=network-online.target sparkbox-net.service
+Wants=network-online.target
+# The eBPF data plane needs a BPF-capable kernel; the meter attaches with a TCX
+# link, which is >= 6.6.
+#
+# Kept as a belt to hostsetup's braces, NOT as the only guard. A unit whose
+# condition fails is SKIPPED by systemd, and `systemctl start` on a skipped unit
+# exits 0 — so this alone would report a clean install of an egress filter that
+# never once ran, which is F7 wearing a different hat. The sluice setup step
+# therefore refuses to install below 6.6 in the first place, and `sparkbox
+# doctor` reports a condition-failed unit as a failure rather than as absence.
+ConditionKernelVersion=>=6.6
+# Same reasoning as sparkbox.service: this restarts until :53 is free, and
+# systemd's default start-rate limit would give up and leave the box unfiltered
+# while reporting "failed" rather than "still trying". In [Unit], not [Service]
+# — systemd moved it in v229 and silently IGNORES the key in [Service].
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# sluice.env may override the defaults below, e.g.
+#   SLUICE_ARGS=--deny refused --upstream 10.0.0.53:53
+# Referenced unbraced so systemd word-splits it (empty -> zero args); see the
+# note in sparkbox.service about ${VAR} vs $VAR.
+EnvironmentFile=-{{.EnvPath}}
+# Root: loading eBPF and attaching to taps needs CAP_BPF + CAP_NET_ADMIN, and
+# binding :53 needs CAP_NET_BIND_SERVICE. Root is simplest; to drop privilege
+# use AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_BIND_SERVICE instead.
+User=root
+# --dns-listen is templated rather than fixed at :53 because a gateway that also
+# runs sparkbox's own wildcard DNS responder (--dns-addr) cannot have both of
+# them on the wildcard :53 — the DGX hit exactly that and answered it with a
+# dedicated resolver address on a dummy interface. `sparkbox setup
+# --sluice-dns-addr` moves this and --guest-dns together.
+#
+# --api-listen exposes a root-owned control socket the sparkbox gateway pushes
+# per-tag egress policy to and reads per-VM bandwidth from. It lives under /run
+# (tmpfs, recreated each boot) and never leaves the box. The gateway's
+# --sluice-socket must name this same path.
+ExecStart={{.BinPath}} run \
+  --allowlist {{.AllowlistPath}} \
+  --dns-listen {{.DNSAddr}} \
+  --tap-prefix {{.TapPrefix}} \
+  --report-interval 60s \
+  --api-listen {{.SocketPath}} \
+  $SLUICE_ARGS
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+# eBPF maps are locked memory on older kernels.
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

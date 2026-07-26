@@ -77,6 +77,9 @@ func DefaultChecks() []Check {
 		{"disk space", checkDisk},
 		{"sandbox NAT rules", checkNAT},
 		{"sparkbox service", checkService},
+		// The SECOND unit setup starts, and for a long time the only one nothing
+		// ever proved had come up (see checkSluiceService).
+		{"sluice service", checkSluiceService},
 		// After the liveness verdict: it reads the running gateway's command
 		// line, so its "running service" / "service not running" wording only
 		// makes sense once the reader has seen whether the service is up.
@@ -544,15 +547,17 @@ func natChainExists(p Probe, chain string) bool {
 // is what the daemon is running with, bundles and all — the same reason
 // checkVersions reads /proc/<pid>/exe rather than trusting BinPath.
 //
-// TODO(sluice): `setup` cannot install sluice yet, so this check can only
-// report. tools/sluice is a separate Go module (github.com/vanpelt/sparky/tools/sluice,
-// with a committed eBPF object) that the release pipeline does not build:
-// hack/stage-artifacts.sh stages only sparkbox, vmlinux, firecracker and the
-// rootfs, and the manifest has no SHA256_SLUICE, so there is no asset to fetch
-// and inventing a URL for one would be worse than saying this. Publishing
-// sluice-linux-<arch> (plus adding tools/sluice to CI, which never builds it
-// today) unblocks a real --sluice step; the flags it would need — --guest-dns
-// and --sluice-socket — are already here.
+// This check used to carry a TODO recording why `setup` could not install
+// sluice: tools/sluice is a separate Go module, no CI built it, and no release
+// published a binary, so there was nothing to fetch and inventing a URL would
+// have been worse than admitting it. That gap is closed — a release now ships
+// sluice-linux-<arch> with SHA256_SLUICE in the manifest, go.yml builds and
+// tests the module, and `sparkbox setup --sluice` installs it (see sluice.go).
+// So the remediation below names a command that exists.
+//
+// What the check still cannot do is decide anything for the operator. Egress
+// filtering changes what running sandboxes can reach, so it stays opt-in, and
+// the unfiltered default stays a WARN that says so in full.
 func checkEgress(p Probe, cfg Config) Result {
 	flags, source := gatewayFlags(p, cfg)
 	socket, guestDNS := flags["--sluice-socket"], flags["--guest-dns"]
@@ -560,8 +565,9 @@ func checkEgress(p Probe, cfg Config) Result {
 	switch {
 	case socket == "" && guestDNS == "":
 		return warn("this gateway has no egress control — every sandbox reaches the whole internet ("+source+")",
-			"that is the default and it is silent: sandboxes are unfiltered. To enable it, run sluice on this host and "+
-				"re-run `sparkbox setup --sluice-socket /run/sluice.sock --guest-dns <resolver-ip>` (setup cannot install sluice itself yet)")
+			"that is the default and it is silent: sandboxes are unfiltered. Turn it on with "+
+				"`sparkbox setup --sluice`, which installs the egress gateway from this release, seeds an allowlist, "+
+				"and points guests at it (untagged sandboxes stay unrestricted; only tagged ones are filtered)")
 	case socket == "":
 		return warn("guests resolve through "+guestDNS+" but no --sluice-socket: the gateway pushes no egress policy ("+source+")",
 			"add --sluice-socket /run/sluice.sock so the gateway can program the allowlist; without it the resolver enforces only its own defaults")
@@ -572,11 +578,189 @@ func checkEgress(p Probe, cfg Config) Result {
 	// Both halves are configured; the remaining question is whether the daemon
 	// on the other end of the socket is actually there. A socket path that does
 	// not exist means every policy push fails and the gateway carries on.
+	//
+	// FAIL rather than WARN when THIS run asked for --sluice: setup has just
+	// installed and started the daemon, so an absent socket is not a host
+	// somebody else configured oddly, it is this run's own work not having
+	// happened — and a WARN there is what let `setup --sluice` exit 0 and print
+	// "egress: sluice on …" over a daemon that never answered. A doctor run
+	// (which has no --sluice flag) still gets the WARN, because a hand-installed
+	// sluice that is merely stopped is the operator's business, not a broken
+	// provision.
 	if _, err := p.Stat(socket); err != nil {
-		return warn("--sluice-socket "+socket+" does not exist — sluice is not running ("+source+")",
-			"start it (`systemctl status sluice`); until it answers, the gateway's egress policy pushes go nowhere and sandboxes are unfiltered")
+		detail := "--sluice-socket " + socket + " does not exist — sluice is not answering (" + source + ")"
+		if cfg.Sluice {
+			return fail(detail, sluiceUnitAdvice(p))
+		}
+		return warn(detail, sluiceUnitAdvice(p))
 	}
 	return pass("sluice at " + socket + ", guests resolve through " + guestDNS + " (" + source + ")")
+}
+
+// sluiceUnitAdvice explains WHY the control socket is missing by asking systemd
+// about the unit, instead of telling every operator to go read `systemctl
+// status` for themselves.
+//
+// The condition-failed case is the one worth the code. sluice.service carries
+// ConditionKernelVersion=>=6.6 (its meter attaches with a TCX link, which does
+// not exist below that), and systemd SKIPS a unit whose condition fails while
+// exiting 0 for `systemctl start` — so the unit sits at inactive/dead with
+// ConditionResult=no and every surface that samples ActiveState reads it as
+// "not started yet". Without this, a host whose kernel is simply too old would
+// be told to "start it", which would go on quietly succeeding and doing nothing.
+func sluiceUnitAdvice(p Probe) string {
+	out, _ := p.Run("systemctl", "show", sluiceUnit,
+		"--property=LoadState,ActiveState,SubState,ConditionResult,NRestarts")
+	kv := parseKV(out)
+	switch {
+	case kv["LoadState"] == "" && kv["ActiveState"] == "":
+		return "could not ask systemd about " + sluiceUnit + "; until sluice answers on that socket, " +
+			"the gateway's policy pushes go nowhere and sandboxes are unfiltered"
+	case kv["LoadState"] == "not-found":
+		return sluiceUnit + " is not installed on this host — the --sluice-socket flag names a daemon that was never put here. " +
+			"Run `sparkbox setup --sluice` to install and enable it, or drop the flag so the gateway stops claiming an egress filter it does not have"
+	case kv["ConditionResult"] == "no":
+		return sluiceUnit + " is installed but systemd SKIPPED it because its start condition failed " +
+			"(ConditionKernelVersion=>=6.6 — sluice's eBPF meter attaches with a TCX link, which older kernels do not have). " +
+			"`systemctl start sluice` will keep exiting 0 without running anything: upgrade the kernel, " +
+			"or drop --sluice-socket/--guest-dns so this host is honestly unfiltered rather than silently so"
+	case kv["ActiveState"] == "failed" || kv["SubState"] == "auto-restart":
+		return sluiceUnit + " is installed and failing (" + orDash(kv["ActiveState"]) + "/" + orDash(kv["SubState"]) +
+			", " + orDash(kv["NRestarts"]) + " restarts) — read `journalctl -u sluice -n 50`. " +
+			"The usual causes are a missing allowlist file (sluice exits 1 when the path its --allowlist names cannot be " +
+			"opened, so the journal reads status=1/FAILURE), a resolver address that is busy or is not on this host " +
+			"(\"bind: address already in use\" / \"cannot assign requested address\"), and an eBPF load this kernel refused"
+	case kv["ActiveState"] == "active":
+		return sluiceUnit + " is active but the socket is absent: it is either still starting, or was started with a " +
+			"different --api-listen than the gateway's --sluice-socket. Compare `systemctl cat sluice` with the gateway's flags"
+	default:
+		return sluiceUnit + " is " + orDash(kv["ActiveState"]) + " — start it with `systemctl start sluice` " +
+			"(or `sparkbox setup --sluice` to install its allowlist and unit properly). Until it answers, sandboxes are unfiltered"
+	}
+}
+
+// checkSluiceService proves sluice is ALIVE, for the same reason checkService
+// exists for the gateway — and it was the missing half of that lesson.
+//
+// The failure it closes, in full, because it is F7 reintroduced on the newer
+// unit: `stepEnableServices` runs `systemctl enable --now sluice.service`, the
+// unit is Type=simple, so systemd returns 0 the moment the fork succeeds. The
+// process then dies, Restart=always plus StartLimitIntervalSec=0 restarts it
+// every two seconds forever, and NOTHING in the run looked again: the A1
+// liveness probe only ever sampled sparkbox.service, checkEgress could only
+// WARN, so AnyFail was false, `setup` exited 0, and printConnect announced
+// "egress: sluice on 172.30.0.53:53 … tagged ones are filtered" over a daemon
+// that had never once served a query — while guests handed --guest-dns had no
+// resolver at all and so had no working DNS whatsoever.
+//
+// Three ways in, none of them exotic, and all of them silent before this check:
+//
+//   - The resolver address does not exist on the host. validateSluice
+//     RECOMMENDS `--sluice-dns-addr 172.30.0.53:53` for a box that also runs the
+//     wildcard responder, and the bind then fails with EADDRNOTAVAIL. (The
+//     packet-filter script now creates that address on a dummy interface — see
+//     SLUICE_DNS_IP in deploy/sparkbox-net.sh — so this is no longer the default
+//     outcome, but an operator's own address on a host whose sparkbox-net did
+//     not run still gets there.) The port preflight deliberately steps over
+//     EADDRNOTAVAIL, so it cannot be the thing that catches this.
+//   - The eBPF meter fails to load, which with the seeded `SLUICE_ARGS=--enforce
+//     --open-untagged` is exit 1 and a permanent loop, with no flag from the
+//     operator at all.
+//   - The allowlist file is absent (exit 1, see sluiceAllowlistPath).
+//
+// The first of those does not even exit non-zero — sluice cancels its root
+// context and returns 0 — so the unit never reaches ActiveState=failed. It
+// oscillates active/auto-restart with NRestarts climbing, which is precisely the
+// state a single is-active sample calls healthy. Hence the same two-sample probe
+// the gateway gets: anything that moved between the samples is a crash loop.
+func checkSluiceService(p Probe, cfg Config) Result {
+	first := showUnit(p, sluiceUnit)
+
+	// `systemctl show` exits 0 even for a unit that does not exist, so empty
+	// LoadState AND ActiveState means systemctl itself could not answer.
+	if first.load == "" && first.active == "" {
+		if !cfg.Sluice {
+			return pass("not checked (no --sluice, and systemd could not be queried)")
+		}
+		return warn("could not query systemd about "+sluiceUnit,
+			"--sluice was asked for but this host's systemd cannot be queried, so whether the egress gateway is running is unknown")
+	}
+	if first.load != "loaded" {
+		if !cfg.Sluice {
+			// The overwhelmingly common case: a host with no egress gateway.
+			// checkEgress is the check that has an opinion about that; saying it
+			// twice would only teach the operator to skim the report.
+			return pass(sluiceUnit + " not installed (LoadState=" + orDash(first.load) + "); this host has no egress gateway")
+		}
+		return fail(fmt.Sprintf("--sluice was requested but %s is not installed (LoadState=%s)", sluiceUnit, orDash(first.load)),
+			sluiceUnitAdvice(p))
+	}
+
+	switch first.active {
+	case "failed":
+		return failWithUnitJournal(p, sluiceUnit, fmt.Sprintf("%s failed (%s)", sluiceUnit, orDash(first.sub)),
+			sluiceUnitAdvice(p))
+	case "inactive", "deactivating":
+		detail := fmt.Sprintf("%s %s (%s)", sluiceUnit, first.active, orDash(first.sub))
+		// With --sluice this run just ran `enable --now` on it, so "not running"
+		// is this run having failed, not a host in a state of its own. It is also
+		// how a condition-skipped unit looks (ConditionKernelVersion=>=6.6:
+		// systemd skips it and `start` still exits 0) — sluiceUnitAdvice asks
+		// systemd for ConditionResult and says which of the two it is.
+		if cfg.Sluice {
+			return failWithUnitJournal(p, sluiceUnit, detail, sluiceUnitAdvice(p))
+		}
+		return warn(detail, sluiceUnitAdvice(p))
+	case "active", "activating":
+		// fall through to the liveness comparison below
+	default:
+		return warn("unknown state "+orDash(first.active), sluiceUnitAdvice(p))
+	}
+
+	// Only now is the settle window worth paying for — every branch above
+	// returned immediately, so a doctor run on a host with no sluice stays
+	// instant and never sleeps.
+	if cfg.ServiceSettle > 0 {
+		p.Sleep(cfg.ServiceSettle)
+	}
+	second := showUnit(p, sluiceUnit)
+
+	const loopHint = "sluice is restarting faster than it can serve, so guests pointed at --guest-dns have NO resolver: " +
+		"the journal below has the reason (a missing allowlist file, an address the host does not hold, " +
+		"a busy :53, or an eBPF load this kernel refused)"
+	if looped, why := restarted(first, second); looped {
+		return failWithUnitJournal(p, sluiceUnit, fmt.Sprintf("%s is crash-looping: %s", sluiceUnit, why), loopHint)
+	}
+	// Same reasoning as checkService: a sample taken inside the RestartSec gap
+	// reads activating/auto-restart and moves NEITHER restart signal, so without
+	// this a loop that straddles the end of the window reports "stable".
+	if first.sub == "auto-restart" || second.sub == "auto-restart" {
+		return failWithUnitJournal(p, sluiceUnit,
+			fmt.Sprintf("%s is crash-looping: systemd has it in a restart backoff (SubState=auto-restart)", sluiceUnit), loopHint)
+	}
+	switch second.active {
+	case "failed":
+		return failWithUnitJournal(p, sluiceUnit, fmt.Sprintf("%s failed during the settle window (%s)", sluiceUnit, orDash(second.sub)), loopHint)
+	case "inactive", "deactivating":
+		return failWithUnitJournal(p, sluiceUnit, fmt.Sprintf("%s went %s during the settle window", sluiceUnit, second.active), loopHint)
+	case "activating":
+		if first.active == "active" {
+			return failWithUnitJournal(p, sluiceUnit,
+				fmt.Sprintf("%s restarted during the settle window (now %s/%s)", sluiceUnit, second.active, orDash(second.sub)), loopHint)
+		}
+	}
+	if first.active == "activating" && second.active == "activating" {
+		return warn(fmt.Sprintf("%s still starting after %s (%s)", sluiceUnit, cfg.ServiceSettle, orDash(second.sub)),
+			"give it a moment and re-run `sparkbox doctor`; if it never leaves activating, read `journalctl -u sluice`")
+	}
+	detail := fmt.Sprintf("active (%s), stable", orDash(second.sub))
+	if cfg.ServiceSettle > 0 {
+		detail = fmt.Sprintf("active (%s), stable across a %s window", orDash(second.sub), cfg.ServiceSettle)
+	}
+	if second.restarts != "" && second.restarts != "0" {
+		detail += fmt.Sprintf(" (%s lifetime restarts)", second.restarts)
+	}
+	return pass(detail)
 }
 
 // gatewayFlags reads the flags the running gateway was started with, falling
@@ -792,21 +976,33 @@ func checkVersions(p Probe, cfg Config) Result {
 	return pass(detail)
 }
 
-// failWithJournal builds a FAIL carrying the tail of the unit's journal, so the
-// operator sees the actual error without running a second command. journalctl
-// needs privilege to read the system journal and doctor is routinely run
-// unprivileged (checkRoot is only a WARN), so a refusal is reported as such
-// rather than silently reading as "no evidence".
+// failWithJournal builds a FAIL carrying the tail of the gateway unit's journal.
 func failWithJournal(p Probe, detail, hint string) Result {
+	return failWithUnitJournal(p, serviceUnit, detail, hint)
+}
+
+// failWithUnitJournal builds a FAIL carrying the tail of a unit's journal, so
+// the operator sees the actual error without running a second command.
+// journalctl needs privilege to read the system journal and doctor is routinely
+// run unprivileged (checkRoot is only a WARN), so a refusal is reported as such
+// rather than silently reading as "no evidence".
+//
+// Takes the unit because sluice's crash loop needs the same treatment as the
+// gateway's, and for the same reason: the one line that names the cause
+// ("cannot assign requested address", "load allowlist") is in ITS journal, and
+// an operator who has to go and find it is an operator who will read
+// "sluice.service is crash-looping" as a mystery.
+func failWithUnitJournal(p Probe, unit, detail, hint string) Result {
 	r := fail(detail, hint)
-	out, err := p.Run("journalctl", "-u", serviceUnit, "-n", "20", "--no-pager")
+	out, err := p.Run("journalctl", "-u", unit, "-n", "20", "--no-pager")
+	name := strings.TrimSuffix(unit, ".service")
 	switch {
 	case strings.TrimSpace(out) != "":
 		r.Output = out
 	case err != nil:
-		r.Output = "(journal unavailable: " + err.Error() + " — re-run as root, or `journalctl -u sparkbox -n 50`)"
+		r.Output = "(journal unavailable: " + err.Error() + " — re-run as root, or `journalctl -u " + name + " -n 50`)"
 	default:
-		r.Output = "(no journal entries for " + serviceUnit + ")"
+		r.Output = "(no journal entries for " + unit + ")"
 	}
 	return r
 }

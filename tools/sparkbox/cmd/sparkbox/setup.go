@@ -50,7 +50,9 @@ func setup(args []string) error {
 	tlsProvider := fs.String("tls-provider", "", "certificates when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN in the unit's environment) | autocert (per-host, on demand)")
 	tlsEmail := fs.String("tls-email", "", "ACME account email for certificate-expiry notices (with --proxy-tls)")
 	guestDNS := fs.String("guest-dns", "", "resolver handed to guests: an IP (e.g. 172.30.0.53, where sluice listens) or the literal \"gateway\". Empty leaves guests on public DNS, which bypasses egress filtering entirely")
-	sluiceSocket := fs.String("sluice-socket", "", "sluice control socket (e.g. /run/sluice.sock) the gateway pushes per-tag egress policy to; empty disables egress control. NOTE: setup does not install sluice itself yet — see the egress check in 'sparkbox doctor'")
+	sluice := fs.Bool("sluice", false, "install and enable the sluice egress gateway from this release: fetch sluice-linux-<arch>, seed an allowlist, write its unit and start it. Implies --sluice-socket and --guest-dns unless you set them. Needs kernel >= 6.6. Untagged sandboxes keep unrestricted egress; only tagged ones are filtered")
+	sluiceDNSAddr := fs.String("sluice-dns-addr", "", "where sluice's allowlist resolver binds, host:port (default :53 with --sluice). Give it an address of its own (e.g. 172.30.0.53:53) on a host that also runs --dns-addr; guests are then pointed at that literal")
+	sluiceSocket := fs.String("sluice-socket", "", "sluice control socket (e.g. /run/sluice.sock) the gateway pushes per-tag egress policy to; empty disables egress control. --sluice supplies /run/sluice.sock; set this explicitly only to talk to a sluice you installed yourself")
 	archiveRemote := fs.String("archive-remote", "", "rclone remote holding sandbox archives (needs S3 write creds in the host's rclone.conf); requires --archive-bucket")
 	archiveBucket := fs.String("archive-bucket", "", "bucket within --archive-remote for sandbox archives")
 	binPath := fs.String("bin-path", cfg.BinPath, "where to install this sparkbox binary; the systemd unit's ExecStart runs it (empty skips the install)")
@@ -110,6 +112,8 @@ func setup(args []string) error {
 	cfg.TLSProvider = *tlsProvider
 	cfg.TLSEmail = *tlsEmail
 	cfg.GuestDNS = *guestDNS
+	cfg.Sluice = *sluice
+	cfg.SluiceDNSAddr = *sluiceDNSAddr
 	cfg.SluiceSocket = *sluiceSocket
 	cfg.ArchiveRemote = *archiveRemote
 	cfg.ArchiveBucket = *archiveBucket

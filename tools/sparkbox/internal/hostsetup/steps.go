@@ -36,10 +36,16 @@ type Env struct {
 	SystemdDir string // /etc/systemd/system
 	SysctlDir  string // /etc/sysctl.d
 	SbinDir    string // /usr/local/sbin
-	FstabPath  string // /etc/fstab
-	SwapPath   string // /swapfile
-	SSHDConfD  string // /etc/ssh/sshd_config.d
-	HomeDir    string // operator-key auto-detect root (~)
+	// SluiceBinPath is where stepSluice installs the egress gateway, and the
+	// path its unit's ExecStart names. A field for the same reason as the
+	// directories above rather than a Config knob: no operator has ever needed
+	// to move it, but a test that could not redirect it would download to (and
+	// chmod +x) the developer's real /usr/local/bin/sluice.
+	SluiceBinPath string
+	FstabPath     string // /etc/fstab
+	SwapPath      string // /swapfile
+	SSHDConfD     string // /etc/ssh/sshd_config.d
+	HomeDir       string // operator-key auto-detect root (~)
 	// SelfPath is the binary running this setup — the thing stepInstallBinary
 	// copies to Cfg.BinPath. It is a field, filled once in NewEnv, rather than
 	// an os.Executable() call inside the step, because inside a test that call
@@ -76,6 +82,12 @@ type Env struct {
 	// reached the disk and never the rules until somebody rebooted the box.
 	NetChanged bool
 
+	// SluiceChanged records that stepSluice installed or updated the egress
+	// gateway (its binary, its unit, or its seed files). Same contract as
+	// UnitsChanged, and it names a DIFFERENT unit: enable-services has to
+	// enable and restart sluice.service, which no other flag here implies.
+	SluiceChanged bool
+
 	// AdoptedLegacy records that reconcileLayout repointed Cfg at a state (and
 	// image) directory that was already live on this host, rather than the
 	// layout DefaultConfig describes. It is reported in the connect banner: an
@@ -100,16 +112,17 @@ func NewEnv(ctx context.Context, cfg Config, run Runner, fetch Fetcher, log io.W
 	}
 	return &Env{
 		Ctx: ctx, Cfg: cfg, Run: run, Fetch: fetch, Log: log,
-		Probe:      System(),
-		Listen:     NewNetListener(),
-		SystemdDir: "/etc/systemd/system",
-		SysctlDir:  "/etc/sysctl.d",
-		SbinDir:    "/usr/local/sbin",
-		FstabPath:  "/etc/fstab",
-		SwapPath:   "/swapfile",
-		SSHDConfD:  "/etc/ssh/sshd_config.d",
-		HomeDir:    home,
-		SelfPath:   self,
+		Probe:         System(),
+		Listen:        NewNetListener(),
+		SystemdDir:    "/etc/systemd/system",
+		SysctlDir:     "/etc/sysctl.d",
+		SbinDir:       "/usr/local/sbin",
+		SluiceBinPath: sluiceBinPath,
+		FstabPath:     "/etc/fstab",
+		SwapPath:      "/swapfile",
+		SSHDConfD:     "/etc/ssh/sshd_config.d",
+		HomeDir:       home,
+		SelfPath:      self,
 	}
 }
 
@@ -290,6 +303,11 @@ func allSteps() []Step {
 		stepUsersConf(),
 		stepEnvFile(),
 		stepNetAssets(),
+		// Before systemd-units and enable-services, because the gateway's unit
+		// carries --sluice-socket and --guest-dns and enable-services starts
+		// both daemons: a gateway that came up first would spend its startup
+		// failing to push policy at a socket nothing was listening on.
+		stepSluice(),
 		stepSystemdUnits(),
 		stepAdminSSH(),
 		stepEnableServices(),
@@ -425,6 +443,13 @@ func stepResolveRelease() Step {
 			defer rc.Close()
 			m, err := ParseManifest(rc, e.Cfg.Release)
 			if err != nil {
+				return err
+			}
+			// A manifest for the wrong OS parses perfectly and every checksum
+			// in it is right — for somebody else's binaries. The PLATFORM key
+			// is the only tell, so check it here, once, before anything is
+			// downloaded on the strength of it.
+			if err := m.CheckPlatform(hostOS()); err != nil {
 				return err
 			}
 			e.Manifest = m
@@ -975,8 +1000,13 @@ func stepEnableServices() Step {
 			return false, "", nil
 		},
 		Plan: func(e *Env) string {
-			return "systemctl daemon-reload; enable --now " + netUnit + " + " + serviceUnit +
-				" (restarting either one whose binary, unit, sparkbox.env or rules changed)"
+			units := netUnit
+			if e.Cfg.Sluice {
+				units += " + " + sluiceUnit
+			}
+			units += " + " + serviceUnit
+			return "systemctl daemon-reload; enable --now " + units +
+				" (restarting any whose binary, unit, sparkbox.env or rules changed)"
 		},
 		Apply: func(e *Env) error {
 			if _, err := e.run("systemctl", "daemon-reload"); err != nil {
@@ -984,6 +1014,21 @@ func stepEnableServices() Step {
 			}
 			if _, err := e.run("systemctl", "enable", "--now", netUnit); err != nil {
 				return err
+			}
+			// sluice before the gateway, and only when this config installs it.
+			// The gateway pushes egress policy at --sluice-socket as soon as it
+			// starts, so bringing it up first means a startup spent failing to
+			// reach a socket nothing is bound to.
+			//
+			// It is NOT disabled when --sluice is absent: a host that has sluice
+			// running from a hand install (which was the only way to have it
+			// until this step existed) must not silently lose its egress filter
+			// because somebody re-ran setup without the new flag. Turning it off
+			// is `systemctl disable --now sluice`, typed on purpose.
+			if e.Cfg.Sluice {
+				if _, err := e.run("systemctl", "enable", "--now", sluiceUnit); err != nil {
+					return err
+				}
 			}
 			if _, err := e.run("systemctl", "enable", "--now", serviceUnit); err != nil {
 				return err
@@ -1011,6 +1056,17 @@ func stepEnableServices() Step {
 					return err
 				}
 			}
+			// Then sluice, for the same reason and with the same argument about
+			// ordering: `enable --now` is a no-op on a unit that is already
+			// running, so a re-fetched binary or a re-rendered unit reaches the
+			// kernel only through an explicit restart. Still ahead of the
+			// gateway, so the socket exists before anything pushes to it.
+			if e.Cfg.Sluice && e.SluiceChanged {
+				e.logf("   sluice binary or unit changed — restarting %s\n", sluiceUnit)
+				if _, err := e.run("systemctl", "restart", sluiceUnit); err != nil {
+					return err
+				}
+			}
 			if e.BinaryInstalled || e.UnitsChanged || e.EnvChanged {
 				e.logf("   %s changed — restarting %s so it runs the new configuration\n",
 					changedWhat(map[string]bool{"binary": e.BinaryInstalled, "unit": e.UnitsChanged, "sparkbox.env": e.EnvChanged}), serviceUnit)
@@ -1026,7 +1082,7 @@ func stepEnableServices() Step {
 // somethingChanged reports whether this run has already rewritten anything a
 // running unit would not pick up on its own.
 func (e *Env) somethingChanged() bool {
-	return e.BinaryInstalled || e.UnitsChanged || e.EnvChanged || e.NetChanged
+	return e.BinaryInstalled || e.UnitsChanged || e.EnvChanged || e.NetChanged || e.SluiceChanged
 }
 
 // changedWhat names the things that changed, in a stable order, for the restart
@@ -1218,6 +1274,16 @@ func (e *Env) renderEnvFile() string {
 			fmt.Fprintf(&b, "%s=%s\n", s.key, s.val)
 		}
 	}
+	// The sluice resolver's own address, which sparkbox-net.sh puts on a dummy
+	// interface at boot. Emitted only when there is one, and through the same
+	// derivation managedEnv reconciles with, so a fresh host and an upgraded one
+	// cannot describe different resolver addresses to the packet filter.
+	if ip := e.Cfg.sluiceResolverIP(); ip != "" {
+		b.WriteString("# sluice's allowlist resolver binds this address and guests are handed it as their\n")
+		b.WriteString("# DNS server, so it has to EXIST: sparkbox-net.sh creates it on a dummy interface\n")
+		b.WriteString("# (skipping it if the host already holds it). Moved by `sparkbox setup --sluice-dns-addr`.\n")
+		fmt.Fprintf(&b, "SLUICE_DNS_IP=%s\n", ip)
+	}
 	b.WriteString("# Live memory overcommit + density defaults (retune with hack/measure-density.py):\n")
 	b.WriteString("OVERCOMMIT_FLAGS=--mem-reserve-mb 1024 --max-running-per-owner 50\n")
 	b.WriteString("# Any `sparkbox serve` flag setup has none of its own for. Appended LAST in the\n")
@@ -1300,12 +1366,28 @@ func (e *Env) printConnect() {
 		scheme, tlsNote = "https", ""
 	}
 	e.logf("  web routes:        %s://<name>.%s%s\n", scheme, e.Cfg.ProxyDomain, tlsNote)
-	if e.Cfg.SluiceSocket == "" || e.Cfg.GuestDNS == "" {
+	switch {
+	case e.Cfg.sluiceSocket() == "" || e.Cfg.guestDNS() == "":
 		// The same thing checkEgress says, said once where the operator is
 		// actually looking. A gateway with no egress control is the default and
 		// nothing about a green report suggests it.
 		e.logf("  egress:            UNFILTERED — sandboxes reach the whole internet\n")
-		e.logf("                     (needs sluice on this host plus --sluice-socket and --guest-dns)\n")
+		e.logf("                     (re-run with --sluice to install and enable the egress gateway)\n")
+	case e.Cfg.Sluice:
+		// This is a claim of FACT ("tagged ones are filtered"), and it is only
+		// printed because Provision returns before this banner on any FAIL and
+		// checkSluiceService FAILs on a sluice that is not alive. It used to be
+		// printed unconditionally, over a daemon that had crash-looped since the
+		// moment it was installed — F7's exact shape on the newer unit. If this
+		// branch ever stops being gated by that check, it goes back to lying.
+		e.logf("  egress:            sluice on %s, guests resolve through %s\n", e.Cfg.sluiceDNSAddr(), e.Cfg.guestDNS())
+		e.logf("                     allowlist: %s (edit, then `systemctl restart %s`)\n", e.Cfg.sluiceAllowlistPath(), sluiceUnit)
+		e.logf("                     untagged sandboxes stay unrestricted; tagged ones are filtered\n")
+	default:
+		// Both halves configured but nothing installed here — the pre-existing
+		// hand-installed shape. Nothing to warn about, nothing to claim credit
+		// for either.
+		e.logf("  egress:            pushing policy to %s, guests resolve through %s\n", e.Cfg.sluiceSocket(), e.Cfg.guestDNS())
 	}
 }
 

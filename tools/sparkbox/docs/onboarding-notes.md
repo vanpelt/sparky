@@ -36,11 +36,26 @@ released binary only enters at the very last step, *inside* the guest.
 be the macOS entry point until `sparkbox-darwin-arm64` ships. That is the first
 piece of work.
 
-**Second blocker:** building a kernel from source on a user's laptop is not an
-onboarding step anyone will tolerate. The outer kernel is pinned and
-reproducible (SHA-256
-`7bb865dfc2dfb6578d41a9fb2d044299c626377ff69c540b15108afb75dd080c`) — it belongs
-in the release, built once in CI.
+**Second blocker (FIXED — B2):** building a kernel from source on a user's
+laptop is not an onboarding step anyone will tolerate. The outer kernel's inputs
+are all pinned (Linux 6.14.9 and Apple's `config-arm64` by SHA-256, the builder
+image by digest), so it is now built once in CI on a native arm64 runner and
+published as `vmlinux-macos-arm64`; `macos/kernel/fetch.sh` downloads it and
+verifies it against `SHA256_OUTER_KERNEL` in `manifest-darwin-arm64.env`.
+`macos/kernel/build.sh` survives as the escape hatch
+(`SPARKBOX_KERNEL_SOURCE=build`).
+
+That checksum is an **integrity** claim, not an identity one, and the earlier
+wording here — "pinned and reproducible", with
+`7bb865dfc2dfb6578d41a9fb2d044299c626377ff69c540b15108afb75dd080c` quoted as
+though anyone could re-derive it — was wrong. `build.sh` installs its toolchain
+with an unpinned `apt-get install build-essential`, and gcc's and binutils'
+version strings are compiled into the kernel banner
+(`CONFIG_CC_VERSION_TEXT="gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"`), so a
+packaging-only Ubuntu revision changes the bytes with no change in behaviour.
+What CI gates on instead is determinism *within* a toolchain: on a `v*` tag it
+builds twice at different `-j` and fails if the hashes differ. The known-good
+hash is kept as a witness that reports drift, not as a gate.
 
 ## 1.2 Linux: subsystems `setup` doesn't install
 
@@ -50,22 +65,65 @@ has no `setup` story:
 
 | Component | What it is | Where it lives now |
 | --- | --- | --- |
-| **sluice** | per-VM egress control (`/run/sluice.sock`, `sluice.env`, `allowlist.txt`) — the gateway is started with `--guest-dns 172.30.0.53 --sluice-socket …` and silently loses egress filtering without it | `tools/sluice`, hand-installed |
+| **sluice** | per-VM egress control (`/run/sluice.sock`, `sluice.env`, `allowlist.txt`) — the gateway is started with `--guest-dns 172.30.0.53 --sluice-socket …` and silently loses egress filtering without it | **fixed**: `setup --sluice` installs it from the release |
 | **agent tooling** | `sparkbox-refresh-tools.sh` → `/srv/sparkbox/tools/{claude,codex,hivemind}` + `versions.env`; what makes a sandbox useful | `deploy/install-host-tooling.sh` |
 | **guest identity** | `sparkbox-install-guest-identity.sh` | `deploy/install-guest-identity.sh` |
 | **cloudflared** | public `*.catnip.sh` tunnel | hand-configured |
 | **tailscale + the edge /32** | `10.66.0.1` dedicated tailnet IP the edge binds; split-DNS via the Tailscale API | hand-configured, `docs/dedicated-edge-ip-cutover.md` |
 
-`sluice` is the one that feels core: a gateway without it is a gateway with no
-egress control, and nothing in `setup` says so.
+`sluice` was the one that felt core, and it is now installable: a release
+publishes `sluice-linux-<arch>` with `SHA256_SLUICE` in the manifest, and
+`sparkbox setup --sluice` fetches it, seeds `allowlist.txt` and `sluice.env`,
+renders `sluice.service` and enables it — implying `--sluice-socket` and
+`--guest-dns` so the daemon and the gateway cannot end up installed-but-not-
+talking. It stays **opt-in**: turning egress filtering on changes what running
+sandboxes can reach, so the unfiltered default remains, and `doctor` plus the
+`setup` banner both say so in words.
+
+Two things settled before shipping a prebuilt binary, because a wrong answer
+here is an asset that installs cleanly and fails to load on somebody's kernel:
+
+- **No eBPF toolchain is needed.** `internal/meter/sluice_bpfel.o` is committed
+  and `//go:embed`-ed, so the whole tool is one `go build` — no clang, no
+  bpf2go, no bpftool, no kernel headers, on the builder or the host.
+- **The object is neither arch- nor kernel-version-specific.** Its ELF
+  `e_machine` is `EM_BPF` (BPF is its own ISA; the only target property is
+  endianness, and both release arches are little-endian), and `bpf/sluice.c` is
+  CO-RE-free — the compiled object's `.BTF.ext` carries `core_relo_len = 0`,
+  i.e. zero CO-RE relocations, so there is no kernel struct layout for a
+  different kernel to invalidate. Guest kernels are irrelevant: sluice runs on
+  the host, attached to the host side of each guest's tap.
+
+What *is* version-dependent is the runtime attach path, and it belongs to the
+box rather than to the artifact: the meter uses a TCX link, which needs a **host
+kernel >= 6.6**. `setup --sluice` refuses below it. The unit's
+`ConditionKernelVersion=>=6.6` is not enough on its own — systemd *skips* a unit
+whose condition fails and `systemctl start` on a skipped unit exits 0, which
+would be F7's silent-success shape all over again — so `doctor` reports a
+condition-failed unit explicitly rather than telling the operator to start it.
 
 ## 1.3 Release-pipeline gaps implied by the above
 
-- no `sparkbox-darwin-arm64` asset
-- no `vmlinux-macos-arm64` (outer kernel) asset
-- no macOS outer-machine image
+- no `sparkbox-darwin-arm64` asset — **fixed (B1)**
+- no `vmlinux-macos-arm64` (outer kernel) asset — **fixed (B2)**
+- no `sluice-linux-<arch>` asset, and `tools/sluice` built by no CI at all —
+  **fixed**: `hack/stage-artifacts.sh` stages it with a `SHA256_SLUICE` manifest
+  entry, `stage-darwin-artifacts.sh` carries both keys across, and `go.yml` has
+  a `sluice` job (gofmt/build/vet/test -race + both release cross-compiles).
+  That job goes green on compilation and the pure-Go halves only; the eBPF
+  load/attach path needs root, `CAP_BPF` and real taps, and it says so.
 - the `Containerfile.gateway` build path duplicates the release build instead of
-  consuming it
+  consuming it — **fixed (B3)**: the image now bakes *no* sparkbox at all. It
+  needs neither the git repo nor a Go toolchain (`poc.sh` builds it from a
+  three-file staging dir), and `macos/sparkbox-bootstrap.sh` fetches the
+  released `sparkbox-linux-<arch>` for the tag being provisioned, verifies it
+  against that release's `SHA256_SPARKBOX`, and lets A1's `stepInstallBinary`
+  install it. The skew that motivated this — a `v0.3.0-5-g18bfe3b` source build
+  driving `v0.4.0` artifacts — is now impossible rather than merely unobserved,
+  and `provision` fails outright if the installed binary reports another tag.
+- no macOS outer-machine image — **still open**. The gateway image is still
+  built locally by `poc.sh`; only the kernel and the binaries inside it come
+  from the release. Publishing the image is B4's business, not B1–B3's.
 
 ---
 
@@ -151,13 +209,14 @@ the only real change is one line in `sparkbox.env`. Defensible as a guard (a
 gateway's users DB and secrets are meaningless on a node) but it should say why
 and allow the in-place path when the machine holds no state.
 
-## F3b — `destroy` also deletes the expensive, reproducible kernel
+## F3b — `destroy` also deletes the expensive kernel
 
 `poc.sh destroy --yes` removes the machine, the local image **and all of
-`macos/out`** — which is where the compiled outer kernel lives. The kernel is
-the single most expensive artifact in the whole flow and is byte-reproducible
-from pinned, checksummed inputs, so throwing it away to change a machine's role
-is pure waste. We sidestepped it by calling `container machine delete` directly
+`macos/out`** — which is where the outer kernel lives. The kernel was the single
+most expensive artifact in the whole flow, so throwing it away to change a
+machine's role is pure waste. (B2 has since made it a 29MB verified download
+rather than a compile, which lowers the cost but not the argument — and on the
+`SPARKBOX_KERNEL_SOURCE=build` path the original cost is back in full.) We sidestepped it by calling `container machine delete` directly
 and keeping `out/`.
 
 Teardown granularity should match cost: machine (cheap, seconds) / image
@@ -328,10 +387,13 @@ laptop now", and that is the next two milestones, not this one.
    F0 and F7 compound: the first breaks the install, the second hides it.
 1. **Ship `sparkbox-darwin-arm64`** — nothing else in Part 1 can start without it.
 2. **Ship the pinned macOS outer kernel as a release artifact** — kills the
-   from-source kernel build on the user's laptop.
+   from-source kernel build on the user's laptop. *(Done: B2. Note the
+   checksum ships as an integrity check, not a reproducibility claim.)*
 3. **Port `poc.sh` into `sparkbox setup` on darwin** — doctor, machine
    create/start/stop/destroy, provisioning, in that order.
-4. **F2 / sluice** — core subsystems silently absent after `setup`.
+4. **F2 / sluice** — core subsystems silently absent after `setup`. *(Done: the
+   release ships `sluice-linux-<arch>`, CI builds the module, and
+   `setup --sluice` installs and enables it. Still opt-in by design.)*
 5. **F1** — edge bind address; the `TLS_FLAGS` workaround is a trap.
 6. **F4** — legacy-layout detection.
 7. **F6** — README fleet quick-start (cheap, high leverage).

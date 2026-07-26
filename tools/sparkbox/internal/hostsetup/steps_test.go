@@ -105,11 +105,15 @@ func testEnv(t *testing.T, dry bool) (*Env, string) {
 		SystemdDir: filepath.Join(root, "systemd"),
 		SysctlDir:  filepath.Join(root, "sysctl"),
 		SbinDir:    filepath.Join(root, "sbin"),
-		FstabPath:  filepath.Join(root, "fstab"),
-		SwapPath:   filepath.Join(root, "swapfile"),
-		SSHDConfD:  filepath.Join(root, "sshd_config.d"),
-		HomeDir:    filepath.Join(root, "home"),
-		SelfPath:   self,
+		// Redirected for the same reason as BinPath and FirecrackerBin: the
+		// default is the real /usr/local/bin/sluice, and stepSluice would
+		// download to it and chmod it +x.
+		SluiceBinPath: filepath.Join(root, "bin", "sluice"),
+		FstabPath:     filepath.Join(root, "fstab"),
+		SwapPath:      filepath.Join(root, "swapfile"),
+		SSHDConfD:     filepath.Join(root, "sshd_config.d"),
+		HomeDir:       filepath.Join(root, "home"),
+		SelfPath:      self,
 	}
 	return e, root
 }
@@ -118,9 +122,13 @@ func TestDryRunMutatesNothing(t *testing.T) {
 	e, root := testEnv(t, true)
 	buf := &bytes.Buffer{}
 	e.Log = buf
-	// Resolve works offline via the map fetcher.
+	// Resolve works offline via the map fetcher. PLATFORM has to match this
+	// host: resolve-release rejects a manifest built for another OS, and the
+	// URL the fetcher is keyed by already carries the OS, so serving a linux
+	// manifest here would be serving it at the darwin manifest's address.
 	e.Fetch = mapFetcher{
-		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nARCH=" + runtime.GOARCH + "\n",
+		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nPLATFORM=" + runtime.GOOS +
+			"\nARCH=" + runtime.GOARCH + "\n",
 	}
 	if err := Provision(e); err != nil {
 		t.Fatalf("dry-run Provision: %v", err)
@@ -502,7 +510,8 @@ func TestProvisionFailsWhenVerificationFails(t *testing.T) {
 	buf := &bytes.Buffer{}
 	e.Log = buf
 	e.Fetch = mapFetcher{
-		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nARCH=" + runtime.GOARCH + "\n",
+		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nPLATFORM=" + runtime.GOOS +
+			"\nARCH=" + runtime.GOARCH + "\n",
 	}
 	// Let every step run to completion so the run reaches the verify pass: no
 	// swapfile, artifacts already on disk, a literal operator key.

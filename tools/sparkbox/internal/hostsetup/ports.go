@@ -69,19 +69,47 @@ func splitAddr(addr string) (host string, port int, err error) {
 }
 
 // addrFlags is the ordered list of listen addresses setup owns: the flag name
-// as `sparkbox serve` spells it, a human label for reports, and the networks
-// the daemon will actually bind.
+// as `sparkbox serve` spells it, a human label for reports, the networks the
+// daemon will actually bind, and WHICH DAEMON binds it.
+//
+// The last part is not decoration. A re-run on a host this tool already
+// provisioned finds every one of these ports busy — held by the very services
+// setup installed — so the preflight has to be able to recognise its own work,
+// and "its own work" stopped being one process the moment `--sluice` shipped.
+// unit is the systemd unit whose MainPID owns the address, and proc the process
+// name to fall back on where systemd cannot be asked (see diagnoseBusy).
 var addrFlags = []struct {
 	flag     string
 	label    string
 	networks []string
+	unit     string
+	proc     string
 	get      func(Config) string
 }{
-	{"--ssh-addr", "ssh gateway", []string{"tcp"}, Config.sshAddr},
-	{"--proxy-addr", "http edge", []string{"tcp"}, Config.proxyAddr},
-	{"--api-addr", "control api", []string{"tcp"}, Config.apiAddr},
+	{"--ssh-addr", "ssh gateway", []string{"tcp"}, serviceUnit, "sparkbox", Config.sshAddr},
+	{"--proxy-addr", "http edge", []string{"tcp"}, serviceUnit, "sparkbox", Config.proxyAddr},
+	{"--api-addr", "control api", []string{"tcp"}, serviceUnit, "sparkbox", Config.apiAddr},
 	// dnsedge serves UDP and TCP on the same address (dnsedge.ListenAndServe).
-	{"--dns-addr", "wildcard dns", []string{"udp", "tcp"}, Config.dnsAddr},
+	{"--dns-addr", "wildcard dns", []string{"udp", "tcp"}, serviceUnit, "sparkbox", Config.dnsAddr},
+	// sluice's allowlist resolver. Not a `sparkbox serve` flag at all — it is
+	// an ExecStart word in a DIFFERENT unit — but it is an address `setup`
+	// causes to be bound, which is what this list is actually about, and it is
+	// the single likeliest collision on the whole host: a stock Ubuntu server
+	// runs systemd-resolved on 127.0.0.53:53, and a wildcard :53 bind fails
+	// against it. Catching that here costs a millisecond; missing it costs a
+	// Restart=always loop that `systemctl is-active` calls "active".
+	//
+	// Empty unless --sluice was asked for, so every host that does not install
+	// the daemon skips it by the same rule --dns-addr already uses.
+	//
+	// It is also the one entry whose owner is NOT the gateway, and getting that
+	// wrong made `setup --sluice` a one-shot command: on the second run (an
+	// upgrade, say) the address is held by the sluice this tool installed, ss
+	// names the process "sluice" with a PID that is not sparkbox.service's
+	// MainPID, so diagnoseBusy called it a foreign squatter and aborted the run
+	// before the download — the exact outcome its doc comment says must never
+	// happen.
+	{"--sluice-dns-addr", "sluice resolver", []string{"udp", "tcp"}, sluiceUnit, "sluice", Config.sluiceDNSAddr},
 }
 
 // validateAddrs rejects listen addresses setup cannot faithfully write down or
@@ -244,6 +272,8 @@ type portProbe struct {
 	flag    string
 	network string
 	addr    string
+	unit    string // the systemd unit that binds it on a host we already provisioned
+	proc    string // and that unit's process name, for hosts systemd cannot answer for
 }
 
 // wantedPorts expands the effective addresses into one probe per socket.
@@ -255,7 +285,7 @@ func wantedPorts(addrs map[string]string) []portProbe {
 			continue
 		}
 		for _, n := range a.networks {
-			out = append(out, portProbe{label: a.label, flag: a.flag, network: n, addr: v})
+			out = append(out, portProbe{label: a.label, flag: a.flag, network: n, addr: v, unit: a.unit, proc: a.proc})
 		}
 	}
 	return out
@@ -302,24 +332,31 @@ func preflightPorts(e *Env) error {
 
 	warnProxyPortSkew(e, kv, addrs)
 
-	// The main PID of our own service, so a re-run on a live host does not trip
-	// over the gateway it provisioned last time. Looked up lazily and once: on
-	// the overwhelmingly common path every port is free and nobody needs to
-	// know, and `systemctl show` is not free.
-	mainPID, pidKnown := "", false
-	ourPID := func() string {
-		if !pidKnown {
-			pidKnown = true
-			if e.Probe != nil {
-				if pid := showService(e.Probe).mainPID; isPID(pid) {
-					mainPID = pid
-				}
+	// The main PID of whichever of OUR services owns the address being probed,
+	// so a re-run on a live host does not trip over the daemons it provisioned
+	// last time. Per unit, because sparkbox.service is not the only one setup
+	// starts: sluice.service binds the resolver address, and asking
+	// sparkbox.service for its PID could only ever answer "no" for that one.
+	//
+	// Looked up lazily and memoised per unit: on the overwhelmingly common path
+	// every port is free and nobody needs to know, and `systemctl show` is not
+	// free.
+	pids := map[string]string{}
+	ourPID := func(unit string) string {
+		if pid, done := pids[unit]; done {
+			return pid
+		}
+		pid := ""
+		if e.Probe != nil && unit != "" {
+			if p := showUnit(e.Probe, unit).mainPID; isPID(p) {
+				pid = p
 			}
 		}
-		return mainPID
+		pids[unit] = pid
+		return pid
 	}
 
-	var conflicts []string
+	var conflicts, movable []string
 	for _, p := range probes {
 		c, err := e.Listen.Listen(p.network, p.addr)
 		if err == nil {
@@ -335,7 +372,11 @@ func preflightPorts(e *Env) error {
 		//   dedicated edge IP: sparkbox-net.sh creates the `sparkedge` dummy
 		//   interface and its /32 from SPARKBOX_EDGE_IP at boot, i.e. after the
 		//   step that is running right now. Failing here would make the DGX's
-		//   own configuration un-provisionable.
+		//   own configuration un-provisionable. The same is now true of the
+		//   sluice resolver's own address (SLUICE_DNS_IP → the `sparkdns` dummy
+		//   interface), which is why THAT one must be proven by the sluice
+		//   liveness check afterwards: tolerating the error here is right, and
+		//   for a long time nothing downstream noticed when it was permanent.
 		//
 		//   EACCES — a privileged port without the privilege. doctor's root
 		//   check already reports that, and it is the same answer for every
@@ -347,10 +388,10 @@ func preflightPorts(e *Env) error {
 			continue
 		}
 		found, ok := listenerOwner(e, p.network, p.addr)
-		who, mine, detail := diagnoseBusy(found, ok, ourPID())
+		who, mine, detail := diagnoseBusy(found, ok, ourPID(p.unit), p.proc, p.unit)
 		if mine {
-			e.logf("   %s %s/%s is held by %s — that is this host's own gateway; it will rebind on restart\n",
-				p.flag, p.network, p.addr, who)
+			e.logf("   %s %s/%s is held by %s — that is this host's own %s; it will rebind on restart\n",
+				p.flag, p.network, p.addr, who, p.unit)
 			continue
 		}
 		if movingAdminSSHD(e.Cfg, p, found) {
@@ -359,16 +400,37 @@ func preflightPorts(e *Env) error {
 			continue
 		}
 		conflicts = append(conflicts, fmt.Sprintf("%s %s (%s/%s): %s", p.flag, p.addr, p.network, p.label, detail))
+		if !containsFlag(movable, p.flag) {
+			movable = append(movable, p.flag)
+		}
 	}
 	if len(conflicts) > 0 {
 		// Every conflict at once. Reporting the first would make an operator
 		// re-run setup once per busy port, and each re-run is a fresh chance to
 		// half-provision the host.
+		//
+		// The remedy names the flags that would move THESE probes rather than a
+		// fixed list, which used to omit --sluice-dns-addr entirely — so the one
+		// conflict the operator could not act on was the one whose flag was
+		// missing from the only sentence telling them there was a flag.
 		return fmt.Errorf("port preflight failed — the gateway cannot bind:\n    %s\n  "+
-			"free the port(s), or pick others with --ssh-addr/--proxy-addr/--api-addr/--dns-addr",
-			strings.Join(conflicts, "\n    "))
+			"free the port(s), or pick others with %s",
+			strings.Join(conflicts, "\n    "), strings.Join(movable, "/"))
 	}
 	return nil
+}
+
+// containsFlag is the "already listed" test for the remedy sentence's flag
+// list. Written out rather than reached for in slices, because the module
+// targets whatever Go the release runners have and this file has no other
+// reason to pin a version.
+func containsFlag(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // movingAdminSSHD reports whether a busy --ssh-addr probe is the host's own
@@ -423,28 +485,36 @@ func isAddrInUse(err error) bool { return errors.Is(err, syscall.EADDRINUSE) }
 // holds every one of these ports by design. Three signals, in order of
 // authority:
 //
-//  1. the owning PID is the service's own MainPID — conclusive;
-//  2. the owning process is *named* sparkbox — the fallback for hosts where
-//     systemd cannot be queried (a container, an unprivileged doctor run);
-//  3. nobody could be identified at all, but our service is running — presumed
+//  1. the owning PID is the MainPID of the unit that binds this address —
+//     conclusive;
+//  2. the owning process has that unit's process name — the fallback for hosts
+//     where systemd cannot be queried (a container, an unprivileged doctor run);
+//  3. nobody could be identified at all, but that unit is running — presumed
 //     ours, because on a live host that is overwhelmingly what it is.
+//
+// unit and proc are parameters rather than the sparkbox constants they used to
+// be, and that is the whole bug fix: with `--sluice` the resolver address is
+// held by sluice.service, whose PID is not sparkbox.service's MainPID and whose
+// process ss names "sluice", so every signal answered "not ours" and a second
+// `setup --sluice` on a working host aborted at the preflight with "in use by
+// sluice (pid N)" and no remedy but an undocumented `systemctl stop sluice`.
 //
 // Signals 2 and 3 can be wrong (a hand-started `sparkbox serve` in a terminal,
 // or an unidentifiable squatter on a host that also happens to be running the
 // service). That is deliberate: the cost of a false conflict is a host that
 // cannot be re-provisioned, while the cost of a missed one is bounded — the
-// post-apply liveness check still FAILs on the crash loop and inlines the
-// "address already in use" line from the journal.
-func diagnoseBusy(owner owner, found bool, mainPID string) (who string, mine bool, detail string) {
+// post-apply liveness checks still FAIL on the crash loop and inline the
+// "address already in use" line from that unit's journal.
+func diagnoseBusy(owner owner, found bool, mainPID, proc, unit string) (who string, mine bool, detail string) {
 	switch {
 	case found && mainPID != "" && owner.pid == mainPID:
-		return owner.String() + ", the running " + serviceUnit, true, ""
-	case found && owner.name == "sparkbox":
+		return owner.String() + ", the running " + unit, true, ""
+	case found && proc != "" && owner.name == proc:
 		return owner.String(), true, ""
 	case found:
 		return owner.String(), false, "in use by " + owner.String()
 	case mainPID != "":
-		return "pid " + mainPID + " (" + serviceUnit + ")", true, ""
+		return "pid " + mainPID + " (" + unit + ")", true, ""
 	default:
 		return "", false, "in use (could not identify the owner; `ss -lntup` and `lsof` were unavailable or said nothing)"
 	}

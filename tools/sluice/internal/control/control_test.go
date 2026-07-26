@@ -34,7 +34,7 @@ func TestReportJoinsPerTapDomainsAndLabelsByVM(t *testing.T) {
 	fm := &fakeMeter{
 		ifaces: map[uint32]string{7: "sbtap3", 9: "sbtap4"},
 		byIf: map[uint32]map[netip.Addr]report.Flow{
-			7: {addr("140.82.112.3"): {TxBytes: 100, RxBytes: 900}}, // sbtap3 -> github
+			7: {addr("140.82.112.3"): {TxBytes: 100, RxBytes: 900}},  // sbtap3 -> github
 			9: {addr("142.250.72.14"): {TxBytes: 10, RxBytes: 5000}}, // sbtap4 -> youtube
 		},
 	}

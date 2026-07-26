@@ -92,6 +92,19 @@ func (e *Env) managedEnv(kv map[string]string) []envSetting {
 			envSetting{"SPARKBOX_EDGE_REDIRECT", "0"},
 		)
 	}
+	// The address sluice's resolver binds, for sparkbox-net.sh to CREATE on a
+	// dummy interface. Managed only when this run installs sluice with a
+	// concrete resolver IP, because that is the only case where the key means
+	// anything — and, like SPARKBOX_EDGE_IP above, an unset --sluice must not
+	// rewrite a hand-configured host's line.
+	//
+	// Without it the whole recommended shape ("give sluice 172.30.0.53:53") was
+	// unrunnable: nothing put the address on the host, the bind failed with
+	// EADDRNOTAVAIL, and Restart=always turned that into a permanent loop that
+	// every surface reported as a successful provision.
+	if ip := e.Cfg.sluiceResolverIP(); ip != "" {
+		out = append(out, envSetting{"SLUICE_DNS_IP", ip})
+	}
 	// Managed only when this run IS a node. A standalone run must never write
 	// GATEWAY_FLAG= over an existing node's link — checkRoleSwitch refuses that
 	// combination outright rather than letting a merge quietly demote the host.

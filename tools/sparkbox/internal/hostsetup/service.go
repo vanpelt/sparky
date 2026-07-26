@@ -46,11 +46,23 @@ type serviceSample struct {
 	raw       string
 }
 
-// showService samples the unit. A non-zero exit is kept rather than returned:
-// on a host without systemd the output ("System has not been booted with
-// systemd…") is the only thing that explains the result to an operator.
-func showService(p Probe) serviceSample {
-	out, err := p.Run("systemctl", "show", serviceUnit, "--property="+serviceShowProps)
+// showService samples the gateway unit.
+func showService(p Probe) serviceSample { return showUnit(p, serviceUnit) }
+
+// showUnit samples any unit setup owns. A non-zero exit is kept rather than
+// returned: on a host without systemd the output ("System has not been booted
+// with systemd…") is the only thing that explains the result to an operator.
+//
+// Parameterised on the unit name because sparkbox.service is no longer the only
+// thing `setup` starts and therefore no longer the only thing it has to prove
+// came UP. sluice.service is Type=simple with Restart=always and
+// StartLimitIntervalSec=0, exactly like the gateway, so `enable --now` returns 0
+// the instant the fork succeeds and a daemon that dies on every start reads as a
+// successful one — F7's shape on the newer unit. The liveness comparison below
+// (and checkSluiceService) is the only thing that can tell the difference, and
+// it needed a sampler that is not hardwired to one unit.
+func showUnit(p Probe, unit string) serviceSample {
+	out, err := p.Run("systemctl", "show", unit, "--property="+serviceShowProps)
 	kv := parseKV(out)
 	return serviceSample{
 		load:      kv["LoadState"],

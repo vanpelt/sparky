@@ -484,10 +484,10 @@ func TestEgressControlReportsAGatewayWithNone(t *testing.T) {
 		{
 			// Configured, but nothing is listening: every policy push fails and
 			// the gateway carries on regardless.
-			name:    "a socket that does not exist means sluice is not running",
+			name:    "a socket that does not exist means sluice is not answering",
 			cmd:     cmdline("/usr/local/bin/sparkbox", "serve", "--sluice-socket", sock, "--guest-dns", "172.30.0.53"),
 			want:    Warn,
-			mention: "not running",
+			mention: "not answering",
 		},
 		{
 			// --flag=value is as valid on a command line as "--flag value".
@@ -526,6 +526,82 @@ func TestEgressControlReportsAGatewayWithNone(t *testing.T) {
 			}
 			if got.Status != Pass && got.Hint == "" {
 				t.Error("non-pass result should carry a remediation hint")
+			}
+		})
+	}
+}
+
+// TestSluiceUnitAdviceNamesTheRealCause covers the half of checkEgress that
+// exists because "sluice is not answering" has several very different causes
+// and only one of them is fixed by "start it".
+//
+// The condition-failed row is the one worth writing down. sluice.service
+// carries ConditionKernelVersion=>=6.6 (its meter attaches with a TCX link),
+// systemd SKIPS a unit whose condition fails, and `systemctl start` on a
+// skipped unit exits 0 — so an operator told to start it would keep
+// succeeding at nothing forever. That is the same silent-success shape as F7,
+// and it is the reason the setup step refuses the install outright rather than
+// leaving the unit's Condition as the only guard.
+func TestSluiceUnitAdviceNamesTheRealCause(t *testing.T) {
+	const showSluice = "systemctl show " + sluiceUnit +
+		" --property=LoadState,ActiveState,SubState,ConditionResult,NRestarts"
+
+	tests := []struct {
+		name    string
+		out     string
+		absent  bool // systemctl itself could not answer
+		mention string
+		reject  string // advice that must NOT appear
+	}{
+		{
+			name:    "unit was never installed",
+			out:     "LoadState=not-found\nActiveState=inactive\nSubState=dead\nConditionResult=yes\n",
+			mention: "setup --sluice",
+		},
+		{
+			name:    "kernel too old, so systemd skipped the unit",
+			out:     "LoadState=loaded\nActiveState=inactive\nSubState=dead\nConditionResult=no\nNRestarts=0\n",
+			mention: "start condition failed",
+			// It may NAME that command — it has to, to explain why running it
+			// achieves nothing — but it must never be the instruction, which is
+			// what the generic branch below gives. Starting a skipped unit exits
+			// 0 and changes nothing, so an operator who followed that advice
+			// would believe egress was filtered.
+			reject: "start it with `systemctl start sluice`",
+		},
+		{
+			name:    "crash loop (a missing allowlist file makes sluice exit 1)",
+			out:     "LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nConditionResult=yes\nNRestarts=14\n",
+			mention: "journalctl -u sluice",
+		},
+		{
+			name:    "active but the socket path disagrees with the gateway's",
+			out:     "LoadState=loaded\nActiveState=active\nSubState=running\nConditionResult=yes\nNRestarts=0\n",
+			mention: "--api-listen",
+		},
+		{
+			name:    "installed and simply stopped",
+			out:     "LoadState=loaded\nActiveState=inactive\nSubState=dead\nConditionResult=yes\nNRestarts=0\n",
+			mention: "systemctl start sluice",
+		},
+		{
+			name:    "no systemd to ask",
+			absent:  true,
+			mention: "could not ask systemd",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fakeProbe{runs: map[string]runResult{}}
+			if !tt.absent {
+				p.runs[showSluice] = runResult{out: tt.out}
+			}
+			got := sluiceUnitAdvice(p)
+			if !strings.Contains(got, tt.mention) {
+				t.Errorf("advice = %q, want it to mention %q", got, tt.mention)
+			}
+			if tt.reject != "" && strings.Contains(got, tt.reject) {
+				t.Errorf("advice = %q, must not suggest %q", got, tt.reject)
 			}
 		})
 	}

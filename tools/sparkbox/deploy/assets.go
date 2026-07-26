@@ -35,3 +35,28 @@ var NetService []byte
 //
 //go:embed sysctl/99-sparkbox.conf
 var SysctlConf []byte
+
+// SluiceServiceTemplate is the text/template for the sluice.service unit that
+// `sparkbox setup --sluice` installs.
+//
+// It is a NEAR-COPY of tools/sluice/deploy/sluice.service, and that duplication
+// is forced rather than chosen: tools/sluice is a separate Go module, and
+// go:embed cannot reach outside its own package directory, let alone across a
+// module boundary. The two differ on purpose as well — this one templates the
+// paths and the DNS listen address (a gateway that also runs sparkbox's own
+// wildcard responder cannot leave sluice on the wildcard :53), where the
+// standalone file hardcodes the /srv/sparkbox layout for a hand install.
+//
+// If you change one, change the other. The sluice-side file says the same.
+//
+//go:embed units/sluice.service.tmpl
+var SluiceServiceTemplate string
+
+// SluiceAllowlistSeed is the initial /srv/sparkbox/allowlist.txt.
+//
+// Seeded only when the file is absent — see the long note inside it. sluice
+// exits 1 when the path its --allowlist names does not exist, so shipping the
+// unit without shipping this would install a permanent crash loop.
+//
+//go:embed sluice-allowlist.txt
+var SluiceAllowlistSeed []byte
