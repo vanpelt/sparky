@@ -122,16 +122,24 @@ func TestManifestURLLatestAndPinned(t *testing.T) {
 	// it parses cleanly and every checksum in it is right, for someone else's
 	// binaries.
 	name := manifestAsset(runtime.GOOS, runtime.GOARCH)
+	goos, arch := runtime.GOOS, runtime.GOARCH
 	// "latest" rides GitHub's redirect; a concrete tag addresses the release
 	// directly. A trailing slash on the base must not double up.
-	if got, want := ManifestURL(base+"/", "latest"), base+"/latest/download/"+name; got != want {
+	if got, want := ManifestURL(goos, arch, base+"/", "latest"), base+"/latest/download/"+name; got != want {
 		t.Errorf("latest manifest URL = %q, want %q", got, want)
 	}
-	if got, want := ManifestURL(base, "v0.3.0"), base+"/download/v0.3.0/"+name; got != want {
+	if got, want := ManifestURL(goos, arch, base, "v0.3.0"), base+"/download/v0.3.0/"+name; got != want {
 		t.Errorf("pinned manifest URL = %q, want %q", got, want)
 	}
-	if got, want := ManifestURL(base, ""), base+"/latest/download/"+name; got != want {
+	if got, want := ManifestURL(goos, arch, base, ""), base+"/latest/download/"+name; got != want {
 		t.Errorf("empty release URL = %q, want %q", got, want)
+	}
+	// The platform is a PARAMETER now, so a linux CI runner can ask for the URL
+	// a Mac would resolve — which is what makes the whole darwin pipeline
+	// testable off a Mac.
+	if got, want := ManifestURL("darwin", "arm64", base, "v0.4.0"),
+		base+"/download/v0.4.0/manifest-darwin-arm64.env"; got != want {
+		t.Errorf("darwin manifest URL = %q, want %q", got, want)
 	}
 }
 

@@ -1,0 +1,3 @@
+umask 077
+printf '%s\n' "$SPARKBOX_OPERATOR_KEY" > "$SPARKBOX_KEY_PATH"
+chmod 0600 "$SPARKBOX_KEY_PATH"

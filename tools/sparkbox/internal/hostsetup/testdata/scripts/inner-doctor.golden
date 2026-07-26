@@ -1,0 +1,5 @@
+if [ -n "${SPARKBOX_DOCTOR_GATEWAY:-}" ]; then
+  "$SPARKBOX_BIN" doctor --gateway "$SPARKBOX_DOCTOR_GATEWAY"
+else
+  "$SPARKBOX_BIN" doctor
+fi

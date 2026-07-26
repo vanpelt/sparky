@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/deploy"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/machine"
 	xssh "golang.org/x/crypto/ssh"
 )
 
@@ -88,6 +89,26 @@ type Env struct {
 	// enable and restart sluice.service, which no other flag here implies.
 	SluiceChanged bool
 
+	// Machine is the nested-VM driver, used only on darwin. Nil on linux, and
+	// nil in a darwin dry run until Provision installs the real one wrapped in
+	// machine.DryRun — which is what makes a forgotten guard in a step fail
+	// loudly instead of touching the operator's live machine.
+	Machine machine.Driver
+	// MacDir is where a darwin host keeps the things that belong to the MAC
+	// rather than to the machine: the outer kernel, the staged image build
+	// context and the evidence bundles. ~/Library/Application Support/sparkbox.
+	//
+	// An Env field rather than a Config knob for exactly the reason given at
+	// SluiceBinPath: no operator has needed to move it, and a test that could
+	// not redirect it would write into the developer's real ~/Library.
+	MacDir string
+	// EvidenceDir is this run's append-only evidence directory,
+	// <MacDir>/results/<UTC timestamp>/. Created lazily on first write and never
+	// in --dry-run, so a plan leaves no trace; poc.sh's convention exactly,
+	// except that this one is written even when provisioning FAILS — which is
+	// the run whose evidence anybody actually needs.
+	EvidenceDir string
+
 	// AdoptedLegacy records that reconcileLayout repointed Cfg at a state (and
 	// image) directory that was already live on this host, rather than the
 	// layout DefaultConfig describes. It is reported in the connect banner: an
@@ -110,10 +131,17 @@ func NewEnv(ctx context.Context, cfg Config, run Runner, fetch Fetcher, log io.W
 			self = resolved
 		}
 	}
+	// The Mac's own directory. Set unconditionally rather than behind a GOOS
+	// check so a test can exercise it anywhere; nothing on linux reads it.
+	macDir := ""
+	if home != "" {
+		macDir = filepath.Join(home, "Library", "Application Support", "sparkbox")
+	}
 	return &Env{
 		Ctx: ctx, Cfg: cfg, Run: run, Fetch: fetch, Log: log,
 		Probe:         System(),
 		Listen:        NewNetListener(),
+		MacDir:        macDir,
 		SystemdDir:    "/etc/systemd/system",
 		SysctlDir:     "/etc/sysctl.d",
 		SbinDir:       "/usr/local/sbin",
@@ -156,6 +184,10 @@ func Provision(e *Env) error {
 	if e.Listen == nil {
 		e.Listen = NewNetListener()
 	}
+	darwin := e.Probe.GOOS() == "darwin"
+	if err := AttachMachineDriver(e); err != nil {
+		return err
+	}
 	// Contradictory or unparseable listen addresses are a usage error, not a
 	// host problem: catch them before the plan is even described, because every
 	// one of them ends up as a systemd ExecStart word or an iptables argument
@@ -170,24 +202,34 @@ func Provision(e *Env) error {
 	if err := validateSubsystems(e.Cfg); err != nil {
 		return err
 	}
-	// Where does this host's live state ACTUALLY sit? A populated state
-	// directory anywhere other than Cfg.StateDir means this run would build a
-	// second data root beside a working one (F4) — so adopt it or refuse, and do
-	// it here: it rewrites the paths every plan line, unit and download
-	// destination below is derived from, and it must be answered before the
-	// operator is shown a plan that describes the wrong host.
-	if err := reconcileLayout(e); err != nil {
-		return err
-	}
-	// The same question one level up: is this host already the OTHER kind of
-	// sparkbox? The gateway/node role lives in sparkbox.env's GATEWAY_FLAG,
-	// which setup does not rewrite, so provisioning across it would leave half
-	// of each.
-	if err := checkRoleSwitch(e); err != nil {
-		return err
+	// Layout, role and ports are all questions about the LINUX filesystem and
+	// the LINUX listeners that hold the gateway — and on darwin every one of
+	// those lives inside the machine, not on the Mac. Reading the Mac's
+	// /srv/sparkbox, its sparkbox.env or its port 2222 would answer about the
+	// wrong host: reconcileLayout would find nothing and silently lose F4's
+	// protection, checkRoleSwitch would see no role to contradict, and
+	// preflightPorts would either invent conflicts against the operator's own
+	// laptop services or report "free" about ports this host will never bind.
+	//
+	// The guards are HERE, at the call site, rather than as early returns
+	// inside those functions — a function that quietly does nothing on one
+	// platform is a function that lies about itself. The layer that now owns
+	// all three is the inner `sparkbox setup`, which is this same Go code
+	// running against the filesystem and the listeners that actually hold the
+	// gateway, and whose refusals are relayed out verbatim.
+	if !darwin {
+		if err := reconcileLayout(e); err != nil {
+			return err
+		}
+		if err := checkRoleSwitch(e); err != nil {
+			return err
+		}
+	} else {
+		e.logf("   skipping layout/role/port preflight — the machine's filesystem and ports live inside it; " +
+			"the inner setup runs all three there\n")
 	}
 	// Preflight: the host-capability subset must pass before we touch anything.
-	pre := RunChecks(e.Probe, e.Cfg, preflightChecks())
+	pre := RunChecks(e.Probe, e.Cfg, preflightChecksFor(e))
 	if AnyFail(pre) {
 		if e.Cfg.DryRun {
 			e.logf("preflight (advisory in --dry-run):\n")
@@ -199,10 +241,15 @@ func Provision(e *Env) error {
 		}
 	}
 
-	steps := allSteps()
+	steps := stepsFor(e)
 	if e.Cfg.DryRun {
-		e.logf("plan for %s (release %s, domain %s):\n", e.Cfg.Root, e.Cfg.Release, e.Cfg.ProxyDomain)
-	} else {
+		if darwin {
+			e.logf("plan for machine %q (release %s, domain %s; the machine's home is %s):\n",
+				e.Cfg.machineName(), e.Cfg.Release, e.Cfg.ProxyDomain, e.Cfg.Root)
+		} else {
+			e.logf("plan for %s (release %s, domain %s):\n", e.Cfg.Root, e.Cfg.Release, e.Cfg.ProxyDomain)
+		}
+	} else if !darwin {
 		e.logf("== port-preflight ==\n")
 	}
 	// Ports before anything expensive. A busy port is the single most common
@@ -210,8 +257,10 @@ func Provision(e *Env) error {
 	// systemd problem rather than a config one), and it costs milliseconds to
 	// detect — so detect it before the multi-GB artifact download, not after
 	// the unit that names it has been written and started.
-	if err := preflightPorts(e); err != nil {
-		return err
+	if !darwin {
+		if err := preflightPorts(e); err != nil {
+			return err
+		}
 	}
 	for _, s := range steps {
 		sat, note, err := s.Satisfied(e)
@@ -246,17 +295,44 @@ func Provision(e *Env) error {
 	// `setup` came to announce "== sparkbox is provisioned ==" over a gateway
 	// that had never once stayed up (F7). An operator who sees that walks away.
 	e.logf("\n== verify ==\n")
-	res := RunChecks(e.Probe, e.Cfg, DefaultChecks())
+	res := RunChecks(e.Probe, e.Cfg, verifyChecksFor(e))
 	PrintResults(e.Log, res)
 	if AnyFail(res) {
 		e.logf("\n== sparkbox is NOT healthy ==\n")
 		e.logf("  every provisioning step ran, but the checks above found a hard failure.\n")
-		e.logf("  logs: journalctl -u sparkbox -n 100 --no-pager\n")
+		if darwin {
+			// journalctl does not exist on a Mac; naming it would be F7's genus
+			// in a cheap costume.
+			e.logf("  logs: %s machine run --name %s --root -- journalctl -u sparkbox -n 100 --no-pager\n",
+				e.Cfg.containerBin(), e.Cfg.machineName())
+		} else {
+			e.logf("  logs: journalctl -u sparkbox -n 100 --no-pager\n")
+		}
 		e.logf("  re-check after fixing: sparkbox doctor\n")
 		return fmt.Errorf("provisioning completed but the host is not healthy: %d check(s) FAILED (see above)", countFail(res))
 	}
-	e.printConnect()
+	if darwin {
+		e.printConnectDarwin()
+	} else {
+		e.printConnect()
+	}
 	return nil
+}
+
+// stepsFor selects the provisioning pipeline for this host.
+//
+// A darwin run is a DIFFERENT list, not a filtered one: nothing a Mac does —
+// fetch an outer kernel, build a machine image, create a VM, stage a binary in
+// it, run `setup` inside it — has a linux counterpart, and nothing linux does
+// (swap, XFS, systemd, sshd) belongs on a Mac. Everything AROUND the list is
+// shared, which is what keeps --dry-run, the step loop, the "already
+// satisfied" reporting and the verify-decides-the-exit-code rule identical on
+// both platforms by construction rather than by discipline.
+func stepsFor(e *Env) []Step {
+	if e.Probe.GOOS() == "darwin" {
+		return darwinSteps()
+	}
+	return allSteps()
 }
 
 func countFail(results []Result) int {
@@ -436,7 +512,10 @@ func stepResolveRelease() Step {
 			// One GET does both jobs: "latest" rides GitHub's
 			// /releases/latest/download redirect, and the manifest that comes
 			// back names the concrete tag every artifact URL is then built from.
-			rc, err := e.Fetch.Get(e.Ctx, ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release))
+			// The platform comes from the Probe, not from runtime.GOOS: it is
+			// what makes a darwin provisioning run testable on a linux runner,
+			// and it is the same seam every other host fact travels through.
+			rc, err := e.Fetch.Get(e.Ctx, ManifestURL(e.Probe.GOOS(), e.Probe.GOARCH(), e.Cfg.ArtifactBase, e.Cfg.Release))
 			if err != nil {
 				return fmt.Errorf("fetch manifest: %w", err)
 			}
@@ -449,7 +528,7 @@ func stepResolveRelease() Step {
 			// in it is right — for somebody else's binaries. The PLATFORM key
 			// is the only tell, so check it here, once, before anything is
 			// downloaded on the strength of it.
-			if err := m.CheckPlatform(hostOS()); err != nil {
+			if err := m.CheckPlatform(e.Probe.GOOS()); err != nil {
 				return err
 			}
 			e.Manifest = m

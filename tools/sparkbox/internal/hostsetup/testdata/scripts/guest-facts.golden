@@ -1,0 +1,3 @@
+printf 'kernel_release=%s\n' "$(uname -r)"
+printf 'virtiofs_targets=%s\n' "$(findmnt -rn -t virtiofs -o TARGET 2>/dev/null | tr '\n' ',' || true)"
+if [ -c /dev/net/tun ]; then printf 'tun=present\n'; else printf 'tun=absent\n'; fi

@@ -127,8 +127,8 @@ func TestDryRunMutatesNothing(t *testing.T) {
 	// URL the fetcher is keyed by already carries the OS, so serving a linux
 	// manifest here would be serving it at the darwin manifest's address.
 	e.Fetch = mapFetcher{
-		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nPLATFORM=" + runtime.GOOS +
-			"\nARCH=" + runtime.GOARCH + "\n",
+		ManifestURL(e.Probe.GOOS(), e.Probe.GOARCH(), e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nPLATFORM=" +
+			e.Probe.GOOS() + "\nARCH=" + e.Probe.GOARCH() + "\n",
 	}
 	if err := Provision(e); err != nil {
 		t.Fatalf("dry-run Provision: %v", err)
@@ -509,8 +509,12 @@ func TestProvisionFailsWhenVerificationFails(t *testing.T) {
 	e, _ := testEnv(t, false)
 	buf := &bytes.Buffer{}
 	e.Log = buf
+	// The manifest URL and its PLATFORM key are built from the probe this test
+	// installs below (linux/<this arch>), not from runtime.GOOS: the platform is
+	// a parameter now, so the fixture describes the host the test is pretending
+	// to be rather than the one it happens to run on.
 	e.Fetch = mapFetcher{
-		ManifestURL(e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nPLATFORM=" + runtime.GOOS +
+		ManifestURL("linux", runtime.GOARCH, e.Cfg.ArtifactBase, e.Cfg.Release): "RELEASE=r1\nPLATFORM=linux" +
 			"\nARCH=" + runtime.GOARCH + "\n",
 	}
 	// Let every step run to completion so the run reaches the verify pass: no

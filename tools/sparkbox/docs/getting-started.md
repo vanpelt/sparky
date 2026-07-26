@@ -2,14 +2,20 @@
 
 This is the operator quickstart for running your own sparkbox on **any Linux
 host with KVM** — a bare-metal box, a nested-virt cloud instance, a DGX, a
-homelab server. The `sparkbox` binary is its own installer: point it at a host
-and it fetches a prebuilt release, lays down the storage and networking, wires
-systemd, and starts the gateway.
+homelab server — or on an **Apple Silicon Mac**. The `sparkbox` binary is its
+own installer: point it at a host and it fetches a prebuilt release, lays down
+the storage and networking, wires systemd, and starts the gateway.
 
 ```
 sparkbox doctor        # is this host ready?
 sparkbox setup         # provision it into a running gateway
 ```
+
+Those two commands are the whole story on both platforms. On a Mac they do one
+extra thing — provision a nested Linux machine to run the gateway in, because
+macOS has no KVM — and that is described in [macOS](#macos-apple-silicon) below.
+Sections 0–5 are the Linux walkthrough; the macOS section tells you which parts
+of it differ.
 
 For a provider-managed, zero-touch fleet on Scaleway Elastic Metal, see
 [deploy-scaleway.md](deploy-scaleway.md) instead. To just kick the tires with no
@@ -257,6 +263,156 @@ guard only covers the case where `setup` itself moves the layout out from under
 a live cache — reimaging the box, deleting the VM, or building a fresh instance
 is entirely outside its reach, which is why the backup above is the procedure
 and the guard is only a backstop.
+
+## macOS (Apple Silicon)
+
+A Mac cannot run Firecracker: there is no KVM on macOS. So `sparkbox setup`
+provisions a **nested Linux machine** using Apple's
+[`container`](https://github.com/apple/container) CLI and runs the ordinary
+Linux `sparkbox setup` *inside* it. Everything from section 3 onwards — the
+steps, the release, `sparkbox.env`, the systemd units, `ctl@` — is unchanged;
+it just lives one layer down.
+
+```sh
+curl -fLO https://github.com/vanpelt/sparky/releases/latest/download/sparkbox-darwin-arm64
+chmod +x sparkbox-darwin-arm64 && sudo mv sparkbox-darwin-arm64 /usr/local/bin/sparkbox
+
+sparkbox doctor
+sparkbox setup --dry-run --proxy-domain yourdomain.tools   # read the plan first
+sparkbox setup --proxy-domain yourdomain.tools
+```
+
+### What you need
+
+`sparkbox setup` checks all of these before it changes anything and refuses with
+the reason, so `sparkbox setup --dry-run` is the safe way to ask "can this Mac
+do it?" — a host that passes prints no preflight section at all, so silence
+there means yes:
+
+- **Apple Silicon M3 or newer.** Nested virtualization arrived with M3, and it
+  is the entire reason this works — Firecracker needs `/dev/kvm` inside the
+  machine. An M1 or M2 cannot do it, and the preflight says exactly that rather
+  than failing later in a way that looks like a bug.
+- **macOS 15 or newer.**
+- **Apple's `container` CLI, 1.1.0 or newer** — `brew install container`, then
+  `container system start`. Both the version and the service are checked.
+- Free disk for the machine's data volume (`--data-volume-gb`).
+
+Unlike Linux, you do not need `sudo` for `setup` itself: the machine's
+provisioning runs as root *inside* the VM, not on your Mac. You only need it to
+put the binary in `/usr/local/bin`.
+
+### What `setup` does differently
+
+Five extra steps run before the familiar Linux ones, and every one is
+idempotent and visible in `--dry-run`:
+
+1. **outer-kernel** — download and sha256-verify `vmlinux-macos-arm64`, the
+   KVM-capable kernel Apple's `container machine` boots. (Not the same as
+   `vmlinux-<arch>`, the *guest* kernel a sandbox boots one layer further in.
+   `setup` fetches both.)
+2. **machine-image** — build the gateway image. Its tag is content-addressed
+   from the embedded build context, so editing the context produces a new tag
+   and a rebuild instead of silently reusing a stale image.
+3. **machine** — create the machine, or adopt an existing one after checking it
+   is ours: the name, the image *repository* and `home-mount=none` must all
+   match. (The repository rather than the full reference, because the image tag
+   is content-addressed and legitimately changes when the build context does.) A
+   machine you created for something else is never adopted.
+4. **machine-sparkbox** — fetch the released `sparkbox-linux-arm64` *inside* the
+   machine, verify it against the manifest's checksum, and refuse if the binary
+   reports a version different from the tag it was published under.
+5. **provision-inner** — run `sparkbox setup` in the machine with your flags
+   forwarded.
+
+### Flags
+
+Every flag you would use on Linux means the same thing and is **forwarded** to
+the gateway inside the machine: `--proxy-domain`, `--operator-key`,
+`--operator-handle`, `--sluice`, `--gateway`/`--node-name`, the listen
+addresses, the TLS flags, `--data-volume-gb`. Only flags the operator actually
+typed are forwarded, so re-running `setup` after an upgrade cannot quietly
+rewrite a live machine's config with compiled-in defaults.
+
+These describe the Mac itself and are not forwarded:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--machine-name` | `sparkbox` | the nested VM to create or adopt |
+| `--machine-cpus` | 8 | the machine's CPU budget (shared by every sandbox in it) |
+| `--machine-memory-gb` | 24 | the machine's memory budget |
+| `--machine-image` | content-addressed | override the gateway image reference |
+| `--outer-kernel` | `~/Library/Application Support/sparkbox/vmlinux-macos-arm64` | where the outer kernel is stored |
+| `--container-bin` | `container` | path to Apple's CLI |
+
+Two flags are **refused** on macOS rather than silently ignored:
+
+- `--move-admin-ssh` — the machine runs one process, the gateway, and nothing
+  competes with it for `:22` inside the VM.
+- `--bin-path` — the gateway's binary is installed by the inner `setup` from
+  what the bootstrap staged. The Mac's own binary is not what runs the gateway.
+
+### Verifying and day-2
+
+`sparkbox doctor` on a Mac reports on **two hosts at once**, and every line says
+which one it means:
+
+```
+sparkbox doctor — this Mac and machine "sparkbox" (guest paths are inside it, under /srv/sparkbox)
+  [PASS] mac: macos version              26.5.2
+  [PASS] mac: apple container            container 1.1.0
+  [FAIL] mac: outer kernel               no outer kernel at ~/Library/…/vmlinux-macos-arm64
+  [PASS] machine: state                  sparkbox running at 192.168.64.18 (8 cpu, 24 GiB)
+  [PASS] machine: nested virtualization  enabled
+  [PASS] machine: sparkbox service       active (running), stable across a 10s window
+  [FAIL] machine: gateway doctor         the gateway's own doctor FAILED (exit 1); its report is below
+                                         │ ── sparkbox doctor, inside machine sparkbox ──
+                                         │   [FAIL] users.conf  no users.conf at /srv/sparkbox/users.conf
+```
+
+- `mac:` lines are about this laptop — macOS version, Apple Silicon generation,
+  the `container` CLI and its service, free disk, and the outer kernel the
+  hypervisor boots. The kernel's checksum is only *asserted* when you pass a
+  concrete `sparkbox doctor --release <tag>`; without one there is no release to
+  be right or wrong about, so a difference from the newest published kernel is
+  reported as a WARN naming the local hash — a Mac deliberately a release behind
+  is not a broken Mac, and the kernel is rebuilt on every tag.
+- `machine:` lines are about the nested Linux machine: does it exist, is it
+  ours, is it running, is nested virtualization really on, is the image current,
+  `/dev/kvm`, `/dev/net/tun`, no `/Users` mount, the gateway service's liveness —
+  and finally the gateway's **own `doctor`, relayed out of the machine** in its
+  own words.
+
+It exits non-zero when either layer is genuinely wrong. When the machine is
+missing, stopped or unreachable, the machine section is one honest line saying
+which of those it is — never an empty section that reads as health. `setup` ends
+by running the same machine-layer battery and exits non-zero if the gateway is
+not alive.
+
+`doctor` takes the same macOS-only flags `setup` does — `--machine-name`,
+`--machine-image`, `--outer-kernel`, `--container-bin` — so a gateway you
+provisioned under a non-default machine name is diagnosed with
+`sparkbox doctor --machine-name <name>`.
+
+Everything in [Day-2](#5-day-2) applies unchanged — TLS, the console, the REST
+API, adding users — because it is all happening in a normal Linux gateway.
+Re-running `sparkbox setup` upgrades it, exactly as on Linux.
+
+### Honest limits
+
+- **No CI creates a real machine.** GitHub's hosted macOS runners have no
+  `container` CLI and cannot nest VMs. CI builds and unit-tests the darwin code
+  on real Apple Silicon, but the machine-lifecycle tests drive an in-memory fake
+  of the CLI. Your laptop is where this is proven for the first time.
+- **`macos/poc.sh` is still in the tree**, as the fallback and as the reference
+  the Go port was written from. It uses a different machine (`sparkbox-poc`), so
+  it coexists with `setup`'s `sparkbox`. Its `smoke` and `destroy` subcommands
+  have no equivalent in the binary yet: nothing in `sparkbox` boots a test
+  sandbox end-to-end, and nothing deletes a machine, an image or the outer
+  kernel.
+- **Sizing is a single budget.** `--machine-cpus` / `--machine-memory-gb` size
+  the whole machine, and every sandbox in it draws from that, not from your
+  Mac's totals.
 
 ## Local dev (no KVM)
 

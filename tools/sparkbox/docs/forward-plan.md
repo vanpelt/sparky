@@ -207,11 +207,49 @@ Virtualization.framework bindings are a much larger commitment. Keep the exec
 transport (`container machine run --root -i /bin/bash -s`) behind one Go helper
 so it can be swapped later.
 
-### B5 — `sparkbox doctor` on darwin — **size S, priority 5**
+### B5 — `sparkbox doctor` on darwin — **size S, priority 5** — **DONE**
 
-`checks.go:136` hard-fails any non-Linux host. Branch it: on darwin, run the
-macOS host checks and then relay the inner `doctor` from the machine, printing
-both. This is what makes "run `sparkbox doctor`" a truthful instruction on a Mac.
+`checkOS` hard-failed any non-Linux host, which made "run `sparkbox doctor`" an
+untruthful instruction on a Mac: the command could only tell its owner their OS
+was wrong. Branched: on darwin `DoctorChecksFor` returns the macOS host battery
+plus the machine battery, and the last machine check relays the gateway's own
+`doctor` out of the VM.
+
+Shipped:
+
+- **Two labelled layers in one report.** Every darwin check name is prefixed
+  `mac:` or `machine:`, by the layer the result *describes* rather than where it
+  was measured — so `machine: nested virtualization` (read from `container
+  inspect`, on the Mac) sits with the machine, and nobody frees disk on the
+  wrong host. `mac: outer kernel` is doctor-only and *verifies*: it hashes the
+  file and compares against the release manifest, fetching one (15s cap,
+  best-effort) since a standalone doctor has resolved none. That manifest is
+  deliberately **not** published onto the Env — doing so would turn "no
+  `--release` given, so assert nothing" into an assertion against today's
+  `latest` and fail every host deliberately a release behind.
+- **The relay can never be silently empty.** Four distinct FAILs replace what
+  would otherwise be a blank section reading as health (F7's shape): the inner
+  binary missing (exit 127, *not* "127 failing checks"), a transport fault that
+  never delivered the script, a `container` CLI too old to run it, and a doctor
+  that exited 0 while printing nothing. The relayed text is headed
+  `── sparkbox doctor, inside machine <name> ──`, because the inner report's own
+  `[PASS]` lines are formatted exactly like the outer one's.
+- **Machine down is one honest line**, naming which of "does not exist" /
+  "is stopped" / "could not be inspected" it is, with the matching next command
+  — and doctor never `Exec`s against a stopped machine, because `container
+  machine run` boots what it touches.
+- **`doctor` grew the macOS-only flags** (`--machine-name`, `--machine-image`,
+  `--outer-kernel`, `--container-bin`), sharing setup's `FlagFate` registry and
+  its linux-side refusal. Without them a gateway in a non-default machine was
+  confidently reported as absent.
+- **Linux is untouched**, and pinned so: `TestLinuxDoctorBatteryUnchanged`
+  compares `DoctorChecksFor` against `DefaultChecks()` name-for-name and asserts
+  the header line is byte-identical.
+
+Proven on real hardware (read-only) as well as against the fake: on an M4 Max
+running macOS 26.5.2 with `container` 1.1.0, `sparkbox doctor --machine-name
+sparkbox-poc` reported both layers and relayed the PoC gateway's own doctor,
+whose `users.conf` FAIL propagated to exit 1.
 
 ---
 

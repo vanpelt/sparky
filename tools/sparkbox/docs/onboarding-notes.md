@@ -21,20 +21,44 @@ friction we hit even where the binary *is* the entry point.
 `macos/smoke.sh` (236) + `macos/gateway-verify.sh` are all host-side bash. The
 released binary only enters at the very last step, *inside* the guest.
 
-| Step | Today | Wants to be |
-| --- | --- | --- |
-| Host doctor (macOS ≥15, Apple Container ≥1.1.0, disk, machine-name ownership) | `poc.sh doctor` | `sparkbox doctor` on darwin |
-| Outer KVM kernel | `kernel/build.sh` — downloads Linux 6.14.9 + Apple `config-arm64` 0.5.0, applies `sparkbox-arm64.fragment`, compiles in an Ubuntu container | a **released artifact** (`vmlinux-macos-arm64`), fetched + checksum-verified like every other asset |
-| Outer machine image | `container build` of `Containerfile.gateway`, which compiles sparkbox **from source** (needs the git repo + a Go toolchain) | a released/GHCR image, or one assembled from the released `sparkbox-linux-arm64` |
-| Machine lifecycle (`create/start/stop/destroy`) | `container machine …` shellouts | `sparkbox setup` driving the same CLI (or Virtualization.framework) from Go |
-| Exec transport | `container machine run --root --interactive /bin/bash -s` heredocs | a Go exec helper |
-| Inner provisioning | `sparkbox setup` ✅ | unchanged |
-| Verification | `smoke.sh` + `gateway-verify.sh` | `sparkbox doctor` levels |
+| Step | Today | Wants to be | Status |
+| --- | --- | --- | --- |
+| Host doctor (macOS ≥15, Apple Container ≥1.1.0, disk, machine-name ownership) | `poc.sh doctor` | `sparkbox doctor` on darwin | **closed — B5** |
+| Outer KVM kernel | `kernel/build.sh` — downloads Linux 6.14.9 + Apple `config-arm64` 0.5.0, applies `sparkbox-arm64.fragment`, compiles in an Ubuntu container | a **released artifact** (`vmlinux-macos-arm64`), fetched + checksum-verified like every other asset | **closed — B2** |
+| Outer machine image | `container build` of `Containerfile.gateway`, which compiles sparkbox **from source** (needs the git repo + a Go toolchain) | a released/GHCR image, or one assembled from the released `sparkbox-linux-arm64` | **half closed — B3**: the image no longer compiles anything from source and needs neither the repo nor a Go toolchain, but it is still built locally on every Mac. No image is *published*; see the still-open bullet in §1.3 |
+| Machine lifecycle (`create/start/stop/destroy`) | `container machine …` shellouts | `sparkbox setup` driving the same CLI (or Virtualization.framework) from Go | **half closed — B4**: `create`/`start` run from Go behind one driver (still `container` shellouts). `stop`/`destroy` have no Go home — there is no `sparkbox machine` subcommand, so every error message punts to `container machine delete` and the cost-tiered teardown lives only in `poc.sh destroy` |
+| Exec transport | `container machine run --root --interactive /bin/bash -s` heredocs | a Go exec helper | **closed — B4** (`internal/machine`) |
+| Inner provisioning | `sparkbox setup` ✅ | unchanged | unchanged |
+| Verification | `smoke.sh` + `gateway-verify.sh` | `sparkbox doctor` levels | **L1 closed, L2 open** — the darwin verify battery covers `gateway-verify.sh`'s assertions (nested virt, machine kernel, `/dev/kvm`, TUN, no `/Users` virtiofs mount) and relays the gateway's own doctor out of the machine. `smoke.sh`'s L2 — SSH into a real sandbox, in-guest DNS/HTTPS, the metadata cross-slot refusal, a published HTTP route — has no Go equivalent |
+| Darwin release binary | nothing — `build-artifacts.yml` built only `linux/{amd64,arm64}` | `sparkbox-darwin-arm64` + `manifest-darwin-arm64.env` on every release | **closed — B1** |
 
-**Blocker:** the release publishes **no darwin binary at all** —
-`build-artifacts.yml` builds only `linux/{amd64,arm64}`. `sparkbox setup` cannot
-be the macOS entry point until `sparkbox-darwin-arm64` ships. That is the first
-piece of work.
+~~**Blocker:** the release publishes **no darwin binary at all**.~~ **Closed by
+B1.** Every release now publishes `sparkbox-darwin-arm64`,
+`manifest-darwin-arm64.env` and `vmlinux-macos-arm64`, and the release is not
+published until all of them land, so `latest` can never resolve half-populated.
+
+### What is genuinely still open
+
+1. **Nothing here is proven on real hardware by CI, and cannot be.** GitHub's
+   hosted macOS runners have no Apple `container` CLI and cannot nest VMs. The
+   `macos` job in `go.yml` builds and runs the full unit suite on real Apple
+   Silicon — which is more than a cross-compile can do, since a cross-compiled
+   test binary cannot be executed — but every machine-lifecycle test there
+   drives an in-memory fake of the `container` CLI. The first real
+   `sparkbox setup` on a Mac is an operator running it on their own laptop.
+   Until that has happened, treat B4 as written-and-unit-tested, not proven.
+2. **`macos/poc.sh` is still the only thing that has ever created a real
+   machine.** It stays in the tree as the fallback and as the reference
+   behaviour B4 was ported from; see its header for which subcommands are now
+   redundant. It is deliberately not deleted in the same pass that replaced it.
+3. **L2 verification has no Go equivalent.** `smoke.sh` exercises the things
+   only a booted sandbox can show — SSH in, in-guest DNS and HTTPS, the
+   metadata endpoint's cross-slot refusal, a published HTTP route answering
+   through the edge. `sparkbox doctor` on darwin reports the machine and relays
+   the gateway's own doctor; it does not boot a sandbox.
+4. **The two provisioners still coexist** (`cloud-init` vs `sparkbox setup` on
+   Linux, `poc.sh` vs `sparkbox setup` on darwin), which is the same dual-path
+   hazard Part 2 records for the Linux side.
 
 **Second blocker (FIXED — B2):** building a kernel from source on a user's
 laptop is not an onboarding step anyone will tolerate. The outer kernel's inputs

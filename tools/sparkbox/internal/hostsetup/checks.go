@@ -90,6 +90,51 @@ func DefaultChecks() []Check {
 	}
 }
 
+// preflightChecksFor is the gate Provision runs before it touches anything, for
+// THIS host's platform. It sits beside preflightChecks() rather than replacing
+// it, so the linux battery is provably untouched.
+func preflightChecksFor(e *Env) []Check {
+	if e.Probe.GOOS() == "darwin" {
+		return darwinPreflightChecks(e)
+	}
+	return preflightChecks()
+}
+
+// verifyChecksFor is the battery Provision's verify pass runs — the one that
+// decides the exit code.
+//
+// On darwin this must NOT be DefaultChecks(): those interrogate the local
+// systemd, the local iptables and the local /dev/kvm, so a darwin run would end
+// in a green report about the laptop rather than about the gateway it just
+// provisioned. That is F7's exact shape, one layer out.
+func verifyChecksFor(e *Env) []Check {
+	if e.Probe.GOOS() == "darwin" {
+		return darwinVerifyChecks(e)
+	}
+	return DefaultChecks()
+}
+
+// DoctorChecksFor is the battery `sparkbox doctor` runs.
+//
+// On linux it is DefaultChecks(), unchanged and unchangeable — the linux report
+// is what every runbook, every screenshot and every existing test describes.
+//
+// On darwin it is the host layer PLUS the machine layer, which is one more
+// section than the verify pass runs. Not a second opinion: doctor is a
+// STANDALONE process, so nothing has already asked whether this Mac can host a
+// machine, whereas Provision's verify pass runs minutes after its own preflight
+// asked exactly that. Both sections come from the same two functions, so the
+// questions cannot drift.
+func DoctorChecksFor(e *Env) []Check {
+	if e == nil || e.Probe == nil {
+		return DefaultChecks()
+	}
+	if e.Probe.GOOS() == "darwin" {
+		return darwinDoctorChecks(e)
+	}
+	return DefaultChecks()
+}
+
 // RunChecks evaluates every check against the probe and config.
 func RunChecks(p Probe, cfg Config, checks []Check) []Result {
 	out := make([]Result, 0, len(checks))
@@ -158,11 +203,21 @@ func warn(detail, hint string) Result { return Result{Status: Warn, Detail: deta
 func fail(detail, hint string) Result { return Result{Status: Fail, Detail: detail, Hint: hint} }
 
 func checkOS(p Probe, _ Config) Result {
-	if p.GOOS() != "linux" {
-		return fail(p.GOOS(), "sparkbox hosts must run Linux (firecracker needs KVM); "+
+	switch p.GOOS() {
+	case "linux":
+		return pass("linux")
+	case "darwin":
+		// A Mac is a first-class sparkbox host — it just is not the host the
+		// gateway runs ON. `sparkbox setup` creates a nested linux machine with
+		// KVM (Apple's `container machine --virtualization`) and provisions the
+		// gateway inside it, so the KVM requirement is satisfied one layer down
+		// and checked there (see darwinVerifyChecks).
+		return pass("darwin (macOS host; the gateway runs in a nested linux machine)")
+	default:
+		return fail(p.GOOS(), "sparkbox hosts must run Linux (firecracker needs KVM) or macOS on Apple Silicon "+
+			"(where setup provisions a nested linux machine); "+
 			"on this machine you can still develop against `sparkbox serve --driver mock`")
 	}
-	return pass("linux")
 }
 
 func checkArch(p Probe, _ Config) Result {

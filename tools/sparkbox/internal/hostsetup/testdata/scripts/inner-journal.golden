@@ -1,0 +1,1 @@
+journalctl --no-pager -n 200 -u sparkbox-net.service -u sparkbox.service 2>&1 || true

@@ -97,6 +97,17 @@ type Manifest struct {
 	// them is not pinned. See the header of macos/kernel/build.sh.
 	OuterKernelAsset  string
 	SHA256OuterKernel string
+	// OuterKernelRelease is the `uname -r` that kernel reports once booted
+	// ("6.14.9-sparkbox-poc"), when the release chooses to publish it.
+	//
+	// Optional, and read only to ASSERT what a running machine reports. It is
+	// here because poc.sh hardcodes that exact string in two files —
+	// gateway-verify.sh asserts it and kernel/build.sh produces it — so bumping
+	// the kernel in one turns a working machine into a failing preflight.
+	// Naming it in the manifest puts the fact where the artifact is described;
+	// when it is absent, the darwin verify pass REPORTS the machine's kernel
+	// rather than asserting a literal it made up.
+	OuterKernelRelease string
 }
 
 // hostArch is the arch suffix this host's assets carry, and hostOS the OS half
@@ -165,6 +176,7 @@ func ParseManifest(r io.Reader, release string) (Manifest, error) {
 		SHA256MachineSparkbox: kv["SHA256_MACHINE_SPARKBOX"],
 		OuterKernelAsset:      kv["OUTER_KERNEL_ASSET"],
 		SHA256OuterKernel:     kv["SHA256_OUTER_KERNEL"],
+		OuterKernelRelease:    kv["OUTER_KERNEL_RELEASE"],
 	}
 	// Asset names are data, not code, wherever the <thing>-<goarch> mould does
 	// not fit — the same reason ROOTFS_ASSET is a key. The derivations below
@@ -209,16 +221,26 @@ func assetURL(base, release, name string) string {
 	return base + "/download/" + release + "/" + name
 }
 
-// ManifestURL returns the URL of this host's platform-specific manifest for the
-// given release ("latest" allowed). A darwin host resolves
-// manifest-darwin-arm64.env; a linux host keeps resolving manifest-<arch>.env.
+// ManifestURL returns the URL of a platform's manifest for the given release
+// ("latest" allowed). A darwin host resolves manifest-darwin-arm64.env; a linux
+// host keeps resolving manifest-<arch>.env.
 //
 // A Mac on a release cut before B1 therefore gets a 404 naming the asset it
 // wanted, which is the correct answer: that release genuinely has nothing for
 // it, and the alternative — quietly reading the linux manifest — is the bug
 // this function exists to prevent.
-func ManifestURL(base, release string) string {
-	return assetURL(base, release, manifestAsset(hostOS(), hostArch()))
+//
+// # Why goos/arch are parameters rather than runtime globals
+//
+// They used to be runtime.GOOS/GOARCH read inside this function. That made the
+// darwin path untestable anywhere except on a Mac: a linux CI runner could not
+// even ask for the URL a Mac would resolve, so steps_test.go had to write
+// PLATFORM=runtime.GOOS into its fixture to make resolve-release accept it.
+// Both callers now feed these from the Probe, which is the same seam every
+// other host fact already travels through — so a fakeProbe{goos:"darwin"} gets
+// a genuinely darwin provisioning run, on any machine.
+func ManifestURL(goos, arch, base, release string) string {
+	return assetURL(base, release, manifestAsset(goos, arch))
 }
 
 // Artifacts computes the download set for a release: kernel, firecracker, and

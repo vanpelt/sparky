@@ -287,7 +287,7 @@ per-sandbox workdir — the full control plane, gateway, pause/resume, and
 reaper paths are real; only the isolation is fake. `go test ./...` runs an
 end-to-end suite over exactly this stack.
 
-## Deploy on your own Linux host
+## Deploy on your own host
 
 The `sparkbox` binary is its own installer. On any KVM-capable Linux host:
 
@@ -306,6 +306,81 @@ FAIL carrying the tail of its journal, not a PASS. `doctor` runs the same
 battery at any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
 fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
+
+### On a Mac (Apple Silicon)
+
+Same binary-is-the-installer story, same two commands:
+
+```sh
+curl -fLO https://github.com/vanpelt/sparky/releases/latest/download/sparkbox-darwin-arm64
+chmod +x sparkbox-darwin-arm64 && sudo mv sparkbox-darwin-arm64 /usr/local/bin/sparkbox
+
+sparkbox doctor
+sparkbox setup --proxy-domain yourdomain.tools
+```
+
+macOS has no KVM, so a Mac cannot run Firecracker directly. `setup` therefore
+provisions a **nested Linux machine** with Apple's
+[`container`](https://github.com/apple/container) CLI and runs the real Linux
+`sparkbox setup` *inside* it — the same steps, the same release, the same
+`sparkbox.env`. What you get is an ordinary sparkbox gateway that happens to
+live one layer down.
+
+Prerequisites. `sparkbox setup` checks every one of these *before* it touches
+anything and refuses with the reason. `sparkbox setup --dry-run` runs the same
+preflight and changes nothing, so it is the safe way to ask whether this Mac
+qualifies — a host that passes prints no preflight section at all, and anything
+that does not is listed with its fix:
+
+- **Apple Silicon M3 or newer** — nested virtualization is an M3+ feature, and
+  it is what lets Firecracker run inside the machine. An M1/M2 fails here.
+- **macOS 15 or newer**, and Apple's `container` CLI **1.1.0 or newer**, with
+  its service running (`container system start`).
+- Disk for the machine's data volume (`--data-volume-gb`).
+
+`sparkbox doctor` answers the *other* question — how are both hosts doing now.
+It reports the Mac (`mac:` lines — the same prerequisites, plus the outer kernel
+verified against the release's checksum) and the nested machine (`machine:`
+lines — state, nested virtualization, `/dev/kvm`, the gateway service), ending
+with the gateway's **own `doctor` relayed out of the machine**. It exits
+non-zero if either layer is wrong, and when the machine is missing or stopped it
+says so in one line rather than printing an empty section. Use `setup --dry-run`
+before provisioning, `doctor` after.
+
+Everything you would pass on Linux still means the same thing and is forwarded
+to the gateway inside the machine — `--proxy-domain`, `--operator-key`,
+`--sluice`, `--gateway`/`--node-name`, the listen addresses, TLS flags. Only
+these describe the Mac itself:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--machine-name` | `sparkbox` | the nested VM to create/adopt |
+| `--machine-cpus` / `--machine-memory-gb` | 8 / 24 | the machine's whole budget |
+| `--machine-image` | content-addressed | override the gateway image reference |
+| `--outer-kernel` | `~/Library/Application Support/sparkbox/vmlinux-macos-arm64` | where the outer kernel is stored |
+| `--container-bin` | `container` | path to Apple's CLI |
+
+Two flags are **refused** on darwin rather than ignored: `--move-admin-ssh`
+(the machine runs one process and nothing competes for `:22` inside it) and
+`--bin-path` (the gateway's binary is installed by the inner `setup`, not by
+the Mac). `--dry-run` prints the whole plan — including the exact inner `setup`
+command line — and touches nothing.
+
+> **Two kernels, do not confuse them.** `vmlinux-macos-arm64` is the *outer*
+> KVM-capable kernel Apple's `container machine` boots; `vmlinux-<arch>` is the
+> *guest* kernel each Firecracker sandbox boots, one layer further in. `setup`
+> fetches and sha256-verifies both.
+
+An existing machine is adopted only if its name, image repository and
+`home-mount=none` all match, so `setup` never takes over a machine you created
+for something else.
+
+> **What is proven, and what is not.** CI builds and unit-tests the darwin paths
+> on a real Apple Silicon runner, but GitHub's hosted Macs have no `container`
+> CLI and cannot nest VMs, so **no CI anywhere creates a real machine** — the
+> lifecycle tests drive a fake. `macos/poc.sh` remains in the tree as the
+> fallback and as the reference the Go port was written from; it uses a separate
+> machine (`sparkbox-poc`), so the two coexist on one Mac.
 
 ### Adding a second machine
 

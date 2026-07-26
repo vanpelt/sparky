@@ -1,4 +1,67 @@
 #!/bin/bash
+#
+# macos/poc.sh — the original macOS bring-up script. NO LONGER THE SUPPORTED
+# PATH, and kept deliberately.
+#
+#   ############################################################################
+#   #  On macOS the supported way to stand up a sparkbox host is now:          #
+#   #                                                                          #
+#   #      sparkbox doctor                                                     #
+#   #      sparkbox setup --proxy-domain <domain>                              #
+#   #                                                                          #
+#   #  from the released sparkbox-darwin-arm64 binary — no repo, no Go         #
+#   #  toolchain, no shell scripts. See docs/getting-started.md.               #
+#   ############################################################################
+#
+# This script proved the whole design (docs/macos-nested-poc-results.md) and
+# `sparkbox setup` on darwin is a port OF IT, step for step. It survives as a
+# development and fallback tool for three concrete reasons:
+#
+#   1. It is the only thing that has ever created a real machine. The Go path is
+#      unit-tested against an in-memory fake of the `container` CLI, and no CI
+#      runner on earth can nest a VM for us (see the `macos` job in
+#      .github/workflows/go.yml, which says so out loud). Until an operator has
+#      run `sparkbox setup` on real hardware, deleting the thing that works
+#      would be trading a proven path for an untested one.
+#   2. `smoke` has no Go equivalent at all. Nothing in the binary boots a
+#      sandbox and checks SSH, in-guest DNS/HTTPS, the metadata endpoint's
+#      cross-slot refusal and a published HTTP route.
+#   3. It is the reference for what the port is supposed to do. When the Go path
+#      and this script disagree about a real machine, this script is the older
+#      and better-tested claim.
+#
+# WHICH SUBCOMMANDS ARE NOW REDUNDANT
+#
+#   doctor     REDUNDANT — `sparkbox doctor` runs the macOS host checks (macOS
+#              version, Apple Container version, Apple Silicon generation, disk,
+#              machine ownership) and then relays the gateway's own doctor out
+#              of the machine.
+#   build      REDUNDANT — the `outer-kernel` and `machine-image` steps of
+#              `sparkbox setup` fetch the released vmlinux-macos-arm64 and build
+#              the gateway image from an embedded build context.
+#   create     REDUNDANT — the `machine` step creates/adopts the machine.
+#   provision  REDUNDANT — the `machine-sparkbox` and `provision-inner` steps
+#              stage the released linux binary and run `sparkbox setup` inside.
+#   status     MOSTLY REDUNDANT — `sparkbox doctor` reports machine state and
+#              gateway health. This still prints a denser one-screen summary.
+#
+#   start      NOT redundant. `setup` ensures the machine is running as a side
+#   stop       effect of provisioning; there is no `sparkbox machine start/stop`.
+#   smoke      NOT redundant. The only L2 test that exists — see (2) above.
+#   destroy    NOT redundant. Nothing in the binary deletes a machine, an image
+#              or the outer kernel, and the cost-tiered teardown has no
+#              equivalent.
+#
+# ONE THING THAT MATTERS IF YOU RUN BOTH: they use DIFFERENT machines. This
+# script owns `sparkbox-poc`; `sparkbox setup` creates `sparkbox`. They coexist
+# on one Mac without touching each other's state, which is the point — you can
+# try the binary without giving up a working PoC. Both are `--home-mount none`
+# and both check ownership before mutating, so neither will adopt the other's.
+#
+# Retirement plan: once `sparkbox setup` has provisioned a Mac on real hardware
+# and `smoke` has an equivalent, this becomes a thin dev script (or disappears).
+# Do not extend it in the meantime — new behaviour belongs in the Go path.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,6 +133,15 @@ BOOTSTRAP_VERSION=""
 usage() {
   cat <<'EOF'
 usage: ./macos/poc.sh <command>
+
+NOTE: this script is no longer the supported way to stand up a macOS host.
+Use the released sparkbox-darwin-arm64 binary instead:
+    sparkbox doctor
+    sparkbox setup --proxy-domain <domain>
+It creates a machine named `sparkbox`, separate from this script's
+`sparkbox-poc`, so the two coexist. doctor/build/create/provision here are
+redundant with it; start/stop/smoke/destroy have no equivalent yet. See the
+header of this file and docs/getting-started.md.
 
 Commands:
   doctor         Check the macOS host without changing it

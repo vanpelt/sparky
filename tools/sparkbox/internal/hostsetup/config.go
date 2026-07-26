@@ -13,10 +13,14 @@
 package hostsetup
 
 import (
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/machine"
+	macosassets "github.com/vanpelt/sparky/tools/sparkbox/macos"
 )
 
 // DefaultArtifactBase is the GitHub Releases endpoint the release workflow
@@ -267,6 +271,42 @@ type Config struct {
 	// the one running setup. Without it a downgrade is refused: re-running an
 	// old installer on an upgraded host would otherwise quietly roll it back.
 	Force bool
+	// --- darwin: the nested linux machine ------------------------------------
+	//
+	// On darwin, EVERY field above continues to describe the MACHINE's layout —
+	// Root is /srv/sparkbox inside it, ProxyDomain is the domain its gateway
+	// serves, --sluice installs sluice in it — and is forwarded verbatim to the
+	// inner `sparkbox setup`. The five fields below are the only ones that
+	// describe the Mac itself.
+
+	// MachineName is the nested VM `setup` creates and provisions.
+	//
+	// It is "sparkbox", NOT poc.sh's "sparkbox-poc": the two coexist during the
+	// transition and the operator retires the PoC when they are ready. Validated
+	// against machine.ValidName — both because the name is the one
+	// caller-supplied word that reaches a command line the guest's bash
+	// re-parses, and because it must be non-empty: `container machine
+	// inspect`/`stop` with no id silently operate on the DEFAULT machine.
+	MachineName string
+	// MachineCPUs / MachineMemGB size the machine. These are the machine's
+	// whole budget, not a per-sandbox one.
+	MachineCPUs  int
+	MachineMemGB int
+	// MachineImage overrides the gateway image reference. Empty means the
+	// content-addressed default, local/sparkbox-gateway:<12 hex of the embedded
+	// build context> — so an edit to any of the three embedded files produces a
+	// new tag and a rebuild, which an existence check on a constant tag never
+	// would.
+	MachineImage string
+	// OuterKernel is where the macOS OUTER kernel (the KVM-capable arm64 Image
+	// Apple's `container machine` boots) lands on the Mac. Empty means
+	// <Env.MacDir>/vmlinux-macos-arm64. Not to be confused with KernelPath,
+	// which is the GUEST kernel a firecracker microVM boots, inside the machine.
+	OuterKernel string
+	// ContainerBin is Apple's container CLI. A field so a test can point it at
+	// a stub and an operator at a non-standard install.
+	ContainerBin string
+
 	// Version is the release tag of the binary executing this command
 	// (main.version, "dev" for a hand build). It is plumbed in rather than read
 	// here because it is stamped into package main at link time; doctor compares
@@ -328,7 +368,87 @@ func DefaultConfigAt(root string) Config {
 		FirecrackerBin: "/usr/local/bin/firecracker",
 		BinPath:        "/usr/local/bin/sparkbox",
 		ServiceSettle:  DefaultServiceSettle,
+		// darwin only; inert on linux, where nothing reads them.
+		MachineName:  defaultMachineName,
+		MachineCPUs:  8,
+		MachineMemGB: 24,
+		ContainerBin: "container",
 	}
+}
+
+// darwin machine defaults. Named here rather than inline for the same reason
+// sluiceBinPath and serviceUnit are: the plan line, the create call, the
+// ownership predicate and the connect banner all have to agree on one string.
+const (
+	defaultMachineName = "sparkbox"
+	// machineImageRepo is the repository half of the gateway image reference.
+	// The ownership predicate compares THIS, not the full tag — see
+	// machineIsOurs.
+	machineImageRepo = "local/sparkbox-gateway"
+	// outerKernelName is the outer kernel's filename on the Mac. It matches the
+	// release asset name so an operator who downloaded one by hand can drop it
+	// in place.
+	outerKernelName = "vmlinux-macos-arm64"
+	// minMacOSVersion / minContainerVersion / minAppleGeneration are the host
+	// floors for a nested KVM machine: Apple's --virtualization documents
+	// "Apple Silicon M3+ and macOS 15+", and every transport behaviour sparkbox
+	// relies on was measured on container 1.1.0 only.
+	minMacOSVersion     = "15.0"
+	minContainerVersion = "1.1.0"
+	minAppleGeneration  = 3
+)
+
+// machineImageRef is the gateway image this build of sparkbox wants.
+//
+// Content-addressed by default: the tag is the first 12 hex of a hash over the
+// three embedded context files and the pinned base image, so "is the image
+// current?" is a content comparison rather than an existence check — the same
+// lesson wantedUnits and wantedNetAssets already encode. poc.sh tags a constant
+// and would keep a stale image forever after an asset edit.
+func machineImageRef(c Config) string {
+	if r := strings.TrimSpace(c.MachineImage); r != "" {
+		return r
+	}
+	return machineImageRepo + ":" + macosassets.ContextSHA()[:12]
+}
+
+// outerKernelPath is where the macOS outer kernel lands on the Mac.
+func (c Config) outerKernelPath(macDir string) string {
+	if p := strings.TrimSpace(c.OuterKernel); p != "" {
+		return p
+	}
+	return filepath.Join(macDir, outerKernelName)
+}
+
+// machineName is the nested VM's name, defaulted so a hand-built Config in a
+// test cannot accidentally address the DEFAULT machine.
+func (c Config) machineName() string {
+	if n := strings.TrimSpace(c.MachineName); n != "" {
+		return n
+	}
+	return defaultMachineName
+}
+
+// containerBin is Apple's container CLI.
+func (c Config) containerBin() string {
+	if b := strings.TrimSpace(c.ContainerBin); b != "" {
+		return b
+	}
+	return "container"
+}
+
+// validateMachine rejects darwin machine settings setup cannot act on. Called
+// from Provision before anything is described, so a bad name costs nothing.
+func validateMachine(c Config) error {
+	if !machine.ValidName(c.machineName()) {
+		return fmt.Errorf("invalid --machine-name %q: lowercase letters, digits and hyphens only, "+
+			"starting with a letter or digit, at most 63 characters "+
+			"(the name reaches a command line the machine's own bash re-parses)", c.machineName())
+	}
+	if c.MachineCPUs < 0 || c.MachineMemGB < 0 {
+		return fmt.Errorf("--machine-cpus and --machine-memory-gb must not be negative")
+	}
+	return nil
 }
 
 // DefaultServiceSettle is the production settle window for the service liveness
