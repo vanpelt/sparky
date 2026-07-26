@@ -1292,3 +1292,30 @@ func TestSpecIsServedAndNamesThisHost(t *testing.T) {
 		t.Fatalf("YAML does not start with the version: %.120s", yml.Body.String())
 	}
 }
+
+// A create that names a machine this host does not have must be refused rather
+// than quietly built here. The rig wires a bare *host.Manager as its sandbox
+// store — a single box, exactly as most deployments are — so the honest answer
+// is that placing by name is not a thing this host can do.
+//
+// The regression it guards is the silent one: a `node` field that never reached
+// CreateArgs would come back 201, with a sandbox on the wrong machine and
+// nothing said about it.
+func TestCreateOnANamedNodeWithoutAFleet(t *testing.T) {
+	ta := newTestAPI(t)
+
+	rec := ta.do(t, "POST", "/v1/sandboxes", "alice", createRequest{Name: "demo", Node: "dgx"})
+	if rec.Code == http.StatusCreated {
+		t.Fatalf("a single-box host accepted a placement: %s", rec.Body)
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Kind != ctlops.KindDisabled.String() {
+		t.Fatalf("kind %q, want %q (%s)", env.Error.Kind, ctlops.KindDisabled, rec.Body)
+	}
+	if _, ok := ta.mgr.Get("demo"); ok {
+		t.Error("the refused create built the sandbox here anyway")
+	}
+}

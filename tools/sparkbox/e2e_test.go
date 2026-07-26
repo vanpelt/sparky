@@ -7,7 +7,6 @@ package sparkbox_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
@@ -26,7 +25,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
@@ -138,37 +136,12 @@ func (ts *testStack) run(t *testing.T, sshUser, cmd string) (string, string) {
 	return stdout.String(), stderr.String()
 }
 
-func TestEndToEnd(t *testing.T) {
-	ts := newStack(t)
-	ctx := context.Background()
-
-	// Create via the manager (the API server is a thin layer over it).
-	if _, err := ts.mgr.Create(ctx, "demo", "tester", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run a command through the gateway; state must persist across sessions.
-	ts.run(t, "demo", "echo hello-from-sandbox > marker.txt")
-	out, _ := ts.run(t, "demo", "cat marker.txt")
-	if strings.TrimSpace(out) != "hello-from-sandbox" {
-		t.Fatalf("marker roundtrip failed, got %q", out)
-	}
-
-	// Suspend, then resume-on-connect must bring it back with disk intact.
-	if err := ts.mgr.Pause(ctx, "demo"); err != nil {
-		t.Fatal(err)
-	}
-	if box, _ := ts.mgr.Get("demo"); box.State != vmm.StatePaused {
-		t.Fatalf("expected paused, got %s", box.State)
-	}
-	out, _ = ts.run(t, "demo", "cat marker.txt")
-	if strings.TrimSpace(out) != "hello-from-sandbox" {
-		t.Fatalf("post-resume marker read failed, got %q", out)
-	}
-	if box, _ := ts.mgr.Get("demo"); box.State != vmm.StateRunning {
-		t.Fatalf("expected running after resume-on-connect, got %s", box.State)
-	}
-}
+// TestEndToEnd, the ownership-masking assertion and the idle reaper moved to
+// placement_e2e_test.go, where each runs twice — once against a sandbox on this
+// machine and once against one on another. They are the assertions with a guest
+// in them, and a guest is what a placement changes. What stays here is what has
+// no sandbox in it at all: the signup dialog, invites, keys, and the refusal an
+// unregistered key gets at the door.
 
 func TestNewSandboxOnConnect(t *testing.T) {
 	ts := newStack(t)
@@ -229,34 +202,17 @@ func TestNewSandboxOnConnect(t *testing.T) {
 
 var nameRe = regexp.MustCompile(`^[a-z]+-[a-z]+(-[0-9a-f]+)?$`)
 
-func TestOwnershipAndAuth(t *testing.T) {
+// TestUnknownKeyIsRefusedAtTheDoor is the half of the old TestOwnershipAndAuth
+// that has no sandbox in it: a key nobody registered gets nowhere, whatever it
+// asks for. The other half — what the owner of nothing is told about somebody
+// else's sandbox — is a masking property that has to hold on either machine, so
+// it lives in placement_e2e_test.go and runs twice.
+func TestUnknownKeyIsRefusedAtTheDoor(t *testing.T) {
 	ts := newStack(t)
-	ctx := context.Background()
 
-	// A sandbox owned by someone else must be invisible to our user.
-	if _, err := ts.mgr.Create(ctx, "theirs", "someone-else", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-	client := ts.dial(t, "theirs")
-	defer client.Close()
-	sess, err := client.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
-	var stderr bytes.Buffer
-	sess.Stderr = &stderr
-	if err := sess.Run("true"); err == nil {
-		t.Fatal("expected failure accessing another user's sandbox")
-	}
-	if !strings.Contains(stderr.String(), "no sandbox named") {
-		t.Fatalf("ownership failure should look like not-found, got %q", stderr.String())
-	}
-
-	// An unknown key must be rejected outright.
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	badKey, _ := xssh.NewSignerFromKey(priv)
-	_, err = xssh.Dial("tcp", ts.addr, &xssh.ClientConfig{
+	_, err := xssh.Dial("tcp", ts.addr, &xssh.ClientConfig{
 		User:            "theirs",
 		Auth:            []xssh.AuthMethod{xssh.PublicKeys(badKey)},
 		HostKeyCallback: xssh.InsecureIgnoreHostKey(), //nolint:gosec // test
@@ -265,27 +221,6 @@ func TestOwnershipAndAuth(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected auth failure for unknown key")
 	}
-}
-
-func TestIdleReaper(t *testing.T) {
-	ts := newStack(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if _, err := ts.mgr.Create(ctx, "sleepy", "tester", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-	// balloonAfter=0 disables the balloon stage; this exercises pause + resume.
-	go ts.mgr.RunReaper(ctx, 0, 50*time.Millisecond, 25*time.Millisecond)
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if box, _ := ts.mgr.Get("sleepy"); box.State == vmm.StatePaused {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("reaper never paused the idle sandbox")
 }
 
 // syncBuf merges a session's stdout and stderr into one transcript. It must be

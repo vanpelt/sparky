@@ -24,7 +24,12 @@ func (g *Gateway) RunInSandbox(ctx context.Context, name, cmd string) (int, stri
 
 	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
 	if err != nil {
-		return 0, "", fmt.Errorf("dial %s: %w", name, err)
+		// The full cause here and not at the caller: the scheduler stores
+		// err.Error() in the job's last_error column and logs the same string,
+		// so this is the last place that still has the address the dial named.
+		// See dialFailure.
+		g.log.Warn("scheduled job could not reach its sandbox", "sandbox", name, "err", err)
+		return 0, "", dialFailure(name, err)
 	}
 	defer client.Close()
 

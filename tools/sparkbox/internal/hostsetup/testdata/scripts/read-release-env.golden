@@ -1,0 +1,4 @@
+# Absent is not an error: that is a machine nobody has bootstrapped yet.
+if [ -r "$SPARKBOX_RELEASE_ENV" ]; then
+  cat "$SPARKBOX_RELEASE_ENV"
+fi

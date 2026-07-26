@@ -428,24 +428,28 @@ func (g *Gateway) handle(s gssh.Session) {
 		// are taken as tags, not just --tag: the local ssh client swallows
 		// leading-dash arguments as its own options, so `ssh new@host --tag ml`
 		// never reaches us without an `ssh new@host -- --tag ml` incantation.
-		// This door takes no other arguments — a chosen name arrives in the
+		// This door takes no positional arguments — a chosen name arrives in the
 		// username instead (splitNewName), precisely so it can't be mistaken for
 		// a tag — so every bare word here is unambiguously a tag.
-		flagged, bare, err := parseTags(s.Command())
+		//
+		// Which is exactly why --node has to be understood HERE and cannot be
+		// left to fall through: an unrecognised flag is not refused at this door,
+		// it is quietly turned into two tags. See parseCreateArgs.
+		flagged, node, bare, err := parseCreateArgs(s.Command())
 		if err != nil {
-			fail(s, log, "create sandbox", err)
+			failUsage(s, log, err)
 			return
 		}
 		tags, err := ctlops.NormalizeTags(append(flagged, bare...))
 		if err != nil {
-			fail(s, log, "create sandbox", err)
+			failUsage(s, log, err)
 			return
 		}
 		// ctlops.Create is the whole creation: it names the box when the caller
 		// didn't, stamps the tags before Create (the secret-env push is fired
 		// asynchronously and the tags decide its contents) and clears them again
 		// if the create fails.
-		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{Name: requestedName, Tags: tags})
+		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{Name: requestedName, Tags: tags, Node: node})
 		if err != nil {
 			g.failStart(s, log, "create sandbox", err)
 			return
@@ -453,6 +457,13 @@ func (g *Gateway) handle(s gssh.Session) {
 		tagNote := ""
 		if len(tags) > 0 {
 			tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
+		}
+		// Where it landed, and only when the caller asked: on a single-box
+		// deployment there is one answer and printing it every time would be
+		// noise, but a user who named a machine is owed confirmation from the
+		// record rather than from their own request.
+		if node != "" && box.Node != "" {
+			tagNote = " on " + box.Node + tagNote
 		}
 		via := viaGateway
 		if viaDoor {
@@ -494,7 +505,7 @@ func (g *Gateway) handle(s gssh.Session) {
 
 	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
 	if err != nil {
-		fail(s, log, "dial vm", err)
+		failDial(s, log, sandboxName, err)
 		return
 	}
 	defer client.Close()
@@ -679,8 +690,17 @@ func DialUpstreamVia(ctx context.Context, dial Dialer, addr, user string, key xs
 			// A dialer that refused the channel outright has already given a
 			// final answer, so hammering it for the rest of the dial budget
 			// only delays the message the user is going to get anyway.
+			//
+			// A typed *ctlops.Error is the same thing said in this tree's own
+			// vocabulary: the fleet dialer answers one when the machine holding
+			// the sandbox is offline, or when this build cannot carry a
+			// connection to another machine at all. Neither becomes true again
+			// inside a 15-second dial budget, and the sentence it carries is the
+			// one the user needs — so it is delivered at once rather than after
+			// a quarter-minute of silence.
 			var oce *xssh.OpenChannelError
-			if errors.As(err, &oce) {
+			var typed *ctlops.Error
+			if errors.As(err, &oce) || errors.As(err, &typed) {
 				return nil, fmt.Errorf("vm ssh not reachable: %w", err)
 			}
 		}
@@ -809,6 +829,86 @@ func fail(s gssh.Session, log *slog.Logger, what string, err error) {
 	s.Exit(1) //nolint:errcheck
 }
 
+// ---------------------------------------------------------------------------
+// A failed dial is the one error on this path that is never printed as it came
+// ---------------------------------------------------------------------------
+//
+// Every other failure here is a sentence somebody wrote. A dial error is
+// composed by whatever did the dialing, and what it names is an ADDRESS: on
+// this machine `dial tcp 172.30.5.2:22: connect: connection refused`, and for a
+// sandbox held by another machine the synthetic
+// `<sandbox>.<node>.sandbox.invalid` the fleet dialer resolves. Neither is
+// something a user can act on — the first is a bridge address on a host they
+// have no shell on, the second resolves nowhere by design — and the second is
+// fleet topology besides.
+//
+// It matters more than the wording suggests, because this path does not only
+// write to a terminal. RunInSandbox is the scheduler's exec runner, and the
+// error it returns is stored verbatim in the job's `last_error` column and
+// rendered by `ctl schedule list` and by both consoles. An address that reaches
+// there is persisted, not just glimpsed.
+//
+// A TYPED refusal is the exception and is printed in full: fleet's node-offline
+// sentence is curated, names no address, and is the only useful thing anybody
+// can say about a machine that is not answering. Telling an owner "your sandbox
+// is on a machine that is offline" is exactly the point of having the type.
+
+// dialError is a failed guest dial rendered for a reader, with the cause still
+// reachable for errors.As and for a log line that wants it.
+type dialError struct {
+	sandbox string
+	msg     string
+	cause   error
+}
+
+func (e *dialError) Error() string { return "dial " + e.sandbox + ": " + e.msg }
+func (e *dialError) Unwrap() error { return e.cause }
+
+// dialFailure wraps a dial error for a caller that will store or display the
+// sentence. See the section comment above.
+func dialFailure(sandbox string, err error) error {
+	var typed *ctlops.Error
+	if errors.As(err, &typed) {
+		return &dialError{sandbox: sandbox, msg: typed.Msg, cause: err}
+	}
+	return &dialError{sandbox: sandbox, msg: unreachableShell, cause: err}
+}
+
+// unreachableShell is what a user is told when the dial failed for a reason
+// that only an operator's log can usefully carry.
+const unreachableShell = "could not reach the sandbox's shell; it may still be starting"
+
+// failDial answers an interactive session whose sandbox's sshd could not be
+// reached. The cause reaches the log; the terminal gets a sentence.
+func failDial(s gssh.Session, log *slog.Logger, sandbox string, err error) {
+	var typed *ctlops.Error
+	if errors.As(err, &typed) {
+		// A curated refusal, rendered by the one function that knows whether a
+		// ctlops sentence stands alone or is wrapped — the same rendering the
+		// ctl@ door gives the identical error, so an offline machine reads the
+		// same way whichever door you knocked on.
+		failCtl(s, log, "dial vm", typed)
+		return
+	}
+	log.Error("dial vm failed", "sandbox", sandbox, "err", err)
+	fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n", unreachableShell)
+	s.Exit(1) //nolint:errcheck
+}
+
+// failUsage answers a malformed invocation: the command never ran, so this is
+// not a failure of anything and does not read as one.
+//
+// Exit 2 rather than 1, which is what the ctl@ door has always used for a
+// mistyped command (see control.go) and what ctlops.KindInvalid renders as
+// everywhere else. This door used to exit 1 for a bad --tag, which was the odd
+// one out; nothing pinned it, and a user who cannot tell "you typed it wrong"
+// from "it broke" retries instead of reading.
+func failUsage(s gssh.Session, log *slog.Logger, err error) {
+	log.Info("bad arguments", "err", err)
+	fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+	s.Exit(2) //nolint:errcheck
+}
+
 // failStart is fail plus friendly, actionable guidance for the resource-limit
 // errors, which are expected user-facing conditions rather than faults.
 func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err error) {
@@ -842,6 +942,20 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 			"sparkbox: host is at capacity (%d/%d MB allocated). Try again shortly, or pause a sandbox:  ssh %s@%s list\r\n",
 			capacity.UsedMB, capacity.BudgetMB, ControlUser, g.domainHint())
 		s.Exit(1) //nolint:errcheck
+		return
+	}
+	// A curated sentence the router already wrote — chiefly "sandbox %q lives
+	// on node %q, which is offline" — is printed as it stands rather than
+	// wrapped in "resume failed: …". The Verbatim flag is the error's own claim
+	// that it is already the whole sentence, and honouring it here is what
+	// makes an offline machine read identically at this door and at ctl@.
+	//
+	// Only Verbatim errors are diverted, so nothing a single-box deployment can
+	// produce takes this branch: the manager raises host.* error types, none of
+	// which is a *ctlops.Error at all.
+	var typed *ctlops.Error
+	if errors.As(err, &typed) && typed.Verbatim {
+		failCtl(s, log, what, typed)
 		return
 	}
 	fail(s, log, what, err)

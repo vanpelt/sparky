@@ -37,6 +37,44 @@ iptables -C INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP 2>/dev/null || \
 iptables -C FORWARD -i sbtap+ -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i sbtap+ -j ACCEPT
 iptables -C FORWARD -o sbtap+ -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -o sbtap+ -j ACCEPT
 
+# sluice's allowlist resolver needs an address of its OWN on any host that also
+# runs sparkbox's wildcard DNS responder: they are two different DNS servers and
+# only one can hold :53. `sparkbox setup --sluice-dns-addr 172.30.0.53:53` is the
+# documented answer and it writes SLUICE_DNS_IP here — because RECOMMENDING an
+# address is not the same as creating one, and an address no interface holds is
+# not bindable. Without this block sluice failed with "bind: cannot assign
+# requested address", its Restart=always unit looped forever, every guest handed
+# that literal as --guest-dns had no resolver at all, and `sparkbox setup` still
+# printed a clean report (the port preflight tolerates EADDRNOTAVAIL by design,
+# and `enable --now` on a Type=simple unit returns 0 at the fork).
+#
+# A dummy interface, exactly like the edge's /32 below: host-local, reached by
+# guests across their tap through the host's own routing, and free. Recreated
+# every boot, because dummy links do not survive one. Skipped when the address is
+# already on some interface — the operator may have put it somewhere real, and a
+# second copy on a dummy would shadow it.
+SLUICE_DNS_IP="${SLUICE_DNS_IP:-}"
+if [ -n "$SLUICE_DNS_IP" ]; then
+  # Captured rather than `| grep -q`: this script runs under `set -o pipefail`,
+  # and a `grep -q` that exits on its first match can SIGPIPE the producers, so
+  # the pipeline would report 141 exactly when the address WAS found — i.e. the
+  # check would invert itself on a host with enough interfaces to fill the pipe
+  # buffer, and then `ip addr add` would fail on the duplicate and `set -e`
+  # would abort the whole packet filter at boot.
+  HAVE_DNS_IP=$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fx "$SLUICE_DNS_IP" || true)
+  if [ -n "$HAVE_DNS_IP" ]; then
+    echo "SLUICE_DNS_IP=$SLUICE_DNS_IP is already on this host — leaving it where it is" >&2
+  else
+    ip link show sparkdns >/dev/null 2>&1 || ip link add sparkdns type dummy
+    ip addr add "$SLUICE_DNS_IP/32" dev sparkdns
+  fi
+  # Unconditionally up: an interface that exists but is DOWN has no local route,
+  # so the bind fails with the same EADDRNOTAVAIL the block above exists to stop.
+  if ip link show sparkdns >/dev/null 2>&1; then
+    ip link set sparkdns up
+  fi
+fi
+
 # Any-port authenticated forwarding via an uplink REDIRECT is only for the
 # direct-public-IP edge, where web traffic arrives ON the uplink. Behind a
 # reverse tunnel (e.g. Cloudflare Tunnel) it arrives from localhost instead, so

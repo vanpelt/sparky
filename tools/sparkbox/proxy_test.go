@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,7 +23,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
 
@@ -86,80 +84,12 @@ func (ps *proxyStack) get(t *testing.T, host string) (int, string) {
 	return rec.Code, string(body)
 }
 
-// backendOn starts an HTTP server bound to a fixed loopback port (the mock
-// driver's HostIP is 127.0.0.1) so the proxy can reach it as if it were a
-// service inside the VM. Returns the port.
-func backendOn(t *testing.T, reply string) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "%s host=%s", reply, r.Host)
-	})}
-	go srv.Serve(ln) //nolint:errcheck
-	t.Cleanup(func() { srv.Close() })
-	return ln.Addr().(*net.TCPAddr).Port
-}
-
-func TestProxyRoutesToBackend(t *testing.T) {
-	ps := newProxyStack(t)
-	ctx := context.Background()
-
-	if _, err := ps.mgr.Create(ctx, "webvm", "alice", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-	port := backendOn(t, "hello-from-app")
-	// Point the sandbox's default subdomain at our backend port.
-	if err := ps.store.Upsert(routes.Route{
-		Subdomain: "webvm", Sandbox: "webvm", Owner: "alice", Port: port,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	code, body := ps.get(t, "webvm.hivemind.tools")
-	if code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (%s)", code, body)
-	}
-	if want := "hello-from-app"; body[:len(want)] != want {
-		t.Fatalf("unexpected body %q", body)
-	}
-	// Host header must be preserved for the backend, not rewritten to the guest IP.
-	if wantHost := "host=webvm.hivemind.tools"; body[len(body)-len(wantHost):] != wantHost {
-		t.Fatalf("Host not preserved: %q", body)
-	}
-}
-
-func TestProxyResumesPausedSandbox(t *testing.T) {
-	ps := newProxyStack(t)
-	ctx := context.Background()
-
-	if _, err := ps.mgr.Create(ctx, "sleepy", "alice", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-	port := backendOn(t, "awake")
-	if err := ps.store.Upsert(routes.Route{
-		Subdomain: "sleepy", Sandbox: "sleepy", Owner: "alice", Port: port,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ps.mgr.Pause(ctx, "sleepy"); err != nil {
-		t.Fatal(err)
-	}
-	if box, _ := ps.mgr.Get("sleepy"); box.State != vmm.StatePaused {
-		t.Fatalf("expected paused, got %s", box.State)
-	}
-
-	code, body := ps.get(t, "sleepy.hivemind.tools")
-	if code != http.StatusOK {
-		t.Fatalf("expected 200 after resume, got %d (%s)", code, body)
-	}
-	if box, _ := ps.mgr.Get("sleepy"); box.State != vmm.StateRunning {
-		t.Fatalf("proxy hit should have resumed sandbox, state=%s", box.State)
-	}
-}
+// The round trip, the resume-on-request, the dead-port 502 and the default
+// route moved to placement_e2e_test.go, where each runs twice — once against a
+// sandbox on this machine and once against one on another. Every one of them
+// reaches into a guest, and reaching into a guest is what a placement changes.
+// What stays here is the edge's own dispatch: what happens when there is no
+// sandbox at the other end at all, and which handler wins for a given host.
 
 func TestProxyUnknownHosts(t *testing.T) {
 	ps := newProxyStack(t)
@@ -186,9 +116,12 @@ func (ps *proxyStack) getHTML(t *testing.T, host string) (int, string, string) {
 	return rec.Code, string(body), rec.Header().Get("Content-Type")
 }
 
+// TestProxyErrorPages is the content-negotiation half: the same missing route
+// renders as a styled page for a browser and as plain text for curl. The 502
+// for a running sandbox whose port has no listener is in
+// placement_e2e_test.go, because it is an assertion about a guest.
 func TestProxyErrorPages(t *testing.T) {
 	ps := newProxyStack(t)
-	ctx := context.Background()
 
 	// Unknown route + browser Accept -> styled HTML 404.
 	code, body, ct := ps.getHTML(t, "ghost.hivemind.tools")
@@ -203,29 +136,6 @@ func TestProxyErrorPages(t *testing.T) {
 	code, body = ps.get(t, "ghost.hivemind.tools")
 	if code != http.StatusNotFound || strings.Contains(body, "<html") {
 		t.Fatalf("expected plain-text 404, got %d %q", code, body)
-	}
-
-	// Running sandbox whose forwarded port has no listener -> 502 naming the port.
-	if _, err := ps.mgr.Create(ctx, "deadport", "alice", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close() // free the port so nothing is listening
-	if err := ps.store.Upsert(routes.Route{
-		Subdomain: "deadport", Sandbox: "deadport", Owner: "alice", Port: port,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	code, body, ct = ps.getHTML(t, "deadport.hivemind.tools")
-	if code != http.StatusBadGateway {
-		t.Fatalf("expected 502, got %d (%s)", code, body)
-	}
-	if !strings.Contains(ct, "text/html") || !strings.Contains(body, fmt.Sprintf("Nothing is listening on port %d", port)) {
-		t.Fatalf("expected HTML 502 naming port %d, got ct=%q body=%q", port, ct, body)
 	}
 }
 
@@ -294,29 +204,5 @@ func insertRouteRaw(t *testing.T, dir, subdomain, sandbox, owner string, port in
 		subdomain, sandbox, owner, port, routes.VisibilityPrivate, time.Now().UTC(),
 	); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestDefaultRouteCreatedOnCreate(t *testing.T) {
-	ps := newProxyStack(t)
-	ctx := context.Background()
-
-	if _, err := ps.mgr.Create(ctx, "auto", "alice", "ubuntu", 1, 512); err != nil {
-		t.Fatal(err)
-	}
-	r, ok, err := ps.store.GetBySubdomain("auto")
-	if err != nil || !ok {
-		t.Fatalf("default route missing: ok=%v err=%v", ok, err)
-	}
-	if r.Sandbox != "auto" || r.Port != routes.DefaultPort {
-		t.Fatalf("unexpected default route: %+v", r)
-	}
-
-	// Destroy must clean routes up.
-	if err := ps.mgr.Destroy(ctx, "auto"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, _ := ps.store.GetBySubdomain("auto"); ok {
-		t.Fatal("route should be removed on destroy")
 	}
 }

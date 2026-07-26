@@ -7,12 +7,16 @@ import (
 	"net"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // The compile assertions live here rather than beside the interfaces they
@@ -23,6 +27,17 @@ var (
 	_ ctlops.Sandboxes = (*Fleet)(nil)
 	_ ctlops.Templates = (*Fleet)(nil)
 	_ Node             = (*localNode)(nil)
+	// The shape ctlops type-asserts a sandbox store to when a create names a
+	// machine. It is restated rather than exported from there because that
+	// interface exists precisely to tell this type from *host.Manager, and a
+	// store that fails the assertion does not fail to compile — it answers
+	// "this host runs a single machine", which is the right answer for a
+	// manager and a silent regression for a fleet. The two are kept honest
+	// together by the two-machine tests, which drive --node through ctlops onto
+	// a real link.
+	_ interface {
+		CreateOn(ctx context.Context, node, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
+	} = (*Fleet)(nil)
 )
 
 // setPinnedBudget bounds the one mutating operation whose interface signature
@@ -47,6 +62,43 @@ type Options struct {
 	// recording and the local manager stays the only truth.
 	Index *placement.Store
 	Log   *slog.Logger
+
+	// Routes, Schedules, Tags and FrontDoor are the gateway-owned stores keyed
+	// by a sandbox's NAME. They must be the SAME objects host.Options is given:
+	// one set of rows per deployment, reached from here only for the sandboxes
+	// the local manager will never be told about. Any of them may be nil, which
+	// is what a unit test's fleet and a deployment with no front door pass.
+	//
+	// A single-box deployment never uses them — every placement is local, and
+	// the local manager does its own half — so leaving them unwired costs it
+	// nothing. A deployment with a second machine that leaves them unwired
+	// silently strands a remote sandbox's routes, schedules and tags. See
+	// sidestores.go.
+	Routes    RouteRows
+	Schedules SandboxRows
+	Tags      SandboxRows
+	FrontDoor host.FrontDoor
+
+	// NodeGrace is how long a machine that has gone quiet still counts as
+	// online. Zero takes nodelink.DefaultGrace (45s, three missed heartbeats).
+	//
+	// It is a fleet-level setting rather than a per-link one because it is a
+	// policy about this deployment's network, not about one machine: a fleet
+	// over a tailnet that dips wants a longer one than a fleet on a rack
+	// switch. ServeLink hands it to each link it serves, so there is one place
+	// to set it. Offline is never a verdict about the sandboxes on a machine —
+	// they are still running, on something that stopped talking — it only
+	// decides whether an operation is sent or refused with the offline
+	// sentence, and whether the record is flagged unreachable.
+	NodeGrace time.Duration
+	// ReconcileGrace is how long a freshly reserved name may go unreported by
+	// the machine it was placed on before that placement is marked orphaned.
+	// Zero takes DefaultReconcileGrace; see reconcile.go.
+	ReconcileGrace time.Duration
+	// Now is the clock reconciliation judges a placement's age against; nil is
+	// time.Now. It is settable for the same reason nodelink.ServerOptions.Now
+	// is: the alternative is a test that waits out a real grace period.
+	Now func() time.Time
 }
 
 // Fleet is the router. It holds no lifecycle state of its own: the local
@@ -60,9 +112,41 @@ type Fleet struct {
 	localArch string
 	index     *placement.Store
 	log       *slog.Logger
+	// sides is the gateway's half of a remote sandbox's lifecycle: the stores
+	// keyed by its name that no node has. See sidestores.go.
+	sides sides
 
-	mu    sync.RWMutex
-	nodes map[string]Node // linked machines other than this one, by name
+	// nodeGrace and reconcileGrace are Options' two timers, resolved once; now
+	// is the clock the second is measured on. See Options.
+	nodeGrace      time.Duration
+	reconcileGrace time.Duration
+	now            func() time.Time
+
+	mu     sync.RWMutex
+	nodes  map[string]Node // linked machines other than this one, by name
+	placer Placer          // nil is defaultPlacer; see place.go
+	// sessions is the registry of interactive sessions attached to sandboxes,
+	// so a pause that happens on another machine can hang up the terminals this
+	// gateway holds for it. Nil until SetSessions; see link.go.
+	sessions host.SessionCloser
+	// envPush delivers an owner's secret environment into a sandbox on another
+	// machine, which no node can do for itself. Nil until SetEnvPusher; see
+	// envsync.go.
+	envPush host.EnvPusher
+
+	// foreign latches once this fleet can hold a record that is not on this
+	// machine. See hasRemote.
+	foreign atomic.Bool
+
+	// The tunneled conns DialContext has handed out, under their own lock.
+	//
+	// Deliberately not f.mu: that is the lock Get takes, and Get sits under
+	// every authorization decision the control plane makes. A proxy opening and
+	// closing connections must never be able to make an ownership check wait.
+	// See dial.go.
+	smu           sync.Mutex
+	streams       map[*tracked]struct{}
+	streamsClosed bool
 }
 
 func New(opts Options) (*Fleet, error) {
@@ -87,6 +171,10 @@ func New(opts Options) (*Fleet, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	f := &Fleet{
 		local:     Local(name, opts.Local),
 		localMgr:  opts.Local,
@@ -94,7 +182,17 @@ func New(opts Options) (*Fleet, error) {
 		localArch: arch,
 		index:     opts.Index,
 		log:       log,
-		nodes:     map[string]Node{},
+		sides: sides{
+			routes:    opts.Routes,
+			schedules: opts.Schedules,
+			tags:      opts.Tags,
+			frontDoor: opts.FrontDoor,
+		},
+		nodeGrace:      orDuration(opts.NodeGrace, nodelink.DefaultGrace),
+		reconcileGrace: orDuration(opts.ReconcileGrace, DefaultReconcileGrace),
+		now:            now,
+		nodes:          map[string]Node{},
+		streams:        map[*tracked]struct{}{},
 	}
 	if err := f.adoptLocal(); err != nil {
 		return nil, err
@@ -102,9 +200,28 @@ func New(opts Options) (*Fleet, error) {
 	return f, nil
 }
 
-// Close drops every linked node. The local manager and the ledger belong to
-// whoever opened them and are not closed here.
+// orDuration is nodelink's own zero-means-the-default helper, restated rather
+// than exported from there: a negative duration is a configuration mistake and
+// must not become a grace that has already expired.
+func orDuration(d, fallback time.Duration) time.Duration {
+	if d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+// Close drops every linked node and tears down every tunneled connection this
+// fleet handed out. The local manager and the ledger belong to whoever opened
+// them and are not closed here.
+//
+// The streams go first, and they go at all because nothing else would end them.
+// A tunneled conn's lifetime belongs to whoever holds it — that asymmetry is
+// the whole of DialContext's no-close-bound rule — and the busiest holder is an
+// http.Transport idle pool, which will keep a connection for a minute and a half
+// after the request that dialed it. Dropping the node map without closing them
+// leaves those conns riding a link this fleet has stopped accounting for.
 func (f *Fleet) Close() error {
+	f.closeStreams()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	clear(f.nodes)
@@ -182,6 +299,19 @@ func (f *Fleet) adoptLocal() error {
 			return err
 		}
 	}
+	// One scan, at boot, to learn whether this ledger already places anything
+	// elsewhere. Everything written after this point goes through reserve or
+	// arrives with a link, and both latch on their own.
+	all, err := f.index.List()
+	if err != nil {
+		return err
+	}
+	for _, r := range all {
+		if r.Node != f.localName {
+			f.foreign.Store(true)
+			break
+		}
+	}
 	return nil
 }
 
@@ -212,6 +342,7 @@ func (f *Fleet) Attach(n Node) (detach func(), err error) {
 		return nil, errors.New("fleet: node " + name + " is already linked")
 	}
 	f.nodes[name] = n
+	f.foreign.Store(true)
 	return func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -304,6 +435,23 @@ func (f *Fleet) route(op, name string) (Node, error) {
 	if !ok || !n.Online() {
 		return nil, Unreachable(op, name, row.Node)
 	}
+	// What reconciliation found, refused. Both answers come after the machine's
+	// reachability rather than before it, because a machine that is not
+	// answering is the more immediate fact and the more actionable sentence —
+	// and because "the machine is up and does not have it" would be a lie about
+	// one that has since gone away.
+	//
+	// Both are also strictly after the ownership gate, which resolves through
+	// the context-free Fleet.Get: a stranger asking about either of these names
+	// is compared against the ledger's owner column and gets the masked
+	// "no sandbox named %q" they have always got, having reached no machine and
+	// no branch here.
+	switch row.State {
+	case placement.StateOrphaned:
+		return nil, orphanedSandbox(op, name, row.Node)
+	case placement.StateQuarantine:
+		return nil, contestedSandbox(op, name)
+	}
 	return n, nil
 }
 
@@ -358,10 +506,33 @@ func (f *Fleet) serve(b *host.Sandbox, row placement.Row, online bool) *host.San
 	return &c
 }
 
-// remoteRows renders ledger rows held by other machines. Rows whose node has
-// never reported an inventory are skipped: there is nothing to say about them
-// yet, and a placeholder would be a state nobody observed. Quarantined rows —
-// a name two machines claim — are never served at all.
+// unplaced renders a ledger row no machine is currently answering for.
+//
+// It exists because the alternative is worse than an incomplete record: a row
+// the gateway cannot ask about is still the user's sandbox, and dropping it
+// would answer "no sandbox named %q" for something that exists, is running, and
+// will be back the moment its machine reconnects. That answer is also the one a
+// stranger gets, so leaving it in place would make an outage indistinguishable
+// from a deletion for the owner while telling them nothing.
+//
+// Everything the ledger records is filled in and nothing else is invented. In
+// particular State stays empty rather than becoming "paused" or "running": no
+// machine has said, this process holds no durable cache of what one last said,
+// and a state nobody observed would be a lie that a later reader could mistake
+// for an authorization input. Unreachable is what carries the meaning, and it
+// is set by serve.
+func (f *Fleet) unplaced(row placement.Row) *host.Sandbox {
+	return f.serve(&host.Sandbox{
+		Name:      row.Name,
+		Image:     row.Image,
+		CreatedAt: row.CreatedAt,
+	}, row, false)
+}
+
+// remoteRows renders ledger rows held by other machines. A row whose node is
+// not linked, or is linked but has not reported that name, is rendered from the
+// ledger alone — see unplaced. Quarantined rows — a name two machines claim —
+// are never served at all.
 func (f *Fleet) remoteRows(rows []placement.Row) []*host.Sandbox {
 	var out []*host.Sandbox
 	byNode := map[string]map[string]*host.Sandbox{}
@@ -369,8 +540,9 @@ func (f *Fleet) remoteRows(rows []placement.Row) []*host.Sandbox {
 		if row.Node == f.localName || row.State == placement.StateQuarantine {
 			continue
 		}
-		n, ok := f.nodeByName(row.Node)
-		if !ok {
+		n, linked := f.nodeByName(row.Node)
+		if !linked {
+			out = append(out, f.unplaced(row))
 			continue
 		}
 		cache, seen := byNode[row.Node]
@@ -383,6 +555,7 @@ func (f *Fleet) remoteRows(rows []placement.Row) []*host.Sandbox {
 		}
 		b, ok := cache[row.Name]
 		if !ok {
+			out = append(out, f.unplaced(row))
 			continue
 		}
 		out = append(out, f.serve(b, row, n.Online()))
@@ -390,22 +563,29 @@ func (f *Fleet) remoteRows(rows []placement.Row) []*host.Sandbox {
 	return out
 }
 
-// hasRemote reports whether any other machine is linked. remoteRows can only
-// render a row against an attached node, so with none attached the answer to
-// both listing reads is nil whatever the ledger holds.
-func (f *Fleet) hasRemote() bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return len(f.nodes) > 0
-}
+// hasRemote reports whether this fleet can hold a record that is not on this
+// machine. It is a latch, and it only ever goes from false to true.
+//
+// It used to ask whether any machine was linked right now, which made every
+// remote record vanish the instant its link dropped — including from its
+// owner's own listing, and including from the ownership check that decides
+// whether that owner is told "offline" or the masked "no sandbox named". A
+// machine being asleep is not a machine's sandboxes ceasing to exist.
+//
+// It stays a latch rather than a ledger read because the read it replaces is on
+// the path of every `ctl list`, every door listing, every REST list and every
+// lookup of a name this machine does not hold. A gateway that has a ledger but
+// has never been joined to anything is the ordinary single-box deployment, and
+// it should not query sqlite to be told so. Three things set it: a boot scan of
+// the ledger (adoptLocal), a machine joining (Attach and linkUp), and a
+// placement written for another machine (reserve). Nothing else writes a
+// foreign row, so nothing else can be missed.
+func (f *Fleet) hasRemote() bool { return f.foreign.Load() }
 
 // remoteAll and remoteByOwner are the two listing reads. Both answer nil with
 // no ledger, which is what makes a single-box deployment's listings the local
-// manager's own slice, untouched. They answer nil the same way when nothing is
-// linked, because a box that has a ledger but has not been joined to anything
-// is the ordinary single-machine deployment, and scanning the whole placements
-// table on every `ctl list`, every door listing and every REST list only to
-// discard every row is a cost it should not pay.
+// manager's own slice, untouched, and nil again when nothing has ever been
+// placed elsewhere — see hasRemote.
 func (f *Fleet) remoteAll() []*host.Sandbox {
 	if f.index == nil || !f.hasRemote() {
 		return nil
@@ -445,14 +625,22 @@ func (f *Fleet) remoteByOwner(owner string) []*host.Sandbox {
 // so a whole-inventory copy per lookup is the wrong shape however small the
 // fleet is today. The quarantine and node-match rules are remoteRows' — a name
 // two machines claim is served by neither.
+//
+// A row whose machine is not answering is still served, out of the ledger
+// alone. That is what makes the masking rule hold in both directions when a
+// node goes down: the owner's operation gets as far as the router and is told
+// the machine is offline, while a stranger asking about the same name is
+// compared against the ledger's owner column and gets the byte-identical
+// "no sandbox named %q" they have always got — having reached no machine at
+// all. Answering "not found" here instead would have given the OWNER that same
+// masked sentence, turning a reboot into a disappearance.
 func (f *Fleet) Get(name string) (*host.Sandbox, bool) {
 	if b, ok := f.localMgr.Get(name); ok {
 		return b, true
 	}
-	// Nothing linked means nothing to render whatever the ledger holds, and a
-	// box that has a ledger but has not been joined to anything is the ordinary
-	// single-machine deployment: it should not read sqlite on every lookup of a
-	// name it does not hold.
+	// A deployment that has never placed anything elsewhere has nothing to
+	// render whatever the ledger holds, and should not read sqlite on every
+	// lookup of a name it does not hold.
 	if !f.hasRemote() {
 		return nil, false
 	}
@@ -460,15 +648,12 @@ func (f *Fleet) Get(name string) (*host.Sandbox, bool) {
 	if !ok || row.Node == f.localName || row.State == placement.StateQuarantine {
 		return nil, false
 	}
-	n, ok := f.nodeByName(row.Node)
-	if !ok {
-		return nil, false
+	if n, linked := f.nodeByName(row.Node); linked {
+		if b, ok := n.Box(name); ok {
+			return f.serve(b, row, n.Online()), true
+		}
 	}
-	b, ok := n.Box(name)
-	if !ok {
-		return nil, false
-	}
-	return f.serve(b, row, n.Online()), true
+	return f.unplaced(row), true
 }
 
 func (f *Fleet) List() []*host.Sandbox {
@@ -500,17 +685,83 @@ func (f *Fleet) ListByOwner(owner string) []*host.Sandbox {
 // asked to build anything. The reservation is the fleet's name allocator: the
 // ledger's PRIMARY KEY decides, so two concurrent creates cannot both win, and
 // there is no read-then-write window between checking a name and taking it.
+//
+// Where it goes is the Placer's answer rather than a hardcoded f.local, which
+// is the whole of this method's change: the default policy still says "here",
+// so a single-box deployment is unaffected, but the decision now has a seam a
+// scheduler can be dropped into without touching the sequence below it.
 func (f *Fleet) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
-	return f.placed(f.local, name, owner, image, func() (*host.Sandbox, error) {
-		return f.local.Create(ctx, name, owner, image, vcpus, memMB)
+	return f.create(ctx, "", name, owner, image, vcpus, memMB)
+}
+
+// CreateOn is Create with the machine named by the caller — `--node` on the
+// new@ door, `"node"` in a REST create body.
+//
+// It is a separate method rather than an argument on Create because Create's
+// signature is ctlops.Sandboxes', which *host.Manager satisfies structurally: a
+// single-box gateway wired straight to its manager has no fleet, no ledger and
+// no second machine, and must not be made to grow a parameter it can only
+// answer one way. ctlops asks whether its store can place by name and says so
+// plainly when it cannot.
+func (f *Fleet) CreateOn(ctx context.Context, node, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
+	return f.create(ctx, node, name, owner, image, vcpus, memMB)
+}
+
+func (f *Fleet) create(ctx context.Context, prefer, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
+	n, err := f.pick(Request{
+		Owner: owner, Image: image, PreferNode: prefer, VCPUs: vcpus, MemMB: memMB,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return f.placed(ctx, n, name, owner, image, func() (*host.Sandbox, error) {
+		return n.Create(ctx, name, owner, image, vcpus, memMB)
+	})
+}
+
+// pick resolves a placement request to the machine that will build it.
+//
+// The shortcut is the single-box path and is exactly the default policy's own
+// answer, taken without building a candidate list: with no preference and no
+// placer installed, defaultPlacer returns the local machine and nothing else
+// can. It is skipped the moment either of those is true, so a deployment that
+// has installed a placer always consults it.
+func (f *Fleet) pick(req Request) (Node, error) {
+	f.mu.RLock()
+	p := f.placer
+	f.mu.RUnlock()
+	if p == nil {
+		if req.PreferNode == "" {
+			return f.local, nil
+		}
+		p = defaultPlacer{}
+	}
+	chosen, err := p.Place(req, f.candidates())
+	if err != nil {
+		return nil, err
+	}
+	n, ok := f.nodeByName(chosen)
+	if !ok {
+		// A placer naming a machine this fleet does not have. It is the same
+		// answer a user's own bad --node gets, because from here the two are
+		// indistinguishable and inventing a second phrasing for an operator's
+		// misconfiguration would only make it harder to search for.
+		return nil, ctlops.NotFound("create", "node", chosen)
+	}
+	return n, nil
 }
 
 // placed is the reserve/build/undo sequence both ways of making a sandbox
 // follow: take the name in the ledger first, then ask the machine, and hand the
 // name back if the machine says no. Create and Fork differ only in what build
 // does and in which machine it runs on.
-func (f *Fleet) placed(n Node, name, owner, image string, build func() (*host.Sandbox, error)) (*host.Sandbox, error) {
+//
+// A sandbox built on another machine also gets the gateway-side rows
+// Manager.Create mints for a local one — its default subdomain and its
+// front-door name — after the build, never before: a create that fails releases
+// the name, and rows minted for a sandbox that was never built would outlive it
+// under a name somebody else can now take.
+func (f *Fleet) placed(ctx context.Context, n Node, name, owner, image string, build func() (*host.Sandbox, error)) (*host.Sandbox, error) {
 	release, err := f.reserve(name, owner, image, n)
 	if err != nil {
 		return nil, err
@@ -519,6 +770,13 @@ func (f *Fleet) placed(n Node, name, owner, image string, build func() (*host.Sa
 	if err != nil {
 		release()
 		return nil, err
+	}
+	if n.Name() != f.localName {
+		f.mint(ctx, name, owner)
+		// The manager fires this for a sandbox built here; on a node the same
+		// hook is nil by construction, so a remote sandbox would boot with an
+		// empty managed block and stay that way. See envsync.go.
+		f.pushEnv(ctx, b)
 	}
 	return b, nil
 }
@@ -550,6 +808,13 @@ func (f *Fleet) reserve(name, owner, image string, n Node) (release func(), err 
 	if n.Name() != f.localName && f.heldLocally(name) {
 		return nil, &host.NameError{Problem: host.NameTaken, Noun: "sandbox", Name: name}
 	}
+	if n.Name() != f.localName {
+		// Latched before the insert rather than after it: the row exists from
+		// the moment the INSERT commits, and a reader that arrived between the
+		// commit and a later latch would be told this gateway has nothing
+		// elsewhere while the ledger already said otherwise.
+		f.foreign.Store(true)
+	}
 	if f.index == nil {
 		return func() {}, nil
 	}
@@ -570,12 +835,54 @@ func (f *Fleet) reserve(name, owner, image string, n Node) (release func(), err 
 	}, nil
 }
 
+// EnsureRunning resumes a sandbox wherever it lives, and — for one on another
+// machine that was NOT already running — pushes its secret environment
+// afterwards, because the hook that does that automatically only exists on the
+// machine that holds the secrets store. See envsync.go.
+//
+// The push is gated on the state BEFORE the call, and reading it before is the
+// whole of the gate: after a successful EnsureRunning the sandbox is running by
+// definition, so a gate on the returned record would fire every time. That is
+// not the cheap redundancy envsync.go accepts between its case 1 and case 2 —
+// this method is on the per-request path. proxy.Server.ServeHTTP calls it for
+// EVERY request, sshgw for every session, xterm for every attach, the scheduler
+// for every job, so pushing on "it is running now" means one SSH dial,
+// handshake and `sudo -n /bin/sh` rewrite of /etc/environment per subresource
+// of every page a remote sandbox serves, queued on envsync's per-box mutex and
+// each carrying a three-minute budget. It is exactly what
+// TestAHeartbeatIsNotATransition rejects for the event path, arriving by a
+// hotter door: the trigger has to be the transition, not the state.
+//
+// A stale cache costs nothing here. If this gateway thought the box was running
+// and the machine had to resume it, the machine says so — host.Manager stamps
+// "resumed" and the node's emitter sends sandbox.changed, which ApplyChanged
+// turns into the push (link.go). Missing a push is a sandbox that gets its
+// environment a moment later; pushing on every request is an SSH exec per HTTP
+// hit forever.
 func (f *Fleet) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
 	n, err := f.route("restore", name)
 	if err != nil {
 		return nil, err
 	}
-	return n.EnsureRunning(ctx, name)
+	remote := n.Name() != f.localName
+	// The machine's last known picture of this sandbox, which is the only thing
+	// that can distinguish a resume from a no-op once the call has returned.
+	// Unknown counts as "not running": a name this link has never reported is a
+	// box the gateway cannot claim already had its environment.
+	wasRunning := false
+	if remote {
+		if before, ok := n.Box(name); ok && before.State == vmm.StateRunning {
+			wasRunning = true
+		}
+	}
+	b, err := n.EnsureRunning(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if remote && !wasRunning {
+		f.pushEnv(ctx, b)
+	}
+	return b, nil
 }
 
 func (f *Fleet) Pause(ctx context.Context, name string) error {
@@ -583,6 +890,7 @@ func (f *Fleet) Pause(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Pause(ctx, name)
 }
 
@@ -591,6 +899,7 @@ func (f *Fleet) Archive(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Archive(ctx, name)
 }
 
@@ -599,6 +908,7 @@ func (f *Fleet) Resize(ctx context.Context, name string, sizeMB int64) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Resize(ctx, name, sizeMB)
 }
 
@@ -607,6 +917,7 @@ func (f *Fleet) Reboot(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Reboot(ctx, name)
 }
 
@@ -614,16 +925,39 @@ func (f *Fleet) Reboot(ctx context.Context, name string) error {
 // between the two halves leaves the name pointing at the machine that holds
 // the rootfs rather than stranding it under a name nothing claims. A refusal
 // from the machine rolls the row back.
+//
+// For a sandbox on another machine the ledger row is only half of what the
+// gateway has to move. The routes, schedules, tags and front-door rows that
+// follow a sandbox's name are all HERE — a node is given none of them, so
+// Manager.Rename's own hooks are no-ops over there — and every one of them is
+// keyed by the name that is about to change. Left behind, an owner's tag rows
+// select nothing for the renamed sandbox (it silently loses every secret those
+// tags carried) and a route row keeps pointing, with its owner column, at a name
+// that no longer exists. So the gateway does its half before dispatching and
+// takes it back if the machine refuses, which is the split W17 describes.
 func (f *Fleet) Rename(ctx context.Context, oldName, newName, owner string) error {
 	n, err := f.route("rename", oldName)
 	if err != nil {
 		return err
 	}
-	// Renaming another machine's sandbox onto a name this one holds is the same
-	// hole reserve guards: the ledger is the only thing consulted, and a name it
-	// has no row for reads as free. See heldLocally.
-	if n.Name() != f.localName && f.heldLocally(newName) {
-		return &host.NameError{Problem: host.NameTaken, Noun: "sandbox", Name: newName}
+	remote := n.Name() != f.localName
+	if remote {
+		// Renaming another machine's sandbox onto a name this one holds is the
+		// same hole reserve guards: the ledger is the only thing consulted, and
+		// a name it has no row for reads as free. See heldLocally.
+		if f.heldLocally(newName) {
+			return &host.NameError{Problem: host.NameTaken, Noun: "sandbox", Name: newName}
+		}
+		// And onto a subdomain somebody else's custom route holds. The manager
+		// makes this check with its own routes store, which a node does not
+		// have, so on the remote path it is made here or nowhere.
+		switch free, err := f.subdomainFree(oldName, newName, owner); {
+		case err != nil:
+			return err
+		case !free:
+			return &host.StateError{Code: "subdomain_taken",
+				Msg: "subdomain " + strconv.Quote(newName) + " is already taken"}
+		}
 	}
 	moved := false
 	if f.index != nil {
@@ -639,13 +973,32 @@ func (f *Fleet) Rename(ctx context.Context, oldName, newName, owner string) erro
 			return err
 		}
 	}
-	if err := n.Rename(ctx, oldName, newName, owner); err != nil {
+	// Undoing the ledger move is needed on every failure from here down, and
+	// forgetting it on one of them is how a sandbox ends up filed under a name
+	// its machine has never heard of.
+	rollback := func() {
 		if moved {
 			if rb := f.index.Rename(newName, oldName); rb != nil {
 				f.log.Error("could not roll back a placement rename",
 					"from", oldName, "to", newName, "err", rb)
 			}
 		}
+	}
+	undo := func() {}
+	if remote {
+		back, err := f.carry(ctx, oldName, newName)
+		if err != nil {
+			// Routes are fatal (see carry). Nothing else has moved yet and the
+			// machine has not been asked to do anything.
+			rollback()
+			return err
+		}
+		undo = back
+	}
+	f.hangUpBefore(n, oldName)
+	if err := n.Rename(ctx, oldName, newName, owner); err != nil {
+		undo()
+		rollback()
 		return err
 	}
 	return nil
@@ -654,6 +1007,16 @@ func (f *Fleet) Rename(ctx context.Context, oldName, newName, owner string) erro
 // Destroy releases the name only after the machine has actually let go of it.
 // The other order would hand the name to somebody else while the rootfs is
 // still being deleted.
+//
+// The gateway's own rows for that sandbox go in between, and the sandwich is
+// deliberate. Manager.Destroy deletes a sandbox's routes, schedules and tags
+// itself; a node has none of those stores, so for a remote sandbox nothing would
+// delete them at all — and Release then hands the NAME to the next person who
+// asks for it, on top of one route row that still carries the previous owner's
+// handle (their subdomain now answers into the new owner's sandbox) and one
+// schedule row that still runs the previous owner's command in it. Sweeping
+// while the placement row is still held is what makes "every row keyed by this
+// name belongs to the sandbox being destroyed" true at the moment it is read.
 func (f *Fleet) Destroy(ctx context.Context, name string) error {
 	n, err := f.route("rm", name)
 	if err != nil {
@@ -661,6 +1024,9 @@ func (f *Fleet) Destroy(ctx context.Context, name string) error {
 	}
 	if err := n.Destroy(ctx, name); err != nil {
 		return err
+	}
+	if n.Name() != f.localName {
+		f.sweep(ctx, name)
 	}
 	if f.index != nil {
 		if err := f.index.Release(name); err != nil {
@@ -691,9 +1057,20 @@ func (f *Fleet) SetPinned(name string, pinned bool) error {
 
 // ResyncEnv reports nothing, so a machine that is not answering is simply not
 // told: the secrets it is missing are pushed again when it reconnects.
+//
+// For a sandbox on another machine the gateway pushes rather than relays.
+// Relaying is what the code used to do and it delivered nothing at all: the
+// frame reaches the node's Manager.ResyncEnv, which fires a hook that is nil
+// over there because a node has no secrets store — so `ctl tag set` on a remote
+// sandbox silently changed which secrets it was entitled to and never changed
+// the secrets it had. See envsync.go.
 func (f *Fleet) ResyncEnv(ctx context.Context, name string) {
 	n, err := f.route("secrets.sync", name)
 	if err != nil {
+		return
+	}
+	if n.Name() != f.localName {
+		f.pushEnvByName(ctx, name)
 		return
 	}
 	if err := n.ResyncEnv(ctx, name); err != nil {
@@ -787,6 +1164,7 @@ func (f *Fleet) Snapshot(ctx context.Context, box, snapName, owner string) (*hos
 	if err != nil {
 		return nil, err
 	}
+	f.hangUpBefore(n, box)
 	return n.Snapshotter(ctx, box, snapName, owner)
 }
 
@@ -800,7 +1178,7 @@ func (f *Fleet) DeleteSnapshot(ctx context.Context, snapName, owner string) erro
 // forked there, and it is architecture-pinned by construction.
 func (f *Fleet) Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error) {
 	n, image := f.templateNode(owner, snapName)
-	return f.placed(n, newName, owner, image, func() (*host.Sandbox, error) {
+	return f.placed(ctx, n, newName, owner, image, func() (*host.Sandbox, error) {
 		return n.Fork(ctx, snapName, newName, owner, vcpus, memMB)
 	})
 }

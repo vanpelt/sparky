@@ -60,7 +60,7 @@ The first PoC includes:
 
 - one persistent Linux gateway VM;
 - the current Linux/ARM64 Sparkbox gateway and Firecracker driver;
-- a pinned, reproducible outer KVM kernel;
+- a pinned, checksum-verified outer KVM kernel;
 - a systemd-based Ubuntu 24.04 gateway image;
 - persistent Sparkbox state inside the machine root filesystem;
 - direct access from macOS over the machine's vmnet address;
@@ -162,9 +162,13 @@ The following become constants in the PoC scripts:
 - outer Linux version and source SHA-256;
 - Apple base kernel-config tag and SHA-256;
 - gateway base-image digest;
-- Go toolchain version;
-- Sparkbox release tag used for Firecracker, guest kernel, and rootfs; and
+- Sparkbox release tag used for the sparkbox binary, Firecracker, guest kernel,
+  and rootfs; and
 - the local gateway image tag.
+
+> **Superseded by B3.** The plan originally also pinned a Go toolchain version,
+> because the image compiled sparkbox from source. It no longer does: one release
+> tag now covers the binary and the artifacts together (see below).
 
 The lifecycle script prints the resolved values into a result bundle so a
 successful run can be reproduced later.
@@ -181,6 +185,8 @@ tools/sparkbox/
   macos/
     .gitignore
     Containerfile.gateway
+    sparkbox-bootstrap.sh             # fetch + verify the released binary (B3)
+    test-bootstrap.sh                 # exercises it without a machine
     poc.sh
     smoke.sh
     kernel/
@@ -219,12 +225,11 @@ committed.
 
 ### `macos/Containerfile.gateway`
 
-Use a multi-stage ARM64 build:
+Single-stage ARM64 build:
 
-1. Build the current Sparkbox source with Go 1.25.
-2. Create an Ubuntu 24.04 systemd machine image following Apple's documented
+1. Create an Ubuntu 24.04 systemd machine image following Apple's documented
    container-machine pattern.
-3. Install only the Linux host dependencies needed by `sparkbox setup` and
+2. Install only the Linux host dependencies needed by `sparkbox setup` and
    runtime:
 
 ```text
@@ -234,9 +239,31 @@ iptables iproute2
 systemd dbus
 ```
 
-4. Install the locally built `sparkbox` at `/usr/local/bin/sparkbox`.
-5. Set the machine's default target to `multi-user.target`.
-6. Do not include credentials, operator keys, rootfs images, or mutable state.
+3. Install `macos/sparkbox-bootstrap.sh` at `/usr/local/sbin/sparkbox-bootstrap`.
+4. Set the machine's default target to `multi-user.target`.
+5. Do not include credentials, operator keys, rootfs images, or mutable state —
+   **and no sparkbox binary**.
+
+> **Superseded by B3.** The first implementation had a Go build stage that
+> compiled the working tree and baked the result at `/usr/local/bin/sparkbox`.
+> That required the git repo, a Go toolchain and `go mod download` on every
+> onboarding, and it decoupled the machine's control plane from the release it
+> provisioned — a machine built at `v0.3.0-5-g18bfe3b` provisioned
+> `--release v0.4.0` and drove v0.4.0 artifacts with a v0.3.0-era sparkbox, with
+> both numbers recorded in the same evidence bundle and nothing comparing them.
+>
+> Since A1, `sparkbox setup` installs the binary it is running from. So
+> `provision` now runs `/usr/local/sbin/sparkbox-bootstrap` in the machine, which
+> downloads the released `sparkbox-linux-arm64` for the pinned tag and verifies
+> it against `SHA256_SPARKBOX` in that release's `manifest-arm64.env`, then runs
+> `setup` from the staged copy; setup installs it at `/usr/local/bin/sparkbox`.
+> `provision` fails if the installed binary reports any other version.
+>
+> Developing against a working-tree build is still supported, but only opt-in via
+> `SPARKBOX_SOURCE_BUILD=1` or `SPARKBOX_LOCAL_BINARY`, and such a machine is
+> marked with `/etc/sparkbox-poc-source-build` and reports the fact in `status`.
+> `macos/test-bootstrap.sh` exercises the bootstrap's decisions against a fake
+> release without needing a machine.
 
 ### `macos/poc.sh`
 
@@ -251,7 +278,7 @@ Provide deliberately small subcommands:
 ./macos/poc.sh stop
 ./macos/poc.sh start
 ./macos/poc.sh smoke
-./macos/poc.sh destroy --yes
+./macos/poc.sh destroy [--machine] [--image] [--kernel] [--all] --yes
 ```
 
 Behavior:
@@ -281,9 +308,19 @@ sparkbox setup \
   Sparkbox service state, and current L2 sandbox count.
 - `start` boots the machine through `container machine run` and waits for
   `sparkbox.service` readiness.
-- `destroy` is the only destructive operation and requires `--yes`. It removes
-  the named machine and local generated image/kernel output but never prunes
-  unrelated Apple Container data.
+- `destroy` is the only destructive operation and requires `--yes`. It never
+  prunes unrelated Apple Container data, and it tears down **by cost tier**
+  rather than all at once: `--machine` (the default — seconds to recreate),
+  `--image` (a multi-minute container build), `--kernel` (an 8-CPU
+  in-container Linux compile, reproducing bytes that are already pinned and
+  checksummed), or `--all` for every tier plus `macos/out`'s inputs and
+  `results/` evidence. A bare `destroy --yes` deletes only the machine.
+- `provision` switches a machine between standalone gateway and fleet node
+  **in place** when the machine carries no sandboxes — the change is one line in
+  `sparkbox.env`, which `setup` will not rewrite on its own, so `poc.sh` backs
+  the file up and lets `setup` render it fresh. It still refuses when sandboxes
+  are present, or when it cannot prove there are none, because a gateway's users
+  DB, routes and fleet secrets are meaningless on a node.
 
 Defaults for this 64 GiB M4 Max test host are 8 vCPUs and 24 GiB of outer
 memory. Both remain environment-variable overrides.

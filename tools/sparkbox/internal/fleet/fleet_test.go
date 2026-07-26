@@ -1,6 +1,7 @@
 package fleet_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,7 +10,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,11 +64,38 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 // name the gateway uses so a test exercises the shared-database path.
 func newIndex(t *testing.T) *placement.Store {
 	t.Helper()
-	st, err := placement.Open(filepath.Join(t.TempDir(), "sparkbox.db"))
+	// Deliberately not t.TempDir(), and the reason is a real property of the
+	// driver rather than fussiness. sqlite3_close_v2 does not always finish
+	// closing when Close returns — a connection with a statement still to be
+	// finalised becomes a zombie and completes later — and a WAL database
+	// finishing its close writes the -shm side file back into the directory.
+	// t.TempDir sweeps its directory with RemoveAll and FAILS THE TEST if
+	// anything appears mid-sweep, so a database that closed a moment late
+	// showed up as "TempDir RemoveAll cleanup: directory not empty" against
+	// whichever test drew the short straw, with nothing in that test to point
+	// at the store. Owning the sweep means the late file is swept too, and a
+	// directory that will not go is left in TMPDIR rather than reported as a
+	// verdict on the code under test.
+	dir, err := os.MkdirTemp("", "sparkbox-index-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	st, err := placement.Open(filepath.Join(dir, "sparkbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		st.Close() //nolint:errcheck
+		// Bounded: nothing here waits on a real timer for a result, it only
+		// gives a late close somewhere to land before giving up quietly.
+		for range 50 {
+			os.RemoveAll(dir) //nolint:errcheck
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 	return st
 }
 
@@ -97,6 +127,11 @@ func mustCreate(t *testing.T, f *fleet.Fleet, name, owner string) *host.Sandbox 
 type fakeNode struct {
 	name  string
 	facts fleet.Facts
+	// capacity is what this machine last reported about its resources. The zero
+	// value is a machine that has reported nothing yet, which is a state a real
+	// link is in for its first few seconds and which nothing may treat as "no
+	// room".
+	capacity host.NodeCapacity
 
 	mu        sync.Mutex
 	online    bool
@@ -113,7 +148,9 @@ func newFakeNode(name string) *fakeNode {
 func (n *fakeNode) Name() string       { return n.name }
 func (n *fakeNode) Facts() fleet.Facts { return n.facts }
 func (n *fakeNode) Capacity() host.NodeCapacity {
-	return host.NodeCapacity{Node: n.name, Arch: n.facts.Arch}
+	c := n.capacity
+	c.Node, c.Arch = n.name, n.facts.Arch
+	return c
 }
 
 func (n *fakeNode) Online() bool {
@@ -143,6 +180,21 @@ func (n *fakeNode) Boxes() []*host.Sandbox {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.boxes
+}
+
+// forget drops a sandbox from this machine's inventory without telling anybody,
+// which is what a disk restored from an older snapshot — or a state directory
+// that came back empty — looks like from the gateway.
+func (n *fakeNode) forget(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	kept := n.boxes[:0]
+	for _, b := range n.boxes {
+		if b.Name != name {
+			kept = append(kept, b)
+		}
+	}
+	n.boxes = kept
 }
 
 func (n *fakeNode) Templates() []*host.Snapshot {
@@ -181,16 +233,35 @@ func (n *fakeNode) Create(context.Context, string, string, string, int64, int64)
 	return nil, errors.New("fakeNode cannot create")
 }
 
+// EnsureRunning answers the way a machine does: a sandbox that was not running
+// is resumed, and one that already was is handed back untouched. The difference
+// is invisible to the caller — both return a running record — which is exactly
+// why the fake has to make it, because the gateway's decision about whether to
+// push a secret environment turns on the state BEFORE the call.
 func (n *fakeNode) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
 	n.record("ensure_running")
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, b := range n.boxes {
 		if b.Name == name {
+			b.State = vmm.StateRunning
 			return b, nil
 		}
 	}
 	return nil, errors.New("no such sandbox")
+}
+
+// stopped parks a sandbox in a state a resume has something to do from. It is
+// the machine's own record that changes, which is the only place the state a
+// resume is judged against ever lives.
+func (n *fakeNode) stopped(name string, state vmm.State) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, b := range n.boxes {
+		if b.Name == name {
+			b.State = state
+		}
+	}
 }
 
 func (n *fakeNode) Pause(context.Context, string) error   { n.record("pause"); return nil }
@@ -508,45 +579,75 @@ func TestAnUnplacedLocalNameIsDefendedFleetWide(t *testing.T) {
 	}
 }
 
-// The gateway always builds a ledger, so "no other machine is linked" — the
-// ordinary single-box deployment — must not pay for one. Listings are the
-// highest-traffic reads in the system and there is nothing a row can produce
-// without a node attached to render it against.
-func TestListingsSkipTheLedgerWithNothingLinked(t *testing.T) {
+// The gateway always builds a ledger, so a deployment that has never placed
+// anything on another machine — the ordinary single box — must not pay for one.
+// Listings are the highest-traffic reads in the system.
+//
+// This used to be phrased as "nothing is linked right now", and it was the
+// wrong question: a machine being asleep does not make its sandboxes stop
+// existing, and answering listings from attachment alone made a user's record
+// vanish for as long as their laptop was shut. The question is whether this
+// ledger has ever placed anything elsewhere, which cannot become false again.
+//
+// The observable is the ledger itself, closed before the listings run: a read
+// would fail and say so in the log. A timing assertion could only ever report
+// "fast enough on this machine today".
+func TestListingsSkipTheLedgerWithNothingPlacedElsewhere(t *testing.T) {
 	mgr := newManager(t, host.Options{})
 	index := newIndex(t)
-	for i := range 5000 {
-		if err := index.Reserve(fmt.Sprintf("remote-%04d", i), "bob", "boxb", "ubuntu", "amd64"); err != nil {
-			t.Fatal(err)
-		}
+	var logged bytes.Buffer
+	f, err := fleet.New(fleet.Options{
+		Local: mgr, LocalName: mgr.NodeName(), LocalArch: "arm64", Index: index,
+		Log: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	f := newFleet(t, mgr, index)
+	t.Cleanup(func() { f.Close() })
 	mustCreate(t, f, "brave-otter", "alice")
 
-	start := time.Now()
-	const rounds = 200
-	for range rounds {
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
 		if got := f.List(); len(got) != 1 || got[0].Name != "brave-otter" {
-			t.Fatalf("List = %+v", got)
+			t.Fatalf("List = %s", boxNames(got))
 		}
 		if got := f.ListByOwner("bob"); got != nil {
-			t.Fatalf("ListByOwner(bob) = %+v", got)
+			t.Fatalf("ListByOwner(bob) = %s", boxNames(got))
+		}
+		if _, ok := f.Get("nothing-here"); ok {
+			t.Fatal("Get invented a sandbox")
 		}
 	}
-	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-		t.Fatalf("%d listings against a 5000-row ledger with nothing linked took %v", rounds, elapsed)
+	if strings.Contains(logged.String(), "placement ledger") {
+		t.Fatalf("the ledger was read on a listing with nothing placed elsewhere:\n%s", logged.String())
 	}
+}
 
-	// And the shortcut is exactly that: once a machine is linked, its rows are
-	// served again.
-	attach(t, f, newFakeNode("boxb"), &host.Sandbox{
+// And once something IS placed elsewhere, every one of those reads goes back to
+// the ledger — with or without the machine on the end of it.
+func TestListingsReadTheLedgerOncePlacedElsewhere(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	index := newIndex(t)
+	f := newFleet(t, mgr, index)
+	mustCreate(t, f, "brave-otter", "alice")
+	place(t, index, "remote-0000", "bob", "boxb")
+
+	// Written straight to the ledger, so nothing has latched yet — this is the
+	// gateway-restart case, where a row survives the process that wrote it.
+	f2 := newFleet(t, mgr, index)
+	if got := f2.ListByOwner("bob"); len(got) != 1 || got[0].Name != "remote-0000" || !got[0].Unreachable {
+		t.Fatalf("ListByOwner(bob) after a restart = %+v", got)
+	}
+	attach(t, f2, newFakeNode("boxb"), &host.Sandbox{
 		Name: "remote-0000", Owner: "bob", Image: "ubuntu", State: vmm.StateRunning,
 	})
-	if got := f.ListByOwner("bob"); len(got) != 1 || got[0].Name != "remote-0000" {
+	if got := f2.ListByOwner("bob"); len(got) != 1 || got[0].Name != "remote-0000" || got[0].Unreachable {
 		t.Fatalf("ListByOwner(bob) after attach = %+v", got)
 	}
-	if got := f.List(); len(got) != 2 {
-		t.Fatalf("List after attach = %+v", got)
+	if got := f2.List(); len(got) != 2 {
+		t.Fatalf("List after attach = %s", boxNames(got))
 	}
 }
 
@@ -848,4 +949,12 @@ func TestFleetNeedsALocalMachine(t *testing.T) {
 	if _, err := fleet.New(fleet.Options{Log: discardLog()}); err == nil {
 		t.Fatal("a fleet with nowhere to put anything was built")
 	}
+}
+
+// callCount is how many operations this machine has been asked to perform. Used
+// to say "the gateway did its half FIRST" without a clock.
+func (n *fakeNode) callCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.calls)
 }

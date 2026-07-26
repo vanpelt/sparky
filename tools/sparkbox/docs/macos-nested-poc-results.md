@@ -23,6 +23,12 @@ The kernel input, Apple base configuration, Go image, and Ubuntu image were
 pinned by version and digest. The resulting outer kernel SHA-256 was
 `7bb865dfc2dfb6578d41a9fb2d044299c626377ff69c540b15108afb75dd080c`.
 
+That is a record of what this run produced, and it has been quoted since as
+though it were an identity anyone could re-derive. It is not: the builder's
+toolchain came from an unpinned `apt-get install build-essential`, and gcc's and
+binutils' version strings are compiled into the kernel banner. See B2 in
+[`forward-plan.md`](forward-plan.md) for what CI does gate on instead.
+
 ## Milestone results
 
 ### M0 — ARM64 provisioning preflight

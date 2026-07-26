@@ -6,7 +6,6 @@ package fleet
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -17,10 +16,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-var (
-	_ Node               = (*linkNode)(nil)
-	_ ctlops.NodeEvicter = (*Fleet)(nil)
-)
+var _ ctlops.NodeEvicter = (*Fleet)(nil)
 
 // ServeLink owns one node's link for its lifetime and returns when it ends.
 // opts.Node is the authenticated roster name; the name in the hello is
@@ -43,7 +39,19 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 	if opts.Log == nil {
 		opts.Log = f.log
 	}
-	opts.Hooks = nodelink.Hooks{OnInventory: f.linkInventory}
+	opts.Hooks = nodelink.Hooks{
+		OnInventory: f.Reconcile,
+		OnChanged:   f.ApplyChanged,
+		OnGone:      f.ApplyGone,
+		OnPaused:    f.ApplyPaused,
+	}
+	if opts.Grace == 0 {
+		// How long this machine still counts as online after it goes quiet.
+		// The door builds the ServerOptions and knows nothing about fleet
+		// policy, so the fleet fills it in here — and only when the caller left
+		// it unset, so a caller with a reason to differ still can.
+		opts.Grace = f.nodeGrace
+	}
 
 	client, wait, err := nodelink.Serve(ctx, opts)
 	if err != nil {
@@ -51,7 +59,7 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 	}
 	defer client.Close()
 
-	n := &linkNode{client: client}
+	n := Remote(client)
 	detach := f.linkUp(n)
 	defer detach()
 
@@ -63,17 +71,253 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 	return err
 }
 
-// linkInventory is what the gateway makes of a node's picture of itself.
+// ---------------------------------------------------------------------------
+// What a machine tells its gateway between requests
+// ---------------------------------------------------------------------------
 //
-// Nothing durable, yet: the ledger's rows are gateway-authored, and until the
-// gateway can place a sandbox on another machine there is no row for a node's
-// inventory to agree or disagree with. Adopting names out of it now would
-// invent placements nobody asked for. The link's own cache still records it,
-// which is what makes the node observable.
-func (f *Fleet) linkInventory(node string, inv nodelink.InventoryMsg) nodelink.InventoryAck {
-	f.log.Debug("node inventory", "node", node,
-		"sandboxes", len(inv.Sandboxes), "snapshots", len(inv.Snapshots))
-	return nodelink.InventoryAck{}
+// The node's Emitter sends three events as they happen — sandbox.changed,
+// sandbox.gone and sandbox.paused — and nodelink.Client has already done the
+// display half of the work by the time any of the hooks below run: its cache is
+// updated first, so a listing converges without this file existing at all.
+//
+// What is left is the half only the gateway can do, and all three share one
+// rule. An event is attributed to the AUTHENTICATED link it arrived on, never
+// to the node named in its payload, and it may only speak for the sandboxes the
+// ledger places on that link. Without the second half, a machine that is merely
+// misconfigured — two nodes, one state directory, one duplicated sandbox name —
+// hangs up a stranger's terminal every time it pauses, and a machine that is
+// compromised does it on purpose to any name it can guess. With it, a node's
+// reach is exactly the set of sandboxes the gateway itself put there, which is
+// the same boundary the ledger's owner column draws everywhere else.
+//
+// Every hook runs on the link's read goroutine (see nodelink.Hooks): heartbeats,
+// replies and every frame behind it wait on the slowest thing done here.
+
+// SetSessions installs the registry of interactive sessions attached to
+// sandboxes, so a pause on another machine can release the terminals this
+// gateway is holding for it. Nil — every deployment that has not wired one —
+// simply skips the courtesy, exactly as it does on host.Manager.
+//
+// It takes the same object host.Manager.SetSessions is given, and cmd/sparkbox
+// passes the one *sshgw.Gateway to both. There must remain exactly one registry
+// on a gateway: sessions are tracked in whichever one the door registered them
+// with, so a second would mean a pause hanging up the half of a user's
+// terminals that happened to land in the registry it could see. That is the
+// invariant internal/xterm depends on when it registers browser terminals
+// through the gateway rather than starting a registry of its own.
+func (f *Fleet) SetSessions(c host.SessionCloser) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions = c
+}
+
+// hangUpDrain bounds how long a fleet operation waits for the goodbyes it just
+// triggered. Long enough that a client which is still reading gets its bytes
+// (sshgw's own per-session write grace is 2s), short enough that a wedged
+// browser tab cannot hold somebody's pause open.
+const hangUpDrain = 3 * time.Second
+
+// hangUpBefore releases the terminals THIS gateway is holding for a sandbox
+// that the machine n is about to stop running, and waits for the goodbyes to be
+// written before returning.
+//
+// It exists because the ordering the local path gets for free does not survive
+// a link. host.Manager.pause closes attached sessions and only then calls the
+// driver, so the goodbye is written while the guest's sshd is still answering;
+// that is what turns a pause into "sparkbox: sandbox %q was paused" plus the
+// escape sequences that undo a full-screen TUI, rather than a terminal that
+// simply stops. On another machine the same code still runs — but its
+// SessionCloser is nodelink's Emitter, which by contract only ENQUEUES a
+// sandbox.paused event and returns, and the node then pauses its driver
+// immediately. The event still has to cross the wire and be handled here before
+// anything is hung up, while the guest's sshd is already gone and the SSH
+// channel carrying the terminal with it. The bridge unwinds first, the hang-up
+// arrives to an empty registry, and the user gets "shell exited with 1" with no
+// goodbye and no terminal restore. Round-trip latency makes the gateway lose
+// that race more often, not less, so it cannot be left to timing.
+//
+// The gateway therefore does its half BEFORE dispatching, which is the same
+// ordering the manager uses and the same sidestores rule everywhere else in the
+// fleet: the gateway does the part a node cannot, and only for a sandbox on
+// another machine. Doing it for a local sandbox would double up with the
+// manager's own call for no gain.
+//
+// The wording is "was paused" — Manager.Pause's exact fragment — because every
+// operation routed through here pauses the box on the way (Reboot, Resize,
+// Rename, Archive and Snapshot all call Manager.Pause locally), and a user
+// whose terminal just closed should read the same sentence on either machine.
+// The node's own sandbox.paused event arrives a moment later carrying the same
+// news; by then there is nothing left to close and ApplyPaused is a no-op,
+// which is exactly what a lossy event stream is allowed to be.
+//
+// A failure after this point leaves terminals closed on a sandbox that is still
+// running. That is not new and not a regression: the local path has the same
+// property, because Manager.pause closes sessions before a driver.Pause that
+// may itself fail.
+func (f *Fleet) hangUpBefore(n Node, sandbox string) {
+	if n == nil || n.Name() == f.localName {
+		return
+	}
+	f.mu.RLock()
+	sessions := f.sessions
+	f.mu.RUnlock()
+	d, ok := sessions.(host.SessionDrainer)
+	if !ok {
+		// Either no registry at all, or one that cannot be waited on. Nothing
+		// to do rather than something racy: CloseSandboxSessions here would
+		// return before the goodbye was written, which is the very thing this
+		// function exists to stop being true.
+		if sessions != nil {
+			sessions.CloseSandboxSessions(sandbox, "was paused")
+		}
+		return
+	}
+	d.DrainSandboxSessions(sandbox, "was paused", hangUpDrain)
+}
+
+// ApplyPaused hangs up the sessions attached to a sandbox that another machine
+// is about to stop running.
+//
+// This is the whole reason the event exists. A pause severs a sandbox from
+// everything attached to it, and every interactive session in a fleet
+// terminates at the gateway — the node holds none — so the machine doing the
+// pausing cannot close them and the gateway does not otherwise find out until
+// the user's terminal has already been left pointing at a VM that no longer
+// answers.
+//
+// It is a BACKSTOP, not the ordering guarantee, and the difference matters. The
+// node emits this before its driver pauses anything, but emitting is not
+// delivering: the event still has to cross the link and be handled here, while
+// over there the driver pause is already tearing down the guest's sshd and the
+// channel every attached session rides on. A pause this gateway asked for is
+// therefore hung up by hangUpBefore, on the dispatch path, where the ordering
+// is real. What is left for this hook is the pauses the gateway did not ask
+// for — a node's own idle reaper, chiefly — where losing the race and closing a
+// terminal a moment late still beats leaving it pointed at a stopped VM. By the
+// time it runs for a pause the gateway initiated there is nothing left to
+// close, and it is a no-op.
+//
+// The reason is the NODE'S OWN WORDING, relayed. "was paused" and "went idle
+// for 30m" are sentences a machine composes about its own policy — the reaper's
+// threshold is a node's setting, and this gateway does not know it — and the
+// gateway interpolates whichever arrives into the one goodbye it has always
+// written. A locally invented fragment would be a plausible-looking guess at
+// something the machine already said, and would go quietly wrong the moment the
+// two disagreed. It has been scrubbed of anything that could reach a terminal
+// as an escape sequence on the way in (nodelink's TypePaused reader).
+//
+// Called inline, never on a goroutine: CloseSandboxSessions is contractually
+// non-blocking — it is called from inside the manager's lock on the local path,
+// which is a stronger constraint than this one — and spawning would put the
+// goodbye in a race with whatever the link says next about the same sandbox.
+func (f *Fleet) ApplyPaused(node string, m nodelink.PausedMsg) {
+	if !f.speaksFor(node, m.Name, "pause") {
+		return
+	}
+	f.mu.RLock()
+	sessions := f.sessions
+	f.mu.RUnlock()
+	if sessions == nil {
+		return
+	}
+	f.log.Info("a node paused a sandbox; releasing its attached sessions",
+		"node", node, "sandbox", m.Name, "reason", m.Reason)
+	sessions.CloseSandboxSessions(m.Name, m.Reason)
+}
+
+// ApplyChanged records a lifecycle transition another machine reports.
+//
+// The record itself needs nothing done to it here: nodelink.Client has already
+// replaced its cached row, and every listing renders that row through serve(),
+// which stamps owner and node from the ledger. So what is left for this hook is
+// the ledger-facing half — a name arriving from a machine the ledger does not
+// place it on is either a sandbox this gateway should adopt or two machines
+// claiming one name — and that decision belongs to reconciliation, where it can
+// be made once against a node's whole inventory instead of one event at a time.
+// Deciding it here, per event, would mean adopting a name on the strength of a
+// single message that may have arrived out of order and cannot be re-read.
+//
+// Until then the disagreement is logged rather than acted on, which is the
+// conservative answer: nothing is created and nothing is deleted on a node's
+// say-so, and an operator watching a machine come up with somebody else's
+// sandbox name on it can see that it did.
+// One thing IS done here, and it is the half no other path can cover: a
+// sandbox that reached running on the machine's OWN initiative needs its
+// secret environment, and the gateway's only notice of that is this event.
+// The gateway-driven starts (Create, EnsureRunning) push from the call itself;
+// a node rebooting and resuming its pinned sandboxes, or restoring one, tells
+// nobody and would otherwise bring every box back with an empty managed block.
+//
+// The filter is the REASON and not the state. Every running sandbox on a node
+// emits "touched" on every reaper tick, so triggering on state would mean an
+// SSH exec into every remote guest on every tick, forever. host.ReachedRunning
+// owns the vocabulary because the manager is what stamps it.
+func (f *Fleet) ApplyChanged(node string, m nodelink.ChangedMsg) {
+	if !f.speaksFor(node, m.Sandbox.Name, "change") {
+		return
+	}
+	f.log.Debug("node reported a change", "node", node,
+		"sandbox", m.Sandbox.Name, "state", m.Sandbox.State, "reason", m.Reason)
+	if host.ReachedRunning(m.Reason) {
+		// Not the caller's context: this hook has none, and the push must not
+		// be cancellable by the link's read goroutine moving on. pushEnv
+		// detaches and bounds it.
+		f.pushEnvByName(context.Background(), m.Sandbox.Name)
+	}
+}
+
+// ApplyGone records a sandbox another machine no longer has.
+//
+// Nothing is deleted here, and that is deliberate rather than unfinished: the
+// ledger row is the fleet's name allocation and the user's record of where
+// their sandbox went, and releasing it because a machine said so would let a
+// node that was wiped, rolled back or merely confused destroy a placement the
+// gateway authored. The row outliving its sandbox is visible and recoverable;
+// the reverse is a name that silently becomes available to somebody else.
+//
+// The gateway's own destroy path releases the row after the node has let go
+// (Fleet.Destroy), so an ordinary rm has already released it by the time this
+// arrives and finds nothing to speak for.
+func (f *Fleet) ApplyGone(node string, m nodelink.GoneMsg) {
+	if !f.speaksFor(node, m.Name, "gone") {
+		return
+	}
+	f.log.Info("node reported a sandbox as gone", "node", node, "sandbox", m.Name, "reason", m.Reason)
+}
+
+// speaksFor reports whether a link may say anything at all about a name.
+//
+// The answer is the ledger's and only the ledger's: the row must exist and must
+// place the name on the machine the event arrived over. node is the
+// authenticated roster name the link was admitted under, not the node field in
+// the payload — nothing above ever reads that, exactly as nothing reads the
+// name a node puts in its hello.
+//
+// A gateway with no ledger has placed nothing anywhere, so a linked machine's
+// events can only be about sandboxes it holds on its own initiative, which this
+// gateway is not routing anyone to. Refusing them costs nothing and keeps the
+// single-box path from depending on a table that is not open.
+// The two ways it says no are logged differently, and the difference is a rate
+// as much as a severity. A row that exists and names another machine is a
+// genuine conflict — two claimants for one name — which is rare, bounded by the
+// ledger, and worth an operator's attention. No row at all is routine until
+// reconciliation adopts what a machine already holds, and it is emitted per
+// event: a node's manager reports "touched" for every running sandbox on every
+// reaper tick, so warning about those would be a line per sandbox per tick,
+// forever, about a state nobody can act on yet.
+func (f *Fleet) speaksFor(node, sandbox, event string) bool {
+	row, ok := f.rowFor(sandbox)
+	switch {
+	case !ok:
+		f.log.Debug("ignoring a node event for a sandbox this gateway has not placed",
+			"node", node, "sandbox", sandbox, "event", event)
+		return false
+	case row.Node != node:
+		f.log.Warn("ignoring a node event for a sandbox the ledger places on another machine",
+			"node", node, "sandbox", sandbox, "event", event, "placed_on", row.Node)
+		return false
+	}
+	return true
 }
 
 // linkUp registers a link and returns the function that removes it again.
@@ -87,12 +331,13 @@ func (f *Fleet) linkInventory(node string, inv nodelink.InventoryMsg) nodelink.I
 //
 // Detach only ever removes the node it was minted for, so the superseded link
 // tearing itself down cannot unregister its replacement.
-func (f *Fleet) linkUp(n *linkNode) func() {
+func (f *Fleet) linkUp(n Node) func() {
 	name := n.Name()
 	f.mu.Lock()
 	old, dup := f.nodes[name]
 	f.nodes[name] = n
 	f.mu.Unlock()
+	f.foreign.Store(true)
 
 	if dup {
 		f.log.Info("node reconnected; superseding the previous link", "node", name)
@@ -101,7 +346,7 @@ func (f *Fleet) linkUp(n *linkNode) func() {
 	return func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if f.nodes[name] == Node(n) {
+		if f.nodes[name] == n {
 			delete(f.nodes, name)
 		}
 	}
@@ -221,105 +466,4 @@ func (f *Fleet) statusOf(n Node, local bool) NodeStatus {
 		st.LastSeen = &t
 	}
 	return st
-}
-
-// linkNode presents a connected machine as a Node.
-//
-// It is deliberately observation-only at this milestone: the fleet can see what
-// the node is and what it has left, and can do nothing to it. Nothing routes
-// here yet either — the router resolves a machine from a ledger row, and no row
-// names another machine until placement can put one there.
-type linkNode struct {
-	client *nodelink.Client
-}
-
-func (l *linkNode) Name() string { return l.client.Name() }
-
-func (l *linkNode) Online() bool { return l.client.Online() }
-
-func (l *linkNode) LastSeen() time.Time { return l.client.LastSeen() }
-
-func (l *linkNode) Hangup(code, msg string) { l.client.Hangup(code, msg) }
-
-func (l *linkNode) Revoke(code string, reason error) { l.client.Revoke(code, reason) }
-
-// Facts are what the machine said about itself when it connected, with the name
-// taken from the roster rather than from the hello: the roster row is what the
-// SSH key resolved to, and the hello's own name is advisory.
-func (l *linkNode) Facts() Facts {
-	h := l.client.Hello()
-	h.Node = l.client.Name()
-	return h
-}
-
-func (l *linkNode) Capacity() host.NodeCapacity { return l.client.Capacity() }
-
-// Box, Boxes and Templates answer with nothing on purpose.
-//
-// The link caches every row the node reports, but projecting those rows into
-// the records the gateway serves is what makes a remote sandbox visible in a
-// listing — and a sandbox visible before the ledger can place one would be a
-// record no authorization decision could be made about. The projection lands
-// with the placement it belongs to.
-func (l *linkNode) Box(string) (*host.Sandbox, bool) { return nil, false }
-
-func (l *linkNode) Boxes() []*host.Sandbox { return nil }
-
-func (l *linkNode) Templates() []*host.Snapshot { return nil }
-
-// notYet is the answer to every operation that would have to cross the link.
-//
-// It is unreachable: the router only resolves to a linked machine for a name
-// the ledger places there, and nothing places one yet. It exists so that if
-// something does route here, the answer is a sentence an operator can read
-// rather than a nil dereference.
-func notYet(op string) error {
-	return ctlops.Disabled(op, "operating a sandbox on another machine isn't enabled on this gateway yet.")
-}
-
-func (l *linkNode) Create(context.Context, string, string, string, int64, int64) (*host.Sandbox, error) {
-	return nil, notYet("create")
-}
-
-func (l *linkNode) EnsureRunning(context.Context, string) (*host.Sandbox, error) {
-	return nil, notYet("restore")
-}
-
-func (l *linkNode) Pause(context.Context, string) error { return notYet("pause") }
-
-func (l *linkNode) Archive(context.Context, string) error { return notYet("archive") }
-
-func (l *linkNode) Resize(context.Context, string, int64) error { return notYet("resize") }
-
-func (l *linkNode) Reboot(context.Context, string) error { return notYet("reboot") }
-
-func (l *linkNode) Rename(context.Context, string, string, string) error { return notYet("rename") }
-
-func (l *linkNode) Destroy(context.Context, string) error { return notYet("rm") }
-
-func (l *linkNode) SetPinned(context.Context, string, bool) error { return notYet("pin") }
-
-func (l *linkNode) ResyncEnv(context.Context, string) error { return notYet("secrets.sync") }
-
-func (l *linkNode) Touch(context.Context, string) error { return notYet("touch") }
-
-func (l *linkNode) RecordKey(context.Context, string, string) error { return notYet("keys.record") }
-
-func (l *linkNode) Snapshotter(context.Context, string, string, string) (*host.Snapshot, error) {
-	return nil, notYet("snapshot.create")
-}
-
-func (l *linkNode) DeleteSnapshot(context.Context, string, string) error {
-	return notYet("snapshot.rm")
-}
-
-func (l *linkNode) Fork(context.Context, string, string, string, int64, int64) (*host.Sandbox, error) {
-	return nil, notYet("fork")
-}
-
-// DialGuest opens a stream to a port inside one of that machine's guests. It
-// names the sandbox rather than an address, which is what keeps "where does
-// this guest's sshd listen" knowledge of the machine that booted it.
-func (l *linkNode) DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
-	return l.client.DialSandbox(ctx, sandbox, kind, port)
 }

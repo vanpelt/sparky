@@ -120,11 +120,32 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, box)
+	writeJSON(w, http.StatusCreated, box.Public())
 }
 
 func (s *Server) list(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.mgr.List())
+	writeJSON(w, http.StatusOK, publicAll(s.mgr.List()))
+}
+
+// publicAll drops the guest addresses from every record on the way out.
+//
+// This endpoint is the last one that was still serializing a *host.Sandbox
+// whole. It never mattered on a single box — the address was a bridge IP on the
+// same host as the listener — and it does now: routed through the fleet, a
+// sandbox on another machine carries a synthetic
+// <sandbox>.<node>.sandbox.invalid that resolves nowhere and names which
+// machine holds it. See host.Sandbox.Public, which the two consoles reach
+// through webui.Public and ctlops reaches by projecting onto a shape without
+// the fields.
+//
+// Non-nil for an empty list so the JSON stays `[]` rather than becoming `null`,
+// which is what it has always emitted.
+func publicAll(in []*host.Sandbox) []*host.Sandbox {
+	out := make([]*host.Sandbox, 0, len(in))
+	for _, b := range in {
+		out = append(out, b.Public())
+	}
+	return out
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +154,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("not found"))
 		return
 	}
-	writeJSON(w, http.StatusOK, box)
+	writeJSON(w, http.StatusOK, box.Public())
 }
 
 func (s *Server) destroy(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +179,7 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, box)
+	writeJSON(w, http.StatusOK, box.Public())
 }
 
 // archive parks the sandbox's rootfs in object storage and frees its host disk.
@@ -220,7 +241,7 @@ func (s *Server) fork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, box)
+	writeJSON(w, http.StatusCreated, box.Public())
 }
 
 // listRoutes returns every web route pointing at a sandbox.

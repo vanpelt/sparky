@@ -1,0 +1,145 @@
+[
+  {
+    "configuration" : {
+      "capAdd" : [
+        "ALL"
+      ],
+      "capDrop" : [
+
+      ],
+      "creationDate" : "2026-07-25T19:57:33Z",
+      "dns" : {
+        "domain" : "machine",
+        "nameservers" : [
+
+        ],
+        "options" : [
+
+        ],
+        "searchDomains" : [
+          "machine"
+        ]
+      },
+      "id" : "sparkbox-poc-109421",
+      "image" : {
+        "descriptor" : {
+          "annotations" : {
+            "com.apple.containerization.image.name" : "local\/sparkbox-gateway:macos-poc",
+            "io.containerd.image.name" : "docker.io\/local\/sparkbox-gateway:macos-poc",
+            "org.opencontainers.image.created" : "2026-07-25T15:57:34Z",
+            "org.opencontainers.image.ref.name" : "macos-poc"
+          },
+          "digest" : "sha256:047645be93399e0877655e714d0ef3057ad7aaa54acd318482553dfa24a0eec2",
+          "mediaType" : "application\/vnd.oci.image.index.v1+json",
+          "size" : 375
+        },
+        "reference" : "local\/sparkbox-gateway:macos-poc"
+      },
+      "initProcess" : {
+        "arguments" : [
+
+        ],
+        "environment" : [
+          "PATH=\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin",
+          "CONTAINER_MACHINE_ID=sparkbox-poc",
+          "CONTAINER_USER=vanpelt",
+          "CONTAINER_HOME=\/home\/vanpelt",
+          "CONTAINER_UID=502",
+          "CONTAINER_GID=20"
+        ],
+        "executable" : "\/sbin.machine\/init",
+        "rlimits" : [
+
+        ],
+        "supplementalGroups" : [
+
+        ],
+        "terminal" : true,
+        "user" : {
+          "id" : {
+            "gid" : 0,
+            "uid" : 0
+          }
+        },
+        "workingDirectory" : "\/"
+      },
+      "labels" : {
+        "com.apple.container.plugin" : "machine"
+      },
+      "mounts" : [
+        {
+          "destination" : "\/sbin.machine",
+          "options" : [
+            "ro"
+          ],
+          "source" : "\/Users\/vanpelt\/Library\/Application Support\/com.apple.container\/plugin-state\/machine-apiserver\/machines\/sparkbox-poc\/sbin.machine",
+          "type" : {
+            "virtiofs" : {
+
+            }
+          }
+        },
+        {
+          "destination" : "\/etc\/.machine.initialized",
+          "options" : [
+            "rw"
+          ],
+          "source" : "\/Users\/vanpelt\/Library\/Application Support\/com.apple.container\/plugin-state\/machine-apiserver\/machines\/sparkbox-poc\/machine.initialized",
+          "type" : {
+            "virtiofs" : {
+
+            }
+          }
+        }
+      ],
+      "networks" : [
+        {
+          "network" : "default",
+          "options" : {
+            "hostname" : "sparkbox-poc.machine."
+          }
+        }
+      ],
+      "platform" : {
+        "architecture" : "arm64",
+        "os" : "linux"
+      },
+      "publishedPorts" : [
+
+      ],
+      "publishedSockets" : [
+
+      ],
+      "readOnly" : false,
+      "resources" : {
+        "cpuOverhead" : 0,
+        "cpus" : 8,
+        "memoryInBytes" : 25769803776
+      },
+      "rosetta" : false,
+      "runtimeHandler" : "container-runtime-linux",
+      "ssh" : true,
+      "sysctls" : {
+
+      },
+      "useInit" : false,
+      "virtualization" : true
+    },
+    "id" : "sparkbox-poc-109421",
+    "status" : {
+      "networks" : [
+        {
+          "hostname" : "sparkbox-poc.machine.",
+          "ipv4Address" : "192.168.64.18\/24",
+          "ipv4Gateway" : "192.168.64.1",
+          "ipv6Address" : "fdc3:1ce5:8729:e4f5:f466:48ff:fe6f:71b1\/64",
+          "macAddress" : "f6:66:48:6f:71:b1",
+          "network" : "default",
+          "variant" : "reserved"
+        }
+      ],
+      "startedDate" : "2026-07-25T19:57:35Z",
+      "state" : "running"
+    }
+  }
+]

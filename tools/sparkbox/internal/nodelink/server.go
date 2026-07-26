@@ -71,6 +71,13 @@ const CodeRevoked = "node_revoked"
 // that link.
 const MaxSandboxesPerNode = 1024
 
+// MaxReasonText bounds the pause reason a node may hand the gateway. It is the
+// fragment in "sandbox %q %s — reconnect with: …", so it is measured against
+// what a person reads on one line of a terminal, not against what fits in a
+// frame: the sentences the tree actually sends are "was paused" and "went idle
+// for 30m", and a peer with more to say than this is not describing a pause.
+const MaxReasonText = 120
+
 // Greeting is a link's first frame, read before any policy has run.
 //
 // It carries the reader as well as the message because reading a line off a
@@ -288,6 +295,35 @@ type Client struct {
 	capacity host.NodeCapacity
 	boxes    map[string]SandboxRow
 	snaps    map[string]SnapshotRow
+
+	// The live data streams, under their own lock.
+	//
+	// Their own lock and not c.mu because the busy path here is a stream
+	// opening and closing, and c.mu is the lock Box and Capacity take — the
+	// reads that sit under every authorization decision and every heartbeat.
+	// A proxy under load must not be able to slow those down.
+	//
+	// The registry exists so a link that ends takes its streams with it and
+	// SAYS SO, and the case it is really for is the one x/crypto cannot see.
+	//
+	// When the node's TCP connection closes cleanly, x/crypto's mux drops every
+	// channel itself and a reader gets io.EOF: not a hang, and a truncated HTTP
+	// body is still caught by its own framing above. The stream that genuinely
+	// never errors is the one on a BLACK-HOLED link — no FIN, no reset, the mux
+	// reading a socket that will never speak again. Nothing in x/crypto ends
+	// that; the liveness prober does, by hanging up after two missed pings, and
+	// hanging up is exactly the path that would otherwise leave every stream on
+	// that link blocked in Read forever.
+	//
+	// So this is not decoration on the clean case. It is the whole answer to
+	// the half-open one, and it is deterministic there precisely because
+	// nothing else has touched those channels. Asking each channel to close is
+	// not enough to end a read on a link nothing answers on, though — see
+	// dropStreams, which records every reason and then closes the transport
+	// under them.
+	smu     sync.Mutex
+	streams map[*streamConn]struct{}
+	dead    error
 }
 
 // overfullLogEvery is how often a link repeats that its machine holds more
@@ -350,18 +386,28 @@ func Serve(ctx context.Context, opts ServerOptions) (*Client, func() error, erro
 
 	linkCtx, cancel := context.WithCancel(ctx)
 	c := &Client{
-		node:   opts.Node,
-		hello:  opts.Greeting.Hello,
-		ssh:    opts.Conn,
-		log:    log,
-		hooks:  opts.Hooks,
-		grace:  orDuration(opts.Grace, DefaultGrace),
-		now:    now,
-		cancel: cancel,
-		boxes:  map[string]SandboxRow{},
-		snaps:  map[string]SnapshotRow{},
+		node:    opts.Node,
+		hello:   opts.Greeting.Hello,
+		ssh:     opts.Conn,
+		log:     log,
+		hooks:   opts.Hooks,
+		grace:   orDuration(opts.Grace, DefaultGrace),
+		now:     now,
+		cancel:  cancel,
+		boxes:   map[string]SandboxRow{},
+		snaps:   map[string]SnapshotRow{},
+		streams: map[*streamConn]struct{}{},
 	}
 	c.conn = NewConn(opts.Greeting.rest, opts.Session, "g", log)
+	// One place ends the streams, whichever way the link ends: a bye, a revoke,
+	// a superseding connection, the node's TCP dying, or this process shutting
+	// down. All five cancel linkCtx, and none of them would otherwise reach
+	// something the proxy is holding in an idle pool.
+	//
+	// Registered AFTER c.conn exists, because a linkCtx that is already done
+	// runs this immediately and dropStreams closes the control channel before
+	// it touches the transport.
+	context.AfterFunc(linkCtx, func() { c.dropStreams(ErrLinkClosed) })
 	// Handlers derive their work from the link's lifetime, not from a request's:
 	// everything the gateway answers here is bookkeeping whose value dies with
 	// the connection that asked for it.
@@ -485,6 +531,20 @@ func (c *Client) register() {
 			return
 		}
 		c.seen()
+		// The one field on the link that is written verbatim to a human's
+		// terminal: the gateway interpolates it into the goodbye it sends every
+		// session attached to the sandbox, in raw mode (sshgw.hangUp). Scrubbed
+		// here, at the boundary, for the same reason ctlops.FromWire scrubs the
+		// prose in an error — a machine that is merely misconfigured should not
+		// be able to garble somebody's terminal, and one that is compromised
+		// should not be able to forge a line in it. It is scrubbed here rather
+		// than at the far end because a pause event is consumed as prose and
+		// never becomes a record: the display strings a node's rows carry —
+		// state, image, login, the names on a template — reach a terminal
+		// through fleet's remote adapter instead, and are clamped there, where
+		// the gateway also knows which of them it authored itself. See
+		// fleet.remoteNode.record.
+		m.Reason = ctlops.SafeText(m.Reason, MaxReasonText)
 		if c.hooks.OnPaused != nil {
 			c.hooks.OnPaused(c.node, m)
 		}
@@ -612,6 +672,20 @@ func (c *Client) Capacity() host.NodeCapacity {
 	return reported
 }
 
+// Box is one row from the node's last known inventory.
+//
+// It exists beside Snapshot because the two have different callers: a listing
+// wants the whole picture, while an ownership check wants one name and sits
+// under every authorized operation and every browser terminal request. Serving
+// that from Snapshot would copy and sort up to MaxSandboxesPerNode rows per
+// lookup.
+func (c *Client) Box(name string) (SandboxRow, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	row, ok := c.boxes[name]
+	return row, ok
+}
+
 // Snapshot is the node's last known inventory, name-sorted so every listing
 // built from it is stable whatever the map iteration does.
 func (c *Client) Snapshot() ([]SandboxRow, []SnapshotRow) {
@@ -649,6 +723,9 @@ func (c *Client) Cast(typ string, body any) {
 // request names a sandbox and never an address: the node re-resolves it against
 // its own records, so nothing the gateway believes about where a guest lives can
 // talk that machine into dialing something else.
+// The stream is registered before it is returned, so that a link which dies
+// while somebody is mid-transfer ends that transfer with a stated reason rather
+// than with the io.EOF a closed SSH channel reads.
 func (c *Client) DialSandbox(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
 	if c.ssh == nil {
 		return nil, errors.New("nodelink: this link carries no data channels")
@@ -656,12 +733,124 @@ func (c *Client) DialSandbox(ctx context.Context, sandbox, kind string, port int
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return OpenStream(c.ssh, StreamOpen{
+	s, err := openStream(c.ssh, StreamOpen{
 		Sandbox: sandbox,
 		Kind:    kind,
 		Port:    uint32(port), //nolint:gosec // a port is range-checked by the caller
 		Nonce:   nonce(),
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := c.track(s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// track registers a live stream, or refuses it because the link is already
+// gone. The refusal matters: OpenChannel on a connection that died a
+// microsecond ago can still succeed against x/crypto's own bookkeeping, and a
+// stream nobody will ever tear down is exactly the half-open connection this
+// registry exists to prevent.
+func (c *Client) track(s *streamConn) error {
+	c.smu.Lock()
+	if c.dead != nil {
+		reason := c.dead
+		c.smu.Unlock()
+		s.fail(reason)
+		return reason
+	}
+	// Set before the stream is reachable from the map, so dropStreams can never
+	// race a half-initialised entry.
+	s.released = func() { c.untrack(s) }
+	c.streams[s] = struct{}{}
+	c.smu.Unlock()
+	return nil
+}
+
+func (c *Client) untrack(s *streamConn) {
+	c.smu.Lock()
+	delete(c.streams, s)
+	c.smu.Unlock()
+}
+
+// dropStreams ends every live stream with one reason and latches, so anything
+// opened afterwards is refused rather than added to a registry nobody will
+// visit again.
+func (c *Client) dropStreams(reason error) {
+	c.smu.Lock()
+	if c.dead == nil {
+		c.dead = reason
+	}
+	live := make([]*streamConn, 0, len(c.streams))
+	for s := range c.streams {
+		live = append(live, s)
+	}
+	clear(c.streams)
+	c.smu.Unlock()
+	// Outside the lock: fail closes, close releases, and release wants this
+	// lock. The map is already empty, so the release is a no-op — but a
+	// self-deadlock that only fires when a link dies under load is not a bug
+	// anyone finds twice.
+	for _, s := range live {
+		s.fail(reason)
+	}
+	// And then the transport, which is what actually unparks them.
+	//
+	// s.fail RECORDS the reason and then asks the channel to close, and
+	// x/crypto's Channel.Close is only a request: it sends one CHANNEL_CLOSE
+	// packet and returns. The routine that unblocks a goroutine parked in
+	// Read — channel.close(), which runs pending.eof() — has exactly two
+	// triggers, and neither of them is us calling Close. It runs when the PEER's
+	// close arrives, or when the mux loop's read of the transport fails and it
+	// drops every channel at once.
+	//
+	// On a live link the first trigger fires and everything above is enough. On
+	// a BLACK-HOLED one — no FIN, no reset, the shape a wifi or tailnet
+	// partition has — nothing answers, so no packet ever comes back and the mux
+	// keeps happily reading a socket that will never speak again. That is
+	// precisely the case this registry exists for (see the streams field), and
+	// without this close it would be the case it did not handle: the reason
+	// would be recorded and never delivered, because failure() is only consulted
+	// after c.ch.Read returns. The read would stay parked forever, holding its
+	// goroutine, its pooled http transport connection and its gliderlabs
+	// session, with nothing else in the tree to end it — Close() closes the
+	// framed control channel and not this connection, and the node door
+	// deliberately runs without an idle timeout (sshgw.Gateway.Server).
+	//
+	// So the order here is load-bearing. Every reason is recorded first; only
+	// then is the transport closed, so the io.EOF the mux hands each dropped
+	// channel is substituted for the reason rather than reaching a caller as a
+	// clean end of stream.
+	//
+	// Closing it is safe wherever this runs, because this runs in exactly one
+	// place: the AfterFunc on the link's context, i.e. the link is already over
+	// by every definition the rest of the package uses. The control session
+	// rides the same connection and has nothing left to say.
+	//
+	// It does have something left to WRITE, though, and that is why the control
+	// channel is shut down first rather than being cut off with the socket. The
+	// last frame on a link is the bye that explains why it is ending — a
+	// supersession, a revoke — and it is queued, not written inline (see
+	// writer). Conn.Close is what gives that queue its flushGrace to reach the
+	// peer, and its once means calling it here waits for the flush whether this
+	// path or Client.Close got there first. Skipping it would replace every
+	// stated goodbye with a socket that simply stopped, which is the diagnosis a
+	// node then has to infer from a grace period.
+	_ = c.conn.Close()
+	if c.ssh != nil {
+		_ = c.ssh.Close()
+	}
+}
+
+// LiveStreams is how many data streams this link is carrying. It is here for
+// the tests that assert a link tore its streams down, and for a future
+// operator listing; nothing in the control plane branches on it.
+func (c *Client) LiveStreams() int {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	return len(c.streams)
 }
 
 // Hangup says why and then closes. The bye is best-effort: the usual reason for

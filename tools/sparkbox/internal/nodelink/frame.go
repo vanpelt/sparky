@@ -571,16 +571,25 @@ type InventoryMsg struct {
 	At        time.Time         `json:"at"`
 }
 
-// InventoryAck tells a node what the gateway made of its inventory: names it
-// claims but the ledger does not place on it, and names two machines claim.
-// Both are reported rather than acted on — nothing is deleted on a node's
-// say-so.
+// InventoryAck tells a node what the gateway made of its inventory. Both lists
+// are reported rather than acted on — nothing is deleted on a node's say-so,
+// and nothing is deleted on a gateway's either.
 //
-// The gateway sends both fields empty today. Filling them is reconciliation,
-// which is M2: until a sandbox can be placed on another machine there is no
-// gateway-authored row for a node's inventory to disagree with, and adopting
-// names out of one would invent placements nobody asked for. This is the shape
-// that answer will take, pinned now so both halves are written against it.
+// Orphaned is the names the gateway's ledger places on this machine that the
+// machine did not report. Their placements are kept, not released: a machine
+// that has been wiped or rolled back is indistinguishable from one whose
+// sandbox really is gone, and the row is the user's record of where their work
+// went.
+//
+// Quarantined is the names this machine reported that the gateway will not
+// place here: a name another machine already holds, a name this gateway itself
+// holds, or one whose owner or spelling is not something the platform issues.
+// Nothing routes to those, so the sandboxes stay running and reachable to
+// nobody until an operator resolves it.
+//
+// Both are bounded (see the gateway's maxAckNames): this is a diagnostic for a
+// log line, and the full disagreement is logged in one line per name at the end
+// that computed it.
 type InventoryAck struct {
 	Orphaned    []string `json:"orphaned,omitempty"`
 	Quarantined []string `json:"quarantined,omitempty"`

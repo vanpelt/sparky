@@ -82,11 +82,4 @@ func (p *Probe) Listening(ctx context.Context, addr string, remote bool) bool {
 // browser, and an invitation for something to dial them. ctlops.info drops the
 // same three fields for the same reason. nil in, nil out — the callers hand it
 // whatever Get returned.
-func Public(b *host.Sandbox) *host.Sandbox {
-	if b == nil {
-		return nil
-	}
-	c := *b
-	c.SSHAddr, c.HostIP, c.GuestV6 = "", "", ""
-	return &c
-}
+func Public(b *host.Sandbox) *host.Sandbox { return b.Public() }

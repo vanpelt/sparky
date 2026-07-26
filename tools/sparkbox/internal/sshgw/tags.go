@@ -53,3 +53,64 @@ func parseTags(args []string) (tags, rest []string, err error) {
 	}
 	return tags, rest, nil
 }
+
+// parseCreateArgs is the whole argument grammar of a create: the tags, the
+// machine to build on, and whatever is left.
+//
+// The fourth value is the point of the function. The new@ door reads every bare
+// word as a tag (see Gateway.handle), so a flag this grammar does not recognise
+// is not rejected — it is silently absorbed. `ssh new@gw -- --node dgx ml` with
+// no --node case would create a sandbox HERE, tagged `--node` and `dgx`, and
+// say nothing at all about the machine the user asked for. That is the failure
+// this function exists to make impossible, and it is why the ctl@ doors call it
+// too even though they take no --node: a flag that means something at one door
+// and nothing at another has to say so.
+//
+// It is a wrapper rather than a fourth return value bolted onto parseTags
+// because parseTags is the tag grammar and has exactly one job — the tests that
+// pin it are a tripwire for that grammar changing shape, and they should not
+// have to move for a flag that is not a tag.
+func parseCreateArgs(args []string) (tags []string, node string, rest []string, err error) {
+	node, rest, err = splitNodeFlag(args)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	tags, rest, err = parseTags(rest)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return tags, node, rest, nil
+}
+
+// splitNodeFlag pulls `--node x` / `--node=x` out of an argument list. Its shape
+// deliberately mirrors parseTags': the same two spellings, the same
+// consume-the-next-argument rule, and the same sentence when the value is
+// missing — a door's flags should not each have their own dialect.
+//
+// The last --node wins, as the last --tag does not (tags accumulate). Repeating
+// a flag that names one thing is a correction, not a list.
+func splitNodeFlag(args []string) (node string, rest []string, err error) {
+	seen := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--node":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("%s needs a value, e.g. %s dgx", a, a)
+			}
+			node, seen = args[i+1], true
+			i++
+		case strings.HasPrefix(a, "--node="):
+			node, seen = strings.TrimPrefix(a, "--node="), true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	// `--node=` and `--node "  "` are the same mistake as leaving the value off
+	// the end, and reading them as "no preference" would build the sandbox here
+	// while the user waited to be told which machine it went to.
+	if node = strings.TrimSpace(node); seen && node == "" {
+		return "", nil, fmt.Errorf("--node needs a value, e.g. --node dgx")
+	}
+	return node, rest, nil
+}

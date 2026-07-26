@@ -10,29 +10,50 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 # Non-secret host config: PROXY_DOMAIN plus optional flag bundles
-# (LOGIN_USER_FLAG, TLS_FLAGS, SUBNET6_FLAG, OVERCOMMIT_FLAGS, GATEWAY_FLAG) and
-# an optional SPARKBOX_CONSOLE_PASSWORD. Setting GATEWAY_FLAG=--gateway <host:port>
-# runs this machine as a fleet NODE instead: it holds VMs for that gateway and
-# serves no edge of its own, so every other flag on this line is ignored (the
-# --users seed included, which is why passing it unconditionally is harmless).
-# These MUST be referenced unbraced ($TLS_FLAGS, not
-# ${TLS_FLAGS}): systemd splits $VAR at whitespace (empty -> zero args) but
-# treats ${VAR} as one argument (empty -> one empty arg, which terminates Go's
-# flag parsing and silently drops everything after it).
+# (LOGIN_USER_FLAG, SUBNET6_FLAG, OVERCOMMIT_FLAGS, TLS_FLAGS, GATEWAY_FLAG,
+# EXTRA_FLAGS) and an optional SPARKBOX_CONSOLE_PASSWORD. Setting
+# GATEWAY_FLAG=--gateway <host:port> runs this machine as a fleet NODE instead:
+# it holds VMs for that gateway and serves no edge of its own, so every other
+# flag on this line is ignored (the --users seed included, which is why passing
+# it unconditionally is harmless).
+#
+# These MUST be referenced unbraced ($EXTRA_FLAGS, not ${EXTRA_FLAGS}): systemd
+# splits $VAR at whitespace (empty -> zero args) but treats ${VAR} as one
+# argument (empty -> one empty arg, which terminates Go's flag parsing and
+# silently drops everything after it).
+#
+# The same rule is why the optional subsystem flags below (--dns-addr,
+# --guest-dns, --archive-*, --tls-*, …) are OMITTED entirely when unset rather
+# than rendered with an empty value: `--dns-addr ` followed by --proxy-domain
+# would swallow the domain as its value, and `--dns-addr ""` would end the flag
+# list outright.
+#
+# EXTRA_FLAGS is appended LAST on purpose. Go's flag package lets a repeated
+# flag win, so anything in it overrides the templated flags above — that is the
+# escape hatch for a `serve` flag `sparkbox setup` has no flag of its own for
+# yet, and it is now stated rather than discovered. TLS_FLAGS is kept, and kept
+# ahead of it, purely for compatibility: real bind configuration was smuggled
+# into that variable before --ssh-addr/--proxy-addr/--api-addr/--dns-addr
+# existed, sparkbox.env is never rewritten once it exists, and dropping the
+# reference would silently delete a live host's entire edge configuration at the
+# next daemon-reload. New settings belong in EXTRA_FLAGS (or, better, in a real
+# setup flag), which wins over a stale TLS_FLAGS.
 EnvironmentFile={{.EnvPath}}
 # firecracker needs root for /dev/kvm and tap devices.
 User=root
 # Standalone host: fleet keys are generated locally into the state dir on first
 # start (LoadOrCreateKey) — no Secret Manager, and no fleet key-dir/require-keys
 # flags (those are for a tmpfs-fed fleet host).
-ExecStart=/usr/local/bin/sparkbox serve --driver firecracker \
+ExecStart={{.BinPath}} serve --driver firecracker \
   --state-dir {{.StateDir}} \
   --kernel {{.KernelPath}} \
   --image-dir {{.ImageDir}} \
   --default-image {{.DefaultImage}} \
   --users {{.UsersPath}} \
-  --ssh-addr {{.SSHAddr}} --api-addr 127.0.0.1:8080 \
-  --proxy-addr {{.ProxyAddr}} --proxy-domain ${PROXY_DOMAIN} $LOGIN_USER_FLAG $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS $GATEWAY_FLAG
+  --ssh-addr {{.SSHAddr}} --api-addr {{.APIAddr}} \
+  --proxy-addr {{.ProxyAddr}} --proxy-domain ${PROXY_DOMAIN} \
+{{range .OptFlags}}  {{.}} \
+{{end}}  $LOGIN_USER_FLAG $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS $GATEWAY_FLAG $EXTRA_FLAGS
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

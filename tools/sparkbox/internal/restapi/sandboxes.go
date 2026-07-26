@@ -24,10 +24,13 @@ type deleted struct {
 }
 
 type createRequest struct {
-	Name  string   `json:"name"`
-	Tags  []string `json:"tags"`
-	VCPUs int64    `json:"vcpus"`
-	MemMB int64    `json:"mem_mb"`
+	Name string   `json:"name"`
+	Tags []string `json:"tags"`
+	// Node is the machine to build on; omit it to let the gateway choose, which
+	// today means its own. It is the REST form of the new@ door's --node.
+	Node  string `json:"node,omitempty"`
+	VCPUs int64  `json:"vcpus"`
+	MemMB int64  `json:"mem_mb"`
 }
 
 type resizeRequest struct {
@@ -91,8 +94,13 @@ func (h *Handler) createSandbox(w http.ResponseWriter, r *http.Request) {
 		name = h.ops.GenerateName()
 	}
 	c := caller(r)
-	args := ctlops.CreateArgs{Name: name, Tags: req.Tags, VCPUs: req.VCPUs, MemMB: req.MemMB}
-	h.runJob(w, r, op, ctlops.Ref{Type: "sandbox", Name: name}, ctlops.DialTimeout, http.StatusCreated,
+	args := ctlops.CreateArgs{Name: name, Tags: req.Tags, Node: req.Node, VCPUs: req.VCPUs, MemMB: req.MemMB}
+	// The chosen machine rides in the job's resource ref. A ref is compared
+	// whole by the job de-duplicator (ctlops.Ops.Go), so two creates of one name
+	// onto two machines would otherwise collapse into a single job and the
+	// second caller would be handed the first one's answer — a sandbox on a
+	// machine they did not ask for, reported as theirs.
+	h.runJob(w, r, op, ctlops.Ref{Type: "sandbox", Name: name, Args: req.Node}, ctlops.DialTimeout, http.StatusCreated,
 		func(ctx context.Context) (any, error) { return h.ops.Create(ctx, c, args) })
 }
 

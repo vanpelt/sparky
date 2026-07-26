@@ -3,15 +3,18 @@ package sshgw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -240,4 +243,71 @@ func newTestManager(t *testing.T) *host.Manager {
 		t.Fatal(err)
 	}
 	return mgr
+}
+
+// ---------------------------------------------------------------------------
+// What a failed dial is allowed to say
+// ---------------------------------------------------------------------------
+
+// TestDialFailureNamesNoAddress pins the one error on this path that must not
+// be printed as it came.
+//
+// A dial error is composed by whatever did the dialing, and what it names is an
+// address: `dial tcp 172.30.5.2:22` on this machine, and the synthetic
+// `<sandbox>.<node>.sandbox.invalid` the fleet dialer resolves for a sandbox
+// held elsewhere. Neither is anything a user can act on, and the second is
+// fleet topology. It matters beyond a terminal, too: this is the sentence
+// RunInSandbox hands the scheduler, which stores it in a job's last_error
+// column and renders it in `ctl schedule list` and in both consoles.
+//
+// A typed refusal is the deliberate exception. The router's node-offline
+// sentence is curated, names no address, and is the only useful thing anyone
+// can say about a machine that is not answering.
+func TestDialFailureNamesNoAddress(t *testing.T) {
+	offline := fleet.Unreachable("dial", "demo", "node-b")
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "a machine that is not answering",
+			err:  fmt.Errorf("vm ssh not reachable: %w", offline),
+			want: `dial demo: sandbox "demo" lives on node "node-b", which is offline`,
+		},
+		{
+			name: "a guest on this machine that refused",
+			err:  errors.New("vm ssh not reachable: dial tcp 172.30.5.2:22: connect: connection refused"),
+			want: "dial demo: " + unreachableShell,
+		},
+		{
+			name: "a synthetic address nothing resolved",
+			err:  errors.New("dial tcp: lookup demo.node-b.sandbox.invalid: no such host"),
+			want: "dial demo: " + unreachableShell,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dialFailure("demo", tc.err)
+			if got.Error() != tc.want {
+				t.Fatalf("stored sentence = %q, want %q", got.Error(), tc.want)
+			}
+			for _, bad := range []string{"172.30.", "sandbox.invalid", "dial tcp"} {
+				if strings.Contains(got.Error(), bad) {
+					t.Errorf("the sentence carries %q: %q", bad, got.Error())
+				}
+			}
+			// The cause stays reachable, so a log line and errors.As both still
+			// have everything they had before.
+			if !errors.Is(got, tc.err) {
+				t.Error("the cause was dropped rather than wrapped")
+			}
+		})
+	}
+	// And the typed cause survives the wrap, which is what lets anything
+	// downstream classify a node outage rather than parse a sentence.
+	wrapped := dialFailure("demo", fmt.Errorf("vm ssh not reachable: %w", offline))
+	if !ctlops.IsNodeUnreachable(wrapped) {
+		t.Error("a node outage stopped being classifiable once it was rendered")
+	}
 }

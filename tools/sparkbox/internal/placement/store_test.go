@@ -193,7 +193,7 @@ func TestSetNodeAndState(t *testing.T) {
 	if err := s.SetNode("myvm", "nodeb"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetRowState("myvm", StateOrphaned); err != nil {
+	if err := s.SetRowState("myvm", "nodeb", StateOK, StateOrphaned); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := s.Get("myvm")
@@ -203,7 +203,7 @@ func TestSetNodeAndState(t *testing.T) {
 	if got.UpdatedAt.Before(got.CreatedAt) {
 		t.Fatalf("UpdatedAt went backwards: %+v", got)
 	}
-	if err := s.SetRowState("myvm", StateOK); err != nil {
+	if err := s.SetRowState("myvm", "nodeb", StateOrphaned, StateOK); err != nil {
 		t.Fatal(err)
 	}
 	if got, _, _ := s.Get("myvm"); got.State != StateOK {
@@ -213,11 +213,75 @@ func TestSetNodeAndState(t *testing.T) {
 	if err := s.SetNode("ghost", "nodeb"); !errors.Is(err, ErrNoSuchRow) {
 		t.Fatalf("SetNode on a missing row = %v; want ErrNoSuchRow", err)
 	}
-	if err := s.SetRowState("ghost", StateQuarantine); !errors.Is(err, ErrNoSuchRow) {
+	if err := s.SetRowState("ghost", "nodeb", StateOK, StateQuarantine); !errors.Is(err, ErrNoSuchRow) {
 		t.Fatalf("SetRowState on a missing row = %v; want ErrNoSuchRow", err)
 	}
 	if err := s.SetNode("myvm", ""); err == nil {
 		t.Fatal("SetNode with no node should be a validation error")
+	}
+}
+
+// TestSetRowStateIsCompareAndSet pins the guard reconciliation depends on: a
+// pass that read a row and then writes it must not write over a DIFFERENT row
+// that has since taken the same name. See Store.SetRowState.
+func TestSetRowStateIsCompareAndSet(t *testing.T) {
+	cases := []struct {
+		name       string
+		row, want  string // the node and state the caller believes it read
+		wantWrites bool
+	}{
+		{"the row the caller read", "nodea", StateOK, true},
+		{"the name moved to another machine", "nodeb", StateOK, false},
+		{"the state changed under the caller", "nodea", StateQuarantine, false},
+		{"both moved", "nodeb", StateOrphaned, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := openTemp(t)
+			if err := s.Reserve("myvm", "alice", "nodea", "", ""); err != nil {
+				t.Fatal(err)
+			}
+			err := s.SetRowState("myvm", c.row, c.want, StateOrphaned)
+			got, _, _ := s.Get("myvm")
+			switch {
+			case c.wantWrites && err != nil:
+				t.Fatalf("SetRowState = %v; want it to apply", err)
+			case c.wantWrites && got.State != StateOrphaned:
+				t.Fatalf("state = %q; want it marked", got.State)
+			case !c.wantWrites && !errors.Is(err, ErrNoSuchRow):
+				t.Fatalf("SetRowState = %v; want ErrNoSuchRow so the caller can tell it was a no-op", err)
+			case !c.wantWrites && got.State != StateOK:
+				t.Fatalf("state = %q; a stale caller wrote over a row it never read", got.State)
+			}
+		})
+	}
+}
+
+// The disaster this guards, spelled out: a name is released and re-reserved on
+// another machine, for another user, between a reconciliation pass's read and
+// its write. Marking it orphaned would refuse every mutation on a brand-new,
+// perfectly healthy sandbox until its own machine next sent a full inventory.
+func TestSetRowStateDoesNotOrphanARecreatedName(t *testing.T) {
+	s := openTemp(t)
+	if err := s.Reserve("ml", "alice", "laptop", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	read, _, _ := s.Get("ml") // what the pass snapshotted
+
+	// The world moves: alice's rm lands, bob creates the same name elsewhere.
+	if err := s.Release("ml"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reserve("ml", "bob", "dgx", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetRowState(read.Name, read.Node, read.State, StateOrphaned); !errors.Is(err, ErrNoSuchRow) {
+		t.Fatalf("stale mark = %v; want ErrNoSuchRow", err)
+	}
+	got, _, _ := s.Get("ml")
+	if got.Owner != "bob" || got.Node != "dgx" || got.State != StateOK {
+		t.Fatalf("bob's placement was damaged by alice's stale pass: %+v", got)
 	}
 }
 

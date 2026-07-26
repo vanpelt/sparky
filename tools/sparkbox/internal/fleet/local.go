@@ -139,6 +139,14 @@ func (l *localNode) Fork(ctx context.Context, snapName, newName, owner string, v
 // from a caller-supplied address is what the remote implementation must do
 // anyway (a node never dials an address the gateway hands it), and keeping the
 // two halves the same shape keeps them honest about each other.
+//
+// The one difference from the node half — nodelink.StreamResolver checks State
+// and this does not — is deliberate and costs nothing. The manager clears
+// SSHAddr, HostIP and GuestV6 on every transition out of running (Pause, and
+// the boot-time downgrade), so a record that is not running has no address and
+// the empty-address branch below already refuses it. The node half checks state
+// as well because it is answering ANOTHER machine's request, and §2.6's reject
+// table wants those two refusals to arrive as different messages.
 func (l *localNode) DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
 	b, ok := l.mgr.Get(sandbox)
 	if !ok {

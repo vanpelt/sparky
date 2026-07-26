@@ -136,6 +136,25 @@ func New(store *secrets.Store, mgr Lister, upstreamKey xssh.Signer, log *slog.Lo
 // it once at startup.
 func (s *Syncer) SetDialer(d sshgw.Dialer) { s.dial = d }
 
+// SetGuestTarget overrides the guest path a delivery rewrites and the command
+// the rewrite script is piped into.
+//
+// The defaults are what a sparkbox image gives you — /etc/environment, rewritten
+// by `sudo -n /bin/sh` — and no deployment has wanted anything else. It is
+// settable because a "guest" is not always a VM: under the mock driver a
+// sandbox's guest is an unprivileged process on the host with the sandbox's
+// workdir as its cwd, so there is no /etc/environment it may write and no
+// passwordless sudo to write it with. Pointing the two at something a test can
+// read is the only way to assert that a delivery ARRIVED rather than that it was
+// attempted — which for a sandbox on another machine is the whole question,
+// since the node holding it has no secrets store of its own.
+//
+// Call it before the first push; nothing here is guarded, for the same reason
+// SetDialer is not.
+func (s *Syncer) SetGuestTarget(envPath, shell string) {
+	s.envPath, s.shell = envPath, shell
+}
+
 // boxState returns name's delivery state, creating it on first use.
 func (s *Syncer) boxState(name string) *boxState {
 	s.mu.Lock()

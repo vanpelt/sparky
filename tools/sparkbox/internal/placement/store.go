@@ -24,11 +24,13 @@ import (
 )
 
 // A row's State says whether the gateway's picture of a name still matches the
-// fleet's. Nothing authorizes on it, and nothing writes anything but StateOK
-// yet: reconciliation — the loop that compares a node's inventory against the
-// rows placed on it — is M2, and this is the vocabulary it is contracted to
-// use. Only StateQuarantine is read today, by the listing paths, which refuse
-// to serve a row two machines claim.
+// fleet's. Nothing authorizes on it. It is written by exactly one thing —
+// reconciliation, the pass that compares a node's inventory against the rows
+// placed on it (internal/fleet) — and it is a marker, never a cache of the
+// sandbox's vmm state: a machine's own record is the only source of that, and
+// writing "running" here would be the gateway inventing a state nobody
+// observed. Orphaned rows are still served, flagged unreachable, and refused
+// for mutation; quarantined rows are served to nobody.
 const (
 	StateOK         = ""           // the owning node has it and agrees
 	StateOrphaned   = "orphaned"   // the node is up and does not have it
@@ -193,8 +195,14 @@ func (s *Store) Rename(old, new string) error {
 }
 
 // SetNode repoints a name at another machine. Migration only — a sandbox's
-// rootfs does not move on its own, so this is an operator moving it. Part of
-// the M2 reconcile contract: nothing in the gateway calls it yet.
+// rootfs does not move on its own, so this is an operator moving it.
+//
+// Reconciliation deliberately does not call it. A machine reporting a name the
+// ledger places elsewhere is exactly what an operator's half-finished migration
+// looks like AND exactly what a wrong or compromised machine looks like, and
+// moving the placement on that evidence would hand one machine another's
+// sandbox. It marks the contradiction instead; deciding it is this, run by
+// somebody who knows which disk has the data.
 func (s *Store) SetNode(name, node string) error {
 	if node == "" {
 		return fmt.Errorf("placement needs a node")
@@ -202,14 +210,31 @@ func (s *Store) SetNode(name, node string) error {
 	return s.update(`UPDATE placements SET node = ?, updated_at = ? WHERE name = ?`, node, time.Now().UTC(), name)
 }
 
-// SetRowState records what reconciliation last found. It is a cache, so a
-// missing row is a lost race with a destroy rather than an error worth
-// escalating — but the caller is told, because it is also how a typo surfaces.
+// SetRowState records what reconciliation last found. It is a compare-and-set:
+// the row is written only if it is still on the machine the caller read it on
+// AND still in the state the caller read, and ErrNoSuchRow otherwise.
 //
-// Nothing calls it yet: the reconcile loop that would is M2, and this is the
-// write half of the contract its state vocabulary belongs to.
-func (s *Store) SetRowState(name, state string) error {
-	return s.update(`UPDATE placements SET state = ?, updated_at = ? WHERE name = ?`, state, time.Now().UTC(), name)
+// The guard is not defensive tidiness, it is the whole correctness of the
+// caller. Reconciliation reads a machine's rows once and then walks them,
+// writing one statement per disagreement, with no lock held across the pass —
+// it cannot hold one, since a pass over a recovered machine is up to
+// MaxSandboxesPerNode separate transactions and dispatch runs on other
+// goroutines throughout. So between the SELECT and any given UPDATE, a `ctl rm`
+// can release a name and a create can re-reserve it on ANOTHER machine, for
+// ANOTHER user. An update keyed on name alone would then stamp "orphaned" onto
+// that brand-new placement, which refuses every mutation on it — resume
+// included — and only clears when its own machine happens to send a full
+// inventory, which may be never. Comparing node and state makes the stale write
+// a no-op instead: zero rows affected means "that is not the row I read", which
+// is exactly the wanted answer.
+//
+// A missing row is likewise a lost race with a destroy rather than an error
+// worth escalating — but the caller is told, because it is also how a typo
+// surfaces.
+func (s *Store) SetRowState(name, node, want, state string) error {
+	return s.update(
+		`UPDATE placements SET state = ?, updated_at = ? WHERE name = ? AND node = ? AND state = ?`,
+		state, time.Now().UTC(), name, node, want)
 }
 
 func (s *Store) update(q string, args ...any) error {

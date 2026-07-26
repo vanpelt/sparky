@@ -31,6 +31,11 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	inflight map[string]struct{} // entry IDs currently running, to avoid overlap
+
+	// running counts the job goroutines tick has launched, so Run can wait for
+	// them. Separate from inflight, which answers a different question ("is
+	// this entry already going?") and is keyed per entry rather than counted.
+	running sync.WaitGroup
 }
 
 func NewScheduler(store *Store, runner Runner, log *slog.Logger) *Scheduler {
@@ -39,7 +44,17 @@ func NewScheduler(store *Store, runner Runner, log *slog.Logger) *Scheduler {
 
 // Run ticks every interval until ctx is done, firing any entry whose next
 // activation has elapsed. Blocks; call in a goroutine.
+//
+// It does not return until every job it launched has finished. Cancelling the
+// context is what stops them — each job's context descends from this one — so
+// the wait is bounded by how fast a cancelled RunInSandbox unwinds, not by
+// jobTimeout. Returning while a job was still going meant "the scheduler has
+// stopped" was a lie: the job would go on to SSH into a sandbox and write a
+// row into the schedule store after its owner believed it was done, which in a
+// test is a goroutine racing the temp directory it is writing into and in
+// production is a run recorded against a control plane that has shut down.
 func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
+	defer s.running.Wait()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -68,7 +83,11 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 		if !s.claim(e.ID) {
 			continue // already running from a previous tick
 		}
-		go s.fire(ctx, e, now)
+		s.running.Add(1)
+		go func() {
+			defer s.running.Done()
+			s.fire(ctx, e, now)
+		}()
 	}
 }
 

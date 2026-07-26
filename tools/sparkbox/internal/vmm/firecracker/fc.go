@@ -71,9 +71,9 @@ type vmState struct {
 }
 
 type Driver struct {
-	mu      sync.Mutex
-	opts    Options
-	vms     map[string]*vmState
+	mu   sync.Mutex
+	opts Options
+	vms  map[string]*vmState
 	// creating holds the names of Creates that have released d.mu to do their
 	// rootfs disk work. A name is in exactly one of creating and vms.
 	creating map[string]bool

@@ -24,19 +24,30 @@ import (
 type linkedNode struct {
 	served chan error
 	frames chan nodelink.Frame
+	// end is the machine's side of the transport, kept so a test can send the
+	// unprompted frames a real node sends — see emit in sessions_test.go.
+	end net.Conn
 }
 
 // linkTo joins a machine to a fleet and returns the node's end of it.
+func linkTo(t *testing.T, ctx context.Context, f *fleet.Fleet, name string) *linkedNode {
+	t.Helper()
+	return linkAt(t, ctx, f, name, nil)
+}
+
+// linkAt is linkTo with the link's own clock supplied, which is how a test
+// states "this machine has said nothing for thirty seconds" instead of waiting
+// thirty seconds to find out. nil is the real one.
 //
 // The node end drains continuously: a net.Pipe is unbuffered, so the welcome —
 // and later the bye — blocks the gateway until somebody reads it, and a test
 // that never read would hang the teardown it is here to observe.
-func linkTo(t *testing.T, ctx context.Context, f *fleet.Fleet, name string) *linkedNode {
+func linkAt(t *testing.T, ctx context.Context, f *fleet.Fleet, name string, now func() time.Time) *linkedNode {
 	t.Helper()
 	gwEnd, nodeEnd := net.Pipe()
 	t.Cleanup(func() { gwEnd.Close(); nodeEnd.Close() })
 
-	n := &linkedNode{served: make(chan error, 1), frames: make(chan nodelink.Frame, 64)}
+	n := &linkedNode{served: make(chan error, 1), frames: make(chan nodelink.Frame, 64), end: nodeEnd}
 	go func() {
 		dec := json.NewDecoder(nodeEnd)
 		for {
@@ -65,14 +76,38 @@ func linkTo(t *testing.T, ctx context.Context, f *fleet.Fleet, name string) *lin
 	}
 	go func() {
 		n.served <- f.ServeLink(ctx, nodelink.ServerOptions{
-			Node: name, Greeting: greeting, Session: gwEnd, Log: discardLog(),
+			Node: name, Greeting: greeting, Session: gwEnd, Log: discardLog(), Now: now,
 			// Far longer than the test, so the liveness prober never becomes the
 			// reason a link ended.
 			PingEvery: time.Hour,
 		})
+		// Sent AND closed, so "has ServeLink returned?" can be asked more than
+		// once: a test that consumes the error itself must not leave the join
+		// below waiting for a second value that will never come.
+		close(n.served)
 	}()
 
 	waitFor(t, "the node to join the fleet", func() bool { return f.Online(name) })
+
+	// Join the link before the test ends. Registered last so it runs first: it
+	// drops the pipe, which is what makes ServeLink return, and then waits for
+	// it.
+	//
+	// Leaving it running is not merely untidy. ServeLink's unwind marks the
+	// machine offline and touches the placement store, and that store lives in
+	// the test's temp directory — so an unjoined goroutine is a sqlite
+	// connection still working while t.TempDir's RemoveAll walks the directory,
+	// which recreates the -shm file behind the sweep and fails the cleanup with
+	// "directory not empty" in whichever test drew the short straw.
+	t.Cleanup(func() {
+		gwEnd.Close()   //nolint:errcheck
+		nodeEnd.Close() //nolint:errcheck
+		select {
+		case <-n.served:
+		case <-time.After(10 * time.Second):
+			t.Errorf("ServeLink for %q never returned", name)
+		}
+	})
 	return n
 }
 

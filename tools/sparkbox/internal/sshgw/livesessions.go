@@ -17,6 +17,18 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+)
+
+// The gateway is the one live-session registry a deployment has, for the
+// manager's local pause and for the fleet's remote one. Asserting the drainer
+// too keeps the remote path from silently falling back to the racy close if the
+// method is ever renamed: fleet.hangUpBefore reaches it by type assertion, and
+// a failed assertion there is not a compile error.
+var (
+	_ host.SessionCloser  = (*Gateway)(nil)
+	_ host.SessionDrainer = (*Gateway)(nil)
 )
 
 // closeGrace bounds how long we wait for the goodbye message to reach a client
@@ -144,6 +156,33 @@ func (g *Gateway) CloseSandboxSessions(sandbox, reason string) int {
 	}
 	g.liveMu.Unlock()
 	return g.closeAll(victims, reason, 0)
+}
+
+// DrainSandboxSessions implements host.SessionDrainer: CloseSandboxSessions,
+// but it waits for the goodbyes to be written before it returns.
+//
+// This is the fleet's path, and only the fleet's. The local pause calls
+// CloseSandboxSessions from inside the manager's lock and MUST NOT be made to
+// wait — the sessions being torn down take that same lock on their way out. The
+// fleet holds no lock when it dispatches a pause to another machine, and there
+// the wait is not a nicety: the machine is about to stop its guest's sshd, and
+// once it has, the SSH channel carrying a browser terminal dies. A hang-up that
+// has only been *started* by then loses the race, the bridge unwinds first, and
+// the user gets "shell exited with 1" with no goodbye and no terminal restore
+// instead of "the sandbox was paused". Returning only once the bytes are out is
+// what makes the two placements produce the same close code.
+//
+// wait bounds it: a client that has stopped reading must not be able to hold a
+// pause open, so hangUp's own closeGrace still applies per session and this
+// deadline still applies overall.
+func (g *Gateway) DrainSandboxSessions(sandbox, reason string, wait time.Duration) int {
+	g.liveMu.Lock()
+	victims := make([]*liveSession, 0, len(g.live[sandbox]))
+	for ls := range g.live[sandbox] {
+		victims = append(victims, ls)
+	}
+	g.liveMu.Unlock()
+	return g.closeAll(victims, reason, wait)
 }
 
 // CloseAllSessions hangs up every attached session on the gateway and blocks

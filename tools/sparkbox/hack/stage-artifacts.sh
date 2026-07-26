@@ -9,11 +9,19 @@
 # linux/amd64 and linux/arm64 side by side in one flat GitHub asset namespace:
 #
 #   sparkbox-linux-<arch>          the control-plane binary (host side)
+#   sluice-linux-<arch>            the egress gateway (DNS allowlist + eBPF
+#                                  meter/enforcer), installed by
+#                                  `sparkbox setup --sluice`
 #   vmlinux-<arch>                 guest kernel (flat Image on arm64; the name
 #                                  stays vmlinux — firecracker doesn't care)
 #   firecracker-<arch>             the VMM
 #   <rootfs-name>-<arch>.ext4.zst  the guest rootfs template
 #   manifest-<arch>.env            sha256s + metadata `sparkbox setup` reads
+#
+# The unqualified manifest name means *linux* (PLATFORM=linux inside it). The
+# darwin binary and its manifest-darwin-arm64.env are staged separately by
+# hack/stage-darwin-artifacts.sh, which derives the shared checksums from the
+# arm64 manifest this script writes rather than recomputing them.
 #
 # Runs natively: aarch64 artifacts want an aarch64 host (the rootfs build loop-
 # mounts an ext4 and the kernel build is a native compile). The docker image is
@@ -67,6 +75,7 @@ OUT_DIR=$(cd "$OUT_DIR" && pwd)
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 SPARKBOX_ASSET="sparkbox-linux-$GOARCH"
+SLUICE_ASSET="sluice-linux-$GOARCH"
 ROOTFS_ASSET="$ROOTFS_NAME-$GOARCH.ext4.zst"
 
 echo "== build sparkbox binary ($GOARCH) =="
@@ -75,6 +84,60 @@ echo "== build sparkbox binary ($GOARCH) =="
   CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
   go build -trimpath -ldflags "-s -w -X main.version=$RELEASE" \
     -o "$OUT_DIR/$SPARKBOX_ASSET" ./cmd/sparkbox )
+
+# --- sluice ------------------------------------------------------------------
+#
+# The per-VM egress gateway. It lives in tools/sluice, a SEPARATE Go module
+# (there is no go.work at the repo root), which is why it took this long to
+# ship: the release published no sluice asset, so `sparkbox setup` had a
+# --sluice-socket flag and no way to put a daemon on the other end of it, and
+# internal/hostsetup/checks.go carried a TODO admitting exactly that.
+#
+# WHY THIS IS SAFE TO SHIP AS A PREBUILT BINARY — the question that had to be
+# settled before adding these three lines, because a wrong answer here is an
+# asset that installs cleanly and then fails to load on somebody's kernel:
+#
+#   1. No eBPF toolchain is needed, here or anywhere downstream. The compiled
+#      BPF object internal/meter/sluice_bpfel.o is COMMITTED to the repo and
+#      pulled in with //go:embed (meter_linux.go), so this is one ordinary
+#      `go build`. No clang, no llvm, no bpf2go, no bpftool, no kernel headers.
+#      tools/sluice/Makefile's `bpf` target regenerates the object and is a
+#      developer step only; it never runs in the release path.
+#   2. The object is not architecture-specific. Its ELF e_machine is EM_BPF
+#      (247) — BPF is its own instruction set, not the host's — and the only
+#      target property it depends on is endianness (hence the "bpfel" in the
+#      name, and the one `#define ntohs __builtin_bswap16` comment in
+#      bpf/sluice.c). amd64 and arm64 are both little-endian, so ONE object
+#      serves both of these assets.
+#   3. The object is not kernel-version-specific. bpf/sluice.c is deliberately
+#      CO-RE-free: it reads fixed Ethernet/IP offsets with bpf_skb_load_bytes
+#      and includes only UAPI headers — no vmlinux.h, no BPF_CORE_READ. That is
+#      not merely the author's claim; the compiled object's .BTF.ext section has
+#      core_relo_len = 0, i.e. it carries ZERO CO-RE relocations, so there is no
+#      kernel struct layout for a different kernel to invalidate. The one kernel
+#      type it names is struct __sk_buff, which is UAPI and whose field accesses
+#      the verifier rewrites per-kernel by design.
+#   4. Guest kernels are irrelevant to it. sluice runs on the HOST and attaches
+#      to the host side of each guest's sbtap device; nothing of it is ever
+#      loaded inside a microVM.
+#
+# What IS version-dependent is the runtime attach path, not the artifact: the
+# meter uses a TCX link, which needs a HOST kernel >= 6.6. That is a property of
+# the box, it is declared in the unit's ConditionKernelVersion, and hostsetup's
+# sluice step refuses to install on a host below it rather than letting systemd
+# silently skip a unit whose condition failed.
+#
+# No `-X main.version=$RELEASE` here, unlike the sparkbox build above: sluice
+# has no version variable and no `version` subcommand, so there would be nothing
+# to stamp into. That is why hostsetup's sluice step decides "is the installed
+# daemon this release's?" by comparing SHA256_SLUICE against the file on disk
+# rather than by running it — the trick `sparkbox doctor` uses on the gateway
+# binary is not available for this one.
+echo "== build sluice binary ($GOARCH) =="
+( cd "$REPO_DIR/tools/sluice" && \
+  CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
+  go build -trimpath -ldflags "-s -w" \
+    -o "$OUT_DIR/$SLUICE_ASSET" ./cmd/sluice )
 
 echo "== collect kernel + firecracker =="
 cp "$KERNEL" "$OUT_DIR/vmlinux-$GOARCH"
@@ -127,10 +190,14 @@ FC_VER=$("$FIRECRACKER_BIN" --version | head -1 | grep -oE 'v[0-9.]+' | head -1)
 cat > "$OUT_DIR/manifest-$GOARCH.env" <<EOF
 RELEASE=$RELEASE
 ARCH=$GOARCH
+PLATFORM=linux
 FIRECRACKER_VERSION=$FC_VER
 SHA256_VMLINUX=$(sha "$OUT_DIR/vmlinux-$GOARCH")
 SHA256_FIRECRACKER=$(sha "$OUT_DIR/firecracker-$GOARCH")
+SPARKBOX_ASSET=$SPARKBOX_ASSET
 SHA256_SPARKBOX=$(sha "$OUT_DIR/$SPARKBOX_ASSET")
+SLUICE_ASSET=$SLUICE_ASSET
+SHA256_SLUICE=$(sha "$OUT_DIR/$SLUICE_ASSET")
 ROOTFS_NAME=$ROOTFS_NAME
 ROOTFS_ASSET=$ROOTFS_ASSET
 SHA256_ROOTFS=$(sha "$OUT_DIR/$ROOTFS_ASSET")

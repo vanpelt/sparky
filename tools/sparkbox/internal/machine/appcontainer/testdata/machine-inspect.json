@@ -1,0 +1,37 @@
+[
+  {
+    "containerId" : "sparkbox-poc-109421",
+    "cpus" : 8,
+    "createdDate" : "2026-07-25T19:52:59Z",
+    "diskSize" : 3001122816,
+    "homeMount" : "none",
+    "id" : "sparkbox-poc",
+    "image" : {
+      "descriptor" : {
+        "annotations" : {
+          "com.apple.containerization.image.name" : "local\/sparkbox-gateway:macos-poc",
+          "io.containerd.image.name" : "docker.io\/local\/sparkbox-gateway:macos-poc",
+          "org.opencontainers.image.created" : "2026-07-25T15:57:34Z",
+          "org.opencontainers.image.ref.name" : "macos-poc"
+        },
+        "digest" : "sha256:047645be93399e0877655e714d0ef3057ad7aaa54acd318482553dfa24a0eec2",
+        "mediaType" : "application\/vnd.oci.image.index.v1+json",
+        "size" : 375
+      },
+      "reference" : "local\/sparkbox-gateway:macos-poc"
+    },
+    "ipAddress" : "192.168.64.18",
+    "memory" : 25769803776,
+    "platform" : {
+      "architecture" : "arm64",
+      "os" : "linux"
+    },
+    "startedDate" : "2026-07-25T19:57:35Z",
+    "status" : "running",
+    "userSetup" : {
+      "gid" : 20,
+      "uid" : 502,
+      "username" : "vanpelt"
+    }
+  }
+]

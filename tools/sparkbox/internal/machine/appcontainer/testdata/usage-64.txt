@@ -1,0 +1,3 @@
+Error: Unknown option '--nosuchflag'
+Usage: container machine list [--format <format>] [--quiet] [--debug]
+  See 'container machine list --help' for more information.

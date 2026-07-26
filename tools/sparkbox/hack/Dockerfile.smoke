@@ -1,0 +1,42 @@
+# A systemd-capable throwaway host for the provision smoke test.
+#
+# Why a container and not the CI runner VM: `sparkbox setup` rewrites iptables
+# NAT/FORWARD (sparkbox-net.sh REDIRECTs the whole 1024-65535 range on the
+# uplink), appends to /etc/fstab, mounts a loop volume and installs system
+# units. Inside a container all of that lands in the container's own network and
+# mount namespaces, so the runner stays pristine and a failed run leaves nothing
+# behind.
+#
+# Why systemd and not a plain container: stepEnableServices shells out to
+# `systemctl enable --now`, and F7's whole subject is whether the unit STAYS
+# up — neither is observable without a real PID 1 and a real journal. A plain
+# container gets through nine of ten steps and then dies with
+# `exec: "systemctl": executable file not found`.
+#
+# Run it with: --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw
+# (hack/smoke-container.sh does this for you).
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# systemd/dbus  PID 1 + `systemctl`
+# python3       stub artifact server, and the port-squatter for the F7 fixture
+# zstd/e2fsprogs build the stub rootfs (.ext4.zst)
+# xfsprogs      stepDataVolume's mkfs.xfs
+# iproute2/iptables  sparkbox-net.sh derives the uplink and writes rules
+# openssh-*     ssh-keygen for the operator key, ssh for the control-door probe
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      systemd systemd-sysv dbus \
+      python3 zstd e2fsprogs xfsprogs iproute2 iptables \
+      openssh-client curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Strip the distro units we neither need nor want competing for the boot: this
+# container exists to run exactly two units, and a faster, quieter boot makes a
+# `systemctl is-system-running` wait meaningful instead of a coin flip.
+RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
+          /etc/systemd/system/*.wants/* \
+          /lib/systemd/system/sockets.target.wants/*udev* \
+          /lib/systemd/system/basic.target.wants/*
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

@@ -227,7 +227,11 @@ host and add `--proxy-tls`. Two providers:
   auto-renews it (via [CertMagic](https://github.com/caddyserver/certmagic) +
   the Cloudflare libdns provider). One cert covers every sandbox subdomain, so
   no per-name issuance and no brush with Let's Encrypt rate limits regardless of
-  how many ephemeral sandboxes churn. Needs a scoped `Zone.DNS:Edit` token in
+  how many ephemeral sandboxes churn — but *rebuilding the host* does brush one:
+  the wildcard is the same certificate every time, and duplicates are capped at
+  five per week, so back up `<state-dir>/certmagic` before you wipe anything
+  ([getting-started](docs/getting-started.md#rebuilding-a-host-keep-the-certificate-cache)).
+  Needs a scoped `Zone.DNS:Edit` token in
   `CLOUDFLARE_API_TOKEN`; no inbound port 80/443 needed for issuance (DNS-01).
   That one pair is everything — browser terminals live at
   `<name>-xterm.hivemind.tools`, a single label, so they are covered by the same
@@ -283,7 +287,7 @@ per-sandbox workdir — the full control plane, gateway, pause/resume, and
 reaper paths are real; only the isolation is fake. `go test ./...` runs an
 end-to-end suite over exactly this stack.
 
-## Deploy on your own Linux host
+## Deploy on your own host
 
 The `sparkbox` binary is its own installer. On any KVM-capable Linux host:
 
@@ -292,12 +296,139 @@ sparkbox doctor        # is this host ready? (PASS/WARN/FAIL per prerequisite)
 sudo sparkbox setup --proxy-domain yourdomain.tools   # provision + start (idempotent; --dry-run to preview)
 ```
 
-`setup` fetches a prebuilt release (guest kernel, firecracker, rootfs — all
+`setup` installs the binary you ran it from to `/usr/local/bin/sparkbox`
+(`--bin-path`) so the unit runs exactly the build that provisioned the host,
+fetches a prebuilt release (guest kernel, firecracker, rootfs — all
 sha256-verified), lays down an XFS reflink volume, seeds your operator SSH key,
-installs the systemd units, and starts the gateway; `doctor` diagnoses a host at
-any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
+installs the systemd units, and starts the gateway. It then verifies the result
+and **exits non-zero** if the gateway is not alive: a crash-looping service is a
+FAIL carrying the tail of its journal, not a PASS. `doctor` runs the same
+battery at any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
 fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
+
+### On a Mac (Apple Silicon)
+
+Same binary-is-the-installer story, same two commands:
+
+```sh
+curl -fLO https://github.com/vanpelt/sparky/releases/latest/download/sparkbox-darwin-arm64
+chmod +x sparkbox-darwin-arm64 && sudo mv sparkbox-darwin-arm64 /usr/local/bin/sparkbox
+
+sparkbox doctor
+sparkbox setup --proxy-domain yourdomain.tools
+```
+
+macOS has no KVM, so a Mac cannot run Firecracker directly. `setup` therefore
+provisions a **nested Linux machine** with Apple's
+[`container`](https://github.com/apple/container) CLI and runs the real Linux
+`sparkbox setup` *inside* it — the same steps, the same release, the same
+`sparkbox.env`. What you get is an ordinary sparkbox gateway that happens to
+live one layer down.
+
+Prerequisites. `sparkbox setup` checks every one of these *before* it touches
+anything and refuses with the reason. `sparkbox setup --dry-run` runs the same
+preflight and changes nothing, so it is the safe way to ask whether this Mac
+qualifies — a host that passes prints no preflight section at all, and anything
+that does not is listed with its fix:
+
+- **Apple Silicon M3 or newer** — nested virtualization is an M3+ feature, and
+  it is what lets Firecracker run inside the machine. An M1/M2 fails here.
+- **macOS 15 or newer**, and Apple's `container` CLI **1.1.0 or newer**, with
+  its service running (`container system start`).
+- Disk for the machine's data volume (`--data-volume-gb`).
+
+`sparkbox doctor` answers the *other* question — how are both hosts doing now.
+It reports the Mac (`mac:` lines — the same prerequisites, plus the outer kernel
+verified against the release's checksum) and the nested machine (`machine:`
+lines — state, nested virtualization, `/dev/kvm`, the gateway service), ending
+with the gateway's **own `doctor` relayed out of the machine**. It exits
+non-zero if either layer is wrong, and when the machine is missing or stopped it
+says so in one line rather than printing an empty section. Use `setup --dry-run`
+before provisioning, `doctor` after.
+
+Everything you would pass on Linux still means the same thing and is forwarded
+to the gateway inside the machine — `--proxy-domain`, `--operator-key`,
+`--sluice`, `--gateway`/`--node-name`, the listen addresses, TLS flags. Only
+these describe the Mac itself:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--machine-name` | `sparkbox` | the nested VM to create/adopt |
+| `--machine-cpus` / `--machine-memory-gb` | 8 / 24 | the machine's whole budget |
+| `--machine-image` | content-addressed | override the gateway image reference |
+| `--outer-kernel` | `~/Library/Application Support/sparkbox/vmlinux-macos-arm64` | where the outer kernel is stored |
+| `--container-bin` | `container` | path to Apple's CLI |
+
+Two flags are **refused** on darwin rather than ignored: `--move-admin-ssh`
+(the machine runs one process and nothing competes for `:22` inside it) and
+`--bin-path` (the gateway's binary is installed by the inner `setup`, not by
+the Mac). `--dry-run` prints the whole plan — including the exact inner `setup`
+command line — and touches nothing.
+
+> **Two kernels, do not confuse them.** `vmlinux-macos-arm64` is the *outer*
+> KVM-capable kernel Apple's `container machine` boots; `vmlinux-<arch>` is the
+> *guest* kernel each Firecracker sandbox boots, one layer further in. `setup`
+> fetches and sha256-verifies both.
+
+An existing machine is adopted only if its name, image repository and
+`home-mount=none` all match, so `setup` never takes over a machine you created
+for something else.
+
+> **What is proven, and what is not.** CI builds and unit-tests the darwin paths
+> on a real Apple Silicon runner, but GitHub's hosted Macs have no `container`
+> CLI and cannot nest VMs, so **no CI anywhere creates a real machine** — the
+> lifecycle tests drive a fake. `macos/poc.sh` remains in the tree as the
+> fallback and as the reference the Go port was written from; it uses a separate
+> machine (`sparkbox-poc`), so the two coexist on one Mac.
+
+### Adding a second machine
+
+A second host joins an existing gateway as a **node**. Provision the gateway
+first, exactly as above, then run `setup` on the new machine with `--gateway`:
+
+```sh
+sudo sparkbox setup --gateway <gateway-host>:2222 --node-name laptop
+```
+
+`--gateway` is the whole difference: instead of standing up a gateway of its
+own, the machine mints a node key, dials *out* to that address (so a node behind
+NAT needs no inbound anything), enrolls, and parks as **pending**. Nothing is
+trusted yet. It logs its own identity at startup and then the exact command that
+unblocks it:
+
+```
+node identity  node=laptop fingerprint=SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+this node is enrolled and waiting for approval  node=laptop gateway=10.66.0.1:2222
+  ssh ctl@catnip.sh node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+  — after checking that fingerprint against the one this machine printed at startup.
+```
+
+On the gateway, as an operator, read the roster and approve — by **fingerprint**,
+never by name, because a node chooses its own name and only the key is evidence:
+
+```sh
+ssh ctl@<gateway> node ls        # name, status, presence, arch, sandbox count, fingerprint
+ssh ctl@<gateway> node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+ssh ctl@<gateway> node rm laptop # drop one; refused while it still holds sandboxes
+```
+
+Compare the fingerprint against the one the node printed before you say yes —
+that out-of-band comparison is the entire trust decision. The node retries on
+its own backoff (~30s), so approval needs no restart: it reconnects, logs
+`linked to the gateway`, and starts heartbeating. The same roster is
+`GET /v1/nodes` over the REST API.
+
+> **What a fleet is at v0.4.0.** What shipped is the **link layer** — enrollment,
+> trust, roster, heartbeat, capacity and architecture reporting, all surviving a
+> restart on either side. **No sandbox lands on a remote node yet.** `ssh
+> new@<gateway>` always creates on the gateway itself: `Fleet.Create` has no
+> placement step and there is no `--node` override. Remote lifecycle is the next
+> milestone, and the data plane that makes a remote sandbox indistinguishable
+> from a local one is the one after. So a fleet today is a trusted roster of
+> machines, not a scheduler — worth knowing before you add a node expecting your
+> laptop to start running sandboxes. The blueprint for both milestones is
+> [`docs/multi-node-implementation.md`](docs/multi-node-implementation.md).
 
 ## Real microVMs
 
@@ -317,27 +448,43 @@ the gateway key into `/home/sparky`, the release manifest carries
 
 ## Releases
 
-Artifacts ship as **GitHub Releases, built for linux/amd64 and linux/arm64** —
-the same tag provisions an x86 cloud VM or an aarch64 DGX Spark. Push a `v*` tag
-and [`.github/workflows/build-artifacts.yml`](../../.github/workflows/build-artifacts.yml)
-does the rest: Depot builds the `images/Dockerfile` base for both platforms and
-pushes one multi-arch tag to GHCR, then a matrix of native runners
+Artifacts ship as **GitHub Releases, built for linux/amd64, linux/arm64 and
+darwin/arm64** — the same tag provisions an x86 cloud VM, an aarch64 DGX Spark
+or an Apple Silicon Mac. Push a `v*` tag and
+[`.github/workflows/build-artifacts.yml`](../../.github/workflows/build-artifacts.yml)
+does the rest: Depot builds the `images/Dockerfile` base for both linux platforms
+and pushes one multi-arch tag to GHCR, then a matrix of native runners
 (`ubuntu-24.04` / `ubuntu-24.04-arm`) each compile the guest kernel, build the
-`sparkbox` binary, and flatten their arch's image into an ext4 template. The
-release only goes public once **both** arches land, so `setup` can never resolve
-a half-populated `latest`.
+`sparkbox` and `sluice` binaries, and flatten their arch's image into an ext4
+template; alongside them a native arm64 runner compiles the macOS *outer* kernel
+once, and a cheap cross-compile leg emits the Mac's own binary and manifest. The
+release only goes public once **every** platform lands, so `setup` can never
+resolve a half-populated `latest`.
 
 ```sh
 git tag v0.4.0 && git push origin v0.4.0    # cut a release
 gh workflow run "sparkbox release"          # ad-hoc dev-<ts> prerelease (doesn't move `latest`)
 ```
 
-Assets are flat and arch-suffixed — `sparkbox-linux-<arch>`, `vmlinux-<arch>`,
-`firecracker-<arch>`, `universal-<arch>.ext4.zst`, `manifest-<arch>.env` — and
-`sparkbox setup` picks its own arch's set, pinned to the tag the manifest names.
+A release's asset namespace is flat, so every name carries the platform it is
+for. `sparkbox setup` picks its own set, pinned to the tag the manifest names:
+
+| Asset | What | Who fetches it |
+| --- | --- | --- |
+| `sparkbox-linux-<arch>` | control-plane binary | curl'd by the operator; `setup` then installs the binary it is *running* |
+| `sluice-linux-<arch>` | egress gateway (DNS allowlist + eBPF meter) | `setup --sluice`, on either platform — it is a linux daemon even when a Mac puts it inside the nested machine |
+| `vmlinux-<arch>` | **guest** kernel a microVM boots | `setup` |
+| `firecracker-<arch>` | the VMM | `setup` |
+| `universal-<arch>.ext4.zst` | guest rootfs template | `setup` |
+| `manifest-<arch>.env` | sha256s + metadata; unqualified name means **linux** | `setup`, `macos/sparkbox-bootstrap.sh` |
+| `sparkbox-darwin-arm64` | the binary a Mac runs | the operator on macOS |
+| `manifest-darwin-arm64.env` | the Mac's manifest — repeats the linux arm64 checksums it provisions, plus `MACHINE_SPARKBOX_ASSET` and `OUTER_KERNEL_ASSET` | `setup` on darwin, `macos/kernel/fetch.sh` |
+| `vmlinux-macos-arm64` (+ `.config`) | the **outer** KVM kernel Apple's `container machine` boots — a different kernel from `vmlinux-<arch>` | `macos/kernel/fetch.sh` |
+
 To build a release by hand on a build host, `hack/stage-artifacts.sh` stages one
-arch into `OUT_DIR` (blank `IMAGE` = build the base image locally; set `IMAGE=`
-to flatten a prebuilt one instead).
+linux arch into `OUT_DIR` (blank `IMAGE` = build the base image locally; set
+`IMAGE=` to flatten a prebuilt one instead), and `hack/stage-darwin-artifacts.sh`
+derives the darwin pair from the arm64 manifest that produced.
 
 ## Status / roadmap
 
@@ -380,4 +527,10 @@ to flatten a prebuilt one instead).
       of being left wedged against a VM that stopped answering
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
 - [ ] KSM host tuning + cgroup cpu.max; jailer, I/O limits; net isolation
-- [ ] Multi-host: capacity reporting + best-fit placement (flyd pattern)
+- [x] Fleet link layer: a second machine joins with `setup --gateway host:port`,
+      enrolls by its own key, is approved by fingerprint (`ctl node approve`),
+      and reports arch + capacity over a heartbeat — see *Adding a second
+      machine*. The roster is real; the scheduler is not (next item)
+- [ ] Multi-host placement: remote create/pause/resume and best-fit scheduling
+      (flyd pattern). Until this lands every sandbox runs on the gateway,
+      whatever the roster says

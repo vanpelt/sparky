@@ -1,0 +1,8 @@
+printf '%s' "$SPARKBOX_ARGV_B64" | base64 -d > /run/sparkbox-inner-argv
+mapfile -d '' -t args < /run/sparkbox-inner-argv
+rm -f /run/sparkbox-inner-argv
+if [ "${#args[@]}" -ne "$SPARKBOX_ARGV_N" ]; then
+  echo "argv did not survive the transport: expected $SPARKBOX_ARGV_N words, got ${#args[@]}" >&2
+  exit 90
+fi
+"$SPARKBOX_BIN" "${args[@]}"

@@ -1,0 +1,41 @@
+# sluice allowlist — one rule per line. '#' starts a comment.
+#
+#   example.com     allows example.com AND every subdomain (www., api., …)
+#   *.example.com   allows subdomains only, NOT the bare example.com
+#
+# A guest can only resolve — and, with --enforce, only reach — names covered
+# here. Everything else gets NXDOMAIN and is dropped.
+#
+# ---------------------------------------------------------------------------
+# This is a SEED, written by `sparkbox setup --sluice` only when the file does
+# not already exist. Setup never rewrites it afterwards: an allowlist is an
+# operator's policy, and silently reverting a hand-curated one on an upgrade run
+# would be the same class of surprise as F0 (a "successful" setup quietly
+# changing what the box does). Edit it freely and
+# `systemctl reload-or-restart sluice`.
+#
+# It is deliberately MINIMAL. Everything here is something an agent sandbox
+# cannot do its job without; anything broader belongs in a considered addition
+# rather than in a default that nobody chose. It exists at all because sluice
+# EXITS 1 when the file its --allowlist names is not there (exit 2 is the empty
+# FLAG, which the unit never produces — it always templates a path), so
+# installing the unit without seeding this would produce a Restart=always crash
+# loop — which is precisely the shape of failure the liveness probe was added to
+# stop being reported as success.
+# ---------------------------------------------------------------------------
+
+# Package registries / language toolchains
+pypi.org
+files.pythonhosted.org
+registry.npmjs.org
+crates.io
+static.crates.io
+proxy.golang.org
+
+# Source hosting
+github.com
+*.githubusercontent.com
+codeload.github.com
+
+# Anthropic API (for agents running in the sandbox)
+api.anthropic.com

@@ -1,0 +1,522 @@
+name: sparkbox CI
+
+# Until now nothing in .github/workflows ran `go test` — build-artifacts.yml
+# only *builds* a release, and pages.yml is unrelated. Every acceptance
+# criterion in docs/forward-plan.md was therefore honour-system, and two
+# shipped bugs prove the cost: F0 (`setup` never installed the sparkbox binary,
+# so a "successful" provision left the unit ExecStarting a file that did not
+# exist) and F7 (`setup` printed PASS over a crash-looping service and exited
+# 0). See docs/onboarding-notes.md.
+#
+# Four jobs:
+#
+#   test   go build + go vet + go test -race + gofmt on the nested
+#          tools/sparkbox module. Fast, hermetic (89 test files, no network, no
+#          ports, no external binaries), ~1 minute. Also runs the two shell
+#          guards that need no special hardware: the macos/sparkbox-bootstrap.sh
+#          suite and hack/stage-darwin-artifacts.sh.
+#
+#   sluice actually the same three commands against tools/sluice, the OTHER Go
+#          module in this repo. It had no CI at all: nothing built it, nothing
+#          vetted it, and `gofmt -l` had been dirty for long enough that wiring
+#          this job required a formatting fix first. A release now publishes
+#          sluice-linux-<arch>, so a module nobody compiles is a module that
+#          breaks at tag time.
+#
+#   macos  the same build/vet/test on a real Apple Silicon runner, because
+#          `sparkbox setup` is becoming the macOS entry point (Workstream B) and
+#          a cross-compile cannot RUN anything. It is emphatically not a test of
+#          macOS provisioning — see the long comment on the job.
+#
+#   smoke  actually provisions a host with `sparkbox setup` against a stub
+#          release and asserts the result. This is the job that would have
+#          caught F0 and F7. It is honest about what a hosted runner cannot do
+#          — see the long comment on the job.
+#
+# Deliberately NO `paths:` filter. A path filter would make this workflow skip
+# entirely on PRs that touch nothing under tools/sparkbox, and a skipped
+# workflow reports no status at all — so a required check would either block
+# forever or, worse, be left un-required and silently stop guarding. A couple of
+# wasted runner-minutes on a docs-only PR is the cheaper failure mode, and it is
+# the same "no silent caps" rule the smoke job follows.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  # Supersede in-flight runs of the same branch/PR, but never cancel main.
+  group: sparkbox-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- test -----
+  test:
+    name: build, vet, test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        # tools/sparkbox is its own module (there is no go.work at the repo
+        # root), so every step needs to run from inside it.
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same two lines as build-artifacts.yml, on purpose: the toolchain that
+      # tests the code and the toolchain that ships it must not drift.
+      # go-version-file reads the `go` directive out of the module itself.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files; run \`gofmt -w\` on:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race needs cgo, so CGO_ENABLED stays at its default 1 here even though
+      # the release build deliberately uses CGO_ENABLED=0 — the race detector is
+      # the whole point of running the suite in CI rather than trusting a build.
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      # Cross-compilation is a shipping requirement (linux/amd64 + linux/arm64
+      # today, darwin/arm64 for Workstream B) and it breaks silently: a
+      # //go:build linux file referenced from portable code compiles fine here
+      # and fails only at release time. Cheap to check, so check it.
+      - name: cross-compile matrix
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            echo "-> $target"
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -o /dev/null ./cmd/sparkbox
+          done
+
+      # macos/sparkbox-bootstrap.sh is the last thing standing between a nested
+      # macOS gateway and an UNVERIFIED BINARY RUNNING AS ROOT: it runs inside
+      # the machine, picks the asset URL, checks SHA256_SPARKBOX, refuses a
+      # release whose binary reports a different version than the tag it was
+      # published under (the v0.3.0-provisions-v0.4.0 skew, F-series), and only
+      # then installs to the path systemd will exec. macos/test-bootstrap.sh is
+      # 17 assertions over exactly those decisions — and nothing ran it. A
+      # 17-assertion suite nobody executes is documentation, not a test.
+      #
+      # It needs no Apple hardware, no `container` CLI and no network: it stands
+      # up a fake GitHub release on disk and shims `curl` onto PATH, so the
+      # script under test is byte-for-byte the one baked into the machine image.
+      # It runs HERE, on linux, on purpose — the bootstrap executes inside a
+      # linux machine, so linux bash is its real interpreter. (The macos job
+      # runs it a second time under bash 3.2; see the comment there.)
+      - name: macOS bootstrap contract (macos/test-bootstrap.sh)
+        run: |
+          set -euo pipefail
+          # The harness hashes its fake release with `shasum`, and its stub
+          # sha256sum wraps it. Say so plainly rather than failing 17 times.
+          command -v shasum >/dev/null || {
+            echo "::error::shasum (perl Digest::SHA) is missing on this runner;"
+            echo "::error::macos/test-bootstrap.sh needs it to build its fake release"
+            exit 1
+          }
+          ./macos/test-bootstrap.sh
+
+      # hack/stage-darwin-artifacts.sh is otherwise run ONLY by the release
+      # workflow, which fires only on a `v*` tag — so a typo in it surfaces
+      # while cutting a release, at the worst possible moment. It needs no
+      # kernel build, no rootfs and no registry, just a linux arm64 manifest to
+      # derive from and the outer kernel's bytes to checksum, so run it here on
+      # every push against synthetic versions of both.
+      # (Writing it caught exactly this class of bug: an apostrophe inside a
+      # ${VAR:?message} opened a quote that swallowed thirty lines, and
+      # `bash -n` still passed because the result was valid syntax.)
+      #
+      # Both of the script's REQUIRED inputs are supplied here on purpose, and
+      # this list has to track the script. When B2 added the outer kernel, the
+      # script grew a hard `OUTER_KERNEL=${OUTER_KERNEL:?...}` and this step did
+      # not, so it failed on every push with
+      #   stage-darwin-artifacts.sh: line 76: OUTER_KERNEL: set OUTER_KERNEL: …
+      # A guard that is red for everyone is a guard nobody reads, and the one
+      # thing it exists to catch — release-only breakage — is exactly what a
+      # permanently-red step hides.
+      - name: stage darwin release assets against a synthetic manifest
+        run: |
+          set -euo pipefail
+          guest="$RUNNER_TEMP/guest"; out="$RUNNER_TEMP/darwin-out"
+          mkdir -p "$guest"
+          # Stands in for the vmlinux-macos-arm64 the macos-kernel job uploads.
+          # Its CONTENT is irrelevant — the script only sha256s it, exactly as
+          # it does in the release, because the checksum a Mac verifies must be
+          # of the bytes the release actually published. Compiling a real 6.14
+          # kernel here to hash 32 bytes of it would cost 25 arm64 minutes on
+          # every push.
+          printf 'not a kernel, only its checksum is used\n' \
+            >"$guest/vmlinux-macos-arm64"
+          printf '%s\n' \
+            'RELEASE=v0-cistage' \
+            'ARCH=arm64' \
+            'PLATFORM=linux' \
+            'FIRECRACKER_VERSION=v1.16.1' \
+            'SHA256_VMLINUX=1111' \
+            'SHA256_FIRECRACKER=2222' \
+            'SPARKBOX_ASSET=sparkbox-linux-arm64' \
+            'SHA256_SPARKBOX=3333' \
+            'SLUICE_ASSET=sluice-linux-arm64' \
+            'SHA256_SLUICE=5555' \
+            'ROOTFS_NAME=universal' \
+            'ROOTFS_ASSET=universal-arm64.ext4.zst' \
+            'SHA256_ROOTFS=4444' \
+            'ROOTFS_LOGIN_USER=sparky' \
+            'GATEWAY_PUBKEY="ssh-ed25519 AAAA ci@stage"' \
+            >"$guest/manifest-arm64.env"
+          OUT_DIR="$out" RELEASE=v0-cistage GUEST_MANIFEST="$guest/manifest-arm64.env" \
+            OUTER_KERNEL_ASSET=vmlinux-macos-arm64 \
+            OUTER_KERNEL="$guest/vmlinux-macos-arm64" \
+            REPO_DIR="$GITHUB_WORKSPACE" ./hack/stage-darwin-artifacts.sh
+          # The two assets a Mac fetches, and the three derivations that make
+          # the darwin manifest more than a copy: its own PLATFORM, its own
+          # SHA256_SPARKBOX (the darwin build), and the linux binary it will
+          # install into the machine carried across under MACHINE_*.
+          test -s "$out/sparkbox-darwin-arm64"
+          m="$out/manifest-darwin-arm64.env"
+          grep -qx 'PLATFORM=darwin' "$m"
+          grep -qx 'SPARKBOX_ASSET=sparkbox-darwin-arm64' "$m"
+          grep -qx 'MACHINE_SPARKBOX_ASSET=sparkbox-linux-arm64' "$m"
+          grep -qx 'SHA256_MACHINE_SPARKBOX=3333' "$m"
+          grep -qx 'SHA256_ROOTFS=4444' "$m"
+          # sluice is a linux binary on either platform — a Mac installs it into
+          # the machine it provisions, exactly as it does the rootfs — so the
+          # key crosses over verbatim rather than being renamed MACHINE_*.
+          grep -qx 'SLUICE_ASSET=sluice-linux-arm64' "$m"
+          grep -qx 'SHA256_SLUICE=5555' "$m"
+          # The outer kernel is the one darwin-only asset with a producer in a
+          # DIFFERENT job (macos-kernel), so the name has to be asserted here
+          # rather than inferred: a rename on either side is a 404 in
+          # macos/kernel/fetch.sh, which reads OUTER_KERNEL_ASSET out of this
+          # very file. Both checksums must be real sha256s — downloadVerify and
+          # fetch.sh both treat an empty one as "do not verify".
+          grep -qx 'OUTER_KERNEL_ASSET=vmlinux-macos-arm64' "$m"
+          grep -q  '^SHA256_OUTER_KERNEL=[0-9a-f]\{64\}$' "$m"
+          grep -q  '^SHA256_SPARKBOX=[0-9a-f]\{64\}$' "$m"
+          file "$out/sparkbox-darwin-arm64"
+
+  # -------------------------------------------------------------- sluice -----
+  #
+  # tools/sluice is the repo's SECOND Go module (there is no go.work at the
+  # root), and until now literally nothing in CI entered the directory: no
+  # build, no vet, no test, and no release asset. The doctor egress check
+  # carried a TODO saying so. That is now the wrong shape of gap to leave open,
+  # because `sparkbox setup --sluice` downloads sluice-linux-<arch> from a
+  # release and installs it as root — a binary the release pipeline compiles on
+  # every tag is a binary CI has to be able to compile on every push.
+  #
+  # Its own job rather than more steps on `test`: a second module needs its own
+  # setup-go (tools/sluice declares go 1.24.7 where sparkbox declares 1.25.0,
+  # and cache-dependency-path must point at ITS go.sum or the cache is a lie),
+  # and a red sluice must be legible as "sluice broke" rather than as a failed
+  # step buried in the sparkbox job.
+  #
+  # NO clang, no bpf2go, no llvm anywhere. internal/meter/sluice_bpfel.o is a
+  # committed, //go:embed-ed artifact, so the whole tool is one `go build`.
+  # See the feasibility note in hack/stage-artifacts.sh for why that object is
+  # neither arch- nor kernel-version-specific.
+  sluice:
+    name: sluice build, vet, test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tools/sluice
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sluice/go.mod
+          cache-dependency-path: tools/sluice/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files; run \`gofmt -w\` on:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      # The exact two builds hack/stage-artifacts.sh performs for a release,
+      # with the same CGO_ENABLED=0 (the meter is pure Go over
+      # github.com/cilium/ebpf; nothing here needs cgo). A release-time-only
+      # compile is a compile that first fails while cutting a tag.
+      - name: cross-compile the release targets
+        run: |
+          for arch in amd64 arm64; do
+            echo "-> linux/$arch"
+            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -o /dev/null ./cmd/sluice
+          done
+
+      # Say plainly what this job does NOT prove, the same way the smoke job
+      # does. The eBPF half of sluice is the half CI cannot reach: loading the
+      # program needs CAP_BPF and a non-trivial memlock rlimit, ATTACHING it
+      # needs CAP_NET_ADMIN and real sbtap devices, and the TCX link the meter
+      # uses needs a host kernel >= 6.6. internal/meter's tests are
+      # //go:build linux and skip themselves without root, so what is green
+      # above is: the DNS proxy, the allowlist matcher, the ip↔name table, the
+      # policy model, the control socket, the report format — and that the
+      # binary compiles for both release arches.
+      - name: what this job does not prove
+        run: |
+          echo "SKIP: eBPF load/attach (needs root, CAP_BPF, real sbtap taps, kernel >= 6.6)"
+          echo "SKIP: :53 DNS interception end to end (needs a guest on a tap)"
+          echo "the release asset's runtime floor is checked host-side by"
+          echo "hostsetup's sluice step and reported by \`sparkbox doctor\`."
+
+  # --------------------------------------------------------------- macos -----
+  #
+  # WHAT THIS JOB PROVES: that the darwin code paths compile, and that their
+  # unit tests pass when actually EXECUTED on an Apple Silicon Mac.
+  #
+  # WHAT IT DOES NOT PROVE: anything whatsoever about real macOS provisioning.
+  # GitHub's hosted macOS runners do not have Apple's `container` CLI installed
+  # and cannot nest virtual machines. No machine is created, no gateway image is
+  # built, no outer kernel is booted, and `sparkbox setup` is never run here.
+  # Every darwin machine-lifecycle test runs against an in-memory fake of the
+  # `container` CLI, so what is green is the DECISION LOGIC — which command
+  # would be run, whether an existing machine is owned, what the plan says —
+  # and never the CLI's actual behaviour. The real lifecycle is proven only on
+  # an operator's own Apple Silicon hardware.
+  #
+  # WHY IT IS WORTH A JOB ANYWAY. The `test` job already cross-compiles
+  # darwin/arm64, and the release builds the Mac's binary on ubuntu — but a
+  # GOOS=darwin build catches a missing symbol and nothing else, because a
+  # cross-compiled test binary cannot be run. Everything darwin-specific that
+  # misbehaves only at runtime is invisible to it: the //go:build darwin probe,
+  # sysctl names such as kern.osproductversion, statfs field widths, and the
+  # //go:build !linux fallbacks that quietly answer 0 or an error. Since
+  # Workstream B makes `sparkbox setup` the macOS entry point, that is now the
+  # code an operator's first command runs.
+  #
+  # And it is not a token subset. Exactly ONE package is excluded from the
+  # darwin build — internal/vmm/firecracker, which is //go:build linux, and
+  # whose tests need /dev/kvm anyway — so `go test ./...` here is the same
+  # suite the linux job runs, in about half a minute with -race.
+  #
+  # COST. This repository is public, so macOS runner minutes are free. On a
+  # private repo they bill at a 10x multiplier and this job would need
+  # re-justifying; that is the same trade the release workflow's `darwin` job
+  # made in the other direction, cross-compiling on ubuntu because it only ever
+  # needs to BUILD the binary, never to run it.
+  macos:
+    name: darwin build, vet, test (Apple Silicon)
+    # macos-15 is arm64, and the label is also the architecture decision:
+    # macos-13 is the last Intel image, and sparkbox on darwin is arm64-only on
+    # purpose (macOS host provisioning needs Apple Silicon nested virt, so a
+    # darwin/amd64 build would be a download whose every useful path exits
+    # non-zero — see the note in hack/stage-darwin-artifacts.sh). It is also at
+    # or above the macOS 15 floor the darwin host checks enforce, so the runner
+    # cannot be the reason a check fails.
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      # No gofmt step: it is the same source tree the `test` job already
+      # checked, and gofmt does not vary by platform. Duplicating it would buy
+      # a second red X for one problem.
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # The whole suite, not a darwin subset — see the note above. -race for the
+      # same reason the linux job runs it: this is the only place the darwin
+      # scheduler and memory model are exercised at all.
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      # The one cross-compile that is genuinely Mac-shaped: a Mac provisioning a
+      # nested gateway needs a LINUX arm64 binary to put inside the machine, and
+      # the source-build escape hatch (SPARKBOX_LOCAL_BINARY / poc.sh's
+      # bootstrap_local_binary) produces it with exactly this command, from a
+      # Mac, with the macOS toolchain and SDK in play. The linux job cannot
+      # prove that direction works from here.
+      - name: cross-compile the machine's linux/arm64 binary from macOS
+        run: |
+          # Explicit, not relying on the runner's default `bash -e`: without it
+          # a failed `go build` still leaves the previous step's binary on disk
+          # and the `file` below reports it happily. That is a green step over a
+          # broken build — the exact shape of failure this workflow exists for.
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w -X main.version=v0-macosci" \
+            -o "$RUNNER_TEMP/sparkbox-linux-arm64" ./cmd/sparkbox
+          file "$RUNNER_TEMP/sparkbox-linux-arm64"
+
+      # A second run of the bootstrap suite the `test` job already ran, and it
+      # is not redundant: this one runs under the interpreter a Mac developer
+      # actually has. macOS ships bash 3.2.57 as /bin/bash — the shebang of
+      # every script in macos/ — and 3.2 predates associative arrays, `${x^^}`,
+      # `mapfile`, negative array indices and much else that is reflex on a
+      # modern Linux bash 5.x. A harness that only ever runs on the linux job
+      # will acquire a bash-5-ism and then fail for the only people who run it
+      # by hand.
+      - name: macOS bootstrap contract under /bin/bash 3.2
+        run: |
+          set -euo pipefail
+          # No `| head -1` here: under `set -o pipefail` a short-reading head
+          # can turn a fine command into a failed step.
+          /bin/bash -c 'echo "bash $BASH_VERSION"'
+          ./macos/test-bootstrap.sh
+
+      # Same argument, one step earlier in the pipeline: parse every macOS shell
+      # script with the 3.2 the operator will use. `bash -n` is only a syntax
+      # check — it proves nothing about behaviour — but a script that does not
+      # parse is a failure the operator meets after they have already installed
+      # the CLI, downloaded a kernel and built an image.
+      - name: bash -n every macOS script (bash 3.2)
+        run: |
+          set -euo pipefail
+          for f in macos/poc.sh macos/smoke.sh macos/gateway-verify.sh \
+                   macos/sparkbox-bootstrap.sh macos/test-bootstrap.sh \
+                   macos/kernel/fetch.sh macos/kernel/build.sh; do
+            /bin/bash -n "$f"
+            echo "  parsed  $f"
+          done
+
+      # Say the quiet part out loud, in the job log, next to all that green —
+      # the same discipline the sluice and smoke jobs follow. The failure this
+      # guards against is somebody reading "darwin build, vet, test ✅" as
+      # "macOS provisioning is tested", which is exactly the class of untruth
+      # (a green report over work that never happened) that F7 was.
+      - name: what this job does not prove
+        run: |
+          # Single quotes throughout: a backtick inside a double-quoted string
+          # is command substitution, and `container` is precisely the command
+          # this step exists to say is absent.
+          echo 'SKIP: the `container` CLI is not installed on hosted macOS runners'
+          echo 'SKIP: no nested virtualization -> no machine create/start/stop/destroy'
+          echo 'SKIP: no gateway image build, no outer kernel boot, no /dev/kvm'
+          echo 'SKIP: `sparkbox setup` is never executed on this runner'
+          echo 'SKIP: internal/vmm/firecracker (//go:build linux) is not compiled here'
+          echo
+          echo "What IS green above: the darwin build, the full unit suite under"
+          echo "-race on real Apple Silicon, the linux/arm64 cross-compile a Mac"
+          echo "needs for the nested machine, and the bootstrap script's install"
+          echo "decisions under bash 3.2."
+          echo
+          echo "The real macOS machine lifecycle is proven only on an operator's"
+          echo "own Apple Silicon host. Until then, treat 'it works on a Mac' as"
+          echo "unproven no matter how green this job is."
+
+  # --------------------------------------------------------------- smoke -----
+  smoke:
+    name: provision smoke
+    needs: test
+    # aarch64 on purpose, and it is free for public repos. checkVirt
+    # (internal/hostsetup/checks.go) hard-FAILs on amd64 when /proc/cpuinfo has
+    # no vmx/svm — and Provision aborts on any preflight FAIL outside
+    # --dry-run — so on a hosted x86 runner (no nested virt) the real `setup`
+    # could never start. On arm64 checkVirt is not applicable and the run
+    # proceeds. This is also the arch the DGX gateway actually runs.
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sparkbox/go.mod
+          cache-dependency-path: tools/sparkbox/go.sum
+
+      # Stamp the version the same way hack/stage-artifacts.sh does, so the
+      # smoke can assert the plan's literal acceptance criterion: "on a clean
+      # host it installs its own binary and `sparkbox version` on the host
+      # matches the release".
+      - name: Build the binary under test
+        env:
+          RELEASE: v0-smoke
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.version=$RELEASE" \
+            -o "$RUNNER_TEMP/sparkbox" ./cmd/sparkbox
+          "$RUNNER_TEMP/sparkbox" version
+
+      # Phase 1 runs on the bare runner because that is the strongest place to
+      # assert it: --dry-run must be safe on a machine that fails preflight, has
+      # no root, no systemd and no /dev/kvm. It calls each step's Satisfied+Plan
+      # and nothing else, so if any of them ever mutates the host, this fails.
+      - name: setup --dry-run (plan + proves it changes nothing)
+        env:
+          SPARKBOX_BIN: ${{ runner.temp }}/sparkbox
+          RELEASE: v0-smoke
+        run: ./hack/smoke-setup.sh dry
+
+      # Phase 2: a real `setup` in a privileged systemd container.
+      #
+      # What this genuinely proves: every provisioning step runs against a real
+      # PID-1 systemd and a real journal — artifacts are fetched and
+      # sha256-verified, users.conf is seeded, both units are installed and
+      # started, the binary lands at --bin-path and reports the right version
+      # (F0), the service stays up across a settle window measured by NRestarts
+      # and the main PID's start timestamp (F7), the SSH control door and the
+      # HTTP edge answer, and a second run is idempotent. It then breaks the
+      # host on purpose (occupies :8080) and requires the probe to say so.
+      #
+      # What it does NOT prove, and the script prints each of these as a SKIP:
+      # no microVM is ever booted. Hosted runners have no nested virtualization,
+      # so /dev/kvm is a placeholder file and firecracker/vmlinux/rootfs are
+      # stubs — checkKVM, the firecracker driver and the unit's
+      # ConditionPathExists all only *stat* that path. Sandbox lifecycle stays
+      # covered by the in-process mock-driver e2e tests. Also untested here:
+      # TLS/ACME, the tunnel and tailnet edges, --subnet6, archiving,
+      # --move-admin-ssh, the swapfile step, and anything on darwin.
+      #
+      # sluice is a partial: the dry phase asserts both halves of --sluice (the
+      # default says out loud that sandboxes are unfiltered; the flag plans the
+      # install, the allowlist seed and the resolver port probe), the stub
+      # release publishes a sluice asset so the manifest cannot drift from
+      # stage-artifacts.sh, and the fetch/verify/seed/render path is covered by
+      # hostsetup's unit tests. What is NOT reached from any hosted runner is
+      # the eBPF data plane itself — loading needs CAP_BPF and attaching needs
+      # real sbtap devices — so `--sluice` is deliberately not turned on for the
+      # real container run: it would prove the daemon starts and nothing about
+      # whether it filters, at the cost of a flaky :53 bind.
+      - name: Real setup in a systemd container
+        env:
+          SPARKBOX_BIN: ${{ runner.temp }}/sparkbox
+          RELEASE: v0-smoke
+        run: ./hack/smoke-container.sh
