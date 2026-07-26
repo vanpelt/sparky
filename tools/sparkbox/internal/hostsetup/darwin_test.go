@@ -2,12 +2,14 @@ package hostsetup
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/machine"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/machine/machinetest"
@@ -103,6 +105,10 @@ func seedGuest(fd *machinetest.FakeDriver) {
 	// modelling the real consequence, so the second run of the same fake is
 	// genuinely a no-op.
 	fd.Execs["read-release-env"] = machinetest.Outcome{}
+	// The transport-readiness probe stepMachine runs after a create or start.
+	// A machine that answers on the first try is the ordinary case; the retry
+	// is TestWaitExecReadyRetriesOnlyTheTransport.
+	fd.Execs["exec-ready"] = machinetest.Outcome{}
 	fd.Execs["bootstrap"] = machinetest.Outcome{
 		Stdout: "sparkbox-bootstrap: installed " + testRelease + "\n",
 		Apply: func(f *machinetest.FakeDriver) {
@@ -1188,6 +1194,66 @@ func TestMachineProbeParsesGuestAnswers(t *testing.T) {
 
 // TestLinuxStepsUnchanged pins the linux pipeline's names and order, so darwin
 // work provably cannot perturb it.
+// TestWaitExecReadyRetriesOnlyTheTransport is the regression for the race that
+// killed the first real provisioning of a Mac node: the CLI reported the machine
+// running while the guest side of `container machine run` was not yet serving,
+// so the next step's script came back with no receipt and setup refused. Waiting
+// a minute and re-running the identical command worked.
+func TestWaitExecReadyRetriesOnlyTheTransport(t *testing.T) {
+	t.Run("a transport fault is waited out", func(t *testing.T) {
+		e, fd, buf := darwinTestEnv(t, false)
+		// Not answering, not answering, then fine.
+		fd.ExecSeq["exec-ready"] = []machinetest.Outcome{
+			{Err: machine.ErrTransport},
+			{Err: machine.ErrTransport},
+			{},
+		}
+		if err := waitExecReady(e, "sparkbox"); err != nil {
+			t.Fatalf("a machine that answers on the third try must be waited out, got %v", err)
+		}
+		if n := len(fd.Execd); n != 3 {
+			t.Errorf("probed %d times, want 3", n)
+		}
+		if !strings.Contains(buf.String(), "not answering commands yet") {
+			t.Errorf("the wait should be visible to an operator watching:\n%s", buf.String())
+		}
+	})
+
+	t.Run("a real failure is reported as itself, at once", func(t *testing.T) {
+		e, fd, _ := darwinTestEnv(t, false)
+		// A CLI too old to understand the argv does not get better by waiting,
+		// and burning two minutes before showing the operator the real error
+		// would be its own kind of lie.
+		fd.Execs["exec-ready"] = machinetest.Outcome{Err: machine.ErrUnsupported}
+		err := waitExecReady(e, "sparkbox")
+		if !errors.Is(err, machine.ErrUnsupported) {
+			t.Fatalf("err = %v, want the underlying failure unwrapped", err)
+		}
+		if n := len(fd.Execd); n != 1 {
+			t.Errorf("probed %d times, want exactly 1 — a non-transport error is not a race", n)
+		}
+	})
+
+	t.Run("a machine that never answers gives up with a next step", func(t *testing.T) {
+		e, _, _ := darwinTestEnv(t, false)
+		e.Cfg.ContainerBin = "container"
+		fdriver := e.Machine.(*machinetest.FakeDriver)
+		fdriver.Execs["exec-ready"] = machinetest.Outcome{Err: machine.ErrTransport}
+		// fakeProbe.Sleep advances no clock, so bound the loop by the deadline
+		// the real clock crosses. Keeping this honest matters more than keeping
+		// it instant: the point of the test is that the wait TERMINATES.
+		err := waitExecReadyUntil(e, "sparkbox", time.Now().Add(-time.Second))
+		if err == nil {
+			t.Fatal("a machine that never answers must not pass")
+		}
+		for _, want := range []string{"never accepted a command", "machine logs"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %q, want it to mention %q", err, want)
+			}
+		}
+	})
+}
+
 func TestLinuxStepsUnchanged(t *testing.T) {
 	want := []string{
 		"swapfile", "resolve-release", "install-binary", "data-volume", "fetch-artifacts",

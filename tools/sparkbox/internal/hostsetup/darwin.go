@@ -52,6 +52,11 @@ const (
 // running.
 const machineBootTimeout = 3 * time.Minute
 
+// machineExecSettle bounds the SECOND wait — for the guest side of
+// `container machine run` to start answering after the machine reports running.
+// See waitExecReady.
+const machineExecSettle = 2 * time.Minute
+
 // darwinSteps is the ordered darwin pipeline.
 func darwinSteps() []Step {
 	return []Step{
@@ -369,8 +374,69 @@ func stepMachine() Step {
 				}
 				e.logf("   started machine %s (was %s)\n", name, info.State)
 			}
-			return waitRunning(e, name)
+			if err := waitRunning(e, name); err != nil {
+				return err
+			}
+			return waitExecReady(e, name)
 		},
+	}
+}
+
+// waitExecReady blocks until the machine will actually RUN a script.
+//
+// "Reports running" is necessary and not sufficient, which cost the first real
+// provisioning of a Mac node (2026-07-26): setup logged `created machine
+// sparkbox`, then `machine sparkbox is running`, and the very next step died
+// with "the guest shell never acknowledged the script". Driving the identical
+// argv by hand a minute later, against that same machine, worked first time.
+// The CLI reports the VM up while the guest side of `container machine run` is
+// not yet serving, and a script sent into that window comes back with no
+// receipt at all.
+//
+// The receipt protocol turning that into a refusal rather than a false success
+// is exactly right (it is the F7 lesson, and it is why the failure was legible
+// at all) — but a race the tool can wait out should not be the operator's
+// problem, and "run setup twice" is not a fix, it is a folk remedy.
+//
+// This uses Exec where waitRunning deliberately does not, and the two are not in
+// conflict: they measure different things. waitRunning asks whether the machine
+// is UP, and Exec would boot a stopped machine, so using it there would change
+// the answer it was reading. This asks whether the TRANSPORT works — a question
+// only the transport can answer — and it runs after the machine is already up,
+// so there is nothing left for it to perturb.
+//
+// Only ErrTransport is retried. An inner failure or a broken CLI is reported as
+// itself, immediately: those do not get better by waiting, and burning two
+// minutes before showing an operator the real error would be its own kind of
+// lie.
+func waitExecReady(e *Env, name string) error {
+	return waitExecReadyUntil(e, name, time.Now().Add(machineExecSettle))
+}
+
+// waitExecReadyUntil is waitExecReady with the deadline injected, so the
+// give-up path is testable without spending machineExecSettle to reach it.
+func waitExecReadyUntil(e *Env, name string, deadline time.Time) error {
+	for attempt := 1; ; attempt++ {
+		_, err := e.Machine.Exec(e.Ctx, machine.ExecSpec{
+			Machine: name, Op: "exec-ready",
+			// The smallest script that still proves the whole path: the guest
+			// received it, ran it, and the receipt came back.
+			Script: "exit 0", ReadOnly: true, Timeout: 30 * time.Second,
+		})
+		if !errors.Is(err, machine.ErrTransport) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("machine %s reports running but never accepted a command within %s "+
+				"(%d attempts): %w.\n"+
+				"  The VM is up and the guest side of `%s machine run` is not answering.\n"+
+				"  logs: %s machine logs %s --boot",
+				name, machineExecSettle, attempt, err, e.Cfg.containerBin(), e.Cfg.containerBin(), name)
+		}
+		if attempt == 1 {
+			e.logf("   machine %s is up but not answering commands yet — waiting\n", name)
+		}
+		e.Probe.Sleep(2 * time.Second)
 	}
 }
 
