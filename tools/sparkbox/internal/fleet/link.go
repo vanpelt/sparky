@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -110,6 +111,70 @@ func (f *Fleet) SetSessions(c host.SessionCloser) {
 	f.sessions = c
 }
 
+// hangUpDrain bounds how long a fleet operation waits for the goodbyes it just
+// triggered. Long enough that a client which is still reading gets its bytes
+// (sshgw's own per-session write grace is 2s), short enough that a wedged
+// browser tab cannot hold somebody's pause open.
+const hangUpDrain = 3 * time.Second
+
+// hangUpBefore releases the terminals THIS gateway is holding for a sandbox
+// that the machine n is about to stop running, and waits for the goodbyes to be
+// written before returning.
+//
+// It exists because the ordering the local path gets for free does not survive
+// a link. host.Manager.pause closes attached sessions and only then calls the
+// driver, so the goodbye is written while the guest's sshd is still answering;
+// that is what turns a pause into "sparkbox: sandbox %q was paused" plus the
+// escape sequences that undo a full-screen TUI, rather than a terminal that
+// simply stops. On another machine the same code still runs — but its
+// SessionCloser is nodelink's Emitter, which by contract only ENQUEUES a
+// sandbox.paused event and returns, and the node then pauses its driver
+// immediately. The event still has to cross the wire and be handled here before
+// anything is hung up, while the guest's sshd is already gone and the SSH
+// channel carrying the terminal with it. The bridge unwinds first, the hang-up
+// arrives to an empty registry, and the user gets "shell exited with 1" with no
+// goodbye and no terminal restore. Round-trip latency makes the gateway lose
+// that race more often, not less, so it cannot be left to timing.
+//
+// The gateway therefore does its half BEFORE dispatching, which is the same
+// ordering the manager uses and the same sidestores rule everywhere else in the
+// fleet: the gateway does the part a node cannot, and only for a sandbox on
+// another machine. Doing it for a local sandbox would double up with the
+// manager's own call for no gain.
+//
+// The wording is "was paused" — Manager.Pause's exact fragment — because every
+// operation routed through here pauses the box on the way (Reboot, Resize,
+// Rename, Archive and Snapshot all call Manager.Pause locally), and a user
+// whose terminal just closed should read the same sentence on either machine.
+// The node's own sandbox.paused event arrives a moment later carrying the same
+// news; by then there is nothing left to close and ApplyPaused is a no-op,
+// which is exactly what a lossy event stream is allowed to be.
+//
+// A failure after this point leaves terminals closed on a sandbox that is still
+// running. That is not new and not a regression: the local path has the same
+// property, because Manager.pause closes sessions before a driver.Pause that
+// may itself fail.
+func (f *Fleet) hangUpBefore(n Node, sandbox string) {
+	if n == nil || n.Name() == f.localName {
+		return
+	}
+	f.mu.RLock()
+	sessions := f.sessions
+	f.mu.RUnlock()
+	d, ok := sessions.(host.SessionDrainer)
+	if !ok {
+		// Either no registry at all, or one that cannot be waited on. Nothing
+		// to do rather than something racy: CloseSandboxSessions here would
+		// return before the goodbye was written, which is the very thing this
+		// function exists to stop being true.
+		if sessions != nil {
+			sessions.CloseSandboxSessions(sandbox, "was paused")
+		}
+		return
+	}
+	d.DrainSandboxSessions(sandbox, "was paused", hangUpDrain)
+}
+
 // ApplyPaused hangs up the sessions attached to a sandbox that another machine
 // is about to stop running.
 //
@@ -118,9 +183,19 @@ func (f *Fleet) SetSessions(c host.SessionCloser) {
 // terminates at the gateway — the node holds none — so the machine doing the
 // pausing cannot close them and the gateway does not otherwise find out until
 // the user's terminal has already been left pointing at a VM that no longer
-// answers. The node emits this before its driver pauses anything, which is what
-// makes the goodbye arrive while the session is still healthy, exactly as a
-// local pause manages by calling the same registry from inside the manager.
+// answers.
+//
+// It is a BACKSTOP, not the ordering guarantee, and the difference matters. The
+// node emits this before its driver pauses anything, but emitting is not
+// delivering: the event still has to cross the link and be handled here, while
+// over there the driver pause is already tearing down the guest's sshd and the
+// channel every attached session rides on. A pause this gateway asked for is
+// therefore hung up by hangUpBefore, on the dispatch path, where the ordering
+// is real. What is left for this hook is the pauses the gateway did not ask
+// for — a node's own idle reaper, chiefly — where losing the race and closing a
+// terminal a moment late still beats leaving it pointed at a stopped VM. By the
+// time it runs for a pause the gateway initiated there is nothing left to
+// close, and it is a no-op.
 //
 // The reason is the NODE'S OWN WORDING, relayed. "was paused" and "went idle
 // for 30m" are sentences a machine composes about its own policy — the reaper's
@@ -166,12 +241,29 @@ func (f *Fleet) ApplyPaused(node string, m nodelink.PausedMsg) {
 // conservative answer: nothing is created and nothing is deleted on a node's
 // say-so, and an operator watching a machine come up with somebody else's
 // sandbox name on it can see that it did.
+// One thing IS done here, and it is the half no other path can cover: a
+// sandbox that reached running on the machine's OWN initiative needs its
+// secret environment, and the gateway's only notice of that is this event.
+// The gateway-driven starts (Create, EnsureRunning) push from the call itself;
+// a node rebooting and resuming its pinned sandboxes, or restoring one, tells
+// nobody and would otherwise bring every box back with an empty managed block.
+//
+// The filter is the REASON and not the state. Every running sandbox on a node
+// emits "touched" on every reaper tick, so triggering on state would mean an
+// SSH exec into every remote guest on every tick, forever. host.ReachedRunning
+// owns the vocabulary because the manager is what stamps it.
 func (f *Fleet) ApplyChanged(node string, m nodelink.ChangedMsg) {
 	if !f.speaksFor(node, m.Sandbox.Name, "change") {
 		return
 	}
 	f.log.Debug("node reported a change", "node", node,
 		"sandbox", m.Sandbox.Name, "state", m.Sandbox.State, "reason", m.Reason)
+	if host.ReachedRunning(m.Reason) {
+		// Not the caller's context: this hook has none, and the push must not
+		// be cancellable by the link's read goroutine moving on. pushEnv
+		// detaches and bounds it.
+		f.pushEnvByName(context.Background(), m.Sandbox.Name)
+	}
 }
 
 // ApplyGone records a sandbox another machine no longer has.

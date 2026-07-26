@@ -81,9 +81,33 @@ func linkAt(t *testing.T, ctx context.Context, f *fleet.Fleet, name string, now 
 			// reason a link ended.
 			PingEvery: time.Hour,
 		})
+		// Sent AND closed, so "has ServeLink returned?" can be asked more than
+		// once: a test that consumes the error itself must not leave the join
+		// below waiting for a second value that will never come.
+		close(n.served)
 	}()
 
 	waitFor(t, "the node to join the fleet", func() bool { return f.Online(name) })
+
+	// Join the link before the test ends. Registered last so it runs first: it
+	// drops the pipe, which is what makes ServeLink return, and then waits for
+	// it.
+	//
+	// Leaving it running is not merely untidy. ServeLink's unwind marks the
+	// machine offline and touches the placement store, and that store lives in
+	// the test's temp directory — so an unjoined goroutine is a sqlite
+	// connection still working while t.TempDir's RemoveAll walks the directory,
+	// which recreates the -shm file behind the sweep and fails the cleanup with
+	// "directory not empty" in whichever test drew the short straw.
+	t.Cleanup(func() {
+		gwEnd.Close()   //nolint:errcheck
+		nodeEnd.Close() //nolint:errcheck
+		select {
+		case <-n.served:
+		case <-time.After(10 * time.Second):
+			t.Errorf("ServeLink for %q never returned", name)
+		}
+	})
 	return n
 }
 

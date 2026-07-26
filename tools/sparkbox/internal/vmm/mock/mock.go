@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	gssh "github.com/gliderlabs/ssh"
@@ -37,6 +38,54 @@ type fakeVM struct {
 	balloonTarget int64  // MiB the balloon is holding (0 = deflated)
 	cpuNanos      uint64 // synthetic cumulative CPU time (see CPUTimeNanos)
 	netRx, netTx  uint64 // synthetic cumulative network bytes (see NetBytes)
+
+	// procMu guards procs: what is running "inside" this VM right now. A real
+	// microVM takes its processes with it when it stops; this one runs them on
+	// the host, so without this they outlive the machine that was supposed to
+	// be holding them — a shell still sitting in the workdir after the VM was
+	// paused or destroyed, writing into a directory the driver has already
+	// deleted or a test's temp dir is already sweeping.
+	procMu sync.Mutex
+	procs  map[*exec.Cmd]struct{}
+}
+
+// track registers a command as running inside the VM and returns its
+// deregistration.
+func (vm *fakeVM) track(cmd *exec.Cmd) func() {
+	vm.procMu.Lock()
+	if vm.procs == nil {
+		vm.procs = map[*exec.Cmd]struct{}{}
+	}
+	vm.procs[cmd] = struct{}{}
+	vm.procMu.Unlock()
+	return func() {
+		vm.procMu.Lock()
+		delete(vm.procs, cmd)
+		vm.procMu.Unlock()
+	}
+}
+
+// stopProcs kills everything running inside the VM and waits for it to be gone,
+// which is what "the machine stopped" means. Bounded, because a driver call
+// must not be able to hang on a wedged child, and best-effort: a process that
+// will not die is not worth failing a Pause over.
+func (vm *fakeVM) stopProcs() {
+	vm.procMu.Lock()
+	for cmd := range vm.procs {
+		if cmd.Process != nil {
+			cmd.Process.Kill() //nolint:errcheck
+		}
+	}
+	vm.procMu.Unlock()
+	for range 200 {
+		vm.procMu.Lock()
+		n := len(vm.procs)
+		vm.procMu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 type Driver struct {
@@ -92,8 +141,12 @@ func (d *Driver) start(vm *fakeVM, gatewayKey string) error {
 	if err != nil {
 		return err
 	}
+	// ptys carries each session's PTY details from the request loop to the
+	// handler. See snapPty for why they cannot simply be read in the handler.
+	var ptys sync.Map
 	srv := &gssh.Server{
-		Handler: func(s gssh.Session) { handleSession(s, vm.workdir) },
+		Handler:                func(s gssh.Session) { handleSession(s, &ptys, vm) },
+		SessionRequestCallback: func(s gssh.Session, _ string) bool { return snapPty(s, &ptys) },
 		PublicKeyHandler: func(_ gssh.Context, key gssh.PublicKey) bool {
 			return gssh.KeysEqual(key, authorized)
 		},
@@ -108,10 +161,45 @@ func (d *Driver) start(vm *fakeVM, gatewayKey string) error {
 	return os.WriteFile(keyPath, []byte(gatewayKey), 0o600)
 }
 
+// ptyInfo is one session's PTY, snapshotted off the goroutine that owns it.
+type ptyInfo struct {
+	req   gssh.Pty
+	winCh <-chan gssh.Window
+	isPty bool
+}
+
+// snapPty records a session's PTY details from inside the SSH request loop, and
+// exists only to keep the race detector honest about a genuine race in the
+// library.
+//
+// gliderlabs stores the current window inside the same struct Session.Pty()
+// returns by value, and writes to it from the request-loop goroutine every time
+// a "window-change" arrives (session.go:351) with no lock and no ordering
+// against the handler goroutine it spawned. So a guest that calls s.Pty() in
+// its handler — the documented way to use the API, and what this file used to
+// do — races every resize the client sends. It is upstream's race, but we are
+// the ones calling into it, and it turns up as a hard failure the moment
+// anything drives a browser terminal against a mock guest under -race.
+//
+// SessionRequestCallback is the fix because of WHERE it runs: the request loop
+// invokes it for "shell"/"exec" on its own goroutine, after "pty-req" has
+// already populated the fields and before it spawns the handler. Reading them
+// there is same-goroutine, and the `go` that starts the handler is the
+// happens-before edge that publishes the snapshot. Nothing is copied twice and
+// nothing is guessed.
+//
+// Always returns true: this is a snapshot, not a policy.
+func snapPty(s gssh.Session, ptys *sync.Map) bool {
+	req, winCh, isPty := s.Pty()
+	ptys.Store(s, ptyInfo{req: req, winCh: winCh, isPty: isPty})
+	return true
+}
+
 // handleSession runs the requested command (or an interactive shell) in the
 // sandbox workdir. This is intentionally NOT an isolation boundary — the mock
 // driver exists to exercise the control plane and gateway, not to sandbox.
-func handleSession(s gssh.Session, workdir string) {
+func handleSession(s gssh.Session, ptys *sync.Map, vm *fakeVM) {
+	workdir := vm.workdir
 	shell := "/bin/sh"
 	var cmd *exec.Cmd
 	if raw := s.RawCommand(); raw != "" {
@@ -123,7 +211,11 @@ func handleSession(s gssh.Session, workdir string) {
 	cmd.Env = append(os.Environ(), "SPARKBOX=mock", "HOME="+workdir)
 	cmd.Env = append(cmd.Env, s.Environ()...)
 
-	ptyReq, winCh, isPty := s.Pty()
+	var info ptyInfo
+	if v, ok := ptys.LoadAndDelete(s); ok {
+		info = v.(ptyInfo)
+	}
+	ptyReq, winCh, isPty := info.req, info.winCh, info.isPty
 	if isPty {
 		cmd.Env = append(cmd.Env, "TERM="+ptyReq.Term)
 		f, err := pty.Start(cmd)
@@ -132,10 +224,35 @@ func handleSession(s gssh.Session, workdir string) {
 			s.Exit(1) //nolint:errcheck
 			return
 		}
-		defer f.Close()
+		defer vm.track(cmd)()
+		// The pty master outlives this function only as far as the winsize
+		// goroutine, and the two must not touch it at the same time: Setsize
+		// reads f.Fd() while Close is destroying the descriptor underneath it,
+		// which is a real data race and, worse, a chance to resize whatever
+		// file the recycled fd now belongs to. gliderlabs pushes the INITIAL
+		// window onto winCh as soon as it accepts the pty request, so EVERY
+		// session runs at least one Setsize and every teardown can race it —
+		// which is why this showed up on a test that never resizes anything.
+		//
+		// One mutex, and a flag so a resize arriving after the shell exited is
+		// dropped rather than applied to a dead descriptor. The goroutine is
+		// left to drain winCh until gliderlabs closes it, because a blocked
+		// send on that channel stalls the session's whole request loop.
+		var ptyMu sync.Mutex
+		ptyClosed := false
+		defer func() {
+			ptyMu.Lock()
+			ptyClosed = true
+			f.Close() //nolint:errcheck
+			ptyMu.Unlock()
+		}()
 		go func() {
 			for win := range winCh {
-				pty.Setsize(f, &pty.Winsize{Rows: uint16(win.Height), Cols: uint16(win.Width)}) //nolint:errcheck
+				ptyMu.Lock()
+				if !ptyClosed {
+					pty.Setsize(f, &pty.Winsize{Rows: uint16(win.Height), Cols: uint16(win.Width)}) //nolint:errcheck
+				}
+				ptyMu.Unlock()
 			}
 		}()
 		go io.Copy(f, s) //nolint:errcheck
@@ -149,6 +266,7 @@ func handleSession(s gssh.Session, workdir string) {
 			s.Exit(1) //nolint:errcheck
 			return
 		}
+		defer vm.track(cmd)()
 	}
 	if err := cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -172,6 +290,7 @@ func (d *Driver) Pause(_ context.Context, name string) error {
 		return nil
 	}
 	vm.server.Close() //nolint:errcheck
+	vm.stopProcs()
 	vm.listener = nil
 	vm.server = nil
 	vm.paused = true
@@ -208,6 +327,7 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	if vm.server != nil {
 		vm.server.Close() //nolint:errcheck
 	}
+	vm.stopProcs()
 	delete(d.vms, name)
 	return os.RemoveAll(vm.workdir)
 }
@@ -219,6 +339,7 @@ func (d *Driver) Close() error {
 		if vm.server != nil {
 			vm.server.Close() //nolint:errcheck
 		}
+		vm.stopProcs()
 	}
 	return nil
 }

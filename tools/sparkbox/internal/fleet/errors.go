@@ -1,7 +1,6 @@
 package fleet
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -10,7 +9,12 @@ import (
 
 // codeUnreachable is the stable machine token for "that machine is not
 // answering". It is a Code and not a Kind on purpose — see Unreachable.
-const codeUnreachable = "node_unreachable"
+//
+// The token itself lives in ctlops, not here, because the surfaces that have
+// to tell a node outage from a guest fault are edges — the HTTP proxy, the
+// browser terminal — and making them import the router to ask would drag the
+// whole placement ledger into the edge's dependency graph for one string.
+const codeUnreachable = ctlops.CodeNodeUnreachable
 
 // Unreachable is the canonical "that machine is not answering" error.
 //
@@ -130,12 +134,9 @@ func contestedSandbox(op, sandbox string) *ctlops.Error {
 
 // IsNodeUnreachable reports whether err is (or wraps) a node outage.
 //
-// Nothing branches on it yet: the edge still renders a node outage as the
-// generic 502 it shows when a guest app is not listening. Telling the two apart
-// there — "the machine holding this is offline" — is M2 work, and this is the
-// predicate it will ask, kept here so the answer is not re-derived from the
-// Code string at each call site.
-func IsNodeUnreachable(err error) bool {
-	var e *ctlops.Error
-	return errors.As(err, &e) && e.Code == codeUnreachable
-}
+// It is ctlops.IsNodeUnreachable under a name this package's own callers
+// already use. The predicate moved down there when the edges acquired their
+// first consumers of it (W22): internal/proxy renders a node outage as a 503
+// that says the machine is offline, instead of the 502 that says the guest app
+// is not listening, and it must be able to ask without importing the router.
+func IsNodeUnreachable(err error) bool { return ctlops.IsNodeUnreachable(err) }

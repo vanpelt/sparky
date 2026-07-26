@@ -430,9 +430,21 @@ func serve(args []string) error {
 	// /etc/environment block over SSH when it reaches running (create, resume,
 	// restore, fork) and when the console changes a tag or secret. Installed
 	// post-construction so the manager never depends on it at build time.
-	syncer := envsync.New(secretsStore, mgr, upstreamKey, log)
+	//
+	// The lister is the FLEET, not the manager. SyncOwner's fan-out — what runs
+	// when the user console changes a tag or a secret — walks whatever it is
+	// given, so a manager here would quietly restrict every secret change to
+	// the sandboxes on this machine while reporting success for all of them.
+	// The dialer is what then lets a delivery reach a guest on another machine;
+	// the two together are the whole of it, because a node has no secrets store
+	// and its own push hook is nil (see internal/fleet/envsync.go).
+	syncer := envsync.New(secretsStore, flt, upstreamKey, log)
 	syncer.SetDialer(flt.DialContext)
 	mgr.SetEnvSync(syncer)
+	// The same syncer on both sides of the split: the manager fires it for a
+	// sandbox on this machine, the fleet for one on any other. There is exactly
+	// one channel into a guest's /etc/environment, and two would race over it.
+	flt.SetEnvPusher(syncer)
 
 	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
 	// --sluice-socket is set, which makes the syncer a no-op (rules can still be
@@ -502,12 +514,22 @@ func serve(args []string) error {
 	// DNS records) for the reserved names and each existing sandbox. This is
 	// the reconcile pass: new sandboxes are handled on create, and anything
 	// that failed or drifted since the last run is repaired here.
+	//
+	// It walks the FLEET rather than the local manager, and has to: a front
+	// door is a name plumbed on THIS host — an address in this host's range and
+	// a DNS record pointing at it — and the gateway mints one for a sandbox
+	// built on another machine too (fleet.mint). Reconciling only the local
+	// manager's names would quietly drop every remote sandbox's front door at
+	// the next deploy, and `ssh <name>.<domain>` would stop resolving for its
+	// owner with nothing in the logs about it. Nothing here touches a VM: the
+	// hooks take a name and plumb this host, so a row for a machine that is not
+	// answering yet costs an idempotent repair and no more.
 	if plumber != nil {
 		plumber.EnsureRange(ctx)
 		for _, r := range sshgw.ReservedUsers {
 			doorHooks.Ensure(ctx, r)
 		}
-		for _, b := range mgr.List() {
+		for _, b := range flt.List() {
 			doorHooks.Ensure(ctx, b.Name)
 		}
 		log.Info("front doors enabled", "range", doors.Range(),
@@ -516,6 +538,16 @@ func serve(args []string) error {
 
 	// A process restart marks every sandbox paused; bring the pinned ones back
 	// up so their in-guest daemons keep running across a host reboot.
+	//
+	// The manager, deliberately, and NOT the fleet. Both of the boot-time
+	// reconciliations below are true of the machine this process is on and
+	// false of every other one: this process dying took its own VMs with it, so
+	// "everything is paused now" is an observation here and an invention about
+	// a node — whose VMs kept running throughout, and whose own sparkbox is the
+	// one that resumes its pinned ones and reaps its idle ones. A gateway that
+	// ran either of these fleet-wide would stop somebody's work with a deploy
+	// they were told was invisible to them. See internal/fleet/reconcile.go's
+	// second prohibition, which is the same rule at ingest time.
 	mgr.ResumePinned(ctx)
 
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)

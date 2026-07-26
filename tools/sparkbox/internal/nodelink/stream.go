@@ -12,6 +12,8 @@ import (
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // The two kinds of guest port a stream can name. There is no third: everything
@@ -62,6 +64,53 @@ func (s StreamOpen) label() string {
 // gateway needs to distinguish.
 type Resolver func(sandbox, kind string, port int) (addr string, err error)
 
+// StreamResolver is the resolver every node runs: its own manager, and nothing
+// else. It is the enforcement of the rule StreamOpen only states — the payload
+// names a sandbox, so the address must come from the machine that booted it.
+//
+// The state check is here even though the gateway calls EnsureRunning before it
+// dials, and it is not belt-and-braces. Between that call and this one a reaper
+// can pause the box, and a paused sandbox's SSHAddr still names the port its
+// sshd used to listen on. Under the mock driver that port is ephemeral and gets
+// recycled; under firecracker the guest IP is reused by the next VM to take that
+// tap index. Refusing on state rather than trusting a stale address is the
+// difference between a stream that fails and a stream that quietly lands in
+// somebody else's sandbox.
+//
+// A kind this node does not serve is refused as not-running rather than as
+// unknown-sandbox, because the sandbox is fine: it is the request that names
+// something this machine does not offer, and ErrUnknownSandbox is reserved for
+// the one case that means the two machines disagree about placement (which the
+// node logs at Error, see serveStream).
+func StreamResolver(mgr Manager) Resolver {
+	return func(sandbox, kind string, port int) (string, error) {
+		b, ok := mgr.Get(sandbox)
+		if !ok {
+			return "", ErrUnknownSandbox
+		}
+		if b.State != vmm.StateRunning {
+			return "", ErrNotRunning
+		}
+		switch kind {
+		case StreamSSH:
+			// Verbatim, because only this machine knows where its guests' sshd
+			// listens: 172.30.<idx>.2:22 under firecracker, an ephemeral
+			// 127.0.0.1 port under the mock driver.
+			if b.SSHAddr == "" {
+				return "", ErrNotRunning
+			}
+			return b.SSHAddr, nil
+		case StreamTCP:
+			if b.HostIP == "" {
+				return "", ErrNotRunning
+			}
+			return net.JoinHostPort(b.HostIP, strconv.Itoa(port)), nil
+		default:
+			return "", ErrNotRunning
+		}
+	}
+}
+
 // OpenStream opens a sandbox-stream channel and adapts it to net.Conn. This is
 // the gateway's side: it is the only end that opens data channels, which is
 // what keeps a node's inbound surface to exactly one thing.
@@ -70,6 +119,20 @@ type Resolver func(sandbox, kind string, port int) (addr string, err error)
 // how the edge tells a node's "no such sandbox" (503, the machine is confused)
 // from a connection refused inside the guest (502, nothing is listening).
 func OpenStream(conn xssh.Conn, req StreamOpen) (net.Conn, error) {
+	c, err := openStream(conn, req)
+	if err != nil {
+		// Returned as an untyped nil rather than as (*streamConn)(nil): a typed
+		// nil in a net.Conn is not == nil, and every caller here tests the error
+		// first only by convention.
+		return nil, err
+	}
+	return c, nil
+}
+
+// openStream is OpenStream with the concrete type kept, for the one caller that
+// has to hold on to the stream after handing it out — Client, which tears its
+// live streams down when the link under them dies.
+func openStream(conn xssh.Conn, req StreamOpen) (*streamConn, error) {
 	ch, reqs, err := conn.OpenChannel(StreamChannel, xssh.Marshal(&req))
 	if err != nil {
 		return nil, err
@@ -139,7 +202,17 @@ func serveStream(ctx context.Context, nc xssh.NewChannel, resolve Resolver, live
 
 	up, err := net.DialTimeout("tcp", addr, StreamDialTimeout)
 	if err != nil {
-		_ = nc.Reject(xssh.ConnectionFailed, err.Error())
+		// The rejection message is the node's OWN WORDS about its own network,
+		// so it is the one string on this path that has to be composed rather
+		// than relayed. net's dial error names the address it tried —
+		// 172.30.<idx>.2:8000 under firecracker, 127.0.0.1:<ephemeral> under
+		// the mock driver — and that address is fleet-internal: it means
+		// nothing on the gateway (every machine mints the same guest IPs) and
+		// it travels from here into a public error page and a user's terminal.
+		// The gateway needs the CLASS of failure, which the rejection reason
+		// already carries; the address stays in this machine's log.
+		log.Info("nodelink: could not reach the guest", "addr", addr, "err", err)
+		_ = nc.Reject(xssh.ConnectionFailed, refusalWords(err))
 		return
 	}
 	ch, reqs, err := nc.Accept()
@@ -159,6 +232,22 @@ func serveStream(ctx context.Context, nc xssh.NewChannel, resolve Resolver, live
 	defer stop()
 
 	pipe(ch, up)
+}
+
+// refusalWords renders a failed guest dial for the gateway with no address in
+// it. Two phrasings, because they are the two things an owner would do
+// something different about: a refusal means the port is not being served, and
+// a timeout means something in the guest is wedged or firewalling.
+//
+// It deliberately does not fall back to err.Error() for the "other" case. The
+// whole point is that nothing composed by net reaches the wire, and an
+// unforeseen error class is exactly where an address would slip through.
+func refusalWords(err error) string {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timed out connecting to that port in the sandbox"
+	}
+	return "nothing accepted a connection on that port in the sandbox"
 }
 
 // pipe copies both ways and half-closes each direction as it ends, so a guest
@@ -212,6 +301,14 @@ type streamConn struct {
 	mu sync.Mutex
 	rd *time.Timer
 	wr *time.Timer
+	// reason is why this stream ended, when it ended for a reason worse than
+	// the guest hanging up. See fail.
+	reason error
+	// released runs once, when this stream stops being live, so whoever is
+	// holding a registry of streams can forget it. It is set before the conn is
+	// published to anyone and never afterwards.
+	released func()
+	gone     bool
 
 	// deadlineCalls counts every setter. It exists for the test that pins the
 	// assumption above: the day net/http starts setting deadlines on pooled
@@ -228,10 +325,65 @@ func newStreamConn(ch xssh.Channel, req StreamOpen) *streamConn {
 	}
 }
 
-func (c *streamConn) Read(p []byte) (int, error)  { return c.ch.Read(p) }
-func (c *streamConn) Write(p []byte) (int, error) { return c.ch.Write(p) }
-func (c *streamConn) LocalAddr() net.Addr         { return c.local }
-func (c *streamConn) RemoteAddr() net.Addr        { return c.remote }
+// Read and Write substitute the recorded reason for whatever x/crypto says once
+// the link has been torn out from under this stream.
+//
+// Without this a link that dies mid-transfer is indistinguishable from a guest
+// that finished talking: x/crypto closes every channel on a dead connection,
+// and a closed channel reads io.EOF and writes io.EOF. A truncated HTTP
+// response body that ends in a clean EOF is the worst failure this package can
+// produce — the proxy relays a short 200, the browser renders half a page, and
+// nothing anywhere logs a thing. It is also invariant 2 (an io.EOF may not
+// leak) applied to the data plane: fleet.Unreachable cannot wrap this, because
+// by the time it happens the dial has long since returned.
+func (c *streamConn) Read(p []byte) (int, error) {
+	n, err := c.ch.Read(p)
+	if err != nil {
+		if r := c.failure("read"); r != nil {
+			return n, r
+		}
+	}
+	return n, err
+}
+
+func (c *streamConn) Write(p []byte) (int, error) {
+	n, err := c.ch.Write(p)
+	if err != nil {
+		if r := c.failure("write"); r != nil {
+			return n, r
+		}
+	}
+	return n, err
+}
+
+func (c *streamConn) LocalAddr() net.Addr  { return c.local }
+func (c *streamConn) RemoteAddr() net.Addr { return c.remote }
+
+// failure renders the recorded reason as a *net.OpError, which is the shape
+// every caller here already handles: net/http's transport, x/crypto's client
+// handshake and io.Copy all treat it as an ordinary network failure, and
+// errors.Is reaches the sentinel underneath for anything that wants to branch.
+func (c *streamConn) failure(op string) error {
+	c.mu.Lock()
+	reason := c.reason
+	c.mu.Unlock()
+	if reason == nil {
+		return nil
+	}
+	return &net.OpError{Op: op, Net: c.remote.Network(), Addr: c.remote, Err: reason}
+}
+
+// fail records why this stream is ending and then ends it. The first reason
+// wins, for the same reason Conn.Fail keeps the first one: the close that
+// follows would otherwise overwrite the diagnosis with its own side effect.
+func (c *streamConn) fail(reason error) {
+	c.mu.Lock()
+	if c.reason == nil {
+		c.reason = reason
+	}
+	c.mu.Unlock()
+	_ = c.Close()
+}
 
 // CloseWrite half-closes, so an upstream reading to EOF gets one without the
 // whole stream going away.
@@ -241,7 +393,15 @@ func (c *streamConn) Close() error {
 	c.mu.Lock()
 	stopTimer(&c.rd)
 	stopTimer(&c.wr)
+	release := c.released
+	if c.gone {
+		release = nil
+	}
+	c.gone = true
 	c.mu.Unlock()
+	if release != nil {
+		release()
+	}
 	return c.ch.Close()
 }
 

@@ -251,6 +251,20 @@ func (m *fakeManager) AllSnapshots() []*host.Snapshot {
 	return append([]*host.Snapshot(nil), m.snaps...)
 }
 
+// Get is the resolver's whole view of this machine. Like *host.Manager's own it
+// answers a copy, so a caller cannot mutate the record through it.
+func (m *fakeManager) Get(name string) (*host.Sandbox, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, b := range m.boxes {
+		if b.Name == name {
+			c := *b
+			return &c, true
+		}
+	}
+	return nil, false
+}
+
 // testManager is the whole fake a link now asks for: the reporting half below
 // plus the lifecycle half in nodeops_test.go, which is where a test that drives
 // a verb keeps its recorder.

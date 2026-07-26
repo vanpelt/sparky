@@ -20,6 +20,7 @@ package proxy
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -31,6 +32,9 @@ import (
 	"strings"
 	"time"
 
+	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -391,6 +395,9 @@ func New(mgr Resumer, store *routes.Store, domain string, log *slog.Logger) *Ser
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Warn("proxy upstream error", "host", r.Host, "err", err)
 			route, _ := r.Context().Value(routeKey).(routes.Route)
+			if s.machineFailed(w, r, route, err) {
+				return
+			}
 			s.errorPage(w, r, http.StatusBadGateway,
 				fmt.Sprintf("Nothing is listening on port %d", route.Port),
 				// The underlying dial error goes to the log, not the page: on a
@@ -411,6 +418,99 @@ func New(mgr Resumer, store *routes.Store, domain string, log *slog.Logger) *Ser
 func (s *Server) SetDialer(d Dialer) {
 	s.transport = newUpstreamTransport(d)
 	s.rp.Transport = s.transport
+}
+
+// ---------------------------------------------------------------------------
+// When the failure is the machine, not the app
+// ---------------------------------------------------------------------------
+//
+// Everything the edge could not reach used to render as one page: 502, "nothing
+// is listening on port N". On a single box that was always true — the only
+// thing between the edge and the guest was the guest. In a fleet there are two
+// more things in the path, and telling a user their app is not listening when
+// the machine holding their sandbox is simply offline sends them to debug a
+// program that is running perfectly well on a computer that is asleep.
+//
+// So there are three answers now, and the SEPARATION is the point:
+//
+//   - 503, the machine is offline — the link to the node holding this sandbox
+//     is down. Nothing was tried and nothing is wrong with the sandbox.
+//   - 503, the sandbox is not running there — the machine answered and refused:
+//     it has no such sandbox, or the box is paused. (Between the resume above
+//     and the dial, a reaper on the far machine can pause it.)
+//   - 502, nothing is listening — the machine reached the guest and the guest
+//     refused the port. This is the original page and the original wording,
+//     because it is the original situation.
+//
+// The node's name appears ONLY for a request that carried an authenticated
+// identity. A public route is served to strangers who merely typed a URL, and
+// which machine holds which sandbox is fleet topology: an outage must not
+// become a free map of the deployment. This is the same rule the 502 page has
+// always followed by keeping the dial error in the log.
+
+// machineFailed answers an upstream failure that is about the machine rather
+// than the guest app, and reports whether it wrote a response. False means the
+// caller renders its own page — which for every single-box deployment is every
+// time, since neither branch can be reached without a node in the path.
+func (s *Server) machineFailed(w http.ResponseWriter, r *http.Request, route routes.Route, err error) bool {
+	if ctlops.IsNodeUnreachable(err) {
+		s.errorPage(w, r, http.StatusServiceUnavailable,
+			"The machine hosting this sandbox is offline",
+			fmt.Sprintf("Sandbox %s runs on another machine%s, which is not answering right now.",
+				route.Sandbox, s.nodeAside(r, err)),
+			"Nothing has been lost. It is reachable again as soon as that machine reconnects.")
+		return true
+	}
+	// A refusal from the node itself, typed rather than described: the stream
+	// never got as far as the guest. internal/nodelink refuses with Prohibited
+	// when it has no such sandbox or the box is not running, and with
+	// ConnectionFailed when it did dial the guest and the guest said no — which
+	// is the 502 below and must stay there.
+	var refused *xssh.OpenChannelError
+	if errors.As(err, &refused) && refused.Reason == xssh.Prohibited {
+		s.errorPage(w, r, http.StatusServiceUnavailable,
+			"The sandbox isn't running on its machine",
+			fmt.Sprintf("Sandbox %s did not come up on the machine that holds it.", route.Sandbox),
+			"Try again in a moment; if it persists, `ssh ctl@ list` shows what that machine thinks it has.")
+		return true
+	}
+	return false
+}
+
+// becauseFor renders ": <reason>" — the sentence explaining why a resume
+// failed — and withholds it only in the one case where it would say something
+// the reader is not entitled to.
+//
+// The reasons this page has always carried are the user's own situation: over
+// their running limit, host at capacity. Those name no machine and stay, so a
+// single-box deployment's page is byte-identical to what it always was. The
+// router's sentences are different in kind — "sandbox %q lives on node %q,
+// which is offline", "is not on node %q any more" — and are withheld from a
+// visitor the edge has not authenticated, because a public URL is served to
+// strangers and which machine holds whose work is not theirs to collect. The
+// reason always reaches the log either way.
+func (s *Server) becauseFor(r *http.Request, err error) string {
+	if node, ok := ctlops.MachineNamed(err); ok && node != "" {
+		if _, signedIn := r.Context().Value(identityKey).(edgeauth.Identity); !signedIn {
+			return ""
+		}
+	}
+	return ": " + err.Error()
+}
+
+// nodeAside renders " (node \"b\")" for a caller the edge has authenticated,
+// and nothing at all for anyone else. See the section comment above: a node
+// name is topology, and the owner of the sandbox is the only visitor entitled
+// to it.
+func (s *Server) nodeAside(r *http.Request, err error) string {
+	if _, ok := r.Context().Value(identityKey).(edgeauth.Identity); !ok {
+		return ""
+	}
+	node, ok := ctlops.UnreachableNode(err)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(" (node %q)", node)
 }
 
 // notListeningHint is the advice on the 502 page, and the closest thing sparkbox
@@ -483,6 +583,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return // authorize already wrote the redirect/401/403
 	} else if id != nil {
 		ctxr = context.WithValue(ctxr, identityKey, *id)
+		// Rebound here rather than only just before ServeHTTP, because the
+		// error pages between here and there have to know whether they are
+		// talking to somebody who signed in: it is what decides whether a
+		// failure may name the machine a sandbox lives on. See machineFailed.
+		r = r.WithContext(ctxr)
 	}
 
 	// The forwarded port comes from the URL (…:4444) when the visitor named one,
@@ -497,8 +602,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	box, err := s.mgr.EnsureRunning(ctx, route.Sandbox)
 	if err != nil {
 		s.log.Warn("resume for proxy failed", "sandbox", route.Sandbox, "err", err)
+		if s.machineFailed(w, r, route, err) {
+			return
+		}
 		s.errorPage(w, r, http.StatusBadGateway, "The sandbox couldn't be started",
-			fmt.Sprintf("Sandbox %q exists but didn't come up: %v.", route.Sandbox, err),
+			// Only a caller the edge authenticated is told WHY. The reason is
+			// a curated sentence for the failures a user can act on (at
+			// capacity, over their limit) but it is also the router's, and the
+			// router's sentences name machines: `sandbox %q is not on node %q
+			// any more` is a true and useful thing to tell an owner and a free
+			// map of the deployment to hand a stranger who typed a public URL.
+			fmt.Sprintf("Sandbox %q exists but didn't come up%s.", route.Sandbox, s.becauseFor(r, err)),
 			"Retry in a moment — if the host is at capacity, pausing another sandbox frees room.")
 		return
 	}

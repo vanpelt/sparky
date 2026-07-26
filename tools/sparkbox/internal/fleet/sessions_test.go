@@ -14,7 +14,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 )
@@ -223,5 +225,118 @@ func TestServeLinkWiresThePauseEvent(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.reason, "went idle for 30m") {
 		t.Errorf("reason = %q, want the machine's own words kept", got.reason)
+	}
+}
+
+// drainingSessions is fakeSessions that can also be waited on, which is what
+// the fleet asks of a registry when it is about to stop somebody's sandbox on
+// another machine. It records how much the machine had been asked to do at the
+// moment it was called, because "before" is the whole property under test and a
+// bare list of calls cannot show it.
+type drainingSessions struct {
+	fakeSessions
+	node *fakeNode
+
+	mu     sync.Mutex
+	drains []drainCall
+}
+
+type drainCall struct {
+	sandbox, reason string
+	// nodeCalls is how many operations the machine had received when the
+	// goodbye was written. Zero means the gateway got there first.
+	nodeCalls int
+}
+
+func (s *drainingSessions) DrainSandboxSessions(sandbox, reason string, _ time.Duration) int {
+	s.mu.Lock()
+	s.drains = append(s.drains, drainCall{sandbox, reason, s.node.callCount()})
+	s.mu.Unlock()
+	return 1
+}
+
+func (s *drainingSessions) drainCalls() []drainCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]drainCall(nil), s.drains...)
+}
+
+var _ host.SessionDrainer = (*drainingSessions)(nil)
+
+// TestFleetHangsUpBeforeAnotherMachineStopsTheVM is the ordering the goodbye
+// depends on.
+//
+// A pause severs a sandbox from everything attached to it, and the terminals
+// are held HERE while the sshd about to disappear is over THERE. Locally the
+// manager gets this right for free — it closes the sessions and then calls the
+// driver, in one process — but a node cannot: its session registry is the
+// nodelink emitter, which is contractually non-blocking and only queues an
+// event. So the goodbye would be in a footrace with the guest's death, over a
+// wire, and a lost race means the user's terminal vanishes with no explanation
+// and no reset of the mouse reporting a full-screen program turned on.
+//
+// Every operation below pauses the box on its way through Manager, so every one
+// of them has to hang up first, and with Manager.Pause's own wording so the
+// sentence is the same on either machine. A local sandbox must NOT be drained
+// here: its manager does it, and doing it twice would mean two goodbyes.
+func TestFleetHangsUpBeforeAnotherMachineStopsTheVM(t *testing.T) {
+	cases := []struct {
+		op string
+		do func(*fleet.Fleet, string) error
+	}{
+		{"pause", func(f *fleet.Fleet, name string) error { return f.Pause(context.Background(), name) }},
+		{"archive", func(f *fleet.Fleet, name string) error { return f.Archive(context.Background(), name) }},
+		{"resize", func(f *fleet.Fleet, name string) error { return f.Resize(context.Background(), name, 1) }},
+		{"reboot", func(f *fleet.Fleet, name string) error { return f.Reboot(context.Background(), name) }},
+		{"rename", func(f *fleet.Fleet, name string) error {
+			return f.Rename(context.Background(), name, name+"-2", "alice")
+		}},
+		{"snapshot", func(f *fleet.Fleet, name string) error {
+			_, err := f.Snapshot(context.Background(), name, "tpl", "alice")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.op, func(t *testing.T) {
+			index := newIndex(t)
+			f := newFleet(t, newManager(t, host.Options{NodeName: "boxa"}), index)
+			nodeb := newFakeNode("boxb")
+			attach(t, f, nodeb)
+			place(t, index, "remote", "alice", "boxb")
+			mustCreate(t, f, "here", "alice")
+
+			sessions := &drainingSessions{node: nodeb}
+			f.SetSessions(sessions)
+
+			// The machine's own answer does not matter: snapshot and fork
+			// refuse on a fakeNode, and the hang-up still has to have happened.
+			tc.do(f, "remote") //nolint:errcheck
+
+			got := sessions.drainCalls()
+			if len(got) != 1 {
+				t.Fatalf("%s drained %d times, want exactly one goodbye", tc.op, len(got))
+			}
+			if got[0].sandbox != "remote" {
+				t.Errorf("drained %q, want remote", got[0].sandbox)
+			}
+			if got[0].reason != "was paused" {
+				t.Errorf("reason = %q, want Manager.Pause's own wording", got[0].reason)
+			}
+			if got[0].nodeCalls != 0 {
+				t.Errorf("the machine had already been asked to do %d things when the goodbye was written; it must be written first",
+					got[0].nodeCalls)
+			}
+			if n := len(sessions.calls()); n != 0 {
+				t.Errorf("the fleet used the non-waiting close %d times; a remote stop must wait for the bytes", n)
+			}
+
+			// The local half of the same operation belongs to the manager.
+			sessions2 := &drainingSessions{node: nodeb}
+			f.SetSessions(sessions2)
+			tc.do(f, "here") //nolint:errcheck
+			if n := len(sessions2.drainCalls()); n != 0 {
+				t.Errorf("a sandbox on this gateway was drained by the fleet %d times; its manager owns that", n)
+			}
+		})
 	}
 }

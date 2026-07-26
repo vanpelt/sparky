@@ -25,9 +25,10 @@ package fleet
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"time"
+
+	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -468,20 +469,41 @@ func (r *remoteNode) Fork(ctx context.Context, snapName, newName, owner string, 
 	return r.record(resp.Sandbox, newName, owner), nil
 }
 
-// DialGuest is deliberately still a stub.
+// DialGuest opens a stream to a port inside a guest on the other machine.
 //
-// The control plane is finished — a sandbox can be created, paused, resized,
-// renamed and destroyed on another machine — but the DATA plane is not: a node
-// answers every inbound stream open with a refusal until its resolver is
-// replaced by one that reads its own manager, which is the next milestone. This
-// is what lets the control plane ship on its own.
+// It names a sandbox and never an address, which is the whole point of the
+// reverse stream: the node re-resolves from the record IT holds, so nothing this
+// gateway believes — a cached row, a sandbox that has since moved or paused —
+// can talk another machine into dialing something of its own choosing. It is
+// also why a remote sandbox's HostIP and SSHAddr are synthetic .invalid names:
+// there is no address here to leak, because there never was one.
 //
-// The refusal is minted here rather than left to the node so that the answer is
-// typed and immediate. Opening a channel across the network only to have it
-// declined would cost a round trip and arrive as an untyped sentence about a
-// stream, when what the caller can act on is "this cannot be done here yet".
-func (r *remoteNode) DialGuest(_ context.Context, sandbox, _ string, _ int) (net.Conn, error) {
-	return nil, ctlops.Disabled("dial", fmt.Sprintf(
-		"sandbox %q runs on node %q, and this gateway cannot yet carry a connection to a sandbox on another machine.",
-		sandbox, r.client.Name()))
+// The error handling is the one deliberate exception to invariant 2, and it is
+// load-bearing rather than an oversight:
+//
+//   - An *xssh.OpenChannelError is the NODE'S OWN typed answer, carried back by
+//     the protocol. It is the only thing that tells "that machine has never
+//     heard of this sandbox" and "it is not running" (Prohibited — the machine
+//     is confused or the box is down, a 503) apart from "connection refused
+//     inside the guest" (ConnectionFailed — nothing is listening on that port,
+//     the existing 502). Passing it through r.fail would collapse both into
+//     Unreachable and destroy the distinction the edge's error pages are built
+//     on. It is therefore returned untouched.
+//   - Everything else is the link dying under the open — io.EOF, a closed
+//     connection, a link that carries no data channels at all — and becomes
+//     Unreachable like every other transport death in this file.
+//
+// There is no retry. A channel-open rejection is an answer, not a hiccup, and
+// the one caller that retries at all (sshgw.DialUpstreamVia) already fast-fails
+// on both of these types rather than spending its 15-second budget on them.
+func (r *remoteNode) DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
+	c, err := r.client.DialSandbox(ctx, sandbox, kind, port)
+	if err != nil {
+		var refused *xssh.OpenChannelError
+		if errors.As(err, &refused) {
+			return nil, err
+		}
+		return nil, r.fail("dial", sandbox, err)
+	}
+	return c, nil
 }

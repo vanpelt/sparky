@@ -702,11 +702,16 @@ func TestRemoteCallerCancellationIsNotAnOutage(t *testing.T) {
 	}
 }
 
-// TestRemoteDialGuestIsRefusedInWords pins the one method that is deliberately
-// still a stub. The control plane crosses machines; the data plane does not
-// yet, and the honest answer to "open a connection into that guest" is a typed
-// refusal rather than a nil connection or an untyped sentence about a stream.
-func TestRemoteDialGuestIsRefusedInWords(t *testing.T) {
+// TestRemoteDialGuestOnALinkThatCarriesNoStreams pins invariant 2 on the data
+// plane's one entry point.
+//
+// This rig's link is a net.Pipe: it carries control frames and has no SSH
+// connection under it, which is exactly the shape of a link whose transport has
+// died — Client.DialSandbox has nothing to open a channel on. What must NOT
+// come back is the sentence it says about itself, which is a remark about this
+// process's plumbing that no user can act on. The gateway owes the caller the
+// same answer it owes for any other machine that is not answering.
+func TestRemoteDialGuestOnALinkThatCarriesNoStreams(t *testing.T) {
 	rig := newRemoteRig(t, nil)
 
 	conn, err := rig.node.DialGuest(context.Background(), "demo", nodelink.StreamSSH, 0)
@@ -716,11 +721,17 @@ func TestRemoteDialGuestIsRefusedInWords(t *testing.T) {
 	if err == nil {
 		t.Fatal("DialGuest reported success")
 	}
+	if !fleet.IsNodeUnreachable(err) {
+		t.Fatalf("DialGuest failed with %v (%T), want the node-unreachable answer", err, err)
+	}
 	e := ctlops.AsError("dial", err)
-	if e.Kind != ctlops.KindDisabled {
-		t.Errorf("DialGuest refused with %s/%s, want a disabled-feature answer", e.Kind, e.Code)
+	if e.Op != "dial" {
+		t.Errorf("op = %q, want the op the caller asked for", e.Op)
 	}
 	if !strings.Contains(e.Msg, "demo") || !strings.Contains(e.Msg, "node-b") {
 		t.Errorf("refusal = %q, want it to name the sandbox and the machine", e.Msg)
+	}
+	if strings.Contains(e.Msg, "channel") {
+		t.Errorf("refusal = %q, want no plumbing detail in a sentence a user reads", e.Msg)
 	}
 }

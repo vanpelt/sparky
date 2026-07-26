@@ -403,6 +403,61 @@ func IsKind(err error, k Kind) bool {
 	return errors.As(err, &e) && e.Kind == k
 }
 
+// CodeNodeUnreachable is the stable machine token for "the machine holding
+// this is not answering". internal/fleet mints the errors that carry it; it is
+// declared HERE, with the rest of the taxonomy, because a Code is part of the
+// contract a client switches on — it is in every JSON error body — and because
+// the surfaces that have to tell a node outage from a guest fault are edges
+// (internal/proxy, internal/xterm) that must not have to import the router to
+// ask. A Code and not a Kind for the reason fleet.Unreachable spells out:
+// KindCapacity already means exit 1 and HTTP 503, and a new Kind would mean
+// editing the embedded OpenAPI enum that is parsed at package init.
+const CodeNodeUnreachable = "node_unreachable"
+
+// IsNodeUnreachable reports whether err is (or wraps) a node outage — the
+// machine holding a sandbox is not answering, so nothing could be tried.
+//
+// The distinction it draws at an edge is the difference between two answers a
+// user reads very differently: "your app is not listening on that port" (the
+// sandbox is fine, the guest is not serving) and "the machine your sandbox
+// lives on is offline" (nothing about the sandbox is wrong and there is
+// nothing to fix).
+func IsNodeUnreachable(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Code == CodeNodeUnreachable
+}
+
+// MachineNamed reports whether err's sentence is about a particular machine,
+// and which one.
+//
+// It is Details["node"], asked as a question rather than read as a map, so that
+// the one decision it feeds — may this reader be told which machine? — is a
+// call a reader can find and grep for. Every error in this tree whose Msg names
+// a machine also carries the name in Details, and that is the contract this
+// depends on: a node outage, a sandbox its own machine no longer has, a create
+// aimed at a machine that is not answering.
+//
+// A machine's name is fleet topology. It is the useful half of the sentence for
+// the owner of the sandbox and it is a map of the deployment for a stranger who
+// merely typed a public URL. See internal/proxy's error pages.
+func MachineNamed(err error) (string, bool) {
+	var e *Error
+	if !errors.As(err, &e) {
+		return "", false
+	}
+	node, _ := e.Details["node"].(string)
+	return node, node != ""
+}
+
+// UnreachableNode is MachineNamed narrowed to a node outage: the machine is not
+// answering, as opposed to answering with something a caller did not want.
+func UnreachableNode(err error) (string, bool) {
+	if !IsNodeUnreachable(err) {
+		return "", false
+	}
+	return MachineNamed(err)
+}
+
 // ParseKind is the inverse of Kind.String(), derived from the same table rather
 // than restated. The string form is what crosses the node link precisely because
 // the Kind constants are iota-ordered: a future insertion would silently

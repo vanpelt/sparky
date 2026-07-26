@@ -4,6 +4,23 @@ package xterm
 // hang-up path, driven through a real WebSocket against a fake guest built on
 // io.Pipe. No VM, no SSH, no manager beyond the in-memory fake — the PTY seam
 // exists precisely so this file can exercise the framing without one.
+//
+// These are deliberately NOT parameterised by placement (W23), and the reason
+// is worth writing down rather than leaving to be rediscovered. newWSHarness
+// replaces h.open wholesale, so nothing here dials anything: running the same
+// bodies "once local, once remote" would run identical code twice and report
+// coverage it does not have, which is worse than not running them twice at all.
+// What placement can genuinely be asked of the browser terminal is the real
+// dialPTY against a real guest on either machine, and that needs two machines
+// and a link — so it lives in the root package's placement_e2e_test.go, where
+// the bridge assertions below are re-expressed against a guest that is a shell
+// rather than a pair of pipes.
+//
+// One assertion has no counterpart over there and stays unique to this file:
+// TestResizeIsForwardedAndClamped's clamp ({99999,0} → {1000,1}). The clamp
+// happens in the handler before anything is sent, so a guest cannot observe the
+// difference between a window that was clamped and one that was refused; only a
+// fake PTY recording what it was handed can.
 
 import (
 	"context"

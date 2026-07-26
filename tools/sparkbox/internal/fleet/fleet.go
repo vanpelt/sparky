@@ -16,6 +16,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // The compile assertions live here rather than beside the interfaces they
@@ -128,10 +129,24 @@ type Fleet struct {
 	// so a pause that happens on another machine can hang up the terminals this
 	// gateway holds for it. Nil until SetSessions; see link.go.
 	sessions host.SessionCloser
+	// envPush delivers an owner's secret environment into a sandbox on another
+	// machine, which no node can do for itself. Nil until SetEnvPusher; see
+	// envsync.go.
+	envPush host.EnvPusher
 
 	// foreign latches once this fleet can hold a record that is not on this
 	// machine. See hasRemote.
 	foreign atomic.Bool
+
+	// The tunneled conns DialContext has handed out, under their own lock.
+	//
+	// Deliberately not f.mu: that is the lock Get takes, and Get sits under
+	// every authorization decision the control plane makes. A proxy opening and
+	// closing connections must never be able to make an ownership check wait.
+	// See dial.go.
+	smu           sync.Mutex
+	streams       map[*tracked]struct{}
+	streamsClosed bool
 }
 
 func New(opts Options) (*Fleet, error) {
@@ -177,6 +192,7 @@ func New(opts Options) (*Fleet, error) {
 		reconcileGrace: orDuration(opts.ReconcileGrace, DefaultReconcileGrace),
 		now:            now,
 		nodes:          map[string]Node{},
+		streams:        map[*tracked]struct{}{},
 	}
 	if err := f.adoptLocal(); err != nil {
 		return nil, err
@@ -194,9 +210,18 @@ func orDuration(d, fallback time.Duration) time.Duration {
 	return d
 }
 
-// Close drops every linked node. The local manager and the ledger belong to
-// whoever opened them and are not closed here.
+// Close drops every linked node and tears down every tunneled connection this
+// fleet handed out. The local manager and the ledger belong to whoever opened
+// them and are not closed here.
+//
+// The streams go first, and they go at all because nothing else would end them.
+// A tunneled conn's lifetime belongs to whoever holds it — that asymmetry is
+// the whole of DialContext's no-close-bound rule — and the busiest holder is an
+// http.Transport idle pool, which will keep a connection for a minute and a half
+// after the request that dialed it. Dropping the node map without closing them
+// leaves those conns riding a link this fleet has stopped accounting for.
 func (f *Fleet) Close() error {
+	f.closeStreams()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	clear(f.nodes)
@@ -748,6 +773,10 @@ func (f *Fleet) placed(ctx context.Context, n Node, name, owner, image string, b
 	}
 	if n.Name() != f.localName {
 		f.mint(ctx, name, owner)
+		// The manager fires this for a sandbox built here; on a node the same
+		// hook is nil by construction, so a remote sandbox would boot with an
+		// empty managed block and stay that way. See envsync.go.
+		f.pushEnv(ctx, b)
 	}
 	return b, nil
 }
@@ -806,12 +835,54 @@ func (f *Fleet) reserve(name, owner, image string, n Node) (release func(), err 
 	}, nil
 }
 
+// EnsureRunning resumes a sandbox wherever it lives, and — for one on another
+// machine that was NOT already running — pushes its secret environment
+// afterwards, because the hook that does that automatically only exists on the
+// machine that holds the secrets store. See envsync.go.
+//
+// The push is gated on the state BEFORE the call, and reading it before is the
+// whole of the gate: after a successful EnsureRunning the sandbox is running by
+// definition, so a gate on the returned record would fire every time. That is
+// not the cheap redundancy envsync.go accepts between its case 1 and case 2 —
+// this method is on the per-request path. proxy.Server.ServeHTTP calls it for
+// EVERY request, sshgw for every session, xterm for every attach, the scheduler
+// for every job, so pushing on "it is running now" means one SSH dial,
+// handshake and `sudo -n /bin/sh` rewrite of /etc/environment per subresource
+// of every page a remote sandbox serves, queued on envsync's per-box mutex and
+// each carrying a three-minute budget. It is exactly what
+// TestAHeartbeatIsNotATransition rejects for the event path, arriving by a
+// hotter door: the trigger has to be the transition, not the state.
+//
+// A stale cache costs nothing here. If this gateway thought the box was running
+// and the machine had to resume it, the machine says so — host.Manager stamps
+// "resumed" and the node's emitter sends sandbox.changed, which ApplyChanged
+// turns into the push (link.go). Missing a push is a sandbox that gets its
+// environment a moment later; pushing on every request is an SSH exec per HTTP
+// hit forever.
 func (f *Fleet) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
 	n, err := f.route("restore", name)
 	if err != nil {
 		return nil, err
 	}
-	return n.EnsureRunning(ctx, name)
+	remote := n.Name() != f.localName
+	// The machine's last known picture of this sandbox, which is the only thing
+	// that can distinguish a resume from a no-op once the call has returned.
+	// Unknown counts as "not running": a name this link has never reported is a
+	// box the gateway cannot claim already had its environment.
+	wasRunning := false
+	if remote {
+		if before, ok := n.Box(name); ok && before.State == vmm.StateRunning {
+			wasRunning = true
+		}
+	}
+	b, err := n.EnsureRunning(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if remote && !wasRunning {
+		f.pushEnv(ctx, b)
+	}
+	return b, nil
 }
 
 func (f *Fleet) Pause(ctx context.Context, name string) error {
@@ -819,6 +890,7 @@ func (f *Fleet) Pause(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Pause(ctx, name)
 }
 
@@ -827,6 +899,7 @@ func (f *Fleet) Archive(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Archive(ctx, name)
 }
 
@@ -835,6 +908,7 @@ func (f *Fleet) Resize(ctx context.Context, name string, sizeMB int64) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Resize(ctx, name, sizeMB)
 }
 
@@ -843,6 +917,7 @@ func (f *Fleet) Reboot(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	f.hangUpBefore(n, name)
 	return n.Reboot(ctx, name)
 }
 
@@ -920,6 +995,7 @@ func (f *Fleet) Rename(ctx context.Context, oldName, newName, owner string) erro
 		}
 		undo = back
 	}
+	f.hangUpBefore(n, oldName)
 	if err := n.Rename(ctx, oldName, newName, owner); err != nil {
 		undo()
 		rollback()
@@ -981,9 +1057,20 @@ func (f *Fleet) SetPinned(name string, pinned bool) error {
 
 // ResyncEnv reports nothing, so a machine that is not answering is simply not
 // told: the secrets it is missing are pushed again when it reconnects.
+//
+// For a sandbox on another machine the gateway pushes rather than relays.
+// Relaying is what the code used to do and it delivered nothing at all: the
+// frame reaches the node's Manager.ResyncEnv, which fires a hook that is nil
+// over there because a node has no secrets store — so `ctl tag set` on a remote
+// sandbox silently changed which secrets it was entitled to and never changed
+// the secrets it had. See envsync.go.
 func (f *Fleet) ResyncEnv(ctx context.Context, name string) {
 	n, err := f.route("secrets.sync", name)
 	if err != nil {
+		return
+	}
+	if n.Name() != f.localName {
+		f.pushEnvByName(ctx, name)
 		return
 	}
 	if err := n.ResyncEnv(ctx, name); err != nil {
@@ -1077,6 +1164,7 @@ func (f *Fleet) Snapshot(ctx context.Context, box, snapName, owner string) (*hos
 	if err != nil {
 		return nil, err
 	}
+	f.hangUpBefore(n, box)
 	return n.Snapshotter(ctx, box, snapName, owner)
 }
 

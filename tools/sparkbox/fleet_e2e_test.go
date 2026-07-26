@@ -37,11 +37,15 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -93,6 +97,19 @@ type fleetStack struct {
 	// upstreamPub is the one piece of gateway material that ever crosses a link.
 	upstreamPub string
 
+	// The four gateway-owned stores keyed by a sandbox's NAME. They are here
+	// rather than in a data-plane-only harness because a node has none of them
+	// — cmd/sparkbox leaves every one nil in node mode — so a rig that wired
+	// none could not tell "the gateway does the half a node cannot" from "this
+	// deployment does not do it at all". See internal/fleet/sidestores.go.
+	routes    *routes.Store
+	schedules *schedule.Store
+	secrets   *secrets.Store
+	// syncer is the secret-env push. It is the ONLY way a secret reaches a
+	// sandbox on another machine, because that machine has no secrets store and
+	// its own push hook is nil; see internal/fleet/envsync.go.
+	syncer *envsync.Syncer
+
 	// The durable half, kept so the volatile half can be rebuilt over it — see
 	// restart. A gateway restarting replaces its router, its control plane and
 	// its door; it does not replace the state directory, the keys in it or
@@ -100,9 +117,17 @@ type fleetStack struct {
 	// question.
 	dir         string
 	log         *slog.Logger
+	driver      *mock.Driver
 	hostKey     xssh.Signer
 	upstreamKey xssh.Signer
 	srv         *gssh.Server
+	// reconcileGrace is how long a freshly placed name may go unreported by the
+	// machine it was placed on before the router gives up on it. Zero is the
+	// shipped two minutes; a test that wants to watch a machine disclaim a
+	// sandbox sets it small before the boot that will do the reconciling, since
+	// every row here is seconds old and the grace exists precisely to protect
+	// those.
+	reconcileGrace time.Duration
 }
 
 // nodeSide is the second machine. It holds no users, no secrets, no ledger and
@@ -116,9 +141,30 @@ type nodeSide struct {
 	mgr     *host.Manager
 	key     xssh.Signer
 	emitter *nodelink.Emitter
+	// link carries whatever this machine's supervisor returns, which is the
+	// only thing that can end it. See linkAlive.
+	link chan error
 
 	mu      sync.Mutex
 	welcome nodelink.Welcome
+}
+
+// linkAlive asserts the machine's link supervisor is still running.
+//
+// It is the assertion behind "nothing fatal was fed to the node": RunClient
+// returns only when its context is cancelled — every transport failure is a
+// backoff, not an exit — so a value on this channel means the gateway managed
+// to say something that made a machine give up on it. In cmd/sparkbox that
+// value goes straight into the process's error channel, so the node would not
+// merely stop reconnecting: it would exit, taking a healthy machine's whole
+// sparkbox down because somebody deployed the gateway.
+func (n *nodeSide) linkAlive(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-n.link:
+		t.Fatalf("%s's link supervisor returned %v; a gateway going away must never end it", n.name, err)
+	default:
+	}
 }
 
 func (n *nodeSide) lastWelcome() nodelink.Welcome {
@@ -167,17 +213,30 @@ func newFleetStack(t *testing.T) (*fleetStack, *nodeSide) {
 		t.Fatal(err)
 	}
 
-	driver := mock.New(dir, hostKey)
-	t.Cleanup(func() { driver.Close() })
-	mgr, err := host.NewManager(host.Options{
-		StateDir: dir, Driver: driver, Logger: log,
-		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey),
-		NodeName:         "gw", Arch: "amd64", Release: "2026-07-22",
-		HostMemMB: 16384, MemAdmissionPct: 80, HostVCPUs: 4,
-	})
+	// The gateway-owned side stores, on the same sqlite file everything else
+	// here uses. The local manager gets them exactly as cmd/sparkbox gives them
+	// to it, and the fleet gets the SAME objects (see boot) — one set of rows
+	// per deployment, reached from the router only for the sandboxes this
+	// manager will never be told about.
+	routeStore, err := routes.Open(db)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { routeStore.Close() })
+	scheduleStore, err := schedule.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { scheduleStore.Close() })
+	secretStore, err := secrets.Open(db, secrets.DeriveKEK([]byte("fleet-e2e-key-material")), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { secretStore.Close() })
+
+	// The driver outlives the manager on purpose; see newManager.
+	driver := mock.New(dir, hostKey)
+	t.Cleanup(func() { driver.Close() })
 
 	// The roster is a further writer on the same sqlite file the identity store
 	// already opened, which is how they ship. The placement ledger is opened by
@@ -190,18 +249,52 @@ func newFleetStack(t *testing.T) (*fleetStack, *nodeSide) {
 
 	fs := &fleetStack{
 		testStack: &testStack{
-			mgr: mgr, userKey: userKey, users: userStore,
+			userKey: userKey, users: userStore,
 		},
 		roster:      roster,
 		strangerKey: strangerKey,
 		upstreamPub: sshgw.PublicKeyLine(upstreamKey),
+		routes:      routeStore,
+		schedules:   scheduleStore,
+		secrets:     secretStore,
 		dir:         dir,
 		log:         log,
+		driver:      driver,
 		hostKey:     hostKey,
 		upstreamKey: upstreamKey,
 	}
+	fs.newManager(t)
 	fs.boot(t)
 	return fs, newNodeSide(t, log, sshgw.PublicKeyLine(upstreamKey))
+}
+
+// newManager builds this machine's manager over its state directory, exactly as
+// cmd/sparkbox does at startup — including everything host.NewManager does to
+// the records it loads, which is the half of a restart that is easy to forget a
+// test is not running.
+//
+// A restart calls it again, and the DRIVER is deliberately not rebuilt with it.
+// mock.Driver keeps its VMs in a map and a real firecracker host keeps its
+// rootfs images on disk, so a fresh mock driver would be a host that lost every
+// sandbox's disk in the restart rather than a host whose VMM processes died —
+// and nothing pinned could come back at all. Keeping it is what makes the
+// resume half of the boot sequence testable; the manager's own load is what
+// supplies the other half, since it marks every record it finds paused.
+func (fs *fleetStack) newManager(t *testing.T) {
+	t.Helper()
+	mgr, err := host.NewManager(host.Options{
+		StateDir: fs.dir, Driver: fs.driver, Logger: fs.log,
+		GatewayPublicKey: sshgw.PublicKeyLine(fs.upstreamKey),
+		NodeName:         "gw", Arch: "amd64", Release: "2026-07-22",
+		HostMemMB: 16384, MemAdmissionPct: 80, HostVCPUs: 4,
+		Routes:    fs.routes,
+		Schedules: fs.schedules,
+		Tags:      fs.secrets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.mgr = mgr
 }
 
 // boot builds everything a gateway restart rebuilds — the placement ledger's
@@ -218,12 +311,34 @@ func (fs *fleetStack) boot(t *testing.T) {
 	fleetLog := &syncBuf{}
 	flt, err := fleet.New(fleet.Options{
 		Local: fs.mgr, LocalName: "gw", LocalArch: "amd64", Index: index,
+		ReconcileGrace: fs.reconcileGrace,
+		// The same store objects the local manager holds. Wiring them is what
+		// gives a sandbox built on the other machine its default route row, and
+		// what carries its schedules and tag rows through a rename or a
+		// destroy; a fleet that left them nil would strand all three silently.
+		Routes: fs.routes, Schedules: fs.schedules, Tags: fs.secrets,
 		Log: slog.New(slog.NewTextHandler(fleetLog, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { flt.Close() })
+
+	// Secret env, wired exactly as cmd/sparkbox wires it: the syncer lists
+	// through the FLEET (so a change reaches an owner's sandboxes wherever they
+	// are), dials through the fleet (so a delivery can cross a link), and is
+	// installed on both the manager and the router — the manager pushes for a
+	// sandbox here, the router for one anywhere else.
+	//
+	// The guest target is redirected because a mock guest is an unprivileged
+	// process with the sandbox's workdir as its cwd, not a VM with an
+	// /etc/environment and a passwordless sudo. Redirecting it is what lets a
+	// test read the file a delivery actually wrote.
+	syncer := envsync.New(fs.secrets, flt, fs.upstreamKey, fs.log)
+	syncer.SetDialer(flt.DialContext)
+	syncer.SetGuestTarget("environment", "sh")
+	fs.mgr.SetEnvSync(syncer)
+	flt.SetEnvPusher(syncer)
 
 	// One control plane for the whole gateway, and deliberately one without a
 	// node roster.
@@ -242,6 +357,7 @@ func (fs *fleetStack) boot(t *testing.T) {
 	// handshake, the inventory, the heartbeat and a name defended fleet-wide.
 	ops := ctlops.New(ctlops.Config{
 		Sandboxes: flt, Templates: flt, Accounts: fs.users,
+		Tags: fs.secrets, Schedules: fs.schedules, Routes: fs.routes,
 		DefaultImage: "ubuntu", Domain: "hivemind.tools", Log: fs.log,
 	})
 	t.Cleanup(func() { ops.Close() })
@@ -259,30 +375,74 @@ func (fs *fleetStack) boot(t *testing.T) {
 	fs.mgr.SetSessions(gw)
 	flt.SetSessions(gw)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln := fs.listen(t)
 	srv := gw.Server("")
 	go srv.Serve(ln) //nolint:errcheck // returns on Close
 	t.Cleanup(func() { srv.Close() })
 
 	fs.index, fs.flt, fs.fleetLog, fs.gw, fs.srv = index, flt, fleetLog, gw, srv
+	fs.syncer = syncer
 	fs.addr = ln.Addr().String()
+
+	// Last, and last in cmd/sparkbox too: a process restart marked every record
+	// this machine holds paused, and the pinned ones are brought back so an
+	// in-guest daemon survives a deploy. It is the local half of the property
+	// this file's restart tests are about — the same boot that does this to
+	// THIS machine's VMs must do nothing whatsoever to another machine's.
+	fs.mgr.ResumePinned(context.Background())
 }
 
-// restart is the gateway process going away and coming back.
+// listen binds the gateway's door, reclaiming the address the previous process
+// was serving on when there was one.
 //
-// It stands the volatile half up again on a NEW socket rather than reclaiming
-// the old one, because a test that rebinds an ephemeral port is a test that
-// fails on somebody else's machine one day in twenty. From the node's side the
-// difference does not matter: what it reconnects to is a gateway with no memory
-// of the link it had, which is the whole point — every cached inventory, every
-// capacity report and the router's own idea of what is where died with the
-// process, and only sparkbox.db and the machines themselves are left.
-func (fs *fleetStack) restart(t *testing.T) {
+// Keeping the address is what makes a restart something a node can survive by
+// itself: nodelink.RunClient resolves its gateway once, so a supervisor left
+// running across a restart that moved to a fresh ephemeral port would spend the
+// rest of the test dialling something nothing answers, and the reconnect would
+// have to be faked by starting a second one — which would prove the harness can
+// reconnect, not that the machine does. The rebind is retried briefly because
+// the only thing that can refuse it is another process taking the port in the
+// moment between the two calls; a listening socket does not linger.
+func (fs *fleetStack) listen(t *testing.T) net.Listener {
+	t.Helper()
+	addr := fs.addr
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return ln
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rebinding the gateway's address %s: %v", addr, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// down is the gateway process going away: the door closes and every link it was
+// carrying is dropped abruptly, which is what a deploy looks like from a node.
+// Nothing else is torn down, because nothing else is what a node can observe.
+func (fs *fleetStack) down(t *testing.T) {
 	t.Helper()
 	fs.srv.Close() //nolint:errcheck // idempotent; the cleanup closes it again
+}
+
+// restart is the gateway process going away and coming back on the same
+// address, over the same state directory and the same sparkbox.db.
+//
+// Everything volatile is rebuilt: the manager (so the records on disk get the
+// treatment host.NewManager gives them at every boot), the placement ledger's
+// handle, the router, the control plane and the door. What the node reconnects
+// to is a gateway with no memory of the link it had — every cached inventory,
+// every capacity report and the router's own idea of what is where died with
+// the process, and only sparkbox.db and the machines themselves are left.
+func (fs *fleetStack) restart(t *testing.T) {
+	t.Helper()
+	fs.down(t)
+	fs.newManager(t)
 	fs.boot(t)
 }
 
@@ -412,6 +572,7 @@ func (fs *fleetStack) dial(t *testing.T, n *nodeSide) (unplug func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	n.link = done
 	go func() {
 		done <- nodelink.RunClient(ctx, nodelink.ClientOptions{
 			Gateway: fs.addr, NodeName: n.name, Key: n.key,
@@ -677,27 +838,30 @@ func (fs *fleetStack) ctl(t *testing.T, cmd string) (string, string, int) {
 // builds the sandbox on the other machine, and every command that follows finds
 // it there.
 //
-// The absence of a tag store is load-bearing. This stack wires none, so any word
-// that reaches the door as a tag fails the create with "tagging is not enabled".
-// A `--node` that were merely unrecognised would arrive as the two bare words
-// `--node` and `node-b`, which the door folds into the tag list — so the create
-// succeeding at all is the assertion that the flag was understood and not
-// silently swallowed.
+// That the flag was UNDERSTOOD, rather than merely tolerated, is asserted
+// explicitly and has to be. The new@ door takes no positional arguments and
+// folds every bare word into the tag list, so an unrecognised `--node node-b`
+// is not refused — it becomes the two tags "--node" and "node-b" on a sandbox
+// built here, and every other assertion in this test would still pass. The
+// sandbox therefore has to end up with NO tags at all.
 func TestFleetPlacesOnANamedNode(t *testing.T) {
 	fs, node := newFleetStack(t)
 	fs.join(t, node)
 	ctx := context.Background()
 
-	// The door creates, prints its banner, and only then tries to open a shell
-	// inside the guest — which cannot happen across a link yet (the data plane
-	// is the next milestone), so the session ends non-zero. The banner is what
-	// this test is here for.
+	// The door creates, prints its banner, and then opens a shell inside the
+	// guest — over a reverse stream, since the guest is on the other machine.
+	// The banner is what this test is here for; that the session succeeds at
+	// all is the data plane's, and is asserted on its own below.
 	_, banner, _ := fs.session(t, fs.userKey, sshgw.NewSandboxUser+"+far-away", "--node node-b")
 	if !strings.Contains(banner, `created sandbox "far-away"`) {
 		t.Fatalf("the create did not happen: %q", banner)
 	}
 	if !strings.Contains(banner, "on node-b") {
 		t.Errorf("the banner does not say where it landed: %q", banner)
+	}
+	if tags, err := fs.secrets.TagsFor("far-away"); err != nil || len(tags) != 0 {
+		t.Fatalf("tags = %v (err %v); --node was swallowed into the tag list rather than understood", tags, err)
 	}
 
 	// The three places that have to agree, and the one that must not.
@@ -719,6 +883,23 @@ func TestFleetPlacesOnANamedNode(t *testing.T) {
 	out, _, code := fs.ctl(t, "list")
 	if code != 0 || !strings.Contains(out, "far-away") {
 		t.Fatalf("ctl list = %q (exit %d)", out, code)
+	}
+
+	// The data plane, through the whole stack: a user's `ssh far-away@gateway`
+	// lands in a guest on the other machine.
+	//
+	// Nothing in this hop knows an address. The gateway's record carries the
+	// synthetic name far-away.node-b.sandbox.invalid, the fleet dialer turns
+	// that into a stream naming a sandbox, and node-b resolves it against its
+	// own manager — so a data path that still tried to dial box.SSHAddr as an
+	// address would fail HERE and nowhere else, which is exactly what this
+	// assertion is for.
+	shell, errs, code := fs.session(t, fs.userKey, "far-away", "echo hi")
+	if code != 0 {
+		t.Fatalf("ssh far-away@gateway exited %d: %s%s", code, shell, errs)
+	}
+	if got := strings.TrimSpace(shell); got != "hi" {
+		t.Fatalf("the remote guest said %q, want %q (stderr: %s)", got, "hi", errs)
 	}
 
 	// Every lifecycle verb, round-tripped against the machine that holds it.
@@ -864,10 +1045,18 @@ func TestFleetSandboxSurvivesItsMachineGoingAway(t *testing.T) {
 	}
 }
 
-// TestFleetSurvivesAGatewayRestart is reconciliation end to end, and it is the
+// TestFleetSurvivesGatewayRestart is reconciliation end to end, and it is the
 // case a fleet exists to make survivable: the gateway is the one process that
 // can be restarted without stopping anybody's work, because the work is not on
 // it.
+//
+// This is the variant where the machine is unreachable for the whole outage —
+// switched off, or on the wrong side of a network that is also down. Its rows
+// have to survive a boot that has never heard of it, which is the case where a
+// reconciliation written for one host is most tempting and most wrong: there is
+// nothing to reconcile against, and a gateway that treated silence as absence
+// would release every one of those names. The machine still attached across the
+// restart is TestFleetSurvivesGatewayRestartWithTheMachineAttached.
 //
 // The sequence is the one an operator actually performs — deploy a new binary,
 // which drops every link — with the machine's sandbox running throughout. What
@@ -881,7 +1070,7 @@ func TestFleetSandboxSurvivesItsMachineGoingAway(t *testing.T) {
 // gateway that applied its own boot reconciliation to another machine's records
 // would have paused it, and the user would find their work stopped by a deploy
 // they were told was invisible to them.
-func TestFleetSurvivesAGatewayRestart(t *testing.T) {
+func TestFleetSurvivesGatewayRestart(t *testing.T) {
 	fs, node := newFleetStack(t)
 	unplug := fs.join(t, node)
 
@@ -899,6 +1088,13 @@ func TestFleetSurvivesAGatewayRestart(t *testing.T) {
 	fs.restart(t)
 	if b, ok := node.mgr.Get("far-away"); !ok || b.State != "running" {
 		t.Fatalf("the restart reached node-b's VM: %+v", b)
+	}
+	// And nothing was destroyed on the machine either. The manager's record is
+	// in this process; the file is what would still be there after node-b's own
+	// reboot, and it is the thing a gateway deleting what it cannot see would
+	// take with it.
+	if !node.holds(t, "far-away") {
+		t.Fatal("node-b's state file lost the sandbox across a gateway restart")
 	}
 
 	// The new process has never spoken to node-b. What it knows is the ledger,
@@ -976,6 +1172,233 @@ func TestFleetSurvivesAGatewayRestart(t *testing.T) {
 	if out, _, _ := fs.session(t, fs.strangerKey, sshgw.ControlUser, "list"); strings.Contains(out, "made-offline") {
 		t.Errorf("an adopted sandbox is visible to a stranger: %q", out)
 	}
+}
+
+// sameRow compares two readings of one placement.
+//
+// Field by field rather than == because a Row carries two time.Time values and
+// a struct comparison of those is a comparison of monotonic readings and
+// *Location pointers, neither of which is what "the row was not written" means.
+func sameRow(a, b placement.Row) bool {
+	return a.Name == b.Name && a.Owner == b.Owner && a.Node == b.Node &&
+		a.Image == b.Image && a.Arch == b.Arch && a.State == b.State &&
+		a.CreatedAt.Equal(b.CreatedAt) && a.UpdatedAt.Equal(b.UpdatedAt)
+}
+
+// TestFleetSurvivesGatewayRestartWithTheMachineAttached is the deploy an
+// operator actually performs: the door closes under a LIVE link, with a running
+// VM on the other end of it.
+//
+// Three things about the machine, none of which anything else here can show:
+// its VM is untouched, its supervisor did not return, and it reattaches to the
+// new process by itself. The last one is why the restart keeps its address —
+// nodelink.RunClient resolves its gateway once and then only ever backs off, so
+// a reconnect is the machine's own retry loop rather than something a harness
+// arranged.
+//
+// And then the contrast, which is the whole of the item. The SAME boot that
+// left node-b's VM alone paused this machine's running sandbox and resumed this
+// machine's pinned one. Both of those are observations about the host the
+// process is on — its VMs died with it — and inventions about any other host,
+// whose VMs did not. A gateway that ran either of them fleet-wide would stop
+// somebody's work with a deploy nobody was supposed to notice, and the ledger
+// would be recording states no machine ever reported.
+func TestFleetSurvivesGatewayRestartWithTheMachineAttached(t *testing.T) {
+	fs, node := newFleetStack(t)
+	fs.join(t, node)
+	ctx := context.Background()
+
+	_, banner, _ := fs.session(t, fs.userKey, sshgw.NewSandboxUser+"+far-away", "--node node-b")
+	if !strings.Contains(banner, `created sandbox "far-away"`) {
+		t.Fatalf("the create did not happen: %q", banner)
+	}
+	if !node.holds(t, "far-away") {
+		t.Fatal("far-away is not on node-b, so this test would prove nothing")
+	}
+	// Two on THIS machine, one of them pinned, because the boot treats them
+	// differently and both treatments have to be seen to happen.
+	for _, name := range []string{"right-here", "pinned-here"} {
+		if _, err := fs.flt.Create(ctx, name, "tester", "ubuntu", 1, 512); err != nil {
+			t.Fatalf("creating %s on the gateway: %v", name, err)
+		}
+	}
+	if err := fs.mgr.SetPinned("pinned-here", true); err != nil {
+		t.Fatal(err)
+	}
+	before, ok, err := fs.index.Get("far-away")
+	if err != nil || !ok {
+		t.Fatalf("no ledger row for the remote sandbox: ok=%v err=%v", ok, err)
+	}
+
+	// The deploy. The link dies mid-flight, with no goodbye of any kind.
+	fs.restart(t)
+
+	// The machine never noticed. Its manager still holds a running VM, and its
+	// state file — the thing that would still be there after node-b's own
+	// reboot — still names it.
+	if b, ok := node.mgr.Get("far-away"); !ok || b.State != "running" {
+		t.Fatalf("node-b's sandbox = %+v, want still running", b)
+	}
+	if !node.holds(t, "far-away") {
+		t.Fatal("node-b's state file lost the sandbox across a gateway restart")
+	}
+	// Nothing fatal reached it either: the supervisor is still in its retry
+	// loop rather than having returned into cmd/sparkbox's error channel.
+	node.linkAlive(t)
+
+	// The local half of the same boot. Without this the paragraph above could
+	// be true because nothing ran at all.
+	if b, ok := fs.mgr.Get("right-here"); !ok || b.State != "paused" {
+		t.Fatalf("a running sandbox on THIS machine = %+v, want paused by the boot", b)
+	}
+	if b, ok := fs.mgr.Get("pinned-here"); !ok || b.State != "running" {
+		t.Fatalf("a pinned sandbox on THIS machine = %+v, want resumed by the boot", b)
+	}
+
+	// And the machine comes back on its own and the two pictures converge.
+	fs.awaitLink(t, node)
+	waitFor(t, "the gateway to take node-b's inventory again", func() bool {
+		b, ok := fs.flt.Get("far-away")
+		return ok && !b.Unreachable
+	})
+	after, ok, err := fs.index.Get("far-away")
+	if err != nil || !ok {
+		t.Fatalf("the placement did not survive: ok=%v err=%v", ok, err)
+	}
+	if !sameRow(before, after) {
+		t.Fatalf("the ledger row was written across a restart:\n before %+v\n after  %+v", before, after)
+	}
+	if b, _ := fs.flt.Get("far-away"); b.State != "running" {
+		t.Fatalf("the gateway shows it as %q, want what node-b reports", b.State)
+	}
+	if out, errs, code := fs.ctl(t, "pause far-away"); code != 0 {
+		t.Fatalf("ctl pause after the restart exited %d: %s%s", code, out, errs)
+	}
+	node.linkAlive(t)
+}
+
+// TestFleetSurvivesGatewayRestartKeepingWhatAMachineNoLongerHas is the outage
+// with disagreements in it: while the gateway is down, the machine loses one
+// sandbox and gains another whose name the ledger already places somewhere
+// else. Both are resolved on the reconnect, and the resolution of both is that
+// NOTHING IS DELETED — which is the restart-time form of reconcile.go's first
+// prohibition, and the reason a gateway coming up to an inventory it disagrees
+// with is not allowed to be decisive.
+//
+// The quarantine half deliberately ends with the incumbent row standing rather
+// than marked. A healthy row was authored by this gateway when a user asked for
+// a sandbox; marking it on a claim alone would let any approved machine take
+// any sandbox in the fleet out of service by reporting an inventory full of
+// guessed names. The marker is for the case where the row's own machine has
+// already disclaimed the name (fleet.contested); what is asserted here is the
+// case an operator will actually hit, and its answer is that the claimant is
+// served to nobody and told so.
+func TestFleetSurvivesGatewayRestartKeepingWhatAMachineNoLongerHas(t *testing.T) {
+	fs, node := newFleetStack(t)
+	fs.join(t, node)
+	ctx := context.Background()
+
+	_, banner, _ := fs.session(t, fs.userKey, sshgw.NewSandboxUser+"+gone-away", "--node node-b")
+	if !strings.Contains(banner, `created sandbox "gone-away"`) {
+		t.Fatalf("creating gone-away on node-b: %q", banner)
+	}
+	// A second sandbox on the same machine, so a reconciliation that gave up on
+	// everything cannot pass for one that gave up on the right thing. It goes
+	// through the router rather than the door because node-b is sized to hold
+	// exactly one default-sized sandbox, and this one only has to exist.
+	if _, err := fs.flt.CreateOn(ctx, "node-b", "still-there", "tester", "ubuntu", 1, 512); err != nil {
+		t.Fatalf("creating still-there on node-b: %v", err)
+	}
+
+	// The gateway goes away, and the world moves while it is gone.
+	fs.down(t)
+	if err := node.mgr.Destroy(ctx, "gone-away"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.mgr.Create(ctx, "contested", "tester", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	// A third machine already holds that name in the ledger. Written by hand
+	// because a second node is a second process and this one only has to exist
+	// as a row: what is being tested is what the gateway does with two claims,
+	// and the claim that matters is node-b's.
+	if err := fs.index.Reserve("contested", "tester", "node-c", "ubuntu", "arm64"); err != nil {
+		t.Fatal(err)
+	}
+	// Every row here is seconds old and the shipped grace protects a row that
+	// young from being given up on at all — it cannot tell one from a create
+	// still in flight. The outage is what is under test, not the clock.
+	fs.reconcileGrace = time.Millisecond
+	fs.newManager(t)
+	fs.boot(t)
+	fs.awaitLink(t, node)
+
+	// The machine is connected and does not have it. The row is marked and kept.
+	waitFor(t, "the gateway to give up on the sandbox node-b no longer has", func() bool {
+		row, ok, err := fs.index.Get("gone-away")
+		return err == nil && ok && row.State == placement.StateOrphaned
+	})
+	row, ok, err := fs.index.Get("gone-away")
+	if err != nil || !ok {
+		t.Fatalf("the orphaned placement was deleted: ok=%v err=%v", ok, err)
+	}
+	if row.Node != "node-b" || row.Owner != "tester" {
+		t.Fatalf("the orphaned row = %+v, want tester's, still on node-b", row)
+	}
+	if logged := fs.fleetLog.String(); !strings.Contains(logged, "the placement is kept, not deleted") {
+		t.Errorf("the gateway did not report giving up on a placement:\n%s", logged)
+	}
+	// Its owner still sees it, and is told what happened in one sentence rather
+	// than being told it never existed.
+	if out, _, _ := fs.ctl(t, "list"); !strings.Contains(out, "gone-away") {
+		t.Errorf("the owner lost sight of an orphaned sandbox: %q", out)
+	}
+	_, errs, code := fs.ctl(t, "pause gone-away")
+	want := `sparkbox: sandbox "gone-away" is not on node "node-b" any more: ` +
+		`that machine is connected and no longer has it` + "\r\n"
+	if errs != want {
+		t.Fatalf("the owner reads %q, want %q", errs, want)
+	}
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	// A stranger reads what they read about a name nobody ever used: the
+	// ownership gate is ahead of every branch reconciliation can reach.
+	_, mine, _ := fs.session(t, fs.strangerKey, sshgw.ControlUser, "pause gone-away")
+	if mine != `sparkbox: no sandbox named "gone-away"`+"\r\n" {
+		t.Fatalf("a stranger reads %q", mine)
+	}
+	// The sandbox that was there all along is untouched: a pass that gave up on
+	// everything would pass every assertion above.
+	if row, ok, err := fs.index.Get("still-there"); err != nil || !ok || row.State != placement.StateOK {
+		t.Fatalf("an unaffected placement = %+v (ok=%v err=%v), want unmarked", row, ok, err)
+	}
+
+	// The contested name: the ledger's answer stands, the claim is refused, and
+	// the machine keeps its disk.
+	waitFor(t, "the gateway to refuse node-b's claim on a placed name", func() bool {
+		return strings.Contains(fs.fleetLog.String(), "ignoring the claim")
+	})
+	claimed, ok, err := fs.index.Get("contested")
+	if err != nil || !ok {
+		t.Fatalf("the contested placement was deleted: ok=%v err=%v", ok, err)
+	}
+	if claimed.Node != "node-c" || claimed.State != placement.StateOK {
+		t.Fatalf("the contested row = %+v, want the incumbent's, unmarked", claimed)
+	}
+	if !node.holds(t, "contested") {
+		t.Error("node-b's copy of the contested sandbox was deleted; a refused claim must destroy nothing")
+	}
+	// And it is node-c's row that is served — never the claimant's, however
+	// loudly node-b reports it and however unreachable node-c is.
+	b, ok := fs.flt.Get("contested")
+	if !ok {
+		t.Fatal("the contested name resolves to nothing at all")
+	}
+	if b.Node != "node-c" || !b.Unreachable {
+		t.Fatalf("the gateway serves %+v for a contested name, want node-c's unreachable row", b)
+	}
+	node.linkAlive(t)
 }
 
 // A machine refuses in its own words, and the user reads the sentence they

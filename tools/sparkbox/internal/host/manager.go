@@ -277,6 +277,33 @@ type SessionCloser interface {
 	CloseSandboxSessions(sandbox, reason string) int
 }
 
+// SessionDrainer is a SessionCloser for a caller that is NOT holding the
+// manager's lock and therefore can afford to wait for the goodbye to actually
+// reach the client before it lets the VM stop answering.
+//
+// The distinction exists because the local pause path and the fleet's remote
+// one have opposite constraints, not because one of them is fussier. Locally
+// the ordering that makes the goodbye land is free: Manager.pause closes the
+// sessions and then calls the driver, in one process, so a hang-up goroutine
+// that has merely been *started* still gets to write before the guest's sshd
+// goes away — and it must not be waited on, because the manager holds a lock
+// the teardown takes. When the sandbox is on another machine there is no such
+// luck. The gateway holds the terminals, the machine holds the sshd, and
+// "started the hang-up" no longer implies "wrote the goodbye first": the pause
+// travels over a link, the guest dies over there, and the two race with the
+// wire in between. So the fleet — which holds no lock at all when it dispatches
+// — asks for the stronger guarantee and waits.
+//
+// Optional: nothing requires a SessionCloser to implement it, and a registry
+// that does not simply keeps the weaker, racy ordering.
+type SessionDrainer interface {
+	SessionCloser
+	// DrainSandboxSessions closes every session attached to sandbox and blocks
+	// until their goodbyes have been written, or wait elapses, whichever comes
+	// first. It returns how many it closed.
+	DrainSandboxSessions(sandbox, reason string, wait time.Duration) int
+}
+
 // Observer is told about every change to a sandbox record, so a process that
 // mirrors this host's inventory somewhere else can follow along instead of
 // polling. Optional: nil on a host nobody is mirroring, which is every
@@ -921,6 +948,34 @@ func (m *Manager) observe(b *Sandbox, reason string) {
 		return
 	}
 	m.observer.SandboxChanged(copyOf(b), reason)
+}
+
+// ReachedRunning reports whether an observed change is a transition INTO
+// running, given the reason the manager stamped on it.
+//
+// It exists for the fleet, and it lives here because the vocabulary is this
+// file's: the reasons are the literals passed to observe/observeName a few
+// lines up, and a predicate stated anywhere else would silently stop matching
+// the day one of them is added or renamed.
+//
+// Why a caller needs it at all: on a single box the manager fires its own
+// env-push hook the moment a sandbox reaches running. On a node that hook is
+// nil by construction — a node has no secrets store and must not — so the
+// gateway has to fire the push for a sandbox on another machine, and its only
+// notice that one has come up on the machine's own initiative (a node reboot
+// resuming its pinned sandboxes, a restore) is the change event. Every running
+// sandbox also emits "touched" on every reaper tick, so "state is running" is
+// not a usable trigger; the reason is what separates a transition from a
+// heartbeat.
+//
+// ADD A REASON HERE when you add one that ends with a VM running, or a sandbox
+// on another machine will come up without its secrets.
+func ReachedRunning(reason string) bool {
+	switch reason {
+	case "created", "resumed", "restored", "rebooted", "resized":
+		return true
+	}
+	return false
 }
 
 // observeName is observe for the paths that finish with the lock released:
@@ -1881,5 +1936,31 @@ func (m *Manager) save() error {
 
 func copyOf(b *Sandbox) *Sandbox {
 	c := *b
+	return &c
+}
+
+// Public copies a record for anything outside the control plane with its three
+// addresses dropped: SSHAddr, HostIP and GuestV6. nil in, nil out.
+//
+// It lives on the type that declares those fields, and not in each surface that
+// serializes one, so that a field added here is dropped by everything at once.
+// Three surfaces call it — both consoles (via webui.Public) and the legacy
+// loopback API — and internal/ctlops does the same thing by projecting onto a
+// shape that never had the fields at all.
+//
+// Why they must not escape. On a single box they are a guest address on a
+// bridge no client can route to: useless, and a needless statement of internal
+// layout. In a fleet they are worse than useless. Every machine mints its
+// guests the same 172.30.<idx>.2, so an address relayed from another machine
+// names one of THIS machine's sandboxes — which is why the fleet replaces them
+// with a synthetic <sandbox>.<node>.sandbox.invalid that resolves nowhere on
+// purpose. Emitting either is an invitation for something to dial it, and the
+// synthetic form additionally spells out which machine holds whose work.
+func (b *Sandbox) Public() *Sandbox {
+	if b == nil {
+		return nil
+	}
+	c := *b
+	c.SSHAddr, c.HostIP, c.GuestV6 = "", "", ""
 	return &c
 }

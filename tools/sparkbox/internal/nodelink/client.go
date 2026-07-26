@@ -73,6 +73,12 @@ type Manager interface {
 	List() []*host.Sandbox
 	AllSnapshots() []*host.Snapshot
 
+	// Get is the whole of the data plane's node half: a stream names a sandbox
+	// and this is where the address comes from. It is a read of one record and
+	// deliberately not List, because it runs on the path of every proxy request
+	// to every guest on this machine.
+	Get(name string) (*host.Sandbox, bool)
+
 	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
 	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
 	Pause(ctx context.Context, name string) error
@@ -266,7 +272,7 @@ func (c *nodeClient) runOnce(ctx context.Context) (linked bool, err error) {
 	// channel queue blocks x/crypto's mux loop — and with it every frame on
 	// this connection — so the one thing a node must never do is leave an
 	// inbound open unaccepted, even for the moment it takes to say hello.
-	go ServeStreams(linkCtx, ssh.HandleChannelOpen(StreamChannel), streamsNotCarriedYet, c.log)
+	go ServeStreams(linkCtx, ssh.HandleChannelOpen(StreamChannel), StreamResolver(c.mgr), c.log)
 
 	sess, err := ssh.NewSession()
 	if err != nil {
@@ -560,14 +566,6 @@ func (c *nodeClient) inventory() InventoryMsg {
 		inv.Snapshots = append(inv.Snapshots, snapshotRow(s))
 	}
 	return inv
-}
-
-// streamsNotCarriedYet is the resolver a node runs until the gateway can place
-// a sandbox on it. The accept loop is registered regardless, because leaving
-// inbound channel opens unaccepted is what freezes x/crypto's mux — a node with
-// nothing to serve still has to serve the refusal.
-func streamsNotCarriedYet(sandbox, _ string, _ int) (string, error) {
-	return "", fmt.Errorf("this node does not carry streams for %q yet", sandbox)
 }
 
 // hostKeyPin is trust-on-first-use for the gateway's host key.

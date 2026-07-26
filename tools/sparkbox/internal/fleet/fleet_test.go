@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -63,11 +64,38 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 // name the gateway uses so a test exercises the shared-database path.
 func newIndex(t *testing.T) *placement.Store {
 	t.Helper()
-	st, err := placement.Open(filepath.Join(t.TempDir(), "sparkbox.db"))
+	// Deliberately not t.TempDir(), and the reason is a real property of the
+	// driver rather than fussiness. sqlite3_close_v2 does not always finish
+	// closing when Close returns — a connection with a statement still to be
+	// finalised becomes a zombie and completes later — and a WAL database
+	// finishing its close writes the -shm side file back into the directory.
+	// t.TempDir sweeps its directory with RemoveAll and FAILS THE TEST if
+	// anything appears mid-sweep, so a database that closed a moment late
+	// showed up as "TempDir RemoveAll cleanup: directory not empty" against
+	// whichever test drew the short straw, with nothing in that test to point
+	// at the store. Owning the sweep means the late file is swept too, and a
+	// directory that will not go is left in TMPDIR rather than reported as a
+	// verdict on the code under test.
+	dir, err := os.MkdirTemp("", "sparkbox-index-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	st, err := placement.Open(filepath.Join(dir, "sparkbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		st.Close() //nolint:errcheck
+		// Bounded: nothing here waits on a real timer for a result, it only
+		// gives a late close somewhere to land before giving up quietly.
+		for range 50 {
+			os.RemoveAll(dir) //nolint:errcheck
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 	return st
 }
 
@@ -205,16 +233,35 @@ func (n *fakeNode) Create(context.Context, string, string, string, int64, int64)
 	return nil, errors.New("fakeNode cannot create")
 }
 
+// EnsureRunning answers the way a machine does: a sandbox that was not running
+// is resumed, and one that already was is handed back untouched. The difference
+// is invisible to the caller — both return a running record — which is exactly
+// why the fake has to make it, because the gateway's decision about whether to
+// push a secret environment turns on the state BEFORE the call.
 func (n *fakeNode) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
 	n.record("ensure_running")
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, b := range n.boxes {
 		if b.Name == name {
+			b.State = vmm.StateRunning
 			return b, nil
 		}
 	}
 	return nil, errors.New("no such sandbox")
+}
+
+// stopped parks a sandbox in a state a resume has something to do from. It is
+// the machine's own record that changes, which is the only place the state a
+// resume is judged against ever lives.
+func (n *fakeNode) stopped(name string, state vmm.State) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, b := range n.boxes {
+		if b.Name == name {
+			b.State = state
+		}
+	}
 }
 
 func (n *fakeNode) Pause(context.Context, string) error   { n.record("pause"); return nil }
@@ -902,4 +949,12 @@ func TestFleetNeedsALocalMachine(t *testing.T) {
 	if _, err := fleet.New(fleet.Options{Log: discardLog()}); err == nil {
 		t.Fatal("a fleet with nowhere to put anything was built")
 	}
+}
+
+// callCount is how many operations this machine has been asked to perform. Used
+// to say "the gateway did its half FIRST" without a clock.
+func (n *fakeNode) callCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.calls)
 }
