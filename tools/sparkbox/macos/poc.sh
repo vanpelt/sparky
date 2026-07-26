@@ -90,7 +90,7 @@ BOOTSTRAP_RESULT="/var/lib/sparkbox-bootstrap/release.env"
 
 MIN_CONTAINER_VERSION="1.1.0"
 MIN_MACOS_VERSION="15.0"
-SPARKBOX_RELEASE="${SPARKBOX_RELEASE:-v0.4.0}"
+SPARKBOX_RELEASE="${SPARKBOX_RELEASE:-v0.4.1}"
 ARTIFACT_BASE="${SPARKBOX_ARTIFACT_BASE:-https://github.com/vanpelt/sparky/releases}"
 # The opt-in escape hatch: develop against a working-tree sparkbox instead of
 # the released one. Either build it here (SPARKBOX_SOURCE_BUILD=1) or point at a
@@ -203,7 +203,7 @@ Environment overrides:
   SPARKBOX_GATEWAY_BUILD_MEMORY  gateway image build memory (default 8G)
   SPARKBOX_DATA_VOLUME_GB        required free space (default 40)
   SPARKBOX_RELEASE               pinned release: artifacts AND the sparkbox
-                                 binary (default v0.4.0; "latest" allowed)
+                                 binary (default v0.4.1; "latest" allowed)
   SPARKBOX_ARTIFACT_BASE         release base URL (default GitHub Releases)
   SPARKBOX_KERNEL_SOURCE         release (default) = download + verify the
                                  released outer kernel; build = compile it here

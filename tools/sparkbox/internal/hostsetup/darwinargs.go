@@ -81,6 +81,23 @@ func boolFlag(name string, get func(Config) bool) forwardableFlag {
 	}}
 }
 
+// boolValFlag forwards a bool as --name=false / --name=true, and is the correct
+// helper for any bool whose DEFAULT IS TRUE.
+//
+// boolFlag above is fine for presence flags (--sluice, --proxy-tls): they
+// default to false, so "not typed" and "typed false" are the same argv by
+// construction and rendering nothing for false loses nothing. A default-true
+// flag breaks that equivalence in the one direction that matters — an operator
+// who typed --agent-tools=false would have it rendered as nothing, the inner
+// setup would apply its own default of true, and the Mac would come back with a
+// machine baking agent CLIs the operator explicitly declined. Same class as
+// intFlag's --swap-gb 0: suppressing the zero value suppresses a CHOICE.
+func boolValFlag(name string, get func(Config) bool) forwardableFlag {
+	return forwardableFlag{name: name, render: func(c Config) []string {
+		return []string{fmt.Sprintf("--%s=%t", name, get(c))}
+	}}
+}
+
 // forwardableFlags is every inner-meaningful setup flag, in a stable order so
 // the rendered command line — which the dry-run plan prints verbatim — does not
 // shuffle between runs.
@@ -122,6 +139,8 @@ func forwardableFlags() []forwardableFlag {
 		strFlag("tls-email", func(c Config) string { return c.TLSEmail }),
 		strFlag("guest-dns", func(c Config) string { return c.GuestDNS }),
 		boolFlag("sluice", func(c Config) bool { return c.Sluice }),
+		// Default-true, so boolValFlag rather than boolFlag — see there.
+		boolValFlag("agent-tools", func(c Config) bool { return c.AgentTools }),
 		strFlag("sluice-dns-addr", func(c Config) string { return c.SluiceDNSAddr }),
 		strFlag("sluice-socket", func(c Config) string { return c.SluiceSocket }),
 		strFlag("archive-remote", func(c Config) string { return c.ArchiveRemote }),

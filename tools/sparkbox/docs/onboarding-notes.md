@@ -90,10 +90,36 @@ has no `setup` story:
 | Component | What it is | Where it lives now |
 | --- | --- | --- |
 | **sluice** | per-VM egress control (`/run/sluice.sock`, `sluice.env`, `allowlist.txt`) — the gateway is started with `--guest-dns 172.30.0.53 --sluice-socket …` and silently loses egress filtering without it | **fixed**: `setup --sluice` installs it from the release |
-| **agent tooling** | `sparkbox-refresh-tools.sh` → `/srv/sparkbox/tools/{claude,codex,hivemind}` + `versions.env`; what makes a sandbox useful | `deploy/install-host-tooling.sh` |
-| **guest identity** | `sparkbox-install-guest-identity.sh` | `deploy/install-guest-identity.sh` |
+| **agent tooling** | `sparkbox-refresh-tools.sh` → `/srv/sparkbox/tools/{claude,codex,hivemind}` + `versions.env`; what makes a sandbox useful | **fixed**: `setup` installs the script, its daily timer, and bakes the tools (`--agent-tools`, on by default) |
+| **guest identity** | `sparkbox-install-guest-identity.sh` | **fixed**: installed by the same step; the refresher calls it by its installed path |
 | **cloudflared** | public `*.catnip.sh` tunnel | hand-configured |
 | **tailscale + the edge /32** | `10.66.0.1` dedicated tailnet IP the edge binds; split-DNS via the Tailscale API | hand-configured, `docs/dedicated-edge-ip-cutover.md` |
+
+**Agent tooling closed next, and it was worse than a gap — it was a wrong
+answer.** The two rows above are now one `setup` step (`stepAgentTools`,
+`--agent-tools`, on by default), and closing them turned up the bug that
+motivated it. The refresher decided whether templates were current from a
+host-side stamp file, `$TOOLS_DIR/versions.env`, and exited without opening a
+single template. On the DGX the v0.4.0 upgrade fetched a fresh `universal.ext4`
+at 12:43 over a stamp written at 00:38; every run after that printed "templates
+already current" and every sandbox created from that template had no `claude`,
+no `codex` and no `hivemind`. `--force` existed and was documented — which means
+correctness depended on an operator remembering an invariant the script was in a
+position to check.
+
+The stamp now lives **inside** each template at `/etc/sparkbox/tools-rev`, read
+per template with `debugfs` (no mount, no loop device, read-only, so it is safe
+against a template being reflinked from right now). Both layers ask the same
+file: the script patches what does not match, `setup`'s `Satisfied` refuses to
+call the step done over a bare template, and `doctor` gained an `agent tooling`
+line that WARNs rather than staying green. An unreadable template counts as
+stale on purpose — a needless re-patch costs a minute, a wrong "current" costs
+every sandbox made that day and says nothing.
+
+The bake is also the one step in the pipeline whose failure is **not** fatal: it
+pulls several hundred MB from three third-party release channels, and a hiccup
+there must not undo a provisioning run whose gateway, network and units are all
+correct. It warns, names the retry, and the daily timer picks it up.
 
 `sluice` was the one that felt core, and it is now installable: a release
 publishes `sluice-linux-<arch>` with `SHA256_SLUICE` in the manifest, and

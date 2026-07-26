@@ -72,6 +72,9 @@ func DefaultChecks() []Check {
 		{"firecracker binary", checkFirecracker},
 		{"guest kernel", checkKernel},
 		{"rootfs template", checkRootfs},
+		// Right after the template, because it is a question ABOUT the template
+		// and the reader has just been told whether there is one.
+		{"agent tooling", checkAgentTools},
 		{"fleet keys", checkFleetKeys},
 		{"users.conf", checkUsers},
 		{"disk space", checkDisk},
@@ -325,6 +328,43 @@ func checkRootfs(p Probe, cfg Config) Result {
 	}
 	return fail("no rootfs template at "+path,
 		"`sparkbox setup` fetches + decompresses the rootfs; or set --default-image to a template you have")
+}
+
+// checkAgentTools reports whether the rootfs template this host clones actually
+// carries the agent CLIs.
+//
+// It is the diagnostic that was missing when it mattered. The DGX ran for a day
+// creating sandboxes with no claude, no codex and no hivemind in them: the
+// refresher was installed, its timer had run that morning and logged "templates
+// already current", and doctor was green — because nothing on the box was
+// asking the template, only a host-side stamp that a release upgrade had
+// replaced the template underneath. The versions were right and the file they
+// described was gone.
+//
+// So the question is asked of the image, with debugfs — read-only, no loop
+// device, safe against a template that sandboxes are being reflinked from right
+// now. WARN and not FAIL: a host in this state is healthy in every other way and
+// serves sandboxes fine, they are simply empty, and that is the operator's call
+// to make about a box they may have provisioned with --agent-tools=false.
+func checkAgentTools(p Probe, cfg Config) Result {
+	path := cfg.rootfsPath()
+	if fi, err := p.Stat(path); err != nil || fi.IsDir() {
+		// checkRootfs, one line above, has already failed on this and said what
+		// to do. Repeating it as a second failure would only add noise.
+		return pass("no template to inspect (see rootfs template above)")
+	}
+	out, err := p.Run("debugfs", "-R", "cat "+templateToolsStamp, path)
+	if err != nil && len(out) == 0 {
+		return warn("could not read "+path+" (debugfs not available?)",
+			"install e2fsprogs so this can be checked; the refresher needs it too")
+	}
+	stamp := strings.TrimSpace(firstLine(out))
+	if !strings.Contains(stamp, "claude=") {
+		return warn("the rootfs template carries no agent CLIs — every sandbox created from it has no claude, codex or hivemind",
+			"run "+filepath.Join("/usr/local/sbin", refreshToolsScript)+" (or `sparkbox setup`, which installs and runs it) — "+
+				"this is also what a template replaced by a release upgrade looks like")
+	}
+	return pass(stamp)
 }
 
 func checkFleetKeys(p Probe, cfg Config) Result {

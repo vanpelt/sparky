@@ -303,7 +303,18 @@ sha256-verified), lays down an XFS reflink volume, seeds your operator SSH key,
 installs the systemd units, and starts the gateway. It then verifies the result
 and **exits non-zero** if the gateway is not alive: a crash-looping service is a
 FAIL carrying the tail of its journal, not a PASS. `doctor` runs the same
-battery at any time. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
+battery at any time.
+
+It also **bakes the agent CLIs into the rootfs template** — `claude`, `codex`
+and `hivemind`, plus the guest workload-identity unit — and installs the daily
+timer that keeps them current. That is what makes a sandbox worth creating, and
+it is on by default (`--agent-tools=false` opts out). A released rootfs carries a
+toolchain and no agent; the tools are patched in afterwards, which takes about a
+minute instead of the ~65 of an image rebuild. The claim is checked against the
+**template itself** — `/etc/sparkbox/tools-rev` inside the image — rather than a
+stamp file beside it, so a template replaced by a release upgrade is re-baked
+instead of being declared current, and `doctor`'s `agent tooling` line reports a
+bare template rather than staying green over one. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
 fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
 
@@ -419,16 +430,41 @@ its own backoff (~30s), so approval needs no restart: it reconnects, logs
 `linked to the gateway`, and starts heartbeating. The same roster is
 `GET /v1/nodes` over the REST API.
 
-> **What a fleet is at v0.4.0.** What shipped is the **link layer** — enrollment,
-> trust, roster, heartbeat, capacity and architecture reporting, all surviving a
-> restart on either side. **No sandbox lands on a remote node yet.** `ssh
-> new@<gateway>` always creates on the gateway itself: `Fleet.Create` has no
-> placement step and there is no `--node` override. Remote lifecycle is the next
-> milestone, and the data plane that makes a remote sandbox indistinguishable
-> from a local one is the one after. So a fleet today is a trusted roster of
-> machines, not a scheduler — worth knowing before you add a node expecting your
-> laptop to start running sandboxes. The blueprint for both milestones is
+### Placing work on a node
+
+Once a node is approved, name it and the sandbox is built there:
+
+```sh
+ssh new+webapp@<gateway> -- --node laptop     # build on the node called laptop
+ssh webapp@<gateway>                          # …and reach it exactly as if it were local
+```
+
+Everything after that is meant to be indistinguishable from a local sandbox: the
+shell, the web routes at `webapp.<domain>`, the browser terminal, pause/resume,
+snapshots and `ctl` all work through the gateway, which holds the session and
+relays it over the node link. A node behind NAT needs no inbound anything — it
+dialled out to enroll and the same connection carries the work.
+
+> **The default is still "build here", on purpose.** With no `--node`, `ssh
+> new@<gateway>` creates on the gateway itself, exactly as a single-box
+> deployment always did. There is no scheduler and no best-fit spreading: a
+> gateway that started moving people's work across machines the day a second one
+> joined would be surprising in the one direction that costs someone their
+> afternoon. Placement is a thing you ask for.
+
+> **Egress rules do not cross the link yet.** Tag-to-rule bindings live in the
+> gateway's store, and nothing carries them to a node — so a **tagged sandbox
+> placed on a remote node is unfiltered**, where the same sandbox on the gateway
+> would be governed by its tag's allowlist. The node says so at startup and the
+> code names it (`ungovernedRules` in `cmd/sparkbox/node.go`). If egress control
+> is load-bearing for you, keep tagged work on the gateway until the relay
+> lands; the plan is in
 > [`docs/multi-node-implementation.md`](docs/multi-node-implementation.md).
+
+> **Also gateway-only: guest identity.** The metadata service signs id tokens
+> with the fleet's OIDC key, which a node never holds — so a sandbox on a node
+> gets no workload-identity token, and `hivemind start` there has nothing to
+> federate with.
 
 ## Real microVMs
 
@@ -462,7 +498,7 @@ release only goes public once **every** platform lands, so `setup` can never
 resolve a half-populated `latest`.
 
 ```sh
-git tag v0.4.0 && git push origin v0.4.0    # cut a release
+git tag v0.4.1 && git push origin v0.4.1    # cut a release
 gh workflow run "sparkbox release"          # ad-hoc dev-<ts> prerelease (doesn't move `latest`)
 ```
 
@@ -530,7 +566,14 @@ derives the darwin pair from the arm64 manifest that produced.
 - [x] Fleet link layer: a second machine joins with `setup --gateway host:port`,
       enrolls by its own key, is approved by fingerprint (`ctl node approve`),
       and reports arch + capacity over a heartbeat — see *Adding a second
-      machine*. The roster is real; the scheduler is not (next item)
-- [ ] Multi-host placement: remote create/pause/resume and best-fit scheduling
-      (flyd pattern). Until this lands every sandbox runs on the gateway,
-      whatever the roster says
+      machine*
+- [x] Multi-host placement + data plane: `ssh new@<gw> -- --node <name>` builds
+      on a node, and the shell, web routes, terminal, pause/resume, snapshots
+      and `ctl` all reach it through the gateway. Placement is explicit by
+      design — with no `--node` the gateway still builds locally
+- [ ] Best-fit scheduling (flyd pattern): a placer that picks the node itself
+      from the roster's capacity, instead of the operator naming one
+- [ ] Relay egress policy to nodes: tag-to-rule bindings live in the gateway's
+      store, so a **tagged sandbox on a node is unfiltered** today
+- [ ] Guest identity on nodes: id tokens are signed by the gateway's OIDC key,
+      which a node never holds, so a sandbox there gets no workload token

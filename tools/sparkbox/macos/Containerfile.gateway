@@ -33,6 +33,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 # curl + ca-certificates are load-bearing, not conveniences: sparkbox-bootstrap
 # fetches the release manifest and binary over HTTPS with them, and
 # gateway-verify.sh proves that path works before anything depends on it.
+#
+# python3 is here for the same reason and is just as load-bearing: the inner
+# `setup` runs deploy/refresh-agent-tools.sh to bake claude/codex/hivemind into
+# the rootfs templates, and that script parses three release manifests with it
+# and MERGES the guest's ~/.claude.json rather than clobbering a real user's
+# accumulated state. Without it the machine provisions cleanly and every sandbox
+# it creates is empty. debugfs (e2fsprogs, below) is the other half: it is how
+# the refresher reads each template's own stamp instead of trusting a host-side
+# one.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -41,6 +50,7 @@ RUN apt-get update \
       e2fsprogs \
       iproute2 \
       iptables \
+      python3 \
       systemd \
       systemd-sysv \
       util-linux \

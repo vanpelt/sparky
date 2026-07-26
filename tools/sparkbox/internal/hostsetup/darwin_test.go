@@ -855,6 +855,29 @@ func TestInnerSetupArgs(t *testing.T) {
 			wantErr: "--move-admin-ssh cannot be used on macOS",
 		},
 		{
+			// A default-TRUE bool cannot be a presence flag at this boundary.
+			// Rendered the way --sluice is, `--agent-tools=false` would emit
+			// nothing, the inner setup would apply its own default of true, and
+			// the Mac would come back with a machine baking agent CLIs the
+			// operator explicitly declined — the silent-drop failure this whole
+			// file exists to prevent, in the one direction where "absent" and
+			// "false" are not the same thing.
+			name: "--agent-tools=false is forwarded as a value, not dropped",
+			cfg: func(c Config) Config {
+				c.FlagsGiven["agent-tools"] = true
+				c.AgentTools = false
+				return c
+			},
+			wantHas: []string{"--agent-tools=false"},
+		},
+		{
+			name: "an untyped --agent-tools is not forwarded (the inner default is the same true)",
+			cfg:  func(c Config) Config { return c },
+			wantLacks: []string{
+				"--agent-tools=true", "--agent-tools=false", "--agent-tools",
+			},
+		},
+		{
 			name: "--bin-path is refused too",
 			cfg: func(c Config) Config {
 				c.FlagsGiven["bin-path"] = true
@@ -1168,7 +1191,7 @@ func TestMachineProbeParsesGuestAnswers(t *testing.T) {
 func TestLinuxStepsUnchanged(t *testing.T) {
 	want := []string{
 		"swapfile", "resolve-release", "install-binary", "data-volume", "fetch-artifacts",
-		"users.conf", "host-config", "net-rules", "sluice", "systemd-units", "admin-ssh", "enable-services",
+		"users.conf", "host-config", "net-rules", "sluice", "agent-tools", "systemd-units", "admin-ssh", "enable-services",
 	}
 	var got []string
 	for _, s := range allSteps() {

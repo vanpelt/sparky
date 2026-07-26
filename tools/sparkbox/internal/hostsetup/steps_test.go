@@ -555,6 +555,8 @@ func TestProvisionFailsWhenVerificationFails(t *testing.T) {
 		"systemctl enable --now sparkbox.service":     "",
 		"systemctl restart sparkbox.service":          "",
 		"systemctl restart sparkbox-net.service":      "",
+		"systemctl enable --now " + refreshToolsTimer: "",
+		filepath.Join(e.SbinDir, refreshToolsScript):  ">> patching universal.ext4",
 	})
 
 	err := Provision(e)

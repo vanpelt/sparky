@@ -1,0 +1,14 @@
+[Unit]
+Description=refresh agent CLIs (claude, codex, hivemind) in sparkbox rootfs templates
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The box's actual layout wins over the script's compiled-in cloud defaults: a
+# host provisioned with --root or --image-dir keeps its templates somewhere the
+# script would otherwise not look, and a refresher pointed at an empty directory
+# exits 1 rather than patching anything.
+Environment=IMAGES_DIR={{.ImageDir}}
+Environment=TOOLS_DIR={{.ToolsDir}}
+ExecStart={{.ScriptPath}}

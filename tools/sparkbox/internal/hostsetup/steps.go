@@ -384,6 +384,12 @@ func allSteps() []Step {
 		// both daemons: a gateway that came up first would spend its startup
 		// failing to push policy at a socket nothing was listening on.
 		stepSluice(),
+		// After fetch-artifacts, which is what puts a template on disk for it to
+		// patch, and before the gateway is started: a sandbox created in the
+		// window between "gateway up" and "tools baked" would be missing them
+		// for its whole life, since a template patch only reaches sandboxes
+		// created after it.
+		stepAgentTools(),
 		stepSystemdUnits(),
 		stepAdminSSH(),
 		stepEnableServices(),

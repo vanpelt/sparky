@@ -19,9 +19,29 @@
 #             resolved from the repo's hivemind-latest.json manifest (the same
 #             manifest the official installer at hivemind.wandb.tools uses).
 #
+# WHICH TEMPLATES ARE CURRENT IS ASKED OF THE TEMPLATES THEMSELVES.
+#
+# This used to key off one host-side stamp file ($TOOLS_DIR/versions.env): if it
+# named today's versions, every template was declared current and the run exited
+# without looking at one. That is a claim about files the script never opened,
+# and a template can be replaced underneath it — which is exactly what `sparkbox
+# setup` does when it fetches a release's rootfs. On the DGX the v0.4.0 upgrade
+# dropped a fresh universal.ext4 at 12:43 over a stamp written at 00:38; every
+# run afterwards said "templates already current" and every sandbox created from
+# it had no claude, no codex and no hivemind. --force was the documented escape
+# hatch, which means the correct behaviour depended on the operator remembering
+# an invariant the script was in a position to check.
+#
+# So the stamp now lives INSIDE each template, at /etc/sparkbox/tools-rev, and is
+# read per template with debugfs (no mount, no loop device, read-only). A
+# template whose stamp does not match what this run resolved is patched; one that
+# matches is skipped. A template that cannot be read is treated as STALE, because
+# the failure directions are not symmetric: a needless re-patch costs a minute,
+# a wrong "current" costs a sandbox with no agent in it and says nothing.
+#
 # Usage: refresh-agent-tools.sh [--force]
-#   --force  re-patch templates even when the version stamp says current
-#            (use after replacing a template, e.g. a fresh provision)
+#   --force  re-patch every template even when its own stamp says current
+#            (a repair tool now, not a correctness requirement)
 set -euo pipefail
 
 IMAGES_DIR=${IMAGES_DIR:-/srv/sparkbox/data/images}
@@ -86,15 +106,41 @@ case "$IDENTITY_REV" in
   *) echo "could not read IDENTITY_REV from $GUEST_IDENTITY" >&2; exit 1 ;;
 esac
 
-if [ "$FORCE" = 0 ] && [ -f "$STAMP" ] \
-   && grep -qx "CLAUDE_VERSION=$CLAUDE_VER" "$STAMP" \
-   && grep -qx "CODEX_TAG=$CODEX_TAG" "$STAMP" \
-   && grep -qx "HIVEMIND_VERSION=$HM_VER" "$STAMP" \
-   && grep -qx "IDENTITY_REV=$IDENTITY_REV" "$STAMP" \
-   && grep -qx "AGENT_ENV_REV=$AGENT_ENV_REV" "$STAMP"; then
-  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV)"
+# ---- decide which templates are stale, by asking each one ---------------------
+# The single line every template must carry to count as current. One line so
+# reading it back is a string compare and not a parse.
+WANT="claude=$CLAUDE_VER codex=$CODEX_TAG hivemind=$HM_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
+TEMPLATE_STAMP=/etc/sparkbox/tools-rev
+
+# Read one template's stamp WITHOUT mounting it. debugfs (e2fsprogs) opens the
+# image read-only, needs no loop device — so this scales to a box holding dozens
+# of snap-<owner>-<name>.ext4 forks — and exits 0 even when the file is absent,
+# which is why the OUTPUT is the answer and the exit status is discarded.
+template_stamp() {
+  debugfs -R "cat $TEMPLATE_STAMP" "$1" 2>/dev/null | tr -d '\0' | head -1 || true
+}
+command -v debugfs >/dev/null \
+  || echo "WARN: debugfs not found (install e2fsprogs) — no template can be read, so every one will be re-patched on every run" >&2
+
+shopt -s nullglob
+ALL=("$IMAGES_DIR"/*.ext4)
+if [ ${#ALL[@]} = 0 ]; then
+  echo "no templates in $IMAGES_DIR — nothing to patch" >&2
+  exit 1
+fi
+STALE=()
+for tpl in "${ALL[@]}"; do
+  if [ "$FORCE" = 0 ] && [ "$(template_stamp "$tpl")" = "$WANT" ]; then
+    continue
+  fi
+  STALE+=("$tpl")
+done
+
+if [ ${#STALE[@]} = 0 ]; then
+  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
   exit 0
 fi
+echo ">> ${#STALE[@]} of ${#ALL[@]} template(s) need patching"
 
 # ---- download (cached by version, so reruns are free) ------------------------
 CLAUDE_BIN="$TOOLS_DIR/claude-$CLAUDE_VER-$CLAUDE_PLAT"
@@ -204,9 +250,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-shopt -s nullglob
 patched=0
-for tpl in "$IMAGES_DIR"/*.ext4; do
+for tpl in "${STALE[@]}"; do
   echo ">> patching $(basename "$tpl")"
   TMP="$tpl.tools-new"
   # Reflink copy on the XFS data volume: instant, and leaves the live template
@@ -222,16 +267,20 @@ for tpl in "$IMAGES_DIR"/*.ext4; do
   # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with
   # no secret in the guest and nothing to paste.
   "$GUEST_IDENTITY" "$MNT"
+  # Stamp LAST, inside the copy, and only once everything above succeeded — so a
+  # run that dies mid-patch leaves a template that still reads as stale and gets
+  # redone, rather than one that claims tools it never received. `set -e` makes
+  # that automatic: any failure above exits before this line.
+  mkdir -p "$MNT/etc/sparkbox"
+  printf '%s\n' "$WANT" > "$MNT/etc/sparkbox/tools-rev"
   umount "$MNT" && rmdir "$MNT"; MNT=""
   mv -f "$TMP" "$tpl"; TMP=""
   patched=$((patched + 1))
 done
 
-if [ "$patched" = 0 ]; then
-  echo "no templates in $IMAGES_DIR — nothing to patch" >&2
-  exit 1
-fi
-
+# The host-side stamp is now a RECORD, not a decision: what counts as current is
+# read out of each template above. Keep writing it because it is what an operator
+# (and `sparkbox doctor`) reads to see which versions this box last resolved.
 printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
   "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
 # Drop cached binaries from older versions; keep the current set.

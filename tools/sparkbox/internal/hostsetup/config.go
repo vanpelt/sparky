@@ -189,6 +189,13 @@ type Config struct {
 	// the gateway's egress syncer a silent no-op — unless Sluice is set, which
 	// defaults it (see Config.sluiceSocket).
 	SluiceSocket string
+	// AgentTools bakes the agent CLIs (claude, codex, hivemind) plus the guest
+	// workload-identity payload into the rootfs templates, and installs the
+	// daily refresher that keeps them current. ON by default, unlike every other
+	// field in this block: it does not change what a sandbox is allowed to do,
+	// it is what makes one worth creating, and no host provisioned by the binary
+	// could get it any other way. See agenttools.go.
+	AgentTools bool
 	// Sluice installs and enables the sluice egress gateway itself: fetch
 	// sluice-linux-<arch> from the release, seed an allowlist, write the unit,
 	// start it. Off by default, because turning egress filtering on is a change
@@ -365,6 +372,10 @@ func DefaultConfigAt(root string) Config {
 		OperatorHandle: "operator",
 		DataVolumeGB:   300,
 		SwapGB:         16,
+		// On by default — see the header of agenttools.go. A sandbox host whose
+		// sandboxes hold no agent is not a useful default, and this was
+		// unreachable from the released binary at all until stepAgentTools.
+		AgentTools: true,
 		FirecrackerBin: "/usr/local/bin/firecracker",
 		BinPath:        "/usr/local/bin/sparkbox",
 		ServiceSettle:  DefaultServiceSettle,

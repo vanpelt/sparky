@@ -52,6 +52,39 @@ var SysctlConf []byte
 //go:embed units/sluice.service.tmpl
 var SluiceServiceTemplate string
 
+// RefreshToolsScript bakes the agent CLIs (claude, codex, hivemind) and the
+// guest workload-identity payload into the rootfs templates, without the ~65
+// minute image rebuild. Installed at /usr/local/sbin/sparkbox-refresh-tools.sh
+// and run daily by sparkbox-refresh-tools.timer.
+//
+// This is what makes a sandbox useful, and until `setup` installed it the only
+// paths that did were deploy/cloud-init.yaml (cloud hosts) and
+// deploy/install-host-tooling.sh (run by hand) — so a host provisioned by the
+// binary, which is every macOS host and every fleet node, produced sandboxes
+// with no agent in them.
+//
+//go:embed refresh-agent-tools.sh
+var RefreshToolsScript []byte
+
+// GuestIdentityScript installs the guest OIDC token unit + timer into a mounted
+// template. RefreshToolsScript calls it by its installed path, and
+// hack/build-rootfs.sh runs the same file at bake time so the two cannot drift.
+//
+//go:embed install-guest-identity.sh
+var GuestIdentityScript []byte
+
+// RefreshToolsServiceTemplate is the oneshot unit that runs RefreshToolsScript
+// with this host's IMAGES_DIR/TOOLS_DIR.
+//
+//go:embed units/sparkbox-refresh-tools.service.tmpl
+var RefreshToolsServiceTemplate string
+
+// RefreshToolsTimer runs the refresher daily, so a box picks up new agent
+// releases without an operator.
+//
+//go:embed units/sparkbox-refresh-tools.timer
+var RefreshToolsTimer []byte
+
 // SluiceAllowlistSeed is the initial /srv/sparkbox/allowlist.txt.
 //
 // Seeded only when the file is absent — see the long note inside it. sluice
