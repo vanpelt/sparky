@@ -337,7 +337,7 @@ func hostFromWire(h *WireHostError) error {
 		}
 		return &host.CapacityError{RequestedMB: h.RequestedMB, UsedMB: h.UsedMB, BudgetMB: h.BudgetMB}
 	case hostQuota:
-		owner := safeText(h.Owner, maxWireText)
+		owner := SafeText(h.Owner, maxWireText)
 		if owner == "" || !saneMB(h.RequestedMB) || !saneMB(h.UsedMB) || !saneMB(h.PoolMB) || h.PoolMB == 0 {
 			return nil
 		}
@@ -348,19 +348,19 @@ func hostFromWire(h *WireHostError) error {
 		// ("sandbox_not_found"), so it is held to a token's charset rather than
 		// scrubbed; Name is whatever the caller typed and only has to be
 		// printable and present, since `"" not found` names nothing.
-		name := safeText(h.Name, maxWireText)
+		name := SafeText(h.Name, maxWireText)
 		if !safeToken(h.Noun) || name == "" {
 			return nil
 		}
 		return &host.MissingError{Noun: h.Noun, Name: name}
 	case hostState:
-		msg := safeText(h.Msg, maxWireMsg)
+		msg := SafeText(h.Msg, maxWireMsg)
 		if !safeToken(h.Code) || msg == "" {
 			return nil
 		}
 		return &host.StateError{Code: h.Code, Msg: msg}
 	case hostDisabled:
-		msg := safeText(h.Msg, maxWireMsg)
+		msg := SafeText(h.Msg, maxWireMsg)
 		if !safeToken(h.Code) || msg == "" {
 			return nil
 		}
@@ -373,7 +373,7 @@ func hostFromWire(h *WireHostError) error {
 		// default branch already renders anything it does not know as "invalid
 		// <noun> name": the clamp only makes the classification agree with the
 		// sentence that would have been printed either way.
-		name := safeText(h.Name, maxWireText)
+		name := SafeText(h.Name, maxWireText)
 		if !safeToken(h.Noun) || name == "" {
 			return nil
 		}
@@ -406,11 +406,18 @@ func unsafeRune(r rune) bool {
 	return false
 }
 
-// safeText makes a node-supplied string printable: everything unsafeRune names
+// SafeText makes a node-supplied string printable: everything unsafeRune names
 // goes, and the result is trimmed and capped. Scrubbed rather than rejected
 // because these are prose and names a human typed, and blanking one would leave
 // a user reading about a sandbox we refused to name.
-func safeText(s string, max int) string {
+//
+// Exported because FromWire is not the only door peer-authored prose comes
+// through: a node's pause event carries the sentence fragment the gateway
+// interpolates into the goodbye it writes to an attached terminal in raw mode
+// (sshgw.hangUp), which is the same rendering surface, reached the same way,
+// from the same machine. One scrubber for both, applied at the boundary where
+// the bytes arrive — see nodelink's TypePaused reader.
+func SafeText(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		if unsafeRune(r) {
 			return -1
@@ -434,7 +441,7 @@ func safeNames(in []string) []string {
 	}
 	out := make([]string, 0, n)
 	for _, s := range in[:n] {
-		if name := safeText(s, maxWireText); name != "" {
+		if name := SafeText(s, maxWireText); name != "" {
 			out = append(out, name)
 		}
 	}
@@ -539,7 +546,7 @@ func wireDetailValue(v any, budget *int) (any, bool) {
 		if max > *budget {
 			max = *budget
 		}
-		s := safeText(t, max)
+		s := SafeText(t, max)
 		if s == "" {
 			return nil, false
 		}

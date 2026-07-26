@@ -428,24 +428,28 @@ func (g *Gateway) handle(s gssh.Session) {
 		// are taken as tags, not just --tag: the local ssh client swallows
 		// leading-dash arguments as its own options, so `ssh new@host --tag ml`
 		// never reaches us without an `ssh new@host -- --tag ml` incantation.
-		// This door takes no other arguments — a chosen name arrives in the
+		// This door takes no positional arguments — a chosen name arrives in the
 		// username instead (splitNewName), precisely so it can't be mistaken for
 		// a tag — so every bare word here is unambiguously a tag.
-		flagged, bare, err := parseTags(s.Command())
+		//
+		// Which is exactly why --node has to be understood HERE and cannot be
+		// left to fall through: an unrecognised flag is not refused at this door,
+		// it is quietly turned into two tags. See parseCreateArgs.
+		flagged, node, bare, err := parseCreateArgs(s.Command())
 		if err != nil {
-			fail(s, log, "create sandbox", err)
+			failUsage(s, log, err)
 			return
 		}
 		tags, err := ctlops.NormalizeTags(append(flagged, bare...))
 		if err != nil {
-			fail(s, log, "create sandbox", err)
+			failUsage(s, log, err)
 			return
 		}
 		// ctlops.Create is the whole creation: it names the box when the caller
 		// didn't, stamps the tags before Create (the secret-env push is fired
 		// asynchronously and the tags decide its contents) and clears them again
 		// if the create fails.
-		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{Name: requestedName, Tags: tags})
+		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{Name: requestedName, Tags: tags, Node: node})
 		if err != nil {
 			g.failStart(s, log, "create sandbox", err)
 			return
@@ -453,6 +457,13 @@ func (g *Gateway) handle(s gssh.Session) {
 		tagNote := ""
 		if len(tags) > 0 {
 			tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
+		}
+		// Where it landed, and only when the caller asked: on a single-box
+		// deployment there is one answer and printing it every time would be
+		// noise, but a user who named a machine is owed confirmation from the
+		// record rather than from their own request.
+		if node != "" && box.Node != "" {
+			tagNote = " on " + box.Node + tagNote
 		}
 		via := viaGateway
 		if viaDoor {
@@ -679,8 +690,17 @@ func DialUpstreamVia(ctx context.Context, dial Dialer, addr, user string, key xs
 			// A dialer that refused the channel outright has already given a
 			// final answer, so hammering it for the rest of the dial budget
 			// only delays the message the user is going to get anyway.
+			//
+			// A typed *ctlops.Error is the same thing said in this tree's own
+			// vocabulary: the fleet dialer answers one when the machine holding
+			// the sandbox is offline, or when this build cannot carry a
+			// connection to another machine at all. Neither becomes true again
+			// inside a 15-second dial budget, and the sentence it carries is the
+			// one the user needs — so it is delivered at once rather than after
+			// a quarter-minute of silence.
 			var oce *xssh.OpenChannelError
-			if errors.As(err, &oce) {
+			var typed *ctlops.Error
+			if errors.As(err, &oce) || errors.As(err, &typed) {
 				return nil, fmt.Errorf("vm ssh not reachable: %w", err)
 			}
 		}
@@ -807,6 +827,20 @@ func fail(s gssh.Session, log *slog.Logger, what string, err error) {
 	log.Error(what+" failed", "err", err)
 	fmt.Fprintf(s.Stderr(), "sparkbox: %s failed: %v\r\n", what, err)
 	s.Exit(1) //nolint:errcheck
+}
+
+// failUsage answers a malformed invocation: the command never ran, so this is
+// not a failure of anything and does not read as one.
+//
+// Exit 2 rather than 1, which is what the ctl@ door has always used for a
+// mistyped command (see control.go) and what ctlops.KindInvalid renders as
+// everywhere else. This door used to exit 1 for a bad --tag, which was the odd
+// one out; nothing pinned it, and a user who cannot tell "you typed it wrong"
+// from "it broke" retries instead of reading.
+func failUsage(s gssh.Session, log *slog.Logger, err error) {
+	log.Info("bad arguments", "err", err)
+	fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+	s.Exit(2) //nolint:errcheck
 }
 
 // failStart is fail plus friendly, actionable guidance for the resource-limit

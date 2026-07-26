@@ -54,14 +54,44 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	if err := o.stampTags(name, c.Handle, tags); err != nil {
 		return SandboxInfo{}, Fail(op, err)
 	}
-	box, err := o.boxes.Create(ctx, name, c.Handle, o.defaultImage, a.VCPUs, a.MemMB)
+	box, err := o.build(ctx, op, a.Node, name, c.Handle, a.VCPUs, a.MemMB)
 	if err != nil {
 		// Don't strand tag rows for a sandbox that never came into being.
 		o.clearTags(name, c.Handle, tags)
 		return SandboxInfo{}, Fail(op, err)
 	}
-	o.log.Info("sandbox created", "user", c.Handle, "name", name, "tags", tags)
+	o.log.Info("sandbox created", "user", c.Handle, "name", name, "node", a.Node, "tags", tags)
 	return o.info(box), nil
+}
+
+// placer is the sandbox store that can build on a NAMED machine.
+//
+// It is a type assertion rather than a field on Config because the thing that
+// satisfies it — internal/fleet — is the same value already wired in as
+// Sandboxes, and because *host.Manager is not one: a single box has exactly one
+// machine and no way to answer a question about a second. Asserting keeps that
+// distinction where it belongs, at the store, instead of asking every caller to
+// wire two things that are always the same thing or always nil.
+type placer interface {
+	CreateOn(ctx context.Context, node, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
+}
+
+// build runs the create on the machine the caller asked for, or on whichever
+// one the store chooses when they did not ask.
+//
+// Naming a machine on a host that has no fleet is a request this deployment
+// cannot satisfy at all, and it is answered as such rather than silently built
+// here: a caller who says --node laptop and gets a sandbox on the gateway has
+// been told nothing and has to discover it later, on the machine's bill.
+func (o *Ops) build(ctx context.Context, op, node, name, owner string, vcpus, memMB int64) (*host.Sandbox, error) {
+	if node == "" {
+		return o.boxes.Create(ctx, name, owner, o.defaultImage, vcpus, memMB)
+	}
+	p, ok := o.boxes.(placer)
+	if !ok {
+		return nil, Disabled(op, "this host runs a single machine, so a sandbox can't be placed on a named one.")
+	}
+	return p.CreateOn(ctx, node, name, owner, o.defaultImage, vcpus, memMB)
 }
 
 // nameIsFree refuses a name that already names a sandbox — anyone's — BEFORE a

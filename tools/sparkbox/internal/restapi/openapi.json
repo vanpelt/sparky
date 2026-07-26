@@ -261,6 +261,14 @@
           "202": { "$ref": "#/components/responses/Accepted" },
           "400": { "$ref": "#/components/responses/Invalid" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": {
+            "description": "No machine in this fleet is called `node`. Node names are not masked: an operator publishes them so callers can place work.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
           "409": {
             "description": "That name is taken or reserved.",
             "content": {
@@ -1916,6 +1924,10 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Stamped before the VM exists, so the first secret push already has them."
+          },
+          "node": {
+            "type": "string",
+            "description": "The machine to build on, as `GET /v1/nodes` names it. Omit to let the gateway choose, which on a single-box deployment is its own machine. An unknown name is 404; one whose machine is offline is 503."
           },
           "vcpus": {
             "type": "integer",

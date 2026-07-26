@@ -42,6 +42,92 @@ func Unreachable(op, sandbox, node string) *ctlops.Error {
 	}
 }
 
+// nodeOffline is Unreachable's placement-time twin: the machine a caller asked
+// to build on is not answering.
+//
+// It is a second sentence rather than a reuse of Unreachable because
+// Unreachable's wording — `sandbox %q lives on node %q` — is about a sandbox
+// that already exists somewhere, and a create has not put one anywhere yet.
+// Saying a sandbox lives on a machine that has never held it would be the
+// gateway telling a user something untrue about where their work is.
+//
+// Everything a client switches on is the same: the same Code, the same
+// KindCapacity, the same exit 1 and HTTP 503, so IsNodeUnreachable answers yes
+// for both and any retry logic written against one covers the other.
+func nodeOffline(op, node string) *ctlops.Error {
+	return &ctlops.Error{
+		Kind: ctlops.KindCapacity,
+		Op:   op,
+		Code: codeUnreachable,
+		Msg:  fmt.Sprintf("node %q is offline", node),
+		Hint: "It can take sandboxes again when it reconnects; leave --node off to build on the gateway.",
+		Details: map[string]any{
+			"node": node,
+		},
+		Verbatim: true,
+		Exit:     1,
+		Status:   http.StatusServiceUnavailable,
+	}
+}
+
+// The two answers reconciliation produces. Both are KindConflict — well formed,
+// refused by the current state of the fleet — which yields exit 1 and HTTP 409
+// with no override needed, and neither is a not-found: the sandbox is still
+// visible to its owner in every listing, still theirs, and still holding its
+// name. Saying "no such sandbox" instead would tell a user their work had been
+// deleted by something that has deliberately deleted nothing.
+const (
+	codeOrphaned  = "sandbox_orphaned"
+	codeContested = "sandbox_contested"
+)
+
+// orphanedSandbox is what an operation on a sandbox its own machine no longer
+// has reports.
+//
+// It is a distinct sentence from Unreachable because the two are opposite
+// situations that a single "not available" would blur: unreachable means the
+// machine is not answering and the sandbox is almost certainly fine, and this
+// means the machine IS answering and says it does not have it. The first
+// resolves itself when a laptop wakes up; the second never resolves itself and
+// needs somebody to go and look.
+func orphanedSandbox(op, sandbox, node string) *ctlops.Error {
+	return &ctlops.Error{
+		Kind: ctlops.KindConflict,
+		Op:   op,
+		Code: codeOrphaned,
+		Msg: fmt.Sprintf("sandbox %q is not on node %q any more: that machine is connected and no longer has it",
+			sandbox, node),
+		Hint: "Nothing has been deleted here and the name is still yours; ask an operator to check that machine.",
+		Details: map[string]any{
+			"node": node,
+		},
+		Verbatim: true,
+		Exit:     1,
+		Status:   http.StatusConflict,
+	}
+}
+
+// contestedSandbox is what an operation on a name two machines claim reports.
+//
+// It is nearly unreachable through the control plane and that is deliberate: a
+// contested row is served by no read at all, so the ownership gate answers the
+// masked not-found first and this sentence only surfaces to a caller holding
+// the router directly. It exists so that such a caller cannot be routed to one
+// of two machines on a coin flip — the failure mode this state exists to
+// prevent — rather than because a user is expected to read it.
+func contestedSandbox(op, sandbox string) *ctlops.Error {
+	return &ctlops.Error{
+		Kind:     ctlops.KindConflict,
+		Op:       op,
+		Code:     codeContested,
+		Msg:      fmt.Sprintf("two machines claim the sandbox name %q, so this gateway will not act on either", sandbox),
+		Hint:     "Nothing has been deleted on either machine; an operator has to decide which one holds your data.",
+		Verbatim: true,
+		Exit:     1,
+		Status:   http.StatusConflict,
+	}
+}
+
 // IsNodeUnreachable reports whether err is (or wraps) a node outage.
 //
 // Nothing branches on it yet: the edge still renders a node outage as the

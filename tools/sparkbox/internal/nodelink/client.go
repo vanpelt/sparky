@@ -58,16 +58,37 @@ const (
 )
 
 // Manager is the node's own host manager, narrowed to what a link asks of it:
-// what this machine has left, and what is on it.
+// what this machine has left, what is on it, and the lifecycle operations a
+// gateway may ask it to run (see nodeops.go).
 //
-// It is an interface rather than *host.Manager because everything above these
-// three methods is policy this package must not grow — and because it lets a
-// test drive a link without a driver, a state dir or a VM. The assertion below
-// is what keeps the narrowing honest.
+// It is an interface rather than *host.Manager because everything outside this
+// list is policy this package must not grow — no ownership check, no name
+// policy, no placement — and because it lets a test drive a link without a
+// driver, a state dir or a VM. The assertion below is what keeps the narrowing
+// honest: every signature here is *host.Manager's own, including the four that
+// carry no context or no error, which are exactly the four the fleet's Node
+// interface has to adapt.
 type Manager interface {
 	Capacity() host.NodeCapacity
 	List() []*host.Sandbox
 	AllSnapshots() []*host.Snapshot
+
+	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
+	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Pause(ctx context.Context, name string) error
+	Archive(ctx context.Context, name string) error
+	Resize(ctx context.Context, name string, sizeMB int64) error
+	Reboot(ctx context.Context, name string) error
+	Rename(ctx context.Context, oldName, newName, owner string) error
+	Destroy(ctx context.Context, name string) error
+	SetPinned(name string, pinned bool) error
+	ResyncEnv(ctx context.Context, name string)
+	Touch(name string)
+	RecordKey(name, fp string)
+
+	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, snapName, owner string) error
+	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
 }
 
 var _ Manager = (*host.Manager)(nil)
@@ -269,7 +290,7 @@ func (c *nodeClient) runOnce(ctx context.Context) (linked bool, err error) {
 	// a fifteen-minute archive that a dropped connection could cancel would
 	// tear down a running VM because a gateway restarted.
 	conn.SetBaseContext(ctx)
-	c.register(conn)
+	c.register(linkCtx, conn)
 	defer conn.Close()
 
 	served := make(chan error, 1)
@@ -406,11 +427,17 @@ type writerOnly struct{ w io.Writer }
 
 func (w writerOnly) Write(p []byte) (int, error) { return w.w.Write(p) }
 
-// register wires what the gateway may ask of this node. Lifecycle verbs are not
-// here: until the gateway can place a sandbox on this machine there is nothing
-// for it to operate, and an unregistered type is answered with a sentence
-// rather than silence.
-func (c *nodeClient) register(conn *Conn) {
+// register wires what the gateway may ask of this node: the link's own
+// housekeeping here, and every lifecycle verb in nodeops.go. An unregistered
+// type is answered with a sentence rather than silence, so a version skew reads
+// as a log line instead of a hung caller.
+//
+// ctx is the LINK's context. It bounds only the bookkeeping drain registerOps
+// starts — the handlers themselves derive their work from the PROCESS context
+// installed by SetBaseContext, because a fifteen-minute archive that a dropped
+// connection could cancel would tear down a running VM because a gateway
+// restarted.
+func (c *nodeClient) register(ctx context.Context, conn *Conn) {
 	conn.Handle(TypePing, func(_ context.Context, raw json.RawMessage) (any, error) {
 		var req PingReq
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -432,6 +459,8 @@ func (c *nodeClient) register(conn *Conn) {
 		c.log.Info("the gateway said goodbye", "code", b.Code, "msg", b.Msg)
 		_ = conn.Close()
 	})
+
+	registerOps(ctx, conn, c.mgr, c.log)
 }
 
 // beat is the node's own cadence: a capacity report the gateway does not have
@@ -512,12 +541,10 @@ func (c *nodeClient) sendInventory(ctx context.Context, conn *Conn) {
 	}
 	// Reported, never acted on: a name the gateway does not place here is a
 	// disagreement for an operator to resolve, and deleting a rootfs over one
-	// would be the fleet destroying user data on its own initiative.
-	//
-	// Nothing can reach this line yet — the gateway acks every inventory empty
-	// until reconciliation lands (M2, see InventoryAck) — so it is the node half
-	// of that contract waiting for the gateway half, not a warning anyone has
-	// seen.
+	// would be the fleet destroying user data on its own initiative. The
+	// gateway's half is the same undertaking in the other direction — it marks
+	// the placements it disagrees with and releases none of them — so a
+	// disagreement costs both sides a log line and nobody a sandbox.
 	if len(ack.Orphaned) > 0 || len(ack.Quarantined) > 0 {
 		c.log.Warn("the gateway disagrees about what this node holds",
 			"orphaned", ack.Orphaned, "quarantined", ack.Quarantined)

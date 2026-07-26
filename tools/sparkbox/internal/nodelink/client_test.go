@@ -251,8 +251,11 @@ func (m *fakeManager) AllSnapshots() []*host.Snapshot {
 	return append([]*host.Snapshot(nil), m.snaps...)
 }
 
-func testManager() *fakeManager {
-	return &fakeManager{
+// testManager is the whole fake a link now asks for: the reporting half below
+// plus the lifecycle half in nodeops_test.go, which is where a test that drives
+// a verb keeps its recorder.
+func testManager() *opsManager {
+	return &opsManager{fakeManager: &fakeManager{
 		capacity: host.NodeCapacity{Node: "node-b", TotalMemMB: 8192, BudgetMemMB: 6144, TotalVCPUs: 8},
 		boxes: []*host.Sandbox{{
 			Name: "demo", Owner: "alice", Image: "ubuntu", State: vmm.StateRunning,
@@ -263,7 +266,7 @@ func testManager() *fakeManager {
 			Name: "base", Owner: "alice", Image: "snap-alice-base", FromBox: "demo",
 			CreatedAt: time.Now().Add(-time.Hour),
 		}},
-	}
+	}}
 }
 
 // logBuffer captures log output for the tests that assert on a sentence an
@@ -885,5 +888,5 @@ func TestUnknownRequestIsAnswered(t *testing.T) {
 }
 
 // The fake stands in for a real *host.Manager, which client.go asserts
-// satisfies the same three methods.
-var _ Manager = (*fakeManager)(nil)
+// satisfies the same interface.
+var _ Manager = (*opsManager)(nil)

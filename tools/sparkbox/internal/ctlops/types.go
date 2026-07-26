@@ -153,10 +153,19 @@ type Endpoint struct {
 // body has named fields — so there is deliberately no Command field here, which
 // is the bug execsCommand exists to prevent.
 type CreateArgs struct {
-	Name  string   // "" generates an adjective-noun name
-	Tags  []string // normalized and stamped BEFORE Create, rolled back on failure
-	VCPUs int64    // 0 takes the manager default (2)
-	MemMB int64    // 0 takes the manager default (8192)
+	Name string   // "" generates an adjective-noun name
+	Tags []string // normalized and stamped BEFORE Create, rolled back on failure
+	// Node names the machine to build on. "" leaves the choice to the gateway,
+	// which today means its own machine — so a single-box deployment, and every
+	// caller written before there was a second machine, is unaffected.
+	//
+	// A node name is not a tenant's secret: an operator publishes them so people
+	// can place work, and `node ls` renders them. So an unknown one is answered
+	// plainly rather than masked, which is the one place this package's
+	// not-found is not also an ownership answer.
+	Node  string
+	VCPUs int64 // 0 takes the manager default (2)
+	MemMB int64 // 0 takes the manager default (8192)
 }
 
 type ForkArgs struct {

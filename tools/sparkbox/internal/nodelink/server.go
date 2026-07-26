@@ -71,6 +71,13 @@ const CodeRevoked = "node_revoked"
 // that link.
 const MaxSandboxesPerNode = 1024
 
+// MaxReasonText bounds the pause reason a node may hand the gateway. It is the
+// fragment in "sandbox %q %s — reconnect with: …", so it is measured against
+// what a person reads on one line of a terminal, not against what fits in a
+// frame: the sentences the tree actually sends are "was paused" and "went idle
+// for 30m", and a peer with more to say than this is not describing a pause.
+const MaxReasonText = 120
+
 // Greeting is a link's first frame, read before any policy has run.
 //
 // It carries the reader as well as the message because reading a line off a
@@ -485,6 +492,20 @@ func (c *Client) register() {
 			return
 		}
 		c.seen()
+		// The one field on the link that is written verbatim to a human's
+		// terminal: the gateway interpolates it into the goodbye it sends every
+		// session attached to the sandbox, in raw mode (sshgw.hangUp). Scrubbed
+		// here, at the boundary, for the same reason ctlops.FromWire scrubs the
+		// prose in an error — a machine that is merely misconfigured should not
+		// be able to garble somebody's terminal, and one that is compromised
+		// should not be able to forge a line in it. It is scrubbed here rather
+		// than at the far end because a pause event is consumed as prose and
+		// never becomes a record: the display strings a node's rows carry —
+		// state, image, login, the names on a template — reach a terminal
+		// through fleet's remote adapter instead, and are clamped there, where
+		// the gateway also knows which of them it authored itself. See
+		// fleet.remoteNode.record.
+		m.Reason = ctlops.SafeText(m.Reason, MaxReasonText)
 		if c.hooks.OnPaused != nil {
 			c.hooks.OnPaused(c.node, m)
 		}
@@ -610,6 +631,20 @@ func (c *Client) Capacity() host.NodeCapacity {
 		reported.LastSeenAt = &t
 	}
 	return reported
+}
+
+// Box is one row from the node's last known inventory.
+//
+// It exists beside Snapshot because the two have different callers: a listing
+// wants the whole picture, while an ownership check wants one name and sits
+// under every authorized operation and every browser terminal request. Serving
+// that from Snapshot would copy and sort up to MaxSandboxesPerNode rows per
+// lookup.
+func (c *Client) Box(name string) (SandboxRow, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	row, ok := c.boxes[name]
+	return row, ok
 }
 
 // Snapshot is the node's last known inventory, name-sorted so every listing

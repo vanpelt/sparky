@@ -642,7 +642,14 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 
 // controlFork creates a new sandbox from one of the caller's snapshots.
 func (g *Gateway) controlFork(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
-	tags, rest, err := parseTags(args)
+	tags, node, rest, err := parseCreateArgs(args)
+	if err == nil && node != "" {
+		// A fork has no --node to give: a snapshot is a file in one machine's
+		// image directory, so the fork happens where the template is or not at
+		// all. Saying so is the whole reason this door parses a flag it does not
+		// accept — the alternative is the bare word `--node` becoming a tag.
+		err = fmt.Errorf("fork has no --node: a snapshot can only be forked on the machine that holds it")
+	}
 	if err != nil {
 		fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
 		s.Exit(2) //nolint:errcheck
@@ -699,7 +706,13 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 	}
 	var want []string
 	if !(len(args) == 3 && args[2] == "--clear") {
-		parsed, rest, err := parseTags(args[2:])
+		parsed, node, rest, err := parseCreateArgs(args[2:])
+		if err == nil && node != "" {
+			// Tags do not move a sandbox, and a --node here would be read as
+			// two tags if this door did not know the flag at all. See
+			// parseCreateArgs.
+			err = fmt.Errorf("tags has no --node: a sandbox is placed when it is created")
+		}
 		if err != nil {
 			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
 			s.Exit(2) //nolint:errcheck

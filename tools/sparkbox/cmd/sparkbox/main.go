@@ -406,10 +406,21 @@ func serve(args []string) error {
 	// this manager with a ledger bolted on: the local answer is authoritative
 	// for everything local, so a single-box deployment behaves exactly as it did
 	// before this existed.
-	flt, err := fleet.New(fleet.Options{
+	//
+	// It is given the SAME four name-keyed side stores the manager was given
+	// (mgrOpts above), and it must be: they live here, a node has none of them,
+	// and they are keyed by a sandbox's name. For a local placement the manager
+	// still does all of that work itself; for one on another machine the fleet is
+	// the only thing that can. See internal/fleet/sidestores.go.
+	fleetOpts := fleet.Options{
 		Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
 		Index: placeStore, Log: log,
-	})
+		Routes: routeStore, Schedules: scheduleStore, Tags: secretsStore,
+	}
+	if doorHooks != nil {
+		fleetOpts.FrontDoor = doorHooks
+	}
+	flt, err := fleet.New(fleetOpts)
 	if err != nil {
 		return fmt.Errorf("fleet: %w", err)
 	}
@@ -474,8 +485,13 @@ func serve(args []string) error {
 		Nodes: nodeStore, NodeJoiner: flt, NodeEnrol: !*noNodeEnrol,
 	})
 	// The gateway knows which terminals are attached to which sandbox, so it is
-	// what the manager calls to release them when a sandbox is paused.
+	// what the manager calls to release them when a sandbox is paused. The
+	// fleet gets the SAME registry, not one of its own: a sandbox on another
+	// machine has its sessions here like any other, and two registries would
+	// mean a pause hanging up only the half of them that happened to land in
+	// the one it could see.
 	mgr.SetSessions(gw)
+	flt.SetSessions(gw)
 
 	warnDoorNameCollision(sshgw.NodeUser, mgr, log)
 
