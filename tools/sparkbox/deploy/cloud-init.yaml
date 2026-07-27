@@ -44,14 +44,19 @@ write_files:
     permissions: '0644'
     content: |
       PROXY_DOMAIN=@@PROXY_DOMAIN@@
+      GUEST_SUBNET_FLAG=
+      TRANSPORT_FLAGS=--node-control-transport=ssh --node-control-rollout=inherit --guest-data-transport=ssh --routed-guest-canary-percent=0
       SUBNET6_FLAG=@@SUBNET6_FLAG@@
       EDGE_V4_FLAG=@@EDGE_V4_FLAG@@
       OVERCOMMIT_FLAGS=@@OVERCOMMIT_FLAGS@@
       TLS_FLAGS=@@TLS_FLAGS@@
+      GATEWAY_FLAG=
+      EXTRA_FLAGS=
       # Bare values (not the flag form) so sparkbox-net.service can source them:
       # the v6 any-port REDIRECT only fires when SUBNET6 is in the unit's env, and
       # PROXY_PORT must match the edge listener (:443 under TLS, :8081 otherwise).
       SUBNET6=@@SUBNET6@@
+      SPARKBOX_GUEST_SUBNET=172.30.0.0/16
       PROXY_PORT=@@PROXY_PORT@@
 
   # The one secret still in user-data: this host's Secret Manager API key, used
@@ -201,7 +206,9 @@ write_files:
         --image-dir /srv/sparkbox/data/images \
         --users /srv/sparkbox/users.conf \
         --ssh-addr :22 --api-addr 127.0.0.1:8080 \
-        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} $LOGIN_USER_FLAG $SUBNET6_FLAG $EDGE_V4_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS
+        --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} \
+        $LOGIN_USER_FLAG $GUEST_SUBNET_FLAG $TRANSPORT_FLAGS $SUBNET6_FLAG \
+        $EDGE_V4_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS $GATEWAY_FLAG $EXTRA_FLAGS
       Restart=always
       RestartSec=2
       LimitNOFILE=1048576

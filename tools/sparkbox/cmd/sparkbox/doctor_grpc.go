@@ -262,8 +262,12 @@ func loadDoctorGatewayIdentity(cfg hostsetup.Config, now time.Time) (doctorContr
 	if cfg.ClusterID != "" {
 		expected = nodecert.Peer{Role: nodecert.RoleGateway, Name: cfg.ClusterID}
 	}
+	keyDir := cfg.KeyDir
+	if keyDir == "" {
+		keyDir = cfg.StateDir
+	}
 	identity, err := loadDoctorIdentity(
-		cfg.StateDir, nodepki.GatewayCertFile, nodepki.GatewayKeyFile,
+		cfg.StateDir, keyDir, nodepki.GatewayCertFile, nodepki.GatewayKeyFile,
 		nodecert.RoleGateway, expected, x509.ExtKeyUsageClientAuth, now,
 	)
 	if err == nil && cfg.GatewayGRPCAddr != "" {
@@ -278,7 +282,7 @@ func loadDoctorNodeIdentity(cfg hostsetup.Config, now time.Time) (doctorControlI
 		expected = nodecert.Peer{Role: nodecert.RoleNode, Name: cfg.NodeName}
 	}
 	identity, err := loadDoctorIdentity(
-		cfg.StateDir, nodepki.NodeCertFile, nodepki.NodeKeyFile,
+		cfg.StateDir, cfg.StateDir, nodepki.NodeCertFile, nodepki.NodeKeyFile,
 		nodecert.RoleNode, expected, x509.ExtKeyUsageServerAuth, now,
 	)
 	if err == nil {
@@ -288,21 +292,21 @@ func loadDoctorNodeIdentity(cfg hostsetup.Config, now time.Time) (doctorControlI
 }
 
 func loadDoctorIdentity(
-	dir, certFile, keyFile string,
+	stateDir, keyDir, certFile, keyFile string,
 	role nodecert.Role,
 	expected nodecert.Peer,
 	usage x509.ExtKeyUsage,
 	now time.Time,
 ) (doctorControlIdentity, error) {
-	certPEM, err := os.ReadFile(filepath.Join(dir, certFile))
+	certPEM, err := os.ReadFile(filepath.Join(stateDir, certFile))
 	if err != nil {
 		return doctorControlIdentity{}, err
 	}
-	keyPEM, err := os.ReadFile(filepath.Join(dir, keyFile))
+	keyPEM, err := os.ReadFile(filepath.Join(keyDir, keyFile))
 	if err != nil {
 		return doctorControlIdentity{}, err
 	}
-	caPEM, err := os.ReadFile(filepath.Join(dir, nodepki.CACertFile))
+	caPEM, err := os.ReadFile(filepath.Join(stateDir, nodepki.CACertFile))
 	if err != nil {
 		return doctorControlIdentity{}, err
 	}

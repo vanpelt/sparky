@@ -317,3 +317,29 @@ func TestLoadDoctorNodeIdentityRejectsConfiguredNameMismatch(t *testing.T) {
 		t.Fatalf("peer = %+v", identity.peer)
 	}
 }
+
+func TestLoadDoctorGatewayIdentityReadsPrivateKeyFromKeyDir(t *testing.T) {
+	stateDir, keyDir := t.TempDir(), t.TempDir()
+	authority, err := nodepki.LoadOrCreateAuthorityFrom(
+		stateDir, keyDir, "prod-a", false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.GatewayCertificateFrom(
+		stateDir, keyDir, "prod-a", time.Hour, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg := hostsetup.DefaultConfig()
+	cfg.StateDir = stateDir
+	cfg.KeyDir = keyDir
+	cfg.ClusterID = "prod-a"
+	identity, err := loadDoctorGatewayIdentity(cfg, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.peer != (nodecert.Peer{Role: nodecert.RoleGateway, Name: "prod-a"}) {
+		t.Fatalf("peer = %+v", identity.peer)
+	}
+}

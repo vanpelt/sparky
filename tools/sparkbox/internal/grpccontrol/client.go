@@ -32,6 +32,12 @@ func DialTLS(ctx context.Context, target string, tlsConfig *tls.Config, opts ...
 	if len(tlsConfig.Certificates) == 0 && tlsConfig.GetClientCertificate == nil {
 		return nil, errors.New("grpccontrol: gateway client certificate is required")
 	}
+	if tlsConfig.MinVersion < tls.VersionTLS13 {
+		return nil, errors.New("grpccontrol: client TLS must require TLS 1.3")
+	}
+	if tlsConfig.VerifyConnection == nil {
+		return nil, errors.New("grpccontrol: client TLS must verify the node SPIFFE identity")
+	}
 	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())))
 	connection, err := grpc.DialContext(ctx, target, opts...)
 	if err != nil {
@@ -88,7 +94,10 @@ func (c *Client) WatchEvents(ctx context.Context, after uint64) (<-chan *nodev1.
 		defer close(errs)
 		stream, err := c.control.WatchEvents(ctx, &nodev1.WatchEventsRequest{AfterRevision: after})
 		if err != nil {
-			errs <- err
+			select {
+			case errs <- err:
+			case <-ctx.Done():
+			}
 			return
 		}
 		for {
@@ -97,7 +106,10 @@ func (c *Client) WatchEvents(ctx context.Context, after uint64) (<-chan *nodev1.
 				return
 			}
 			if err != nil {
-				errs <- err
+				select {
+				case errs <- err:
+				case <-ctx.Done():
+				}
 				return
 			}
 			select {

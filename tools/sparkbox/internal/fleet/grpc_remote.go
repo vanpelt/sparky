@@ -132,10 +132,11 @@ type GRPCControl struct {
 	cancel context.CancelFunc
 	once   sync.Once
 
-	mu       sync.RWMutex
-	facts    Facts
-	capacity host.NodeCapacity
-	boxes    map[string]*host.Sandbox
+	callbackMu sync.Mutex
+	mu         sync.RWMutex
+	facts      Facts
+	capacity   host.NodeCapacity
+	boxes      map[string]*host.Sandbox
 	// routedBoxes is the only cache that retains a node-reported HostIP. It is
 	// consumed by a prefix-confined routedguest.Dialer and is never returned
 	// from Box or Boxes.
@@ -394,15 +395,21 @@ func (g *GRPCControl) reconcile(ctx context.Context) error {
 	facts := factsFromProto(g.node, g.Facts(), health, capacity)
 	now := g.now()
 	g.mu.Lock()
+	if err := g.stoppedLocked(); err != nil {
+		g.mu.Unlock()
+		return err
+	}
 	g.boxes, g.routedBoxes, g.snaps = boxes, routedBoxes, snaps
 	g.revision = inventory.GetRevision()
 	g.capacity, g.facts = hostCapacity, facts
 	g.lastSeen, g.healthy = now, true
 	g.mu.Unlock()
 	if g.onInventory != nil {
-		g.onInventory(nodelink.InventoryMsg{
-			Node: g.node, Sandboxes: rows, Snapshots: snapshotRows,
-			Capacity: hostCapacity, At: now,
+		g.deliverCallback(func() {
+			g.onInventory(nodelink.InventoryMsg{
+				Node: g.node, Sandboxes: rows, Snapshots: snapshotRows,
+				Capacity: hostCapacity, At: now,
+			})
 		})
 	}
 	return nil
@@ -415,12 +422,15 @@ func (g *GRPCControl) watch() (err error) {
 	started := time.Now()
 	g.metrics.AddPending(g.node, "grpc", 1)
 	g.metrics.AddInFlight(g.node, "grpc", "watch_events", 1)
+	watchCtx, cancelWatch := context.WithCancel(g.ctx)
+	events, errs := g.client.WatchEvents(watchCtx, after)
 	defer func() {
+		cancelWatch()
+		drainGRPCWatch(events, errs)
 		g.metrics.AddInFlight(g.node, "grpc", "watch_events", -1)
 		g.metrics.AddPending(g.node, "grpc", -1)
 		g.metrics.ObserveControlRPC(g.node, "grpc", "watch_events", grpcMetricOutcome(err), time.Since(started))
 	}()
-	events, errs := g.client.WatchEvents(g.ctx, after)
 	ticker := time.NewTicker(g.healthEvery)
 	defer ticker.Stop()
 	for events != nil || errs != nil {
@@ -458,6 +468,10 @@ func (g *GRPCControl) watch() (err error) {
 				return err
 			}
 			g.mu.Lock()
+			if err := g.stoppedLocked(); err != nil {
+				g.mu.Unlock()
+				return err
+			}
 			g.capacity = capacityFromProto(g.node, capacity)
 			g.facts = factsFromProto(g.node, g.facts, health, capacity)
 			g.lastSeen, g.healthy = g.now(), g.dead == nil
@@ -465,6 +479,24 @@ func (g *GRPCControl) watch() (err error) {
 		}
 	}
 	return errGRPCWatchEnd
+}
+
+// drainGRPCWatch joins the producer goroutine after its attempt-local context
+// is canceled. DurableControlClient implementations must close both returned
+// channels when that context is done.
+func drainGRPCWatch(events <-chan *nodev1.InventoryEvent, errs <-chan error) {
+	for events != nil || errs != nil {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				events = nil
+			}
+		case _, ok := <-errs:
+			if !ok {
+				errs = nil
+			}
+		}
+	}
 }
 
 func (g *GRPCControl) probeHealth(ctx context.Context) (*nodev1.HealthResponse, error) {
@@ -493,6 +525,10 @@ func (g *GRPCControl) applyEvent(event *nodev1.InventoryEvent) error {
 		return errors.New("fleet: gRPC inventory event has no revision")
 	}
 	g.mu.Lock()
+	if err := g.stoppedLocked(); err != nil {
+		g.mu.Unlock()
+		return err
+	}
 	if event.GetRevision() <= g.revision {
 		g.mu.Unlock()
 		return nil
@@ -562,16 +598,41 @@ func (g *GRPCControl) applyEvent(event *nodev1.InventoryEvent) error {
 	g.revision = event.GetRevision()
 	g.lastSeen, g.healthy = now, true
 	g.mu.Unlock()
-	if changed != nil && g.onChanged != nil {
-		g.onChanged(*changed)
-	}
-	if gone != nil && g.onGone != nil {
-		g.onGone(*gone)
-	}
-	if paused != nil && g.onPaused != nil {
-		g.onPaused(*paused)
+	if changed != nil || gone != nil || paused != nil {
+		g.deliverCallback(func() {
+			if changed != nil && g.onChanged != nil {
+				g.onChanged(*changed)
+			}
+			if gone != nil && g.onGone != nil {
+				g.onGone(*gone)
+			}
+			if paused != nil && g.onPaused != nil {
+				g.onPaused(*paused)
+			}
+		})
 	}
 	return nil
+}
+
+func (g *GRPCControl) stoppedLocked() error {
+	if g.dead != nil {
+		return g.dead
+	}
+	return g.ctx.Err()
+}
+
+// deliverCallback serializes callback admission with Close and Revoke. Once
+// either lifecycle method returns, every admitted callback has finished and no
+// later inventory generation can enter a callback.
+func (g *GRPCControl) deliverCallback(callback func()) {
+	g.callbackMu.Lock()
+	defer g.callbackMu.Unlock()
+	g.mu.RLock()
+	live := g.dead == nil && g.ctx.Err() == nil
+	g.mu.RUnlock()
+	if live {
+		callback()
+	}
 }
 
 func (g *GRPCControl) seen() {
@@ -1333,25 +1394,26 @@ func (g *GRPCControl) Hangup(code, message string) {
 }
 
 func (g *GRPCControl) Revoke(_ string, reason error) {
+	g.stop(reason)
+	_ = g.Close()
+}
+
+func (g *GRPCControl) stop(reason error) {
+	g.callbackMu.Lock()
+	defer g.callbackMu.Unlock()
+	g.cancel()
 	g.mu.Lock()
-	if g.dead == nil {
+	if g.dead == nil && reason != nil {
 		g.dead = reason
 	}
 	g.healthy = false
 	g.mu.Unlock()
-	_ = g.Close()
 }
 
 func (g *GRPCControl) Close() error {
 	var err error
 	g.once.Do(func() {
-		g.cancel()
-		g.mu.Lock()
-		g.healthy = false
-		if g.dead == nil {
-			g.dead = errors.New("fleet: gRPC control closed")
-		}
-		g.mu.Unlock()
+		g.stop(errors.New("fleet: gRPC control closed"))
 		g.readyOnce.Do(func() { close(g.ready) })
 		err = g.client.Close()
 	})

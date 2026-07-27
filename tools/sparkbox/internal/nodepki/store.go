@@ -46,14 +46,44 @@ type Authority struct {
 // partial CA is an error: silently replacing its missing half would strand
 // every still-valid node certificate.
 func LoadOrCreateAuthority(dir, clusterID string) (*Authority, error) {
-	if dir == "" {
+	return LoadOrCreateAuthorityFrom(dir, dir, clusterID, false)
+}
+
+// LoadOrCreateAuthorityFrom keeps public CA state durable under stateDir while
+// loading its private key exclusively from keyDir. requireKeys is the fleet
+// host fail-closed policy: a missing private key is never silently replaced.
+//
+// A public CA certificate may be staged in keyDir on first boot by a secret
+// fetcher. It is copied into stateDir before use and must match the durable copy
+// on later boots. This lets a new host restore the public half without making
+// private material part of its persistent state volume.
+func LoadOrCreateAuthorityFrom(stateDir, keyDir, clusterID string, requireKeys bool) (*Authority, error) {
+	if stateDir == "" {
 		return nil, errors.New("nodepki: state directory is required")
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if keyDir == "" {
+		keyDir = stateDir
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	certPath, keyPath := filepath.Join(dir, CACertFile), filepath.Join(dir, CAKeyFile)
+	if !requireKeys {
+		if err := os.MkdirAll(keyDir, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	certPath, keyPath := filepath.Join(stateDir, CACertFile), filepath.Join(keyDir, CAKeyFile)
 	certPEM, certErr := os.ReadFile(certPath)
+	if errors.Is(certErr, os.ErrNotExist) && keyDir != stateDir {
+		if staged, err := os.ReadFile(filepath.Join(keyDir, CACertFile)); err == nil {
+			if err := writePublic(certPath, staged); err != nil {
+				return nil, err
+			}
+			certPEM, certErr = staged, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
 	keyPEM, keyErr := os.ReadFile(keyPath)
 	switch {
 	case certErr == nil && keyErr == nil:
@@ -62,6 +92,8 @@ func LoadOrCreateAuthority(dir, clusterID string) (*Authority, error) {
 			return nil, err
 		}
 		return authority(ca, certPEM)
+	case requireKeys && errors.Is(keyErr, os.ErrNotExist):
+		return nil, fmt.Errorf("nodepki: required CA private key %s is missing", keyPath)
 	case errors.Is(certErr, os.ErrNotExist) && errors.Is(keyErr, os.ErrNotExist):
 		ca, newCert, newKey, err := nodecert.NewCA(clusterID)
 		if err != nil {
@@ -91,23 +123,47 @@ func authority(ca *nodecert.CA, certPEM []byte) (*Authority, error) {
 // private key. Renewal starts before the final hour so a long-lived process
 // never begins a listener with a certificate about to expire.
 func (a *Authority) GatewayCertificate(dir, clusterID string, ttl time.Duration) (tls.Certificate, error) {
+	return a.GatewayCertificateFrom(dir, dir, clusterID, ttl, false)
+}
+
+// GatewayCertificateFrom keeps the renewable public leaf in stateDir and its
+// durable private key in keyDir. requireKeys has the same fail-closed semantics
+// as LoadOrCreateAuthorityFrom.
+func (a *Authority) GatewayCertificateFrom(
+	stateDir, keyDir, clusterID string,
+	ttl time.Duration,
+	requireKeys bool,
+) (tls.Certificate, error) {
 	if a == nil || a.CA == nil {
 		return tls.Certificate{}, errors.New("nodepki: authority is required")
 	}
-	return a.loadOrIssue(dir, GatewayKeyFile, GatewayCertFile,
-		nodecert.Peer{Role: nodecert.RoleGateway, Name: clusterID}, ttl)
+	if keyDir == "" {
+		keyDir = stateDir
+	}
+	return a.loadOrIssue(
+		stateDir, keyDir, GatewayKeyFile, GatewayCertFile,
+		nodecert.Peer{Role: nodecert.RoleGateway, Name: clusterID}, ttl,
+		requireKeys,
+	)
 }
 
-func (a *Authority) loadOrIssue(dir, keyFile, certFile string, peer nodecert.Peer, ttl time.Duration) (tls.Certificate, error) {
-	keyPath, certPath := filepath.Join(dir, keyFile), filepath.Join(dir, certFile)
-	key, keyPEM, err := loadOrCreateKey(keyPath)
+func (a *Authority) loadOrIssue(
+	stateDir, keyDir, keyFile, certFile string,
+	peer nodecert.Peer,
+	ttl time.Duration,
+	requireKey bool,
+) (tls.Certificate, error) {
+	keyPath, certPath := filepath.Join(keyDir, keyFile), filepath.Join(stateDir, certFile)
+	key, keyPEM, err := loadOrCreateKeyPolicy(keyPath, requireKey)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
 	if certPEM, err := os.ReadFile(certPath); err == nil {
 		leaf, err := tlsKeyPair(certPEM, keyPEM)
-		if err == nil && leaf.Leaf.NotAfter.After(time.Now().Add(time.Hour)) &&
-			hasIdentity(leaf.Leaf, peer) {
+		if err == nil &&
+			leaf.Leaf.NotAfter.After(time.Now().Add(time.Hour)) &&
+			hasIdentity(leaf.Leaf, peer) &&
+			a.verifyLeaf(leaf.Leaf) == nil {
 			return leaf, nil
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -125,6 +181,17 @@ func (a *Authority) loadOrIssue(dir, keyFile, certFile string, peer nodecert.Pee
 		return tls.Certificate{}, err
 	}
 	return tlsKeyPair(certPEM, keyPEM)
+}
+
+func (a *Authority) verifyLeaf(leaf *x509.Certificate) error {
+	if leaf == nil || a.Roots == nil {
+		return errors.New("nodepki: gateway certificate has no trust roots")
+	}
+	_, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     a.Roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	return err
 }
 
 // NodeCSR returns a CSR backed by the node's durable control-plane key. The CA
@@ -280,12 +347,22 @@ func GatewayPeer(identity string) (nodecert.Peer, error) {
 }
 
 func loadOrCreateKey(path string) (crypto.Signer, []byte, error) {
+	return loadOrCreateKeyPolicy(path, false)
+}
+
+func loadOrCreateKeyPolicy(path string, require bool) (crypto.Signer, []byte, error) {
 	keyPEM, err := os.ReadFile(path)
 	if err == nil {
 		key, err := parseKey(keyPEM)
 		return key, keyPEM, err
 	}
 	if !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	if require {
+		return nil, nil, fmt.Errorf("nodepki: required private key %s is missing", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, nil, err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

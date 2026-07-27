@@ -100,8 +100,8 @@ func serve(args []string) error {
 	var (
 		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker")
 		stateDir             = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
-		keyDir               = fs.String("key-dir", "", "directory holding the three fleet key PEMs (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
-		requireKeys          = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
+		keyDir               = fs.String("key-dir", "", "directory holding fleet private key PEMs, including node-control CA/gateway keys (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
+		requireKeys          = fs.Bool("require-keys", false, "fail if any required fleet private key is missing instead of generating one — set on fleet hosts, where a missing key means secret hydration failed and generating a fresh identity would lock the fleet out")
 		usersPath            = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
 		sshAddr              = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
 		sshAdvertise         = fs.Int("ssh-advertise-port", 0, "gateway port shown in user-facing instructions when it differs from the listen port (e.g. 22 when an edge DNAT forwards :22 to the gateway); 0 uses the listen port")
@@ -150,7 +150,7 @@ func serve(args []string) error {
 		githubClientID       = fs.String("github-client-id", defaultGitHubClientID, "public client id of the GitHub app used to link accounts via the OAuth device flow (`ssh ctl@<domain> github link`). It is an identifier, not a secret. Empty disables the flow, leaving `keys verify-github` — which needs the user's key published on GitHub — as the only way to link")
 		nodeNameFlag         = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
 		archFlag             = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
-		noNodeEnrol          = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator still has to run 'ssh ctl@<domain> node approve <name>' — so this is only worth setting on a gateway that will never gain another node")
+		noNodeEnrol          = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator must approve its verified fingerprint and network configuration — so this is only worth setting on a gateway that will never gain another node")
 		gatewayAddr          = fs.String("gateway", "", "run this machine as a fleet NODE linked to the gateway at host:port, instead of as a gateway itself. A provisioned node passes it through the unit's GATEWAY_FLAG line, which lands here as an ordinary flag")
 		gatewayPub           = fs.String("gateway-pubkey", "", "node mode: the gateway's PUBLIC upstream authorized_keys line, or a path to a file holding it. Omitted, it is learned from the first welcome and cached under --state-dir")
 		gatewayHostK         = fs.String("gateway-host-key", "", "node mode: pin the gateway's SSH host key (an authorized_keys line or a path to one). Empty trusts the first key offered, remembers it, and refuses any later change")
@@ -254,7 +254,7 @@ func serve(args []string) error {
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
 		return err
 	}
-	// The three fleet keys live in --key-dir (default --state-dir). On a fleet
+	// Fleet private keys live in --key-dir (default --state-dir). On a fleet
 	// host that's tmpfs, hydrated from Secret Manager by `sparkbox fetch-secrets`
 	// before this starts, and --require-keys turns a missing file into a hard
 	// failure rather than a silently-minted new fleet identity.
@@ -405,12 +405,14 @@ func serve(args []string) error {
 		gatewayControl *gatewayNodeControl
 	)
 	if controlMode != fleet.ControlTransportSSH {
-		nodeAuthority, err = nodepki.LoadOrCreateAuthority(*stateDir, *clusterID)
+		nodeAuthority, err = nodepki.LoadOrCreateAuthorityFrom(
+			*stateDir, keysIn, *clusterID, *requireKeys,
+		)
 		if err != nil {
 			return fmt.Errorf("node control certificate authority: %w", err)
 		}
-		leaf, err := nodeAuthority.GatewayCertificate(
-			*stateDir, *clusterID, nodecert.DefaultTTL,
+		leaf, err := nodeAuthority.GatewayCertificateFrom(
+			*stateDir, keysIn, *clusterID, nodecert.DefaultTTL, *requireKeys,
 		)
 		if err != nil {
 			return fmt.Errorf("gateway node control certificate: %w", err)
@@ -422,7 +424,9 @@ func serve(args []string) error {
 		if err != nil {
 			return fmt.Errorf("node certificate issuer: %w", err)
 		}
-		go gatewayLeaf.run(ctx, nodeAuthority, *stateDir, *clusterID, log)
+		go gatewayLeaf.run(
+			ctx, nodeAuthority, *stateDir, keysIn, *clusterID, *requireKeys, log,
+		)
 	}
 
 	// --edge-v4 feeds the per-name front-door A records below. Parsed here, once,
@@ -473,7 +477,7 @@ func serve(args []string) error {
 	}
 
 	mgrOpts := host.Options{
-		StateDir: *stateDir, Driver: driver,
+		Context: ctx, StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
 		Routes:             routeStore,
 		Schedules:          scheduleStore,
@@ -542,7 +546,7 @@ func serve(args []string) error {
 	}
 
 	fleetOpts := fleet.Options{
-		Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
+		Context: ctx, Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
 		Index: placeStore, Log: log, Metrics: metricsRegistry,
 		Routes: routeStore, Schedules: scheduleStore, Tags: secretsStore,
 		LocalNet: netSyncer,

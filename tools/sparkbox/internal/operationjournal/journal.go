@@ -218,6 +218,64 @@ func (j *Journal) Cancel(ctx context.Context, id string, failure Failure) (Opera
 	return j.transition(ctx, id, StateCancelled, nil, &failure)
 }
 
+// RecoverInterrupted terminalizes operations left pending or running by a
+// previous service instance. The request body is intentionally not stored in
+// this journal, so replaying one of these operations could repeat a side
+// effect whose outcome was lost during the crash. Callers may retry with a new
+// operation identity after reconciling authoritative state.
+func (j *Journal) RecoverInterrupted(ctx context.Context, failure Failure) ([]Operation, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	tx, err := j.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE node_operations
+		SET updated_at = ?, state = ?, sequence = sequence + 1, result = NULL,
+		    error_code = ?, error_message = ?, error_retryable = ?
+		WHERE state IN (?, ?)
+		RETURNING operation_id`,
+		time.Now().UTC(), StateFailed, failure.Code, failure.Message, failure.Retryable,
+		StatePending, StateRunning)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close() //nolint:errcheck
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	recovered := make([]Operation, 0, len(ids))
+	for _, id := range ids {
+		op, err := j.Get(ctx, id)
+		if err != nil {
+			return recovered, err
+		}
+		recovered = append(recovered, op)
+		j.notify(id)
+	}
+	return recovered, nil
+}
+
 func (j *Journal) transition(ctx context.Context, id string, next State, result []byte, failure *Failure) (Operation, error) {
 	if id == "" || !validState(next) {
 		return Operation{}, ErrInvalid

@@ -100,7 +100,7 @@ survives this reasoning entirely.
 
 ### Secret layout
 
-All five secrets move. Not just the two passwords — the PEMs are the ones whose
+All fleet secrets move. Not just the two passwords — the PEMs are the ones whose
 exposure actually matters, and leaving them in user-data would mean doing this
 work and still having a plaintext fleet-secret store.
 
@@ -108,6 +108,9 @@ work and still having a plaintext fleet-secret store.
 /sparkbox/fleet/gateway-host-key        type: ssh_key   {"ssh_private_key": "..."}
 /sparkbox/fleet/gateway-upstream-key    type: ssh_key
 /sparkbox/fleet/oidc-signing-key        type: opaque    (PEM; not an SSH key)
+/sparkbox/fleet/node-control-ca-cert    type: opaque    (public bootstrap copy)
+/sparkbox/fleet/node-control-ca-key     type: opaque    (PEM)
+/sparkbox/fleet/gateway-control-key     type: opaque    (PEM)
 /sparkbox/fleet/cloudflare-api-token    type: opaque
 /sparkbox/fleet/console-password        type: opaque
 ```
@@ -122,12 +125,17 @@ cloud-init carries **one** credential instead of five. A small `sparkbox-secrets
 oneshot unit, ordered before `sparkbox.service`, fetches each secret by path and
 materializes it, then the server starts unchanged.
 
-**Write the PEMs to `/run` (tmpfs), not the persistent state dir.** They are
+**Write private-key PEMs to `/run` (tmpfs), not the persistent state dir.** They are
 re-hydrated from Secret Manager on every boot, so they don't need to survive
 one — and tmpfs means a captured disk image or a pulled drive yields no keys.
 This is a free win that falls out of the design: it removes the *at-rest disk*
 exposure on top of the user-data exposure, and it's only available because
 we're fetching at boot anyway.
+
+The node CA certificate is public and is copied from its hydrated bootstrap
+copy into durable state. Short-lived gateway and node leaf certificates are
+also durable public state. Their matching private keys remain exclusively in
+the configured key directory.
 
 The keys must stay byte-stable across reboots (clients pin the gateway host key
 in `known_hosts`; every rootfs trusts the upstream key), which the fetch
@@ -227,7 +235,7 @@ from Secret Manager into `/run/sparkbox` (tmpfs), sparkbox came up with
 `--require-keys` on those keys, the gateway on :22 served the fetched host key
 (fingerprint matched byte-for-byte), OIDC served the fetched signing key, and a
 sandbox was created through the fetched upstream key. Confirmed on the box: no
-PEMs on persistent disk, zero private keys in cloud-init user-data, only the
+private-key PEMs on persistent disk, zero private keys in cloud-init user-data, only the
 IP-pinned bootstrap key in `/etc/sparkbox/fetch.env`.
 
 Resolved along the way, now folded into the scripts/units:
@@ -248,6 +256,11 @@ Resolved along the way, now folded into the scripts/units:
   regenerate — the rootfs bakes in the upstream pubkey, and clients pin the host
   key. The OIDC key can be minted fresh only because no relying party is bound to
   a brand-new box's issuer yet.
+- **Node-control rollout starts with SSH authoritative.** Run
+  `FLEET_CLUSTER_ID=<stable-id> deploy/upload-fleet-secrets.sh` before enabling
+  `--node-control-transport=auto|grpc`. On a fleet that already issued node
+  certificates, upload its existing `node_ca_{cert,key}.pem`; never generate a
+  replacement CA merely to move the key into Secret Manager.
 
 ## Open questions
 

@@ -57,6 +57,10 @@ type Options struct {
 	// Local is the gateway's own machine. Required: a fleet with nowhere to put
 	// the first sandbox is not a fleet.
 	Local *host.Manager
+	// Context owns shared remote restore/resume work. Request cancellation stops
+	// only that caller waiting; it must not abort work concurrent callers share.
+	// Nil uses Background for tests and embedders without a lifecycle.
+	Context context.Context
 	// LocalName is what this machine is called in the ledger and in listings.
 	// Empty takes the manager's own node name, so the two cannot disagree about
 	// the string the manager already stamps on every record it creates.
@@ -129,6 +133,7 @@ type Options struct {
 // display of its own, and the ledger is the truth for who owns what and where
 // it lives.
 type Fleet struct {
+	ctx               context.Context
 	local             Node
 	localMgr          *host.Manager
 	localName         string
@@ -221,7 +226,12 @@ func New(opts Options) (*Fleet, error) {
 	if now == nil {
 		now = time.Now
 	}
+	lifecycle := opts.Context
+	if lifecycle == nil {
+		lifecycle = context.Background()
+	}
 	f := &Fleet{
+		ctx:               lifecycle,
 		local:             Local(name, opts.Local, opts.LocalNet),
 		localMgr:          opts.Local,
 		localName:         name,
@@ -920,14 +930,40 @@ func (f *Fleet) reserve(name, owner, image string, n Node) (release func(), err 
 // environment a moment later; pushing on every request is an SSH exec per HTTP
 // hit forever.
 func (f *Fleet) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
-	v, err, _ := f.ready.Do(name, func() (any, error) {
-		return f.ensureReady(ctx, name)
-	})
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	b := *v.(*host.Sandbox)
-	return &b, nil
+	result := f.ready.DoChan(name, func() (any, error) {
+		operationCtx, cancel := sharedOperationContext(ctx, f.ctx)
+		defer cancel()
+		return f.ensureReady(operationCtx, name)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case resolved := <-result:
+		if resolved.Err != nil {
+			return nil, resolved.Err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		b := *resolved.Val.(*host.Sandbox)
+		return &b, nil
+	}
+}
+
+func sharedOperationContext(values, lifecycle context.Context) (context.Context, context.CancelFunc) {
+	operation, cancel := context.WithCancel(context.WithoutCancel(values))
+	if lifecycle.Err() != nil {
+		cancel()
+		return operation, cancel
+	}
+	stop := context.AfterFunc(lifecycle, cancel)
+	return operation, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (f *Fleet) ensureReady(ctx context.Context, name string) (*host.Sandbox, error) {

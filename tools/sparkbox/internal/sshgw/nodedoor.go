@@ -22,7 +22,9 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodepki"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 )
 
@@ -263,7 +265,7 @@ func (g *Gateway) admitNode(s gssh.Session, hello nodelink.Hello, log *slog.Logg
 		// what puts a live "last seen" next to the row an operator is deciding
 		// about.
 		g.noteContact(row, hello, log)
-		return nodes.Node{}, g.pendingRefusal(row)
+		return nodes.Node{}, g.pendingRefusal(row, hello)
 	}
 	if hello.Node != row.Name {
 		// The row is authoritative: an operator approved a name they read off
@@ -272,6 +274,9 @@ func (g *Gateway) admitNode(s gssh.Session, hello nodelink.Hello, log *slog.Logg
 		return nodes.Node{}, nodelink.Refusal(nodelink.CodeNodeNameMismatch,
 			"this key is registered as node %q, not %q — the roster name is the one that counts.",
 			row.Name, hello.Node)
+	}
+	if refusal := approvedNetworkRefusal(row, hello); refusal != nil {
+		return nodes.Node{}, refusal
 	}
 	return row, nil
 }
@@ -322,10 +327,51 @@ func (g *Gateway) enrolNode(key xssh.PublicKey, hello nodelink.Hello, log *slog.
 	// greps for when the machine they just brought up has not appeared, so it is
 	// deliberately not rate-limited.
 	log.Info("node enrolled and awaiting approval", "node", row.Name, "fp", row.FP,
-		"approve_with", fmt.Sprintf("ssh %s@%s node approve %s --guest-subnet <unique-CIDR>",
-			ControlUser, g.domainHint(), row.FP))
+		"approve_with", g.approvalCommand(row, hello))
 	g.noteContact(row, hello, log)
-	return nodes.Node{}, g.pendingRefusal(row)
+	return nodes.Node{}, g.pendingRefusal(row, hello)
+}
+
+// approvedNetworkRefusal binds machine-reported routing and listener state to
+// the values an operator approved. The roster wins: accepting a different
+// prefix would route another node's traffic to this key, and accepting a
+// different gRPC endpoint would let an approved SSH identity redirect the
+// gateway's mTLS dial away from the reviewed tailnet address.
+func approvedNetworkRefusal(row nodes.Node, hello nodelink.Hello) *ctlops.Error {
+	if row.ApprovedGuestSubnet == "" {
+		return nodelink.Refusal(
+			nodelink.CodeNodeNameMismatch,
+			"node %q has no approved guest subnet. Remove and re-approve its fingerprint with --guest-subnet before it can join.",
+			row.Name,
+		)
+	}
+	reported, err := guestnet.Parse(hello.GuestSubnet)
+	if err != nil || reported.String() != row.ApprovedGuestSubnet {
+		return nodelink.Refusal(
+			nodelink.CodeNodeNameMismatch,
+			"node %q reports guest subnet %q, but the roster approves %q. Restart it with the approved --guest-subnet or remove and re-approve its fingerprint.",
+			row.Name, hello.GuestSubnet, row.ApprovedGuestSubnet,
+		)
+	}
+	reportedGRPC := ""
+	if hello.GRPCAddr != "" {
+		reportedGRPC, err = nodepki.NormalizeGRPCAddr(hello.GRPCAddr)
+		if err != nil {
+			return nodelink.Refusal(
+				nodelink.CodeNodeNameMismatch,
+				"node %q reports invalid gRPC address %q; use a concrete tailnet host:port.",
+				row.Name, hello.GRPCAddr,
+			)
+		}
+	}
+	if reportedGRPC != row.GRPCAddr {
+		return nodelink.Refusal(
+			nodelink.CodeNodeNameMismatch,
+			"node %q reports gRPC address %q, but the roster approves %q. Restart it with the approved --node-grpc-addr or remove and re-approve its fingerprint.",
+			row.Name, reportedGRPC, row.GRPCAddr,
+		)
+	}
+	return nil
 }
 
 // noteContact records that a machine that is still waiting for approval knocked,
@@ -358,7 +404,7 @@ const nodeEnrolStale = 10 * time.Minute
 // rows rather than on people, so a stranger with 32 throwaway keys can fill the
 // roster and — if nothing is ever reclaimed — lock every genuine machine out of
 // enrolment for good. But a row is not just a slot: it is also the name that
-// `node approve <name>` is keyed on, and it is the ErrNameTaken that keeps that
+// the operator's pending approval is tied to, and ErrNameTaken keeps that
 // name attached to one key. Reclaim a row and the name goes back on the market;
 // reclaim the wrong row and a stranger can put their own key behind the name an
 // operator is about to say yes to, which turns an approval into a machine
@@ -485,15 +531,30 @@ func disarmProbation(ctx gssh.Context) {
 // pendingRefusal names the exact command that unblocks the node. The node logs
 // this sentence and that log line is the only place anyone will look.
 //
-// It ends by pointing at the fingerprint because approval is keyed on the name
+// It ends by pointing at the fingerprint because approval is keyed on the key
 // and the name is only ever a label: this sentence is printed on the machine
 // that owns the key, so the fingerprint in it is the one thing an operator can
 // compare out of band against what the roster shows before they say yes.
-func (g *Gateway) pendingRefusal(row nodes.Node) *ctlops.Error {
+func (g *Gateway) pendingRefusal(row nodes.Node, hello nodelink.Hello) *ctlops.Error {
 	return nodelink.Refusal(nodelink.CodeNodePending,
-		"node %q (%s) is waiting for approval. An operator runs:  ssh %s@%s node approve %s --guest-subnet <unique-CIDR>  "+
+		"node %q (%s) is waiting for approval. An operator runs:  %s  "+
 			"— after checking that fingerprint against the one this machine printed at startup.",
-		row.Name, row.FP, ControlUser, g.domainHint(), row.FP)
+		row.Name, row.FP, g.approvalCommand(row, hello))
+}
+
+func (g *Gateway) approvalCommand(row nodes.Node, hello nodelink.Hello) string {
+	subnet := "<unique-CIDR>"
+	if network, err := guestnet.Parse(hello.GuestSubnet); err == nil {
+		subnet = network.String()
+	}
+	command := fmt.Sprintf(
+		"ssh %s@%s node approve %s --guest-subnet %s",
+		ControlUser, g.domainHint(), row.FP, subnet,
+	)
+	if address, err := nodepki.NormalizeGRPCAddr(hello.GRPCAddr); err == nil {
+		command += " --grpc-addr " + address
+	}
+	return command
 }
 
 // doorNoise bounds the log lines a machine this gateway has not approved can

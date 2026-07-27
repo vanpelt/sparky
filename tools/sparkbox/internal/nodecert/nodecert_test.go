@@ -1,12 +1,12 @@
 package nodecert
 
 import (
-	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,11 +150,10 @@ func TestCSRIdentityCannotOverrideRosterNameAndTTLIsCapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, csr, err := NewCSR("attacker-chosen-name")
+	_, csr, err := NewCSR("attacker-chosen-name")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = key.(crypto.Signer)
 	certPEM, _, expiry, err := ca.SignCSR(csr, Peer{Role: RoleNode, Name: "approved-name"}, 30*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -169,5 +168,31 @@ func TestCSRIdentityCannotOverrideRosterNameAndTTLIsCapped(t *testing.T) {
 	}
 	if remaining := time.Until(expiry); remaining > MaxTTL+time.Minute {
 		t.Fatalf("leaf TTL = %v, exceeds cap %v", remaining, MaxTTL)
+	}
+}
+
+func TestIdentityAcceptsOnlyCanonicalPlatformLabels(t *testing.T) {
+	for _, role := range []Role{RoleGateway, RoleNode} {
+		for _, name := range []string{"prod", "prod-a", "node-01", "prod.example", "Prod_1"} {
+			identity, err := Identity(role, name)
+			if err != nil {
+				t.Fatalf("Identity(%q, %q): %v", role, name, err)
+			}
+			peer, err := ParseIdentity(identity.String())
+			if err != nil {
+				t.Fatalf("ParseIdentity(%q): %v", identity, err)
+			}
+			if peer != (Peer{Role: role, Name: name}) {
+				t.Fatalf("round trip = %+v, want %s/%s", peer, role, name)
+			}
+		}
+	}
+	for _, name := range []string{
+		"", "prod%2Fwest", "prod/west", "prod west", "prod@example", "prod\u00e9",
+		strings.Repeat("a", 256),
+	} {
+		if identity, err := Identity(RoleGateway, name); !errors.Is(err, ErrIdentity) {
+			t.Errorf("Identity(gateway, %q) = %v, %v; want ErrIdentity", name, identity, err)
+		}
 	}
 }

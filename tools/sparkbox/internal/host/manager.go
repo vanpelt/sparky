@@ -368,6 +368,7 @@ type ObjectStore interface {
 type Manager struct {
 	mu          sync.Mutex
 	ready       singleflight.Group // one restore/resume per sandbox at a time
+	ctx         context.Context    // process lifetime for shared restore/resume work
 	driver      vmm.Driver
 	balloon     vmm.Ballooner    // driver's balloon capability, if it has one; else nil
 	archiver    vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
@@ -433,6 +434,10 @@ type Options struct {
 	Driver           vmm.Driver
 	GatewayPublicKey string
 	Logger           *slog.Logger
+	// Context owns shared restore/resume work. Request cancellation stops that
+	// caller waiting but must not abort the one operation concurrent callers
+	// share. Nil uses Background for tests and embedders without a lifecycle.
+	Context context.Context
 	// Routes, if set, gets a default route per sandbox on create and is cleaned
 	// up on destroy. Nil disables proxy-route bookkeeping (used by unit tests).
 	Routes *routes.Store
@@ -503,7 +508,12 @@ type Options struct {
 }
 
 func NewManager(opts Options) (*Manager, error) {
+	lifecycle := opts.Context
+	if lifecycle == nil {
+		lifecycle = context.Background()
+	}
 	m := &Manager{
+		ctx:         lifecycle,
 		driver:      opts.Driver,
 		log:         opts.Logger,
 		stateDir:    opts.StateDir,
@@ -926,13 +936,39 @@ func Prepare(ctx context.Context, boxes Accessor, name string) (*Sandbox, error)
 // Concurrent callers for one sandbox share the complete restore/resume. Warm
 // request paths call Prepare and do not reach this method.
 func (m *Manager) EnsureReady(ctx context.Context, name string) (*Sandbox, error) {
-	v, err, _ := m.ready.Do(name, func() (any, error) {
-		return m.ensureReady(ctx, name)
-	})
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return copyOf(v.(*Sandbox)), nil
+	result := m.ready.DoChan(name, func() (any, error) {
+		operationCtx, cancel := sharedOperationContext(ctx, m.ctx)
+		defer cancel()
+		return m.ensureReady(operationCtx, name)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case resolved := <-result:
+		if resolved.Err != nil {
+			return nil, resolved.Err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return copyOf(resolved.Val.(*Sandbox)), nil
+	}
+}
+
+func sharedOperationContext(values, lifecycle context.Context) (context.Context, context.CancelFunc) {
+	operation, cancel := context.WithCancel(context.WithoutCancel(values))
+	if lifecycle.Err() != nil {
+		cancel()
+		return operation, cancel
+	}
+	stop := context.AfterFunc(lifecycle, cancel)
+	return operation, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (m *Manager) ensureReady(ctx context.Context, name string) (*Sandbox, error) {
@@ -1137,6 +1173,9 @@ func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instan
 	inst, err := m.driver.Resume(ctx, b.Name)
 	if err == nil {
 		return inst, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	m.log.Warn("resume failed, recreating", "name", b.Name, "err", err)
 	return m.driver.Create(ctx, vmm.Config{

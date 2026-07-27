@@ -393,7 +393,15 @@ func (f *Fleet) linkUp(n Node) func() {
 
 	if dup {
 		f.log.Info("node reconnected; superseding the previous link", "node", name)
-		old.Hangup(nodelink.CodeSuperseded, "a newer link for this node replaced this one")
+		// A linkedRemote may be composed with a durable gRPC control that is
+		// shared across SSH link generations. Supersession retires only the old
+		// SSH generation; revocation and explicit fleet shutdown still use the
+		// composed Node and therefore close both transports.
+		if linked, ok := old.(*linkedRemote); ok {
+			linked.ssh.Hangup(nodelink.CodeSuperseded, "a newer link for this node replaced this one")
+		} else {
+			old.Hangup(nodelink.CodeSuperseded, "a newer link for this node replaced this one")
+		}
 	}
 	return func() {
 		f.mu.Lock()

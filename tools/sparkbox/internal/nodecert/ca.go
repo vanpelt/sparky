@@ -44,10 +44,37 @@ func Identity(role Role, name string) (*url.URL, error) {
 	if role != RoleGateway && role != RoleNode {
 		return nil, ErrIdentity
 	}
-	if name == "" || strings.ContainsAny(name, "/?#") {
+	// Limit the path segment to RFC 3986 unreserved bytes. Cluster IDs may be a
+	// hostname (and therefore contain dots), while node names are constrained
+	// further by the roster. Rejecting '%' is load-bearing: accepting it used to
+	// produce identities such as prod%2Fwest which ParseIdentity decoded and
+	// rejected. Building a structured URL below also prevents accidental raw
+	// path interpolation.
+	if !validIdentityName(name) {
 		return nil, ErrIdentity
 	}
-	return url.Parse(fmt.Sprintf("spiffe://%s/%s/%s", TrustDomain, role, name))
+	return &url.URL{
+		Scheme: "spiffe",
+		Host:   TrustDomain,
+		Path:   fmt.Sprintf("/%s/%s", role, name),
+	}, nil
+}
+
+func validIdentityName(name string) bool {
+	if len(name) == 0 || len(name) > 255 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ParseIdentity accepts only the canonical Sparkbox SPIFFE form and returns the

@@ -202,6 +202,9 @@ type nodeControlState struct {
 	events         *eventjournal.Journal
 	observer       *grpccontrol.EventObserver
 	observerCancel context.CancelFunc
+	service        *grpccontrol.Server
+	controlCancel  context.CancelFunc
+	controlDone    chan struct{}
 }
 
 func openNodeControlState(stateDir string, log *slog.Logger) (*nodeControlState, error) {
@@ -228,12 +231,44 @@ func (s *nodeControlState) Close(log *slog.Logger) {
 	if s == nil {
 		return
 	}
+	if s.controlCancel != nil {
+		s.controlCancel()
+	}
+	if s.service != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.service.Shutdown(shutdownCtx)
+		shutdownCancel()
+		if err != nil {
+			// A backend action may ignore cancellation. Keep SQLite open
+			// rather than closing the journals underneath that goroutine.
+			log.Warn("node control mutations did not stop; leaving journals open", "err", err)
+			return
+		}
+	}
+	if s.controlDone != nil {
+		serverCtx, serverCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		select {
+		case <-s.controlDone:
+		case <-serverCtx.Done():
+			serverCancel()
+			log.Warn("node control server did not stop; leaving journals open", "err", serverCtx.Err())
+			return
+		}
+		serverCancel()
+	}
 	flushCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	if err := s.observer.Flush(flushCtx); err != nil {
 		log.Warn("final node event flush failed", "err", err)
 	}
 	cancel()
 	s.observerCancel()
+	observerCtx, observerCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := s.observer.Wait(observerCtx); err != nil {
+		observerCancel()
+		log.Warn("node event observer did not stop; leaving journals open", "err", err)
+		return
+	}
+	observerCancel()
 	if err := s.events.Close(); err != nil {
 		log.Warn("close node event journal", "err", err)
 	}
@@ -266,8 +301,9 @@ func startNodeControl(
 	if err != nil {
 		return fmt.Errorf("node gRPC listen: %w", err)
 	}
+	controlCtx, cancelControl := context.WithCancel(ctx)
 	service, err := grpccontrol.NewServer(grpccontrol.ServerConfig{
-		Context: ctx, Backend: mgr,
+		Context: controlCtx, Backend: mgr,
 		Operations: state.operations, Events: state.events,
 		Network: networkHooks(network),
 		Node:    opts.nodeName, Version: version, StartedAt: time.Now().UTC(),
@@ -276,12 +312,18 @@ func startNodeControl(
 		SandboxEventsFromObserver: true,
 	})
 	if err != nil {
+		cancelControl()
 		listener.Close() //nolint:errcheck
 		return err
 	}
+	service.SetEventHealth(state.observer)
+	controlDone := make(chan struct{})
+	state.service = service
+	state.controlCancel = cancelControl
+	state.controlDone = controlDone
 	go func() {
+		defer close(controlDone)
 		defer listener.Close() //nolint:errcheck
-		controlCtx, cancelControl := context.WithCancel(ctx)
 		defer cancelControl()
 		loadCertificate := func(loadCtx context.Context) (tls.Certificate, *x509.CertPool, nodecert.Peer, error) {
 			leaf, roots, gateway, err := enrolledNodeCertificate(loadCtx, opts, uplink, log)
@@ -294,7 +336,7 @@ func startNodeControl(
 		}
 		leaf, roots, gateway, err := loadCertificate(controlCtx)
 		if err != nil {
-			if ctx.Err() == nil {
+			if controlCtx.Err() == nil {
 				log.Error("node control enrollment stopped", "err", err)
 			}
 			return
@@ -326,7 +368,7 @@ func startNodeControl(
 		serial, expires := tlsState.details()
 		log.Info("mTLS node control enabled", "addr", listener.Addr(),
 			"certificate_serial", serial, "certificate_expires", expires)
-		if err := server.Serve(listener); err != nil && ctx.Err() == nil &&
+		if err := server.Serve(listener); err != nil && controlCtx.Err() == nil &&
 			!errors.Is(err, grpc.ErrServerStopped) {
 			log.Error("node control server stopped", "err", err)
 		}

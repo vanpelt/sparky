@@ -41,6 +41,134 @@ func TestAuthorityPersistsAndGatewayLeafRenewsSafely(t *testing.T) {
 	}
 }
 
+func TestGatewayPrivateKeysUseKeyDirAndRequireKeysFailsClosed(t *testing.T) {
+	stateDir, keyDir := t.TempDir(), t.TempDir()
+	authority, err := LoadOrCreateAuthorityFrom(stateDir, keyDir, "cluster-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.GatewayCertificateFrom(
+		stateDir, keyDir, "cluster-a", time.Hour, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{CAKeyFile, GatewayKeyFile} {
+		if _, err := os.Stat(filepath.Join(keyDir, name)); err != nil {
+			t.Fatalf("private key %s was not stored in key-dir: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(stateDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("private key %s leaked into state-dir: %v", name, err)
+		}
+	}
+	for _, name := range []string{CACertFile, GatewayCertFile} {
+		if _, err := os.Stat(filepath.Join(stateDir, name)); err != nil {
+			t.Fatalf("public certificate %s was not durable in state-dir: %v", name, err)
+		}
+	}
+
+	if _, err := LoadOrCreateAuthorityFrom(stateDir, keyDir, "cluster-a", true); err != nil {
+		t.Fatalf("require-keys rejected present CA key: %v", err)
+	}
+	if err := os.Remove(filepath.Join(keyDir, GatewayKeyFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.GatewayCertificateFrom(
+		stateDir, keyDir, "cluster-a", time.Hour, true,
+	); err == nil {
+		t.Fatal("require-keys regenerated a missing gateway private key")
+	}
+	if err := os.Remove(filepath.Join(keyDir, CAKeyFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateAuthorityFrom(stateDir, keyDir, "cluster-a", true); err == nil {
+		t.Fatal("require-keys regenerated a missing CA private key")
+	}
+}
+
+func TestAuthorityRestoresPublicCertificateFromHydratedKeyDir(t *testing.T) {
+	seedDir := t.TempDir()
+	seed, err := LoadOrCreateAuthority(seedDir, "cluster-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedKey, err := os.ReadFile(filepath.Join(seedDir, CAKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir, keyDir := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(keyDir, CACertFile), seed.CertPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, CAKeyFile), seedKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := LoadOrCreateAuthorityFrom(stateDir, keyDir, "cluster-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored.CertPEM) != string(seed.CertPEM) {
+		t.Fatal("restored authority differs from hydrated authority")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, CACertFile)); err != nil {
+		t.Fatalf("public CA certificate was not copied into durable state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, CAKeyFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("CA private key leaked into durable state: %v", err)
+	}
+}
+
+func TestGatewayCertificateRejectsCachedLeafFromAnotherAuthority(t *testing.T) {
+	stateDir, keyDir := t.TempDir(), t.TempDir()
+	current, err := LoadOrCreateAuthorityFrom(stateDir, keyDir, "cluster-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := current.GatewayCertificateFrom(
+		stateDir, keyDir, "cluster-a", 4*time.Hour, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	other, err := LoadOrCreateAuthority(t.TempDir(), "cluster-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(keyDir, GatewayKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := parseKey(keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := csrFor(key, "cluster-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignPEM, _, _, err := other.CA.SignCSR(
+		csr,
+		nodecert.Peer{Role: nodecert.RoleGateway, Name: "cluster-a"},
+		4*time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePublic(filepath.Join(stateDir, GatewayCertFile), foreignPEM); err != nil {
+		t.Fatal(err)
+	}
+
+	renewed, err := current.GatewayCertificateFrom(
+		stateDir, keyDir, "cluster-a", 4*time.Hour, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := renewed.Leaf.Verify(x509.VerifyOptions{
+		Roots: current.Roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Fatalf("cached foreign leaf was reused instead of reissued: %v", err)
+	}
+}
+
 func TestNodeEnrollmentUsesDurableKeyAndExactIdentity(t *testing.T) {
 	gatewayDir, nodeDir := t.TempDir(), t.TempDir()
 	authority, err := LoadOrCreateAuthority(gatewayDir, "cluster-a")

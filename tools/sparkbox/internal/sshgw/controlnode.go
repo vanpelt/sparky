@@ -1,6 +1,7 @@
 package sshgw
 
-// The operator's half of the fleet: `ctl@ node ls | approve <name> | rm <name>`.
+// The operator's half of the fleet:
+// `ctl@ node ls | approve <fingerprint> --guest-subnet <CIDR> | rm <name>`.
 //
 // The other half is nodedoor.go, where a machine enrols itself and is told to
 // wait. These two files are the whole trust ceremony — the node offers a key

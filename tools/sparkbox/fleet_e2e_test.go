@@ -554,7 +554,10 @@ func (fs *fleetStack) join(t *testing.T, n *nodeSide) (unplug func()) {
 	if err != nil {
 		t.Fatalf("reading the pending row for %s: %v", n.name, err)
 	}
-	if err := fs.roster.ApproveFP(row.FP, "tester"); err != nil {
+	if err := fs.roster.ApproveFPWithConfig(row.FP, "tester", nodes.ApprovalConfig{
+		GuestSubnet:        "172.30.0.0/16",
+		GatewayGuestSubnet: "10.200.0.0/20",
+	}); err != nil {
 		t.Fatalf("approving %s: %v", n.name, err)
 	}
 	fs.awaitLink(t, n)

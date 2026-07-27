@@ -40,7 +40,9 @@ func fleetRoutingExpected(cfg Config) bool {
 		cfg.GatewayGRPCAddr != "" ||
 		cfg.ClusterID != "" ||
 		cfg.NodeControlTransport == "grpc" ||
-		cfg.GuestDataTransport == "routed"
+		cfg.GuestDataTransport == "routed" ||
+		(cfg.GuestDataTransport == "auto" && cfg.RoutedGuestCanaryPercent > 0 &&
+			(cfg.RoutedGuestCanaryExplicit || cfg.flagGiven("routed-guest-canary-percent")))
 }
 
 func parseTailscalePrefs(raw []byte) (tailscalePrefs, error) {

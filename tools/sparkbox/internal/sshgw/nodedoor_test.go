@@ -337,11 +337,16 @@ func (l *link) next(t *testing.T) nodelink.Frame {
 
 func helloFrame(t *testing.T, name string) nodelink.Frame {
 	t.Helper()
-	body, err := json.Marshal(nodelink.Hello{
+	return helloDetailsFrame(t, nodelink.Hello{
 		Protocol: nodelink.Protocol, Node: name, Arch: "arm64", OS: "linux",
 		Release: "2026-07-22", Version: "test", Driver: "mock",
 		GuestSubnet: "172.30.0.0/16", StartedAt: time.Now(),
 	})
+}
+
+func helloDetailsFrame(t *testing.T, hello nodelink.Hello) nodelink.Frame {
+	t.Helper()
+	body, err := json.Marshal(hello)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,6 +357,12 @@ func helloFrame(t *testing.T, name string) nodelink.Frame {
 func (l *link) hello(t *testing.T, name string) nodelink.Frame {
 	t.Helper()
 	l.send(t, helloFrame(t, name))
+	return l.next(t)
+}
+
+func (l *link) helloDetails(t *testing.T, hello nodelink.Hello) nodelink.Frame {
+	t.Helper()
+	l.send(t, helloDetailsFrame(t, hello))
 	return l.next(t)
 }
 
@@ -380,6 +391,9 @@ func TestNodeEnrolsOnceAndIsRefused(t *testing.T) {
 	if strings.Contains(reply.Err.Msg, "node approve node-b") {
 		t.Errorf("refusal offers approval by name: %q", reply.Err.Msg)
 	}
+	if !strings.Contains(reply.Err.Msg, "--guest-subnet 172.30.0.0/16") {
+		t.Errorf("refusal does not carry the node's reported subnet: %q", reply.Err.Msg)
+	}
 
 	row, err := s.roster.Get("node-b")
 	if err != nil {
@@ -406,6 +420,61 @@ func TestNodeEnrolsOnceAndIsRefused(t *testing.T) {
 	// Enrolling is not capacity: nothing joined the fleet.
 	if got := len(s.flt.Capacities()); got != 1 {
 		t.Errorf("fleet reports %d machines, want only this one", got)
+	}
+}
+
+func TestApprovedNodeMustReportRosterApprovedNetworkConfiguration(t *testing.T) {
+	s := newNodeStack(t, true)
+	key := newNodeKey(t)
+	pending := nodelink.Hello{
+		Protocol: nodelink.Protocol, Node: "node-b", Arch: "arm64", OS: "linux",
+		Release: "test", Version: "test", Driver: "mock",
+		GuestSubnet: "172.30.0.0/16", GRPCAddr: "100.64.0.20:9443",
+		StartedAt: time.Now(),
+	}
+	reply := s.open(t, key).helloDetails(t, pending)
+	if reply.Err == nil || !strings.Contains(
+		reply.Err.Msg,
+		"--guest-subnet 172.30.0.0/16 --grpc-addr 100.64.0.20:9443",
+	) {
+		t.Fatalf("pending approval guidance did not bind reported network values: %+v", reply.Err)
+	}
+	approveTestNode(t, s, key, "100.64.0.20:9443")
+
+	wrongSubnet := pending
+	wrongSubnet.GuestSubnet = "172.31.0.0/16"
+	reply = s.open(t, key).helloDetails(t, wrongSubnet)
+	if reply.Err == nil || reply.Err.Code != nodelink.CodeNodeNameMismatch ||
+		!strings.Contains(reply.Err.Msg, "roster approves") {
+		t.Fatalf("approved subnet drift was admitted: %+v", reply.Err)
+	}
+
+	wrongGRPC := pending
+	wrongGRPC.GRPCAddr = "100.64.0.21:9443"
+	reply = s.open(t, key).helloDetails(t, wrongGRPC)
+	if reply.Err == nil || reply.Err.Code != nodelink.CodeNodeNameMismatch ||
+		!strings.Contains(reply.Err.Msg, "roster approves") {
+		t.Fatalf("approved gRPC address drift was admitted: %+v", reply.Err)
+	}
+
+	reply = s.open(t, key).helloDetails(t, pending)
+	if reply.Err != nil {
+		t.Fatalf("exact approved network configuration was refused: %+v", reply.Err)
+	}
+}
+
+func TestLegacyApprovalWithoutNetworkConfigurationFailsClosed(t *testing.T) {
+	s := newNodeStack(t, true)
+	key := newNodeKey(t)
+	s.open(t, key).hello(t, "node-b")
+	if err := s.roster.ApproveFP(
+		xssh.FingerprintSHA256(key.PublicKey()), "operator",
+	); err != nil {
+		t.Fatal(err)
+	}
+	reply := s.open(t, key).hello(t, "node-b")
+	if reply.Err == nil || !strings.Contains(reply.Err.Msg, "no approved guest subnet") {
+		t.Fatalf("legacy unbound approval was admitted: %+v", reply.Err)
 	}
 }
 
@@ -466,9 +535,7 @@ func TestUnknownKeyRefusedIdenticallyElsewhere(t *testing.T) {
 func (s *nodeStack) approved(t *testing.T, key xssh.Signer, name string) *link {
 	t.Helper()
 	s.open(t, key).hello(t, name)
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 	l := s.open(t, key)
 	reply := l.hello(t, name)
 	if reply.Err != nil {
@@ -477,15 +544,27 @@ func (s *nodeStack) approved(t *testing.T, key xssh.Signer, name string) *link {
 	return l
 }
 
+func approveTestNode(t *testing.T, s *nodeStack, key xssh.Signer, grpcAddr string) {
+	t.Helper()
+	if err := s.roster.ApproveFPWithConfig(
+		xssh.FingerprintSHA256(key.PublicKey()),
+		"operator",
+		nodes.ApprovalConfig{
+			GuestSubnet: "172.30.0.0/16", GatewayGuestSubnet: "10.200.0.0/20",
+			GRPCAddr: grpcAddr,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestApprovedNodeJoinsTheFleet is the happy path end to end: hello, welcome,
 // inventory, heartbeat, and a machine the fleet can see.
 func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 
 	l := s.open(t, key)
 	reply := l.hello(t, "node-b")
@@ -571,9 +650,7 @@ func TestDedicatedDataLaneBindsToRosterAndControlGeneration(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 
 	control := s.open(t, key)
 	hello := helloFrame(t, "node-b")
@@ -874,9 +951,7 @@ func TestApprovedNodeIsNeverRecycled(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 	waiting := s.fillEnrolmentQueue(t)
 	// node-b has been silent longer than any of them, which is what makes it the
 	// row a rule about silence alone would pick.

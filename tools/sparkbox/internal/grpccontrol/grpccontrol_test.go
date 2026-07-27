@@ -2,7 +2,6 @@ package grpccontrol
 
 import (
 	"context"
-	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -21,6 +20,8 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
@@ -31,6 +32,38 @@ type fakeBackend struct {
 	boxes       map[string]*host.Sandbox
 	snapshots   map[string]*host.Snapshot
 	createCalls atomic.Int32
+}
+
+func TestCurrentPeerCertificateRejectsExpiredLongLivedConnection(t *testing.T) {
+	now := time.Now().UTC()
+	peerContext := func(notBefore, notAfter time.Time) context.Context {
+		return peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{{
+					NotBefore: notBefore,
+					NotAfter:  notAfter,
+				}},
+			}},
+		})
+	}
+
+	if err := requireCurrentPeerCertificate(
+		peerContext(now.Add(-time.Hour), now.Add(time.Hour)), now,
+	); err != nil {
+		t.Fatalf("current peer certificate rejected: %v", err)
+	}
+	for name, ctx := range map[string]context.Context{
+		"expired":    peerContext(now.Add(-2*time.Hour), now.Add(-time.Hour)),
+		"not active": peerContext(now.Add(time.Hour), now.Add(2*time.Hour)),
+		"missing":    context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := requireCurrentPeerCertificate(ctx, now)
+			if status.Code(err) != codes.Unauthenticated {
+				t.Fatalf("certificate check = %v, want Unauthenticated", err)
+			}
+		})
+	}
 }
 
 func newFakeBackend() *fakeBackend {
@@ -291,7 +324,7 @@ func issueCertificate(t *testing.T, authority *nodecert.CA, peer nodecert.Peer) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key.(crypto.Signer))
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,6 +518,202 @@ func TestEventReplayGapProducesReconciliationSignal(t *testing.T) {
 	}
 }
 
+func TestNewServerRecoversInterruptedOperationWithoutRepeatingMutation(t *testing.T) {
+	dir := t.TempDir()
+	operationPath := dir + "/operations.db"
+	operations, err := operationjournal.Open(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := createRequest(t, "demo", "operation-interrupted", "idempotency-interrupted")
+	spec, err := operationSpec(request.GetOperation(), "create", request.GetName(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := operations.Claim(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operations.Start(context.Background(), spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.Close(); err != nil {
+		t.Fatal(err)
+	}
+	operations, err = operationjournal.Open(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operations.Close()
+	events, err := eventjournal.Open(dir+"/events.db", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	backend := newFakeBackend()
+	service, err := NewServer(ServerConfig{
+		Backend: backend, Operations: operations, Events: events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, err := service.BeginCreate(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.GetState() != nodev1.OperationState_OPERATION_STATE_FAILED ||
+		replayed.GetError().GetCode() != interruptedOperationCode ||
+		!replayed.GetError().GetRetryable() {
+		t.Fatalf("recovered operation = %+v", replayed)
+	}
+	if got := backend.createCalls.Load(); got != 0 {
+		t.Fatalf("backend create calls = %d, want no replay after restart", got)
+	}
+}
+
+func TestPostSideEffectEventFailureIsTerminalAndDoesNotReplay(t *testing.T) {
+	dir := t.TempDir()
+	operations, err := operationjournal.Open(dir + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operations.Close()
+	events, err := eventjournal.Open(dir+"/events.db", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewServer(ServerConfig{
+		Backend: newFakeBackend(), Operations: operations, Events: events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := createRequest(t, "demo", "operation-event-fault", "idempotency-event-fault")
+	spec, err := operationSpec(request.GetOperation(), "create", request.GetName(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := operations.Claim(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := events.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var sideEffects atomic.Int32
+	action := func(context.Context) (mutationResult, error) {
+		sideEffects.Add(1)
+		return mutationResult{
+			result: emptyResult(),
+			events: []*nodev1.InventoryEvent{snapshotGone("snapshot-a")},
+		}, nil
+	}
+	service.execute(spec.ID, action)
+	op, err := operations.Get(context.Background(), spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.State != operationjournal.StateFailed || op.Failure == nil ||
+		op.Failure.Code != interruptedOperationCode || !op.Failure.Retryable {
+		t.Fatalf("operation after event-journal fault = %+v", op)
+	}
+
+	replayed, err := service.begin(
+		context.Background(), request.GetOperation(), "create", request.GetName(), request, action,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.GetState() != nodev1.OperationState_OPERATION_STATE_FAILED {
+		t.Fatalf("replayed operation = %+v", replayed)
+	}
+	if got := sideEffects.Load(); got != 1 {
+		t.Fatalf("side effects = %d, want exactly one", got)
+	}
+}
+
+func TestPostSideEffectOperationJournalFailureRecoversAfterReopen(t *testing.T) {
+	dir := t.TempDir()
+	operationPath := dir + "/operations.db"
+	operations, err := operationjournal.Open(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := eventjournal.Open(dir+"/events.db", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	service, err := NewServer(ServerConfig{
+		Backend: newFakeBackend(), Operations: operations, Events: events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := createRequest(t, "demo", "operation-result-fault", "idempotency-result-fault")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var sideEffects atomic.Int32
+	action := func(context.Context) (mutationResult, error) {
+		close(started)
+		<-release
+		sideEffects.Add(1)
+		return mutationResult{result: emptyResult()}, nil
+	}
+	if _, err := service.begin(
+		context.Background(), request.GetOperation(), "create", request.GetName(), request, action,
+	); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("mutation did not start")
+	}
+	if err := operations.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err = service.Shutdown(shutdownCtx)
+	shutdownCancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown with unavailable operation journal error = %v, want deadline", err)
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := service.Shutdown(drainCtx); err != nil {
+		drainCancel()
+		t.Fatalf("drain mutation after stopping persistence retries: %v", err)
+	}
+	drainCancel()
+
+	operations, err = operationjournal.Open(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operations.Close()
+	restarted, err := NewServer(ServerConfig{
+		Backend: newFakeBackend(), Operations: operations, Events: events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := restarted.begin(
+		context.Background(), request.GetOperation(), "create", request.GetName(), request, action,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.GetState() != nodev1.OperationState_OPERATION_STATE_FAILED ||
+		replayed.GetError().GetCode() != interruptedOperationCode {
+		t.Fatalf("recovered operation = %+v", replayed)
+	}
+	if got := sideEffects.Load(); got != 1 {
+		t.Fatalf("side effects = %d, want exactly one after journal reopen", got)
+	}
+}
+
 func TestMTLSRejectsUnexpectedGatewayIdentity(t *testing.T) {
 	backend := newFakeBackend()
 	operations, err := operationjournal.Open(t.TempDir() + "/operations.db")
@@ -574,10 +803,40 @@ func TestTLSConstructorsRefuseNilConfiguration(t *testing.T) {
 	}); err == nil {
 		t.Fatal("NewRPCServer accepted TLS without required client authentication")
 	}
+	if _, err := NewRPCServer(service, &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{pki.node},
+		ClientAuth:   tls.RequireAnyClientCert,
+	}); err == nil {
+		t.Fatal("NewRPCServer accepted mTLS without gateway SPIFFE verification")
+	}
+	if _, err := NewRPCServer(service, &tls.Config{
+		MinVersion:       tls.VersionTLS12,
+		Certificates:     []tls.Certificate{pki.node},
+		ClientAuth:       tls.RequireAnyClientCert,
+		VerifyConnection: func(tls.ConnectionState) error { return nil },
+	}); err == nil {
+		t.Fatal("NewRPCServer accepted TLS below version 1.3")
+	}
 	if _, err := DialTLS(context.Background(), "node", &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		RootCAs:    pki.roots,
 	}); err == nil {
 		t.Fatal("DialTLS accepted TLS without a gateway client certificate")
+	}
+	if _, err := DialTLS(context.Background(), "node", &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{pki.gateway},
+		RootCAs:      pki.roots,
+	}); err == nil {
+		t.Fatal("DialTLS accepted mTLS without node SPIFFE verification")
+	}
+	if _, err := DialTLS(context.Background(), "node", &tls.Config{
+		MinVersion:       tls.VersionTLS12,
+		Certificates:     []tls.Certificate{pki.gateway},
+		RootCAs:          pki.roots,
+		VerifyConnection: func(tls.ConnectionState) error { return nil },
+	}); err == nil {
+		t.Fatal("DialTLS accepted TLS below version 1.3")
 	}
 }

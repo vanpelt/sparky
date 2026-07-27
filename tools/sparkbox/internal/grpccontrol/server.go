@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	nodev1 "github.com/vanpelt/sparky/tools/sparkbox/api/node/v1"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/eventjournal"
@@ -23,13 +25,32 @@ const (
 	eventSandboxGone     = "sandbox.gone"
 	eventSnapshotChanged = "snapshot.changed"
 	eventSnapshotGone    = "snapshot.gone"
+
+	interruptedOperationCode = "outcome_indeterminate"
 )
+
+type eventHealthReporter interface {
+	Health() error
+	Acknowledge()
+}
 
 // Server is the node-side NodeControl adapter.
 type Server struct {
 	nodev1.UnimplementedNodeControlServer
 
 	config ServerConfig
+
+	lifecycleMu sync.Mutex
+	stopping    bool
+	mutations   sync.WaitGroup
+	stopOnce    sync.Once
+	stopRetries chan struct{}
+
+	healthMu             sync.Mutex
+	eventHealth          eventHealthReporter
+	reconcileGeneration  uint64
+	reconciledGeneration uint64
+	reconcileErr         error
 }
 
 // NewServer validates and constructs a NodeControl service. Use NewRPCServer
@@ -38,10 +59,22 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if err := config.normalize(); err != nil {
 		return nil, err
 	}
-	return &Server{config: config}, nil
+	recoveryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := config.Operations.RecoverInterrupted(recoveryCtx, operationjournal.Failure{
+		Code:      interruptedOperationCode,
+		Message:   "the node restarted before the mutation outcome was durably recorded; reconcile authoritative state before retrying",
+		Retryable: true,
+	}); err != nil {
+		return nil, fmt.Errorf("recover interrupted node operations: %w", err)
+	}
+	return &Server{config: config, stopRetries: make(chan struct{})}, nil
 }
 
 func (s *Server) GetInventory(ctx context.Context, _ *nodev1.GetInventoryRequest) (*nodev1.Inventory, error) {
+	s.healthMu.Lock()
+	reconcileGeneration := s.reconcileGeneration
+	s.healthMu.Unlock()
 	revision, err := s.config.Events.Current(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read inventory revision: %v", err)
@@ -59,6 +92,7 @@ func (s *Server) GetInventory(ctx context.Context, _ *nodev1.GetInventoryRequest
 	for _, snapshot := range snapshots {
 		out.Snapshots = append(out.Snapshots, snapshotToProto(snapshot))
 	}
+	s.acknowledgeInventory(reconcileGeneration)
 	return out, nil
 }
 
@@ -151,10 +185,23 @@ func (s *Server) Health(ctx context.Context, _ *nodev1.HealthRequest) (*nodev1.H
 	if err != nil {
 		health = nodev1.HealthStatus_HEALTH_STATUS_DEGRADED
 	}
+	s.healthMu.Lock()
+	eventHealth := s.eventHealth
+	needsReconcile := s.reconcileGeneration != s.reconciledGeneration
+	s.healthMu.Unlock()
+	if needsReconcile || eventHealth != nil && eventHealth.Health() != nil {
+		health = nodev1.HealthStatus_HEALTH_STATUS_DEGRADED
+	}
+	s.lifecycleMu.Lock()
+	stopping := s.stopping
+	s.lifecycleMu.Unlock()
 	select {
 	case <-s.config.Context.Done():
-		health = nodev1.HealthStatus_HEALTH_STATUS_STOPPING
+		stopping = true
 	default:
+	}
+	if stopping {
+		health = nodev1.HealthStatus_HEALTH_STATUS_STOPPING
 	}
 	return &nodev1.HealthResponse{
 		Status:            health,
@@ -164,6 +211,56 @@ func (s *Server) Health(ctx context.Context, _ *nodev1.HealthRequest) (*nodev1.H
 		InventoryRevision: revision,
 		Capabilities:      append([]string(nil), s.config.Capabilities...),
 	}, nil
+}
+
+// SetEventHealth connects an asynchronous event observer to service health.
+// It should be called before the gRPC server begins accepting requests.
+func (s *Server) SetEventHealth(reporter eventHealthReporter) {
+	s.healthMu.Lock()
+	s.eventHealth = reporter
+	s.healthMu.Unlock()
+}
+
+// Shutdown rejects new mutation claims and waits for every detached mutation
+// goroutine to stop using the journals. A timeout also stops terminal-state
+// retry loops; callers must not close the journals when Shutdown returns an
+// error because a backend action may still be running.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	s.stopping = true
+	s.lifecycleMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.mutations.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		s.stopOnce.Do(func() { close(s.stopRetries) })
+		return ctx.Err()
+	}
+}
+
+func (s *Server) markInventoryReconcile(err error) {
+	s.healthMu.Lock()
+	s.reconcileGeneration++
+	s.reconcileErr = err
+	s.healthMu.Unlock()
+}
+
+func (s *Server) acknowledgeInventory(generation uint64) {
+	s.healthMu.Lock()
+	if generation > s.reconciledGeneration {
+		s.reconciledGeneration = generation
+	}
+	reporter := s.eventHealth
+	s.healthMu.Unlock()
+	if reporter != nil {
+		reporter.Acknowledge()
+	}
 }
 
 func (s *Server) GetVitals(ctx context.Context, request *nodev1.GetVitalsRequest) (*nodev1.Vitals, error) {
@@ -209,12 +306,26 @@ func (s *Server) begin(
 	if err != nil {
 		return nil, err
 	}
+
+	s.lifecycleMu.Lock()
+	if s.stopping {
+		s.lifecycleMu.Unlock()
+		return nil, status.Error(codes.Unavailable, "node control is stopping")
+	}
 	op, existing, err := s.config.Operations.Claim(ctx, spec)
 	if err != nil {
+		s.lifecycleMu.Unlock()
 		return nil, journalStatus(err)
 	}
 	if !existing {
-		go s.execute(spec.ID, action)
+		s.mutations.Add(1)
+	}
+	s.lifecycleMu.Unlock()
+	if !existing {
+		go func() {
+			defer s.mutations.Done()
+			s.execute(spec.ID, action)
+		}()
 	}
 	return operationToProto(op)
 }
@@ -252,18 +363,19 @@ const sha256Size = 32
 func (s *Server) execute(operationID string, action mutationAction) {
 	ctx := s.config.Context
 	durableContext := context.WithoutCancel(ctx)
-	if _, err := s.config.Operations.Start(durableContext, operationID); err != nil {
+	if !s.startOperation(durableContext, operationID) {
 		return
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			_, _ = s.config.Operations.Fail(durableContext, operationID, operationjournal.Failure{
-				Code: "panic", Message: fmt.Sprint(recovered), Retryable: true,
-			})
+			s.markInventoryReconcile(fmt.Errorf("mutation panic: %v", recovered))
+			s.persistFailure(durableContext, operationID, false, indeterminateFailure(
+				"the mutation panicked after it started: "+fmt.Sprint(recovered),
+			))
 		}
 	}()
 	if err := ctx.Err(); err != nil {
-		_, _ = s.config.Operations.Cancel(durableContext, operationID, operationjournal.Failure{
+		s.persistFailure(durableContext, operationID, true, operationjournal.Failure{
 			Code: "server_stopping", Message: err.Error(), Retryable: true,
 		})
 		return
@@ -271,11 +383,11 @@ func (s *Server) execute(operationID string, action mutationAction) {
 	outcome, err := action(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			_, _ = s.config.Operations.Cancel(durableContext, operationID, operationjournal.Failure{
+			s.persistFailure(durableContext, operationID, true, operationjournal.Failure{
 				Code: "server_stopping", Message: ctx.Err().Error(), Retryable: true,
 			})
 		} else {
-			_, _ = s.config.Operations.Fail(durableContext, operationID, failureFromError(err))
+			s.persistFailure(durableContext, operationID, false, failureFromError(err))
 		}
 		return
 	}
@@ -288,26 +400,109 @@ func (s *Server) execute(operationID string, action mutationAction) {
 		}
 		payload, err := proto.Marshal(event)
 		if err != nil {
-			_, _ = s.config.Operations.Fail(durableContext, operationID, operationjournal.Failure{
-				Code: "event_encode", Message: err.Error(), Retryable: true,
-			})
+			s.markInventoryReconcile(fmt.Errorf("encode mutation inventory event: %w", err))
+			s.persistFailure(durableContext, operationID, false, indeterminateFailure(
+				"the mutation completed but its inventory event could not be encoded: "+err.Error(),
+			))
 			return
 		}
 		if _, err := s.config.Events.Append(ctx, inventoryEventKind(event), payload); err != nil {
-			_, _ = s.config.Operations.Fail(durableContext, operationID, operationjournal.Failure{
-				Code: "event_journal", Message: err.Error(), Retryable: true,
-			})
+			s.markInventoryReconcile(fmt.Errorf("persist mutation inventory event: %w", err))
+			s.persistFailure(durableContext, operationID, false, indeterminateFailure(
+				"the mutation completed but its inventory event was not durably recorded: "+err.Error(),
+			))
 			return
 		}
 	}
 	result, err := proto.Marshal(outcome.result)
 	if err != nil {
-		_, _ = s.config.Operations.Fail(durableContext, operationID, operationjournal.Failure{
-			Code: "result_encode", Message: err.Error(), Retryable: true,
-		})
+		s.markInventoryReconcile(fmt.Errorf("encode mutation result: %w", err))
+		s.persistFailure(durableContext, operationID, false, indeterminateFailure(
+			"the mutation completed but its result could not be encoded: "+err.Error(),
+		))
 		return
 	}
-	_, _ = s.config.Operations.Succeed(durableContext, operationID, result)
+	if _, err := s.config.Operations.Succeed(durableContext, operationID, result); err != nil {
+		// A commit error is ambiguous: Succeed may already be durable. If it is,
+		// preserve success; otherwise explicitly terminalize without replaying
+		// the backend action.
+		if op, getErr := s.config.Operations.Get(durableContext, operationID); getErr == nil &&
+			op.State == operationjournal.StateSucceeded {
+			return
+		}
+		s.markInventoryReconcile(fmt.Errorf("persist mutation result: %w", err))
+		s.persistFailure(durableContext, operationID, false, indeterminateFailure(
+			"the mutation completed but its result was not durably recorded: "+err.Error(),
+		))
+	}
+}
+
+func indeterminateFailure(message string) operationjournal.Failure {
+	return operationjournal.Failure{
+		Code:      interruptedOperationCode,
+		Message:   message + "; reconcile authoritative state before retrying",
+		Retryable: true,
+	}
+}
+
+func (s *Server) startOperation(ctx context.Context, operationID string) bool {
+	delay := 10 * time.Millisecond
+	for {
+		if _, err := s.config.Operations.Start(ctx, operationID); err == nil {
+			return true
+		}
+		if op, err := s.config.Operations.Get(ctx, operationID); err == nil {
+			switch op.State {
+			case operationjournal.StateRunning:
+				return true
+			case operationjournal.StateSucceeded, operationjournal.StateFailed, operationjournal.StateCancelled:
+				return false
+			}
+		}
+		if !s.waitTerminalRetry(delay) {
+			return false
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
+	}
+}
+
+func (s *Server) persistFailure(
+	ctx context.Context,
+	operationID string,
+	cancelled bool,
+	failure operationjournal.Failure,
+) {
+	delay := 10 * time.Millisecond
+	for {
+		var err error
+		if cancelled {
+			_, err = s.config.Operations.Cancel(ctx, operationID, failure)
+		} else {
+			_, err = s.config.Operations.Fail(ctx, operationID, failure)
+		}
+		if err == nil || errors.Is(err, operationjournal.ErrTerminal) {
+			return
+		}
+		if !s.waitTerminalRetry(delay) {
+			return
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
+	}
+}
+
+func (s *Server) waitTerminalRetry(delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-s.stopRetries:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func isSandboxEvent(event *nodev1.InventoryEvent) bool {
@@ -524,6 +719,7 @@ func (s *Server) RecordKey(ctx context.Context, request *nodev1.RecordKeyRequest
 		return nil, status.Errorf(codes.Internal, "encode record-key event: %v", err)
 	}
 	if _, err := s.config.Events.Append(ctx, eventSandboxChanged, payload); err != nil {
+		s.markInventoryReconcile(fmt.Errorf("persist record-key inventory event: %w", err))
 		return nil, status.Errorf(codes.Internal, "record key event: %v", err)
 	}
 	return &emptypb.Empty{}, nil

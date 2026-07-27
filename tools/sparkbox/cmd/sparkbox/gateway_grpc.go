@@ -58,7 +58,8 @@ func (s *gatewayCertificateSource) GetCertificate(*tls.ClientHelloInfo) (*tls.Ce
 func (s *gatewayCertificateSource) run(
 	ctx context.Context,
 	authority *nodepki.Authority,
-	stateDir, clusterID string,
+	stateDir, keyDir, clusterID string,
+	requireKeys bool,
 	log *slog.Logger,
 ) {
 	ticker := time.NewTicker(gatewayCertificateRefresh)
@@ -69,8 +70,8 @@ func (s *gatewayCertificateSource) run(
 			return
 		case <-ticker.C:
 		}
-		leaf, err := authority.GatewayCertificate(
-			stateDir, clusterID, nodecert.DefaultTTL,
+		leaf, err := authority.GatewayCertificateFrom(
+			stateDir, keyDir, clusterID, nodecert.DefaultTTL, requireKeys,
 		)
 		if err != nil {
 			log.Error("renew gateway control certificate", "err", err)

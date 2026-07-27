@@ -1,6 +1,6 @@
 // Package bootsecrets pulls the fleet's secrets from Scaleway Secret Manager at
 // host boot into tmpfs, replacing the plaintext copies that used to ride in
-// cloud-init user-data. The three private keys land as PEM files under KeyDir;
+// cloud-init user-data. Private keys land as PEM files under KeyDir;
 // the two passwords are written as a systemd EnvironmentFile. Everything is
 // meant for /run, so a captured disk or a pulled drive yields no key material.
 package bootsecrets
@@ -40,9 +40,11 @@ const (
 )
 
 // manifest is the fixed set of fleet secrets and how each maps onto the host.
-// required decides whether a missing secret fails the boot: the three keys are
-// load-bearing; the two passwords are optional (a box may run without a console
-// or Cloudflare).
+// required decides whether a missing secret fails the boot. The original three
+// keys remain load-bearing. Node-control PKI material is optional at fetch time
+// so an SSH-only fleet can roll out this binary before its new secrets exist;
+// `serve --require-keys --node-control-transport=auto|grpc` is the point that
+// fails closed until the operator uploads them.
 var manifest = []struct {
 	name     string
 	kind     kind
@@ -52,6 +54,9 @@ var manifest = []struct {
 	{"gateway-host-key", sshKeyPEM, "gateway_host_key.pem", true},
 	{"gateway-upstream-key", sshKeyPEM, "gateway_upstream_key.pem", true},
 	{"oidc-signing-key", opaquePEM, "oidc_signing_key.pem", true},
+	{"node-control-ca-cert", opaquePEM, "node_ca_cert.pem", false},
+	{"node-control-ca-key", opaquePEM, "node_ca_key.pem", false},
+	{"gateway-control-key", opaquePEM, "gateway_control_key.pem", false},
 	{"cloudflare-api-token", envVar, "CLOUDFLARE_API_TOKEN", false},
 	{"console-password", envVar, "SPARKBOX_CONSOLE_PASSWORD", false},
 }
@@ -62,7 +67,7 @@ var manifest = []struct {
 func KeyFiles() []string {
 	var out []string
 	for _, s := range manifest {
-		if s.kind != envVar {
+		if s.kind != envVar && s.required {
 			out = append(out, s.dest)
 		}
 	}

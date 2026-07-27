@@ -334,7 +334,7 @@ func (fw *fleetWiring) startNode(t *testing.T, name string) *nodeMachine {
 			Hello: func() nodelink.Hello {
 				return nodelink.Hello{
 					Arch: "amd64", Release: "2026-07-22", Version: "test",
-					Driver: "mock", GuestSubnet: "172.30.0.0/16",
+					Driver: "mock", GuestSubnet: testNodeGuestSubnet,
 				}
 			},
 			OnWelcome: func(nodelink.Welcome) error { return nil },

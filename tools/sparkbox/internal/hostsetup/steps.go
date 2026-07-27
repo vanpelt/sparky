@@ -1424,7 +1424,7 @@ func (e *Env) printConnect() {
 		e.logf("  node:              %s\n", name)
 		e.logf("  gateway:           %s\n", e.Cfg.Gateway)
 		e.logf("  enrollment:        compare this node's logged fingerprint with `ssh ctl@<gateway> node ls`\n")
-		e.logf("  approve at gateway: ssh ctl@<gateway> node approve <SHA256:...>\n")
+		e.logf("  approve at gateway: %s\n", nodeApprovalCommand(e.Cfg))
 		e.logf("  health check:      sparkbox doctor --gateway %s\n", e.Cfg.Gateway)
 		e.logf("  logs:              journalctl -u sparkbox -f\n")
 		return
@@ -1497,6 +1497,14 @@ func (e *Env) printConnect() {
 		// for either.
 		e.logf("  egress:            pushing policy to %s, guests resolve through %s\n", e.Cfg.sluiceSocket(), e.Cfg.guestDNS())
 	}
+}
+
+func nodeApprovalCommand(cfg Config) string {
+	command := "ssh ctl@<gateway> node approve <SHA256:...> --guest-subnet " + cfg.guestSubnet()
+	if address := cfg.nodeGRPCAddr(); address != "" {
+		command += " --grpc-addr " + address
+	}
+	return command
 }
 
 // appendLineIfMissing appends line (with a trailing newline) to path unless an

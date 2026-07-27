@@ -66,6 +66,112 @@ func TestGRPCControlReconcilesRevisionGap(t *testing.T) {
 	}
 }
 
+func TestGRPCControlCancelsWatchAttemptBeforeReconnect(t *testing.T) {
+	client := newFakeDurable()
+	client.setInventory(inventoryProto(1, sandboxProto("alpha", vmm.StateRunning)))
+	control, err := NewGRPCControl(context.Background(), GRPCControlOptions{
+		Node: "node-b", Client: client, Retry: time.Millisecond,
+		HealthEvery: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = control.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := control.WaitReady(ctx); err != nil {
+		t.Fatalf("gRPC control did not become ready: %v", err)
+	}
+
+	first := client.nextWatch(t)
+	client.setHealthError(status.Error(codes.Unavailable, "health transport down"))
+	select {
+	case <-first.done:
+	case <-time.After(time.Second):
+		t.Fatal("failed watch producer was not canceled and joined")
+	}
+
+	client.setHealthError(nil)
+	second := client.nextWatch(t)
+	select {
+	case <-first.done:
+	default:
+		t.Fatal("replacement watch started before the previous producer exited")
+	}
+	if second == first {
+		t.Fatal("reconnect reused the previous watch attempt")
+	}
+}
+
+func TestGRPCControlCloseJoinsCallbacksAndSuppressesLaterEvents(t *testing.T) {
+	client := newFakeDurable()
+	client.setInventory(inventoryProto(1, sandboxProto("alpha", vmm.StateRunning)))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	callbackCalls := 0
+	control, err := NewGRPCControl(context.Background(), GRPCControlOptions{
+		Node: "node-b", Client: client, Retry: time.Millisecond,
+		HealthEvery: time.Hour,
+		OnChanged: func(nodelink.ChangedMsg) {
+			callbackCalls++
+			close(entered)
+			<-release
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = control.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := control.WaitReady(ctx); err != nil {
+		t.Fatalf("gRPC control did not become ready: %v", err)
+	}
+
+	watch := client.nextWatch(t)
+	watch.events <- &nodev1.InventoryEvent{
+		Revision: 2,
+		Event: &nodev1.InventoryEvent_SandboxChanged{SandboxChanged: &nodev1.SandboxChanged{
+			Sandbox: sandboxProto("alpha", vmm.StatePaused), Reason: "idle",
+		}},
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("authoritative callback did not start")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- control.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before the admitted callback exited: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after the callback exited")
+	}
+
+	err = control.applyEvent(&nodev1.InventoryEvent{
+		Revision: 3,
+		Event: &nodev1.InventoryEvent_SandboxChanged{SandboxChanged: &nodev1.SandboxChanged{
+			Sandbox: sandboxProto("alpha", vmm.StateRunning),
+		}},
+	})
+	if err == nil {
+		t.Fatal("closed control accepted a later authoritative event")
+	}
+	if callbackCalls != 1 {
+		t.Fatalf("callbacks after Close = %d, want one admitted callback total", callbackCalls)
+	}
+}
+
 func TestGRPCControlKeepsRoutedAddressOutOfOrdinaryInventory(t *testing.T) {
 	client := newFakeDurable()
 	wire := sandboxProto("alpha", vmm.StateRunning)
@@ -301,6 +407,29 @@ func TestGuestSelectorAutoUsesOnlyTypedRouteFallback(t *testing.T) {
 	}
 }
 
+func TestGuestSelectorAutoFallsBackAcrossHealthTransition(t *testing.T) {
+	health := &healthStub{
+		healthy:      true,
+		capabilities: []string{nodelink.CapabilityRoutedGuestV1},
+	}
+	routed := guestDialerFunc(func(context.Context, string, string, int) (net.Conn, error) {
+		health.healthy = false
+		return nil, nodelink.ErrUnknownSandbox
+	})
+	ssh := &guestRecorder{}
+	selector, err := NewGuestSelector(GuestTransportAuto, health, routed, ssh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := selector.DialGuest(context.Background(), "alpha", nodelink.StreamTCP, 80); err != nil {
+		t.Fatalf("health-transition fallback failed: %v", err)
+	}
+	if ssh.calls != 1 {
+		t.Fatalf("SSH fallback calls = %d, want 1", ssh.calls)
+	}
+}
+
 func TestGuestSelectorRequiresRoutedCapability(t *testing.T) {
 	health := &healthStub{healthy: true}
 	routed := &guestRecorder{}
@@ -323,6 +452,65 @@ func TestGuestSelectorRequiresRoutedCapability(t *testing.T) {
 	}
 	if routed.calls != 0 || ssh.calls != 1 {
 		t.Fatal("explicit routed mode fell back or dialed without the capability")
+	}
+}
+
+func TestSSHLinkSupersessionLeavesSharedGRPCControlRunning(t *testing.T) {
+	client := newFakeDurable()
+	client.setInventory(inventoryProto(1))
+	control := newReadyGRPCControl(t, client)
+	oldSSH := &selectorStub{name: "node-b", online: true}
+	newSSH := &selectorStub{name: "node-b", online: true}
+	oldSelector, err := NewControlSelector(ControlTransportAuto, control, oldSSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSelector, err := NewControlSelector(ControlTransportSSH, nil, newSSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGuest, err := NewGuestSelector(GuestTransportSSH, nil, nil, guestStub{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGuest, err := NewGuestSelector(GuestTransportSSH, nil, nil, guestStub{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &linkedRemote{
+		Node: ComposeNode(oldSelector, oldGuest), selector: oldSelector,
+		guestSelector: oldGuest, ssh: oldSSH, sshGuest: oldGuest.ssh,
+	}
+	replacement := &linkedRemote{
+		Node: ComposeNode(newSelector, newGuest), selector: newSelector,
+		guestSelector: newGuest, ssh: newSSH, sshGuest: newGuest.ssh,
+	}
+	f := &Fleet{
+		log:   slog.New(slog.DiscardHandler),
+		nodes: map[string]Node{"node-b": old},
+		grpcControls: map[string]*grpcBinding{
+			"node-b": {control: control, mode: ControlTransportAuto},
+		},
+		routedGuests: map[string]*routedGuestBinding{},
+	}
+
+	detach := f.linkUp(replacement)
+	defer detach()
+	if oldSSH.hangupCalls != 1 || oldSSH.hangupCode != nodelink.CodeSuperseded {
+		t.Fatalf("old SSH hangup = %d/%q, want 1/%q",
+			oldSSH.hangupCalls, oldSSH.hangupCode, nodelink.CodeSuperseded)
+	}
+	if !control.Healthy() {
+		t.Fatal("SSH supersession closed the shared gRPC control")
+	}
+	client.mu.Lock()
+	closedClients := client.closed
+	client.mu.Unlock()
+	if closedClients != 0 {
+		t.Fatalf("SSH supersession closed the durable client %d time(s)", closedClients)
+	}
+	if replacement.selector.choice() != control {
+		t.Fatal("replacement SSH link did not reuse the shared gRPC control")
 	}
 }
 
@@ -409,6 +597,7 @@ type fakeWatch struct {
 	after  uint64
 	events chan *nodev1.InventoryEvent
 	errs   chan error
+	done   chan struct{}
 }
 
 type fakeDurable struct {
@@ -465,12 +654,47 @@ func (f *fakeDurable) setHealthError(err error) {
 	f.mu.Unlock()
 }
 
-func (f *fakeDurable) WatchEvents(_ context.Context, after uint64) (<-chan *nodev1.InventoryEvent, <-chan error) {
+func (f *fakeDurable) WatchEvents(ctx context.Context, after uint64) (<-chan *nodev1.InventoryEvent, <-chan error) {
 	watch := &fakeWatch{
 		after: after, events: make(chan *nodev1.InventoryEvent, 8), errs: make(chan error, 1),
+		done: make(chan struct{}),
 	}
+	out := make(chan *nodev1.InventoryEvent, 8)
+	outErrs := make(chan error, 1)
 	f.watches <- watch
-	return watch.events, watch.errs
+	go func() {
+		defer close(watch.done)
+		defer close(out)
+		defer close(outErrs)
+		events, errs := watch.events, watch.errs
+		for events != nil || errs != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-events:
+				if !ok {
+					events = nil
+					continue
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					return
+				}
+			case err, ok := <-errs:
+				if !ok {
+					errs = nil
+					continue
+				}
+				select {
+				case outErrs <- err:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, outErrs
 }
 
 func (f *fakeDurable) nextWatch(t *testing.T) *fakeWatch {
@@ -582,6 +806,8 @@ type selectorStub struct {
 	ControlPlane
 	name        string
 	online      bool
+	hangupCalls int
+	hangupCode  string
 	pauseCalls  int
 	ensureCalls int
 	boxes       []*host.Sandbox
@@ -594,6 +820,12 @@ type guestStub struct{ err error }
 
 func (g guestStub) DialGuest(context.Context, string, string, int) (net.Conn, error) {
 	return nil, g.err
+}
+
+type guestDialerFunc func(context.Context, string, string, int) (net.Conn, error)
+
+func (f guestDialerFunc) DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
+	return f(ctx, sandbox, kind, port)
 }
 
 type healthStub struct {
@@ -618,6 +850,10 @@ func (g *guestRecorder) DialGuest(context.Context, string, string, int) (net.Con
 
 func (s *selectorStub) Name() string { return s.name }
 func (s *selectorStub) Online() bool { return s.online }
+func (s *selectorStub) Hangup(code, _ string) {
+	s.hangupCalls++
+	s.hangupCode = code
+}
 func (s *selectorStub) Pause(context.Context, string) error {
 	s.pauseCalls++
 	return nil

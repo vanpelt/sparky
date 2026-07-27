@@ -152,10 +152,19 @@ func (c *Client) AttachDataLane(hello DataHello, conn xssh.Conn) (func(), error)
 	}
 	lane := &dataLane{id: hello.Lane, conn: conn}
 	old := c.lanes[hello.Lane]
+	var retired []*streamConn
+	if old != nil {
+		retired, _ = c.retireDataLaneLocked(old)
+	}
 	c.lanes[hello.Lane] = lane
 	c.smu.Unlock()
 	if old != nil {
+		reason := errors.New("nodelink: data lane replaced by a newer connection")
+		for _, stream := range retired {
+			stream.fail(reason)
+		}
 		_ = old.conn.Close()
+		c.log.Info("nodelink: data lane replaced", "lane", old.id, "streams", len(retired))
 	}
 	c.log.Info("nodelink: data lane attached", "lane", hello.Lane)
 
@@ -209,9 +218,24 @@ func (c *Client) chooseDataLane() *dataLane {
 
 func (c *Client) detachDataLane(lane *dataLane, reason error) {
 	c.smu.Lock()
-	if c.lanes[lane.id] != lane {
-		c.smu.Unlock()
+	live, removed := c.retireDataLaneLocked(lane)
+	c.smu.Unlock()
+	if !removed {
 		return
+	}
+	for _, stream := range live {
+		stream.fail(reason)
+	}
+	_ = lane.conn.Close()
+	c.log.Info("nodelink: data lane detached", "lane", lane.id, "streams", len(live))
+}
+
+// retireDataLaneLocked removes one exact lane and every stream it owns. The
+// caller must hold smu. Returning false protects a replacement which reused the
+// same lane ID from the old session's deferred detach.
+func (c *Client) retireDataLaneLocked(lane *dataLane) ([]*streamConn, bool) {
+	if c.lanes[lane.id] != lane {
+		return nil, false
 	}
 	delete(c.lanes, lane.id)
 	var live []*streamConn
@@ -222,10 +246,5 @@ func (c *Client) detachDataLane(lane *dataLane, reason error) {
 			c.metrics.AddLiveStreams(c.node, "ssh-data", metricStreamKind(stream.kind), -1)
 		}
 	}
-	c.smu.Unlock()
-	for _, stream := range live {
-		stream.fail(reason)
-	}
-	_ = lane.conn.Close()
-	c.log.Info("nodelink: data lane detached", "lane", lane.id, "streams", len(live))
+	return live, true
 }

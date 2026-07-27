@@ -57,6 +57,78 @@ func TestClaimIsDurablyIdempotent(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedAfterReopenTerminalizesWithoutReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.db")
+	j, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, spec := range []Spec{
+		testSpec("op-pending", "key-pending", 1),
+		testSpec("op-running", "key-running", 2),
+		testSpec("op-succeeded", "key-succeeded", 3),
+	} {
+		if _, _, err := j.Claim(ctx, spec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := j.Start(ctx, "op-running"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.Start(ctx, "op-succeeded"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.Succeed(ctx, "op-succeeded", []byte("done")); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
+	recovered, err := j.RecoverInterrupted(ctx, Failure{
+		Code:      "outcome_indeterminate",
+		Message:   "node restarted before outcome was durable",
+		Retryable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 2 {
+		t.Fatalf("recovered %d operations, want 2: %+v", len(recovered), recovered)
+	}
+	for _, id := range []string{"op-pending", "op-running"} {
+		op, err := j.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if op.State != StateFailed || op.Failure == nil ||
+			op.Failure.Code != "outcome_indeterminate" || !op.Failure.Retryable {
+			t.Fatalf("%s after recovery = %+v", id, op)
+		}
+		replayed, existing, err := j.Claim(ctx, testSpec(
+			id,
+			map[string]string{"op-pending": "key-pending", "op-running": "key-running"}[id],
+			map[string]byte{"op-pending": 1, "op-running": 2}[id],
+		))
+		if err != nil || !existing || replayed.State != StateFailed {
+			t.Fatalf("replay %s = %+v, existing %v, err %v", id, replayed, existing, err)
+		}
+	}
+	succeeded, err := j.Get(ctx, "op-succeeded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded.State != StateSucceeded || string(succeeded.Result) != "done" {
+		t.Fatalf("terminal operation changed during recovery: %+v", succeeded)
+	}
+}
+
 func TestClaimRejectsIdentityReuseWithDifferentRequest(t *testing.T) {
 	j := openTestJournal(t)
 	ctx := context.Background()

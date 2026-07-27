@@ -236,7 +236,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// each is backed by a store or a DNS zone the gateway owns. A node keeps
 	// only what describes the VMs on this machine.
 	mgr, err := host.NewManager(host.Options{
-		StateDir: opts.stateDir, Driver: driver,
+		Context: ctx, StateDir: opts.stateDir, Driver: driver,
 		GatewayPublicKey: gwPub, Logger: log,
 		MaxRunningPerOwner: opts.maxPerOwner,
 		MemAdmissionPct:    opts.memAdmitPct,

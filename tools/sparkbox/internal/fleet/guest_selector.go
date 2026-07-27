@@ -120,7 +120,33 @@ func (s *GuestSelector) DialGuest(ctx context.Context, sandbox, kind string, por
 			if err != nil {
 				return nil, err
 			}
-			return auto.DialGuest(ctx, sandbox, kind, port)
+			connection, primaryErr := auto.DialGuest(ctx, sandbox, kind, port)
+			if primaryErr == nil || !errors.Is(primaryErr, nodelink.ErrUnknownSandbox) ||
+				health.Healthy() {
+				return connection, primaryErr
+			}
+
+			// RoutedBox deliberately becomes unavailable as soon as its
+			// authoritative gRPC control turns unhealthy. If that transition
+			// happens after auto mode selected the routed path but before its
+			// resolver runs, the resulting "unknown sandbox" is a transport
+			// transition rather than an authoritative placement refusal. This
+			// is the one additional case where SSH fallback is safe.
+			if err := ctx.Err(); err != nil {
+				metrics.IncRouteFallback(node, string(routedguest.FallbackSuppressed))
+				return nil, err
+			}
+			connection, fallbackErr := ssh.DialGuest(ctx, sandbox, kind, port)
+			if fallbackErr == nil {
+				metrics.IncRouteFallback(node, string(routedguest.FallbackConnected))
+				return connection, nil
+			}
+			if err := ctx.Err(); err != nil {
+				metrics.IncRouteFallback(node, string(routedguest.FallbackSuppressed))
+				return nil, err
+			}
+			metrics.IncRouteFallback(node, string(routedguest.FallbackFailed))
+			return nil, &routedguest.FallbackError{Primary: primaryErr, Fallback: fallbackErr}
 		}
 	}
 	return ssh.DialGuest(ctx, sandbox, kind, port)

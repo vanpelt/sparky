@@ -150,6 +150,37 @@ type blockingResumeDriver struct {
 	resumes atomic.Int64
 }
 
+type contextValueKey struct{}
+
+type valueResumeDriver struct {
+	*mock.Driver
+	got any
+}
+
+func (d *valueResumeDriver) Resume(ctx context.Context, name string) (*vmm.Instance, error) {
+	d.got = ctx.Value(contextValueKey{})
+	return d.Driver.Resume(ctx, name)
+}
+
+func TestEnsureReadyPreservesCallerContextValues(t *testing.T) {
+	var d *valueResumeDriver
+	m := newTestManagerWith(t, host.Options{}, func(md *mock.Driver) vmm.Driver {
+		d = &valueResumeDriver{Driver: md}
+		return d
+	})
+	mustCreate(t, m, "shared", "alice", 512)
+	if err := m.Pause(context.Background(), "shared"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), contextValueKey{}, "operation-identity")
+	if _, err := m.EnsureReady(ctx, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if d.got != "operation-identity" {
+		t.Fatalf("resume context value = %v, want operation identity", d.got)
+	}
+}
+
 func (d *blockingResumeDriver) Resume(ctx context.Context, name string) (*vmm.Instance, error) {
 	d.resumes.Add(1)
 	d.once.Do(func() { close(d.entered) })
@@ -198,6 +229,73 @@ func TestConcurrentEnsureReadyResumesOnce(t *testing.T) {
 	}
 	if got := d.resumes.Load(); got != 1 {
 		t.Fatalf("driver Resume calls = %d, want 1", got)
+	}
+}
+
+func TestCancelledEnsureReadyCallerDoesNotPoisonSharedResume(t *testing.T) {
+	lifecycle, stop := context.WithCancel(context.Background())
+	defer stop()
+	var d *blockingResumeDriver
+	m := newTestManagerWith(t, host.Options{Context: lifecycle}, func(md *mock.Driver) vmm.Driver {
+		d = &blockingResumeDriver{
+			Driver: md, entered: make(chan struct{}), release: make(chan struct{}),
+		}
+		return d
+	})
+	mustCreate(t, m, "shared", "alice", 512)
+	if err := m.Pause(context.Background(), "shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leader := make(chan error, 1)
+	go func() {
+		_, err := m.EnsureReady(leaderCtx, "shared")
+		leader <- err
+	}()
+	<-d.entered
+
+	follower := make(chan error, 1)
+	go func() {
+		_, err := m.EnsureReady(context.Background(), "shared")
+		follower <- err
+	}()
+	cancelLeader()
+	if err := <-leader; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled leader = %v, want context.Canceled", err)
+	}
+	close(d.release)
+	if err := <-follower; err != nil {
+		t.Fatalf("live follower inherited leader cancellation: %v", err)
+	}
+	if got := d.resumes.Load(); got != 1 {
+		t.Fatalf("driver Resume calls = %d, want 1", got)
+	}
+}
+
+func TestManagerLifecycleCancelsSharedResume(t *testing.T) {
+	lifecycle, stop := context.WithCancel(context.Background())
+	var d *blockingResumeDriver
+	m := newTestManagerWith(t, host.Options{Context: lifecycle}, func(md *mock.Driver) vmm.Driver {
+		d = &blockingResumeDriver{
+			Driver: md, entered: make(chan struct{}), release: make(chan struct{}),
+		}
+		return d
+	})
+	mustCreate(t, m, "shared", "alice", 512)
+	if err := m.Pause(context.Background(), "shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := m.EnsureReady(context.Background(), "shared")
+		result <- err
+	}()
+	<-d.entered
+	stop()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("resume after manager shutdown = %v, want context.Canceled", err)
 	}
 }
 

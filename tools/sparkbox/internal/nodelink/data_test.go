@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -156,6 +157,52 @@ func TestDataPoolGenerationSelectionAndLaneLoss(t *testing.T) {
 	}
 	for _, stream := range streams {
 		_ = stream.Close()
+	}
+}
+
+func TestReplacingDataLaneRetiresItsStreamsWithoutDetachingReplacement(t *testing.T) {
+	c := dataPoolClient()
+	old := &fakeDataConn{}
+	detachOld, err := c.AttachDataLane(DataHello{
+		Protocol: Protocol, Node: "node-b", Generation: c.generation, Lane: "lane-a",
+	}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := c.DialSandbox(context.Background(), "demo", StreamTCP, 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := &fakeDataConn{}
+	detachReplacement, err := c.AttachDataLane(DataHello{
+		Protocol: Protocol, Node: "node-b", Generation: c.generation, Lane: "lane-a",
+	}, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detachReplacement()
+	if !old.isClosed() {
+		t.Fatal("replaced lane connection remained open")
+	}
+	if got := c.LiveStreams(); got != 0 {
+		t.Fatalf("replaced lane left %d streams registered", got)
+	}
+	if _, err := stream.Write([]byte("after replacement")); err == nil ||
+		!strings.Contains(err.Error(), "data lane replaced") {
+		t.Fatalf("write on replaced lane = %v, want recorded replacement failure", err)
+	}
+
+	// The superseded session is allowed to unwind after the replacement has
+	// attached. Its detach must not remove the new lane with the same ID.
+	detachOld()
+	fresh, err := c.DialSandbox(context.Background(), "demo", StreamTCP, 8080)
+	if err != nil {
+		t.Fatalf("old detach removed replacement lane: %v", err)
+	}
+	_ = fresh.Close()
+	if got := replacement.openCount(); got != 1 {
+		t.Fatalf("replacement lane got %d opens, want 1", got)
 	}
 }
 

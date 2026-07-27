@@ -399,7 +399,8 @@ A second host joins an existing gateway as a **node**. Provision the gateway
 first, exactly as above, then run `setup` on the new machine with `--gateway`:
 
 ```sh
-sudo sparkbox setup --gateway <gateway-host>:2222 --node-name laptop
+sudo sparkbox setup --gateway <gateway-host>:2222 --node-name laptop \
+  --guest-subnet 10.201.0.0/20
 ```
 
 `--gateway` is the whole difference: instead of standing up a gateway of its
@@ -411,7 +412,7 @@ unblocks it:
 ```
 node identity  node=laptop fingerprint=SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
 this node is enrolled and waiting for approval  node=laptop gateway=10.66.0.1:2222
-  ssh ctl@catnip.sh node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+  ssh ctl@catnip.sh node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM --guest-subnet 10.201.0.0/20
   — after checking that fingerprint against the one this machine printed at startup.
 ```
 
@@ -420,12 +421,14 @@ never by name, because a node chooses its own name and only the key is evidence:
 
 ```sh
 ssh ctl@<gateway> node ls        # name, status, presence, arch, sandbox count, fingerprint
-ssh ctl@<gateway> node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM
+ssh ctl@<gateway> node approve SHA256:IZWmZrHR+PrPOFr5DI5b93scC2XC+0uEZ2pD76MJpnM --guest-subnet 10.201.0.0/20
 ssh ctl@<gateway> node rm laptop # drop one; refused while it still holds sandboxes
 ```
 
 Compare the fingerprint against the one the node printed before you say yes —
-that out-of-band comparison is the entire trust decision. The node retries on
+that out-of-band comparison is the identity trust decision. The approved subnet
+must exactly match the node's `--guest-subnet`; with gRPC enabled, also approve
+the exact reported tailnet listener using `--grpc-addr <host:port>`. The node retries on
 its own backoff (~30s), so approval needs no restart: it reconnects, logs
 `linked to the gateway`, and starts heartbeating. The same roster is
 `GET /v1/nodes` over the REST API.

@@ -83,6 +83,11 @@ func TestFleetRoutingExpectedFromDurableGatewayTransport(t *testing.T) {
 		{ClusterID: "prod-a"},
 		{NodeControlTransport: "grpc"},
 		{GuestDataTransport: "routed"},
+		{
+			GuestDataTransport:        "auto",
+			RoutedGuestCanaryPercent:  5,
+			RoutedGuestCanaryExplicit: true,
+		},
 	} {
 		if !fleetRoutingExpected(cfg) {
 			t.Fatalf("durable fleet gateway config was treated as standalone: %+v", cfg)

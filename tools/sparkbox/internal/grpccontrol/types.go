@@ -18,7 +18,11 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/operationjournal"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -51,6 +55,15 @@ type Backend interface {
 }
 
 var _ Backend = (*host.Manager)(nil)
+
+const (
+	// Certificates renew during their final hour. Cycling HTTP/2 transports
+	// inside half that window guarantees a connection picks up the renewed leaf
+	// before the certificate used at its handshake can expire. Per-message
+	// checks below remain the fail-closed backstop.
+	maxControlConnectionAge      = 30 * time.Minute
+	maxControlConnectionAgeGrace = time.Minute
+)
 
 // NetworkHooks connects the transport-neutral control API to the node's
 // network-policy implementation. A nil hook reports current usage from the
@@ -134,15 +147,91 @@ func NewRPCServer(service *Server, tlsConfig *tls.Config, opts ...grpc.ServerOpt
 	if len(tlsConfig.Certificates) == 0 && tlsConfig.GetCertificate == nil {
 		return nil, errors.New("grpccontrol: server certificate is required")
 	}
+	if tlsConfig.MinVersion < tls.VersionTLS13 {
+		return nil, errors.New("grpccontrol: server TLS must require TLS 1.3")
+	}
+	if tlsConfig.VerifyConnection == nil {
+		return nil, errors.New("grpccontrol: server TLS must verify the gateway SPIFFE identity")
+	}
 	switch tlsConfig.ClientAuth {
 	case tls.RequireAnyClientCert, tls.RequireAndVerifyClientCert:
 	default:
 		return nil, errors.New("grpccontrol: server TLS must require a client certificate")
 	}
-	opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig.Clone())))
+	opts = append(opts,
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionAge:      maxControlConnectionAge,
+			MaxConnectionAgeGrace: maxControlConnectionAgeGrace,
+		}),
+		grpc.ChainUnaryInterceptor(currentPeerCertificateUnary),
+		grpc.ChainStreamInterceptor(currentPeerCertificateStream),
+		grpc.Creds(credentials.NewTLS(tlsConfig.Clone())),
+	)
 	server := grpc.NewServer(opts...)
 	nodev1.RegisterNodeControlServer(server, service)
 	return server, nil
+}
+
+func currentPeerCertificateUnary(
+	ctx context.Context,
+	request any,
+	info *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (any, error) {
+	if err := requireCurrentPeerCertificate(ctx, time.Now()); err != nil {
+		return nil, err
+	}
+	return handler(ctx, request)
+}
+
+func currentPeerCertificateStream(
+	service any,
+	stream grpc.ServerStream,
+	info *grpc.StreamServerInfo,
+	handler grpc.StreamHandler,
+) error {
+	if err := requireCurrentPeerCertificate(stream.Context(), time.Now()); err != nil {
+		return err
+	}
+	return handler(service, &certificateCheckingServerStream{ServerStream: stream})
+}
+
+type certificateCheckingServerStream struct {
+	grpc.ServerStream
+}
+
+func (s *certificateCheckingServerStream) SendMsg(message any) error {
+	if err := requireCurrentPeerCertificate(s.Context(), time.Now()); err != nil {
+		return err
+	}
+	return s.ServerStream.SendMsg(message)
+}
+
+func (s *certificateCheckingServerStream) RecvMsg(message any) error {
+	if err := requireCurrentPeerCertificate(s.Context(), time.Now()); err != nil {
+		return err
+	}
+	return s.ServerStream.RecvMsg(message)
+}
+
+func requireCurrentPeerCertificate(ctx context.Context, now time.Time) error {
+	transportPeer, ok := peer.FromContext(ctx)
+	if !ok || transportPeer.AuthInfo == nil {
+		return status.Error(codes.Unauthenticated, "node control peer has no TLS identity")
+	}
+	tlsInfo, ok := transportPeer.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return status.Error(codes.Unauthenticated, "node control peer has no certificate")
+	}
+	leaf := tlsInfo.State.PeerCertificates[0]
+	switch {
+	case now.Before(leaf.NotBefore):
+		return status.Error(codes.Unauthenticated, "node control peer certificate is not active")
+	case !now.Before(leaf.NotAfter):
+		return status.Error(codes.Unauthenticated, "node control peer certificate has expired")
+	default:
+		return nil
+	}
 }
 
 // RequestHash returns the canonical hash of a mutation request's immutable
