@@ -11,7 +11,10 @@ bare-metal x86 path (`deploy-hetzner.md` / `deploy-scaleway.md`):
    wildcard TLS cert. The tunnel is outbound-only, so it sidesteps NAT/CGNAT and
    a dynamic residential IP entirely, and TLS terminates at Cloudflare's edge.
    No Scaleway Secret Manager: on a box you physically own, the fleet keys are
-   just root-owned files.
+   just root-owned files. Keep the authoritative copies in 1Password and stage
+   them onto the box with `deploy/sync-fleet-secrets.sh pull` — see
+   [`docs/secret-management.md`](secret-management.md), which also covers what
+   to escrow offline so losing this box doesn't take the fleet identity with it.
 
 Everything below is non-secret except the three fleet key PEMs and the tunnel
 credentials, which stay root-owned under `/srv/sparkbox/state` and

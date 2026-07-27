@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# The Scaleway half of fleet secret storage. For hardware you own — or any fleet
+# not running on Scaleway — use deploy/sync-fleet-secrets.sh, which keeps the
+# same secrets in a 1Password vault. Both feed the same `sparkbox fetch-secrets`
+# manifest; see docs/secret-management.md.
+#
 # Upload the fleet's secrets into Scaleway Secret Manager under /sparkbox/fleet,
 # so hosts fetch them at boot (`sparkbox fetch-secrets`) instead of carrying them
 # in cloud-init user-data. Idempotent: creates each secret once, then adds a new

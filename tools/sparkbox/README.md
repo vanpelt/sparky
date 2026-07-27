@@ -316,7 +316,10 @@ stamp file beside it, so a template replaced by a release upgrade is re-baked
 instead of being declared current, and `doctor`'s `agent tooling` line reports a
 bare template rather than staying green over one. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
-fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md).
+fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md). Where
+the fleet's keys live — 1Password or Scaleway Secret Manager, staged at
+provisioning time or fetched into tmpfs at boot — is
+[`docs/secret-management.md`](docs/secret-management.md).
 
 ### On a Mac (Apple Silicon)
 

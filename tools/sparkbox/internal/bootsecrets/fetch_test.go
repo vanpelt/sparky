@@ -37,15 +37,22 @@ func sshSecret(pem string) struct{ payload, typ string } {
 	return struct{ payload, typ string }{string(b), "ssh_key"}
 }
 
-func cfg(srv *httptest.Server, dir string) Config {
-	return Config{
+func cfg(t *testing.T, srv *httptest.Server, dir string) Config {
+	t.Helper()
+	src, err := NewScalewaySource(ScalewayConfig{
 		BaseURL:   srv.URL,
 		Region:    "fr-par",
 		ProjectID: "proj",
 		Token:     "k",
 		Path:      "/sparkbox/fleet",
-		KeyDir:    filepath.Join(dir, "keys"),
-		EnvOut:    filepath.Join(dir, "secrets.env"),
+	})
+	if err != nil {
+		t.Fatalf("NewScalewaySource: %v", err)
+	}
+	return Config{
+		Source: src,
+		KeyDir: filepath.Join(dir, "keys"),
+		EnvOut: filepath.Join(dir, "secrets.env"),
 	}
 }
 
@@ -68,7 +75,7 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	c := cfg(srv, dir)
+	c := cfg(t, srv, dir)
 	if err := Fetch(context.Background(), c); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -120,7 +127,7 @@ func TestFetchOptionalMissing(t *testing.T) {
 		"/sparkbox/fleet/oidc-signing-key":     {"-----BEGIN PRIVATE KEY-----\nC\n-----END PRIVATE KEY-----\n", "opaque"},
 	})
 	dir := t.TempDir()
-	if err := Fetch(context.Background(), cfg(srv, dir)); err != nil {
+	if err := Fetch(context.Background(), cfg(t, srv, dir)); err != nil {
 		t.Fatalf("optional secrets missing should not fail the boot: %v", err)
 	}
 	// Env file still exists (with no vars), so a `-` EnvironmentFile is happy.
@@ -132,18 +139,29 @@ func TestFetchOptionalMissing(t *testing.T) {
 func TestFetchRequiredMissingFails(t *testing.T) {
 	srv := fakeSM(t, map[string]struct{ payload, typ string }{}) // nothing exists
 	dir := t.TempDir()
-	err := Fetch(context.Background(), cfg(srv, dir))
+	err := Fetch(context.Background(), cfg(t, srv, dir))
 	if err == nil || !strings.Contains(err.Error(), "gateway-host-key") {
 		t.Errorf("want a required-secret-missing error naming the secret, got %v", err)
 	}
 }
 
-func TestFetchNeedsCredentials(t *testing.T) {
-	dir := t.TempDir()
-	c := cfg(&httptest.Server{URL: "http://unused"}, dir)
-	c.Token = ""
-	if err := Fetch(context.Background(), c); err == nil {
+func TestScalewaySourceNeedsCredentials(t *testing.T) {
+	if _, err := NewScalewaySource(ScalewayConfig{ProjectID: "proj"}); err == nil {
 		t.Error("want an error when the token is empty")
+	}
+	if _, err := NewScalewaySource(ScalewayConfig{Token: "k"}); err == nil {
+		t.Error("want an error when the project ID is empty")
+	}
+}
+
+func TestFetchNeedsSource(t *testing.T) {
+	dir := t.TempDir()
+	err := Fetch(context.Background(), Config{
+		KeyDir: filepath.Join(dir, "keys"),
+		EnvOut: filepath.Join(dir, "secrets.env"),
+	})
+	if err == nil {
+		t.Error("want an error when no source is configured")
 	}
 }
 
@@ -154,8 +172,70 @@ func TestFetchWrongTypeFails(t *testing.T) {
 		"/sparkbox/fleet/gateway-host-key": {"not-a-wrapped-key", "opaque"},
 	})
 	dir := t.TempDir()
-	err := Fetch(context.Background(), cfg(srv, dir))
+	err := Fetch(context.Background(), cfg(t, srv, dir))
 	if err == nil || !strings.Contains(err.Error(), "ssh_key") {
 		t.Errorf("want a type-mismatch error, got %v", err)
+	}
+}
+
+// mapSource is a store with no notion of secret types — the shape 1Password
+// presents, where an SSH key is a bare PEM rather than Scaleway's JSON envelope.
+type mapSource map[string]string
+
+func (m mapSource) Get(_ context.Context, name string) ([]byte, string, error) {
+	v, ok := m[name]
+	if !ok {
+		return nil, "", ErrNotFound
+	}
+	return []byte(v), "", nil
+}
+
+func (m mapSource) Describe() string { return "test source" }
+
+func TestFetchFromUntypedSource(t *testing.T) {
+	const hostPEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nHOST\n-----END OPENSSH PRIVATE KEY-----\n"
+	const oidcPEM = "-----BEGIN PRIVATE KEY-----\nOIDC\n-----END PRIVATE KEY-----\n"
+	dir := t.TempDir()
+	c := Config{
+		Source: mapSource{
+			"gateway-host-key":     hostPEM,
+			"gateway-upstream-key": hostPEM,
+			"oidc-signing-key":     oidcPEM,
+			// No trailing newline: a paste into a secret store often loses it.
+			"node-control-ca-key": "-----BEGIN PRIVATE KEY-----\nCAKEY\n-----END PRIVATE KEY-----",
+			// A trailing newline on an env value must not fail the boot.
+			"console-password": "hunter2\n",
+		},
+		KeyDir: filepath.Join(dir, "keys"),
+		EnvOut: filepath.Join(dir, "secrets.env"),
+	}
+	if err := Fetch(context.Background(), c); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	// The SSH key is stored verbatim, NOT run through the JSON unwrap.
+	got, err := os.ReadFile(filepath.Join(c.KeyDir, "gateway_host_key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != hostPEM {
+		t.Errorf("host key = %q, want the raw PEM %q", got, hostPEM)
+	}
+
+	// A PEM that arrived without its trailing newline gains exactly one.
+	got, err = os.ReadFile(filepath.Join(c.KeyDir, "node_ca_key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "-----BEGIN PRIVATE KEY-----\nCAKEY\n-----END PRIVATE KEY-----\n"; string(got) != want {
+		t.Errorf("ca key = %q, want a single trailing newline %q", got, want)
+	}
+
+	envBytes, err := os.ReadFile(c.EnvOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(envBytes), `SPARKBOX_CONSOLE_PASSWORD="hunter2"`) {
+		t.Errorf("env did not trim the trailing newline:\n%s", envBytes)
 	}
 }

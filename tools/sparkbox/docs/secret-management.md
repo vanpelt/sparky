@@ -1,0 +1,183 @@
+# Fleet secrets: where they live and how a host gets them
+
+A sparkbox fleet has eight secrets. Six are PEMs, two are strings, and one of
+them — the OIDC signing key — has no recovery path at all. This document covers
+where they are stored, how a host obtains them, and what to do when one is lost.
+
+Two questions are deliberately kept separate, because conflating them is what
+tied the original design to one cloud vendor:
+
+* **Source of truth** — where the fleet's identity is kept so it survives any
+  single box. Today: a 1Password vault (or Scaleway Secret Manager).
+* **Delivery** — how a running host obtains them. Either the operator pulls them
+  once at provisioning time, or the host fetches them itself at every boot.
+
+## What the secrets are, and how much a leak costs
+
+| Secret | File | Blast radius |
+|---|---|---|
+| `oidc-signing-key` | `oidc_signing_key.pem` | **Catastrophic and unrecoverable.** Signs workload identity tokens *and* derives the KEK for every user secret in the database (`secrets.DeriveKEK`). Lose it and every stored user secret is undecryptable — there is no previous-KEK unwrap, only a keycheck sentinel that disables delivery. Steal it and you can mint any workload identity and decrypt the whole table. |
+| `node-control-ca-key` | `node_ca_key.pem` | Mints a control-plane certificate for any node. A 10-year CA. |
+| `gateway-host-key` | `gateway_host_key.pem` | The SSH host identity pinned in every user's `known_hosts` and in each node's `gateway_host_key.pub`. Rotating it warns every user. |
+| `gateway-upstream-key` | `gateway_upstream_key.pem` | Gateway→guest authentication: access to every sandbox. |
+| `gateway-control-key` | `gateway_control_key.pem` | A leaf key; reissuable from the CA. |
+| `cloudflare-api-token` | (env var) | DNS-01 and tunnel control — full domain takeover — but revocable in one click. |
+| `console-password` | (env var) | Admin console access. Rotate freely. |
+| `node-control-ca-cert` | `node_ca_cert.pem` | Not secret. A public certificate, carried here only so a fresh host can restore the pair together. |
+
+The first four are fleet identity: they must outlive any particular machine, and
+three of them cannot be rotated without disrupting something. The rest are
+operational credentials you can cycle at will.
+
+**Escrow the OIDC key and the node CA key somewhere other than 1Password.** They
+are ~200 bytes of PEM each. If you lose vault access *and* the box in the same
+event, every user re-enters every secret and every relying party re-onboards
+against a new JWKS. A printed copy in a drawer removes that single point of
+failure for the price of a sheet of paper.
+
+## Delivery model 1: pull at provisioning time (hardware you own)
+
+This is the right default for a box you physically control, like the DGX. The
+operator's laptop is the only machine that ever talks to 1Password; the host
+just holds root-owned files.
+
+```sh
+# On the laptop, once: mint anything missing and store it.
+OP_ACCOUNT=my.1password.com deploy/sync-fleet-secrets.sh push
+
+# Onto a host, at provisioning time:
+SECRETS_DIR=./staged deploy/sync-fleet-secrets.sh pull
+scp ./staged/*.pem root@box:/srv/sparkbox/state/
+```
+
+The host needs no 1Password credential, no `op` binary, and no network path to
+1Password at boot. The cost is that the keys are at rest on the host's disk.
+
+## Delivery model 2: fetch at boot (hardware you rent)
+
+For a host you don't physically control, keep the keys off the disk entirely:
+`sparkbox fetch-secrets` writes them into tmpfs on every boot, so a pulled drive
+yields no key material and the host's read credential can be revoked remotely.
+
+```sh
+sparkbox fetch-secrets --provider op \
+  --op-vault Sparkbox \
+  --key-dir /run/sparkbox/keys \
+  --env-out /run/sparkbox/secrets.env
+```
+
+The host authenticates with a **service account token** in
+`OP_SERVICE_ACCOUNT_TOKEN` — supplied through the environment, never argv, so it
+can't be read out of the process table. Give each host its own read-only service
+account scoped to just this vault, so revoking one host doesn't touch the others
+and a compromised host can't read the rest of your 1Password.
+
+This mode currently requires the `op` CLI on the host (arm64 builds exist). See
+"Why not the Go SDK" below.
+
+The Scaleway path is unchanged and remains the default:
+`sparkbox fetch-secrets --provider scw --path /sparkbox/fleet`.
+
+### Rate limits matter on a personal plan
+
+1Password's daily limit is **1,000 requests per account** on Individual and
+Families plans (Teams 5,000; Business 50,000). A boot fetch is 8 reads, which is
+nothing — but `sparkbox-secrets.service` sets `Restart=on-failure` with
+`RestartSec=3` and `StartLimitIntervalSec=0`, so a misconfigured host retries
+forever. That burns a personal plan's entire daily quota in about six minutes and
+locks you out of your own password manager. If you enable boot-time fetch on a
+personal plan, bound the retries.
+
+## Storage layout in 1Password
+
+One vault, one item per secret, named exactly as the manifest in
+`internal/bootsecrets/fetch.go` names it. Each is a **Password item whose
+`password` field holds the entire payload**, so a PEM and a token look the same
+and one reference shape reads both:
+
+```
+op://Sparkbox/gateway-host-key/password
+op://Sparkbox/console-password/password
+```
+
+Note that **an SSH key is stored as a bare PEM here**, unlike Scaleway's
+`ssh_key` type which wraps it in `{"ssh_private_key": ...}` JSON. 1Password has
+no notion of secret types, so the source reports `""` and `bootsecrets` stores
+the payload verbatim. Both shapes are handled; a Scaleway secret with the wrong
+type is still a hard error.
+
+### Why not 1Password's SSH Key item type
+
+It looks like the obvious home for `gateway_host_key.pem`, and it isn't:
+
+* The SSH Key category only accepts **valid SSH private keys**, so the four EC
+  P-256 TLS keys (OIDC, node CA, gateway control) can't use it at all — and
+  1Password has [no TLS/SSL certificate category](https://1password.community/discussion/135124/request-feature-tls-ssl-certificates-item-type).
+* `op read` re-encodes SSH keys on the way out (`?ssh-format=openssh`), so byte
+  fidelity isn't guaranteed for the two keys that *could* live there.
+
+Splitting the manifest across two storage shapes to gain nothing wasn't worth it.
+
+## Gotchas found the hard way
+
+**`op item create --category X --template f` silently discards every field
+value.** The piped form (`op item create - --category X`) creates an item with
+all fields empty and exits 0; the `--template` form at least errors. The fix is
+to omit `--category` and let the template's own `category` field carry it. This
+was observed on `op` 2.33.0.
+
+Because of that, **`sync-fleet-secrets.sh` reads every value back after writing
+it** and fails loudly if it doesn't match the local file. A secret you believe is
+backed up but isn't is the worst failure mode available here — you find out when
+the box is already gone.
+
+**A missing vault is not a missing secret.** `op read` reports these
+differently, and the provider only treats two wordings as "absent":
+
+```
+"foo" isn't an item in the "Sparkbox" vault.     -> absent (skip if optional)
+item 'Sparkbox/foo' does not have a field 'bar'  -> absent (skip if optional)
+"Typo" isn't a vault in this account.            -> HARD ERROR
+you are not currently signed in.                 -> HARD ERROR
+```
+
+Anything unrecognized is a hard error by design. If 1Password rewords these
+strings, optional secrets start failing loudly rather than silently vanishing —
+which is what would happen if a typo'd vault name were read as "nothing here".
+
+**`timeout` doesn't exist on a stock macOS.** The sync script degrades to running
+unbounded rather than failing, since its whole purpose is to run on a laptop.
+
+## Why not the Go SDK (yet)
+
+Embedding [`onepassword-sdk-go`](https://github.com/1Password/onepassword-sdk-go)
+would drop the `op` dependency on hosts. Two things block it today:
+
+1. **v0.4.x does not compile with `CGO_ENABLED=0`.** `client_builder_no_cgo.go`
+   has `WithDesktopAppIntegration` reference an undefined identifier in its
+   body, and Go type-checks function bodies whether or not you call them, so the
+   package fails to build. sparkbox is a pure-Go cross-compiled binary, so
+   embedding today means pinning to v0.3.1.
+2. **Size.** Measured on `linux/arm64`: 41.5 MB → 55.1 MB, +33%, from the Rust
+   core shipped as an 8.7 MB embedded `core.wasm` plus wazero.
+
+`bootsecrets.Source` is the seam for this. Switching means adding one file that
+implements `Get` and `Describe` against the SDK; nothing else changes.
+
+## Rolling out the v0.5.0 mTLS PKI
+
+`node-control-ca-cert`, `node-control-ca-key` and `gateway-control-key` are the
+material the gRPC control plane needs. `sync-fleet-secrets.sh push` mints all
+three if they don't exist yet and stores them, so the rollout is:
+
+```sh
+deploy/sync-fleet-secrets.sh push     # mints the CA + gateway control key
+deploy/sync-fleet-secrets.sh status   # confirm all eight agree
+```
+
+They are optional at fetch time on purpose, so an SSH-only fleet can roll out
+this binary before the secrets exist. The point that fails closed is
+`serve --require-keys --node-control-transport=auto|grpc`.
+
+Keep `FLEET_CLUSTER_ID` stable across gateway moves — it is baked into the CA
+subject and into the gateway's mTLS identity.

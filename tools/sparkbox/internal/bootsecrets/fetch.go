@@ -1,8 +1,12 @@
-// Package bootsecrets pulls the fleet's secrets from Scaleway Secret Manager at
-// host boot into tmpfs, replacing the plaintext copies that used to ride in
-// cloud-init user-data. Private keys land as PEM files under KeyDir;
-// the two passwords are written as a systemd EnvironmentFile. Everything is
-// meant for /run, so a captured disk or a pulled drive yields no key material.
+// Package bootsecrets pulls the fleet's secrets from a secret store into tmpfs,
+// replacing the plaintext copies that used to ride in cloud-init user-data.
+// Private keys land as PEM files under KeyDir; the two passwords are written as
+// a systemd EnvironmentFile. Everything is meant for /run, so a captured disk or
+// a pulled drive yields no key material.
+//
+// Which store the secrets come from is a Source (see source.go): Scaleway Secret
+// Manager on rented metal, 1Password on hardware you own. The manifest below —
+// what the fleet needs and where each secret lands — is the same either way.
 package bootsecrets
 
 import (
@@ -18,17 +22,14 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/scwsecrets"
 )
 
-// Config controls a fetch. Token is the Scaleway secret key; it comes from the
-// environment, never an argv flag, so it can't leak into the process table.
+// Config controls a fetch. Credentials belong to the Source, which takes them
+// from the environment rather than argv so they can't leak into the process
+// table.
 type Config struct {
-	BaseURL   string // "" for the real API; set in tests
-	Region    string
-	ProjectID string
-	Token     string
-	Path      string // Secret Manager folder, e.g. "/sparkbox/fleet"
-	KeyDir    string // where PEMs are written (put on tmpfs)
-	EnvOut    string // EnvironmentFile to write (put on tmpfs)
-	Log       io.Writer
+	Source Source // where secrets are read from (required)
+	KeyDir string // where PEMs are written (put on tmpfs)
+	EnvOut string // EnvironmentFile to write (put on tmpfs)
+	Log    io.Writer
 }
 
 type kind int
@@ -77,11 +78,8 @@ func KeyFiles() []string {
 // Fetch reads every manifest secret and materializes it. It is safe to re-run:
 // each write is atomic, so a reader never sees a half-written key.
 func Fetch(ctx context.Context, cfg Config) error {
-	if cfg.Token == "" {
-		return errors.New("SCW_SECRET_KEY is not set (the host's Secret Manager access key)")
-	}
-	if cfg.ProjectID == "" {
-		return errors.New("project ID is required (SCW_DEFAULT_PROJECT_ID)")
+	if cfg.Source == nil {
+		return errors.New("no secret source configured")
 	}
 	if cfg.Log == nil {
 		cfg.Log = io.Discard
@@ -93,14 +91,14 @@ func Fetch(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	client := scwsecrets.New(cfg.BaseURL, cfg.Region, cfg.ProjectID, cfg.Token)
+	fmt.Fprintf(cfg.Log, "fetch-secrets: reading from %s\n", cfg.Source.Describe())
 	env := map[string]string{}
 
 	for _, s := range manifest {
-		payload, secretType, err := client.AccessByPath(ctx, cfg.Path, s.name)
-		if errors.Is(err, scwsecrets.ErrNotFound) {
+		payload, secretType, err := cfg.Source.Get(ctx, s.name)
+		if errors.Is(err, ErrNotFound) {
 			if s.required {
-				return fmt.Errorf("required secret %s/%s is missing", strings.TrimRight(cfg.Path, "/"), s.name)
+				return fmt.Errorf("required secret %s is missing from %s", s.name, cfg.Source.Describe())
 			}
 			fmt.Fprintf(cfg.Log, "fetch-secrets: %s not set, skipping\n", s.name)
 			continue
@@ -111,24 +109,25 @@ func Fetch(ctx context.Context, cfg Config) error {
 
 		switch s.kind {
 		case sshKeyPEM:
-			if secretType != "ssh_key" {
-				return fmt.Errorf("%s: expected type ssh_key, got %q", s.name, secretType)
-			}
-			pem, err := scwsecrets.UnwrapSSHKey(payload)
+			pem, err := unwrapSSHKey(s.name, payload, secretType)
 			if err != nil {
-				return fmt.Errorf("%s: %w", s.name, err)
+				return err
 			}
-			if err := writeFileAtomic(filepath.Join(cfg.KeyDir, s.dest), pem, 0o600); err != nil {
+			if err := writeFileAtomic(filepath.Join(cfg.KeyDir, s.dest), normalizePEM(pem), 0o600); err != nil {
 				return err
 			}
 			fmt.Fprintf(cfg.Log, "fetch-secrets: wrote %s (%d bytes)\n", s.dest, len(pem))
 		case opaquePEM:
-			if err := writeFileAtomic(filepath.Join(cfg.KeyDir, s.dest), payload, 0o600); err != nil {
+			if err := writeFileAtomic(filepath.Join(cfg.KeyDir, s.dest), normalizePEM(payload), 0o600); err != nil {
 				return err
 			}
 			fmt.Fprintf(cfg.Log, "fetch-secrets: wrote %s (%d bytes)\n", s.dest, len(payload))
 		case envVar:
-			env[s.dest] = string(payload)
+			// Trim only a trailing line ending, not all whitespace: a value
+			// pasted into a secret store often picks one up, and writeEnvFile
+			// refuses newlines outright. Interior or leading spaces stay,
+			// because they may be part of the password.
+			env[s.dest] = strings.TrimRight(string(payload), "\r\n")
 			fmt.Fprintf(cfg.Log, "fetch-secrets: set %s\n", s.dest)
 		}
 	}
@@ -138,6 +137,39 @@ func Fetch(ctx context.Context, cfg Config) error {
 	}
 	fmt.Fprintf(cfg.Log, "fetch-secrets: wrote %s (%d var(s))\n", cfg.EnvOut, len(env))
 	return nil
+}
+
+// unwrapSSHKey turns a stored SSH key into a bare PEM.
+//
+// Scaleway types its secrets and validates an ssh_key's JSON envelope on write,
+// so a mistyped secret there is a real problem and stays a hard error: writing a
+// JSON blob where a PEM belongs would fail much later and much less clearly.
+// Stores with no notion of types report "" and hold the PEM verbatim, which is
+// how the same key looks in 1Password.
+func unwrapSSHKey(name string, payload []byte, secretType string) ([]byte, error) {
+	switch secretType {
+	case "":
+		return payload, nil
+	case "ssh_key":
+		pem, err := scwsecrets.UnwrapSSHKey(payload)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return pem, nil
+	default:
+		return nil, fmt.Errorf("%s: expected type ssh_key, got %q", name, secretType)
+	}
+}
+
+// normalizePEM guarantees the single trailing newline a PEM file is supposed to
+// end with. Secret stores are byte-exact, so this only matters when a human put
+// the value there — a paste that dropped the final newline produces a file some
+// parsers accept and others reject, which is a miserable thing to debug at boot.
+func normalizePEM(payload []byte) []byte {
+	if len(payload) == 0 || payload[len(payload)-1] == '\n' {
+		return payload
+	}
+	return append(payload, '\n')
 }
 
 // writeFileAtomic writes data to a temp file in the same directory, sets its
