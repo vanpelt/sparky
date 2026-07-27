@@ -441,12 +441,26 @@ full_phase() {
   info "seeding users.conf with a literal --operator-key"
 
   # --------------------------------------------------------------- real setup
+  #
+  # --agent-tools=false, deliberately. The bake fetches claude, codex and
+  # hivemind from three third-party hosts — around half a gigabyte — and
+  # installs them into the rootfs template. None of that is what this job
+  # exists to prove: everything up to and including the CHOICE to bake is
+  # asserted by the dry-run plan above, and the bake's own logic has unit tests
+  # in internal/hostsetup. Running it here bought three network dependencies, a
+  # minute of wall clock, and the disk pressure that filled this container's
+  # filesystem — which is how the bake, whose failure is a warning by design,
+  # ended up truncating the gateway's host key and crash-looping the service.
+  # The key write is atomic now (sshgw.LoadOrCreateKey), so that particular
+  # collateral cannot recur; downloading half a gigabyte to re-prove it still
+  # would not be a smoke test.
   say "real setup"
   local args=(setup
     --root "$FULL_ROOT"
     --release "$RELEASE"
     --artifact-base "http://127.0.0.1:$STUB_PORT"
     --operator-key "$opkey"
+    --agent-tools=false
     --swap-gb 0 --data-volume-gb 2 --proxy-domain "$DOMAIN")
   [ "$HAVE_A1" = 1 ] && args+=(--bin-path "$BIN_PATH")
 

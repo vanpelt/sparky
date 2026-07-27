@@ -31,11 +31,19 @@ import (
 // generating it on first use — the same lifecycle as the gateway SSH keys, so
 // a single-host dev run needs no setup and a fleet host gets the key injected
 // by cloud-init before sparkbox first starts.
+//
+// The write is atomic, and an existing zero-byte file is minted over, for the
+// reasons written out at length on sshgw.LoadOrCreateKey — an interrupted write
+// there leaves a host nobody can log into, and one here leaves an issuer that
+// signs nothing, both permanently and both repairable only by deleting a file
+// an operator has no reason to suspect.
 func LoadOrCreateKey(dir, name string) (*ecdsa.PrivateKey, error) {
 	path := filepath.Join(dir, name+".pem")
-	if data, err := os.ReadFile(path); err == nil {
+	switch data, err := os.ReadFile(path); {
+	case err == nil && len(data) > 0:
 		return parseECPrivateKey(data)
-	} else if !os.IsNotExist(err) {
+	case err == nil: // zero bytes: nothing to lose, mint over it
+	case !os.IsNotExist(err):
 		return nil, err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -50,10 +58,38 @@ func LoadOrCreateKey(dir, name string) (*ecdsa.PrivateKey, error) {
 		return nil, err
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+	if err := writeFileAtomic(path, pemBytes); err != nil {
 		return nil, err
 	}
 	return key, nil
+}
+
+// writeFileAtomic is sshgw's, restated rather than shared: it is fifteen lines,
+// and the alternative is oidc importing sshgw (or a new package existing) for
+// one unexported helper, when the two packages are otherwise independent.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) //nolint:errcheck
+	if err := f.Chmod(0o600); err != nil {
+		f.Close() //nolint:errcheck
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close() //nolint:errcheck
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close() //nolint:errcheck
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // LoadKey returns the key at <dir>/<name>.pem, erroring if it does not exist.
