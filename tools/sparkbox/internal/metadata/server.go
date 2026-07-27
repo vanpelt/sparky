@@ -175,7 +175,20 @@ func (l Local) claims(box *host.Sandbox) oidc.Claims {
 		Box:     l.NodeName,
 	}
 	if l.Users != nil {
-		if u, err := l.Users.Get(box.Owner); err == nil && u.GitHubVerifiedAt != nil {
+		// Strong provenance only, and this is the load-bearing half of the
+		// condition rather than a refinement of it.
+		//
+		// docs/identity-federation-design.md tells relying parties that `github`
+		// is a strong external anchor — hivemind is invited to write
+		// `claims.github == "vanpelt"` in a policy — and that is a promise about
+		// where the fact came from, not merely that somebody recorded one. A
+		// link established by a third party's signed word would make this claim
+		// mean "somebody said so", and if that third party is also the one
+		// reading the policy it would be authorizing against a fact it asserted.
+		// So an `assertion` link is a fine thing for a console to display and
+		// not a thing an id token may carry. See docs/github-linking-design.md.
+		if u, err := l.Users.Get(box.Owner); err == nil &&
+			u.GitHubVerifiedAt != nil && users.StrongGitHubLink(u.GitHubVia) {
 			c.GitHub = u.GitHubLogin
 		}
 	}

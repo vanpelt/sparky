@@ -43,6 +43,12 @@ func TestGoDedupesIdenticalWork(t *testing.T) {
 	if done.State != JobSucceeded {
 		t.Fatalf("state = %s, want succeeded", done.State)
 	}
+	// Await the other one too before counting. Its fn records itself from its
+	// own goroutine, and nothing so far has waited for that goroutine — reading
+	// len(ran) here would be asking how far somebody else's scheduler has got.
+	if got := r.ops.Await(context.Background(), other, 2*time.Second); got.State != JobSucceeded {
+		t.Fatalf("the other owner's job = %s, want succeeded", got.State)
+	}
 	var result string
 	if err := json.Unmarshal(done.Result, &result); err != nil || result != "done" {
 		t.Errorf("result = %s (%v), want \"done\"", done.Result, err)

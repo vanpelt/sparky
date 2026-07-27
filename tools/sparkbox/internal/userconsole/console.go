@@ -122,11 +122,15 @@ type NetPlane interface {
 
 // Handler serves the user console UI and its JSON API.
 type Handler struct {
-	// mgr is this machine's own manager. It is kept alongside boxes because the
-	// balloon and CPU reads below can only be answered by the machine running
-	// the VM — they are not routable, so a sandbox that lives elsewhere is
-	// skipped rather than asked.
-	mgr      *host.Manager
+	// mgr is this machine's own manager, kept for the handful of reads that are
+	// genuinely about THIS machine (its node name, its capacity) rather than
+	// about a sandbox.
+	mgr *host.Manager
+	// vitals answers the balloon and CPU reads. It defaults to mgr and is
+	// pointed at the fleet by SetVitals: those counters can only be read on the
+	// machine running the VM, but "which machine" is a question the fleet
+	// answers, so they are routable after all — see webui.Probe.Vitals.
+	vitals   webui.VitalsReader
 	boxes    Sandboxes
 	routes   *routes.Store            // optional: nil hides web routes and disables port/visibility
 	secrets  *secrets.Store           // optional: nil disables tags + secrets endpoints
@@ -180,6 +184,11 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 		origin:   "https://" + subdomain + "." + domain,
 	}
 	if mgr != nil {
+		// Assigned inside the guard rather than in the literal above: a nil
+		// *host.Manager stored in an interface is not a nil interface, so the
+		// nil check webui.Probe.Vitals makes would pass and the first dashboard
+		// load would panic in a lock.
+		h.vitals = mgr
 		h.probe.Node = mgr.NodeName()
 	}
 	return h
@@ -197,6 +206,12 @@ func (h *Handler) SetSandboxes(s Sandboxes) { h.boxes = s }
 // guest's address on the host network — see webui.Probe.Dial for why a fleet
 // cannot be probed directly.
 func (h *Handler) SetDialer(d Dialer) { h.probe.Dial = d }
+
+// SetVitals points the dashboard's memory and CPU reads at the fleet, which
+// asks the machine holding each sandbox. Unset, the console reads the manager
+// it was built with, which answers for its own VMs and reports nothing for
+// anyone else's — right for one machine, and the reason a fleet must call this.
+func (h *Handler) SetVitals(v webui.VitalsReader) { h.vitals = v }
 
 func (h *Handler) Handler() http.Handler {
 	auth := edgeauth.Require(h.signer, h.accounts, h.loginURL)
@@ -327,24 +342,23 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 				views[i].EnvUndecryptable = true
 			}
 		}
-		// Read the guest's real memory use and cumulative CPU time concurrently;
-		// bounded by probeTimeout so one slow VM can't stall the dashboard. Only
-		// for the sandboxes on this machine: a balloon and a VMM process can
-		// only be asked of the host running them, so a remote name would just
-		// miss in the local manager's maps and report nothing.
-		if b.State == vmm.StateRunning && !remote {
+		// Read the guest's real memory use and cumulative CPU time concurrently,
+		// under the budget its placement deserves, so one slow VM can't stall
+		// the dashboard. A sandbox on another machine is asked of the machine
+		// running it — a balloon and a VMM process can only be asked there —
+		// which is the whole reason this goes through the fleet rather than the
+		// local manager it used to.
+		if b.State == vmm.StateRunning {
 			wg.Add(1)
-			go func(name string, mem **int64, cpu **float64) {
+			go func(box *host.Sandbox, mem **int64, cpu **float64) {
 				defer wg.Done()
-				ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
-				defer cancel()
-				if used, ok := h.mgr.MemStats(ctx, name); ok {
-					*mem = &used
+				v, err := h.probe.Vitals(r.Context(), h.vitals, box)
+				if err != nil {
+					h.log.Debug("vitals unavailable", "sandbox", box.Name, "node", box.Node, "err", err)
+					return
 				}
-				if secs, ok := h.mgr.CPUSeconds(ctx, name); ok {
-					*cpu = &secs
-				}
-			}(b.Name, &views[i].MemUsedMB, &views[i].CPUSeconds)
+				*mem, *cpu = v.MemUsedMB, v.CPUSeconds
+			}(b, &views[i].MemUsedMB, &views[i].CPUSeconds)
 		}
 		if h.routes == nil {
 			continue

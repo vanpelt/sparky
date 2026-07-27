@@ -182,40 +182,65 @@ func VerifyGitHubKey(ctx context.Context, login string, key xssh.PublicKey) (boo
 // for the same reason as githubKeysURL: so tests can exercise it locally.
 var githubUserAPIURL = "https://api.github.com/users/%s"
 
-// FetchGitHubEmail returns login's public profile email, or "" when the
-// profile doesn't show one — the common case, since the field is opt-in. It
-// only prefills the signup email prompt, so callers treat "" and most errors
-// alike: no default, just ask.
-func FetchGitHubEmail(ctx context.Context, login string) (string, error) {
+// FetchGitHubPublicProfile returns what github.com publishes about login
+// without any credential: the account number, and the profile email when the
+// account chooses to show one (opt-in, so usually not).
+//
+// The number is the reason this is fetched even on the key-proof path, where
+// the login was already proved: a login is renameable and, once released,
+// re-registerable by somebody else, so it is not an identifier anything should
+// still be relying on next year. GitHub's account number is. A caller that
+// cannot reach github.com links anyway with the number unknown — an unverified
+// id is worth less than a verified login, and the verification already happened.
+func FetchGitHubPublicProfile(ctx context.Context, login string) (GitHubProfile, error) {
 	if !githubLoginOK(login) {
-		return "", fmt.Errorf("invalid github login %q", login)
+		return GitHubProfile{}, fmt.Errorf("invalid github login %q", login)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(githubUserAPIURL, login), nil)
 	if err != nil {
-		return "", err
+		return GitHubProfile{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return GitHubProfile{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("github returned %s for %q", resp.Status, login)
+		return GitHubProfile{}, fmt.Errorf("github returned %s for %q", resp.Status, login)
 	}
 	var profile struct {
+		Login string `json:"login"`
+		ID    int64  `json:"id"`
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&profile); err != nil {
+		return GitHubProfile{}, err
+	}
+	// The login comes back from the response rather than from the request: the
+	// two differ in case for the same account, and this one is GitHub's own
+	// spelling of it.
+	out := GitHubProfile{Login: profile.Login, ID: profile.ID}
+	if !githubLoginOK(out.Login) {
+		out.Login = login
+	}
+	if email := strings.TrimSpace(profile.Email); ValidEmail(email) {
+		out.Email = email
+	}
+	return out, nil
+}
+
+// FetchGitHubEmail returns login's public profile email, or "" when the
+// profile doesn't show one. It only prefills the signup email prompt, so
+// callers treat "" and most errors alike: no default, just ask.
+func FetchGitHubEmail(ctx context.Context, login string) (string, error) {
+	p, err := FetchGitHubPublicProfile(ctx, login)
+	if err != nil {
 		return "", err
 	}
-	email := strings.TrimSpace(profile.Email)
-	if !ValidEmail(email) {
-		return "", nil
-	}
-	return email, nil
+	return p.Email, nil
 }
 
 // FetchGitHubKeys returns every public key github.com serves for login. Used

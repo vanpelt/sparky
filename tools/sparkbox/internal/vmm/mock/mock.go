@@ -98,6 +98,14 @@ type Driver struct {
 	// LoginUser mirrors the firecracker driver's login user so a mock host
 	// reports the same SSHUser the real fleet would. Empty defaults root.
 	LoginUser string
+	// PauseDelay makes Pause take at least this long, for the tests that need an
+	// operation to still be running when something else looks at it.
+	//
+	// A real pause takes a moment; this driver's takes microseconds, which is
+	// what lets a test that means "while this is in flight" pass by coincidence
+	// on a quiet machine and fail on a loaded one. Set it and the window is a
+	// fact rather than a race. Zero is the default and costs nothing.
+	PauseDelay time.Duration
 }
 
 func New(stateDir string, hostKey xssh.Signer) *Driver {
@@ -280,6 +288,9 @@ func handleSession(s gssh.Session, ptys *sync.Map, vm *fakeVM) {
 }
 
 func (d *Driver) Pause(_ context.Context, name string) error {
+	if d.PauseDelay > 0 {
+		time.Sleep(d.PauseDelay) // before the lock: this is latency, not work
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	vm, ok := d.vms[name]

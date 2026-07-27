@@ -340,14 +340,15 @@ func (f *fakeAccounts) RemoveKey(handle, fp string) error {
 	return fmt.Errorf("no key %s on this account", fp)
 }
 
-func (f *fakeAccounts) LinkGitHub(handle, login string) error {
-	f.c.add("LinkGitHub %s %s", handle, login)
+func (f *fakeAccounts) LinkGitHub(handle, login, via string, id int64) error {
+	f.c.add("LinkGitHub %s %s %s %d", handle, login, via, id)
 	if f.err != nil {
 		return f.err
 	}
 	u := f.users[handle]
 	now := time.Unix(0, 0).UTC()
 	u.GitHubLogin, u.GitHubVerifiedAt = login, &now
+	u.GitHubVia, u.GitHubID = via, id
 	f.users[handle] = u
 	return nil
 }
@@ -574,6 +575,11 @@ type fakeGitHub struct {
 	keys   map[string][]xssh.PublicKey
 	listed bool
 	err    error
+	// id is what the profile lookup reports, and profileErr makes that lookup
+	// fail on its own — separately from err, because the interesting case is a
+	// key check that PASSED followed by a profile fetch that could not be made.
+	id         int64
+	profileErr error
 }
 
 func (f *fakeGitHub) Fetch(ctx context.Context, login string) ([]xssh.PublicKey, error) {
@@ -590,6 +596,17 @@ func (f *fakeGitHub) Verify(ctx context.Context, login string, key xssh.PublicKe
 		return false, f.err
 	}
 	return f.listed, nil
+}
+
+func (f *fakeGitHub) Profile(ctx context.Context, login string) (users.GitHubProfile, error) {
+	f.c.add("github.Profile %s", login)
+	if f.profileErr != nil {
+		return users.GitHubProfile{}, f.profileErr
+	}
+	if f.err != nil {
+		return users.GitHubProfile{}, f.err
+	}
+	return users.GitHubProfile{Login: login, ID: f.id}, nil
 }
 
 // ---------------------------------------------------------------------------

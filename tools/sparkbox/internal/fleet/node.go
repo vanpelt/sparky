@@ -96,6 +96,18 @@ type Node interface {
 	Templates() []*host.Snapshot
 	Capacity() host.NodeCapacity
 
+	// Vitals is the one inventory read that is NOT served from cache, and the
+	// only method here that changes nothing on the far machine.
+	//
+	// It costs a round trip on purpose. The cached inventory is a lifecycle
+	// picture refreshed when something happens to a sandbox; these are
+	// instrument readings whose whole value is being current to the second, and
+	// a node cannot know which of its sandboxes somebody has a terminal open on.
+	// So the question is asked when it is asked — and because it is asked from a
+	// page that polls, callers give it the short remote budget rather than an
+	// operation's.
+	Vitals(ctx context.Context, name string) (host.Vitals, error)
+
 	// Hangup ends this machine's link with a stated reason, and Revoke ends it
 	// having first failed everything riding on it. They are on the interface
 	// rather than reached by a type assertion on the link implementation

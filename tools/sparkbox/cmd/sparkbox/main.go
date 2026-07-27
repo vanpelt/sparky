@@ -138,6 +138,7 @@ func serve(args []string) error {
 		dnsAnswer      = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
 		openSignup     = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
 		invitesPer     = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
+		githubClientID = fs.String("github-client-id", defaultGitHubClientID, "public client id of the GitHub app used to link accounts via the OAuth device flow (`ssh ctl@<domain> github link`). It is an identifier, not a secret. Empty disables the flow, leaving `keys verify-github` — which needs the user's key published on GitHub — as the only way to link")
 		nodeNameFlag   = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
 		archFlag       = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
 		noNodeEnrol    = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator still has to run 'ssh ctl@<domain> node approve <name>' — so this is only worth setting on a gateway that will never gain another node")
@@ -494,7 +495,8 @@ func serve(args []string) error {
 		Schedules: scheduleStore, Routes: routeStore, Sessions: sessionSigner,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
 		XtermSubdomain: xtermLabel, InvitesPerUser: *invitesPer,
-		Log: log,
+		GitHubClientID: *githubClientID,
+		Log:            log,
 	})
 	defer ops.Close()
 
@@ -686,11 +688,12 @@ func serve(args []string) error {
 		if consolePw != "" {
 			consoleH := console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log)
 			consoleH.SetSchedules(scheduleStore)
-			// The manager it was built with stays for the balloon reads, which
-			// only the machine running a VM can answer; everything else — the
-			// listing and every lifecycle action — goes through the fleet, so
-			// the placement ledger sees every name the console takes or frees.
+			// Everything goes through the fleet: the listing and every
+			// lifecycle action, so the placement ledger sees every name the
+			// console takes or frees — and the balloon read too, which only the
+			// machine running a VM can answer and which the fleet routes there.
 			consoleH.SetSandboxes(flt)
+			consoleH.SetVitals(flt)
 			consoleH.SetCapacities(flt.Capacities)
 			consoleH.SetDialer(flt.DialContext)
 			px.SetConsole(*consoleSub, consoleH.Handler())
@@ -704,10 +707,11 @@ func serve(args []string) error {
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
-			// Same split as the operator console: the manager answers the
-			// balloon and CPU reads for this machine's own VMs, the fleet
-			// answers everything an owner can act on.
+			// Same as the operator console: the fleet answers everything an
+			// owner can act on, and routes the balloon and CPU reads to the
+			// machine holding each sandbox.
 			uc.SetSandboxes(flt)
+			uc.SetVitals(flt)
 			uc.SetDialer(flt.DialContext)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			// The apex has no other job, and the user console is the only page a
@@ -729,11 +733,11 @@ func serve(args []string) error {
 			xt = xterm.New(xterm.Config{
 				Sandboxes: flt, Accounts: userStore, Sessions: sessionSigner,
 				UpstreamKey: upstreamKey, Dial: flt.DialContext,
-				// The same split the two consoles make: the fleet answers
-				// everything an owner can act on, the manager answers the
-				// balloon and CPU reads, which only the machine running the VM
-				// can be asked. A sandbox on another node draws no meters.
-				Vitals: mgr,
+				// The fleet, not the manager: a balloon and a VMM process can
+				// only be asked of the machine running them, and the fleet is
+				// what knows which machine that is. Node lets the handler give
+				// a remote reading the longer budget it needs.
+				Vitals: flt, Node: mgr.NodeName(),
 				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
 				// The gateway owns the one live-session registry the manager
@@ -959,6 +963,11 @@ type gatewayStores struct {
 	Domain         string
 	XtermSubdomain string
 	InvitesPerUser int
+	// GitHubClientID turns the OAuth device flow on. Empty leaves it off, which
+	// is not a degraded state so much as the state every host was in before it
+	// existed: `keys verify-github` still links an account whose key is
+	// published on GitHub.
+	GitHubClientID string
 	Log            *slog.Logger
 }
 
@@ -980,11 +989,37 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
 		// cannot say whether a machine is answering, and the fleet alone cannot
 		// say which fingerprint an operator compared before approving it.
-		Nodes:        fleetRoster{roster: s.Roster, index: s.Placement, flt: s.Fleet},
+		Nodes: fleetRoster{roster: s.Roster, index: s.Placement, flt: s.Fleet},
+		// nil rather than a client with an empty id: ctlops decides whether the
+		// flow exists by comparing this against nil, and a client that would
+		// answer every start with "invalid client" is worse than a host that
+		// says plainly it cannot do this.
+		GitHubDevice: githubDevice(s.GitHubClientID),
 		DefaultImage: s.DefaultImage, Domain: s.Domain,
 		XtermSubdomain: s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
 		Log: s.Log,
 	})
+}
+
+// defaultGitHubClientID is the app a stock sparkbox links accounts through.
+//
+// A client id is a public identifier — it travels in the request that mints a
+// device code and is meant to be read by the user authorizing it — so shipping
+// one costs nothing and saves every operator the app registration. It does mean
+// the consent screen names that app rather than the host's own; an operator who
+// would rather it named theirs registers one and passes --github-client-id,
+// and one who wants no GitHub linking at all passes the empty string.
+//
+// Whatever app it names must have the device flow enabled, or every attempt
+// fails with the same message. See docs/github-linking-design.md.
+const defaultGitHubClientID = "Iv23liV6n9amGfGY20Js"
+
+// githubDevice builds the device-flow client, or nil when no app is configured.
+func githubDevice(clientID string) ctlops.GitHubDeviceFlow {
+	if clientID == "" {
+		return nil
+	}
+	return users.NewGitHubDevice(clientID)
 }
 
 // fleetRoster answers the operator's two questions about a machine that neither

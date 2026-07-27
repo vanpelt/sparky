@@ -236,6 +236,10 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		"ListKeys": true, "ListPasskeys": true, "ListJobs": true,
 		"Whoami": true, "Email": true, "SetEmail": true, "AddKey": true,
 		"RemoveKey": true, "ImportGitHubKeys": true, "VerifyGitHub": true,
+		// The device flow names no resource at all: it acts on the caller's own
+		// account, and the login it links is GitHub's answer rather than
+		// anything the caller could pass in.
+		"StartGitHubLink": true, "FinishGitHubLink": true,
 		"RemovePasskey": true, "MintSessionToken": true, "Invite": true,
 		"Go": true, "Await": true,
 		// The node commands take a machine's name, not a resource anybody owns:

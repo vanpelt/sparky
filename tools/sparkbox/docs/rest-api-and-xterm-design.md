@@ -1411,13 +1411,17 @@ the terminal would keep resurrecting a box the reaper is trying to put away, and
 the page's deliberate refusal to auto-reconnect after a pause (`4002`) would be
 pointless. Watching a meter is not work.
 
-**`Config.Vitals` is the local manager, not the fleet.** `Sandboxes` is `flt`
-because ownership and resume are fleet-wide; a balloon and a VMM process can
-only be asked of the machine running them, so vitals is `mgr`. A sandbox placed
-on another node simply misses in the local manager's maps and every reader
-answers `ok=false` — no special case, and the same degradation the user console
-has always had. The response still carries the ceilings, so "no reading" and
-"paused" and "no `VitalsReader` wired" all render as one state instead of three.
+**`Config.Vitals` was the local manager, and is now the fleet.** The first
+build read `mgr`: a balloon and a VMM process can only be asked of the machine
+running them, so a sandbox placed on another node missed in the local manager's
+maps and every reader answered `ok=false` — no special case, and the same
+degradation both consoles had. That was correct and permanently blank, and the
+further the fleet spreads the more of the platform's instrumentation goes dark
+with it. *Which* machine to ask is a question the fleet answers, so the read is
+routable after all; see "Vitals across the fleet" below. The response still
+carries the ceilings, so "no reading", "paused", "that machine is not
+answering" and "no `VitalsReader` wired" all render as one state instead of
+four.
 
 **Two scales, chosen per metric.** CPU is pinned to 0–100% (normalised by
 vCPUs, so 100% is every core busy): autoscaling a percentage would make an idle
@@ -1466,6 +1470,66 @@ The strip then sheds cells one at a time rather than vanishing at a single
 threshold — network at 980px, memory at 700px — ordered by value per pixel. The
 CPU sparkline is the last thing standing, because "is this machine doing
 anything" is the question the strip exists to answer. Verified down to 360px.
+
+## Vitals across the fleet — added after the strip shipped
+
+The strip shipped reading the local manager, which meant a sandbox on a fleet
+node drew no meters at all. That was the honest answer for a build with no way
+to ask another machine, and it was also the beginning of a pattern worth
+refusing: every surface that instruments a sandbox goes blind the moment the
+sandbox leaves the gateway, and the answer to "why is this empty" becomes "where
+is your VM", which is exactly what the fleet exists to stop anyone having to
+know.
+
+**One reading, not three.** `host.Manager` grew `Vitals`, which fans the three
+existing readers out concurrently and returns a `host.Vitals` of four pointers.
+That struct — rather than the three `(value, ok)` methods — is what crosses the
+machine boundary, because the alternative is three round trips a second per open
+tab. Pointers all the way down, because a missing counter and a zero counter are
+different facts at every layer: absent `cpu_seconds` means this machine has no
+CPU stats for that sandbox; a present `0.0` means it has used none.
+
+**A new nodelink verb, `sandbox.vitals`.** It is the only read in that catalogue
+not served from the inventory cache, and it has to be. The inventory a node
+pushes is a lifecycle picture — state, sizes, lifetime totals — refreshed when
+something *happens*; these are instrument readings whose whole value is being
+current to the second. Folding them into the inventory would either have every
+node broadcast a CPU sample a second to a gateway with nobody watching, or make
+the meters as stale as the last lifecycle event. It is also the only verb a
+*viewer* drives rather than an operator, which is why it changes nothing on the
+far machine and never touches `last_active`: passivity had to survive the hop,
+not just the handler.
+
+**`Fleet.Vitals` routes and does not fall back.** When the owning machine is
+offline the answer is that machine's outage, never a reading from here. The
+fallback would be the easy mistake and it is a cross-tenant one — every machine
+mints its guests the same `172.30.x.y` addresses and the local manager holds a
+*different* sandbox for any name it happens to share, so a helpful local answer
+draws one person's CPU under another person's name with no error and no log
+line. `TestVitalsRefuseRatherThanAnswerFromTheWrongMachine` holds it.
+
+**The budget is the placement's, and it is stated once.** `webui.Probe.Vitals`
+gives a local sandbox the 300ms every local probe gets and a remote one the
+tunneled 2s, for the same reason the port probe already did: the remote question
+costs a round trip before the balloon is even touched. Giving every reading the
+remote budget lets one wedged local VMM stall a dashboard; giving every reading
+the local one times out exactly the sandboxes this work exists to reach. Putting
+it on `Probe` rather than in three handlers is what keeps the browser terminal
+and both consoles from drifting on it — the same argument that put `Remote` and
+`Public` there.
+
+**Both consoles came along.** `console` and `userconsole` each held a
+`*host.Manager` purely for the balloon and CPU reads, with a comment explaining
+that those were not routable. They are now `SetVitals(flt)`, and the dashboards
+show memory and CPU for every sandbox an owner has, wherever it landed. The
+`SetVitals` shape matches `SetSandboxes`/`SetDialer`: a single-machine build
+constructs with the manager and never calls the setter.
+
+**What still does not travel.** Bandwidth accounting stays with the egress plane
+(`net.usage`), which is metered per machine by the daemon in front of its own
+taps; this verb reports the tap counters the guest sees, not sluice's ledger.
+And a paused sandbox reports nothing from anywhere, which is not a fleet
+property at all — there is no VMM process to ask.
 
 ---
 

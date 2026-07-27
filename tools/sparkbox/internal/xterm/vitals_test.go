@@ -8,6 +8,7 @@ package xterm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -19,15 +20,17 @@ import (
 )
 
 // fakeVitals is a VitalsReader over a fixed table. A name it does not hold
-// answers ok=false, which is exactly how the real *host.Manager behaves for a
-// sandbox placed on another machine — so "remote" needs no special case here,
-// it is just an absent row. calls counts every read so a test can assert the
-// driver was not consulted at all.
+// answers the empty reading, which is exactly how the real *host.Manager
+// behaves for a sandbox it does not run — so "no reading" needs no special case
+// here, it is just an absent row. calls counts every read so a test can assert
+// the reader was not consulted at all; err makes it fail the way a machine that
+// has stopped answering does.
 type fakeVitals struct {
 	mu    sync.Mutex
 	cpu   map[string]float64
 	mem   map[string]int64
 	net   map[string][2]uint64
+	err   error
 	calls int
 }
 
@@ -37,28 +40,25 @@ func (f *fakeVitals) count() int {
 	return f.calls
 }
 
-func (f *fakeVitals) hit() {
+func (f *fakeVitals) Vitals(_ context.Context, name string) (host.Vitals, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
-}
-
-func (f *fakeVitals) CPUSeconds(_ context.Context, name string) (float64, bool) {
-	f.hit()
-	v, ok := f.cpu[name]
-	return v, ok
-}
-
-func (f *fakeVitals) MemStats(_ context.Context, name string) (int64, bool) {
-	f.hit()
-	v, ok := f.mem[name]
-	return v, ok
-}
-
-func (f *fakeVitals) NetCounters(_ context.Context, name string) (uint64, uint64, bool) {
-	f.hit()
-	v, ok := f.net[name]
-	return v[0], v[1], ok
+	if f.err != nil {
+		return host.Vitals{}, f.err
+	}
+	var v host.Vitals
+	if secs, ok := f.cpu[name]; ok {
+		v.CPUSeconds = &secs
+	}
+	if used, ok := f.mem[name]; ok {
+		v.MemUsedMB = &used
+	}
+	if n, ok := f.net[name]; ok {
+		rx, tx := n[0], n[1]
+		v.NetRxBytes, v.NetTxBytes = &rx, &tx
+	}
+	return v, nil
 }
 
 // getJSON issues the request the page actually makes: no text/html in Accept,
@@ -268,5 +268,37 @@ func TestVitalsForeignHostIs404(t *testing.T) {
 	hz := withVitals(t, &fakeVitals{}, runningBox("demo", "alice"))
 	if rec := hz.getJSON(t, "demo-xterm.evil.example", "/vitals", "alice"); rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestVitalsSurviveAMachineThatIsNotAnswering is the fleet's failure mode seen
+// from the page.
+//
+// A sandbox on another node is now asked of that node, which means the read can
+// fail in a way a local one never could. When it does, the terminal must keep
+// working: the header loses its meters and nothing else changes. A 500 here
+// would be the terminal telling somebody their session is broken because a stat
+// read timed out — and the page polls this once a second, so it would say so
+// sixty times a minute.
+func TestVitalsSurviveAMachineThatIsNotAnswering(t *testing.T) {
+	fv := &fakeVitals{err: errors.New("node boxb is offline")}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
+
+	rec := hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — an unreachable machine is not a broken terminal", rec.Code)
+	}
+	got := decode(t, rec)
+	if got["state"] != string(vmm.StateRunning) {
+		t.Errorf("state = %v, want the record's own running", got["state"])
+	}
+	if _, ok := got["cpu_seconds"]; ok {
+		t.Errorf("a failed read produced a cpu_seconds field: %v", got)
+	}
+	// The ceilings still ship, because they come from the gateway's own record
+	// rather than from the machine that went quiet. It is what lets the page
+	// draw the empty instrument at the right scale.
+	if got["vcpus"] != float64(4) || got["mem_mb"] != float64(8192) {
+		t.Errorf("ceilings = %v/%v, want the record's 4/8192", got["vcpus"], got["mem_mb"])
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 const (
@@ -73,6 +74,51 @@ func (p *Probe) Listening(ctx context.Context, addr string, remote bool) bool {
 	}
 	conn.Close() //nolint:errcheck
 	return true
+}
+
+// VitalsReader reads a sandbox's live CPU, memory and network counters,
+// wherever it runs. Satisfied by *fleet.Fleet, which routes the read to the
+// machine holding the VM, and by *host.Manager for a build with no fleet.
+//
+// It is here, next to the probe, because the three surfaces that draw a meter —
+// both consoles and the browser terminal — used to ask the LOCAL manager and so
+// drew nothing at all for a sandbox on another machine. That was correct (a
+// balloon and a VMM process can only be asked of the host running them) and
+// permanently blank, which is the same policy problem this file already exists
+// to keep from being stated three times.
+type VitalsReader interface {
+	Vitals(ctx context.Context, name string) (host.Vitals, error)
+}
+
+// Vitals reads one sandbox's counters under the budget its placement deserves,
+// and answers the empty reading for everything that is not an answer.
+//
+// A sandbox on this machine is three concurrent reads of /proc, sysfs and a VMM
+// socket — the 300ms every local probe gets. One on another machine is a round
+// trip to that machine before its balloon is even touched, which is what the
+// tunneled budget is for. Giving every reading the remote budget lets one wedged
+// local VMM stall a dashboard for two seconds; giving every reading the local
+// one times out exactly the remote sandboxes this routing exists to reach.
+//
+// Not running, no reader wired, and a machine that is not answering all produce
+// the same empty reading, because every surface renders them identically: no
+// meter. The error comes back only so a caller can log it — nothing should
+// branch on it, and a caller that ignores it entirely is correct.
+func (p *Probe) Vitals(ctx context.Context, r VitalsReader, b *host.Sandbox) (host.Vitals, error) {
+	if r == nil || b == nil || b.State != vmm.StateRunning {
+		return host.Vitals{}, nil
+	}
+	budget := ProbeTimeout
+	if p.Remote(b) {
+		budget = TunneledProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	v, err := r.Vitals(ctx, b.Name)
+	if err != nil {
+		return host.Vitals{}, err
+	}
+	return v, nil
 }
 
 // Public copies a sandbox record for the wire with its addresses dropped. The

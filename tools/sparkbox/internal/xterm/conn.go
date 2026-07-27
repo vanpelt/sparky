@@ -20,6 +20,13 @@ import (
 // that would make one wedged tab delay the pause of a sandbox.
 const hangUpGrace = 2 * time.Second
 
+// hangUpSettle bounds how long a session that has been claimed waits for the
+// goodbye to be written and the 4002 sent before it gives up and lets the
+// connection be dropped. Longer than hangUpGrace because it covers the whole
+// sequence — the bounded write, then the close frame — and one wedged tab
+// delaying only its own teardown is harmless: nothing holds a lock here.
+const hangUpSettle = hangUpGrace + time.Second
+
 // wsSession presents a live WebSocket terminal as the sshgw session registry's
 // sessionConn: a place to write the parting message, and a Close that ends it.
 //
@@ -34,15 +41,51 @@ type wsSession struct {
 	cancel context.CancelFunc
 	once   sync.Once
 	hung   atomic.Bool
+	// closed is closed once the hang-up has finished with the connection: the
+	// goodbye written, the 4002 sent, the socket dropped. serve waits on it so
+	// its own CloseNow backstop cannot truncate a goodbye still in flight.
+	closed chan struct{}
 }
 
+// The adapter is what both halves of the registry's contract are asserted
+// against: a failed assertion in sshgw is a silent fallback to the racy close,
+// not a compile error, because that package reaches this type structurally.
+var (
+	_ SessionConn  = (*wsSession)(nil)
+	_ HungUpMarker = (*wsSession)(nil)
+)
+
 func newSessionConn(conn *websocket.Conn, cancel context.CancelFunc) *wsSession {
-	return &wsSession{conn: conn, cancel: cancel}
+	return &wsSession{conn: conn, cancel: cancel, closed: make(chan struct{})}
 }
 
 // HungUp reports that the gateway ended this session, so the normal exit path
 // knows the close code has already been chosen and does not race a second one.
 func (s *wsSession) HungUp() bool { return s.hung.Load() }
+
+// MarkHungUp implements sshgw.HungUpMarker: the gateway's claim on this session,
+// taken synchronously before the sandbox is stopped and before any goodbye is
+// written. It settles who chooses the close code, which is the one decision that
+// cannot be left until after the guest has gone — by then the bridge may already
+// have unwound and answered "shell exited" for a sandbox that was paused.
+//
+// Deliberately not Close: no cancellation, no frames, nothing that blocks. The
+// manager calls this holding its lock, and the session is still perfectly usable
+// afterwards — it has to be, because the goodbye is written over it next.
+func (s *wsSession) MarkHungUp() { s.hung.Store(true) }
+
+// awaitClosed waits for a hang-up in flight to be done with the connection, or
+// for d to pass. Bounded, and bounded generously: the alternative to waiting is
+// a truncated goodbye, but a client that has stopped reading must not be able to
+// pin the goroutine either.
+func (s *wsSession) awaitClosed(d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-s.closed:
+	case <-t.C:
+	}
+}
 
 // Stderr is where the gateway writes the terminal-restore escape sequences and
 // the "sandbox paused" line. Those bytes belong in the terminal itself, not in
@@ -63,6 +106,7 @@ func (s *wsSession) Close() error {
 		// lock held, so we hand the handshake to a goroutine and return: the
 		// contract is that the session *will* end, not that it has.
 		go func() {
+			defer close(s.closed)
 			// A distinct close code so the page can tell "your sandbox was
 			// paused, press reconnect" from "your shell exited".
 			closeWith(s.conn, statusSandboxHungUp, "sandbox hung up")

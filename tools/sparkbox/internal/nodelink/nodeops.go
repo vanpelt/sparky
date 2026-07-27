@@ -124,6 +124,27 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 		return EmptyResp{}, nil
 	})
 
+	// Vitals is the only read here, and the only verb a viewer rather than an
+	// operator drives: an open browser terminal asks once a second for as long
+	// as the tab is in front of somebody. It stays a request-reply like the
+	// rest — a reading nobody is waiting for is worth nothing, so there is
+	// nothing for a node to push — and it deliberately resolves through the
+	// manager's own readers, which answer "no reading" for a sandbox that is
+	// paused or not on this machine rather than raising. Watching must not
+	// wake anything: nothing on this path touches last_active.
+	handle(conn, TypeVitals, func(ctx context.Context, req NameReq) (VitalsResp, error) {
+		v, err := mgr.Vitals(ctx, req.Name)
+		if err != nil {
+			return VitalsResp{}, err
+		}
+		return VitalsResp{
+			CPUSeconds: v.CPUSeconds,
+			MemUsedMB:  v.MemUsedMB,
+			NetRxBytes: v.NetRxBytes,
+			NetTxBytes: v.NetTxBytes,
+		}, nil
+	})
+
 	handle(conn, TypeSnapshotCreate, func(ctx context.Context, req SnapshotReq) (SnapshotResp, error) {
 		s, err := mgr.Snapshot(ctx, req.Sandbox, req.Snapshot, req.Owner)
 		if err != nil {

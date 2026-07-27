@@ -205,5 +205,11 @@ func (g *Gateway) controlSessionToken(s gssh.Session, c ctlops.Caller, args []st
 	fmt.Fprint(s.Stderr(), "# api:     curl -H \"Authorization: Bearer <token>\" https://api.<domain>/v1/sandboxes\r\n")
 	fmt.Fprint(s.Stderr(), "#          docs at https://api.<domain>/docs; the same header opens https://<name>.<domain>:<port>\r\n")
 	fmt.Fprint(s.Stderr(), "# shell:   TOKEN=$(ssh ctl@<domain> session-token | tr -d '\\r\\n')   # this channel sends CRLF\r\n")
+	// The offer, for an account that has never taken it. This is the moment
+	// somebody is most likely to be standing at: minting a token is what you do
+	// on the way to signing into the browser for the first time, which is also
+	// where a linked GitHub account starts paying off. On stderr with the rest
+	// of the commentary, so `$(…)` still captures nothing but the credential.
+	g.nudgeGitHub(s, s.Stderr(), c)
 	s.Exit(0) //nolint:errcheck
 }

@@ -99,6 +99,7 @@ const (
 	TypeResyncEnv     = "sandbox.resync_env"
 	TypeTouch         = "sandbox.touch"
 	TypeRecordKey     = "sandbox.record_key"
+	TypeVitals        = "sandbox.vitals"
 
 	TypeSnapshotCreate = "snapshot.create"
 	TypeSnapshotDelete = "snapshot.delete"
@@ -715,6 +716,30 @@ type SnapshotResp struct {
 // information. It exists so a handler can return a value rather than nil and
 // the reply frame stays uniform.
 type EmptyResp struct{}
+
+// VitalsResp is one reading of a sandbox's live counters, taken on the machine
+// that runs it. Its request is a bare NameReq.
+//
+// It is the one read in this catalogue that is not served from the inventory
+// cache, and it has to be: the inventory a node pushes is a lifecycle picture —
+// state, sizes, lifetime totals — refreshed when something changes, whereas
+// these are instrument readings whose whole value is that they are current to
+// the second. Folding them into the inventory would either make every node
+// broadcast a CPU sample a second to a gateway with nobody watching, or make
+// the meters as stale as the last lifecycle event.
+//
+// The fields mirror host.Vitals exactly, pointers included, because a missing
+// reading and a genuine zero are different facts all the way down: an absent
+// cpu_seconds means this machine has no CPU stats for that sandbox, and a
+// present 0.0 means it has used none. Every field is omitempty, so a node that
+// can answer nothing sends `{}` — which is the same thing a gateway with no
+// link at all renders, and deliberately so.
+type VitalsResp struct {
+	CPUSeconds *float64 `json:"cpu_seconds,omitempty"`
+	MemUsedMB  *int64   `json:"mem_used_mb,omitempty"`
+	NetRxBytes *uint64  `json:"net_rx_bytes,omitempty"`
+	NetTxBytes *uint64  `json:"net_tx_bytes,omitempty"`
+}
 
 // ---------------------------------------------------------------------------
 // The egress plane

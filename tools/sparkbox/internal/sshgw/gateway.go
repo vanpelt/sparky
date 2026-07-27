@@ -471,6 +471,14 @@ func (g *Gateway) handle(s gssh.Session) {
 		}
 		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: %s\r\n",
 			box.Name, tagNote, g.reconnectHint(box.Name, via))
+		// One line, once, to an account that has never linked GitHub. This door
+		// is where the traffic is — it is the only one a user is guaranteed to
+		// come back to — and a first sandbox is the moment the offer is worth
+		// something, since a linked account is what lets a workload identity
+		// token carry `github` and what makes `keys import-github` work. It
+		// goes on stderr beside the create banner and never in front of the
+		// shell that follows.
+		g.nudgeGitHub(s, s.Stderr(), caller(s, user))
 		sandboxName = box.Name
 	}
 
