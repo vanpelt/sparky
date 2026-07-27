@@ -161,10 +161,16 @@ func TestTransportFlagsPersistWithoutDisturbingLegacyUpgrades(t *testing.T) {
 			"--guest-data-transport=auto --routed-guest-canary-percent=100\n") {
 		t.Fatalf("fresh env does not persist explicit transport defaults:\n%s", fresh)
 	}
+	if !strings.Contains(fresh, routedGuestCanaryExplicitEnv+"=0\n") {
+		t.Fatalf("fresh env does not mark the default canary as implicit:\n%s", fresh)
+	}
 
 	legacy := map[string]string{"PROXY_DOMAIN": "example.test"}
 	if _, managed := lookupSetting(e.managedEnv(legacy), transportFlagsEnv); managed {
 		t.Fatal("an unasked upgrade should not add TRANSPORT_FLAGS and restart a legacy host")
+	}
+	if _, managed := lookupSetting(e.managedEnv(legacy), routedGuestCanaryExplicitEnv); managed {
+		t.Fatal("an unasked upgrade should not add the routed-canary intent marker")
 	}
 
 	cfg.FlagsGiven = map[string]bool{"node-control-transport": true}
@@ -174,6 +180,9 @@ func TestTransportFlagsPersistWithoutDisturbingLegacyUpgrades(t *testing.T) {
 		"--guest-data-transport=auto --routed-guest-canary-percent=100" {
 		t.Fatalf("explicit default was not persisted: managed=%v value=%q", managed, value)
 	}
+	if value, managed = lookupSetting(e.managedEnv(legacy), routedGuestCanaryExplicitEnv); !managed || value != "0" {
+		t.Fatalf("implicit canary marker = %q, %v; want 0, true", value, managed)
+	}
 
 	cfg = DefaultConfig()
 	cfg.GatewayGRPCAddr = "100.64.0.10:9444"
@@ -181,6 +190,55 @@ func TestTransportFlagsPersistWithoutDisturbingLegacyUpgrades(t *testing.T) {
 	value, managed = lookupSetting(e.managedEnv(legacy), transportFlagsEnv)
 	if !managed || !strings.Contains(value, "--gateway-grpc-addr=100.64.0.10:9444") {
 		t.Fatalf("gateway identity listener was not persisted: managed=%v value=%q", managed, value)
+	}
+}
+
+func TestGeneratedTransportDefaultsRemainStandaloneAfterEnvRecovery(t *testing.T) {
+	cfg := DefaultConfig()
+	raw := (&Env{Cfg: cfg}).renderEnvFile()
+	kv, err := parseEnv(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	effective := effectiveTransportConfig(DefaultConfig(), kv)
+	if effective.RoutedGuestCanaryPercent != 100 || effective.RoutedGuestCanaryExplicit {
+		t.Fatalf("generated defaults became an explicit rollout: %+v", effective)
+	}
+	if fleetRoutingExpected(effective) {
+		t.Fatalf("generated standalone defaults unexpectedly require fleet routing: %+v", effective)
+	}
+}
+
+func TestExplicitFullCanarySurvivesEnvRecovery(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.FlagsGiven = map[string]bool{"routed-guest-canary-percent": true}
+	raw := (&Env{Cfg: cfg}).renderEnvFile()
+	if !strings.Contains(raw, routedGuestCanaryExplicitEnv+"=1\n") {
+		t.Fatalf("explicit full canary was not marked:\n%s", raw)
+	}
+	kv, err := parseEnv(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	effective := effectiveTransportConfig(DefaultConfig(), kv)
+	if effective.RoutedGuestCanaryPercent != 100 || !effective.RoutedGuestCanaryExplicit {
+		t.Fatalf("explicit full canary intent was lost: %+v", effective)
+	}
+	if !fleetRoutingExpected(effective) {
+		t.Fatalf("explicit full canary no longer requires fleet routing: %+v", effective)
+	}
+}
+
+func TestOperatorTransportOverrideMakesFullCanaryExplicit(t *testing.T) {
+	effective := effectiveTransportConfig(DefaultConfig(), map[string]string{
+		transportFlagsEnv:            "--guest-data-transport=auto --routed-guest-canary-percent=100",
+		routedGuestCanaryExplicitEnv: "0",
+		"EXTRA_FLAGS":                "--routed-guest-canary-percent=100",
+	})
+	if !effective.RoutedGuestCanaryExplicit {
+		t.Fatalf("operator-owned full canary override was treated as a default: %+v", effective)
 	}
 }
 

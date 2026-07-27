@@ -1148,9 +1148,13 @@ func TestFleetSurvivesGatewayRestart(t *testing.T) {
 	// node-b reconnects, with no ceremony: its approval is a durable row.
 	fs.relink(t, node)
 
-	waitFor(t, "the gateway to reconcile node-b's inventory", func() bool {
+	waitFor(t, "the gateway to reconcile node-b's inventory and adopt its new sandbox", func() bool {
 		b, ok := fs.flt.Get("far-away")
-		return ok && !b.Unreachable
+		if !ok || b.Unreachable {
+			return false
+		}
+		_, adopted, err := fs.index.Get("made-offline")
+		return err == nil && adopted
 	})
 	// The row was never released and never re-marked: it is the same placement
 	// it was before the restart.

@@ -158,9 +158,10 @@ type Config struct {
 	// using routed data while GuestDataTransport is auto. Explicit ssh/routed
 	// modes do not use a canary.
 	RoutedGuestCanaryPercent int
-	// RoutedGuestCanaryExplicit distinguishes an operator-selected zero-percent
-	// canary from a hand-built Config's zero value. Command callers normally
-	// communicate this through FlagsGiven; env recovery sets it directly.
+	// RoutedGuestCanaryExplicit distinguishes an operator-selected canary from
+	// the numeric defaults: zero in a hand-built Config and 100 in the generated
+	// service environment. Command callers normally communicate this through
+	// FlagsGiven; env recovery restores it from the managed intent marker.
 	RoutedGuestCanaryExplicit bool
 	// ClusterID is the stable gateway name in its SPIFFE identity. Empty lets
 	// serve use the historical node-name/hostname default; an explicit value is

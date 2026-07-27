@@ -68,6 +68,7 @@ func (e *Env) managedEnv(kv map[string]string) []envSetting {
 	out = append(out, guestSubnetSettings(e.Cfg, kv)...)
 	if manageTransportSetting(e.Cfg, kv) {
 		out = append(out, transportSetting(e.Cfg, kv))
+		out = append(out, routedGuestCanaryIntentSetting(e.Cfg, kv))
 	}
 	out = append(out, sshNetSettings(e.Cfg, kv)...)
 	// Comes from the release manifest, so it is only known once resolve-release
@@ -175,7 +176,11 @@ func flagValue(bundle, name string) string {
 	return ""
 }
 
-const transportFlagsEnv = "TRANSPORT_FLAGS"
+const (
+	transportFlagsEnv               = "TRANSPORT_FLAGS"
+	routedGuestCanaryExplicitEnv    = "SPARKBOX_ROUTED_GUEST_CANARY_EXPLICIT"
+	routedGuestCanaryExplicitMarker = "1"
+)
 
 // manageTransportSetting keeps upgrades inert unless transport configuration
 // already exists or this run actually asks to create/change it. Fresh files go
@@ -229,6 +234,21 @@ func transportSetting(cfg Config, kv map[string]string) envSetting {
 	return envSetting{transportFlagsEnv, strings.Join(flags, " ")}
 }
 
+// routedGuestCanaryIntentSetting preserves the one distinction the numeric
+// canary cannot encode by itself: 100 is both the compiled-in default and a
+// valid operator-selected full rollout. A fresh standalone host writes 0;
+// explicitly selecting the canary writes 1. Reading TRANSPORT_FLAGS alone
+// must not promote setup's generated auto/100 defaults into a fleet-routing
+// request on the second setup run.
+func routedGuestCanaryIntentSetting(cfg Config, kv map[string]string) envSetting {
+	effective := effectiveTransportConfig(cfg, kv)
+	value := "0"
+	if effective.RoutedGuestCanaryExplicit || cfg.flagGiven("routed-guest-canary-percent") {
+		value = routedGuestCanaryExplicitMarker
+	}
+	return envSetting{routedGuestCanaryExplicitEnv, value}
+}
+
 func effectiveTransportConfig(cfg Config, kv map[string]string) Config {
 	if cfg.NodeControlTransport == "" {
 		cfg.NodeControlTransport = "auto"
@@ -239,10 +259,13 @@ func effectiveTransportConfig(cfg Config, kv map[string]string) Config {
 	if cfg.GuestDataTransport == "" {
 		cfg.GuestDataTransport = "auto"
 	}
+	if cfg.flagGiven("routed-guest-canary-percent") {
+		cfg.RoutedGuestCanaryExplicit = true
+	}
 	if cfg.RoutedGuestCanaryPercent == 0 && !cfg.flagGiven("routed-guest-canary-percent") {
 		cfg.RoutedGuestCanaryPercent = 100
 	}
-	apply := func(bundle string, onlyUngiven bool) {
+	apply := func(bundle string, onlyUngiven, operatorOwned bool) {
 		if !onlyUngiven || !cfg.flagGiven("node-control-transport") {
 			if value := flagValue(bundle, "--node-control-transport"); value != "" {
 				cfg.NodeControlTransport = value
@@ -262,7 +285,23 @@ func effectiveTransportConfig(cfg Config, kv map[string]string) Config {
 			if value := flagValue(bundle, "--routed-guest-canary-percent"); value != "" {
 				if percent, err := strconv.Atoi(value); err == nil {
 					cfg.RoutedGuestCanaryPercent = percent
-					cfg.RoutedGuestCanaryExplicit = true
+					marker, marked := kv[routedGuestCanaryExplicitEnv]
+					switch {
+					case operatorOwned:
+						// EXTRA_FLAGS and the other later bundles are edited by
+						// an operator, so even their 100 is intentional.
+						cfg.RoutedGuestCanaryExplicit = true
+					case marker == routedGuestCanaryExplicitMarker:
+						cfg.RoutedGuestCanaryExplicit = true
+					case marked:
+						// The managed marker is authoritative when present.
+						cfg.RoutedGuestCanaryExplicit = false
+					default:
+						// Backward compatibility for files written before the
+						// marker: every non-default percentage was necessarily
+						// selected intentionally.
+						cfg.RoutedGuestCanaryExplicit = percent != 100
+					}
 				}
 			}
 		}
@@ -282,14 +321,14 @@ func effectiveTransportConfig(cfg Config, kv map[string]string) Config {
 			}
 		}
 	}
-	apply(kv[transportFlagsEnv], true)
+	apply(kv[transportFlagsEnv], true, false)
 	// These bundles appear after TRANSPORT_FLAGS in ExecStart. A repeated Go
 	// flag wins last, so doctor and setup reconciliation must observe the same
 	// effective values the daemon does.
 	for _, key := range []string{
 		"SUBNET6_FLAG", "OVERCOMMIT_FLAGS", "TLS_FLAGS", "GATEWAY_FLAG", "EXTRA_FLAGS",
 	} {
-		apply(kv[key], false)
+		apply(kv[key], false, true)
 	}
 	return cfg
 }

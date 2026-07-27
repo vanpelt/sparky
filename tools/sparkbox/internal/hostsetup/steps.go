@@ -1356,6 +1356,8 @@ func (e *Env) renderEnvFile() string {
 	b.WriteString("# Fleet control/data rollout and stable gateway workload identity.\n")
 	transport := transportSetting(e.Cfg, nil)
 	fmt.Fprintf(&b, "%s=%s\n", transport.key, transport.val)
+	canaryIntent := routedGuestCanaryIntentSetting(e.Cfg, nil)
+	fmt.Fprintf(&b, "%s=%s\n", canaryIntent.key, canaryIntent.val)
 	// Any-port forwarding mode, read by sparkbox-net.sh (never by the gateway).
 	// Written on a fresh host whichever way --edge-ip went, so an operator can
 	// see both knobs and what this host chose; mergeEnv only ever CORRECTS them
