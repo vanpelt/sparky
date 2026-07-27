@@ -97,8 +97,14 @@ type Whoami struct {
 	Email            string     `json:"email,omitempty"`
 	GitHubLogin      string     `json:"github_login,omitempty"`
 	GitHubVerifiedAt *time.Time `json:"github_verified_at,omitempty"`
-	Subject          string     `json:"subject"`          // oidc.SubjectFor(handle)
-	KeyFP            string     `json:"key_fp,omitempty"` // the key on THIS session; "" over HTTP
+	// GitHubVia is HOW the link was proved — "github-keys", "device-flow" or
+	// "assertion". It is shown rather than kept internal because the three are
+	// not interchangeable: only the first two may adopt keys, and somebody
+	// wondering why `keys import-github` refused should be able to read the
+	// answer off `whoami`.
+	GitHubVia string `json:"github_via,omitempty"`
+	Subject   string `json:"subject"`          // oidc.SubjectFor(handle)
+	KeyFP     string `json:"key_fp,omitempty"` // the key on THIS session; "" over HTTP
 }
 
 type KeyInfo struct {

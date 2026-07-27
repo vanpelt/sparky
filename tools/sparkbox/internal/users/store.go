@@ -65,6 +65,38 @@ type Key struct {
 	Via           string    `json:"via"` // seed | signup | ctl | github-import
 }
 
+// GitHub link provenance: HOW a linked account was proved, recorded beside the
+// login because the three ways do not carry the same weight and a single
+// verified_at cannot say which one happened.
+//
+// The distinction is not bookkeeping. A GitHub link is what authorizes adopting
+// github.com/<login>.keys onto an account (ImportGitHubKeys), and a key adopted
+// that way authenticates — so a link established by a channel that could be
+// wrong about which human is on the other end must not be able to reach that
+// verb. See StrongGitHubLink.
+const (
+	// GitHubViaKeys: one of the account's own registered keys was found on
+	// github.com/<login>.keys. Possession of a key GitHub publishes for an
+	// account is what GitHub itself accepts for a git push.
+	GitHubViaKeys = "github-keys"
+	// GitHubViaDevice: the user completed GitHub's OAuth device flow and the
+	// token GitHub issued named this login. The only path that needs neither a
+	// published key nor a third party.
+	GitHubViaDevice = "device-flow"
+	// GitHubViaAssertion: another service that already knows this user's GitHub
+	// identity said so, signed. It is deliberately NOT strong: it is one more
+	// key away from GitHub, and whoever holds that key speaks for every user.
+	// Nothing writes it yet — see docs/github-linking-design.md.
+	GitHubViaAssertion = "assertion"
+)
+
+// StrongGitHubLink reports whether a link's provenance is direct evidence from
+// GitHub about the person holding this account, rather than a third party's
+// word for it. Only a strong link may adopt keys.
+func StrongGitHubLink(via string) bool {
+	return via == GitHubViaKeys || via == GitHubViaDevice
+}
+
 // User is an account. GitHub is populated only when verified.
 type User struct {
 	Handle           string     `json:"handle"`
@@ -74,6 +106,14 @@ type User struct {
 	Email            string     `json:"email,omitempty"`
 	GitHubLogin      string     `json:"github_login,omitempty"`
 	GitHubVerifiedAt *time.Time `json:"github_verified_at,omitempty"`
+	// GitHubID is GitHub's own immutable account number. A login can be
+	// renamed, released, and claimed by somebody else; the number cannot. It is
+	// what a future assertion must be matched on, and it is why the profile is
+	// fetched even when the proof was a key. 0 means unknown, which is every
+	// link made before the profile fetch existed.
+	GitHubID int64 `json:"github_id,omitempty"`
+	// GitHubVia is how the link was proved — one of the GitHubVia* constants.
+	GitHubVia string `json:"github_via,omitempty"`
 }
 
 // OperatorInviter marks the accounts seeded from users.conf. That file is
@@ -171,6 +211,26 @@ func Open(path string) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
+	// Migration: how a GitHub link was proved, and GitHub's own account number.
+	// Both postdate the device flow; before it there was exactly one way to link
+	// an account and the column would have been a constant.
+	for _, col := range [][2]string{{"github_via", "TEXT"}, {"github_id", "INTEGER"}} {
+		if err := addColumnIfMissing(db, "users", col[0], col[1]); err != nil {
+			db.Close() //nolint:errcheck
+			return nil, err
+		}
+	}
+	// Backfill, and it is a statement of fact rather than a default: every link
+	// that can exist in a database being migrated was made by the key check,
+	// because that was the only linking path that had ever shipped. Writing it
+	// down now means an empty github_via can mean "not linked" forever after,
+	// and the strength check below never has to special-case history.
+	if _, err := db.Exec(
+		`UPDATE users SET github_via = ? WHERE github_login IS NOT NULL AND github_login != ''
+		 AND (github_via IS NULL OR github_via = '')`, GitHubViaKeys); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -225,12 +285,14 @@ func (s *Store) Lookup(key xssh.PublicKey) (string, bool) {
 // Get returns one user record.
 func (s *Store) Get(handle string) (User, error) {
 	var u User
-	var invitedBy, ghLogin, email sql.NullString
+	var invitedBy, ghLogin, ghVia, email sql.NullString
 	var ghAt sql.NullTime
+	var ghID sql.NullInt64
 	err := s.db.QueryRow(
-		`SELECT handle, created_at, status, invited_by, email, github_login, github_verified_at
+		`SELECT handle, created_at, status, invited_by, email, github_login, github_verified_at,
+		        github_via, github_id
 		 FROM users WHERE handle = ?`, handle,
-	).Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &email, &ghLogin, &ghAt)
+	).Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &email, &ghLogin, &ghAt, &ghVia, &ghID)
 	if err == sql.ErrNoRows {
 		return User{}, ErrNoSuchUser
 	}
@@ -240,6 +302,8 @@ func (s *Store) Get(handle string) (User, error) {
 	u.InvitedBy = invitedBy.String
 	u.Email = email.String
 	u.GitHubLogin = ghLogin.String
+	u.GitHubVia = ghVia.String
+	u.GitHubID = ghID.Int64
 	if ghAt.Valid {
 		t := ghAt.Time
 		u.GitHubVerifiedAt = &t
@@ -250,7 +314,8 @@ func (s *Store) Get(handle string) (User, error) {
 // List returns every user, handle-sorted.
 func (s *Store) List() ([]User, error) {
 	rows, err := s.db.Query(
-		`SELECT handle, created_at, status, invited_by, email, github_login, github_verified_at
+		`SELECT handle, created_at, status, invited_by, email, github_login, github_verified_at,
+		        github_via, github_id
 		 FROM users ORDER BY handle`)
 	if err != nil {
 		return nil, err
@@ -259,14 +324,18 @@ func (s *Store) List() ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		var invitedBy, ghLogin, email sql.NullString
+		var invitedBy, ghLogin, ghVia, email sql.NullString
 		var ghAt sql.NullTime
-		if err := rows.Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &email, &ghLogin, &ghAt); err != nil {
+		var ghID sql.NullInt64
+		if err := rows.Scan(&u.Handle, &u.CreatedAt, &u.Status, &invitedBy, &email, &ghLogin, &ghAt,
+			&ghVia, &ghID); err != nil {
 			return nil, err
 		}
 		u.InvitedBy = invitedBy.String
 		u.Email = email.String
 		u.GitHubLogin = ghLogin.String
+		u.GitHubVia = ghVia.String
+		u.GitHubID = ghID.Int64
 		if ghAt.Valid {
 			t := ghAt.Time
 			u.GitHubVerifiedAt = &t
@@ -436,13 +505,26 @@ func (s *Store) SetEmail(handle, email string) error {
 }
 
 // LinkGitHub records a verified GitHub login. Callers must have verified the
-// linkage first (see VerifyGitHubKey) — this only writes the claim.
-func (s *Store) LinkGitHub(handle, login string) error {
+// linkage first (see VerifyGitHubKey, or the device flow) — this only writes
+// the claim.
+//
+// via is how it was proved and is REQUIRED to be one of the GitHubVia*
+// constants: it decides whether the link may later adopt keys, so a caller that
+// forgot to say gets a link that cannot, rather than one that silently can. id
+// is GitHub's own account number, or 0 when the proving path could not learn
+// it — a login is renameable and re-claimable, the number is not.
+func (s *Store) LinkGitHub(handle, login, via string, id int64) error {
+	switch via {
+	case GitHubViaKeys, GitHubViaDevice, GitHubViaAssertion:
+	default:
+		return fmt.Errorf("github link provenance %q is not one this store records", via)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, err := s.db.Exec(
-		`UPDATE users SET github_login = ?, github_verified_at = ? WHERE handle = ?`,
-		login, time.Now().UTC(), handle)
+		`UPDATE users SET github_login = ?, github_verified_at = ?, github_via = ?, github_id = ?
+		 WHERE handle = ?`,
+		login, time.Now().UTC(), via, id, handle)
 	if err != nil {
 		return err
 	}

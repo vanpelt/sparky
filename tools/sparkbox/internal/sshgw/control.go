@@ -46,8 +46,9 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  keys list                list the SSH keys on your account\r\n" +
 	"  keys add \"<key line>\"    link another key\r\n" +
 	"  keys rm <SHA256:...>     unlink a key (never the last one)\r\n" +
+	"  github link              link your GitHub account (opens a code to enter on github.com)\r\n" +
 	"  keys import-github       adopt every key github.com lists for your login\r\n" +
-	"  keys verify-github       re-check your GitHub link\r\n" +
+	"  keys verify-github       link by proving this key is published on GitHub\r\n" +
 	"  passkey list             list the passkeys enrolled from your browsers\r\n" +
 	"  passkey rm <id>          remove a passkey (id or unique prefix from list)\r\n" +
 	"  email [set <addr>|clear] show or set the email forwarded to private apps\r\n" +
@@ -216,6 +217,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlWhoami(s, c, log)
 	case "keys":
 		g.controlKeys(s, c, args[1:], log)
+	case "github":
+		g.controlGitHub(s, c, args[1:], log)
 	case "passkey", "passkeys":
 		g.controlPasskey(s, c, args[1:], log)
 	case "email":
@@ -359,9 +362,14 @@ func (g *Gateway) controlWhoami(s gssh.Session, c ctlops.Caller, log *slog.Logge
 	fmt.Fprintf(s, "handle:  %s\r\n", me.Handle)
 	fmt.Fprintf(s, "status:  %s\r\n", me.Status)
 	if me.GitHubVerifiedAt != nil {
-		fmt.Fprintf(s, "github:  %s (verified %s)\r\n", me.GitHubLogin, me.GitHubVerifiedAt.Format("2006-01-02"))
+		// The provenance is shown because the three ways of proving a link are
+		// not interchangeable — only two of them may adopt keys — and somebody
+		// wondering why `keys import-github` refused should read the answer
+		// here rather than guess.
+		fmt.Fprintf(s, "github:  %s (verified %s via %s)\r\n",
+			me.GitHubLogin, me.GitHubVerifiedAt.Format("2006-01-02"), me.GitHubVia)
 	} else {
-		fmt.Fprintf(s, "github:  not linked — link it with: ssh %s@%s keys verify-github\r\n",
+		fmt.Fprintf(s, "github:  not linked — link it with: ssh %s@%s github link\r\n",
 			ControlUser, g.domainHint())
 	}
 	fmt.Fprintf(s, "subject: %s\r\n", me.Subject)
@@ -427,7 +435,7 @@ func (g *Gateway) controlKeys(s gssh.Session, c ctlops.Caller, args []string, lo
 			// channel's syntax rather than something ctlops should know; it hands
 			// back the transport-free version, so the CLI wording is rebuilt here.
 			if e := ctlops.AsError("keys import-github", err); e.Code == "github_not_linked" {
-				fmt.Fprintf(s.Stderr(), "sparkbox: no GitHub account linked — link one with: ssh %s@%s keys verify-github\r\n",
+				fmt.Fprintf(s.Stderr(), "sparkbox: no GitHub account linked — link one with: ssh %s@%s github link\r\n",
 					ControlUser, g.domainHint())
 				s.Exit(1) //nolint:errcheck
 				return

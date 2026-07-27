@@ -75,7 +75,7 @@ type Accounts interface {
 	Keys(handle string) ([]users.Key, error)
 	AddKey(handle string, key xssh.PublicKey, label, via string) error
 	RemoveKey(handle, fp string) error
-	LinkGitHub(handle, login string) error
+	LinkGitHub(handle, login, via string, id int64) error
 	SetEmail(handle, email string) error
 	Passkeys(handle string) ([]users.Passkey, error)
 	RemovePasskey(handle, idPrefix string) error
@@ -131,10 +131,24 @@ type Minter interface {
 
 // GitHubKeys is the github.com dependency, behind an interface so no test in
 // this package ever makes a network call. A nil one defaults to
-// users.FetchGitHubKeys / users.VerifyGitHubKey.
+// users.FetchGitHubKeys / users.VerifyGitHubKey / users.FetchGitHubPublicProfile.
 type GitHubKeys interface {
 	Fetch(ctx context.Context, login string) ([]xssh.PublicKey, error)
 	Verify(ctx context.Context, login string, key xssh.PublicKey) (bool, error)
+	// Profile is what github.com publishes about a login without any
+	// credential. It exists on this interface so the key-proof path can record
+	// GitHub's immutable account number too; a failure is not fatal to a link
+	// that has already been proved.
+	Profile(ctx context.Context, login string) (users.GitHubProfile, error)
+}
+
+// GitHubDeviceFlow is the OAuth device flow, behind an interface for the same
+// reason. A nil one disables the flow entirely — which is the honest state of a
+// host with no client id configured, and the reason every caller checks
+// Capabilities().GitHubDevice before offering it.
+type GitHubDeviceFlow interface {
+	Start(ctx context.Context) (users.DeviceCode, error)
+	Wait(ctx context.Context, dc users.DeviceCode) (users.GitHubProfile, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +170,10 @@ type Config struct {
 	Sessions  Minter     // nil: MintSessionToken is KindDisabled
 	Nodes     NodeRoster // nil: node operations are KindDisabled
 	GitHub    GitHubKeys // nil: the real github.com client
+	// GitHubDevice runs the OAuth device flow. nil — the default, and the state
+	// of any host with no --github-client-id — leaves the key check as the only
+	// way to link, which is what shipped before this existed.
+	GitHubDevice GitHubDeviceFlow
 
 	DefaultImage   string // rootfs template new sandboxes get
 	Domain         string // base zone, for the URL fields on results; "" omits them
@@ -179,6 +197,7 @@ type Ops struct {
 	sessions  Minter
 	nodes     NodeRoster
 	github    GitHubKeys
+	ghDevice  GitHubDeviceFlow
 
 	defaultImage   string
 	domain         string
@@ -209,6 +228,7 @@ func New(cfg Config) *Ops {
 		sessions:       cfg.Sessions,
 		nodes:          cfg.Nodes,
 		github:         cfg.GitHub,
+		ghDevice:       cfg.GitHubDevice,
 		defaultImage:   cfg.DefaultImage,
 		domain:         normalizeDomain(cfg.Domain),
 		xtermSubdomain: cfg.XtermSubdomain,
@@ -270,6 +290,11 @@ type Capabilities struct {
 	Routes        bool `json:"routes"`
 	SessionTokens bool `json:"session_tokens"`
 	Terminal      bool `json:"terminal"`
+	// GitHubDevice reports that this host can link a GitHub account without the
+	// user having published an SSH key there. It is what decides which dialog
+	// the signup and `github link` paths offer, so a client asks rather than
+	// starting a flow that would answer KindDisabled.
+	GitHubDevice bool `json:"github_device"`
 	// Fleet reports that this host is a gateway other machines can join, which
 	// is what makes the node commands answerable. It says nothing about whether
 	// any machine actually has joined — that is what `nodes.list` is for.
@@ -285,6 +310,7 @@ func (o *Ops) Capabilities() Capabilities {
 		Routes:        o.routes != nil,
 		SessionTokens: o.sessions != nil,
 		Terminal:      o.domain != "" && o.xtermSubdomain != "",
+		GitHubDevice:  o.ghDevice != nil,
 		Fleet:         o.nodes != nil,
 	}
 }
@@ -404,4 +430,8 @@ func (realGitHub) Fetch(ctx context.Context, login string) ([]xssh.PublicKey, er
 
 func (realGitHub) Verify(ctx context.Context, login string, key xssh.PublicKey) (bool, error) {
 	return users.VerifyGitHubKey(ctx, login, key)
+}
+
+func (realGitHub) Profile(ctx context.Context, login string) (users.GitHubProfile, error) {
+	return users.FetchGitHubPublicProfile(ctx, login)
 }

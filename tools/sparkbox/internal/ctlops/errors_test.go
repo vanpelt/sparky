@@ -351,7 +351,8 @@ func TestVerifyGitHubRejectsAForeignFingerprint(t *testing.T) {
 // TestGitHubFailureIsUpstream keeps a github.com outage out of the 500 bucket.
 func TestGitHubFailureIsUpstream(t *testing.T) {
 	r := newRig(t)
-	r.accts.users["alice"] = users.User{Handle: "alice", Status: "active", GitHubLogin: "alice-gh"}
+	r.accts.users["alice"] = users.User{Handle: "alice", Status: "active", GitHubLogin: "alice-gh",
+		GitHubVia: users.GitHubViaKeys}
 	r.github.err = errors.New("dial tcp: i/o timeout")
 
 	_, err := r.ops.ImportGitHubKeys(context.Background(), alice())

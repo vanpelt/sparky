@@ -32,6 +32,7 @@ func (o *Ops) Whoami(ctx context.Context, c Caller) (Whoami, error) {
 		Email:            u.Email,
 		GitHubLogin:      u.GitHubLogin,
 		GitHubVerifiedAt: u.GitHubVerifiedAt,
+		GitHubVia:        u.GitHubVia,
 		Subject:          oidc.SubjectFor(u.Handle),
 		KeyFP:            c.KeyFP,
 	}, nil
@@ -132,7 +133,26 @@ func (o *Ops) ImportGitHubKeys(ctx context.Context, c Caller) (ImportResult, err
 		return ImportResult{}, &Error{
 			Kind: KindConflict, Op: op, Code: "github_not_linked",
 			Msg:      "no GitHub account linked",
-			Hint:     "link one with: keys verify-github <login>",
+			Hint:     "link one with: github link",
+			Verbatim: true,
+		}
+	}
+	// The sharp edge of the whole feature, and the reason the link records HOW
+	// it was proved.
+	//
+	// This verb adopts every key github.com lists for the linked login onto this
+	// account, and an adopted key authenticates. So a link established by a
+	// channel that could be wrong about which human is on the other end — a
+	// third party's signed word for it, say — must not reach this verb: it would
+	// let somebody claim a stranger's login, pre-load the stranger's public keys
+	// onto their own account, and collect that stranger the next time they
+	// connected. Only evidence that came from GitHub itself about the person
+	// holding THIS account qualifies.
+	if !users.StrongGitHubLink(u.GitHubVia) {
+		return ImportResult{}, &Error{
+			Kind: KindDenied, Op: op, Code: "github_link_too_weak",
+			Msg:      fmt.Sprintf("the link to github.com/%s was not proved directly with GitHub, so it cannot adopt keys", u.GitHubLogin),
+			Hint:     "re-link with `github link` (or `keys verify-github`) and run this again.",
 			Verbatim: true,
 		}
 	}
@@ -200,11 +220,128 @@ func (o *Ops) VerifyGitHub(ctx context.Context, c Caller, login, proofFP string)
 		return Whoami{}, Denied(op, "github_key_not_listed",
 			fmt.Sprintf("%s isn't listed on github.com/%s.keys — add it there, then retry.", proofFP, login))
 	}
-	if err := o.accounts.LinkGitHub(c.Handle, login); err != nil {
+	return o.link(ctx, op, c, users.GitHubProfile{Login: login}, users.GitHubViaKeys)
+}
+
+// ---------------------------------------------------------------------------
+// The device flow
+// ---------------------------------------------------------------------------
+
+// StartGitHubLink asks GitHub for a code pair to show the caller.
+//
+// It is split from the wait because the two halves belong to different actors:
+// this one produces something for a human to read, and the human then goes and
+// does something in a browser that takes as long as it takes. A single blocking
+// call would have nothing to print until it was already over.
+//
+// Nothing is reserved or written here. An abandoned flow leaves no state on this
+// side at all — GitHub expires the code on its own — which is why there is no
+// cancel verb and no cleanup to forget.
+func (o *Ops) StartGitHubLink(ctx context.Context, c Caller) (users.DeviceCode, error) {
+	const op = "github.link"
+	if o.ghDevice == nil {
+		return users.DeviceCode{}, &Error{
+			Kind: KindDisabled, Op: op, Code: "github_device_disabled",
+			Msg:      "this host has no GitHub app configured, so it cannot run the browser sign-in",
+			Hint:     "link by publishing an SSH key on GitHub instead: keys verify-github <login>",
+			Verbatim: true,
+		}
+	}
+	dc, err := o.ghDevice.Start(ctx)
+	if err != nil {
+		return users.DeviceCode{}, deviceFail(op, err)
+	}
+	// The user code is logged and the device code never is: the first is a
+	// throwaway string a person reads off their screen, the second is the
+	// credential that collects the token this flow mints.
+	o.log.Info("github device flow started", "user", c.Handle, "user_code", dc.UserCode)
+	return dc, nil
+}
+
+// FinishGitHubLink waits for the caller to authorize on github.com, then links
+// whichever account GitHub says authorized it.
+//
+// The login is GitHub's answer and never the caller's claim — there is no login
+// parameter, deliberately. That is the difference in kind between this and the
+// key check: the key check verifies a login somebody typed, and this one is
+// TOLD the login by the party that knows. A caller cannot aim it at an account
+// they do not control, so there is nothing here to authorize beyond being
+// signed in.
+//
+// It blocks for as long as ctx allows, which is the caller's patience rather
+// than GitHub's fifteen minutes; a caller that gives up leaves nothing behind.
+func (o *Ops) FinishGitHubLink(ctx context.Context, c Caller, dc users.DeviceCode) (Whoami, error) {
+	const op = "github.link"
+	if o.ghDevice == nil {
+		return Whoami{}, Invalid(op, "github_device_disabled", "no GitHub app is configured on this host")
+	}
+	if dc.Code == "" {
+		return Whoami{}, Invalid(op, "missing_device_code", "that sign-in was never started")
+	}
+	profile, err := o.ghDevice.Wait(ctx, dc)
+	if err != nil {
+		return Whoami{}, deviceFail(op, err)
+	}
+	return o.link(ctx, op, c, profile, users.GitHubViaDevice)
+}
+
+// link is the one place a GitHub account becomes this account's, whichever path
+// proved it.
+//
+// It fills in the immutable account number when the proving path did not carry
+// one — the key check proves a login and learns nothing else — because a login
+// is renameable and, once released, re-registerable by a stranger. That fetch is
+// explicitly best-effort: the verification has already happened, and refusing to
+// record a proved link because api.github.com was slow would be trading a real
+// fact for an optional one.
+func (o *Ops) link(ctx context.Context, op string, c Caller, p users.GitHubProfile, via string) (Whoami, error) {
+	if p.ID == 0 {
+		if full, err := o.github.Profile(ctx, p.Login); err == nil {
+			p.ID = full.ID
+			if p.Email == "" {
+				p.Email = full.Email
+			}
+		} else {
+			o.log.Warn("github profile lookup failed; linking without the account number",
+				"user", c.Handle, "login", p.Login, "err", err)
+		}
+	}
+	if err := o.accounts.LinkGitHub(c.Handle, p.Login, via, p.ID); err != nil {
 		return Whoami{}, Fail(op, err)
 	}
-	o.log.Info("github linked", "user", c.Handle, "login", login)
+	o.log.Info("github linked", "user", c.Handle, "login", p.Login, "github_id", p.ID, "via", via)
 	return o.Whoami(ctx, c)
+}
+
+// deviceFail maps the flow's three decisions to error kinds a transport already
+// knows how to render, and everything else to an upstream fault. A person
+// declining on github.com is not this platform failing, and it must not read
+// like it — but it is also not success, so it cannot be swallowed.
+func deviceFail(op string, err error) error {
+	switch {
+	case errors.Is(err, users.ErrDeviceDenied):
+		return Denied(op, "github_denied", "that GitHub sign-in was declined; nothing was linked.")
+	case errors.Is(err, users.ErrDeviceExpired):
+		return &Error{
+			Kind: KindConflict, Op: op, Code: "github_code_expired",
+			Msg: "that code expired before it was entered", Hint: "run it again for a fresh one.",
+			Verbatim: true,
+		}
+	case errors.Is(err, users.ErrDeviceUnsupported):
+		// An operator fault, and the only one here a user can do nothing about.
+		return &Error{
+			Kind: KindDisabled, Op: op, Code: "github_device_disabled",
+			Msg:      "this host's GitHub app does not have the device flow enabled",
+			Hint:     "an operator has to turn it on; link with `keys verify-github <login>` meanwhile.",
+			Verbatim: true,
+		}
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return err
+	}
+	return &Error{
+		Kind: KindUpstream, Op: op, Code: "github_unreachable",
+		Msg: err.Error(), Verbatim: true, Err: err,
+	}
 }
 
 // callerKey resolves a fingerprint to a key the CALLER owns. Resolving through

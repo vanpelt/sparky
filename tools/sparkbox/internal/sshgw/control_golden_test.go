@@ -180,8 +180,10 @@ func newCtlStack(t *testing.T) *ctlStack {
 }
 
 // newCtlStackWith builds the stack against a given roster; a nil one is a
-// single-box host, where every node command is KindDisabled.
-func newCtlStackWith(t *testing.T, roster *fakeRoster) *ctlStack {
+// single-box host, where every node command is KindDisabled. Each tweak gets
+// the config the gateway would have built for itself, before the Ops is
+// constructed from it — the same window main has.
+func newCtlStackWith(t *testing.T, roster *fakeRoster, tweaks ...func(*ctlops.Config)) *ctlStack {
 	t.Helper()
 	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -260,6 +262,9 @@ func newCtlStackWith(t *testing.T, roster *fakeRoster) *ctlStack {
 	if roster != nil {
 		cfg.Nodes = roster
 	}
+	for _, tweak := range tweaks {
+		tweak(&cfg)
+	}
 	ops := ctlops.New(cfg)
 	t.Cleanup(ops.Close)
 	opts.Ops = ops
@@ -268,13 +273,37 @@ func newCtlStackWith(t *testing.T, roster *fakeRoster) *ctlStack {
 	return &ctlStack{gw: gw, mgr: mgr, users: userStore, roster: roster, key: pub, log: log}
 }
 
-// run drives one ctl command as handle, returning the session it wrote into.
-func (st *ctlStack) run(t *testing.T, handle string, args ...string) *ctlSession {
+// newCtlStackGitHub builds the stack with the GitHub halves wired: device is
+// the OAuth device flow (nil models a host with no --github-client-id, which is
+// what makes the key check the only path) and keys is github.com/<login>.keys.
+//
+// It is a separate constructor rather than fields on ctlStack because both are
+// decided when the Ops is built, exactly as they are in main: a host either has
+// an app configured at startup or it does not, and nothing switches it later.
+func newCtlStackGitHub(t *testing.T, device ctlops.GitHubDeviceFlow, keys ctlops.GitHubKeys) *ctlStack {
 	t.Helper()
+	return newCtlStackWith(t, testRoster(), func(cfg *ctlops.Config) {
+		cfg.GitHubDevice = device
+		if keys != nil {
+			cfg.GitHub = keys
+		}
+	})
+}
+
+// newSession builds an empty session for handle, for the handful of assertions
+// that call a gateway method directly rather than through a ctl command.
+func (st *ctlStack) newSession(handle string) *ctlSession {
 	ctx := &ctlContext{Context: context.Background(), vals: map[any]any{}}
 	ctx.SetValue(authedUserKey, handle)
 	ctx.SetValue(authedKeyKey, st.key)
-	s := &ctlSession{cmd: args, ctx: ctx}
+	return &ctlSession{ctx: ctx}
+}
+
+// run drives one ctl command as handle, returning the session it wrote into.
+func (st *ctlStack) run(t *testing.T, handle string, args ...string) *ctlSession {
+	t.Helper()
+	s := st.newSession(handle)
+	s.cmd = args
 	st.gw.handleControl(s, handle, st.log)
 	return s
 }
@@ -412,7 +441,7 @@ func TestControlGolden(t *testing.T) {
 	}, {
 		name: "keys import-github without a link", handle: "alice", args: []string{"keys", "import-github"},
 		wantErr: "sparkbox: no GitHub account linked — link one with: " +
-			"ssh ctl@hivemind.tools keys verify-github\r\n",
+			"ssh ctl@hivemind.tools github link\r\n",
 		wantExit: 1,
 	}, {
 		name: "keys verify-github with no login to check", handle: "alice", args: []string{"keys", "verify-github"},

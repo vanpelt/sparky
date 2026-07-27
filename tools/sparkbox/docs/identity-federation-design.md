@@ -200,6 +200,12 @@ registered. try:  ssh new@hivemind.tools
   authentication). `ctl invite` mints them — operator always; optionally any
   active user with a small quota (`--invites-per-user`, default 0 = operator
   only). Codes are single-use, expiring, stored hashed.
+- **GitHub verification, two ways.** `ctl github link` runs GitHub's OAuth
+  device flow (a code typed into github.com — no published key needed, no
+  callback URL, no client secret on this side), and the key check below is the
+  zero-config fallback. How a link was proved is recorded, and **only a link
+  proved directly with GitHub reaches the `github` claim** — see
+  `docs/github-linking-design.md`.
 - **GitHub verification without OAuth**: fetch `https://github.com/<login>.keys`
   and check the *connecting* key is in the set. Possession of a key GitHub
   serves for that account proves control of the account, to the same strength
@@ -224,7 +230,8 @@ ssh ctl@hivemind.tools keys rm SHA256:…          # refuses to remove the last 
 `via: ctl` (they authenticate, but only github-verified presence keeps the
 `github` claim — if the linked account ever stops listing *any* of the user's
 keys, the claim persists; verification is at link time, recorded with
-`verified_at`, and `ctl keys verify-github` re-runs it on demand).
+`verified_at`, and `ctl github link` / `ctl keys verify-github` re-run it on
+demand).
 
 ### What this fixes beyond federation
 

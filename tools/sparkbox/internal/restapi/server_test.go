@@ -42,6 +42,9 @@ func (stubGitHub) Fetch(context.Context, string) ([]xssh.PublicKey, error) { ret
 func (stubGitHub) Verify(context.Context, string, xssh.PublicKey) (bool, error) {
 	return false, nil
 }
+func (stubGitHub) Profile(context.Context, string) (users.GitHubProfile, error) {
+	return users.GitHubProfile{}, nil
+}
 
 type testAPI struct {
 	h       http.Handler

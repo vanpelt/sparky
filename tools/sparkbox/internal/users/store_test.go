@@ -209,7 +209,7 @@ func TestGitHubLinkIsRecordedWithATimestamp(t *testing.T) {
 	if u.GitHubVerifiedAt != nil {
 		t.Error("a fresh account is github-verified")
 	}
-	if err := s.LinkGitHub("alice", "alice-gh"); err != nil {
+	if err := s.LinkGitHub("alice", "alice-gh", GitHubViaKeys, 4242); err != nil {
 		t.Fatal(err)
 	}
 	if u, err = s.Get("alice"); err != nil {
@@ -217,6 +217,15 @@ func TestGitHubLinkIsRecordedWithATimestamp(t *testing.T) {
 	}
 	if u.GitHubLogin != "alice-gh" || u.GitHubVerifiedAt == nil {
 		t.Errorf("github link = %q, verified_at = %v", u.GitHubLogin, u.GitHubVerifiedAt)
+	}
+	if u.GitHubVia != GitHubViaKeys || u.GitHubID != 4242 {
+		t.Errorf("provenance = %q id = %d, want %q/4242", u.GitHubVia, u.GitHubID, GitHubViaKeys)
+	}
+	// The provenance is a gate, not a label — it decides whether this link may
+	// adopt keys — so a caller that cannot name how the link was proved must not
+	// get one recorded at all.
+	if err := s.LinkGitHub("alice", "alice-gh", "", 0); err == nil {
+		t.Error("a link with no stated provenance was recorded")
 	}
 }
 
