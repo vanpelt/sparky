@@ -686,11 +686,12 @@ func serve(args []string) error {
 		if consolePw != "" {
 			consoleH := console.New(mgr, routeStore, *proxyDomain, consolePw, *proxyTLS, log)
 			consoleH.SetSchedules(scheduleStore)
-			// The manager it was built with stays for the balloon reads, which
-			// only the machine running a VM can answer; everything else — the
-			// listing and every lifecycle action — goes through the fleet, so
-			// the placement ledger sees every name the console takes or frees.
+			// Everything goes through the fleet: the listing and every
+			// lifecycle action, so the placement ledger sees every name the
+			// console takes or frees — and the balloon read too, which only the
+			// machine running a VM can answer and which the fleet routes there.
 			consoleH.SetSandboxes(flt)
+			consoleH.SetVitals(flt)
 			consoleH.SetCapacities(flt.Capacities)
 			consoleH.SetDialer(flt.DialContext)
 			px.SetConsole(*consoleSub, consoleH.Handler())
@@ -704,10 +705,11 @@ func serve(args []string) error {
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
-			// Same split as the operator console: the manager answers the
-			// balloon and CPU reads for this machine's own VMs, the fleet
-			// answers everything an owner can act on.
+			// Same as the operator console: the fleet answers everything an
+			// owner can act on, and routes the balloon and CPU reads to the
+			// machine holding each sandbox.
 			uc.SetSandboxes(flt)
+			uc.SetVitals(flt)
 			uc.SetDialer(flt.DialContext)
 			px.SetReserved(*userConsoleSub, uc.Handler())
 			// The apex has no other job, and the user console is the only page a
@@ -729,11 +731,11 @@ func serve(args []string) error {
 			xt = xterm.New(xterm.Config{
 				Sandboxes: flt, Accounts: userStore, Sessions: sessionSigner,
 				UpstreamKey: upstreamKey, Dial: flt.DialContext,
-				// The same split the two consoles make: the fleet answers
-				// everything an owner can act on, the manager answers the
-				// balloon and CPU reads, which only the machine running the VM
-				// can be asked. A sandbox on another node draws no meters.
-				Vitals: mgr,
+				// The fleet, not the manager: a balloon and a VMM process can
+				// only be asked of the machine running them, and the fleet is
+				// what knows which machine that is. Node lets the handler give
+				// a remote reading the longer budget it needs.
+				Vitals: flt, Node: mgr.NodeName(),
 				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
 				// The gateway owns the one live-session registry the manager

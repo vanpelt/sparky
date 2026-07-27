@@ -101,6 +101,10 @@ func (l *localNode) Templates() []*host.Snapshot { return l.mgr.AllSnapshots() }
 
 func (l *localNode) Capacity() host.NodeCapacity { return l.mgr.Capacity() }
 
+func (l *localNode) Vitals(ctx context.Context, name string) (host.Vitals, error) {
+	return l.mgr.Vitals(ctx, name)
+}
+
 func (l *localNode) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
 	return l.mgr.Create(ctx, name, owner, image, vcpus, memMB)
 }

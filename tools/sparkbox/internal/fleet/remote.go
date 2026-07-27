@@ -303,6 +303,31 @@ func (r *remoteNode) Boxes() []*host.Sandbox {
 	return out
 }
 
+// Vitals is the exception to the paragraph above: a live counter cannot come
+// out of a cache, so this one does cross the wire. It is safe to do so from an
+// ownership-checked page rather than only from an operation because it is a
+// read that changes nothing and carries its caller's budget — the terminal's
+// poll gives it webui.TunneledProbeTimeout, so a node that has gone quiet costs
+// a viewer one late frame and not a hung request.
+func (r *remoteNode) Vitals(ctx context.Context, name string) (host.Vitals, error) {
+	var resp nodelink.VitalsResp
+	if err := r.client.Do(ctx, nodelink.TypeVitals, nodelink.NameReq{Name: name}, &resp); err != nil {
+		return host.Vitals{}, r.fail("vitals", name, err)
+	}
+	// Copied field by field rather than passed through: these are numbers a
+	// meter divides by, and the ceilings they are divided by (VCPUs, MemMB) come
+	// from the gateway's own record. Nothing here is clamped because there is no
+	// clamp that would be honest — a machine that lies about its own CPU seconds
+	// produces a wrong sparkline for its own sandbox, which is the whole of the
+	// damage, and a plausible-looking invented ceiling would be worse.
+	return host.Vitals{
+		CPUSeconds: resp.CPUSeconds,
+		MemUsedMB:  resp.MemUsedMB,
+		NetRxBytes: resp.NetRxBytes,
+		NetTxBytes: resp.NetTxBytes,
+	}, nil
+}
+
 func (r *remoteNode) Templates() []*host.Snapshot {
 	_, rows := r.client.Snapshot()
 	out := make([]*host.Snapshot, 0, len(rows))

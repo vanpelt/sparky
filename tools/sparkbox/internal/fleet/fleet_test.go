@@ -146,6 +146,11 @@ type fakeNode struct {
 	metered  bool
 	netAllow map[string][]string
 	netUsage map[string]netpush.VMUsage
+	// The instrument reads. vitals is keyed by sandbox name and holds the CPU
+	// seconds this machine would report; vitalsErr makes the machine fail the
+	// way an unreachable one does.
+	vitals    map[string]float64
+	vitalsErr error
 }
 
 func newFakeNode(name string) *fakeNode {
@@ -269,6 +274,23 @@ func (n *fakeNode) stopped(name string, state vmm.State) {
 			b.State = state
 		}
 	}
+}
+
+// Vitals reports this machine's name as the CPU number's whole number of
+// seconds, so a test can tell WHICH machine answered — the point of routing it
+// at all — from a value rather than from a call log.
+func (n *fakeNode) Vitals(_ context.Context, name string) (host.Vitals, error) {
+	n.record("vitals")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.vitalsErr != nil {
+		return host.Vitals{}, n.vitalsErr
+	}
+	secs, ok := n.vitals[name]
+	if !ok {
+		return host.Vitals{}, nil
+	}
+	return host.Vitals{CPUSeconds: &secs}, nil
 }
 
 func (n *fakeNode) Pause(context.Context, string) error   { n.record("pause"); return nil }

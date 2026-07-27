@@ -79,6 +79,12 @@ type Manager interface {
 	// to every guest on this machine.
 	Get(name string) (*host.Sandbox, bool)
 
+	// Vitals is the live-counter read. Unlike everything below it this is not a
+	// lifecycle operation and changes nothing; it is here because a balloon and
+	// a VMM process can only be asked of the machine running them, which is the
+	// same reason every other method on this interface exists.
+	Vitals(ctx context.Context, name string) (host.Vitals, error)
+
 	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
 	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
 	Pause(ctx context.Context, name string) error
