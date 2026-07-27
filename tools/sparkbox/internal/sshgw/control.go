@@ -46,7 +46,7 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  keys list                list the SSH keys on your account\r\n" +
 	"  keys add \"<key line>\"    link another key\r\n" +
 	"  keys rm <SHA256:...>     unlink a key (never the last one)\r\n" +
-	"  github link              link your GitHub account (opens a code to enter on github.com)\r\n" +
+	"  github link [<login>]    link your GitHub account\r\n" +
 	"  keys import-github       adopt every key github.com lists for your login\r\n" +
 	"  keys verify-github       link by proving this key is published on GitHub\r\n" +
 	"  passkey list             list the passkeys enrolled from your browsers\r\n" +
