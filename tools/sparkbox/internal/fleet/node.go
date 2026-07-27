@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 )
 
@@ -125,6 +126,19 @@ type Node interface {
 	// nodelink.StreamSSH (port ignored, the node knows where its sshd is) or
 	// nodelink.StreamTCP.
 	DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error)
+
+	// NetPolicy replaces this machine's whole egress policy, keyed by sandbox
+	// NAME. NetUsage reads back what its VMs have been talking to, keyed the
+	// same way.
+	//
+	// They are on Node rather than reached through the local syncer because
+	// egress is enforced and metered per MACHINE — sluice attaches to the taps
+	// in front of it and can see no others — so "which machine" is exactly the
+	// question this interface exists to answer. Both refuse with a typed
+	// nodelink.CodeNoSluice on a machine that runs no egress gateway, which is
+	// what lets a caller tell "nothing to report" from "not measured".
+	NetPolicy(ctx context.Context, allow map[string][]string) error
+	NetUsage(ctx context.Context) (map[string]netpush.VMUsage, error)
 }
 
 // Facts is what a node says about itself: everything a placement decision or an

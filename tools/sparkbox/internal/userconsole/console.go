@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -101,6 +102,24 @@ type OwnerSyncer interface {
 	SyncOwner(ctx context.Context, owner string)
 }
 
+// NetPlane is the egress plane as the console needs it: read one sandbox's
+// meter, and re-push the whole fleet's policy after a rule or tag changes.
+// *fleet.Fleet satisfies it.
+//
+// It is the FLEET rather than this machine's own netpush.Syncer because both
+// operations are per-machine and the console does not know — must not need to
+// know — which machine a sandbox is on. Reading the local syncer directly, as
+// this used to, answered a VM on another machine with a panel of zeroes: the
+// syncer looks up taps in the local manager's list, the name is not in it, and
+// an absent tap is indistinguishable in the result from an idle one.
+type NetPlane interface {
+	NetUsage(ctx context.Context, name string) (netpush.VMUsage, error)
+	PushNet(ctx context.Context) error
+	// NetMetered reports whether the machine holding this sandbox meters at
+	// all, so a caller can distinguish "no traffic" from "not measured".
+	NetMetered(name string) bool
+}
+
 // Handler serves the user console UI and its JSON API.
 type Handler struct {
 	// mgr is this machine's own manager. It is kept alongside boxes because the
@@ -112,7 +131,7 @@ type Handler struct {
 	routes   *routes.Store            // optional: nil hides web routes and disables port/visibility
 	secrets  *secrets.Store           // optional: nil disables tags + secrets endpoints
 	netrules *netrules.Store          // optional: nil disables network-rule endpoints (501)
-	netsync  *netpush.Syncer          // optional: nil (or no sluice socket) disables bandwidth + policy push
+	netplane NetPlane                 // optional: nil disables bandwidth + policy push (501)
 	favicons *domainmeta.FaviconCache // optional: nil serves the globe fallback
 	accounts edgeauth.Accounts
 	signer   *edgeauth.Signer
@@ -141,7 +160,7 @@ type Handler struct {
 // ("" when browser terminals are disabled). secure should be true when the
 // proxy edge serves TLS.
 func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Store,
-	netrulesStore *netrules.Store, netSync *netpush.Syncer, favicons *domainmeta.FaviconCache,
+	netrulesStore *netrules.Store, netPlane NetPlane, favicons *domainmeta.FaviconCache,
 	accounts edgeauth.Accounts, signer *edgeauth.Signer, syncer OwnerSyncer,
 	subdomain, domain, xtermSub string, secure bool, log *slog.Logger) *Handler {
 	if subdomain == "" {
@@ -154,7 +173,7 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 	domain = strings.TrimPrefix(domain, ".")
 	h := &Handler{
 		mgr: mgr, boxes: mgr, routes: routeStore, secrets: secretsStore,
-		netrules: netrulesStore, netsync: netSync, favicons: favicons,
+		netrules: netrulesStore, netplane: netPlane, favicons: favicons,
 		accounts: accounts, signer: signer, syncer: syncer,
 		domain: domain, xtermSub: strings.Trim(xtermSub, "."), secure: secure, log: log,
 		loginURL: "https://login." + domain + "/",
@@ -887,33 +906,37 @@ type bwResponse struct {
 // sorted by total bytes and labelled with display names. Owner-scoped via
 // ownedBox, so a cross-owner name 404s like any other.
 func (h *Handler) bandwidth(w http.ResponseWriter, r *http.Request) {
-	box, name, ok := h.ownedBox(r)
+	_, name, ok := h.ownedBox(r)
 	if !ok {
 		notFoundBox(w, name)
 		return
 	}
-	if h.netsync == nil || !h.netsync.Enabled() {
+	if h.netplane == nil {
 		writeErr(w, http.StatusNotImplemented, "network metering is not enabled on this host")
 		return
 	}
-	usage, err := h.netsync.Usage(r.Context(), box.Owner)
+	// Routed by name, so a sandbox on a fleet node is answered by that node's
+	// own meter. A machine that runs no sluice refuses with a typed
+	// KindDisabled, which statusFor turns back into the 501 this endpoint has
+	// always answered — but now it is a statement about the machine holding
+	// THIS sandbox rather than about the gateway rendering the page.
+	u, err := h.netplane.NetUsage(r.Context(), name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	resp := bwResponse{Name: name, Domains: []bwDomain{}}
-	if u, ok := usage[name]; ok {
-		resp.TxBytes, resp.RxBytes = u.TxBytes, u.RxBytes
-		for _, d := range u.Domains {
-			resp.Domains = append(resp.Domains, bwDomain{
-				Domain:   d.Domain,
-				Display:  domainmeta.DisplayName(d.Domain),
-				Resolved: d.Resolved,
-				TxBytes:  d.TxBytes,
-				RxBytes:  d.RxBytes,
-				Total:    d.TxBytes + d.RxBytes,
-			})
-		}
+	resp := bwResponse{
+		Name: name, TxBytes: u.TxBytes, RxBytes: u.RxBytes, Domains: []bwDomain{},
+	}
+	for _, d := range u.Domains {
+		resp.Domains = append(resp.Domains, bwDomain{
+			Domain:   d.Domain,
+			Display:  domainmeta.DisplayName(d.Domain),
+			Resolved: d.Resolved,
+			TxBytes:  d.TxBytes,
+			RxBytes:  d.RxBytes,
+			Total:    d.TxBytes + d.RxBytes,
+		})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -951,13 +974,17 @@ func (h *Handler) syncOwner(ctx context.Context, owner string) {
 // fails the response; the syncer sends a full snapshot, so a single push
 // reconciles every affected VM.
 func (h *Handler) pushNet() {
-	if h.netsync == nil || !h.netsync.Enabled() {
+	if h.netplane == nil {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Longer than the old ten seconds because this now fans out over every
+		// machine in the fleet, each of which may be a link across a network
+		// rather than a unix socket. It is still bounded, and still async, so a
+		// slow node delays nothing the user is waiting on.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := h.netsync.Push(ctx); err != nil {
+		if err := h.netplane.PushNet(ctx); err != nil {
 			h.log.Warn("push egress policy", "err", err)
 		}
 	}()
@@ -966,6 +993,15 @@ func (h *Handler) pushNet() {
 // statusFor maps store/manager errors onto HTTP statuses by their sentinel or
 // message, per the local-copy convention (internal/console has its own).
 func statusFor(err error) int {
+	// A typed error already carries its status, and the ones that reach here
+	// from another machine are rebuilt from the wire with their Kind intact —
+	// so classifying them by their own mapping beats re-deriving one from the
+	// sentence, which is what the string matching below has to do for the
+	// errors that predate ctlops.
+	var typed *ctlops.Error
+	if errors.As(err, &typed) {
+		return typed.HTTPStatus()
+	}
 	switch {
 	case err == nil:
 		return http.StatusInternalServerError

@@ -120,6 +120,16 @@ type ClientOptions struct {
 
 	Manager Manager
 	Emitter *Emitter
+	// Uplink, if set, is bound to each live link so this node can make requests
+	// OF its gateway — today the two workload-identity calls. Nil is a node
+	// that never asks for anything, which is every node before this existed.
+	Uplink *Uplink
+	// Net, if set, is the egress gateway on this machine: what a pushed policy
+	// is applied to and what a usage request reads. Nil answers both with the
+	// typed refusal in nodeops, so a gateway learns this machine meters
+	// nothing rather than being handed an empty report it would render as an
+	// idle VM.
+	Net NetControl
 
 	// Hello supplies the facts about this machine that only the process
 	// assembling it knows — its build version, its release tag, which driver it
@@ -310,6 +320,14 @@ func (c *nodeClient) runOnce(ctx context.Context) (linked bool, err error) {
 
 	detach := c.emitter.attach(conn, c.name)
 	defer detach()
+	// The uplink is bound at the same moment and released at the same moment,
+	// and deliberately AFTER the handshake: a request made against a link whose
+	// welcome has not landed would be answered by a gateway that has not yet
+	// decided this machine is who it says it is.
+	if c.opts.Uplink != nil {
+		release := c.opts.Uplink.attach(conn)
+		defer release()
+	}
 	// The first inventory is the gateway's whole picture of this machine, and
 	// it goes before the first heartbeat so nothing arrives about a sandbox the
 	// gateway has not been told exists.
@@ -467,6 +485,7 @@ func (c *nodeClient) register(ctx context.Context, conn *Conn) {
 	})
 
 	registerOps(ctx, conn, c.mgr, c.log)
+	registerNetOps(conn, c.name, c.opts.Net)
 }
 
 // beat is the node's own cadence: a capacity report the gateway does not have

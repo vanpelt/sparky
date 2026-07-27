@@ -13,6 +13,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 )
 
 // The shape of the link itself.
@@ -102,6 +103,18 @@ const (
 	TypeSnapshotCreate = "snapshot.create"
 	TypeSnapshotDelete = "snapshot.delete"
 	TypeSnapshotFork   = "snapshot.fork"
+
+	// The egress plane, gateway -> node. Policy is pushed because the rules
+	// that produce it live in the gateway's store; usage is pulled because the
+	// meter that produces it is attached to the node's own taps.
+	TypeNetPolicy = "net.policy"
+	TypeNetUsage  = "net.usage"
+
+	// Workload identity, NODE -> gateway. The only two requests that travel
+	// that way, and they do so because the fleet's OIDC signing key is the one
+	// piece of gateway material that never leaves the gateway.
+	TypeIdentityToken = "identity.token"
+	TypeIdentityDoc   = "identity.describe"
 )
 
 // Frame is one newline-delimited JSON message. A request carries a non-empty
@@ -443,6 +456,15 @@ type Hello struct {
 	Snapshots   bool      `json:"snapshots"`
 	GuestSubnet string    `json:"guest_subnet"`
 	StartedAt   time.Time `json:"started_at"`
+	// Sluice reports whether this machine has an egress gateway to enforce
+	// against and meter from. It is stated rather than discovered because both
+	// answers are silent otherwise: a gateway that pushes policy to a machine
+	// with no sluice gets a cheerful nil back and believes a tagged sandbox is
+	// filtered when it is not, and an owner reading a bandwidth panel for a VM
+	// on such a machine sees zeroes that look like an idle box rather than an
+	// unmetered one. An older node omits the field and reads as false, which is
+	// the honest answer for a build that had no way to install one.
+	Sluice bool `json:"sluice,omitempty"`
 }
 
 // Welcome is the gateway's reply to an approved hello.
@@ -693,3 +715,73 @@ type SnapshotResp struct {
 // information. It exists so a handler can return a value rather than nil and
 // the reply frame stays uniform.
 type EmptyResp struct{}
+
+// ---------------------------------------------------------------------------
+// The egress plane
+// ---------------------------------------------------------------------------
+
+// NetPolicyReq is one machine's whole egress policy, keyed by SANDBOX NAME.
+//
+// Not by tap, which is what the node's own sluice client is keyed by and what
+// sluice itself enforces on. A tap name is derived from a guest's slot index
+// (sbtap<idx>, see internal/netpush), and slot indices are assigned by the
+// machine that holds the VM — so sbtap3 on the gateway and sbtap3 on a node are
+// different sandboxes belonging to different people. Sending tap names would be
+// sending one machine's addressing to another and hoping; the name is the only
+// identifier both ends agree on, and the node re-derives its own taps from it.
+//
+// Like the sluice PUT it ends up as, this is a FULL SNAPSHOT: a sandbox absent
+// from Allow is one no rule governs, which leaves its egress unrestricted. A
+// governed sandbox that resolves to nothing is present with an empty list,
+// which is a deliberate deny-all — so the two cases stay distinguishable across
+// the link exactly as they are on one machine.
+type NetPolicyReq struct {
+	Allow map[string][]string `json:"allow"`
+}
+
+// NetUsageResp is the node's per-sandbox bandwidth, already re-labelled from
+// tap to name by the machine that knows the mapping.
+//
+// It carries netpush's own types rather than a third copy of them. There are
+// already two — sluice's report structs and netpush's mirror of them — and a
+// third would be a set of json tags that has to be kept in step with the other
+// two by hand, for a payload that is passed straight through.
+type NetUsageResp struct {
+	VMs []netpush.VMUsage `json:"vms"`
+}
+
+// ---------------------------------------------------------------------------
+// Workload identity
+// ---------------------------------------------------------------------------
+
+// IdentityReq is a node asking its gateway to speak for one of the sandboxes on
+// it. The name and the audience are the whole request, and that is the point:
+// everything else about a sandbox — who owns it, what image it runs, which
+// machine it is on — the gateway resolves from its own ledger and its own cache
+// of this node's inventory, so nothing a node could assert reaches the claims.
+//
+// Aud empty means the gateway's default audience.
+type IdentityReq struct {
+	Sandbox string `json:"sandbox"`
+	Aud     string `json:"aud,omitempty"`
+}
+
+// IdentityTokenResp is a signed id token and its expiry.
+type IdentityTokenResp struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// IdentityDocResp is the unsigned claim set behind /run/sparkbox/identity.json.
+// Its fields mirror metadata.Doc; they are restated here for the same reason
+// SandboxRow restates host.Sandbox — the wire is its own contract.
+type IdentityDocResp struct {
+	Issuer  string `json:"iss"`
+	Subject string `json:"sub"`
+	Owner   string `json:"owner"`
+	GitHub  string `json:"github,omitempty"`
+	KeyFP   string `json:"key_fp,omitempty"`
+	Sandbox string `json:"sandbox"`
+	Image   string `json:"image"`
+	Box     string `json:"box"`
+}

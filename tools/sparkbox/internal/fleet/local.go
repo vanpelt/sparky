@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 )
 
@@ -19,7 +20,19 @@ import (
 type localNode struct {
 	name      string
 	mgr       *host.Manager
+	net       NetControl
 	startedAt time.Time
+}
+
+// NetControl is the local machine's egress gateway, narrowed to what a Node
+// asks of it. *netpush.Syncer satisfies it; it is restated rather than imported
+// from nodelink because this is the LOCAL half and has no business depending on
+// the link package for a shape it shares only by coincidence of both talking to
+// the same daemon.
+type NetControl interface {
+	Enabled() bool
+	Apply(ctx context.Context, allow map[string][]string) error
+	Usage(ctx context.Context, owner string) (map[string]netpush.VMUsage, error)
 }
 
 // Local adapts a *host.Manager to Node. name is what the fleet calls this
@@ -27,11 +40,17 @@ type localNode struct {
 // string it already stamps on every record it creates. That fallback cannot be
 // empty either — host.NewManager coerces its own node name to "local" — so the
 // literal lives there and nowhere else.
-func Local(name string, mgr *host.Manager) Node {
+//
+// net is this machine's own sluice, or nil where there is none. It is passed at
+// construction rather than reached through the Fleet because the gateway is
+// just another machine to the egress plane: its VMs are metered by the daemon
+// in front of THEIR taps, exactly as a node's are, and the only thing that
+// makes it special is that no link is involved.
+func Local(name string, mgr *host.Manager, net NetControl) Node {
 	if name == "" {
 		name = mgr.NodeName()
 	}
-	return &localNode{name: name, mgr: mgr, startedAt: time.Now()}
+	return &localNode{name: name, mgr: mgr, net: net, startedAt: time.Now()}
 }
 
 func (l *localNode) Name() string { return l.name }
@@ -66,6 +85,10 @@ func (l *localNode) Facts() Facts {
 		Release:   c.Release,
 		Archiving: l.mgr.ArchivingEnabled(),
 		Snapshots: l.mgr.Snapshotter(),
+		// Reported for the same reason a node reports it, and it is a fact this
+		// process genuinely holds rather than one it would be guessing at: a
+		// syncer was either wired to a socket at startup or it was not.
+		Sluice:    l.net != nil && l.net.Enabled(),
 		StartedAt: l.startedAt,
 	}
 }
@@ -163,4 +186,26 @@ func (l *localNode) DialGuest(ctx context.Context, sandbox, kind string, port in
 		return nil, nodelink.ErrNotRunning
 	}
 	return hostDialer.DialContext(ctx, "tcp", addr)
+}
+
+// NetPolicy and NetUsage go to this machine's own sluice with no link in the
+// middle. They refuse in the SAME sentence a node does, built by the same
+// function, because "this machine runs no egress gateway" is a fact about a
+// machine and the gateway is one — an owner reading an empty bandwidth panel
+// should not be told a different story depending on where their VM landed.
+func (l *localNode) NetPolicy(ctx context.Context, allow map[string][]string) error {
+	if l.net == nil || !l.net.Enabled() {
+		return nodelink.NoSluice(l.name)
+	}
+	return l.net.Apply(ctx, allow)
+}
+
+func (l *localNode) NetUsage(ctx context.Context) (map[string]netpush.VMUsage, error) {
+	if l.net == nil || !l.net.Enabled() {
+		return nil, nodelink.NoSluice(l.name)
+	}
+	// Unfiltered, like the node half: the caller holds the ledger that decides
+	// who may see what, and a second owner check here would be a staler copy of
+	// a decision that gates one user's view of another's VM.
+	return l.net.Usage(ctx, "")
 }

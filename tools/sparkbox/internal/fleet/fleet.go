@@ -57,6 +57,11 @@ type Options struct {
 	// so a later scheduler can tell an arm64 machine from an amd64 one without
 	// asking it.
 	LocalArch string
+	// LocalNet is the gateway's own egress gateway — the same *netpush.Syncer
+	// the console has always pushed to. Nil is a gateway with no sluice, which
+	// refuses the two egress verbs with the same sentence a node without one
+	// does, rather than answering an empty report.
+	LocalNet NetControl
 	// Index is the durable name -> node ledger. Nil is a single-node
 	// deployment: nothing is placed anywhere but here, so nothing needs
 	// recording and the local manager stays the only truth.
@@ -133,6 +138,13 @@ type Fleet struct {
 	// machine, which no node can do for itself. Nil until SetEnvPusher; see
 	// envsync.go.
 	envPush host.EnvPusher
+	// rules resolves a sandbox's egress allow-set from its tags. Nil until
+	// SetRules; see netplane.go.
+	rules Rules
+	// identity mints workload credentials for a sandbox on any machine. Nil
+	// until SetIdentity — a deployment with no OIDC key — and a node asking is
+	// then told so rather than left waiting. See identity.go.
+	identity Identity
 
 	// foreign latches once this fleet can hold a record that is not on this
 	// machine. See hasRemote.
@@ -176,7 +188,7 @@ func New(opts Options) (*Fleet, error) {
 		now = time.Now
 	}
 	f := &Fleet{
-		local:     Local(name, opts.Local),
+		local:     Local(name, opts.Local, opts.LocalNet),
 		localMgr:  opts.Local,
 		localName: name,
 		localArch: arch,

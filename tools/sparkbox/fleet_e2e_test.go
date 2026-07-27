@@ -141,6 +141,12 @@ type nodeSide struct {
 	mgr     *host.Manager
 	key     xssh.Signer
 	emitter *nodelink.Emitter
+	// uplink is this machine's request channel TO its gateway — the direction
+	// only workload identity travels. net is its egress gateway, or nil for a
+	// machine that runs no sluice. Both are wired by dial, so every node in
+	// this file has them and the tests that do not care simply never look.
+	uplink *nodelink.Uplink
+	net    *fakeNodeSluice
 	// link carries whatever this machine's supervisor returns, which is the
 	// only thing that can end it. See linkAlive.
 	link chan error
@@ -483,7 +489,14 @@ func newNodeSide(t *testing.T, log *slog.Logger, gatewayPub string) *nodeSide {
 		t.Fatal(err)
 	}
 	mgr.SetSessions(emitter)
-	return &nodeSide{name: "node-b", dir: dir, mgr: mgr, key: key, emitter: emitter}
+	return &nodeSide{
+		name: "node-b", dir: dir, mgr: mgr, key: key, emitter: emitter,
+		uplink: nodelink.NewUplink(),
+		// A machine with no sluice by default, which is what every node in this
+		// file was before the egress plane existed. A test that wants one turns
+		// it on before dialling.
+		net: &fakeNodeSluice{},
+	}
 }
 
 // holds reports whether this machine's own state file names a sandbox. It reads
@@ -577,11 +590,13 @@ func (fs *fleetStack) dial(t *testing.T, n *nodeSide) (unplug func()) {
 		done <- nodelink.RunClient(ctx, nodelink.ClientOptions{
 			Gateway: fs.addr, NodeName: n.name, Key: n.key,
 			Manager: n.mgr, Emitter: n.emitter,
+			Uplink: n.uplink, Net: n.net,
 			Hello: func() nodelink.Hello {
 				return nodelink.Hello{
 					Arch: "arm64", Release: "2026-07-22", Version: "test",
 					Driver: "mock", GuestSubnet: "172.30.0.0/16",
 					Archiving: n.mgr.ArchivingEnabled(), Snapshots: n.mgr.Snapshotter(),
+					Sluice: n.net.Enabled(),
 				}
 			},
 			OnWelcome: func(w nodelink.Welcome) error {

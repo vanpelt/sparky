@@ -49,8 +49,9 @@ func (g *Gateway) controlNode(s gssh.Session, c ctlops.Caller, args []string, lo
 			s.Exit(0) //nolint:errcheck
 			return
 		}
+		mixed := mixedEgress(nodes)
 		for _, n := range nodes {
-			fmt.Fprint(s, nodeLine(n))
+			fmt.Fprint(s, nodeLine(n, mixed))
 		}
 		s.Exit(0) //nolint:errcheck
 	case "approve":
@@ -96,7 +97,10 @@ func (g *Gateway) controlNode(s gssh.Session, c ctlops.Caller, args []string, lo
 // nodeLine renders one machine, columns padded and then right-trimmed: the
 // local machine has no fingerprint to print, and a line of trailing spaces in a
 // terminal is invisible until somebody copies it.
-func nodeLine(n ctlops.NodeInfo) string {
+//
+// flagUnmetered marks the machines running no egress gateway. It is decided by
+// the CALLER from the whole listing rather than per row — see mixedEgress.
+func nodeLine(n ctlops.NodeInfo, flagUnmetered bool) string {
 	presence := "offline"
 	if n.Online {
 		presence = "online"
@@ -115,7 +119,38 @@ func nodeLine(n ctlops.NodeInfo) string {
 		// has to be able to tell which one they are logged into.
 		name += " (this gateway)"
 	}
+	egress := ""
+	if flagUnmetered && !n.Egress {
+		egress = " no-egress-control"
+	}
 	line := fmt.Sprintf("%-28s %-9s %-8s %-8s %-13s %s",
 		name, n.Status, presence, arch, boxes, n.FP)
-	return strings.TrimRight(line, " ") + "\r\n"
+	return strings.TrimRight(line, " ") + egress + "\r\n"
+}
+
+// mixedEgress reports whether this fleet meters some machines and not others.
+//
+// It is the condition worth a word in a listing, and the only one. A fleet
+// where nothing meters is a deployment choice — `doctor` says so once, in the
+// place an operator goes to be told what is not configured — and repeating it
+// on every row would be noise on the common case. A fleet where SOME machines
+// meter is different: it is the state that produces a bandwidth panel of
+// zeroes for one owner's VM and real numbers for their colleague's, with
+// nothing anywhere else saying why.
+func mixedEgress(nodes []ctlops.NodeInfo) bool {
+	var metered, bare int
+	for _, n := range nodes {
+		// Only machines that are actually attached have reported. A pending or
+		// offline row has no facts, so counting it as unmetered would flag
+		// every fleet with a machine that has not linked yet.
+		if !n.Online {
+			continue
+		}
+		if n.Egress {
+			metered++
+		} else {
+			bare++
+		}
+	}
+	return metered > 0 && bare > 0
 }

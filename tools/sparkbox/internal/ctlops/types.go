@@ -79,7 +79,12 @@ type NodeInfo struct {
 	// number that decides whether removing the node is safe, so it is part of
 	// the listing rather than something a client has to derive by cross-
 	// referencing every sandbox.
-	Sandboxes  int        `json:"sandboxes"`
+	Sandboxes int `json:"sandboxes"`
+	// Egress is whether this machine runs an egress gateway. A fleet can be
+	// half-metered — a gateway with sluice and a node without is a working
+	// deployment — and a bandwidth panel of zeroes is the only other place that
+	// shows, where it reads as an idle VM rather than an unmeasured one.
+	Egress     bool       `json:"egress,omitempty"`
 	ApprovedBy string     `json:"approved_by,omitempty"`
 	ApprovedAt *time.Time `json:"approved_at,omitempty"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`

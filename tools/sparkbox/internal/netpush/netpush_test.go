@@ -189,3 +189,99 @@ func TestNilClientIsNoOp(t *testing.T) {
 		t.Errorf("Usage no-op = %v, %v", u, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The Resolve/Apply split
+// ---------------------------------------------------------------------------
+
+// Resolve is the half a GATEWAY runs for a sandbox it does not hold: it must
+// answer in names, because tap indices are assigned per machine and sbtap5 on
+// one is a different person's VM on another.
+func TestResolveKeysByNameAndKeepsTheGovernedDistinction(t *testing.T) {
+	fleet := fakeFleet{boxes: []Sandbox{
+		{Name: "ci-box", Owner: "alice", HostIP: "172.30.5.2"},
+		{Name: "vault", Owner: "alice", HostIP: "172.30.6.2"},
+		{Name: "free", Owner: "bob", HostIP: "172.30.7.2"},
+		// Paused: no tap here, but the gateway resolving for another machine
+		// cannot see taps at all, so this must still resolve on its rules.
+		{Name: "resting", Owner: "alice", HostIP: ""},
+	}}
+	rules := fakeRules{
+		"alice/ci-box":  {"github.com"},
+		"alice/vault":   nil, // governed deny-all
+		"alice/resting": {"pypi.org"},
+		// bob/free absent: ungoverned
+	}
+	got := NewSyncer(nil, fleet, rules, nil).Resolve()
+	want := map[string][]string{
+		"ci-box":  {"github.com"},
+		"vault":   {},
+		"resting": {"pypi.org"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Resolve() = %v, want %v", got, want)
+	}
+	if _, present := got["free"]; present {
+		t.Error("an ungoverned sandbox appeared in the resolved set; it must be omitted so it stays unrestricted")
+	}
+}
+
+// Apply is the half a NODE runs on what arrives: names in, its own taps out.
+func TestApplyResolvesNamesToThisMachinesOwnTaps(t *testing.T) {
+	var mu sync.Mutex
+	var got policyBody
+	client := unixSluice(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		json.NewDecoder(r.Body).Decode(&got) //nolint:errcheck
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	// This machine's slot assignment is its own: the gateway that sent these
+	// names has no idea which index any of them landed in.
+	fleet := fakeFleet{boxes: []Sandbox{
+		{Name: "ci-box", Owner: "alice", HostIP: "172.30.9.2"},
+		{Name: "vault", Owner: "alice", HostIP: "172.30.3.2"},
+		{Name: "resting", Owner: "alice", HostIP: ""}, // paused: no tap
+	}}
+	s := NewSyncer(client, fleet, fakeRules{}, nil)
+	err := s.Apply(context.Background(), map[string][]string{
+		"ci-box":  {"github.com"},
+		"vault":   {},
+		"resting": {"pypi.org"},    // no live tap here
+		"gone":    {"example.com"}, // destroyed between resolve and apply
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[string][]string{"sbtap9": {"github.com"}, "sbtap3": {}}
+	if !reflect.DeepEqual(got.Taps, want) {
+		t.Errorf("applied taps = %v, want %v", got.Taps, want)
+	}
+}
+
+// Push is still both halves back to back, so a single-box deployment is
+// unchanged by the split existing.
+func TestPushIsResolveThenApply(t *testing.T) {
+	var mu sync.Mutex
+	var got policyBody
+	client := unixSluice(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		json.NewDecoder(r.Body).Decode(&got) //nolint:errcheck
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	fleet := fakeFleet{boxes: []Sandbox{{Name: "ci-box", Owner: "alice", HostIP: "172.30.5.2"}}}
+	rules := fakeRules{"alice/ci-box": {"github.com"}}
+	s := NewSyncer(client, fleet, rules, nil)
+	if err := s.Push(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := (map[string][]string{"sbtap5": {"github.com"}}); !reflect.DeepEqual(got.Taps, want) {
+		t.Errorf("pushed taps = %v, want %v", got.Taps, want)
+	}
+}

@@ -180,13 +180,27 @@ func (s *Syncer) Push(ctx context.Context) error {
 	if s.client == nil {
 		return nil
 	}
-	taps := map[string][]string{}
+	return s.Apply(ctx, s.Resolve())
+}
+
+// Resolve computes the allow-sets for the sandboxes this syncer's fleet holds,
+// keyed by SANDBOX NAME.
+//
+// Split out of Push because in a fleet the two halves happen on different
+// machines: the rules live in the gateway's store and the taps live wherever
+// the VM does. The gateway calls Resolve for a node's sandboxes and sends the
+// result; the node calls Apply on what arrives. On one machine Push is still
+// both, back to back, which is the single-box deployment paying nothing for the
+// split.
+//
+// Only governed sandboxes appear. An absent name means no rule governs it,
+// which downstream is "leave it unrestricted"; a name present with an empty
+// list is a deliberate deny-all. Keeping those two distinguishable is why the
+// map is name-keyed rather than a list of names.
+func (s *Syncer) Resolve() map[string][]string {
+	allow := map[string][]string{}
 	for _, b := range s.fleet.List() {
-		tap, ok := TapName(b.HostIP)
-		if !ok {
-			continue // paused or non-firecracker addressing
-		}
-		allow, governed, err := s.rules.AllowForSandbox(b.Name, b.Owner)
+		set, governed, err := s.rules.AllowForSandbox(b.Name, b.Owner)
 		if err != nil {
 			s.log.Warn("resolve allow-set", "sandbox", b.Name, "err", err)
 			continue
@@ -194,15 +208,56 @@ func (s *Syncer) Push(ctx context.Context) error {
 		if !governed {
 			continue // untagged / unpolicied VM → sluice leaves it unrestricted
 		}
-		if allow == nil {
-			allow = []string{} // governed deny-all: send an explicit empty list
+		if set == nil {
+			set = []string{} // governed deny-all: send an explicit empty list
 		}
-		taps[tap] = allow
+		allow[b.Name] = set
+	}
+	return allow
+}
+
+// Apply turns a name-keyed allow map into the tap-keyed policy sluice enforces
+// and PUTs the whole thing.
+//
+// The name -> tap resolution happens HERE, on the machine that assigned the
+// slot, and that is the point of the split: sbtap3 is a different sandbox on
+// every machine in the fleet, so a tap name is meaningless anywhere but where
+// it was minted.
+//
+// A name this machine does not have running is dropped rather than refused. It
+// is the ordinary race — a VM paused between the gateway resolving the policy
+// and this call — and the correct handling is the same as for a VM that was
+// never here: it has no tap, so there is nothing to enforce against, and the
+// next full snapshot will agree.
+func (s *Syncer) Apply(ctx context.Context, allow map[string][]string) error {
+	if s.client == nil {
+		return nil
+	}
+	byName := map[string]Sandbox{}
+	for _, b := range s.fleet.List() {
+		byName[b.Name] = b
+	}
+	taps := map[string][]string{}
+	var unplaced int
+	for name, set := range allow {
+		b, ok := byName[name]
+		if !ok {
+			unplaced++
+			continue
+		}
+		tap, ok := TapName(b.HostIP)
+		if !ok {
+			continue // paused or non-firecracker addressing: no live tap
+		}
+		if set == nil {
+			set = []string{}
+		}
+		taps[tap] = set
 	}
 	if err := s.client.PutPolicy(ctx, taps); err != nil {
 		return err
 	}
-	s.log.Info("pushed egress policy", "taps", len(taps))
+	s.log.Info("pushed egress policy", "taps", len(taps), "not_running_here", unplaced)
 	return nil
 }
 
