@@ -386,6 +386,62 @@ func TestShellExitClosesWith4001(t *testing.T) {
 	waitForTouch(t, wh, "session end did not touch the sandbox")
 }
 
+// TestHangUpSurvivesTheGuestDyingFirst is the pause path in the order it
+// actually happens, which is not the order TestHangUpClosesWith4002 uses.
+//
+// A local pause claims the session and then stops the VM, and the goodbye is
+// written afterwards — over a connection whose far end is already gone. So the
+// bridge unwinds in the middle of the hang-up, every time; the only question is
+// whether the session notices it has been claimed. Before MarkHungUp it did not,
+// and the browser got 4001 with an empty screen: no goodbye, no escape
+// sequences, and a "shell exited" for a sandbox nobody exited.
+func TestHangUpSurvivesTheGuestDyingFirst(t *testing.T) {
+	wh := newWSHarness(t, vmm.StateRunning)
+	conn, ctx := wh.dial(t)
+	readUntilReady(ctx, t, conn)
+
+	var sc SessionConn
+	select {
+	case sc = <-wh.sessionConn:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the terminal never registered with the live-session registry")
+	}
+
+	// Exactly the order sshgw.closeAll and host.Manager.pause produce.
+	sc.(HungUpMarker).MarkHungUp()
+	wh.pty.exit(0) // the driver pause tears the guest down
+	goodbye := terminalRestoreProbe + "\r\nsparkbox: sandbox \"demo\" was paused\r\n"
+	if _, err := sc.Stderr().Write([]byte(goodbye)); err != nil {
+		t.Fatalf("goodbye write: %v", err)
+	}
+	sc.Close() //nolint:errcheck
+
+	var got strings.Builder
+	for {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			if code := websocket.CloseStatus(err); code != statusSandboxHungUp {
+				t.Fatalf("close status = %v, want %v (sandbox hung up); saw %q",
+					code, statusSandboxHungUp, got.String())
+			}
+			break
+		}
+		if typ == websocket.MessageBinary {
+			got.WriteString(string(data))
+		}
+	}
+	if !strings.Contains(got.String(), terminalRestoreProbe) {
+		t.Errorf("the terminal-restore escapes were cut off: %q", got.String())
+	}
+	if !strings.Contains(got.String(), "was paused") {
+		t.Errorf("the goodbye was cut off: %q", got.String())
+	}
+}
+
+// terminalRestoreProbe stands in for sshgw's terminalRestore, which this package
+// cannot import. Only its arrival is under test, not its contents.
+const terminalRestoreProbe = "\x1b[?1000l"
+
 // TestHangUpClosesWith4002 is the pause path: the manager tells the gateway to
 // close every session attached to a sandbox, the gateway writes its goodbye to
 // Stderr() and calls Close, and the browser must get both — the escape

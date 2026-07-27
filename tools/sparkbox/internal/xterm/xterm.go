@@ -74,6 +74,17 @@ type SessionConn interface {
 	Close() error
 }
 
+// HungUpMarker mirrors sshgw.HungUpMarker for the same reason SessionConn
+// mirrors its sessionConn, and is satisfied by the same adapter: it is how the
+// gateway claims a terminal synchronously, before the sandbox stops, so that a
+// bridge unwinding on the dead guest does not answer "shell exited" for a
+// sandbox that was paused. Declared here so the two halves are visible together
+// and a rename on either side is a compile error rather than a silent return to
+// the race — see the assertion in conn.go.
+type HungUpMarker interface {
+	MarkHungUp()
+}
+
 // Config wires the handler. Sandboxes, Sessions and UpstreamKey are required;
 // the rest degrade rather than panic, because a unit test and a
 // minimally-configured host both want that.

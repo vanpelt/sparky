@@ -164,6 +164,61 @@ func TestCloseSandboxSessionsDoesNotBlock(t *testing.T) {
 	}
 }
 
+// markableSession is a fakeSession that also implements HungUpMarker, the way
+// internal/xterm's browser terminal does.
+type markableSession struct {
+	fakeSession
+	markedC chan struct{}
+}
+
+func newMarkableSession() *markableSession {
+	return &markableSession{markedC: make(chan struct{}, 1)}
+}
+
+func (m *markableSession) MarkHungUp() {
+	select {
+	case m.markedC <- struct{}{}:
+	default:
+	}
+}
+
+func (m *markableSession) wasMarked() bool {
+	select {
+	case <-m.markedC:
+		return true
+	default:
+		return false
+	}
+}
+
+// TestCloseSandboxSessionsMarksBeforeReturning is the ordering guarantee a
+// browser terminal depends on, and the one this path did not used to give.
+//
+// The manager calls this and then immediately pauses the driver, which kills
+// the guest's sshd and unwinds every attached session. The goodbye goroutines
+// below may not run until after all of that. If the claim rode along with them,
+// the session would reach its own exit path first and report "shell exited" for
+// a sandbox that was paused — no goodbye, no terminal restore, wrong close code.
+//
+// The write is blocked here on purpose: it makes the goroutine that writes the
+// goodbye incapable of being what marks the session, so a passing test can only
+// mean the claim was taken on the caller's own goroutine.
+func TestCloseSandboxSessionsMarksBeforeReturning(t *testing.T) {
+	gw, _, _ := newDoorGateway(t)
+	sess := newMarkableSession()
+	sess.blockWrite = make(chan struct{})
+	defer sess.Close() //nolint:errcheck // unblocks the stuck goodbye writer
+	gw.trackSession("box", sess, true)
+
+	gw.CloseSandboxSessions("box", "was paused")
+
+	// No polling: "eventually" is precisely the property that is not enough.
+	if !sess.wasMarked() {
+		t.Fatal("CloseSandboxSessions returned to the manager without claiming " +
+			"the session; the pause that follows will race the hang-up")
+	}
+}
+
 // TestCloseAllSessionsSpansSandboxes covers the redeploy case: a control-plane
 // restart never pauses anything, so shutdown has to sweep every sandbox's
 // sessions rather than one named box's.

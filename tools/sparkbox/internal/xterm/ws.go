@@ -251,10 +251,19 @@ func (h *Handler) serve(_ context.Context, conn *websocket.Conn, name string, lo
 	}
 	// The hang-up path owns the close when it fired: it has already sent the
 	// goodbye and a 4002, and a second close code here would just race it.
-	if !sc.HungUp() {
-		sendJSON(conn, statusMsg{Type: "exit", Code: code})
-		closeWith(conn, statusShellExited, fmt.Sprintf("shell exited with %d", code))
+	//
+	// "Fired" means claimed, not finished — the claim is taken before the
+	// sandbox stops and the goodbye follows over the dying connection, so this
+	// is normally reached with bytes still to be written. Returning here would
+	// run the handler's CloseNow backstop and cut them off, which costs the user
+	// exactly what the hang-up exists to deliver: the terminal-restore escapes.
+	// So we wait for the hang-up to be done with the connection instead.
+	if sc.HungUp() {
+		sc.awaitClosed(hangUpSettle)
+		return
 	}
+	sendJSON(conn, statusMsg{Type: "exit", Code: code})
+	closeWith(conn, statusShellExited, fmt.Sprintf("shell exited with %d", code))
 }
 
 // bridge pumps the socket and the PTY into each other and returns the shell's
