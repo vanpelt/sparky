@@ -1382,6 +1382,91 @@ The hang-up goodbye's `reconnect with: ssh <name>.<domain>` line gains a
 browser form (`https://<name>.xterm.<domain>`), selected by a `via` field on the
 tracked session.
 
+## The instrument strip — added after the terminal shipped
+
+The header carries three live readings of the sandbox: a CPU sparkline, a RAM
+capsule, and a mirrored network plot. Five decisions are worth recording.
+
+**A route, not a WebSocket frame.** `GET /vitals` sits beside `/ws` rather than
+adding a `{"type":"vitals"}` text frame to the bridge. The wire protocol above
+is *published* — `openapi.json` documents it, and `internal/restapi` hands the
+same `Bridge` to non-browser clients — so unsolicited frames would change a
+contract every client reads in order to decorate one page's chrome. The route
+also keeps reporting while the socket is between reconnects, which is exactly
+when a person wants to know whether the machine is still doing anything.
+
+**Raw counters out, rates derived in the page.** The response carries
+`cpu_seconds`, the tap's `net_rx_bytes`/`net_tx_bytes` and `mem_used_mb`, plus
+`at_ms` — never a rate. The server stays stateless (no per-viewer sample to keep
+or expire), and the delta is computed in the one place that knows whether its
+own two samples were contiguous, which the server cannot know for a tab that was
+backgrounded for ten minutes. `at_ms` is the divisor rather than the browser's
+clock, so request latency never shows up as a CPU spike. This is the same split
+the user console already makes with `cpu_seconds`.
+
+**It is strictly passive.** The handler resolves through `Get`, never
+`EnsureRunning`, and never calls `Touch` — `TestVitalsNeverResumesOrTouches`
+holds the line. A tab polls this once a second; if any of it counted as activity
+the terminal would keep resurrecting a box the reaper is trying to put away, and
+the page's deliberate refusal to auto-reconnect after a pause (`4002`) would be
+pointless. Watching a meter is not work.
+
+**`Config.Vitals` is the local manager, not the fleet.** `Sandboxes` is `flt`
+because ownership and resume are fleet-wide; a balloon and a VMM process can
+only be asked of the machine running them, so vitals is `mgr`. A sandbox placed
+on another node simply misses in the local manager's maps and every reader
+answers `ok=false` — no special case, and the same degradation the user console
+has always had. The response still carries the ceilings, so "no reading" and
+"paused" and "no `VitalsReader` wired" all render as one state instead of three.
+
+**Two scales, chosen per metric.** CPU is pinned to 0–100% (normalised by
+vCPUs, so 100% is every core busy): autoscaling a percentage would make an idle
+machine's noise look identical to a pegged one. Network autoscales to the
+window's peak on a *square-root* scale, because traffic spans orders of
+magnitude — an `apt-get` against a keystroke of SSH — and on a linear scale one
+burst flattens the rest of the minute into the axis. The root reorders nothing
+and the exact rate is printed beside the plot either way. Both directions share
+one axis; direction is what distinguishes them, which is why the two rate
+readouts sit in the same order as the halves they name.
+
+Colour follows the rest of the chrome: recessive ink, crossing into `--amber`
+and `--red` only at the 70/90 thresholds both consoles already use. Nothing is
+encoded by colour alone — the height carries the value and the number beside it
+carries it again — so the strip stays readable when colour means nothing.
+
+### Condensing the bar — a second pass
+
+The first build put label and value side by side and kept the status pill's
+word, and the whole thing needed 900px. Four changes took that to ~305px for the
+CPU cell alone, which is what makes the strip survive on a phone:
+
+- **Each readout is a two-line stack**, label over value, the way a menu-bar
+  meter does it. The label stops paying for horizontal room it was only using to
+  sit beside a number.
+- **The status pill became a lamp.** Its word cost ~65px of a 44px bar to say
+  something the screen already says louder: every state that is *not* connected
+  puts a full overlay over the terminal explaining itself. The text moved into
+  the `title` and into an `sr-only` span under `role="status"` — a live region,
+  so a screen reader is told when the connection changes. An `aria-label` would
+  not be: a changed label is not announced, changed live-region content is.
+- **The dividers became wells.** Each plot sits on a `--muted` rounded
+  background; the wells group a plot with its numbers, so the hairline rules
+  between cells could go. Grouping is now carried by spacing alone — 14px
+  between cells against 6px inside one.
+- **`header { min-width: 0 }`**, which is the whole mobile fix. The header is a
+  grid item, and a grid item's automatic minimum size is its min-content width,
+  so it refused to be narrower than its contents and pushed Reconnect off the
+  right edge of a phone instead of ellipsizing the name. Note that
+  `html, body { overflow: hidden }` hides this from the usual
+  `scrollWidth > clientWidth` check — the overflow is clipped, not scrollable,
+  so the bug is invisible to the obvious test and has to be caught by measuring
+  the last child's right edge.
+
+The strip then sheds cells one at a time rather than vanishing at a single
+threshold — network at 980px, memory at 700px — ordered by value per pixel. The
+CPU sparkline is the last thing standing, because "is this machine doing
+anything" is the question the strip exists to answer. Verified down to 360px.
+
 ---
 
 # Part 5 — the edge

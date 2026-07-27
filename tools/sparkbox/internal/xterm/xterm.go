@@ -82,6 +82,13 @@ type Config struct {
 	// Accounts resolves operator status. Satisfied by *users.Store; nil means
 	// nobody is an operator, which fails closed.
 	Accounts edgeauth.Accounts
+	// Vitals reads live CPU, memory and network counters for the sandboxes on
+	// THIS machine, feeding the page's instrument strip. Satisfied by
+	// *host.Manager — deliberately the local manager and not Sandboxes, which in
+	// a fleet is the gateway's view of every node: a balloon and a VMM process
+	// can only be asked of the host running them. Nil serves the page with no
+	// meters, which is what a test and a stats-less driver both want.
+	Vitals VitalsReader
 	// Sessions verifies the edge session token carried by the cookie or a
 	// Bearer header.
 	Sessions *edgeauth.Signer
@@ -125,6 +132,7 @@ type Handler struct {
 	accounts    edgeauth.Accounts
 	sessions    *edgeauth.Signer
 	upstreamKey xssh.Signer
+	vitalsOf    VitalsReader
 
 	domain    string
 	subdomain string
@@ -161,13 +169,13 @@ func New(cfg Config) *Handler {
 	}
 	h := &Handler{
 		mgr: cfg.Sandboxes, accounts: cfg.Accounts, sessions: cfg.Sessions,
-		upstreamKey: cfg.UpstreamKey,
-		domain:      strings.ToLower(strings.Trim(cfg.Domain, ".")),
-		subdomain:   strings.ToLower(sub),
-		loginURL:    cfg.LoginURL,
-		track:       cfg.Track,
-		dial:        cfg.Dial,
-		log:         cfg.Log,
+		upstreamKey: cfg.UpstreamKey, vitalsOf: cfg.Vitals,
+		domain:    strings.ToLower(strings.Trim(cfg.Domain, ".")),
+		subdomain: strings.ToLower(sub),
+		loginURL:  cfg.LoginURL,
+		track:     cfg.Track,
+		dial:      cfg.Dial,
+		log:       cfg.Log,
 	}
 	h.open = h.dialPTY
 
@@ -179,6 +187,7 @@ func New(cfg Config) *Handler {
 	mux.Handle("GET /assets/{file}", http.StripPrefix("/assets", assetServer()))
 	mux.Handle("GET /{$}", require(http.HandlerFunc(h.page)))
 	mux.Handle("GET /ws", require(http.HandlerFunc(h.ws)))
+	mux.Handle("GET /vitals", require(http.HandlerFunc(h.vitals)))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: not found", http.StatusNotFound)
 	})

@@ -1561,6 +1561,38 @@ func (m *Manager) CPUSeconds(ctx context.Context, name string) (seconds float64,
 	return float64(nanos) / 1e9, true
 }
 
+// NetCounters reports a running sandbox's network counters straight from the
+// device, in bytes, from the guest's point of view — rx received, tx sent.
+//
+// These are NOT Sandbox.NetRxBytes/NetTxBytes. Those are lifetime totals the
+// reaper accumulates a minute at a time and which only ever grow; these are the
+// raw tap counters, which die and restart at zero with the host-side device on
+// every pause, resume and cold boot. A caller deriving a rate from two readings
+// must treat a reading BELOW the previous one as that reset rather than as a
+// negative rate — the same rule counterDelta encodes for the totals.
+//
+// It exists because a rate and a total want different resolutions: the reaper's
+// once-a-minute sample is the right cadence for metering and the wrong one for
+// a live meter, and reading through to the device costs two sysfs reads.
+// ok=false when unavailable (the driver has no counters, the sandbox is not on
+// this machine, or it isn't running). The driver call is made without m.mu held.
+func (m *Manager) NetCounters(ctx context.Context, name string) (rx, tx uint64, ok bool) {
+	m.mu.Lock()
+	b, exists := m.boxes[name]
+	if !exists || m.netStats == nil || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return 0, 0, false
+	}
+	ns := m.netStats
+	m.mu.Unlock()
+
+	rx, tx, err := ns.NetBytes(ctx, name)
+	if err != nil {
+		return 0, 0, false
+	}
+	return rx, tx, true
+}
+
 // SetPinned marks a sandbox pinned (exempt from the idle reaper) or clears the
 // flag. Pinning does not itself resume the sandbox — callers that want it warm
 // immediately follow with EnsureRunning.

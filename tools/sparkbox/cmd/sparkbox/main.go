@@ -729,6 +729,11 @@ func serve(args []string) error {
 			xt = xterm.New(xterm.Config{
 				Sandboxes: flt, Accounts: userStore, Sessions: sessionSigner,
 				UpstreamKey: upstreamKey, Dial: flt.DialContext,
+				// The same split the two consoles make: the fleet answers
+				// everything an owner can act on, the manager answers the
+				// balloon and CPU reads, which only the machine running the VM
+				// can be asked. A sandbox on another node draws no meters.
+				Vitals: mgr,
 				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
 				// The gateway owns the one live-session registry the manager

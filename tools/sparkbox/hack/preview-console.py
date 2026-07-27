@@ -34,7 +34,9 @@ def _pkg(*parts):
 # is injected: the docs page needs only its spec (served below) and the terminal
 # needs a WebSocket it cannot have, so both render themselves honestly without
 # it — the terminal shows its own "reconnecting" state, which is a real state
-# worth being able to look at.
+# worth being able to look at. The terminal's instrument strip does not need the
+# stub either: its /vitals poll is answered by a real route below, so the
+# sparklines animate against mock counters while the shell stays disconnected.
 PAGES = {
     "console": {"index": _pkg("userconsole", "index.html"), "stub": True,
                 "assets": None},
@@ -151,6 +153,44 @@ def _machines_js():
         '"cpu_seconds": 1200.0', '"cpu_seconds": 1200 + tick * 3.1') + "; }"
 
 
+# ---- mock vitals for the terminal's instrument strip ------------------------
+# The strip derives every rate from the delta between two readings, so the mock
+# has to walk cumulative counters forward in real time — handing back a fresh
+# random number each poll would produce no series at all. The intensity sweeps a
+# slow cycle on purpose: it is the only way to watch the plot cross the 70% and
+# 90% threshold colours without a genuinely busy VM to point at.
+_VITALS = {"at": None, "cpu": 1200.0, "rx": 4_200_000, "tx": 910_000, "mem": 2600.0}
+_V_VCPUS, _V_MEM_MB = 2, 8192
+
+
+def _vitals():
+    import math
+    import random
+    now = time.time()
+    dt = min(5.0, max(0.0, now - (_VITALS["at"] or now - 1.0)))
+    _VITALS["at"] = now
+
+    util = min(1.0, max(0.01, ((math.sin(now / 7.6) + 1) / 2) ** 2 * 1.15
+                        + random.uniform(-0.06, 0.06)))
+    _VITALS["cpu"] += util * _V_VCPUS * dt
+    # Traffic is bursty rather than smooth, which is what makes a mirrored plot
+    # worth drawing in the first place.
+    burst = 1.0 if random.random() < 0.12 else 0.06
+    _VITALS["rx"] += (18_000 + burst * random.uniform(0, 900_000)) * dt
+    _VITALS["tx"] += (9_000 + burst * random.uniform(0, 300_000)) * dt
+    _VITALS["mem"] = min(_V_MEM_MB * 0.96, max(700.0,
+                         _VITALS["mem"] + random.uniform(-42, 40) + util * 34))
+    rx, tx = int(_VITALS["rx"]), int(_VITALS["tx"])
+    return {
+        "state": "running", "at_ms": int(now * 1000),
+        "vcpus": _V_VCPUS, "mem_mb": _V_MEM_MB,
+        "cpu_seconds": round(_VITALS["cpu"], 3),
+        "mem_used_mb": int(_VITALS["mem"]),
+        "net_rx_bytes": rx, "net_tx_bytes": tx,
+        "life_rx_bytes": rx + 8_400_000_000, "life_tx_bytes": tx + 1_100_000_000,
+    }
+
+
 _GLOBE_SVG = (
     b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" '
     b'stroke="#888" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/>'
@@ -178,6 +218,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        # The terminal's instrument strip polls this once a second. It is not
+        # under /api/, so it needs its own branch rather than the ok:true stub.
+        if self.path.split("?")[0] == "/vitals":
+            body = json.dumps(_vitals()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return

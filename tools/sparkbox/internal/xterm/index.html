@@ -20,10 +20,17 @@
 
   /* ---------- top bar ---------- */
   header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 0 12px; height: 44px; flex: none;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 10px; height: 44px; flex: none;
     border-bottom: 1px solid hsl(var(--border));
     background: hsl(var(--card));
+    /* The header is a grid item, and a grid item's automatic minimum size is
+       its min-content width — so without this it refuses to be narrower than
+       everything it holds and simply overflows the viewport on a phone, taking
+       the Reconnect button off the right edge. Zero lets it shrink and hands
+       the decision to the flex rules below, where the name ellipsizes and the
+       instruments hold their size. */
+    min-width: 0;
     /* The bar sits above a canvas that repaints constantly; isolating it keeps
        the terminal's compositing out of its way. */
     position: relative; z-index: 2;
@@ -41,18 +48,30 @@
   .name {
     font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* The name outranks the instruments, so it keeps a readable stub even when
+       the bar is squeezed — but it is not allowed to hog a wide bar either. */
+    min-width: 4ch; max-width: 24ch;
   }
   .spacer { flex: 1 1 auto; }
 
-  /* status pill — one dot, one word, no colour anywhere else */
+  /* Status is a lamp, not a sentence. The word it used to carry cost ~65px of a
+     44px bar to say something the screen already says louder: every state that
+     is not "connected" puts a full overlay over the terminal explaining itself.
+     So the text moves into the tooltip and, for screen readers, into a live
+     region that announces the change rather than a label that quietly differs. */
   .status {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; color: hsl(var(--muted-foreground));
-    white-space: nowrap;
+    display: inline-flex; align-items: center; flex: none;
+    /* A 7px dot is a 7px hit target. The padding makes the tooltip reachable
+       without making the lamp look like a button. */
+    padding: 6px 3px; margin: -6px 0;
   }
   .status .dot {
-    width: 7px; height: 7px; border-radius: 50%; flex: none;
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
     background: hsl(var(--muted-foreground));
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
   }
   .status[data-state="ready"] .dot { background: hsl(var(--green)); }
   .status[data-state="starting"] .dot,
@@ -61,6 +80,98 @@
   .status[data-state="error"] .dot { background: hsl(var(--red)); }
   @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
   @media (prefers-reduced-motion: reduce) { .status .dot { animation: none } }
+
+  /* ---------- instrument strip ----------
+     Three readings of the machine you are shelled into, one a second, sitting
+     beside the status lamp because they answer the same question it does.
+
+     Monochrome, like the rest of the chrome. The plots are drawn in recessive
+     ink and cross into --amber/--red only at the 70/90 thresholds both consoles
+     already use, so colour in this bar never means "this is the CPU one" — it
+     only ever means look. Height carries the value; the number beside each plot
+     carries it again, so nothing here is encoded by colour alone. */
+  /* flex: none, so the strip is never the thing that gets squeezed: the name
+     beside it already ellipsizes, and a compressed plot would be a lie about
+     the time window rather than a smaller version of the truth. */
+  /* 14 between cells against 6 inside one: with the dividers gone, the only
+     thing grouping a plot with its own numbers is that the gap around the pair
+     is more than twice the gap within it. */
+  .vitals { display: flex; align-items: center; gap: 14px; flex: none; }
+  .v-cell { display: flex; align-items: center; gap: 6px; }
+  /* Every readout is a two-line stack, label over value, the way a menu-bar
+     meter does it. Stacking is the whole compaction: the label stops paying for
+     horizontal room it was only ever using to sit beside a number. */
+  .v-read { display: flex; flex-direction: column; gap: 2px; line-height: 1; }
+  .v-key {
+    font-size: 8.5px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: hsl(var(--muted-foreground));
+  }
+  /* Each plot sits in its own recessed well. It reads as an instrument rather
+     than a scribble floating in the bar, and it is what lets the dividers
+     between the three cells go away — the wells already do the separating. */
+  .v-plot {
+    display: block; flex: none; overflow: hidden;
+    background: hsl(var(--muted) / .6); border-radius: 4px;
+  }
+  .v-cap { display: block; flex: none; }
+  .v-area { fill: hsl(var(--muted-foreground) / .2); }
+  .v-line {
+    fill: none; stroke: hsl(var(--muted-foreground)); stroke-width: 1.25;
+    stroke-linejoin: round; stroke-linecap: round;
+  }
+  /* The network plot packs a minute into 56px, so a one-second burst is a
+     one-pixel spike. The outline is what makes it a spike instead of a speck. */
+  .v-thin { stroke-width: 1; }
+  #v-net .v-area { fill: hsl(var(--muted-foreground) / .3); }
+  /* "Now" is pinned to the right edge and history scrolls off to the left, so
+     the leading edge is the one point worth marking. */
+  .v-now { fill: hsl(var(--foreground)); }
+  .v-axis { stroke: hsl(var(--border)); stroke-width: 1; }
+  .v-cap-track { fill: none; stroke: hsl(var(--border)); stroke-width: 1; }
+  .v-cap-fill { fill: hsl(var(--muted-foreground)); }
+  .v-cell[data-level="warn"] .v-area { fill: hsl(var(--amber) / .26); }
+  .v-cell[data-level="warn"] .v-line { stroke: hsl(var(--amber)); }
+  .v-cell[data-level="warn"] .v-cap-fill { fill: hsl(var(--amber)); }
+  .v-cell[data-level="hot"] .v-area { fill: hsl(var(--red) / .26); }
+  .v-cell[data-level="hot"] .v-line { stroke: hsl(var(--red)); }
+  .v-cell[data-level="hot"] .v-cap-fill { fill: hsl(var(--red)); }
+  /* tabular-nums and a floor width together: without both, a bar that repaints
+     every second twitches sideways as the digits change, which reads as the
+     page being unstable rather than the number being live. */
+  .v-val {
+    font-size: 12px; font-weight: 600; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; min-width: 30px;
+  }
+  /* The network cell stacks too, but both its lines are values — and their
+     order IS the legend: the rate on top names the half of the plot above the
+     axis, the one beneath names the half below it. Direction does the work two
+     colours do in most network meters. */
+  .v-rates {
+    display: flex; flex-direction: column; gap: 2px; line-height: 1;
+    font-size: 9.5px; font-variant-numeric: tabular-nums;
+    color: hsl(var(--muted-foreground)); min-width: 56px;
+  }
+  /* A sandbox that isn't running: the plots are the last thing that happened
+     rather than what is happening, so they go quiet instead of vanishing and
+     taking the header's layout with them. */
+  .vitals[data-live="0"] { opacity: .4; }
+  /* The strip sheds cells one at a time rather than vanishing at a single
+     threshold, so a phone still gets the reading that matters most. The order
+     is by value per pixel: network is the widest cell and the least urgent
+     (its plot says "something is transferring", which the CPU plot usually
+     says too), memory next, and the CPU sparkline is the last thing standing —
+     "is this machine doing anything" is the question the strip exists for. */
+  @media (max-width: 980px) { #v-net { display: none } }
+  @media (max-width: 700px) { #v-mem { display: none } }
+  /* Phone. The CPU cell survives intact — logo, name stub, sparkline, lamp and
+     Reconnect measure ~305px, so it fits a 360px viewport with room to spare.
+     Only the spacing tightens; the plot keeps its width, because scaling an SVG
+     whose viewBox is a fixed sample count would squash a minute of history into
+     a smear rather than showing less of it. */
+  @media (max-width: 460px) {
+    header { gap: 8px; padding: 0 8px; }
+    .brand { gap: 7px; }
+  }
 
   /* background: transparent is not cosmetic — the shared reset leaves it
      unset, so without it the user agent's own button face shows through and
@@ -122,8 +233,69 @@
       <span class="name mono" id="sandbox-name">&nbsp;</span>
     </div>
     <div class="spacer"></div>
-    <span class="status" id="status" data-state="connecting">
-      <span class="dot"></span><span id="status-text">connecting</span>
+
+    <div class="vitals hidden" id="vitals" data-live="0" role="group" aria-label="Sandbox vitals">
+      <div class="v-cell hidden" id="v-cpu">
+        <svg class="v-plot" width="64" height="22" viewBox="0 0 64 22" aria-hidden="true" focusable="false">
+          <path class="v-area" id="cpu-area"></path>
+          <path class="v-line" id="cpu-line"></path>
+          <circle class="v-now hidden" id="cpu-now" r="1.6"></circle>
+        </svg>
+        <span class="v-read">
+          <span class="v-key">CPU</span>
+          <span class="v-val mono" id="cpu-val">&#8212;</span>
+        </span>
+      </div>
+
+      <div class="v-cell hidden" id="v-mem">
+        <!-- A capsule filled from the bottom, clipped to its own outline so the
+             fill has a flat top and a rounded floor. A rounded rect scaled from
+             the bottom instead would round its top edge too and read as a pill
+             floating in a tube. -->
+        <svg class="v-cap" width="10" height="22" viewBox="0 0 10 22" aria-hidden="true" focusable="false">
+          <defs>
+            <clipPath id="v-cap-clip">
+              <rect x="1.25" y="2.25" width="7.5" height="17.5" rx="3.75"></rect>
+            </clipPath>
+          </defs>
+          <rect class="v-cap-track" x="0.5" y="1.5" width="9" height="19" rx="4.5"></rect>
+          <g clip-path="url(#v-cap-clip)">
+            <rect class="v-cap-fill" id="mem-fill" x="0" y="19.75" width="10" height="0"></rect>
+          </g>
+        </svg>
+        <span class="v-read">
+          <span class="v-key">RAM</span>
+          <span class="v-val mono" id="mem-val">&#8212;</span>
+        </span>
+      </div>
+
+      <div class="v-cell hidden" id="v-net">
+        <!-- One scale, one axis, mirrored: out above the line, in below it.
+             Both series are bytes per second, so they belong on the same scale;
+             the direction is what tells them apart, and the two rates to the
+             right sit in the same order as the halves they name. -->
+        <svg class="v-plot" width="56" height="22" viewBox="0 0 56 22" aria-hidden="true" focusable="false">
+          <line class="v-axis" x1="0" y1="11" x2="56" y2="11"></line>
+          <path class="v-area" id="tx-area"></path>
+          <path class="v-area" id="rx-area"></path>
+          <path class="v-line v-thin" id="tx-line"></path>
+          <path class="v-line v-thin" id="rx-line"></path>
+        </svg>
+        <span class="v-rates mono">
+          <span id="tx-val">&#8593; &#8212;</span>
+          <span id="rx-val">&#8595; &#8212;</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- role="status" makes the text below a live region, so a screen reader is
+         told when the connection changes. That is why the word stays in the DOM
+         rather than becoming an aria-label: a changed label is not announced,
+         changed live-region content is. Sighted users get it from the tooltip,
+         and from the overlay that covers the terminal in every state but this
+         one. -->
+    <span class="status" id="status" data-state="connecting" role="status" title="Connecting">
+      <span class="dot"></span><span class="sr-only" id="status-text">connecting</span>
     </span>
     <button class="btn-ghost hide-sm" id="clear-btn" title="Clear the scrollback">Clear</button>
     <button class="btn-outline" id="reconnect-btn">Reconnect</button>
@@ -156,6 +328,9 @@
     const SANDBOX = location.hostname.split(".")[0];
     document.title = SANDBOX + " — sparkbox terminal";
     $("sandbox-name").textContent = SANDBOX;
+    // On a narrow bar the name is the thing that gives way, so keep the whole
+    // of it one hover (or long-press) away.
+    $("sandbox-name").title = SANDBOX;
 
     // xterm.js needs concrete colours; the rest of the page reads CSS
     // variables. Two palettes, picked from the same signal shared.css uses so
@@ -224,9 +399,23 @@
     const enc = new TextEncoder();
     const dec = new TextDecoder();
 
+    // The lamp carries no words of its own, so its tooltip is where a sighted
+    // user reads the connection state while the terminal is usable. Keyed on
+    // the word rather than the data-state: three different situations share the
+    // "closed" lamp, and they are not the same news.
+    const STATUS_HINT = {
+      connecting: "Opening a shell in your sandbox.",
+      starting: "Starting your sandbox. This can take a moment.",
+      connected: "Connected to your sandbox.",
+      reconnecting: "Disconnected. Reconnecting.",
+      exited: "The shell exited. Reconnect starts a new one.",
+      paused: "The sandbox went idle and was paused. Reconnect starts it again.",
+      failed: "Couldn't attach to your sandbox.",
+    };
     function setStatus(state, text) {
       $("status").setAttribute("data-state", state);
       $("status-text").textContent = text;
+      $("status").title = STATUS_HINT[text] || text;
     }
 
     function overlay(title, msg, opts) {
@@ -406,7 +595,204 @@
       if (!term.hasSelection()) setTimeout(() => term.focus(), 0);
     });
 
+    // ---- instrument strip -------------------------------------------------
+    // GET /vitals hands back raw counters; the rates are derived here. That is
+    // the same division the user console already makes with cpu_seconds, and it
+    // is the right one: only the client knows whether its own two samples were
+    // contiguous, which the server cannot know for a tab that was backgrounded
+    // for ten minutes.
+
+    const V_SAMPLES = 60;    // one minute of history, at one sample a second
+    const V_POLL_MS = 1000;  // the guest's balloon publishes stats at 1 Hz too
+    const V_IDLE_MS = 5000;  // a sandbox that isn't running has nothing to plot
+    const V_MAX_GAP_S = 10;  // a wider gap between samples is not a rate
+    // The floor the network plot scales up from. Without one, an idle guest's
+    // few hundred bytes a second of background chatter would autoscale into a
+    // dramatic-looking storm.
+    const V_NET_FLOOR = 1024;
+    // Plot widths in user units. They must equal the viewBox widths above —
+    // one user unit is one CSS pixel here, which is what keeps a 1.25px stroke
+    // 1.25px and a one-second sample one pixel wide.
+    const V_CPU_W = 64, V_NET_W = 56;
+
+    const cpuHist = [], rxHist = [], txHist = [];
+    let vPrev = null;      // the previous raw reading, for deltas
+    let vTimer = null;
+    let vDelay = V_POLL_MS;
+    let vStopped = false;  // a permanent refusal; stop asking
+
+    function push(a, v) { a.push(v); if (a.length > V_SAMPLES) a.shift(); }
+    function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+    function num(v) { return typeof v === "number"; }
+    function rate(bps) { return bytes(bps) + "/s"; }
+    function peak(a) { return a.length ? Math.max.apply(null, a) : 0; }
+    function avg(a) { return a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0; }
+
+    // Points are laid out right-anchored: the newest sample owns the right edge
+    // and older ones march left off the plot. A window that filled from the
+    // left would slide the "now" reading around as history accumulated.
+    function points(vals, w, toY) {
+      const n = vals.length, step = w / (V_SAMPLES - 1), pts = [];
+      for (let i = 0; i < n; i++) pts.push([w - (n - 1 - i) * step, toY(vals[i])]);
+      return pts;
+    }
+    function xy(x, y) { return x.toFixed(2) + "," + y.toFixed(2); }
+    function line(pts) {
+      return pts.map((p, i) => (i ? "L" : "M") + xy(p[0], p[1])).join("");
+    }
+    function area(pts, base) {
+      if (pts.length < 2) return "";
+      const a = pts[0], z = pts[pts.length - 1];
+      return "M" + xy(a[0], base) + line(pts).slice(1) + "L" + xy(z[0], base) + "Z";
+    }
+    // The consoles' thresholds, not a second set: 70% is worth noticing, 90% is
+    // worth acting on, everywhere in the product.
+    function level(pct) { return pct >= 90 ? "hot" : pct >= 70 ? "warn" : ""; }
+
+    // showCell is sticky on purpose. A sandbox that pauses stops answering with
+    // counters, and a cell that hid itself on the way down would collapse the
+    // header's layout every time the box went to sleep.
+    function showCell(id) { $(id).classList.remove("hidden"); }
+
+    function foldVitals(v) {
+      const prev = vPrev;
+      const cur = { at: v.at_ms, cpu: v.cpu_seconds, rx: v.net_rx_bytes, tx: v.net_tx_bytes };
+      vPrev = cur;
+      if (!prev) return;                       // the first reading is a baseline
+      const dt = (cur.at - prev.at) / 1000;
+      if (dt <= 0 || dt > V_MAX_GAP_S) return; // out of order, or slept through
+
+      // A counter that went backwards is its device restarting at zero, not a
+      // negative rate: the CPU clock follows the VMM process and resets on a
+      // cold boot, and the tap counters die with the tap on every pause and
+      // resume. Neither is a measurable interval, so no sample is recorded —
+      // the plot holds its history rather than inventing a spike or a trough.
+      if (num(cur.cpu) && num(prev.cpu) && cur.cpu >= prev.cpu) {
+        push(cpuHist, (cur.cpu - prev.cpu) / dt / (v.vcpus || 1) * 100);
+      }
+      if (num(cur.rx) && num(prev.rx) && num(cur.tx) && num(prev.tx) &&
+          cur.rx >= prev.rx && cur.tx >= prev.tx) {
+        push(rxHist, (cur.rx - prev.rx) / dt);
+        push(txHist, (cur.tx - prev.tx) / dt);
+      }
+    }
+
+    function paintVitals(v) {
+      const live = v.state === "running";
+      $("vitals").setAttribute("data-live", live ? "1" : "0");
+
+      // CPU. The scale is fixed 0–100 because it is a percentage; autoscaling
+      // one would make an idle machine's noise look identical to a pegged one.
+      // 100% means every vCPU busy, so the reading is comparable across boxes.
+      if (num(v.cpu_seconds) || cpuHist.length) {
+        showCell("v-cpu");
+        $("vitals").classList.remove("hidden");
+        const pts = points(cpuHist, V_CPU_W, (p) => 22 - clamp(p, 0, 100) / 100 * 20);
+        $("cpu-line").setAttribute("d", line(pts));
+        $("cpu-area").setAttribute("d", area(pts, 22));
+        const now = pts[pts.length - 1];
+        $("cpu-now").classList.toggle("hidden", pts.length < 2);
+        if (now) { $("cpu-now").setAttribute("cx", now[0].toFixed(2)); $("cpu-now").setAttribute("cy", now[1].toFixed(2)); }
+        const cur = cpuHist.length ? cpuHist[cpuHist.length - 1] : null;
+        $("cpu-val").textContent = live && cur !== null ? Math.round(cur) + "%" : "—";
+        $("v-cpu").dataset.level = live && cur !== null ? level(cur) : "";
+        $("v-cpu").title = cur === null
+          ? "CPU — waiting for a second reading."
+          : "CPU " + cur.toFixed(1) + "% of " + (v.vcpus || 1) + " vCPU" + (v.vcpus === 1 ? "" : "s") +
+            " (100% is all of them busy). Last minute: peak " + Math.round(peak(cpuHist)) +
+            "%, average " + Math.round(avg(cpuHist)) + "%.";
+        $("v-cpu").setAttribute("aria-label", $("v-cpu").title);
+      }
+
+      // RAM. A level, not a series — one number against a ceiling, so it gets a
+      // capsule rather than a plot.
+      if (num(v.mem_used_mb)) {
+        showCell("v-mem");
+        $("vitals").classList.remove("hidden");
+        const pct = v.mem_mb > 0 ? clamp(v.mem_used_mb / v.mem_mb * 100, 0, 100) : 0;
+        const h = pct / 100 * 17.5;
+        $("mem-fill").setAttribute("height", h.toFixed(2));
+        $("mem-fill").setAttribute("y", (19.75 - h).toFixed(2));
+        $("mem-val").textContent = Math.round(pct) + "%";
+        $("v-mem").dataset.level = level(pct);
+        $("v-mem").title = "RAM " + gb(v.mem_used_mb) + " of " + gb(v.mem_mb) + " GB (" +
+          pct.toFixed(0) + "%)." +
+          (v.ballooned ? " The idle reaper has handed some of this guest's RAM back to the host." : "");
+        $("v-mem").setAttribute("aria-label", $("v-mem").title);
+      } else if (!live) {
+        $("mem-val").textContent = "—";
+        $("v-mem").dataset.level = "";
+      }
+
+      // Network. Both directions share one scale — they are the same unit, and
+      // two y-scales on one plot would make a trickle out look like a match for
+      // a flood in.
+      if (num(v.net_rx_bytes) || rxHist.length) {
+        showCell("v-net");
+        $("vitals").classList.remove("hidden");
+        // Square root, not linear. Traffic spans orders of magnitude — an
+        // apt-get against a keystroke's worth of SSH — so against a linear
+        // scale one burst flattens the whole rest of the minute into the axis
+        // and the plot stops reporting anything. The root compresses the tall
+        // end without reordering anything: the peak still owns the full height,
+        // and a trickle is still visibly smaller than a stream. The exact rate
+        // is spelled out beside the plot either way.
+        const top = Math.max(V_NET_FLOOR, peak(rxHist), peak(txHist));
+        const swing = (p) => Math.sqrt(Math.min(1, p / top)) * 10;
+        const tx = points(txHist, V_NET_W, (p) => 11 - swing(p));
+        const rx = points(rxHist, V_NET_W, (p) => 11 + swing(p));
+        $("tx-area").setAttribute("d", area(tx, 11));
+        $("rx-area").setAttribute("d", area(rx, 11));
+        $("tx-line").setAttribute("d", line(tx));
+        $("rx-line").setAttribute("d", line(rx));
+        const curTx = txHist.length ? txHist[txHist.length - 1] : null;
+        const curRx = rxHist.length ? rxHist[rxHist.length - 1] : null;
+        $("tx-val").textContent = "↑ " + (live && curTx !== null ? rate(curTx) : "—");
+        $("rx-val").textContent = "↓ " + (live && curRx !== null ? rate(curRx) : "—");
+        $("v-net").title = "Network: " +
+          (curTx === null ? "waiting for a second reading."
+            : rate(curTx) + " out, " + rate(curRx) + " in. Last minute's peak " + rate(top) + ".") +
+          " Lifetime " + bytes(v.life_rx_bytes || 0) + " in, " + bytes(v.life_tx_bytes || 0) + " out.";
+        $("v-net").setAttribute("aria-label", $("v-net").title);
+      }
+
+      vDelay = live ? V_POLL_MS : V_IDLE_MS;
+    }
+
+    function scheduleVitals(ms) {
+      clearTimeout(vTimer);
+      if (vStopped || document.hidden) return;
+      vTimer = setTimeout(pollVitals, ms === undefined ? vDelay : ms);
+    }
+
+    function pollVitals() {
+      fetch("/vitals", { credentials: "same-origin" })
+        .then((r) => {
+          // 401 expired, 403 wrong origin, 404 not yours or no such route — none
+          // of which the next second will fix. The WebSocket owns recovery from
+          // an expired session; the strip just stops asking.
+          if (r.status === 401 || r.status === 403 || r.status === 404) { vStopped = true; return null; }
+          if (!r.ok) throw new Error("vitals " + r.status);
+          return r.json();
+        })
+        .then((v) => { if (v) { foldVitals(v); paintVitals(v); vDelay = v.state === "running" ? V_POLL_MS : V_IDLE_MS; } })
+        .catch(() => { vDelay = Math.min(15000, Math.max(vDelay, V_POLL_MS) * 2); })
+        .finally(() => scheduleVitals());
+    }
+
+    // A hidden tab is not watching. Stopping matters for more than the request:
+    // the counters keep running while the tab sleeps, so the first reading back
+    // has to be treated as a fresh baseline — vPrev is dropped rather than
+    // turned into one enormous spike spanning the whole nap.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { clearTimeout(vTimer); vTimer = null; return; }
+      vPrev = null;
+      vDelay = V_POLL_MS;
+      scheduleVitals(0);
+    });
+
     connect();
+    pollVitals();
   })();
   </script>
 </body>
