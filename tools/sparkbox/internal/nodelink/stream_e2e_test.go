@@ -31,6 +31,7 @@ import (
 	gssh "github.com/gliderlabs/ssh"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -41,6 +42,9 @@ import (
 type dataLink struct {
 	client *Client
 	mgr    *host.Manager
+	// nodeConn is exposed only to same-package integration benchmarks that add a
+	// narrowly scoped control handler to the real-SSH fixture.
+	nodeConn *Conn
 	// guestKey is the gateway's upstream key. The mock driver makes it both the
 	// guests' host key and the only key they accept, which is the same
 	// arrangement a real deployment has.
@@ -49,16 +53,27 @@ type dataLink struct {
 	relay *relay
 }
 
-// dataLinkOption tunes the rig. There is one, and it exists because the failure
-// this file's lifecycle tests are about only happens on a link whose packets go
-// nowhere — which loopback cannot be talked into on its own.
+// dataLinkOption tunes the rig for lifecycle faults, fixed-address netem, and
+// optional gateway-side transport metrics.
 type dataLinkOption func(*dataLinkOptions)
 
-type dataLinkOptions struct{ relayed bool }
+type dataLinkOptions struct {
+	relayed     bool
+	gatewayAddr string
+	metrics     *fleetmetrics.Registry
+}
 
 // throughARelay puts a TCP splice between the node and the gateway that a test
 // can black-hole. See relay.
 func throughARelay() dataLinkOption { return func(o *dataLinkOptions) { o.relayed = true } }
+
+func atGatewayAddr(addr string) dataLinkOption {
+	return func(o *dataLinkOptions) { o.gatewayAddr = addr }
+}
+
+func withDataLinkMetrics(metrics *fleetmetrics.Registry) dataLinkOption {
+	return func(o *dataLinkOptions) { o.metrics = metrics }
+}
 
 // relay is a TCP splice with a switch.
 //
@@ -161,7 +176,11 @@ func newDataLink(t *testing.T, opts ...dataLinkOption) *dataLink {
 	}
 	dl.mgr = mgr
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	listenAddr := cfg.gatewayAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -179,6 +198,7 @@ func newDataLink(t *testing.T, opts ...dataLinkOption) *dataLink {
 				// be the reason a link in this file ended.
 				PingEvery: time.Hour,
 				Log:       slog.New(slog.DiscardHandler),
+				Metrics:   cfg.metrics,
 			})
 			if err != nil {
 				return
@@ -242,6 +262,7 @@ func newDataLink(t *testing.T, opts ...dataLinkOption) *dataLink {
 	// drops it, which is the same shortcut remote_test.go takes: the handshake's
 	// own behaviour belongs to the link tests.
 	nodeConn := NewConn(stdout, stdin, "n", nil)
+	dl.nodeConn = nodeConn
 	pingHandler(nodeConn)
 	go nodeConn.Serve(ctx) //nolint:errcheck // ends with the link
 

@@ -7,6 +7,9 @@
 #   gateway-host-key      ssh_key   $SECRETS_DIR/gateway_host_key.pem
 #   gateway-upstream-key  ssh_key   $SECRETS_DIR/gateway_upstream_key.pem
 #   oidc-signing-key      opaque    $SECRETS_DIR/oidc_signing_key.pem  (generated if absent)
+#   node-control-ca-cert  opaque    $SECRETS_DIR/node_ca_cert.pem       (generated with its key)
+#   node-control-ca-key   opaque    $SECRETS_DIR/node_ca_key.pem        (generated if absent)
+#   gateway-control-key   opaque    $SECRETS_DIR/gateway_control_key.pem (generated if absent)
 #   cloudflare-api-token  opaque    $SECRETS_DIR/.env  CLOUDFLARE_API_TOKEN  (optional)
 #   console-password      opaque    $CONSOLE_PASSWORD or generated + saved  (optional)
 #
@@ -20,6 +23,10 @@ REGION=${REGION:-$(scw config get default-region 2>/dev/null || echo fr-par)}
 GATEWAY_HOST_KEY=${GATEWAY_HOST_KEY:-$SECRETS_DIR/gateway_host_key.pem}
 GATEWAY_UPSTREAM_KEY=${GATEWAY_UPSTREAM_KEY:-$SECRETS_DIR/gateway_upstream_key.pem}
 OIDC_SIGNING_KEY=${OIDC_SIGNING_KEY:-$SECRETS_DIR/oidc_signing_key.pem}
+NODE_CA_CERT=${NODE_CA_CERT:-$SECRETS_DIR/node_ca_cert.pem}
+NODE_CA_KEY=${NODE_CA_KEY:-$SECRETS_DIR/node_ca_key.pem}
+GATEWAY_CONTROL_KEY=${GATEWAY_CONTROL_KEY:-$SECRETS_DIR/gateway_control_key.pem}
+FLEET_CLUSTER_ID=${FLEET_CLUSTER_ID:-prod}
 
 for k in "$GATEWAY_HOST_KEY" "$GATEWAY_UPSTREAM_KEY"; do
   [ -f "$k" ] || { echo "missing fleet gateway key: $k"; exit 1; }
@@ -32,6 +39,35 @@ if [ ! -f "$OIDC_SIGNING_KEY" ]; then
   echo "== generating fleet OIDC signing key at $OIDC_SIGNING_KEY =="
   mkdir -p "$(dirname "$OIDC_SIGNING_KEY")"
   ( umask 077; openssl ecparam -name prime256v1 -genkey -noout -out "$OIDC_SIGNING_KEY" )
+fi
+
+# The node-control CA is a fleet identity, not disposable host state. Generate
+# it once on the trusted upload machine, upload both halves, and keep the local
+# copies for disaster recovery. The gateway leaf key is likewise stable while
+# its public certificate is short-lived and reissued into durable state.
+if [ ! -f "$NODE_CA_KEY" ] || [ ! -f "$NODE_CA_CERT" ]; then
+  if [ -f "$NODE_CA_KEY" ] || [ -f "$NODE_CA_CERT" ]; then
+    echo "incomplete node-control CA: $NODE_CA_KEY and $NODE_CA_CERT must both exist or both be absent"
+    exit 1
+  fi
+  echo "== generating node-control CA for cluster $FLEET_CLUSTER_ID =="
+  mkdir -p "$(dirname "$NODE_CA_KEY")"
+  ( umask 077
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$NODE_CA_KEY"
+    openssl req -x509 -new -sha256 -days 3650 \
+      -key "$NODE_CA_KEY" -out "$NODE_CA_CERT" \
+      -subj "/CN=Sparkbox $FLEET_CLUSTER_ID internal CA" \
+      -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+      -addext "keyUsage=critical,digitalSignature,keyCertSign,cRLSign"
+  )
+fi
+if [ ! -f "$GATEWAY_CONTROL_KEY" ]; then
+  echo "== generating gateway control key at $GATEWAY_CONTROL_KEY =="
+  mkdir -p "$(dirname "$GATEWAY_CONTROL_KEY")"
+  ( umask 077
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+      -out "$GATEWAY_CONTROL_KEY"
+  )
 fi
 
 # Cloudflare token (optional): from env or $SECRETS_DIR/.env.
@@ -98,6 +134,15 @@ wrap_ssh "$GATEWAY_UPSTREAM_KEY" > "$TMP/up.json"; put_version "$id" "$TMP/up.js
 
 id=$(ensure_secret oidc-signing-key opaque)
 put_version "$id" "$OIDC_SIGNING_KEY"
+
+id=$(ensure_secret node-control-ca-cert opaque)
+put_version "$id" "$NODE_CA_CERT"
+
+id=$(ensure_secret node-control-ca-key opaque)
+put_version "$id" "$NODE_CA_KEY"
+
+id=$(ensure_secret gateway-control-key opaque)
+put_version "$id" "$GATEWAY_CONTROL_KEY"
 
 if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
   id=$(ensure_secret cloudflare-api-token opaque)

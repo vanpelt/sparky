@@ -196,7 +196,7 @@ func (h *Handler) serve(_ context.Context, conn *websocket.Conn, name string, lo
 	// Detached from the request: after a hijack the server no longer cancels
 	// r.Context(), so it is not a liveness signal, and the socket itself is.
 	startCtx, stopStart := context.WithTimeout(context.Background(), startTimeout)
-	box, err := h.mgr.EnsureRunning(startCtx, name)
+	box, err := host.Prepare(startCtx, h.mgr, name)
 	stopStart()
 	if err != nil {
 		log.Warn("terminal resume failed", "err", err)
@@ -207,7 +207,7 @@ func (h *Handler) serve(_ context.Context, conn *websocket.Conn, name string, lo
 	// Deferred, never periodic: LastActive is what the idle reaper reads, and
 	// refreshing it on a timer would turn a forgotten tab into a permanently
 	// pinned VM. See touch() for the one throttled exception.
-	defer h.mgr.Touch(name)
+	defer h.mgr.MarkActive(name)
 
 	// The session context is cancelled by exactly one thing — the gateway
 	// hanging this terminal up because the sandbox is going away — and its only
@@ -370,7 +370,7 @@ func (h *Handler) touch(name string, last time.Time) time.Time {
 	if now.Sub(last) < touchInterval {
 		return last
 	}
-	h.mgr.Touch(name)
+	h.mgr.MarkActive(name)
 	return now
 }
 

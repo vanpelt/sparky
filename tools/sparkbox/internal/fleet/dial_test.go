@@ -21,6 +21,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // dialingNode is a machine whose guests can actually be reached, which fakeNode
@@ -39,6 +40,7 @@ type dialingNode struct {
 	dials  atomic.Int64
 	asked  atomic.Value // the last (sandbox, kind, port) it was asked for
 	failed error
+	first  error
 }
 
 type dialAsk struct {
@@ -55,6 +57,9 @@ func (n *dialingNode) DialGuest(ctx context.Context, sandbox, kind string, port 
 	n.record("dial")
 	n.dials.Add(1)
 	n.asked.Store(dialAsk{sandbox: sandbox, kind: kind, port: port})
+	if n.first != nil && n.dials.Load() == 1 {
+		return nil, n.first
+	}
 	if n.failed != nil {
 		return nil, n.failed
 	}
@@ -94,8 +99,14 @@ func newDialRig(t *testing.T) *dialRig {
 	t.Cleanup(backend.Close)
 
 	mgr := newManager(t, host.Options{})
-	f := newFleet(t, mgr, newIndex(t))
+	index := newIndex(t)
+	f := newFleet(t, mgr, index)
 	n := newDialingNode("boxb", strings.TrimPrefix(backend.URL, "http://"))
+	n.boxes = []*host.Sandbox{{
+		Name: "demo", Owner: "alice", Node: "boxb", State: vmm.StateRunning,
+		HostIP: fleet.Host("demo", "boxb"),
+	}}
+	place(t, index, "demo", "alice", "boxb")
 	attachDialer(t, f, n)
 	return &dialRig{fleet: f, node: n, served: served, backend: backend}
 }
@@ -447,5 +458,44 @@ func TestADialFailureFromTheMachineIsNotRewritten(t *testing.T) {
 	_, err := rig.fleet.DialContext(context.Background(), "tcp", net.JoinHostPort(fleet.Host("demo", "boxb"), "80"))
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want the machine's own answer", err)
+	}
+}
+
+func TestAStoppedGuestIsResumedAndDialedOnceMore(t *testing.T) {
+	rig := newDialRig(t)
+	rig.node.first = nodelink.ErrNotRunning
+	rig.node.stopped("demo", vmm.StatePaused)
+
+	conn, err := rig.fleet.DialContext(
+		context.Background(), "tcp", net.JoinHostPort(fleet.Host("demo", "boxb"), "80"),
+	)
+	if err != nil {
+		t.Fatalf("DialContext: %v", err)
+	}
+	conn.Close()
+	if got := rig.node.dials.Load(); got != 2 {
+		t.Fatalf("dial attempts = %d, want failed dial + one retry", got)
+	}
+	if got := rig.node.count("ensure_running"); got != 1 {
+		t.Fatalf("ensure operations = %d, want 1", got)
+	}
+}
+
+func TestNoResumeDialNeverWakesAStoppedGuest(t *testing.T) {
+	rig := newDialRig(t)
+	rig.node.first = nodelink.ErrNotRunning
+	rig.node.stopped("demo", vmm.StatePaused)
+
+	_, err := rig.fleet.DialContextNoResume(
+		context.Background(), "tcp", net.JoinHostPort(fleet.Host("demo", "boxb"), "80"),
+	)
+	if !nodelink.IsNotRunning(err) {
+		t.Fatalf("DialContextNoResume error = %v, want the node's not-running refusal", err)
+	}
+	if got := rig.node.dials.Load(); got != 1 {
+		t.Fatalf("dial attempts = %d, want exactly the non-waking attempt", got)
+	}
+	if got := rig.node.count("ensure_running"); got != 0 {
+		t.Fatalf("ensure operations = %d, background no-resume work woke the sandbox", got)
 	}
 }

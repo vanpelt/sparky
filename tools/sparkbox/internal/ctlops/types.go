@@ -88,6 +88,18 @@ type NodeInfo struct {
 	ApprovedBy string     `json:"approved_by,omitempty"`
 	ApprovedAt *time.Time `json:"approved_at,omitempty"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`
+	// GuestSubnet and GRPCAddr are operator-approved topology, not values a
+	// node is allowed to rewrite when it reports status. They are shown here
+	// because this operator-only listing is the place to audit what the
+	// gateway will route and dial.
+	GuestSubnet string `json:"guest_subnet,omitempty"`
+	GRPCAddr    string `json:"grpc_addr,omitempty"`
+	// Certificate metadata describes the one current node-control credential.
+	// A rotated certificate replaces these fields; a revoked one remains
+	// visible so an operator can tell "never issued" from "withdrawn".
+	CertSerial    string     `json:"cert_serial,omitempty"`
+	CertExpiresAt *time.Time `json:"cert_expires_at,omitempty"`
+	CertRevokedAt *time.Time `json:"cert_revoked_at,omitempty"`
 }
 
 type Whoami struct {
@@ -189,4 +201,16 @@ type ScheduleArgs struct {
 	Sandbox string
 	Spec    string
 	Command string
+}
+
+// NodeApprovalConfig is the trusted topology an operator supplies while
+// approving a node. GuestSubnet is required by configured fleet rosters;
+// GRPCAddr is optional while a mixed SSH/gRPC fleet is migrating.
+//
+// GatewayGuestSubnet is deliberately absent: it is process configuration,
+// never an operator-controlled command argument. Ops adds it immediately
+// before the atomic roster write.
+type NodeApprovalConfig struct {
+	GuestSubnet string
+	GRPCAddr    string
 }

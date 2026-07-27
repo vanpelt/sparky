@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	nodev1 "github.com/vanpelt/sparky/tools/sparkbox/api/node/v1"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/grpcidentity"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
@@ -24,6 +26,9 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	_ "modernc.org/sqlite"
 )
@@ -400,5 +405,100 @@ func TestRelayErrorKeepsTheUnderlyingCause(t *testing.T) {
 	got := relayError(nodelink.ErrNoLink)
 	if !errors.Is(got, nodelink.ErrNoLink) {
 		t.Errorf("err = %v, want the transport cause preserved for the node's own log", got)
+	}
+}
+
+type relayGRPCFailure struct {
+	code  codes.Code
+	calls int
+}
+
+func (f *relayGRPCFailure) IssueToken(context.Context, *nodev1.IssueTokenRequest, ...grpc.CallOption) (*nodev1.IssueTokenResponse, error) {
+	f.calls++
+	return nil, status.Error(f.code, "identity RPC failed")
+}
+
+func (f *relayGRPCFailure) DescribeIdentity(context.Context, *nodev1.DescribeIdentityRequest, ...grpc.CallOption) (*nodev1.IdentityDescription, error) {
+	f.calls++
+	return nil, status.Error(f.code, "identity RPC failed")
+}
+
+func TestIdentityRelayFallsBackToSSHOnlyForGRPCTransportFailure(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	box := &host.Sandbox{Name: "alpha"}
+	for _, test := range []struct {
+		name      string
+		code      codes.Code
+		wantSSH   bool
+		wantClass error
+	}{
+		{name: "transport unavailable", code: codes.Unavailable, wantSSH: true, wantClass: metadata.ErrNoIssuer},
+		{name: "authorization refused", code: codes.PermissionDenied},
+		{name: "audience refused", code: codes.InvalidArgument, wantClass: metadata.ErrAudience},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := &relayGRPCFailure{code: test.code}
+			client, err := grpcidentity.WrapClient(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			relay := newRelayIdentity(nodelink.NewUplink(), "auto", log)
+			relay.setGRPC(client)
+			defer relay.Close()
+
+			_, err = relay.Issue(context.Background(), box, "aud")
+			if raw.calls != 1 {
+				t.Fatalf("gRPC calls = %d, want 1", raw.calls)
+			}
+			if got := errors.Is(err, nodelink.ErrNoLink); got != test.wantSSH {
+				t.Fatalf("SSH fallback = %t, want %t (error %v)", got, test.wantSSH, err)
+			}
+			if test.wantClass != nil && !errors.Is(err, test.wantClass) {
+				t.Fatalf("error = %v, want class %v", err, test.wantClass)
+			}
+		})
+	}
+}
+
+type trackedIdentityClient struct {
+	token  string
+	closed bool
+}
+
+func (c *trackedIdentityClient) Issue(context.Context, *host.Sandbox, string) (metadata.Token, error) {
+	return metadata.Token{JWT: c.token}, nil
+}
+
+func (c *trackedIdentityClient) Describe(context.Context, *host.Sandbox) (metadata.Doc, error) {
+	return metadata.Doc{Subject: c.token}, nil
+}
+
+func (c *trackedIdentityClient) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestIdentityRelayReplacesClientAfterCertificateRenewal(t *testing.T) {
+	relay := newRelayIdentity(
+		nodelink.NewUplink(), "auto",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	first := &trackedIdentityClient{token: "old-leaf"}
+	second := &trackedIdentityClient{token: "renewed-leaf"}
+	relay.setGRPC(first)
+	relay.setGRPC(second) // configureGRPC does this after every certificate load.
+	if !first.closed {
+		t.Fatal("replacing the identity client left the old certificate connection open")
+	}
+	token, err := relay.Issue(context.Background(), &host.Sandbox{Name: "alpha"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.JWT != "renewed-leaf" {
+		t.Fatalf("token = %q, want client built from renewed leaf", token.JWT)
+	}
+	relay.Close()
+	if !second.closed {
+		t.Fatal("relay shutdown left the renewed identity client open")
 	}
 }

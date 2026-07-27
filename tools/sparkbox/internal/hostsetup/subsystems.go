@@ -5,6 +5,9 @@ import (
 	"net"
 	"strconv"
 	"strings"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodecert"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodepki"
 )
 
 // The optional `sparkbox serve` subsystems setup can turn on.
@@ -20,11 +23,6 @@ import (
 // unit carries, and one validator that refuses the combinations `serve` would
 // only reject at boot (where the failure reads as a crash loop rather than as a
 // typo).
-
-// guestSubnet is the sandbox address space deploy/sparkbox-net.sh masquerades
-// and firecracker carves the per-VM /30s out of. Named here because checkNAT
-// asserts the MASQUERADE rule by matching on it.
-const guestSubnet = "172.30.0.0/16"
 
 // optionalFlags renders the settings above into one "--flag value" line per
 // setting for the unit's line-continued ExecStart, in a FIXED order.
@@ -75,6 +73,12 @@ func optionalFlags(c Config) []string {
 // up green and does not do the thing they asked for. Refusing here is the only
 // place that can tell them.
 func validateSubsystems(cfg Config) error {
+	if _, err := NormalizeGuestSubnet(cfg.GuestSubnet); err != nil {
+		return fmt.Errorf("invalid --guest-subnet: %w", err)
+	}
+	if err := ValidateTransportConfig(cfg); err != nil {
+		return err
+	}
 	// Everything below is templated into ExecStart as a bare word. Whitespace
 	// would not reach the daemon as one argument — it would become extra
 	// arguments and the service would die on an opaque flag-parse error at boot.
@@ -149,6 +153,170 @@ func validateSubsystems(cfg Config) error {
 		return fmt.Errorf("invalid --edge-ip %q: expected a bare IP address to give the edge its own /32 (e.g. 10.66.0.1)", cfg.EdgeIP)
 	}
 	return nil
+}
+
+// ValidateTransportConfig rejects control/data combinations setup would
+// otherwise persist into a service that either ignores them or fails only at
+// boot. Exported so the command layer can report these mistakes before
+// provisioning begins; Provision calls it again through validateSubsystems.
+func ValidateTransportConfig(cfg Config) error {
+	control := strings.TrimSpace(cfg.NodeControlTransport)
+	if control == "" {
+		control = "auto"
+	} else if control != cfg.NodeControlTransport {
+		return fmt.Errorf("invalid --node-control-transport=%q: whitespace is not allowed", cfg.NodeControlTransport)
+	}
+	data := strings.TrimSpace(cfg.GuestDataTransport)
+	if data == "" {
+		data = "auto"
+	} else if data != cfg.GuestDataTransport {
+		return fmt.Errorf("invalid --guest-data-transport=%q: whitespace is not allowed", cfg.GuestDataTransport)
+	}
+	rollout := strings.TrimSpace(cfg.NodeControlRollout)
+	if rollout == "" {
+		rollout = "inherit"
+	} else if rollout != cfg.NodeControlRollout {
+		return fmt.Errorf("invalid --node-control-rollout=%q: whitespace is not allowed", cfg.NodeControlRollout)
+	}
+	switch control {
+	case "auto", "ssh", "grpc":
+	default:
+		return fmt.Errorf("--node-control-transport=%q is invalid (expected auto|ssh|grpc)",
+			cfg.NodeControlTransport)
+	}
+	switch data {
+	case "auto", "ssh", "routed":
+	default:
+		return fmt.Errorf("--guest-data-transport=%q is invalid (expected auto|ssh|routed)",
+			cfg.GuestDataTransport)
+	}
+	switch rollout {
+	case "inherit", "shadow", "read-only", "idempotent", "grpc":
+	default:
+		return fmt.Errorf("--node-control-rollout=%q is invalid (expected inherit|shadow|read-only|idempotent|grpc)",
+			cfg.NodeControlRollout)
+	}
+	if control == "ssh" && data == "routed" {
+		return fmt.Errorf("--guest-data-transport=routed requires gRPC node control for authoritative guest addresses")
+	}
+	if rollout != "inherit" {
+		if cfg.Gateway != "" {
+			return fmt.Errorf("--node-control-rollout=%s has no effect on a fleet node; the gateway owns transport selection", rollout)
+		}
+		if control == "ssh" {
+			return fmt.Errorf("--node-control-rollout=%s requires --node-control-transport=auto|grpc", rollout)
+		}
+	}
+	if cfg.RoutedGuestCanaryPercent < 0 || cfg.RoutedGuestCanaryPercent > 100 {
+		return fmt.Errorf("--routed-guest-canary-percent=%d is invalid (expected 0..100)",
+			cfg.RoutedGuestCanaryPercent)
+	}
+	canaryConfigured := cfg.RoutedGuestCanaryExplicit ||
+		cfg.flagGiven("routed-guest-canary-percent") ||
+		(cfg.RoutedGuestCanaryPercent != 0 && cfg.RoutedGuestCanaryPercent != 100)
+	if canaryConfigured && cfg.RoutedGuestCanaryPercent != 100 {
+		if cfg.Gateway != "" {
+			return fmt.Errorf("--routed-guest-canary-percent has no effect on a fleet node; the gateway owns routing selection")
+		}
+		if data != "auto" {
+			return fmt.Errorf("--routed-guest-canary-percent requires --guest-data-transport=auto")
+		}
+		if control == "ssh" {
+			return fmt.Errorf("--routed-guest-canary-percent requires --node-control-transport=auto|grpc")
+		}
+	}
+
+	grpcAddr := strings.TrimSpace(cfg.NodeGRPCAddr)
+	if grpcAddr != "" {
+		if grpcAddr != cfg.NodeGRPCAddr {
+			return fmt.Errorf("invalid --node-grpc-addr %q: whitespace is not allowed", cfg.NodeGRPCAddr)
+		}
+		if cfg.Gateway == "" {
+			return fmt.Errorf("--node-grpc-addr has no effect on a gateway; approve each node's gRPC address instead")
+		}
+		if control == "ssh" {
+			return fmt.Errorf("--node-grpc-addr has no effect with --node-control-transport=ssh")
+		}
+		host, port, err := net.SplitHostPort(grpcAddr)
+		if err != nil || strings.TrimSpace(host) == "" || port == "" {
+			return fmt.Errorf("invalid --node-grpc-addr %q: expected a concrete tailnet host:port", cfg.NodeGRPCAddr)
+		}
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return fmt.Errorf("invalid --node-grpc-addr %q: expected a numeric port from 1 to 65535", cfg.NodeGRPCAddr)
+		}
+	}
+	if cfg.Gateway != "" && control == "grpc" && grpcAddr == "" {
+		return fmt.Errorf("--node-control-transport=grpc requires --node-grpc-addr on a fleet node")
+	}
+
+	gatewayGRPCAddr := strings.TrimSpace(cfg.GatewayGRPCAddr)
+	if gatewayGRPCAddr != "" {
+		if gatewayGRPCAddr != cfg.GatewayGRPCAddr {
+			return fmt.Errorf("invalid --gateway-grpc-addr %q: whitespace is not allowed", cfg.GatewayGRPCAddr)
+		}
+		if cfg.Gateway != "" {
+			return fmt.Errorf("--gateway-grpc-addr has no effect on a fleet node; it is a gateway identity listener")
+		}
+		if control == "ssh" {
+			return fmt.Errorf("--gateway-grpc-addr has no effect with --node-control-transport=ssh")
+		}
+		host, port, err := net.SplitHostPort(gatewayGRPCAddr)
+		if err != nil || strings.TrimSpace(host) == "" || port == "" {
+			return fmt.Errorf("invalid --gateway-grpc-addr %q: expected a concrete tailnet host:port", cfg.GatewayGRPCAddr)
+		}
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return fmt.Errorf("invalid --gateway-grpc-addr %q: expected a numeric port from 1 to 65535", cfg.GatewayGRPCAddr)
+		}
+	}
+
+	clusterID := strings.TrimSpace(cfg.ClusterID)
+	if clusterID != "" {
+		if cfg.Gateway != "" {
+			return fmt.Errorf("--cluster-id has no effect on a fleet node; its identity comes from --node-name")
+		}
+		if strings.ContainsAny(clusterID, " \t\n") {
+			return fmt.Errorf("invalid --cluster-id %q: whitespace is not allowed", cfg.ClusterID)
+		}
+		if _, err := nodecert.Identity(nodecert.RoleGateway, clusterID); err != nil {
+			return fmt.Errorf("invalid --cluster-id %q: expected a stable SPIFFE-safe name", cfg.ClusterID)
+		}
+	}
+	return nil
+}
+
+// NormalizeTransportConfig validates role/mode combinations and canonicalizes
+// concrete gRPC listeners exactly as serve does. Persisting the normalized
+// host:port keeps setup, systemd port preflight, enrollment metadata and the
+// runtime listener on one spelling.
+func NormalizeTransportConfig(cfg Config) (Config, error) {
+	if err := ValidateTransportConfig(cfg); err != nil {
+		return cfg, err
+	}
+	if cfg.NodeControlTransport == "" {
+		cfg.NodeControlTransport = "auto"
+	}
+	if cfg.NodeControlRollout == "" {
+		cfg.NodeControlRollout = "inherit"
+	}
+	if cfg.GuestDataTransport == "" {
+		cfg.GuestDataTransport = "auto"
+	}
+	var err error
+	if cfg.NodeGRPCAddr != "" {
+		cfg.NodeGRPCAddr, err = nodepki.NormalizeGRPCAddr(cfg.NodeGRPCAddr)
+		if err != nil {
+			return cfg, fmt.Errorf("--node-grpc-addr: %w", err)
+		}
+	}
+	if cfg.GatewayGRPCAddr != "" {
+		cfg.GatewayGRPCAddr, err = nodepki.NormalizeGRPCAddr(cfg.GatewayGRPCAddr)
+		if err != nil {
+			return cfg, fmt.Errorf("--gateway-grpc-addr: %w", err)
+		}
+	}
+	return cfg, nil
 }
 
 // validateSluice rejects --sluice combinations that would install a daemon

@@ -852,6 +852,33 @@ func TestInnerSetupArgs(t *testing.T) {
 			wantPairs: [][2]string{{"--tls-email", "ops@example.test"}, {"--edge-ip", "10.66.0.1"}},
 		},
 		{
+			name: "typed fleet transport flags are forwarded",
+			cfg: func(c Config) Config {
+				c.NodeControlTransport = "grpc"
+				c.NodeControlRollout = "read-only"
+				c.GatewayGRPCAddr = "100.64.0.10:9444"
+				c.GuestDataTransport = "auto"
+				c.RoutedGuestCanaryPercent = 25
+				c.ClusterID = "prod-a"
+				for _, name := range []string{
+					"node-control-transport", "node-control-rollout",
+					"gateway-grpc-addr", "guest-data-transport",
+					"routed-guest-canary-percent", "cluster-id",
+				} {
+					c.FlagsGiven[name] = true
+				}
+				return c
+			},
+			wantPairs: [][2]string{
+				{"--node-control-transport", "grpc"},
+				{"--node-control-rollout", "read-only"},
+				{"--gateway-grpc-addr", "100.64.0.10:9444"},
+				{"--guest-data-transport", "auto"},
+				{"--routed-guest-canary-percent", "25"},
+				{"--cluster-id", "prod-a"},
+			},
+		},
+		{
 			name: "a refused flag is an error, not a silent drop",
 			cfg: func(c Config) Config {
 				c.MoveAdminSSH = true
@@ -1257,7 +1284,7 @@ func TestWaitExecReadyRetriesOnlyTheTransport(t *testing.T) {
 func TestLinuxStepsUnchanged(t *testing.T) {
 	want := []string{
 		"swapfile", "resolve-release", "install-binary", "data-volume", "fetch-artifacts",
-		"users.conf", "host-config", "net-rules", "sluice", "agent-tools", "systemd-units", "admin-ssh", "enable-services",
+		"users.conf", "host-config", "tailscale-routes", "net-rules", "sluice", "agent-tools", "systemd-units", "admin-ssh", "enable-services",
 	}
 	var got []string
 	for _, s := range allSteps() {

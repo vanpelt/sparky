@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/opidentity"
 )
 
 // The Idempotency-Key replay cache.
@@ -21,9 +23,11 @@ import (
 // remember the response, replay it verbatim, and refuse a key that arrives with
 // a different request.
 //
-// It is in memory and unreplicated, which matches the jobs registry and is
-// honest for a single-process control plane: a restart forgets both, and a
-// restart also killed whatever the key was protecting.
+// Response replay is in memory and unreplicated. Node mutation safety does not
+// depend on that cache: the authenticated handle and key also derive the stable
+// operation identity propagated through ctlops to the node journal, so a retry
+// after gateway restart reattaches rather than executing twice. Non-node
+// mutations still rely on this process-local response cache.
 const (
 	// idempotencyRetain is how long a key is remembered. 24 hours is the
 	// interval the IETF draft suggests and comfortably outlives any client's
@@ -128,8 +132,20 @@ func (rc *replayCache) wrap(next http.Handler) http.Handler {
 		// with that key, including a plain retry of the same call, 409
 		// idempotency_key_in_flight until it expires a day later.
 		defer rc.settle(id, rec)
-		next.ServeHTTP(rec, r)
+		next.ServeHTTP(rec, r.WithContext(opidentity.WithContext(
+			r.Context(), durableRequestIdentity(caller(r).Handle, key),
+		)))
 	})
+}
+
+func durableRequestIdentity(handle, key string) opidentity.Identity {
+	sum := sha256.Sum256([]byte("sparkbox-rest-operation-v1\x00" + handle + "\x00" + key))
+	stable := hex.EncodeToString(sum[:])
+	return opidentity.Identity{
+		OperationID:    "rest-" + stable,
+		IdempotencyKey: "rest-" + stable,
+		Initiator:      handle,
+	}
 }
 
 type verdict int

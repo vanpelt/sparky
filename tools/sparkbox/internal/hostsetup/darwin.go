@@ -896,7 +896,7 @@ func (e *Env) printConnectDarwin() {
 		e.logf("\n== sparkbox fleet node is provisioned (in machine %s) ==\n", name)
 		e.logf("  node:               %s\n", node)
 		e.logf("  gateway:            %s\n", e.Cfg.Gateway)
-		e.logf("  approve at gateway: ssh ctl@<gateway> node approve <SHA256:...>\n")
+		e.logf("  approve at gateway: %s\n", nodeApprovalCommand(e.Cfg))
 		e.logf("  health check:       sparkbox doctor --gateway %s\n", e.Cfg.Gateway)
 		e.logf("  logs:               %s machine run --name %s --root -- journalctl -u sparkbox -f\n",
 			e.Cfg.containerBin(), name)

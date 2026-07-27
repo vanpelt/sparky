@@ -17,7 +17,7 @@ func TestTapName(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		"172.30.5.2":  {"sbtap5", true},
+		"172.30.5.2":  {"sbtap320", true},
 		"172.30.0.2":  {"sbtap0", true},
 		"172.30.5.1":  {"", false}, // gateway, not guest
 		"127.0.0.1":   {"", false}, // mock driver
@@ -30,6 +30,52 @@ func TestTapName(t *testing.T) {
 		if got != want.want || ok != want.ok {
 			t.Errorf("TapName(%q) = (%q,%v), want (%q,%v)", in, got, ok, want.want, want.ok)
 		}
+	}
+}
+
+func TestTapNameForConfiguredSubnet(t *testing.T) {
+	tests := []struct {
+		subnet, addr string
+		want         string
+		ok           bool
+	}{
+		{"10.44.16.0/20", "10.44.16.2", "sbtap0", true},
+		{"10.44.16.0/20", "10.44.17.6", "sbtap65", true},
+		{"10.44.16.0/20", "10.44.17.5", "", false},
+		{"10.44.16.0/20", "172.30.0.2", "", false},
+		{"bad", "10.44.16.2", "", false},
+	}
+	for _, test := range tests {
+		got, ok := TapNameForSubnet(test.subnet, test.addr)
+		if got != test.want || ok != test.ok {
+			t.Errorf("TapNameForSubnet(%q, %q) = (%q,%v), want (%q,%v)",
+				test.subnet, test.addr, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestSyncerUsesConfiguredSubnet(t *testing.T) {
+	var got policyBody
+	client := unixSluice(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	syncer, err := NewSyncerForSubnet(
+		client,
+		fakeFleet{boxes: []Sandbox{{Name: "ci-box", Owner: "alice", HostIP: "10.44.17.6"}}},
+		fakeRules{"alice/ci-box": {"github.com"}},
+		"10.44.16.9/20",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncer.Push(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{"sbtap65": {"github.com"}}
+	if !reflect.DeepEqual(got.Taps, want) {
+		t.Fatalf("configured-subnet taps = %#v, want %#v", got.Taps, want)
 	}
 }
 
@@ -97,8 +143,8 @@ func TestPushSendsFullFleetPolicy(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	want := map[string][]string{
-		"sbtap5": {"github.com"},
-		"sbtap6": {"huggingface.co"},
+		"sbtap320": {"github.com"},
+		"sbtap384": {"huggingface.co"},
 	}
 	if !reflect.DeepEqual(got.Taps, want) {
 		t.Errorf("pushed taps = %v, want %v", got.Taps, want)
@@ -130,25 +176,25 @@ func TestPushOmitsUngovernedButSendsGovernedDenyAll(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	want := map[string][]string{
-		"sbtap5": {"github.com"},
-		"sbtap6": {}, // deny-all still pushed, so sluice enforces (drops) it
+		"sbtap320": {"github.com"},
+		"sbtap384": {}, // deny-all still pushed, so sluice enforces (drops) it
 	}
 	if !reflect.DeepEqual(got.Taps, want) {
 		t.Errorf("pushed taps = %#v, want %#v (untagged VM must be omitted)", got.Taps, want)
 	}
-	if _, ok := got.Taps["sbtap7"]; ok {
-		t.Error("ungoverned VM sbtap7 must not appear in the policy")
+	if _, ok := got.Taps["sbtap448"]; ok {
+		t.Error("ungoverned VM sbtap448 must not appear in the policy")
 	}
 }
 
 func TestUsageAttributesTapsToVMsAndFiltersByOwner(t *testing.T) {
 	rep := Report{Taps: []TapUsage{
-		{Tap: "sbtap5", TxBytes: 100, RxBytes: 900, Domains: []DomainUsage{
+		{Tap: "sbtap320", TxBytes: 100, RxBytes: 900, Domains: []DomainUsage{
 			{Domain: "github.com", TxBytes: 10, RxBytes: 90},
 			{Domain: "youtube.com", TxBytes: 90, RxBytes: 810},
 		}},
-		{Tap: "sbtap9", TxBytes: 5, RxBytes: 5, Domains: nil}, // bob's box
-		{Tap: "sbtap42", TxBytes: 1, RxBytes: 1},              // no current VM
+		{Tap: "sbtap576", TxBytes: 5, RxBytes: 5, Domains: nil}, // bob's box
+		{Tap: "sbtap42", TxBytes: 1, RxBytes: 1},                // no current VM
 	}}
 	client := unixSluice(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(rep) //nolint:errcheck
@@ -195,7 +241,7 @@ func TestNilClientIsNoOp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // Resolve is the half a GATEWAY runs for a sandbox it does not hold: it must
-// answer in names, because tap indices are assigned per machine and sbtap5 on
+// answer in names, because tap indices are assigned per machine and sbtap320 on
 // one is a different person's VM on another.
 func TestResolveKeysByNameAndKeepsTheGovernedDistinction(t *testing.T) {
 	fleet := fakeFleet{boxes: []Sandbox{
@@ -256,7 +302,7 @@ func TestApplyResolvesNamesToThisMachinesOwnTaps(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := map[string][]string{"sbtap9": {"github.com"}, "sbtap3": {}}
+	want := map[string][]string{"sbtap576": {"github.com"}, "sbtap192": {}}
 	if !reflect.DeepEqual(got.Taps, want) {
 		t.Errorf("applied taps = %v, want %v", got.Taps, want)
 	}
@@ -281,7 +327,7 @@ func TestPushIsResolveThenApply(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if want := (map[string][]string{"sbtap5": {"github.com"}}); !reflect.DeepEqual(got.Taps, want) {
+	if want := (map[string][]string{"sbtap320": {"github.com"}}); !reflect.DeepEqual(got.Taps, want) {
 		t.Errorf("pushed taps = %v, want %v", got.Taps, want)
 	}
 }

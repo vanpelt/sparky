@@ -341,7 +341,9 @@ func (fs *fleetStack) boot(t *testing.T) {
 	// /etc/environment and a passwordless sudo. Redirecting it is what lets a
 	// test read the file a delivery actually wrote.
 	syncer := envsync.New(fs.secrets, flt, fs.upstreamKey, fs.log)
-	syncer.SetDialer(flt.DialContext)
+	// Match production: a delayed environment push racing a pause must not
+	// become a new user-visible wake-up source.
+	syncer.SetDialer(flt.DialContextNoResume)
 	syncer.SetGuestTarget("environment", "sh")
 	fs.mgr.SetEnvSync(syncer)
 	flt.SetEnvPusher(syncer)
@@ -552,7 +554,10 @@ func (fs *fleetStack) join(t *testing.T, n *nodeSide) (unplug func()) {
 	if err != nil {
 		t.Fatalf("reading the pending row for %s: %v", n.name, err)
 	}
-	if err := fs.roster.ApproveFP(row.FP, "tester"); err != nil {
+	if err := fs.roster.ApproveFPWithConfig(row.FP, "tester", nodes.ApprovalConfig{
+		GuestSubnet:        "172.30.0.0/16",
+		GatewayGuestSubnet: "10.200.0.0/20",
+	}); err != nil {
 		t.Fatalf("approving %s: %v", n.name, err)
 	}
 	fs.awaitLink(t, n)
@@ -1143,9 +1148,13 @@ func TestFleetSurvivesGatewayRestart(t *testing.T) {
 	// node-b reconnects, with no ceremony: its approval is a durable row.
 	fs.relink(t, node)
 
-	waitFor(t, "the gateway to reconcile node-b's inventory", func() bool {
+	waitFor(t, "the gateway to reconcile node-b's inventory and adopt its new sandbox", func() bool {
 		b, ok := fs.flt.Get("far-away")
-		return ok && !b.Unreachable
+		if !ok || b.Unreachable {
+			return false
+		}
+		_, adopted, err := fs.index.Get("made-offline")
+		return err == nil && adopted
 	})
 	// The row was never released and never re-marked: it is the same placement
 	// it was before the restart.

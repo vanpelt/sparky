@@ -23,7 +23,86 @@ const (
 	SessionTokenMaxTTL = 7 * 24 * time.Hour
 	// DefaultSessionTokenTTL is what a caller who names no TTL gets.
 	DefaultSessionTokenTTL = 12 * time.Hour
+
+	nodeApproveUsage = "Usage: node approve <fingerprint> --guest-subnet <CIDR> [--grpc-addr <host:port>]."
 )
+
+// ParseNodeApprovalArgs parses the words after `node approve`. Keeping this
+// grammar beside NodeApprovalConfig lets every command transport accept the
+// same two flag forms and, importantly, makes the explicit subnet requirement
+// impossible to omit at the operator surface.
+func ParseNodeApprovalArgs(args []string) (string, NodeApprovalConfig, error) {
+	const op = "nodes.approve"
+	if len(args) == 0 || strings.HasPrefix(args[0], "--") {
+		return "", NodeApprovalConfig{}, &Error{
+			Kind: KindInvalid, Op: op, Code: "missing_fingerprint",
+			Msg: "a node fingerprint is required.", Hint: nodeApproveUsage, Verbatim: true,
+		}
+	}
+	fp := args[0]
+	var cfg NodeApprovalConfig
+	seenSubnet, seenGRPC := false, false
+
+	for i := 1; i < len(args); i++ {
+		word := args[i]
+		flag, value, attached := strings.Cut(word, "=")
+		switch flag {
+		case "--guest-subnet":
+			if seenSubnet {
+				return "", NodeApprovalConfig{}, nodeApproveUsageError(
+					"duplicate_guest_subnet", "--guest-subnet may be specified only once")
+			}
+			seenSubnet = true
+			if !attached {
+				i++
+				if i >= len(args) || strings.HasPrefix(args[i], "--") {
+					return "", NodeApprovalConfig{}, nodeApproveUsageError(
+						"missing_guest_subnet", "--guest-subnet requires an IPv4 CIDR")
+				}
+				value = args[i]
+			}
+			if strings.TrimSpace(value) == "" {
+				return "", NodeApprovalConfig{}, nodeApproveUsageError(
+					"missing_guest_subnet", "--guest-subnet requires an IPv4 CIDR")
+			}
+			cfg.GuestSubnet = value
+		case "--grpc-addr":
+			if seenGRPC {
+				return "", NodeApprovalConfig{}, nodeApproveUsageError(
+					"duplicate_grpc_addr", "--grpc-addr may be specified only once")
+			}
+			seenGRPC = true
+			if !attached {
+				i++
+				if i >= len(args) || strings.HasPrefix(args[i], "--") {
+					return "", NodeApprovalConfig{}, nodeApproveUsageError(
+						"missing_grpc_addr", "--grpc-addr requires host:port")
+				}
+				value = args[i]
+			}
+			if strings.TrimSpace(value) == "" {
+				return "", NodeApprovalConfig{}, nodeApproveUsageError(
+					"missing_grpc_addr", "--grpc-addr requires host:port")
+			}
+			cfg.GRPCAddr = value
+		default:
+			return "", NodeApprovalConfig{}, nodeApproveUsageError(
+				"bad_node_approve_usage", fmt.Sprintf("unexpected node approval argument %q", word))
+		}
+	}
+	if !seenSubnet || strings.TrimSpace(cfg.GuestSubnet) == "" {
+		return "", NodeApprovalConfig{}, nodeApproveUsageError(
+			"missing_guest_subnet", "--guest-subnet <CIDR> is required")
+	}
+	return fp, cfg, nil
+}
+
+func nodeApproveUsageError(code, message string) *Error {
+	return &Error{
+		Kind: KindInvalid, Op: "nodes.approve", Code: code,
+		Msg: message, Hint: nodeApproveUsage, Verbatim: true,
+	}
+}
 
 // ParseSize reads a human disk size into MiB: "25G"/"25GB"/"25g" and
 // "512M"/"512MB", or a bare number, which is taken as GB because that is the

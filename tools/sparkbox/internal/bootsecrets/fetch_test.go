@@ -53,10 +53,16 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 	const hostPEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nHOST\n-----END OPENSSH PRIVATE KEY-----\n"
 	const upstreamPEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nUP\n-----END OPENSSH PRIVATE KEY-----\n"
 	const oidcPEM = "-----BEGIN PRIVATE KEY-----\nOIDC\n-----END PRIVATE KEY-----\n"
+	const caCertPEM = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
+	const caKeyPEM = "-----BEGIN PRIVATE KEY-----\nCAKEY\n-----END PRIVATE KEY-----\n"
+	const controlKeyPEM = "-----BEGIN PRIVATE KEY-----\nCONTROL\n-----END PRIVATE KEY-----\n"
 	srv := fakeSM(t, map[string]struct{ payload, typ string }{
 		"/sparkbox/fleet/gateway-host-key":     sshSecret(hostPEM),
 		"/sparkbox/fleet/gateway-upstream-key": sshSecret(upstreamPEM),
 		"/sparkbox/fleet/oidc-signing-key":     {oidcPEM, "opaque"},
+		"/sparkbox/fleet/node-control-ca-cert": {caCertPEM, "opaque"},
+		"/sparkbox/fleet/node-control-ca-key":  {caKeyPEM, "opaque"},
+		"/sparkbox/fleet/gateway-control-key":  {controlKeyPEM, "opaque"},
 		"/sparkbox/fleet/cloudflare-api-token": {"cf-token", "opaque"},
 		"/sparkbox/fleet/console-password":     {`p@ss "with" quotes`, "opaque"},
 	})
@@ -72,6 +78,9 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 		"gateway_host_key.pem":     hostPEM,
 		"gateway_upstream_key.pem": upstreamPEM,
 		"oidc_signing_key.pem":     oidcPEM,
+		"node_ca_cert.pem":         caCertPEM,
+		"node_ca_key.pem":          caKeyPEM,
+		"gateway_control_key.pem":  controlKeyPEM,
 	} {
 		p := filepath.Join(c.KeyDir, name)
 		got, err := os.ReadFile(p)

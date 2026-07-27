@@ -29,6 +29,29 @@ type fakeRunner struct {
 	calls []string
 }
 
+func TestNodeApprovalCommandIncludesTrustedNetworkConfiguration(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Gateway = "gateway:2222"
+	cfg.GuestSubnet = "10.201.7.9/20"
+	cfg.NodeControlTransport = "auto"
+	cfg.NodeGRPCAddr = "100.64.0.20:9443"
+	got := nodeApprovalCommand(cfg)
+	for _, want := range []string{
+		"node approve <SHA256:...>",
+		"--guest-subnet 10.201.0.0/20",
+		"--grpc-addr 100.64.0.20:9443",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("approval command %q does not contain %q", got, want)
+		}
+	}
+
+	cfg.NodeControlTransport = "ssh"
+	if got := nodeApprovalCommand(cfg); strings.Contains(got, "--grpc-addr") {
+		t.Fatalf("SSH-only approval command advertised disabled gRPC: %q", got)
+	}
+}
+
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	f.calls = append(f.calls, key)
@@ -800,6 +823,8 @@ func TestStepEnvFileAddsMissingManagedKey(t *testing.T) {
 const dgxEnvFile = `# sparkbox host config
 PROXY_DOMAIN=catnip.sh
 PROXY_PORT=443
+SPARKBOX_GUEST_SUBNET=172.30.0.0/16
+GUEST_SUBNET_FLAG=--guest-subnet=172.30.0.0/16
 SPARKBOX_EDGE_IP=10.66.0.1
 SPARKBOX_EDGE_REDIRECT=0
 OVERCOMMIT_FLAGS=--mem-reserve-mb 1024

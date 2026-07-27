@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
@@ -46,7 +47,9 @@ type event struct {
 // and unbinds it when that link ends, so a node with no gateway does no work at
 // all per transition.
 type Emitter struct {
-	log *slog.Logger
+	log        *slog.Logger
+	metrics    *fleetmetrics.Registry
+	metricNode string
 
 	// resync carries "you missed something". One slot, because the answer to
 	// any number of dropped events is the same single inventory.
@@ -55,6 +58,14 @@ type Emitter struct {
 	mu   sync.Mutex
 	node string
 	q    chan event
+}
+
+// SetMetrics attaches the node's process registry. It is separate from
+// NewEmitter so existing manager wiring and tests remain source compatible.
+func (e *Emitter) SetMetrics(m *fleetmetrics.Registry, node string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.metrics, e.metricNode = m, node
 }
 
 // NewEmitter returns an emitter with no link. It is safe to install on a
@@ -123,6 +134,10 @@ func (e *Emitter) send(typ string, build func(node string) any) {
 	case q <- ev:
 	default:
 		e.log.Warn("nodelink: event queue full; asking the gateway to resync", "type", typ)
+		e.mu.Lock()
+		metrics, node := e.metrics, e.metricNode
+		e.mu.Unlock()
+		metrics.IncDropped(node, "ssh", "event")
 		e.markStale()
 	}
 }

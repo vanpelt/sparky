@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"golang.org/x/sync/singleflight"
 )
 
 // The compile assertions live here rather than beside the interfaces they
@@ -26,6 +28,7 @@ import (
 var (
 	_ ctlops.Sandboxes = (*Fleet)(nil)
 	_ ctlops.Templates = (*Fleet)(nil)
+	_ host.Accessor    = (*Fleet)(nil)
 	_ Node             = (*localNode)(nil)
 	// The shape ctlops type-asserts a sandbox store to when a create names a
 	// machine. It is restated rather than exported from there because that
@@ -45,10 +48,19 @@ var (
 // stingy because a `ctl pin` that hangs is worse than one that fails.
 const setPinnedBudget = 10 * time.Second
 
+const (
+	markActiveInterval = 10 * time.Second
+	markActiveBudget   = 5 * time.Second
+)
+
 type Options struct {
 	// Local is the gateway's own machine. Required: a fleet with nowhere to put
 	// the first sandbox is not a fleet.
 	Local *host.Manager
+	// Context owns shared remote restore/resume work. Request cancellation stops
+	// only that caller waiting; it must not abort work concurrent callers share.
+	// Nil uses Background for tests and embedders without a lifecycle.
+	Context context.Context
 	// LocalName is what this machine is called in the ledger and in listings.
 	// Empty takes the manager's own node name, so the two cannot disagree about
 	// the string the manager already stamps on every record it creates.
@@ -67,6 +79,16 @@ type Options struct {
 	// recording and the local manager stays the only truth.
 	Index *placement.Store
 	Log   *slog.Logger
+	// Metrics is optional transport-neutral fleet instrumentation.
+	Metrics *fleetmetrics.Registry
+	// OnCertificateEnroll signs a certificate request from an SSH-authenticated
+	// roster node. Nil leaves certificate enrollment disabled. The authenticated
+	// node name is supplied by nodelink, never taken from the request payload.
+	OnCertificateEnroll func(
+		ctx context.Context,
+		node string,
+		req nodelink.CertificateEnrollRequest,
+	) (nodelink.CertificateEnrollResponse, error)
 
 	// Routes, Schedules, Tags and FrontDoor are the gateway-owned stores keyed
 	// by a sandbox's NAME. They must be the SAME objects host.Options is given:
@@ -111,12 +133,19 @@ type Options struct {
 // display of its own, and the ledger is the truth for who owns what and where
 // it lives.
 type Fleet struct {
-	local     Node
-	localMgr  *host.Manager
-	localName string
-	localArch string
-	index     *placement.Store
-	log       *slog.Logger
+	ctx               context.Context
+	local             Node
+	localMgr          *host.Manager
+	localName         string
+	localArch         string
+	index             *placement.Store
+	log               *slog.Logger
+	metrics           *fleetmetrics.Registry
+	enrollCertificate func(
+		ctx context.Context,
+		node string,
+		req nodelink.CertificateEnrollRequest,
+	) (nodelink.CertificateEnrollResponse, error)
 	// sides is the gateway's half of a remote sandbox's lifecycle: the stores
 	// keyed by its name that no node has. See sidestores.go.
 	sides sides
@@ -127,9 +156,11 @@ type Fleet struct {
 	reconcileGrace time.Duration
 	now            func() time.Time
 
-	mu     sync.RWMutex
-	nodes  map[string]Node // linked machines other than this one, by name
-	placer Placer          // nil is defaultPlacer; see place.go
+	mu           sync.RWMutex
+	nodes        map[string]Node // linked machines other than this one, by name
+	grpcControls map[string]*grpcBinding
+	routedGuests map[string]*routedGuestBinding
+	placer       Placer // nil is defaultPlacer; see place.go
 	// sessions is the registry of interactive sessions attached to sandboxes,
 	// so a pause that happens on another machine can hang up the terminals this
 	// gateway holds for it. Nil until SetSessions; see link.go.
@@ -149,6 +180,14 @@ type Fleet struct {
 	// foreign latches once this fleet can hold a record that is not on this
 	// machine. See hasRemote.
 	foreign atomic.Bool
+
+	// ready coalesces resume/restore operations before they become node RPCs.
+	// marks is the independent warm-path gate: one lossy, fire-and-forget
+	// activity event per sandbox every ten seconds is enough to beat a
+	// minute-scale idle policy.
+	ready singleflight.Group
+	amu   sync.Mutex
+	marks map[string]time.Time
 
 	// The tunneled conns DialContext has handed out, under their own lock.
 	//
@@ -187,13 +226,20 @@ func New(opts Options) (*Fleet, error) {
 	if now == nil {
 		now = time.Now
 	}
+	lifecycle := opts.Context
+	if lifecycle == nil {
+		lifecycle = context.Background()
+	}
 	f := &Fleet{
-		local:     Local(name, opts.Local, opts.LocalNet),
-		localMgr:  opts.Local,
-		localName: name,
-		localArch: arch,
-		index:     opts.Index,
-		log:       log,
+		ctx:               lifecycle,
+		local:             Local(name, opts.Local, opts.LocalNet),
+		localMgr:          opts.Local,
+		localName:         name,
+		localArch:         arch,
+		index:             opts.Index,
+		log:               log,
+		metrics:           opts.Metrics,
+		enrollCertificate: opts.OnCertificateEnroll,
 		sides: sides{
 			routes:    opts.Routes,
 			schedules: opts.Schedules,
@@ -204,6 +250,9 @@ func New(opts Options) (*Fleet, error) {
 		reconcileGrace: orDuration(opts.ReconcileGrace, DefaultReconcileGrace),
 		now:            now,
 		nodes:          map[string]Node{},
+		grpcControls:   map[string]*grpcBinding{},
+		routedGuests:   map[string]*routedGuestBinding{},
+		marks:          map[string]time.Time{},
 		streams:        map[*tracked]struct{}{},
 	}
 	if err := f.adoptLocal(); err != nil {
@@ -235,8 +284,17 @@ func orDuration(d, fallback time.Duration) time.Duration {
 func (f *Fleet) Close() error {
 	f.closeStreams()
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	controls := make([]*GRPCControl, 0, len(f.grpcControls))
+	for _, binding := range f.grpcControls {
+		controls = append(controls, binding.control)
+	}
 	clear(f.nodes)
+	clear(f.grpcControls)
+	clear(f.routedGuests)
+	f.mu.Unlock()
+	for _, control := range controls {
+		_ = control.Close()
+	}
 	return nil
 }
 
@@ -871,7 +929,44 @@ func (f *Fleet) reserve(name, owner, image string, n Node) (release func(), err 
 // turns into the push (link.go). Missing a push is a sandbox that gets its
 // environment a moment later; pushing on every request is an SSH exec per HTTP
 // hit forever.
-func (f *Fleet) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
+func (f *Fleet) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := f.ready.DoChan(name, func() (any, error) {
+		operationCtx, cancel := sharedOperationContext(ctx, f.ctx)
+		defer cancel()
+		return f.ensureReady(operationCtx, name)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case resolved := <-result:
+		if resolved.Err != nil {
+			return nil, resolved.Err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		b := *resolved.Val.(*host.Sandbox)
+		return &b, nil
+	}
+}
+
+func sharedOperationContext(values, lifecycle context.Context) (context.Context, context.CancelFunc) {
+	operation, cancel := context.WithCancel(context.WithoutCancel(values))
+	if lifecycle.Err() != nil {
+		cancel()
+		return operation, cancel
+	}
+	stop := context.AfterFunc(lifecycle, cancel)
+	return operation, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (f *Fleet) ensureReady(ctx context.Context, name string) (*host.Sandbox, error) {
 	n, err := f.route("restore", name)
 	if err != nil {
 		return nil, err
@@ -887,7 +982,7 @@ func (f *Fleet) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, 
 			wasRunning = true
 		}
 	}
-	b, err := n.EnsureRunning(ctx, name)
+	b, err := n.EnsureReady(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -1046,6 +1141,12 @@ func (f *Fleet) Rename(ctx context.Context, oldName, newName, owner string) erro
 		rollback()
 		return err
 	}
+	f.amu.Lock()
+	if at, ok := f.marks[oldName]; ok {
+		f.marks[newName] = at
+		delete(f.marks, oldName)
+	}
+	f.amu.Unlock()
 	return nil
 }
 
@@ -1081,6 +1182,9 @@ func (f *Fleet) Destroy(ctx context.Context, name string) error {
 			f.log.Error("could not release a destroyed sandbox's placement", "name", name, "err", err)
 		}
 	}
+	f.amu.Lock()
+	delete(f.marks, name)
+	f.amu.Unlock()
 	return nil
 }
 
@@ -1123,17 +1227,43 @@ func (f *Fleet) ResyncEnv(ctx context.Context, name string) {
 	}
 }
 
-// Touch is the highest-frequency write in the system — every SSH session
-// teardown and every terminal keystroke batch — so it reports nothing and
-// fails silently.
-func (f *Fleet) Touch(name string) {
-	n, err := f.route("touch", name)
-	if err != nil {
+// MarkActive is the highest-frequency write in the system. It is coalesced
+// before routing so the common suppressed case does not even read the
+// placement ledger, then routed and sent asynchronously. gRPC MarkActive is a
+// unary RPC rather than the legacy SSH event, so keeping the whole delivery
+// off the caller prevents a slow node, placement-store lock, or reconnect from
+// re-entering the warm request path.
+func (f *Fleet) MarkActive(name string) {
+	now := f.now()
+	f.amu.Lock()
+	if last := f.marks[name]; !last.IsZero() && now.Sub(last) < markActiveInterval {
+		f.amu.Unlock()
 		return
 	}
-	if err := n.Touch(context.Background(), name); err != nil {
-		f.log.Warn("could not record sandbox activity", "name", name, "err", err)
+	f.marks[name] = now
+	f.amu.Unlock()
+
+	// Keep the single-host/local behavior exactly synchronous: Manager's
+	// implementation only updates in-memory activity and returns immediately,
+	// which preserves read-after-mark semantics without a ledger lookup.
+	if _, ok := f.localMgr.Get(name); ok {
+		if err := f.local.MarkActive(context.Background(), name); err != nil {
+			f.log.Warn("could not record sandbox activity", "name", name, "err", err)
+		}
+		return
 	}
+
+	go func() {
+		n, err := f.route("touch", name)
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), markActiveBudget)
+		defer cancel()
+		if err := n.MarkActive(ctx, name); err != nil {
+			f.log.Warn("could not record sandbox activity", "name", name, "err", err)
+		}
+	}()
 }
 
 // RecordKey is best-effort bookkeeping for the id token's key_fp claim; a

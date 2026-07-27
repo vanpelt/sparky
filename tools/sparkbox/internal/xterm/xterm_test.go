@@ -47,7 +47,7 @@ func (m *fakeManager) Get(name string) (*host.Sandbox, bool) {
 	return b, ok
 }
 
-func (m *fakeManager) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
+func (m *fakeManager) EnsureReady(_ context.Context, name string) (*host.Sandbox, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resumes = append(m.resumes, name)
@@ -59,7 +59,7 @@ func (m *fakeManager) EnsureRunning(_ context.Context, name string) (*host.Sandb
 	return b, nil
 }
 
-func (m *fakeManager) Touch(name string) {
+func (m *fakeManager) MarkActive(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.touches = append(m.touches, name)

@@ -4,9 +4,9 @@
 // bandwidth back, re-labelled from tap name to VM name.
 //
 // The mapping between a VM and its tap is implicit in addressing: a running
-// sandbox's HostIP is its guest address 172.30.<idx>.2, and its tap is
-// sbtap<idx> (see internal/vmm/firecracker). So the console never needs to
-// learn tap names — this package derives them.
+// sandbox's HostIP is offset 2 in a /30 guest slot, and its tap is named for
+// that slot index (see internal/vmm/firecracker). So the console never needs
+// to learn tap names — this package derives them.
 //
 // sluice's PUT /policy replaces the entire per-tap set, so every push sends the
 // whole running fleet; a VM that has gone away simply drops out of the map and
@@ -24,6 +24,8 @@ import (
 	"net/netip"
 	"sort"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 )
 
 // Sandbox is the slice of a running VM netpush needs: its name, owner, and the
@@ -32,7 +34,7 @@ import (
 type Sandbox struct {
 	Name  string
 	Owner string
-	// HostIP is the guest address (172.30.<idx>.2). Empty for a paused VM,
+	// HostIP is the guest address in its configured /30. Empty for a paused VM,
 	// which has no live tap and is skipped.
 	HostIP string
 }
@@ -151,19 +153,35 @@ type VMUsage struct {
 // Syncer computes and pushes the full-fleet policy and attributes bandwidth back
 // to VMs. It is safe for concurrent use; each method call is independent.
 type Syncer struct {
-	client *Client
-	fleet  Fleet
-	rules  Rules
-	log    *slog.Logger
+	client   *Client
+	fleet    Fleet
+	rules    Rules
+	log      *slog.Logger
+	guestNet guestnet.Network
 }
 
 // NewSyncer wires a syncer. A nil client disables the socket calls (Push/Usage
 // become no-ops returning nil), so the console still runs when sluice is absent.
 func NewSyncer(client *Client, fleet Fleet, rules Rules, log *slog.Logger) *Syncer {
+	syncer, err := NewSyncerForSubnet(client, fleet, rules, "", log)
+	if err != nil {
+		panic(err)
+	}
+	return syncer
+}
+
+// NewSyncerForSubnet wires a syncer using the same IPv4 guest prefix as the VM
+// driver. The subnet is normalized; empty uses the standalone compatibility
+// default.
+func NewSyncerForSubnet(client *Client, fleet Fleet, rules Rules, guestSubnet string, log *slog.Logger) (*Syncer, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Syncer{client: client, fleet: fleet, rules: rules, log: log}
+	network, err := guestnet.Parse(guestSubnet)
+	if err != nil {
+		return nil, err
+	}
+	return &Syncer{client: client, fleet: fleet, rules: rules, log: log, guestNet: network}, nil
 }
 
 // Enabled reports whether a sluice socket is configured.
@@ -245,7 +263,7 @@ func (s *Syncer) Apply(ctx context.Context, allow map[string][]string) error {
 			unplaced++
 			continue
 		}
-		tap, ok := TapName(b.HostIP)
+		tap, ok := tapName(s.guestNet, b.HostIP)
 		if !ok {
 			continue // paused or non-firecracker addressing: no live tap
 		}
@@ -275,7 +293,7 @@ func (s *Syncer) Usage(ctx context.Context, owner string) (map[string]VMUsage, e
 	// tap name -> VM (name, owner), for the running fleet.
 	byTap := map[string]Sandbox{}
 	for _, b := range s.fleet.List() {
-		if tap, ok := TapName(b.HostIP); ok {
+		if tap, ok := tapName(s.guestNet, b.HostIP); ok {
 			byTap[tap] = b
 		}
 	}
@@ -297,17 +315,31 @@ func (s *Syncer) Usage(ctx context.Context, owner string) (map[string]VMUsage, e
 	return out, nil
 }
 
-// TapName derives the tap device name from a guest HostIP of the form
-// 172.30.<idx>.2. It returns false for any other address (a paused VM's empty
-// HostIP, or a mock-driver 127.0.0.1), so callers skip VMs with no real tap.
+// TapName derives the tap device name from a guest HostIP in the standalone
+// compatibility subnet. It returns false for any other address (a paused VM's
+// empty HostIP, or a mock-driver 127.0.0.1).
 func TapName(hostIP string) (string, bool) {
+	return tapName(guestnet.MustParse(""), hostIP)
+}
+
+// TapNameForSubnet derives a tap name using an explicitly configured guest
+// subnet. Invalid subnets and non-guest addresses return false.
+func TapNameForSubnet(guestSubnet, hostIP string) (string, bool) {
+	network, err := guestnet.Parse(guestSubnet)
+	if err != nil {
+		return "", false
+	}
+	return tapName(network, hostIP)
+}
+
+func tapName(network guestnet.Network, hostIP string) (string, bool) {
 	addr, err := netip.ParseAddr(hostIP)
-	if err != nil || !addr.Is4() {
+	if err != nil {
 		return "", false
 	}
-	o := addr.As4()
-	if o[0] != 172 || o[1] != 30 || o[3] != 2 {
+	index, ok := network.SlotForGuest(addr.Unmap())
+	if !ok {
 		return "", false
 	}
-	return fmt.Sprintf("sbtap%d", o[2]), true
+	return fmt.Sprintf("sbtap%d", index), true
 }

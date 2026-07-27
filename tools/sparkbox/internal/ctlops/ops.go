@@ -46,7 +46,7 @@ type Sandboxes interface {
 	Get(name string) (*host.Sandbox, bool)
 	ListByOwner(owner string) []*host.Sandbox
 	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
 	Pause(ctx context.Context, name string) error
 	Archive(ctx context.Context, name string) error
 	Resize(ctx context.Context, name string, sizeMB int64) error
@@ -55,7 +55,7 @@ type Sandboxes interface {
 	Destroy(ctx context.Context, name string) error
 	SetPinned(name string, pinned bool) error
 	ResyncEnv(ctx context.Context, name string)
-	Touch(name string)
+	MarkActive(name string)
 	ArchivingEnabled() bool
 }
 
@@ -179,6 +179,10 @@ type Config struct {
 	Domain         string // base zone, for the URL fields on results; "" omits them
 	XtermSubdomain string // "xterm" when browser terminals are served; "" omits TerminalURL
 	InvitesPerUser int    // non-operator invite quota; 0 means operators only
+	// GatewayGuestSubnet is this machine's local guest prefix. Configured node
+	// approval requires it so the roster can reject a remote prefix that would
+	// make routed guest traffic ambiguous.
+	GatewayGuestSubnet string
 
 	NewName func() string    // nil: the built-in adjective-noun generator
 	Now     func() time.Time // nil: time.Now — injectable so schedule next-run is testable
@@ -199,10 +203,11 @@ type Ops struct {
 	github    GitHubKeys
 	ghDevice  GitHubDeviceFlow
 
-	defaultImage   string
-	domain         string
-	xtermSubdomain string
-	invitesPerUser int
+	defaultImage       string
+	domain             string
+	xtermSubdomain     string
+	invitesPerUser     int
+	gatewayGuestSubnet string
 
 	newName func() string
 	now     func() time.Time
@@ -219,25 +224,26 @@ type Ops struct {
 
 func New(cfg Config) *Ops {
 	o := &Ops{
-		boxes:          cfg.Sandboxes,
-		templates:      cfg.Templates,
-		accounts:       cfg.Accounts,
-		tags:           cfg.Tags,
-		schedules:      cfg.Schedules,
-		routes:         cfg.Routes,
-		sessions:       cfg.Sessions,
-		nodes:          cfg.Nodes,
-		github:         cfg.GitHub,
-		ghDevice:       cfg.GitHubDevice,
-		defaultImage:   cfg.DefaultImage,
-		domain:         normalizeDomain(cfg.Domain),
-		xtermSubdomain: cfg.XtermSubdomain,
-		invitesPerUser: cfg.InvitesPerUser,
-		newName:        cfg.NewName,
-		now:            cfg.Now,
-		log:            cfg.Log,
-		jobs:           map[string]*Job{},
-		stop:           make(chan struct{}),
+		boxes:              cfg.Sandboxes,
+		templates:          cfg.Templates,
+		accounts:           cfg.Accounts,
+		tags:               cfg.Tags,
+		schedules:          cfg.Schedules,
+		routes:             cfg.Routes,
+		sessions:           cfg.Sessions,
+		nodes:              cfg.Nodes,
+		github:             cfg.GitHub,
+		ghDevice:           cfg.GitHubDevice,
+		defaultImage:       cfg.DefaultImage,
+		domain:             normalizeDomain(cfg.Domain),
+		xtermSubdomain:     cfg.XtermSubdomain,
+		invitesPerUser:     cfg.InvitesPerUser,
+		gatewayGuestSubnet: cfg.GatewayGuestSubnet,
+		newName:            cfg.NewName,
+		now:                cfg.Now,
+		log:                cfg.Log,
+		jobs:               map[string]*Job{},
+		stop:               make(chan struct{}),
 	}
 	if o.now == nil {
 		o.now = time.Now

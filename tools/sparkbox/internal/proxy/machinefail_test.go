@@ -27,6 +27,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // unreachable is the error internal/fleet raises for a machine that is not
@@ -46,9 +47,15 @@ func unreachable(sandbox, node string) error {
 // EnsureRunning branch is reached.
 type failingManager struct{ err error }
 
-func (m failingManager) EnsureRunning(context.Context, string) (*host.Sandbox, error) {
+func (failingManager) Get(string) (*host.Sandbox, bool) {
+	return &host.Sandbox{State: vmm.StatePaused}, true
+}
+
+func (m failingManager) EnsureReady(context.Context, string) (*host.Sandbox, error) {
 	return nil, m.err
 }
+
+func (failingManager) MarkActive(string) {}
 
 // refusingDialer answers every dial with err, which is how the ErrorHandler
 // branch is reached: the resume succeeds and the upstream connection does not.

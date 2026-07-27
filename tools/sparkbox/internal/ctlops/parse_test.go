@@ -1,6 +1,7 @@
 package ctlops
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -89,6 +90,65 @@ func TestNormalizeTags(t *testing.T) {
 			again, err := NormalizeTags(got)
 			if err != nil || !slices.Equal(again, got) {
 				t.Errorf("not idempotent: %v -> %v (%v)", got, again, err)
+			}
+		})
+	}
+}
+
+func TestParseNodeApprovalArgs(t *testing.T) {
+	t.Run("split flags", func(t *testing.T) {
+		fp, cfg, err := ParseNodeApprovalArgs([]string{
+			fpNewcomer, "--guest-subnet", "10.201.0.0/20",
+			"--grpc-addr", "100.64.0.12:9443",
+		})
+		if err != nil {
+			t.Fatalf("ParseNodeApprovalArgs: %v", err)
+		}
+		if fp != fpNewcomer || cfg.GuestSubnet != "10.201.0.0/20" || cfg.GRPCAddr != "100.64.0.12:9443" {
+			t.Fatalf("parsed = %q %+v", fp, cfg)
+		}
+	})
+
+	t.Run("equals flags", func(t *testing.T) {
+		fp, cfg, err := ParseNodeApprovalArgs([]string{
+			fpNewcomer, "--guest-subnet=10.202.0.0/20", "--grpc-addr=node-a.ts.net:9443",
+		})
+		if err != nil {
+			t.Fatalf("ParseNodeApprovalArgs: %v", err)
+		}
+		if fp != fpNewcomer || cfg.GuestSubnet != "10.202.0.0/20" || cfg.GRPCAddr != "node-a.ts.net:9443" {
+			t.Fatalf("parsed = %q %+v", fp, cfg)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		code string
+	}{
+		{"no fingerprint", nil, "missing_fingerprint"},
+		{"flag where fingerprint belongs", []string{"--guest-subnet=10.0.0.0/20"}, "missing_fingerprint"},
+		{"subnet omitted", []string{fpNewcomer}, "missing_guest_subnet"},
+		{"subnet value omitted", []string{fpNewcomer, "--guest-subnet"}, "missing_guest_subnet"},
+		{"subnet equals empty", []string{fpNewcomer, "--guest-subnet="}, "missing_guest_subnet"},
+		{"grpc value omitted", []string{fpNewcomer, "--guest-subnet=10.0.0.0/20", "--grpc-addr"}, "missing_grpc_addr"},
+		{"grpc equals empty", []string{fpNewcomer, "--guest-subnet=10.0.0.0/20", "--grpc-addr="}, "missing_grpc_addr"},
+		{"duplicate subnet", []string{fpNewcomer, "--guest-subnet=10.0.0.0/20", "--guest-subnet=10.1.0.0/20"}, "duplicate_guest_subnet"},
+		{"duplicate grpc", []string{fpNewcomer, "--guest-subnet=10.0.0.0/20", "--grpc-addr=a:1", "--grpc-addr=b:2"}, "duplicate_grpc_addr"},
+		{"unknown flag", []string{fpNewcomer, "--guest-subnet=10.0.0.0/20", "--magic"}, "bad_node_approve_usage"},
+		{"extra word", []string{fpNewcomer, "--guest-subnet=10.0.0.0/20", "extra"}, "bad_node_approve_usage"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := ParseNodeApprovalArgs(tc.args)
+			if !IsKind(err, KindInvalid) {
+				t.Fatalf("err = %v, want KindInvalid", err)
+			}
+			var e *Error
+			if !errors.As(err, &e) {
+				t.Fatalf("err type = %T", err)
+			}
+			if e.Code != tc.code || e.Hint != nodeApproveUsage || e.ExitCode() != 2 {
+				t.Errorf("error = %+v, want code %q and usage", e, tc.code)
 			}
 		})
 	}

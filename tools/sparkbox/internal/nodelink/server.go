@@ -25,6 +25,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
@@ -55,6 +56,12 @@ const (
 	// about a sandbox the ledger does not place on it. Nothing legitimate
 	// produces it.
 	CodeNotYours = "identity_not_on_this_node"
+	// CodeNoCertificateIssuer means this gateway has no internal CA/roster
+	// signer wired. It is distinct from a pending or disabled authenticated row.
+	CodeNoCertificateIssuer = "certificate_not_issued"
+	// CodeCertificateNotApproved is a roster row that ceased to be approved
+	// before its signed leaf could be recorded.
+	CodeCertificateNotApproved = "certificate_node_not_approved"
 )
 
 // registerIdentityOps installs the two requests that travel node -> gateway.
@@ -302,8 +309,9 @@ func encodeBye(enc *encoder, code, msg string) error {
 // internal/fleet: the import DAG stays acyclic by the gateway half knowing
 // nothing about what a fleet is.
 //
-// Every hook runs on the link's read goroutine, so none of them may block: a
-// slow hook stalls heartbeats, replies and every other frame behind it.
+// Event hooks run on the link's read goroutine and must not block. Request
+// hooks run in Conn's bounded request pools with the caller's deadline, so
+// signing and durable bookkeeping may block without stalling heartbeats.
 type Hooks struct {
 	OnInventory func(node string, inv InventoryMsg) InventoryAck
 	OnHeartbeat func(node string, hb Heartbeat)
@@ -321,6 +329,9 @@ type Hooks struct {
 	// key — and the node is told so in a sentence rather than left waiting.
 	OnIdentityToken func(ctx context.Context, node string, req IdentityReq) (IdentityTokenResp, error)
 	OnIdentityDoc   func(ctx context.Context, node string, req IdentityReq) (IdentityDocResp, error)
+	// OnCertificateEnroll receives the same authenticated roster name. The CSR
+	// payload deliberately has no identity field.
+	OnCertificateEnroll func(ctx context.Context, node string, req CertificateEnrollRequest) (CertificateEnrollResponse, error)
 }
 
 // ServerOptions is one link's whole configuration. The door fills in the
@@ -347,6 +358,8 @@ type ServerOptions struct {
 	Welcome Welcome
 	Hooks   Hooks
 	Log     *slog.Logger
+	// Metrics is optional and is deliberately independent of the SSH transport.
+	Metrics *fleetmetrics.Registry
 
 	// Grace, PingEvery and PingBudget default to the package constants. They
 	// are settable so a test can drive the liveness machinery without waiting
@@ -362,12 +375,15 @@ type ServerOptions struct {
 // channel, the last thing that machine said about itself, and the ability to
 // open a stream into one of its guests.
 type Client struct {
-	node  string
-	hello Hello
-	conn  *Conn
-	ssh   xssh.Conn
-	log   *slog.Logger
-	hooks Hooks
+	node       string
+	hello      Hello
+	conn       *Conn
+	ssh        xssh.Conn
+	split      bool
+	generation string
+	log        *slog.Logger
+	hooks      Hooks
+	metrics    *fleetmetrics.Registry
 
 	grace  time.Duration
 	now    func() time.Time
@@ -412,7 +428,9 @@ type Client struct {
 	// dropStreams, which records every reason and then closes the transport
 	// under them.
 	smu     sync.Mutex
-	streams map[*streamConn]struct{}
+	streams map[*streamConn]*dataLane
+	lanes   map[string]*dataLane
+	opening int
 	dead    error
 }
 
@@ -481,14 +499,17 @@ func Serve(ctx context.Context, opts ServerOptions) (*Client, func() error, erro
 		ssh:     opts.Conn,
 		log:     log,
 		hooks:   opts.Hooks,
+		metrics: opts.Metrics,
 		grace:   orDuration(opts.Grace, DefaultGrace),
 		now:     now,
 		cancel:  cancel,
 		boxes:   map[string]SandboxRow{},
 		snaps:   map[string]SnapshotRow{},
-		streams: map[*streamConn]struct{}{},
+		streams: map[*streamConn]*dataLane{},
+		lanes:   map[string]*dataLane{},
 	}
 	c.conn = NewConn(opts.Greeting.rest, opts.Session, "g", log)
+	c.conn.SetMetrics(opts.Metrics, opts.Node, "ssh")
 	// One place ends the streams, whichever way the link ends: a bye, a revoke,
 	// a superseding connection, the node's TCP dying, or this process shutting
 	// down. All five cancel linkCtx, and none of them would otherwise reach
@@ -510,6 +531,20 @@ func Serve(ctx context.Context, opts ServerOptions) (*Client, func() error, erro
 	w := opts.Welcome
 	w.Protocol = Protocol
 	w.Node = opts.Node
+	w.Capabilities = negotiatedCapabilities(opts.Greeting.Hello.Capabilities, w.Capabilities)
+	if hasCapability(w.Capabilities, CapabilitySSHDataPoolV1) {
+		generation, err := newControlGeneration()
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		c.split = true
+		c.generation = generation
+		c.ssh = nil
+		w.ControlGeneration = generation
+	} else {
+		w.ControlGeneration = ""
+	}
 	if w.HeartbeatSeconds == 0 {
 		w.HeartbeatSeconds = int(DefaultHeartbeat / time.Second)
 	}
@@ -573,6 +608,7 @@ func (c *Client) register() {
 	})
 
 	registerIdentityOps(c.conn, c.node, c.hooks)
+	registerCertificateEnroll(c.conn, c.node, c.hooks)
 
 	c.conn.OnEvent(TypeChanged, func(raw json.RawMessage) {
 		var m ChangedMsg
@@ -707,6 +743,7 @@ func (c *Client) pingLoop(ctx context.Context, every, budget time.Duration) {
 			continue
 		}
 		misses++
+		c.metrics.IncLivenessFailure(c.node, "ssh", "gateway")
 		c.log.Warn("node did not answer a ping", "misses", misses, "err", err)
 		// Two, not one: a single missed answer is a busy machine or a slow
 		// network, and dropping a link costs every stream riding on it.
@@ -818,25 +855,61 @@ func (c *Client) Cast(typ string, body any) {
 // The stream is registered before it is returned, so that a link which dies
 // while somebody is mid-transfer ends that transfer with a stated reason rather
 // than with the io.EOF a closed SSH channel reads.
-func (c *Client) DialSandbox(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
-	if c.ssh == nil {
-		return nil, errors.New("nodelink: this link carries no data channels")
-	}
+func (c *Client) DialSandbox(ctx context.Context, sandbox, kind string, port int) (out net.Conn, err error) {
+	started := time.Now()
+	metricKind := metricStreamKind(kind)
+	metricTransport := "ssh"
+	defer func() {
+		c.metrics.ObserveStreamOpen(c.node, metricTransport, metricKind, metricOutcome(err), time.Since(started))
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s, err := openStream(c.ssh, StreamOpen{
+	c.smu.Lock()
+	if c.dead != nil {
+		err := c.dead
+		c.smu.Unlock()
+		return nil, err
+	}
+	if len(c.streams)+c.opening >= MaxLiveStreams {
+		c.smu.Unlock()
+		return nil, errors.New("nodelink: stream limit")
+	}
+	lane := c.chooseDataLane()
+	c.opening++
+	transport := c.ssh
+	if lane != nil {
+		transport = lane.conn
+		metricTransport = "ssh-data"
+	}
+	if transport == nil {
+		c.opening--
+		c.smu.Unlock()
+		return nil, errors.New("nodelink: this link has no healthy data lanes")
+	}
+	c.smu.Unlock()
+
+	s, err := openStream(transport, StreamOpen{
 		Sandbox: sandbox,
 		Kind:    kind,
 		Port:    uint32(port), //nolint:gosec // a port is range-checked by the caller
 		Nonce:   nonce(),
 	})
+	c.smu.Lock()
+	c.opening--
+	c.smu.Unlock()
 	if err != nil {
+		if lane != nil {
+			c.smu.Lock()
+			lane.active--
+			c.smu.Unlock()
+		}
 		return nil, err
 	}
-	if err := c.track(s); err != nil {
+	if err := c.track(s, lane); err != nil {
 		return nil, err
 	}
+	s.setMetrics(c.metrics, c.node, metricTransport, metricKind)
 	return s, nil
 }
 
@@ -845,26 +918,51 @@ func (c *Client) DialSandbox(ctx context.Context, sandbox, kind string, port int
 // microsecond ago can still succeed against x/crypto's own bookkeeping, and a
 // stream nobody will ever tear down is exactly the half-open connection this
 // registry exists to prevent.
-func (c *Client) track(s *streamConn) error {
+func (c *Client) track(s *streamConn, lane *dataLane) error {
 	c.smu.Lock()
 	if c.dead != nil {
 		reason := c.dead
+		if lane != nil {
+			lane.active--
+		}
 		c.smu.Unlock()
 		s.fail(reason)
 		return reason
 	}
+	if lane != nil && c.lanes[lane.id] != lane {
+		lane.active--
+		c.smu.Unlock()
+		err := errors.New("nodelink: data lane closed during stream open")
+		s.fail(err)
+		return err
+	}
 	// Set before the stream is reachable from the map, so dropStreams can never
 	// race a half-initialised entry.
 	s.released = func() { c.untrack(s) }
-	c.streams[s] = struct{}{}
+	c.streams[s] = lane
 	c.smu.Unlock()
+	c.metrics.AddLiveStreams(c.node, streamTransport(lane), metricStreamKind(s.kind), 1)
 	return nil
 }
 
 func (c *Client) untrack(s *streamConn) {
 	c.smu.Lock()
+	lane, tracked := c.streams[s]
 	delete(c.streams, s)
+	if tracked && lane != nil {
+		lane.active--
+	}
 	c.smu.Unlock()
+	if tracked {
+		c.metrics.AddLiveStreams(c.node, streamTransport(lane), metricStreamKind(s.kind), -1)
+	}
+}
+
+func streamTransport(lane *dataLane) string {
+	if lane != nil {
+		return "ssh-data"
+	}
+	return "ssh"
 }
 
 // dropStreams ends every live stream with one reason and latches, so anything
@@ -876,10 +974,16 @@ func (c *Client) dropStreams(reason error) {
 		c.dead = reason
 	}
 	live := make([]*streamConn, 0, len(c.streams))
-	for s := range c.streams {
+	for s, lane := range c.streams {
 		live = append(live, s)
+		c.metrics.AddLiveStreams(c.node, streamTransport(lane), metricStreamKind(s.kind), -1)
 	}
 	clear(c.streams)
+	lanes := make([]*dataLane, 0, len(c.lanes))
+	for _, lane := range c.lanes {
+		lanes = append(lanes, lane)
+	}
+	clear(c.lanes)
 	c.smu.Unlock()
 	// Outside the lock: fail closes, close releases, and release wants this
 	// lock. The map is already empty, so the release is a no-op — but a
@@ -887,6 +991,9 @@ func (c *Client) dropStreams(reason error) {
 	// anyone finds twice.
 	for _, s := range live {
 		s.fail(reason)
+	}
+	for _, lane := range lanes {
+		_ = lane.conn.Close()
 	}
 	// And then the transport, which is what actually unparks them.
 	//

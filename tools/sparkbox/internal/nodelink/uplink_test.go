@@ -4,6 +4,7 @@ package nodelink
 // riding it.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -148,5 +149,114 @@ func TestIdentityRequestWithoutASandboxIsInvalid(t *testing.T) {
 	}
 	if reached {
 		t.Error("a nameless request reached the gateway's hook")
+	}
+}
+
+func TestCertificateEnrollmentReachesHookWithAuthenticatedNode(t *testing.T) {
+	var gotNode string
+	var gotCSR []byte
+	expires := time.Now().Add(time.Hour).UTC()
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerCertificateEnroll(c, "roster-node", Hooks{
+			OnCertificateEnroll: func(_ context.Context, authenticated string, request CertificateEnrollRequest) (CertificateEnrollResponse, error) {
+				gotNode = authenticated
+				gotCSR = append([]byte(nil), request.CSRPEM...)
+				return CertificateEnrollResponse{
+					CertificatePEM:   []byte("leaf PEM"),
+					CACertificatePEM: []byte("CA PEM"),
+					GatewayIdentity:  "spiffe://sparkbox/gateway/cluster-a",
+					GatewayGRPCAddr:  "gateway.tailnet:9444",
+					Serial:           "1234abcd",
+					ExpiresAt:        expires,
+				}, nil
+			},
+		})
+	})
+	uplink := NewUplink()
+	defer uplink.attach(node)()
+
+	requestCSR := []byte("node CSR")
+	response, err := uplink.EnrollCertificate(context.Background(), requestCSR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" {
+		t.Fatalf("hook node = %q, want authenticated roster-node", gotNode)
+	}
+	if !bytes.Equal(gotCSR, requestCSR) {
+		t.Fatalf("hook CSR = %q", gotCSR)
+	}
+	if response.Serial != "1234abcd" || response.GatewayIdentity != "spiffe://sparkbox/gateway/cluster-a" ||
+		response.GatewayGRPCAddr != "gateway.tailnet:9444" ||
+		!response.ExpiresAt.Equal(expires) {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestCertificateEnrollmentGatewayGRPCAddressIsOptionalButValidated(t *testing.T) {
+	response := CertificateEnrollResponse{
+		CertificatePEM:   []byte("leaf"),
+		CACertificatePEM: []byte("CA"),
+		GatewayIdentity:  "spiffe://sparkbox/gateway/cluster-a",
+		Serial:           "serial",
+		ExpiresAt:        time.Now().Add(time.Hour),
+	}
+	// An old gateway omits the address; this is the negotiated SSH fallback.
+	if err := validateCertificateEnrollResponse(response); err != nil {
+		t.Fatalf("empty gateway gRPC address: %v", err)
+	}
+	response.GatewayGRPCAddr = "gateway.tailnet:9444"
+	if err := validateCertificateEnrollResponse(response); err != nil {
+		t.Fatalf("valid gateway gRPC address: %v", err)
+	}
+	for _, bad := range []string{"gateway.tailnet", ":9444", "gateway.tailnet:0", "gateway.tailnet:09444"} {
+		response.GatewayGRPCAddr = bad
+		if err := validateCertificateEnrollResponse(response); err == nil {
+			t.Errorf("gateway gRPC address %q was accepted", bad)
+		}
+	}
+}
+
+func TestCertificateEnrollmentBoundsCSRAndClassifiesMissingIssuer(t *testing.T) {
+	uplink := NewUplink()
+	_, err := uplink.EnrollCertificate(context.Background(), bytes.Repeat([]byte("x"), MaxCSRPEMBytes+1))
+	var typed *ctlops.Error
+	if !errors.As(err, &typed) || typed.Kind != ctlops.KindInvalid ||
+		typed.Code != "certificate_request_too_large" {
+		t.Fatalf("oversized CSR error = %#v", err)
+	}
+
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerCertificateEnroll(c, "roster-node", Hooks{})
+	})
+	defer uplink.attach(node)()
+	_, err = uplink.EnrollCertificate(context.Background(), []byte("CSR"))
+	if !errors.As(err, &typed) || typed.Kind != ctlops.KindDisabled ||
+		typed.Code != CodeNoCertificateIssuer {
+		t.Fatalf("missing issuer error = %#v", err)
+	}
+}
+
+func TestCertificateEnrollmentRejectsMalformedGatewayResponse(t *testing.T) {
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerCertificateEnroll(c, "roster-node", Hooks{
+			OnCertificateEnroll: func(context.Context, string, CertificateEnrollRequest) (CertificateEnrollResponse, error) {
+				return CertificateEnrollResponse{
+					CertificatePEM:   []byte("leaf"),
+					CACertificatePEM: []byte("CA"),
+					GatewayIdentity:  "https://not-spiffe.example",
+					Serial:           "serial",
+					ExpiresAt:        time.Now().Add(time.Hour),
+				}, nil
+			},
+		})
+	})
+	uplink := NewUplink()
+	defer uplink.attach(node)()
+	_, err := uplink.EnrollCertificate(context.Background(), []byte("CSR"))
+	var typed *ctlops.Error
+	if !errors.As(err, &typed) || typed.Kind != ctlops.KindInternal ||
+		typed.Code != "bad_certificate_response" {
+		t.Fatalf("malformed response error = %#v", err)
 	}
 }

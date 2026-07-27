@@ -9,6 +9,7 @@ package fleet_test
 // fleet's answers a moment later.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -204,5 +205,58 @@ func TestEvictingAMachineWithNoLinkIsHarmless(t *testing.T) {
 	}
 	if got := len(f.Capacities()); got != 1 {
 		t.Errorf("capacities = %d, want 1", got)
+	}
+}
+
+func TestServeLinkWiresCertificateEnrollmentFromFleetOptions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type enrollment struct {
+		node string
+		csr  []byte
+	}
+	reached := make(chan enrollment, 1)
+	expires := time.Now().Add(time.Hour).UTC()
+	f, err := fleet.New(fleet.Options{
+		Local:     newManager(t, host.Options{NodeName: "boxa"}),
+		LocalName: "boxa",
+		Index:     newIndex(t),
+		Log:       discardLog(),
+		OnCertificateEnroll: func(
+			_ context.Context,
+			node string,
+			req nodelink.CertificateEnrollRequest,
+		) (nodelink.CertificateEnrollResponse, error) {
+			reached <- enrollment{node: node, csr: append([]byte(nil), req.CSRPEM...)}
+			return nodelink.CertificateEnrollResponse{
+				CertificatePEM:   []byte("leaf PEM"),
+				CACertificatePEM: []byte("CA PEM"),
+				GatewayIdentity:  "spiffe://sparkbox/gateway/cluster-a",
+				Serial:           "1234abcd",
+				ExpiresAt:        expires,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+
+	node := linkTo(t, ctx, f, "roster-node")
+	csr := []byte("node CSR")
+	node.ask(t, "enroll-1", nodelink.TypeCertificateEnroll,
+		nodelink.CertificateEnrollRequest{CSRPEM: csr})
+
+	select {
+	case got := <-reached:
+		if got.node != "roster-node" {
+			t.Fatalf("enrollment hook node = %q, want the authenticated roster name", got.node)
+		}
+		if !bytes.Equal(got.csr, csr) {
+			t.Fatalf("enrollment hook CSR = %q, want %q", got.csr, csr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("certificate enrollment did not reach the hook configured on Fleet")
 	}
 }

@@ -77,7 +77,7 @@ func (h *Handler) runJob(w http.ResponseWriter, r *http.Request, op string, ref 
 	c := caller(r)
 	p := parsePrefer(r)
 
-	job := h.ops.Go(c, op, ref, budget, fn)
+	job := h.ops.GoFrom(r.Context(), c, op, ref, budget, fn)
 	job = h.ops.Await(r.Context(), job, p.wait)
 
 	switch job.State {

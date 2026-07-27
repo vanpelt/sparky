@@ -115,6 +115,12 @@ type Env struct {
 	// operator who adopts a layout should be told which one they are running,
 	// because every later `setup` on that host needs the same flag.
 	AdoptedLegacy bool
+
+	// NodeControlHealth optionally replaces doctor's placeholder mTLS check.
+	// The command layer does not yet own certificate paths, so the default is a
+	// transparent WARN; Phase 4 wiring can inject a real gRPC health probe
+	// without teaching generic checks where credentials live.
+	NodeControlHealth *Check
 }
 
 // NewEnv builds an Env with the real on-host system paths.
@@ -224,6 +230,15 @@ func Provision(e *Env) error {
 		if err := checkRoleSwitch(e); err != nil {
 			return err
 		}
+		// An upgrade may preserve transport flags from the existing env file.
+		// Validate the effective last-flag-wins combination too: independently
+		// preserving an old gRPC address while this run explicitly switches to
+		// SSH must fail here, not become a daemon restart loop.
+		effectiveTransport, err := NormalizeTransportConfig(EffectiveTransportConfig(e.Probe, e.Cfg))
+		if err != nil {
+			return fmt.Errorf("effective transport configuration: %w", err)
+		}
+		e.Cfg = effectiveTransport
 	} else {
 		e.logf("   skipping layout/role/port preflight — the machine's filesystem and ports live inside it; " +
 			"the inner setup runs all three there\n")
@@ -378,6 +393,7 @@ func allSteps() []Step {
 		stepFetchArtifacts(),
 		stepUsersConf(),
 		stepEnvFile(),
+		stepTailscaleRoutes(),
 		stepNetAssets(),
 		// Before systemd-units and enable-services, because the gateway's unit
 		// carries --sluice-socket and --guest-dns and enable-services starts
@@ -1333,6 +1349,15 @@ func (e *Env) renderEnvFile() string {
 	b.WriteString("# sparkbox-net.sh forwards any-port traffic to this port, so it must keep matching the\n")
 	b.WriteString("# unit's --proxy-addr. `sparkbox setup --proxy-addr <addr>` moves both together.\n")
 	fmt.Fprintf(&b, "PROXY_PORT=%d\n", port)
+	b.WriteString("# One normalized prefix feeds both the daemon's /30 allocator and the boot-time NAT rule.\n")
+	for _, setting := range guestSubnetSettings(e.Cfg, nil) {
+		fmt.Fprintf(&b, "%s=%s\n", setting.key, setting.val)
+	}
+	b.WriteString("# Fleet control/data rollout and stable gateway workload identity.\n")
+	transport := transportSetting(e.Cfg, nil)
+	fmt.Fprintf(&b, "%s=%s\n", transport.key, transport.val)
+	canaryIntent := routedGuestCanaryIntentSetting(e.Cfg, nil)
+	fmt.Fprintf(&b, "%s=%s\n", canaryIntent.key, canaryIntent.val)
 	// Any-port forwarding mode, read by sparkbox-net.sh (never by the gateway).
 	// Written on a fresh host whichever way --edge-ip went, so an operator can
 	// see both knobs and what this host chose; mergeEnv only ever CORRECTS them
@@ -1401,7 +1426,7 @@ func (e *Env) printConnect() {
 		e.logf("  node:              %s\n", name)
 		e.logf("  gateway:           %s\n", e.Cfg.Gateway)
 		e.logf("  enrollment:        compare this node's logged fingerprint with `ssh ctl@<gateway> node ls`\n")
-		e.logf("  approve at gateway: ssh ctl@<gateway> node approve <SHA256:...>\n")
+		e.logf("  approve at gateway: %s\n", nodeApprovalCommand(e.Cfg))
 		e.logf("  health check:      sparkbox doctor --gateway %s\n", e.Cfg.Gateway)
 		e.logf("  logs:              journalctl -u sparkbox -f\n")
 		return
@@ -1474,6 +1499,14 @@ func (e *Env) printConnect() {
 		// for either.
 		e.logf("  egress:            pushing policy to %s, guests resolve through %s\n", e.Cfg.sluiceSocket(), e.Cfg.guestDNS())
 	}
+}
+
+func nodeApprovalCommand(cfg Config) string {
+	command := "ssh ctl@<gateway> node approve <SHA256:...> --guest-subnet " + cfg.guestSubnet()
+	if address := cfg.nodeGRPCAddr(); address != "" {
+		command += " --grpc-addr " + address
+	}
+	return command
 }
 
 // appendLineIfMissing appends line (with a trailing newline) to path unless an

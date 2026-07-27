@@ -99,6 +99,14 @@ func TestSetupFlagsParse(t *testing.T) {
 		"--proxy-domain", "example.test",
 		"--gateway", "gw.example.com:2222",
 		"--node-name", "laptop",
+		"--guest-subnet", "10.44.7.9/20",
+		"--node-control-transport", "grpc",
+		"--node-control-rollout", "read-only",
+		"--node-grpc-addr", "100.64.0.20:9443",
+		"--gateway-grpc-addr", "100.64.0.10:9444",
+		"--guest-data-transport", "auto",
+		"--routed-guest-canary-percent", "25",
+		"--cluster-id", "prod-a",
 		"--machine-name", "sparkbox-two",
 		"--machine-cpus", "4",
 		"--machine-memory-gb", "12",
@@ -116,6 +124,14 @@ func TestSetupFlagsParse(t *testing.T) {
 		{"proxy-domain", *o.domain, "example.test"},
 		{"gateway", *o.gateway, "gw.example.com:2222"},
 		{"node-name", *o.nodeName, "laptop"},
+		{"guest-subnet", *o.guestSubnet, "10.44.7.9/20"},
+		{"node-control-transport", *o.nodeControlTransport, "grpc"},
+		{"node-control-rollout", *o.nodeControlRollout, "read-only"},
+		{"node-grpc-addr", *o.nodeGRPCAddr, "100.64.0.20:9443"},
+		{"gateway-grpc-addr", *o.gatewayGRPCAddr, "100.64.0.10:9444"},
+		{"guest-data-transport", *o.guestDataTransport, "auto"},
+		{"routed-guest-canary-percent", *o.routedGuestCanaryPercent, 25},
+		{"cluster-id", *o.clusterID, "prod-a"},
 		{"machine-name", *o.machineName, "sparkbox-two"},
 		{"machine-cpus", *o.machineCPUs, 4},
 		{"machine-memory-gb", *o.machineMemGB, 12},
@@ -127,4 +143,35 @@ func TestSetupFlagsParse(t *testing.T) {
 			t.Errorf("--%s = %v, want %v", c.name, c.got, c.want)
 		}
 	}
+}
+
+func TestPrepareGuestSubnet(t *testing.T) {
+	t.Run("fleet node requires an explicit prefix", func(t *testing.T) {
+		cfg := hostsetup.DefaultConfig()
+		cfg.Gateway = "gw.example:2222"
+		if err := prepareGuestSubnet(&cfg); err == nil || !strings.Contains(err.Error(), "required with --gateway") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("normalizes explicit fleet prefix", func(t *testing.T) {
+		cfg := hostsetup.DefaultConfig()
+		cfg.Gateway = "gw.example:2222"
+		cfg.GuestSubnet = "10.44.7.9/20"
+		cfg.FlagsGiven = map[string]bool{"guest-subnet": true}
+		if err := prepareGuestSubnet(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GuestSubnet != "10.44.0.0/20" {
+			t.Fatalf("GuestSubnet = %q", cfg.GuestSubnet)
+		}
+	})
+	t.Run("standalone keeps compatibility default", func(t *testing.T) {
+		cfg := hostsetup.DefaultConfig()
+		if err := prepareGuestSubnet(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GuestSubnet != "172.30.0.0/16" {
+			t.Fatalf("GuestSubnet = %q", cfg.GuestSubnet)
+		}
+	})
 }

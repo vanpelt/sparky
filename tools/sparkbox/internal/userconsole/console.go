@@ -71,7 +71,7 @@ type Dialer = webui.Dialer
 type Sandboxes interface {
 	Get(name string) (*host.Sandbox, bool)
 	ListByOwner(owner string) []*host.Sandbox
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
 	Pause(ctx context.Context, name string) error
 	Archive(ctx context.Context, name string) error
 	Destroy(ctx context.Context, name string) error
@@ -448,7 +448,7 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	box, err := h.boxes.EnsureRunning(ctx, name)
+	box, err := h.boxes.EnsureReady(ctx, name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
@@ -512,7 +512,7 @@ func (h *Handler) pin(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), archiveTimeout)
 	defer cancel()
-	box, err := h.boxes.EnsureRunning(ctx, name)
+	box, err := h.boxes.EnsureReady(ctx, name)
 	if err != nil {
 		// The flag stuck; it just isn't warm yet. Surface the reason.
 		writeErr(w, statusFor(err), err.Error())

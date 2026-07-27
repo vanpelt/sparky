@@ -77,7 +77,7 @@ func TestReaperGradientBalloonThenPause(t *testing.T) {
 	}
 
 	// Activity deflates it and clears the flag.
-	if _, err := m.EnsureRunning(ctx, "warm"); err != nil {
+	if _, err := m.EnsureReady(ctx, "warm"); err != nil {
 		t.Fatal(err)
 	}
 	if m.boxes["warm"].Ballooned {
@@ -86,6 +86,9 @@ func TestReaperGradientBalloonThenPause(t *testing.T) {
 	st, _ = m.balloon.BalloonStats(ctx, "warm")
 	if st.TargetMiB != 0 {
 		t.Fatalf("balloon should be fully deflated, target = %d", st.TargetMiB)
+	}
+	if err := m.FlushActivity(); err != nil {
+		t.Fatal(err)
 	}
 
 	// Idle past the pause floor → paused (RAM fully freed).

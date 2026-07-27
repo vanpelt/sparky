@@ -22,19 +22,32 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // placedManager stands in for a fleet router: EnsureRunning answers with the
 // synthetic host name a sandbox on machine `node` carries, never an address.
 type placedManager map[string]string // sandbox -> node
 
-func (m placedManager) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
+func (m placedManager) Get(name string) (*host.Sandbox, bool) {
 	node, ok := m[name]
+	if !ok {
+		return nil, false
+	}
+	return &host.Sandbox{
+		Name: name, HostIP: name + "." + node + ".sandbox.invalid", State: vmm.StateRunning,
+	}, true
+}
+
+func (m placedManager) EnsureReady(_ context.Context, name string) (*host.Sandbox, error) {
+	b, ok := m.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("no sandbox named %q", name)
 	}
-	return &host.Sandbox{Name: name, HostIP: name + "." + node + ".sandbox.invalid"}, nil
+	return b, nil
 }
+
+func (placedManager) MarkActive(string) {}
 
 // backend is a stand-in for a guest app that names itself in every response and
 // counts the TCP connections it was reached over, so a test can tell a reused
@@ -175,9 +188,16 @@ func TestDefaultTransportDialsDirectly(t *testing.T) {
 // localManager is the single-box shape: a real guest IP, no fleet in sight.
 type localManager string
 
-func (ip localManager) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
-	return &host.Sandbox{Name: name, HostIP: string(ip)}, nil
+func (ip localManager) Get(name string) (*host.Sandbox, bool) {
+	return &host.Sandbox{Name: name, HostIP: string(ip), State: vmm.StateRunning}, true
 }
+
+func (ip localManager) EnsureReady(_ context.Context, name string) (*host.Sandbox, error) {
+	b, _ := ip.Get(name)
+	return b, nil
+}
+
+func (localManager) MarkActive(string) {}
 
 // TestSetDialerRebuildsTransport pins that SetDialer takes effect on the
 // reverse proxy itself, not just on a field nothing reads.

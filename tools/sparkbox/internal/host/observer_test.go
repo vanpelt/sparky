@@ -112,7 +112,7 @@ func TestObserverSeesEveryTransition(t *testing.T) {
 			reason: "paused", wantBox: "box", wantState: vmm.StatePaused,
 		},
 		{
-			name: "resume", run: func() error { _, err := m.EnsureRunning(ctx, "box"); return err },
+			name: "resume", run: func() error { _, err := m.EnsureReady(ctx, "box"); return err },
 			reason: "resumed", wantBox: "box", wantState: vmm.StateRunning,
 		},
 		{
@@ -144,7 +144,7 @@ func TestObserverSeesEveryTransition(t *testing.T) {
 		{
 			// Resume-on-connect restores first, so this step emits the restore
 			// and the resume that rides on it.
-			name: "restore", run: func() error { _, err := m.EnsureRunning(ctx, "boxy"); return err },
+			name: "restore", run: func() error { _, err := m.EnsureReady(ctx, "boxy"); return err },
 			reason: "restored", wantBox: "boxy", wantState: vmm.StatePaused,
 		},
 		{

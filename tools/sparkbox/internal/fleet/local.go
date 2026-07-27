@@ -109,8 +109,8 @@ func (l *localNode) Create(ctx context.Context, name, owner, image string, vcpus
 	return l.mgr.Create(ctx, name, owner, image, vcpus, memMB)
 }
 
-func (l *localNode) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
-	return l.mgr.EnsureRunning(ctx, name)
+func (l *localNode) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
+	return l.mgr.EnsureReady(ctx, name)
 }
 
 func (l *localNode) Pause(ctx context.Context, name string) error { return l.mgr.Pause(ctx, name) }
@@ -138,8 +138,8 @@ func (l *localNode) ResyncEnv(ctx context.Context, name string) error {
 	return nil
 }
 
-func (l *localNode) Touch(_ context.Context, name string) error {
-	l.mgr.Touch(name)
+func (l *localNode) MarkActive(_ context.Context, name string) error {
+	l.mgr.MarkActive(name)
 	return nil
 }
 

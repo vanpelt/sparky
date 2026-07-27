@@ -77,7 +77,7 @@ func TestResizeRefusesShrink(t *testing.T) {
 		t.Fatal("shrink was accepted; resize must grow only")
 	}
 	// A refused resize still leaves a usable sandbox.
-	if _, err := m.EnsureRunning(ctx, "box"); err != nil {
+	if _, err := m.EnsureReady(ctx, "box"); err != nil {
 		t.Fatalf("sandbox unusable after a refused resize: %v", err)
 	}
 }

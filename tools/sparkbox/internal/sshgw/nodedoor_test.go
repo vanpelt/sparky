@@ -207,6 +207,11 @@ type link struct {
 	dec    *json.Decoder
 }
 
+type dataLink struct {
+	client *xssh.Client
+	sess   *xssh.Session
+}
+
 func (s *nodeStack) open(t *testing.T, key xssh.Signer) *link {
 	t.Helper()
 	client, err := dialAs(s.addr, NodeUser, key)
@@ -236,6 +241,61 @@ func (s *nodeStack) open(t *testing.T, key xssh.Signer) *link {
 func (l *link) close() {
 	l.sess.Close()   //nolint:errcheck
 	l.client.Close() //nolint:errcheck
+}
+
+func (s *nodeStack) openData(t *testing.T, key xssh.Signer, hello nodelink.DataHello) (*dataLink, nodelink.DataWelcome) {
+	t.Helper()
+	client, err := dialAs(s.addr, NodeUser, key)
+	if err != nil {
+		t.Fatalf("dial data lane: %v", err)
+	}
+	sess, err := client.NewSession()
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	in, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Start(nodelink.DataCommand); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(in).Encode(hello); err != nil {
+		t.Fatal(err)
+	}
+	reply := make(chan struct {
+		w   nodelink.DataWelcome
+		err error
+	}, 1)
+	go func() {
+		var welcome nodelink.DataWelcome
+		err := json.NewDecoder(out).Decode(&welcome)
+		reply <- struct {
+			w   nodelink.DataWelcome
+			err error
+		}{welcome, err}
+	}()
+	select {
+	case got := <-reply:
+		if got.err != nil {
+			t.Fatalf("read data welcome: %v", got.err)
+		}
+		lane := &dataLink{client: client, sess: sess}
+		t.Cleanup(func() {
+			lane.sess.Close()   //nolint:errcheck
+			lane.client.Close() //nolint:errcheck
+		})
+		return lane, got.w
+	case <-time.After(frameWait):
+		client.Close()
+		t.Fatal("no data-lane welcome within the wait")
+		return nil, nodelink.DataWelcome{}
+	}
 }
 
 func (l *link) send(t *testing.T, f nodelink.Frame) {
@@ -277,11 +337,16 @@ func (l *link) next(t *testing.T) nodelink.Frame {
 
 func helloFrame(t *testing.T, name string) nodelink.Frame {
 	t.Helper()
-	body, err := json.Marshal(nodelink.Hello{
+	return helloDetailsFrame(t, nodelink.Hello{
 		Protocol: nodelink.Protocol, Node: name, Arch: "arm64", OS: "linux",
 		Release: "2026-07-22", Version: "test", Driver: "mock",
 		GuestSubnet: "172.30.0.0/16", StartedAt: time.Now(),
 	})
+}
+
+func helloDetailsFrame(t *testing.T, hello nodelink.Hello) nodelink.Frame {
+	t.Helper()
+	body, err := json.Marshal(hello)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +357,12 @@ func helloFrame(t *testing.T, name string) nodelink.Frame {
 func (l *link) hello(t *testing.T, name string) nodelink.Frame {
 	t.Helper()
 	l.send(t, helloFrame(t, name))
+	return l.next(t)
+}
+
+func (l *link) helloDetails(t *testing.T, hello nodelink.Hello) nodelink.Frame {
+	t.Helper()
+	l.send(t, helloDetailsFrame(t, hello))
 	return l.next(t)
 }
 
@@ -320,6 +391,9 @@ func TestNodeEnrolsOnceAndIsRefused(t *testing.T) {
 	if strings.Contains(reply.Err.Msg, "node approve node-b") {
 		t.Errorf("refusal offers approval by name: %q", reply.Err.Msg)
 	}
+	if !strings.Contains(reply.Err.Msg, "--guest-subnet 172.30.0.0/16") {
+		t.Errorf("refusal does not carry the node's reported subnet: %q", reply.Err.Msg)
+	}
 
 	row, err := s.roster.Get("node-b")
 	if err != nil {
@@ -346,6 +420,61 @@ func TestNodeEnrolsOnceAndIsRefused(t *testing.T) {
 	// Enrolling is not capacity: nothing joined the fleet.
 	if got := len(s.flt.Capacities()); got != 1 {
 		t.Errorf("fleet reports %d machines, want only this one", got)
+	}
+}
+
+func TestApprovedNodeMustReportRosterApprovedNetworkConfiguration(t *testing.T) {
+	s := newNodeStack(t, true)
+	key := newNodeKey(t)
+	pending := nodelink.Hello{
+		Protocol: nodelink.Protocol, Node: "node-b", Arch: "arm64", OS: "linux",
+		Release: "test", Version: "test", Driver: "mock",
+		GuestSubnet: "172.30.0.0/16", GRPCAddr: "100.64.0.20:9443",
+		StartedAt: time.Now(),
+	}
+	reply := s.open(t, key).helloDetails(t, pending)
+	if reply.Err == nil || !strings.Contains(
+		reply.Err.Msg,
+		"--guest-subnet 172.30.0.0/16 --grpc-addr 100.64.0.20:9443",
+	) {
+		t.Fatalf("pending approval guidance did not bind reported network values: %+v", reply.Err)
+	}
+	approveTestNode(t, s, key, "100.64.0.20:9443")
+
+	wrongSubnet := pending
+	wrongSubnet.GuestSubnet = "172.31.0.0/16"
+	reply = s.open(t, key).helloDetails(t, wrongSubnet)
+	if reply.Err == nil || reply.Err.Code != nodelink.CodeNodeNameMismatch ||
+		!strings.Contains(reply.Err.Msg, "roster approves") {
+		t.Fatalf("approved subnet drift was admitted: %+v", reply.Err)
+	}
+
+	wrongGRPC := pending
+	wrongGRPC.GRPCAddr = "100.64.0.21:9443"
+	reply = s.open(t, key).helloDetails(t, wrongGRPC)
+	if reply.Err == nil || reply.Err.Code != nodelink.CodeNodeNameMismatch ||
+		!strings.Contains(reply.Err.Msg, "roster approves") {
+		t.Fatalf("approved gRPC address drift was admitted: %+v", reply.Err)
+	}
+
+	reply = s.open(t, key).helloDetails(t, pending)
+	if reply.Err != nil {
+		t.Fatalf("exact approved network configuration was refused: %+v", reply.Err)
+	}
+}
+
+func TestLegacyApprovalWithoutNetworkConfigurationFailsClosed(t *testing.T) {
+	s := newNodeStack(t, true)
+	key := newNodeKey(t)
+	s.open(t, key).hello(t, "node-b")
+	if err := s.roster.ApproveFP(
+		xssh.FingerprintSHA256(key.PublicKey()), "operator",
+	); err != nil {
+		t.Fatal(err)
+	}
+	reply := s.open(t, key).hello(t, "node-b")
+	if reply.Err == nil || !strings.Contains(reply.Err.Msg, "no approved guest subnet") {
+		t.Fatalf("legacy unbound approval was admitted: %+v", reply.Err)
 	}
 }
 
@@ -406,9 +535,7 @@ func TestUnknownKeyRefusedIdenticallyElsewhere(t *testing.T) {
 func (s *nodeStack) approved(t *testing.T, key xssh.Signer, name string) *link {
 	t.Helper()
 	s.open(t, key).hello(t, name)
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 	l := s.open(t, key)
 	reply := l.hello(t, name)
 	if reply.Err != nil {
@@ -417,15 +544,27 @@ func (s *nodeStack) approved(t *testing.T, key xssh.Signer, name string) *link {
 	return l
 }
 
+func approveTestNode(t *testing.T, s *nodeStack, key xssh.Signer, grpcAddr string) {
+	t.Helper()
+	if err := s.roster.ApproveFPWithConfig(
+		xssh.FingerprintSHA256(key.PublicKey()),
+		"operator",
+		nodes.ApprovalConfig{
+			GuestSubnet: "172.30.0.0/16", GatewayGuestSubnet: "10.200.0.0/20",
+			GRPCAddr: grpcAddr,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestApprovedNodeJoinsTheFleet is the happy path end to end: hello, welcome,
 // inventory, heartbeat, and a machine the fleet can see.
 func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 
 	l := s.open(t, key)
 	reply := l.hello(t, "node-b")
@@ -444,6 +583,9 @@ func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	}
 	if w.HeartbeatSeconds != int(nodelink.DefaultHeartbeat/time.Second) {
 		t.Errorf("welcome asks for a %ds heartbeat, want %v", w.HeartbeatSeconds, nodelink.DefaultHeartbeat)
+	}
+	if w.SupportsDataPool() || w.ControlGeneration != "" {
+		t.Fatal("a legacy hello was not kept on the combined SSH link")
 	}
 
 	// The inventory is a request, so the gateway has to answer it; a node that
@@ -501,6 +643,108 @@ func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	}
 	if remote.Capacity.Node != "node-b" {
 		t.Errorf("node-b's capacity is filed under %q; the authenticated name must win", remote.Capacity.Node)
+	}
+}
+
+func TestDedicatedDataLaneBindsToRosterAndControlGeneration(t *testing.T) {
+	s := newNodeStack(t, true)
+	key := newNodeKey(t)
+	s.open(t, key).hello(t, "node-b")
+	approveTestNode(t, s, key, "")
+
+	control := s.open(t, key)
+	hello := helloFrame(t, "node-b")
+	var facts nodelink.Hello
+	if err := json.Unmarshal(hello.Body, &facts); err != nil {
+		t.Fatal(err)
+	}
+	facts.Capabilities = []string{nodelink.CapabilitySSHDataPoolV1}
+	hello.Body, _ = json.Marshal(facts)
+	control.send(t, hello)
+	reply := control.next(t)
+	var welcome nodelink.Welcome
+	if err := json.Unmarshal(reply.Body, &welcome); err != nil {
+		t.Fatal(err)
+	}
+	if !welcome.SupportsDataPool() {
+		t.Fatalf("capable peers did not negotiate a data pool: %+v", welcome)
+	}
+
+	_, refused := s.openData(t, key, nodelink.DataHello{
+		Protocol: nodelink.Protocol, Node: "other-node",
+		Generation: welcome.ControlGeneration, Lane: "wrong-roster",
+	})
+	if refused.Accepted {
+		t.Fatal("a data lane naming a different roster node was accepted")
+	}
+	_, refused = s.openData(t, key, nodelink.DataHello{
+		Protocol: nodelink.Protocol, Node: "node-b",
+		Generation: "stale-control-generation", Lane: "stale",
+	})
+	if refused.Accepted {
+		t.Fatal("a data lane from an old control generation was accepted")
+	}
+
+	lane, accepted := s.openData(t, key, nodelink.DataHello{
+		Protocol: nodelink.Protocol, Node: "node-b",
+		Generation: welcome.ControlGeneration, Lane: "lane-1",
+	})
+	if !accepted.Accepted {
+		t.Fatalf("current authenticated data lane was refused: %s", accepted.Error)
+	}
+
+	// A split gateway must open guest channels on the dedicated lane, never on
+	// the control transport. Rejecting the channel keeps this test independent
+	// of a real VM while still proving which SSH mux received it.
+	onControl := make(chan struct{}, 1)
+	go func() {
+		for ch := range control.client.HandleChannelOpen(nodelink.StreamChannel) {
+			onControl <- struct{}{}
+			_ = ch.Reject(xssh.Prohibited, "test")
+		}
+	}()
+	onData := make(chan struct{}, 1)
+	go func() {
+		for ch := range lane.client.HandleChannelOpen(nodelink.StreamChannel) {
+			onData <- struct{}{}
+			_ = ch.Reject(xssh.Prohibited, "test")
+		}
+	}()
+	if err := s.index.Reserve("demo", "alice", "node-b", "ubuntu", "arm64"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := json.Marshal(nodelink.ChangedMsg{
+		Node: "node-b",
+		Sandbox: nodelink.SandboxRow{
+			Name: "demo", Owner: "alice", State: "running",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.send(t, nodelink.Frame{Type: nodelink.TypeChanged, Body: changed})
+	waitFor(t, "remote sandbox cache", func() bool {
+		_, ok := s.flt.Get("demo")
+		return ok
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _ = s.flt.DialContext(ctx, "tcp", net.JoinHostPort(fleet.Host("demo", "node-b"), "8080"))
+	select {
+	case <-onData:
+	case <-time.After(time.Second):
+		t.Fatal("guest channel did not arrive on the dedicated data lane")
+	}
+	select {
+	case <-onControl:
+		t.Fatal("split control connection carried a guest channel")
+	default:
+	}
+
+	lane.sess.Close() //nolint:errcheck
+	lane.client.Close()
+	if !s.flt.Online("node-b") {
+		t.Fatal("losing a data lane marked the node offline")
 	}
 }
 
@@ -707,9 +951,7 @@ func TestApprovedNodeIsNeverRecycled(t *testing.T) {
 	s := newNodeStack(t, true)
 	key := newNodeKey(t)
 	s.open(t, key).hello(t, "node-b")
-	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
-		t.Fatal(err)
-	}
+	approveTestNode(t, s, key, "")
 	waiting := s.fillEnrolmentQueue(t)
 	// node-b has been silent longer than any of them, which is what makes it the
 	// row a rule about silence alone would pick.

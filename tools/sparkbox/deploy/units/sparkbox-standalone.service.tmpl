@@ -10,8 +10,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 # Non-secret host config: PROXY_DOMAIN plus optional flag bundles
-# (LOGIN_USER_FLAG, SUBNET6_FLAG, OVERCOMMIT_FLAGS, TLS_FLAGS, GATEWAY_FLAG,
-# EXTRA_FLAGS) and an optional SPARKBOX_CONSOLE_PASSWORD. Setting
+# (LOGIN_USER_FLAG, GUEST_SUBNET_FLAG, TRANSPORT_FLAGS, SUBNET6_FLAG,
+# OVERCOMMIT_FLAGS, TLS_FLAGS, GATEWAY_FLAG, EXTRA_FLAGS) and an optional
+# SPARKBOX_CONSOLE_PASSWORD. Setting
 # GATEWAY_FLAG=--gateway <host:port> runs this machine as a fleet NODE instead:
 # it holds VMs for that gateway and serves no edge of its own, so every other
 # flag on this line is ignored (the --users seed included, which is why passing
@@ -53,7 +54,7 @@ ExecStart={{.BinPath}} serve --driver firecracker \
   --ssh-addr {{.SSHAddr}} --api-addr {{.APIAddr}} \
   --proxy-addr {{.ProxyAddr}} --proxy-domain ${PROXY_DOMAIN} \
 {{range .OptFlags}}  {{.}} \
-{{end}}  $LOGIN_USER_FLAG $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS $GATEWAY_FLAG $EXTRA_FLAGS
+{{end}}  $LOGIN_USER_FLAG $GUEST_SUBNET_FLAG $TRANSPORT_FLAGS $SUBNET6_FLAG $OVERCOMMIT_FLAGS $TLS_FLAGS $GATEWAY_FLAG $EXTRA_FLAGS
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

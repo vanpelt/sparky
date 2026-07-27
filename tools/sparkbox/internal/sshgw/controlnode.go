@@ -1,6 +1,7 @@
 package sshgw
 
-// The operator's half of the fleet: `ctl@ node ls | approve <name> | rm <name>`.
+// The operator's half of the fleet:
+// `ctl@ node ls | approve <fingerprint> --guest-subnet <CIDR> | rm <name>`.
 //
 // The other half is nodedoor.go, where a machine enrols itself and is told to
 // wait. These two files are the whole trust ceremony — the node offers a key
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	gssh "github.com/gliderlabs/ssh"
 
@@ -55,18 +57,12 @@ func (g *Gateway) controlNode(s gssh.Session, c ctlops.Caller, args []string, lo
 		}
 		s.Exit(0) //nolint:errcheck
 	case "approve":
-		if len(args) < 2 {
-			// The usage line names the fingerprint and says where to read it,
-			// because the obvious guess is the name in the line above it and
-			// the whole point of this command is that the name is not enough.
-			fmt.Fprintf(s.Stderr(),
-				"usage: ssh %s@<gateway> node approve <SHA256:...>\r\n"+
-					"Approve a machine by the fingerprint of its key, which it prints at startup — "+
-					"compare that against `node ls` first.\r\n", ControlUser)
-			s.Exit(2) //nolint:errcheck
+		fp, config, err := ctlops.ParseNodeApprovalArgs(args[1:])
+		if err != nil {
+			failCtl(s, log, "node approve", err)
 			return
 		}
-		n, err := g.ops.ApproveNode(s.Context(), c, args[1])
+		n, err := g.ops.ApproveNode(s.Context(), c, fp, config)
 		if err != nil {
 			failCtl(s, log, "node approve", err)
 			return
@@ -125,7 +121,23 @@ func nodeLine(n ctlops.NodeInfo, flagUnmetered bool) string {
 	}
 	line := fmt.Sprintf("%-28s %-9s %-8s %-8s %-13s %s",
 		name, n.Status, presence, arch, boxes, n.FP)
-	return strings.TrimRight(line, " ") + egress + "\r\n"
+	line = strings.TrimRight(line, " ") + egress
+	if n.GuestSubnet != "" {
+		line += " guest=" + n.GuestSubnet
+	}
+	if n.GRPCAddr != "" {
+		line += " grpc=" + n.GRPCAddr
+	}
+	if n.CertSerial != "" {
+		line += " cert=" + n.CertSerial
+		switch {
+		case n.CertRevokedAt != nil:
+			line += "(revoked)"
+		case n.CertExpiresAt != nil:
+			line += "(expires " + n.CertExpiresAt.UTC().Format(time.RFC3339) + ")"
+		}
+	}
+	return line + "\r\n"
 }
 
 // mixedEgress reports whether this fleet meters some machines and not others.

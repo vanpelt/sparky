@@ -1033,6 +1033,22 @@ func TestIdempotencyKeyReplaysTheAnswer(t *testing.T) {
 	}
 }
 
+func TestRESTOperationIdentitySurvivesReplayCacheRestart(t *testing.T) {
+	first := durableRequestIdentity("alice", "deploy-42")
+	// A gateway restart constructs a fresh replay cache, but derives the same
+	// node operation identity from the authenticated caller's stable key.
+	second := durableRequestIdentity("alice", "deploy-42")
+	if first != second || first.OperationID == "" || first.IdempotencyKey == "" {
+		t.Fatalf("durable identities differ across restart: %+v vs %+v", first, second)
+	}
+	if other := durableRequestIdentity("alice", "deploy-43"); other.OperationID == first.OperationID {
+		t.Fatal("different idempotency keys share an operation identity")
+	}
+	if other := durableRequestIdentity("mallory", "deploy-42"); other.OperationID == first.OperationID {
+		t.Fatal("operation identity is not scoped to the authenticated caller")
+	}
+}
+
 func TestIdempotencyIgnoresUnkeyedRequests(t *testing.T) {
 	ta := newTestAPI(t)
 	a := ta.do(t, "POST", "/v1/account/tokens", "alice", tokenRequest{TTL: "1h"})

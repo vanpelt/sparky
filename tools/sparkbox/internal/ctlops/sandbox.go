@@ -164,7 +164,7 @@ func (o *Ops) Resume(ctx context.Context, c Caller, name string) (SandboxInfo, e
 	// decompress the whole rootfs before it can boot.
 	ctx, cancel := withBudget(ctx, ArchiveTimeout)
 	defer cancel()
-	box, err := o.boxes.EnsureRunning(ctx, name)
+	box, err := o.boxes.EnsureReady(ctx, name)
 	if err != nil {
 		return SandboxInfo{}, Fail(op, err)
 	}
@@ -339,7 +339,7 @@ func (o *Ops) Attach(ctx context.Context, c Caller, name string) (Endpoint, erro
 	}
 	ctx, cancel := withBudget(ctx, DialTimeout)
 	defer cancel()
-	box, err := o.boxes.EnsureRunning(ctx, name)
+	box, err := host.Prepare(ctx, o.boxes, name)
 	if err != nil {
 		return Endpoint{}, Fail(op, err)
 	}
@@ -351,7 +351,7 @@ func (o *Ops) Attach(ctx context.Context, c Caller, name string) (Endpoint, erro
 // bridge, exactly as the SSH gateway defers mgr.Touch — never on a keepalive,
 // because a ping-driven Touch turns a forgotten browser tab into a permanently
 // pinned VM.
-func (o *Ops) Touch(name string) { o.boxes.Touch(name) }
+func (o *Ops) MarkActive(name string) { o.boxes.MarkActive(name) }
 
 // reread re-resolves a sandbox after a mutation so the result carries the state
 // the manager actually settled on rather than the one we asked for. A record

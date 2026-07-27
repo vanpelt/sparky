@@ -65,6 +65,11 @@ func (e *Env) managedEnv(kv map[string]string) []envSetting {
 	if _, port, err := splitAddr(effectiveAddr(e.Cfg, kv, "--proxy-addr")); err == nil {
 		out = append(out, envSetting{"PROXY_PORT", strconv.Itoa(port)})
 	}
+	out = append(out, guestSubnetSettings(e.Cfg, kv)...)
+	if manageTransportSetting(e.Cfg, kv) {
+		out = append(out, transportSetting(e.Cfg, kv))
+		out = append(out, routedGuestCanaryIntentSetting(e.Cfg, kv))
+	}
 	out = append(out, sshNetSettings(e.Cfg, kv)...)
 	// Comes from the release manifest, so it is only known once resolve-release
 	// has run: a release that changes the rootfs login user would otherwise
@@ -116,6 +121,268 @@ func (e *Env) managedEnv(kv map[string]string) []envSetting {
 		out = append(out, envSetting{"GATEWAY_FLAG", flag})
 	}
 	return out
+}
+
+// guestSubnetSettings keeps the daemon and packet filter on one prefix. The
+// daemon consumes GUEST_SUBNET_FLAG; sparkbox-net.sh consumes
+// SPARKBOX_GUEST_SUBNET.
+func guestSubnetSettings(cfg Config, kv map[string]string) []envSetting {
+	subnet := effectiveGuestSubnet(cfg, kv)
+	return []envSetting{
+		{"SPARKBOX_GUEST_SUBNET", subnet},
+		{"GUEST_SUBNET_FLAG", "--guest-subnet=" + subnet},
+	}
+}
+
+// effectiveGuestSubnet protects a live custom value during an upgrade. When
+// --guest-subnet was explicitly supplied this run it is the starting point;
+// otherwise an existing environment value wins over the compiled-in default.
+// Finally inspect the flag bundles in their ExecStart order because a repeated
+// flag there wins in Go. Mirroring that value into SPARKBOX_GUEST_SUBNET keeps
+// NAT aligned with what the daemon actually uses without rewriting the
+// operator-owned bundle.
+func effectiveGuestSubnet(cfg Config, kv map[string]string) string {
+	subnet := cfg.guestSubnet()
+	if !cfg.flagGiven("guest-subnet") {
+		for _, raw := range []string{
+			kv["SPARKBOX_GUEST_SUBNET"],
+			flagValue(kv["GUEST_SUBNET_FLAG"], "--guest-subnet"),
+		} {
+			if normalized, err := NormalizeGuestSubnet(raw); raw != "" && err == nil {
+				subnet = normalized
+			}
+		}
+	}
+	for _, key := range []string{"TLS_FLAGS", "GATEWAY_FLAG", "EXTRA_FLAGS"} {
+		if raw := flagValue(kv[key], "--guest-subnet"); raw != "" {
+			if normalized, err := NormalizeGuestSubnet(raw); err == nil {
+				subnet = normalized
+			}
+		}
+	}
+	return subnet
+}
+
+func flagValue(bundle, name string) string {
+	words := strings.Fields(bundle)
+	for i := 0; i < len(words); i++ {
+		if words[i] == name && i+1 < len(words) {
+			return words[i+1]
+		}
+		if value, ok := strings.CutPrefix(words[i], name+"="); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+const (
+	transportFlagsEnv               = "TRANSPORT_FLAGS"
+	routedGuestCanaryExplicitEnv    = "SPARKBOX_ROUTED_GUEST_CANARY_EXPLICIT"
+	routedGuestCanaryExplicitMarker = "1"
+)
+
+// manageTransportSetting keeps upgrades inert unless transport configuration
+// already exists or this run actually asks to create/change it. Fresh files go
+// through renderEnvFile and always receive the explicit auto defaults.
+func manageTransportSetting(cfg Config, kv map[string]string) bool {
+	if _, present := kv[transportFlagsEnv]; present {
+		return true
+	}
+	for _, name := range []string{
+		"node-control-transport", "node-control-rollout",
+		"node-grpc-addr", "gateway-grpc-addr",
+		"guest-data-transport", "routed-guest-canary-percent", "cluster-id",
+	} {
+		if cfg.flagGiven(name) {
+			return true
+		}
+	}
+	control := strings.TrimSpace(cfg.NodeControlTransport)
+	data := strings.TrimSpace(cfg.GuestDataTransport)
+	return (control != "" && control != "auto") ||
+		(strings.TrimSpace(cfg.NodeControlRollout) != "" &&
+			strings.TrimSpace(cfg.NodeControlRollout) != "inherit") ||
+		strings.TrimSpace(cfg.NodeGRPCAddr) != "" ||
+		strings.TrimSpace(cfg.GatewayGRPCAddr) != "" ||
+		(data != "" && data != "auto") ||
+		(cfg.RoutedGuestCanaryPercent != 0 && cfg.RoutedGuestCanaryPercent != 100) ||
+		strings.TrimSpace(cfg.ClusterID) != ""
+}
+
+// transportSetting persists the fleet transport and workload-identity knobs in one
+// systemd-word-split bundle. effectiveTransportConfig preserves values from a
+// live host when an upgrade run did not name their setup flags, while still
+// respecting later operator-owned bundles in their actual ExecStart order.
+func transportSetting(cfg Config, kv map[string]string) envSetting {
+	effective := effectiveTransportConfig(cfg, kv)
+	flags := []string{
+		"--node-control-transport=" + effective.NodeControlTransport,
+		"--node-control-rollout=" + effective.NodeControlRollout,
+		"--guest-data-transport=" + effective.GuestDataTransport,
+		"--routed-guest-canary-percent=" + strconv.Itoa(effective.RoutedGuestCanaryPercent),
+	}
+	if effective.NodeGRPCAddr != "" {
+		flags = append(flags, "--node-grpc-addr="+effective.NodeGRPCAddr)
+	}
+	if effective.GatewayGRPCAddr != "" {
+		flags = append(flags, "--gateway-grpc-addr="+effective.GatewayGRPCAddr)
+	}
+	if effective.ClusterID != "" {
+		flags = append(flags, "--cluster-id="+effective.ClusterID)
+	}
+	return envSetting{transportFlagsEnv, strings.Join(flags, " ")}
+}
+
+// routedGuestCanaryIntentSetting preserves the one distinction the numeric
+// canary cannot encode by itself: 100 is both the compiled-in default and a
+// valid operator-selected full rollout. A fresh standalone host writes 0;
+// explicitly selecting the canary writes 1. Reading TRANSPORT_FLAGS alone
+// must not promote setup's generated auto/100 defaults into a fleet-routing
+// request on the second setup run.
+func routedGuestCanaryIntentSetting(cfg Config, kv map[string]string) envSetting {
+	effective := effectiveTransportConfig(cfg, kv)
+	value := "0"
+	if effective.RoutedGuestCanaryExplicit || cfg.flagGiven("routed-guest-canary-percent") {
+		value = routedGuestCanaryExplicitMarker
+	}
+	return envSetting{routedGuestCanaryExplicitEnv, value}
+}
+
+func effectiveTransportConfig(cfg Config, kv map[string]string) Config {
+	if cfg.NodeControlTransport == "" {
+		cfg.NodeControlTransport = "auto"
+	}
+	if cfg.NodeControlRollout == "" {
+		cfg.NodeControlRollout = "inherit"
+	}
+	if cfg.GuestDataTransport == "" {
+		cfg.GuestDataTransport = "auto"
+	}
+	if cfg.flagGiven("routed-guest-canary-percent") {
+		cfg.RoutedGuestCanaryExplicit = true
+	}
+	if cfg.RoutedGuestCanaryPercent == 0 && !cfg.flagGiven("routed-guest-canary-percent") {
+		cfg.RoutedGuestCanaryPercent = 100
+	}
+	apply := func(bundle string, onlyUngiven, operatorOwned bool) {
+		if !onlyUngiven || !cfg.flagGiven("node-control-transport") {
+			if value := flagValue(bundle, "--node-control-transport"); value != "" {
+				cfg.NodeControlTransport = value
+			}
+		}
+		if !onlyUngiven || !cfg.flagGiven("guest-data-transport") {
+			if value := flagValue(bundle, "--guest-data-transport"); value != "" {
+				cfg.GuestDataTransport = value
+			}
+		}
+		if !onlyUngiven || !cfg.flagGiven("node-control-rollout") {
+			if value := flagValue(bundle, "--node-control-rollout"); value != "" {
+				cfg.NodeControlRollout = value
+			}
+		}
+		if !onlyUngiven || !cfg.flagGiven("routed-guest-canary-percent") {
+			if value := flagValue(bundle, "--routed-guest-canary-percent"); value != "" {
+				if percent, err := strconv.Atoi(value); err == nil {
+					cfg.RoutedGuestCanaryPercent = percent
+					marker, marked := kv[routedGuestCanaryExplicitEnv]
+					switch {
+					case operatorOwned:
+						// EXTRA_FLAGS and the other later bundles are edited by
+						// an operator, so even their 100 is intentional.
+						cfg.RoutedGuestCanaryExplicit = true
+					case marker == routedGuestCanaryExplicitMarker:
+						cfg.RoutedGuestCanaryExplicit = true
+					case marked:
+						// The managed marker is authoritative when present.
+						cfg.RoutedGuestCanaryExplicit = false
+					default:
+						// Backward compatibility for files written before the
+						// marker: every non-default percentage was necessarily
+						// selected intentionally.
+						cfg.RoutedGuestCanaryExplicit = percent != 100
+					}
+				}
+			}
+		}
+		if !onlyUngiven || !cfg.flagGiven("node-grpc-addr") {
+			if value := flagValue(bundle, "--node-grpc-addr"); value != "" {
+				cfg.NodeGRPCAddr = value
+			}
+		}
+		if !onlyUngiven || !cfg.flagGiven("gateway-grpc-addr") {
+			if value := flagValue(bundle, "--gateway-grpc-addr"); value != "" {
+				cfg.GatewayGRPCAddr = value
+			}
+		}
+		if !onlyUngiven || !cfg.flagGiven("cluster-id") {
+			if value := flagValue(bundle, "--cluster-id"); value != "" {
+				cfg.ClusterID = value
+			}
+		}
+	}
+	apply(kv[transportFlagsEnv], true, false)
+	// These bundles appear after TRANSPORT_FLAGS in ExecStart. A repeated Go
+	// flag wins last, so doctor and setup reconciliation must observe the same
+	// effective values the daemon does.
+	for _, key := range []string{
+		"SUBNET6_FLAG", "OVERCOMMIT_FLAGS", "TLS_FLAGS", "GATEWAY_FLAG", "EXTRA_FLAGS",
+	} {
+		apply(kv[key], false, true)
+	}
+	return cfg
+}
+
+// EffectiveTransportConfig reads the service environment through Probe and
+// returns the transport values the daemon actually receives. Explicit doctor
+// flags win the managed TRANSPORT_FLAGS value; later operator bundles retain
+// their documented last-flag-wins precedence.
+func EffectiveTransportConfig(p Probe, cfg Config) Config {
+	kv, ok := effectiveEnvKV(p, cfg)
+	if !ok {
+		return cfg
+	}
+	return effectiveTransportConfig(cfg, kv)
+}
+
+// EffectiveFleetConfig resolves the transport settings plus the fleet role and
+// exact node name persisted by setup in GATEWAY_FLAG. Doctor uses this so a
+// plain invocation on a node validates the certificate against the configured
+// SPIFFE name rather than accepting any otherwise-valid node identity.
+func EffectiveFleetConfig(p Probe, cfg Config) Config {
+	kv, ok := effectiveEnvKV(p, cfg)
+	if !ok {
+		return cfg
+	}
+	cfg = effectiveTransportConfig(cfg, kv)
+	for _, bundle := range bundleOrder {
+		if !cfg.flagGiven("gateway") {
+			if value := flagValue(kv[bundle], "--gateway"); value != "" {
+				cfg.Gateway = value
+			}
+		}
+		if !cfg.flagGiven("node-name") {
+			if value := flagValue(kv[bundle], "--node-name"); value != "" {
+				cfg.NodeName = value
+			}
+		}
+	}
+	return cfg
+}
+
+func effectiveEnvKV(p Probe, cfg Config) (map[string]string, bool) {
+	if p == nil {
+		return nil, false
+	}
+	raw, err := p.ReadFile(cfg.envPath())
+	if err != nil {
+		return nil, false
+	}
+	kv, err := parseEnv(strings.NewReader(string(raw)))
+	if err != nil {
+		return nil, false
+	}
+	return kv, true
 }
 
 // netScriptSSHPort is the gateway SSH port deploy/sparkbox-net.sh assumes when

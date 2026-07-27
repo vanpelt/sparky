@@ -12,8 +12,14 @@ package ctlops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 )
 
 // notAFleet is the KindDisabled sentence every node command answers on a host
@@ -36,6 +42,16 @@ type NodeEvicter interface {
 	// EvictNode tears down whatever link the named machine holds and reports
 	// whether there was one.
 	EvictNode(name, reason string) bool
+}
+
+// NodeConfiguredApprover is the migration-safe extension implemented by a
+// roster that can persist operator-trusted network configuration.
+//
+// It is optional rather than part of NodeRoster so old adapters and narrow
+// test fakes continue to work during the rolling migration. A production
+// roster that implements it never falls back to the legacy approval write.
+type NodeConfiguredApprover interface {
+	ApproveFPWithConfig(fp, by string, cfg nodes.ApprovalConfig) error
 }
 
 // revokeLink tears down a machine's live link after its approval has been taken
@@ -95,7 +111,7 @@ func (o *Ops) ListNodes(ctx context.Context, c Caller) ([]NodeInfo, error) {
 // it and answers with the row — because the operator's mental model is "make
 // sure this is approved", and a failure there would only invite them to remove
 // and re-enrol a working node.
-func (o *Ops) ApproveNode(ctx context.Context, c Caller, fp string) (NodeInfo, error) {
+func (o *Ops) ApproveNode(ctx context.Context, c Caller, fp string, configs ...NodeApprovalConfig) (NodeInfo, error) {
 	const op = "nodes.approve"
 	if o.nodes == nil {
 		return NodeInfo{}, Disabled(op, notAFleet)
@@ -107,18 +123,157 @@ func (o *Ops) ApproveNode(ctx context.Context, c Caller, fp string) (NodeInfo, e
 	if err != nil {
 		return NodeInfo{}, err
 	}
+	if len(configs) > 1 {
+		return NodeInfo{}, Invalid(op, "bad_approval_config",
+			"node approval accepts one network configuration")
+	}
+
+	approver, configured := o.nodes.(NodeConfiguredApprover)
+	var approval nodes.ApprovalConfig
+	if configured || len(configs) == 1 {
+		var requested NodeApprovalConfig
+		if len(configs) == 1 {
+			requested = configs[0]
+		}
+		approval, err = o.normalizeNodeApproval(op, requested)
+		if err != nil {
+			return NodeInfo{}, err
+		}
+	}
 	// Resolved before the write so an unknown fingerprint gets the same masked
 	// sentence every other missing object gets, rather than whatever the roster
 	// store happens to say.
 	if _, err := o.nodeByFP(op, canon); err != nil {
 		return NodeInfo{}, err
 	}
-	n, err := o.nodes.ApproveNode(canon, c.Handle)
+
+	var n NodeInfo
+	if configured {
+		if err := approver.ApproveFPWithConfig(canon, c.Handle, approval); err != nil {
+			return NodeInfo{}, nodeApprovalError(op, approval.GuestSubnet, err)
+		}
+		// ApproveFPWithConfig owns the atomic persistence write but deliberately
+		// returns no presentation row. Re-resolve through the joined listing so
+		// online state and sandbox counts are present in the answer too.
+		n, err = o.nodeByFP(op, canon)
+	} else {
+		// Compatibility is intentionally restricted to a roster that does not
+		// expose configured approval. Once an adapter grows the extension above,
+		// every approval through it must carry and persist an explicit prefix.
+		n, err = o.nodes.ApproveNode(canon, c.Handle)
+	}
 	if err != nil {
 		return NodeInfo{}, Fail(op, err)
 	}
 	o.log.Info("node approved", "node", n.Name, "by", c.Handle, "fp", n.FP)
 	return n, nil
+}
+
+// normalizeNodeApproval validates and canonicalizes the operator-controlled
+// half of configured approval, then adds the gateway-local prefix that the
+// roster needs for its overlap transaction.
+func (o *Ops) normalizeNodeApproval(op string, requested NodeApprovalConfig) (nodes.ApprovalConfig, error) {
+	rawSubnet := strings.TrimSpace(requested.GuestSubnet)
+	if rawSubnet == "" {
+		return nodes.ApprovalConfig{}, &Error{
+			Kind: KindInvalid, Op: op, Code: "missing_guest_subnet",
+			Msg:      "a node guest subnet is required.",
+			Hint:     "Usage: node approve <fingerprint> --guest-subnet <CIDR> [--grpc-addr <host:port>].",
+			Verbatim: true,
+			Err:      nodes.ErrGuestSubnetRequired,
+		}
+	}
+	nodeNetwork, err := guestnet.Parse(rawSubnet)
+	if err != nil {
+		return nodes.ApprovalConfig{}, &Error{
+			Kind: KindInvalid, Op: op, Code: "bad_guest_subnet",
+			Msg:      fmt.Sprintf("%q is not a valid node guest subnet: %v", rawSubnet, err),
+			Hint:     "Use an IPv4 CIDR containing at least one /30 guest slot, for example 10.201.0.0/20.",
+			Verbatim: true,
+			Err:      err,
+		}
+	}
+
+	rawGateway := strings.TrimSpace(o.gatewayGuestSubnet)
+	if rawGateway == "" {
+		return nodes.ApprovalConfig{}, &Error{
+			Kind: KindDisabled, Op: op, Code: "gateway_guest_subnet_missing",
+			Msg:      "this fleet gateway has no guest subnet configured.",
+			Hint:     "Restart the gateway with an explicit --guest-subnet <CIDR> before approving fleet nodes.",
+			Verbatim: true,
+			Err:      nodes.ErrGatewayGuestSubnetRequired,
+		}
+	}
+	gatewayNetwork, err := guestnet.Parse(rawGateway)
+	if err != nil {
+		return nodes.ApprovalConfig{}, &Error{
+			Kind: KindDisabled, Op: op, Code: "gateway_guest_subnet_invalid",
+			Msg:      fmt.Sprintf("this fleet gateway's guest subnet %q is invalid.", rawGateway),
+			Hint:     "Fix --guest-subnet on the gateway before approving fleet nodes.",
+			Verbatim: true,
+			Err:      err,
+		}
+	}
+
+	grpcAddr := strings.TrimSpace(requested.GRPCAddr)
+	if grpcAddr != "" {
+		host, portText, err := net.SplitHostPort(grpcAddr)
+		if err != nil || strings.TrimSpace(host) == "" {
+			return nodes.ApprovalConfig{}, &Error{
+				Kind: KindInvalid, Op: op, Code: "bad_grpc_addr",
+				Msg:      fmt.Sprintf("%q is not a valid node gRPC address.", grpcAddr),
+				Hint:     "Use host:port, for example 100.64.0.12:9443; bracket IPv6 addresses.",
+				Verbatim: true,
+				Err:      err,
+			}
+		}
+		port, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil || port == 0 {
+			return nodes.ApprovalConfig{}, &Error{
+				Kind: KindInvalid, Op: op, Code: "bad_grpc_addr",
+				Msg:      fmt.Sprintf("%q is not a valid node gRPC address.", grpcAddr),
+				Hint:     "Use host:port with a numeric port from 1 to 65535.",
+				Verbatim: true,
+				Err:      err,
+			}
+		}
+		grpcAddr = net.JoinHostPort(host, strconv.FormatUint(port, 10))
+	}
+
+	return nodes.ApprovalConfig{
+		GuestSubnet:        nodeNetwork.String(),
+		GatewayGuestSubnet: gatewayNetwork.String(),
+		GRPCAddr:           grpcAddr,
+	}, nil
+}
+
+func nodeApprovalError(op, guestSubnet string, err error) error {
+	switch {
+	case errors.Is(err, nodes.ErrGuestSubnetRequired):
+		return &Error{
+			Kind: KindInvalid, Op: op, Code: "missing_guest_subnet",
+			Msg:      "a node guest subnet is required.",
+			Hint:     "Usage: node approve <fingerprint> --guest-subnet <CIDR> [--grpc-addr <host:port>].",
+			Verbatim: true, Err: err,
+		}
+	case errors.Is(err, nodes.ErrGatewayGuestSubnetRequired):
+		return &Error{
+			Kind: KindDisabled, Op: op, Code: "gateway_guest_subnet_missing",
+			Msg:      "this fleet gateway has no guest subnet configured.",
+			Hint:     "Restart the gateway with an explicit --guest-subnet <CIDR> before approving fleet nodes.",
+			Verbatim: true, Err: err,
+		}
+	case errors.Is(err, nodes.ErrGuestSubnetOverlap):
+		return &Error{
+			Kind: KindConflict, Op: op, Code: "guest_subnet_overlap",
+			Msg:      err.Error(),
+			Hint:     "Choose a prefix that does not overlap the gateway or any enrolled node, including offline and disabled nodes.",
+			Details:  map[string]any{"guest_subnet": guestSubnet},
+			Verbatim: true, Err: err,
+		}
+	default:
+		return Fail(op, err)
+	}
 }
 
 // RemoveNode drops a machine from the roster. It does not blacklist the key:

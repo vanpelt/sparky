@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 )
 
 // ErrLinkClosed is what pending and future requests report once Close has been
@@ -112,10 +113,13 @@ func (b *busySignal) record(now time.Time, every time.Duration) (refused int, wi
 // requests it answers. It is transport-agnostic on purpose — the SSH session it
 // rides in production is nothing more than an io.Reader and an io.Writer to it.
 type Conn struct {
-	out      *writer
-	dec      *decoder
-	log      *slog.Logger
-	idPrefix string
+	out       *writer
+	dec       *decoder
+	log       *slog.Logger
+	idPrefix  string
+	metrics   *fleetmetrics.Registry
+	node      string
+	transport string
 
 	// slots and bulkSlots bound how many of this peer's requests may be in
 	// flight at once, split by what the work behind them costs — see
@@ -146,6 +150,16 @@ type Conn struct {
 	base     context.Context
 	failure  error
 	done     chan struct{}
+}
+
+// SetMetrics attaches optional transport-neutral instrumentation to this
+// connection. Existing constructors stay unchanged, and a caller that does not
+// opt in pays only nil checks. Call this before the connection is served.
+func (c *Conn) SetMetrics(m *fleetmetrics.Registry, node, transport string) {
+	c.metrics = m
+	c.node = node
+	c.transport = transport
+	c.out.setMetrics(m, node, transport)
 }
 
 // NewConn wraps one direction each of a duplex transport. idPrefix is the
@@ -251,7 +265,11 @@ func (c *Conn) Serve(ctx context.Context) error {
 // That holds for the send as much as for the wait: the frame is handed to the
 // writer goroutine under the same context, so a peer that has stopped reading
 // costs this caller its deadline and nothing else.
-func (c *Conn) Request(ctx context.Context, typ string, body, out any) error {
+func (c *Conn) Request(ctx context.Context, typ string, body, out any) (err error) {
+	started := time.Now()
+	defer func() {
+		c.metrics.ObserveControlRPC(c.node, c.transport, typ, metricOutcome(err), time.Since(started))
+	}()
 	raw, err := marshalBody(body)
 	if err != nil {
 		return err
@@ -281,10 +299,12 @@ func (c *Conn) Request(ctx context.Context, typ string, body, out any) error {
 	}
 	c.pending[f.ID] = ch
 	c.mu.Unlock()
+	c.metrics.AddPending(c.node, c.transport, 1)
 	defer func() {
 		c.mu.Lock()
 		delete(c.pending, f.ID)
 		c.mu.Unlock()
+		c.metrics.AddPending(c.node, c.transport, -1)
 	}()
 
 	if err := c.out.send(ctx, f); err != nil {
@@ -351,6 +371,7 @@ func (c *Conn) Fail(err error) {
 	}
 	c.failure = err
 	close(c.done)
+	c.metrics.IncDisconnect(c.node, c.transport, metricDisconnectReason(err))
 }
 
 // Err reports why the link is dead, or nil while it lives.
@@ -401,6 +422,7 @@ func (c *Conn) dispatch(f *Frame) {
 			// A reply to a request whose caller has already given up. Expected
 			// whenever a deadline fires, so it is not worth a log line above Debug.
 			c.log.Debug("nodelink: reply for unknown request", "id", f.ID)
+			c.recordDrop("reply")
 			return
 		}
 		// Non-blocking: the waiter's channel holds one, and a peer that replied
@@ -409,6 +431,7 @@ func (c *Conn) dispatch(f *Frame) {
 		case ch <- f:
 		default:
 			c.log.Debug("nodelink: duplicate reply dropped", "id", f.ID)
+			c.recordDrop("reply")
 		}
 	case f.Type == TypePing && f.ID != "":
 		// The liveness probe is answered on the read goroutine itself, and it is
@@ -491,15 +514,21 @@ func (c *Conn) serveRequest(f *Frame) {
 	c.mu.Lock()
 	c.inflight[f.ID] = cancel
 	c.mu.Unlock()
+	c.metrics.AddInFlight(c.node, c.transport, f.Type, 1)
 	defer func() {
 		c.mu.Lock()
 		delete(c.inflight, f.ID)
 		c.mu.Unlock()
+		c.metrics.AddInFlight(c.node, c.transport, f.Type, -1)
 		cancel()
 	}()
 
 	out, err := h(ctx, f.Body)
 	c.reply(f, out, err)
+}
+
+func (c *Conn) recordDrop(kind string) {
+	c.metrics.IncDropped(c.node, c.transport, kind)
 }
 
 // reply answers one request. A send failure means the link died or fell far

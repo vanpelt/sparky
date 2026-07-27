@@ -46,17 +46,41 @@ import (
 // terminal.
 const maxDisplayText = 128
 
-var _ Node = (*remoteNode)(nil)
+var (
+	_ ControlPlane = (*remoteNode)(nil)
+	_ GuestDialer  = (*remoteNode)(nil)
+	_ Node         = (*linkedRemote)(nil)
+)
 
 // remoteNode presents a connected machine as a Node.
 type remoteNode struct {
 	client *nodelink.Client
 }
 
+// linkedRemote is the live-link metadata kept alongside the reusable
+// ControlPlane/GuestDialer composition. The two interfaces happen to share the
+// SSH implementation during phase 3, but callers no longer assume they do.
+type linkedRemote struct {
+	Node
+	client        *nodelink.Client
+	selector      *ControlSelector
+	guestSelector *GuestSelector
+	ssh           ControlPlane
+	sshGuest      GuestDialer
+}
+
 // Remote adapts a live link to Node. The link is already authenticated: the
 // door resolved an SSH key to a roster row before it ever built one, and that
 // row's name is the only name this machine is known by up here.
-func Remote(c *nodelink.Client) Node { return &remoteNode{client: c} }
+func Remote(c *nodelink.Client) Node {
+	ssh := &remoteNode{client: c}
+	selector := &ControlSelector{mode: ControlTransportSSH, ssh: ssh}
+	guestSelector := &GuestSelector{mode: GuestTransportSSH, ssh: ssh, canaryPercent: 100}
+	return &linkedRemote{
+		Node: ComposeNode(selector, guestSelector), client: c,
+		selector: selector, guestSelector: guestSelector, ssh: ssh, sshGuest: ssh,
+	}
+}
 
 func (r *remoteNode) Name() string { return r.client.Name() }
 
@@ -366,7 +390,7 @@ func (r *remoteNode) Create(ctx context.Context, name, owner, image string, vcpu
 	return r.record(resp.Sandbox, name, owner), nil
 }
 
-func (r *remoteNode) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
+func (r *remoteNode) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
 	var resp nodelink.SandboxResp
 	if err := r.client.Do(ctx, nodelink.TypeEnsureRunning, nodelink.NameReq{Name: name}, &resp); err != nil {
 		return nil, r.fail("restore", name, err)
@@ -447,7 +471,7 @@ func (r *remoteNode) ResyncEnv(ctx context.Context, name string) error {
 // keystroke batch. They ride as events and answer nil immediately — including
 // when the link is dead, because there is no failure to report to a caller that
 // was never going to look. The node applies them off its own read goroutine.
-func (r *remoteNode) Touch(_ context.Context, name string) error {
+func (r *remoteNode) MarkActive(_ context.Context, name string) error {
 	r.client.Cast(nodelink.TypeTouch, nodelink.NameReq{Name: name})
 	return nil
 }

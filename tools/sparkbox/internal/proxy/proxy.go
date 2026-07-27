@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
@@ -36,9 +37,11 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // resumeTimeout bounds how long a request will wait for a paused sandbox to
@@ -105,7 +108,9 @@ func newUpstreamTransport(dial Dialer) *http.Transport {
 // sandbox; a single-box deployment passes its *host.Manager and nothing about
 // the path changes.
 type Resumer interface {
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	Get(name string) (*host.Sandbox, bool)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
+	MarkActive(name string)
 }
 
 // Dialer is net.Dialer.DialContext's shape — see SetDialer.
@@ -136,6 +141,7 @@ type Server struct {
 	// transport carries every upstream request and owns the idle-connection
 	// pool. SetDialer replaces it wholesale.
 	transport *http.Transport
+	metrics   *fleetmetrics.Registry
 
 	// reserved maps subdomains owned by built-in handlers (operator console,
 	// OIDC issuer, login, user console) — checked before route lookup, so a
@@ -420,6 +426,9 @@ func (s *Server) SetDialer(d Dialer) {
 	s.rp.Transport = s.transport
 }
 
+// SetMetrics enables bounded warm/cold upstream first-byte observations.
+func (s *Server) SetMetrics(metrics *fleetmetrics.Registry) { s.metrics = metrics }
+
 // ---------------------------------------------------------------------------
 // When the failure is the machine, not the app
 // ---------------------------------------------------------------------------
@@ -597,9 +606,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Resume-on-connect: bring the sandbox up if it was reaped, and keep it
 	// marked active so the reaper leaves it alone while it's serving traffic.
+	temperature := "cold"
+	if cached, ok := s.mgr.Get(route.Sandbox); ok && cached.State == vmm.StateRunning {
+		temperature = "warm"
+	}
+	ttfbStarted := time.Now()
 	ctx, cancel := context.WithTimeout(ctxr, resumeTimeout)
 	defer cancel()
-	box, err := s.mgr.EnsureRunning(ctx, route.Sandbox)
+	box, err := host.Prepare(ctx, s.mgr, route.Sandbox)
 	if err != nil {
 		s.log.Warn("resume for proxy failed", "sandbox", route.Sandbox, "err", err)
 		if s.machineFailed(w, r, route, err) {
@@ -634,6 +648,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// default, since an any-port URL can override it.
 	route.Port = port
 	ctx2 := context.WithValue(ctxr, targetKey, target)
+	ctx2 = httptrace.WithClientTrace(ctx2, &httptrace.ClientTrace{
+		GotFirstResponseByte: func() {
+			s.metrics.ObserveProxyTTFB(box.Node, temperature, time.Since(ttfbStarted))
+		},
+	})
 	r = r.WithContext(context.WithValue(ctx2, routeKey, route))
 	s.rp.ServeHTTP(w, r)
 }

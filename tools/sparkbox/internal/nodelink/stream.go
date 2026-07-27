@@ -13,6 +13,7 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -33,6 +34,22 @@ var (
 	ErrUnknownSandbox = errors.New("unknown sandbox")
 	ErrNotRunning     = errors.New("sandbox not running")
 )
+
+const notRunningRefusal = "sandbox not running"
+
+// IsNotRunning reports the one guest-dial failure for which resuming and
+// retrying is valid. It accepts both the local resolver sentinel and the typed
+// SSH channel rejection sent by a node. Other Prohibited answers, especially
+// "unknown sandbox", are placement faults and must not be retried.
+func IsNotRunning(err error) bool {
+	if errors.Is(err, ErrNotRunning) {
+		return true
+	}
+	var refused *xssh.OpenChannelError
+	return errors.As(err, &refused) &&
+		refused.Reason == xssh.Prohibited &&
+		refused.Message == notRunningRefusal
+}
 
 // StreamOpen is the extra data on a sandbox-stream channel. It is marshalled
 // the way direct-tcpip's is (RFC 4254 §5.1), not as JSON, because that is the
@@ -151,10 +168,79 @@ func openStream(conn xssh.Conn, req StreamOpen) (*streamConn, error) {
 // and every other live stream freeze together. So this loop hands off and
 // nothing else.
 func ServeStreams(ctx context.Context, chans <-chan xssh.NewChannel, resolve Resolver, log *slog.Logger) {
+	ServeStreamsWithMetrics(ctx, chans, resolve, log, nil, "")
+}
+
+// ServeStreamsWithMetrics is ServeStreams with optional process-local
+// instrumentation. The original entry point remains source compatible.
+func ServeStreamsWithMetrics(
+	ctx context.Context,
+	chans <-chan xssh.NewChannel,
+	resolve Resolver,
+	log *slog.Logger,
+	metrics *fleetmetrics.Registry,
+	node string,
+) {
+	ServeStreamsWithOptions(ctx, chans, resolve, log, metrics, node, "ssh", nil, nil)
+}
+
+// StreamLimiter is shared by every data lane belonging to one node process.
+// Keeping it outside an individual accept loop is what makes MaxLiveStreams a
+// node-wide ceiling when two or more SSH connections are serving channels.
+type StreamLimiter struct {
+	live atomic.Int64
+	max  int64
+}
+
+func NewStreamLimiter(max int) *StreamLimiter {
+	if max <= 0 {
+		max = MaxLiveStreams
+	}
+	return &StreamLimiter{max: int64(max)}
+}
+
+func (l *StreamLimiter) acquire() bool {
+	if l == nil {
+		return true
+	}
+	if n := l.live.Add(1); n > l.max {
+		l.live.Add(-1)
+		return false
+	}
+	return true
+}
+
+func (l *StreamLimiter) release() {
+	if l != nil {
+		l.live.Add(-1)
+	}
+}
+
+// ServeStreamsWithOptions is the node-side accept loop used by both combined
+// links and dedicated data lanes. enabled, when non-nil, is checked for every
+// open; the split control connection keeps draining and explicitly rejecting
+// guest channels rather than leaving x/crypto's channel queue to stall its
+// mux. limiter may be shared across any number of lanes.
+func ServeStreamsWithOptions(
+	ctx context.Context,
+	chans <-chan xssh.NewChannel,
+	resolve Resolver,
+	log *slog.Logger,
+	metrics *fleetmetrics.Registry,
+	node string,
+	transport string,
+	limiter *StreamLimiter,
+	enabled *atomic.Bool,
+) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	var live atomic.Int64
+	if limiter == nil {
+		limiter = NewStreamLimiter(MaxLiveStreams)
+	}
+	if transport == "" {
+		transport = "ssh"
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -163,32 +249,54 @@ func ServeStreams(ctx context.Context, chans <-chan xssh.NewChannel, resolve Res
 			if !ok {
 				return
 			}
-			go serveStream(ctx, nc, resolve, &live, log)
+			if enabled != nil && !enabled.Load() {
+				_ = nc.Reject(xssh.Prohibited, "guest streams use dedicated data lanes")
+				continue
+			}
+			go serveStream(ctx, nc, resolve, limiter, log, metrics, node, transport)
 		}
 	}
 }
 
-func serveStream(ctx context.Context, nc xssh.NewChannel, resolve Resolver, live *atomic.Int64, log *slog.Logger) {
+func serveStream(
+	ctx context.Context,
+	nc xssh.NewChannel,
+	resolve Resolver,
+	limiter *StreamLimiter,
+	log *slog.Logger,
+	metrics *fleetmetrics.Registry,
+	node string,
+	transport string,
+) {
+	started := time.Now()
+	kind, outcome := "unknown", "error"
+	defer func() {
+		metrics.ObserveStreamOpen(node, transport, kind, outcome, time.Since(started))
+	}()
 	if nc.ChannelType() != StreamChannel {
+		outcome = "wrong_type"
 		_ = nc.Reject(xssh.UnknownChannelType, "")
 		return
 	}
 	var req StreamOpen
 	if err := xssh.Unmarshal(nc.ExtraData(), &req); err != nil {
+		outcome = "bad_request"
 		_ = nc.Reject(xssh.ConnectionFailed, "bad stream request")
 		return
 	}
-	if n := live.Add(1); n > MaxLiveStreams {
-		live.Add(-1)
+	kind = metricStreamKind(req.Kind)
+	if !limiter.acquire() {
+		outcome = "limit"
 		_ = nc.Reject(xssh.ResourceShortage, "stream limit")
 		return
 	}
-	defer live.Add(-1)
+	defer limiter.release()
 
 	log = log.With("sandbox", req.Sandbox, "kind", req.Kind, "nonce", req.Nonce)
 	addr, err := resolve(req.Sandbox, req.Kind, int(req.Port))
 	switch {
 	case errors.Is(err, ErrUnknownSandbox):
+		outcome = "unknown_sandbox"
 		// The gateway authorized this before it dialed, so a sandbox this node
 		// has never heard of means the two disagree about placement. That is a
 		// control-plane fault, not a user error, and it is logged as one.
@@ -196,12 +304,14 @@ func serveStream(ctx context.Context, nc xssh.NewChannel, resolve Resolver, live
 		_ = nc.Reject(xssh.Prohibited, "unknown sandbox")
 		return
 	case err != nil || addr == "":
-		_ = nc.Reject(xssh.Prohibited, "sandbox not running")
+		outcome = "not_running"
+		_ = nc.Reject(xssh.Prohibited, notRunningRefusal)
 		return
 	}
 
 	up, err := net.DialTimeout("tcp", addr, StreamDialTimeout)
 	if err != nil {
+		outcome = "dial_error"
 		// The rejection message is the node's OWN WORDS about its own network,
 		// so it is the one string on this path that has to be composed rather
 		// than relayed. net's dial error names the address it tried —
@@ -218,9 +328,13 @@ func serveStream(ctx context.Context, nc xssh.NewChannel, resolve Resolver, live
 	ch, reqs, err := nc.Accept()
 	if err != nil {
 		up.Close()
+		outcome = "accept_error"
 		return
 	}
 	go xssh.DiscardRequests(reqs)
+	outcome = "ok"
+	metrics.AddLiveStreams(node, transport, kind, 1)
+	defer metrics.AddLiveStreams(node, transport, kind, -1)
 
 	// Bounding the stream by the node's process context is right here and wrong
 	// on the gateway: this ctx is the node's lifetime, not one request's, so
@@ -231,7 +345,7 @@ func serveStream(ctx context.Context, nc xssh.NewChannel, resolve Resolver, live
 	})
 	defer stop()
 
-	pipe(ch, up)
+	pipeWithTransportMetrics(ch, up, metrics, node, transport, kind)
 }
 
 // refusalWords renders a failed guest dial for the gateway with no address in
@@ -253,16 +367,33 @@ func refusalWords(err error) string {
 // pipe copies both ways and half-closes each direction as it ends, so a guest
 // that reads until EOF sees one.
 func pipe(ch xssh.Channel, up net.Conn) {
+	pipeWithMetrics(ch, up, nil, "", "unknown")
+}
+
+func pipeWithMetrics(ch xssh.Channel, up net.Conn, metrics *fleetmetrics.Registry, node, kind string) {
+	pipeWithTransportMetrics(ch, up, metrics, node, "ssh", kind)
+}
+
+func pipeWithTransportMetrics(
+	ch xssh.Channel,
+	up net.Conn,
+	metrics *fleetmetrics.Registry,
+	node, transport, kind string,
+) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(ch, up)
+		_, _ = io.Copy(metricWriter{Writer: ch, record: func(n int) {
+			metrics.AddStreamBytes(node, transport, kind, "from_guest", n)
+		}}, up)
 		_ = ch.CloseWrite()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(up, ch)
+		_, _ = io.Copy(metricWriter{Writer: up, record: func(n int) {
+			metrics.AddStreamBytes(node, transport, kind, "to_guest", n)
+		}}, ch)
 		if cw, ok := up.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		} else {
@@ -272,6 +403,19 @@ func pipe(ch xssh.Channel, up net.Conn) {
 	wg.Wait()
 	ch.Close()
 	up.Close()
+}
+
+type metricWriter struct {
+	io.Writer
+	record func(int)
+}
+
+func (w metricWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n > 0 {
+		w.record(n)
+	}
+	return n, err
 }
 
 // fleetAddr keeps log lines legible: a tunneled connection has no host address
@@ -297,6 +441,11 @@ type streamConn struct {
 	ch     xssh.Channel
 	local  fleetAddr
 	remote fleetAddr
+	kind   string
+
+	metrics                     *fleetmetrics.Registry
+	metricNode, metricTransport string
+	metricKind                  string
 
 	mu sync.Mutex
 	rd *time.Timer
@@ -322,7 +471,12 @@ func newStreamConn(ch xssh.Channel, req StreamOpen) *streamConn {
 		ch:     ch,
 		local:  fleetAddr{network: "sandbox", addr: "gateway"},
 		remote: fleetAddr{network: "sandbox", addr: req.label()},
+		kind:   req.Kind,
 	}
+}
+
+func (c *streamConn) setMetrics(m *fleetmetrics.Registry, node, transport, kind string) {
+	c.metrics, c.metricNode, c.metricTransport, c.metricKind = m, node, transport, kind
 }
 
 // Read and Write substitute the recorded reason for whatever x/crypto says once
@@ -338,6 +492,7 @@ func newStreamConn(ch xssh.Channel, req StreamOpen) *streamConn {
 // by the time it happens the dial has long since returned.
 func (c *streamConn) Read(p []byte) (int, error) {
 	n, err := c.ch.Read(p)
+	c.metrics.AddStreamBytes(c.metricNode, c.metricTransport, c.metricKind, "from_guest", n)
 	if err != nil {
 		if r := c.failure("read"); r != nil {
 			return n, r
@@ -348,6 +503,7 @@ func (c *streamConn) Read(p []byte) (int, error) {
 
 func (c *streamConn) Write(p []byte) (int, error) {
 	n, err := c.ch.Write(p)
+	c.metrics.AddStreamBytes(c.metricNode, c.metricTransport, c.metricKind, "to_guest", n)
 	if err != nil {
 		if r := c.failure("write"); r != nil {
 			return n, r

@@ -26,6 +26,15 @@ func doctor(args []string) error {
 	defaultImage := fs.String("default-image", cfg.DefaultImage, "rootfs template basename")
 	users := fs.String("users", "", "users.conf path (default <root>/users.conf)")
 	gateway := fs.String("gateway", cfg.Gateway, "fleet gateway host:port; diagnose this machine as a node")
+	nodeName := fs.String("node-name", cfg.NodeName, "fleet node name expected in this node's exact mTLS SPIFFE identity")
+	guestSubnet := fs.String("guest-subnet", cfg.GuestSubnet, "IPv4 guest prefix expected in daemon, NAT, and Tailscale route state")
+	nodeControlTransport := fs.String("node-control-transport", cfg.NodeControlTransport, "fleet control transport: auto | ssh | grpc")
+	nodeControlRollout := fs.String("node-control-rollout", cfg.NodeControlRollout, "gateway control cutover: inherit | shadow | read-only | idempotent | grpc")
+	nodeGRPCAddr := fs.String("node-grpc-addr", cfg.NodeGRPCAddr, "fleet node tailnet listen address for the mTLS NodeControl server")
+	gatewayGRPCAddr := fs.String("gateway-grpc-addr", cfg.GatewayGRPCAddr, "fleet gateway tailnet listen address for mTLS workload-identity RPCs")
+	guestDataTransport := fs.String("guest-data-transport", cfg.GuestDataTransport, "remote guest data transport: auto | ssh | routed")
+	routedGuestCanaryPercent := fs.Int("routed-guest-canary-percent", cfg.RoutedGuestCanaryPercent, "gateway share of sandboxes using routed data in auto mode: 0..100")
+	clusterID := fs.String("cluster-id", cfg.ClusterID, "stable gateway mTLS identity name")
 	binPath := fs.String("bin-path", cfg.BinPath, "sparkbox binary the systemd unit runs (checked for version skew against the live service)")
 	release := fs.String("release", "", "release tag this host is supposed to be running; skew from the installed binary is reported (default: no assertion)")
 	// macOS only, and the same spellings `sparkbox setup` uses. Without these a
@@ -55,6 +64,21 @@ func doctor(args []string) error {
 
 	cfg = applyPaths(cfg, *root, *stateDir, *keyDir, *kernel, *imageDir, *defaultImage, *users)
 	cfg.Gateway = *gateway
+	cfg.NodeName = *nodeName
+	cfg.GuestSubnet = *guestSubnet
+	cfg.NodeControlTransport = *nodeControlTransport
+	cfg.NodeControlRollout = *nodeControlRollout
+	cfg.NodeGRPCAddr = *nodeGRPCAddr
+	cfg.GatewayGRPCAddr = *gatewayGRPCAddr
+	cfg.GuestDataTransport = *guestDataTransport
+	cfg.RoutedGuestCanaryPercent = *routedGuestCanaryPercent
+	cfg.ClusterID = *clusterID
+	cfg.FlagsGiven = given
+	normalizedGuestSubnet, err := hostsetup.NormalizeGuestSubnet(cfg.GuestSubnet)
+	if err != nil {
+		return fmt.Errorf("invalid --guest-subnet: %w", err)
+	}
+	cfg.GuestSubnet = normalizedGuestSubnet
 	// Set after applyPaths: --root rebuilds cfg from the default layout, and the
 	// install path is absolute rather than derived from the sparkbox home.
 	cfg.BinPath = *binPath
@@ -75,6 +99,22 @@ func doctor(args []string) error {
 	env := hostsetup.NewEnv(context.Background(), cfg, hostsetup.NewExecRunner(), hostsetup.NewHTTPFetcher(), os.Stdout)
 	if err := hostsetup.AttachMachineDriver(env); err != nil {
 		return err
+	}
+	// On Linux, diagnose what systemd actually starts. TRANSPORT_FLAGS is
+	// managed by setup, while the later compatibility/operator bundles retain
+	// Go flag's last-value-wins precedence. The macOS outer doctor deliberately
+	// leaves this to the inner Linux doctor running inside the machine.
+	if runtime.GOOS != "darwin" {
+		cfg, err = hostsetup.NormalizeTransportConfig(hostsetup.EffectiveFleetConfig(env.Probe, cfg))
+		if err != nil {
+			return fmt.Errorf("effective transport configuration: %w", err)
+		}
+		if err := validateNodeFlags(cfg.Gateway, cfg.NodeName); err != nil {
+			return err
+		}
+		env.Cfg = cfg
+		check := nodeControlHealthCheck(env.Ctx, cfg)
+		env.NodeControlHealth = &check
 	}
 	results := hostsetup.RunChecks(env.Probe, cfg, hostsetup.DoctorChecksFor(env))
 	// Unchanged on linux ("sparkbox doctor — /srv/sparkbox"); on a Mac it names
