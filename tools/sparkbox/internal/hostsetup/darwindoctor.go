@@ -127,11 +127,10 @@ func checkOuterKernel(e *Env) Result {
 		// three ordinary situations differ from it through nobody's fault: a
 		// Mac deliberately a release behind, a Mac provisioned before the next
 		// tag shipped, and the documented SPARKBOX_KERNEL_SOURCE=build /
-		// --outer-kernel escape hatch, whose bytes match no published checksum
-		// by construction. The kernel is also rebuilt from scratch on every
-		// `v*` tag (build-artifacts.yml disables the cache there), so the
-		// published hash moves for packaging reasons alone — stage-darwin-
-		// artifacts.sh calls it "an INTEGRITY claim and not an identity one".
+		// --outer-kernel escape hatch, which is not necessarily the artifact
+		// published for the release being checked. The published checksum is
+		// the download-integrity contract; its adjacent kernel manifest carries
+		// the separate build-provenance information.
 		//
 		// FAILing on that would go red on every Mac in the field the moment a
 		// release ships, which is the F8 pattern: a check that cries wolf

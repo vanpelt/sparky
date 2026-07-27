@@ -1,0 +1,11 @@
+FROM scratch
+
+LABEL org.opencontainers.image.title="sparkbox macOS outer kernel"
+
+COPY vmlinux-kvm /vmlinux-kvm
+COPY kernel.config /kernel.config
+COPY kernel-manifest.txt /kernel-manifest.txt
+
+# The cache image is a transport envelope, not a runnable filesystem. Supplying
+# a placeholder command lets `docker create` + `docker cp` extract its files.
+CMD ["/not-a-runnable-image"]

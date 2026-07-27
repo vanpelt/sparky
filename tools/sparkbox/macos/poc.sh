@@ -171,10 +171,9 @@ Teardown (./macos/poc.sh destroy [targets] --yes):
 Where the outer KVM kernel comes from:
   `build` downloads vmlinux-macos-arm64 for SPARKBOX_RELEASE and verifies it
   against SHA256_OUTER_KERNEL in that release's manifest-darwin-arm64.env. That
-  checksum says "this is the file the release published"; it is NOT a claim that
-  recompiling reproduces those bytes (the builder's gcc version is baked into
-  the kernel banner and the Ubuntu archive is not pinned — see the header of
-  macos/kernel/build.sh).
+  checksum says "this is the file the release published". CI also publishes a
+  provenance manifest with the content key and exact builder image digest (see
+  the header of macos/kernel/build.sh).
 
   To compile it yourself instead — the escape hatch, needed when changing
   sparkbox-arm64.fragment or the pinned Linux version:
@@ -489,9 +488,9 @@ stage_image_context() {
 }
 
 # ensure_kernel puts macos/out/vmlinux-kvm in place. The default is a download:
-# CI compiles this kernel once per release on a native arm64 runner and publishes
-# it as vmlinux-macos-arm64, so a Mac verifies a checksum instead of spending
-# five minutes and 149MB of Linux source on an onboarding step.
+# CI publishes vmlinux-macos-arm64 from a verified content cache or a pair of
+# native ARM builds, so a Mac verifies a checksum instead of spending five
+# minutes and 149MB of Linux source on an onboarding step.
 #
 # Both paths write the same two files (the Image and kernel-manifest.txt), and
 # the manifest's kernel_source= line is the only way to tell them apart — which
@@ -1262,10 +1261,9 @@ KERNEL_ARTIFACTS=(vmlinux-kvm kernel.config kernel-manifest.txt downloads)
 # It is now fetched from the release and verified against SHA256_OUTER_KERNEL,
 # and fetch.sh reuses a copy whose checksum still matches, so re-getting it is a
 # 29MB download at best and a full compile on SPARKBOX_KERNEL_SOURCE=build.
-# (Deleting it is not a way to "get a clean rebuild" either: a rebuild is only
-# guaranteed to be *a* valid kernel, not the same bytes — the builder's compiler
-# version is embedded in it and the Ubuntu archive that supplies it is not
-# pinned.) `--yes` used to mean all three tiers, which is how a role
+# (Deleting it is not a way to "get a clean rebuild" either: reproducing CI
+# requires the exact builder digest recorded in the released kernel manifest.)
+# `--yes` used to mean all three tiers, which is how a role
 # change — one line in sparkbox.env — ended up costing a kernel build. It now
 # means the cheap tier unless a target says otherwise.
 destroy_all() {

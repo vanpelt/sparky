@@ -91,10 +91,9 @@ type Manifest struct {
 	// It is what replaces compiling Linux 6.14.9 on the user's laptop as an
 	// onboarding step (macos/kernel/build.sh survives as the escape hatch).
 	//
-	// The checksum is an integrity claim about the published file, not a
-	// promise that a rebuild reproduces it: the builder's gcc/binutils versions
-	// are compiled into the kernel banner and the Ubuntu archive that supplies
-	// them is not pinned. See the header of macos/kernel/build.sh.
+	// The checksum is the integrity claim a Mac uses to verify the published
+	// file. CI separately records a content cache key and exact builder image
+	// digest in the kernel's release manifest; see macos/kernel/build.sh.
 	OuterKernelAsset  string
 	SHA256OuterKernel string
 	// OuterKernelRelease is the `uname -r` that kernel reports once booted

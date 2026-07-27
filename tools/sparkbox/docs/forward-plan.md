@@ -152,32 +152,27 @@ our fragment **on the user's laptop**. It is fully pinned, so it now belongs in
 CI, built once, as `vmlinux-macos-arm64`. Nobody should compile a kernel as an
 onboarding step.
 
-Shipped: a `macos-kernel` job on a native `ubuntu-24.04-arm` runner publishes
-`vmlinux-macos-arm64` (+ its resolved `.config`); `manifest-darwin-arm64.env`
-carries `OUTER_KERNEL_ASSET` / `SHA256_OUTER_KERNEL`; `macos/kernel/fetch.sh`
-downloads and verifies it and is now the default path, with
+Shipped: `macos-kernel` publishes `vmlinux-macos-arm64`, its resolved `.config`
+and a provenance manifest; `manifest-darwin-arm64.env` carries
+`OUTER_KERNEL_ASSET` / `SHA256_OUTER_KERNEL`; `macos/kernel/fetch.sh` downloads
+and verifies it and is now the default path, with
 `SPARKBOX_KERNEL_SOURCE=build` as the escape hatch.
 
-**The reproducibility gate resolved the other way, deliberately.** The
-checksum is published as an **integrity** claim — *this is the file the release
-shipped, verify your download against it* — and **not** as an identity claim.
-Byte-reproducibility across time is not achievable here at reasonable cost:
-`build.sh` installs its toolchain with a bare `apt-get install build-essential`,
-and the compiler is not merely used but *embedded* — the resolved config carries
-`CONFIG_CC_VERSION_TEXT="gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"` and the
-same string, plus the binutils version, is compiled into the kernel banner. A
-packaging-only Ubuntu revision moves the SHA-256 with zero codegen change.
-Pinning the archive as well (snapshot.ubuntu.com) would buy an identity claim at
-the price of a builder that can never take a compiler security fix, and would
-still not be a proof.
+The release checksum is the **integrity** claim a Mac consumes — *this is the
+file the release shipped, verify your download against it*. CI's provenance
+claim is separate and stronger: the compiler packages and verified source
+inputs live in a builder image pinned by digest, and that digest plus the build
+script, fragment and cache schema form a content-addressed GHCR key. An
+unchanged application release restores the existing verified bundle instead of
+recompiling it.
 
-What CI *does* prove, and gates on, is the narrower true claim: the build is a
-pure function of its inputs. On every `v*` tag the kernel is built **twice at
-different `-j`** and the job fails if the two hashes differ — which also settles
-the one input `build.sh` does not pin. The recorded known-good hash survives as
-a *witness*: a mismatch prints the observed compiler alongside both hashes and
-raises a CI warning, but does not fail the release, because failing a release
-because Ubuntu revved gcc is treating a snapshot as a law.
+On a genuine miss CI builds on two independent native ARM runners at `-j3` and
+`-j4`, compares both kernel images, configs and manifests byte-for-byte, and
+only then publishes the bundle. Updating the toolchain is deliberate: change
+`Dockerfile.builder`, get a new builder digest and cache key, exercise the new
+kernel, and update the known-good witness if appropriate. A direct local
+`build.sh` invocation retains the convenient archive-resolved fallback unless
+the recorded CI builder digest is supplied.
 
 ### B3 — build the machine image from the released binary — **size S, priority 3**
 
@@ -363,18 +358,13 @@ are the difference between a tool that installs and one that appears to.
 2. **W23 is where latent address leaks surface**, all at once, late. Expect the
    remote pass to fail in places nobody suspected — that is the test doing its
    job, and it is why W23 must not be deferred out of M3.
-3. ~~**B2's kernel reproducibility** is assumed, not proven. Verify before
-   treating the checksum as an identity.~~ **Settled: it is not reproducible
-   across time, and we no longer claim it is.** The builder's gcc and binutils
-   versions are compiled into the kernel banner while the Ubuntu archive that
-   supplies them is unpinned, so a packaging-only compiler revision changes the
-   bytes. `SHA256_OUTER_KERNEL` is therefore an integrity check on the published
-   file, not an identity anyone can re-derive; CI instead gates on determinism
-   *within* a toolchain (two builds at different `-j` must match) and reports
-   drift from the known-good witness without failing on it. Details in B2 above
-   and at the top of `macos/kernel/build.sh`. The residual risk is now the
-   honest one: **if the release pipeline ever loses that asset, a Mac has no
-   fallback but to compile**, so `macos/kernel/build.sh` must keep working.
+3. ~~**B2's kernel reproducibility** depended on an archive-resolved
+   toolchain.~~ **Settled:** CI now pins the resolved builder by digest, includes
+   it in the content key, and compares independent `-j3`/`-j4` builds before
+   caching. `SHA256_OUTER_KERNEL` remains the download-integrity contract; the
+   adjacent kernel manifest records provenance. The residual risk is the honest
+   one: **if both GHCR and the release asset are lost, a Mac has no fallback but
+   to compile**, so `macos/kernel/build.sh` must keep working.
 4. **No `go test` in CI today** means every acceptance criterion in the
    blueprint is honour-system. A6 should land before C starts in earnest.
 5. **Mixed-version fleets** are unhandled: nodes report a release tag but

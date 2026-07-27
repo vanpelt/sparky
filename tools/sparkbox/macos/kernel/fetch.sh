@@ -2,17 +2,17 @@
 # Fetch the macOS outer kernel from a sparkbox release instead of compiling it.
 #
 # THIS IS THE DEFAULT PATH. macos/kernel/build.sh — which downloads 149MB of
-# Linux source and spends 5 minutes (laptop) to 25 minutes (CI runner) compiling
+# Linux source and spends several minutes compiling
 # it — is now the escape hatch, taken only when SPARKBOX_KERNEL_SOURCE=build.
-# Nobody should compile a kernel as an onboarding step; CI builds it once per
-# release and publishes it as `vmlinux-macos-arm64`.
+# Nobody should compile a kernel as an onboarding step; CI restores the
+# content-addressed build when its inputs are unchanged and publishes it as
+# `vmlinux-macos-arm64`.
 #
 # The asset is verified against SHA256_OUTER_KERNEL in the same release's
 # manifest-darwin-arm64.env, exactly the way `sparkbox setup` verifies the guest
 # kernel, firecracker and the rootfs. That checksum is an INTEGRITY claim — this
-# is the file that release published — and deliberately not an identity claim:
-# see the reproducibility note at the top of build.sh for why a rebuild is not
-# guaranteed to produce the same bytes, and why it does not need to.
+# is the file that release published. CI's adjacent kernel manifest records the
+# exact builder digest and content key; see the reproducibility note in build.sh.
 #
 # Output is byte-for-byte what build.sh would have written, at the same paths,
 # so poc.sh, `container machine create --kernel`, the evidence bundle and

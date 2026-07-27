@@ -69,17 +69,15 @@ verifies it against `SHA256_OUTER_KERNEL` in `manifest-darwin-arm64.env`.
 `macos/kernel/build.sh` survives as the escape hatch
 (`SPARKBOX_KERNEL_SOURCE=build`).
 
-That checksum is an **integrity** claim, not an identity one, and the earlier
-wording here — "pinned and reproducible", with
-`7bb865dfc2dfb6578d41a9fb2d044299c626377ff69c540b15108afb75dd080c` quoted as
-though anyone could re-derive it — was wrong. `build.sh` installs its toolchain
-with an unpinned `apt-get install build-essential`, and gcc's and binutils'
-version strings are compiled into the kernel banner
-(`CONFIG_CC_VERSION_TEXT="gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"`), so a
-packaging-only Ubuntu revision changes the bytes with no change in behaviour.
-What CI gates on instead is determinism *within* a toolchain: on a `v*` tag it
-builds twice at different `-j` and fails if the hashes differ. The known-good
-hash is kept as a witness that reports drift, not as a gate.
+That checksum remains the **integrity** claim a Mac uses for its download. CI
+now makes the separate provenance claim explicit: it builds with an immutable
+toolchain image digest, keys a GHCR artifact over that digest plus every kernel
+input, and publishes the key and digest in
+`vmlinux-macos-arm64.manifest`. Unchanged releases restore that verified
+artifact. A genuine miss builds concurrently at `-j3` and `-j4` on independent
+native ARM runners and admits the result only when the images and configs are
+byte-identical. `build.sh`'s convenient local fallback still resolves packages
+from the current Ubuntu archive unless the CI builder digest is passed.
 
 ## 1.2 Linux: subsystems `setup` doesn't install
 
