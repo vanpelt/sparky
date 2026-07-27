@@ -1360,9 +1360,12 @@ func TestFleetSurvivesGatewayRestartKeepingWhatAMachineNoLongerHas(t *testing.T)
 	if row.Node != "node-b" || row.Owner != "tester" {
 		t.Fatalf("the orphaned row = %+v, want tester's, still on node-b", row)
 	}
-	if logged := fs.fleetLog.String(); !strings.Contains(logged, "the placement is kept, not deleted") {
-		t.Errorf("the gateway did not report giving up on a placement:\n%s", logged)
-	}
+	// Waited for, not sampled: orphan() marks the row and only then writes this
+	// line, so the state the loop above is watching flips first and a bare read
+	// here races the logger by however long that gap happens to be.
+	waitFor(t, "the gateway to report giving up on a placement", func() bool {
+		return strings.Contains(fs.fleetLog.String(), "the placement is kept, not deleted")
+	})
 	// Its owner still sees it, and is told what happened in one sentence rather
 	// than being told it never existed.
 	if out, _, _ := fs.ctl(t, "list"); !strings.Contains(out, "gone-away") {

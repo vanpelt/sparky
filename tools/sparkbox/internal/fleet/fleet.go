@@ -897,6 +897,39 @@ func (f *Fleet) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, 
 	return b, nil
 }
 
+// Vitals reads one sandbox's live counters from whichever machine runs it.
+//
+// It is routed rather than answered from the local manager because a balloon
+// and a VMM process can only be asked of the host holding them: before this
+// existed, every meter on a sandbox placed on a node drew empty — correctly,
+// but permanently, and the further the fleet spreads the more of the platform's
+// instrumentation goes dark.
+//
+// Three things it deliberately does NOT do, each of which would be an easy
+// "improvement" that breaks something:
+//
+//   - It never resumes and never touches. A reading is watching, not working; a
+//     terminal tab left open overnight must not keep a sandbox awake, which is
+//     the promise /vitals has made since it shipped and the reason it resolves
+//     through Get.
+//   - It does not fall back to the local manager when the owning machine is
+//     unreachable. The local manager holds a DIFFERENT sandbox for any name it
+//     happens to share, and drawing that one's CPU under this one's name is a
+//     cross-tenant reading with no error and no log line.
+//   - It does not cache. The caller polls at its own cadence and a stale
+//     instrument is worse than a blank one.
+//
+// The error is the caller's to swallow: every surface renders "no reading" and
+// "the machine is not answering" identically, on purpose, because a viewer can
+// act on neither.
+func (f *Fleet) Vitals(ctx context.Context, name string) (host.Vitals, error) {
+	n, err := f.route("vitals", name)
+	if err != nil {
+		return host.Vitals{}, err
+	}
+	return n.Vitals(ctx, name)
+}
+
 func (f *Fleet) Pause(ctx context.Context, name string) error {
 	n, err := f.route("pause", name)
 	if err != nil {

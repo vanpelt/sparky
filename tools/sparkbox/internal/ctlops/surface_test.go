@@ -85,7 +85,8 @@ func TestKeyLifecycle(t *testing.T) {
 
 func TestImportGitHubKeysReportsSkips(t *testing.T) {
 	r := newRig(t)
-	r.accts.users["alice"] = users.User{Handle: "alice", Status: "active", GitHubLogin: "alice-gh"}
+	r.accts.users["alice"] = users.User{Handle: "alice", Status: "active", GitHubLogin: "alice-gh",
+		GitHubVia: users.GitHubViaKeys}
 	key, fp := mustKey(t, testKey)
 	r.github.keys["alice-gh"] = []xssh.PublicKey{key}
 	r.accts.addErr = users.ErrKeyLinked

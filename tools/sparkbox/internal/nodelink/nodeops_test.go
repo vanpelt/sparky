@@ -12,6 +12,7 @@ package nodelink
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"sync"
@@ -118,6 +119,24 @@ func (m *opsManager) EnsureRunning(ctx context.Context, name string) (*host.Sand
 		return nil, err
 	}
 	return built(name, "alice", "ubuntu", 2, 2048), nil
+}
+
+// Vitals answers a fixed reading for one name and nothing for any other, which
+// is how the real manager behaves for a sandbox it does not run. The CPU number
+// is the only one set on purpose: a caller that mixed the fields up would still
+// pass if all four carried the same value.
+func (m *opsManager) Vitals(ctx context.Context, name string) (host.Vitals, error) {
+	if err := m.record("vitals", name); err != nil {
+		return host.Vitals{}, err
+	}
+	if err := m.waited(ctx); err != nil {
+		return host.Vitals{}, err
+	}
+	if name != "demo" {
+		return host.Vitals{}, nil
+	}
+	secs, used, rx, tx := 12.5, int64(700), uint64(4096), uint64(2048)
+	return host.Vitals{CPUSeconds: &secs, MemUsedMB: &used, NetRxBytes: &rx, NetTxBytes: &tx}, nil
 }
 
 func (m *opsManager) simple(ctx context.Context, verb string, args ...any) error {
@@ -299,6 +318,24 @@ func TestNodeRunsEveryLifecycleVerb(t *testing.T) {
 		{
 			name: "resync_env", typ: TypeResyncEnv, body: NameReq{Name: "demo"}, reply: &EmptyResp{},
 			want: managerCall{"resync_env", []any{"demo"}},
+		},
+		{
+			name: "vitals", typ: TypeVitals, body: NameReq{Name: "demo"},
+			reply: &VitalsResp{},
+			want:  managerCall{"vitals", []any{"demo"}},
+			check: func(t *testing.T, reply any) {
+				got := reply.(*VitalsResp)
+				if got.CPUSeconds == nil || *got.CPUSeconds != 12.5 {
+					t.Errorf("cpu_seconds = %v, want the node's 12.5", got.CPUSeconds)
+				}
+				if got.MemUsedMB == nil || *got.MemUsedMB != 700 {
+					t.Errorf("mem_used_mb = %v, want 700", got.MemUsedMB)
+				}
+				if got.NetRxBytes == nil || *got.NetRxBytes != 4096 ||
+					got.NetTxBytes == nil || *got.NetTxBytes != 2048 {
+					t.Errorf("tap counters = %v/%v, want 4096/2048", got.NetRxBytes, got.NetTxBytes)
+				}
+			},
 		},
 		{
 			name: "snapshot.create", typ: TypeSnapshotCreate,
@@ -588,4 +625,40 @@ func waitForCalls(t *testing.T, mgr *opsManager, want []managerCall) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %v; the node recorded %v", want, mgr.took())
+}
+
+// TestVitalsAbsenceCrossesTheWireAsAbsence is the one property of the vitals
+// reply that a table row cannot state: a counter this machine cannot read must
+// arrive missing rather than as zero.
+//
+// The distinction is the whole reason host.Vitals is all pointers. A guest that
+// has used no CPU since it booted and a guest whose driver has no CPU stats are
+// different facts, and every surface draws them differently — one shows an idle
+// meter, the other shows no meter. A wire shape without omitempty would collapse
+// the second into the first, and the sparkline for a sandbox on a stats-less
+// node would read as a machine that is doing nothing.
+func TestVitalsAbsenceCrossesTheWireAsAbsence(t *testing.T) {
+	p, _ := nodeOpsLink(t)
+	ctx := testCtx(t)
+
+	// The fake answers readings for "demo" and nothing for any other name,
+	// which is how the real manager behaves for a sandbox it does not run.
+	var resp VitalsResp
+	if err := p.gw.Request(ctx, TypeVitals, NameReq{Name: "elsewhere"}, &resp); err != nil {
+		t.Fatalf("vitals: %v", err)
+	}
+	if resp.CPUSeconds != nil || resp.MemUsedMB != nil ||
+		resp.NetRxBytes != nil || resp.NetTxBytes != nil {
+		t.Fatalf("a machine with no reading answered %+v, want every field absent", resp)
+	}
+
+	// And the encoding is genuinely empty rather than four zeroes, which is
+	// what a later `omitempty` deletion would quietly change.
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "{}" {
+		t.Errorf("encoded as %s, want {} — a zero counter is not a missing one", raw)
+	}
 }

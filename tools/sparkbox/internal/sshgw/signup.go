@@ -12,6 +12,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
@@ -94,7 +95,14 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 
 	// GitHub linking and email are optional and never block registration: the
 	// account exists from here on regardless of how these go.
-	emailPrefetch := g.askGitHub(s.Context(), t, handle, key, fp, log)
+	//
+	// From here the new account acts for itself. Everything below goes through
+	// ctlops as the user, which is what makes signup's GitHub step the same
+	// dialog, the same provenance and the same audit line as `ctl github link` —
+	// they were two implementations of one ceremony, and only one of them was
+	// ever kept current.
+	me := ctlops.Caller{Handle: handle, KeyFP: fp}
+	emailPrefetch := g.askGitHub(s, t, me, log)
 	g.askEmail(s.Context(), t, handle, emailPrefetch, log)
 
 	fmt.Fprintf(t, "registered as %q. try:  ssh %s@%s\r\n", handle, NewSandboxUser, g.domainHint())
@@ -147,51 +155,25 @@ func (g *Gateway) askHandle(t *term.Terminal) (string, error) {
 	return "", errors.New("no valid handle")
 }
 
-// askGitHub offers to link a GitHub account by checking the connecting key
-// against github.com/<login>.keys. Possession of a key GitHub publishes for an
-// account proves control of it — the same evidence GitHub itself accepts for a
-// git push — so this needs no OAuth app, browser, or client secret. On a
-// verified link it returns a channel that will deliver the profile's public
+// askGitHub offers to link a GitHub account, through the dialog every other
+// door uses.
+//
+// On a verified link it returns a channel that will deliver the profile's public
 // email for askEmail's prefill; nil when the link was skipped or didn't verify.
-func (g *Gateway) askGitHub(ctx context.Context, t *term.Terminal, handle string, key gssh.PublicKey, fp string, log *slog.Logger) <-chan string {
-	fmt.Fprint(t, "link a GitHub account? enter your GitHub username to verify\r\n")
-	fmt.Fprint(t, "this key against github.com/<user>.keys (or blank to skip)\r\n")
-	t.SetPrompt("github: ")
-	line, err := t.ReadLine()
-	if err != nil {
-		return nil
-	}
-	login := strings.TrimSpace(line)
+// The fetch is started here rather than awaited because the next prompt is the
+// one that wants it: the round trip hides behind the sentence confirming the
+// link instead of stalling in front of the email question.
+func (g *Gateway) askGitHub(s gssh.Session, t *term.Terminal, c ctlops.Caller, log *slog.Logger) <-chan string {
+	login := g.linkGitHub(s, t, c, "", log)
 	if login == "" {
 		return nil
 	}
-	// Fetch the profile email now, concurrent with the key check below: both
-	// requests depend only on the typed login, so the second GitHub round-trip
-	// hides behind the first instead of stalling the email prompt. The buffer
-	// lets the goroutine finish even when the channel is dropped unverified.
+	// Buffered so the goroutine finishes even when the channel is dropped.
 	emailCh := make(chan string, 1)
 	go func() {
-		em, _ := users.FetchGitHubEmail(ctx, login)
+		em, _ := users.FetchGitHubEmail(s.Context(), login)
 		emailCh <- em
 	}()
-	ok, err := users.VerifyGitHubKey(ctx, login, key)
-	if err != nil {
-		fmt.Fprintf(t, "couldn't check github (%v) — skipping; link later with:\r\n", err)
-		fmt.Fprintf(t, "  ssh %s@%s keys verify-github %s\r\n", ControlUser, g.domainHint(), login)
-		return nil
-	}
-	if !ok {
-		fmt.Fprintf(t, "%s isn't listed on github.com/%s.keys — skipping the link.\r\n", fp, login)
-		fmt.Fprintf(t, "add it there, then run:  ssh %s@%s keys verify-github %s\r\n",
-			ControlUser, g.domainHint(), login)
-		return nil
-	}
-	if err := g.users.LinkGitHub(handle, login); err != nil {
-		log.Error("github link failed after verifying", "handle", handle, "login", login, "err", err)
-		return nil
-	}
-	log.Info("github verified at signup", "handle", handle, "login", login)
-	fmt.Fprintf(t, "✓ key %s is listed on github.com/%s — verified.\r\n", fp, login)
 	return emailCh
 }
 

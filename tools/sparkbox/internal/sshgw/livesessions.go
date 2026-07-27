@@ -72,6 +72,30 @@ type SessionConn interface {
 	Close() error
 }
 
+// HungUpMarker is the optional half of SessionConn, implemented by a session
+// whose own teardown would otherwise race the hang-up and pick the close code
+// first.
+//
+// The local pause path cannot wait for the goodbye — see DrainSandboxSessions —
+// so it returns to the manager, which pauses the driver, which kills the guest's
+// sshd, which unwinds the session's bridge. If that lap finishes before the
+// goodbye goroutine is scheduled, the session ends itself: a browser terminal
+// reports "shell exited" and no goodbye or terminal-restore bytes are ever
+// written. Round-trip latency is not the culprit — a loaded machine is enough,
+// and the race is invisible until it fires.
+//
+// MarkHungUp is what closes it. It runs SYNCHRONOUSLY, before the pause is
+// dispatched, and says only "the gateway is ending this session, whatever
+// happens next": the session then knows not to choose its own ending, and to
+// wait for the goodbye rather than slam the connection shut. It must not block
+// and must not close anything — the manager is holding its lock.
+//
+// Optional because the SSH sessions this registry was built for do not need it:
+// they have no close code to lose, and their goodbye is best-effort either way.
+type HungUpMarker interface {
+	MarkHungUp()
+}
+
 // connectVia records how a tracked session reached its sandbox, because that is
 // what decides whether "reconnect with" can honestly print an ssh(1) command. A
 // browser tab handed one would have nothing to do with it.
@@ -212,6 +236,16 @@ func (g *Gateway) CloseAllSessions(reason string, wait time.Duration) int {
 func (g *Gateway) closeAll(victims []*liveSession, reason string, wait time.Duration) int {
 	if len(victims) == 0 {
 		return 0
+	}
+	// Claim them all before any of it happens, and before this function can
+	// return into a caller that is about to stop the VM. See HungUpMarker: the
+	// goroutines below may not be scheduled until well after the guest is gone,
+	// and a session that has not been told it is being hung up will have ended
+	// itself by then.
+	for _, ls := range victims {
+		if m, ok := ls.sess.(HungUpMarker); ok {
+			m.MarkHungUp()
+		}
 	}
 	var wg sync.WaitGroup
 	for _, ls := range victims {

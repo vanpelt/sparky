@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -28,24 +27,19 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
 
-// VitalsReader reads live resource counters for a sandbox running on THIS
-// machine. Satisfied by *host.Manager.
+// VitalsReader reads live resource counters for a sandbox, wherever it runs.
+// It is webui's, shared with both consoles, because all three surfaces draw the
+// same meters from the same numbers under the same budget — see webui.Probe.
+// Satisfied by *fleet.Fleet, and by *host.Manager for a build with no fleet.
 //
-// Every method answers ok=false for a name it does not hold, which is what
-// makes the fleet case correct without this package knowing what a fleet is: a
+// It is one method rather than the three readers underneath it because the
+// fleet made "all three at once" the unit that crosses a machine boundary: a
 // balloon and a VMM process can only be asked of the host running them, so a
-// sandbox placed on another node simply misses in the local manager's maps and
-// reports nothing. The page then draws the meters it has and hides the rest —
-// the same degradation the user console has always had (userconsole.machines).
-type VitalsReader interface {
-	// CPUSeconds is cumulative host CPU time of the VM process, in seconds.
-	CPUSeconds(ctx context.Context, name string) (float64, bool)
-	// MemStats is the guest's real memory use in MiB, from balloon statistics.
-	MemStats(ctx context.Context, name string) (int64, bool)
-	// NetCounters are the raw tap counters in bytes, guest's point of view.
-	// They reset to zero whenever the sandbox is paused, resumed or cold-booted.
-	NetCounters(ctx context.Context, name string) (rx, tx uint64, ok bool)
-}
+// sandbox on another node is asked over the link, and three round trips a
+// second per open tab is not a wire protocol. The reading that comes back is
+// all-pointers for the same reason the wire shape below is — a missing counter
+// and a zero counter are different facts, and the page draws them differently.
+type VitalsReader = webui.VitalsReader
 
 // vitals is the wire shape of one reading.
 //
@@ -122,40 +116,23 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out) //nolint:errcheck
 }
 
-// readVitals fills in whatever the local machine can answer about box.
+// readVitals fills in whatever the machine holding box can answer about it.
 //
-// The three reads run concurrently under one budget, mirroring the user
-// console's dashboard: they touch different things — /proc for CPU, sysfs for
-// the tap, the VMM's API socket for the balloon — and only the last of those
-// can be slow. Sequentially, one wedged VMM would cost the page its CPU plot
-// too, and at a reading a second the latency would compound into a visibly
-// stuttering chart.
+// The reading, its budget and what counts as "no reading" are all webui's, so
+// that this page and the two dashboards cannot drift on any of them. What is
+// left here is the one thing this surface does differently: an error is logged
+// at debug rather than dropped silently, because a terminal is attached to
+// exactly one sandbox and "the meters went blank" has a cause worth naming when
+// somebody goes looking.
 func (h *Handler) readVitals(ctx context.Context, box *host.Sandbox, out *vitals) {
-	if h.vitalsOf == nil || box.State != vmm.StateRunning {
+	v, err := h.probe.Vitals(ctx, h.vitalsOf, box)
+	if err != nil {
+		// Debug, not warn: on a fleet with a node that has gone away this fires
+		// once a second per open tab, and the fact is already visible where it
+		// is actionable (`ctl node ls`, and the console's own offline badge).
+		h.log.Debug("vitals unavailable", "sandbox", box.Name, "node", box.Node, "err", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, webui.ProbeTimeout)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		if secs, ok := h.vitalsOf.CPUSeconds(ctx, box.Name); ok {
-			out.CPUSeconds = &secs
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if used, ok := h.vitalsOf.MemStats(ctx, box.Name); ok {
-			out.MemUsedMB = &used
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if rx, tx, ok := h.vitalsOf.NetCounters(ctx, box.Name); ok {
-			out.NetRxBytes, out.NetTxBytes = &rx, &tx
-		}
-	}()
-	wg.Wait()
+	out.CPUSeconds, out.MemUsedMB = v.CPUSeconds, v.MemUsedMB
+	out.NetRxBytes, out.NetTxBytes = v.NetRxBytes, v.NetTxBytes
 }

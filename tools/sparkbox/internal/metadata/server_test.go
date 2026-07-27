@@ -66,8 +66,9 @@ func fixture(t *testing.T, auds ...string) *Server {
 		Identity: Local{
 			Issuer: iss,
 			Users: fakeAccounts{
-				"alice": {Handle: "alice", Status: "active", GitHubLogin: "alice-gh", GitHubVerifiedAt: &verified},
-				"bob":   {Handle: "bob", Status: "active"}, // never linked GitHub
+				"alice": {Handle: "alice", Status: "active", GitHubLogin: "alice-gh",
+					GitHubVerifiedAt: &verified, GitHubVia: users.GitHubViaKeys},
+				"bob": {Handle: "bob", Status: "active"}, // never linked GitHub
 			},
 			NodeName: "test-box",
 		},
@@ -218,6 +219,33 @@ func TestGitHubClaimRequiresVerification(t *testing.T) {
 	}
 	if _, present := decodeClaims(t, rec.Body.String())["github"]; present {
 		t.Error("unverified github login leaked into the token claims")
+	}
+}
+
+// A link somebody else vouched for is not the same fact as a link GitHub
+// proved, and only the second one may ride in a token.
+//
+// docs/identity-federation-design.md tells relying parties this claim is a
+// strong external anchor and invites them to write `claims.github == "x"` in a
+// policy. An assertion-derived link would make it mean "somebody said so" — and
+// when the somebody is the same service reading the policy, it would be
+// authorizing against a fact it asserted. The console may still display such a
+// link; a token may not carry it.
+func TestGitHubClaimRequiresStrongProvenance(t *testing.T) {
+	verified := time.Unix(0, 0).UTC()
+	s := fixture(t)
+	local := s.id.(Local)
+	local.Users = fakeAccounts{"alice": {
+		Handle: "alice", Status: "active", GitHubLogin: "alice-gh",
+		GitHubVerifiedAt: &verified, GitHubVia: users.GitHubViaAssertion,
+	}}
+	s.id = local
+	rec := request(s, "/token", "172.30.5.2", "172.30.5.1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /token = %d", rec.Code)
+	}
+	if _, present := decodeClaims(t, rec.Body.String())["github"]; present {
+		t.Error("a third party's word for a github account reached the token claims")
 	}
 }
 

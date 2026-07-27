@@ -33,6 +33,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
 
 // DefaultSubdomain is the reserved name segment the edge dispatches on: the
@@ -73,6 +74,17 @@ type SessionConn interface {
 	Close() error
 }
 
+// HungUpMarker mirrors sshgw.HungUpMarker for the same reason SessionConn
+// mirrors its sessionConn, and is satisfied by the same adapter: it is how the
+// gateway claims a terminal synchronously, before the sandbox stops, so that a
+// bridge unwinding on the dead guest does not answer "shell exited" for a
+// sandbox that was paused. Declared here so the two halves are visible together
+// and a rename on either side is a compile error rather than a silent return to
+// the race — see the assertion in conn.go.
+type HungUpMarker interface {
+	MarkHungUp()
+}
+
 // Config wires the handler. Sandboxes, Sessions and UpstreamKey are required;
 // the rest degrade rather than panic, because a unit test and a
 // minimally-configured host both want that.
@@ -82,13 +94,21 @@ type Config struct {
 	// Accounts resolves operator status. Satisfied by *users.Store; nil means
 	// nobody is an operator, which fails closed.
 	Accounts edgeauth.Accounts
-	// Vitals reads live CPU, memory and network counters for the sandboxes on
-	// THIS machine, feeding the page's instrument strip. Satisfied by
-	// *host.Manager — deliberately the local manager and not Sandboxes, which in
-	// a fleet is the gateway's view of every node: a balloon and a VMM process
-	// can only be asked of the host running them. Nil serves the page with no
-	// meters, which is what a test and a stats-less driver both want.
+	// Vitals reads live CPU, memory and network counters for the sandbox this
+	// page is attached to, feeding its instrument strip. Satisfied by
+	// *fleet.Fleet, which routes the read to the machine holding the VM — a
+	// balloon and a VMM process can only be asked of the host running them, so
+	// this is the one meter that cannot be answered locally for a sandbox on
+	// another node. *host.Manager satisfies it too, for a build with no fleet.
+	// Nil serves the page with no meters, which is what a test and a stats-less
+	// driver both want.
 	Vitals VitalsReader
+	// Node is this machine's name, and is used for one thing: deciding how long
+	// a vitals read may take. A sandbox on another machine costs a round trip
+	// to it before its balloon is even touched, so it gets webui's tunneled
+	// budget rather than the local one. Empty makes every sandbox look local,
+	// which is right for a single-machine deployment and for every test.
+	Node string
 	// Sessions verifies the edge session token carried by the cookie or a
 	// Bearer header.
 	Sessions *edgeauth.Signer
@@ -133,6 +153,9 @@ type Handler struct {
 	sessions    *edgeauth.Signer
 	upstreamKey xssh.Signer
 	vitalsOf    VitalsReader
+	// probe carries this machine's name, which is how a local sandbox is told
+	// from a remote one when budgeting a vitals read.
+	probe webui.Probe
 
 	domain    string
 	subdomain string
@@ -170,6 +193,7 @@ func New(cfg Config) *Handler {
 	h := &Handler{
 		mgr: cfg.Sandboxes, accounts: cfg.Accounts, sessions: cfg.Sessions,
 		upstreamKey: cfg.UpstreamKey, vitalsOf: cfg.Vitals,
+		probe:     webui.Probe{Node: cfg.Node},
 		domain:    strings.ToLower(strings.Trim(cfg.Domain, ".")),
 		subdomain: strings.ToLower(sub),
 		loginURL:  cfg.LoginURL,
