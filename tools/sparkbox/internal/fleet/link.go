@@ -49,8 +49,9 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 		// deployment has no signing path, which is a sentence the node can log,
 		// where a nil hook would be the unregistered-type error a version skew
 		// produces and would send an operator looking for the wrong thing.
-		OnIdentityToken: f.IdentityToken,
-		OnIdentityDoc:   f.IdentityDoc,
+		OnIdentityToken:     f.IdentityToken,
+		OnIdentityDoc:       f.IdentityDoc,
+		OnCertificateEnroll: f.enrollCertificate,
 	}
 	if opts.Grace == 0 {
 		// How long this machine still counts as online after it goes quiet.
@@ -76,6 +77,24 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 	err = wait()
 	f.log.Info("node link ended", "node", n.Name(), "err", err)
 	return err
+}
+
+// ServeDataLane binds an authenticated SSH data connection to the live remote
+// control client for its roster node. A lane can race the control link's final
+// registration by a few milliseconds; refusing that attempt is intentional,
+// because the node supervises lanes independently and retries without
+// disturbing control.
+func (f *Fleet) ServeDataLane(ctx context.Context, opts nodelink.DataServerOptions) error {
+	f.mu.RLock()
+	n := f.nodes[opts.Node]
+	f.mu.RUnlock()
+	remote, ok := n.(*linkedRemote)
+	if !ok {
+		err := fmt.Errorf("fleet: node %q has no live control generation", opts.Node)
+		_ = nodelink.RefuseDataLane(opts.Session, err)
+		return err
+	}
+	return remote.client.ServeDataLane(ctx, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +360,32 @@ func (f *Fleet) speaksFor(node, sandbox, event string) bool {
 func (f *Fleet) linkUp(n Node) func() {
 	name := n.Name()
 	f.mu.Lock()
+	if linked, ok := n.(*linkedRemote); ok {
+		linked.guestSelector.setMetrics(name, f.metrics)
+		linked.selector.setMetrics(name, f.metrics)
+		if binding := f.grpcControls[name]; binding != nil {
+			if err := linked.selector.Configure(binding.mode, binding.control); err != nil {
+				f.log.Error("could not apply the node's gRPC control selection",
+					"node", name, "mode", binding.mode, "err", err)
+			}
+			if err := linked.selector.ConfigureRollout(binding.rollout); err != nil {
+				f.log.Error("could not apply the node's gRPC operation rollout",
+					"node", name, "err", err)
+			}
+			linked.selector.ConfigureShadowInventory(binding.shadow.enabled, binding.shadow.observer)
+		}
+		if binding := f.routedGuests[name]; binding != nil {
+			health := binding.resolver.get()
+			if err := linked.guestSelector.Configure(binding.mode, health, binding.dialer); err != nil {
+				f.log.Error("could not apply the node's routed guest selection",
+					"node", name, "mode", binding.mode, "err", err)
+			}
+			if err := linked.guestSelector.ConfigureCanary(binding.canaryPercent); err != nil {
+				f.log.Error("could not apply the node's routed guest canary",
+					"node", name, "percent", binding.canaryPercent, "err", err)
+			}
+		}
+	}
 	old, dup := f.nodes[name]
 	f.nodes[name] = n
 	f.mu.Unlock()
@@ -382,12 +427,26 @@ func (f *Fleet) EvictNode(name, reason string) bool {
 	if linked {
 		delete(f.nodes, name)
 	}
+	grpc := f.grpcControls[name]
+	if grpc != nil {
+		delete(f.grpcControls, name)
+	}
+	if routed := f.routedGuests[name]; routed != nil {
+		routed.resolver.set(nil)
+		delete(f.routedGuests, name)
+	}
 	f.mu.Unlock()
-	if !linked {
+	if !linked && grpc == nil {
 		return false
 	}
 	f.log.Info("node link revoked", "node", name, "reason", reason)
-	n.Revoke(nodelink.CodeRevoked, revoked(name, reason))
+	revocation := revoked(name, reason)
+	if linked {
+		n.Revoke(nodelink.CodeRevoked, revocation)
+	}
+	if grpc != nil {
+		grpc.control.Revoke(nodelink.CodeRevoked, revocation)
+	}
 	return true
 }
 

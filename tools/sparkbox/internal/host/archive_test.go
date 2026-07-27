@@ -117,7 +117,7 @@ func TestArchiveRestoreRoundTrip(t *testing.T) {
 	}
 
 	// Resume-on-connect restores transparently.
-	if _, err := m.EnsureRunning(ctx, "a1"); err != nil {
+	if _, err := m.EnsureReady(ctx, "a1"); err != nil {
 		t.Fatalf("restore/resume: %v", err)
 	}
 	b, _ = m.Get("a1")
@@ -365,7 +365,7 @@ func TestArchiveStripsManagedEnvBlock(t *testing.T) {
 	}
 
 	// Restore re-pushes via the EnsureRunning hook: the env comes back.
-	if _, err := m.EnsureRunning(ctx, "a1"); err != nil {
+	if _, err := m.EnsureReady(ctx, "a1"); err != nil {
 		t.Fatalf("restore/resume: %v", err)
 	}
 	waitFor(t, func() bool { return syncer.pushCount("a1") == 2 })

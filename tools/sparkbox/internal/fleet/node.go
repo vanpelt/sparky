@@ -78,7 +78,7 @@ func SplitHost(h string) (sandbox, node string, ok bool) {
 // made a lookup of one name copy and sort a whole machine's inventory —
 // MaxSandboxesPerNode is 1024, and Get sits under every authorized operation
 // and every browser terminal request.
-type Node interface {
+type ControlPlane interface {
 	Name() string
 	Facts() Facts
 	Online() bool
@@ -118,7 +118,7 @@ type Node interface {
 	Revoke(code string, reason error)
 
 	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
 	Pause(ctx context.Context, name string) error
 	Archive(ctx context.Context, name string) error
 	Resize(ctx context.Context, name string, sizeMB int64) error
@@ -127,17 +127,12 @@ type Node interface {
 	Destroy(ctx context.Context, name string) error
 	SetPinned(ctx context.Context, name string, pinned bool) error
 	ResyncEnv(ctx context.Context, name string) error
-	Touch(ctx context.Context, name string) error
+	MarkActive(ctx context.Context, name string) error
 	RecordKey(ctx context.Context, name, fp string) error
 
 	Snapshotter(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
 	DeleteSnapshot(ctx context.Context, snapName, owner string) error
 	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
-
-	// DialGuest opens a stream to a port inside a sandbox. kind is
-	// nodelink.StreamSSH (port ignored, the node knows where its sshd is) or
-	// nodelink.StreamTCP.
-	DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error)
 
 	// NetPolicy replaces this machine's whole egress policy, keyed by sandbox
 	// NAME. NetUsage reads back what its VMs have been talking to, keyed the
@@ -151,6 +146,35 @@ type Node interface {
 	// what lets a caller tell "nothing to report" from "not measured".
 	NetPolicy(ctx context.Context, allow map[string][]string) error
 	NetUsage(ctx context.Context) (map[string]netpush.VMUsage, error)
+}
+
+// GuestDialer is the fleet data plane. Keeping it separate from ControlPlane
+// lets transports provide and supervise it independently without weakening the
+// historical Node contract consumed by placement and routing.
+type GuestDialer interface {
+	// DialGuest opens a stream to a port inside a sandbox. kind is
+	// nodelink.StreamSSH (port ignored, the node knows where its sshd is) or
+	// nodelink.StreamTCP.
+	DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error)
+}
+
+// Node is the compatibility composition used throughout the fleet. Existing
+// callers keep one value while transports may split its control and data
+// implementations cleanly.
+type Node interface {
+	ControlPlane
+	GuestDialer
+}
+
+type composedNode struct {
+	ControlPlane
+	GuestDialer
+}
+
+// ComposeNode builds the compatibility Node from independently replaceable
+// control and guest-data implementations.
+func ComposeNode(control ControlPlane, guest GuestDialer) Node {
+	return &composedNode{ControlPlane: control, GuestDialer: guest}
 }
 
 // Facts is what a node says about itself: everything a placement decision or an

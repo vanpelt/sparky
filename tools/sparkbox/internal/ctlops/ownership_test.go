@@ -231,7 +231,7 @@ func TestEveryMethodIsClassified(t *testing.T) {
 	// Methods that take no resource name: they act on the caller's own account,
 	// on a collection they filter by owner, or on the process.
 	notResourceScoped := map[string]bool{
-		"Capabilities": true, "Close": true, "GenerateName": true, "Touch": true,
+		"Capabilities": true, "Close": true, "GenerateName": true, "MarkActive": true,
 		"Create": true, "List": true, "ListSnapshots": true, "ListSchedules": true,
 		"ListKeys": true, "ListPasskeys": true, "ListJobs": true,
 		"Whoami": true, "Email": true, "SetEmail": true, "AddKey": true,
@@ -241,7 +241,7 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// anything the caller could pass in.
 		"StartGitHubLink": true, "FinishGitHubLink": true,
 		"RemovePasskey": true, "MintSessionToken": true, "Invite": true,
-		"Go": true, "Await": true,
+		"Go": true, "GoFrom": true, "Await": true,
 		// The node commands take a machine's name, not a resource anybody owns:
 		// a node belongs to the fleet, so they are operator-gated instead of
 		// owner-gated — see TestNodeCommandsAreOperatorGated.

@@ -59,7 +59,7 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 	})
 
 	handle(conn, TypeEnsureRunning, func(ctx context.Context, req NameReq) (SandboxResp, error) {
-		b, err := mgr.EnsureRunning(ctx, req.Name)
+		b, err := mgr.EnsureReady(ctx, req.Name)
 		if err != nil {
 			return SandboxResp{}, err
 		}
@@ -178,7 +178,7 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 			log.Warn("nodelink: malformed touch", "err", err)
 			return
 		}
-		queueWrite(writes, log, TypeTouch, func() { mgr.Touch(req.Name) })
+		queueWrite(conn, writes, log, TypeTouch, func() { mgr.MarkActive(req.Name) })
 	})
 
 	conn.OnEvent(TypeRecordKey, func(raw json.RawMessage) {
@@ -187,7 +187,7 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 			log.Warn("nodelink: malformed key record", "err", err)
 			return
 		}
-		queueWrite(writes, log, TypeRecordKey, func() { mgr.RecordKey(req.Name, req.KeyFP) })
+		queueWrite(conn, writes, log, TypeRecordKey, func() { mgr.RecordKey(req.Name, req.KeyFP) })
 	})
 }
 
@@ -213,7 +213,7 @@ func handle[Req, Resp any](conn *Conn, typ string, fn func(context.Context, Req)
 
 // queueWrite hands one bookkeeping write to the drain goroutine, or drops it.
 // Never blocks: the caller is the link's reader.
-func queueWrite(writes chan<- func(), log *slog.Logger, typ string, fn func()) {
+func queueWrite(conn *Conn, writes chan<- func(), log *slog.Logger, typ string, fn func()) {
 	select {
 	case writes <- fn:
 	default:
@@ -221,6 +221,7 @@ func queueWrite(writes chan<- func(), log *slog.Logger, typ string, fn func()) {
 		// is holding its lock for a long time — which is a fact about this
 		// machine an operator wants, not about the gateway that asked.
 		log.Warn("nodelink: bookkeeping queue full; dropping an event", "type", typ)
+		conn.recordDrop("bookkeeping")
 	}
 }
 

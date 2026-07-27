@@ -11,6 +11,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
@@ -29,6 +32,33 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
+
+const (
+	testGatewayGuestSubnet = "10.200.0.0/20"
+	testNodeGuestSubnet    = "10.201.0.0/20"
+)
+
+func TestPrivateAPIExposesMetricsWithoutShadowingControl(t *testing.T) {
+	control := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	h := privateAPIHandler(control, fleetmetrics.New().Handler())
+
+	metrics := httptest.NewRecorder()
+	h.ServeHTTP(metrics, httptest.NewRequest("GET", "/metrics", nil))
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("GET /metrics = %d, want 200", metrics.Code)
+	}
+	if ct := metrics.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("metrics Content-Type = %q, want Prometheus text", ct)
+	}
+
+	api := httptest.NewRecorder()
+	h.ServeHTTP(api, httptest.NewRequest("GET", "/healthz", nil))
+	if api.Code != http.StatusTeapot {
+		t.Fatalf("control route = %d, want %d", api.Code, http.StatusTeapot)
+	}
+}
 
 // gatewayFixture is the set of stores serve() opens on a gateway, on a temp
 // dir. It is deliberately built the long way rather than by calling serve():
@@ -118,6 +148,7 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 		stores: gatewayStores{
 			Fleet: flt, Placement: index, Roster: roster, Users: userStore,
 			DefaultImage: "ubuntu", Domain: "hivemind.tools", Log: log,
+			GatewayGuestSubnet: testGatewayGuestSubnet,
 		},
 		roster:      roster,
 		users:       userStore,
@@ -175,7 +206,9 @@ func TestGatewayOpsApprovesAnEnrolledNode(t *testing.T) {
 	ctx := context.Background()
 	// By fingerprint, which is what the production adapter has to key on: a node
 	// names itself, so approving a name would trust a string a stranger chose.
-	row, err := ops.ApproveNode(ctx, opsy, enrolled.FP)
+	row, err := ops.ApproveNode(ctx, opsy, enrolled.FP, ctlops.NodeApprovalConfig{
+		GuestSubnet: testNodeGuestSubnet,
+	})
 	if err != nil {
 		t.Fatalf("approving an enrolled node: %v", err)
 	}
@@ -372,7 +405,7 @@ func (fw *fleetWiring) join(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the pending row for %s: %v", name, err)
 	}
-	if out := fw.ctl(t, "node approve "+row.FP); !strings.Contains(out, "approved "+name) {
+	if out := fw.ctl(t, "node approve "+row.FP+" --guest-subnet "+testNodeGuestSubnet); !strings.Contains(out, "approved "+name) {
 		t.Fatalf("ctl node approve said %q", out)
 	}
 	waitFor(t, "the fleet to see "+name+" online", func() bool { return fw.stores.Fleet.Online(name) })

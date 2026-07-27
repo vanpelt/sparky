@@ -54,8 +54,8 @@ func ReservedSuffix(label string) string { return "-" + label }
 // that nothing here can pause, destroy or re-tag a box.
 type Attacher interface {
 	Get(name string) (*host.Sandbox, bool)
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
-	Touch(name string)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
+	MarkActive(name string)
 }
 
 // SessionConn is the slice of a live terminal that the SSH gateway's hang-up

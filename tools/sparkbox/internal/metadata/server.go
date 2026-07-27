@@ -5,8 +5,8 @@
 //
 // # How a caller is identified (and why this is safe)
 //
-// Each guest sits on a point-to-point /30 with the host: guest 172.30.<idx>.2,
-// host 172.30.<idx>.1. A request is attributed to the sandbox whose recorded
+// Each guest sits on a point-to-point /30 with the host at offset 1 and the
+// guest at offset 2. A request is attributed to the sandbox whose recorded
 // guest IP equals the connection's SOURCE address, and is refused unless the
 // DESTINATION is that same slot's host address — a guest may only ask its own
 // gateway.
@@ -14,9 +14,9 @@
 // Source, not destination, is the identity. Destination is attacker-chosen:
 // the host has IP forwarding on and Linux's weak host model accepts a packet
 // for any local address on any interface, so a guest in slot 5 can simply
-// connect to 172.30.9.1 and have the kernel deliver it — the accepted socket's
-// local address would then read 172.30.9.1 and hand slot 5 a token minted for
-// slot 9. Source cannot be forged the same way: this is TCP, and a SYN with a
+// connect to another slot's host address and have the kernel deliver it — the
+// accepted socket's local address would then name the other slot. Source
+// cannot be forged the same way: this is TCP, and a SYN with a
 // spoofed source is answered by a SYN-ACK routed to the *real* owner of that
 // address (a different tap), so the spoofer never completes the handshake.
 // The firecracker driver additionally sets rp_filter on each tap, which drops
@@ -46,9 +46,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
@@ -57,10 +59,6 @@ import (
 // DefaultPort is the metadata service's port on each tap host address. It is
 // reachable only from the guest on the other end of that tap.
 const DefaultPort = 8967
-
-// guestNet bounds which source addresses may be attributed to a sandbox at
-// all: the driver's per-VM /30 range.
-var guestNet = net.IPNet{IP: net.IPv4(172, 30, 0, 0), Mask: net.CIDRMask(16, 32)}
 
 // rateWindow / rateBurst bound how often one sandbox may mint tokens. The
 // guest refreshes every 45 minutes; this leaves ample room for retries and
@@ -196,10 +194,11 @@ func (l Local) claims(box *host.Sandbox) oidc.Claims {
 }
 
 type Server struct {
-	mgr    Sandboxes
-	id     Identity
-	log    *slog.Logger
-	defAud string
+	mgr      Sandboxes
+	id       Identity
+	log      *slog.Logger
+	defAud   string
+	guestNet guestnet.Network
 
 	mu     sync.Mutex
 	recent map[string][]time.Time // sandbox -> mint times inside the window
@@ -212,18 +211,36 @@ type Options struct {
 	Logger   *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
+	// GuestSubnet must match the VM driver's IPv4 prefix. Empty uses the
+	// standalone compatibility default.
+	GuestSubnet string
 }
 
 func New(opts Options) *Server {
+	server, err := NewChecked(opts)
+	if err != nil {
+		panic(err)
+	}
+	return server
+}
+
+// NewChecked constructs a server and reports an invalid guest subnet. New is
+// retained for existing callers that use the compatibility default.
+func NewChecked(opts Options) (*Server, error) {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	guestNetwork, err := guestnet.Parse(opts.GuestSubnet)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		mgr: opts.Manager, id: opts.Identity, log: log,
-		defAud: opts.DefaultAudience,
-		recent: map[string][]time.Time{},
-	}
+		defAud:   opts.DefaultAudience,
+		guestNet: guestNetwork,
+		recent:   map[string][]time.Time{},
+	}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -275,8 +292,13 @@ func (s *Server) caller(r *http.Request) (*host.Sandbox, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unparseable remote address")
 	}
-	src := net.ParseIP(srcStr)
-	if src == nil || !guestNet.Contains(src) {
+	src, err := netip.ParseAddr(srcStr)
+	if err != nil {
+		return nil, fmt.Errorf("caller is not a sandbox")
+	}
+	src = src.Unmap()
+	slotIndex, ok := s.guestNet.SlotForGuest(src)
+	if !ok {
 		return nil, fmt.Errorf("caller is not a sandbox")
 	}
 	local, _ := r.Context().Value(localAddrKey{}).(net.Addr)
@@ -284,10 +306,17 @@ func (s *Server) caller(r *http.Request) (*host.Sandbox, error) {
 	if !ok {
 		return nil, fmt.Errorf("unparseable local address")
 	}
-	// A guest may only ask its own gateway (172.30.<idx>.1 for source
-	// 172.30.<idx>.2). Refusing cross-slot destinations keeps a guest from
-	// even reaching another slot's endpoint.
-	if !ta.IP.Equal(gatewayFor(src)) {
+	localAddr, ok := netip.AddrFromSlice(ta.IP)
+	if !ok {
+		return nil, fmt.Errorf("unparseable local address")
+	}
+	slot, err := s.guestNet.Slot(slotIndex)
+	if err != nil {
+		return nil, fmt.Errorf("caller is not a sandbox")
+	}
+	// A guest may only ask the host offset in its own /30. Refusing cross-slot
+	// destinations keeps a guest from reaching another slot's endpoint.
+	if localAddr.Unmap() != slot.Host {
 		return nil, fmt.Errorf("caller must use its own gateway address")
 	}
 	box, ok := s.mgr.GetByHostIP(src.String())
@@ -295,19 +324,6 @@ func (s *Server) caller(r *http.Request) (*host.Sandbox, error) {
 		return nil, fmt.Errorf("no sandbox at %s", src)
 	}
 	return box, nil
-}
-
-// gatewayFor returns the host address on a guest's /30: 172.30.<idx>.2 ->
-// 172.30.<idx>.1.
-func gatewayFor(guest net.IP) net.IP {
-	v4 := guest.To4()
-	if v4 == nil {
-		return nil
-	}
-	gw := make(net.IP, 4)
-	copy(gw, v4)
-	gw[3] = 1
-	return gw
 }
 
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {

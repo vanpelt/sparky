@@ -1,0 +1,19 @@
+version: v2
+modules:
+  - path: api
+lint:
+  use:
+    - STANDARD
+  except:
+    # The accepted migration contract fixes both the source path and service
+    # names. Reusing the durable Operation envelope also makes every mutation
+    # uniformly watchable, which is more valuable here than one wrapper type
+    # per RPC.
+    - PACKAGE_DIRECTORY_MATCH
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

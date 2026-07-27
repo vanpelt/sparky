@@ -106,6 +106,40 @@ func TestTokenIsMintedForTheCallingSandbox(t *testing.T) {
 	}
 }
 
+func TestCallerUsesConfiguredGuestSubnet(t *testing.T) {
+	s := fixture(t)
+	configured, err := NewChecked(Options{
+		Manager: fakeBoxes{
+			"10.44.17.6": {
+				Name: "alice-box", Owner: "alice", Image: "universal",
+				HostIP: "10.44.17.6", KeyFP: "SHA256:aaa",
+			},
+		},
+		Identity:        s.id,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DefaultAudience: "https://hivemind.wandb.tools",
+		GuestSubnet:     "10.44.16.9/20", // normalized to 10.44.16.0/20
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := request(configured, "/token", "10.44.17.6", "10.44.17.5"); rec.Code != http.StatusOK {
+		t.Fatalf("configured subnet request = %d: %s", rec.Code, rec.Body)
+	}
+	if rec := request(configured, "/token", "10.44.17.6", "10.44.17.1"); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-slot request = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if rec := request(configured, "/token", "172.30.5.2", "172.30.5.1"); rec.Code != http.StatusForbidden {
+		t.Fatalf("default-subnet request = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestNewCheckedRejectsInvalidGuestSubnet(t *testing.T) {
+	if _, err := NewChecked(Options{GuestSubnet: "10.0.0.0/31"}); err == nil {
+		t.Fatal("NewChecked accepted a prefix with no /30 slot")
+	}
+}
+
 // The whole security model in one test. The host forwards between taps and
 // Linux accepts packets for any local address on any interface, so alice CAN
 // open a connection to bob's gateway address. Identifying the caller by that

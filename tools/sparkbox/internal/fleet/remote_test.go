@@ -197,7 +197,7 @@ func lifecycleVerbs() []verb {
 		{
 			name: "restore", op: "restore", typ: nodelink.TypeEnsureRunning,
 			body: nodelink.NameReq{Name: "demo"},
-			call: func(ctx context.Context, n fleet.Node) (any, error) { return n.EnsureRunning(ctx, "demo") },
+			call: func(ctx context.Context, n fleet.Node) (any, error) { return n.EnsureReady(ctx, "demo") },
 		},
 		{
 			name: "pause", op: "pause", typ: nodelink.TypePause,
@@ -270,7 +270,7 @@ func lifecycleVerbs() []verb {
 		{
 			name: "touch", op: "touch", typ: nodelink.TypeTouch, event: true,
 			body: nodelink.NameReq{Name: "demo"},
-			call: func(ctx context.Context, n fleet.Node) (any, error) { return nil, n.Touch(ctx, "demo") },
+			call: func(ctx context.Context, n fleet.Node) (any, error) { return nil, n.MarkActive(ctx, "demo") },
 		},
 		{
 			name: "keys.record", op: "keys.record", typ: nodelink.TypeRecordKey, event: true,
@@ -490,7 +490,7 @@ func TestRemoteRepliesCannotRenameTheirOwnRecord(t *testing.T) {
 		// — so the node's advisory one rides on, but only if it is a handle this
 		// platform would issue.
 		{"restore", func() (*host.Sandbox, error) {
-			return rig.node.EnsureRunning(ctx, "demo3")
+			return rig.node.EnsureReady(ctx, "demo3")
 		}, "demo3", "mallory", false},
 	}
 	for _, c := range cases {

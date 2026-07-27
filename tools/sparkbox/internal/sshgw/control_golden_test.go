@@ -262,6 +262,7 @@ func newCtlStackWith(t *testing.T, roster *fakeRoster, tweaks ...func(*ctlops.Co
 	if roster != nil {
 		cfg.Nodes = roster
 	}
+	cfg.GatewayGuestSubnet = "10.200.0.0/20"
 	for _, tweak := range tweaks {
 		tweak(&cfg)
 	}
@@ -490,18 +491,17 @@ func TestControlGolden(t *testing.T) {
 		wantExit: 0,
 	}, {
 		name: "node approve without a fingerprint", handle: "opsy", args: []string{"node", "approve"},
-		wantErr: "usage: ssh ctl@<gateway> node approve <SHA256:...>\r\n" +
-			"Approve a machine by the fingerprint of its key, which it prints at startup — compare that against `node ls` first.\r\n", wantExit: 2,
+		wantErr: "sparkbox: a node fingerprint is required.\r\n", wantExit: 2,
 	}, {
 		name: "node approve of a machine that never enrolled", handle: "opsy",
-		args:    []string{"node", "approve", fpNobody},
+		args:    []string{"node", "approve", fpNobody, "--guest-subnet", "10.201.0.0/20"},
 		wantErr: "sparkbox: no node in this fleet holds the key " + fpNobody + "\r\n", wantExit: 1,
 	}, {
 		// A name is not a way in, even a name that IS on the roster. The
 		// refusal must not answer with the fingerprint that holds it: that
 		// would turn the ceremony into a paste nobody compared.
 		name: "node approve by name", handle: "opsy",
-		args: []string{"node", "approve", "newcomer"},
+		args: []string{"node", "approve", "newcomer", "--guest-subnet", "10.201.0.0/20"},
 		wantErr: "sparkbox: \"newcomer\" is not an SSH key fingerprint. A machine is approved by the key it " +
 			"holds, not by the name it asked for — the name is chosen by whoever is enrolling, so approving " +
 			"one would trust a stranger's word. Read the fingerprint off the machine itself (it prints one " +
@@ -554,7 +554,7 @@ func TestControlPauseSucceeds(t *testing.T) {
 	if _, err := st.mgr.Create(context.Background(), "alice-box", "alice", "ubuntu", 1, 512); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.mgr.EnsureRunning(context.Background(), "alice-box"); err != nil {
+	if _, err := st.mgr.EnsureReady(context.Background(), "alice-box"); err != nil {
 		t.Fatal(err)
 	}
 	s := st.run(t, "alice", "pause", "alice-box")
@@ -627,7 +627,8 @@ func TestControlNodeOnASingleBox(t *testing.T) {
 func TestControlNodeApproveAndRemove(t *testing.T) {
 	st := newCtlStack(t)
 
-	s := st.run(t, "opsy", "node", "approve", fpNewcomer)
+	s := st.run(t, "opsy", "node", "approve", fpNewcomer,
+		"--guest-subnet", "10.201.0.0/20")
 	if s.code != 0 || s.out.String() != "approved newcomer ("+fpNewcomer+") — it can carry sandboxes now\r\n" {
 		t.Fatalf("approve = exit %d, stdout %q, stderr %q", s.code, s.out.String(), s.stderr.String())
 	}

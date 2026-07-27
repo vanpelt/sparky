@@ -33,11 +33,18 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/hostsetup"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodecert"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodeenroll"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodepki"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/objstore"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
@@ -91,63 +98,123 @@ func main() {
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
-		driverName     = fs.String("driver", "mock", "vm driver: mock | firecracker")
-		stateDir       = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
-		keyDir         = fs.String("key-dir", "", "directory holding the three fleet key PEMs (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
-		requireKeys    = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
-		usersPath      = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
-		sshAddr        = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
-		sshAdvertise   = fs.Int("ssh-advertise-port", 0, "gateway port shown in user-facing instructions when it differs from the listen port (e.g. 22 when an edge DNAT forwards :22 to the gateway); 0 uses the listen port")
-		apiAddr        = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
-		defaultImage   = fs.String("default-image", "universal", "rootfs template for new sandboxes")
-		defaultLogin   = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
-		idleTimeout    = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
-		idleBalloon    = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
-		activityCPU    = fs.Float64("activity-cpu-pct", 2, "treat a sandbox as active while it burns at least this % of one host core (0 disables); keeps an unattended build or agent from being reaped. Idle boxes measure ~0.4%")
-		activityNetKB  = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
-		maxPerOwner    = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
-		memAdmitPct    = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
-		hostMemMB      = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
-		memReserve     = fs.Int64("mem-reserve-mb", 0, "per-VM working-set floor (MB) enabling live overcommit: admission counts this instead of the full memory ceiling, and idle VMs balloon down to it (0 = off; count the full ceiling, never balloon)")
-		diskPool       = fs.Int64("disk-pool-mb-per-owner", 0, "cap an owner's pooled on-disk usage across all their sandboxes + archives (0 = unlimited); soft accounting enforced at create/restore")
-		archiveRemote  = fs.String("archive-remote", "", "rclone remote name for sandbox archives (e.g. sparkbox-artifacts); empty disables archive/restore. Needs S3 WRITE creds in the host's rclone.conf")
-		archiveBucket  = fs.String("archive-bucket", "", "bucket within --archive-remote for archives (required to enable archiving)")
-		archivePrefix  = fs.String("archive-prefix", "archives", "object-key prefix archives are written under: <prefix>/<owner>/<name>.ext4.zst")
-		kernelPath     = fs.String("kernel", "", "firecracker: vmlinux path")
-		imageDir       = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
-		subnet6        = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
-		guestDNS       = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
-		sluiceSocket   = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
-		proxyAddr      = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
-		proxyDomain    = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
-		edgeV4         = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
-		proxyTLS       = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
-		consolePass    = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
-		consoleSub     = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
-		loginSub       = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
-		userConsoleSub = fs.String("user-console-subdomain", "my", "subdomain serving the per-user console (empty disables it)")
-		apiSub         = fs.String("api-subdomain", "api", "subdomain serving the authenticated REST API and its OpenAPI docs at <api-subdomain>.<domain>/docs (empty disables it); authenticate with a token from 'ssh ctl@<domain> session-token'")
-		xtermSub       = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "name suffix serving browser terminals at <name>-<xterm-subdomain>.<domain> (empty disables them); it is one label on purpose, so the zone's existing *.<domain> wildcard covers it in both DNS and TLS with nothing further to publish. Sandbox and route names ending in -<xterm-subdomain> are refused, since the edge answers them here")
-		sessionTTL     = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
-		tlsProvider    = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
-		tlsEmail       = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
-		oidcSub        = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
-		oidcAud        = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
-		metaAddr       = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
-		dnsAddr        = fs.String("dns-addr", "", "wildcard DNS responder listen address (e.g. <edge-ip>:53); serves *.<domain> -> the edge for a Tailscale split-DNS entry. Empty disables it")
-		dnsAnswer      = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
-		openSignup     = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
-		invitesPer     = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
-		githubClientID = fs.String("github-client-id", defaultGitHubClientID, "public client id of the GitHub app used to link accounts via the OAuth device flow (`ssh ctl@<domain> github link`). It is an identifier, not a secret. Empty disables the flow, leaving `keys verify-github` — which needs the user's key published on GitHub — as the only way to link")
-		nodeNameFlag   = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
-		archFlag       = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
-		noNodeEnrol    = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator still has to run 'ssh ctl@<domain> node approve <name>' — so this is only worth setting on a gateway that will never gain another node")
-		gatewayAddr    = fs.String("gateway", "", "run this machine as a fleet NODE linked to the gateway at host:port, instead of as a gateway itself. A provisioned node passes it through the unit's GATEWAY_FLAG line, which lands here as an ordinary flag")
-		gatewayPub     = fs.String("gateway-pubkey", "", "node mode: the gateway's PUBLIC upstream authorized_keys line, or a path to a file holding it. Omitted, it is learned from the first welcome and cached under --state-dir")
-		gatewayHostK   = fs.String("gateway-host-key", "", "node mode: pin the gateway's SSH host key (an authorized_keys line or a path to one). Empty trusts the first key offered, remembers it, and refuses any later change")
+		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker")
+		stateDir             = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
+		keyDir               = fs.String("key-dir", "", "directory holding the three fleet key PEMs (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
+		requireKeys          = fs.Bool("require-keys", false, "fail if a fleet key is missing instead of generating one — set on fleet hosts, where a missing key means the Secret Manager fetch failed and generating a fresh identity would lock the fleet out")
+		usersPath            = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
+		sshAddr              = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
+		sshAdvertise         = fs.Int("ssh-advertise-port", 0, "gateway port shown in user-facing instructions when it differs from the listen port (e.g. 22 when an edge DNAT forwards :22 to the gateway); 0 uses the listen port")
+		apiAddr              = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
+		metricsAddr          = fs.String("metrics-addr", "127.0.0.1:9090", "node mode: private Prometheus metrics listen address (empty to disable; gateways expose /metrics on --api-addr)")
+		defaultImage         = fs.String("default-image", "universal", "rootfs template for new sandboxes")
+		defaultLogin         = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
+		idleTimeout          = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
+		idleBalloon          = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
+		activityCPU          = fs.Float64("activity-cpu-pct", 2, "treat a sandbox as active while it burns at least this % of one host core (0 disables); keeps an unattended build or agent from being reaped. Idle boxes measure ~0.4%")
+		activityNetKB        = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
+		maxPerOwner          = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
+		memAdmitPct          = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
+		hostMemMB            = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
+		memReserve           = fs.Int64("mem-reserve-mb", 0, "per-VM working-set floor (MB) enabling live overcommit: admission counts this instead of the full memory ceiling, and idle VMs balloon down to it (0 = off; count the full ceiling, never balloon)")
+		diskPool             = fs.Int64("disk-pool-mb-per-owner", 0, "cap an owner's pooled on-disk usage across all their sandboxes + archives (0 = unlimited); soft accounting enforced at create/restore")
+		archiveRemote        = fs.String("archive-remote", "", "rclone remote name for sandbox archives (e.g. sparkbox-artifacts); empty disables archive/restore. Needs S3 WRITE creds in the host's rclone.conf")
+		archiveBucket        = fs.String("archive-bucket", "", "bucket within --archive-remote for archives (required to enable archiving)")
+		archivePrefix        = fs.String("archive-prefix", "archives", "object-key prefix archives are written under: <prefix>/<owner>/<name>.ext4.zst")
+		kernelPath           = fs.String("kernel", "", "firecracker: vmlinux path")
+		imageDir             = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		guestSubnet          = fs.String("guest-subnet", guestnet.DefaultPrefix, "IPv4 prefix divided into per-sandbox /30s; fleet nodes must set an explicit unique prefix (a /20 provides 1,024 slots)")
+		subnet6              = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
+		guestDNS             = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
+		sluiceSocket         = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
+		proxyAddr            = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
+		proxyDomain          = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
+		edgeV4               = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
+		proxyTLS             = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
+		consolePass          = fs.String("console-password", "", "password for the operator console at <console-subdomain>.<domain> (empty disables it)")
+		consoleSub           = fs.String("console-subdomain", "console", "subdomain that serves the operator console")
+		loginSub             = fs.String("login-subdomain", "login", "subdomain serving the browser sign-in for private (authenticated) routes")
+		userConsoleSub       = fs.String("user-console-subdomain", "my", "subdomain serving the per-user console (empty disables it)")
+		apiSub               = fs.String("api-subdomain", "api", "subdomain serving the authenticated REST API and its OpenAPI docs at <api-subdomain>.<domain>/docs (empty disables it); authenticate with a token from 'ssh ctl@<domain> session-token'")
+		xtermSub             = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "name suffix serving browser terminals at <name>-<xterm-subdomain>.<domain> (empty disables them); it is one label on purpose, so the zone's existing *.<domain> wildcard covers it in both DNS and TLS with nothing further to publish. Sandbox and route names ending in -<xterm-subdomain> are refused, since the edge answers them here")
+		sessionTTL           = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
+		tlsProvider          = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
+		tlsEmail             = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
+		oidcSub              = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
+		oidcAud              = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
+		metaAddr             = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
+		dnsAddr              = fs.String("dns-addr", "", "wildcard DNS responder listen address (e.g. <edge-ip>:53); serves *.<domain> -> the edge for a Tailscale split-DNS entry. Empty disables it")
+		dnsAnswer            = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
+		openSignup           = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
+		invitesPer           = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
+		githubClientID       = fs.String("github-client-id", defaultGitHubClientID, "public client id of the GitHub app used to link accounts via the OAuth device flow (`ssh ctl@<domain> github link`). It is an identifier, not a secret. Empty disables the flow, leaving `keys verify-github` — which needs the user's key published on GitHub — as the only way to link")
+		nodeNameFlag         = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
+		archFlag             = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
+		noNodeEnrol          = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator still has to run 'ssh ctl@<domain> node approve <name>' — so this is only worth setting on a gateway that will never gain another node")
+		gatewayAddr          = fs.String("gateway", "", "run this machine as a fleet NODE linked to the gateway at host:port, instead of as a gateway itself. A provisioned node passes it through the unit's GATEWAY_FLAG line, which lands here as an ordinary flag")
+		gatewayPub           = fs.String("gateway-pubkey", "", "node mode: the gateway's PUBLIC upstream authorized_keys line, or a path to a file holding it. Omitted, it is learned from the first welcome and cached under --state-dir")
+		gatewayHostK         = fs.String("gateway-host-key", "", "node mode: pin the gateway's SSH host key (an authorized_keys line or a path to one). Empty trusts the first key offered, remembers it, and refuses any later change")
+		nodeControlTransport = fs.String("node-control-transport", "auto", "fleet control transport: auto | ssh | grpc (auto prefers healthy mTLS gRPC and retains SSH fallback)")
+		nodeControlRollout   = fs.String("node-control-rollout", "inherit", "gateway control cutover: inherit | shadow | read-only | idempotent | grpc")
+		nodeGRPCAddr         = fs.String("node-grpc-addr", "", "node mode: tailnet listen address for the mTLS NodeControl server, such as 100.64.0.12:9443 (empty disables it)")
+		gatewayGRPCAddr      = fs.String("gateway-grpc-addr", "", "gateway mode: tailnet host:port for the mTLS GatewayIdentity server; enrolled nodes learn this endpoint automatically (empty keeps SSH identity relay)")
+		guestDataTransport   = fs.String("guest-data-transport", "auto", "remote guest data transport: auto | ssh | routed (auto falls back to the SSH data pool on route failure)")
+		routedGuestCanary    = fs.Int("routed-guest-canary-percent", 100, "gateway share of sandboxes using routed data in auto mode: 0..100")
+		clusterID            = fs.String("cluster-id", "", "gateway mTLS identity name (default: --node-name/hostname; persist this across gateway moves)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	guestSubnetSet := false
+	transportFlagsGiven := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "guest-subnet" {
+			guestSubnetSet = true
+		}
+		transportFlagsGiven[f.Name] = true
+	})
+	guestNetwork, err := guestnet.Parse(*guestSubnet)
+	if err != nil {
+		return err
+	}
+	*guestSubnet = guestNetwork.String()
+	if err := validateTransportFlag("--node-control-transport", *nodeControlTransport, "auto", "ssh", "grpc"); err != nil {
+		return err
+	}
+	if err := validateTransportFlag("--guest-data-transport", *guestDataTransport, "auto", "ssh", "routed"); err != nil {
+		return err
+	}
+	// Runtime and setup must accept exactly the same transport combinations.
+	// Keeping normalization in hostsetup also makes direct `sparkbox serve`
+	// invocations fail closed on role-only flags instead of silently ignoring
+	// (for example) a node listener configured on a gateway.
+	transport, err := hostsetup.NormalizeTransportConfig(hostsetup.Config{
+		Gateway:                  *gatewayAddr,
+		NodeControlTransport:     *nodeControlTransport,
+		NodeControlRollout:       *nodeControlRollout,
+		NodeGRPCAddr:             *nodeGRPCAddr,
+		GatewayGRPCAddr:          *gatewayGRPCAddr,
+		GuestDataTransport:       *guestDataTransport,
+		RoutedGuestCanaryPercent: *routedGuestCanary,
+		ClusterID:                *clusterID,
+		FlagsGiven:               transportFlagsGiven,
+	})
+	if err != nil {
+		return err
+	}
+	*nodeControlTransport = transport.NodeControlTransport
+	*nodeControlRollout = transport.NodeControlRollout
+	*nodeGRPCAddr = transport.NodeGRPCAddr
+	*gatewayGRPCAddr = transport.GatewayGRPCAddr
+	*guestDataTransport = transport.GuestDataTransport
+	*routedGuestCanary = transport.RoutedGuestCanaryPercent
+	*clusterID = transport.ClusterID
+	controlRollout, shadowInventory, err := controlRolloutStageConfig(*nodeControlRollout)
+	if err != nil {
+		return err
+	}
+	if *gatewayAddr != "" && !guestSubnetSet {
+		return errors.New("fleet nodes require an explicit unique --guest-subnet (use a non-overlapping /20 for 1,024 sandbox slots)")
 	}
 	// A node has no accounts of its own — every identity in a fleet lives on the
 	// gateway — so the seed file is required of everything except a node.
@@ -155,6 +222,7 @@ func serve(args []string) error {
 		return errors.New("--users is required")
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	metricsRegistry := fleetmetrics.New()
 
 	// Node mode forks here, before a single store is opened. Nothing below this
 	// line runs on a node: the users, secrets, routes, schedules, netrules,
@@ -171,13 +239,15 @@ func serve(args []string) error {
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
 			driverName: *driverName, stateDir: *stateDir, keyDir: *keyDir,
 			kernelPath: *kernelPath, imageDir: *imageDir,
-			defaultLogin: *defaultLogin, subnet6: *subnet6, guestDNS: *guestDNS,
+			defaultLogin: *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
 			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
 			idleBalloon: *idleBalloon, idleTimeout: *idleTimeout,
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
 			maxPerOwner: *maxPerOwner, memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
 			memReserve: *memReserve, diskPool: *diskPool,
-			log: log,
+			controlTransport: *nodeControlTransport, grpcAddr: *nodeGRPCAddr,
+			guestDataTransport: *guestDataTransport,
+			metricsAddr:        *metricsAddr, metrics: metricsRegistry, log: log,
 		})
 	}
 
@@ -272,7 +342,7 @@ func serve(args []string) error {
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			*kernelPath, *imageDir, *stateDir, *subnet6, *defaultLogin, *guestDNS,
+			*kernelPath, *imageDir, *stateDir, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)
 		if err != nil {
 			return err
@@ -299,6 +369,9 @@ func serve(args []string) error {
 		hostMem = detectHostMemMB()
 	}
 	nodeName := nodeNameOr(*nodeNameFlag)
+	if *clusterID == "" {
+		*clusterID = nodeName
+	}
 
 	// The placement ledger: which machine holds which sandbox name. It is a
 	// sixth writer on the same sqlite file, and on a single-box deployment its
@@ -320,6 +393,37 @@ func serve(args []string) error {
 		return fmt.Errorf("node roster: %w", err)
 	}
 	defer nodeStore.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	controlMode := fleet.ControlTransport(*nodeControlTransport)
+	var (
+		nodeAuthority  *nodepki.Authority
+		nodeIssuer     *nodeenroll.Issuer
+		gatewayLeaf    *gatewayCertificateSource
+		gatewayControl *gatewayNodeControl
+	)
+	if controlMode != fleet.ControlTransportSSH {
+		nodeAuthority, err = nodepki.LoadOrCreateAuthority(*stateDir, *clusterID)
+		if err != nil {
+			return fmt.Errorf("node control certificate authority: %w", err)
+		}
+		leaf, err := nodeAuthority.GatewayCertificate(
+			*stateDir, *clusterID, nodecert.DefaultTTL,
+		)
+		if err != nil {
+			return fmt.Errorf("gateway node control certificate: %w", err)
+		}
+		gatewayLeaf = newGatewayCertificateSource(leaf)
+		nodeIssuer, err = nodeenroll.New(
+			nodeAuthority.CA, nodeStore, *clusterID, nodecert.DefaultTTL,
+		)
+		if err != nil {
+			return fmt.Errorf("node certificate issuer: %w", err)
+		}
+		go gatewayLeaf.run(ctx, nodeAuthority, *stateDir, *clusterID, log)
+	}
 
 	// --edge-v4 feeds the per-name front-door A records below. Parsed here, once,
 	// so a malformed value is reported once too.
@@ -386,6 +490,7 @@ func serve(args []string) error {
 		Arch:               *archFlag,
 		Release:            version,
 		HostVCPUs:          int64(runtime.NumCPU()),
+		Metrics:            metricsRegistry,
 	}
 	if doorHooks != nil {
 		mgrOpts.FrontDoor = doorHooks
@@ -401,6 +506,11 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := mgr.FlushActivity(); err != nil {
+			log.Warn("final activity flush failed", "err", err)
+		}
+	}()
 
 	// The fleet router stands between every control-plane surface and the
 	// machine that actually holds a sandbox. With no other machine linked it is
@@ -426,13 +536,28 @@ func serve(args []string) error {
 		sluiceClient = netpush.NewClient(*sluiceSocket)
 		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
 	}
-	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, netrulesStore, log)
+	netSyncer, err := netpush.NewSyncerForSubnet(sluiceClient, netpushFleet{mgr}, netrulesStore, *guestSubnet, log)
+	if err != nil {
+		return fmt.Errorf("guest subnet for network accounting: %w", err)
+	}
 
 	fleetOpts := fleet.Options{
 		Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
-		Index: placeStore, Log: log,
+		Index: placeStore, Log: log, Metrics: metricsRegistry,
 		Routes: routeStore, Schedules: scheduleStore, Tags: secretsStore,
 		LocalNet: netSyncer,
+	}
+	if nodeIssuer != nil {
+		fleetOpts.OnCertificateEnroll = func(
+			enrollCtx context.Context,
+			node string,
+			request nodelink.CertificateEnrollRequest,
+		) (nodelink.CertificateEnrollResponse, error) {
+			if gatewayControl == nil {
+				return nodeIssuer.Issue(enrollCtx, node, request)
+			}
+			return gatewayControl.Enroll(enrollCtx, node, request)
+		}
 	}
 	if doorHooks != nil {
 		fleetOpts.FrontDoor = doorHooks
@@ -442,6 +567,21 @@ func serve(args []string) error {
 		return fmt.Errorf("fleet: %w", err)
 	}
 	defer flt.Close()
+	nodeStore.SetRevocationHook(func(name, reason string) {
+		flt.EvictNode(name, reason)
+	})
+	if nodeIssuer != nil {
+		gatewayControl = newGatewayNodeControl(
+			ctx, flt, nodeStore, nodeIssuer, nodeAuthority, gatewayLeaf,
+			controlMode, fleet.GuestTransport(*guestDataTransport),
+			controlRollout, shadowInventory, *routedGuestCanary,
+			*gatewayGRPCAddr,
+			metricsRegistry, log,
+		)
+		if err := gatewayControl.StartExisting(); err != nil {
+			return fmt.Errorf("restore node gRPC controls: %w", err)
+		}
+	}
 
 	// Secret-env propagation: the syncer rewrites a sandbox's managed
 	// /etc/environment block over SSH when it reaches running (create, resume,
@@ -456,7 +596,12 @@ func serve(args []string) error {
 	// the two together are the whole of it, because a node has no secrets store
 	// and its own push hook is nil (see internal/fleet/envsync.go).
 	syncer := envsync.New(secretsStore, flt, upstreamKey, log)
-	syncer.SetDialer(flt.DialContext)
+	// Environment delivery is explicitly never a wake-up source. A delayed
+	// push can race a pause; the request-facing dialer would interpret the
+	// resulting typed not-running refusal as stale cache and resume the box.
+	// This variant preserves the delivery contract: skip it now and reconcile
+	// on the next real transition to running.
+	syncer.SetDialer(flt.DialContextNoResume)
 	mgr.SetEnvSync(syncer)
 	// The same syncer on both sides of the split: the manager fires it for a
 	// sandbox on this machine, the fleet for one on any other. There is exactly
@@ -494,7 +639,8 @@ func serve(args []string) error {
 		Users: userStore, Secrets: secretsStore,
 		Schedules: scheduleStore, Routes: routeStore, Sessions: sessionSigner,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
-		XtermSubdomain: xtermLabel, InvitesPerUser: *invitesPer,
+		GatewayGuestSubnet: *guestSubnet,
+		XtermSubdomain:     xtermLabel, InvitesPerUser: *invitesPer,
 		GitHubClientID: *githubClientID,
 		Log:            log,
 	})
@@ -521,9 +667,6 @@ func serve(args []string) error {
 	flt.SetSessions(gw)
 
 	warnDoorNameCollision(sshgw.NodeUser, mgr, log)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Claim the front-door range (AnyIP), then run every hook (NDP plumbing +
 	// DNS records) for the reserved names and each existing sandbox. This is
@@ -588,12 +731,16 @@ func serve(args []string) error {
 	// sandbox names, and the placement ledger is where names are allocated. A
 	// create that skipped it would take a name nothing recorded; a destroy that
 	// skipped it would reserve one forever.
-	apiSrv := &http.Server{Addr: *apiAddr, Handler: api.New(flt, routeStore, *defaultImage, log).Handler()}
+	apiSrv := &http.Server{
+		Addr: *apiAddr,
+		Handler: privateAPIHandler(
+			api.New(flt, routeStore, *defaultImage, log).Handler(),
+			metricsRegistry.Handler(),
+		),
+	}
 	sshSrv := gw.Server(*sshAddr)
 
-	errCh := make(chan error, 5)
-	go func() { errCh <- apiSrv.ListenAndServe() }()
-	go func() { errCh <- sshSrv.ListenAndServe() }()
+	errCh := make(chan error, 6)
 
 	// Guest metadata service: hands each sandbox an id token over its own tap.
 	// It binds every interface because taps come and go, and identifies the
@@ -608,12 +755,33 @@ func serve(args []string) error {
 	// VMs of its own still signs for the ones on its nodes.
 	flt.SetIdentity(fleetIdentity{issuer: issuer, users: userStore,
 		defAud: firstOr(splitList(*oidcAud), defaultAudience)})
+	if *gatewayGRPCAddr != "" {
+		identityServer, identityListener, err := newGatewayIdentityServer(
+			ctx, *gatewayGRPCAddr, flt, nodeStore,
+			nodeAuthority, gatewayLeaf,
+		)
+		if err != nil {
+			return fmt.Errorf("gateway identity gRPC: %w", err)
+		}
+		defer identityListener.Close() //nolint:errcheck
+		go func() { errCh <- identityServer.Serve(identityListener) }()
+		log.Info("mTLS gateway identity enabled", "addr", *gatewayGRPCAddr)
+	}
+	// Do not admit an enrolling node until the advertised identity endpoint has
+	// bound successfully. Older nodes ignore it; new nodes may dial immediately
+	// after the certificate response arrives.
+	go func() { errCh <- apiSrv.ListenAndServe() }()
+	go func() { errCh <- sshSrv.ListenAndServe() }()
 	if *metaAddr != "" {
-		meta := metadata.New(metadata.Options{
+		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
 			Identity:        metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
 			DefaultAudience: firstOr(splitList(*oidcAud), defaultAudience),
+			GuestSubnet:     *guestSubnet,
 		})
+		if err != nil {
+			return fmt.Errorf("guest metadata subnet: %w", err)
+		}
 		go func() { errCh <- meta.ListenAndServe(ctx, *metaAddr) }()
 		log.Info("guest metadata service enabled", "addr", *metaAddr, "issuer", issuer.URL())
 	}
@@ -649,6 +817,7 @@ func serve(args []string) error {
 	if *proxyAddr != "" {
 		px := proxy.New(flt, routeStore, *proxyDomain, log)
 		px.SetDialer(flt.DialContext)
+		px.SetMetrics(metricsRegistry)
 		// The issuer rides on the existing proxy edge: wildcard DNS already
 		// resolves oidc.<domain> to this host and autocert already issues a cert
 		// per SNI, so serving it is two GET handlers and no new listener.
@@ -848,6 +1017,15 @@ func serve(args []string) error {
 	return nil
 }
 
+// privateAPIHandler adds process observability to the existing private control
+// listener. It must never be mounted on the public proxy edge.
+func privateAPIHandler(control, metrics http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics)
+	mux.Handle("/", control)
+	return mux
+}
+
 // terminalBridge lets the REST API serve GET /v1/sandboxes/{name}/terminal from
 // the same WebSocket code path as the browser page, instead of a second copy of
 // the framing, the origin gate and the close codes.
@@ -878,6 +1056,15 @@ func nodeNameOr(flagValue string) string {
 		return h
 	}
 	return "local"
+}
+
+func validateTransportFlag(flagName, value string, allowed ...string) error {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s=%q is invalid (expected %s)", flagName, value, strings.Join(allowed, "|"))
 }
 
 // warnSubdomainCollision reports a reserved subdomain something already answers
@@ -959,10 +1146,11 @@ type gatewayStores struct {
 	Routes    *routes.Store
 	Sessions  *edgeauth.Signer
 
-	DefaultImage   string
-	Domain         string
-	XtermSubdomain string
-	InvitesPerUser int
+	DefaultImage       string
+	Domain             string
+	GatewayGuestSubnet string
+	XtermSubdomain     string
+	InvitesPerUser     int
 	// GitHubClientID turns the OAuth device flow on. Empty leaves it off, which
 	// is not a degraded state so much as the state every host was in before it
 	// existed: `keys verify-github` still links an account whose key is
@@ -996,7 +1184,8 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// says plainly it cannot do this.
 		GitHubDevice: githubDevice(s.GitHubClientID),
 		DefaultImage: s.DefaultImage, Domain: s.Domain,
-		XtermSubdomain: s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
+		GatewayGuestSubnet: s.GatewayGuestSubnet,
+		XtermSubdomain:     s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
 		Log: s.Log,
 	})
 }
@@ -1067,6 +1256,9 @@ func (r fleetRoster) ListNodes() ([]ctlops.NodeInfo, error) {
 			Name: row.Name, Status: row.Status, FP: row.FP,
 			Arch: row.Arch, Release: row.Release, Sandboxes: held,
 			ApprovedBy: row.ApprovedBy, ApprovedAt: row.ApprovedAt, LastSeen: row.LastSeen,
+			GuestSubnet: row.ApprovedGuestSubnet, GRPCAddr: row.GRPCAddr,
+			CertSerial: row.CertSerial, CertExpiresAt: row.CertExpiresAt,
+			CertRevokedAt: row.CertRevokedAt,
 		})
 	}
 	return out, nil
@@ -1097,6 +1289,9 @@ func (r fleetRoster) join(st fleet.NodeStatus, row nodes.Node) (ctlops.NodeInfo,
 	if row.Name != "" {
 		info.Status, info.FP = row.Status, row.FP
 		info.ApprovedBy, info.ApprovedAt = row.ApprovedBy, row.ApprovedAt
+		info.GuestSubnet, info.GRPCAddr = row.ApprovedGuestSubnet, row.GRPCAddr
+		info.CertSerial, info.CertExpiresAt = row.CertSerial, row.CertExpiresAt
+		info.CertRevokedAt = row.CertRevokedAt
 	}
 	return info, nil
 }
@@ -1130,6 +1325,10 @@ func (r fleetRoster) ApproveNode(fp, by string) (ctlops.NodeInfo, error) {
 	return ctlops.NodeInfo{}, nodes.ErrNoSuchNode
 }
 
+func (r fleetRoster) ApproveFPWithConfig(fp, by string, cfg nodes.ApprovalConfig) error {
+	return r.roster.ApproveFPWithConfig(fp, by, cfg)
+}
+
 func (r fleetRoster) RemoveNode(name string) error { return r.roster.Remove(name) }
 
 // EvictNode closes the link a machine is holding right now. It is the other
@@ -1153,8 +1352,9 @@ func (r fleetRoster) EvictNode(name, reason string) bool { return r.flt.EvictNod
 // plane asserts for against a value this package supplies belongs on this list,
 // and it is the whole list today: NodeEvicter is the only one ctlops has.
 var (
-	_ ctlops.NodeRoster  = fleetRoster{}
-	_ ctlops.NodeEvicter = fleetRoster{}
+	_ ctlops.NodeRoster             = fleetRoster{}
+	_ ctlops.NodeEvicter            = fleetRoster{}
+	_ ctlops.NodeConfiguredApprover = fleetRoster{}
 )
 
 // netpushFleet adapts the host manager to netpush.Fleet: only running sandboxes

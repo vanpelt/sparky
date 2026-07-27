@@ -10,6 +10,7 @@ package sshgw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -58,6 +59,14 @@ type NodeJoiner interface {
 	ServeLink(ctx context.Context, opts nodelink.ServerOptions) error
 }
 
+// NodeDataJoiner is the optional, additive half of NodeJoiner implemented by a
+// fleet which can bind dedicated SSH data lanes to an authenticated control
+// generation. Keeping it separate preserves source and wire compatibility for
+// joiners which only understand the historical combined link.
+type NodeDataJoiner interface {
+	ServeDataLane(ctx context.Context, opts nodelink.DataServerOptions) error
+}
+
 // nodeDoorOpen reports whether this gateway has a fleet to join a node to.
 // Both halves are required: a roster with nobody to hand the link to would
 // enrol machines it could never serve, which reads to an operator as a node
@@ -80,7 +89,12 @@ func (g *Gateway) isNodeDoor(user string, local net.Addr) bool {
 // the command, recover the SSH connection, read the hello, apply roster policy,
 // and hand what is left to the fleet.
 func (g *Gateway) handleNodeLink(s gssh.Session, log *slog.Logger) {
-	if cmd := s.Command(); len(cmd) != 1 || cmd[0] != nodelink.LinkCommand {
+	cmd := s.Command()
+	if len(cmd) == 1 && cmd[0] == nodelink.DataCommand {
+		g.handleNodeDataLane(s, log)
+		return
+	}
+	if len(cmd) != 1 || cmd[0] != nodelink.LinkCommand {
 		// A human who typed `ssh node@gateway` gets told what this door is
 		// rather than a silent hang, which is the only reason the command is
 		// checked against a literal instead of being ignored.
@@ -138,20 +152,72 @@ func (g *Gateway) handleNodeLink(s gssh.Session, log *slog.Logger) {
 	// The welcome is built here rather than by the fleet because the upstream
 	// key and the domain are this gateway's identity: shipping them into the
 	// fleet only to be handed back would be a second copy of it.
+	welcome := nodelink.Welcome{
+		GatewayUpstreamPub: PublicKeyLine(g.upstreamKey),
+		Domain:             g.domain,
+	}
+	if _, ok := g.joiner.(NodeDataJoiner); ok {
+		welcome.Capabilities = []string{nodelink.CapabilitySSHDataPoolV1}
+	}
 	err = g.joiner.ServeLink(s.Context(), nodelink.ServerOptions{
 		Node:     row.Name,
 		Greeting: greeting,
 		Session:  s,
 		Stderr:   s.Stderr(),
 		Conn:     conn,
-		Welcome: nodelink.Welcome{
-			GatewayUpstreamPub: PublicKeyLine(g.upstreamKey),
-			Domain:             g.domain,
-		},
-		Log: log,
+		Welcome:  welcome,
+		Log:      log,
 	})
 	if err != nil {
 		log.Info("node link ended in error", "err", err)
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	s.Exit(0) //nolint:errcheck
+}
+
+// handleNodeDataLane registers a separately authenticated SSH connection with
+// the current control generation. It never enrols a key: data capacity is
+// useful only to an already approved roster row and an already live control
+// link.
+func (g *Gateway) handleNodeDataLane(s gssh.Session, log *slog.Logger) {
+	joiner, ok := g.joiner.(NodeDataJoiner)
+	if !ok {
+		_ = json.NewEncoder(s).Encode(nodelink.DataWelcome{Error: "this gateway does not support dedicated data lanes"})
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	conn, _ := s.Context().Value(gssh.ContextKeyConn).(xssh.Conn)
+	if conn == nil {
+		_ = json.NewEncoder(s).Encode(nodelink.DataWelcome{Error: "this data session has no SSH connection"})
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	hello, err := nodelink.ReadDataHello(s.Context(), s, nodelink.HelloTimeout)
+	if err != nil {
+		doorNoise.warn(log, "node data lane did not register", "err", err)
+		s.Exit(2) //nolint:errcheck
+		return
+	}
+	row, known := sessionNode(s)
+	if !known {
+		if key := sessionKey(s); key != nil {
+			row, known = g.nodes.Lookup(key)
+		}
+	}
+	if !known || row.Status != nodes.StatusApproved || row.Name != hello.Node {
+		err := errors.New("data lanes require the approved roster identity named in their registration")
+		_ = json.NewEncoder(s).Encode(nodelink.DataWelcome{Error: err.Error()})
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	disarmProbation(s.Context())
+	log = log.With("node", row.Name, "lane", hello.Lane)
+	err = joiner.ServeDataLane(s.Context(), nodelink.DataServerOptions{
+		Node: row.Name, Hello: hello, Session: s, Conn: conn, Log: log,
+	})
+	if err != nil {
+		log.Info("node data lane ended in error", "err", err)
 		s.Exit(1) //nolint:errcheck
 		return
 	}
@@ -256,7 +322,8 @@ func (g *Gateway) enrolNode(key xssh.PublicKey, hello nodelink.Hello, log *slog.
 	// greps for when the machine they just brought up has not appeared, so it is
 	// deliberately not rate-limited.
 	log.Info("node enrolled and awaiting approval", "node", row.Name, "fp", row.FP,
-		"approve_with", fmt.Sprintf("ssh %s@%s node approve %s", ControlUser, g.domainHint(), row.FP))
+		"approve_with", fmt.Sprintf("ssh %s@%s node approve %s --guest-subnet <unique-CIDR>",
+			ControlUser, g.domainHint(), row.FP))
 	g.noteContact(row, hello, log)
 	return nodes.Node{}, g.pendingRefusal(row)
 }
@@ -424,7 +491,7 @@ func disarmProbation(ctx gssh.Context) {
 // compare out of band against what the roster shows before they say yes.
 func (g *Gateway) pendingRefusal(row nodes.Node) *ctlops.Error {
 	return nodelink.Refusal(nodelink.CodeNodePending,
-		"node %q (%s) is waiting for approval. An operator runs:  ssh %s@%s node approve %s  "+
+		"node %q (%s) is waiting for approval. An operator runs:  ssh %s@%s node approve %s --guest-subnet <unique-CIDR>  "+
 			"— after checking that fingerprint against the one this machine printed at startup.",
 		row.Name, row.FP, ControlUser, g.domainHint(), row.FP)
 }

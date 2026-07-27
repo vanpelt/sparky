@@ -56,7 +56,8 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
 	"  invite                   mint a single-use invite code\r\n" +
 	"  node ls                  list the machines in this fleet (operators)\r\n" +
-	"  node approve <SHA256:...>  let the machine holding that key carry sandboxes (operators)\r\n" +
+	"  node approve <SHA256:...> --guest-subnet <CIDR> [--grpc-addr <host:port>]\r\n" +
+	"                             approve that machine and reserve its guest network (operators)\r\n" +
 	"  node rm <name>           drop a machine from the fleet (operators)\r\n" +
 	"  help                     print this list\r\n" +
 	"\r\n" +

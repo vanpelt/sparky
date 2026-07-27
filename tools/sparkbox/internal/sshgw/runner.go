@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	xssh "golang.org/x/crypto/ssh"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
 // RunInSandbox resumes the sandbox if needed and runs cmd inside it over SSH,
@@ -17,7 +19,7 @@ import (
 // command that ran but exited non-zero returns its exit code with err == nil,
 // so the scheduler can tell "job didn't run" from "job ran and failed".
 func (g *Gateway) RunInSandbox(ctx context.Context, name, cmd string) (int, string, error) {
-	box, err := g.mgr.EnsureRunning(ctx, name)
+	box, err := host.Prepare(ctx, g.mgr, name)
 	if err != nil {
 		return 0, "", fmt.Errorf("resume %s: %w", name, err)
 	}

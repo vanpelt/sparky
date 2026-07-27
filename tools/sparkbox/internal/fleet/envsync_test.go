@@ -102,7 +102,7 @@ func TestRemoteLifecycleFiresTheGatewaysEnvPush(t *testing.T) {
 				// is about the transition firing the push. EnsureRunning on a
 				// box that never stopped is the case below.
 				n.stopped("far-away", vmm.StatePaused)
-				if _, err := f.EnsureRunning(context.Background(), "far-away"); err != nil {
+				if _, err := f.EnsureReady(context.Background(), "far-away"); err != nil {
 					t.Fatalf("EnsureRunning: %v", err)
 				}
 			},
@@ -183,7 +183,7 @@ func TestALocalSandboxIsNeverPushedByTheFleet(t *testing.T) {
 	}
 	noPush(t, pusher, "brave-otter", "a local create", "which is the local manager's job: two writers over one guest's /etc/environment")
 
-	if _, err := f.EnsureRunning(context.Background(), "brave-otter"); err != nil {
+	if _, err := f.EnsureReady(context.Background(), "brave-otter"); err != nil {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
 	noPush(t, pusher, "brave-otter", "a local resume", "which is the local manager's job: two writers over one guest's /etc/environment")
@@ -258,7 +258,7 @@ func TestEnsureRunningOnARunningSandboxIsNotATransition(t *testing.T) {
 	// The sandbox is up and stays up. This is what a burst of traffic looks
 	// like from here.
 	for i := 0; i < 10; i++ {
-		b, err := f.EnsureRunning(context.Background(), "far-away")
+		b, err := f.EnsureReady(context.Background(), "far-away")
 		if err != nil {
 			t.Fatalf("EnsureRunning %d: %v", i, err)
 		}
@@ -301,7 +301,7 @@ func TestAMachineCannotNameTheOwnerWhoseSecretsItGets(t *testing.T) {
 		b.Owner = "mallory"
 	}
 	nodeb.stopped("far-away", vmm.StatePaused)
-	if _, err := f.EnsureRunning(context.Background(), "far-away"); err != nil {
+	if _, err := f.EnsureReady(context.Background(), "far-away"); err != nil {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
 	b := awaitPush(t, pusher, "far-away", "a resume of a relabelled sandbox")

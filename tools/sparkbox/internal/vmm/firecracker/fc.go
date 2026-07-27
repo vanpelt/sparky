@@ -32,6 +32,7 @@ import (
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -44,7 +45,8 @@ type Options struct {
 	StateDir string
 	// FirecrackerBin is the firecracker binary path (default: $PATH lookup).
 	FirecrackerBin string
-	// Subnet is the /16 carved into per-VM /30-style pairs, default 172.30.0.0.
+	// Subnet is an IPv4 CIDR carved into per-VM /30 slots. Empty uses the
+	// standalone compatibility default 172.30.0.0/16.
 	Subnet string
 	// Subnet6 is a routable IPv6 /64 delegated to the host (e.g.
 	// "2001:db8:1c7::/64"). When set, each VM gets a globally-routable /128 from
@@ -56,7 +58,7 @@ type Options struct {
 	LoginUser string
 	// GuestDNS points guests at a specific resolver via the sparkbox_dns kernel
 	// arg, honoured by the guest sparkbox-netcfg hook. The literal "gateway"
-	// expands per-VM to the guest's own gateway (172.30.<idx>.1), where the
+	// expands per-VM to the guest's own host-side address, where the
 	// sluice allowlist resolver listens; any other value is used verbatim as the
 	// nameserver address. Empty leaves guests on public resolvers (no
 	// allowlisting).
@@ -64,7 +66,7 @@ type Options struct {
 }
 
 type vmState struct {
-	idx     int // network slot: host 172.30.<idx>.1, guest 172.30.<idx>.2
+	idx     int // /30 network slot; host is +1 and guest is +2
 	machine *sdk.Machine
 	cancel  context.CancelFunc
 	paused  bool
@@ -77,8 +79,13 @@ type Driver struct {
 	// creating holds the names of Creates that have released d.mu to do their
 	// rootfs disk work. A name is in exactly one of creating and vms.
 	creating map[string]bool
-	prefix6  net.IP // parsed /64 network address; nil disables IPv6
-	uplink6  string // iface backing the v6 default route, for per-guest proxy NDP
+	guestNet guestnet.Network
+	// reservedSlots holds /30s occupied by a host service address, such as a
+	// dedicated in-prefix sluice DNS listener. They count toward prefix
+	// capacity but are never handed to a VM.
+	reservedSlots map[int]bool
+	prefix6       net.IP // parsed /64 network address; nil disables IPv6
+	uplink6       string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
 // reserveName claims cfg.Name for an in-flight Create so no second Create
@@ -110,20 +117,53 @@ func New(opts Options) (*Driver, error) {
 	if opts.FirecrackerBin == "" {
 		opts.FirecrackerBin = "firecracker"
 	}
-	if opts.Subnet == "" {
-		opts.Subnet = "172.30.0.0"
+	guestNetwork, err := guestnet.Parse(opts.Subnet)
+	if err != nil {
+		return nil, err
 	}
+	// macFor encodes the slot in two bytes. The supported defaults are much
+	// smaller (/16 and /20), but fail explicitly rather than silently reusing
+	// MAC addresses if an unusually broad prefix is configured.
+	if guestNetwork.Capacity() > 1<<16 {
+		return nil, fmt.Errorf("guest subnet %s has %d slots; firecracker supports at most 65536",
+			guestNetwork, guestNetwork.Capacity())
+	}
+	opts.Subnet = guestNetwork.String()
 	if err := validateGuestDNS(opts.GuestDNS); err != nil {
 		return nil, err
 	}
-	d := &Driver{opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{}}
+	d := &Driver{
+		opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{},
+		guestNet: guestNetwork, reservedSlots: map[int]bool{},
+	}
+	if dnsAddr, err := netip.ParseAddr(opts.GuestDNS); err == nil {
+		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
+			d.reservedSlots[index] = true
+		}
+	}
 	if opts.Subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
 		if err != nil {
 			return nil, fmt.Errorf("subnet6 %q: %w", opts.Subnet6, err)
 		}
-		if ones, _ := ipNet.Mask.Size(); ones > 112 {
+		ones, _ := ipNet.Mask.Size()
+		if ones > 112 {
 			return nil, fmt.Errorf("subnet6 %q: need /112 or larger for per-VM addressing", opts.Subnet6)
+		}
+		// IPv6 reserves ::1 and assigns one /127 per IPv4 guest slot. A broad
+		// IPv4 prefix can therefore outgrow an otherwise valid /112; reject the
+		// pair now instead of wrapping addresses into a different IPv6 prefix
+		// after enough VMs have been created.
+		hostBits := 128 - ones
+		if hostBits < 32 {
+			available := uint64(1) << hostBits
+			required := uint64(guestNetwork.Capacity())*2 + 2
+			if required > available {
+				return nil, fmt.Errorf(
+					"subnet6 %q has %d addresses; guest subnet %s needs at least %d",
+					opts.Subnet6, available, guestNetwork, required,
+				)
+			}
 		}
 		d.prefix6 = ipNet.IP.To16()
 		// Scaleway (and most providers) deliver the routed /64 on-link: the
@@ -173,9 +213,19 @@ func (d *Driver) vmDir(name string) string {
 	return filepath.Join(d.opts.StateDir, "fc-vms", name)
 }
 
-func (d *Driver) hostIP(idx int) string  { return fmt.Sprintf("172.30.%d.1", idx) }
-func (d *Driver) guestIP(idx int) string { return fmt.Sprintf("172.30.%d.2", idx) }
+func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
+func (d *Driver) guestIP(idx int) string { return d.guestSlot(idx).Guest.String() }
 func tapName(idx int) string             { return fmt.Sprintf("sbtap%d", idx) }
+
+func (d *Driver) guestSlot(idx int) guestnet.Slot {
+	slot, err := d.guestNet.Slot(idx)
+	if err != nil {
+		// Slots are allocated by freeSlot and stored in vmState, so reaching
+		// this means an internal invariant was violated rather than bad input.
+		panic(err)
+	}
+	return slot
+}
 
 // validateGuestDNS accepts only the empty string (feature off), the "gateway"
 // sentinel, or a bare IP literal. Anything else — a hostname, or a value with
@@ -212,11 +262,13 @@ func guestDNSArg(guestDNS, gatewayIP string) (string, error) {
 }
 
 // IPv6 addressing: each slot gets a point-to-point /127 carved from the /64,
-// host on the even address and guest on the odd one. Slot idx=1 -> ::2 (host) /
-// ::3 (guest), leaving ::1 free for the host's own edge address (the AAAA
-// target). Globally routable, so egress needs no NAT — just host forwarding.
-func (d *Driver) hostIP6(idx int) string  { return d.addr6(idx * 2) }
-func (d *Driver) guestIP6(idx int) string { return d.addr6(idx*2 + 1) }
+// host on the even address and guest on the odd one. IPv4 slot indexes begin
+// at zero, so add one before deriving the IPv6 offset: slot idx=0 becomes
+// ::2 (host) / ::3 (guest), leaving ::1 free for the host's own edge address
+// (the AAAA target). Globally routable, so egress needs no NAT — just host
+// forwarding.
+func (d *Driver) hostIP6(idx int) string  { return d.addr6((idx + 1) * 2) }
+func (d *Driver) guestIP6(idx int) string { return d.addr6((idx+1)*2 + 1) }
 
 func (d *Driver) addr6(off int) string {
 	ip := make(net.IP, net.IPv6len)
@@ -290,20 +342,20 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 // d.mu. Every path that drops a record (Destroy, DropSnapshots, RenameVM)
 // thereby releases its slot for reuse — a reused slot can't collide with a
 // live tap because paused VMs keep their record (idx stays reserved) and the
-// record only goes away after the tap does. The bound comes from hostIP's
-// "172.30.<idx>.1" third octet; past it a Create would mint an unroutable
-// address, so error instead.
+// record only goes away after the tap does. The configured prefix determines
+// the bound: every index maps to exactly one /30 inside it.
 func (d *Driver) freeSlot() (int, error) {
 	used := make(map[int]bool, len(d.vms))
 	for _, s := range d.vms {
 		used[s.idx] = true
 	}
-	for idx := 1; idx <= 255; idx++ {
-		if !used[idx] {
+	for idx := 0; idx < d.guestNet.Capacity(); idx++ {
+		if !used[idx] && !d.reservedSlots[idx] {
 			return idx, nil
 		}
 	}
-	return 0, fmt.Errorf("no free network slots (max 255 concurrent VMs)")
+	return 0, fmt.Errorf("no free network slots in %s (max %d concurrent VMs)",
+		d.guestNet, d.guestNet.Capacity())
 }
 
 // boot starts a Firecracker process for the VM; snapshot, when non-nil, is

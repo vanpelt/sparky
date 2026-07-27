@@ -250,7 +250,7 @@ func (n *fakeNode) Create(context.Context, string, string, string, int64, int64)
 // is invisible to the caller — both return a running record — which is exactly
 // why the fake has to make it, because the gateway's decision about whether to
 // push a secret environment turns on the state BEFORE the call.
-func (n *fakeNode) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
+func (n *fakeNode) EnsureReady(_ context.Context, name string) (*host.Sandbox, error) {
 	n.record("ensure_running")
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -261,6 +261,58 @@ func (n *fakeNode) EnsureRunning(_ context.Context, name string) (*host.Sandbox,
 		}
 	}
 	return nil, errors.New("no such sandbox")
+}
+
+type blockingReadyNode struct {
+	*buildingNode
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (n *blockingReadyNode) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
+	n.once.Do(func() { close(n.entered) })
+	select {
+	case <-n.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return n.fakeNode.EnsureReady(ctx, name)
+}
+
+type blockingMarkNode struct {
+	*fakeNode
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (n *blockingMarkNode) MarkActive(ctx context.Context, _ string) error {
+	n.once.Do(func() { close(n.entered) })
+	select {
+	case <-n.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (n *fakeNode) count(op string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var count int
+	for _, call := range n.calls {
+		if call == op {
+			count++
+		}
+	}
+	return count
+}
+
+func (n *fakeNode) clearCalls() {
+	n.mu.Lock()
+	n.calls = nil
+	n.mu.Unlock()
 }
 
 // stopped parks a sandbox in a state a resume has something to do from. It is
@@ -313,8 +365,8 @@ func (n *fakeNode) SetPinned(context.Context, string, bool) error {
 	n.record("set_pinned")
 	return nil
 }
-func (n *fakeNode) ResyncEnv(context.Context, string) error { n.record("resync_env"); return nil }
-func (n *fakeNode) Touch(context.Context, string) error     { n.record("touch"); return nil }
+func (n *fakeNode) ResyncEnv(context.Context, string) error  { n.record("resync_env"); return nil }
+func (n *fakeNode) MarkActive(context.Context, string) error { n.record("touch"); return nil }
 func (n *fakeNode) RecordKey(context.Context, string, string) error {
 	n.record("record_key")
 	return nil
@@ -816,9 +868,108 @@ func TestOperationsOnAnOfflineMachine(t *testing.T) {
 	}
 
 	// The reads that carry no error simply do nothing rather than blocking.
-	f.Touch("far-away")
+	f.MarkActive("far-away")
 	f.RecordKey("far-away", "SHA256:whatever")
 	f.ResyncEnv(context.Background(), "far-away")
+}
+
+func TestWarmAccessSkipsControlAndPausedAccessSingleflights(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	index := newIndex(t)
+	f := newFleet(t, mgr, index)
+	n := &blockingReadyNode{
+		buildingNode: newBuildingNode("boxb"),
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	detach, err := f.Attach(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(detach)
+	if _, err := f.CreateOn(context.Background(), "boxb", "shared", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	n.stopped("shared", vmm.StatePaused)
+	n.clearCalls()
+
+	const callers = 100
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			_, err := host.Prepare(context.Background(), f, "shared")
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-n.entered
+	close(n.release)
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Fatalf("Prepare paused: %v", err)
+		}
+	}
+	if got := n.count("ensure_running"); got != 1 {
+		t.Fatalf("paused access sent %d ensure operations, want 1", got)
+	}
+
+	marksBefore := n.count("touch")
+	for range callers {
+		if _, err := host.Prepare(context.Background(), f, "shared"); err != nil {
+			t.Fatalf("Prepare warm: %v", err)
+		}
+	}
+	if got := n.count("ensure_running"); got != 1 {
+		t.Fatalf("warm access changed ensure operations to %d, want the original 1", got)
+	}
+	if got := n.count("touch"); got > 1 || got < marksBefore {
+		t.Fatalf("total activity marks = %d (before warm burst %d), want at most 1", got, marksBefore)
+	}
+}
+
+func TestMarkActiveNeverBlocksTheWarmPath(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	index := newIndex(t)
+	f := newFleet(t, mgr, index)
+	n := &blockingMarkNode{
+		fakeNode: newFakeNode("boxb"),
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	n.boxes = []*host.Sandbox{{
+		Name: "shared", Owner: "alice", State: vmm.StateRunning, Node: "boxb",
+	}}
+	detach, err := f.Attach(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(detach)
+	place(t, index, "shared", "alice", "boxb")
+
+	returned := make(chan struct{})
+	go func() {
+		f.MarkActive("shared")
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(250 * time.Millisecond):
+		close(n.release)
+		t.Fatal("MarkActive waited for the remote control plane")
+	}
+	select {
+	case <-n.entered:
+	case <-time.After(time.Second):
+		close(n.release)
+		t.Fatal("asynchronous activity mark was never delivered")
+	}
+	close(n.release)
 }
 
 func TestRenameMovesTheLedgerAndRollsBack(t *testing.T) {
@@ -979,8 +1130,13 @@ func TestDialContextReachesALocalSandbox(t *testing.T) {
 	if err := f.Pause(context.Background(), "brave-otter"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.DialContext(context.Background(), "tcp", addr); err == nil {
-		t.Fatal("a paused sandbox was dialed anyway")
+	conn, err = f.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		t.Fatalf("a paused sandbox was not resumed and retried: %v", err)
+	}
+	conn.Close()
+	if b, _ := f.Get("brave-otter"); b.State != vmm.StateRunning {
+		t.Fatalf("stale dial left sandbox %q, want running", b.State)
 	}
 }
 

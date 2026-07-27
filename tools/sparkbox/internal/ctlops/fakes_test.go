@@ -140,7 +140,7 @@ func (f *fakeSandboxes) Create(ctx context.Context, name, owner, image string, v
 	return &cp, nil
 }
 
-func (f *fakeSandboxes) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
+func (f *fakeSandboxes) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
 	f.c.add("EnsureRunning %s", name)
 	if f.err != nil {
 		return nil, f.err
@@ -223,7 +223,7 @@ func (f *fakeSandboxes) SetPinned(name string, pinned bool) error {
 }
 
 func (f *fakeSandboxes) ResyncEnv(ctx context.Context, name string) { f.c.add("ResyncEnv %s", name) }
-func (f *fakeSandboxes) Touch(name string)                          { f.c.add("Touch %s", name) }
+func (f *fakeSandboxes) MarkActive(name string)                     { f.c.add("Touch %s", name) }
 func (f *fakeSandboxes) ArchivingEnabled() bool                     { return f.archiving }
 
 // ---------------------------------------------------------------------------

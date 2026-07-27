@@ -25,11 +25,13 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
@@ -86,7 +88,7 @@ type Manager interface {
 	Vitals(ctx context.Context, name string) (host.Vitals, error)
 
 	Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
 	Pause(ctx context.Context, name string) error
 	Archive(ctx context.Context, name string) error
 	Resize(ctx context.Context, name string, sizeMB int64) error
@@ -95,7 +97,7 @@ type Manager interface {
 	Destroy(ctx context.Context, name string) error
 	SetPinned(name string, pinned bool) error
 	ResyncEnv(ctx context.Context, name string)
-	Touch(name string)
+	MarkActive(name string)
 	RecordKey(name, fp string)
 
 	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
@@ -153,6 +155,8 @@ type ClientOptions struct {
 	// machinery without waiting fifteen seconds for each beat.
 	Heartbeat time.Duration
 	Log       *slog.Logger
+	// Metrics is optional. Nil keeps the historical zero-instrumentation path.
+	Metrics *fleetmetrics.Registry
 }
 
 // RunClient dials, links, serves and reconnects until ctx is done.
@@ -180,6 +184,9 @@ func RunClient(ctx context.Context, opts ClientOptions) error {
 			// looks like. Starting over from the minimum is what gets this node
 			// back within a second of the gateway returning.
 			delay = c.backoffMin
+			if c.opts.Metrics != nil {
+				c.opts.Metrics.IncReconnect(c.name, "ssh")
+			}
 			c.log.Info("gateway link ended; reconnecting", "err", err)
 		case errors.As(err, &refusal):
 			// The gateway answered and said no. The handshake has already
@@ -230,6 +237,7 @@ type nodeClient struct {
 
 	backoffMin, backoffMax time.Duration
 	startedAt              time.Time
+	streams                *StreamLimiter
 }
 
 func newNodeClient(opts ClientOptions) (*nodeClient, error) {
@@ -257,6 +265,7 @@ func newNodeClient(opts ClientOptions) (*nodeClient, error) {
 	if emitter == nil {
 		emitter = NewEmitter(log)
 	}
+	emitter.SetMetrics(opts.Metrics, opts.NodeName)
 	return &nodeClient{
 		opts:       opts,
 		log:        log,
@@ -268,6 +277,7 @@ func newNodeClient(opts ClientOptions) (*nodeClient, error) {
 		backoffMin: orDuration(opts.BackoffMin, DefaultBackoffMin),
 		backoffMax: orDuration(opts.BackoffMax, DefaultBackoffMax),
 		startedAt:  time.Now(),
+		streams:    NewStreamLimiter(MaxLiveStreams),
 	}, nil
 }
 
@@ -288,7 +298,18 @@ func (c *nodeClient) runOnce(ctx context.Context) (linked bool, err error) {
 	// channel queue blocks x/crypto's mux loop — and with it every frame on
 	// this connection — so the one thing a node must never do is leave an
 	// inbound open unaccepted, even for the moment it takes to say hello.
-	go ServeStreams(linkCtx, ssh.HandleChannelOpen(StreamChannel), StreamResolver(c.mgr), c.log)
+	var controlStreams atomic.Bool
+	go ServeStreamsWithOptions(
+		linkCtx,
+		ssh.HandleChannelOpen(StreamChannel),
+		StreamResolver(c.mgr),
+		c.log,
+		c.opts.Metrics,
+		c.name,
+		"ssh",
+		c.streams,
+		&controlStreams,
+	)
 
 	sess, err := ssh.NewSession()
 	if err != nil {
@@ -308,6 +329,7 @@ func (c *nodeClient) runOnce(ctx context.Context) (linked bool, err error) {
 	}
 
 	conn := NewConn(stdout, writerOnly{stdin}, "n", c.log)
+	conn.SetMetrics(c.opts.Metrics, c.name, "ssh")
 	// Handlers derive their work from the PROCESS context, never the link's:
 	// a fifteen-minute archive that a dropped connection could cancel would
 	// tear down a running VM because a gateway restarted.
@@ -323,6 +345,14 @@ func (c *nodeClient) runOnce(ctx context.Context) (linked bool, err error) {
 		return false, err
 	}
 	c.log.Info("linked to the gateway", "domain", welcome.Domain, "heartbeat_s", welcome.HeartbeatSeconds)
+	if welcome.SupportsDataPool() {
+		for lane := 0; lane < DefaultDataLanes; lane++ {
+			go c.superviseDataLane(linkCtx, welcome.ControlGeneration, fmt.Sprintf("lane-%d", lane+1))
+		}
+	} else {
+		// Combined-link fallback for either side of a rolling upgrade.
+		controlStreams.Store(true)
+	}
 
 	detach := c.emitter.attach(conn, c.name)
 	defer detach()
@@ -384,6 +414,122 @@ func (c *nodeClient) dial(ctx context.Context) (*xssh.Client, error) {
 	return xssh.NewClient(sc, chans, reqs), nil
 }
 
+// superviseDataLane keeps one independently replaceable SSH data connection
+// attached for the lifetime of a control generation. A lane failure never
+// reaches runOnce and therefore never marks the node offline or interrupts
+// control RPCs.
+func (c *nodeClient) superviseDataLane(ctx context.Context, generation, lane string) {
+	delay := c.backoffMin
+	for ctx.Err() == nil {
+		linked, err := c.runDataLane(ctx, generation, lane)
+		if ctx.Err() != nil {
+			return
+		}
+		if linked {
+			delay = c.backoffMin
+			if c.opts.Metrics != nil {
+				c.opts.Metrics.IncReconnect(c.name, "ssh-data")
+			}
+			c.log.Info("data lane ended; reconnecting", "lane", lane, "err", err)
+		} else {
+			c.log.Warn("cannot attach data lane", "lane", lane, "retry_in", delay, "err", err)
+		}
+		if !sleepFor(ctx, jitter(delay)) {
+			return
+		}
+		delay = min(delay*2, c.backoffMax)
+	}
+}
+
+func (c *nodeClient) runDataLane(ctx context.Context, generation, lane string) (bool, error) {
+	ssh, err := c.dial(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer ssh.Close()
+	stop := context.AfterFunc(ctx, func() { _ = ssh.Close() })
+	defer stop()
+
+	go ServeStreamsWithOptions(
+		ctx,
+		ssh.HandleChannelOpen(StreamChannel),
+		StreamResolver(c.mgr),
+		c.log,
+		c.opts.Metrics,
+		c.name,
+		"ssh-data",
+		c.streams,
+		nil,
+	)
+
+	sess, err := ssh.NewSession()
+	if err != nil {
+		return false, err
+	}
+	defer sess.Close() //nolint:errcheck
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		return false, err
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	if err := sess.Start(DataCommand); err != nil {
+		return false, err
+	}
+	if err := json.NewEncoder(stdin).Encode(DataHello{
+		Protocol: Protocol, Node: c.name, Generation: generation, Lane: lane,
+	}); err != nil {
+		return false, err
+	}
+
+	type result struct {
+		welcome DataWelcome
+		err     error
+	}
+	registered := make(chan result, 1)
+	go func() {
+		var welcome DataWelcome
+		err := json.NewDecoder(stdout).Decode(&welcome)
+		registered <- result{welcome: welcome, err: err}
+	}()
+	select {
+	case got := <-registered:
+		if got.err != nil {
+			return false, fmt.Errorf("nodelink: data registration: %w", got.err)
+		}
+		if !got.welcome.Accepted {
+			return false, fmt.Errorf("nodelink: data registration refused: %s", got.welcome.Error)
+		}
+	case <-time.After(HelloTimeout):
+		return false, errors.New("nodelink: data registration timed out")
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+
+	c.log.Info("data lane attached", "lane", lane)
+	waited := make(chan error, 1)
+	go func() { waited <- sess.Wait() }()
+	ticker := time.NewTicker(c.heartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-waited:
+			return true, err
+		case <-ticker.C:
+			if err := c.keepalive(ctx, ssh); err != nil {
+				if c.opts.Metrics != nil {
+					c.opts.Metrics.IncLivenessFailure(c.name, "ssh-data", "node")
+				}
+				return true, fmt.Errorf("nodelink: data lane keepalive: %w", err)
+			}
+		case <-ctx.Done():
+			return true, ctx.Err()
+		}
+	}
+}
+
 // handshake introduces this machine and reads the answer.
 //
 // A refusal comes back as the typed error the rest of the control plane speaks,
@@ -433,6 +579,9 @@ func (c *nodeClient) hello() Hello {
 	}
 	h.Protocol = Protocol
 	h.Node = c.name
+	if !hasCapability(h.Capabilities, CapabilitySSHDataPoolV1) {
+		h.Capabilities = append(h.Capabilities, CapabilitySSHDataPoolV1)
+	}
 	if h.Arch == "" {
 		h.Arch = runtime.GOARCH
 	}
@@ -520,6 +669,9 @@ func (c *nodeClient) beat(ctx context.Context, conn *Conn, ssh xssh.Conn) {
 				// Nothing else on this link would ever have noticed: heartbeats
 				// are events, and a half-open socket accepts them forever.
 				c.log.Warn("the gateway stopped answering keepalives; dropping the link", "err", err)
+				if c.opts.Metrics != nil {
+					c.opts.Metrics.IncLivenessFailure(c.name, "ssh", "node")
+				}
 				conn.Fail(err)
 				_ = conn.Close()
 				return

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"sort"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/opidentity"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,9 +44,10 @@ type Ref struct {
 	Args string `json:"-"`
 }
 
-// Job is deliberately in-memory and not persisted: a control-plane restart also
-// kills the operation the job describes, so a surviving "running" row would be a
-// lie.
+// Job is the gateway-local view of asynchronous work. The registry remains
+// in-memory, but a keyed REST request carries a stable node operation identity:
+// after a gateway restart, retrying that request reattaches to the node's
+// durable journal instead of executing the mutation twice.
 type Job struct {
 	ID         string          `json:"id"`
 	Op         string          `json:"op"`
@@ -92,7 +95,14 @@ const jobCancelGrace = 2 * time.Second
 // that distinguish the work; see Ref.Args.
 func (o *Ops) Go(c Caller, op string, ref Ref, budget time.Duration,
 	fn func(ctx context.Context) (any, error)) *Job {
+	return o.GoFrom(context.Background(), c, op, ref, budget, fn)
+}
 
+// GoFrom is Go with a caller context used only to preserve a durable operation
+// identity. Cancellation is deliberately detached exactly as in Go: closing an
+// HTTP request must not abort a long-running node operation.
+func (o *Ops) GoFrom(parent context.Context, c Caller, op string, ref Ref, budget time.Duration,
+	fn func(ctx context.Context) (any, error)) *Job {
 	o.jobsMu.Lock()
 	for _, j := range o.jobs {
 		if j.State == JobRunning && j.Owner == c.Handle && j.Op == op && j.Resource == ref {
@@ -110,7 +120,11 @@ func (o *Ops) Go(c Caller, op string, ref Ref, budget time.Duration,
 		CreatedAt: o.now().UTC(),
 		done:      make(chan struct{}),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	base := context.Background()
+	if identity, ok := opidentity.FromContext(parent); ok {
+		base = opidentity.WithContext(base, identity)
+	}
+	ctx, cancel := context.WithTimeout(base, budget)
 	j.cancel = cancel
 	o.jobs[j.ID] = j
 	o.evictLocked(c.Handle)

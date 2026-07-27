@@ -562,7 +562,7 @@ func TestFleetSecretsReachARemoteGuest(t *testing.T) {
 			if err := os.Remove(filepath.Join(stateDir, "mock-vms", name, "environment")); err != nil {
 				t.Fatalf("clearing the guest's env file: %v", err)
 			}
-			if _, err := ds.flt.EnsureRunning(ctx, name); err != nil {
+			if _, err := ds.flt.EnsureReady(ctx, name); err != nil {
 				t.Fatalf("resume: %v", err)
 			}
 			waitFor(t, "a resume to re-push "+name+"'s environment", func() bool {

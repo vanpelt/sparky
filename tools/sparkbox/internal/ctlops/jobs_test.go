@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/opidentity"
 )
 
 // TestGoDedupesIdenticalWork: firing two archives of one sandbox is never what a
@@ -55,6 +57,34 @@ func TestGoDedupesIdenticalWork(t *testing.T) {
 	}
 	if len(ran) != 2 {
 		t.Errorf("fn ran %d times, want 2 (one per distinct job)", len(ran))
+	}
+}
+
+func TestGoFromDetachesCancellationButPreservesDurableIdentity(t *testing.T) {
+	r := newRig(t)
+	parent, cancel := context.WithCancel(opidentity.WithContext(context.Background(), opidentity.Identity{
+		OperationID: "rest-stable", IdempotencyKey: "rest-stable", Initiator: "alice",
+	}))
+	cancel()
+	got := make(chan opidentity.Identity, 1)
+	job := r.ops.GoFrom(parent, alice(), "archive",
+		Ref{Type: "sandbox", Name: "alicebox"}, time.Second,
+		func(ctx context.Context) (any, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			identity, _ := opidentity.FromContext(ctx)
+			got <- identity
+			return nil, nil
+		})
+	job = r.ops.Await(context.Background(), job, time.Second)
+	if job.State != JobSucceeded {
+		t.Fatalf("job state = %s, error=%v", job.State, job.Error)
+	}
+	identity := <-got
+	if identity.OperationID != "rest-stable" || identity.IdempotencyKey != "rest-stable" ||
+		identity.Initiator != "alice" {
+		t.Fatalf("worker identity = %+v", identity)
 	}
 }
 

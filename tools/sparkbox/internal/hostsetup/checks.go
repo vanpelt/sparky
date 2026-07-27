@@ -79,6 +79,11 @@ func DefaultChecks() []Check {
 		{"users.conf", checkUsers},
 		{"disk space", checkDisk},
 		{"sandbox NAT rules", checkNAT},
+		{"tailscale status", checkTailscaleStatus},
+		{"tailscale preferences", checkTailscalePreferences},
+		{"tailscale routes", checkTailscaleRoutes},
+		{"node control reachability", checkNodeControlReachability},
+		{nodeControlMTLSCheckName, checkNodeControlMTLSUnavailable},
 		{"sparkbox service", checkService},
 		// The SECOND unit setup starts, and for a long time the only one nothing
 		// ever proved had come up (see checkSluiceService).
@@ -114,13 +119,13 @@ func verifyChecksFor(e *Env) []Check {
 	if e.Probe.GOOS() == "darwin" {
 		return darwinVerifyChecks(e)
 	}
-	return DefaultChecks()
+	return checksWithNodeControlHealth(DefaultChecks(), e)
 }
 
 // DoctorChecksFor is the battery `sparkbox doctor` runs.
 //
-// On linux it is DefaultChecks(), unchanged and unchangeable — the linux report
-// is what every runbook, every screenshot and every existing test describes.
+// On linux it is DefaultChecks(), including the fleet-route checks added for
+// configurable guest subnets.
 //
 // On darwin it is the host layer PLUS the machine layer, which is one more
 // section than the verify pass runs. Not a second opinion: doctor is a
@@ -135,7 +140,22 @@ func DoctorChecksFor(e *Env) []Check {
 	if e.Probe.GOOS() == "darwin" {
 		return darwinDoctorChecks(e)
 	}
-	return DefaultChecks()
+	return checksWithNodeControlHealth(DefaultChecks(), e)
+}
+
+func checksWithNodeControlHealth(checks []Check, e *Env) []Check {
+	if e.NodeControlHealth != nil && e.NodeControlHealth.Run != nil {
+		for i := range checks {
+			if checks[i].Name == nodeControlMTLSCheckName {
+				checks[i] = *e.NodeControlHealth
+				if checks[i].Name == "" {
+					checks[i].Name = nodeControlMTLSCheckName
+				}
+				break
+			}
+		}
+	}
+	return checks
 }
 
 // RunChecks evaluates every check against the probe and config.
@@ -493,15 +513,19 @@ func checkNAT(p Probe, cfg Config) Result {
 		return warn("could not read the nat table ("+err.Error()+")",
 			"reading iptables needs privilege — re-run `sparkbox doctor` as root")
 	}
-	masq := strings.Contains(postrouting, guestSubnet)
+	subnet := mode.guestSubnet
+	if subnet == "" {
+		subnet = cfg.guestSubnet()
+	}
+	masq := strings.Contains(postrouting, subnet)
 	edge := natChainExists(p, edgeChain)
 	tnet := natChainExists(p, tnetChain)
 
 	var missing, found, unexpected []string
 	if masq {
-		found = append(found, "sandbox MASQUERADE ("+guestSubnet+")")
+		found = append(found, "sandbox MASQUERADE ("+subnet+")")
 	} else {
-		missing = append(missing, "the "+guestSubnet+" POSTROUTING MASQUERADE that carries all sandbox egress")
+		missing = append(missing, "the "+subnet+" POSTROUTING MASQUERADE that carries all sandbox egress")
 	}
 	switch {
 	case !mode.known:
@@ -584,10 +608,11 @@ const (
 type natSelectors struct {
 	// known is false when sparkbox.env could not be read at all, in which case
 	// neither flag below means anything.
-	known    bool
-	redirect bool   // SPARKBOX_EDGE_REDIRECT: build SPARKBOX_EDGE
-	tnet     bool   // SPARKBOX_EDGE_IP or SPARKBOX_TAILNET_IF: build SPARKBOX_TNET
-	why      string // which variable turned tnet on, for the report
+	known       bool
+	redirect    bool   // SPARKBOX_EDGE_REDIRECT: build SPARKBOX_EDGE
+	tnet        bool   // SPARKBOX_EDGE_IP or SPARKBOX_TAILNET_IF: build SPARKBOX_TNET
+	why         string // which variable turned tnet on, for the report
+	guestSubnet string
 }
 
 // readNATMode mirrors deploy/sparkbox-net.sh's own selectors, exactly.
@@ -603,13 +628,16 @@ type natSelectors struct {
 func readNATMode(p Probe, cfg Config) natSelectors {
 	b, err := p.ReadFile(cfg.envPath())
 	if err != nil {
-		return natSelectors{}
+		return natSelectors{guestSubnet: cfg.guestSubnet()}
 	}
 	kv, err := parseEnv(strings.NewReader(string(b)))
 	if err != nil {
-		return natSelectors{}
+		return natSelectors{guestSubnet: cfg.guestSubnet()}
 	}
-	m := natSelectors{known: true, redirect: kv["SPARKBOX_EDGE_REDIRECT"] == "" || kv["SPARKBOX_EDGE_REDIRECT"] == "1"}
+	m := natSelectors{
+		known: true, redirect: kv["SPARKBOX_EDGE_REDIRECT"] == "" || kv["SPARKBOX_EDGE_REDIRECT"] == "1",
+		guestSubnet: effectiveGuestSubnet(cfg, kv),
+	}
 	switch {
 	case kv["SPARKBOX_EDGE_IP"] != "":
 		m.tnet, m.why = true, "dedicated edge IP "+kv["SPARKBOX_EDGE_IP"]

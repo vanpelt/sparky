@@ -3,6 +3,7 @@ package nodes
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -429,5 +430,341 @@ func TestReopenIsANoOp(t *testing.T) {
 	got, ok := second.Lookup(key)
 	if !ok || got.Status != StatusApproved || got.ApprovedBy != "vanpelt" {
 		t.Fatalf("after reopen: %+v, %v", got, ok)
+	}
+}
+
+func TestApproveWithConfigNormalizesAndRejectsEveryOverlap(t *testing.T) {
+	s := openTemp(t)
+	offline, err := s.Enroll("offline", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := s.Enroll("candidate", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adjacent, err := s.Enroll("adjacent", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayConflict, err := s.Enroll("gateway-conflict", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.ApproveFPWithConfig(offline.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.44.0.9/20",
+		GatewayGuestSubnet: "10.60.0.0/20",
+		GRPCAddr:           " node-a.tailnet:9443 ",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ApprovedGuestSubnet != "10.44.0.0/20" || got.GRPCAddr != "node-a.tailnet:9443" {
+		t.Fatalf("configured node = %+v", got)
+	}
+	if got.LastSeen != nil {
+		t.Fatalf("test node unexpectedly online/seen: %+v", got.LastSeen)
+	}
+
+	// No live-link state exists in this store: a row with no LastSeen is
+	// offline, but its approved range remains reserved.
+	if err := s.ApproveFPWithConfig(candidate.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.44.8.0/21",
+		GatewayGuestSubnet: "10.60.0.0/20",
+	}); !errors.Is(err, ErrGuestSubnetOverlap) {
+		t.Fatalf("overlap with offline node = %v, want ErrGuestSubnetOverlap", err)
+	}
+	unchanged, err := s.Get("candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Status != StatusPending || unchanged.ApprovedGuestSubnet != "" {
+		t.Fatalf("failed approval partially changed row: %+v", unchanged)
+	}
+
+	// Disabled rows also retain their prefix until explicitly removed.
+	if err := s.Disable("offline"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveFPWithConfig(candidate.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.44.0.0/20",
+		GatewayGuestSubnet: "10.60.0.0/20",
+	}); !errors.Is(err, ErrGuestSubnetOverlap) {
+		t.Fatalf("overlap with disabled node = %v, want ErrGuestSubnetOverlap", err)
+	}
+
+	if err := s.ApproveFPWithConfig(gatewayConflict.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.60.8.0/21",
+		GatewayGuestSubnet: "10.60.0.0/20",
+	}); !errors.Is(err, ErrGuestSubnetOverlap) {
+		t.Fatalf("overlap with gateway = %v, want ErrGuestSubnetOverlap", err)
+	}
+	if err := s.ApproveFPWithConfig(adjacent.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.44.16.0/20",
+		GatewayGuestSubnet: "10.60.0.0/20",
+	}); err != nil {
+		t.Fatalf("adjacent prefix: %v", err)
+	}
+}
+
+func TestConfiguredApprovalSerializesOverlapAcrossStoreHandles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sparkbox.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	a, err := first.Enroll("node-a", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := first.Enroll("node-b", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, attempt := range []struct {
+		store *Store
+		fp    string
+	}{
+		{first, a.FP},
+		{second, b.FP},
+	} {
+		wg.Add(1)
+		go func(attempt struct {
+			store *Store
+			fp    string
+		}) {
+			defer wg.Done()
+			<-start
+			errs <- attempt.store.ApproveFPWithConfig(attempt.fp, "opsy", ApprovalConfig{
+				GuestSubnet:        "10.44.0.0/20",
+				GatewayGuestSubnet: "10.60.0.0/20",
+			})
+		}(attempt)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	var approved, overlap int
+	for err := range errs {
+		switch {
+		case err == nil:
+			approved++
+		case errors.Is(err, ErrGuestSubnetOverlap):
+			overlap++
+		default:
+			t.Fatalf("configured approval racer: %v", err)
+		}
+	}
+	if approved != 1 || overlap != 1 {
+		t.Fatalf("approved=%d overlap=%d, want 1 each", approved, overlap)
+	}
+}
+
+func TestConfiguredApprovalRequiresAValidExplicitPrefix(t *testing.T) {
+	s := openTemp(t)
+	row, err := s.Enroll("node-b", newKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveFPWithConfig(row.FP, "opsy", ApprovalConfig{}); !errors.Is(err, ErrGuestSubnetRequired) {
+		t.Fatalf("empty subnet = %v, want ErrGuestSubnetRequired", err)
+	}
+	if err := s.ApproveFPWithConfig(row.FP, "opsy", ApprovalConfig{
+		GuestSubnet: "10.44.0.0/20",
+	}); !errors.Is(err, ErrGatewayGuestSubnetRequired) {
+		t.Fatalf("empty gateway subnet = %v, want ErrGatewayGuestSubnetRequired", err)
+	}
+	if err := s.ApproveFPWithConfig(row.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.0.0.0/31",
+		GatewayGuestSubnet: "10.60.0.0/20",
+	}); err == nil {
+		t.Fatal("configured approval accepted a prefix with no /30")
+	}
+	if err := s.ApproveFP(row.FP, "opsy"); err != nil {
+		t.Fatalf("legacy ApproveFP compatibility: %v", err)
+	}
+	got, err := s.Get("node-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusApproved || got.ApprovedGuestSubnet != "" || got.GRPCAddr != "" {
+		t.Fatalf("legacy approval metadata = %+v", got)
+	}
+}
+
+func TestCertificateLifecycleFailsClosed(t *testing.T) {
+	s := openTemp(t)
+	var tornDown []string
+	s.SetRevocationHook(func(name, reason string) {
+		tornDown = append(tornDown, name+":"+reason)
+	})
+	key := newKey(t)
+	row, err := s.Enroll("node-b", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(time.Hour)
+	if err := s.RecordCertificate("node-b", "serial-pending", expires); !errors.Is(err, ErrNodeNotApproved) {
+		t.Fatalf("certificate for pending node = %v, want ErrNodeNotApproved", err)
+	}
+	if err := s.ApproveFPWithConfig(row.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.44.0.0/20",
+		GatewayGuestSubnet: "10.60.0.0/20",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordCertificate("node-b", "serial-1", expires); err != nil {
+		t.Fatal(err)
+	}
+	active, ok := s.LookupActiveCertificate("serial-1", expires.Add(-time.Minute))
+	if !ok || active.Name != "node-b" {
+		t.Fatalf("active certificate = %+v, %v", active, ok)
+	}
+	if _, ok := s.LookupActiveCertificate("serial-1", expires); ok {
+		t.Error("certificate accepted at its expiration instant")
+	}
+
+	// Rotation recognizes only the new serial.
+	if err := s.RecordCertificate("node-b", "serial-2", expires.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LookupActiveCertificate("serial-1", time.Now()); ok {
+		t.Error("rotated-out serial remains active")
+	}
+	if err := s.RevokeCertificate("serial-2"); err != nil {
+		t.Fatal(err)
+	}
+	if len(tornDown) != 1 || !strings.HasPrefix(tornDown[0], "node-b:") {
+		t.Fatalf("certificate revocation teardown = %v", tornDown)
+	}
+	revoked, err := s.GetByCertSerial("serial-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.CertRevokedAt == nil {
+		t.Fatalf("revoked certificate has no timestamp: %+v", revoked)
+	}
+	if _, ok := s.LookupActiveCertificate("serial-2", time.Now()); ok {
+		t.Error("revoked serial remains active")
+	}
+
+	// Recording a fresh certificate clears the old revocation, but disabling
+	// the row revokes it atomically with the status transition.
+	if err := s.RecordCertificate("node-b", "serial-3", expires.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Disable("node-b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(tornDown) != 2 || !strings.HasPrefix(tornDown[1], "node-b:") {
+		t.Fatalf("disable teardown = %v", tornDown)
+	}
+	disabled, err := s.Get("node-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Status != StatusDisabled || disabled.CertRevokedAt == nil {
+		t.Fatalf("disabled node certificate metadata = %+v", disabled)
+	}
+	if _, ok := s.LookupActiveCertificate("serial-3", time.Now()); ok {
+		t.Error("disabled node certificate remains active")
+	}
+
+	// Removal also fails closed, even though the SSH key may later re-enrol.
+	if err := s.ApproveFP(row.FP, "opsy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordCertificate("node-b", "serial-4", expires.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove("node-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LookupActiveCertificate("serial-4", time.Now()); ok {
+		t.Error("removed node certificate remains active")
+	}
+	if _, err := s.GetByCertSerial("serial-4"); !errors.Is(err, ErrNoSuchCertificate) {
+		t.Fatalf("removed serial lookup = %v, want ErrNoSuchCertificate", err)
+	}
+	reEnrolled, err := s.Enroll("node-b", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reEnrolled.Status != StatusPending || reEnrolled.CertSerial != "" {
+		t.Fatalf("re-enrolled row inherited certificate trust: %+v", reEnrolled)
+	}
+}
+
+func TestOpenMigratesOldNodeSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sparkbox.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := newKey(t)
+	_, err = db.Exec(`
+		CREATE TABLE nodes (
+			name        TEXT PRIMARY KEY,
+			wire        TEXT NOT NULL,
+			fp          TEXT NOT NULL,
+			status      TEXT NOT NULL DEFAULT 'pending',
+			arch        TEXT NOT NULL DEFAULT '',
+			release     TEXT NOT NULL DEFAULT '',
+			approved_by TEXT NOT NULL DEFAULT '',
+			first_seen  TIMESTAMP NOT NULL,
+			approved_at TIMESTAMP,
+			last_seen   TIMESTAMP
+		);
+		INSERT INTO nodes
+			(name, wire, fp, status, first_seen)
+		VALUES (?, ?, ?, ?, ?)
+	`, "legacy", wireOf(key), xssh.FingerprintSHA256(key), StatusPending, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	legacy, err := s.Get("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ApprovedGuestSubnet != "" || legacy.GRPCAddr != "" ||
+		legacy.CertSerial != "" || legacy.CertExpiresAt != nil || legacy.CertRevokedAt != nil {
+		t.Fatalf("migrated defaults = %+v", legacy)
+	}
+	if err := s.ApproveFPWithConfig(legacy.FP, "opsy", ApprovalConfig{
+		GuestSubnet:        "10.88.7.1/20",
+		GatewayGuestSubnet: "10.60.0.0/20",
+		GRPCAddr:           "legacy.tailnet:9443",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordCertificate("legacy", "legacy-serial", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LookupActiveCertificate("legacy-serial", time.Now()); !ok {
+		t.Error("certificate stored in migrated columns is not active")
 	}
 }

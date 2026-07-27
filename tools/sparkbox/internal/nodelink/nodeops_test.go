@@ -111,7 +111,7 @@ func (m *opsManager) Create(ctx context.Context, name, owner, image string, vcpu
 	return built(name, owner, image, vcpus, memMB), nil
 }
 
-func (m *opsManager) EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error) {
+func (m *opsManager) EnsureReady(ctx context.Context, name string) (*host.Sandbox, error) {
 	if err := m.record("ensure_running", name); err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func (m *opsManager) ResyncEnv(ctx context.Context, name string) {
 	_ = m.simple(ctx, "resync_env", name)
 }
 
-func (m *opsManager) Touch(name string) { _ = m.record("touch", name) }
+func (m *opsManager) MarkActive(name string) { _ = m.record("touch", name) }
 
 func (m *opsManager) RecordKey(name, fp string) { _ = m.record("record_key", name, fp) }
 

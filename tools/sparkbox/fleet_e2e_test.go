@@ -341,7 +341,9 @@ func (fs *fleetStack) boot(t *testing.T) {
 	// /etc/environment and a passwordless sudo. Redirecting it is what lets a
 	// test read the file a delivery actually wrote.
 	syncer := envsync.New(fs.secrets, flt, fs.upstreamKey, fs.log)
-	syncer.SetDialer(flt.DialContext)
+	// Match production: a delayed environment push racing a pause must not
+	// become a new user-visible wake-up source.
+	syncer.SetDialer(flt.DialContextNoResume)
 	syncer.SetGuestTarget("environment", "sh")
 	fs.mgr.SetEnvSync(syncer)
 	flt.SetEnvPusher(syncer)

@@ -207,6 +207,11 @@ type link struct {
 	dec    *json.Decoder
 }
 
+type dataLink struct {
+	client *xssh.Client
+	sess   *xssh.Session
+}
+
 func (s *nodeStack) open(t *testing.T, key xssh.Signer) *link {
 	t.Helper()
 	client, err := dialAs(s.addr, NodeUser, key)
@@ -236,6 +241,61 @@ func (s *nodeStack) open(t *testing.T, key xssh.Signer) *link {
 func (l *link) close() {
 	l.sess.Close()   //nolint:errcheck
 	l.client.Close() //nolint:errcheck
+}
+
+func (s *nodeStack) openData(t *testing.T, key xssh.Signer, hello nodelink.DataHello) (*dataLink, nodelink.DataWelcome) {
+	t.Helper()
+	client, err := dialAs(s.addr, NodeUser, key)
+	if err != nil {
+		t.Fatalf("dial data lane: %v", err)
+	}
+	sess, err := client.NewSession()
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	in, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Start(nodelink.DataCommand); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(in).Encode(hello); err != nil {
+		t.Fatal(err)
+	}
+	reply := make(chan struct {
+		w   nodelink.DataWelcome
+		err error
+	}, 1)
+	go func() {
+		var welcome nodelink.DataWelcome
+		err := json.NewDecoder(out).Decode(&welcome)
+		reply <- struct {
+			w   nodelink.DataWelcome
+			err error
+		}{welcome, err}
+	}()
+	select {
+	case got := <-reply:
+		if got.err != nil {
+			t.Fatalf("read data welcome: %v", got.err)
+		}
+		lane := &dataLink{client: client, sess: sess}
+		t.Cleanup(func() {
+			lane.sess.Close()   //nolint:errcheck
+			lane.client.Close() //nolint:errcheck
+		})
+		return lane, got.w
+	case <-time.After(frameWait):
+		client.Close()
+		t.Fatal("no data-lane welcome within the wait")
+		return nil, nodelink.DataWelcome{}
+	}
 }
 
 func (l *link) send(t *testing.T, f nodelink.Frame) {
@@ -445,6 +505,9 @@ func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	if w.HeartbeatSeconds != int(nodelink.DefaultHeartbeat/time.Second) {
 		t.Errorf("welcome asks for a %ds heartbeat, want %v", w.HeartbeatSeconds, nodelink.DefaultHeartbeat)
 	}
+	if w.SupportsDataPool() || w.ControlGeneration != "" {
+		t.Fatal("a legacy hello was not kept on the combined SSH link")
+	}
 
 	// The inventory is a request, so the gateway has to answer it; a node that
 	// got no reply would keep resending its whole picture.
@@ -501,6 +564,110 @@ func TestApprovedNodeJoinsTheFleet(t *testing.T) {
 	}
 	if remote.Capacity.Node != "node-b" {
 		t.Errorf("node-b's capacity is filed under %q; the authenticated name must win", remote.Capacity.Node)
+	}
+}
+
+func TestDedicatedDataLaneBindsToRosterAndControlGeneration(t *testing.T) {
+	s := newNodeStack(t, true)
+	key := newNodeKey(t)
+	s.open(t, key).hello(t, "node-b")
+	if err := s.roster.ApproveFP(xssh.FingerprintSHA256(key.PublicKey()), "operator"); err != nil {
+		t.Fatal(err)
+	}
+
+	control := s.open(t, key)
+	hello := helloFrame(t, "node-b")
+	var facts nodelink.Hello
+	if err := json.Unmarshal(hello.Body, &facts); err != nil {
+		t.Fatal(err)
+	}
+	facts.Capabilities = []string{nodelink.CapabilitySSHDataPoolV1}
+	hello.Body, _ = json.Marshal(facts)
+	control.send(t, hello)
+	reply := control.next(t)
+	var welcome nodelink.Welcome
+	if err := json.Unmarshal(reply.Body, &welcome); err != nil {
+		t.Fatal(err)
+	}
+	if !welcome.SupportsDataPool() {
+		t.Fatalf("capable peers did not negotiate a data pool: %+v", welcome)
+	}
+
+	_, refused := s.openData(t, key, nodelink.DataHello{
+		Protocol: nodelink.Protocol, Node: "other-node",
+		Generation: welcome.ControlGeneration, Lane: "wrong-roster",
+	})
+	if refused.Accepted {
+		t.Fatal("a data lane naming a different roster node was accepted")
+	}
+	_, refused = s.openData(t, key, nodelink.DataHello{
+		Protocol: nodelink.Protocol, Node: "node-b",
+		Generation: "stale-control-generation", Lane: "stale",
+	})
+	if refused.Accepted {
+		t.Fatal("a data lane from an old control generation was accepted")
+	}
+
+	lane, accepted := s.openData(t, key, nodelink.DataHello{
+		Protocol: nodelink.Protocol, Node: "node-b",
+		Generation: welcome.ControlGeneration, Lane: "lane-1",
+	})
+	if !accepted.Accepted {
+		t.Fatalf("current authenticated data lane was refused: %s", accepted.Error)
+	}
+
+	// A split gateway must open guest channels on the dedicated lane, never on
+	// the control transport. Rejecting the channel keeps this test independent
+	// of a real VM while still proving which SSH mux received it.
+	onControl := make(chan struct{}, 1)
+	go func() {
+		for ch := range control.client.HandleChannelOpen(nodelink.StreamChannel) {
+			onControl <- struct{}{}
+			_ = ch.Reject(xssh.Prohibited, "test")
+		}
+	}()
+	onData := make(chan struct{}, 1)
+	go func() {
+		for ch := range lane.client.HandleChannelOpen(nodelink.StreamChannel) {
+			onData <- struct{}{}
+			_ = ch.Reject(xssh.Prohibited, "test")
+		}
+	}()
+	if err := s.index.Reserve("demo", "alice", "node-b", "ubuntu", "arm64"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := json.Marshal(nodelink.ChangedMsg{
+		Node: "node-b",
+		Sandbox: nodelink.SandboxRow{
+			Name: "demo", Owner: "alice", State: "running",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.send(t, nodelink.Frame{Type: nodelink.TypeChanged, Body: changed})
+	waitFor(t, "remote sandbox cache", func() bool {
+		_, ok := s.flt.Get("demo")
+		return ok
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _ = s.flt.DialContext(ctx, "tcp", net.JoinHostPort(fleet.Host("demo", "node-b"), "8080"))
+	select {
+	case <-onData:
+	case <-time.After(time.Second):
+		t.Fatal("guest channel did not arrive on the dedicated data lane")
+	}
+	select {
+	case <-onControl:
+		t.Fatal("split control connection carried a guest channel")
+	default:
+	}
+
+	lane.sess.Close() //nolint:errcheck
+	lane.client.Close()
+	if !s.flt.Online("node-b") {
+		t.Fatal("losing a data lane marked the node offline")
 	}
 }
 

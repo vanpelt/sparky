@@ -30,6 +30,18 @@ var hostDialer = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Sec
 // no log line. Callers that do not pool (the SSH gateway, the PTY bridge, the
 // secret syncer) already install their own bound.
 func (f *Fleet) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f.dialContext(ctx, network, addr, true)
+}
+
+// DialContextNoResume routes like DialContext but never turns a stale
+// not-running answer into EnsureReady. It is for background best-effort work
+// such as environment synchronization, whose contract explicitly forbids
+// waking an idle sandbox.
+func (f *Fleet) DialContextNoResume(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f.dialContext(ctx, network, addr, false)
+}
+
+func (f *Fleet) dialContext(ctx context.Context, network, addr string, resume bool) (net.Conn, error) {
 	h, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return hostDialer.DialContext(ctx, network, addr)
@@ -47,13 +59,41 @@ func (f *Fleet) DialContext(ctx context.Context, network, addr string) (net.Conn
 	// sandbox that has moved or paused cannot talk it into dialing something
 	// else.
 	if port == SSHPort {
-		return f.track(n.DialGuest(ctx, sandbox, nodelink.StreamSSH, 0))
+		return f.dialGuest(ctx, n, sandbox, nodelink.StreamSSH, 0, resume)
 	}
 	p, err := strconv.Atoi(port)
 	if err != nil || p < 1 || p > 65535 {
 		return nil, fmt.Errorf("fleet: %q is not a port on sandbox %q", port, sandbox)
 	}
-	return f.track(n.DialGuest(ctx, sandbox, nodelink.StreamTCP, p))
+	return f.dialGuest(ctx, n, sandbox, nodelink.StreamTCP, p, resume)
+}
+
+// dialGuest retries exactly one stale-state refusal. The node is the authority
+// on whether its guest is still running; a cached running record can lag a
+// reaper pause, so that typed answer singleflights one resume and then gets one
+// fresh dial. Every other failure keeps its existing taxonomy and is returned
+// untouched.
+func (f *Fleet) dialGuest(ctx context.Context, n Node, sandbox, kind string, port int, resume bool) (net.Conn, error) {
+	c, err := n.DialGuest(ctx, sandbox, kind, port)
+	if err == nil {
+		return f.track(c, nil)
+	}
+	if !nodelink.IsNotRunning(err) || !resume {
+		return nil, err
+	}
+	if f.metrics != nil {
+		f.metrics.IncEnsureReady(n.Name(), "retry")
+	}
+	if _, readyErr := f.EnsureReady(ctx, sandbox); readyErr != nil {
+		return nil, readyErr
+	}
+	// Re-route after the lifecycle operation rather than retaining a node
+	// pointer across it. A reconnect may have replaced the adapter generation.
+	n, routeErr := f.route("dial", sandbox)
+	if routeErr != nil {
+		return nil, routeErr
+	}
+	return f.track(n.DialGuest(ctx, sandbox, kind, port))
 }
 
 // track registers a tunneled conn so Fleet.Close can reach it, and is a

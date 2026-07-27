@@ -14,10 +14,11 @@ set -euo pipefail
 
 # NAT for IPv4 sandbox egress. IPv6 needs none: with --subnet6 each sandbox
 # holds a globally routable /128 and egresses unmasqueraded.
+SPARKBOX_GUEST_SUBNET="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/16}"
 UPLINK=$(ip route | awk '/default/{print $5; exit}')
 if [ -n "$UPLINK" ]; then
-  iptables -t nat -C POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o "$UPLINK" -j MASQUERADE
+  iptables -t nat -C POSTROUTING -s "$SPARKBOX_GUEST_SUBNET" -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$SPARKBOX_GUEST_SUBNET" -o "$UPLINK" -j MASQUERADE
 else
   echo "WARN: no default route — skipping sandbox NAT" >&2
 fi

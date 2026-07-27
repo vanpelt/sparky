@@ -118,7 +118,7 @@ func (f *fakeBoxes) Get(name string) (*host.Sandbox, bool) {
 
 func (f *fakeBoxes) List() []*host.Sandbox { return f.boxes }
 
-func (f *fakeBoxes) EnsureRunning(_ context.Context, name string) (*host.Sandbox, error) {
+func (f *fakeBoxes) EnsureReady(_ context.Context, name string) (*host.Sandbox, error) {
 	f.calls = append(f.calls, "resume "+name)
 	b, _ := f.Get(name)
 	return b, nil

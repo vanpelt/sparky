@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/machine"
 	macosassets "github.com/vanpelt/sparky/tools/sparkbox/macos"
 )
@@ -128,6 +129,43 @@ type Config struct {
 	// NodeName is the stable fleet node name written alongside Gateway. Empty
 	// lets sparkbox serve use the machine hostname.
 	NodeName string
+	// GuestSubnet is the IPv4 prefix divided into per-sandbox /30s. Standalone
+	// gateways retain the historical /16 by default. Fleet nodes must receive
+	// an explicit, unique prefix from setup.
+	GuestSubnet string
+	// NodeControlTransport selects the fleet control path: auto prefers healthy
+	// mTLS gRPC and retains SSH fallback, ssh disables gRPC, and grpc requires
+	// it. It applies to both gateway selection and node serving.
+	NodeControlTransport string
+	// NodeControlRollout selects the gateway's progressive operation-class
+	// cutover: inherit preserves NodeControlTransport for every operation,
+	// shadow keeps SSH authoritative while comparing inventories, read-only
+	// and idempotent progressively move those classes to gRPC, and grpc moves
+	// every class. Fleet nodes retain inherit; the gateway owns selection.
+	NodeControlRollout string
+	// NodeGRPCAddr is the tailnet listener a fleet node exposes for its mTLS
+	// NodeControl service. It is unused on a gateway.
+	NodeGRPCAddr string
+	// GatewayGRPCAddr is the tailnet listener a gateway exposes for workload
+	// identity RPCs from authenticated nodes. Enrollment advertises it to nodes;
+	// empty keeps the SSH identity relay for rolling compatibility.
+	GatewayGRPCAddr string
+	// GuestDataTransport selects remote guest data: auto prefers routed guest
+	// addresses with SSH fallback, ssh keeps the tunnel pool, and routed
+	// requires routed data.
+	GuestDataTransport string
+	// RoutedGuestCanaryPercent deterministically bounds the share of sandboxes
+	// using routed data while GuestDataTransport is auto. Explicit ssh/routed
+	// modes do not use a canary.
+	RoutedGuestCanaryPercent int
+	// RoutedGuestCanaryExplicit distinguishes an operator-selected zero-percent
+	// canary from a hand-built Config's zero value. Command callers normally
+	// communicate this through FlagsGiven; env recovery sets it directly.
+	RoutedGuestCanaryExplicit bool
+	// ClusterID is the stable gateway name in its SPIFFE identity. Empty lets
+	// serve use the historical node-name/hostname default; an explicit value is
+	// persisted so moving the gateway does not silently change its identity.
+	ClusterID string
 
 	// --- listen addresses (all templated into the unit's ExecStart) ---
 	// SSHAddr is the gateway's SSH door. Empty keeps the historical behaviour:
@@ -358,20 +396,25 @@ func DefaultConfig() Config { return DefaultConfigAt("/srv/sparkbox") }
 // --root flag shifts every derived path together.
 func DefaultConfigAt(root string) Config {
 	return Config{
-		Root:           root,
-		StateDir:       filepath.Join(root, "data", "state"),
-		ImageDir:       filepath.Join(root, "data", "images"),
-		KernelPath:     filepath.Join(root, "vmlinux"),
-		DefaultImage:   "universal",
-		UsersPath:      filepath.Join(root, "users.conf"),
-		ProxyDomain:    "hivemind.tools",
-		ProxyAddr:      defaultProxyAddr,
-		APIAddr:        defaultAPIAddr,
-		ArtifactBase:   DefaultArtifactBase,
-		Release:        "latest",
-		OperatorHandle: "operator",
-		DataVolumeGB:   300,
-		SwapGB:         16,
+		Root:                     root,
+		StateDir:                 filepath.Join(root, "data", "state"),
+		ImageDir:                 filepath.Join(root, "data", "images"),
+		KernelPath:               filepath.Join(root, "vmlinux"),
+		DefaultImage:             "universal",
+		UsersPath:                filepath.Join(root, "users.conf"),
+		ProxyDomain:              "hivemind.tools",
+		GuestSubnet:              guestnet.DefaultPrefix,
+		NodeControlTransport:     "auto",
+		NodeControlRollout:       "inherit",
+		GuestDataTransport:       "auto",
+		RoutedGuestCanaryPercent: 100,
+		ProxyAddr:                defaultProxyAddr,
+		APIAddr:                  defaultAPIAddr,
+		ArtifactBase:             DefaultArtifactBase,
+		Release:                  "latest",
+		OperatorHandle:           "operator",
+		DataVolumeGB:             300,
+		SwapGB:                   16,
 		// On by default — see the header of agenttools.go. A sandbox host whose
 		// sandboxes hold no agent is not a useful default, and this was
 		// unreachable from the released binary at all until stepAgentTools.
@@ -385,6 +428,42 @@ func DefaultConfigAt(root string) Config {
 		MachineMemGB: 24,
 		ContainerBin: "container",
 	}
+}
+
+// NormalizeGuestSubnet validates an IPv4 prefix and returns canonical CIDR
+// form. It is exported for the command layer so setup can store one normalized
+// value in Config before rendering flags, environment, and route preferences.
+func NormalizeGuestSubnet(raw string) (string, error) {
+	network, err := guestnet.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	return network.String(), nil
+}
+
+func (c Config) guestSubnet() string {
+	normalized, err := NormalizeGuestSubnet(c.GuestSubnet)
+	if err != nil {
+		return c.GuestSubnet
+	}
+	return normalized
+}
+
+// nodeGRPCAddr is the listener this host will actually bind. The raw field is
+// persisted on fleet nodes, but a gateway never hosts NodeControl and ssh mode
+// deliberately disables the listener.
+func (c Config) nodeGRPCAddr() string {
+	if c.Gateway == "" || c.NodeControlTransport == "ssh" {
+		return ""
+	}
+	return strings.TrimSpace(c.NodeGRPCAddr)
+}
+
+func (c Config) gatewayGRPCAddr() string {
+	if c.Gateway != "" || c.NodeControlTransport == "ssh" {
+		return ""
+	}
+	return strings.TrimSpace(c.GatewayGRPCAddr)
 }
 
 // darwin machine defaults. Named here rather than inline for the same reason

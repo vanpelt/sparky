@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,10 +135,101 @@ func TestResumeRespectsCap(t *testing.T) {
 	mustCreate(t, m, "a3", "alice", 512) // a2,a3 running; a1 paused -> 2 running
 
 	// Reconnecting to the paused a1 would make 3 running: refused.
-	_, err := m.EnsureRunning(context.Background(), "a1")
+	_, err := m.EnsureReady(context.Background(), "a1")
 	var limit *host.LimitError
 	if !errors.As(err, &limit) {
 		t.Fatalf("resume past cap: want *LimitError, got %v", err)
+	}
+}
+
+type blockingResumeDriver struct {
+	*mock.Driver
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	resumes atomic.Int64
+}
+
+func (d *blockingResumeDriver) Resume(ctx context.Context, name string) (*vmm.Instance, error) {
+	d.resumes.Add(1)
+	d.once.Do(func() { close(d.entered) })
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return d.Driver.Resume(ctx, name)
+}
+
+func TestConcurrentEnsureReadyResumesOnce(t *testing.T) {
+	var d *blockingResumeDriver
+	m := newTestManagerWith(t, host.Options{}, func(md *mock.Driver) vmm.Driver {
+		d = &blockingResumeDriver{
+			Driver: md, entered: make(chan struct{}), release: make(chan struct{}),
+		}
+		return d
+	})
+	mustCreate(t, m, "shared", "alice", 512)
+	if err := m.Pause(context.Background(), "shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 100
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			_, err := m.EnsureReady(context.Background(), "shared")
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-d.entered
+	close(d.release)
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Fatalf("EnsureReady: %v", err)
+		}
+	}
+	if got := d.resumes.Load(); got != 1 {
+		t.Fatalf("driver Resume calls = %d, want 1", got)
+	}
+}
+
+func TestWarmEnsureReadyDefersPersistenceUntilActivityFlush(t *testing.T) {
+	dir := t.TempDir()
+	m := newManagerInDir(t, dir, host.Options{})
+	mustCreate(t, m, "warm", "alice", 512)
+	path := filepath.Join(dir, "sandboxes.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.EnsureReady(context.Background(), "warm"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("a warm EnsureReady synchronously rewrote manager state")
+	}
+	if err := m.FlushActivity(); err != nil {
+		t.Fatal(err)
+	}
+	flushed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(flushed) == string(before) {
+		t.Fatal("FlushActivity did not persist the warm activity timestamp")
 	}
 }
 
@@ -304,7 +396,7 @@ func TestFrontDoorHook(t *testing.T) {
 	if err := mgr.Pause(ctx, "doorful"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.EnsureRunning(ctx, "doorful"); err != nil {
+	if _, err := mgr.EnsureReady(ctx, "doorful"); err != nil {
 		t.Fatal(err)
 	}
 	if len(fd.ensured) != 1 || len(fd.removed) != 0 {
@@ -420,7 +512,7 @@ func TestRenameRunningBox(t *testing.T) {
 		t.Fatalf("want drop before rename, got calls %v", calls)
 	}
 	// The next start cold-boots the moved rootfs under the new name.
-	if _, err := m.EnsureRunning(ctx, "after"); err != nil {
+	if _, err := m.EnsureReady(ctx, "after"); err != nil {
 		t.Fatalf("resume after rename: %v", err)
 	}
 	if indexOf(rd.recorded(), "create after") == -1 {
@@ -504,7 +596,7 @@ func TestRenameCrashReconciledOnLoad(t *testing.T) {
 			if b.RenamedFrom != "" {
 				t.Fatalf("rename journal not cleared on load: %q", b.RenamedFrom)
 			}
-			if _, err := m2.EnsureRunning(ctx, "after"); err != nil {
+			if _, err := m2.EnsureReady(ctx, "after"); err != nil {
 				t.Fatalf("resume after reconcile: %v", err)
 			}
 			got, err := os.ReadFile(workdirFile(dir, "after", "keep.txt"))
@@ -859,7 +951,7 @@ func TestRebootToleratesConcurrentResume(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		<-sd.resume
-		_, err := m.EnsureRunning(ctx, "busy")
+		_, err := m.EnsureReady(ctx, "busy")
 		done <- err
 	}()
 	if err := m.Reboot(ctx, "busy"); err != nil {
@@ -960,13 +1052,13 @@ func TestEnvPushHook(t *testing.T) {
 	if err := m.Pause(ctx, "envy"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.EnsureRunning(ctx, "envy"); err != nil {
+	if _, err := m.EnsureReady(ctx, "envy"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return pusher.count("envy") == 2 })
 
 	// An already-running box gets no redundant push from EnsureRunning.
-	if _, err := m.EnsureRunning(ctx, "envy"); err != nil {
+	if _, err := m.EnsureReady(ctx, "envy"); err != nil {
 		t.Fatal(err)
 	}
 	if got := pusher.count("envy"); got != 2 {
@@ -994,7 +1086,7 @@ func TestEnvPushFailureNeverFailsLifecycle(t *testing.T) {
 	if err := m.Pause(ctx, "flaky"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.EnsureRunning(ctx, "flaky"); err != nil {
+	if _, err := m.EnsureReady(ctx, "flaky"); err != nil {
 		t.Fatalf("EnsureRunning failed over a push error: %v", err)
 	}
 	waitFor(t, func() bool { return pusher.count("flaky") == 2 })

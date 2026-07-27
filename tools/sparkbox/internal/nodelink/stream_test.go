@@ -661,6 +661,10 @@ func TestStreamRejectionsAreTyped(t *testing.T) {
 			if tc.msg != "" && oce.Message != tc.msg {
 				t.Errorf("message = %q, want %q", oce.Message, tc.msg)
 			}
+			wantRetry := tc.sandbox == "paused" || tc.sandbox == "noaddr"
+			if got := IsNotRunning(err); got != wantRetry {
+				t.Errorf("IsNotRunning = %v, want %v", got, wantRetry)
+			}
 		})
 	}
 }

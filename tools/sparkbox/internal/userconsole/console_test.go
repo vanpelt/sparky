@@ -260,7 +260,7 @@ func TestCrossOwnerIs404(t *testing.T) {
 	if err := tc.secrets.PutSecret("alice", "ALICE_TOKEN", "hunter2", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tc.mgr.EnsureRunning(ctx, "alices-box"); err != nil {
+	if _, err := tc.mgr.EnsureReady(ctx, "alices-box"); err != nil {
 		t.Fatal(err)
 	}
 

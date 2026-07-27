@@ -27,7 +27,11 @@ type setupOpts struct {
 	domain, artifactBase, release                        *string
 	operatorKey, operatorHandle                          *string
 	dataGB, swapGB                                       *int
-	gateway, nodeName                                    *string
+	gateway, nodeName, guestSubnet                       *string
+	nodeControlTransport, nodeControlRollout             *string
+	nodeGRPCAddr, gatewayGRPCAddr                        *string
+	guestDataTransport, clusterID                        *string
+	routedGuestCanaryPercent                             *int
 	moveAdminSSH                                         *bool
 	sshAddr, proxyAddr, apiAddr, dnsAddr, dnsAnswer      *string
 	edgeIP                                               *string
@@ -60,6 +64,14 @@ func newSetupFlags(cfg hostsetup.Config) (*flag.FlagSet, *setupOpts) {
 	o.swapGB = fs.Int("swap-gb", cfg.SwapGB, "overcommit safety-valve swapfile size, GiB (0 disables)")
 	o.gateway = fs.String("gateway", cfg.Gateway, "fleet gateway host:port; provision this machine as a node instead of a gateway")
 	o.nodeName = fs.String("node-name", cfg.NodeName, "fleet node name (default: hostname; only used with --gateway)")
+	o.guestSubnet = fs.String("guest-subnet", cfg.GuestSubnet, "IPv4 guest prefix divided into /30s; fleet nodes must set an explicit unique prefix (recommended /20)")
+	o.nodeControlTransport = fs.String("node-control-transport", cfg.NodeControlTransport, "fleet control transport: auto | ssh | grpc")
+	o.nodeControlRollout = fs.String("node-control-rollout", cfg.NodeControlRollout, "gateway control cutover: inherit | shadow | read-only | idempotent | grpc")
+	o.nodeGRPCAddr = fs.String("node-grpc-addr", cfg.NodeGRPCAddr, "fleet node tailnet listen address for the mTLS NodeControl server, such as 100.64.0.12:9443")
+	o.gatewayGRPCAddr = fs.String("gateway-grpc-addr", cfg.GatewayGRPCAddr, "fleet gateway tailnet listen address for mTLS workload-identity RPCs, such as 100.64.0.10:9444")
+	o.guestDataTransport = fs.String("guest-data-transport", cfg.GuestDataTransport, "remote guest data transport: auto | ssh | routed")
+	o.routedGuestCanaryPercent = fs.Int("routed-guest-canary-percent", cfg.RoutedGuestCanaryPercent, "gateway share of sandboxes using routed data in auto mode: 0..100")
+	o.clusterID = fs.String("cluster-id", cfg.ClusterID, "stable gateway mTLS identity name; persist this across gateway moves")
 	o.moveAdminSSH = fs.Bool("move-admin-ssh", false, "relocate the host's own sshd to :2222 so the gateway can own :22 (DANGEROUS over an SSH session — keep another shell open)")
 	o.sshAddr = fs.String("ssh-addr", "", "SSH gateway listen address, host:port (default :2222, or :22 with --move-admin-ssh). Give the gateway an address of its own (e.g. 10.66.0.1:2222) so it cannot collide with host services")
 	o.proxyAddr = fs.String("proxy-addr", cfg.ProxyAddr, "HTTP edge listen address, host:port. sparkbox.env's PROXY_PORT is derived from its port, so this moves the any-port forwarding target with it")
@@ -138,6 +150,14 @@ func setup(args []string) error {
 	cfg.SwapGB = *o.swapGB
 	cfg.Gateway = *o.gateway
 	cfg.NodeName = *o.nodeName
+	cfg.GuestSubnet = *o.guestSubnet
+	cfg.NodeControlTransport = *o.nodeControlTransport
+	cfg.NodeControlRollout = *o.nodeControlRollout
+	cfg.NodeGRPCAddr = *o.nodeGRPCAddr
+	cfg.GatewayGRPCAddr = *o.gatewayGRPCAddr
+	cfg.GuestDataTransport = *o.guestDataTransport
+	cfg.RoutedGuestCanaryPercent = *o.routedGuestCanaryPercent
+	cfg.ClusterID = *o.clusterID
 	cfg.MoveAdminSSH = *o.moveAdminSSH
 	// Assigned after applyPaths, which rebuilds cfg from DefaultConfigAt when
 	// --root moves: the install path is absolute and does not hang off the
@@ -188,9 +208,17 @@ func setup(args []string) error {
 	if cfg.Gateway != "" && cfg.MoveAdminSSH {
 		return fmt.Errorf("--move-admin-ssh cannot be used with --gateway; a fleet node has no inbound Sparkbox SSH gateway")
 	}
+	if err := prepareGuestSubnet(&cfg); err != nil {
+		return err
+	}
 	if err := validateNodeFlags(cfg.Gateway, cfg.NodeName); err != nil {
 		return err
 	}
+	normalizedTransport, err := hostsetup.NormalizeTransportConfig(cfg)
+	if err != nil {
+		return err
+	}
+	cfg = normalizedTransport
 	if err := validatePlatformFlags(runtime.GOOS, cfg.FlagsGiven); err != nil {
 		return err
 	}
@@ -199,7 +227,26 @@ func setup(args []string) error {
 	defer stop()
 
 	env := hostsetup.NewEnv(ctx, cfg, hostsetup.NewExecRunner(), hostsetup.NewHTTPFetcher(), os.Stdout)
+	// The post-provision verification should exercise the control plane setup
+	// just installed, using the same read-only diagnostic as `sparkbox doctor`.
+	// On macOS the inner Linux setup wires its own check inside the machine.
+	if runtime.GOOS != "darwin" {
+		check := nodeControlHealthCheck(ctx, cfg)
+		env.NodeControlHealth = &check
+	}
 	return hostsetup.Provision(env)
+}
+
+func prepareGuestSubnet(cfg *hostsetup.Config) error {
+	if cfg.Gateway != "" && !cfg.FlagsGiven["guest-subnet"] {
+		return fmt.Errorf("--guest-subnet is required with --gateway; every fleet node needs an explicit unique prefix (recommended /20)")
+	}
+	normalized, err := hostsetup.NormalizeGuestSubnet(cfg.GuestSubnet)
+	if err != nil {
+		return fmt.Errorf("invalid --guest-subnet: %w", err)
+	}
+	cfg.GuestSubnet = normalized
+	return nil
 }
 
 // validatePlatformFlags refuses a flag that cannot mean anything on this host.

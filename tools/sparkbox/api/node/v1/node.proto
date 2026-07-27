@@ -1,0 +1,387 @@
+syntax = "proto3";
+
+package sparkbox.node.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/vanpelt/sparky/tools/sparkbox/api/node/v1;nodev1";
+
+// NodeControl is the typed, durable control plane between a Sparkbox gateway
+// and one approved node. Guest byte streams deliberately do not belong here.
+service NodeControl {
+  rpc GetInventory(GetInventoryRequest) returns (Inventory);
+  rpc WatchEvents(WatchEventsRequest) returns (stream InventoryEvent);
+  rpc GetCapacity(GetCapacityRequest) returns (Capacity);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetVitals(GetVitalsRequest) returns (Vitals);
+
+  rpc EnsureRunning(EnsureRunningRequest) returns (Operation);
+  rpc BeginCreate(CreateRequest) returns (Operation);
+  rpc BeginPause(PauseRequest) returns (Operation);
+  rpc BeginArchive(ArchiveRequest) returns (Operation);
+  rpc BeginResize(ResizeRequest) returns (Operation);
+  rpc BeginReboot(RebootRequest) returns (Operation);
+  rpc BeginRename(RenameRequest) returns (Operation);
+  rpc BeginDestroy(DestroyRequest) returns (Operation);
+  rpc BeginSetPinned(SetPinnedRequest) returns (Operation);
+  rpc BeginResyncEnvironment(ResyncEnvironmentRequest) returns (Operation);
+  rpc BeginSnapshot(SnapshotRequest) returns (Operation);
+  rpc BeginDeleteSnapshot(DeleteSnapshotRequest) returns (Operation);
+  rpc BeginFork(ForkRequest) returns (Operation);
+
+  // MarkActive and RecordKey are intentionally cheap bookkeeping operations.
+  // They are idempotent and may be coalesced by either peer.
+  rpc MarkActive(MarkActiveRequest) returns (google.protobuf.Empty);
+  rpc RecordKey(RecordKeyRequest) returns (google.protobuf.Empty);
+
+  rpc ApplyNetworkPolicy(ApplyNetworkPolicyRequest) returns (Operation);
+  rpc GetNetworkUsage(GetNetworkUsageRequest) returns (GetNetworkUsageResponse);
+
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
+}
+
+// GatewayIdentity is hosted by the gateway for a node's guest metadata
+// service. The authenticated node identity, never a request field, determines
+// which placements the caller may speak for.
+service GatewayIdentity {
+  rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse);
+  rpc DescribeIdentity(DescribeIdentityRequest) returns (IdentityDescription);
+}
+
+message GetInventoryRequest {}
+
+message WatchEventsRequest {
+  uint64 after_revision = 1;
+}
+
+message Inventory {
+  uint64 revision = 1;
+  repeated Sandbox sandboxes = 2;
+  repeated Snapshot snapshots = 3;
+}
+
+message InventoryEvent {
+  uint64 revision = 1;
+  oneof event {
+    SandboxChanged sandbox_changed = 2;
+    SandboxGone sandbox_gone = 3;
+    SnapshotChanged snapshot_changed = 4;
+    SnapshotGone snapshot_gone = 5;
+    EventGap gap = 6;
+  }
+}
+
+message SandboxChanged {
+  Sandbox sandbox = 1;
+  string reason = 2;
+}
+
+message SandboxGone {
+  string name = 1;
+}
+
+message SnapshotChanged {
+  Snapshot snapshot = 1;
+  string reason = 2;
+}
+
+message SnapshotGone {
+  string name = 1;
+}
+
+message EventGap {
+  uint64 oldest_available_revision = 1;
+  uint64 current_revision = 2;
+}
+
+message Sandbox {
+  string name = 1;
+  string owner = 2;
+  string image = 3;
+  int64 vcpus = 4;
+  int64 memory_mb = 5;
+  SandboxState state = 6;
+  string ssh_user = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp last_active = 9;
+  bool pinned = 10;
+  bool ballooned = 11;
+  string key_fingerprint = 12;
+  uint64 network_rx_bytes = 13;
+  uint64 network_tx_bytes = 14;
+  google.protobuf.Timestamp archived_at = 15;
+  int64 disk_mb = 16;
+  int64 disk_total_mb = 17;
+  // The node's actual routed guest address. Gateways must validate it against
+  // the authenticated node's approved prefix before using it.
+  string host_ip = 18;
+}
+
+enum SandboxState {
+  SANDBOX_STATE_UNSPECIFIED = 0;
+  SANDBOX_STATE_RUNNING = 1;
+  SANDBOX_STATE_PAUSED = 2;
+  SANDBOX_STATE_ARCHIVED = 3;
+}
+
+message Snapshot {
+  string name = 1;
+  string owner = 2;
+  string image = 3;
+  string from_sandbox = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message GetCapacityRequest {}
+
+message Capacity {
+  string architecture = 1;
+  string operating_system = 2;
+  string release = 3;
+  string driver = 4;
+  int64 host_vcpus = 5;
+  int64 total_memory_mb = 6;
+  int64 budget_memory_mb = 7;
+  int64 used_vcpus = 8;
+  int64 used_memory_mb = 9;
+  int64 effective_memory_mb = 10;
+  int64 reserve_memory_mb = 11;
+  int64 disk_pool_mb_per_owner = 12;
+  int64 used_disk_mb = 13;
+  int32 running = 14;
+  int32 sandboxes = 15;
+  bool archiving = 16;
+  bool snapshots = 17;
+  bool network_accounting = 18;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  HealthStatus status = 1;
+  string node = 2;
+  string version = 3;
+  google.protobuf.Timestamp started_at = 4;
+  uint64 inventory_revision = 5;
+  repeated string capabilities = 6;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_SERVING = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_STOPPING = 3;
+}
+
+message GetVitalsRequest {
+  string sandbox = 1;
+}
+
+message Vitals {
+  double cpu_seconds = 1;
+  int64 memory_used_mb = 2;
+  uint64 network_rx_bytes = 3;
+  uint64 network_tx_bytes = 4;
+}
+
+// OperationIdentity is required on every mutation. request_hash is a SHA-256
+// digest over a canonical encoding of immutable request fields.
+message OperationIdentity {
+  string operation_id = 1;
+  string idempotency_key = 2;
+  bytes request_hash = 3;
+  string initiator = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message EnsureRunningRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+}
+
+message CreateRequest {
+  OperationIdentity operation = 1;
+  string name = 2;
+  string owner = 3;
+  string image = 4;
+  int64 vcpus = 5;
+  int64 memory_mb = 6;
+}
+
+message PauseRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+}
+
+message ArchiveRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+}
+
+message ResizeRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+  int64 size_mb = 3;
+}
+
+message RebootRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+}
+
+message RenameRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+  string new_name = 3;
+  string owner = 4;
+}
+
+message DestroyRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+}
+
+message SetPinnedRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+  bool pinned = 3;
+}
+
+message ResyncEnvironmentRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+}
+
+message SnapshotRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+  string snapshot = 3;
+  string owner = 4;
+}
+
+message DeleteSnapshotRequest {
+  OperationIdentity operation = 1;
+  string snapshot = 2;
+  string owner = 3;
+}
+
+message ForkRequest {
+  OperationIdentity operation = 1;
+  string snapshot = 2;
+  string name = 3;
+  string owner = 4;
+  int64 vcpus = 5;
+  int64 memory_mb = 6;
+}
+
+message MarkActiveRequest {
+  string sandbox = 1;
+  google.protobuf.Timestamp observed_at = 2;
+}
+
+message RecordKeyRequest {
+  string sandbox = 1;
+  string key_fingerprint = 2;
+}
+
+message NetworkPolicy {
+  string sandbox = 1;
+  repeated string allowed_destinations = 2;
+}
+
+message ApplyNetworkPolicyRequest {
+  OperationIdentity operation = 1;
+  repeated NetworkPolicy policies = 2;
+}
+
+message GetNetworkUsageRequest {}
+
+message NetworkUsage {
+  string sandbox = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+}
+
+message GetNetworkUsageResponse {
+  repeated NetworkUsage usage = 1;
+}
+
+message GetOperationRequest {
+  string operation_id = 1;
+}
+
+message WatchOperationRequest {
+  string operation_id = 1;
+  uint64 after_sequence = 2;
+}
+
+message Operation {
+  string operation_id = 1;
+  string idempotency_key = 2;
+  bytes request_hash = 3;
+  string initiator = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  OperationState state = 7;
+  uint64 sequence = 8;
+  string kind = 9;
+  string target = 10;
+  OperationResult result = 11;
+  OperationError error = 12;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCEEDED = 3;
+  OPERATION_STATE_FAILED = 4;
+  OPERATION_STATE_CANCELLED = 5;
+}
+
+message OperationResult {
+  oneof result {
+    Sandbox sandbox = 1;
+    Snapshot snapshot = 2;
+    google.protobuf.Empty empty = 3;
+  }
+}
+
+message OperationError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message IssueTokenRequest {
+  string sandbox = 1;
+  string audience = 2;
+}
+
+message IssueTokenResponse {
+  string token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message DescribeIdentityRequest {
+  string sandbox = 1;
+}
+
+message IdentityDescription {
+  string issuer = 1;
+  string subject = 2;
+  string owner = 3;
+  string github = 4;
+  string key_fingerprint = 5;
+  string sandbox = 6;
+  string image = 7;
+  string node = 8;
+}
+
+message DurationRange {
+  google.protobuf.Duration minimum = 1;
+  google.protobuf.Duration maximum = 2;
+}

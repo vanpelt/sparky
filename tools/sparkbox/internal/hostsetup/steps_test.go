@@ -800,6 +800,8 @@ func TestStepEnvFileAddsMissingManagedKey(t *testing.T) {
 const dgxEnvFile = `# sparkbox host config
 PROXY_DOMAIN=catnip.sh
 PROXY_PORT=443
+SPARKBOX_GUEST_SUBNET=172.30.0.0/16
+GUEST_SUBNET_FLAG=--guest-subnet=172.30.0.0/16
 SPARKBOX_EDGE_IP=10.66.0.1
 SPARKBOX_EDGE_REDIRECT=0
 OVERCOMMIT_FLAGS=--mem-reserve-mb 1024

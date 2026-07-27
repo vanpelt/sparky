@@ -9,8 +9,8 @@ Before=sparkbox.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# SUBNET6 (enables the v6 REDIRECT branch) + PROXY_PORT (edge listener) live in
-# sparkbox.env; without this the script sees neither and only v4 forwards.
+# SPARKBOX_GUEST_SUBNET (v4 NAT), SUBNET6 (the v6 REDIRECT branch), and
+# PROXY_PORT (edge listener) live in sparkbox.env.
 EnvironmentFile=/srv/sparkbox/sparkbox.env
 ExecStart=/usr/local/sbin/sparkbox-net.sh
 

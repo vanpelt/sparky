@@ -89,6 +89,8 @@ var addrFlags = []struct {
 	{"--ssh-addr", "ssh gateway", []string{"tcp"}, serviceUnit, "sparkbox", Config.sshAddr},
 	{"--proxy-addr", "http edge", []string{"tcp"}, serviceUnit, "sparkbox", Config.proxyAddr},
 	{"--api-addr", "control api", []string{"tcp"}, serviceUnit, "sparkbox", Config.apiAddr},
+	{"--node-grpc-addr", "node gRPC control", []string{"tcp"}, serviceUnit, "sparkbox", Config.nodeGRPCAddr},
+	{"--gateway-grpc-addr", "gateway gRPC identity", []string{"tcp"}, serviceUnit, "sparkbox", Config.gatewayGRPCAddr},
 	// dnsedge serves UDP and TCP on the same address (dnsedge.ListenAndServe).
 	{"--dns-addr", "wildcard dns", []string{"udp", "tcp"}, serviceUnit, "sparkbox", Config.dnsAddr},
 	// sluice's allowlist resolver. Not a `sparkbox serve` flag at all — it is
@@ -166,7 +168,10 @@ func validateAddrs(cfg Config) error {
 // bundles in. It matters twice: Go's flag package lets a repeated flag win
 // last, so this is the precedence, and the preflight has to probe the address
 // the daemon will END UP with, not the one setup put in the template.
-var bundleOrder = []string{"LOGIN_USER_FLAG", "SUBNET6_FLAG", "OVERCOMMIT_FLAGS", "TLS_FLAGS", "GATEWAY_FLAG", "EXTRA_FLAGS"}
+var bundleOrder = []string{
+	"LOGIN_USER_FLAG", "GUEST_SUBNET_FLAG", "TRANSPORT_FLAGS", "SUBNET6_FLAG",
+	"OVERCOMMIT_FLAGS", "TLS_FLAGS", "GATEWAY_FLAG", "EXTRA_FLAGS",
+}
 
 // effectiveAddrs resolves what the gateway will actually bind: this config's
 // addresses, with any override smuggled through an existing sparkbox.env
@@ -200,6 +205,16 @@ func effectiveAddrs(cfg Config, envKV map[string]string) (map[string]string, []s
 			}
 			out[flag] = val
 		}
+	}
+	// The address can be present in a preserved bundle while a later bundle
+	// switches control back to SSH. Mirror serve's role/mode gate so setup does
+	// not reject a port the daemon will never bind.
+	effectiveTransport := effectiveTransportConfig(cfg, envKV)
+	if cfg.Gateway == "" || effectiveTransport.NodeControlTransport == "ssh" {
+		out["--node-grpc-addr"] = ""
+	}
+	if cfg.Gateway != "" || effectiveTransport.NodeControlTransport == "ssh" {
+		out["--gateway-grpc-addr"] = ""
 	}
 	return out, notes
 }
@@ -301,13 +316,10 @@ func wantedPorts(addrs map[string]string) []portProbe {
 // had the port. A1's liveness probe catches that after the fact; this catches
 // it before the multi-GB download, and says which port and whose.
 //
-// It runs on a gateway only. A fleet node opens none of these listeners —
-// serveNode returns before the SSH door, the edge, the API and the DNS
-// responder exist — so probing them there would invent conflicts.
+// Gateways open the edge/control listeners; fleet nodes open only their
+// optional NodeControl gRPC listener. Filtering by role matters because
+// serveNode returns before the SSH door, edge, API and DNS responder exist.
 func preflightPorts(e *Env) error {
-	if e.Cfg.Gateway != "" {
-		return nil
-	}
 	if e.Listen == nil {
 		e.Listen = NewNetListener()
 	}
@@ -317,6 +329,15 @@ func preflightPorts(e *Env) error {
 		e.logf("   note: %s\n", n)
 	}
 	probes := wantedPorts(addrs)
+	if e.Cfg.Gateway != "" {
+		filtered := probes[:0]
+		for _, probe := range probes {
+			if probe.flag == "--node-grpc-addr" {
+				filtered = append(filtered, probe)
+			}
+		}
+		probes = filtered
+	}
 
 	if e.Cfg.DryRun {
 		// Reported, not attempted: a dry run must not open a socket any more

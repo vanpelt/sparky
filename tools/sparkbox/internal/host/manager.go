@@ -17,9 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"golang.org/x/sync/singleflight"
 )
 
 // validName reports whether a sandbox name is well formed. The charset is the
@@ -41,6 +43,12 @@ func reservedName(name string) bool { return reserved.Name(name) }
 const (
 	defaultVCPUs int64 = 2
 	defaultMemMB int64 = 8192
+
+	// activityInterval is the shortest gap between activity marks we retain for
+	// one sandbox. A mark is deliberately approximate: the idle thresholds are
+	// measured in minutes, while keeping one timestamp per request would turn a
+	// page load into a lock storm for no additional scheduling information.
+	activityInterval = 10 * time.Second
 )
 
 // LimitError is returned when a sandbox can't be brought to running because the
@@ -325,6 +333,27 @@ type Observer interface {
 	SandboxGone(name string)
 }
 
+// Observers fans lifecycle notifications out to several independently
+// nonblocking mirrors (for example, the legacy SSH emitter and the durable
+// gRPC event journal).
+type Observers []Observer
+
+func (all Observers) SandboxChanged(b *Sandbox, reason string) {
+	for _, observer := range all {
+		if observer != nil {
+			observer.SandboxChanged(b, reason)
+		}
+	}
+}
+
+func (all Observers) SandboxGone(name string) {
+	for _, observer := range all {
+		if observer != nil {
+			observer.SandboxGone(name)
+		}
+	}
+}
+
 // ObjectStore is where archived sandbox rootfs artifacts are parked and fetched
 // back (see internal/objstore). Optional — nil disables archiving, and the
 // manager also needs the driver to implement vmm.Archivable. Keys are
@@ -338,6 +367,7 @@ type ObjectStore interface {
 
 type Manager struct {
 	mu          sync.Mutex
+	ready       singleflight.Group // one restore/resume per sandbox at a time
 	driver      vmm.Driver
 	balloon     vmm.Ballooner    // driver's balloon capability, if it has one; else nil
 	archiver    vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
@@ -375,6 +405,16 @@ type Manager struct {
 	actCPUPct   float64                 // activity floor: % of one core over a sample; 0 = off
 	actNetBytes uint64                  // activity floor: bytes per sample; 0 = off
 	vitals      map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
+	metrics     *fleetmetrics.Registry  // optional node-local persistence/readiness metrics
+
+	// Activity is intentionally kept off mu on the offer path. Lifecycle
+	// operations hold mu across driver calls, which can take seconds; a web
+	// request marking another sandbox active must not wait behind one. The
+	// asynchronous applier updates the live record and deflates a balloon,
+	// while save/FlushActivity merge the pending timestamps durably.
+	activityMu sync.Mutex
+	activity   map[string]time.Time // dirty timestamps not yet persisted
+	markedAt   map[string]time.Time // last accepted mark, for coalescing
 }
 
 // vitalsSample is the previous reaper-tick reading of a sandbox's resource
@@ -457,6 +497,9 @@ type Options struct {
 	// ~3 KB/min, against 3.6-14% CPU and 400 KB-4 MB/min for a working agent.
 	ActivityCPUPct   float64
 	ActivityNetBytes uint64
+	// Metrics records bounded node-local lifecycle and persistence observations.
+	// Nil preserves the historical no-instrumentation path.
+	Metrics *fleetmetrics.Registry
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -469,6 +512,8 @@ func NewManager(opts Options) (*Manager, error) {
 		boxes:       map[string]*Sandbox{},
 		snaps:       map[string]*Snapshot{},
 		vitals:      map[string]vitalsSample{},
+		activity:    map[string]time.Time{},
+		markedAt:    map[string]time.Time{},
 		actCPUPct:   opts.ActivityCPUPct,
 		actNetBytes: opts.ActivityNetBytes,
 		gwPubKey:    opts.GatewayPublicKey,
@@ -488,6 +533,7 @@ func NewManager(opts Options) (*Manager, error) {
 		hostVCPUs:   opts.HostVCPUs,
 		frontDoor:   opts.FrontDoor,
 		observer:    opts.Observer,
+		metrics:     opts.Metrics,
 	}
 	if m.archivePfx == "" {
 		m.archivePfx = "archives"
@@ -710,7 +756,9 @@ func (m *Manager) Get(name string) (*Sandbox, bool) {
 	if !ok {
 		return nil, false
 	}
-	return copyOf(b), true
+	out := copyOf(b)
+	out.LastActive = m.latestActivity(name, out.LastActive)
+	return out, true
 }
 
 // GetByHostIP returns the running sandbox whose guest IP is ip. This is how
@@ -752,7 +800,9 @@ func (m *Manager) List() []*Sandbox {
 	defer m.mu.Unlock()
 	out := make([]*Sandbox, 0, len(m.boxes))
 	for _, b := range m.boxes {
-		out = append(out, copyOf(b))
+		c := copyOf(b)
+		c.LastActive = m.latestActivity(c.Name, c.LastActive)
+		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -765,7 +815,9 @@ func (m *Manager) ListByOwner(owner string) []*Sandbox {
 	var out []*Sandbox
 	for _, b := range m.boxes {
 		if b.Owner == owner {
-			out = append(out, copyOf(b))
+			c := copyOf(b)
+			c.LastActive = m.latestActivity(c.Name, c.LastActive)
+			out = append(out, c)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -846,9 +898,44 @@ func (m *Manager) Capacity() NodeCapacity {
 	return c
 }
 
-// EnsureRunning resumes the sandbox if paused and returns its SSH endpoint.
-// This is the gateway's resume-on-connect entry point.
-func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, error) {
+// Accessor is the lifecycle slice shared by every warm access path. Both a
+// Manager and a fleet router satisfy it.
+type Accessor interface {
+	Get(name string) (*Sandbox, bool)
+	EnsureReady(ctx context.Context, name string) (*Sandbox, error)
+	MarkActive(name string)
+}
+
+// Prepare is the common resume-on-access decision. A running cached record is
+// returned immediately and merely marked active; only a stopped or unknown
+// record crosses the potentially expensive EnsureReady boundary.
+//
+// Unknown is deliberately handed to EnsureReady rather than answered here.
+// The authoritative store owns the exact not-found/offline/orphaned error, and
+// callers rely on that taxonomy for both masking and user-facing status codes.
+func Prepare(ctx context.Context, boxes Accessor, name string) (*Sandbox, error) {
+	b, ok := boxes.Get(name)
+	if ok && b.State == vmm.StateRunning {
+		boxes.MarkActive(name)
+		return b, nil
+	}
+	return boxes.EnsureReady(ctx, name)
+}
+
+// EnsureReady resumes the sandbox if paused and returns its SSH endpoint.
+// Concurrent callers for one sandbox share the complete restore/resume. Warm
+// request paths call Prepare and do not reach this method.
+func (m *Manager) EnsureReady(ctx context.Context, name string) (*Sandbox, error) {
+	v, err, _ := m.ready.Do(name, func() (any, error) {
+		return m.ensureReady(ctx, name)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return copyOf(v.(*Sandbox)), nil
+}
+
+func (m *Manager) ensureReady(ctx context.Context, name string) (*Sandbox, error) {
 	// An archived sandbox must first be pulled back onto local disk. That's a
 	// multi-GB download, so restore runs without m.mu held and flips the record
 	// to Paused; the resume path below then cold-boots the restored rootfs.
@@ -859,6 +946,14 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		return nil, fmt.Errorf("sandbox %q not found", name)
 	}
 	archived, archKey := b.State == vmm.StateArchived, b.ArchiveKey
+	classification := "resume"
+	switch b.State {
+	case vmm.StateRunning:
+		classification = "warm"
+	case vmm.StateArchived:
+		classification = "restore"
+	}
+	m.metrics.IncEnsureReady(m.nodeName, classification)
 	m.mu.Unlock()
 	if archived {
 		if err := m.restore(ctx, name, archKey); err != nil {
@@ -872,6 +967,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 	if !ok {
 		return nil, fmt.Errorf("sandbox %q not found", name)
 	}
+	resumed := false
 	if b.State != vmm.StateRunning {
 		// Resuming brings this sandbox back to running, so it's subject to the
 		// same limits as a fresh create (exclude itself — it isn't running yet).
@@ -900,12 +996,23 @@ func (m *Manager) EnsureRunning(ctx context.Context, name string) (*Sandbox, err
 		// changed while the box was down — reconcile on every return to running.
 		m.pushEnv(ctx, copyOf(b))
 		m.observe(b, "resumed")
+		resumed = true
 	}
 	// Activity returns a ballooned-down sandbox to full RAM (whether it was
 	// just resumed or was warm-but-ballooned).
 	m.deflate(ctx, b)
 	b.LastActive = time.Now().UTC()
-	return copyOf(b), m.save()
+	if resumed {
+		return copyOf(b), m.save()
+	}
+	// Explicit resume of an already-running sandbox is activity, but not a
+	// lifecycle transition. Keep it off the synchronous persistence path.
+	out := copyOf(b)
+	m.activityMu.Lock()
+	m.activity[name] = b.LastActive
+	m.markedAt[name] = b.LastActive
+	m.activityMu.Unlock()
+	return out, nil
 }
 
 // SetEnvSync installs the env-push hook after construction — the syncer needs
@@ -1150,7 +1257,7 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 	}
 	m.refreshDiskUsage(ctx, name)
 
-	if _, err := m.EnsureRunning(ctx, name); err != nil {
+	if _, err := m.EnsureReady(ctx, name); err != nil {
 		return fmt.Errorf("resize %s: %w", name, err)
 	}
 	m.log.Info("sandbox disk resized", "name", name, "size_mb", sizeMB)
@@ -1202,7 +1309,7 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 			return fmt.Errorf("reboot %s: sandbox keeps being resumed mid-reboot; try again", name)
 		}
 	}
-	if _, err := m.EnsureRunning(ctx, name); err != nil {
+	if _, err := m.EnsureReady(ctx, name); err != nil {
 		return fmt.Errorf("reboot %s: %w", name, err)
 	}
 	m.log.Info("sandbox rebooted", "name", name)
@@ -1324,6 +1431,16 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 	if err := m.save(); err != nil {
 		return err
 	}
+	m.activityMu.Lock()
+	if at, ok := m.activity[oldName]; ok {
+		m.activity[newName] = at
+		delete(m.activity, oldName)
+	}
+	if at, ok := m.markedAt[oldName]; ok {
+		m.markedAt[newName] = at
+		delete(m.markedAt, oldName)
+	}
+	m.activityMu.Unlock()
 	// The remaining side plumbing is best-effort per convention: the sandbox
 	// record is the source of truth and each hook is idempotent under re-run.
 	if sr, ok := m.schedules.(sandboxRenamer); ok {
@@ -1626,7 +1743,7 @@ func (m *Manager) ResumePinned(ctx context.Context) {
 		if !b.Pinned || b.State == vmm.StateRunning {
 			continue
 		}
-		if _, err := m.EnsureRunning(ctx, b.Name); err != nil {
+		if _, err := m.EnsureReady(ctx, b.Name); err != nil {
 			m.log.Warn("resume pinned sandbox failed", "name", b.Name, "err", err)
 			continue
 		}
@@ -1653,6 +1770,10 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	}
 	delete(m.boxes, name)
 	delete(m.vitals, name)
+	m.activityMu.Lock()
+	delete(m.activity, name)
+	delete(m.markedAt, name)
+	m.activityMu.Unlock()
 	if m.routes != nil {
 		if err := m.routes.DeleteBySandbox(name); err != nil {
 			m.log.Warn("route cleanup failed", "name", name, "err", err)
@@ -1678,14 +1799,76 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	return m.save()
 }
 
-// Touch records sandbox activity (an SSH session) for the idle reaper.
-func (m *Manager) Touch(name string) {
+// MarkActive records sandbox activity without waiting for a lifecycle lock,
+// driver call, or disk write. Marks are coalesced per sandbox; the accepted
+// timestamp is immediately visible through Get/List and is applied to the live
+// record (including balloon deflation) asynchronously.
+func (m *Manager) MarkActive(name string) {
+	now := time.Now().UTC()
+	m.activityMu.Lock()
+	if last := m.markedAt[name]; !last.IsZero() && now.Sub(last) < activityInterval {
+		m.activityMu.Unlock()
+		return
+	}
+	m.markedAt[name] = now
+	m.activity[name] = now
+	m.activityMu.Unlock()
+
+	go m.applyActivity(name, now)
+}
+
+// latestActivity returns the newest in-memory activity timestamp. Callers may
+// hold m.mu; MarkActive never takes it, so the lock order is always
+// m.mu -> activityMu.
+func (m *Manager) latestActivity(name string, recorded time.Time) time.Time {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	if at := m.activity[name]; at.After(recorded) {
+		return at
+	}
+	return recorded
+}
+
+func (m *Manager) applyActivity(name string, at time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if b, ok := m.boxes[name]; ok {
-		b.LastActive = time.Now().UTC()
-		m.save() //nolint:errcheck
+	b, ok := m.boxes[name]
+	if !ok {
+		m.activityMu.Lock()
+		delete(m.activity, name)
+		delete(m.markedAt, name)
+		m.activityMu.Unlock()
+		return
 	}
+	if at.After(b.LastActive) {
+		b.LastActive = at
+	}
+	if b.State == vmm.StateRunning {
+		// MarkActive itself stays nonblocking; returning reclaimed RAM belongs
+		// on this asynchronous node-local path, not on the gateway request.
+		m.deflate(context.Background(), b)
+	}
+}
+
+// FlushActivity durably persists accepted activity marks. Lifecycle saves also
+// merge dirty activity, so this is only needed by the periodic and graceful
+// shutdown paths.
+func (m *Manager) FlushActivity() error {
+	m.activityMu.Lock()
+	marks := len(m.activity)
+	m.activityMu.Unlock()
+	if marks == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	err := m.save()
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	m.metrics.ObserveActivityFlush(m.nodeName, outcome, marks)
+	return err
 }
 
 // minVitalsInterval is the shortest gap between two readings we'll turn into a
@@ -1823,6 +2006,14 @@ func (m *Manager) RunReaper(ctx context.Context, balloonAfter, pauseAfter, inter
 // reapOnce applies one pass of the idle policy. Split out from RunReaper's loop
 // so the two-stage gradient is unit-testable without a ticker.
 func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Duration) {
+	// The reaper is already the manager's periodic maintenance loop. Piggyback
+	// activity persistence on its cadence so warm traffic costs no extra
+	// ticker or request-path write.
+	defer func() {
+		if err := m.FlushActivity(); err != nil {
+			m.log.Warn("activity flush failed", "err", err)
+		}
+	}()
 	// Keep disk accounting fresh while we're already ticking: a running/paused
 	// sandbox's rootfs (and snapshot) grow over time.
 	//
@@ -1953,17 +2144,55 @@ func (m *Manager) load() error {
 	return json.Unmarshal(data, &m.boxes)
 }
 
-// save persists state; callers must hold m.mu.
+// save persists state; callers must hold m.mu. Dirty activity is folded into
+// the same atomic state-file replacement. Clear only the timestamps included
+// in this write: a newer MarkActive may arrive while the file is being written.
 func (m *Manager) save() error {
+	started := time.Now()
+	outcome := "ok"
+	defer func() {
+		m.metrics.ObserveManagerSave(m.nodeName, outcome, time.Since(started))
+	}()
+	pending := m.mergeActivityLocked()
 	data, err := json.MarshalIndent(m.boxes, "", "  ")
 	if err != nil {
+		outcome = "error"
 		return err
 	}
 	tmp := m.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		outcome = "error"
 		return err
 	}
-	return os.Rename(tmp, m.path)
+	if err := os.Rename(tmp, m.path); err != nil {
+		outcome = "error"
+		return err
+	}
+	m.activityMu.Lock()
+	for name, at := range pending {
+		if current, ok := m.activity[name]; ok && !current.After(at) {
+			delete(m.activity, name)
+		}
+	}
+	m.activityMu.Unlock()
+	return nil
+}
+
+// mergeActivityLocked applies a stable snapshot of dirty activity to records.
+// Callers hold m.mu.
+func (m *Manager) mergeActivityLocked() map[string]time.Time {
+	m.activityMu.Lock()
+	pending := make(map[string]time.Time, len(m.activity))
+	for name, at := range m.activity {
+		pending[name] = at
+	}
+	m.activityMu.Unlock()
+	for name, at := range pending {
+		if b, ok := m.boxes[name]; ok && at.After(b.LastActive) {
+			b.LastActive = at
+		}
+	}
+	return pending
 }
 
 func copyOf(b *Sandbox) *Sandbox {

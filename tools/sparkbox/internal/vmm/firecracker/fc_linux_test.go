@@ -15,6 +15,7 @@ import (
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -39,9 +40,9 @@ func TestV6Addressing(t *testing.T) {
 		idx         int
 		host, guest string
 	}{
-		{1, "2001:bc8:702:1c7::2", "2001:bc8:702:1c7::3"},
-		{2, "2001:bc8:702:1c7::4", "2001:bc8:702:1c7::5"},
-		{255, "2001:bc8:702:1c7::1fe", "2001:bc8:702:1c7::1ff"},
+		{0, "2001:bc8:702:1c7::2", "2001:bc8:702:1c7::3"},
+		{1, "2001:bc8:702:1c7::4", "2001:bc8:702:1c7::5"},
+		{255, "2001:bc8:702:1c7::200", "2001:bc8:702:1c7::201"},
 	}
 	for _, c := range cases {
 		if got := d.hostIP6(c.idx); got != c.host {
@@ -62,7 +63,47 @@ func TestV6Addressing(t *testing.T) {
 // filesystem work.
 func newTestDriver(t *testing.T) *Driver {
 	t.Helper()
-	return &Driver{opts: Options{StateDir: t.TempDir()}, vms: map[string]*vmState{}}
+	return &Driver{
+		opts: Options{StateDir: t.TempDir()}, vms: map[string]*vmState{},
+		guestNet: guestnet.MustParse(""),
+	}
+}
+
+func TestGuestSubnetAddressing(t *testing.T) {
+	d := newTestDriver(t)
+	d.guestNet = guestnet.MustParse("10.44.16.9/20")
+
+	tests := []struct {
+		idx         int
+		host, guest string
+	}{
+		{0, "10.44.16.1", "10.44.16.2"},
+		{1, "10.44.16.5", "10.44.16.6"},
+		{1023, "10.44.31.253", "10.44.31.254"},
+	}
+	for _, test := range tests {
+		if got := d.hostIP(test.idx); got != test.host {
+			t.Errorf("hostIP(%d) = %s, want %s", test.idx, got, test.host)
+		}
+		if got := d.guestIP(test.idx); got != test.guest {
+			t.Errorf("guestIP(%d) = %s, want %s", test.idx, got, test.guest)
+		}
+	}
+}
+
+func TestNewRejectsGuestSubnetLargerThanMACSpace(t *testing.T) {
+	if _, err := New(Options{Subnet: "10.0.0.0/13"}); err == nil ||
+		!strings.Contains(err.Error(), "at most 65536") {
+		t.Fatalf("New broad guest subnet error = %v", err)
+	}
+}
+
+func TestNewRejectsIPv6PrefixTooSmallForGuestSlots(t *testing.T) {
+	if _, err := New(Options{
+		Subnet: "10.0.0.0/14", Subnet6: "2001:db8::/112",
+	}); err == nil || !strings.Contains(err.Error(), "needs at least 131074") {
+		t.Fatalf("New mismatched IPv4/IPv6 capacity error = %v", err)
+	}
 }
 
 // touch creates name's VM dir containing the given files.
@@ -469,15 +510,15 @@ func TestRenameVMRefusals(t *testing.T) {
 // TestFreeSlotReuse checks that slot allocation reclaims indices released by
 // dropped records — Destroy, DropSnapshots (every reboot), and RenameVM all
 // delete the vmState, and a monotonic counter would burn a slot each time
-// until Create failed with an unroutable 172.30.256.1.
+// until Create failed with an address outside the configured prefix.
 func TestFreeSlotReuse(t *testing.T) {
 	d := newTestDriver(t)
-	d.vms["a"] = &vmState{idx: 1, paused: true}
-	d.vms["c"] = &vmState{idx: 3, paused: true}
+	d.vms["a"] = &vmState{idx: 0, paused: true}
+	d.vms["c"] = &vmState{idx: 2, paused: true}
 
 	// Lowest free slot, including gaps between live records.
-	if idx, err := d.freeSlot(); err != nil || idx != 2 {
-		t.Fatalf("freeSlot = %d, %v; want 2", idx, err)
+	if idx, err := d.freeSlot(); err != nil || idx != 1 {
+		t.Fatalf("freeSlot = %d, %v; want 1", idx, err)
 	}
 
 	// Dropping a record (here via DropSnapshots, the reboot path) releases its
@@ -486,8 +527,8 @@ func TestFreeSlotReuse(t *testing.T) {
 	if err := d.DropSnapshots("a"); err != nil {
 		t.Fatal(err)
 	}
-	if idx, err := d.freeSlot(); err != nil || idx != 1 {
-		t.Fatalf("freeSlot after DropSnapshots = %d, %v; want 1", idx, err)
+	if idx, err := d.freeSlot(); err != nil || idx != 0 {
+		t.Fatalf("freeSlot after DropSnapshots = %d, %v; want 0", idx, err)
 	}
 
 	// RenameVM likewise.
@@ -495,18 +536,31 @@ func TestFreeSlotReuse(t *testing.T) {
 	if err := d.RenameVM("c", "c2"); err != nil {
 		t.Fatal(err)
 	}
-	d.vms["a"] = &vmState{idx: 1, paused: true}
-	d.vms["b"] = &vmState{idx: 2, paused: true}
-	if idx, err := d.freeSlot(); err != nil || idx != 3 {
-		t.Fatalf("freeSlot after RenameVM = %d, %v; want 3", idx, err)
+	d.vms["a"] = &vmState{idx: 0, paused: true}
+	d.vms["b"] = &vmState{idx: 1, paused: true}
+	if idx, err := d.freeSlot(); err != nil || idx != 2 {
+		t.Fatalf("freeSlot after RenameVM = %d, %v; want 2", idx, err)
 	}
 
 	// Exhaustion must error rather than mint an out-of-range address.
-	for i := 1; i <= 255; i++ {
+	d.guestNet = guestnet.MustParse("192.0.2.0/28")
+	d.vms = map[string]*vmState{}
+	for i := 0; i < d.guestNet.Capacity(); i++ {
 		d.vms[fmt.Sprintf("v%d", i)] = &vmState{idx: i, paused: true}
 	}
 	if _, err := d.freeSlot(); err == nil {
-		t.Fatal("expected error with all 255 slots in use")
+		t.Fatal("expected error with every slot in use")
+	}
+}
+
+func TestFreeSlotSkipsHostServiceReservation(t *testing.T) {
+	d := newTestDriver(t)
+	d.guestNet = guestnet.MustParse("10.44.16.0/20")
+	d.reservedSlots = map[int]bool{0: true, 2: true}
+	d.vms["middle"] = &vmState{idx: 1, paused: true}
+
+	if idx, err := d.freeSlot(); err != nil || idx != 3 {
+		t.Fatalf("freeSlot = %d, %v; want first unreserved slot 3", idx, err)
 	}
 }
 

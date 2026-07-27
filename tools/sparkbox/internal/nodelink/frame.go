@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 )
@@ -31,6 +32,23 @@ const (
 	// instead of silence, which is why the door checks for this exact string
 	// rather than accepting anything.
 	LinkCommand = "sparkbox-link/1"
+	// DataCommand is the registration session on a dedicated SSH data
+	// connection. It is intentionally a sibling of LinkCommand rather than a
+	// replacement: peers which do not negotiate the data pool keep carrying
+	// streams on the control connection exactly as before.
+	DataCommand = "sparkbox-data/1"
+	// CapabilitySSHDataPoolV1 opts both peers into separate SSH connections for
+	// control and guest data. Capabilities are additive and omitted on the
+	// wire by older builds, so a rolling upgrade falls back to the combined
+	// link without a protocol-version bump.
+	CapabilitySSHDataPoolV1 = "ssh_data_pool_v1"
+	// CapabilityGRPCControlV1 says the node can host the typed mTLS control
+	// service after certificate enrollment. It is advertised only; transport
+	// preference remains a gateway rollout decision.
+	CapabilityGRPCControlV1 = "grpc_control_v1"
+	// CapabilityRoutedGuestV1 says the node's approved guest prefix is routed
+	// to the gateway and its current HostIP values may be used for direct data.
+	CapabilityRoutedGuestV1 = "routed_guest_v1"
 	// StreamChannel is the data channel type the gateway opens back toward a
 	// node, one per tunneled TCP connection.
 	StreamChannel = "sandbox-stream@sparkbox"
@@ -66,6 +84,9 @@ const (
 	// body per line it can write, and MaxFrameBytes is a megabyte.
 	MaxLiveStreams = 512
 	MaxInFlightOps = 8
+	// DefaultDataLanes is the number of independently supervised SSH data
+	// connections a capable node maintains for each control generation.
+	DefaultDataLanes = 2
 	// LinkMargin is subtracted from a caller's remaining budget before it rides
 	// as deadline_ms, so the responder gives up fractionally before the
 	// requester does and the requester gets a typed answer rather than a
@@ -116,6 +137,11 @@ const (
 	// piece of gateway material that never leaves the gateway.
 	TypeIdentityToken = "identity.token"
 	TypeIdentityDoc   = "identity.describe"
+
+	// Certificate enrollment, NODE -> gateway. The SSH control link is the
+	// bootstrap authentication: the request carries no node name because the
+	// gateway binds the CSR to the roster name authenticated by that link.
+	TypeCertificateEnroll = "certificate.enroll"
 )
 
 // Frame is one newline-delimited JSON message. A request carries a non-empty
@@ -226,8 +252,10 @@ const (
 // write to a goroutine is also what lets a caller keep its own context: it
 // abandons the frame, rather than the frame keeping it.
 type writer struct {
-	enc *encoder
-	q   chan []byte
+	enc             *encoder
+	q               chan []byte
+	metrics         *fleetmetrics.Registry
+	node, transport string
 
 	// started is closed when the goroutine exists; dead when it has gone. The
 	// pair is what lets shutdown tell "nothing was ever written on this link"
@@ -246,6 +274,15 @@ type writer struct {
 
 	mu  sync.Mutex
 	err error
+}
+
+func (w *writer) setMetrics(m *fleetmetrics.Registry, node, transport string) {
+	w.metrics, w.node, w.transport = m, node, transport
+	w.metrics.SetWriteQueueDepth(w.node, w.transport, len(w.q))
+}
+
+func (w *writer) queued() {
+	w.metrics.SetWriteQueueDepth(w.node, w.transport, len(w.q))
 }
 
 func newWriter(w io.Writer, fail func(error)) *writer {
@@ -279,6 +316,7 @@ func (w *writer) send(ctx context.Context, f *Frame) error {
 	}
 	select {
 	case w.q <- line:
+		w.queued()
 		return nil
 	case <-w.dead:
 		return w.reason()
@@ -304,10 +342,16 @@ func (w *writer) post(f *Frame) error {
 	}
 	select {
 	case w.q <- line:
+		w.queued()
 		return nil
 	case <-w.dead:
 		return w.reason()
 	default:
+		kind := "event"
+		if f.Type == TypeReply {
+			kind = "reply"
+		}
+		w.metrics.IncDropped(w.node, w.transport, kind)
 		return ErrLinkBacklogged
 	}
 }
@@ -329,6 +373,7 @@ func (w *writer) loop() {
 	for {
 		select {
 		case line := <-w.q:
+			w.queued()
 			if err := w.write(line); err != nil {
 				return
 			}
@@ -359,6 +404,7 @@ func (w *writer) drain() {
 	for {
 		select {
 		case line := <-w.q:
+			w.queued()
 			if err := w.write(line); err != nil {
 				return
 			}
@@ -445,18 +491,22 @@ func (d *decoder) next() (*Frame, error) {
 // name and status come from the gateway's roster, which the SSH key already
 // resolved before this frame was read.
 type Hello struct {
-	Protocol    int       `json:"protocol"`
-	Node        string    `json:"node"`
-	Arch        string    `json:"arch"`
-	OS          string    `json:"os"`
-	Release     string    `json:"release"`
-	Version     string    `json:"version"`
-	Driver      string    `json:"driver"`
-	Images      []string  `json:"images"`
-	Archiving   bool      `json:"archiving"`
-	Snapshots   bool      `json:"snapshots"`
-	GuestSubnet string    `json:"guest_subnet"`
-	StartedAt   time.Time `json:"started_at"`
+	Protocol    int      `json:"protocol"`
+	Node        string   `json:"node"`
+	Arch        string   `json:"arch"`
+	OS          string   `json:"os"`
+	Release     string   `json:"release"`
+	Version     string   `json:"version"`
+	Driver      string   `json:"driver"`
+	Images      []string `json:"images"`
+	Archiving   bool     `json:"archiving"`
+	Snapshots   bool     `json:"snapshots"`
+	GuestSubnet string   `json:"guest_subnet"`
+	// GRPCAddr is the tailnet address where this node will expose NodeControl
+	// after enrollment. It is advisory at hello; the approved roster row
+	// remains authoritative for dialing.
+	GRPCAddr  string    `json:"grpc_addr,omitempty"`
+	StartedAt time.Time `json:"started_at"`
 	// Sluice reports whether this machine has an egress gateway to enforce
 	// against and meter from. It is stated rather than discovered because both
 	// answers are silent otherwise: a gateway that pushes policy to a machine
@@ -466,6 +516,8 @@ type Hello struct {
 	// unmetered one. An older node omits the field and reads as false, which is
 	// the honest answer for a build that had no way to install one.
 	Sluice bool `json:"sluice,omitempty"`
+	// Capabilities are optional, independently negotiated transport features.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // Welcome is the gateway's reply to an approved hello.
@@ -475,11 +527,16 @@ type Hello struct {
 // node must install on every VM it boots. Node is the canonical roster name,
 // not the one the hello asked for — the row is authoritative.
 type Welcome struct {
-	Protocol           int    `json:"protocol"`
-	Node               string `json:"node"`
-	GatewayUpstreamPub string `json:"gateway_upstream_pub"`
-	Domain             string `json:"domain"`
-	HeartbeatSeconds   int    `json:"heartbeat_seconds"`
+	Protocol           int      `json:"protocol"`
+	Node               string   `json:"node"`
+	GatewayUpstreamPub string   `json:"gateway_upstream_pub"`
+	Domain             string   `json:"domain"`
+	HeartbeatSeconds   int      `json:"heartbeat_seconds"`
+	Capabilities       []string `json:"capabilities,omitempty"`
+	// ControlGeneration is an opaque, per-control-link token. Dedicated data
+	// connections must present it when registering, which prevents a late lane
+	// from an old control link attaching to its replacement.
+	ControlGeneration string `json:"control_generation,omitempty"`
 }
 
 // Bye is the last frame either side sends. It is an event: there is nothing to
@@ -809,4 +866,39 @@ type IdentityDocResp struct {
 	Sandbox string `json:"sandbox"`
 	Image   string `json:"image"`
 	Box     string `json:"box"`
+}
+
+// ---------------------------------------------------------------------------
+// Node control certificate enrollment
+// ---------------------------------------------------------------------------
+
+const (
+	// MaxCSRPEMBytes is far above a P-256 CSR while keeping the node->gateway
+	// signing request a small control operation independent of MaxFrameBytes.
+	MaxCSRPEMBytes = 16 << 10
+	// MaxCertificatePEMBytes bounds each half of the enrollment response.
+	MaxCertificatePEMBytes    = 64 << 10
+	MaxGatewayIdentityBytes   = 512
+	MaxGatewayGRPCAddrBytes   = 1024
+	MaxCertificateSerialBytes = 128
+)
+
+// CertificateEnrollRequest carries only proof of the node's durable private
+// key. Identity is supplied by the authenticated SSH link, never this payload.
+type CertificateEnrollRequest struct {
+	CSRPEM []byte `json:"csr_pem"`
+}
+
+// CertificateEnrollResponse is everything the node needs to install its leaf
+// and authenticate the gateway's exact cluster identity.
+type CertificateEnrollResponse struct {
+	CertificatePEM   []byte `json:"certificate_pem"`
+	CACertificatePEM []byte `json:"ca_certificate_pem"`
+	GatewayIdentity  string `json:"gateway_identity"`
+	// GatewayGRPCAddr is optional for rolling compatibility. A new gateway
+	// advertises the tailnet endpoint hosting GatewayIdentity; an old gateway
+	// omits it and the node keeps relaying identity over the SSH control link.
+	GatewayGRPCAddr string    `json:"gateway_grpc_addr,omitempty"`
+	Serial          string    `json:"serial"`
+	ExpiresAt       time.Time `json:"expires_at"`
 }

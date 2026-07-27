@@ -37,7 +37,7 @@ type Sandboxes interface {
 	List() []*host.Sandbox
 	Destroy(ctx context.Context, name string) error
 	Pause(ctx context.Context, name string) error
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
 	Archive(ctx context.Context, name string) error
 	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
 	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
@@ -174,7 +174,7 @@ func (s *Server) pause(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
-	box, err := s.mgr.EnsureRunning(r.Context(), r.PathValue("name"))
+	box, err := s.mgr.EnsureReady(r.Context(), r.PathValue("name"))
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return

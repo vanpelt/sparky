@@ -89,8 +89,8 @@ const (
 type Sandboxes interface {
 	Get(name string) (*host.Sandbox, bool)
 	List() []*host.Sandbox
-	EnsureRunning(ctx context.Context, name string) (*host.Sandbox, error)
-	Touch(name string)
+	EnsureReady(ctx context.Context, name string) (*host.Sandbox, error)
+	MarkActive(name string)
 	RecordKey(name, fp string)
 }
 
@@ -495,12 +495,12 @@ func (g *Gateway) handle(s gssh.Session) {
 
 	// Resume-on-connect: the user perceives an always-on machine; suspended
 	// sandboxes cost only disk.
-	box, err := g.mgr.EnsureRunning(ctx, sandboxName)
+	box, err := host.Prepare(ctx, g.mgr, sandboxName)
 	if err != nil {
 		g.failStart(s, log, "resume", err)
 		return
 	}
-	defer g.mgr.Touch(sandboxName)
+	defer g.mgr.MarkActive(sandboxName)
 	// Record which of the owner's machines is driving this sandbox; it rides
 	// into the id token as `key_fp` for auditing.
 	g.mgr.RecordKey(sandboxName, sessionKeyFP(s))

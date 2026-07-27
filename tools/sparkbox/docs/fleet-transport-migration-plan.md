@@ -244,6 +244,7 @@ Add:
 
 ```text
 --node-control-transport=auto|ssh|grpc
+--node-control-rollout=inherit|shadow|read-only|idempotent|grpc
 --node-grpc-addr=<tailnet-ip>:9443
 ```
 
@@ -331,10 +332,11 @@ Add a `routed_guest_v1` capability and:
 
 ```text
 --guest-data-transport=auto|ssh|routed
+--routed-guest-canary-percent=0..100
 ```
 
-Roll out per node, then across 5%, 25%, and 100% of new connections. Existing
-pooled connections drain naturally. During the migration window, `auto` may
+Roll out per node, then set the deterministic sandbox canary to 5%, 25%, and
+100%. Existing pooled connections drain naturally. During the migration window, `auto` may
 fall back to the SSH data pool when route health fails. After one stable release,
 routed data becomes the default and SSH fallback may be disabled operationally.
 

@@ -22,31 +22,33 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/grpcidentity"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodecert"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodepki"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
-
-// guestSubnet is the /16 every sparkbox host carves its per-VM tap pairs out of
-// (internal/vmm/firecracker). It is reported in the hello so a gateway can say
-// out loud what it already assumes: every node mints the same guest addresses,
-// which is exactly why no guest address ever crosses the link.
-const guestSubnet = "172.30.0.0/16"
 
 // nodeOptions is the slice of `serve`'s flags a node actually uses. It is a
 // struct rather than a longer parameter list because most of these are limits
@@ -69,6 +71,7 @@ type nodeOptions struct {
 	kernelPath   string
 	imageDir     string
 	defaultLogin string
+	guestSubnet  string
 	subnet6      string
 	guestDNS     string
 	sluiceSocket string
@@ -88,7 +91,12 @@ type nodeOptions struct {
 	memReserve    int64
 	diskPool      int64
 
-	log *slog.Logger
+	controlTransport   string
+	grpcAddr           string
+	guestDataTransport string
+	metricsAddr        string
+	metrics            *fleetmetrics.Registry
+	log                *slog.Logger
 }
 
 // serveNode runs this machine as a fleet node until it is signalled, mirroring
@@ -106,8 +114,38 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
+	if opts.metrics == nil {
+		opts.metrics = fleetmetrics.New()
+	}
 	if err := os.MkdirAll(opts.stateDir, 0o700); err != nil {
 		return err
+	}
+	guestNetwork, err := guestnet.Parse(opts.guestSubnet)
+	if err != nil {
+		return err
+	}
+	opts.guestSubnet = guestNetwork.String()
+	if opts.metricsAddr != "" {
+		listener, err := net.Listen("tcp", opts.metricsAddr)
+		if err != nil {
+			return fmt.Errorf("node metrics listen: %w", err)
+		}
+		metricsServer := &http.Server{
+			Handler:           opts.metrics.Handler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutdownCtx)
+		}()
+		go func() {
+			if err := metricsServer.Serve(listener); err != nil &&
+				!errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+				log.Error("node metrics listener stopped", "err", err)
+			}
+		}()
+		log.Info("node metrics enabled", "addr", listener.Addr())
 	}
 	keysIn := opts.keyDir
 	if keysIn == "" {
@@ -135,7 +173,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		md.LoginUser = opts.defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = newFirecrackerDriver(opts.kernelPath, opts.imageDir, opts.stateDir, opts.subnet6, opts.defaultLogin, opts.guestDNS)
+		driver, err = newFirecrackerDriver(opts.kernelPath, opts.imageDir, opts.stateDir, opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS)
 		if err != nil {
 			return err
 		}
@@ -174,6 +212,21 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// both the manager's Observer and its SessionCloser, and it drops rather
 	// than blocks, because both hooks fire inside the manager's lock.
 	emitter := nodelink.NewEmitter(log)
+	var controlState *nodeControlState
+	if opts.controlTransport == "grpc" && opts.grpcAddr == "" {
+		return errors.New("--node-control-transport=grpc requires --node-grpc-addr")
+	}
+	if opts.grpcAddr != "" && opts.controlTransport != "ssh" {
+		controlState, err = openNodeControlState(opts.stateDir, log)
+		if err != nil {
+			return err
+		}
+		defer controlState.Close(log)
+	}
+	var observer host.Observer = emitter
+	if controlState != nil {
+		observer = host.Observers{emitter, controlState.observer}
+	}
 
 	hostMem := opts.hostMemMB
 	if hostMem == 0 {
@@ -196,11 +249,17 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		Arch:               opts.arch,
 		Release:            version,
 		HostVCPUs:          int64(runtime.NumCPU()),
-		Observer:           emitter,
+		Observer:           observer,
+		Metrics:            opts.metrics,
 	})
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := mgr.FlushActivity(); err != nil {
+			log.Warn("final activity flush failed", "err", err)
+		}
+	}()
 	// Sessions terminate at the gateway, so there is nothing here to hang up.
 	// The emitter is installed anyway: what the gateway needs is the news that a
 	// pause is coming, early enough to hang up its own.
@@ -224,7 +283,10 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		log.Info("egress control not enabled on this node",
 			"detail", "no --sluice-socket, so nothing here is filtered or metered")
 	}
-	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, ungovernedRules{}, log)
+	netSyncer, err := netpush.NewSyncerForSubnet(sluiceClient, netpushFleet{mgr}, ungovernedRules{}, opts.guestSubnet, log)
+	if err != nil {
+		return fmt.Errorf("guest subnet for network accounting: %w", err)
+	}
 
 	// The guest metadata service runs here exactly as it does on a gateway. What
 	// differs is only who signs: a node holds no OIDC key and must not, so its
@@ -234,6 +296,11 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// this machine has ever reached its gateway — it is answered 503 and its own
 	// timer retries, which is the whole of the degradation.
 	uplink := nodelink.NewUplink()
+	identityRelay := newRelayIdentity(uplink, opts.controlTransport, log)
+	defer identityRelay.Close()
+	if err := startNodeControl(ctx, opts, mgr, netSyncer, uplink, controlState, identityRelay, log); err != nil {
+		return err
+	}
 
 	// A process restart marks every sandbox paused; bring the pinned ones back
 	// up, exactly as a gateway does, and — the point of doing it here, before
@@ -246,13 +313,17 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// second loop re-applying a stale snapshot would fight the one being pushed.
 	// The gateway's own loop covers this machine on the same cadence.
 	if opts.metaAddr != "" {
-		meta := metadata.New(metadata.Options{
+		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
-			Identity: relayIdentity{up: uplink},
+			Identity:    identityRelay,
+			GuestSubnet: opts.guestSubnet,
 			// No default audience here: the gateway substitutes its own, which
 			// is the only one that could be right — the allowlist that decides
 			// whether an audience is permitted lives with the issuer.
 		})
+		if err != nil {
+			return fmt.Errorf("guest metadata subnet: %w", err)
+		}
 		go func() {
 			if err := meta.ListenAndServe(ctx, opts.metaAddr); err != nil && ctx.Err() == nil {
 				log.Error("guest metadata service stopped", "err", err)
@@ -281,6 +352,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			Hello:     func() nodelink.Hello { return nodeHello(opts, mgr, netSyncer) },
 			OnWelcome: func(w nodelink.Welcome) error { return acceptWelcome(w, mgr, gwPubPath) },
 			Log:       log,
+			Metrics:   opts.metrics,
 		})
 	}()
 
@@ -301,16 +373,101 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 }
 
 // relayIdentity is a node's metadata.Identity: it names the sandbox and lets
-// the gateway decide everything else.
+// the gateway decide everything else. A negotiated mTLS gRPC client is
+// preferred; the old SSH uplink remains the compatibility path when the
+// gateway omitted an identity endpoint or that transport is temporarily down.
 //
 // Deliberately the thinnest possible object. It sends the name and the audience
 // and nothing more — no owner, no image, no claims — because a relay that
 // asserted any of those would be a machine describing its own guests to the
 // thing that signs for them. The gateway resolves all of it from its ledger;
 // see internal/fleet/identity.go for the check that makes that binding.
-type relayIdentity struct{ up *nodelink.Uplink }
+type relayIdentity struct {
+	up   *nodelink.Uplink
+	mode string
+	log  *slog.Logger
 
-func (r relayIdentity) Issue(ctx context.Context, box *host.Sandbox, aud string) (metadata.Token, error) {
+	mu   sync.RWMutex
+	grpc gatewayIdentityClient
+}
+
+type gatewayIdentityClient interface {
+	metadata.Identity
+	Close() error
+}
+
+func newRelayIdentity(up *nodelink.Uplink, mode string, log *slog.Logger) *relayIdentity {
+	return &relayIdentity{up: up, mode: mode, log: log}
+}
+
+func (r *relayIdentity) configureGRPC(ctx context.Context, stateDir, nodeName string) error {
+	if r == nil || r.mode == "ssh" {
+		return nil
+	}
+	address, err := nodepki.LoadGatewayGRPCAddr(stateDir)
+	if errors.Is(err, os.ErrNotExist) {
+		r.setGRPC(nil)
+		return nil
+	}
+	if err != nil {
+		r.setGRPC(nil)
+		return err
+	}
+	leaf, roots, err := nodepki.LoadNodeCertificate(stateDir, nodeName)
+	if err != nil {
+		r.setGRPC(nil)
+		return err
+	}
+	gateway, err := nodepki.LoadGatewayIdentity(stateDir)
+	if err != nil {
+		r.setGRPC(nil)
+		return err
+	}
+	tlsConfig, err := nodecert.ClientTLSConfig(leaf, roots, gateway, nil)
+	if err != nil {
+		r.setGRPC(nil)
+		return err
+	}
+	client, err := grpcidentity.DialTLS(ctx, address, tlsConfig)
+	if err != nil {
+		r.setGRPC(nil)
+		return err
+	}
+	r.setGRPC(client)
+	r.log.Info("gateway identity gRPC configured", "addr", address)
+	return nil
+}
+
+func (r *relayIdentity) setGRPC(client gatewayIdentityClient) {
+	r.mu.Lock()
+	old := r.grpc
+	r.grpc = client
+	r.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+}
+
+func (r *relayIdentity) currentGRPC() gatewayIdentityClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.grpc
+}
+
+func (r *relayIdentity) Close() {
+	if r != nil {
+		r.setGRPC(nil)
+	}
+}
+
+func (r *relayIdentity) Issue(ctx context.Context, box *host.Sandbox, aud string) (metadata.Token, error) {
+	if client := r.currentGRPC(); client != nil {
+		token, err := client.Issue(ctx, box, aud)
+		if err == nil || !errors.Is(err, grpcidentity.ErrUnavailable) {
+			return token, err
+		}
+		r.log.Debug("gateway identity gRPC unavailable; falling back to SSH", "err", err)
+	}
 	var resp nodelink.IdentityTokenResp
 	req := nodelink.IdentityReq{Sandbox: box.Name, Aud: aud}
 	if err := r.up.Request(ctx, nodelink.TypeIdentityToken, req, &resp); err != nil {
@@ -319,7 +476,14 @@ func (r relayIdentity) Issue(ctx context.Context, box *host.Sandbox, aud string)
 	return metadata.Token{JWT: resp.Token, ExpiresAt: resp.ExpiresAt}, nil
 }
 
-func (r relayIdentity) Describe(ctx context.Context, box *host.Sandbox) (metadata.Doc, error) {
+func (r *relayIdentity) Describe(ctx context.Context, box *host.Sandbox) (metadata.Doc, error) {
+	if client := r.currentGRPC(); client != nil {
+		doc, err := client.Describe(ctx, box)
+		if err == nil || !errors.Is(err, grpcidentity.ErrUnavailable) {
+			return doc, err
+		}
+		r.log.Debug("gateway identity gRPC unavailable; falling back to SSH", "err", err)
+	}
 	var resp nodelink.IdentityDocResp
 	req := nodelink.IdentityReq{Sandbox: box.Name}
 	if err := r.up.Request(ctx, nodelink.TypeIdentityDoc, req, &resp); err != nil {
@@ -369,6 +533,15 @@ func relayError(err error) error {
 // is a fact the gateway cannot observe from the outside and needs in order to
 // decide whether a sandbox can be placed here at all.
 func nodeHello(opts nodeOptions, mgr *host.Manager, net *netpush.Syncer) nodelink.Hello {
+	var capabilities []string
+	grpcAddr := ""
+	if opts.grpcAddr != "" && opts.controlTransport != "ssh" {
+		grpcAddr = opts.grpcAddr
+		capabilities = append(capabilities, nodelink.CapabilityGRPCControlV1)
+	}
+	if opts.guestDataTransport != "ssh" {
+		capabilities = append(capabilities, nodelink.CapabilityRoutedGuestV1)
+	}
 	return nodelink.Hello{
 		Arch: opts.arch,
 		// Whether this machine meters and filters at all. Stated rather than
@@ -380,11 +553,13 @@ func nodeHello(opts nodeOptions, mgr *host.Manager, net *netpush.Syncer) nodelin
 		// IS the release it shipped in. A hand-built binary says "dev" for both,
 		// which is also the honest answer.
 		Release: version, Version: version,
-		Driver:      opts.driverName,
-		Images:      imageNames(opts.imageDir),
-		Archiving:   mgr.ArchivingEnabled(),
-		Snapshots:   mgr.Snapshotter(),
-		GuestSubnet: guestSubnet,
+		Driver:       opts.driverName,
+		Images:       imageNames(opts.imageDir),
+		Archiving:    mgr.ArchivingEnabled(),
+		Snapshots:    mgr.Snapshotter(),
+		GuestSubnet:  opts.guestSubnet,
+		GRPCAddr:     grpcAddr,
+		Capabilities: capabilities,
 	}
 }
 
