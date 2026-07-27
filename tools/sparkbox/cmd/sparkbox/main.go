@@ -171,8 +171,8 @@ func serve(args []string) error {
 			driverName: *driverName, stateDir: *stateDir, keyDir: *keyDir,
 			kernelPath: *kernelPath, imageDir: *imageDir,
 			defaultLogin: *defaultLogin, subnet6: *subnet6, guestDNS: *guestDNS,
-			sluiceSocket: *sluiceSocket,
-			idleBalloon:  *idleBalloon, idleTimeout: *idleTimeout,
+			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
+			idleBalloon: *idleBalloon, idleTimeout: *idleTimeout,
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
 			maxPerOwner: *maxPerOwner, memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
 			memReserve: *memReserve, diskPool: *diskPool,
@@ -412,10 +412,26 @@ func serve(args []string) error {
 	// and they are keyed by a sandbox's name. For a local placement the manager
 	// still does all of that work itself; for one on another machine the fleet is
 	// the only thing that can. See internal/fleet/sidestores.go.
+	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
+	// --sluice-socket is set, which makes the syncer a no-op (rules can still be
+	// authored, just not enforced).
+	//
+	// Built BEFORE the fleet because the fleet holds it: egress is enforced and
+	// metered per machine, so the gateway's own sluice is the gateway's node
+	// adapter's business exactly as a node's own is that node's. The rules it
+	// resolves against are the whole fleet's, and go in separately below.
+	var sluiceClient *netpush.Client
+	if *sluiceSocket != "" {
+		sluiceClient = netpush.NewClient(*sluiceSocket)
+		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
+	}
+	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, netrulesStore, log)
+
 	fleetOpts := fleet.Options{
 		Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
 		Index: placeStore, Log: log,
 		Routes: routeStore, Schedules: scheduleStore, Tags: secretsStore,
+		LocalNet: netSyncer,
 	}
 	if doorHooks != nil {
 		fleetOpts.FrontDoor = doorHooks
@@ -446,15 +462,12 @@ func serve(args []string) error {
 	// one channel into a guest's /etc/environment, and two would race over it.
 	flt.SetEnvPusher(syncer)
 
-	// Egress policy + per-VM bandwidth bridge to sluice. The client is nil unless
-	// --sluice-socket is set, which makes the syncer a no-op (rules can still be
-	// authored, just not enforced). Favicons are cached under the state dir.
-	var sluiceClient *netpush.Client
-	if *sluiceSocket != "" {
-		sluiceClient = netpush.NewClient(*sluiceSocket)
-		log.Info("sluice egress policy enabled", "socket", *sluiceSocket)
-	}
-	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, netrulesStore, log)
+	// The rules half of the egress plane. It goes on the FLEET rather than only
+	// into the local syncer because a tag binding is a gateway-wide fact and the
+	// sandbox it governs may be on any machine: the fleet resolves each one
+	// against the ledger's owner column and hands every machine its own share.
+	// Favicons are cached under the state dir.
+	flt.SetRules(netrulesStore)
 	faviconCache := domainmeta.NewFaviconCache(filepath.Join(*stateDir, "favicons"), nil)
 
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
@@ -551,12 +564,16 @@ func serve(args []string) error {
 	mgr.ResumePinned(ctx)
 
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
-	// Reconcile egress policy to sluice periodically so VM churn (create, resume,
-	// destroy) that bypasses the console's change-time push still converges. The
-	// console also pushes on every rule/tag mutation for immediacy.
-	if netSyncer.Enabled() {
-		go pushLoop(ctx, netSyncer, log)
-	}
+	// Reconcile egress policy periodically so VM churn (create, resume, destroy)
+	// that bypasses the console's change-time push still converges. The console
+	// also pushes on every rule/tag mutation for immediacy.
+	//
+	// Driven off the FLEET, not the local syncer, and unconditionally: a gateway
+	// with no sluice of its own may still have nodes that have one, and gating
+	// this on the local socket would leave every one of them permanently
+	// unpoliced. PushNet refuses per machine and says nothing about the ones
+	// that meter nothing.
+	go pushLoop(ctx, flt, log)
 
 	// The platform scheduler wakes sandboxes to run due cron jobs (the honest
 	// answer to background work in a scale-to-zero world). It ticks every 30s so
@@ -580,11 +597,20 @@ func serve(args []string) error {
 	// It binds every interface because taps come and go, and identifies the
 	// caller by source address — see internal/metadata for why that's the safe
 	// end of the connection to trust.
+	//
+	// The same signing path is handed to the FLEET, which is what lets a node
+	// run this service too: its guests reach their own tap here exactly as these
+	// do, and the mint it cannot perform itself is relayed up and answered by
+	// fleetIdentity below. Installed whether or not this gateway serves its own
+	// metadata endpoint, because the two are independent — a gateway holding no
+	// VMs of its own still signs for the ones on its nodes.
+	flt.SetIdentity(fleetIdentity{issuer: issuer, users: userStore,
+		defAud: firstOr(splitList(*oidcAud), defaultAudience)})
 	if *metaAddr != "" {
 		meta := metadata.New(metadata.Options{
-			Manager: mgr, Issuer: issuer, Users: userStore, Logger: log,
+			Manager: mgr, Logger: log,
+			Identity:        metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
 			DefaultAudience: firstOr(splitList(*oidcAud), defaultAudience),
-			NodeName:        nodeName,
 		})
 		go func() { errCh <- meta.ListenAndServe(ctx, *metaAddr) }()
 		log.Info("guest metadata service enabled", "addr", *metaAddr, "issuer", issuer.URL())
@@ -677,7 +703,7 @@ func serve(args []string) error {
 			// xtermLabel, not *xtermSub: it is already emptied when there is no
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
-			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, netSyncer, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
 			// Same split as the operator console: the manager answers the
 			// balloon and CPU reads for this machine's own VMs, the fleet
 			// answers everything an owner can act on.
@@ -1026,6 +1052,7 @@ func (r fleetRoster) join(st fleet.NodeStatus, row nodes.Node) (ctlops.NodeInfo,
 	info := ctlops.NodeInfo{
 		Name: st.Name, Status: st.Status, Online: st.Online, Local: st.Local,
 		Arch: st.Arch, Release: st.Release, Sandboxes: held, LastSeen: st.LastSeen,
+		Egress: st.Egress,
 	}
 	if row.Name != "" {
 		info.Status, info.FP = row.Status, row.FP
@@ -1112,11 +1139,22 @@ func (f netpushFleet) List() []netpush.Sandbox {
 
 // pushLoop reconciles egress policy to sluice on a ticker (and once at start),
 // so fleet changes that skip the console's change-time push still converge.
-func pushLoop(ctx context.Context, s *netpush.Syncer, log *slog.Logger) {
+//
+// The pusher is an interface of one method so the two callers can differ: a
+// gateway hands it the FLEET, which resolves every machine's share and pushes
+// each one its own, and a node hands it that node's local syncer, which has no
+// rules of its own and is driven by what the gateway sends it. Both converge on
+// the same cadence, which is what makes a missed push — an offline node, a
+// restarted daemon — cost at most one interval.
+type netPusher interface {
+	PushNet(ctx context.Context) error
+}
+
+func pushLoop(ctx context.Context, p netPusher, log *slog.Logger) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
-		if err := s.Push(ctx); err != nil && ctx.Err() == nil {
+		if err := p.PushNet(ctx); err != nil && ctx.Err() == nil {
 			log.Warn("periodic egress policy push", "err", err)
 		}
 		select {
@@ -1125,6 +1163,47 @@ func pushLoop(ctx context.Context, s *netpush.Syncer, log *slog.Logger) {
 		case <-t.C:
 		}
 	}
+}
+
+// fleetIdentity is the gateway's signing path, presented to the fleet.
+//
+// It is an adapter rather than the issuer itself for one reason worth stating:
+// every claim it assembles comes from the sandbox record and the node name the
+// FLEET resolved, never from anything the asking machine sent. metadata.Local
+// already does exactly that assembly for this host's own guests, so this reuses
+// it with the node name substituted — which keeps a token minted for a sandbox
+// on `laptop` identical to one minted for the same sandbox had it been created
+// here, but for the `box` claim, which is the one thing that genuinely differs.
+type fleetIdentity struct {
+	issuer *oidc.Issuer
+	users  *users.Store
+	defAud string
+}
+
+func (f fleetIdentity) local(node string) metadata.Local {
+	return metadata.Local{Issuer: f.issuer, Users: f.users, NodeName: node}
+}
+
+func (f fleetIdentity) Issue(ctx context.Context, box *host.Sandbox, node, aud string) (string, time.Time, error) {
+	if aud == "" {
+		aud = f.defAud
+	}
+	tok, err := f.local(node).Issue(ctx, box, aud)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return tok.JWT, tok.ExpiresAt, nil
+}
+
+func (f fleetIdentity) Describe(ctx context.Context, box *host.Sandbox, node string) (string, fleet.Claims, error) {
+	doc, err := f.local(node).Describe(ctx, box)
+	if err != nil {
+		return "", fleet.Claims{}, err
+	}
+	return doc.Issuer, fleet.Claims{
+		Subject: doc.Subject, Owner: doc.Owner, GitHub: doc.GitHub, KeyFP: doc.KeyFP,
+		Sandbox: doc.Sandbox, Image: doc.Image, Box: doc.Box,
+	}, nil
 }
 
 // splitList parses a comma-separated flag into a trimmed, non-empty list.

@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -61,12 +63,16 @@ func fixture(t *testing.T, auds ...string) *Server {
 			"172.30.5.2": {Name: "alice-box", Owner: "alice", Image: "universal", HostIP: "172.30.5.2", KeyFP: "SHA256:aaa"},
 			"172.30.9.2": {Name: "bob-box", Owner: "bob", Image: "universal", HostIP: "172.30.9.2"},
 		},
-		Users: fakeAccounts{
-			"alice": {Handle: "alice", Status: "active", GitHubLogin: "alice-gh", GitHubVerifiedAt: &verified},
-			"bob":   {Handle: "bob", Status: "active"}, // never linked GitHub
+		Identity: Local{
+			Issuer: iss,
+			Users: fakeAccounts{
+				"alice": {Handle: "alice", Status: "active", GitHubLogin: "alice-gh", GitHubVerifiedAt: &verified},
+				"bob":   {Handle: "bob", Status: "active"}, // never linked GitHub
+			},
+			NodeName: "test-box",
 		},
-		Issuer: iss, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		DefaultAudience: "https://hivemind.wandb.tools", NodeName: "test-box",
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DefaultAudience: "https://hivemind.wandb.tools",
 	})
 }
 
@@ -180,7 +186,7 @@ func TestIdentityReportsClaimsWithoutMinting(t *testing.T) {
 		}
 	}
 	rec := request(s, "/identity", "172.30.9.2", "172.30.9.1")
-	var doc identityDoc
+	var doc Doc
 	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +207,11 @@ func TestIdentityReportsClaimsWithoutMinting(t *testing.T) {
 // a login string is somehow on the record.
 func TestGitHubClaimRequiresVerification(t *testing.T) {
 	s := fixture(t)
-	s.users = fakeAccounts{"alice": {Handle: "alice", GitHubLogin: "alice-gh"}} // no GitHubVerifiedAt
+	// Reach through the Identity the fixture installed and swap its accounts:
+	// the claim assembly lives there now, not on the server.
+	local := s.id.(Local)
+	local.Users = fakeAccounts{"alice": {Handle: "alice", GitHubLogin: "alice-gh"}} // no GitHubVerifiedAt
+	s.id = local
 	rec := request(s, "/token", "172.30.5.2", "172.30.5.1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /token = %d", rec.Code)
@@ -228,4 +238,90 @@ func decodeClaims(t *testing.T, token string) map[string]any {
 		t.Fatal(err)
 	}
 	return claims
+}
+
+// ---------------------------------------------------------------------------
+// A node's relayed identity
+// ---------------------------------------------------------------------------
+
+// relayStub is a node's Identity: it signs nothing and fails the way a real
+// relay fails.
+type relayStub struct{ err error }
+
+func (r relayStub) Issue(context.Context, *host.Sandbox, string) (Token, error) {
+	if r.err != nil {
+		return Token{}, r.err
+	}
+	return Token{JWT: "relayed.jwt", ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (r relayStub) Describe(context.Context, *host.Sandbox) (Doc, error) {
+	if r.err != nil {
+		return Doc{}, r.err
+	}
+	return Doc{Issuer: "https://oidc.example.test", Owner: "bob", Sandbox: "bob-box"}, nil
+}
+
+func relayFixture(t *testing.T, err error) *Server {
+	t.Helper()
+	return New(Options{
+		Manager: fakeBoxes{
+			"172.30.9.2": {Name: "bob-box", Owner: "bob", Image: "universal", HostIP: "172.30.9.2"},
+		},
+		Identity: relayStub{err: err},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+}
+
+// The caller-identification half is unchanged on a node: the same tap check,
+// the same 403s, and a token that came from somewhere else entirely.
+func TestRelayedIdentityServesTheGuestNormally(t *testing.T) {
+	s := relayFixture(t, nil)
+	rec := request(s, "/token", "172.30.9.2", "172.30.9.1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /token = %d: %s", rec.Code, rec.Body)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "relayed.jwt" {
+		t.Errorf("token = %q", got)
+	}
+	// And a guest still cannot ask about another slot, which is a property of
+	// this machine and owes nothing to the gateway.
+	if rec := request(s, "/token", "172.30.9.2", "172.30.5.1"); rec.Code != http.StatusForbidden {
+		t.Errorf("cross-slot on a node = %d, want 403", rec.Code)
+	}
+}
+
+// The status codes are the whole point of the error split. A guest's
+// sparkbox-token unit retries on failure with a StartLimitBurst, so an outage
+// that fixes itself must not be reported as something permanent.
+func TestRelayFailuresMapToTheRightStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"gateway unreachable", fmt.Errorf("%w: no link", ErrNoIssuer), http.StatusServiceUnavailable},
+		{"audience refused", fmt.Errorf("%w: %q", ErrAudience, "https://evil"), http.StatusBadRequest},
+		{"anything else", errors.New("the gateway is confused"), http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := relayFixture(t, tc.err)
+			if rec := request(s, "/token", "172.30.9.2", "172.30.9.1"); rec.Code != tc.want {
+				t.Errorf("GET /token = %d, want %d", rec.Code, tc.want)
+			}
+			if rec := request(s, "/identity", "172.30.9.2", "172.30.9.1"); rec.Code != tc.want {
+				t.Errorf("GET /identity = %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}
+
+// An internal cause must not reach the guest: the sentence a relay failure
+// carries can name the gateway's address or an internal code.
+func TestRelayFailureDoesNotLeakItsCause(t *testing.T) {
+	s := relayFixture(t, errors.New("dial 10.66.0.1:2222: connection refused"))
+	rec := request(s, "/token", "172.30.9.2", "172.30.9.1")
+	if strings.Contains(rec.Body.String(), "10.66.0.1") {
+		t.Errorf("the gateway's address leaked into a guest-facing error: %s", rec.Body)
+	}
 }

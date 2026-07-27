@@ -32,7 +32,9 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
@@ -70,6 +72,11 @@ type nodeOptions struct {
 	subnet6      string
 	guestDNS     string
 	sluiceSocket string
+	// metaAddr is where the guest metadata service binds. Empty disables it,
+	// which is what a node that should hand out no workload identity wants —
+	// but the default is the same port a gateway uses, because a guest asks its
+	// own default gateway on a fixed port and has no way to be told otherwise.
+	metaAddr string
 
 	idleBalloon   time.Duration
 	idleTimeout   time.Duration
@@ -199,32 +206,60 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// pause is coming, early enough to hang up its own.
 	mgr.SetSessions(emitter)
 
-	// Egress policy still runs per machine — sluice enforces against this host's
-	// own taps — so the syncer is wired exactly as on a gateway, minus the rules
-	// store, which lives up there. Nothing is governed here yet: no path carries
-	// tag bindings across the link, and an ungoverned VM is left unrestricted
-	// rather than denied.
+	// Egress policy runs per machine — sluice enforces against this host's own
+	// taps and can see no others — so the syncer is wired exactly as on a
+	// gateway, minus the rules store, which lives up there.
+	//
+	// The rules ARRIVE now rather than being resolved here: the gateway resolves
+	// each of this machine's sandboxes against the ledger's owner column and
+	// pushes the whole snapshot down (nodelink.TypeNetPolicy), and the syncer's
+	// Apply turns those names into this machine's own taps. So the syncer is
+	// given no rule source at all — a node that resolved its own would be a
+	// second, tagless answer racing the one being sent to it.
 	var sluiceClient *netpush.Client
 	if opts.sluiceSocket != "" {
 		sluiceClient = netpush.NewClient(opts.sluiceSocket)
 		log.Info("sluice egress policy enabled", "socket", opts.sluiceSocket)
+	} else {
+		log.Info("egress control not enabled on this node",
+			"detail", "no --sluice-socket, so nothing here is filtered or metered")
 	}
 	netSyncer := netpush.NewSyncer(sluiceClient, netpushFleet{mgr}, ungovernedRules{}, log)
 
-	// The guest metadata service is a gateway surface: it answers a guest with
-	// an id token signed by the fleet's OIDC key, which a node does not hold and
-	// must not. A sandbox placed here therefore gets no id token, and one line
-	// at boot beats a guest discovering it at runtime.
-	log.Warn("guest metadata service disabled on this node",
-		"reason", "id tokens are signed by the gateway's OIDC key, which a node never holds")
+	// The guest metadata service runs here exactly as it does on a gateway. What
+	// differs is only who signs: a node holds no OIDC key and must not, so its
+	// Identity is a relay that names the sandbox and lets the gateway resolve
+	// everything about it. The uplink is what carries that request, and it is
+	// created before the link exists because a guest can boot and ask before
+	// this machine has ever reached its gateway — it is answered 503 and its own
+	// timer retries, which is the whole of the degradation.
+	uplink := nodelink.NewUplink()
 
 	// A process restart marks every sandbox paused; bring the pinned ones back
 	// up, exactly as a gateway does, and — the point of doing it here, before
 	// the link is up — without waiting on a gateway that may be down.
 	mgr.ResumePinned(ctx)
 	go mgr.RunReaper(ctx, opts.idleBalloon, opts.idleTimeout, time.Minute)
-	if netSyncer.Enabled() {
-		go pushLoop(ctx, netSyncer, log)
+	// No push loop here. On a gateway that ticker is what reconciles rule
+	// changes the console did not push; on a node there is nothing local to
+	// reconcile FROM — the policy is whatever the gateway last sent — and a
+	// second loop re-applying a stale snapshot would fight the one being pushed.
+	// The gateway's own loop covers this machine on the same cadence.
+	if opts.metaAddr != "" {
+		meta := metadata.New(metadata.Options{
+			Manager: mgr, Logger: log,
+			Identity: relayIdentity{up: uplink},
+			// No default audience here: the gateway substitutes its own, which
+			// is the only one that could be right — the allowlist that decides
+			// whether an audience is permitted lives with the issuer.
+		})
+		go func() {
+			if err := meta.ListenAndServe(ctx, opts.metaAddr); err != nil && ctx.Err() == nil {
+				log.Error("guest metadata service stopped", "err", err)
+			}
+		}()
+		log.Info("guest metadata service enabled", "addr", opts.metaAddr,
+			"signing", "relayed to the gateway")
 	}
 
 	log.Info("sparkbox node up", "node", opts.nodeName, "gateway", opts.gateway,
@@ -241,7 +276,9 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			HostKey:     hostKeyPin,
 			HostKeyPath: filepath.Join(opts.stateDir, "gateway_host_key.pub"),
 			Manager:     mgr, Emitter: emitter,
-			Hello:     func() nodelink.Hello { return nodeHello(opts, mgr) },
+			Uplink:    uplink,
+			Net:       netSyncer,
+			Hello:     func() nodelink.Hello { return nodeHello(opts, mgr, netSyncer) },
 			OnWelcome: func(w nodelink.Welcome) error { return acceptWelcome(w, mgr, gwPubPath) },
 			Log:       log,
 		})
@@ -263,12 +300,81 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	return nil
 }
 
+// relayIdentity is a node's metadata.Identity: it names the sandbox and lets
+// the gateway decide everything else.
+//
+// Deliberately the thinnest possible object. It sends the name and the audience
+// and nothing more — no owner, no image, no claims — because a relay that
+// asserted any of those would be a machine describing its own guests to the
+// thing that signs for them. The gateway resolves all of it from its ledger;
+// see internal/fleet/identity.go for the check that makes that binding.
+type relayIdentity struct{ up *nodelink.Uplink }
+
+func (r relayIdentity) Issue(ctx context.Context, box *host.Sandbox, aud string) (metadata.Token, error) {
+	var resp nodelink.IdentityTokenResp
+	req := nodelink.IdentityReq{Sandbox: box.Name, Aud: aud}
+	if err := r.up.Request(ctx, nodelink.TypeIdentityToken, req, &resp); err != nil {
+		return metadata.Token{}, relayError(err)
+	}
+	return metadata.Token{JWT: resp.Token, ExpiresAt: resp.ExpiresAt}, nil
+}
+
+func (r relayIdentity) Describe(ctx context.Context, box *host.Sandbox) (metadata.Doc, error) {
+	var resp nodelink.IdentityDocResp
+	req := nodelink.IdentityReq{Sandbox: box.Name}
+	if err := r.up.Request(ctx, nodelink.TypeIdentityDoc, req, &resp); err != nil {
+		return metadata.Doc{}, relayError(err)
+	}
+	return metadata.Doc{
+		Issuer: resp.Issuer, Subject: resp.Subject, Owner: resp.Owner, GitHub: resp.GitHub,
+		KeyFP: resp.KeyFP, Sandbox: resp.Sandbox, Image: resp.Image, Box: resp.Box,
+	}, nil
+}
+
+// relayError turns what came back off the link into what metadata classifies
+// on, so a guest is told 400, 503 or 500 for the right reason.
+//
+// The two that matter are the ones that are NOT faults of this machine. A wrong
+// `?aud=` is the guest's own mistake and must stay a 400 however many hops it
+// crossed. Everything transport-shaped — no link yet, a gateway mid-restart, a
+// deadline — is ErrNoIssuer, which is a 503 the guest's timer retries out of;
+// reporting those as 500 would be true and useless, since the repair is to wait.
+//
+// A refusal this machine should never have provoked (CodeNotYours) is left as a
+// 500 on purpose: the guest cannot fix it and must not retry it into a loop, and
+// the sentence an operator needs is already in the gateway's log.
+func relayError(err error) error {
+	if errors.Is(err, nodelink.ErrNoLink) || errors.Is(err, nodelink.ErrLinkClosed) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", metadata.ErrNoIssuer, err)
+	}
+	var typed *ctlops.Error
+	if errors.As(err, &typed) {
+		switch typed.Code {
+		case nodelink.CodeIdentityAudience:
+			return fmt.Errorf("%w: %s", metadata.ErrAudience, typed.Msg)
+		case nodelink.CodeNoIssuer:
+			// A permanent configuration answer, not an outage. Reported as
+			// unavailable anyway: it is out of this machine's hands either way,
+			// and the retry costs one request every 45 minutes.
+			return fmt.Errorf("%w: %s", metadata.ErrNoIssuer, typed.Msg)
+		}
+		return err
+	}
+	// An untyped error off a link is the link having died mid-request.
+	return fmt.Errorf("%w: %w", metadata.ErrNoIssuer, err)
+}
+
 // nodeHello is what this machine tells a gateway about itself. Everything in it
 // is a fact the gateway cannot observe from the outside and needs in order to
 // decide whether a sandbox can be placed here at all.
-func nodeHello(opts nodeOptions, mgr *host.Manager) nodelink.Hello {
+func nodeHello(opts nodeOptions, mgr *host.Manager, net *netpush.Syncer) nodelink.Hello {
 	return nodelink.Hello{
 		Arch: opts.arch,
+		// Whether this machine meters and filters at all. Stated rather than
+		// left for the gateway to discover on its first refused push, so an
+		// operator reading `ctl node ls` sees it before a rule is ever written.
+		Sluice: net.Enabled(),
 		// Release and Version are the same string on purpose: hack/stage-artifacts.sh
 		// stamps the release tag straight into the binary, so this build's version
 		// IS the release it shipped in. A hand-built binary says "dev" for both,

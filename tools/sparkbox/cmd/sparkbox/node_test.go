@@ -14,6 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -321,5 +325,80 @@ func TestValidateNodeFlags(t *testing.T) {
 				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The identity relay's error classification
+// ---------------------------------------------------------------------------
+
+// What a guest is told when the relay fails, and why each answer differs.
+//
+// The status codes are load-bearing rather than cosmetic. A guest's
+// sparkbox-token unit has Restart=on-failure with a StartLimitBurst of 10, so
+// reporting a gateway restart as something permanent burns that budget against
+// an outage that fixes itself — and the timer's next tick is 45 minutes away
+// against a token that lives an hour.
+func TestRelayErrorClassification(t *testing.T) {
+	audience := &ctlops.Error{Kind: ctlops.KindInvalid, Op: nodelink.OpLink,
+		Code: nodelink.CodeIdentityAudience, Msg: "audience is not allowed"}
+	notYours := &ctlops.Error{Kind: ctlops.KindDenied, Op: nodelink.OpLink,
+		Code: nodelink.CodeNotYours, Msg: "not on this node"}
+	noIssuer := &ctlops.Error{Kind: ctlops.KindDisabled, Op: nodelink.OpLink,
+		Code: nodelink.CodeNoIssuer, Msg: "no signing key"}
+
+	for _, tc := range []struct {
+		name string
+		in   error
+		// want is the sentinel internal/metadata classifies on; nil means the
+		// error must pass through unclassified (a 500).
+		want error
+	}{
+		{"no link yet: this node has never reached its gateway", nodelink.ErrNoLink, metadata.ErrNoIssuer},
+		{"the link died under the request", nodelink.ErrLinkClosed, metadata.ErrNoIssuer},
+		{"the gateway did not answer in time", context.DeadlineExceeded, metadata.ErrNoIssuer},
+		{"an untyped error off a wire is the wire dying", errors.New("EOF"), metadata.ErrNoIssuer},
+		// The guest's own mistake, and it must stay a 400 however many hops it
+		// crossed: no amount of retrying makes a wrong audience right.
+		{"a refused audience", audience, metadata.ErrAudience},
+		// A permanent configuration answer. Still reported as unavailable: it is
+		// out of this machine's hands either way, and the retry is one request
+		// every 45 minutes.
+		{"the gateway issues no identity at all", noIssuer, metadata.ErrNoIssuer},
+		// Nothing legitimate produces this, the guest cannot fix it, and it must
+		// not be retried into a loop — so it stays a 500 with the explanation in
+		// the gateway's log.
+		{"a sandbox this node does not hold", notYours, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := relayError(tc.in)
+			if tc.want == nil {
+				if errors.Is(got, metadata.ErrNoIssuer) || errors.Is(got, metadata.ErrAudience) {
+					t.Fatalf("err = %v, want no classification (a 500)", got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("err = %v, want it to classify as %v", got, tc.want)
+			}
+			// The two sentinels must stay distinguishable: they are 503 and 400,
+			// and collapsing them would make a wrong audience retry forever.
+			other := metadata.ErrAudience
+			if tc.want == metadata.ErrAudience {
+				other = metadata.ErrNoIssuer
+			}
+			if errors.Is(got, other) {
+				t.Errorf("err = %v classifies as both sentinels", got)
+			}
+		})
+	}
+}
+
+// The link's own error must survive wrapping, so a log line on the node still
+// names what actually happened even though the guest is told something vaguer.
+func TestRelayErrorKeepsTheUnderlyingCause(t *testing.T) {
+	got := relayError(nodelink.ErrNoLink)
+	if !errors.Is(got, nodelink.ErrNoLink) {
+		t.Errorf("err = %v, want the transport cause preserved for the node's own log", got)
 	}
 }

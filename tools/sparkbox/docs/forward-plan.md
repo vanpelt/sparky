@@ -288,11 +288,49 @@ user still gets the byte-identical masked `no sandbox named "x"`.
 work against a sandbox on the laptop, and **no test body differs** between the
 local and remote passes except the placement argument.
 
-### Deferred (M4–M6), explicitly
+### M4 — node-local services — **DONE**
 
-M4 node-local services (metadata mint relay, per-node sluice push), M5 scheduler
-policy + fleet-wide caps, M6 migration/drain. `place.go` from W18 is the seam
-M5 plugs into. Not needed for the laptop-as-node story.
+Both halves of M4 shipped together, because they turned out to be one missing
+primitive wearing two hats: **a node had no way to ask its gateway for a
+gateway-owned fact, or be told a gateway-owned decision.**
+
+| Item | What | Status |
+| --- | --- | --- |
+| **Metadata mint relay** | A node runs `internal/metadata` exactly as a gateway does — the tap check that decides *which* sandbox is asking is a property of the machine holding it, and needs nobody's permission. What it cannot do is sign, so `metadata.Identity` became an interface: `Local` on a gateway, a relay over the link on a node. Two new frames (`identity.token`, `identity.describe`) travel **node → gateway**, the only pair that does. | Done |
+| **Per-node sluice** | `net.policy` (gateway → node) and `net.usage` (node → gateway, pulled). `netpush.Push` split into `Resolve` (name-keyed, runs where the rules are) and `Apply` (tap-keyed, runs where the taps are). The console's bandwidth read routes through `Fleet.NetUsage`. | Done |
+
+**The one check that carries the security weight** is in
+`internal/fleet/identity.go`: the ledger must place the named sandbox on the
+node that asked. Without it any linked machine mints tokens for the whole fleet
+by guessing names, and they are indistinguishable from real ones. It grants a
+node no new capability — it already holds the rootfs and the guest's memory, so
+it can read any token that lands there — it keeps the trust *scoped* to the VMs
+the gateway put there.
+
+Three things that could have been silently wrong, and are not:
+
+- **Policy crosses the link keyed by sandbox NAME, never by tap.** `sbtap3` is a
+  different person's VM on every machine, because slot indices are assigned by
+  whoever holds the disk.
+- **A machine with no sluice REFUSES both verbs** (`nodelink.CodeNoSluice`)
+  rather than answering empty. An empty policy push would report a tagged
+  sandbox as filtered when nothing filters it; an empty usage report renders as
+  an idle VM rather than an unmeasured one.
+- **The owner used to resolve rules comes from the ledger**, via `Fleet.List`'s
+  `serve`, not from what the node reported — otherwise a machine could choose
+  which user's egress policy its VMs run under.
+
+**Operational note:** `setup --sluice` is not role-gated and works on a node
+today. The node case also dodges the open gateway problem recorded in
+`onboarding-notes.md` — a node serves no edge, so `:53` is free and the default
+bind is correct, with no dedicated dummy-interface resolver needed. `--guest-dns`
+rides in as a kernel boot arg, so existing VMs need a pause/resume before their
+lookups are attributed.
+
+### Deferred (M5–M6), explicitly
+
+M5 scheduler policy + fleet-wide caps, M6 migration/drain. `place.go` from W18
+is the seam M5 plugs into.
 
 ---
 

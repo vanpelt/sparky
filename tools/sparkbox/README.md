@@ -452,19 +452,30 @@ dialled out to enroll and the same connection carries the work.
 > joined would be surprising in the one direction that costs someone their
 > afternoon. Placement is a thing you ask for.
 
-> **Egress rules do not cross the link yet.** Tag-to-rule bindings live in the
-> gateway's store, and nothing carries them to a node — so a **tagged sandbox
-> placed on a remote node is unfiltered**, where the same sandbox on the gateway
-> would be governed by its tag's allowlist. The node says so at startup and the
-> code names it (`ungovernedRules` in `cmd/sparkbox/node.go`). If egress control
-> is load-bearing for you, keep tagged work on the gateway until the relay
-> lands; the plan is in
-> [`docs/multi-node-implementation.md`](docs/multi-node-implementation.md).
-
-> **Also gateway-only: guest identity.** The metadata service signs id tokens
-> with the fleet's OIDC key, which a node never holds — so a sandbox on a node
-> gets no workload-identity token, and `hivemind start` there has nothing to
-> federate with.
+> **Egress rules and guest identity both reach nodes**, but a node has to be
+> *equipped* for the first one. Tag-to-rule bindings live in the gateway's
+> store; the gateway resolves each machine's share against the placement
+> ledger's owner column and pushes it down, and reads that machine's meter back
+> for the bandwidth panel. Both need a sluice on the node —
+> `sparkbox setup --sluice` on that machine — and a node that has none **refuses**
+> the push rather than accepting it silently, so `ctl node ls` marks it
+> `no-egress-control` whenever the fleet is metered unevenly. A tagged sandbox
+> on an unequipped node is unfiltered, and now something says so.
+>
+> Guest identity needs no equipment. A node runs the metadata service exactly as
+> a gateway does — deciding *which* sandbox is asking is a property of the tap
+> the request arrived on — and relays only the signing step, since the fleet's
+> OIDC key never leaves the gateway. The gateway resolves the owner, the image
+> and the `box` claim from its own ledger, and refuses outright if the ledger
+> does not place that sandbox on the machine that asked. So `hivemind start`
+> federates on a node with nothing pasted, exactly as it does locally.
+>
+> Two things worth knowing when you turn sluice on for a node:
+> `--guest-dns` rides in as a kernel boot arg, so an already-running VM needs a
+> pause/resume before its lookups are attributed to domains; and while the
+> gateway is unreachable a guest's token refresh is answered `503`, which its
+> own timer retries out of — the token lives an hour and the timer fires every
+> 45 minutes, so a gateway restart costs nothing.
 
 ## Real microVMs
 
@@ -573,7 +584,10 @@ derives the darwin pair from the arm64 manifest that produced.
       design — with no `--node` the gateway still builds locally
 - [ ] Best-fit scheduling (flyd pattern): a placer that picks the node itself
       from the roster's capacity, instead of the operator naming one
-- [ ] Relay egress policy to nodes: tag-to-rule bindings live in the gateway's
-      store, so a **tagged sandbox on a node is unfiltered** today
-- [ ] Guest identity on nodes: id tokens are signed by the gateway's OIDC key,
-      which a node never holds, so a sandbox there gets no workload token
+- [x] Egress policy and per-domain bandwidth on nodes: the gateway resolves each
+      machine's share from the ledger and pushes it down, and reads that
+      machine's own meter back. Needs a sluice on the node; one without it
+      refuses rather than silently accepting, and `ctl node ls` says so
+- [x] Guest identity on nodes: the node runs the metadata service and relays
+      only the signing step, which the gateway answers after checking its ledger
+      places that sandbox on the machine that asked

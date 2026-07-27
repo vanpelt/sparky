@@ -38,6 +38,85 @@ const HelloTimeout = 10 * time.Second
 // reads `node.link failed: …` whatever went wrong.
 const OpLink = "node.link"
 
+// The three stable codes an identity request can come back refused with. They
+// are codes rather than sentences because the NODE has to act on the
+// difference: it turns them back into the errors internal/metadata classifies
+// on, and a guest is told 400, 403 or 503 accordingly. A sentence would make
+// that a string comparison.
+const (
+	// CodeNoIssuer is a gateway that issues no workload identity at all — it
+	// has no OIDC key configured. Permanent until an operator changes it, so
+	// the guest's retry will not fix it, but retrying costs nothing either.
+	CodeNoIssuer = "identity_not_issued"
+	// CodeIdentityAudience is a `?aud=` this issuer will not mint for. The
+	// guest asked for something wrong; nothing on the host is broken.
+	CodeIdentityAudience = "identity_audience"
+	// CodeNotYours is the one that matters: this node asked to be spoken for
+	// about a sandbox the ledger does not place on it. Nothing legitimate
+	// produces it.
+	CodeNotYours = "identity_not_on_this_node"
+)
+
+// registerIdentityOps installs the two requests that travel node -> gateway.
+//
+// Every other Handle on this side of the link answers something a node
+// volunteered; these answer something it needs, and the node blocks a guest's
+// HTTP request on the reply — so both are cheap by construction and neither
+// touches a disk.
+//
+// node is the AUTHENTICATED link name and is what the hooks are handed. It is
+// closed over here rather than read from the request precisely so that no
+// future edit to the payload can introduce a second answer to "which machine
+// is asking".
+func registerIdentityOps(conn *Conn, node string, hooks Hooks) {
+	conn.Handle(TypeIdentityToken, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		req, err := identityRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		if hooks.OnIdentityToken == nil {
+			return nil, noIssuer()
+		}
+		return hooks.OnIdentityToken(ctx, node, req)
+	})
+	conn.Handle(TypeIdentityDoc, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		req, err := identityRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		if hooks.OnIdentityDoc == nil {
+			return nil, noIssuer()
+		}
+		return hooks.OnIdentityDoc(ctx, node, req)
+	})
+}
+
+// identityRequest parses and bounds one identity request. The name is checked
+// for shape here rather than at the ledger so a malformed one is an invalid
+// request, which is what it is, instead of a lookup miss.
+func identityRequest(raw json.RawMessage) (IdentityReq, error) {
+	var req IdentityReq
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return IdentityReq{}, ctlops.Invalid(OpLink, "bad_identity_request",
+			"that identity request could not be read: %v", err)
+	}
+	if req.Sandbox == "" {
+		return IdentityReq{}, ctlops.Invalid(OpLink, "bad_identity_request",
+			"an identity request has to name a sandbox")
+	}
+	return req, nil
+}
+
+// noIssuer is built field by field rather than through ctlops.Disabled, whose
+// Code is derived from the op: the node switches on CodeNoIssuer, so it has to
+// be the code that actually goes out.
+func noIssuer() error {
+	return &ctlops.Error{
+		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoIssuer, Verbatim: true,
+		Msg: "this gateway issues no workload identity: it has no OIDC signing key configured.",
+	}
+}
+
 // CodeRevoked is the bye a node is sent when the gateway takes its approval
 // away — it was removed from the roster, or disabled, while it was connected.
 // It is its own code rather than one of the three in frame.go because a node
@@ -231,6 +310,17 @@ type Hooks struct {
 	OnChanged   func(node string, m ChangedMsg)
 	OnGone      func(node string, m GoneMsg)
 	OnPaused    func(node string, m PausedMsg)
+
+	// OnIdentityToken and OnIdentityDoc answer the two requests that travel
+	// node -> gateway. Both are handed the AUTHENTICATED link name, exactly as
+	// the event hooks are and for exactly the same reason: the node the
+	// gateway will speak for must be the node that asked, never a name in a
+	// payload.
+	//
+	// Nil means this deployment issues no workload identity — it has no OIDC
+	// key — and the node is told so in a sentence rather than left waiting.
+	OnIdentityToken func(ctx context.Context, node string, req IdentityReq) (IdentityTokenResp, error)
+	OnIdentityDoc   func(ctx context.Context, node string, req IdentityReq) (IdentityDocResp, error)
 }
 
 // ServerOptions is one link's whole configuration. The door fills in the
@@ -481,6 +571,8 @@ func (c *Client) register() {
 		}
 		return InventoryAck{}, nil
 	})
+
+	registerIdentityOps(c.conn, c.node, c.hooks)
 
 	c.conn.OnEvent(TypeChanged, func(raw json.RawMessage) {
 		var m ChangedMsg

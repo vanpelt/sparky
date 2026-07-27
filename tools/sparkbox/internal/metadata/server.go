@@ -21,6 +21,21 @@
 // address (a different tap), so the spoofer never completes the handshake.
 // The firecracker driver additionally sets rp_filter on each tap, which drops
 // such packets outright rather than merely leaving them unanswered.
+//
+// # Where the signing happens (and why that is a separate question)
+//
+// Everything above is about the HOST end of a tap, and every sparkbox host has
+// one: a fleet node holds VMs exactly as a gateway does, and a guest on it
+// reaches its own gateway address the same way. What a node does NOT hold is
+// the fleet's OIDC signing key, which lives on the gateway and must stay there
+// — one key, one issuer, one JWKS.
+//
+// So this package answers "which sandbox is asking" locally, on every host, and
+// asks Identity to turn that sandbox into a token. On a gateway Identity is
+// Local, which signs in-process. On a node it is a relay over the fleet link:
+// the node names the sandbox, and the gateway decides everything about it from
+// its own placement ledger — see internal/fleet's identity handling for the one
+// check that makes that safe.
 package metadata
 
 import (
@@ -67,13 +82,111 @@ type Accounts interface {
 	Get(handle string) (users.User, error)
 }
 
+// Token is one minted id token and when it stops being valid.
+type Token struct {
+	JWT       string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Doc is what /run/sparkbox/identity.json holds in the guest: the same claims a
+// token carries, minus the registered ones, so shells and tools can answer "who
+// am I" without parsing a JWT.
+type Doc struct {
+	Issuer  string `json:"iss"`
+	Subject string `json:"sub"`
+	Owner   string `json:"owner"`
+	GitHub  string `json:"github,omitempty"`
+	KeyFP   string `json:"key_fp,omitempty"`
+	Sandbox string `json:"sandbox"`
+	Image   string `json:"image"`
+	Box     string `json:"box"`
+}
+
+// Identity turns an authenticated sandbox into credentials. It is the whole of
+// what differs between a gateway and a node: the caller-identification above is
+// identical on both, and only this is signed somewhere else.
+//
+// Both methods take a context because a node's implementation is a network
+// call. Both take the sandbox rather than its name because the local
+// implementation needs no lookup — the record is already in hand — and the
+// relay deliberately sends only the name, so that nothing a node asserts about
+// a sandbox reaches the claims.
+type Identity interface {
+	Issue(ctx context.Context, box *host.Sandbox, aud string) (Token, error)
+	Describe(ctx context.Context, box *host.Sandbox) (Doc, error)
+}
+
+// ErrAudience is what an Identity returns for an audience its issuer will not
+// mint for. It is a distinct error because it is the caller's mistake — a
+// guest asked for `?aud=` something this fleet does not federate with — and is
+// answered 400, where every other failure here is the host's and is answered
+// 500 or 503.
+var ErrAudience = errors.New("audience is not allowed by this issuer")
+
+// ErrNoIssuer is what a relay returns when it cannot reach the machine that
+// signs. It is answered 503: the guest's own retry — the sparkbox-token timer
+// comes back every 45 minutes against a token that lives an hour — is the
+// repair, and a 500 would invite it to give up instead.
+var ErrNoIssuer = errors.New("the machine that signs id tokens is not reachable")
+
+// Local is the Identity of a host that holds the signing key: it mints in
+// process, with no network anywhere on the path.
+type Local struct {
+	Issuer *oidc.Issuer
+	// Users is optional. Nil omits the `github` claim for everyone, which is
+	// the same thing an unverified owner gets.
+	Users Accounts
+	// NodeName is the machine the sandbox runs on, for the `box` claim.
+	NodeName string
+}
+
+func (l Local) Issue(_ context.Context, box *host.Sandbox, aud string) (Token, error) {
+	if !l.Issuer.AudienceAllowed(aud) {
+		return Token{}, fmt.Errorf("%w: %q", ErrAudience, aud)
+	}
+	c := l.claims(box)
+	c.Audience = aud
+	jwt, exp, err := l.Issuer.Mint(c)
+	if err != nil {
+		return Token{}, err
+	}
+	return Token{JWT: jwt, ExpiresAt: exp}, nil
+}
+
+func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
+	c := l.claims(box)
+	return Doc{
+		Issuer: l.Issuer.URL(), Subject: c.Subject, Owner: c.Owner,
+		GitHub: c.GitHub, KeyFP: c.KeyFP,
+		Sandbox: c.Sandbox, Image: c.Image, Box: c.Box,
+	}, nil
+}
+
+// claims assembles the identity of a sandbox: its own facts plus its owner's.
+// The `github` claim is present only when the owner verified it, so a policy
+// matching on it fails closed for everyone else.
+func (l Local) claims(box *host.Sandbox) oidc.Claims {
+	c := oidc.Claims{
+		Subject: oidc.SubjectFor(box.Owner),
+		Owner:   box.Owner,
+		KeyFP:   box.KeyFP,
+		Sandbox: box.Name,
+		Image:   box.Image,
+		Box:     l.NodeName,
+	}
+	if l.Users != nil {
+		if u, err := l.Users.Get(box.Owner); err == nil && u.GitHubVerifiedAt != nil {
+			c.GitHub = u.GitHubLogin
+		}
+	}
+	return c
+}
+
 type Server struct {
-	mgr      Sandboxes
-	issuer   *oidc.Issuer
-	users    Accounts
-	log      *slog.Logger
-	defAud   string
-	nodeName string
+	mgr    Sandboxes
+	id     Identity
+	log    *slog.Logger
+	defAud string
 
 	mu     sync.Mutex
 	recent map[string][]time.Time // sandbox -> mint times inside the window
@@ -81,19 +194,21 @@ type Server struct {
 
 type Options struct {
 	Manager Sandboxes
-	Issuer  *oidc.Issuer
-	Users   Accounts
-	Logger  *slog.Logger
+	// Identity signs. Local on a gateway, a relay to one on a node.
+	Identity Identity
+	Logger   *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
-	// NodeName identifies this host in the `box` claim.
-	NodeName string
 }
 
 func New(opts Options) *Server {
+	log := opts.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	return &Server{
-		mgr: opts.Manager, issuer: opts.Issuer, users: opts.Users, log: opts.Logger,
-		defAud: opts.DefaultAudience, nodeName: opts.NodeName,
+		mgr: opts.Manager, id: opts.Identity, log: log,
+		defAud: opts.DefaultAudience,
 		recent: map[string][]time.Time{},
 	}
 }
@@ -193,43 +308,25 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	if aud == "" {
 		aud = s.defAud
 	}
-	if !s.issuer.AudienceAllowed(aud) {
-		http.Error(w, fmt.Sprintf("sparkbox: audience %q is not allowed by this issuer", aud), http.StatusBadRequest)
-		return
-	}
+	// The rate limit is taken BEFORE the mint, and on a node that matters more
+	// than it does on a gateway: past here the call leaves the machine, so this
+	// is also what bounds how much of the gateway's link one guest can occupy.
 	if !s.allow(box.Name) {
 		http.Error(w, "sparkbox: too many token requests", http.StatusTooManyRequests)
 		return
 	}
 
-	claims := s.claimsFor(box)
-	claims.Audience = aud
-	token, exp, err := s.issuer.Mint(claims)
+	tok, err := s.id.Issue(r.Context(), box, aud)
 	if err != nil {
-		s.log.Error("mint failed", "sandbox", box.Name, "err", err)
-		http.Error(w, "sparkbox: could not mint a token", http.StatusInternalServerError)
+		s.fail(w, "mint", box, err)
 		return
 	}
-	s.log.Info("minted id token", "sandbox", box.Name, "owner", box.Owner, "aud", aud, "exp", exp)
+	s.log.Info("minted id token", "sandbox", box.Name, "owner", box.Owner, "aud", aud, "exp", tok.ExpiresAt)
 	w.Header().Set("Content-Type", "application/jwt")
 	// Every fetch mints a fresh token with a new jti; the exchange accepts each
 	// exactly once, so a cached token is a token that no longer works.
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintln(w, token)
-}
-
-// identityDoc is what /run/sparkbox/identity.json holds in the guest: the same
-// claims a token carries, minus the registered ones, so shells and tools can
-// answer "who am I" without parsing a JWT.
-type identityDoc struct {
-	Issuer  string `json:"iss"`
-	Subject string `json:"sub"`
-	Owner   string `json:"owner"`
-	GitHub  string `json:"github,omitempty"`
-	KeyFP   string `json:"key_fp,omitempty"`
-	Sandbox string `json:"sandbox"`
-	Image   string `json:"image"`
-	Box     string `json:"box"`
+	fmt.Fprintln(w, tok.JWT)
 }
 
 // identity returns the claims without minting a token, so a guest can answer
@@ -240,36 +337,34 @@ func (s *Server) identity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	c := s.claimsFor(box)
+	doc, err := s.id.Describe(r.Context(), box)
+	if err != nil {
+		s.fail(w, "describe", box, err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(identityDoc{ //nolint:errcheck
-		Issuer: s.issuer.URL(), Subject: c.Subject, Owner: c.Owner,
-		GitHub: c.GitHub, KeyFP: c.KeyFP,
-		Sandbox: c.Sandbox, Image: c.Image, Box: c.Box,
-	})
+	enc.Encode(doc) //nolint:errcheck
 }
 
-// claimsFor assembles the identity of a sandbox: its own facts plus its
-// owner's. The `github` claim is present only when the owner verified it, so a
-// policy matching on it fails closed for everyone else.
-func (s *Server) claimsFor(box *host.Sandbox) oidc.Claims {
-	c := oidc.Claims{
-		Subject: oidc.SubjectFor(box.Owner),
-		Owner:   box.Owner,
-		KeyFP:   box.KeyFP,
-		Sandbox: box.Name,
-		Image:   box.Image,
-		Box:     s.nodeName,
+// fail maps an Identity's error onto a status. The 503 is the one that earns
+// its place: a node whose gateway is down is a host that will be able to answer
+// this shortly, and the guest's timer is already the retry — telling it 500
+// instead invites the systemd unit to burn its StartLimitBurst against an
+// outage that fixes itself.
+func (s *Server) fail(w http.ResponseWriter, what string, box *host.Sandbox, err error) {
+	switch {
+	case errors.Is(err, ErrAudience):
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusBadRequest)
+	case errors.Is(err, ErrNoIssuer):
+		s.log.Warn("identity unavailable", "op", what, "sandbox", box.Name, "err", err)
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusServiceUnavailable)
+	default:
+		s.log.Error("identity failed", "op", what, "sandbox", box.Name, "err", err)
+		http.Error(w, "sparkbox: could not establish this sandbox's identity", http.StatusInternalServerError)
 	}
-	if s.users != nil {
-		if u, err := s.users.Get(box.Owner); err == nil && u.GitHubVerifiedAt != nil {
-			c.GitHub = u.GitHubLogin
-		}
-	}
-	return c
 }
 
 // allow is a per-sandbox sliding-window rate limit on minting.

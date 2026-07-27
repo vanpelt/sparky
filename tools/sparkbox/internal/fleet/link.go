@@ -44,6 +44,13 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 		OnChanged:   f.ApplyChanged,
 		OnGone:      f.ApplyGone,
 		OnPaused:    f.ApplyPaused,
+		// The two that answer the node rather than record what it said. Wired
+		// unconditionally: their own first act is to refuse when this
+		// deployment has no signing path, which is a sentence the node can log,
+		// where a nil hook would be the unregistered-type error a version skew
+		// produces and would send an operator looking for the wrong thing.
+		OnIdentityToken: f.IdentityToken,
+		OnIdentityDoc:   f.IdentityDoc,
 	}
 	if opts.Grace == 0 {
 		// How long this machine still counts as online after it goes quiet.
@@ -427,6 +434,12 @@ type NodeStatus struct {
 	Capacity  host.NodeCapacity `json:"capacity"`
 	Sandboxes int               `json:"sandboxes"`
 	Running   int               `json:"running"`
+	// Egress is whether this machine runs a sluice, so `ctl node ls` shows
+	// which machines filter and meter and which do not. It is a per-machine
+	// fact and there is no fleet-wide answer: a gateway with one and a node
+	// without is a normal, working, half-metered fleet, and nothing else says
+	// so.
+	Egress bool `json:"egress"`
 }
 
 // Nodes is every machine in this fleet, this one first and the rest name-sorted.
@@ -452,7 +465,7 @@ func (f *Fleet) statusOf(n Node, local bool) NodeStatus {
 	capacity.Online = online
 	st := NodeStatus{
 		Online: online, Local: local, Capacity: capacity,
-		Sandboxes: len(boxes), Running: running,
+		Sandboxes: len(boxes), Running: running, Egress: facts.Sluice,
 	}
 	st.Name = n.Name()
 	st.Arch = facts.Arch

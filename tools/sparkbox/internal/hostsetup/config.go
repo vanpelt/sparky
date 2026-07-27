@@ -375,7 +375,7 @@ func DefaultConfigAt(root string) Config {
 		// On by default — see the header of agenttools.go. A sandbox host whose
 		// sandboxes hold no agent is not a useful default, and this was
 		// unreachable from the released binary at all until stepAgentTools.
-		AgentTools: true,
+		AgentTools:     true,
 		FirecrackerBin: "/usr/local/bin/firecracker",
 		BinPath:        "/usr/local/bin/sparkbox",
 		ServiceSettle:  DefaultServiceSettle,

@@ -21,6 +21,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
@@ -78,11 +79,17 @@ type testConsole struct {
 	sync     *syncRecorder
 }
 
-// nilFleet is a Fleet that never lists anything — enough for a no-op Syncer
-// (nil client) whose Fleet is never consulted.
-type nilFleet struct{}
+// unmeteredPlane is a NetPlane whose machines all run without sluice: every
+// read refuses with the typed KindDisabled a real one raises, which statusFor
+// turns into the 501 this endpoint has always answered. Pushes are accepted
+// silently, exactly as a fleet with nothing to enforce against does.
+type unmeteredPlane struct{}
 
-func (nilFleet) List() []netpush.Sandbox { return nil }
+func (unmeteredPlane) NetUsage(context.Context, string) (netpush.VMUsage, error) {
+	return netpush.VMUsage{}, nodelink.NoSluice("test-box")
+}
+func (unmeteredPlane) PushNet(context.Context) error { return nil }
+func (unmeteredPlane) NetMetered(string) bool        { return false }
 
 func newTestConsole(t *testing.T) *testConsole {
 	t.Helper()
@@ -142,9 +149,10 @@ func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 	// A favicon cache with a stub fetcher so tests never hit the network.
 	favicons := domainmeta.NewFaviconCache(filepath.Join(dir, "favicons"),
 		func(ctx context.Context, reg string) ([]byte, string, bool) { return testPNG, "image/png", true })
-	// A syncer with no sluice socket: Push/Usage are no-ops, so bandwidth is 501.
-	netSync := netpush.NewSyncer(nil, nilFleet{}, netStore, log)
-	h := New(mgr, routeStore, secretStore, netStore, netSync, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
+	// A net plane whose machines run no sluice, so bandwidth is 501 — the same
+	// answer the old no-socket syncer gave, now raised by the machine holding
+	// the sandbox rather than by the console.
+	h := New(mgr, routeStore, secretStore, netStore, unmeteredPlane{}, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
 	return &testConsole{h: h.Handler(), handler: h, mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, signer: signer, sync: rec}
 }
 

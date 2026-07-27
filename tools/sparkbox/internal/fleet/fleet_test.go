@@ -22,6 +22,8 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -139,6 +141,11 @@ type fakeNode struct {
 	snaps     []*host.Snapshot
 	renameErr error
 	calls     []string
+	// The egress plane. metered false is a machine with no sluice, which is the
+	// default because it is the state every node was in before this existed.
+	metered  bool
+	netAllow map[string][]string
+	netUsage map[string]netpush.VMUsage
 }
 
 func newFakeNode(name string) *fakeNode {
@@ -309,6 +316,31 @@ func (n *fakeNode) Fork(context.Context, string, string, string, int64, int64) (
 func (n *fakeNode) DialGuest(context.Context, string, string, int) (net.Conn, error) {
 	n.record("dial")
 	return nil, errors.New("fakeNode cannot dial")
+}
+
+// The egress plane. netAllow records the last policy this machine was pushed,
+// so a test can assert what the fleet decided each node's share was; netUsage
+// is what it reports back. Both nil by default, which is a machine that runs no
+// sluice — the same refusal a real one gives.
+func (n *fakeNode) NetPolicy(_ context.Context, allow map[string][]string) error {
+	n.record("net.policy")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if !n.metered {
+		return nodelink.NoSluice(n.name)
+	}
+	n.netAllow = allow
+	return nil
+}
+
+func (n *fakeNode) NetUsage(context.Context) (map[string]netpush.VMUsage, error) {
+	n.record("net.usage")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if !n.metered {
+		return nil, nodelink.NoSluice(n.name)
+	}
+	return n.netUsage, nil
 }
 
 var _ fleet.Node = (*fakeNode)(nil)

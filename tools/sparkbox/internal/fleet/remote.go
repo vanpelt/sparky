@@ -32,6 +32,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
@@ -506,4 +507,45 @@ func (r *remoteNode) DialGuest(ctx context.Context, sandbox, kind string, port i
 		return nil, r.fail("dial", sandbox, err)
 	}
 	return c, nil
+}
+
+// ---------------------------------------------------------------------------
+// The egress plane
+// ---------------------------------------------------------------------------
+
+// NetPolicy pushes this machine's whole egress policy over the link, and
+// NetUsage reads its meter back.
+//
+// Both name a machine rather than a sandbox in their failures, which is the one
+// place this file's usual `r.fail(op, sandbox, err)` shape does not fit: a
+// policy push carries the machine's entire fleet and a usage read asks about no
+// sandbox in particular, so there is no single name that could honestly go in
+// the sentence. Passing the empty string is what Unreachable already expects
+// when the subject is the machine itself.
+func (r *remoteNode) NetPolicy(ctx context.Context, allow map[string][]string) error {
+	var resp nodelink.EmptyResp
+	req := nodelink.NetPolicyReq{Allow: allow}
+	if err := r.client.Do(ctx, nodelink.TypeNetPolicy, req, &resp); err != nil {
+		return r.fail("net.policy", "", err)
+	}
+	return nil
+}
+
+func (r *remoteNode) NetUsage(ctx context.Context) (map[string]netpush.VMUsage, error) {
+	var resp nodelink.NetUsageResp
+	if err := r.client.Do(ctx, nodelink.TypeNetUsage, struct{}{}, &resp); err != nil {
+		return nil, r.fail("net.usage", "", err)
+	}
+	// Re-keyed here rather than on the wire so the node sends a list — a map
+	// whose keys are node-authored strings would be a map this gateway indexes
+	// by something it has not clamped. The names are checked against the
+	// ledger by the caller, which drops anything not placed on this machine.
+	out := make(map[string]netpush.VMUsage, len(resp.VMs))
+	for _, u := range resp.VMs {
+		if u.Name == "" {
+			continue
+		}
+		out[u.Name] = u
+	}
+	return out, nil
 }
