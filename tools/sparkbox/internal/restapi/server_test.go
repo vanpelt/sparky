@@ -50,6 +50,7 @@ type testAPI struct {
 	h       http.Handler
 	handler *Handler
 	mgr     *host.Manager
+	driver  *mock.Driver
 	users   *users.Store
 	secrets *secrets.Store
 	routes  *routes.Store
@@ -130,7 +131,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		Subdomain: "api", Domain: testDomain, Log: log,
 	})
 	return &testAPI{
-		h: h.Handler(), handler: h, mgr: mgr, users: userStore,
+		h: h.Handler(), handler: h, mgr: mgr, driver: driver, users: userStore,
 		secrets: secretStore, routes: routeStore, sched: schedStore, signer: signer,
 	}
 }
@@ -842,6 +843,15 @@ func TestSandboxLifecycle(t *testing.T) {
 func TestRespondAsyncEscalatesToAJob(t *testing.T) {
 	ta := newTestAPI(t)
 	ta.create(t, "demo", "alice")
+
+	// respond-async waits out a zero-length window and then reports whichever
+	// outcome happened, so a pause that finishes inside the two statements
+	// between starting it and reading it answers 200 with the result — correct,
+	// and not the path under test here. This driver's pause is fast enough for
+	// that to come down to how the runner felt: it passed locally and on one CI
+	// runner while failing on another, same commit. The delay makes the job
+	// unambiguously still running, which is the state 202 exists to describe.
+	ta.driver.PauseDelay = 250 * time.Millisecond
 
 	rec := ta.doRaw(t, "POST", "/v1/sandboxes/demo/pause", "alice", nil, func(r *http.Request) {
 		r.Header.Set(edgeauth.MutationHeader, "1")
