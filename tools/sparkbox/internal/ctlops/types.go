@@ -22,12 +22,16 @@ type SandboxInfo struct {
 	Node string `json:"node,omitempty"`
 	// Unreachable reports that the node holding this sandbox is not answering
 	// the control plane. The sandbox is very likely still running.
-	Unreachable bool      `json:"unreachable,omitempty"`
-	Pinned      bool      `json:"pinned"`
-	Ballooned   bool      `json:"ballooned,omitempty"`
-	Tags        []string  `json:"tags"` // never nil
-	VCPUs       int64     `json:"vcpus"`
-	MemMB       int64     `json:"mem_mb"`
+	Unreachable bool     `json:"unreachable,omitempty"`
+	Pinned      bool     `json:"pinned"`
+	Ballooned   bool     `json:"ballooned,omitempty"`
+	Tags        []string `json:"tags"` // never nil
+	VCPUs       int64    `json:"vcpus"`
+	MemMB       int64    `json:"mem_mb"`
+	// Turbo says vcpus and mem_mb above are a doubled allocation borrowed for
+	// this run. Without it a listing would report a turbo sandbox's size as its
+	// own, and then appear to shrink it the next time the reaper pauses it.
+	Turbo       bool      `json:"turbo,omitempty"`
 	DiskMB      int64     `json:"disk_mb,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastActive  time.Time `json:"last_active"`

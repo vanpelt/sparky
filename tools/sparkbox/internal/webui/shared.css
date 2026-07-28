@@ -1,7 +1,13 @@
 /* sparkbox shared design tokens (shadcn "new-york", zinc) + base reset.
-   Shared between the operator console (internal/console) and the user
-   console (internal/userconsole) so the two read as siblings; each page adds
-   its own layout and component sizing on top of this. */
+   Shared between the operator console (internal/console), the user console
+   (internal/userconsole) and the browser terminal (internal/xterm) so the
+   three read as one product; each page adds its own layout and component
+   sizing on top of this.
+
+   Two components below are here because more than one page draws them and they
+   must not drift: the tooltip an icon-only button needs to have a name at all,
+   and the turbo switch, whose whole point is that it looks and behaves like the
+   same physical switch wherever you meet it. */
 :root {
   --background: 0 0% 100%;
   --foreground: 240 10% 3.9%;
@@ -77,6 +83,65 @@ button:disabled { opacity: .5; cursor: default; }
 .btn-primary:hover:not(:disabled) { opacity: .9; }
 .btn-outline { background: transparent; border-color: hsl(var(--border)); color: hsl(var(--foreground)); }
 .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+
+/* Tooltips. An icon-only button has no other name, so the label cannot wait
+   out the ~1s the browser's own tooltip takes; these show in a third of that
+   and follow keyboard focus. The full sentence stays in aria-label, where a
+   screen reader gets all of it. */
+.tip { position: relative; display: inline-flex; }
+.tip::after {
+  content: attr(data-tip); position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+  font-size: 11.5px; font-weight: 500; line-height: 1.3; letter-spacing: 0;
+  text-transform: none; padding: 4px 8px; border-radius: calc(var(--radius) - 4px);
+  white-space: nowrap; pointer-events: none; opacity: 0; transform: translateY(-3px);
+  transition: opacity .12s ease .3s, transform .12s ease .3s;
+}
+.tip:hover::after, .tip:focus-within::after { opacity: 1; transform: translateY(0); }
+/* Touch has no hover, so the bubble would only ever be triggered by the tap
+   that also fires the action — a label arriving after the fact. */
+@media (hover: none) { .tip::after { display: none } }
+
+/* ---------- turbo ----------
+   The one physical thing on a flat page, and the only place its boldness is
+   spent: a latching push-button off the front of a 1988 desktop, legend
+   letterspaced in the same utility register the stat labels use, with an LED
+   that lights when the switch is down. Colour is --amber, which already means
+   "look" everywhere else here — no new hue, just a new shape.
+
+   The travel is the whole trick. Raised, it carries a hairline shadow under
+   its bottom edge; pressed, it drops a pixel and the shadow goes inside. */
+.turbo {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  padding: 5px 9px 5px 8px; border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 3px); background: hsl(var(--card));
+  font-size: 9.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+  box-shadow: 0 1px 0 hsl(var(--border));
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.turbo:hover:not(:disabled) { color: hsl(var(--foreground)); border-color: hsl(var(--amber) / .45); }
+/* An unlit lamp: a dark recess, not a grey circle. */
+.turbo .led {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: hsl(var(--muted-foreground) / .3);
+  box-shadow: inset 0 0 0 1px hsl(240 10% 3.9% / .18);
+}
+.turbo[data-on="1"] {
+  color: hsl(var(--amber)); border-color: hsl(var(--amber) / .5);
+  background: hsl(var(--amber) / .12);
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 4px hsl(240 10% 3.9% / .22);
+}
+.turbo[data-on="1"] .led {
+  background: hsl(var(--amber));
+  box-shadow: 0 0 0 2px hsl(var(--amber) / .22), 0 0 7px hsl(var(--amber) / .8);
+}
+/* Mid-restart. The lamp blinks the way a drive light does — steps(), so it is
+   a lamp switching rather than a shape fading. */
+.turbo[data-busy="1"] .led { animation: led 1s steps(1) infinite; }
+@keyframes led { 50% { opacity: .2 } }
+@media (prefers-reduced-motion: reduce) { .turbo[data-busy="1"] .led { animation: none } }
 
 /* toast */
 #toast {

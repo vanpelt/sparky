@@ -64,6 +64,15 @@ type vitals struct {
 	// needs to turn a counter into a percentage. Always present.
 	VCPUs int64 `json:"vcpus"`
 	MemMB int64 `json:"mem_mb"`
+	// Turbo says the two above are a doubled allocation borrowed for this run.
+	// It rides the poll the page already makes rather than getting a route of
+	// its own: the lamp has to go dark the moment the idle reaper hands the
+	// resources back, which is a thing that happens to the sandbox and not a
+	// thing this page did.
+	Turbo bool `json:"turbo,omitempty"`
+	// TurboAvailable says this host will accept POST /turbo at all. The page
+	// hides the button rather than offering one that answers 501.
+	TurboAvailable bool `json:"turbo_available,omitempty"`
 	// Ballooned means the idle reaper has reclaimed some of this guest's RAM to
 	// the host, so MemMB is a ceiling it cannot currently reach.
 	Ballooned bool `json:"ballooned,omitempty"`
@@ -96,13 +105,15 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := vitals{
-		State:       box.State,
-		AtMS:        time.Now().UnixMilli(),
-		VCPUs:       box.VCPUs,
-		MemMB:       box.MemMB,
-		Ballooned:   box.Ballooned,
-		LifeRxBytes: box.NetRxBytes,
-		LifeTxBytes: box.NetTxBytes,
+		State:          box.State,
+		AtMS:           time.Now().UnixMilli(),
+		VCPUs:          box.VCPUs,
+		MemMB:          box.MemMB,
+		Turbo:          box.Turbo,
+		TurboAvailable: h.turbocharger != nil,
+		Ballooned:      box.Ballooned,
+		LifeRxBytes:    box.NetRxBytes,
+		LifeTxBytes:    box.NetTxBytes,
 	}
 	h.readVitals(r.Context(), box, &out)
 

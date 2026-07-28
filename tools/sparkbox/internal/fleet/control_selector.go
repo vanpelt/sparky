@@ -216,6 +216,9 @@ func (s *ControlSelector) Resize(ctx context.Context, name string, sizeMB int64)
 func (s *ControlSelector) Reboot(ctx context.Context, name string) error {
 	return s.choiceFor(ControlClassDestructive).Reboot(ctx, name)
 }
+func (s *ControlSelector) SetTurbo(ctx context.Context, name string, on bool) error {
+	return s.choiceFor(ControlClassDestructive).SetTurbo(ctx, name, on)
+}
 func (s *ControlSelector) Rename(ctx context.Context, oldName, newName, owner string) error {
 	return s.choiceFor(ControlClassDestructive).Rename(ctx, oldName, newName, owner)
 }

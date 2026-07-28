@@ -76,6 +76,7 @@ type Sandboxes interface {
 	Archive(ctx context.Context, name string) error
 	Destroy(ctx context.Context, name string) error
 	Reboot(ctx context.Context, name string) error
+	SetTurbo(ctx context.Context, name string, on bool) error
 	Rename(ctx context.Context, oldName, newName, owner string) error
 	SetPinned(name string, pinned bool) error
 	Snapshots(owner string) []*host.Snapshot
@@ -232,6 +233,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("POST /api/machines/{name}/snapshot", mutate(h.snapshot))
 	mux.Handle("POST /api/machines/{name}/rename", mutate(h.rename))
 	mux.Handle("POST /api/machines/{name}/reboot", mutate(h.reboot))
+	mux.Handle("POST /api/machines/{name}/turbo", mutate(h.turbo))
 	mux.Handle("POST /api/machines/{name}/port", mutate(h.setPort))
 	mux.Handle("PUT /api/machines/{name}/tags", mutate(h.setTags))
 	mux.Handle("POST /api/routes/{subdomain}/visibility", mutate(h.setVisibility))
@@ -610,6 +612,40 @@ func (h *Handler) reboot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.Info("user console rebooted sandbox", "name", name, "handle", handleFrom(r))
+	box, _ := h.boxes.Get(name)
+	writeJSON(w, http.StatusOK, webui.Public(box))
+}
+
+type turboReq struct {
+	On bool `json:"on"`
+}
+
+// turbo restarts a machine with doubled CPU and RAM, or back at its own size.
+// It is a cold boot — firecracker has no CPU hotplug and a balloon can only
+// give memory back, never borrow more — so the guest's processes stop, which
+// is what the console's confirmation says before it gets here.
+//
+// The extra allocation lasts one run: the manager hands it back on the next
+// pause, idle reap included. It takes the reboot budget rather than the pause
+// one because the round trip is a pause plus a cold boot.
+func (h *Handler) turbo(w http.ResponseWriter, r *http.Request) {
+	_, name, ok := h.ownedBox(r)
+	if !ok {
+		notFoundBox(w, name)
+		return
+	}
+	var req turboReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)
+	defer cancel()
+	if err := h.boxes.SetTurbo(ctx, name, req.On); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("user console set turbo", "name", name, "on", req.On, "handle", handleFrom(r))
 	box, _ := h.boxes.Get(name)
 	writeJSON(w, http.StatusOK, webui.Public(box))
 }

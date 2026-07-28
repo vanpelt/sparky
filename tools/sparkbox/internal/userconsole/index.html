@@ -55,10 +55,27 @@
   .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
   .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
   a.btn-primary { text-decoration: none; padding: 7px 13px; }
-  /* icon button (the ··· overflow trigger) */
-  .btn-icon { padding: 5px; width: 28px; height: 28px; color: hsl(var(--muted-foreground)); }
+  /* icon button — the ··· overflow trigger, and the two header actions worth a
+     single click. They lose their words on purpose: a row of four outlined text
+     buttons was the loudest thing on a card whose job is to show numbers. */
+  .btn-icon { padding: 5px; width: 28px; height: 28px; color: hsl(var(--muted-foreground));
+    justify-content: center; }
   .btn-icon:hover:not(:disabled), .btn-icon[aria-expanded="true"] { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
   .btn-icon svg { width: 15px; height: 15px; }
+  .btn-icon.btn-outline { color: hsl(var(--foreground)); }
+  /* A toggle that is currently ON — the pin of a pinned machine. Clicking it
+     turns the thing off, which is why it has to look switched on. */
+  .btn-icon.on { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+
+  /* The switch is set apart from the two routine controls because it is the one
+     that changes the machine's shape — the same reason it sat away from reset on
+     the case it is borrowed from. */
+  .m-actions .m-div { width: 1px; align-self: stretch; margin: 2px 3px;
+    background: hsl(var(--border)); }
+  /* The multiplier beside the doubled spec: the readout that used to flip from
+     16 to 33 on the front panel, except the numbers next to it are real. */
+  .x2 { font-size: 10px; font-weight: 700; letter-spacing: .02em; color: hsl(var(--amber));
+    border: 1px solid hsl(var(--amber) / .35); border-radius: 4px; padding: 0 4px; margin-left: 2px; }
 
   /* tabs */
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid hsl(var(--border)); margin-bottom: 16px; }
@@ -502,6 +519,16 @@
     </div>
   </dialog>
 
+  <!-- TURBO -->
+  <dialog id="turbo-dlg">
+    <h3 id="turbo-title">Turn on turbo</h3>
+    <p id="turbo-msg"></p>
+    <div class="row">
+      <button class="btn-outline" id="turbo-cancel" type="button">Cancel</button>
+      <button class="btn-primary" id="turbo-go" type="button">Turn on turbo</button>
+    </div>
+  </dialog>
+
   <!-- REMOVE CONFIRMATION -->
   <dialog id="confirm-dlg">
     <h3>Remove machine</h3>
@@ -606,6 +633,62 @@
     return r.json().catch(() => null);
   }
 
+  // How much turbo multiplies a machine by. It matches host.TurboFactor; the
+  // page only ever renders it, the manager is what allocates by it.
+  const TURBO_FACTOR = 2;
+
+  // The header's icon vocabulary. Line icons at 15px, stroked in currentColor
+  // so they inherit the button's state — except the two transport glyphs, which
+  // are solid, because a play triangle and a pause bar are shapes everyone has
+  // seen filled and nobody has seen outlined.
+  const ICON = {
+    // A prompt: the one glyph that means "shell" to the people who live in one.
+    term: '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/>' +
+      '<path d="M7 9.5 10 12l-3 2.5"/><path d="M12.5 15.5H17"/>',
+    pause: '<rect x="7" y="5" width="3.6" height="14" rx="1.2" fill="currentColor" stroke="none"/>' +
+      '<rect x="13.4" y="5" width="3.6" height="14" rx="1.2" fill="currentColor" stroke="none"/>',
+    play: '<path d="M8.6 5.7 18.5 12l-9.9 6.3Z" fill="currentColor" stroke-width="2.6"/>',
+    // Restore is not resume: it pulls a multi-GB rootfs back out of object
+    // storage first, so it gets its own glyph rather than a play triangle that
+    // would promise the same wait as starting a paused box.
+    restore: '<path d="M12 3.5v10.5"/><path d="m8.2 10.3 3.8 3.7 3.8-3.7"/><path d="M4.5 18.5h15"/>',
+    pin: '<path d="M12 16.5V22"/><path d="M9.2 2.5h5.6l-.9 6.2 2.9 3v2.3H7.2v-2.3l2.9-3z"/>',
+  };
+
+  // iconBtn renders one header action. tip is the short label the bubble shows;
+  // label is the whole sentence, which only a screen reader hears — an icon has
+  // no other name, so it must have both.
+  function iconBtn(path, tip, label, attrs, extra) {
+    return '<span class="tip" data-tip="' + esc(tip) + '">' +
+      '<button class="btn-icon btn-outline' + (extra ? " " + extra : "") + '" ' + attrs +
+      ' aria-label="' + esc(label) + '">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" ' +
+      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + "</svg>" +
+      "</button></span>";
+  }
+
+  // turboSwitch renders the latching push-button. It reports its own state
+  // rather than the pending one: the LED is lit when the machine is actually
+  // running doubled, and blinks only for as long as the restart takes.
+  function turboSwitch(b) {
+    const on = !!b.turbo;
+    // The blink is derived from the in-flight set rather than set on the
+    // element, so the 4s repaint that rebuilds this card mid-restart puts the
+    // lamp back the way it found it.
+    const busy = inflight.has("turbo:" + b.name);
+    const tip = busy ? "Restarting…"
+      : on ? "Turbo on — " + TURBO_FACTOR + "× resources"
+      : "Turbo — " + TURBO_FACTOR + "× resources";
+    return '<span class="tip" data-tip="' + esc(tip) + '">' +
+      '<button class="turbo" data-turbo="' + esc(b.name) + '"' + (busy ? ' data-busy="1"' : "") +
+      ' data-on="' + (on ? 1 : 0) +
+      '" aria-pressed="' + (on ? "true" : "false") +
+      '" aria-label="' + (on
+        ? "Turn off turbo and restart this machine at its usual size"
+        : "Turn on turbo: restart this machine with " + TURBO_FACTOR + "× the CPU and RAM") +
+      '"><span class="led"></span>Turbo</button></span>';
+  }
+
   function meterHTML(used, total) {
     const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
     const cls = pct >= 90 ? " hot" : pct >= 70 ? " warn" : "";
@@ -682,7 +765,8 @@
   // half-typed tag never gets wiped by a poll.
   function editing() {
     const ae = document.activeElement;
-    if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open) return true;
+    if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open ||
+        $("turbo-dlg").open) return true;
     // an open ··· overflow menu counts as mid-interaction: the 4s repaint would
     // otherwise rebuild the card and snap the menu shut under the cursor.
     if (document.querySelector("#machine-list .menu-pop:not(.hidden)")) return true;
@@ -725,6 +809,7 @@
   function inflightKey(btn) {
     const d = btn.dataset;
     if (d.act) return "act:" + d.name + ":" + d.act;
+    if (d.turbo) return "turbo:" + d.turbo;
     if (d.snap) return "snap:" + d.snap;
     if (d.vis) return "vis:" + d.sub;
     if (d.untag) return "tags:" + d.name;
@@ -878,16 +963,20 @@
     // restore is a multi-GB download, far longer than a browser will hold a
     // pending WebSocket, so the honest path there is Restore first.
     const termBtn = (termSub && !isArchived)
-      ? '<button class="btn-outline btn-sm" data-term="' + esc(b.name) +
-        '" data-running="' + (isRunning ? 1 : 0) +
-        '" title="open a shell in this machine in a new window' +
-        (isRunning ? "" : " — resumes it first") + '">Terminal</button>'
+      ? iconBtn(ICON.term, "Terminal",
+          "Open a shell in this machine in a new window" +
+            (isRunning ? "" : " — resumes it first"),
+          'data-term="' + esc(b.name) + '" data-running="' + (isRunning ? 1 : 0) + '"')
       : "";
 
     const stateBtn = isRunning
-      ? '<button class="btn-outline btn-sm" data-act="pause" data-name="' + esc(b.name) + '">Pause</button>'
-      : '<button class="btn-outline btn-sm" data-act="resume" data-name="' + esc(b.name) + '">' +
-        (isArchived ? "Restore" : "Resume") + "</button>";
+      ? iconBtn(ICON.pause, "Pause", "Pause this machine and hand its RAM back to the host",
+          'data-act="pause" data-name="' + esc(b.name) + '"')
+      : isArchived
+        ? iconBtn(ICON.restore, "Restore", "Pull this machine back from object storage and start it",
+            'data-act="resume" data-name="' + esc(b.name) + '"')
+        : iconBtn(ICON.play, "Resume", "Start this machine again",
+            'data-act="resume" data-name="' + esc(b.name) + '"');
     const rebootBtn = isArchived ? "" :
       '<button class="btn-outline btn-sm" data-act="reboot" data-name="' + esc(b.name) +
       '" title="cold-boot: running processes restart and pick up secret changes">Reboot</button>';
@@ -902,6 +991,11 @@
     const pinBtn = isArchived ? "" : (b.pinned
       ? '<button class="btn-outline btn-sm" data-act="unpin" data-name="' + esc(b.name) + '">Unpin</button>'
       : '<button class="btn-outline btn-sm" data-act="pin" data-name="' + esc(b.name) + '">Pin</button>');
+    // A pinned running machine's header control is the pin itself, switched on:
+    // clicking it is what unpins, and a toggle you turn off has to look on.
+    const pinIcon = iconBtn(ICON.pin, "Unpin",
+      "Unpin — let the idle reaper pause this machine again",
+      'data-act="unpin" data-name="' + esc(b.name) + '"', "on");
     // A pinned running machine is exempt from the idle reaper; pausing it
     // directly would just be undone, so its power action is unpinning. But
     // pinned does not imply running (a pin whose warm-up failed, or an
@@ -920,7 +1014,10 @@
       '<button class="btn-danger" data-delbox="' + esc(b.name) + '" data-archived="' + (isArchived ? 1 : 0) +
       '" title="permanently remove this machine and its disk">Remove…</button>';
 
-    const powerBtn = (b.pinned && isRunning) ? pinBtn : stateBtn;
+    const powerBtn = (b.pinned && isRunning) ? pinIcon : stateBtn;
+    // The turbo switch. Not offered for an archived machine — there is nothing
+    // running to make faster, and the restore has to happen first either way.
+    const turboBtn = isArchived ? "" : turboSwitch(b);
     const coreItems = isArchived ? [] : [
       rebootBtn, snapBtn, renameBtn, portItem, archiveBtn,
       (b.pinned && isRunning) ? "" : pinBtn,
@@ -936,7 +1033,8 @@
         ' aria-expanded="false" title="More actions" aria-label="More actions">' + dots + "</button>" +
         '<div class="menu-pop hidden">' + menuItems.join("") + "</div></div>"
       : "";
-    const actions = termBtn + powerBtn + menuHTML;
+    const actions = termBtn + powerBtn +
+      (turboBtn ? '<span class="m-div"></span>' + turboBtn : "") + menuHTML;
 
     const pinBadge = b.pinned
       ? '<span class="badge pinned"><span class="dot"></span>pinned</span>' : "";
@@ -955,8 +1053,10 @@
       '<div class="m-head">' +
         '<div class="m-title">' +
           '<span class="name mono">' + esc(b.name) + "</span>" + badge(b.state) + pinBadge + offBadge +
-          '<span class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB · " +
-            esc(b.image || "–") + (b.node ? " · " + esc(b.node) : "") +
+          '<span class="spec">' + (b.vcpus || 1) + " vCPU · " + gb(b.mem_mb) + " GB" +
+            (b.turbo ? ' <span class="x2" title="turbo: double this machine\'s usual CPU and RAM, until it next pauses">' +
+              TURBO_FACTOR + '\u00d7</span> ' : " ") + "· " +
+            esc(b.image || "\u2013") + (b.node ? " · " + esc(b.node) : "") +
             " · active " + rel(b.last_active) + "</span>" +
         "</div>" +
         '<div class="m-actions">' + actions + "</div>" +
@@ -1041,6 +1141,11 @@
       btn.addEventListener("click", () => openRemove(btn.dataset.delbox, btn.dataset.archived === "1")));
     wrap.querySelectorAll("button[data-netexp]").forEach((btn) =>
       btn.addEventListener("click", () => toggleNet(btn.dataset.netexp)));
+    wrap.querySelectorAll("button[data-turbo]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const b = list.find((x) => x.name === btn.dataset.turbo);
+        if (b) openTurbo(b);
+      }));
     reapplyInflight(wrap);
   }
 
@@ -1097,6 +1202,60 @@
     } finally {
       btn.disabled = false;
     }
+  });
+
+  // ---- turbo ----
+
+  // Turbo is a cold boot with a bigger machine underneath: firecracker has no
+  // CPU hotplug, and a memory balloon can only hand RAM back to the host, never
+  // borrow more than the VM was built with. So the guest's processes stop, and
+  // the dialog says exactly that before anything happens — this is the one
+  // control on the page that looks playful and isn't free.
+  function openTurbo(b) {
+    const on = !b.turbo;
+    const dlg = $("turbo-dlg");
+    dlg._name = b.name;
+    dlg._on = on;
+    const vcpus = b.vcpus || 1;
+    const size = (n, mb) => n + " vCPU and " + gb(mb) + " GB";
+    const now = size(vcpus, b.mem_mb);
+    const next = on
+      ? size(vcpus * TURBO_FACTOR, (b.mem_mb || 0) * TURBO_FACTOR)
+      : size(Math.round(vcpus / TURBO_FACTOR), Math.round((b.mem_mb || 0) / TURBO_FACTOR));
+    // A paused machine has no processes to lose and is being started, not
+    // restarted. Saying "running processes stop" to somebody looking at a
+    // stopped machine is the kind of warning that teaches people to skip them.
+    const live = b.state === "running";
+    const verb = live ? "Restarts" : "Starts";
+    $("turbo-title").textContent = on ? "Turn on turbo" : "Turn off turbo";
+    $("turbo-go").textContent = on ? "Turn on turbo" : "Turn off turbo";
+    $("turbo-msg").innerHTML = (on
+      ? verb + ' <span class="mono">' + esc(b.name) + "</span> with <strong>" + esc(next) +
+        "</strong> — " + TURBO_FACTOR + "× its usual " + esc(now) + "."
+      : verb + ' <span class="mono">' + esc(b.name) + "</span> back at <strong>" + esc(next) +
+        "</strong>, down from " + esc(now) + ".") +
+      (live ? " Running processes stop: this is a cold boot, not a resize." : "") +
+      (on ? " Turbo lasts until the machine pauses — an idle pause counts." : "");
+    dlg.showModal();
+    $("turbo-go").focus();
+  }
+
+  $("turbo-cancel").addEventListener("click", () => $("turbo-dlg").close());
+  $("turbo-go").addEventListener("click", async () => {
+    const dlg = $("turbo-dlg");
+    const name = dlg._name;
+    const on = dlg._on;
+    const btn = $("turbo-go");
+    dlg.close();
+    // The switch on the card is what shows the work, not the dialog: the
+    // restart takes a while and the card is what the user is left looking at.
+    const sw = document.querySelector('#machine-list button[data-turbo="' + CSS.escape(name) + '"]');
+    if (sw) sw.setAttribute("data-busy", "1");
+    await mutate("turbo:" + name, sw || btn, async () => {
+      await api("/api/machines/" + encodeURIComponent(name) + "/turbo",
+        { method: "POST", body: { on: on } });
+      toast(on ? name + " is in turbo" : name + " is back to its usual size");
+    });
   });
 
   // ---- default-port dialog ----

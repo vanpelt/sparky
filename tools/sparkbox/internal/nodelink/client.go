@@ -93,6 +93,7 @@ type Manager interface {
 	Archive(ctx context.Context, name string) error
 	Resize(ctx context.Context, name string, sizeMB int64) error
 	Reboot(ctx context.Context, name string) error
+	SetTurbo(ctx context.Context, name string, on bool) error
 	Rename(ctx context.Context, oldName, newName, owner string) error
 	Destroy(ctx context.Context, name string) error
 	SetPinned(name string, pinned bool) error

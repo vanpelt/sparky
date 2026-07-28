@@ -10,6 +10,7 @@ package userconsole
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -169,6 +170,11 @@ func (f *fakeBoxes) Destroy(_ context.Context, name string) error {
 
 func (f *fakeBoxes) Reboot(_ context.Context, name string) error {
 	f.calls = append(f.calls, "reboot "+name)
+	return nil
+}
+
+func (f *fakeBoxes) SetTurbo(_ context.Context, name string, on bool) error {
+	f.calls = append(f.calls, fmt.Sprintf("turbo %s %t", name, on))
 	return nil
 }
 

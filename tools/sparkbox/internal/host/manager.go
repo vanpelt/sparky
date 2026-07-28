@@ -230,7 +230,32 @@ type Sandbox struct {
 	// treats "not running" as "safe to ignore", which is right, and a fourth
 	// value would have to be handled in all of them.
 	Unreachable bool `json:"unreachable,omitempty"`
+	// Turbo means this sandbox is currently booted with doubled CPU and RAM —
+	// VCPUs and MemMB above hold the doubled figures, and BaseVCPUs/BaseMemMB
+	// remember what to go back to.
+	//
+	// The doubling lives in VCPUs/MemMB rather than beside them so that nothing
+	// downstream has to know about turbo at all: admission, the balloon target,
+	// the vmm.Config a cold boot is built from and every meter's denominator all
+	// keep reading the one pair of fields that has always meant "what this VM
+	// has". Turbo is the bit that says those two are borrowed.
+	//
+	// It lasts exactly one run. Every path that stops the VM goes through
+	// Manager.pause, which hands the resources back — so an idle reap, an
+	// explicit pause, a reboot or a rename all end turbo, and the next resume
+	// comes up at the sandbox's own size. See SetTurbo.
+	Turbo bool `json:"turbo,omitempty"`
+	// BaseVCPUs and BaseMemMB are the sandbox's own allocation, held aside while
+	// Turbo is on. Zero when it is off — the fields have no meaning then, and an
+	// omitted pair is what every record written before turbo existed looks like.
+	BaseVCPUs int64 `json:"base_vcpus,omitempty"`
+	BaseMemMB int64 `json:"base_mem_mb,omitempty"`
 }
+
+// TurboFactor is how much a turbo boot multiplies a sandbox's CPU and RAM by.
+// One constant, because the console renders the multiplier it promises ("2×")
+// from the same number the manager allocates with.
+const TurboFactor = 2
 
 // ScheduleCleaner drops a sandbox's platform-scheduler entries when it is
 // destroyed, so a deleted sandbox leaves no jobs that would wake a ghost
@@ -1218,9 +1243,165 @@ func (m *Manager) pause(ctx context.Context, name, reason string) error {
 	// after a resume starts from zero over an interval spanning the whole pause.
 	// Re-priming costs one tick and keeps that from reading as a rate.
 	delete(m.vitals, name)
+	// Turbo is borrowed for exactly one run, and this is where it is handed
+	// back — every path that stops a VM arrives here, so there is one place
+	// that has to remember rather than four that have to agree.
+	m.endTurbo(b)
 	m.log.Info("sandbox paused", "name", name)
 	m.observe(b, "paused")
 	return m.save()
+}
+
+// endTurbo returns a paused sandbox to its own CPU and RAM. Callers hold m.mu
+// and have already stopped the VM.
+//
+// The memory snapshot the driver just wrote goes with the allocation. A
+// firecracker guest's shape is baked into its snapshot — the same reason Resize
+// must never resume onto a grown disk — so a snapshot of a doubled machine
+// resumed under a record that says otherwise gives a VM twice the size the
+// control plane is accounting for, invisibly. Dropping it forces the next
+// resume through a cold boot at the size the record now claims.
+func (m *Manager) endTurbo(b *Sandbox) {
+	if !b.Turbo {
+		return
+	}
+	// Nothing should be able to reach this: SetTurbo refuses on a host whose
+	// driver cannot drop snapshots, so no sandbox there is ever turbo. If it
+	// somehow is, the flag stays on — a record that overstates what the guest
+	// has is recoverable, one that understates it is a silent overcommit.
+	if m.rebooter == nil || b.BaseVCPUs <= 0 || b.BaseMemMB <= 0 {
+		m.log.Warn("turbo cannot be released", "name", b.Name)
+		return
+	}
+	if err := m.rebooter.DropSnapshots(b.Name); err != nil {
+		m.log.Warn("turbo release: drop snapshots", "name", b.Name, "err", err)
+		return
+	}
+	m.log.Info("turbo released", "name", b.Name, "vcpus", b.BaseVCPUs, "mem_mb", b.BaseMemMB)
+	b.VCPUs, b.MemMB = b.BaseVCPUs, b.BaseMemMB
+	b.BaseVCPUs, b.BaseMemMB = 0, 0
+	b.Turbo = false
+}
+
+// SetTurbo restarts a sandbox with TurboFactor times its CPU and RAM (on), or
+// back at its own size (off), and leaves it running either way.
+//
+// It is a cold boot, not a resize, and it cannot be anything else: firecracker
+// has no CPU hotplug, and the balloon can only hand memory back to the host —
+// never borrow more than the machine was configured with. So the guest's
+// processes stop. Every caller says so before asking.
+//
+// The extra allocation lasts one run. Manager.pause hands it back, which means
+// an idle reap, an explicit pause, a reboot and a rename all end it — turbo is
+// a thing you do to the session you are in, not a size you set.
+func (m *Manager) SetTurbo(ctx context.Context, name string, on bool) error {
+	if m.rebooter == nil {
+		return errors.New("turbo is not enabled on this host (driver cannot drop snapshots)")
+	}
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	if b.State == vmm.StateArchived {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %q is archived; restore it first", name)
+	}
+	if b.Turbo == on {
+		// Already the size being asked for. Restarting the guest to tell the
+		// caller nothing changed would be the most expensive possible no-op.
+		m.mu.Unlock()
+		return nil
+	}
+	if on {
+		// Check what the boot will cost before anything is torn down. EnsureReady
+		// checks it again for real, but failing here leaves the sandbox running at
+		// its own size rather than paused with an apology.
+		if err := m.admit(b.Owner, b.MemMB*TurboFactor, b.DiskMB, b.Name); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+	}
+	m.mu.Unlock()
+
+	reason := "is restarting at its normal size"
+	if on {
+		reason = "is restarting in turbo mode"
+	}
+	// The same pause/drop dance as Reboot, including its re-check: a client
+	// whose session we just hung up reconnects immediately, and reconnecting
+	// resumes the box out from under us.
+	for attempt := 0; ; attempt++ {
+		if err := m.pause(ctx, name, reason); err != nil {
+			return fmt.Errorf("turbo %s: pause: %w", name, err)
+		}
+		m.mu.Lock()
+		b, ok = m.boxes[name]
+		if !ok {
+			m.mu.Unlock()
+			return fmt.Errorf("sandbox %q not found", name)
+		}
+		if b.State != vmm.StatePaused {
+			m.mu.Unlock()
+			if attempt > 0 {
+				return fmt.Errorf("turbo %s: sandbox keeps being resumed mid-change; try again", name)
+			}
+			continue
+		}
+		// Turning turbo off is already done: the pause above handed the
+		// allocation back and dropped the snapshot with it, so all that is left
+		// is the cold boot below. Turning it on needs the same snapshot drop for
+		// the same reason, and then the new size written down.
+		var err error
+		if on {
+			if err = m.rebooter.DropSnapshots(name); err == nil {
+				b.BaseVCPUs, b.BaseMemMB = b.VCPUs, b.MemMB
+				b.VCPUs, b.MemMB = b.VCPUs*TurboFactor, b.MemMB*TurboFactor
+				b.Turbo = true
+				err = m.save()
+			}
+		} else if b.Turbo {
+			// endTurbo could not let go — its snapshot drop failed. Say so
+			// instead of cold-booting a guest that is about to come back at the
+			// size the caller just asked to leave.
+			err = fmt.Errorf("could not release the turbo allocation; try again")
+		}
+		m.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("turbo %s: %w", name, err)
+		}
+		break
+	}
+
+	if _, err := m.EnsureReady(ctx, name); err != nil {
+		// The size is committed but the guest did not come up. Put the record
+		// back, so that the next resume — quite possibly an automatic one, from
+		// a web request or a reconnecting terminal — asks for an allocation this
+		// host has already served.
+		m.revertTurbo(name)
+		return fmt.Errorf("turbo %s: %w", name, err)
+	}
+	m.log.Info("turbo set", "name", name, "on", on)
+	m.observeName(name, "turbo")
+	return nil
+}
+
+// revertTurbo undoes an uncommitted turbo allocation after a failed boot. The
+// sandbox is paused and its snapshot already gone, so only the record moves.
+func (m *Manager) revertTurbo(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok || !b.Turbo || b.BaseVCPUs <= 0 || b.BaseMemMB <= 0 {
+		return
+	}
+	b.VCPUs, b.MemMB = b.BaseVCPUs, b.BaseMemMB
+	b.BaseVCPUs, b.BaseMemMB = 0, 0
+	b.Turbo = false
+	if err := m.save(); err != nil {
+		m.log.Warn("turbo revert: save", "name", name, "err", err)
+	}
 }
 
 // Reboot cold-restarts a sandbox's guest: pause, discard the memory snapshot,

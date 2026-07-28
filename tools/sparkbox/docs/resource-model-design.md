@@ -318,6 +318,44 @@ Archive stays **manual** in v1 (no auto-archive reaper tier yet); the natural ne
 step is driving Paused→Stopped→Archived on idle + disk pressure, which slots onto
 this same machinery.
 
+## Part 9 — Turbo: double the machine, for one run (✅ landed)
+
+The other half of "burstable compute" (Part 4), taken from the front of an 80s
+desktop: a latching **turbo** switch in the user console's machine card and in
+the browser terminal's header that restarts a sandbox with **2× its vCPUs and
+2× its RAM**, and hands them back at the next pause.
+
+- **It is a cold boot, and it cannot be anything else.** Firecracker has no CPU
+  hotplug, and the balloon can only *return* memory to the host — it can never
+  borrow more than the VM was configured with. So `Manager.SetTurbo` is the
+  Part 6 pause → **drop the memory snapshot** → cold-boot dance that `Reboot`
+  and `Resize` already use, with the new size written between the drop and the
+  boot. Both UIs say so before they ask.
+- **The doubling lives in `VCPUs`/`MemMB`,** with the sandbox's own figures held
+  aside in `BaseVCPUs`/`BaseMemMB`. Nothing downstream had to learn about turbo:
+  admission (Part 5), the balloon target, the `vmm.Config` the cold boot is
+  built from, and every meter's denominator all keep reading the one pair of
+  fields that has always meant "what this VM has".
+- **One run, and `pause` is the single place that ends it.** Every path that
+  stops a guest goes through `Manager.pause`, so an idle reap, an explicit
+  pause, a reboot and a rename all release the allocation — one place that has
+  to remember instead of four that have to agree. The snapshot goes with it: a
+  guest's shape is baked into its memory image, so a 2×-sized snapshot resumed
+  under a 1× record would be a silent overcommit.
+- **Admission runs before anything is torn down.** A host that cannot afford the
+  doubled boot refuses with the sandbox still running at its own size, rather
+  than parking it with an apology. If the cold boot itself fails, the record is
+  reverted so the next (possibly automatic) resume asks for an allocation this
+  host has already served.
+- **Fleet-wide**, over both control transports (`NodeControl.BeginSetTurbo` and
+  the legacy `sandbox.turbo` frame). The multiplier deliberately does not cross
+  the wire — the machine that allocates decides what turbo means, so a gateway
+  and a node on different releases cannot disagree.
+
+Open: turbo is currently free and unmetered. The obvious next step is charging
+it against the same burstable budget Part 4 describes, and a per-owner ceiling
+on how many machines may be in turbo at once.
+
 ## What we already have (so this is mostly policy, not new mechanics)
 
 - Snapshot pause/resume, resume-on-connect over SSH **and** HTTP, thin CoW rootfs,

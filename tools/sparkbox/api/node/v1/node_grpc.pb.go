@@ -31,6 +31,7 @@ const (
 	NodeControl_BeginArchive_FullMethodName           = "/sparkbox.node.v1.NodeControl/BeginArchive"
 	NodeControl_BeginResize_FullMethodName            = "/sparkbox.node.v1.NodeControl/BeginResize"
 	NodeControl_BeginReboot_FullMethodName            = "/sparkbox.node.v1.NodeControl/BeginReboot"
+	NodeControl_BeginSetTurbo_FullMethodName          = "/sparkbox.node.v1.NodeControl/BeginSetTurbo"
 	NodeControl_BeginRename_FullMethodName            = "/sparkbox.node.v1.NodeControl/BeginRename"
 	NodeControl_BeginDestroy_FullMethodName           = "/sparkbox.node.v1.NodeControl/BeginDestroy"
 	NodeControl_BeginSetPinned_FullMethodName         = "/sparkbox.node.v1.NodeControl/BeginSetPinned"
@@ -64,6 +65,7 @@ type NodeControlClient interface {
 	BeginArchive(ctx context.Context, in *ArchiveRequest, opts ...grpc.CallOption) (*Operation, error)
 	BeginResize(ctx context.Context, in *ResizeRequest, opts ...grpc.CallOption) (*Operation, error)
 	BeginReboot(ctx context.Context, in *RebootRequest, opts ...grpc.CallOption) (*Operation, error)
+	BeginSetTurbo(ctx context.Context, in *SetTurboRequest, opts ...grpc.CallOption) (*Operation, error)
 	BeginRename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*Operation, error)
 	BeginDestroy(ctx context.Context, in *DestroyRequest, opts ...grpc.CallOption) (*Operation, error)
 	BeginSetPinned(ctx context.Context, in *SetPinnedRequest, opts ...grpc.CallOption) (*Operation, error)
@@ -202,6 +204,16 @@ func (c *nodeControlClient) BeginReboot(ctx context.Context, in *RebootRequest, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Operation)
 	err := c.cc.Invoke(ctx, NodeControl_BeginReboot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *nodeControlClient) BeginSetTurbo(ctx context.Context, in *SetTurboRequest, opts ...grpc.CallOption) (*Operation, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Operation)
+	err := c.cc.Invoke(ctx, NodeControl_BeginSetTurbo_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +377,7 @@ type NodeControlServer interface {
 	BeginArchive(context.Context, *ArchiveRequest) (*Operation, error)
 	BeginResize(context.Context, *ResizeRequest) (*Operation, error)
 	BeginReboot(context.Context, *RebootRequest) (*Operation, error)
+	BeginSetTurbo(context.Context, *SetTurboRequest) (*Operation, error)
 	BeginRename(context.Context, *RenameRequest) (*Operation, error)
 	BeginDestroy(context.Context, *DestroyRequest) (*Operation, error)
 	BeginSetPinned(context.Context, *SetPinnedRequest) (*Operation, error)
@@ -422,6 +435,9 @@ func (UnimplementedNodeControlServer) BeginResize(context.Context, *ResizeReques
 }
 func (UnimplementedNodeControlServer) BeginReboot(context.Context, *RebootRequest) (*Operation, error) {
 	return nil, status.Error(codes.Unimplemented, "method BeginReboot not implemented")
+}
+func (UnimplementedNodeControlServer) BeginSetTurbo(context.Context, *SetTurboRequest) (*Operation, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginSetTurbo not implemented")
 }
 func (UnimplementedNodeControlServer) BeginRename(context.Context, *RenameRequest) (*Operation, error) {
 	return nil, status.Error(codes.Unimplemented, "method BeginRename not implemented")
@@ -670,6 +686,24 @@ func _NodeControl_BeginReboot_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(NodeControlServer).BeginReboot(ctx, req.(*RebootRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _NodeControl_BeginSetTurbo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTurboRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeControlServer).BeginSetTurbo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeControl_BeginSetTurbo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeControlServer).BeginSetTurbo(ctx, req.(*SetTurboRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -947,6 +981,10 @@ var NodeControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BeginReboot",
 			Handler:    _NodeControl_BeginReboot_Handler,
+		},
+		{
+			MethodName: "BeginSetTurbo",
+			Handler:    _NodeControl_BeginSetTurbo_Handler,
 		},
 		{
 			MethodName: "BeginRename",

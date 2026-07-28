@@ -114,6 +114,7 @@ const (
 	TypeArchive       = "sandbox.archive"
 	TypeResize        = "sandbox.resize"
 	TypeReboot        = "sandbox.reboot"
+	TypeTurbo         = "sandbox.turbo"
 	TypeRename        = "sandbox.rename"
 	TypeDestroy       = "sandbox.destroy"
 	TypeSetPinned     = "sandbox.set_pinned"
@@ -610,23 +611,26 @@ type Cancel struct {
 // column is the authorization input, and the gateway overwrites this one from
 // it before the record is indexed.
 type SandboxRow struct {
-	Name        string    `json:"name"`
-	Owner       string    `json:"owner"`
-	Image       string    `json:"image"`
-	State       string    `json:"state"`
-	VCPUs       int64     `json:"vcpus"`
-	MemMB       int64     `json:"mem_mb"`
-	DiskMB      int64     `json:"disk_mb,omitempty"`
-	DiskTotalMB int64     `json:"disk_total_mb,omitempty"`
-	Pinned      bool      `json:"pinned,omitempty"`
-	Ballooned   bool      `json:"ballooned,omitempty"`
-	SSHUser     string    `json:"ssh_user,omitempty"`
-	KeyFP       string    `json:"key_fp,omitempty"`
-	NetRxBytes  uint64    `json:"net_rx_bytes,omitempty"`
-	NetTxBytes  uint64    `json:"net_tx_bytes,omitempty"`
-	ArchivedAt  time.Time `json:"archived_at,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	LastActive  time.Time `json:"last_active"`
+	Name        string `json:"name"`
+	Owner       string `json:"owner"`
+	Image       string `json:"image"`
+	State       string `json:"state"`
+	VCPUs       int64  `json:"vcpus"`
+	MemMB       int64  `json:"mem_mb"`
+	DiskMB      int64  `json:"disk_mb,omitempty"`
+	DiskTotalMB int64  `json:"disk_total_mb,omitempty"`
+	Pinned      bool   `json:"pinned,omitempty"`
+	Ballooned   bool   `json:"ballooned,omitempty"`
+	SSHUser     string `json:"ssh_user,omitempty"`
+	KeyFP       string `json:"key_fp,omitempty"`
+	NetRxBytes  uint64 `json:"net_rx_bytes,omitempty"`
+	NetTxBytes  uint64 `json:"net_tx_bytes,omitempty"`
+	// Turbo says VCPUs and MemMB above are a doubled allocation borrowed for
+	// this run, which the node hands back the moment the sandbox pauses.
+	Turbo      bool      `json:"turbo,omitempty"`
+	ArchivedAt time.Time `json:"archived_at,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastActive time.Time `json:"last_active"`
 }
 
 // SnapshotRow is a fork template as the gateway sees it. Snapshots are
@@ -724,6 +728,15 @@ type CreateReq struct {
 type ResizeReq struct {
 	Name   string `json:"name"`
 	SizeMB int64  `json:"size_mb"`
+}
+
+// TurboReq asks a node to cold-boot a sandbox with doubled CPU and RAM, or
+// back at its own size. The multiplier is deliberately not on the wire: the
+// machine that allocates the resources is the one that decides what turbo
+// means, so a gateway and a node on different releases cannot disagree.
+type TurboReq struct {
+	Name string `json:"name"`
+	On   bool   `json:"on"`
 }
 
 type RenameReq struct {

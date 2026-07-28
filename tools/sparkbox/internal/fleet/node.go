@@ -123,6 +123,11 @@ type ControlPlane interface {
 	Archive(ctx context.Context, name string) error
 	Resize(ctx context.Context, name string, sizeMB int64) error
 	Reboot(ctx context.Context, name string) error
+	// SetTurbo cold-boots a sandbox with doubled CPU and RAM, or back at its own
+	// size. The multiplier lives on the machine that allocates it, so the fleet
+	// carries the intent (on/off) rather than a pair of numbers a mid-upgrade
+	// gateway could disagree with its nodes about.
+	SetTurbo(ctx context.Context, name string, on bool) error
 	Rename(ctx context.Context, oldName, newName, owner string) error
 	Destroy(ctx context.Context, name string) error
 	SetPinned(ctx context.Context, name string, pinned bool) error
