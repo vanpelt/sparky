@@ -546,6 +546,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-kernel-j${{ matrix.jobs }}
+          # upload-artifact uses the least common ancestor (macos/out) as the
+          # archive root, so these three files are restored at artifact root.
           path: |
             tools/sparkbox/macos/out/vmlinux-kvm
             tools/sparkbox/macos/out/kernel.config
@@ -603,6 +605,9 @@ jobs:
         with:
           pattern: macos-kernel-j*
           path: ${{ runner.temp }}/macos-kernel-builds
+          # Keep one named directory per build so -j3 and -j4 cannot overwrite
+          # each other. Each directory contains the three files at its root.
+          merge-multiple: false
 
       - name: Compare fresh builds
         if: needs.macos_kernel_plan.outputs.cache_hit != 'true'

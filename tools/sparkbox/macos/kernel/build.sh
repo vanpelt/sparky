@@ -276,6 +276,14 @@ command -v curl >/dev/null || die "curl is required"
 # throwaway container (see the /build note above).
 run_builder() {
   local jobs="$1"
+  local input_env_args=()
+  # Preserve the image's default when the caller did not select an input mode,
+  # but carry an explicit choice across the outer/inner script boundary.
+  if [[ "${SPARKBOX_KERNEL_INPUTS_IN_IMAGE+x}" == "x" ]]; then
+    input_env_args=(
+      --env "SPARKBOX_KERNEL_INPUTS_IN_IMAGE=${SPARKBOX_KERNEL_INPUTS_IN_IMAGE}"
+    )
+  fi
   case "$(basename "${CONTAINER_CMD}")" in
     container)
       "${CONTAINER_CMD}" run --rm --arch arm64 \
@@ -285,6 +293,7 @@ run_builder() {
         --volume "${OUT_DIR}:/out" \
         --env SPARKBOX_KERNEL_BUILD_CONTAINER=1 \
         --env "SPARKBOX_KERNEL_BUILD_JOBS=${jobs}" \
+        "${input_env_args[@]}" \
         "${KERNEL_BUILD_IMAGE}" \
         /bin/bash /src/build.sh
       ;;
@@ -294,6 +303,7 @@ run_builder() {
         --volume "${OUT_DIR}:/out" \
         --env SPARKBOX_KERNEL_BUILD_CONTAINER=1 \
         --env "SPARKBOX_KERNEL_BUILD_JOBS=${jobs}" \
+        "${input_env_args[@]}" \
         --env "SPARKBOX_OUT_UID=$(id -u)" \
         --env "SPARKBOX_OUT_GID=$(id -g)" \
         "${KERNEL_BUILD_IMAGE}" \
