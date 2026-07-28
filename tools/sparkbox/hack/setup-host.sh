@@ -150,7 +150,7 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now sparkbox-net.service
 
-echo "== agent-CLI refresher (claude/codex/hivemind) + daily timer =="
+echo "== agent-CLI refresher (claude/codex/pi/hivemind) + daily timer =="
 # The one host-side unit this script used to omit — the cloud path (cloud-init)
 # always installs it, so a from-source box would silently ship sandboxes with no
 # agent CLIs. install-host-tooling.sh bakes them into the template now and every

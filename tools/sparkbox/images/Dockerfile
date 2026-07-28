@@ -2,10 +2,11 @@
 #
 # Adapted (heavily trimmed) from boldsoftware/exeuntu's Dockerfile: we keep the
 # "real machine, not a stripped container" feel (man pages, systemd, a login
-# user, a polished shell) but drop everything exe.dev-specific (shelley, the
-# exeuntu guest CLI, pi, tailscale, exetini) and every heavy toolchain we don't
-# need. This replaces ghcr.io/openai/codex-universal (~30GB unpacked) as the base
-# hack/build-rootfs.sh flattens into an ext4 template.
+# user, a polished shell) but drop exe.dev-specific pieces (shelley, the exeuntu
+# guest CLI, exetini) and every heavy toolchain we don't need. Fast-moving agent
+# CLIs, including pi, are layered in by refresh-agent-tools.sh instead of being
+# frozen here. This replaces ghcr.io/openai/codex-universal (~30GB unpacked) as
+# the base hack/build-rootfs.sh flattens into an ext4 template.
 #
 # hack/build-artifacts.sh builds this, then build-rootfs.sh flattens it, bakes in
 # the fleet gateway public key, and installs the guest hooks. Firecracker boots

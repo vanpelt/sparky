@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bake up-to-date agent CLIs (Claude Code + Codex) and the guest workload-identity
-# payload into the sparkbox rootfs templates WITHOUT rebuilding the image. Runs
-# on the host as root.
+# Bake up-to-date agent CLIs (Claude Code, Codex, Pi, and Hivemind) and the guest
+# workload-identity payload into the sparkbox rootfs templates WITHOUT rebuilding
+# the image. Runs on the host as root.
 #
 # Rebuilding the rootfs is a ~65-minute docker+CI affair; this is seconds. The
 # firecracker driver reflinks <image-dir>/<image>.ext4 at every sandbox create,
@@ -15,6 +15,8 @@
 #             manifest (same scheme as the official install.sh)
 #   codex:    github.com/openai/codex latest release, static musl build (zst).
 #             No plain checksum published (only sigstore) — TLS-only fetch.
+#   pi:       github.com/earendil-works/pi latest release, standalone Linux
+#             bundle, sha256-verified against the release's SHA256SUMS.
 #   hivemind: github.com/wandb/hivemind release binary, version + sha256
 #             resolved from the repo's hivemind-latest.json manifest (the same
 #             manifest the official installer at hivemind.wandb.tools uses).
@@ -28,9 +30,9 @@
 # setup` does when it fetches a release's rootfs. On the DGX the v0.4.0 upgrade
 # dropped a fresh universal.ext4 at 12:43 over a stamp written at 00:38; every
 # run afterwards said "templates already current" and every sandbox created from
-# it had no claude, no codex and no hivemind. --force was the documented escape
-# hatch, which means the correct behaviour depended on the operator remembering
-# an invariant the script was in a position to check.
+# it had no claude, no codex, no pi and no hivemind. --force was the documented
+# escape hatch, which means the correct behaviour depended on the operator
+# remembering an invariant the script was in a position to check.
 #
 # So the stamp now lives INSIDE each template, at /etc/sparkbox/tools-rev, and is
 # read per template with debugfs (no mount, no loop device, read-only). A
@@ -53,6 +55,7 @@ TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/data/tools}
 GUEST_IDENTITY=${GUEST_IDENTITY:-/usr/local/sbin/sparkbox-install-guest-identity.sh}
 CLAUDE_BASE=${CLAUDE_BASE:-https://downloads.claude.ai/claude-code-releases}
 CODEX_REPO=${CODEX_REPO:-openai/codex}
+PI_REPO=${PI_REPO:-earendil-works/pi}
 HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
 # Revision of the guest-side agent conditioning below (/etc/environment knobs +
 # the ~/.claude.json onboarding seed). Versioned like IDENTITY_REV so bumping it
@@ -62,8 +65,8 @@ FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
 case "$(uname -m)" in
-  x86_64)  CLAUDE_PLAT=linux-x64;   CODEX_ARCH=x86_64;  HM_PLAT=linux-x86_64 ;;
-  aarch64) CLAUDE_PLAT=linux-arm64; CODEX_ARCH=aarch64; HM_PLAT=linux-arm64 ;;
+  x86_64)  CLAUDE_PLAT=linux-x64;   CODEX_ARCH=x86_64;  PI_ARCH=x64;   HM_PLAT=linux-x86_64 ;;
+  aarch64) CLAUDE_PLAT=linux-arm64; CODEX_ARCH=aarch64; PI_ARCH=arm64; HM_PLAT=linux-arm64 ;;
   *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -83,6 +86,14 @@ CODEX_TAG=${CODEX_TAG##*/}
 case "$CODEX_TAG" in
   rust-v[0-9]*) ;;
   *) echo "bad codex tag from releases/latest redirect: $CODEX_TAG" >&2; exit 1 ;;
+esac
+# Pi publishes self-contained Linux bundles alongside a SHA256SUMS file.
+PI_TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+  "https://github.com/$PI_REPO/releases/latest")
+PI_TAG=${PI_TAG##*/}
+case "$PI_TAG" in
+  v[0-9]*) ;;
+  *) echo "bad pi tag from releases/latest redirect: $PI_TAG" >&2; exit 1 ;;
 esac
 # Hivemind's manifest carries version, per-platform URL, and sha256 in one doc.
 read -r HM_VER HM_URL HM_SHA <<EOF
@@ -109,7 +120,7 @@ esac
 # ---- decide which templates are stale, by asking each one ---------------------
 # The single line every template must carry to count as current. One line so
 # reading it back is a string compare and not a parse.
-WANT="claude=$CLAUDE_VER codex=$CODEX_TAG hivemind=$HM_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
+WANT="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
 TEMPLATE_STAMP=/etc/sparkbox/tools-rev
 
 # Read one template's stamp WITHOUT mounting it. debugfs (e2fsprogs) opens the
@@ -137,7 +148,7 @@ for tpl in "${ALL[@]}"; do
 done
 
 if [ ${#STALE[@]} = 0 ]; then
-  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
+  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, pi $PI_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
   exit 0
 fi
 echo ">> ${#STALE[@]} of ${#ALL[@]} template(s) need patching"
@@ -159,6 +170,22 @@ if [ ! -x "$CODEX_BIN" ]; then
   curl -fsSL "https://github.com/$CODEX_REPO/releases/download/$CODEX_TAG/codex-$CODEX_ARCH-unknown-linux-musl.zst" \
     | zstd -d -o "$CODEX_BIN.tmp" -f
   chmod 0755 "$CODEX_BIN.tmp" && mv "$CODEX_BIN.tmp" "$CODEX_BIN"
+fi
+
+PI_ASSET="pi-linux-$PI_ARCH.tar.gz"
+PI_BUNDLE="$TOOLS_DIR/pi-$PI_TAG-linux-$PI_ARCH.tar.gz"
+if [ ! -f "$PI_BUNDLE" ]; then
+  echo ">> downloading pi $PI_TAG (linux-$PI_ARCH)"
+  PI_RELEASE="https://github.com/$PI_REPO/releases/download/$PI_TAG"
+  PI_SHA=$(curl -fsSL "$PI_RELEASE/SHA256SUMS" \
+    | awk -v asset="$PI_ASSET" '$2 == asset { print $1; exit }')
+  if [ ${#PI_SHA} -ne 64 ] || [[ "$PI_SHA" = *[!0-9a-fA-F]* ]]; then
+    echo "no valid checksum for $PI_ASSET in $PI_TAG SHA256SUMS" >&2
+    exit 1
+  fi
+  curl -fsSL "$PI_RELEASE/$PI_ASSET" -o "$PI_BUNDLE.tmp"
+  echo "$PI_SHA  $PI_BUNDLE.tmp" | sha256sum -c - >/dev/null
+  mv "$PI_BUNDLE.tmp" "$PI_BUNDLE"
 fi
 
 HM_BIN="$TOOLS_DIR/hivemind-$HM_VER-$HM_PLAT"
@@ -261,6 +288,15 @@ for tpl in "${STALE[@]}"; do
   mount -o loop "$TMP" "$MNT"
   install -m 0755 "$CLAUDE_BIN" "$MNT/usr/local/bin/claude"
   install -m 0755 "$CODEX_BIN"  "$MNT/usr/local/bin/codex"
+  # Pi's standalone bundle includes runtime assets beside the executable. Keep
+  # the bundle together under /usr/local/lib and expose its CLI on the normal
+  # PATH with a relative symlink.
+  rm -rf "$MNT/usr/local/lib/pi"
+  mkdir -p "$MNT/usr/local/lib/pi"
+  tar -xzf "$PI_BUNDLE" -C "$MNT/usr/local/lib/pi" --strip-components=1 --no-same-owner
+  [ -x "$MNT/usr/local/lib/pi/pi" ] \
+    || { echo "pi bundle $PI_BUNDLE has no executable pi" >&2; exit 1; }
+  ln -sfn ../lib/pi/pi "$MNT/usr/local/bin/pi"
   install -m 0755 "$HM_BIN"     "$MNT/usr/local/bin/hivemind"
   seed_agent_env "$MNT"
   # Workload identity: the token unit + timer that keep
@@ -281,9 +317,10 @@ done
 # The host-side stamp is now a RECORD, not a decision: what counts as current is
 # read out of each template above. Keep writing it because it is what an operator
 # (and `sparkbox doctor`) reads to see which versions this box last resolved.
-printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
-  "$CLAUDE_VER" "$CODEX_TAG" "$HM_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
+printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nPI_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
+  "$CLAUDE_VER" "$CODEX_TAG" "$PI_TAG" "$HM_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
 # Drop cached binaries from older versions; keep the current set.
-find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'hivemind-*' \) \
-  ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" ! -name "$(basename "$HM_BIN")" -delete
-echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + hivemind $HM_VER + identity rev $IDENTITY_REV"
+find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'pi-*' -o -name 'hivemind-*' \) \
+  ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" \
+  ! -name "$(basename "$PI_BUNDLE")" ! -name "$(basename "$HM_BIN")" -delete
+echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + pi $PI_TAG + hivemind $HM_VER + identity rev $IDENTITY_REV"

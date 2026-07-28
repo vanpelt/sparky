@@ -442,8 +442,8 @@ full_phase() {
 
   # --------------------------------------------------------------- real setup
   #
-  # --agent-tools=false, deliberately. The bake fetches claude, codex and
-  # hivemind from three third-party hosts — around half a gigabyte — and
+  # --agent-tools=false, deliberately. The bake fetches claude, codex, pi and
+  # hivemind from several third-party hosts — around half a gigabyte — and
   # installs them into the rootfs template. None of that is what this job
   # exists to prove: everything up to and including the CHOICE to bake is
   # asserted by the dry-run plan above, and the bake's own logic has unit tests

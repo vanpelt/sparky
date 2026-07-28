@@ -16,10 +16,10 @@ import (
 // # Why this step exists
 //
 // A rootfs template out of a release carries a shell, a toolchain and nothing
-// that can write code. claude, codex and hivemind are baked into it afterwards
-// by deploy/refresh-agent-tools.sh, which patches the template in place (~a
-// minute) instead of rebuilding the image (~65 minutes), and re-runs daily so a
-// box picks up new agent releases on its own.
+// that can write code. claude, codex, pi and hivemind are baked into it
+// afterwards by deploy/refresh-agent-tools.sh, which patches the template in
+// place (~a minute) instead of rebuilding the image (~65 minutes), and re-runs
+// daily so a box picks up new agent releases on its own.
 //
 // Until now the only things that installed it were deploy/cloud-init.yaml and
 // deploy/install-host-tooling.sh — a cloud user-data blob and a script you run
@@ -123,7 +123,7 @@ func templateHasTools(e *Env) bool {
 	return stampLine(string(out)) != ""
 }
 
-// stampLine picks the version tuple out of debugfs's output.
+// stampLine picks the current agent-tool version tuple out of debugfs's output.
 //
 // Line-scanned rather than "the first line", because debugfs writes a version
 // banner ("debugfs 1.47.0 (5-Feb-2023)") to STDERR and both readers here take
@@ -133,11 +133,20 @@ func templateHasTools(e *Env) bool {
 // template on the box, which is the same genus of wrong report this whole change
 // set out to remove.
 //
-// Returns "" when no line carries the tuple, which is both "the file is not
-// there" (debugfs says so on stderr and exits 0) and "debugfs could not run".
+// Every expected tool key is required. That makes a stamp from before a tool
+// joined the standard set intentionally stale, so setup retries the bake rather
+// than treating (for example) the presence of Claude as proof Pi is installed.
+//
+// Returns "" when no line carries the complete tuple, which covers "the file is
+// not there" (debugfs says so on stderr and exits 0), "debugfs could not run",
+// and a stamp written by an older agent-tool schema.
 func stampLine(out string) string {
 	for _, line := range strings.Split(out, "\n") {
-		if line = strings.TrimSpace(line); strings.Contains(line, "claude=") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "claude=") &&
+			strings.Contains(line, "codex=") &&
+			strings.Contains(line, "pi=") &&
+			strings.Contains(line, "hivemind=") {
 			return line
 		}
 	}
@@ -152,7 +161,7 @@ func stepAgentTools() Step {
 				// Named rather than silent, exactly like --sluice: nothing else
 				// about a green run would hint that the sandboxes this host
 				// creates have no agent in them.
-				return true, "skipped (--agent-tools=false; sandboxes ship no claude/codex/hivemind)", nil
+				return true, "skipped (--agent-tools=false; sandboxes ship no claude/codex/pi/hivemind)", nil
 			}
 			assets, err := agentToolsAssets(e)
 			if err != nil {
@@ -173,7 +182,7 @@ func stepAgentTools() Step {
 			return true, "refresher + timer current, template carries the agent CLIs", nil
 		},
 		Plan: func(e *Env) string {
-			return fmt.Sprintf("install %s + %s, enable %s (daily), bake claude/codex/hivemind into %s",
+			return fmt.Sprintf("install %s + %s, enable %s (daily), bake claude/codex/pi/hivemind into %s",
 				refreshToolsScript, guestIdentityName, refreshToolsTimer, e.Cfg.rootfsPath())
 		},
 		Apply: func(e *Env) error {
@@ -208,12 +217,12 @@ func stepAgentTools() Step {
 			//
 			// BEST-EFFORT, and this is the one place in the pipeline where a
 			// non-zero exit is not fatal. It downloads several hundred MB from
-			// three third-party release channels; a transient failure there must
+			// several third-party release channels; a transient failure there must
 			// not undo a provisioning run whose gateway, network and units are
 			// all correct. The timer retries within the day, `doctor` reports
 			// the gap in the meantime, and the next `setup` will try again
 			// because Satisfied asks the template rather than trusting a stamp.
-			e.logf("   baking claude + codex + hivemind into %s (a few minutes on a first run)\n", e.Cfg.rootfsPath())
+			e.logf("   baking claude + codex + pi + hivemind into %s (a few minutes on a first run)\n", e.Cfg.rootfsPath())
 			out, rerr := e.run(filepath.Join(e.SbinDir, refreshToolsScript))
 			for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 				if line != "" {
@@ -223,7 +232,7 @@ func stepAgentTools() Step {
 			if rerr != nil {
 				e.logf("   WARNING: the agent-CLI bake failed (%v). The gateway is fine and %s will retry\n",
 					rerr, refreshToolsTimer)
-				e.logf("            within the day; until it succeeds, sandboxes have no claude/codex/hivemind.\n")
+				e.logf("            within the day; until it succeeds, sandboxes have no claude/codex/pi/hivemind.\n")
 				e.logf("            Retry now with: %s\n", filepath.Join(e.SbinDir, refreshToolsScript))
 			}
 			return nil

@@ -52,7 +52,7 @@ var SysctlConf []byte
 //go:embed units/sluice.service.tmpl
 var SluiceServiceTemplate string
 
-// RefreshToolsScript bakes the agent CLIs (claude, codex, hivemind) and the
+// RefreshToolsScript bakes the agent CLIs (claude, codex, pi, hivemind) and the
 // guest workload-identity payload into the rootfs templates, without the ~65
 // minute image rebuild. Installed at /usr/local/sbin/sparkbox-refresh-tools.sh
 // and run daily by sparkbox-refresh-tools.timer.
