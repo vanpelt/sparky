@@ -58,9 +58,10 @@ CODEX_REPO=${CODEX_REPO:-openai/codex}
 PI_REPO=${PI_REPO:-earendil-works/pi}
 HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
 # Revision of the guest-side agent conditioning below (/etc/environment knobs +
-# the ~/.claude.json onboarding seed). Versioned like IDENTITY_REV so bumping it
-# re-patches every template on the next run even when no tool version moved.
-AGENT_ENV_REV=1
+# the ~/.claude.json onboarding seed + the hivemind daemon unit). Versioned like
+# IDENTITY_REV so bumping it re-patches every template on the next run even when
+# no tool version moved.
+AGENT_ENV_REV=2
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -265,6 +266,70 @@ os.replace(tmp, path)
 PY
   chown "$uid:$gid" "$mnt$home/.claude.json"
   chmod 0644 "$mnt$home/.claude.json"
+
+  seed_hivemind_unit "$mnt" "$home" "$uid" "$gid" "$(echo "$pw" | cut -d: -f1)"
+}
+
+# seed_hivemind_unit pre-arms the session-sync daemon so a fresh sandbox is
+# already recording before anyone types anything. Until now `hivemind start` had
+# to be run by hand in every new box, and a session that was never synced is not
+# recoverable after the fact — the whole point of the tool is the history.
+#
+# This writes the SAME user unit `hivemind start` writes, rather than a system
+# unit of our own, for two reasons: the daemon must run as the login user (its
+# state, its credentials chain, and the session files it watches all live in
+# that home), and anyone who later runs `hivemind stop/restart/start` then finds
+# exactly the unit their CLI expects to manage instead of a competing copy.
+#
+# Cost was measured before enabling this by fleet default: a daemon in a real
+# sandbox burned 0 CPU ticks over 60s while actively syncing, against the idle
+# reaper's 2%-of-a-core activity threshold. It syncs in proportion to work the
+# sandbox is already doing, so it cannot by itself hold a box awake. Do not
+# assume that stays true if the daemon ever grows a periodic poll.
+seed_hivemind_unit() {
+  local mnt=$1 home=$2 uid=$3 gid=$4 user=$5
+  local unitdir="$mnt$home/.config/systemd/user"
+
+  mkdir -p "$unitdir/default.target.wants"
+  cat > "$unitdir/hivemind.service" <<'EOF'
+[Unit]
+Description=HiveMind - Sync agentic coding sessions to W&B
+Documentation=https://github.com/wandb/agentstream-py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hivemind run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+
+Environment="LC_ALL=C.UTF-8"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hivemind
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+EOF
+  # Enable without a chroot, the same way install-guest-identity.sh does: the
+  # .wants symlink IS what `systemctl --user enable` writes.
+  ln -sfn ../hivemind.service "$unitdir/default.target.wants/hivemind.service"
+  chown -h "$uid:$gid" "$unitdir/default.target.wants/hivemind.service"
+  chown "$uid:$gid" "$unitdir/hivemind.service" "$unitdir/default.target.wants" \
+    "$unitdir" "$mnt$home/.config/systemd" "$mnt$home/.config"
+  chmod 0644 "$unitdir/hivemind.service"
+
+  # A user unit only runs while that user has a session unless the user lingers.
+  # The base image already sets this for uid 1000, but a fork template built
+  # from an older image (or a future login-user change) would not, and a missing
+  # marker means the daemon silently never starts on a cold boot.
+  mkdir -p "$mnt/var/lib/systemd/linger"
+  : > "$mnt/var/lib/systemd/linger/$user"
 }
 
 # ---- patch every template atomically -----------------------------------------
