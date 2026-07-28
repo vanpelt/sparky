@@ -752,6 +752,17 @@ jobs:
   # would be a download whose every useful path exits non-zero.
   darwin:
     needs: [prepare, artifacts, macos-kernel]
+    # macos-kernel deliberately depends on a conditionally skipped build job
+    # when its content-addressed cache hits. GitHub propagates that skipped
+    # ancestor through later `needs` chains unless this job evaluates an
+    # explicit status condition, even though macos-kernel itself succeeded.
+    # `always()` breaks the implicit success() guard; the result checks keep the
+    # release fail-closed if any of the direct prerequisites actually failed.
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.artifacts.result == 'success' &&
+      needs.macos-kernel.result == 'success'
     # GOOS=darwin cross-compiles from anywhere, and a macos runner bills at a
     # 10x multiplier for a build that needs nothing from macOS. The trade is
     # CGO_ENABLED=0 (cgo would want the macOS SDK) — which is what every linux
@@ -825,6 +836,15 @@ jobs:
     # complete", and it must not become wrong because somebody later decouples
     # the darwin manifest from the kernel.
     needs: [prepare, artifacts, darwin, macos-kernel]
+    # Keep the final gate explicit for the same skipped-ancestor case handled
+    # by darwin above. A cache hit is success; a failed or cancelled platform
+    # job must still leave the release in draft.
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.artifacts.result == 'success' &&
+      needs.darwin.result == 'success' &&
+      needs.macos-kernel.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
