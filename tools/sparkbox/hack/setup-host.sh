@@ -154,8 +154,10 @@ echo "== agent-CLI refresher (claude/codex/pi/hivemind) + daily timer =="
 # The one host-side unit this script used to omit — the cloud path (cloud-init)
 # always installs it, so a from-source box would silently ship sandboxes with no
 # agent CLIs. install-host-tooling.sh bakes them into the template now and every
-# day. IMAGES_DIR/TOOLS_DIR match this script's XFS data volume layout.
-IMAGES_DIR="$SPARKBOX_DIR/data/images" TOOLS_DIR="$SPARKBOX_DIR/data/tools" \
+# day. Images live on this script's XFS data volume; the tool cache follows
+# hostsetup's canonical <root>/tools path so a later `sparkbox setup` keeps using
+# the same downloads and versions.env.
+IMAGES_DIR="$SPARKBOX_DIR/data/images" TOOLS_DIR="$SPARKBOX_DIR/tools" \
   "$(dirname "$0")/../deploy/install-host-tooling.sh"
 
 # IPv6: if you have a routed /64, each sandbox gets a globally-routable /128

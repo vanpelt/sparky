@@ -47,7 +47,7 @@
 set -euo pipefail
 
 IMAGES_DIR=${IMAGES_DIR:-/srv/sparkbox/data/images}
-TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/data/tools}
+TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/tools}
 # Installs the guest OIDC token unit + timer into a mounted template. Shared
 # verbatim with hack/build-rootfs.sh so the two paths can't drift; cloud-init
 # lands it next to this script. Templates published before workload identity

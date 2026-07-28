@@ -126,6 +126,11 @@ write_files:
 
       [Service]
       Type=oneshot
+      # Keep these explicit and aligned with hostsetup.DefaultConfig. Otherwise
+      # a later `sparkbox setup` rewrites this unit with a different tool-cache
+      # path and needlessly downloads every agent CLI again.
+      Environment=IMAGES_DIR=/srv/sparkbox/data/images
+      Environment=TOOLS_DIR=/srv/sparkbox/tools
       ExecStart=/usr/local/sbin/sparkbox-refresh-tools.sh
 
   - path: /etc/systemd/system/sparkbox-refresh-tools.timer
@@ -305,7 +310,8 @@ write_files:
       # --force: the template was just replaced, so ignore any version stamp.
       # Best-effort — a download hiccup shouldn't fail provisioning; the daily
       # timer (enabled below) retries.
-      /usr/local/sbin/sparkbox-refresh-tools.sh --force \
+      IMAGES_DIR=/srv/sparkbox/data/images TOOLS_DIR=/srv/sparkbox/tools \
+        /usr/local/sbin/sparkbox-refresh-tools.sh --force \
         || echo "WARN: agent tools refresh failed; timer will retry"
 
       # Pin any reserved (flexible) IPs on the primary NIC so DNS stays stable

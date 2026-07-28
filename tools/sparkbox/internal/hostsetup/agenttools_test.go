@@ -133,6 +133,30 @@ func TestAgentToolsApplyInstallsAndBakes(t *testing.T) {
 	}
 }
 
+// TestCloudInitAgentToolsPathsMatchSetup keeps both cloud-init entry points —
+// the daily unit and its immediate provision-time bake — aligned with the paths
+// a later `sparkbox setup` renders. A mismatch moves the cache and versions.env
+// on the first setup/timer run and needlessly downloads every agent CLI again.
+func TestCloudInitAgentToolsPathsMatchSetup(t *testing.T) {
+	got, err := os.ReadFile(filepath.Join("..", "..", "deploy", "cloud-init.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	if want := "TOOLS_DIR=${TOOLS_DIR:-" + cfg.toolsDir() + "}"; !bytes.Contains(deploy.RefreshToolsScript, []byte(want)) {
+		t.Errorf("refresher default is not aligned with setup: missing %q", want)
+	}
+	for _, want := range []string{
+		"Environment=IMAGES_DIR=" + cfg.ImageDir,
+		"Environment=TOOLS_DIR=" + cfg.toolsDir(),
+		"IMAGES_DIR=" + cfg.ImageDir + " TOOLS_DIR=" + cfg.toolsDir() + " \\",
+	} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("cloud-init agent-tools path is not aligned with setup: missing %q", want)
+		}
+	}
+}
+
 // TestAgentToolsBakeFailureIsNotFatal: the bake pulls several hundred MB from
 // several third-party release channels, and it is the one thing in the pipeline
 // allowed to fail without undoing a provisioning run whose gateway, network and
