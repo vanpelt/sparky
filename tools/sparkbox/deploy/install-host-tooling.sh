@@ -49,7 +49,7 @@ echo "== install sparkbox-refresh-tools.service + .timer =="
 # wins over the script's cloud-default (/srv/sparkbox/data/images).
 cat > /etc/systemd/system/sparkbox-refresh-tools.service <<UNIT
 [Unit]
-Description=refresh agent CLIs (claude, codex, hivemind) in sparkbox rootfs templates
+Description=refresh agent CLIs (claude, codex, pi, hivemind) in sparkbox rootfs templates
 Wants=network-online.target
 After=network-online.target
 
@@ -87,4 +87,4 @@ else
     || echo "WARN: agent tools refresh failed; the daily timer will retry"
 fi
 
-echo "== done: templates in $IMAGES_DIR will carry claude/codex/hivemind + guest identity, refreshed daily =="
+echo "== done: templates in $IMAGES_DIR will carry claude/codex/pi/hivemind + guest identity, refreshed daily =="

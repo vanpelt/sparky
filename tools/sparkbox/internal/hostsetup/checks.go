@@ -354,7 +354,7 @@ func checkRootfs(p Probe, cfg Config) Result {
 // carries the agent CLIs.
 //
 // It is the diagnostic that was missing when it mattered. The DGX ran for a day
-// creating sandboxes with no claude, no codex and no hivemind in them: the
+// creating sandboxes with no claude, no codex, no pi and no hivemind in them: the
 // refresher was installed, its timer had run that morning and logged "templates
 // already current", and doctor was green — because nothing on the box was
 // asking the template, only a host-side stamp that a release upgrade had
@@ -380,7 +380,7 @@ func checkAgentTools(p Probe, cfg Config) Result {
 	}
 	stamp := stampLine(out)
 	if stamp == "" {
-		return warn("the rootfs template carries no agent CLIs — every sandbox created from it has no claude, codex or hivemind",
+		return warn("the rootfs template does not carry the complete agent CLI set — every sandbox created from it may be missing claude, codex, pi or hivemind",
 			"run "+filepath.Join("/usr/local/sbin", refreshToolsScript)+" (or `sparkbox setup`, which installs and runs it) — "+
 				"this is also what a template replaced by a release upgrade looks like")
 	}

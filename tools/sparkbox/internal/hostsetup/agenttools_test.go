@@ -27,7 +27,7 @@ func agentToolsEnv(t *testing.T, stamped bool) (*Env, *fakeRunner) {
 	// puts in front of anything on stdout — see stampLine.
 	stamp := "debugfs 1.47.0 (5-Feb-2023)\n" + templateToolsStamp + ": File not found by ext2_lookup"
 	if stamped {
-		stamp = "debugfs 1.47.0 (5-Feb-2023)\nclaude=2.1.212 codex=rust-v0.145.0 hivemind=1.0.5 identity=2 agentenv=1"
+		stamp = "debugfs 1.47.0 (5-Feb-2023)\nclaude=2.1.212 codex=rust-v0.145.0 pi=v0.82.1 hivemind=1.0.5 identity=2 agentenv=1"
 	}
 	r := runnerWith(map[string]string{
 		"systemctl daemon-reload":                                         "",
@@ -98,6 +98,10 @@ func TestAgentToolsApplyInstallsAndBakes(t *testing.T) {
 	if fi, err := os.Stat(script); err != nil || fi.Mode().Perm() != 0o755 {
 		t.Errorf("the refresher must be executable: %v", err)
 	}
+	if got, _ := os.ReadFile(script); !bytes.Contains(got, []byte("PI_REPO=${PI_REPO:-earendil-works/pi}")) ||
+		!bytes.Contains(got, []byte("ln -sfn ../lib/pi/pi")) {
+		t.Error("the refresher must download Pi's official bundle and expose the pi CLI")
+	}
 	if got, _ := os.ReadFile(filepath.Join(e.SbinDir, guestIdentityName)); !bytes.Equal(got, deploy.GuestIdentityScript) {
 		t.Error("the guest-identity installer was not installed — the refresher calls it by that path and exits 1 without it")
 	}
@@ -129,8 +133,32 @@ func TestAgentToolsApplyInstallsAndBakes(t *testing.T) {
 	}
 }
 
+// TestCloudInitAgentToolsPathsMatchSetup keeps both cloud-init entry points —
+// the daily unit and its immediate provision-time bake — aligned with the paths
+// a later `sparkbox setup` renders. A mismatch moves the cache and versions.env
+// on the first setup/timer run and needlessly downloads every agent CLI again.
+func TestCloudInitAgentToolsPathsMatchSetup(t *testing.T) {
+	got, err := os.ReadFile(filepath.Join("..", "..", "deploy", "cloud-init.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	if want := "TOOLS_DIR=${TOOLS_DIR:-" + cfg.toolsDir() + "}"; !bytes.Contains(deploy.RefreshToolsScript, []byte(want)) {
+		t.Errorf("refresher default is not aligned with setup: missing %q", want)
+	}
+	for _, want := range []string{
+		"Environment=IMAGES_DIR=" + cfg.ImageDir,
+		"Environment=TOOLS_DIR=" + cfg.toolsDir(),
+		"IMAGES_DIR=" + cfg.ImageDir + " TOOLS_DIR=" + cfg.toolsDir() + " \\",
+	} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("cloud-init agent-tools path is not aligned with setup: missing %q", want)
+		}
+	}
+}
+
 // TestAgentToolsBakeFailureIsNotFatal: the bake pulls several hundred MB from
-// three third-party release channels, and it is the one thing in the pipeline
+// several third-party release channels, and it is the one thing in the pipeline
 // allowed to fail without undoing a provisioning run whose gateway, network and
 // units are all correct. It must say so, though — silence here is a host whose
 // sandboxes are empty for a day with no explanation.
@@ -168,7 +196,7 @@ func TestAgentToolsOffIsNamed(t *testing.T) {
 	if err != nil || !sat {
 		t.Fatalf("--agent-tools=false must be satisfied, not a failure: sat=%v err=%v", sat, err)
 	}
-	if !strings.Contains(note, "claude") {
+	if !strings.Contains(note, "pi") {
 		t.Errorf("note = %q, want it to name what the sandboxes will not have", note)
 	}
 	if len(r.calls) != 0 {
@@ -216,11 +244,21 @@ func TestCheckAgentToolsReportsAnEmptyTemplate(t *testing.T) {
 	// that read "the first line" would find "debugfs 1.47.0" here and warn about
 	// a template that is perfectly baked — which is how this was caught, on a
 	// live box, after the check was written.
-	stamp := "claude=2.1.212 codex=rust-v0.145.0 hivemind=1.0.5 identity=2 agentenv=1"
+	stamp := "claude=2.1.212 codex=rust-v0.145.0 pi=v0.82.1 hivemind=1.0.5 identity=2 agentenv=1"
 	ok := newScriptedProbe(map[string][]string{cmd: {"debugfs 1.47.0 (5-Feb-2023)\n" + stamp}})
 	ok.fakeProbe = onDisk
 	if got := checkAgentTools(ok, cfg); got.Status != Pass || !strings.Contains(got.Detail, "claude=") {
 		t.Errorf("a stamped template should pass with its versions: %v %q", got.Status, got.Detail)
+	}
+
+	// A stamp from before Pi joined the baked tool set is intentionally stale.
+	// Setup must retry the bake rather than treating the presence of Claude as
+	// proof that every currently required CLI is present.
+	legacyStamp := "claude=2.1.212 codex=rust-v0.145.0 hivemind=1.0.5 identity=2 agentenv=1"
+	legacy := newScriptedProbe(map[string][]string{cmd: {"debugfs 1.47.0 (5-Feb-2023)\n" + legacyStamp}})
+	legacy.fakeProbe = onDisk
+	if got := checkAgentTools(legacy, cfg); got.Status != Warn || !strings.Contains(got.Detail, "pi") {
+		t.Errorf("a pre-Pi stamp should warn and name the incomplete tool set: %v %q", got.Status, got.Detail)
 	}
 }
 

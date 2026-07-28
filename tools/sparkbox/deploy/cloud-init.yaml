@@ -71,8 +71,9 @@ write_files:
       SCW_DEFAULT_REGION=@@SCW_REGION@@
 
   # Host-side agent-CLI refresher (deploy/refresh-agent-tools.sh, injected as
-  # b64 by launch-host.sh): patches claude+codex into the rootfs templates in
-  # seconds instead of rebuilding the image. Run at provision + daily by timer.
+  # b64 by launch-host.sh): patches claude+codex+pi+hivemind into the rootfs
+  # templates in seconds instead of rebuilding the image. Run at provision +
+  # daily by timer.
   - path: /usr/local/sbin/sparkbox-refresh-tools.sh
     permissions: '0755'
     encoding: b64
@@ -119,12 +120,17 @@ write_files:
     permissions: '0644'
     content: |
       [Unit]
-      Description=refresh agent CLIs (claude, codex) in sparkbox rootfs templates
+      Description=refresh agent CLIs (claude, codex, pi, hivemind) in sparkbox rootfs templates
       Wants=network-online.target
       After=network-online.target
 
       [Service]
       Type=oneshot
+      # Keep these explicit and aligned with hostsetup.DefaultConfig. Otherwise
+      # a later `sparkbox setup` rewrites this unit with a different tool-cache
+      # path and needlessly downloads every agent CLI again.
+      Environment=IMAGES_DIR=/srv/sparkbox/data/images
+      Environment=TOOLS_DIR=/srv/sparkbox/tools
       ExecStart=/usr/local/sbin/sparkbox-refresh-tools.sh
 
   - path: /etc/systemd/system/sparkbox-refresh-tools.timer
@@ -299,11 +305,13 @@ write_files:
       sed -i '/^LOGIN_USER_FLAG=/d' "$DIR/sparkbox.env" 2>/dev/null || true
       echo "LOGIN_USER_FLAG=--default-login-user=${ROOTFS_LOGIN_USER:-root}" >> "$DIR/sparkbox.env"
 
-      # Bake up-to-date agent CLIs (claude, codex) into the fresh template.
+      # Bake up-to-date agent CLIs (claude, codex, pi, hivemind) into the fresh
+      # template.
       # --force: the template was just replaced, so ignore any version stamp.
       # Best-effort — a download hiccup shouldn't fail provisioning; the daily
       # timer (enabled below) retries.
-      /usr/local/sbin/sparkbox-refresh-tools.sh --force \
+      IMAGES_DIR=/srv/sparkbox/data/images TOOLS_DIR=/srv/sparkbox/tools \
+        /usr/local/sbin/sparkbox-refresh-tools.sh --force \
         || echo "WARN: agent tools refresh failed; timer will retry"
 
       # Pin any reserved (flexible) IPs on the primary NIC so DNS stays stable

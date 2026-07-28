@@ -35,8 +35,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # gateway-verify.sh proves that path works before anything depends on it.
 #
 # python3 is here for the same reason and is just as load-bearing: the inner
-# `setup` runs deploy/refresh-agent-tools.sh to bake claude/codex/hivemind into
-# the rootfs templates, and that script parses three release manifests with it
+# `setup` runs deploy/refresh-agent-tools.sh to bake claude/codex/pi/hivemind
+# into the rootfs templates, and that script parses the release manifests with it
 # and MERGES the guest's ~/.claude.json rather than clobbering a real user's
 # accumulated state. Without it the machine provisions cleanly and every sandbox
 # it creates is empty. debugfs (e2fsprogs, below) is the other half: it is how

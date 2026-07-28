@@ -88,7 +88,7 @@ has no `setup` story:
 | Component | What it is | Where it lives now |
 | --- | --- | --- |
 | **sluice** | per-VM egress control (`/run/sluice.sock`, `sluice.env`, `allowlist.txt`) — the gateway is started with `--guest-dns 172.30.0.53 --sluice-socket …` and silently loses egress filtering without it | **fixed**: `setup --sluice` installs it from the release |
-| **agent tooling** | `sparkbox-refresh-tools.sh` → `/srv/sparkbox/tools/{claude,codex,hivemind}` + `versions.env`; what makes a sandbox useful | **fixed**: `setup` installs the script, its daily timer, and bakes the tools (`--agent-tools`, on by default) |
+| **agent tooling** | `sparkbox-refresh-tools.sh` → `/srv/sparkbox/tools/{claude,codex,pi,hivemind}` + `versions.env`; what makes a sandbox useful | **fixed**: `setup` installs the script, its daily timer, and bakes the tools (`--agent-tools`, on by default) |
 | **guest identity** | `sparkbox-install-guest-identity.sh` | **fixed**: installed by the same step; the refresher calls it by its installed path |
 | **cloudflared** | public `*.catnip.sh` tunnel | hand-configured |
 | **tailscale + the edge /32** | `10.66.0.1` dedicated tailnet IP the edge binds; split-DNS via the Tailscale API | hand-configured, `docs/dedicated-edge-ip-cutover.md` |
@@ -115,7 +115,7 @@ stale on purpose — a needless re-patch costs a minute, a wrong "current" costs
 every sandbox made that day and says nothing.
 
 The bake is also the one step in the pipeline whose failure is **not** fatal: it
-pulls several hundred MB from three third-party release channels, and a hiccup
+pulls several hundred MB from several third-party release channels, and a hiccup
 there must not undo a provisioning run whose gateway, network and units are all
 correct. It warns, names the retry, and the daily timer picks it up.
 

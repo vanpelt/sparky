@@ -305,16 +305,17 @@ and **exits non-zero** if the gateway is not alive: a crash-looping service is a
 FAIL carrying the tail of its journal, not a PASS. `doctor` runs the same
 battery at any time.
 
-It also **bakes the agent CLIs into the rootfs template** — `claude`, `codex`
-and `hivemind`, plus the guest workload-identity unit — and installs the daily
-timer that keeps them current. That is what makes a sandbox worth creating, and
-it is on by default (`--agent-tools=false` opts out). A released rootfs carries a
-toolchain and no agent; the tools are patched in afterwards, which takes about a
-minute instead of the ~65 of an image rebuild. The claim is checked against the
-**template itself** — `/etc/sparkbox/tools-rev` inside the image — rather than a
-stamp file beside it, so a template replaced by a release upgrade is re-baked
-instead of being declared current, and `doctor`'s `agent tooling` line reports a
-bare template rather than staying green over one. Full walkthrough — prerequisites, TLS, port 22, day-2 ops — in
+It also **bakes the agent CLIs into the rootfs template** — `claude`, `codex`,
+`pi` and `hivemind`, plus the guest workload-identity unit — and installs the
+daily timer that keeps them current. That is what makes a sandbox worth creating,
+and it is on by default (`--agent-tools=false` opts out). A released rootfs
+carries a toolchain and no agent; the tools are patched in afterwards, which
+takes about a minute instead of the ~65 of an image rebuild. The claim is checked
+against the **template itself** — `/etc/sparkbox/tools-rev` inside the image —
+rather than a stamp file beside it, so a template replaced by a release upgrade
+is re-baked instead of being declared current, and `doctor`'s `agent tooling`
+line reports a bare template rather than staying green over one. Full
+walkthrough — prerequisites, TLS, port 22, day-2 ops — in
 [`docs/getting-started.md`](docs/getting-started.md). For a Scaleway zero-touch
 fleet instead, see [`docs/deploy-scaleway.md`](docs/deploy-scaleway.md). Where
 the fleet's keys live — 1Password or Scaleway Secret Manager, staged at

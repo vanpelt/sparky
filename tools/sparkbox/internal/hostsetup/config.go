@@ -228,7 +228,7 @@ type Config struct {
 	// the gateway's egress syncer a silent no-op — unless Sluice is set, which
 	// defaults it (see Config.sluiceSocket).
 	SluiceSocket string
-	// AgentTools bakes the agent CLIs (claude, codex, hivemind) plus the guest
+	// AgentTools bakes the agent CLIs (claude, codex, pi, hivemind) plus the guest
 	// workload-identity payload into the rootfs templates, and installs the
 	// daily refresher that keeps them current. ON by default, unlike every other
 	// field in this block: it does not change what a sandbox is allowed to do,
