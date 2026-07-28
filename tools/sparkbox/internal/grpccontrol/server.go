@@ -619,6 +619,17 @@ func (s *Server) BeginReboot(ctx context.Context, request *nodev1.RebootRequest)
 	})
 }
 
+func (s *Server) BeginSetTurbo(ctx context.Context, request *nodev1.SetTurboRequest) (*nodev1.Operation, error) {
+	name, on := request.GetSandbox(), request.GetOn()
+	return s.begin(ctx, request.GetOperation(), "turbo", name, request, func(ctx context.Context) (mutationResult, error) {
+		if err := s.config.Backend.SetTurbo(ctx, name, on); err != nil {
+			return mutationResult{}, err
+		}
+		box, _ := s.config.Backend.Get(name)
+		return mutationResult{result: sandboxResult(box), events: []*nodev1.InventoryEvent{sandboxChanged(box, "turbo")}}, nil
+	})
+}
+
 func (s *Server) BeginRename(ctx context.Context, request *nodev1.RenameRequest) (*nodev1.Operation, error) {
 	oldName, newName, owner := request.GetSandbox(), request.GetNewName(), request.GetOwner()
 	return s.begin(ctx, request.GetOperation(), "rename", oldName, request, func(ctx context.Context) (mutationResult, error) {

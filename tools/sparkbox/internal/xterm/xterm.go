@@ -109,6 +109,12 @@ type Config struct {
 	// budget rather than the local one. Empty makes every sandbox look local,
 	// which is right for a single-machine deployment and for every test.
 	Node string
+	// Turbo restarts the attached sandbox with doubled CPU and RAM, or back at
+	// its own size — the header's turbo button. Satisfied by *fleet.Fleet, which
+	// routes the restart to the machine holding the VM. Nil serves the page with
+	// no turbo button, which is what every test wants and what a deployment that
+	// would rather not hand out double resources gets by leaving it unset.
+	Turbo Turbocharger
 	// Sessions verifies the edge session token carried by the cookie or a
 	// Bearer header.
 	Sessions *edgeauth.Signer
@@ -148,11 +154,12 @@ type Config struct {
 
 // Handler serves the terminal page, its assets, and the WebSocket bridge.
 type Handler struct {
-	mgr         Attacher
-	accounts    edgeauth.Accounts
-	sessions    *edgeauth.Signer
-	upstreamKey xssh.Signer
-	vitalsOf    VitalsReader
+	mgr          Attacher
+	accounts     edgeauth.Accounts
+	sessions     *edgeauth.Signer
+	upstreamKey  xssh.Signer
+	vitalsOf     VitalsReader
+	turbocharger Turbocharger
 	// probe carries this machine's name, which is how a local sandbox is told
 	// from a remote one when budgeting a vitals read.
 	probe webui.Probe
@@ -192,7 +199,7 @@ func New(cfg Config) *Handler {
 	}
 	h := &Handler{
 		mgr: cfg.Sandboxes, accounts: cfg.Accounts, sessions: cfg.Sessions,
-		upstreamKey: cfg.UpstreamKey, vitalsOf: cfg.Vitals,
+		upstreamKey: cfg.UpstreamKey, vitalsOf: cfg.Vitals, turbocharger: cfg.Turbo,
 		probe:     webui.Probe{Node: cfg.Node},
 		domain:    strings.ToLower(strings.Trim(cfg.Domain, ".")),
 		subdomain: strings.ToLower(sub),
@@ -212,6 +219,7 @@ func New(cfg Config) *Handler {
 	mux.Handle("GET /{$}", require(http.HandlerFunc(h.page)))
 	mux.Handle("GET /ws", require(http.HandlerFunc(h.ws)))
 	mux.Handle("GET /vitals", require(http.HandlerFunc(h.vitals)))
+	mux.Handle("POST /turbo", require(http.HandlerFunc(h.turbo)))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: not found", http.StatusNotFound)
 	})

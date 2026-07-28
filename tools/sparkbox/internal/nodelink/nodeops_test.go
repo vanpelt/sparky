@@ -162,6 +162,10 @@ func (m *opsManager) Reboot(ctx context.Context, name string) error {
 	return m.simple(ctx, "reboot", name)
 }
 
+func (m *opsManager) SetTurbo(ctx context.Context, name string, on bool) error {
+	return m.simple(ctx, "turbo", name, on)
+}
+
 func (m *opsManager) Rename(ctx context.Context, oldName, newName, owner string) error {
 	return m.simple(ctx, "rename", oldName, newName, owner)
 }

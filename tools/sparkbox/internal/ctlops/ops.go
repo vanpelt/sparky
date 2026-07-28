@@ -405,6 +405,7 @@ func (o *Ops) info(b *host.Sandbox) SandboxInfo {
 		Tags:        []string{},
 		VCPUs:       b.VCPUs,
 		MemMB:       b.MemMB,
+		Turbo:       b.Turbo,
 		DiskMB:      b.DiskMB,
 		CreatedAt:   b.CreatedAt,
 		LastActive:  b.LastActive,

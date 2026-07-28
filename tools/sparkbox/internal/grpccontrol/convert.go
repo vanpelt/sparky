@@ -46,6 +46,7 @@ func sandboxToProto(box *host.Sandbox) *nodev1.Sandbox {
 		DiskMb:         box.DiskMB,
 		DiskTotalMb:    box.DiskTotalMB,
 		HostIp:         box.HostIP,
+		Turbo:          box.Turbo,
 	}
 	return out
 }

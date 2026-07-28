@@ -92,6 +92,15 @@ type harness struct {
 
 func newHarness(t *testing.T, boxes ...*host.Sandbox) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil, boxes...)
+}
+
+// newHarnessWith is newHarness with the optional turbo capability wired. Left
+// nil — which is every other test here — the handler serves no turbo button and
+// its endpoint answers 501, which is the shape a host that has not enabled it
+// should have.
+func newHarnessWith(t *testing.T, turbo Turbocharger, boxes ...*host.Sandbox) *harness {
+	t.Helper()
 	hz := &harness{
 		mgr:    newFakeManager(boxes...),
 		signer: edgeauth.NewSigner([]byte("test-oidc-ikm")),
@@ -106,6 +115,7 @@ func newHarness(t *testing.T, boxes ...*host.Sandbox) *harness {
 			"opsy":    {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
 		},
 		Sessions: hz.signer,
+		Turbo:    turbo,
 		Domain:   testDomain,
 		LoginURL: "https://login." + testDomain + "/",
 		Log:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),

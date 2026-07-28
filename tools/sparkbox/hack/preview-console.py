@@ -68,6 +68,7 @@ def _machines(tick):
          "cpu_seconds": 1200 + tick * 3.1, "image": "universal", "last_active": _iso(4),
          "net_rx_bytes": 4923847112, "net_tx_bytes": 812394002,
          "pinned": True, "env_undecryptable": False, "tags": ["ml", "prod"],
+         "turbo": True, "base_vcpus": 2, "base_mem_mb": 8192,
          "routes": [
              {"subdomain": "brave-meadow", "port": 8080, "visibility": "private", "listening": True},
              {"subdomain": "api", "port": 3000, "visibility": "public", "listening": True},
@@ -124,15 +125,35 @@ _STUB = """
   var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s;
   function machines() {
     tick += 1;
-    return %(machines_fn)s(tick);
+    var list = %(machines_fn)s(tick);
+    list.forEach(function (b) {
+      if (!(b.name in TURBO)) return;
+      var on = TURBO[b.name];
+      if (on === !!b.turbo) return;
+      var f = 2;
+      b.vcpus = on ? b.vcpus * f : Math.round(b.vcpus / f);
+      b.mem_mb = on ? b.mem_mb * f : Math.round(b.mem_mb / f);
+      b.turbo = on;
+    });
+    return list;
   }
   function J(data) {
     return Promise.resolve(new Response(JSON.stringify(data), {
       status: 200, headers: { "Content-Type": "application/json" } }));
   }
+  var TURBO = {};   // name -> on, applied over the canned list below
   var real = window.fetch;
   window.fetch = function (url, opts) {
     var u = String(url), m = (opts && opts.method) || "GET";
+    var tb = u.match(/\\/api\\/machines\\/([^/]+)\\/turbo/);
+    if (tb && m === "POST") {
+      // Real turbo is a pause plus a cold boot; the delay is here so the LED
+      // can be watched blinking rather than flicking instantly.
+      var name = decodeURIComponent(tb[1]), on = JSON.parse(opts.body || "{}").on;
+      return new Promise(function (ok) {
+        setTimeout(function () { TURBO[name] = !!on; ok(J({ ok: true })); }, 2200);
+      });
+    }
     if (u.indexOf("/api/me") >= 0) return J(ME);
     if (u.indexOf("/api/secrets") >= 0 && m === "GET") return J(SECRETS);
     if (u.indexOf("/api/snapshots") >= 0 && m === "GET") return J(SNAPSHOTS);
@@ -159,7 +180,8 @@ def _machines_js():
 # random number each poll would produce no series at all. The intensity sweeps a
 # slow cycle on purpose: it is the only way to watch the plot cross the 70% and
 # 90% threshold colours without a genuinely busy VM to point at.
-_VITALS = {"at": None, "cpu": 1200.0, "rx": 4_200_000, "tx": 910_000, "mem": 2600.0}
+_VITALS = {"at": None, "cpu": 1200.0, "rx": 4_200_000, "tx": 910_000, "mem": 2600.0,
+           "turbo": False}
 _V_VCPUS, _V_MEM_MB = 2, 8192
 
 
@@ -183,7 +205,9 @@ def _vitals():
     rx, tx = int(_VITALS["rx"]), int(_VITALS["tx"])
     return {
         "state": "running", "at_ms": int(now * 1000),
-        "vcpus": _V_VCPUS, "mem_mb": _V_MEM_MB,
+        "vcpus": _V_VCPUS * (2 if _VITALS["turbo"] else 1),
+        "mem_mb": _V_MEM_MB * (2 if _VITALS["turbo"] else 1),
+        "turbo": _VITALS["turbo"], "turbo_available": True,
         "cpu_seconds": round(_VITALS["cpu"], 3),
         "mem_used_mb": int(_VITALS["mem"]),
         "net_rx_bytes": rx, "net_tx_bytes": tx,
@@ -282,6 +306,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # The terminal page posts here when its turbo switch is thrown. Latched, and
+    # slow on purpose: a real turbo is a pause plus a cold boot, and the lamp's
+    # blink is only worth looking at if there is something to blink through.
+    def do_POST(self):
+        if self.path.split("?")[0] != "/turbo":
+            self.send_error(404, "not found")
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        req = json.loads(self.rfile.read(n) or b"{}")
+        time.sleep(2.2)
+        _VITALS["turbo"] = bool(req.get("on"))
+        body = json.dumps({"turbo": _VITALS["turbo"]}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

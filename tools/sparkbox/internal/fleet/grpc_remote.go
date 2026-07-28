@@ -66,6 +66,7 @@ type DurableControlClient interface {
 	Archive(context.Context, *nodev1.ArchiveRequest) (*nodev1.Operation, error)
 	Resize(context.Context, *nodev1.ResizeRequest) (*nodev1.Operation, error)
 	Reboot(context.Context, *nodev1.RebootRequest) (*nodev1.Operation, error)
+	SetTurbo(context.Context, *nodev1.SetTurboRequest) (*nodev1.Operation, error)
 	Rename(context.Context, *nodev1.RenameRequest) (*nodev1.Operation, error)
 	Destroy(context.Context, *nodev1.DestroyRequest) (*nodev1.Operation, error)
 	SetPinned(context.Context, *nodev1.SetPinnedRequest) (*nodev1.Operation, error)
@@ -740,6 +741,7 @@ func sandboxRowFromProto(wire *nodev1.Sandbox) nodelink.SandboxRow {
 		KeyFP: wire.GetKeyFingerprint(), NetRxBytes: wire.GetNetworkRxBytes(),
 		NetTxBytes: wire.GetNetworkTxBytes(), ArchivedAt: protoTime(wire.GetArchivedAt()),
 		CreatedAt: protoTime(wire.GetCreatedAt()), LastActive: protoTime(wire.GetLastActive()),
+		Turbo: wire.GetTurbo(),
 	}
 }
 
@@ -1170,6 +1172,16 @@ func (g *GRPCControl) Reboot(ctx context.Context, name string) error {
 	}
 	return g.sandboxMutation(ctx, "reboot", "reboot", name, request, func(ctx context.Context) (*nodev1.Operation, error) {
 		return g.client.Reboot(ctx, request)
+	})
+}
+
+func (g *GRPCControl) SetTurbo(ctx context.Context, name string, on bool) error {
+	request := &nodev1.SetTurboRequest{Sandbox: name, On: on}
+	if err := setOperation(ctx, g, request, func(identity *nodev1.OperationIdentity) { request.Operation = identity }); err != nil {
+		return err
+	}
+	return g.sandboxMutation(ctx, "turbo", "turbo", name, request, func(ctx context.Context) (*nodev1.Operation, error) {
+		return g.client.SetTurbo(ctx, request)
 	})
 }
 

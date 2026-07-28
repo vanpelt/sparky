@@ -1061,6 +1061,18 @@ func (f *Fleet) Reboot(ctx context.Context, name string) error {
 	return n.Reboot(ctx, name)
 }
 
+// SetTurbo restarts a sandbox with doubled CPU and RAM, or back at its own
+// size. It hangs terminals up first for the same reason every other operation
+// that stops a guest does: the box is about to cold-boot under them.
+func (f *Fleet) SetTurbo(ctx context.Context, name string, on bool) error {
+	n, err := f.route("turbo", name)
+	if err != nil {
+		return err
+	}
+	f.hangUpBefore(n, name)
+	return n.SetTurbo(ctx, name, on)
+}
+
 // Rename moves the ledger row before the machine renames anything, so a crash
 // between the two halves leaves the name pointing at the machine that holds
 // the rootfs rather than stranding it under a name nothing claims. A refusal

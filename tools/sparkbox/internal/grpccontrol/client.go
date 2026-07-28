@@ -263,6 +263,12 @@ func (c *Client) Reboot(ctx context.Context, request *nodev1.RebootRequest) (*no
 	})
 }
 
+func (c *Client) SetTurbo(ctx context.Context, request *nodev1.SetTurboRequest) (*nodev1.Operation, error) {
+	return c.run(ctx, operationID(request.GetOperation()), func(ctx context.Context) (*nodev1.Operation, error) {
+		return c.control.BeginSetTurbo(ctx, request)
+	})
+}
+
 func (c *Client) Rename(ctx context.Context, request *nodev1.RenameRequest) (*nodev1.Operation, error) {
 	return c.run(ctx, operationID(request.GetOperation()), func(ctx context.Context) (*nodev1.Operation, error) {
 		return c.control.BeginRename(ctx, request)

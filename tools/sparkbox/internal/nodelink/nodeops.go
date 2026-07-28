@@ -82,6 +82,10 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 		return EmptyResp{}, mgr.Reboot(ctx, req.Name)
 	})
 
+	handle(conn, TypeTurbo, func(ctx context.Context, req TurboReq) (EmptyResp, error) {
+		return EmptyResp{}, mgr.SetTurbo(ctx, req.Name, req.On)
+	})
+
 	// Rename is the one verb that does not forward wholesale, and the split is
 	// worth stating because it is invisible from either half.
 	//

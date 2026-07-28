@@ -729,7 +729,10 @@ type Sandbox struct {
 	DiskTotalMb    int64                  `protobuf:"varint,17,opt,name=disk_total_mb,json=diskTotalMb,proto3" json:"disk_total_mb,omitempty"`
 	// The node's actual routed guest address. Gateways must validate it against
 	// the authenticated node's approved prefix before using it.
-	HostIp        string `protobuf:"bytes,18,opt,name=host_ip,json=hostIp,proto3" json:"host_ip,omitempty"`
+	HostIp string `protobuf:"bytes,18,opt,name=host_ip,json=hostIp,proto3" json:"host_ip,omitempty"`
+	// turbo means vcpus and memory_mb above are a doubled allocation this run
+	// borrowed, which the node hands back the moment the sandbox pauses.
+	Turbo         bool `protobuf:"varint,19,opt,name=turbo,proto3" json:"turbo,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -888,6 +891,13 @@ func (x *Sandbox) GetHostIp() string {
 		return x.HostIp
 	}
 	return ""
+}
+
+func (x *Sandbox) GetTurbo() bool {
+	if x != nil {
+		return x.Turbo
+	}
+	return false
 }
 
 type Snapshot struct {
@@ -1844,6 +1854,69 @@ func (x *RebootRequest) GetSandbox() string {
 	return ""
 }
 
+// SetTurboRequest cold-boots a sandbox with doubled CPU and RAM (on), or back
+// at its own size. The multiplier is the node's, not the gateway's: a fleet
+// mid-upgrade must not have two machines disagreeing about what turbo means.
+type SetTurboRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operation     *OperationIdentity     `protobuf:"bytes,1,opt,name=operation,proto3" json:"operation,omitempty"`
+	Sandbox       string                 `protobuf:"bytes,2,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
+	On            bool                   `protobuf:"varint,3,opt,name=on,proto3" json:"on,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetTurboRequest) Reset() {
+	*x = SetTurboRequest{}
+	mi := &file_node_v1_node_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetTurboRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetTurboRequest) ProtoMessage() {}
+
+func (x *SetTurboRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_node_v1_node_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetTurboRequest.ProtoReflect.Descriptor instead.
+func (*SetTurboRequest) Descriptor() ([]byte, []int) {
+	return file_node_v1_node_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *SetTurboRequest) GetOperation() *OperationIdentity {
+	if x != nil {
+		return x.Operation
+	}
+	return nil
+}
+
+func (x *SetTurboRequest) GetSandbox() string {
+	if x != nil {
+		return x.Sandbox
+	}
+	return ""
+}
+
+func (x *SetTurboRequest) GetOn() bool {
+	if x != nil {
+		return x.On
+	}
+	return false
+}
+
 type RenameRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Operation     *OperationIdentity     `protobuf:"bytes,1,opt,name=operation,proto3" json:"operation,omitempty"`
@@ -1856,7 +1929,7 @@ type RenameRequest struct {
 
 func (x *RenameRequest) Reset() {
 	*x = RenameRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[24]
+	mi := &file_node_v1_node_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1868,7 +1941,7 @@ func (x *RenameRequest) String() string {
 func (*RenameRequest) ProtoMessage() {}
 
 func (x *RenameRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[24]
+	mi := &file_node_v1_node_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1881,7 +1954,7 @@ func (x *RenameRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenameRequest.ProtoReflect.Descriptor instead.
 func (*RenameRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{24}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *RenameRequest) GetOperation() *OperationIdentity {
@@ -1922,7 +1995,7 @@ type DestroyRequest struct {
 
 func (x *DestroyRequest) Reset() {
 	*x = DestroyRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[25]
+	mi := &file_node_v1_node_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1934,7 +2007,7 @@ func (x *DestroyRequest) String() string {
 func (*DestroyRequest) ProtoMessage() {}
 
 func (x *DestroyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[25]
+	mi := &file_node_v1_node_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1947,7 +2020,7 @@ func (x *DestroyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyRequest.ProtoReflect.Descriptor instead.
 func (*DestroyRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{25}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *DestroyRequest) GetOperation() *OperationIdentity {
@@ -1975,7 +2048,7 @@ type SetPinnedRequest struct {
 
 func (x *SetPinnedRequest) Reset() {
 	*x = SetPinnedRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[26]
+	mi := &file_node_v1_node_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1987,7 +2060,7 @@ func (x *SetPinnedRequest) String() string {
 func (*SetPinnedRequest) ProtoMessage() {}
 
 func (x *SetPinnedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[26]
+	mi := &file_node_v1_node_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2000,7 +2073,7 @@ func (x *SetPinnedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPinnedRequest.ProtoReflect.Descriptor instead.
 func (*SetPinnedRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{26}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SetPinnedRequest) GetOperation() *OperationIdentity {
@@ -2034,7 +2107,7 @@ type ResyncEnvironmentRequest struct {
 
 func (x *ResyncEnvironmentRequest) Reset() {
 	*x = ResyncEnvironmentRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[27]
+	mi := &file_node_v1_node_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2046,7 +2119,7 @@ func (x *ResyncEnvironmentRequest) String() string {
 func (*ResyncEnvironmentRequest) ProtoMessage() {}
 
 func (x *ResyncEnvironmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[27]
+	mi := &file_node_v1_node_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2059,7 +2132,7 @@ func (x *ResyncEnvironmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncEnvironmentRequest.ProtoReflect.Descriptor instead.
 func (*ResyncEnvironmentRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{27}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ResyncEnvironmentRequest) GetOperation() *OperationIdentity {
@@ -2088,7 +2161,7 @@ type SnapshotRequest struct {
 
 func (x *SnapshotRequest) Reset() {
 	*x = SnapshotRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[28]
+	mi := &file_node_v1_node_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2100,7 +2173,7 @@ func (x *SnapshotRequest) String() string {
 func (*SnapshotRequest) ProtoMessage() {}
 
 func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[28]
+	mi := &file_node_v1_node_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2113,7 +2186,7 @@ func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{28}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *SnapshotRequest) GetOperation() *OperationIdentity {
@@ -2155,7 +2228,7 @@ type DeleteSnapshotRequest struct {
 
 func (x *DeleteSnapshotRequest) Reset() {
 	*x = DeleteSnapshotRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[29]
+	mi := &file_node_v1_node_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2167,7 +2240,7 @@ func (x *DeleteSnapshotRequest) String() string {
 func (*DeleteSnapshotRequest) ProtoMessage() {}
 
 func (x *DeleteSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[29]
+	mi := &file_node_v1_node_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2180,7 +2253,7 @@ func (x *DeleteSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{29}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *DeleteSnapshotRequest) GetOperation() *OperationIdentity {
@@ -2218,7 +2291,7 @@ type ForkRequest struct {
 
 func (x *ForkRequest) Reset() {
 	*x = ForkRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[30]
+	mi := &file_node_v1_node_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2230,7 +2303,7 @@ func (x *ForkRequest) String() string {
 func (*ForkRequest) ProtoMessage() {}
 
 func (x *ForkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[30]
+	mi := &file_node_v1_node_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2243,7 +2316,7 @@ func (x *ForkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkRequest.ProtoReflect.Descriptor instead.
 func (*ForkRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{30}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ForkRequest) GetOperation() *OperationIdentity {
@@ -2298,7 +2371,7 @@ type MarkActiveRequest struct {
 
 func (x *MarkActiveRequest) Reset() {
 	*x = MarkActiveRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[31]
+	mi := &file_node_v1_node_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2310,7 +2383,7 @@ func (x *MarkActiveRequest) String() string {
 func (*MarkActiveRequest) ProtoMessage() {}
 
 func (x *MarkActiveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[31]
+	mi := &file_node_v1_node_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2323,7 +2396,7 @@ func (x *MarkActiveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MarkActiveRequest.ProtoReflect.Descriptor instead.
 func (*MarkActiveRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{31}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *MarkActiveRequest) GetSandbox() string {
@@ -2350,7 +2423,7 @@ type RecordKeyRequest struct {
 
 func (x *RecordKeyRequest) Reset() {
 	*x = RecordKeyRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[32]
+	mi := &file_node_v1_node_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2362,7 +2435,7 @@ func (x *RecordKeyRequest) String() string {
 func (*RecordKeyRequest) ProtoMessage() {}
 
 func (x *RecordKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[32]
+	mi := &file_node_v1_node_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2375,7 +2448,7 @@ func (x *RecordKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordKeyRequest.ProtoReflect.Descriptor instead.
 func (*RecordKeyRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{32}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *RecordKeyRequest) GetSandbox() string {
@@ -2402,7 +2475,7 @@ type NetworkPolicy struct {
 
 func (x *NetworkPolicy) Reset() {
 	*x = NetworkPolicy{}
-	mi := &file_node_v1_node_proto_msgTypes[33]
+	mi := &file_node_v1_node_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2414,7 +2487,7 @@ func (x *NetworkPolicy) String() string {
 func (*NetworkPolicy) ProtoMessage() {}
 
 func (x *NetworkPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[33]
+	mi := &file_node_v1_node_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2427,7 +2500,7 @@ func (x *NetworkPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkPolicy.ProtoReflect.Descriptor instead.
 func (*NetworkPolicy) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{33}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *NetworkPolicy) GetSandbox() string {
@@ -2454,7 +2527,7 @@ type ApplyNetworkPolicyRequest struct {
 
 func (x *ApplyNetworkPolicyRequest) Reset() {
 	*x = ApplyNetworkPolicyRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[34]
+	mi := &file_node_v1_node_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2466,7 +2539,7 @@ func (x *ApplyNetworkPolicyRequest) String() string {
 func (*ApplyNetworkPolicyRequest) ProtoMessage() {}
 
 func (x *ApplyNetworkPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[34]
+	mi := &file_node_v1_node_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2479,7 +2552,7 @@ func (x *ApplyNetworkPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyNetworkPolicyRequest.ProtoReflect.Descriptor instead.
 func (*ApplyNetworkPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{34}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ApplyNetworkPolicyRequest) GetOperation() *OperationIdentity {
@@ -2504,7 +2577,7 @@ type GetNetworkUsageRequest struct {
 
 func (x *GetNetworkUsageRequest) Reset() {
 	*x = GetNetworkUsageRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[35]
+	mi := &file_node_v1_node_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2516,7 +2589,7 @@ func (x *GetNetworkUsageRequest) String() string {
 func (*GetNetworkUsageRequest) ProtoMessage() {}
 
 func (x *GetNetworkUsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[35]
+	mi := &file_node_v1_node_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2529,7 +2602,7 @@ func (x *GetNetworkUsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNetworkUsageRequest.ProtoReflect.Descriptor instead.
 func (*GetNetworkUsageRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{35}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{36}
 }
 
 type NetworkUsage struct {
@@ -2543,7 +2616,7 @@ type NetworkUsage struct {
 
 func (x *NetworkUsage) Reset() {
 	*x = NetworkUsage{}
-	mi := &file_node_v1_node_proto_msgTypes[36]
+	mi := &file_node_v1_node_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2555,7 +2628,7 @@ func (x *NetworkUsage) String() string {
 func (*NetworkUsage) ProtoMessage() {}
 
 func (x *NetworkUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[36]
+	mi := &file_node_v1_node_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2568,7 +2641,7 @@ func (x *NetworkUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkUsage.ProtoReflect.Descriptor instead.
 func (*NetworkUsage) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{36}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *NetworkUsage) GetSandbox() string {
@@ -2601,7 +2674,7 @@ type GetNetworkUsageResponse struct {
 
 func (x *GetNetworkUsageResponse) Reset() {
 	*x = GetNetworkUsageResponse{}
-	mi := &file_node_v1_node_proto_msgTypes[37]
+	mi := &file_node_v1_node_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2613,7 +2686,7 @@ func (x *GetNetworkUsageResponse) String() string {
 func (*GetNetworkUsageResponse) ProtoMessage() {}
 
 func (x *GetNetworkUsageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[37]
+	mi := &file_node_v1_node_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2626,7 +2699,7 @@ func (x *GetNetworkUsageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNetworkUsageResponse.ProtoReflect.Descriptor instead.
 func (*GetNetworkUsageResponse) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{37}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *GetNetworkUsageResponse) GetUsage() []*NetworkUsage {
@@ -2645,7 +2718,7 @@ type GetOperationRequest struct {
 
 func (x *GetOperationRequest) Reset() {
 	*x = GetOperationRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[38]
+	mi := &file_node_v1_node_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2657,7 +2730,7 @@ func (x *GetOperationRequest) String() string {
 func (*GetOperationRequest) ProtoMessage() {}
 
 func (x *GetOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[38]
+	mi := &file_node_v1_node_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2670,7 +2743,7 @@ func (x *GetOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetOperationRequest.ProtoReflect.Descriptor instead.
 func (*GetOperationRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{38}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetOperationRequest) GetOperationId() string {
@@ -2690,7 +2763,7 @@ type WatchOperationRequest struct {
 
 func (x *WatchOperationRequest) Reset() {
 	*x = WatchOperationRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[39]
+	mi := &file_node_v1_node_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2702,7 +2775,7 @@ func (x *WatchOperationRequest) String() string {
 func (*WatchOperationRequest) ProtoMessage() {}
 
 func (x *WatchOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[39]
+	mi := &file_node_v1_node_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2715,7 +2788,7 @@ func (x *WatchOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchOperationRequest.ProtoReflect.Descriptor instead.
 func (*WatchOperationRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{39}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *WatchOperationRequest) GetOperationId() string {
@@ -2752,7 +2825,7 @@ type Operation struct {
 
 func (x *Operation) Reset() {
 	*x = Operation{}
-	mi := &file_node_v1_node_proto_msgTypes[40]
+	mi := &file_node_v1_node_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2764,7 +2837,7 @@ func (x *Operation) String() string {
 func (*Operation) ProtoMessage() {}
 
 func (x *Operation) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[40]
+	mi := &file_node_v1_node_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2777,7 +2850,7 @@ func (x *Operation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Operation.ProtoReflect.Descriptor instead.
 func (*Operation) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{40}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *Operation) GetOperationId() string {
@@ -2878,7 +2951,7 @@ type OperationResult struct {
 
 func (x *OperationResult) Reset() {
 	*x = OperationResult{}
-	mi := &file_node_v1_node_proto_msgTypes[41]
+	mi := &file_node_v1_node_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2890,7 +2963,7 @@ func (x *OperationResult) String() string {
 func (*OperationResult) ProtoMessage() {}
 
 func (x *OperationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[41]
+	mi := &file_node_v1_node_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2903,7 +2976,7 @@ func (x *OperationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationResult.ProtoReflect.Descriptor instead.
 func (*OperationResult) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{41}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *OperationResult) GetResult() isOperationResult_Result {
@@ -2973,7 +3046,7 @@ type OperationError struct {
 
 func (x *OperationError) Reset() {
 	*x = OperationError{}
-	mi := &file_node_v1_node_proto_msgTypes[42]
+	mi := &file_node_v1_node_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2985,7 +3058,7 @@ func (x *OperationError) String() string {
 func (*OperationError) ProtoMessage() {}
 
 func (x *OperationError) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[42]
+	mi := &file_node_v1_node_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2998,7 +3071,7 @@ func (x *OperationError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationError.ProtoReflect.Descriptor instead.
 func (*OperationError) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{42}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *OperationError) GetCode() string {
@@ -3032,7 +3105,7 @@ type IssueTokenRequest struct {
 
 func (x *IssueTokenRequest) Reset() {
 	*x = IssueTokenRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[43]
+	mi := &file_node_v1_node_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3044,7 +3117,7 @@ func (x *IssueTokenRequest) String() string {
 func (*IssueTokenRequest) ProtoMessage() {}
 
 func (x *IssueTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[43]
+	mi := &file_node_v1_node_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3057,7 +3130,7 @@ func (x *IssueTokenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueTokenRequest.ProtoReflect.Descriptor instead.
 func (*IssueTokenRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{43}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *IssueTokenRequest) GetSandbox() string {
@@ -3084,7 +3157,7 @@ type IssueTokenResponse struct {
 
 func (x *IssueTokenResponse) Reset() {
 	*x = IssueTokenResponse{}
-	mi := &file_node_v1_node_proto_msgTypes[44]
+	mi := &file_node_v1_node_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3096,7 +3169,7 @@ func (x *IssueTokenResponse) String() string {
 func (*IssueTokenResponse) ProtoMessage() {}
 
 func (x *IssueTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[44]
+	mi := &file_node_v1_node_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3109,7 +3182,7 @@ func (x *IssueTokenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueTokenResponse.ProtoReflect.Descriptor instead.
 func (*IssueTokenResponse) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{44}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *IssueTokenResponse) GetToken() string {
@@ -3135,7 +3208,7 @@ type DescribeIdentityRequest struct {
 
 func (x *DescribeIdentityRequest) Reset() {
 	*x = DescribeIdentityRequest{}
-	mi := &file_node_v1_node_proto_msgTypes[45]
+	mi := &file_node_v1_node_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3147,7 +3220,7 @@ func (x *DescribeIdentityRequest) String() string {
 func (*DescribeIdentityRequest) ProtoMessage() {}
 
 func (x *DescribeIdentityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[45]
+	mi := &file_node_v1_node_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3160,7 +3233,7 @@ func (x *DescribeIdentityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeIdentityRequest.ProtoReflect.Descriptor instead.
 func (*DescribeIdentityRequest) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{45}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *DescribeIdentityRequest) GetSandbox() string {
@@ -3186,7 +3259,7 @@ type IdentityDescription struct {
 
 func (x *IdentityDescription) Reset() {
 	*x = IdentityDescription{}
-	mi := &file_node_v1_node_proto_msgTypes[46]
+	mi := &file_node_v1_node_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3198,7 +3271,7 @@ func (x *IdentityDescription) String() string {
 func (*IdentityDescription) ProtoMessage() {}
 
 func (x *IdentityDescription) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[46]
+	mi := &file_node_v1_node_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3211,7 +3284,7 @@ func (x *IdentityDescription) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentityDescription.ProtoReflect.Descriptor instead.
 func (*IdentityDescription) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{46}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *IdentityDescription) GetIssuer() string {
@@ -3280,7 +3353,7 @@ type DurationRange struct {
 
 func (x *DurationRange) Reset() {
 	*x = DurationRange{}
-	mi := &file_node_v1_node_proto_msgTypes[47]
+	mi := &file_node_v1_node_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3292,7 +3365,7 @@ func (x *DurationRange) String() string {
 func (*DurationRange) ProtoMessage() {}
 
 func (x *DurationRange) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[47]
+	mi := &file_node_v1_node_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3305,7 +3378,7 @@ func (x *DurationRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurationRange.ProtoReflect.Descriptor instead.
 func (*DurationRange) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{47}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *DurationRange) GetMinimum() *durationpb.Duration {
@@ -3354,7 +3427,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"q\n" +
 	"\bEventGap\x12:\n" +
 	"\x19oldest_available_revision\x18\x01 \x01(\x04R\x17oldestAvailableRevision\x12)\n" +
-	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\x8b\x05\n" +
+	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xa1\x05\n" +
 	"\aSandbox\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -3377,7 +3450,8 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"archivedAt\x12\x17\n" +
 	"\adisk_mb\x18\x10 \x01(\x03R\x06diskMb\x12\"\n" +
 	"\rdisk_total_mb\x18\x11 \x01(\x03R\vdiskTotalMb\x12\x17\n" +
-	"\ahost_ip\x18\x12 \x01(\tR\x06hostIp\"\xa8\x01\n" +
+	"\ahost_ip\x18\x12 \x01(\tR\x06hostIp\x12\x14\n" +
+	"\x05turbo\x18\x13 \x01(\bR\x05turbo\"\xa8\x01\n" +
 	"\bSnapshot\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -3455,7 +3529,11 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\asize_mb\x18\x03 \x01(\x03R\x06sizeMb\"l\n" +
 	"\rRebootRequest\x12A\n" +
 	"\toperation\x18\x01 \x01(\v2#.sparkbox.node.v1.OperationIdentityR\toperation\x12\x18\n" +
-	"\asandbox\x18\x02 \x01(\tR\asandbox\"\x9d\x01\n" +
+	"\asandbox\x18\x02 \x01(\tR\asandbox\"~\n" +
+	"\x0fSetTurboRequest\x12A\n" +
+	"\toperation\x18\x01 \x01(\v2#.sparkbox.node.v1.OperationIdentityR\toperation\x12\x18\n" +
+	"\asandbox\x18\x02 \x01(\tR\asandbox\x12\x0e\n" +
+	"\x02on\x18\x03 \x01(\bR\x02on\"\x9d\x01\n" +
 	"\rRenameRequest\x12A\n" +
 	"\toperation\x18\x01 \x01(\v2#.sparkbox.node.v1.OperationIdentityR\toperation\x12\x18\n" +
 	"\asandbox\x18\x02 \x01(\tR\asandbox\x12\x19\n" +
@@ -3574,7 +3652,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x17OPERATION_STATE_RUNNING\x10\x02\x12\x1d\n" +
 	"\x19OPERATION_STATE_SUCCEEDED\x10\x03\x12\x1a\n" +
 	"\x16OPERATION_STATE_FAILED\x10\x04\x12\x1d\n" +
-	"\x19OPERATION_STATE_CANCELLED\x10\x052\xcd\x0f\n" +
+	"\x19OPERATION_STATE_CANCELLED\x10\x052\x9e\x10\n" +
 	"\vNodeControl\x12R\n" +
 	"\fGetInventory\x12%.sparkbox.node.v1.GetInventoryRequest\x1a\x1b.sparkbox.node.v1.Inventory\x12W\n" +
 	"\vWatchEvents\x12$.sparkbox.node.v1.WatchEventsRequest\x1a .sparkbox.node.v1.InventoryEvent0\x01\x12O\n" +
@@ -3587,7 +3665,8 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"BeginPause\x12\x1e.sparkbox.node.v1.PauseRequest\x1a\x1b.sparkbox.node.v1.Operation\x12M\n" +
 	"\fBeginArchive\x12 .sparkbox.node.v1.ArchiveRequest\x1a\x1b.sparkbox.node.v1.Operation\x12K\n" +
 	"\vBeginResize\x12\x1f.sparkbox.node.v1.ResizeRequest\x1a\x1b.sparkbox.node.v1.Operation\x12K\n" +
-	"\vBeginReboot\x12\x1f.sparkbox.node.v1.RebootRequest\x1a\x1b.sparkbox.node.v1.Operation\x12K\n" +
+	"\vBeginReboot\x12\x1f.sparkbox.node.v1.RebootRequest\x1a\x1b.sparkbox.node.v1.Operation\x12O\n" +
+	"\rBeginSetTurbo\x12!.sparkbox.node.v1.SetTurboRequest\x1a\x1b.sparkbox.node.v1.Operation\x12K\n" +
 	"\vBeginRename\x12\x1f.sparkbox.node.v1.RenameRequest\x1a\x1b.sparkbox.node.v1.Operation\x12M\n" +
 	"\fBeginDestroy\x12 .sparkbox.node.v1.DestroyRequest\x1a\x1b.sparkbox.node.v1.Operation\x12Q\n" +
 	"\x0eBeginSetPinned\x12\".sparkbox.node.v1.SetPinnedRequest\x1a\x1b.sparkbox.node.v1.Operation\x12a\n" +
@@ -3620,7 +3699,7 @@ func file_node_v1_node_proto_rawDescGZIP() []byte {
 }
 
 var file_node_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 49)
 var file_node_v1_node_proto_goTypes = []any{
 	(SandboxState)(0),                 // 0: sparkbox.node.v1.SandboxState
 	(HealthStatus)(0),                 // 1: sparkbox.node.v1.HealthStatus
@@ -3649,33 +3728,34 @@ var file_node_v1_node_proto_goTypes = []any{
 	(*ArchiveRequest)(nil),            // 24: sparkbox.node.v1.ArchiveRequest
 	(*ResizeRequest)(nil),             // 25: sparkbox.node.v1.ResizeRequest
 	(*RebootRequest)(nil),             // 26: sparkbox.node.v1.RebootRequest
-	(*RenameRequest)(nil),             // 27: sparkbox.node.v1.RenameRequest
-	(*DestroyRequest)(nil),            // 28: sparkbox.node.v1.DestroyRequest
-	(*SetPinnedRequest)(nil),          // 29: sparkbox.node.v1.SetPinnedRequest
-	(*ResyncEnvironmentRequest)(nil),  // 30: sparkbox.node.v1.ResyncEnvironmentRequest
-	(*SnapshotRequest)(nil),           // 31: sparkbox.node.v1.SnapshotRequest
-	(*DeleteSnapshotRequest)(nil),     // 32: sparkbox.node.v1.DeleteSnapshotRequest
-	(*ForkRequest)(nil),               // 33: sparkbox.node.v1.ForkRequest
-	(*MarkActiveRequest)(nil),         // 34: sparkbox.node.v1.MarkActiveRequest
-	(*RecordKeyRequest)(nil),          // 35: sparkbox.node.v1.RecordKeyRequest
-	(*NetworkPolicy)(nil),             // 36: sparkbox.node.v1.NetworkPolicy
-	(*ApplyNetworkPolicyRequest)(nil), // 37: sparkbox.node.v1.ApplyNetworkPolicyRequest
-	(*GetNetworkUsageRequest)(nil),    // 38: sparkbox.node.v1.GetNetworkUsageRequest
-	(*NetworkUsage)(nil),              // 39: sparkbox.node.v1.NetworkUsage
-	(*GetNetworkUsageResponse)(nil),   // 40: sparkbox.node.v1.GetNetworkUsageResponse
-	(*GetOperationRequest)(nil),       // 41: sparkbox.node.v1.GetOperationRequest
-	(*WatchOperationRequest)(nil),     // 42: sparkbox.node.v1.WatchOperationRequest
-	(*Operation)(nil),                 // 43: sparkbox.node.v1.Operation
-	(*OperationResult)(nil),           // 44: sparkbox.node.v1.OperationResult
-	(*OperationError)(nil),            // 45: sparkbox.node.v1.OperationError
-	(*IssueTokenRequest)(nil),         // 46: sparkbox.node.v1.IssueTokenRequest
-	(*IssueTokenResponse)(nil),        // 47: sparkbox.node.v1.IssueTokenResponse
-	(*DescribeIdentityRequest)(nil),   // 48: sparkbox.node.v1.DescribeIdentityRequest
-	(*IdentityDescription)(nil),       // 49: sparkbox.node.v1.IdentityDescription
-	(*DurationRange)(nil),             // 50: sparkbox.node.v1.DurationRange
-	(*timestamppb.Timestamp)(nil),     // 51: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),             // 52: google.protobuf.Empty
-	(*durationpb.Duration)(nil),       // 53: google.protobuf.Duration
+	(*SetTurboRequest)(nil),           // 27: sparkbox.node.v1.SetTurboRequest
+	(*RenameRequest)(nil),             // 28: sparkbox.node.v1.RenameRequest
+	(*DestroyRequest)(nil),            // 29: sparkbox.node.v1.DestroyRequest
+	(*SetPinnedRequest)(nil),          // 30: sparkbox.node.v1.SetPinnedRequest
+	(*ResyncEnvironmentRequest)(nil),  // 31: sparkbox.node.v1.ResyncEnvironmentRequest
+	(*SnapshotRequest)(nil),           // 32: sparkbox.node.v1.SnapshotRequest
+	(*DeleteSnapshotRequest)(nil),     // 33: sparkbox.node.v1.DeleteSnapshotRequest
+	(*ForkRequest)(nil),               // 34: sparkbox.node.v1.ForkRequest
+	(*MarkActiveRequest)(nil),         // 35: sparkbox.node.v1.MarkActiveRequest
+	(*RecordKeyRequest)(nil),          // 36: sparkbox.node.v1.RecordKeyRequest
+	(*NetworkPolicy)(nil),             // 37: sparkbox.node.v1.NetworkPolicy
+	(*ApplyNetworkPolicyRequest)(nil), // 38: sparkbox.node.v1.ApplyNetworkPolicyRequest
+	(*GetNetworkUsageRequest)(nil),    // 39: sparkbox.node.v1.GetNetworkUsageRequest
+	(*NetworkUsage)(nil),              // 40: sparkbox.node.v1.NetworkUsage
+	(*GetNetworkUsageResponse)(nil),   // 41: sparkbox.node.v1.GetNetworkUsageResponse
+	(*GetOperationRequest)(nil),       // 42: sparkbox.node.v1.GetOperationRequest
+	(*WatchOperationRequest)(nil),     // 43: sparkbox.node.v1.WatchOperationRequest
+	(*Operation)(nil),                 // 44: sparkbox.node.v1.Operation
+	(*OperationResult)(nil),           // 45: sparkbox.node.v1.OperationResult
+	(*OperationError)(nil),            // 46: sparkbox.node.v1.OperationError
+	(*IssueTokenRequest)(nil),         // 47: sparkbox.node.v1.IssueTokenRequest
+	(*IssueTokenResponse)(nil),        // 48: sparkbox.node.v1.IssueTokenResponse
+	(*DescribeIdentityRequest)(nil),   // 49: sparkbox.node.v1.DescribeIdentityRequest
+	(*IdentityDescription)(nil),       // 50: sparkbox.node.v1.IdentityDescription
+	(*DurationRange)(nil),             // 51: sparkbox.node.v1.DurationRange
+	(*timestamppb.Timestamp)(nil),     // 52: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),             // 53: google.protobuf.Empty
+	(*durationpb.Duration)(nil),       // 54: google.protobuf.Duration
 }
 var file_node_v1_node_proto_depIdxs = []int32{
 	12, // 0: sparkbox.node.v1.Inventory.sandboxes:type_name -> sparkbox.node.v1.Sandbox
@@ -3688,98 +3768,101 @@ var file_node_v1_node_proto_depIdxs = []int32{
 	12, // 7: sparkbox.node.v1.SandboxChanged.sandbox:type_name -> sparkbox.node.v1.Sandbox
 	13, // 8: sparkbox.node.v1.SnapshotChanged.snapshot:type_name -> sparkbox.node.v1.Snapshot
 	0,  // 9: sparkbox.node.v1.Sandbox.state:type_name -> sparkbox.node.v1.SandboxState
-	51, // 10: sparkbox.node.v1.Sandbox.created_at:type_name -> google.protobuf.Timestamp
-	51, // 11: sparkbox.node.v1.Sandbox.last_active:type_name -> google.protobuf.Timestamp
-	51, // 12: sparkbox.node.v1.Sandbox.archived_at:type_name -> google.protobuf.Timestamp
-	51, // 13: sparkbox.node.v1.Snapshot.created_at:type_name -> google.protobuf.Timestamp
+	52, // 10: sparkbox.node.v1.Sandbox.created_at:type_name -> google.protobuf.Timestamp
+	52, // 11: sparkbox.node.v1.Sandbox.last_active:type_name -> google.protobuf.Timestamp
+	52, // 12: sparkbox.node.v1.Sandbox.archived_at:type_name -> google.protobuf.Timestamp
+	52, // 13: sparkbox.node.v1.Snapshot.created_at:type_name -> google.protobuf.Timestamp
 	1,  // 14: sparkbox.node.v1.HealthResponse.status:type_name -> sparkbox.node.v1.HealthStatus
-	51, // 15: sparkbox.node.v1.HealthResponse.started_at:type_name -> google.protobuf.Timestamp
-	51, // 16: sparkbox.node.v1.OperationIdentity.created_at:type_name -> google.protobuf.Timestamp
+	52, // 15: sparkbox.node.v1.HealthResponse.started_at:type_name -> google.protobuf.Timestamp
+	52, // 16: sparkbox.node.v1.OperationIdentity.created_at:type_name -> google.protobuf.Timestamp
 	20, // 17: sparkbox.node.v1.EnsureRunningRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 18: sparkbox.node.v1.CreateRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 19: sparkbox.node.v1.PauseRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 20: sparkbox.node.v1.ArchiveRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 21: sparkbox.node.v1.ResizeRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 22: sparkbox.node.v1.RebootRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 23: sparkbox.node.v1.RenameRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 24: sparkbox.node.v1.DestroyRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 25: sparkbox.node.v1.SetPinnedRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 26: sparkbox.node.v1.ResyncEnvironmentRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 27: sparkbox.node.v1.SnapshotRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 28: sparkbox.node.v1.DeleteSnapshotRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	20, // 29: sparkbox.node.v1.ForkRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	51, // 30: sparkbox.node.v1.MarkActiveRequest.observed_at:type_name -> google.protobuf.Timestamp
-	20, // 31: sparkbox.node.v1.ApplyNetworkPolicyRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	36, // 32: sparkbox.node.v1.ApplyNetworkPolicyRequest.policies:type_name -> sparkbox.node.v1.NetworkPolicy
-	39, // 33: sparkbox.node.v1.GetNetworkUsageResponse.usage:type_name -> sparkbox.node.v1.NetworkUsage
-	51, // 34: sparkbox.node.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
-	51, // 35: sparkbox.node.v1.Operation.updated_at:type_name -> google.protobuf.Timestamp
-	2,  // 36: sparkbox.node.v1.Operation.state:type_name -> sparkbox.node.v1.OperationState
-	44, // 37: sparkbox.node.v1.Operation.result:type_name -> sparkbox.node.v1.OperationResult
-	45, // 38: sparkbox.node.v1.Operation.error:type_name -> sparkbox.node.v1.OperationError
-	12, // 39: sparkbox.node.v1.OperationResult.sandbox:type_name -> sparkbox.node.v1.Sandbox
-	13, // 40: sparkbox.node.v1.OperationResult.snapshot:type_name -> sparkbox.node.v1.Snapshot
-	52, // 41: sparkbox.node.v1.OperationResult.empty:type_name -> google.protobuf.Empty
-	51, // 42: sparkbox.node.v1.IssueTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
-	53, // 43: sparkbox.node.v1.DurationRange.minimum:type_name -> google.protobuf.Duration
-	53, // 44: sparkbox.node.v1.DurationRange.maximum:type_name -> google.protobuf.Duration
-	3,  // 45: sparkbox.node.v1.NodeControl.GetInventory:input_type -> sparkbox.node.v1.GetInventoryRequest
-	4,  // 46: sparkbox.node.v1.NodeControl.WatchEvents:input_type -> sparkbox.node.v1.WatchEventsRequest
-	14, // 47: sparkbox.node.v1.NodeControl.GetCapacity:input_type -> sparkbox.node.v1.GetCapacityRequest
-	16, // 48: sparkbox.node.v1.NodeControl.Health:input_type -> sparkbox.node.v1.HealthRequest
-	18, // 49: sparkbox.node.v1.NodeControl.GetVitals:input_type -> sparkbox.node.v1.GetVitalsRequest
-	21, // 50: sparkbox.node.v1.NodeControl.EnsureRunning:input_type -> sparkbox.node.v1.EnsureRunningRequest
-	22, // 51: sparkbox.node.v1.NodeControl.BeginCreate:input_type -> sparkbox.node.v1.CreateRequest
-	23, // 52: sparkbox.node.v1.NodeControl.BeginPause:input_type -> sparkbox.node.v1.PauseRequest
-	24, // 53: sparkbox.node.v1.NodeControl.BeginArchive:input_type -> sparkbox.node.v1.ArchiveRequest
-	25, // 54: sparkbox.node.v1.NodeControl.BeginResize:input_type -> sparkbox.node.v1.ResizeRequest
-	26, // 55: sparkbox.node.v1.NodeControl.BeginReboot:input_type -> sparkbox.node.v1.RebootRequest
-	27, // 56: sparkbox.node.v1.NodeControl.BeginRename:input_type -> sparkbox.node.v1.RenameRequest
-	28, // 57: sparkbox.node.v1.NodeControl.BeginDestroy:input_type -> sparkbox.node.v1.DestroyRequest
-	29, // 58: sparkbox.node.v1.NodeControl.BeginSetPinned:input_type -> sparkbox.node.v1.SetPinnedRequest
-	30, // 59: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:input_type -> sparkbox.node.v1.ResyncEnvironmentRequest
-	31, // 60: sparkbox.node.v1.NodeControl.BeginSnapshot:input_type -> sparkbox.node.v1.SnapshotRequest
-	32, // 61: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:input_type -> sparkbox.node.v1.DeleteSnapshotRequest
-	33, // 62: sparkbox.node.v1.NodeControl.BeginFork:input_type -> sparkbox.node.v1.ForkRequest
-	34, // 63: sparkbox.node.v1.NodeControl.MarkActive:input_type -> sparkbox.node.v1.MarkActiveRequest
-	35, // 64: sparkbox.node.v1.NodeControl.RecordKey:input_type -> sparkbox.node.v1.RecordKeyRequest
-	37, // 65: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:input_type -> sparkbox.node.v1.ApplyNetworkPolicyRequest
-	38, // 66: sparkbox.node.v1.NodeControl.GetNetworkUsage:input_type -> sparkbox.node.v1.GetNetworkUsageRequest
-	41, // 67: sparkbox.node.v1.NodeControl.GetOperation:input_type -> sparkbox.node.v1.GetOperationRequest
-	42, // 68: sparkbox.node.v1.NodeControl.WatchOperation:input_type -> sparkbox.node.v1.WatchOperationRequest
-	46, // 69: sparkbox.node.v1.GatewayIdentity.IssueToken:input_type -> sparkbox.node.v1.IssueTokenRequest
-	48, // 70: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:input_type -> sparkbox.node.v1.DescribeIdentityRequest
-	5,  // 71: sparkbox.node.v1.NodeControl.GetInventory:output_type -> sparkbox.node.v1.Inventory
-	6,  // 72: sparkbox.node.v1.NodeControl.WatchEvents:output_type -> sparkbox.node.v1.InventoryEvent
-	15, // 73: sparkbox.node.v1.NodeControl.GetCapacity:output_type -> sparkbox.node.v1.Capacity
-	17, // 74: sparkbox.node.v1.NodeControl.Health:output_type -> sparkbox.node.v1.HealthResponse
-	19, // 75: sparkbox.node.v1.NodeControl.GetVitals:output_type -> sparkbox.node.v1.Vitals
-	43, // 76: sparkbox.node.v1.NodeControl.EnsureRunning:output_type -> sparkbox.node.v1.Operation
-	43, // 77: sparkbox.node.v1.NodeControl.BeginCreate:output_type -> sparkbox.node.v1.Operation
-	43, // 78: sparkbox.node.v1.NodeControl.BeginPause:output_type -> sparkbox.node.v1.Operation
-	43, // 79: sparkbox.node.v1.NodeControl.BeginArchive:output_type -> sparkbox.node.v1.Operation
-	43, // 80: sparkbox.node.v1.NodeControl.BeginResize:output_type -> sparkbox.node.v1.Operation
-	43, // 81: sparkbox.node.v1.NodeControl.BeginReboot:output_type -> sparkbox.node.v1.Operation
-	43, // 82: sparkbox.node.v1.NodeControl.BeginRename:output_type -> sparkbox.node.v1.Operation
-	43, // 83: sparkbox.node.v1.NodeControl.BeginDestroy:output_type -> sparkbox.node.v1.Operation
-	43, // 84: sparkbox.node.v1.NodeControl.BeginSetPinned:output_type -> sparkbox.node.v1.Operation
-	43, // 85: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:output_type -> sparkbox.node.v1.Operation
-	43, // 86: sparkbox.node.v1.NodeControl.BeginSnapshot:output_type -> sparkbox.node.v1.Operation
-	43, // 87: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:output_type -> sparkbox.node.v1.Operation
-	43, // 88: sparkbox.node.v1.NodeControl.BeginFork:output_type -> sparkbox.node.v1.Operation
-	52, // 89: sparkbox.node.v1.NodeControl.MarkActive:output_type -> google.protobuf.Empty
-	52, // 90: sparkbox.node.v1.NodeControl.RecordKey:output_type -> google.protobuf.Empty
-	43, // 91: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:output_type -> sparkbox.node.v1.Operation
-	40, // 92: sparkbox.node.v1.NodeControl.GetNetworkUsage:output_type -> sparkbox.node.v1.GetNetworkUsageResponse
-	43, // 93: sparkbox.node.v1.NodeControl.GetOperation:output_type -> sparkbox.node.v1.Operation
-	43, // 94: sparkbox.node.v1.NodeControl.WatchOperation:output_type -> sparkbox.node.v1.Operation
-	47, // 95: sparkbox.node.v1.GatewayIdentity.IssueToken:output_type -> sparkbox.node.v1.IssueTokenResponse
-	49, // 96: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:output_type -> sparkbox.node.v1.IdentityDescription
-	71, // [71:97] is the sub-list for method output_type
-	45, // [45:71] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	20, // 23: sparkbox.node.v1.SetTurboRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 24: sparkbox.node.v1.RenameRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 25: sparkbox.node.v1.DestroyRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 26: sparkbox.node.v1.SetPinnedRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 27: sparkbox.node.v1.ResyncEnvironmentRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 28: sparkbox.node.v1.SnapshotRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 29: sparkbox.node.v1.DeleteSnapshotRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	20, // 30: sparkbox.node.v1.ForkRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	52, // 31: sparkbox.node.v1.MarkActiveRequest.observed_at:type_name -> google.protobuf.Timestamp
+	20, // 32: sparkbox.node.v1.ApplyNetworkPolicyRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
+	37, // 33: sparkbox.node.v1.ApplyNetworkPolicyRequest.policies:type_name -> sparkbox.node.v1.NetworkPolicy
+	40, // 34: sparkbox.node.v1.GetNetworkUsageResponse.usage:type_name -> sparkbox.node.v1.NetworkUsage
+	52, // 35: sparkbox.node.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
+	52, // 36: sparkbox.node.v1.Operation.updated_at:type_name -> google.protobuf.Timestamp
+	2,  // 37: sparkbox.node.v1.Operation.state:type_name -> sparkbox.node.v1.OperationState
+	45, // 38: sparkbox.node.v1.Operation.result:type_name -> sparkbox.node.v1.OperationResult
+	46, // 39: sparkbox.node.v1.Operation.error:type_name -> sparkbox.node.v1.OperationError
+	12, // 40: sparkbox.node.v1.OperationResult.sandbox:type_name -> sparkbox.node.v1.Sandbox
+	13, // 41: sparkbox.node.v1.OperationResult.snapshot:type_name -> sparkbox.node.v1.Snapshot
+	53, // 42: sparkbox.node.v1.OperationResult.empty:type_name -> google.protobuf.Empty
+	52, // 43: sparkbox.node.v1.IssueTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	54, // 44: sparkbox.node.v1.DurationRange.minimum:type_name -> google.protobuf.Duration
+	54, // 45: sparkbox.node.v1.DurationRange.maximum:type_name -> google.protobuf.Duration
+	3,  // 46: sparkbox.node.v1.NodeControl.GetInventory:input_type -> sparkbox.node.v1.GetInventoryRequest
+	4,  // 47: sparkbox.node.v1.NodeControl.WatchEvents:input_type -> sparkbox.node.v1.WatchEventsRequest
+	14, // 48: sparkbox.node.v1.NodeControl.GetCapacity:input_type -> sparkbox.node.v1.GetCapacityRequest
+	16, // 49: sparkbox.node.v1.NodeControl.Health:input_type -> sparkbox.node.v1.HealthRequest
+	18, // 50: sparkbox.node.v1.NodeControl.GetVitals:input_type -> sparkbox.node.v1.GetVitalsRequest
+	21, // 51: sparkbox.node.v1.NodeControl.EnsureRunning:input_type -> sparkbox.node.v1.EnsureRunningRequest
+	22, // 52: sparkbox.node.v1.NodeControl.BeginCreate:input_type -> sparkbox.node.v1.CreateRequest
+	23, // 53: sparkbox.node.v1.NodeControl.BeginPause:input_type -> sparkbox.node.v1.PauseRequest
+	24, // 54: sparkbox.node.v1.NodeControl.BeginArchive:input_type -> sparkbox.node.v1.ArchiveRequest
+	25, // 55: sparkbox.node.v1.NodeControl.BeginResize:input_type -> sparkbox.node.v1.ResizeRequest
+	26, // 56: sparkbox.node.v1.NodeControl.BeginReboot:input_type -> sparkbox.node.v1.RebootRequest
+	27, // 57: sparkbox.node.v1.NodeControl.BeginSetTurbo:input_type -> sparkbox.node.v1.SetTurboRequest
+	28, // 58: sparkbox.node.v1.NodeControl.BeginRename:input_type -> sparkbox.node.v1.RenameRequest
+	29, // 59: sparkbox.node.v1.NodeControl.BeginDestroy:input_type -> sparkbox.node.v1.DestroyRequest
+	30, // 60: sparkbox.node.v1.NodeControl.BeginSetPinned:input_type -> sparkbox.node.v1.SetPinnedRequest
+	31, // 61: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:input_type -> sparkbox.node.v1.ResyncEnvironmentRequest
+	32, // 62: sparkbox.node.v1.NodeControl.BeginSnapshot:input_type -> sparkbox.node.v1.SnapshotRequest
+	33, // 63: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:input_type -> sparkbox.node.v1.DeleteSnapshotRequest
+	34, // 64: sparkbox.node.v1.NodeControl.BeginFork:input_type -> sparkbox.node.v1.ForkRequest
+	35, // 65: sparkbox.node.v1.NodeControl.MarkActive:input_type -> sparkbox.node.v1.MarkActiveRequest
+	36, // 66: sparkbox.node.v1.NodeControl.RecordKey:input_type -> sparkbox.node.v1.RecordKeyRequest
+	38, // 67: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:input_type -> sparkbox.node.v1.ApplyNetworkPolicyRequest
+	39, // 68: sparkbox.node.v1.NodeControl.GetNetworkUsage:input_type -> sparkbox.node.v1.GetNetworkUsageRequest
+	42, // 69: sparkbox.node.v1.NodeControl.GetOperation:input_type -> sparkbox.node.v1.GetOperationRequest
+	43, // 70: sparkbox.node.v1.NodeControl.WatchOperation:input_type -> sparkbox.node.v1.WatchOperationRequest
+	47, // 71: sparkbox.node.v1.GatewayIdentity.IssueToken:input_type -> sparkbox.node.v1.IssueTokenRequest
+	49, // 72: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:input_type -> sparkbox.node.v1.DescribeIdentityRequest
+	5,  // 73: sparkbox.node.v1.NodeControl.GetInventory:output_type -> sparkbox.node.v1.Inventory
+	6,  // 74: sparkbox.node.v1.NodeControl.WatchEvents:output_type -> sparkbox.node.v1.InventoryEvent
+	15, // 75: sparkbox.node.v1.NodeControl.GetCapacity:output_type -> sparkbox.node.v1.Capacity
+	17, // 76: sparkbox.node.v1.NodeControl.Health:output_type -> sparkbox.node.v1.HealthResponse
+	19, // 77: sparkbox.node.v1.NodeControl.GetVitals:output_type -> sparkbox.node.v1.Vitals
+	44, // 78: sparkbox.node.v1.NodeControl.EnsureRunning:output_type -> sparkbox.node.v1.Operation
+	44, // 79: sparkbox.node.v1.NodeControl.BeginCreate:output_type -> sparkbox.node.v1.Operation
+	44, // 80: sparkbox.node.v1.NodeControl.BeginPause:output_type -> sparkbox.node.v1.Operation
+	44, // 81: sparkbox.node.v1.NodeControl.BeginArchive:output_type -> sparkbox.node.v1.Operation
+	44, // 82: sparkbox.node.v1.NodeControl.BeginResize:output_type -> sparkbox.node.v1.Operation
+	44, // 83: sparkbox.node.v1.NodeControl.BeginReboot:output_type -> sparkbox.node.v1.Operation
+	44, // 84: sparkbox.node.v1.NodeControl.BeginSetTurbo:output_type -> sparkbox.node.v1.Operation
+	44, // 85: sparkbox.node.v1.NodeControl.BeginRename:output_type -> sparkbox.node.v1.Operation
+	44, // 86: sparkbox.node.v1.NodeControl.BeginDestroy:output_type -> sparkbox.node.v1.Operation
+	44, // 87: sparkbox.node.v1.NodeControl.BeginSetPinned:output_type -> sparkbox.node.v1.Operation
+	44, // 88: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:output_type -> sparkbox.node.v1.Operation
+	44, // 89: sparkbox.node.v1.NodeControl.BeginSnapshot:output_type -> sparkbox.node.v1.Operation
+	44, // 90: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:output_type -> sparkbox.node.v1.Operation
+	44, // 91: sparkbox.node.v1.NodeControl.BeginFork:output_type -> sparkbox.node.v1.Operation
+	53, // 92: sparkbox.node.v1.NodeControl.MarkActive:output_type -> google.protobuf.Empty
+	53, // 93: sparkbox.node.v1.NodeControl.RecordKey:output_type -> google.protobuf.Empty
+	44, // 94: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:output_type -> sparkbox.node.v1.Operation
+	41, // 95: sparkbox.node.v1.NodeControl.GetNetworkUsage:output_type -> sparkbox.node.v1.GetNetworkUsageResponse
+	44, // 96: sparkbox.node.v1.NodeControl.GetOperation:output_type -> sparkbox.node.v1.Operation
+	44, // 97: sparkbox.node.v1.NodeControl.WatchOperation:output_type -> sparkbox.node.v1.Operation
+	48, // 98: sparkbox.node.v1.GatewayIdentity.IssueToken:output_type -> sparkbox.node.v1.IssueTokenResponse
+	50, // 99: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:output_type -> sparkbox.node.v1.IdentityDescription
+	73, // [73:100] is the sub-list for method output_type
+	46, // [46:73] is the sub-list for method input_type
+	46, // [46:46] is the sub-list for extension type_name
+	46, // [46:46] is the sub-list for extension extendee
+	0,  // [0:46] is the sub-list for field type_name
 }
 
 func init() { file_node_v1_node_proto_init() }
@@ -3794,7 +3877,7 @@ func file_node_v1_node_proto_init() {
 		(*InventoryEvent_SnapshotGone)(nil),
 		(*InventoryEvent_Gap)(nil),
 	}
-	file_node_v1_node_proto_msgTypes[41].OneofWrappers = []any{
+	file_node_v1_node_proto_msgTypes[42].OneofWrappers = []any{
 		(*OperationResult_Sandbox)(nil),
 		(*OperationResult_Snapshot)(nil),
 		(*OperationResult_Empty)(nil),
@@ -3805,7 +3888,7 @@ func file_node_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_node_v1_node_proto_rawDesc), len(file_node_v1_node_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   48,
+			NumMessages:   49,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

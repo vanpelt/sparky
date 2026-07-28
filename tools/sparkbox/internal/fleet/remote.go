@@ -167,6 +167,7 @@ func (r *remoteNode) record(row nodelink.SandboxRow, name, owner string) *host.S
 		ArchivedAt:  row.ArchivedAt,
 		DiskMB:      row.DiskMB,
 		DiskTotalMB: row.DiskTotalMB,
+		Turbo:       row.Turbo,
 		Node:        node,
 	}
 	b.HostIP = Host(b.Name, node)
@@ -408,6 +409,15 @@ func (r *remoteNode) Archive(ctx context.Context, name string) error {
 
 func (r *remoteNode) Reboot(ctx context.Context, name string) error {
 	return r.named(ctx, nodelink.TypeReboot, "reboot", name)
+}
+
+func (r *remoteNode) SetTurbo(ctx context.Context, name string, on bool) error {
+	var resp nodelink.EmptyResp
+	req := nodelink.TurboReq{Name: name, On: on}
+	if err := r.client.Do(ctx, nodelink.TypeTurbo, req, &resp); err != nil {
+		return r.fail("turbo", name, err)
+	}
+	return nil
 }
 
 func (r *remoteNode) Destroy(ctx context.Context, name string) error {

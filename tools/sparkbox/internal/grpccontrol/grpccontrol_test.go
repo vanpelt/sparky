@@ -204,6 +204,24 @@ func (f *fakeBackend) Reboot(_ context.Context, name string) error {
 	return nil
 }
 
+func (f *fakeBackend) SetTurbo(_ context.Context, name string, on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	box, ok := f.boxes[name]
+	if !ok {
+		return &host.MissingError{Noun: "sandbox", Name: name}
+	}
+	if on {
+		box.BaseVCPUs, box.BaseMemMB = box.VCPUs, box.MemMB
+		box.VCPUs, box.MemMB = box.VCPUs*host.TurboFactor, box.MemMB*host.TurboFactor
+	} else if box.Turbo {
+		box.VCPUs, box.MemMB = box.BaseVCPUs, box.BaseMemMB
+		box.BaseVCPUs, box.BaseMemMB = 0, 0
+	}
+	box.Turbo = on
+	return nil
+}
+
 func (f *fakeBackend) Rename(_ context.Context, oldName, newName, owner string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

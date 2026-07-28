@@ -1880,6 +1880,10 @@
           },
           "vcpus": { "type": "integer", "format": "int64", "example": 2 },
           "mem_mb": { "type": "integer", "format": "int64", "example": 8192 },
+          "turbo": {
+            "type": "boolean",
+            "description": "`vcpus` and `mem_mb` above are a doubled allocation this run borrowed. The host hands it back the moment the sandbox pauses — an idle pause included — so the next resume comes up at the sandbox's own size."
+          },
           "disk_mb": { "type": "integer", "format": "int64", "example": 25600 },
           "created_at": { "type": "string", "format": "date-time" },
           "last_active": {

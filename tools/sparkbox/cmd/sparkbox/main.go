@@ -911,6 +911,9 @@ func serve(args []string) error {
 				// what knows which machine that is. Node lets the handler give
 				// a remote reading the longer budget it needs.
 				Vitals: flt, Node: mgr.NodeName(),
+				// Same routing argument as Vitals: the restart has to happen on
+				// the machine holding the VM, and the fleet is what knows which.
+				Turbo:  flt,
 				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
 				// The gateway owns the one live-session registry the manager

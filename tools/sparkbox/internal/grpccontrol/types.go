@@ -42,6 +42,7 @@ type Backend interface {
 	Archive(context.Context, string) error
 	Resize(context.Context, string, int64) error
 	Reboot(context.Context, string) error
+	SetTurbo(context.Context, string, bool) error
 	Rename(context.Context, string, string, string) error
 	Destroy(context.Context, string) error
 	SetPinned(string, bool) error

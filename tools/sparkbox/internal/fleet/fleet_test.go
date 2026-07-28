@@ -393,6 +393,8 @@ func (n *fakeNode) Resize(context.Context, string, int64) error {
 }
 func (n *fakeNode) Reboot(context.Context, string) error { n.record("reboot"); return nil }
 
+func (n *fakeNode) SetTurbo(context.Context, string, bool) error { n.record("turbo"); return nil }
+
 func (n *fakeNode) Rename(_ context.Context, _, _, _ string) error {
 	n.record("rename")
 	n.mu.Lock()

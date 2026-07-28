@@ -223,6 +223,7 @@ func sandboxRow(b *host.Sandbox) SandboxRow {
 		KeyFP:       b.KeyFP,
 		NetRxBytes:  b.NetRxBytes,
 		NetTxBytes:  b.NetTxBytes,
+		Turbo:       b.Turbo,
 		ArchivedAt:  b.ArchivedAt,
 		CreatedAt:   b.CreatedAt,
 		LastActive:  b.LastActive,

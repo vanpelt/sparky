@@ -23,6 +23,7 @@ service NodeControl {
   rpc BeginArchive(ArchiveRequest) returns (Operation);
   rpc BeginResize(ResizeRequest) returns (Operation);
   rpc BeginReboot(RebootRequest) returns (Operation);
+  rpc BeginSetTurbo(SetTurboRequest) returns (Operation);
   rpc BeginRename(RenameRequest) returns (Operation);
   rpc BeginDestroy(DestroyRequest) returns (Operation);
   rpc BeginSetPinned(SetPinnedRequest) returns (Operation);
@@ -118,6 +119,9 @@ message Sandbox {
   // The node's actual routed guest address. Gateways must validate it against
   // the authenticated node's approved prefix before using it.
   string host_ip = 18;
+  // turbo means vcpus and memory_mb above are a doubled allocation this run
+  // borrowed, which the node hands back the moment the sandbox pauses.
+  bool turbo = 19;
 }
 
 enum SandboxState {
@@ -230,6 +234,15 @@ message ResizeRequest {
 message RebootRequest {
   OperationIdentity operation = 1;
   string sandbox = 2;
+}
+
+// SetTurboRequest cold-boots a sandbox with doubled CPU and RAM (on), or back
+// at its own size. The multiplier is the node's, not the gateway's: a fleet
+// mid-upgrade must not have two machines disagreeing about what turbo means.
+message SetTurboRequest {
+  OperationIdentity operation = 1;
+  string sandbox = 2;
+  bool on = 3;
 }
 
 message RenameRequest {

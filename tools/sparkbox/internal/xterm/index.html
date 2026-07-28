@@ -215,6 +215,22 @@
   @keyframes spin { to { transform: rotate(360deg) } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s } }
 
+  /* The turbo confirmation. Same shape as the consoles' dialogs — this page
+     had no need of one until now, so the handful of rules lives here rather
+     than in a shared file only one page would still be reading. */
+  dialog {
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+    background: hsl(var(--card)); color: hsl(var(--foreground));
+    padding: 22px; width: 100%; max-width: 400px;
+  }
+  dialog::backdrop { background: hsl(240 10% 3.9% / .55); }
+  dialog h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  dialog p { margin: 0 0 14px; font-size: 12.5px; color: hsl(var(--muted-foreground)); line-height: 1.5; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+  dialog button { font-size: 13px; padding: 6px 12px; }
+  dialog .btn-outline { border-color: hsl(var(--border)); }
+  dialog .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
+
   /* ---------- toast (shared helper writes into this) ---------- */
   #toast {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(8px);
@@ -297,9 +313,29 @@
     <span class="status" id="status" data-state="connecting" role="status" title="Connecting">
       <span class="dot"></span><span class="sr-only" id="status-text">connecting</span>
     </span>
+    <!-- The turbo switch, hidden until GET /vitals says this host will accept
+         one. Its lamp is painted from that same poll rather than from what this
+         page last did, so it goes dark when the idle reaper hands the borrowed
+         resources back — which is a thing that happens to the sandbox, not a
+         thing the page did. -->
+    <span class="tip hidden" id="turbo-tip" data-tip="Turbo — 2× resources">
+      <button class="turbo hide-sm" id="turbo-btn" data-on="0" aria-pressed="false"
+        aria-label="Turn on turbo: restart this sandbox with double the CPU and RAM"><span class="led"></span>Turbo</button>
+    </span>
     <button class="btn-ghost hide-sm" id="clear-btn" title="Clear the scrollback">Clear</button>
     <button class="btn-outline" id="reconnect-btn">Reconnect</button>
   </header>
+
+  <!-- Turbo restarts the guest, which ends the shell in the grid behind this.
+       Nothing about a lit push-button says so, hence the sentence. -->
+  <dialog id="turbo-dlg">
+    <h3 id="turbo-title">Turn on turbo</h3>
+    <p id="turbo-msg"></p>
+    <div class="row">
+      <button class="btn-outline" id="turbo-cancel" type="button">Cancel</button>
+      <button class="btn-primary" id="turbo-go" type="button">Turn on turbo</button>
+    </div>
+  </dialog>
 
   <div id="screen">
     <div id="term"></div>
@@ -521,6 +557,18 @@
           return;
         }
         if (ev.code === 4002) {
+          // A hang-up we asked for. Turbo pauses the sandbox on its way to the
+          // cold boot, so this arrives every time — and "it went idle" would be
+          // a flatly wrong account of what just happened. No retry here either:
+          // the POST is still in flight and reconnects itself when it lands.
+          if (turboPending) {
+            setStatus("starting", "starting");
+            overlay("Restarting", turboWant
+              ? "Bringing " + SANDBOX + " back with " + TURBO_FACTOR + "× the CPU and RAM."
+              : "Bringing " + SANDBOX + " back at its usual size.",
+              { busy: true });
+            return;
+          }
           setStatus("closed", "paused");
           // Deliberately no auto-retry: reconnecting resumes the sandbox, and a
           // tab left open overnight must not keep resurrecting a machine the
@@ -617,6 +665,7 @@
 
     const cpuHist = [], rxHist = [], txHist = [];
     let vPrev = null;      // the previous raw reading, for deltas
+    let vLast = null;      // the newest raw reading, quoted by the turbo dialog
     let vTimer = null;
     let vDelay = V_POLL_MS;
     let vStopped = false;  // a permanent refusal; stop asking
@@ -678,6 +727,8 @@
     }
 
     function paintVitals(v) {
+      vLast = v;
+      paintTurbo(v);
       const live = v.state === "running";
       $("vitals").setAttribute("data-live", live ? "1" : "0");
 
@@ -790,6 +841,102 @@
       vDelay = V_POLL_MS;
       scheduleVitals(0);
     });
+
+    // ---- turbo -------------------------------------------------------------
+    // The switch restarts the sandbox underneath this page with double the CPU
+    // and RAM. That is a cold boot — firecracker has no CPU hotplug, and a
+    // memory balloon can only hand RAM back to the host, never borrow more — so
+    // the shell in the grid behind the dialog is about to end. The extra
+    // allocation lasts one run: the manager takes it back at the next pause.
+    const TURBO_FACTOR = 2;
+    let turboOn = false;        // last state /vitals reported
+    let turboPending = false;   // a restart we asked for, so the hang-up is ours
+    let turboWant = false;      // the state that restart is heading for
+
+    // paintTurbo is called from every vitals poll, which is what keeps the lamp
+    // honest: it reports the sandbox, not the button.
+    function paintTurbo(v) {
+      if (!v.turbo_available) return;
+      $("turbo-tip").classList.remove("hidden");
+      turboOn = !!v.turbo;
+      const btn = $("turbo-btn");
+      btn.setAttribute("data-on", turboOn ? "1" : "0");
+      btn.setAttribute("aria-pressed", turboOn ? "true" : "false");
+      btn.setAttribute("aria-label", turboOn
+        ? "Turn off turbo and restart this sandbox at its usual size"
+        : "Turn on turbo: restart this sandbox with " + TURBO_FACTOR + "× the CPU and RAM");
+      $("turbo-tip").setAttribute("data-tip", turboPending ? "Restarting…"
+        : turboOn ? "Turbo on — " + v.vcpus + " vCPU · " + gb(v.mem_mb) + " GB"
+        : "Turbo — " + TURBO_FACTOR + "× resources");
+    }
+
+    $("turbo-btn").addEventListener("click", () => {
+      const on = !turboOn;
+      // The dialog quotes real numbers, and the only place this page has them
+      // is the reading the strip beside it is already drawing.
+      const cur = vLast || {};
+      const vcpus = cur.vcpus || 0, mem = cur.mem_mb || 0;
+      const size = (n, mb) => n + " vCPU and " + gb(mb) + " GB";
+      const next = on
+        ? size(vcpus * TURBO_FACTOR, mem * TURBO_FACTOR)
+        : size(Math.round(vcpus / TURBO_FACTOR), Math.round(mem / TURBO_FACTOR));
+      $("turbo-title").textContent = on ? "Turn on turbo" : "Turn off turbo";
+      $("turbo-go").textContent = on ? "Turn on turbo" : "Turn off turbo";
+      $("turbo-msg").textContent = (on
+        ? "Restarts " + SANDBOX + " with " + next + " — " + TURBO_FACTOR + "× its usual " +
+          size(vcpus, mem) + "."
+        : "Restarts " + SANDBOX + " back at " + next + ", down from " + size(vcpus, mem) + ".") +
+        " This shell ends and a new one opens when it comes back." +
+        (on ? " Turbo lasts until the sandbox pauses — an idle pause counts." : "");
+      $("turbo-dlg").showModal();
+      $("turbo-go").focus();
+    });
+
+    $("turbo-cancel").addEventListener("click", () => $("turbo-dlg").close());
+    $("turbo-go").addEventListener("click", () => {
+      $("turbo-dlg").close();
+      setTurbo(!turboOn);
+    });
+
+    function setTurbo(on) {
+      const btn = $("turbo-btn");
+      btn.disabled = true;
+      btn.setAttribute("data-busy", "1");
+      turboPending = true;
+      turboWant = on;
+      // The custom header is the CSRF proof: a cross-site form cannot set one,
+      // and a cross-origin fetch that tried would need a preflight this server
+      // does not answer.
+      fetch("/turbo", {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Sparkbox-Console": "1" },
+        body: JSON.stringify({ on: on }),
+      }).then((r) => {
+        if (r.ok) return null;
+        return r.text().then((t) => { throw new Error((t || "turbo failed").trim()); });
+      }).then(() => {
+        // The sandbox is back up — the request does not return until it is —
+        // so open the new shell rather than making the user ask for it.
+        turboPending = false;
+        vPrev = null;   // the CPU clock restarted with the guest; do not plot the jump
+        attempt = 0;
+        toast(on ? SANDBOX + " is in turbo" : SANDBOX + " is back to its usual size");
+        connect();
+      }).catch((e) => {
+        turboPending = false;
+        toast(String(e.message || e).replace(/^sparkbox: /, ""), true);
+        // The box may or may not have come back; either way the user is looking
+        // at a dead terminal, so give them the button that fixes it.
+        if (!ws) {
+          setStatus("error", "failed");
+          overlay("Turbo failed", String(e.message || e).replace(/^sparkbox: /, ""),
+            { action: "Reconnect" });
+        }
+      }).finally(() => {
+        btn.disabled = false;
+        btn.removeAttribute("data-busy");
+      });
+    }
 
     connect();
     pollVitals();

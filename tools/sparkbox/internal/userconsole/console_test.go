@@ -208,6 +208,7 @@ var apiEndpoints = []struct{ method, path string }{
 	{"DELETE", "/api/machines/somebox"},
 	{"POST", "/api/machines/somebox/archive"},
 	{"POST", "/api/machines/somebox/pin"},
+	{"POST", "/api/machines/somebox/turbo"},
 	{"POST", "/api/machines/somebox/unpin"},
 	{"POST", "/api/machines/somebox/snapshot"},
 	{"POST", "/api/machines/somebox/rename"},
@@ -876,5 +877,47 @@ func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "terminal_subdomain") {
 		t.Errorf("terminals disabled but /api/me advertised one: %s", rec.Body)
+	}
+}
+
+// The console's turbo endpoint restarts a machine at double size and reports
+// the record that came back, so the SPA's lamp is lit by the manager's answer
+// rather than by what the page just asked for.
+func TestTurboEndpointDoublesAndIsOwnerScoped(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+
+	rec := tc.do(t, "POST", "/api/machines/webby/turbo", "alice", map[string]bool{"on": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turbo on: status %d (%s)", rec.Code, rec.Body)
+	}
+	var view host.Sandbox
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if !view.Turbo || view.VCPUs != host.TurboFactor || view.MemMB != 512*host.TurboFactor {
+		t.Fatalf("response = {turbo:%v vcpus:%d mem:%d}, want the doubled record",
+			view.Turbo, view.VCPUs, view.MemMB)
+	}
+	if box, _ := tc.mgr.Get("webby"); !box.Turbo || box.State != vmm.StateRunning {
+		t.Fatalf("manager record after turbo = %+v", box)
+	}
+
+	// Somebody else's machine answers exactly like a missing one, and — the
+	// point of checking ownership before the manager call — is not restarted.
+	if rec := tc.do(t, "POST", "/api/machines/webby/turbo", "mallory",
+		map[string]bool{"on": false}); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner turbo: status %d, want 404", rec.Code)
+	}
+	if box, _ := tc.mgr.Get("webby"); !box.Turbo {
+		t.Fatal("a cross-owner request changed the machine")
+	}
+
+	if rec := tc.do(t, "POST", "/api/machines/webby/turbo", "alice",
+		map[string]bool{"on": false}); rec.Code != http.StatusOK {
+		t.Fatalf("turbo off: status %d (%s)", rec.Code, rec.Body)
+	}
+	if box, _ := tc.mgr.Get("webby"); box.Turbo || box.MemMB != 512 {
+		t.Fatalf("turbo off left %+v", box)
 	}
 }

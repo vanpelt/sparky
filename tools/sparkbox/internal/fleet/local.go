@@ -123,6 +123,10 @@ func (l *localNode) Resize(ctx context.Context, name string, sizeMB int64) error
 
 func (l *localNode) Reboot(ctx context.Context, name string) error { return l.mgr.Reboot(ctx, name) }
 
+func (l *localNode) SetTurbo(ctx context.Context, name string, on bool) error {
+	return l.mgr.SetTurbo(ctx, name, on)
+}
+
 func (l *localNode) Rename(ctx context.Context, oldName, newName, owner string) error {
 	return l.mgr.Rename(ctx, oldName, newName, owner)
 }
