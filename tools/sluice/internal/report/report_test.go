@@ -9,7 +9,7 @@ import (
 
 type fakeResolver map[string]string // ip string -> domain
 
-func (f fakeResolver) Domain(a netip.Addr) (string, bool) {
+func (f fakeResolver) Label(a netip.Addr) (string, bool) {
 	d, ok := f[a.Unmap().String()]
 	return d, ok
 }
@@ -56,6 +56,39 @@ func TestAggregate(t *testing.T) {
 	}
 	if !foundRaw {
 		t.Error("unresolved raw-IP flow was dropped")
+	}
+}
+
+// A guest's IPv6 router solicitations go to ff02::2 forever and are not egress
+// to anywhere. They were showing up as a destination row on the console.
+func TestAggregateDropsUnnamedLinkLocal(t *testing.T) {
+	flows := map[netip.Addr]Flow{
+		netip.MustParseAddr("160.79.104.10"): {TxBytes: 1000},
+		netip.MustParseAddr("ff02::2"):       {TxBytes: 630},
+		netip.MustParseAddr("fe80::1"):       {TxBytes: 12},
+		netip.MustParseAddr("169.254.1.2"):   {TxBytes: 12},
+	}
+	usage := Aggregate(flows, fakeResolver{})
+	for _, u := range usage {
+		switch u.Domain {
+		case "ff02::2", "fe80::1", "169.254.1.2":
+			t.Errorf("link-scope address %q reported as egress", u.Domain)
+		}
+	}
+	if len(usage) != 1 || usage[0].Domain != "160.79.104.10" {
+		t.Fatalf("usage = %+v, want just the routable unresolved address", usage)
+	}
+}
+
+// ...but the gateway is link-local on some fleets and is pinned by name. A name
+// somebody set on purpose outranks the heuristic.
+func TestAggregateKeepsNamedLinkLocal(t *testing.T) {
+	flows := map[netip.Addr]Flow{
+		netip.MustParseAddr("fe80::1"): {TxBytes: 42},
+	}
+	usage := Aggregate(flows, fakeResolver{"fe80::1": "gateway"})
+	if len(usage) != 1 || usage[0].Domain != "gateway" || !usage[0].Resolved {
+		t.Fatalf("usage = %+v, want the named gateway row", usage)
 	}
 }
 

@@ -2,6 +2,13 @@
 // DNS proxy resolved, producing a per-domain bandwidth breakdown. Addresses
 // with no known domain (raw-IP connections, or names resolved before the meter
 // started) are bucketed under their literal IP so nothing is silently dropped.
+//
+// The one exception is link-local traffic that never had a name and never
+// left the link — a guest's IPv6 router solicitations to ff02::2, its NDP
+// chatter, an APIPA address. Counting those as "egress by domain" put a row
+// on the panel that no reader could act on and that no allowlist would ever
+// name. A link-local address that DOES have a name (the pinned gateway) is
+// still reported: somebody named it on purpose.
 package report
 
 import (
@@ -26,8 +33,14 @@ type Flow struct {
 func (f Flow) Total() uint64 { return f.TxBytes + f.RxBytes }
 
 // Resolver maps an address to a domain label. *ipmap.Map satisfies it.
+//
+// Label, not Domain: the meter's counters are cumulative for the life of the
+// tap, so the join has to answer "what was this address ever called", not "is
+// it reachable right now". Using the allow-set here is what made a sandbox's
+// largest row lose its name whenever a long-lived connection outlived the DNS
+// entry that opened it.
 type Resolver interface {
-	Domain(netip.Addr) (string, bool)
+	Label(netip.Addr) (string, bool)
 }
 
 // DomainUsage is bandwidth aggregated to a single domain (or a raw-IP bucket).
@@ -68,9 +81,12 @@ func Aggregate(flows map[netip.Addr]Flow, r Resolver) []DomainUsage {
 		addr = addr.Unmap()
 		key, resolved := addr.String(), false
 		if r != nil {
-			if d, ok := r.Domain(addr); ok {
+			if d, ok := r.Label(addr); ok {
 				key, resolved = d, true
 			}
+		}
+		if !resolved && !offLink(addr) {
+			continue
 		}
 		a := get(key, resolved)
 		a.TxBytes += f.TxBytes
@@ -94,6 +110,20 @@ func Aggregate(flows map[netip.Addr]Flow, r Resolver) []DomainUsage {
 		return out[i].Domain < out[j].Domain
 	})
 	return out
+}
+
+// offLink reports whether addr is somewhere a packet could actually be
+// egressing to, as opposed to link scope. Only consulted for addresses no name
+// was ever recorded for.
+func offLink(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.IsUnspecified() {
+		return false
+	}
+	return !addr.IsMulticast() &&
+		!addr.IsLinkLocalUnicast() &&
+		!addr.IsLinkLocalMulticast() &&
+		!addr.IsInterfaceLocalMulticast() &&
+		!addr.IsLoopback()
 }
 
 // WriteTable renders usage as an aligned text table.
