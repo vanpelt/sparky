@@ -626,8 +626,8 @@ type turboReq struct {
 // is what the console's confirmation says before it gets here.
 //
 // The extra allocation lasts one run: the manager hands it back on the next
-// pause, idle reap included. It takes the reboot budget rather than the pause
-// one because the round trip is a pause plus a cold boot.
+// pause, idle reap included. It takes the same action budget as pause and
+// reboot, which is what the round trip is: a pause plus a cold boot.
 func (h *Handler) turbo(w http.ResponseWriter, r *http.Request) {
 	_, name, ok := h.ownedBox(r)
 	if !ok {

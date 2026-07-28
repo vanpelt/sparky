@@ -93,9 +93,8 @@ func firstParty(r *http.Request) bool {
 	if origin == "" {
 		return false
 	}
-	scheme := "https://"
-	if r.TLS == nil && !strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "http://"
-	}
-	return origin == scheme+r.Host
+	// Same rendering and same case-insensitive compare the terminal WebSocket
+	// handshake uses, so one page cannot be first-party to one route and a
+	// stranger to the other.
+	return strings.EqualFold(origin, requestOrigin(r))
 }

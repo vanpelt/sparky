@@ -132,6 +132,21 @@ func TestTurboAcceptsItsOwnOrigin(t *testing.T) {
 	if got := turbo.recorded(); len(got) != 1 || got[0] != "demo:off" {
 		t.Fatalf("manager saw %v, want just the same-origin call", got)
 	}
+
+	// Behind the edge the connection is plain http and the scheme arrives in a
+	// header a proxy chain is free to write as a list; the browser's Origin is
+	// free to differ in case. Both are the same origin, and the check shares
+	// requestOrigin with the WebSocket handshake so it says so.
+	req = httptest.NewRequest(http.MethodPost, "http://"+host+"/turbo", strings.NewReader(`{"on":true}`))
+	req.Host = host
+	req.Header.Set("X-Forwarded-Proto", "https, http")
+	req.Header.Set("Origin", "HTTPS://"+strings.ToUpper(host))
+	req.AddCookie(&http.Cookie{Name: edgeauth.CookieName, Value: hz.token(t, "alice")})
+	rec = httptest.NewRecorder()
+	hz.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forwarded same-origin turbo: status %d (%s)", rec.Code, rec.Body)
+	}
 }
 
 // The vitals poll is where the page learns whether to draw the switch at all,
