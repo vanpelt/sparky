@@ -16,10 +16,8 @@ name: sparkbox release
 #              template, and upload their assets to the draft. No emulation
 #              anywhere.
 #   macos-kernel
-#              compiles the macOS OUTER kernel (KVM-capable arm64 Linux, the
-#              thing Apple's `container machine` boots) natively on an arm64
-#              runner, so a Mac downloads it instead of spending an onboarding
-#              step compiling Linux
+#              restores the content-addressed macOS OUTER kernel, or compiles
+#              and compares it concurrently at -j3/-j4 on native arm64 runners
 #   darwin     cross-builds sparkbox-darwin-arm64 on a plain ubuntu runner and
 #              derives manifest-darwin-arm64.env from the linux arm64 one plus
 #              the outer kernel's checksum
@@ -58,7 +56,7 @@ on:
         required: false
         default: "25600"
       kernel_repro_check:
-        description: "Build the macOS outer kernel twice at different -j and fail if the SHA-256s differ (always on for v* tags)"
+        description: "Ignore the content cache and rebuild the macOS outer kernel twice"
         type: boolean
         default: false
 
@@ -75,11 +73,13 @@ env:
   # The macOS OUTER kernel, which is a different kernel from KERNEL_VERSION
   # above: that one is the 6.1 guest kernel a firecracker microVM boots, this is
   # the 6.14 KVM-capable Image Apple's `container machine` boots so that
-  # firecracker can exist inside it at all. Keeping the version here rather than
-  # only in build.sh is what lets the cache key bust on a bump without anyone
-  # editing the key.
+  # firecracker can exist inside it at all. This version is an explicit part of
+  # the content cache key and must match build.sh and Dockerfile.builder.
   MACOS_KERNEL_VERSION: 6.14.9
   MACOS_KERNEL_ASSET: vmlinux-macos-arm64
+  MACOS_KERNEL_BUILDER_REPO: ghcr.io/${{ github.repository }}/macos-kernel-builder
+  MACOS_KERNEL_CACHE_REPO: ghcr.io/${{ github.repository }}/macos-kernel-cache
+  MACOS_KERNEL_CACHE_SCHEMA: v1
   DEPOT_PROJECT: h0htfmz04l
   IMAGE_REPO: ghcr.io/${{ github.repository }}/universal
   ROOTFS_NAME: ${{ inputs.rootfs_name || 'universal' }}
@@ -153,10 +153,9 @@ jobs:
           \`vmlinux-macos-arm64\` is the outer KVM kernel the nested machine
           boots (Apple's stock machine kernel has none, so no nested virt).
           Its \`SHA256_OUTER_KERNEL\` in the darwin manifest says *this is the
-          file we published* — verify your download against it. It is not a
-          claim that rebuilding \`macos/kernel/build.sh\` reproduces these
-          bytes: the builder's compiler version is baked into the kernel
-          banner and the Ubuntu archive supplying it is not pinned.
+          file we published* — verify your download against it. The accompanying
+          \`${MACOS_KERNEL_ASSET}.manifest\` records the content cache key and
+          exact builder image digest used to produce it.
           EOF
           gh release create "$RELEASE" --draft --target "$GITHUB_SHA" \
             --title "sparkbox $RELEASE" --notes-file notes.md
@@ -331,110 +330,386 @@ jobs:
 
   # ----------------------------------------------------------- macos-kernel --
   #
-  # The macOS outer kernel. Until this job existed, `macos/kernel/build.sh` ran
-  # on the user's laptop: download 149MB of Linux source, apply Apple's
-  # config-arm64 plus our fragment, and compile — as an ONBOARDING step, before
-  # anything sparkbox-shaped had happened. Every input is pinned by hash or
-  # digest, so it belongs here: built once, downloaded and checksum-verified
-  # thereafter (macos/kernel/fetch.sh).
+  # The macOS outer kernel is independent of a sparkbox release tag. Its cache
+  # key covers the build script, config fragment, cache schema and the exact
+  # toolchain image digest. Most releases therefore restore a verified OCI
+  # bundle from GHCR instead of compiling the same bytes again.
   #
-  # NATIVE arm64, and not for speed. build.sh passes no ARCH= (kbuild derives
-  # SUBARCH from uname -m), so a cross build configures for x86 and dies copying
-  # arch/arm64/boot/Image. And even with cross plumbing added,
-  # gcc-13-aarch64-linux-gnu is a different package build than native gcc-13, so
-  # CONFIG_CC_VERSION_TEXT — which is compiled into the kernel banner — would
-  # differ from every kernel we have ever shipped.
-  #
-  # Its own job, not a leg of the artifacts matrix: it shares no step with that
-  # matrix (no image pull, no ext4, no firecracker, no zstd, no gateway pubkey),
-  # it runs concurrently with the ~40-minute linux legs so its ~25 minutes cost
-  # nothing in wall clock, and a Mac wants nothing else the matrix produces.
-  macos-kernel:
-    needs: prepare
-    runs-on: ubuntu-24.04-arm # free for public repos; native aarch64
+  # A genuine cache miss still proves -j invariance, but the -j3 and -j4 builds
+  # run concurrently on separate native ARM runners. The final macos-kernel job
+  # compares both files and configs before it publishes either one. Keeping that
+  # final job name means darwin and publish have one success gate regardless of
+  # whether the artifact was restored or freshly built.
+
+  # Resolve (or create) the toolchain image first. The tag is derived from its
+  # Dockerfile; the output consumed downstream is always the immutable digest.
+  macos_kernel_builder:
+    name: macOS kernel builder image
+    runs-on: ubuntu-latest
     permissions:
-      contents: write
-    defaults:
-      run:
-        working-directory: tools/sparkbox
-    env:
-      # Build twice at different -j and compare, always for a real release.
-      #
-      # What this proves and what it does not, precisely, because the difference
-      # is the whole reason B2 was flagged as a risk: it proves the build is a
-      # pure function of its inputs, and it exercises -j, the one input build.sh
-      # does not pin. It does NOT prove the kernel is reproducible across time.
-      # Nothing run inside a single job can: the same job's two passes see the
-      # same Ubuntu archive, and the archive is the unpinned input —
-      # `apt-get install build-essential` takes whatever gcc/binutils is current,
-      # and their version strings are compiled into the kernel banner, so a
-      # packaging-only revision moves the SHA-256 with zero behaviour change.
-      #
-      # Hence the published checksum is an INTEGRITY claim (this is the file
-      # this release shipped, verify your download against it) and not an
-      # IDENTITY one (rebuild and you get these bytes). The full argument is at
-      # the top of macos/kernel/build.sh.
-      SPARKBOX_KERNEL_REPRO_CHECK: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.kernel_repro_check) && '1' || '0' }}
+      contents: read
+      packages: write
+      id-token: write # Depot OIDC trust relationship
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
-      # The 149MB source tarball and Apple's config are pinned by SHA-256 and
-      # re-verified on reuse, so caching them is pure win and independent of any
-      # change to the build. Separate key from the compiled kernel on purpose:
-      # editing the fragment must not re-download Linux.
-      - name: Cache the pinned kernel sources
-        uses: actions/cache@v4
+      - uses: docker/login-action@v3
         with:
-          path: tools/sparkbox/macos/out/downloads
-          key: macos-kernel-src-${{ env.MACOS_KERNEL_VERSION }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
-      # Deliberately NOT used on a `v*` tag. A cache hit skips the compile, and
-      # a release that ships a kernel nobody re-derived is exactly the thing
-      # this job exists to stop being true of the laptop build. Dev and dispatch
-      # runs keep the cache, because there the point is the plumbing.
-      - name: Cache the built kernel (non-release runs only)
-        id: kernel-cache
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/cache@v4
+      - name: Resolve builder inputs
+        id: inputs
+        run: tools/sparkbox/macos/kernel/build.sh --print-builder-args >> "$GITHUB_OUTPUT"
+
+      - name: Look up the builder image
+        id: lookup
+        env:
+          APPLE_CONFIG_SHA256: ${{ steps.inputs.outputs.APPLE_CONFIG_SHA256 }}
+          APPLE_CONFIG_TAG: ${{ steps.inputs.outputs.APPLE_CONFIG_TAG }}
+          APPLE_CONFIG_URL: ${{ steps.inputs.outputs.APPLE_CONFIG_URL }}
+          DOCKERFILE_SHA: ${{ hashFiles('tools/sparkbox/macos/kernel/Dockerfile.builder') }}
+          LINUX_SHA256: ${{ steps.inputs.outputs.LINUX_SHA256 }}
+          LINUX_URL: ${{ steps.inputs.outputs.LINUX_URL }}
+          LINUX_VERSION: ${{ steps.inputs.outputs.LINUX_VERSION }}
+        run: |
+          builder_key=$(
+            printf '%s\n' \
+              "$DOCKERFILE_SHA" \
+              "$LINUX_VERSION" "$LINUX_URL" "$LINUX_SHA256" \
+              "$APPLE_CONFIG_TAG" "$APPLE_CONFIG_URL" "$APPLE_CONFIG_SHA256" \
+              | sha256sum | cut -d' ' -f1
+          )
+          tag="${MACOS_KERNEL_BUILDER_REPO}:${builder_key}"
+          digest=$(
+            docker buildx imagetools inspect "$tag" \
+              --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"'
+          ) || true
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "using existing builder $tag@$digest"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            echo "builder image not found: $tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: depot/setup-action@v1
+        if: steps.lookup.outputs.hit != 'true'
+
+      - name: Build the ARM64 builder image
+        id: build
+        if: steps.lookup.outputs.hit != 'true'
+        uses: depot/build-push-action@v1
         with:
+          project: ${{ env.DEPOT_PROJECT }}
+          context: tools/sparkbox/macos/kernel
+          file: tools/sparkbox/macos/kernel/Dockerfile.builder
+          platforms: linux/arm64
+          provenance: false
+          push: true
+          tags: ${{ steps.lookup.outputs.tag }}
+          build-args: |
+            LINUX_VERSION=${{ steps.inputs.outputs.LINUX_VERSION }}
+            LINUX_URL=${{ steps.inputs.outputs.LINUX_URL }}
+            LINUX_SHA256=${{ steps.inputs.outputs.LINUX_SHA256 }}
+            APPLE_CONFIG_TAG=${{ steps.inputs.outputs.APPLE_CONFIG_TAG }}
+            APPLE_CONFIG_URL=${{ steps.inputs.outputs.APPLE_CONFIG_URL }}
+            APPLE_CONFIG_SHA256=${{ steps.inputs.outputs.APPLE_CONFIG_SHA256 }}
+
+      - name: Pin the builder by digest
+        id: resolve
+        env:
+          HIT: ${{ steps.lookup.outputs.hit }}
+          CACHED_DIGEST: ${{ steps.lookup.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [ "$HIT" = true ]; then
+            digest="$CACHED_DIGEST"
+          else
+            digest="$BUILT_DIGEST"
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "invalid builder digest: $digest" >&2; exit 1; }
+          image="${MACOS_KERNEL_BUILDER_REPO}@${digest}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "builder: $image"
+
+  # The cache is a normal OCI image rather than actions/cache: Actions caches
+  # are ref-scoped, so a cache written by v0.5.0 is not reusable by v0.5.1.
+  macos_kernel_plan:
+    name: Plan macOS kernel
+    needs: macos_kernel_builder
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      cache_hit: ${{ steps.key.outputs.cache_hit }}
+      cache_key: ${{ steps.key.outputs.cache_key }}
+      cache_ref: ${{ steps.key.outputs.cache_ref }}
+      cache_tag: ${{ steps.key.outputs.cache_tag }}
+      previous_ref: ${{ steps.key.outputs.previous_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Resolve the content-addressed kernel
+        id: key
+        env:
+          BUILDER_IMAGE: ${{ needs.macos_kernel_builder.outputs.image }}
+          FORCE_REBUILD: ${{ inputs.kernel_repro_check && 'true' || 'false' }}
+          KERNEL_FILES_SHA: ${{ hashFiles('tools/sparkbox/macos/kernel/build.sh', 'tools/sparkbox/macos/kernel/sparkbox-arm64.fragment') }}
+        run: |
+          cache_key=$(
+            printf '%s\n' \
+              "$MACOS_KERNEL_CACHE_SCHEMA" \
+              "linux/arm64" \
+              "$MACOS_KERNEL_VERSION" \
+              "$BUILDER_IMAGE" \
+              "$KERNEL_FILES_SHA" \
+              | sha256sum | cut -d' ' -f1
+          )
+          cache_tag="${MACOS_KERNEL_CACHE_REPO}:${cache_key}"
+          digest=$(
+            docker buildx imagetools inspect "$cache_tag" \
+              --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"'
+          ) || true
+          previous_ref=
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            previous_ref="${MACOS_KERNEL_CACHE_REPO}@${digest}"
+          fi
+          if [[ "${FORCE_REBUILD:-false}" != "true" && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            cache_hit=true
+            cache_ref="$previous_ref"
+            echo "kernel cache hit: $cache_ref"
+          else
+            cache_hit=false
+            cache_ref="$cache_tag"
+            if [[ "${FORCE_REBUILD:-false}" == "true" ]]; then
+              echo "kernel cache bypass requested: $cache_tag"
+            else
+              echo "kernel cache miss: $cache_tag"
+            fi
+          fi
+          {
+            echo "cache_hit=$cache_hit"
+            echo "cache_key=$cache_key"
+            echo "cache_ref=$cache_ref"
+            echo "cache_tag=$cache_tag"
+            echo "previous_ref=$previous_ref"
+          } >> "$GITHUB_OUTPUT"
+
+  macos_kernel_build:
+    name: macOS kernel build (-j${{ matrix.jobs }})
+    needs: [macos_kernel_builder, macos_kernel_plan]
+    if: needs.macos_kernel_plan.outputs.cache_hit != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        jobs: [3, 4]
+    runs-on: ubuntu-24.04-arm # native aarch64; cross builds differ by design
+    permissions:
+      contents: read
+      packages: read
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build at -j${{ matrix.jobs }}
+        env:
+          SPARKBOX_CONTAINER_CMD: docker
+          SPARKBOX_KERNEL_BUILD_IMAGE: ${{ needs.macos_kernel_builder.outputs.image }}
+          SPARKBOX_KERNEL_INPUTS_IN_IMAGE: "1"
+          SPARKBOX_KERNEL_BUILD_JOBS: ${{ matrix.jobs }}
+          SPARKBOX_KERNEL_REPRO_CHECK: "0"
+        run: ./macos/kernel/build.sh
+
+      - name: Preserve build for comparison
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-kernel-j${{ matrix.jobs }}
+          # upload-artifact uses the least common ancestor (macos/out) as the
+          # archive root, so these three files are restored at artifact root.
           path: |
             tools/sparkbox/macos/out/vmlinux-kvm
             tools/sparkbox/macos/out/kernel.config
             tools/sparkbox/macos/out/kernel-manifest.txt
-          key: macos-kernel-arm64-${{ env.MACOS_KERNEL_VERSION }}-${{ hashFiles('tools/sparkbox/macos/kernel/build.sh', 'tools/sparkbox/macos/kernel/sparkbox-arm64.fragment') }}
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
 
-      - name: Build the macOS outer kernel
-        if: steps.kernel-cache.outputs.cache-hit != 'true'
-        # SPARKBOX_CONTAINER_CMD=docker: build.sh defaults to Apple's `container`
-        # CLI on macOS and docker elsewhere, and the flag spellings differ
-        # (--arch vs --platform), so the runtime is chosen once, here.
+  macos-kernel:
+    name: macos-kernel
+    needs: [prepare, macos_kernel_builder, macos_kernel_plan, macos_kernel_build]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.macos_kernel_builder.result == 'success' &&
+      needs.macos_kernel_plan.result == 'success' &&
+      (
+        needs.macos_kernel_plan.outputs.cache_hit == 'true' ||
+        needs.macos_kernel_build.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    defaults:
+      run:
+        working-directory: tools/sparkbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Restore the verified kernel bundle
+        if: needs.macos_kernel_plan.outputs.cache_hit == 'true'
         env:
-          SPARKBOX_CONTAINER_CMD: docker
-        run: ./macos/kernel/build.sh
-
-      - name: Report what this build actually claims
+          CACHE_REF: ${{ needs.macos_kernel_plan.outputs.cache_ref }}
         run: |
-          cat macos/out/kernel-manifest.txt
+          mkdir -p macos/out
+          docker pull "$CACHE_REF"
+          container_id=$(docker create "$CACHE_REF")
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/vmlinux-kvm" macos/out/vmlinux-kvm
+          docker cp "$container_id:/kernel.config" macos/out/kernel.config
+          docker cp "$container_id:/kernel-manifest.txt" macos/out/kernel-manifest.txt
+          docker rm "$container_id" >/dev/null
+          trap - EXIT
+
+      - name: Download both fresh builds
+        if: needs.macos_kernel_plan.outputs.cache_hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-kernel-j*
+          path: ${{ runner.temp }}/macos-kernel-builds
+          # Keep one named directory per build so -j3 and -j4 cannot overwrite
+          # each other. Each directory contains the three files at its root.
+          merge-multiple: false
+
+      - name: Compare fresh builds
+        if: needs.macos_kernel_plan.outputs.cache_hit != 'true'
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/macos-kernel-builds
+          CACHE_KEY: ${{ needs.macos_kernel_plan.outputs.cache_key }}
+        run: |
+          j3="$BUILD_ROOT/macos-kernel-j3"
+          j4="$BUILD_ROOT/macos-kernel-j4"
+          for dir in "$j3" "$j4"; do
+            test -s "$dir/vmlinux-kvm"
+            test -s "$dir/kernel.config"
+            test -s "$dir/kernel-manifest.txt"
+          done
+          cmp "$j3/vmlinux-kvm" "$j4/vmlinux-kvm"
+          cmp "$j3/kernel.config" "$j4/kernel.config"
+          cmp "$j3/kernel-manifest.txt" "$j4/kernel-manifest.txt"
+          mkdir -p macos/out
+          cp "$j4/vmlinux-kvm" macos/out/vmlinux-kvm
+          cp "$j4/kernel.config" macos/out/kernel.config
+          cp "$j4/kernel-manifest.txt" macos/out/kernel-manifest.txt
+          sed -i 's/^repro_checked=.*/repro_checked=j3+j4/' \
+            macos/out/kernel-manifest.txt
+          printf 'cache_key=%s\n' "$CACHE_KEY" >> macos/out/kernel-manifest.txt
+          echo "identical across independent -j3 and -j4 builds"
+          sha256sum macos/out/vmlinux-kvm
+
+      # workflow_dispatch can force a cold rebuild of an existing key. In that
+      # case "content addressed" is enforced, not merely asserted: the fresh
+      # result must also match the bundle already stored under that key.
+      - name: Compare a forced rebuild with the existing cache
+        if: >-
+          needs.macos_kernel_plan.outputs.cache_hit != 'true' &&
+          needs.macos_kernel_plan.outputs.previous_ref != ''
+        env:
+          PREVIOUS_REF: ${{ needs.macos_kernel_plan.outputs.previous_ref }}
+        run: |
+          previous="$RUNNER_TEMP/previous-kernel"
+          mkdir -p "$previous"
+          docker pull "$PREVIOUS_REF"
+          container_id=$(docker create "$PREVIOUS_REF")
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/vmlinux-kvm" "$previous/vmlinux-kvm"
+          docker cp "$container_id:/kernel.config" "$previous/kernel.config"
+          docker cp "$container_id:/kernel-manifest.txt" "$previous/kernel-manifest.txt"
+          docker rm "$container_id" >/dev/null
+          trap - EXIT
+          cmp macos/out/vmlinux-kvm "$previous/vmlinux-kvm"
+          cmp macos/out/kernel.config "$previous/kernel.config"
+          cmp macos/out/kernel-manifest.txt "$previous/kernel-manifest.txt"
+          echo "forced rebuild matches existing content cache"
+
+      - name: Verify the selected kernel bundle
+        env:
+          BUILDER_IMAGE: ${{ needs.macos_kernel_builder.outputs.image }}
+          CACHE_KEY: ${{ needs.macos_kernel_plan.outputs.cache_key }}
+        run: |
+          manifest=macos/out/kernel-manifest.txt
+          kernel_sha=$(sha256sum macos/out/vmlinux-kvm | cut -d' ' -f1)
+          config_sha=$(sha256sum macos/out/kernel.config | cut -d' ' -f1)
+          grep -Fqx "cache_key=$CACHE_KEY" "$manifest"
+          grep -Fqx "kernel_build_image=$BUILDER_IMAGE" "$manifest"
+          grep -Fqx "kernel_sha256=$kernel_sha" "$manifest"
+          grep -Fqx "config_sha256=$config_sha" "$manifest"
+          grep -Fqx "repro_checked=j3+j4" "$manifest"
+          cat "$manifest"
+
+      - name: Publish the content-addressed cache
+        if: needs.macos_kernel_plan.outputs.cache_hit != 'true'
+        env:
+          CACHE_TAG: ${{ needs.macos_kernel_plan.outputs.cache_tag }}
+        run: |
+          docker build \
+            --file macos/kernel/Dockerfile.cache \
+            --tag "$CACHE_TAG" \
+            macos/out
+          docker push "$CACHE_TAG"
+          digest=$(
+            docker buildx imagetools inspect "$CACHE_TAG" \
+              --format '{{json .Manifest.Digest}}' | tr -d '"'
+          )
+          echo "published kernel cache ${MACOS_KERNEL_CACHE_REPO}@${digest}"
+
+      - name: Report what this release ships
+        env:
+          CACHE_HIT: ${{ needs.macos_kernel_plan.outputs.cache_hit }}
+          CACHE_KEY: ${{ needs.macos_kernel_plan.outputs.cache_key }}
+        run: |
+          manifest=macos/out/kernel-manifest.txt
           sha=$(sha256sum macos/out/vmlinux-kvm | cut -d' ' -f1)
-          status=$(sed -n 's/^known_good_status=//p' macos/out/kernel-manifest.txt)
-          repro=$(sed -n 's/^repro_checked=//p' macos/out/kernel-manifest.txt)
+          status=$(sed -n 's/^known_good_status=//p' "$manifest")
+          repro=$(sed -n 's/^repro_checked=//p' "$manifest")
           {
             echo "### macOS outer kernel"
             echo "- \`${MACOS_KERNEL_ASSET}\` sha256 \`${sha}\`"
-            echo "- determinism check (two builds, different \`-j\`): \`${repro:-cached}\`"
-            echo "- vs the recorded known-good build: \`${status:-cached}\`"
-            echo
-            echo "This checksum is an **integrity** claim — the file this release"
-            echo "published — not an identity claim. The builder's gcc/binutils"
-            echo "versions are compiled into the kernel banner and the Ubuntu"
-            echo "archive supplying them is not pinned, so a packaging-only"
-            echo "compiler revision changes these bytes with no behaviour change."
+            echo "- content cache hit: \`${CACHE_HIT}\`"
+            echo "- content cache key: \`${CACHE_KEY}\`"
+            echo "- producing determinism check: \`${repro}\`"
+            echo "- vs the recorded known-good build: \`${status}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          # A drift is reported, never fatal: failing a release because Ubuntu
-          # revved gcc would be treating a snapshot as a law. build.sh has
-          # already printed the observed compiler next to both hashes.
           if [ "$status" = drift ]; then
-            echo "::warning title=macOS kernel drifted from the known-good build::sha256 $sha; see the job log for the compiler version, then update KNOWN_GOOD_KERNEL_SHA256 in macos/kernel/build.sh"
+            echo "::warning title=macOS kernel drifted from the known-good build::sha256 $sha; inspect the pinned builder and update KNOWN_GOOD_KERNEL_SHA256 in macos/kernel/build.sh"
           fi
 
       - name: Upload assets to the draft release
@@ -442,18 +717,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE: ${{ needs.prepare.outputs.release }}
         run: |
-          # The asset is renamed on the way out: on disk it is the vmlinux-kvm
-          # that `container machine create --kernel` wants, but a release's asset
-          # namespace is flat and shared with the GUEST kernel (vmlinux-arm64),
-          # so it has to say which of the two it is.
           cp macos/out/vmlinux-kvm "$RUNNER_TEMP/$MACOS_KERNEL_ASSET"
-          # The resolved .config rides along because it is the cheap tripwire for
-          # the drift above: CONFIG_CC_VERSION_TEXT lives in it, so it explains a
-          # changed kernel hash without anyone rebuilding anything.
           cp macos/out/kernel.config "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.config"
+          cp macos/out/kernel-manifest.txt "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.manifest"
           gh release upload "$RELEASE" \
             "$RUNNER_TEMP/$MACOS_KERNEL_ASSET" \
-            "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.config" --clobber
+            "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.config" \
+            "$RUNNER_TEMP/$MACOS_KERNEL_ASSET.manifest" --clobber
 
   # ----------------------------------------------------------------- darwin --
   #
@@ -468,9 +738,8 @@ jobs:
   #
   # `needs: artifacts` because the darwin manifest is DERIVED from the linux
   # arm64 one rather than recomputing the shas it shares with it, so it cannot
-  # be written until that leg has uploaded. Costs a couple of minutes tacked
-  # onto the end of a ~40-minute run; buys the guarantee that a Mac and the
-  # machine it provisions can never disagree about what a tag contains.
+  # be written until that leg has uploaded. The dependency buys the guarantee
+  # that a Mac and the machine it provisions cannot disagree about a tag.
   #
   # `needs: macos-kernel` for the same reason, one level further out: the
   # manifest records SHA256_OUTER_KERNEL, and it is computed over the file that

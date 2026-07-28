@@ -70,8 +70,8 @@ MACHINE_SPARKBOX_ASSET="sparkbox-linux-$GOARCH"
 # carries "macos" rather than an arch alone, and it lives only in the darwin
 # manifest because no linux host would ever have a use for it.
 #
-# Path in, not a build: macos/kernel/build.sh needs a native aarch64 runner and
-# ~25 minutes, so it has its own CI job. See the note at the top of the file.
+# Path in, not a build: the release workflow either restores the verified
+# content-addressed kernel or builds it on native aarch64 runners.
 OUTER_KERNEL_ASSET=${OUTER_KERNEL_ASSET:-vmlinux-macos-$DARWIN_ARCH}
 OUTER_KERNEL=${OUTER_KERNEL:?set OUTER_KERNEL: path to the built $OUTER_KERNEL_ASSET}
 
@@ -145,13 +145,9 @@ echo "== manifest =="
 # installs sluice-linux-arm64 there exactly as it installs the rootfs. There is
 # no darwin sluice to disambiguate it from, which is why it is not MACHINE_*.
 #
-# SHA256_OUTER_KERNEL is an INTEGRITY claim and not an identity one: it says
-# "this is the kernel image this release published", which is what a Mac needs
-# to verify a download. It does NOT say a rebuild of macos/kernel/build.sh
-# yields the same bytes — the builder's gcc and binutils versions are compiled
-# into the kernel banner and the Ubuntu archive is not pinned, so a
-# packaging-only compiler revision moves the hash with no behavioural change.
-# The long version is at the top of macos/kernel/build.sh.
+# SHA256_OUTER_KERNEL is the integrity claim a Mac needs to verify its download.
+# CI's adjacent kernel manifest carries the separate provenance claim: content
+# key, exact builder digest, resolved config and producing determinism check.
 cat > "$OUT_DIR/manifest-darwin-$DARWIN_ARCH.env" <<EOF
 RELEASE=$RELEASE
 ARCH=$GOARCH
