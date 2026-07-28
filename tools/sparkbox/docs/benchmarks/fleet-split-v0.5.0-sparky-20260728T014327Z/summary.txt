@@ -1,0 +1,7 @@
+attempted=145
+passed=145
+failed=0
+route_connected=37012
+route_rejected=0
+route_failure=0
+route_canceled=0

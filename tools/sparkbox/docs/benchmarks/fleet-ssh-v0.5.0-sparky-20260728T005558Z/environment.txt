@@ -1,0 +1,8 @@
+git_sha=92900586ab80568316988b79dc518eb5c06515f8
+release=v0.5.0
+go_version=go1.25.4
+compiler_host=CW-LD4GQL399M-L (darwin/arm64; CGO_ENABLED=0 GOOS=linux GOARCH=arm64)
+kernel=Linux sparky 6.14.0-1013-nvidia #13-Ubuntu SMP PREEMPT_DYNAMIC Wed Oct 29 06:01:19 UTC 2025 aarch64 aarch64 aarch64 GNU/Linux
+benchmark_host=sparky
+command=tools/sparkbox/hack/fleet-wan-bench.sh equivalent with prebuilt tagged test binary
+binary_sha256=fbec6239d4119867e93bead611c808f6308cb2ce752e078c26658af3c40265e5
