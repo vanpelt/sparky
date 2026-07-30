@@ -72,6 +72,8 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	queries := 0
 	protectUntil := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	observedAt := time.Now().UTC().Truncate(time.Second)
+	startedAt := observedAt.Add(-time.Hour)
+	endedAt := observedAt.Add(-5 * time.Minute)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/actions/exchange":
@@ -102,11 +104,13 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 				"observed_at":   observedAt,
 				"protect_until": protectUntil,
 				"total_count":   1,
+				"has_more":      true,
 				"sessions": []map[string]any{{
 					"id": "session-1", "title": "Fix session listing",
 					"url":   "https://hivemind.example/sessions/session-1",
-					"state": "active", "agent_type": "codex", "model": "gpt-5",
-					"started_at":       observedAt.Add(-time.Hour),
+					"state": "ended", "agent_type": "codex", "model": "gpt-5",
+					"started_at":       startedAt,
+					"ended_at":         endedAt,
 					"last_activity_at": observedAt,
 				}},
 			})
@@ -160,11 +164,20 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	if !observed || len(snapshot.Sessions) != 1 {
 		t.Fatalf("session snapshot = %+v, observed %v", snapshot, observed)
 	}
-	if got := snapshot.Sessions[0]; got.Title != "Fix session listing" ||
-		got.URL != "https://hivemind.example/sessions/session-1" {
+	got := snapshot.Sessions[0]
+	if got.ID != "session-1" ||
+		got.Title != "Fix session listing" ||
+		got.URL != "https://hivemind.example/sessions/session-1" ||
+		got.State != "ended" ||
+		got.AgentType != "codex" ||
+		got.Model != "gpt-5" ||
+		!got.StartedAt.Equal(startedAt) ||
+		got.EndedAt == nil ||
+		!got.EndedAt.Equal(endedAt) ||
+		!got.LastActivityAt.Equal(observedAt) {
 		t.Fatalf("session = %+v", got)
 	}
-	if !snapshot.ObservedAt.Equal(observedAt) || snapshot.TotalCount != 1 {
+	if !snapshot.ObservedAt.Equal(observedAt) || snapshot.TotalCount != 1 || !snapshot.HasMore {
 		t.Fatalf("snapshot metadata = %+v", snapshot)
 	}
 }
