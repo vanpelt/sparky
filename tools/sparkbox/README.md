@@ -71,10 +71,12 @@ live agent session inside it:
 The feature is off unless `--hivemind-api` is set. Each host exchanges a fresh
 device-bound OIDC token, asks HiveMind only about that sandbox, and installs
 the returned short lease in the idle reaper. The lease prevents pause but
-still allows memory ballooning; API failures never extend it. Fleet nodes run
-the same loop locally and relay token minting to the gateway, so the signing
-key remains gateway-only. If `--hivemind-audience` is customized, add the same
-value to the gateway's `--oidc-audiences` allowlist.
+still allows memory ballooning; API failures never extend it. A successful
+response also refreshes an in-memory, non-persisted list of that VM's HiveMind
+sessions, including titles and dashboard links. Fleet nodes run the same loop
+locally and relay token minting to the gateway, so the signing key remains
+gateway-only. If `--hivemind-audience` is customized, add the same value to the
+gateway's `--oidc-audiences` allowlist.
 
 ## Authenticated forwarding
 

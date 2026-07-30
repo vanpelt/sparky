@@ -52,11 +52,26 @@ func (f *fakeProtector) ProtectUntil(id string, until time.Time) {
 	f.leases[id] = until
 }
 
+type fakeObserver struct {
+	mu        sync.Mutex
+	snapshots map[string]host.HiveMindSessionSnapshot
+}
+
+func (f *fakeObserver) ObserveHiveMindSessions(
+	id string,
+	snapshot host.HiveMindSessionSnapshot,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshots[id] = snapshot
+}
+
 func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	var mu sync.Mutex
 	exchanges := 0
 	queries := 0
 	protectUntil := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	observedAt := time.Now().UTC().Truncate(time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/actions/exchange":
@@ -77,11 +92,23 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 			mu.Lock()
 			queries++
 			mu.Unlock()
+			if got := r.URL.Query().Get("page_size"); got != "100" {
+				t.Errorf("page_size = %q, want 100", got)
+			}
 			if got := r.Header.Get("Authorization"); got != "Bearer hivemind-token" {
 				t.Errorf("authorization = %q", got)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
+				"observed_at":   observedAt,
 				"protect_until": protectUntil,
+				"total_count":   1,
+				"sessions": []map[string]any{{
+					"id": "session-1", "title": "Fix session listing",
+					"url":   "https://hivemind.example/sessions/session-1",
+					"state": "active", "agent_type": "codex", "model": "gpt-5",
+					"started_at":       observedAt.Add(-time.Hour),
+					"last_activity_at": observedAt,
+				}},
 			})
 		default:
 			http.NotFound(w, r)
@@ -91,13 +118,14 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 
 	identity := &fakeIdentity{}
 	protector := &fakeProtector{leases: map[string]time.Time{}}
+	observer := &fakeObserver{snapshots: map[string]host.HiveMindSessionSnapshot{}}
 	monitor, err := New(Options{
 		APIBase: server.URL, Audience: "hivemind",
 		Sandboxes: fakeBoxes{boxes: []*host.Sandbox{
 			{ID: "box-running", Name: "dev", State: vmm.StateRunning},
 			{ID: "box-paused", Name: "sleeping", State: vmm.StatePaused},
 		}},
-		Protector: protector, Identity: identity,
+		Protector: protector, Observer: observer, Identity: identity,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -125,6 +153,19 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	}
 	if pausedProtected {
 		t.Fatal("paused sandbox was queried or protected")
+	}
+	observer.mu.Lock()
+	snapshot, observed := observer.snapshots["box-running"]
+	observer.mu.Unlock()
+	if !observed || len(snapshot.Sessions) != 1 {
+		t.Fatalf("session snapshot = %+v, observed %v", snapshot, observed)
+	}
+	if got := snapshot.Sessions[0]; got.Title != "Fix session listing" ||
+		got.URL != "https://hivemind.example/sessions/session-1" {
+		t.Fatalf("session = %+v", got)
+	}
+	if !snapshot.ObservedAt.Equal(observedAt) || snapshot.TotalCount != 1 {
+		t.Fatalf("snapshot metadata = %+v", snapshot)
 	}
 }
 

@@ -314,7 +314,8 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		monitor, err := hivemindpresence.New(hivemindpresence.Options{
 			APIBase: opts.hivemindAPI, Audience: opts.hivemindAudience,
 			Sandboxes: mgr, Protector: mgr, Identity: identityRelay,
-			Logger: log, UserAgent: "sparkbox/" + version,
+			Observer: mgr,
+			Logger:   log, UserAgent: "sparkbox/" + version,
 		})
 		if err != nil {
 			return err

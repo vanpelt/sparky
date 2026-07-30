@@ -722,6 +722,7 @@ func serve(args []string) error {
 		monitor, err := hivemindpresence.New(hivemindpresence.Options{
 			APIBase: *hivemindAPI, Audience: *hivemindAudience,
 			Sandboxes: mgr, Protector: mgr,
+			Observer: mgr,
 			Identity: metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
 			Logger:   log, UserAgent: "sparkbox/" + version,
 		})

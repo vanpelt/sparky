@@ -31,6 +31,10 @@ type Protector interface {
 	ProtectUntil(sandboxID string, until time.Time)
 }
 
+type Observer interface {
+	ObserveHiveMindSessions(sandboxID string, snapshot host.HiveMindSessionSnapshot)
+}
+
 type Identity interface {
 	Issue(ctx context.Context, box *host.Sandbox, aud string) (metadata.Token, error)
 }
@@ -40,6 +44,7 @@ type Options struct {
 	Audience   string
 	Sandboxes  Sandboxes
 	Protector  Protector
+	Observer   Observer
 	Identity   Identity
 	HTTPClient *http.Client
 	Logger     *slog.Logger
@@ -51,6 +56,7 @@ type Monitor struct {
 	audience  string
 	boxes     Sandboxes
 	protector Protector
+	observer  Observer
 	identity  Identity
 	http      *http.Client
 	log       *slog.Logger
@@ -71,7 +77,11 @@ type exchangeResponse struct {
 }
 
 type presenceResponse struct {
-	ProtectUntil *time.Time `json:"protect_until"`
+	ObservedAt   time.Time              `json:"observed_at"`
+	ProtectUntil *time.Time             `json:"protect_until"`
+	Sessions     []host.HiveMindSession `json:"sessions"`
+	TotalCount   int                    `json:"total_count"`
+	HasMore      bool                   `json:"has_more"`
 }
 
 func New(opts Options) (*Monitor, error) {
@@ -94,6 +104,7 @@ func New(opts Options) (*Monitor, error) {
 		audience:  opts.Audience,
 		boxes:     opts.Sandboxes,
 		protector: opts.Protector,
+		observer:  opts.Observer,
 		identity:  opts.Identity,
 		http:      client,
 		log:       logger,
@@ -170,11 +181,25 @@ func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
 		return err
 	}
 	var presence presenceResponse
-	if err := m.post(ctx, "/v1/integrations/sparkbox/presence", token, []byte("{}"), &presence); err != nil {
+	if err := m.post(
+		ctx,
+		"/v1/integrations/sparkbox/presence?page_size=100",
+		token,
+		[]byte("{}"),
+		&presence,
+	); err != nil {
 		return fmt.Errorf("query: %w", err)
 	}
 	if presence.ProtectUntil != nil && presence.ProtectUntil.After(time.Now()) {
 		m.protector.ProtectUntil(box.ID, presence.ProtectUntil.UTC())
+	}
+	if m.observer != nil {
+		m.observer.ObserveHiveMindSessions(box.ID, host.HiveMindSessionSnapshot{
+			ObservedAt: presence.ObservedAt,
+			Sessions:   presence.Sessions,
+			TotalCount: presence.TotalCount,
+			HasMore:    presence.HasMore,
+		})
 	}
 	return nil
 }

@@ -252,6 +252,29 @@ type Sandbox struct {
 	// omitted pair is what every record written before turbo existed looks like.
 	BaseVCPUs int64 `json:"base_vcpus,omitempty"`
 	BaseMemMB int64 `json:"base_mem_mb,omitempty"`
+	// HiveMind is an ephemeral view of sessions attributed to this VM. It is
+	// refreshed from a token-bound API response and deliberately never written
+	// to the sandbox state file.
+	HiveMind *HiveMindSessionSnapshot `json:"-"`
+}
+
+type HiveMindSession struct {
+	ID             string     `json:"id"`
+	Title          string     `json:"title"`
+	URL            string     `json:"url"`
+	State          string     `json:"state"`
+	AgentType      string     `json:"agent_type"`
+	Model          string     `json:"model"`
+	StartedAt      time.Time  `json:"started_at"`
+	EndedAt        *time.Time `json:"ended_at"`
+	LastActivityAt time.Time  `json:"last_activity_at"`
+}
+
+type HiveMindSessionSnapshot struct {
+	ObservedAt time.Time         `json:"observed_at"`
+	Sessions   []HiveMindSession `json:"sessions"`
+	TotalCount int               `json:"total_count"`
+	HasMore    bool              `json:"has_more"`
 }
 
 // TurboFactor is how much a turbo boot multiplies a sandbox's CPU and RAM by.
@@ -854,6 +877,36 @@ func (m *Manager) List() []*Sandbox {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+func (m *Manager) ObserveHiveMindSessions(sandboxID string, snapshot HiveMindSessionSnapshot) {
+	if sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, box := range m.boxes {
+		if box.ID != sandboxID {
+			continue
+		}
+		snapshot.Sessions = append([]HiveMindSession(nil), snapshot.Sessions...)
+		box.HiveMind = &snapshot
+		return
+	}
+}
+
+func (m *Manager) HiveMindSessions(sandboxID string) (HiveMindSessionSnapshot, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, box := range m.boxes {
+		if box.ID != sandboxID || box.HiveMind == nil {
+			continue
+		}
+		snapshot := *box.HiveMind
+		snapshot.Sessions = append([]HiveMindSession(nil), snapshot.Sessions...)
+		return snapshot, true
+	}
+	return HiveMindSessionSnapshot{}, false
 }
 
 // ListByOwner returns one owner's sandboxes, sorted by name.
@@ -2461,6 +2514,11 @@ func (m *Manager) mergeActivityLocked() map[string]time.Time {
 
 func copyOf(b *Sandbox) *Sandbox {
 	c := *b
+	if b.HiveMind != nil {
+		snapshot := *b.HiveMind
+		snapshot.Sessions = append([]HiveMindSession(nil), b.HiveMind.Sessions...)
+		c.HiveMind = &snapshot
+	}
 	return &c
 }
 
