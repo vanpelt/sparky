@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -328,6 +329,69 @@ func TestWarmEnsureReadyDefersPersistenceUntilActivityFlush(t *testing.T) {
 	}
 	if string(flushed) == string(before) {
 		t.Fatal("FlushActivity did not persist the warm activity timestamp")
+	}
+}
+
+func TestSandboxIDPersistsAcrossRenameAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	m := newManagerInDir(t, dir, host.Options{})
+	box, err := m.Create(context.Background(), "before", "alice", "ubuntu", 1, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if box.ID == "" {
+		t.Fatal("created sandbox has no immutable ID")
+	}
+	if _, err := uuid.Parse(box.ID); err != nil {
+		t.Fatalf("sandbox ID %q is not a UUID: %v", box.ID, err)
+	}
+	if err := m.Rename(context.Background(), "before", "after", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	renamed, ok := m.Get("after")
+	if !ok || renamed.ID != box.ID {
+		t.Fatalf("rename changed sandbox ID: got %q, want %q", renamed.ID, box.ID)
+	}
+
+	reloaded := newManagerInDir(t, dir, host.Options{})
+	afterRestart, ok := reloaded.Get("after")
+	if !ok || afterRestart.ID != box.ID {
+		t.Fatalf("restart changed sandbox ID: got %q, want %q", afterRestart.ID, box.ID)
+	}
+}
+
+func TestManagerBackfillsLegacySandboxID(t *testing.T) {
+	dir := t.TempDir()
+	m := newManagerInDir(t, dir, host.Options{})
+	mustCreate(t, m, "legacy", "alice", 512)
+
+	statePath := filepath.Join(dir, "sandboxes.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records map[string]map[string]any
+	if err := json.Unmarshal(raw, &records); err != nil {
+		t.Fatal(err)
+	}
+	delete(records["legacy"], "id")
+	raw, err = json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := newManagerInDir(t, dir, host.Options{})
+	backfilled, ok := reloaded.Get("legacy")
+	if !ok || backfilled.ID == "" {
+		t.Fatal("legacy sandbox ID was not backfilled")
+	}
+	restarted := newManagerInDir(t, dir, host.Options{})
+	persisted, ok := restarted.Get("legacy")
+	if !ok || persisted.ID != backfilled.ID {
+		t.Fatalf("backfilled ID was not persisted: got %q, want %q", persisted.ID, backfilled.ID)
 	}
 }
 

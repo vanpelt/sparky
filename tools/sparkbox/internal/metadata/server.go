@@ -90,14 +90,15 @@ type Token struct {
 // token carries, minus the registered ones, so shells and tools can answer "who
 // am I" without parsing a JWT.
 type Doc struct {
-	Issuer  string `json:"iss"`
-	Subject string `json:"sub"`
-	Owner   string `json:"owner"`
-	GitHub  string `json:"github,omitempty"`
-	KeyFP   string `json:"key_fp,omitempty"`
-	Sandbox string `json:"sandbox"`
-	Image   string `json:"image"`
-	Box     string `json:"box"`
+	Issuer    string `json:"iss"`
+	Subject   string `json:"sub"`
+	Owner     string `json:"owner"`
+	GitHub    string `json:"github,omitempty"`
+	KeyFP     string `json:"key_fp,omitempty"`
+	Sandbox   string `json:"sandbox"`
+	SandboxID string `json:"sandbox_id"`
+	Image     string `json:"image"`
+	Box       string `json:"box"`
 }
 
 // Identity turns an authenticated sandbox into credentials. It is the whole of
@@ -156,7 +157,7 @@ func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
 	return Doc{
 		Issuer: l.Issuer.URL(), Subject: c.Subject, Owner: c.Owner,
 		GitHub: c.GitHub, KeyFP: c.KeyFP,
-		Sandbox: c.Sandbox, Image: c.Image, Box: c.Box,
+		Sandbox: c.Sandbox, SandboxID: c.SandboxID, Image: c.Image, Box: c.Box,
 	}, nil
 }
 
@@ -165,12 +166,13 @@ func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
 // matching on it fails closed for everyone else.
 func (l Local) claims(box *host.Sandbox) oidc.Claims {
 	c := oidc.Claims{
-		Subject: oidc.SubjectFor(box.Owner),
-		Owner:   box.Owner,
-		KeyFP:   box.KeyFP,
-		Sandbox: box.Name,
-		Image:   box.Image,
-		Box:     l.NodeName,
+		Subject:   oidc.SubjectFor(box.Owner),
+		Owner:     box.Owner,
+		KeyFP:     box.KeyFP,
+		Sandbox:   box.Name,
+		SandboxID: box.ID,
+		Image:     box.Image,
+		Box:       l.NodeName,
 	}
 	if l.Users != nil {
 		// Strong provenance only, and this is the load-bearing half of the

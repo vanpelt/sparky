@@ -122,6 +122,8 @@ message Sandbox {
   // turbo means vcpus and memory_mb above are a doubled allocation this run
   // borrowed, which the node hands back the moment the sandbox pauses.
   bool turbo = 19;
+  // Stable workload identity. Unlike name, this survives sandbox rename.
+  string id = 20;
 }
 
 enum SandboxState {
@@ -392,6 +394,7 @@ message IdentityDescription {
   string sandbox = 6;
   string image = 7;
   string node = 8;
+  string sandbox_id = 9;
 }
 
 message DurationRange {

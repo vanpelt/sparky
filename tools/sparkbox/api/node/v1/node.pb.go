@@ -732,7 +732,9 @@ type Sandbox struct {
 	HostIp string `protobuf:"bytes,18,opt,name=host_ip,json=hostIp,proto3" json:"host_ip,omitempty"`
 	// turbo means vcpus and memory_mb above are a doubled allocation this run
 	// borrowed, which the node hands back the moment the sandbox pauses.
-	Turbo         bool `protobuf:"varint,19,opt,name=turbo,proto3" json:"turbo,omitempty"`
+	Turbo bool `protobuf:"varint,19,opt,name=turbo,proto3" json:"turbo,omitempty"`
+	// Stable workload identity. Unlike name, this survives sandbox rename.
+	Id            string `protobuf:"bytes,20,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -898,6 +900,13 @@ func (x *Sandbox) GetTurbo() bool {
 		return x.Turbo
 	}
 	return false
+}
+
+func (x *Sandbox) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
 }
 
 type Snapshot struct {
@@ -3253,6 +3262,7 @@ type IdentityDescription struct {
 	Sandbox        string                 `protobuf:"bytes,6,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
 	Image          string                 `protobuf:"bytes,7,opt,name=image,proto3" json:"image,omitempty"`
 	Node           string                 `protobuf:"bytes,8,opt,name=node,proto3" json:"node,omitempty"`
+	SandboxId      string                 `protobuf:"bytes,9,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -3343,6 +3353,13 @@ func (x *IdentityDescription) GetNode() string {
 	return ""
 }
 
+func (x *IdentityDescription) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
 type DurationRange struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Minimum       *durationpb.Duration   `protobuf:"bytes,1,opt,name=minimum,proto3" json:"minimum,omitempty"`
@@ -3427,7 +3444,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"q\n" +
 	"\bEventGap\x12:\n" +
 	"\x19oldest_available_revision\x18\x01 \x01(\x04R\x17oldestAvailableRevision\x12)\n" +
-	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xa1\x05\n" +
+	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xb1\x05\n" +
 	"\aSandbox\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -3451,7 +3468,8 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\adisk_mb\x18\x10 \x01(\x03R\x06diskMb\x12\"\n" +
 	"\rdisk_total_mb\x18\x11 \x01(\x03R\vdiskTotalMb\x12\x17\n" +
 	"\ahost_ip\x18\x12 \x01(\tR\x06hostIp\x12\x14\n" +
-	"\x05turbo\x18\x13 \x01(\bR\x05turbo\"\xa8\x01\n" +
+	"\x05turbo\x18\x13 \x01(\bR\x05turbo\x12\x0e\n" +
+	"\x02id\x18\x14 \x01(\tR\x02id\"\xa8\x01\n" +
 	"\bSnapshot\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -3623,7 +3641,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"3\n" +
 	"\x17DescribeIdentityRequest\x12\x18\n" +
-	"\asandbox\x18\x01 \x01(\tR\asandbox\"\xe2\x01\n" +
+	"\asandbox\x18\x01 \x01(\tR\asandbox\"\x81\x02\n" +
 	"\x13IdentityDescription\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x18\n" +
 	"\asubject\x18\x02 \x01(\tR\asubject\x12\x14\n" +
@@ -3632,7 +3650,9 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x0fkey_fingerprint\x18\x05 \x01(\tR\x0ekeyFingerprint\x12\x18\n" +
 	"\asandbox\x18\x06 \x01(\tR\asandbox\x12\x14\n" +
 	"\x05image\x18\a \x01(\tR\x05image\x12\x12\n" +
-	"\x04node\x18\b \x01(\tR\x04node\"y\n" +
+	"\x04node\x18\b \x01(\tR\x04node\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\t \x01(\tR\tsandboxId\"y\n" +
 	"\rDurationRange\x123\n" +
 	"\aminimum\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\aminimum\x123\n" +
 	"\amaximum\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\amaximum*~\n" +

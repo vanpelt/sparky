@@ -28,6 +28,7 @@ func sandboxToProto(box *host.Sandbox) *nodev1.Sandbox {
 		state = nodev1.SandboxState_SANDBOX_STATE_ARCHIVED
 	}
 	out := &nodev1.Sandbox{
+		Id:             box.ID,
 		Name:           box.Name,
 		Owner:          box.Owner,
 		Image:          box.Image,

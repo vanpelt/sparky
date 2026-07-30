@@ -9,6 +9,7 @@ require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/gliderlabs/ssh v0.3.8
 	github.com/go-webauthn/webauthn v0.17.4
+	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.19.0
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/libdns v1.1.1
@@ -57,7 +58,6 @@ require (
 	github.com/go-webauthn/x v0.2.6 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect

@@ -209,6 +209,7 @@ func (e *Emitter) drain(conn *Conn, q <-chan event, stop <-chan struct{}) {
 // nothing anywhere else.
 func sandboxRow(b *host.Sandbox) SandboxRow {
 	return SandboxRow{
+		ID:          b.ID,
 		Name:        b.Name,
 		Owner:       b.Owner,
 		Image:       b.Image,

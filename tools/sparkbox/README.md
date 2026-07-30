@@ -59,6 +59,23 @@ pasted. The guest is authenticated by its network position (it can only reach
 the metadata endpoint over its own tap), exactly like a cloud IMDS. See
 [`docs/identity-federation-design.md`](docs/identity-federation-design.md).
 
+Sparkbox can also keep an otherwise-idle VM reachable while HiveMind reports a
+live agent session inside it:
+
+```text
+--hivemind-api=https://hivemind.wandb.tools
+--hivemind-audience=https://hivemind.wandb.tools
+--hivemind-presence-interval=1m
+```
+
+The feature is off unless `--hivemind-api` is set. Each host exchanges a fresh
+device-bound OIDC token, asks HiveMind only about that sandbox, and installs
+the returned short lease in the idle reaper. The lease prevents pause but
+still allows memory ballooning; API failures never extend it. Fleet nodes run
+the same loop locally and relay token minting to the gateway, so the signing
+key remains gateway-only. If `--hivemind-audience` is customized, add the same
+value to the gateway's `--oidc-audiences` allowlist.
+
 ## Authenticated forwarding
 
 Web routes are **private by default**: a visitor to `<name>.hivemind.tools`

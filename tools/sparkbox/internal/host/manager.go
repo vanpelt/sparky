@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -158,6 +159,7 @@ type DisabledError struct {
 func (e *DisabledError) Error() string { return e.Msg }
 
 type Sandbox struct {
+	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	Owner      string    `json:"owner"`
 	Image      string    `json:"image"`
@@ -441,6 +443,12 @@ type Manager struct {
 	activityMu sync.Mutex
 	activity   map[string]time.Time // dirty timestamps not yet persisted
 	markedAt   map[string]time.Time // last accepted mark, for coalescing
+
+	// protectUntil holds short, external activity leases keyed by immutable
+	// sandbox ID. They are intentionally memory-only: a HiveMind outage or a
+	// process restart must not turn yesterday's observation into a permanent
+	// exemption from scale-to-zero.
+	protectUntil map[string]time.Time
 }
 
 // vitalsSample is the previous reaper-tick reading of a sandbox's resource
@@ -538,37 +546,38 @@ func NewManager(opts Options) (*Manager, error) {
 		lifecycle = context.Background()
 	}
 	m := &Manager{
-		ctx:         lifecycle,
-		driver:      opts.Driver,
-		log:         opts.Logger,
-		stateDir:    opts.StateDir,
-		path:        filepath.Join(opts.StateDir, "sandboxes.json"),
-		snapsPath:   filepath.Join(opts.StateDir, "snapshots.json"),
-		boxes:       map[string]*Sandbox{},
-		snaps:       map[string]*Snapshot{},
-		vitals:      map[string]vitalsSample{},
-		activity:    map[string]time.Time{},
-		markedAt:    map[string]time.Time{},
-		actCPUPct:   opts.ActivityCPUPct,
-		actNetBytes: opts.ActivityNetBytes,
-		gwPubKey:    opts.GatewayPublicKey,
-		routes:      opts.Routes,
-		schedules:   opts.Schedules,
-		tags:        opts.Tags,
-		archive:     opts.Archive,
-		archivePfx:  opts.ArchivePrefix,
-		maxPerOwner: opts.MaxRunningPerOwner,
-		memAdmitPct: opts.MemAdmissionPct,
-		hostMemMB:   opts.HostMemMB,
-		reserveMB:   opts.MemReserveMB,
-		diskPoolMB:  opts.DiskPoolMBPerOwner,
-		nodeName:    opts.NodeName,
-		nodeArch:    opts.Arch,
-		nodeRelease: opts.Release,
-		hostVCPUs:   opts.HostVCPUs,
-		frontDoor:   opts.FrontDoor,
-		observer:    opts.Observer,
-		metrics:     opts.Metrics,
+		ctx:          lifecycle,
+		driver:       opts.Driver,
+		log:          opts.Logger,
+		stateDir:     opts.StateDir,
+		path:         filepath.Join(opts.StateDir, "sandboxes.json"),
+		snapsPath:    filepath.Join(opts.StateDir, "snapshots.json"),
+		boxes:        map[string]*Sandbox{},
+		snaps:        map[string]*Snapshot{},
+		vitals:       map[string]vitalsSample{},
+		activity:     map[string]time.Time{},
+		markedAt:     map[string]time.Time{},
+		protectUntil: map[string]time.Time{},
+		actCPUPct:    opts.ActivityCPUPct,
+		actNetBytes:  opts.ActivityNetBytes,
+		gwPubKey:     opts.GatewayPublicKey,
+		routes:       opts.Routes,
+		schedules:    opts.Schedules,
+		tags:         opts.Tags,
+		archive:      opts.Archive,
+		archivePfx:   opts.ArchivePrefix,
+		maxPerOwner:  opts.MaxRunningPerOwner,
+		memAdmitPct:  opts.MemAdmissionPct,
+		hostMemMB:    opts.HostMemMB,
+		reserveMB:    opts.MemReserveMB,
+		diskPoolMB:   opts.DiskPoolMBPerOwner,
+		nodeName:     opts.NodeName,
+		nodeArch:     opts.Arch,
+		nodeRelease:  opts.Release,
+		hostVCPUs:    opts.HostVCPUs,
+		frontDoor:    opts.FrontDoor,
+		observer:     opts.Observer,
+		metrics:      opts.Metrics,
 	}
 	if m.archivePfx == "" {
 		m.archivePfx = "archives"
@@ -636,6 +645,9 @@ func NewManager(opts Options) (*Manager, error) {
 	// link instead of into this process. Unreachable is a routing verdict some
 	// other process makes about this one, so it is never loaded off disk.
 	for _, b := range m.boxes {
+		if b.ID == "" {
+			b.ID = uuid.NewString()
+		}
 		b.Node = m.nodeName
 		b.Unreachable = false
 	}
@@ -695,6 +707,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	}
 	now := time.Now().UTC()
 	b := &Sandbox{
+		ID:   uuid.NewString(),
 		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
 		State: inst.State, SSHAddr: inst.SSHAddr, SSHUser: inst.SSHUser,
 		HostIP: inst.HostIP, GuestV6: inst.GuestV6, CreatedAt: now, LastActive: now,
@@ -1990,6 +2003,7 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	}
 	delete(m.boxes, name)
 	delete(m.vitals, name)
+	delete(m.protectUntil, b.ID)
 	m.activityMu.Lock()
 	delete(m.activity, name)
 	delete(m.markedAt, name)
@@ -2223,6 +2237,35 @@ func (m *Manager) RunReaper(ctx context.Context, balloonAfter, pauseAfter, inter
 	}
 }
 
+// ProtectUntil prevents the idle reaper from pausing one sandbox before until.
+// It does not change LastActive and it does not prevent ballooning: the lease
+// says an external session still needs the VM reachable, not that the workload
+// is consuming memory. Older or expired observations never shorten a lease.
+func (m *Manager) ProtectUntil(sandboxID string, until time.Time) {
+	if sandboxID == "" || !until.After(time.Now()) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current := m.protectUntil[sandboxID]; until.After(current) {
+		m.protectUntil[sandboxID] = until
+	}
+}
+
+func (m *Manager) isProtected(sandboxID string, now time.Time) bool {
+	if sandboxID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	until := m.protectUntil[sandboxID]
+	if !until.After(now) {
+		delete(m.protectUntil, sandboxID)
+		return false
+	}
+	return true
+}
+
 // reapOnce applies one pass of the idle policy. Split out from RunReaper's loop
 // so the two-stage gradient is unit-testable without a ticker.
 func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Duration) {
@@ -2254,8 +2297,9 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 			continue
 		}
 		idle := time.Since(b.LastActive)
+		protected := m.isProtected(b.ID, time.Now())
 		switch {
-		case idle > pauseAfter:
+		case idle > pauseAfter && !protected:
 			if err := m.pause(ctx, b.Name, fmt.Sprintf("went idle for %s", pauseAfter)); err != nil {
 				m.log.Error("reaper pause failed", "name", b.Name, "err", err)
 			} else {
