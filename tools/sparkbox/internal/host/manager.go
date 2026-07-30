@@ -889,7 +889,7 @@ func (m *Manager) ObserveHiveMindSessions(sandboxID string, snapshot HiveMindSes
 		if box.ID != sandboxID {
 			continue
 		}
-		snapshot.Sessions = append([]HiveMindSession(nil), snapshot.Sessions...)
+		snapshot.Sessions = cloneHiveMindSessions(snapshot.Sessions)
 		box.HiveMind = &snapshot
 		return
 	}
@@ -903,7 +903,7 @@ func (m *Manager) HiveMindSessions(sandboxID string) (HiveMindSessionSnapshot, b
 			continue
 		}
 		snapshot := *box.HiveMind
-		snapshot.Sessions = append([]HiveMindSession(nil), snapshot.Sessions...)
+		snapshot.Sessions = cloneHiveMindSessions(snapshot.Sessions)
 		return snapshot, true
 	}
 	return HiveMindSessionSnapshot{}, false
@@ -2516,10 +2516,22 @@ func copyOf(b *Sandbox) *Sandbox {
 	c := *b
 	if b.HiveMind != nil {
 		snapshot := *b.HiveMind
-		snapshot.Sessions = append([]HiveMindSession(nil), b.HiveMind.Sessions...)
+		snapshot.Sessions = cloneHiveMindSessions(b.HiveMind.Sessions)
 		c.HiveMind = &snapshot
 	}
 	return &c
+}
+
+func cloneHiveMindSessions(sessions []HiveMindSession) []HiveMindSession {
+	out := append([]HiveMindSession(nil), sessions...)
+	for i := range out {
+		if out[i].EndedAt == nil {
+			continue
+		}
+		endedAt := *out[i].EndedAt
+		out[i].EndedAt = &endedAt
+	}
+	return out
 }
 
 // Public copies a record for anything outside the control plane with its three

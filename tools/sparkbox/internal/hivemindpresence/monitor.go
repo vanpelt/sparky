@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	defaultInterval = time.Minute
-	maxParallel     = 4
+	defaultInterval        = time.Minute
+	sessionRefreshInterval = 10 * time.Minute
+	maxParallel            = 4
 )
 
 type Sandboxes interface {
@@ -64,6 +65,10 @@ type Monitor struct {
 
 	mu     sync.Mutex
 	tokens map[string]cachedToken
+	// sessionsAt is the last successful catalog refresh per sandbox. Protection
+	// is polled every minute, but the expensive paginated history/count query is
+	// deliberately much less frequent.
+	sessionsAt map[string]time.Time
 }
 
 type cachedToken struct {
@@ -77,11 +82,15 @@ type exchangeResponse struct {
 }
 
 type presenceResponse struct {
-	ObservedAt   time.Time              `json:"observed_at"`
-	ProtectUntil *time.Time             `json:"protect_until"`
-	Sessions     []host.HiveMindSession `json:"sessions"`
-	TotalCount   int                    `json:"total_count"`
-	HasMore      bool                   `json:"has_more"`
+	ObservedAt   time.Time  `json:"observed_at"`
+	ProtectUntil *time.Time `json:"protect_until"`
+}
+
+type sessionsResponse struct {
+	ObservedAt time.Time              `json:"observed_at"`
+	Sessions   []host.HiveMindSession `json:"sessions"`
+	TotalCount int                    `json:"total_count"`
+	HasMore    bool                   `json:"has_more"`
 }
 
 func New(opts Options) (*Monitor, error) {
@@ -100,16 +109,17 @@ func New(opts Options) (*Monitor, error) {
 		logger = slog.Default()
 	}
 	return &Monitor{
-		apiBase:   strings.TrimRight(opts.APIBase, "/"),
-		audience:  opts.Audience,
-		boxes:     opts.Sandboxes,
-		protector: opts.Protector,
-		observer:  opts.Observer,
-		identity:  opts.Identity,
-		http:      client,
-		log:       logger,
-		userAgent: opts.UserAgent,
-		tokens:    map[string]cachedToken{},
+		apiBase:    strings.TrimRight(opts.APIBase, "/"),
+		audience:   opts.Audience,
+		boxes:      opts.Sandboxes,
+		protector:  opts.Protector,
+		observer:   opts.Observer,
+		identity:   opts.Identity,
+		http:       client,
+		log:        logger,
+		userAgent:  opts.UserAgent,
+		tokens:     map[string]cachedToken{},
+		sessionsAt: map[string]time.Time{},
 	}, nil
 }
 
@@ -146,6 +156,7 @@ func (m *Monitor) Poll(ctx context.Context) {
 	for sandboxID := range m.tokens {
 		if _, exists := liveIDs[sandboxID]; !exists {
 			delete(m.tokens, sandboxID)
+			delete(m.sessionsAt, sandboxID)
 		}
 	}
 	m.mu.Unlock()
@@ -167,7 +178,7 @@ func (m *Monitor) Poll(ctx context.Context) {
 				return
 			}
 			if err := m.pollSandbox(ctx, box); err != nil {
-				m.log.Warn("HiveMind presence check failed",
+				m.log.Warn("HiveMind monitor poll failed",
 					"sandbox", box.Name, "sandbox_id", box.ID, "err", err)
 			}
 		}()
@@ -183,7 +194,7 @@ func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
 	var presence presenceResponse
 	if err := m.post(
 		ctx,
-		"/v1/integrations/sparkbox/presence?page_size=100",
+		"/v1/integrations/runtime/presence",
 		token,
 		[]byte("{}"),
 		&presence,
@@ -193,15 +204,36 @@ func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
 	if presence.ProtectUntil != nil && presence.ProtectUntil.After(time.Now()) {
 		m.protector.ProtectUntil(box.ID, presence.ProtectUntil.UTC())
 	}
-	if m.observer != nil {
-		m.observer.ObserveHiveMindSessions(box.ID, host.HiveMindSessionSnapshot{
-			ObservedAt: presence.ObservedAt,
-			Sessions:   presence.Sessions,
-			TotalCount: presence.TotalCount,
-			HasMore:    presence.HasMore,
-		})
+	if m.observer == nil || !m.sessionsDue(box.ID, time.Now()) {
+		return nil
 	}
+
+	var sessions sessionsResponse
+	if err := m.post(
+		ctx,
+		"/v1/integrations/runtime/sessions?page_size=100",
+		token,
+		[]byte("{}"),
+		&sessions,
+	); err != nil {
+		return fmt.Errorf("sessions: %w", err)
+	}
+	m.observer.ObserveHiveMindSessions(box.ID, host.HiveMindSessionSnapshot{
+		ObservedAt: sessions.ObservedAt,
+		Sessions:   sessions.Sessions,
+		TotalCount: sessions.TotalCount,
+		HasMore:    sessions.HasMore,
+	})
+	m.mu.Lock()
+	m.sessionsAt[box.ID] = time.Now()
+	m.mu.Unlock()
 	return nil
+}
+
+func (m *Monitor) sessionsDue(sandboxID string, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.sessionsAt[sandboxID].Add(sessionRefreshInterval).After(now)
 }
 
 func (m *Monitor) token(ctx context.Context, box *host.Sandbox) (string, error) {

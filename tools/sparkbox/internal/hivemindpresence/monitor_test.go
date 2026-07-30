@@ -69,7 +69,8 @@ func (f *fakeObserver) ObserveHiveMindSessions(
 func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	var mu sync.Mutex
 	exchanges := 0
-	queries := 0
+	presenceQueries := 0
+	sessionQueries := 0
 	protectUntil := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	observedAt := time.Now().UTC().Truncate(time.Second)
 	startedAt := observedAt.Add(-time.Hour)
@@ -90,9 +91,20 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"token": "hivemind-token", "expires_at": time.Now().Add(time.Hour).Unix(),
 			})
-		case "/v1/integrations/sparkbox/presence":
+		case "/v1/integrations/runtime/presence":
 			mu.Lock()
-			queries++
+			presenceQueries++
+			mu.Unlock()
+			if got := r.Header.Get("Authorization"); got != "Bearer hivemind-token" {
+				t.Errorf("authorization = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"observed_at":   observedAt,
+				"protect_until": protectUntil,
+			})
+		case "/v1/integrations/runtime/sessions":
+			mu.Lock()
+			sessionQueries++
 			mu.Unlock()
 			if got := r.URL.Query().Get("page_size"); got != "100" {
 				t.Errorf("page_size = %q, want 100", got)
@@ -101,10 +113,9 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 				t.Errorf("authorization = %q", got)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"observed_at":   observedAt,
-				"protect_until": protectUntil,
-				"total_count":   1,
-				"has_more":      true,
+				"observed_at": observedAt,
+				"total_count": 1,
+				"has_more":    true,
 				"sessions": []map[string]any{{
 					"id": "session-1", "title": "Fix session listing",
 					"url":   "https://hivemind.example/sessions/session-1",
@@ -140,13 +151,17 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	monitor.Poll(context.Background())
 
 	mu.Lock()
-	gotExchanges, gotQueries := exchanges, queries
+	gotExchanges := exchanges
+	gotPresenceQueries, gotSessionQueries := presenceQueries, sessionQueries
 	mu.Unlock()
 	if gotExchanges != 1 || identity.calls != 1 {
 		t.Fatalf("exchange/identity calls = %d/%d, want 1/1", gotExchanges, identity.calls)
 	}
-	if gotQueries != 2 {
-		t.Fatalf("presence queries = %d, want 2", gotQueries)
+	if gotPresenceQueries != 2 {
+		t.Fatalf("presence queries = %d, want 2", gotPresenceQueries)
+	}
+	if gotSessionQueries != 1 {
+		t.Fatalf("session queries = %d, want 1", gotSessionQueries)
 	}
 	protector.mu.Lock()
 	lease, ok := protector.leases["box-running"]
@@ -180,6 +195,18 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	if !snapshot.ObservedAt.Equal(observedAt) || snapshot.TotalCount != 1 || !snapshot.HasMore {
 		t.Fatalf("snapshot metadata = %+v", snapshot)
 	}
+
+	monitor.mu.Lock()
+	monitor.sessionsAt["box-running"] = time.Now().Add(-sessionRefreshInterval)
+	monitor.mu.Unlock()
+	monitor.Poll(context.Background())
+	mu.Lock()
+	gotPresenceQueries, gotSessionQueries = presenceQueries, sessionQueries
+	mu.Unlock()
+	if gotPresenceQueries != 3 || gotSessionQueries != 2 {
+		t.Fatalf("queries after catalog expiry = presence %d, sessions %d, want 3/2",
+			gotPresenceQueries, gotSessionQueries)
+	}
 }
 
 func TestPollDoesNotProtectOnQueryFailure(t *testing.T) {
@@ -209,5 +236,48 @@ func TestPollDoesNotProtectOnQueryFailure(t *testing.T) {
 	monitor.Poll(context.Background())
 	if len(protector.leases) != 0 {
 		t.Fatalf("failed query installed leases: %v", protector.leases)
+	}
+}
+
+func TestSessionCatalogFailureDoesNotDiscardPresenceLease(t *testing.T) {
+	protectUntil := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/actions/exchange":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token": "hivemind-token", "expires_at": time.Now().Add(time.Hour).Unix(),
+			})
+		case "/v1/integrations/runtime/presence":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"observed_at": time.Now().UTC(), "protect_until": protectUntil,
+			})
+		case "/v1/integrations/runtime/sessions":
+			http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	protector := &fakeProtector{leases: map[string]time.Time{}}
+	monitor, err := New(Options{
+		APIBase: server.URL, Audience: "hivemind",
+		Sandboxes: fakeBoxes{boxes: []*host.Sandbox{
+			{ID: "box-running", Name: "dev", State: vmm.StateRunning},
+		}},
+		Protector: protector, Observer: &fakeObserver{snapshots: map[string]host.HiveMindSessionSnapshot{}},
+		Identity: &fakeIdentity{},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor.Poll(context.Background())
+
+	protector.mu.Lock()
+	lease, ok := protector.leases["box-running"]
+	protector.mu.Unlock()
+	if !ok || !lease.Equal(protectUntil) {
+		t.Fatalf("presence lease = %v, want %v", lease, protectUntil)
 	}
 }
