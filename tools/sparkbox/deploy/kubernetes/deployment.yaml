@@ -39,6 +39,10 @@ spec:
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
               value: "22000"
+            - name: SPARKBOX_PROXY_TLS
+              value: "true"
+            - name: SPARKBOX_TLS_PROVIDER
+              value: autocert
           securityContext:
             privileged: true
             runAsNonRoot: false
@@ -49,7 +53,10 @@ spec:
             - name: ssh
               containerPort: 2222
               protocol: TCP
-            - name: http
+            - name: acme
+              containerPort: 80
+              protocol: TCP
+            - name: https
               containerPort: 8081
               protocol: TCP
           resources:

@@ -12,6 +12,9 @@ readonly artifact_base="${SPARKBOX_ARTIFACT_BASE:-https://github.com/vanpelt/spa
 readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:?SPARKBOX_PROXY_DOMAIN is required}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
+readonly proxy_tls="${SPARKBOX_PROXY_TLS:-true}"
+readonly tls_provider="${SPARKBOX_TLS_PROVIDER:-autocert}"
+readonly tls_email="${SPARKBOX_TLS_EMAIL:-}"
 
 case "$(uname -m)" in
   x86_64)
@@ -117,7 +120,15 @@ export SPARKBOX_EDGE_REDIRECT=0
 export SPARKBOX_GUEST_SUBNET="$guest_subnet"
 /usr/local/sbin/sparkbox-net.sh
 
-echo "starting Sparkbox for *.$proxy_domain"
+tls_args=()
+if [ "$proxy_tls" = true ]; then
+  tls_args+=(--proxy-tls --tls-provider "$tls_provider")
+  if [ -n "$tls_email" ]; then
+    tls_args+=(--tls-email "$tls_email")
+  fi
+fi
+
+echo "starting Sparkbox for *.$proxy_domain (TLS: $proxy_tls)"
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
   --state-dir "$state_dir" \
@@ -134,4 +145,5 @@ exec /usr/local/bin/sparkbox serve \
   --host-mem-mb "$host_mem_mb" \
   --mem-admission-pct 80 \
   --max-running-per-owner 2 \
+  "${tls_args[@]}" \
   "$@"

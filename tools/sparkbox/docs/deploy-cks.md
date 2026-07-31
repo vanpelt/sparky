@@ -11,7 +11,8 @@ public CKS LoadBalancer provides SSH and wildcard HTTP routing under
 - One `Deployment`, pinned to an amd64 CKS NodePool.
 - A 100 GiB local `emptyDir` for the rootfs template and sandbox state.
 - Host device mounts for `/dev/kvm` and `/dev/net/tun`.
-- A public `LoadBalancer` Service with a `*.coreweave.app` record.
+- A public `LoadBalancer` Service with a `*.coreweave.app` record and ports 80,
+  443, and 22.
 - A Secret containing one operator's **public** SSH key.
 
 The Pod is privileged, but it does not use `hostNetwork`. TAP devices, sysctls,
@@ -84,7 +85,10 @@ deploy/kubernetes/deploy.sh \
 The script creates the LoadBalancer first, reads its `ExternalRecords` status
 condition, removes the leading `*.`, and passes the resulting base domain to
 Sparkbox. It then creates `sparkbox-users`, renders the image/domain/NodePool
-values into the Deployment, and waits up to 20 minutes for first boot.
+values into the Deployment, and waits up to 20 minutes for first boot. Sparkbox
+uses its `autocert` provider to issue per-host Let's Encrypt certificates on
+first use. Port 80 serves the ACME challenge and redirects ordinary requests to
+port 443.
 
 The wildcard record does not represent the base name itself. Use any label,
 such as `ssh`, for the SSH gateway:
@@ -98,6 +102,12 @@ DOMAIN=$(
 
 ssh -p 22 ctl@"ssh.$DOMAIN" help
 ssh -p 22 new@"ssh.$DOMAIN"
+```
+
+The browser dashboard is:
+
+```text
+https://my.<domain>
 ```
 
 New sandboxes receive two vCPUs and 8 GiB RAM by default. This POC admits at
@@ -121,9 +131,10 @@ failures are:
 - The mounted local filesystem cannot perform reflink copies.
 - The cluster or organization has no public LoadBalancer/IP quota.
 
-HTTP is plain text for the POC. CKS wildcard DNS does not issue a TLS
-certificate; add cert-manager and TLS termination before exposing real
-workloads.
+The certificate cache is on the same ephemeral volume as the rest of the POC.
+Deleting the Pod therefore causes certificate reissuance and can eventually
+hit Let's Encrypt rate limits. Use persistent certificate storage or
+cert-manager before treating this as a durable endpoint.
 
 ## Remove the POC
 

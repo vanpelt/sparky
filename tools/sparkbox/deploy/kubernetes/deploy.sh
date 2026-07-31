@@ -152,5 +152,5 @@ echo
 echo "Sparkbox is ready."
 echo "  SSH:  ssh -p 22 ctl@ssh.$proxy_domain help"
 echo "  New:  ssh -p 22 new@ssh.$proxy_domain"
-echo "  Web:  http://<sandbox>.$proxy_domain"
+echo "  Web:  https://my.$proxy_domain"
 echo "  Logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox"
