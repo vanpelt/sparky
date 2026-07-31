@@ -671,6 +671,14 @@ func linkJailedResource(root string, uid int, source, name string, writable bool
 		if err := os.Chmod(source, 0o600); err != nil {
 			return fmt.Errorf("make jail resource writable %s: %w", source, err)
 		}
+	} else {
+		// The jailer drops Firecracker to the slot-scoped uid before the SDK
+		// configures its boot source. The shared kernel therefore has to be
+		// readable by that uid. Keep it immutable to every unprivileged VMM;
+		// the production asset remains root-owned, and 0444 grants read only.
+		if err := os.Chmod(source, 0o444); err != nil {
+			return fmt.Errorf("make shared jail resource readable %s: %w", source, err)
+		}
 	}
 	destination := filepath.Join(root, name)
 	if err := os.Link(source, destination); err != nil {

@@ -133,6 +133,15 @@ func TestLinkJailedResourceRejectsSymlink(t *testing.T) {
 	if err != nil || string(linked) != "kernel" {
 		t.Fatalf("linked kernel = %q, %v", linked, err)
 	}
+	for _, path := range []string{source, filepath.Join(root, "vmlinux")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := info.Mode().Perm(), os.FileMode(0o444); got != want {
+			t.Errorf("mode of %s = %o, want %o", path, got, want)
+		}
+	}
 
 	symlink := filepath.Join(dir, "symlink")
 	if err := os.Symlink(source, symlink); err != nil {
