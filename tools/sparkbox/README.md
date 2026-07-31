@@ -344,6 +344,9 @@ the fleet's keys live — 1Password or Scaleway Secret Manager, staged at
 provisioning time or fetched into tmpfs at boot — is
 [`docs/secret-management.md`](docs/secret-management.md).
 
+For the minimal single-Pod Firecracker proof of concept on CoreWeave Kubernetes
+Service, see [`docs/deploy-cks.md`](docs/deploy-cks.md).
+
 ### On a Mac (Apple Silicon)
 
 Same binary-is-the-installer story, same two commands:

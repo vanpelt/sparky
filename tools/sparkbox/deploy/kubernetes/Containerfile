@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+
+ARG TARGETARCH
+ARG TARGETOS
+ARG SPARKBOX_VERSION=dev-cks
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${SPARKBOX_VERSION}" \
+      -o /out/sparkbox ./cmd/sparkbox
+
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates \
+      coreutils \
+      curl \
+      e2fsprogs \
+      iproute2 \
+      iptables \
+      openssh-client \
+      procps \
+      util-linux \
+      zerofree \
+      zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
+COPY deploy/sparkbox-net.sh /usr/local/sbin/sparkbox-net.sh
+COPY deploy/kubernetes/entrypoint.sh /usr/local/sbin/sparkbox-kubernetes-entrypoint
+
+RUN chmod 0755 \
+      /usr/local/bin/sparkbox \
+      /usr/local/sbin/sparkbox-net.sh \
+      /usr/local/sbin/sparkbox-kubernetes-entrypoint
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/sbin/sparkbox-kubernetes-entrypoint"]
