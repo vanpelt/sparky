@@ -77,6 +77,73 @@ func TestVMDirUsesVMStateDir(t *testing.T) {
 	}
 }
 
+func TestJailerUsesSlotScopedIdentityAndWorkspace(t *testing.T) {
+	base := t.TempDir()
+	d := &Driver{opts: Options{
+		FirecrackerBin:   "/opt/sparkbox/firecracker",
+		JailerBin:        "/opt/sparkbox/jailer",
+		JailerChrootBase: base,
+		JailerUIDBase:    100000,
+	}}
+	if got, want := d.jailUID(7), 100007; got != want {
+		t.Fatalf("jail uid = %d, want %d", got, want)
+	}
+	if got, want := d.jailRoot(7),
+		filepath.Join(base, "firecracker", "sparkbox-7", "root"); got != want {
+		t.Fatalf("jail root = %q, want %q", got, want)
+	}
+}
+
+func TestJailerPairMustMatch(t *testing.T) {
+	dir := t.TempDir()
+	fake := func(name, version string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\necho "+version+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	firecracker := fake("firecracker", "Firecracker v1.16.1")
+	jailer := fake("jailer", "Jailer v1.16.1")
+	if err := validateJailerPair(firecracker, jailer); err != nil {
+		t.Fatal(err)
+	}
+	oldJailer := fake("old-jailer", "Jailer v1.15.0")
+	if err := validateJailerPair(firecracker, oldJailer); err == nil ||
+		!strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("mismatched pair error = %v", err)
+	}
+}
+
+func TestLinkJailedResourceRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "kernel")
+	if err := os.WriteFile(source, []byte("kernel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkJailedResource(root, os.Getuid(), source, "vmlinux", false); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := os.ReadFile(filepath.Join(root, "vmlinux"))
+	if err != nil || string(linked) != "kernel" {
+		t.Fatalf("linked kernel = %q, %v", linked, err)
+	}
+
+	symlink := filepath.Join(dir, "symlink")
+	if err := os.Symlink(source, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkJailedResource(root, os.Getuid(), symlink, "bad", false); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlink jail resource error = %v", err)
+	}
+}
+
 func TestUnpackRootfsFailurePreservesExistingDisk(t *testing.T) {
 	d := newTestDriver(t)
 	dir := d.vmDir("box")

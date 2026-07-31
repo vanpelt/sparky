@@ -8,7 +8,11 @@
 # so patching the template is picked up by the next `ssh new@...` instantly.
 # The patch is atomic (reflink copy -> loop mount -> install -> rename), so a
 # concurrent create sees either the old or the new template, never a torn one.
-# Running/paused VMs keep their own rootfs copies and are untouched.
+# Only release/operator base templates are mounted here. User-derived
+# snap-*.ext4 images are deliberately excluded: mounting an untrusted guest
+# filesystem asks the privileged host kernel to parse attacker-controlled ext4
+# metadata and turns the management plane into a second sandbox boundary.
+# Running/paused VMs and their snapshot templates are untouched.
 #
 # Sources (all self-contained single binaries, no guest deps):
 #   claude:   downloads.claude.ai native build, sha256-verified via the release
@@ -135,7 +139,13 @@ command -v debugfs >/dev/null \
   || echo "WARN: debugfs not found (install e2fsprogs) — no template can be read, so every one will be re-patched on every run" >&2
 
 shopt -s nullglob
-ALL=("$IMAGES_DIR"/*.ext4)
+ALL=()
+for tpl in "$IMAGES_DIR"/*.ext4; do
+  case "$(basename "$tpl")" in
+    snap-*.ext4) continue ;;
+  esac
+  ALL+=("$tpl")
+done
 if [ ${#ALL[@]} = 0 ]; then
   echo "no templates in $IMAGES_DIR — nothing to patch" >&2
   exit 1

@@ -15,6 +15,8 @@
 #   vmlinux-<arch>                 guest kernel (flat Image on arm64; the name
 #                                  stays vmlinux — firecracker doesn't care)
 #   firecracker-<arch>             the VMM
+#   jailer-<arch>                  the matching Firecracker privilege-drop /
+#                                  chroot launcher
 #   <rootfs-name>-<arch>.ext4.zst  the guest rootfs template
 #   manifest-<arch>.env            sha256s + metadata `sparkbox setup` reads
 #
@@ -61,6 +63,7 @@ ROOTFS_NAME=${ROOTFS_NAME:-universal}   # template basename; must match the serv
 ROOTFS_MB=${ROOTFS_MB:-25600}   # per-sandbox root disk ceiling, 25 GiB (thin CoW copy; mostly unwritten)
 KERNEL=${KERNEL:-$SPARKBOX_DIR/vmlinux}
 FIRECRACKER_BIN=${FIRECRACKER_BIN:-$(command -v firecracker || true)}
+JAILER_BIN=${JAILER_BIN:-$(command -v jailer || true)}
 # The rootfs build needs root (loop mount); self-elevate that one step when we
 # aren't already root, so the rest (go build, staging) runs unprivileged in CI.
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO=sudo
@@ -68,6 +71,7 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO=sudo
 [ -f "$GATEWAY_PUBKEY_FILE" ] || { echo "missing gateway pubkey: $GATEWAY_PUBKEY_FILE"; exit 1; }
 [ -f "$KERNEL" ] || { echo "missing kernel: $KERNEL"; exit 1; }
 [ -x "$FIRECRACKER_BIN" ] || { echo "missing firecracker binary (set FIRECRACKER_BIN)"; exit 1; }
+[ -x "$JAILER_BIN" ] || { echo "missing jailer binary (set JAILER_BIN; it must match firecracker)"; exit 1; }
 command -v zstd >/dev/null || { echo "zstd required: apt-get install zstd"; exit 1; }
 
 mkdir -p "$OUT_DIR"
@@ -139,9 +143,10 @@ echo "== build sluice binary ($GOARCH) =="
   go build -trimpath -ldflags "-s -w" \
     -o "$OUT_DIR/$SLUICE_ASSET" ./cmd/sluice )
 
-echo "== collect kernel + firecracker =="
+echo "== collect kernel + firecracker + jailer =="
 cp "$KERNEL" "$OUT_DIR/vmlinux-$GOARCH"
 cp "$FIRECRACKER_BIN" "$OUT_DIR/firecracker-$GOARCH"
+cp "$JAILER_BIN" "$OUT_DIR/jailer-$GOARCH"
 
 if [ "$BUILD_OWN_IMAGE" = 1 ]; then
   echo "== build base image from images/Dockerfile (tag $IMAGE) =="
@@ -187,6 +192,11 @@ fi
 
 echo "== manifest =="
 FC_VER=$("$FIRECRACKER_BIN" --version | head -1 | grep -oE 'v[0-9.]+' | head -1)
+JAILER_VER=$("$JAILER_BIN" --version | head -1 | grep -oE 'v[0-9.]+' | head -1)
+[ -n "$FC_VER" ] && [ "$JAILER_VER" = "$FC_VER" ] || {
+  echo "firecracker ($FC_VER) and jailer ($JAILER_VER) must come from the same release" >&2
+  exit 1
+}
 cat > "$OUT_DIR/manifest-$GOARCH.env" <<EOF
 RELEASE=$RELEASE
 ARCH=$GOARCH
@@ -194,6 +204,7 @@ PLATFORM=linux
 FIRECRACKER_VERSION=$FC_VER
 SHA256_VMLINUX=$(sha "$OUT_DIR/vmlinux-$GOARCH")
 SHA256_FIRECRACKER=$(sha "$OUT_DIR/firecracker-$GOARCH")
+SHA256_JAILER=$(sha "$OUT_DIR/jailer-$GOARCH")
 SPARKBOX_ASSET=$SPARKBOX_ASSET
 SHA256_SPARKBOX=$(sha "$OUT_DIR/$SPARKBOX_ASSET")
 SLUICE_ASSET=$SLUICE_ASSET

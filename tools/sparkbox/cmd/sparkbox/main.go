@@ -100,6 +100,7 @@ func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
 		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker")
+		gatewayOnly          = fs.Bool("gateway-only", false, "run the public control plane without local VM capacity; ordinary creates are placed on an attached fleet node")
 		stateDir             = fs.String("state-dir", "./state", "directory for control state: sqlite stores, certificates, and sandbox metadata")
 		vmStateDir           = fs.String("vm-state-dir", "", "directory for per-VM disks, sockets, and memory snapshots (default: --state-dir)")
 		keyDir               = fs.String("key-dir", "", "directory holding fleet private key PEMs, including node-control CA/gateway keys (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
@@ -128,6 +129,9 @@ func serve(args []string) error {
 		checkpointPrefix     = fs.String("checkpoint-prefix", "checkpoints", "object-key prefix beneath --checkpoint-dir")
 		kernelPath           = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir             = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		jailerBin            = fs.String("jailer", "", "firecracker: matching jailer binary; empty launches Firecracker directly (development/legacy)")
+		jailerChrootBase     = fs.String("jailer-chroot-base", "", "firecracker jailer: root-owned chroot parent (default <vm-state-dir>/jailer)")
+		jailerUIDBase        = fs.Int("jailer-uid-base", 100000, "firecracker jailer: first uid/gid in the per-VM unprivileged identity range")
 		guestSubnet          = fs.String("guest-subnet", guestnet.DefaultPrefix, "IPv4 prefix divided into per-sandbox /30s; fleet nodes must set an explicit unique prefix (a /20 provides 1,024 slots)")
 		subnet6              = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
 		guestDNS             = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
@@ -226,6 +230,12 @@ func serve(args []string) error {
 	if *gatewayAddr != "" && !guestSubnetSet {
 		return errors.New("fleet nodes require an explicit unique --guest-subnet (use a non-overlapping /20 for 1,024 sandbox slots)")
 	}
+	if *gatewayOnly && *gatewayAddr != "" {
+		return errors.New("--gateway-only and --gateway are mutually exclusive roles")
+	}
+	if *gatewayOnly && *driverName != "mock" {
+		return errors.New("--gateway-only requires --driver mock so the public gateway never opens a host virtualization device")
+	}
 	// A node has no accounts of its own — every identity in a fleet lives on the
 	// gateway — so the seed file is required of everything except a node.
 	if *usersPath == "" && *gatewayAddr == "" {
@@ -249,6 +259,7 @@ func serve(args []string) error {
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
 			driverName: *driverName, stateDir: *stateDir, vmStateDir: *vmStateDir, keyDir: *keyDir,
 			kernelPath: *kernelPath, imageDir: *imageDir,
+			jailerBin: *jailerBin, jailerChrootBase: *jailerChrootBase, jailerUIDBase: *jailerUIDBase,
 			defaultLogin: *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
 			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
 			idleBalloon: *idleBalloon, idleTimeout: *idleTimeout,
@@ -357,7 +368,8 @@ func serve(args []string) error {
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			*kernelPath, *imageDir, *vmStateDir, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
+			*kernelPath, *imageDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
+			*guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)
 		if err != nil {
 			return err
@@ -596,6 +608,10 @@ func serve(args []string) error {
 		return fmt.Errorf("fleet: %w", err)
 	}
 	defer flt.Close()
+	if *gatewayOnly {
+		flt.SetPlacer(fleet.RemoteOnlyPlacer{})
+		log.Info("running as a control-plane-only gateway", "local_vm_capacity", false)
+	}
 	nodeStore.SetRevocationHook(func(name, reason string) {
 		flt.EvictNode(name, reason)
 	})

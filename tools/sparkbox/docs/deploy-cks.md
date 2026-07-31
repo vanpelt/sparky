@@ -1,43 +1,47 @@
 # Sparkbox on CoreWeave Kubernetes Service
 
-This is a deliberately small proof of concept: one privileged Sparkbox Pod on
-one CKS bare-metal CPU Node, with Firecracker guests nested under the Pod. A
-public CKS LoadBalancer provides SSH and wildcard HTTP routing under
-`coreweave.app`.
+This proof of concept splits Sparkbox across two trust domains: a non-root
+public gateway and one privileged Firecracker node pinned to a CKS bare-metal
+CPU Node. A public CKS LoadBalancer provides SSH and wildcard HTTPS routing
+under `coreweave.app`; the VM node has no public Service.
 
 ## What it creates
 
 - Namespace `sparkbox-poc`.
-- One `Deployment`, pinned to one exact amd64 Node in a CKS NodePool.
-- A Node-local XFS `hostPath` at `/mnt/local/sparkbox-poc` for control state,
-  the rootfs template, and live sandbox disks.
+- `sparkbox-gateway`, an unprivileged Deployment with no host devices,
+  hostPath, Linux capabilities, or writable root filesystem.
+- `sparkbox-node`, a privileged Deployment pinned to one exact amd64 Node.
+- A Node-local XFS `hostPath` at `/mnt/local/sparkbox-poc` for the VM inventory,
+  rootfs template, live sandbox disks, and node identity.
 - A 100 GiB `shared-vast` PVC mounted at `/mnt/sparkbox-durable` for durable
-  checkpoint objects.
-- Host device mounts for `/dev/kvm` and `/dev/net/tun`.
-- A public `LoadBalancer` Service with a `*.coreweave.app` record and ports 80,
-  443, and 22.
+  gateway databases, edge certificate cache, and checkpoint objects.
+- Host device mounts for `/dev/kvm` and `/dev/net/tun` on the VM node only.
+- A public `LoadBalancer` Service selecting only the gateway on ports 443 and
+  22, plus an internal ClusterIP Service for the authenticated fleet link.
+- Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
+  admitted. The node has no admitted ingress.
 - A Secret containing one operator's **public** SSH key.
 - A separately provisioned `sparkbox-identity` Secret containing the stable
-  gateway, OIDC, and node-control identity.
+  gateway, OIDC, and node-control identity, mounted only by the gateway. The
+  node receives a separate Secret containing only the gateway's public host-key
+  pin.
 
-The Pod is privileged, but it does not use `hostNetwork`. TAP devices, sysctls,
-NAT, and packet-filter rules therefore live in the Pod's network namespace
+The VM node is privileged, but it does not use `hostNetwork`. TAP devices,
+sysctls, NAT, and packet-filter rules therefore live in that Pod's network namespace
 instead of modifying the CKS Node's Calico network namespace.
 
-The named host path survives deletion and replacement of the Pod on the same
-Node. The exact hostname selector makes that placement explicit. It is still an
-ephemeral hot tier: CoreWeave local storage is encrypted with an in-memory key
-and is lost when the Node reboots or is replaced. The Kubernetes identity
-Secret and VAST checkpoint volume survive that Node loss; local control records
-and guest disks do not. If that happens, redeploy against a new Node with the
-same Secret and restore what has a committed checkpoint. Do not treat this
-manifest as a production deployment.
+The named host path survives deletion and replacement of the node Pod on the
+same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost
+when the Node is replaced. The gateway database, identity Secret, and VAST
+objects survive that loss; VM inventory and guest disks do not. Do not treat
+this manifest as a production deployment.
 
-Applying this version over the original `emptyDir` POC does not migrate that
-Pod's data into the host path. The first rollout starts with empty state and
-removes the old Pod's sandboxes, certificates, and account database. Capture
-the generated identity into `sparkbox-identity` before that rollout, and export
-anything else worth keeping before the one-time cutover.
+On the first split rollout, `deploy.sh` stops the combined Pod, copies its
+SQLite databases and edge caches to VAST, and leaves `sandboxes.json` and VM
+files on the pinned Node. Before the privileged node starts, its init container
+removes the retired gateway databases, edge TLS cache, and fleet private keys
+from the hostPath. The identity Secret is a required precondition and remains
+the recovery source for those keys.
 
 The proposed path to durable identity and recoverable reflink-backed guest
 disks is documented in
@@ -145,11 +149,20 @@ it is not an off-cluster backup. Keep an approved escrow copy, especially of
 `oidc_signing_key.pem`: it also protects access to encrypted user secrets.
 
 The `sparkbox-durable` claim is a 100 GiB ReadWriteMany `shared-vast` volume.
-The entrypoint creates `/mnt/sparkbox-durable/checkpoints` for checkpoint
-objects. SQLite databases and live Firecracker disks remain under the
-Node-local mount; do not move them onto VAST.
+Gateway SQLite databases live under `/mnt/sparkbox-durable/gateway/control` and
+checkpoint objects under `/mnt/sparkbox-durable/checkpoints`. Live Firecracker
+disks and `sandboxes.json` remain on Node-local XFS; do not move them onto VAST.
 
 ## Manual durable checkpoints
+
+The one-node checkpoint command is temporarily unavailable in the split
+deployment: the gateway no longer has the VM disk, and the VM node deliberately
+does not mount the durable control volume. Existing immutable checkpoint
+objects are retained. Restoring this feature requires a fleet checkpoint RPC
+or a narrow transfer helper; remounting the gateway PVC into the privileged
+node would undo the secret/state separation.
+
+The original combined-Pod behavior was:
 
 The CKS entrypoint enables a deliberately small manual checkpoint path:
 
@@ -211,15 +224,13 @@ deploy/kubernetes/deploy.sh \
   --user vanpelt
 ```
 
-The script resolves the exact Node, applies the namespace, verifies every
-required entry in `sparkbox-identity`, and applies the `shared-vast` claim
-before creating the LoadBalancer. It reads the Service's `ExternalRecords`
-status condition, removes the leading `*.`, and passes the resulting base
-domain to Sparkbox. It then creates `sparkbox-users`, renders the
-image/domain/NodePool/exact-Node values into the Deployment, and waits up to 20
-minutes for first boot. Sparkbox uses its `autocert` provider to issue per-host
-Let's Encrypt certificates on first use. Port 80 serves the ACME challenge and
-redirects ordinary requests to port 443.
+The script resolves the exact Node, verifies `sparkbox-identity`, derives a
+public-only gateway host-key pin, and reads the LoadBalancer's `ExternalRecords`
+domain. It stops the legacy Deployment, runs the idempotent state-migration
+Job, starts both role-specific Deployments, and uses the operator key to approve
+the node's authenticated fleet enrollment. The public gateway is then selected
+by the existing LoadBalancer and the ingress policies are applied. Sparkbox's
+`autocert` provider obtains certificates on the HTTPS listener.
 
 The wildcard record does not represent the base name itself. Use any label,
 such as `ssh`, for the SSH gateway. The Kubernetes entrypoint passes this
@@ -252,8 +263,9 @@ is not quota-enforced by Kubernetes; monitor and clean
 ## Observe and troubleshoot
 
 ```sh
-kubectl -n sparkbox-poc get pods,service,pvc
-kubectl -n sparkbox-poc logs -f deployment/sparkbox
+kubectl -n sparkbox-poc get pods,service,pvc,networkpolicy
+kubectl -n sparkbox-poc logs -f deployment/sparkbox-gateway
+kubectl -n sparkbox-poc logs -f deployment/sparkbox-node
 kubectl -n sparkbox-poc describe pod -l app.kubernetes.io/name=sparkbox
 ```
 
@@ -270,16 +282,13 @@ failures are:
 - The mounted local filesystem cannot perform reflink copies.
 - The cluster or organization has no public LoadBalancer/IP quota.
 
-The certificate cache, control database, and guest disks are on the same
-Node-local path. They survive an ordinary Pod rollout on that Node and
-disappear together on Node loss. Private identity instead comes from the
-Kubernetes Secret, and the VAST mount provides a Node-independent checkpoint
-target. The runtime node and cluster identity is fixed at `cks-poc`, rather
-than inheriting the changing Kubernetes Pod name, so placement records remain
-stable across rollouts. A Deployment pinned to a lost Node remains pending
-until it is redeployed for a replacement Node. Automated checkpoint creation,
-checkpoint discovery after control-state loss, and automatic recovery remain
-work described in
+The certificate cache and control databases are on VAST; guest disks and VM
+inventory remain Node-local. Private identity comes from the gateway-only
+Kubernetes Secret. The VM node identity is fixed at `cks-poc`, rather than
+inheriting the changing Kubernetes Pod name, so placement records remain stable
+across rollouts. A node Deployment pinned to a lost Node remains pending until
+it is redeployed for a replacement Node. Automated checkpoint creation,
+checkpoint discovery, and automatic recovery remain work described in
 [`cks-reflink-persistence-plan.md`](cks-reflink-persistence-plan.md).
 
 ## Remove the POC

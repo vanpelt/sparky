@@ -1,10 +1,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sparkbox
+  name: sparkbox-node
   namespace: sparkbox-poc
   labels:
     app.kubernetes.io/name: sparkbox
+    app.kubernetes.io/component: vm-node
     app.kubernetes.io/part-of: sparky
 spec:
   replicas: 1
@@ -13,22 +14,60 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: sparkbox
+      app.kubernetes.io/component: vm-node
   template:
     metadata:
       labels:
         app.kubernetes.io/name: sparkbox
+        app.kubernetes.io/component: vm-node
         app.kubernetes.io/part-of: sparky
-      annotations:
-        sparkbox.dev/users-hash: __SPARKBOX_USERS_HASH__
     spec:
+      serviceAccountName: sparkbox-node
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 90
       nodeSelector:
         kubernetes.io/arch: amd64
         compute.coreweave.com/node-pool: __SPARKBOX_NODE_POOL__
         kubernetes.io/hostname: __SPARKBOX_NODE__
+      initContainers:
+        - name: scrub-retired-gateway-state
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              rm -f \
+                /var/lib/sparkbox/control/sparkbox.db \
+                /var/lib/sparkbox/control/sparkbox.db-shm \
+                /var/lib/sparkbox/control/sparkbox.db-wal \
+                /var/lib/sparkbox/control/schedules.db \
+                /var/lib/sparkbox/control/schedules.db-shm \
+                /var/lib/sparkbox/control/schedules.db-wal \
+                /var/lib/sparkbox/control/gateway_host_key.pem \
+                /var/lib/sparkbox/control/gateway_upstream_key.pem \
+                /var/lib/sparkbox/control/oidc_signing_key.pem \
+                /var/lib/sparkbox/control/oidc_signing_key_prev.pem \
+                /var/lib/sparkbox/control/node_ca_key.pem \
+                /var/lib/sparkbox/control/gateway_control_key.pem
+              rm -rf \
+                /var/lib/sparkbox/control/autocert \
+                /var/lib/sparkbox/control/certmagic \
+                /var/lib/sparkbox/control/favicons
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sparkbox
       containers:
-        - name: sparkbox
+        - name: sparkbox-node
           image: __SPARKBOX_IMAGE__
           imagePullPolicy: Always
           env:
@@ -40,14 +79,12 @@ spec:
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
               value: "22000"
-            - name: SPARKBOX_PROXY_TLS
-              value: "true"
-            - name: SPARKBOX_TLS_PROVIDER
-              value: autocert
+            - name: SPARKBOX_GATEWAY_ADDR
+              value: sparkbox-gateway.sparkbox-poc.svc.cluster.local:2222
             - name: SPARKBOX_NODE_NAME
               value: cks-poc
-            - name: SPARKBOX_CLUSTER_ID
-              value: cks-poc
+            - name: SPARKBOX_NODE_KEY_DIR
+              value: /var/lib/sparkbox/node-identity
           securityContext:
             privileged: true
             runAsNonRoot: false
@@ -55,14 +92,8 @@ spec:
             seccompProfile:
               type: Unconfined
           ports:
-            - name: ssh
-              containerPort: 2222
-              protocol: TCP
-            - name: acme
-              containerPort: 80
-              protocol: TCP
-            - name: https
-              containerPort: 8081
+            - name: metrics
+              containerPort: 9090
               protocol: TCP
           resources:
             requests:
@@ -75,29 +106,24 @@ spec:
               ephemeral-storage: 100Gi
           startupProbe:
             tcpSocket:
-              port: ssh
+              port: metrics
             periodSeconds: 5
             failureThreshold: 240
           readinessProbe:
             tcpSocket:
-              port: ssh
+              port: metrics
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
             tcpSocket:
-              port: ssh
+              port: metrics
             periodSeconds: 10
             failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/lib/sparkbox
-            - name: durable
-              mountPath: /mnt/sparkbox-durable
-            - name: identity
-              mountPath: /run/sparkbox/keys
-              readOnly: true
-            - name: users
-              mountPath: /etc/sparkbox/users
+            - name: gateway-trust
+              mountPath: /run/sparkbox/trust
               readOnly: true
             - name: kvm
               mountPath: /dev/kvm
@@ -107,18 +133,11 @@ spec:
         - name: data
           hostPath:
             path: /mnt/local/sparkbox-poc
-            type: DirectoryOrCreate
-        - name: durable
-          persistentVolumeClaim:
-            claimName: sparkbox-durable
-        - name: identity
+            type: Directory
+        - name: gateway-trust
           secret:
-            secretName: sparkbox-identity
-            defaultMode: 0400
-        - name: users
-          secret:
-            secretName: sparkbox-users
-            defaultMode: 0400
+            secretName: sparkbox-node-trust
+            defaultMode: 0444
         - name: kvm
           hostPath:
             path: /dev/kvm

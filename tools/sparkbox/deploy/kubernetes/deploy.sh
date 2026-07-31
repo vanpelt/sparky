@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy one Node-local Sparkbox gateway to a CKS CPU node pool.
+# Split Sparkbox into an unprivileged public gateway and a private VM node.
 set -euo pipefail
 
 usage() {
@@ -11,6 +11,8 @@ Options:
   --node-pool NAME        CKS NodePool label value (default: default-node-pool)
   --node NAME             exact CKS Node (default: sole ready eligible pool Node)
   --public-key PATH       operator SSH public key (default: ~/.ssh/id_ed25519.pub)
+  --private-key PATH      matching operator key used to approve the VM node
+                          (default: public-key path without .pub; optional on re-runs)
   --user HANDLE           operator handle in users.conf (default: local username)
   --image IMAGE           linux/amd64 Sparkbox image to deploy (required)
 EOF
@@ -21,6 +23,7 @@ context=$(kubectl config current-context)
 node_pool=default-node-pool
 node=
 public_key="${HOME}/.ssh/id_ed25519.pub"
+private_key=
 operator=$(id -un)
 image=
 namespace=sparkbox-poc
@@ -41,6 +44,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --public-key)
       public_key=${2:?--public-key requires a value}
+      shift 2
+      ;;
+    --private-key)
+      private_key=${2:?--private-key requires a value}
       shift 2
       ;;
     --user)
@@ -65,6 +72,9 @@ done
 
 [ -n "$image" ] || { echo "--image is required" >&2; exit 2; }
 [ -f "$public_key" ] || { echo "public key not found: $public_key" >&2; exit 2; }
+if [ -z "$private_key" ]; then
+  private_key=${public_key%.pub}
+fi
 case "$operator" in
   *[!a-z0-9_-]*|'')
     echo "--user must contain only lowercase letters, digits, underscores, and dashes" >&2
@@ -181,7 +191,9 @@ if [ "${#missing_identity_files[@]}" -gt 0 ]; then
 fi
 
 "${k[@]}" apply -f "$script_dir/durable-pvc.yaml"
-"${k[@]}" apply -f "$script_dir/service.yaml"
+if ! "${k[@]}" -n "$namespace" get service sparkbox >/dev/null 2>&1; then
+  "${k[@]}" apply -f "$script_dir/service.yaml"
+fi
 
 echo "Waiting for CoreWeave to allocate the wildcard DNS record..."
 deadline=$((SECONDS + 600))
@@ -210,8 +222,13 @@ esac
 
 temporary_dir=$(mktemp -d)
 users_file="$temporary_dir/users.conf"
+gateway_private_file="$temporary_dir/gateway_host_key.pem"
+gateway_public_file="$temporary_dir/gateway_host_key.pub"
+known_hosts_file="$temporary_dir/known_hosts"
 cleanup() {
-  rm -f "$users_file"
+  rm -f \
+    "$users_file" "$gateway_private_file" "$gateway_public_file" \
+    "$known_hosts_file"
   rmdir "$temporary_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -227,60 +244,95 @@ else
   users_hash=$(shasum -a 256 "$users_file" | awk '{print $1}')
 fi
 
+"${k[@]}" -n "$namespace" get secret "$identity_secret" \
+  -o 'go-template={{index .data "gateway_host_key.pem" | base64decode}}' \
+  > "$gateway_private_file"
+chmod 0600 "$gateway_private_file"
+ssh-keygen -y -f "$gateway_private_file" > "$gateway_public_file"
+"${k[@]}" -n "$namespace" create secret generic sparkbox-node-trust \
+  --from-file="gateway_host_key.pub=$gateway_public_file" \
+  --dry-run=client -o yaml | "${k[@]}" apply -f -
+
+# The old combined Pod must be stopped before its SQLite WAL and control
+# database are copied. The migration Job copies only gateway-owned state to the
+# RWX volume; sandboxes.json and the Firecracker hot tier remain on this Node.
+if "${k[@]}" -n "$namespace" get deployment sparkbox >/dev/null 2>&1; then
+  echo "Stopping the combined gateway/VM Pod for the one-time state split..."
+  "${k[@]}" -n "$namespace" scale deployment sparkbox --replicas=0
+  "${k[@]}" -n "$namespace" rollout status deployment/sparkbox --timeout=5m
+fi
+"${k[@]}" -n "$namespace" delete job sparkbox-split-gateway-state \
+  --ignore-not-found --wait=true
+sed \
+  -e "s|__SPARKBOX_IMAGE__|$image|g" \
+  -e "s|__SPARKBOX_NODE__|$node|g" \
+  "$script_dir/migration-job.yaml" | "${k[@]}" apply -f -
+if ! "${k[@]}" -n "$namespace" wait \
+  --for=condition=complete job/sparkbox-split-gateway-state --timeout=10m; then
+  "${k[@]}" -n "$namespace" logs job/sparkbox-split-gateway-state >&2 || true
+  exit 1
+fi
+
+"${k[@]}" apply -f "$script_dir/service-accounts.yaml"
+"${k[@]}" apply -f "$script_dir/internal-service.yaml"
+
+sed \
+  -e "s|__SPARKBOX_IMAGE__|$image|g" \
+  -e "s|__SPARKBOX_PROXY_DOMAIN__|$proxy_domain|g" \
+  -e "s|__SPARKBOX_USERS_HASH__|$users_hash|g" \
+  "$script_dir/gateway-deployment.yaml" | "${k[@]}" apply -f -
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \
   -e "s|__SPARKBOX_PROXY_DOMAIN__|$proxy_domain|g" \
   -e "s|__SPARKBOX_NODE_POOL__|$node_pool|g" \
   -e "s|__SPARKBOX_NODE__|$node|g" \
-  -e "s|__SPARKBOX_USERS_HASH__|$users_hash|g" \
   "$script_dir/deployment.yaml" | "${k[@]}" apply -f -
+"${k[@]}" apply -f "$script_dir/service.yaml"
 
-# The first checkpoint POC overlaid a content-addressed hostPath binary at
-# /usr/local/bin/sparkbox. kubectl apply correctly preserves fields it did not
-# create, so remove that one development-only mount explicitly after applying
-# the real image. Do the mount, its appended args, and its marker annotation in
-# one Pod-template patch so the Deployment rolls only to the final image-backed
-# configuration.
-runtime_mount_index=
-mount_index=0
-while IFS= read -r mount_path; do
-  if [ "$mount_path" = /usr/local/bin/sparkbox ]; then
-    runtime_mount_index=$mount_index
-    break
-  fi
-  mount_index=$((mount_index + 1))
-done < <(
-  "${k[@]}" -n "$namespace" get deployment sparkbox \
-    -o jsonpath='{range .spec.template.spec.containers[0].volumeMounts[*]}{.mountPath}{"\n"}{end}'
-)
-if [ -n "$runtime_mount_index" ]; then
-  echo "Removing the temporary hostPath runtime overlay."
-  runtime_patch='[{"op":"remove","path":"/spec/template/spec/containers/0/volumeMounts/'"$runtime_mount_index"'"}'
-  runtime_args=$(
-    "${k[@]}" -n "$namespace" get deployment sparkbox \
-      -o jsonpath='{.spec.template.spec.containers[0].args}'
+echo "Waiting for the public gateway..."
+"${k[@]}" -n "$namespace" rollout status deployment/sparkbox-gateway --timeout=10m
+echo "Waiting for the private VM node (first boot may refresh Firecracker and agent tools)..."
+"${k[@]}" -n "$namespace" rollout status deployment/sparkbox-node --timeout=20m
+
+# Pin the administrative SSH connection with the same public host key mounted
+# into the VM node. If the matching operator private key is available, approve
+# a newly enrolled node without an insecure host-key prompt.
+node_fingerprint=$("${k[@]}" -n "$namespace" exec deployment/sparkbox-node -- \
+  ssh-keygen -lf /var/lib/sparkbox/node-identity/node_key.pem -E sha256 | awk '{print $2}')
+printf 'ssh.%s %s\n' "$proxy_domain" "$(cat "$gateway_public_file")" > "$known_hosts_file"
+if [ -f "$private_key" ]; then
+  ssh_args=(
+    ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes
+    -o "UserKnownHostsFile=$known_hosts_file" -i "$private_key"
+    -p 22 "ctl@ssh.$proxy_domain"
   )
-  if [ -n "$runtime_args" ]; then
-    runtime_patch+=',{"op":"remove","path":"/spec/template/spec/containers/0/args"}'
+  deadline=$((SECONDS + 120))
+  roster=
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    roster=$("${ssh_args[@]}" node ls 2>/dev/null || true)
+    printf '%s\n' "$roster" | grep -F "$node_fingerprint" >/dev/null && break
+    sleep 3
+  done
+  if ! printf '%s\n' "$roster" | grep -F "$node_fingerprint" >/dev/null; then
+    echo "VM node did not enrol with the gateway within 120 seconds" >&2
+    exit 1
   fi
-  runtime_marker=$(
-    "${k[@]}" -n "$namespace" get deployment sparkbox \
-      -o jsonpath='{.spec.template.metadata.annotations.sparkbox\.dev/runtime-candidate}'
-  )
-  if [ -n "$runtime_marker" ]; then
-    runtime_patch+=',{"op":"remove","path":"/spec/template/metadata/annotations/sparkbox.dev~1runtime-candidate"}'
+  if ! printf '%s\n' "$roster" | grep -F "$node_fingerprint" | grep -F approved >/dev/null; then
+    "${ssh_args[@]}" node approve "$node_fingerprint" --guest-subnet 172.30.0.0/20
   fi
-  runtime_patch+=']'
-  "${k[@]}" -n "$namespace" patch deployment sparkbox \
-    --type=json --patch "$runtime_patch"
+else
+  echo "operator private key not found at $private_key; approve the pending node manually:" >&2
+  echo "  ssh -p 22 ctl@ssh.$proxy_domain node approve $node_fingerprint --guest-subnet 172.30.0.0/20" >&2
 fi
 
-echo "Waiting for Sparkbox to become available (first boot downloads release artifacts and agent tools)..."
-"${k[@]}" -n "$namespace" rollout status deployment/sparkbox --timeout=20m
+"${k[@]}" apply -f "$script_dir/network-policy.yaml"
+"${k[@]}" -n "$namespace" delete deployment sparkbox --ignore-not-found --wait=true
 
 echo
-echo "Sparkbox is ready."
+echo "Sparkbox gateway and VM node are ready."
 echo "  SSH:  ssh -p 22 ctl@ssh.$proxy_domain help"
 echo "  New:  ssh -p 22 new@ssh.$proxy_domain"
 echo "  Web:  https://my.$proxy_domain"
-echo "  Logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox"
+echo "  Gateway logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-gateway"
+echo "  VM node logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-node"
+echo "  The VM node init container removed the retired gateway databases, TLS cache, and fleet private keys from its hostPath."
