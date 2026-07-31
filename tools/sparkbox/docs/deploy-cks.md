@@ -29,37 +29,27 @@ that loop-mount patch, so this proves the Firecracker runtime, SSH gateway,
 workload-identity metadata, and HTTP proxy rather than the complete agent
 toolchain.
 
-## Build and push the runtime image
+## Runtime image from GitHub Actions
 
-Build from `tools/sparkbox` so the Containerfile can compile the current source:
+`.github/workflows/sparkbox-cks-image.yml` builds this Containerfile for
+`linux/amd64` and publishes it to GitHub Container Registry on every push that
+changes Sparkbox or the workflow. It needs no registry secret: the workflow's
+`GITHUB_TOKEN` receives `packages: write`.
 
-```sh
-cd tools/sparkbox
-IMAGE=your-registry.example/sparkbox-cks-poc:$(git rev-parse --short HEAD)
-
-docker buildx build \
-  --platform linux/amd64 \
-  --build-arg SPARKBOX_VERSION="$(git describe --always --dirty)-cks" \
-  -f deploy/kubernetes/Containerfile \
-  -t "$IMAGE" \
-  --push .
-```
-
-The image contains the current Sparkbox binary and host networking tools. At
-Pod startup it downloads and SHA-256-verifies the Firecracker, kernel, and
-universal rootfs artifacts pinned to Sparkbox `v0.5.3`. The first start
-downloads about 750 MB and decompresses a sparse ext4 image.
-
-For a short-lived POC, an anonymous temporary registry such as `ttl.sh` is
-convenient:
+Every build receives an immutable full-SHA tag and a branch tag. The default
+branch also updates `edge`:
 
 ```sh
-IMAGE=ttl.sh/sparkbox-cks-$(uuidgen | tr '[:upper:]' '[:lower:]'):24h
+IMAGE=ghcr.io/vanpelt/sparkbox-cks:edge
 ```
 
-The image and its tag are public while they exist, so do not bake credentials
-or private source into it. A temporary tag also expires, so publish the image
-to a durable registry before relying on Pod recreation.
+GHCR packages are private until their visibility is changed. After the first
+workflow run, open the `sparkbox-cks` package settings on GitHub and change its
+visibility to public so CKS can pull it without an image-pull secret. The image
+contains the current Sparkbox binary and host networking tools. At Pod startup
+it downloads and SHA-256-verifies the Firecracker, kernel, and universal rootfs
+artifacts pinned to Sparkbox `v0.5.3`. The first start downloads about 750 MB
+and decompresses a sparse ext4 image.
 
 ## Deploy
 
@@ -91,7 +81,9 @@ first use. Port 80 serves the ACME challenge and redirects ordinary requests to
 port 443.
 
 The wildcard record does not represent the base name itself. Use any label,
-such as `ssh`, for the SSH gateway:
+such as `ssh`, for the SSH gateway. The Kubernetes entrypoint passes this
+public hostname and the load balancer's public ports to Sparkbox, so the login
+page and WebAuthn origin never advertise the Pod's internal names or ports:
 
 ```sh
 DOMAIN=$(

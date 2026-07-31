@@ -309,7 +309,7 @@ func (g *Gateway) reconnectHint(sandbox string, via connectVia) string {
 		return "ssh " + sandbox + "@<gateway>"
 	}
 	if via == viaGateway {
-		return "ssh " + sandbox + "@" + g.domain
+		return "ssh " + sandbox + "@" + g.sshHint()
 	}
 	return "ssh " + sandbox + "." + g.domain
 }

@@ -15,6 +15,16 @@ readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
 readonly proxy_tls="${SPARKBOX_PROXY_TLS:-true}"
 readonly tls_provider="${SPARKBOX_TLS_PROVIDER:-autocert}"
 readonly tls_email="${SPARKBOX_TLS_EMAIL:-}"
+readonly ssh_advertise_host="${SPARKBOX_SSH_ADVERTISE_HOST:-ssh.$proxy_domain}"
+proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
+if [ -z "$proxy_advertise_port" ]; then
+  if [ "$proxy_tls" = true ]; then
+    proxy_advertise_port=443
+  else
+    proxy_advertise_port=80
+  fi
+fi
+readonly proxy_advertise_port
 
 case "$(uname -m)" in
   x86_64)
@@ -137,10 +147,12 @@ exec /usr/local/bin/sparkbox serve \
   --image-dir "$image_dir" \
   --guest-subnet "$guest_subnet" \
   --ssh-addr :2222 \
+  --ssh-advertise-host "$ssh_advertise_host" \
   --ssh-advertise-port 22 \
   --api-addr 127.0.0.1:8080 \
   --metrics-addr "" \
   --proxy-addr :8081 \
+  --proxy-advertise-port "$proxy_advertise_port" \
   --proxy-domain "$proxy_domain" \
   --host-mem-mb "$host_mem_mb" \
   --mem-admission-pct 80 \

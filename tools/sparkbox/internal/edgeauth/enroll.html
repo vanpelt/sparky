@@ -119,6 +119,14 @@
       for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
       return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
+    async function responseJSON(response, fallback) {
+      var text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        throw new Error(fallback + " (server returned " + response.status + ")");
+      }
+    }
 
     document.getElementById("skip-btn").addEventListener("click", function () {
       location.href = RETURN;
@@ -139,7 +147,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: document.getElementById("pk-name").value })
         });
-        var body = await begin.json();
+        var body = await responseJSON(begin, "could not start passkey setup");
         if (!begin.ok) throw new Error(body.error || "could not start passkey setup");
         var opts = body.publicKey;
         opts.challenge = b64uDec(opts.challenge);
@@ -162,7 +170,7 @@
             clientExtensionResults: cred.getClientExtensionResults()
           })
         });
-        var out = await fin.json();
+        var out = await responseJSON(fin, "could not save the passkey");
         if (!out.ok) throw new Error(out.error || "could not save the passkey");
         // Same hint the login page reads: this browser now holds a passkey,
         // so future sign-ins lead with it.

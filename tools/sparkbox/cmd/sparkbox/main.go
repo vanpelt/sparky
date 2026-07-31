@@ -106,6 +106,7 @@ func serve(args []string) error {
 		usersPath            = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
 		sshAddr              = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
 		sshAdvertise         = fs.Int("ssh-advertise-port", 0, "gateway port shown in user-facing instructions when it differs from the listen port (e.g. 22 when an edge DNAT forwards :22 to the gateway); 0 uses the listen port")
+		sshAdvertiseHost     = fs.String("ssh-advertise-host", "", "gateway hostname shown in user-facing instructions when it differs from --proxy-domain (e.g. ssh.example.com); empty uses --proxy-domain")
 		apiAddr              = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
 		metricsAddr          = fs.String("metrics-addr", "127.0.0.1:9090", "node mode: private Prometheus metrics listen address (empty to disable; gateways expose /metrics on --api-addr)")
 		defaultImage         = fs.String("default-image", "universal", "rootfs template for new sandboxes")
@@ -129,6 +130,7 @@ func serve(args []string) error {
 		guestDNS             = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
 		sluiceSocket         = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
 		proxyAddr            = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
+		proxyAdvertise       = fs.Int("proxy-advertise-port", 0, "public HTTP(S) port used for browser origins when it differs from --proxy-addr (e.g. 443 when a load balancer forwards to :8081); 0 uses the listen port")
 		proxyDomain          = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		edgeV4               = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
 		proxyTLS             = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
@@ -660,7 +662,7 @@ func serve(args []string) error {
 		Manager: mgr, Fleet: flt, Dial: flt.DialContext,
 		Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
-		Doors: doors, Domain: *proxyDomain,
+		Doors: doors, Domain: *proxyDomain, SSHHost: advertisedHost(*sshAdvertiseHost, *proxyDomain),
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
 		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
@@ -854,8 +856,9 @@ func serve(args []string) error {
 		// at login.<domain> like the console and issuer do.
 		loginH, lerr := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
 			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
-			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain, GatewayPort: gatewayPort(*sshAdvertise, *sshAddr),
-			Passkeys: userStore, Subdomain: *loginSub, Port: portOf(*proxyAddr),
+			TTL: *sessionTTL, Logger: log, Gateway: advertisedHost(*sshAdvertiseHost, *proxyDomain),
+			GatewayPort: advertisedPort(*sshAdvertise, *sshAddr),
+			Passkeys:    userStore, Subdomain: *loginSub, Port: advertisedPort(*proxyAdvertise, *proxyAddr),
 			HomeSub: *userConsoleSub,
 		})
 		if lerr != nil {
@@ -1495,14 +1498,22 @@ func firstOr(list []string, def string) string {
 // portOf extracts the numeric port from a listen address like ":443" or
 // "0.0.0.0:8081". Returns 0 when there is no parseable port, which just
 // disables the edge's "dialed me directly" check in the proxy.
-// gatewayPort picks the port user-facing instructions should show for the SSH
-// gateway: the advertised override when set (an edge DNAT can expose the
-// gateway on a different port than it binds), else the listen port.
-func gatewayPort(advertised int, listenAddr string) int {
+// advertisedPort picks the public port user-facing instructions and browser
+// origins should use: the advertised override when set (an edge or load
+// balancer can expose a different port than the process binds), else the
+// listen port.
+func advertisedPort(advertised int, listenAddr string) int {
 	if advertised != 0 {
 		return advertised
 	}
 	return portOf(listenAddr)
+}
+
+func advertisedHost(advertised, fallback string) string {
+	if advertised != "" {
+		return advertised
+	}
+	return fallback
 }
 
 func portOf(addr string) int {

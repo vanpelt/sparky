@@ -371,7 +371,7 @@ func (g *Gateway) controlWhoami(s gssh.Session, c ctlops.Caller, log *slog.Logge
 			me.GitHubLogin, me.GitHubVerifiedAt.Format("2006-01-02"), me.GitHubVia)
 	} else {
 		fmt.Fprintf(s, "github:  not linked — link it with: ssh %s@%s github link\r\n",
-			ControlUser, g.domainHint())
+			ControlUser, g.sshHint())
 	}
 	fmt.Fprintf(s, "subject: %s\r\n", me.Subject)
 	fmt.Fprintf(s, "key:     %s\r\n", me.KeyFP)
@@ -437,7 +437,7 @@ func (g *Gateway) controlKeys(s gssh.Session, c ctlops.Caller, args []string, lo
 			// back the transport-free version, so the CLI wording is rebuilt here.
 			if e := ctlops.AsError("keys import-github", err); e.Code == "github_not_linked" {
 				fmt.Fprintf(s.Stderr(), "sparkbox: no GitHub account linked — link one with: ssh %s@%s github link\r\n",
-					ControlUser, g.domainHint())
+					ControlUser, g.sshHint())
 				s.Exit(1) //nolint:errcheck
 				return
 			}
@@ -495,7 +495,7 @@ func (g *Gateway) controlInvite(s gssh.Session, c ctlops.Caller, log *slog.Logge
 	}
 	fmt.Fprintf(s, "invite code: %s   (single use, expires in %d days)\r\n",
 		inv.Code, int(users.InviteTTL.Hours()/24))
-	fmt.Fprintf(s, "they run:    ssh %s@%s\r\n", SignupUser, g.domainHint())
+	fmt.Fprintf(s, "they run:    ssh %s@%s\r\n", SignupUser, g.sshHint())
 	s.Exit(0) //nolint:errcheck
 }
 
@@ -524,7 +524,7 @@ func (g *Gateway) controlSchedule(s gssh.Session, c ctlops.Caller, args []string
 		}
 		if len(entries) == 0 {
 			fmt.Fprintf(s, "no scheduled jobs — add one with:\r\n  ssh %s@%s schedule add <box> \"*/30 * * * *\" <cmd>\r\n",
-				ControlUser, g.domainHint())
+				ControlUser, g.sshHint())
 			s.Exit(0) //nolint:errcheck
 			return
 		}
@@ -603,7 +603,7 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 		}
 		if len(snaps) == 0 {
 			fmt.Fprintf(s, "no snapshots — create one with:\r\n  ssh %s@%s snapshot create <box> <name>\r\n",
-				ControlUser, g.domainHint())
+				ControlUser, g.sshHint())
 			s.Exit(0) //nolint:errcheck
 			return
 		}
@@ -629,7 +629,7 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 			return
 		}
 		fmt.Fprintf(s, "created snapshot %q — fork it with: ssh %s@%s fork %s <new-name>\r\n",
-			args[2], ControlUser, g.domainHint(), args[2])
+			args[2], ControlUser, g.sshHint(), args[2])
 		s.Exit(0) //nolint:errcheck
 	case "rm":
 		if len(args) < 2 {
@@ -683,7 +683,7 @@ func (g *Gateway) controlFork(s gssh.Session, c ctlops.Caller, args []string, lo
 		tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
 	}
 	fmt.Fprintf(s, "created %s from snapshot %q%s — connect with: ssh %s@%s\r\n",
-		name, snapshot, tagNote, name, g.domainHint())
+		name, snapshot, tagNote, name, g.sshHint())
 	s.Exit(0) //nolint:errcheck
 }
 
