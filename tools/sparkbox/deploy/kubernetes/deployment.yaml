@@ -150,6 +150,8 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: checkpoint-scratch
+              mountPath: /mnt/sparkbox-durable
       volumes:
         - name: data
           hostPath:
@@ -160,5 +162,8 @@ spec:
             secretName: sparkbox-node-trust
             defaultMode: 0444
         - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: checkpoint-scratch
           emptyDir:
             sizeLimit: 1Gi

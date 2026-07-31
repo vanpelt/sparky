@@ -173,7 +173,10 @@ deployment: the gateway no longer has the VM disk, and the VM node deliberately
 does not mount the durable control volume. Existing immutable checkpoint
 objects are retained. Restoring this feature requires a fleet checkpoint RPC
 or a narrow transfer helper; remounting the gateway PVC into the VM
-node would undo the secret/state separation.
+node would undo the secret/state separation. A size-limited ephemeral
+`emptyDir` occupies the node's configured checkpoint path only so the
+read-only container can initialize it; it is not durable storage and receives
+no gateway data.
 
 The original combined-Pod behavior was:
 

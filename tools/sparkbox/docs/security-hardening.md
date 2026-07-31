@@ -151,9 +151,9 @@ it over a constrained protocol.
 ## Guest disk handling
 
 The guest controls the bytes and directory entries in its rootfs. Mounting that
-filesystem in the capability-bearing management Pod enlarges the trusted computing base
-from Firecracker/KVM to the host ext4 driver and every root process that walks
-the mount.
+filesystem in the capability-bearing management Pod enlarges the trusted
+computing base from Firecracker/KVM to the host ext4 driver and every root
+process that walks the mount.
 
 This change closes two immediate issues:
 
