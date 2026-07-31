@@ -41,6 +41,9 @@ spec:
           imagePullPolicy: Always
           command:
             - /usr/local/sbin/sparkbox-gateway-entrypoint
+          args:
+            - --guest-subnet
+            - 10.254.0.0/20
           env:
             - name: HOME
               value: /tmp
