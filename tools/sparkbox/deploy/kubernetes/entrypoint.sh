@@ -69,9 +69,18 @@ fetch_checked() {
   temporary=$(mktemp "${destination}.download.XXXXXX")
   trap 'rm -f "$temporary"' RETURN
   echo "downloading $(basename "$destination") from $url"
-  curl --fail --location --retry 5 --retry-all-errors \
-    --connect-timeout 15 --output "$temporary" "$url"
-  printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --status
+  if ! curl --fail --location --retry 5 --retry-all-errors \
+    --connect-timeout 15 --output "$temporary" "$url"; then
+    rm -f "$temporary"
+    trap - RETURN
+    return 1
+  fi
+  if ! printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --status; then
+    echo "checksum mismatch for $url" >&2
+    rm -f "$temporary"
+    trap - RETURN
+    return 1
+  fi
   mv "$temporary" "$destination"
   trap - RETURN
 }
