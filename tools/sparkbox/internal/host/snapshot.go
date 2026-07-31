@@ -41,6 +41,8 @@ func (m *Manager) Snapshotter() bool { return m.archiver != nil }
 // paused first (a consistent, unmounted rootfs), then the driver compacts +
 // sanitizes it into the image dir. The heavy driver work runs without m.mu held.
 func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*Snapshot, error) {
+	unlock := m.lockDiskOperation(box)
+	defer unlock()
 	if !m.Snapshotter() {
 		return nil, fmt.Errorf("snapshots are not supported by this driver")
 	}
@@ -69,7 +71,7 @@ func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*S
 	}
 	// Pause so the guest has flushed + unmounted its rootfs before we fsck/mount
 	// it. Idempotent if already paused.
-	if err := m.Pause(ctx, box); err != nil {
+	if err := m.pause(ctx, box, "was paused for a template snapshot"); err != nil {
 		return nil, fmt.Errorf("snapshot %q: pause %s: %w", snapName, box, err)
 	}
 	if err := m.archiver.Snapshot(ctx, box, image); err != nil {

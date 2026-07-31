@@ -26,6 +26,7 @@ spec:
       nodeSelector:
         kubernetes.io/arch: amd64
         compute.coreweave.com/node-pool: __SPARKBOX_NODE_POOL__
+        kubernetes.io/hostname: __SPARKBOX_NODE__
       containers:
         - name: sparkbox
           image: __SPARKBOX_IMAGE__
@@ -43,6 +44,10 @@ spec:
               value: "true"
             - name: SPARKBOX_TLS_PROVIDER
               value: autocert
+            - name: SPARKBOX_NODE_NAME
+              value: cks-poc
+            - name: SPARKBOX_CLUSTER_ID
+              value: cks-poc
           securityContext:
             privileged: true
             runAsNonRoot: false
@@ -86,6 +91,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/sparkbox
+            - name: durable
+              mountPath: /mnt/sparkbox-durable
+            - name: identity
+              mountPath: /run/sparkbox/keys
+              readOnly: true
             - name: users
               mountPath: /etc/sparkbox/users
               readOnly: true
@@ -95,8 +105,16 @@ spec:
               mountPath: /dev/net/tun
       volumes:
         - name: data
-          emptyDir:
-            sizeLimit: 100Gi
+          hostPath:
+            path: /mnt/local/sparkbox-poc
+            type: DirectoryOrCreate
+        - name: durable
+          persistentVolumeClaim:
+            claimName: sparkbox-durable
+        - name: identity
+          secret:
+            secretName: sparkbox-identity
+            defaultMode: 0400
         - name: users
           secret:
             secretName: sparkbox-users

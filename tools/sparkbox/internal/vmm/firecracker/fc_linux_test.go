@@ -64,8 +64,95 @@ func TestV6Addressing(t *testing.T) {
 func newTestDriver(t *testing.T) *Driver {
 	t.Helper()
 	return &Driver{
-		opts: Options{StateDir: t.TempDir()}, vms: map[string]*vmState{},
+		opts: Options{VMStateDir: t.TempDir()}, vms: map[string]*vmState{},
 		guestNet: guestnet.MustParse(""),
+	}
+}
+
+func TestVMDirUsesVMStateDir(t *testing.T) {
+	hot := t.TempDir()
+	d := &Driver{opts: Options{VMStateDir: hot}}
+	if got, want := d.vmDir("box"), filepath.Join(hot, "fc-vms", "box"); got != want {
+		t.Errorf("vmDir = %q, want %q", got, want)
+	}
+}
+
+func TestUnpackRootfsFailurePreservesExistingDisk(t *testing.T) {
+	d := newTestDriver(t)
+	dir := d.vmDir("box")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(rootfs, []byte("original disk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(t.TempDir(), "checkpoint.ext4.zst")
+	if err := os.WriteFile(in, []byte("not important to fake zstd"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	fakeZstd := filepath.Join(bin, "zstd")
+	script := `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out=$2; shift 2; continue; fi
+  shift
+done
+printf 'partial restored disk' > "$out"
+exit 1
+`
+	if err := os.WriteFile(fakeZstd, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	if err := d.UnpackRootfs(context.Background(), "box", in); err == nil {
+		t.Fatal("UnpackRootfs with failing zstd should fail")
+	}
+	got, err := os.ReadFile(rootfs)
+	if err != nil || string(got) != "original disk" {
+		t.Fatalf("failed restore changed rootfs to %q, %v", got, err)
+	}
+}
+
+func TestReflinkCloneRequiresAlways(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "args")
+	fakeCP := filepath.Join(binDir, "cp")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SPARKBOX_CP_ARGS\"\n: > \"$3\"\n"
+	if err := os.WriteFile(fakeCP, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("SPARKBOX_CP_ARGS", argsPath)
+
+	source := filepath.Join(t.TempDir(), "source.ext4")
+	destination := filepath.Join(t.TempDir(), "destination.ext4")
+	if err := reflinkClone(context.Background(), source, destination); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--reflink=always\n" + source + "\n" + destination + "\n"
+	if string(got) != want {
+		t.Fatalf("cp args = %q, want %q", got, want)
+	}
+
+	// cp may create its destination before discovering that FICLONE cannot work.
+	// A retry must not mistake that torn file for a complete pre-existing disk.
+	failureScript := "#!/bin/sh\nprintf partial > \"$3\"\necho no-reflink >&2\nexit 1\n"
+	if err := os.WriteFile(fakeCP, []byte(failureScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = reflinkClone(context.Background(), source, destination)
+	if err == nil || !strings.Contains(err.Error(), "no-reflink") {
+		t.Fatalf("failed clone error = %v, want cp diagnostic", err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("failed clone left destination behind: %v", err)
 	}
 }
 

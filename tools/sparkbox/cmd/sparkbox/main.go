@@ -100,7 +100,8 @@ func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
 		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker")
-		stateDir             = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
+		stateDir             = fs.String("state-dir", "./state", "directory for control state: sqlite stores, certificates, and sandbox metadata")
+		vmStateDir           = fs.String("vm-state-dir", "", "directory for per-VM disks, sockets, and memory snapshots (default: --state-dir)")
 		keyDir               = fs.String("key-dir", "", "directory holding fleet private key PEMs, including node-control CA/gateway keys (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
 		requireKeys          = fs.Bool("require-keys", false, "fail if any required fleet private key is missing instead of generating one — set on fleet hosts, where a missing key means secret hydration failed and generating a fresh identity would lock the fleet out")
 		usersPath            = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
@@ -123,6 +124,8 @@ func serve(args []string) error {
 		archiveRemote        = fs.String("archive-remote", "", "rclone remote name for sandbox archives (e.g. sparkbox-artifacts); empty disables archive/restore. Needs S3 WRITE creds in the host's rclone.conf")
 		archiveBucket        = fs.String("archive-bucket", "", "bucket within --archive-remote for archives (required to enable archiving)")
 		archivePrefix        = fs.String("archive-prefix", "archives", "object-key prefix archives are written under: <prefix>/<owner>/<name>.ext4.zst")
+		checkpointDir        = fs.String("checkpoint-dir", "", "durable mounted directory for immutable manual checkpoints; empty disables checkpoint/restore")
+		checkpointPrefix     = fs.String("checkpoint-prefix", "checkpoints", "object-key prefix beneath --checkpoint-dir")
 		kernelPath           = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir             = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
 		guestSubnet          = fs.String("guest-subnet", guestnet.DefaultPrefix, "IPv4 prefix divided into per-sandbox /30s; fleet nodes must set an explicit unique prefix (a /20 provides 1,024 slots)")
@@ -171,6 +174,7 @@ func serve(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*vmStateDir = effectiveVMStateDir(*vmStateDir, *stateDir)
 	guestSubnetSet := false
 	transportFlagsGiven := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) {
@@ -243,7 +247,7 @@ func serve(args []string) error {
 		return serveNode(nodeOptions{
 			gateway: *gatewayAddr, gatewayPub: *gatewayPub, gatewayHostKey: *gatewayHostK,
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
-			driverName: *driverName, stateDir: *stateDir, keyDir: *keyDir,
+			driverName: *driverName, stateDir: *stateDir, vmStateDir: *vmStateDir, keyDir: *keyDir,
 			kernelPath: *kernelPath, imageDir: *imageDir,
 			defaultLogin: *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
 			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
@@ -260,6 +264,9 @@ func serve(args []string) error {
 	}
 
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(*vmStateDir, 0o700); err != nil {
 		return err
 	}
 	// Fleet private keys live in --key-dir (default --state-dir). On a fleet
@@ -345,12 +352,12 @@ func serve(args []string) error {
 	var driver vmm.Driver
 	switch *driverName {
 	case "mock":
-		md := mock.New(*stateDir, hostKey)
+		md := mock.New(*vmStateDir, hostKey)
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			*kernelPath, *imageDir, *stateDir, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
+			*kernelPath, *imageDir, *vmStateDir, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)
 		if err != nil {
 			return err
@@ -487,22 +494,24 @@ func serve(args []string) error {
 	mgrOpts := host.Options{
 		Context: ctx, StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
-		Routes:             routeStore,
-		Schedules:          scheduleStore,
-		Tags:               secretsStore,
-		MaxRunningPerOwner: *maxPerOwner,
-		MemAdmissionPct:    *memAdmitPct,
-		HostMemMB:          hostMem,
-		MemReserveMB:       *memReserve,
-		DiskPoolMBPerOwner: *diskPool,
-		ActivityCPUPct:     *activityCPU,
-		ActivityNetBytes:   uint64(*activityNetKB) * 1024,
-		ArchivePrefix:      *archivePrefix,
-		NodeName:           nodeName,
-		Arch:               *archFlag,
-		Release:            version,
-		HostVCPUs:          int64(runtime.NumCPU()),
-		Metrics:            metricsRegistry,
+		Routes:               routeStore,
+		Schedules:            scheduleStore,
+		Tags:                 secretsStore,
+		MaxRunningPerOwner:   *maxPerOwner,
+		MemAdmissionPct:      *memAdmitPct,
+		HostMemMB:            hostMem,
+		MemReserveMB:         *memReserve,
+		DiskPoolMBPerOwner:   *diskPool,
+		ActivityCPUPct:       *activityCPU,
+		ActivityNetBytes:     uint64(*activityNetKB) * 1024,
+		ArchivePrefix:        *archivePrefix,
+		CheckpointPrefix:     *checkpointPrefix,
+		CheckpointStagingDir: *vmStateDir,
+		NodeName:             nodeName,
+		Arch:                 *archFlag,
+		Release:              version,
+		HostVCPUs:            int64(runtime.NumCPU()),
+		Metrics:              metricsRegistry,
 	}
 	if doorHooks != nil {
 		mgrOpts.FrontDoor = doorHooks
@@ -513,6 +522,14 @@ func serve(args []string) error {
 	if arch := objstore.New(*archiveRemote, *archiveBucket); arch != nil {
 		mgrOpts.Archive = arch
 		log.Info("sandbox archiving enabled", "remote", *archiveRemote, "bucket", *archiveBucket, "prefix", *archivePrefix)
+	}
+	if *checkpointDir != "" {
+		checkpoints, err := objstore.NewFilesystem(*checkpointDir)
+		if err != nil {
+			return fmt.Errorf("checkpoint store: %w", err)
+		}
+		mgrOpts.Checkpoint = checkpoints
+		log.Info("sandbox checkpointing enabled", "dir", *checkpointDir, "prefix", *checkpointPrefix)
 	}
 	mgr, err := host.NewManager(mgrOpts)
 	if err != nil {
@@ -648,7 +665,8 @@ func serve(args []string) error {
 	// can stop it.
 	ops := newGatewayOps(gatewayStores{
 		Fleet: flt, Placement: placeStore, Roster: nodeStore,
-		Users: userStore, Secrets: secretsStore,
+		Checkpoints: localCheckpointOps{mgr: mgr},
+		Users:       userStore, Secrets: secretsStore,
 		Schedules: scheduleStore, Routes: routeStore, Sessions: sessionSigner,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
 		GatewayGuestSubnet: *guestSubnet,
@@ -1089,6 +1107,15 @@ func nodeNameOr(flagValue string) string {
 	return "local"
 }
 
+// effectiveVMStateDir preserves the historical one-directory layout unless an
+// operator explicitly places the hot VM data elsewhere.
+func effectiveVMStateDir(configured, stateDir string) string {
+	if configured == "" {
+		return stateDir
+	}
+	return configured
+}
+
 func validateTransportFlag(flagName, value string, allowed ...string) error {
 	for _, candidate := range allowed {
 		if value == candidate {
@@ -1168,14 +1195,15 @@ const defaultAudience = "https://hivemind.wandb.tools"
 // They are a struct rather than a dozen parameters so the assembly below reads
 // as the wiring diagram it is.
 type gatewayStores struct {
-	Fleet     *fleet.Fleet
-	Placement *placement.Store
-	Roster    *nodes.Store
-	Users     *users.Store
-	Secrets   *secrets.Store
-	Schedules *schedule.Store
-	Routes    *routes.Store
-	Sessions  *edgeauth.Signer
+	Fleet       *fleet.Fleet
+	Checkpoints ctlops.Checkpoints
+	Placement   *placement.Store
+	Roster      *nodes.Store
+	Users       *users.Store
+	Secrets     *secrets.Store
+	Schedules   *schedule.Store
+	Routes      *routes.Store
+	Sessions    *edgeauth.Signer
 
 	DefaultImage       string
 	Domain             string
@@ -1202,7 +1230,8 @@ type gatewayStores struct {
 func newGatewayOps(s gatewayStores) *ctlops.Ops {
 	return ctlops.New(ctlops.Config{
 		Sandboxes: s.Fleet, Templates: s.Fleet, Accounts: s.Users,
-		Tags: s.Secrets, Schedules: s.Schedules, Routes: s.Routes,
+		Checkpoints: s.Checkpoints,
+		Tags:        s.Secrets, Schedules: s.Schedules, Routes: s.Routes,
 		Sessions: s.Sessions,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
@@ -1219,6 +1248,29 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		XtermSubdomain:     s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
 		Log: s.Log,
 	})
+}
+
+// localCheckpointOps keeps the manual checkpoint v1 explicitly node-local.
+// Enabled is target-aware, so a gateway with a mounted checkpoint directory
+// does not advertise the operation for a sandbox placed on another node.
+type localCheckpointOps struct {
+	mgr *host.Manager
+}
+
+func (c localCheckpointOps) Enabled(name string) bool {
+	if c.mgr == nil || !c.mgr.CheckpointEnabled() {
+		return false
+	}
+	_, ok := c.mgr.Get(name)
+	return ok
+}
+
+func (c localCheckpointOps) Checkpoint(ctx context.Context, name string) error {
+	return c.mgr.Checkpoint(ctx, name)
+}
+
+func (c localCheckpointOps) RestoreCheckpoint(ctx context.Context, name string) error {
+	return c.mgr.RestoreCheckpoint(ctx, name)
 }
 
 // defaultGitHubClientID is the app a stock sparkbox links accounts through.

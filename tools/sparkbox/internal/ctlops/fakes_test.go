@@ -68,6 +68,7 @@ func (c *calls) reset() {
 // slipping through an out-of-date exclusion list.
 var mutatingVerbs = map[string]bool{
 	"Create": true, "EnsureRunning": true, "Pause": true, "Archive": true,
+	"Checkpoint": true, "RestoreCheckpoint": true,
 	"Resize": true, "Reboot": true, "Rename": true, "Destroy": true,
 	"SetPinned": true, "ResyncEnv": true, "Touch": true, "Snapshot": true,
 	"DeleteSnapshot": true, "Fork": true, "SetTags": true, "AddKey": true,
@@ -225,6 +226,28 @@ func (f *fakeSandboxes) SetPinned(name string, pinned bool) error {
 func (f *fakeSandboxes) ResyncEnv(ctx context.Context, name string) { f.c.add("ResyncEnv %s", name) }
 func (f *fakeSandboxes) MarkActive(name string)                     { f.c.add("Touch %s", name) }
 func (f *fakeSandboxes) ArchivingEnabled() bool                     { return f.archiving }
+
+// ---------------------------------------------------------------------------
+
+type fakeCheckpoints struct {
+	c       *calls
+	enabled map[string]bool
+	err     error
+}
+
+func (f *fakeCheckpoints) Enabled(name string) bool {
+	return f != nil && f.enabled[name]
+}
+
+func (f *fakeCheckpoints) Checkpoint(_ context.Context, name string) error {
+	f.c.add("Checkpoint %s", name)
+	return f.err
+}
+
+func (f *fakeCheckpoints) RestoreCheckpoint(_ context.Context, name string) error {
+	f.c.add("RestoreCheckpoint %s", name)
+	return f.err
+}
 
 // ---------------------------------------------------------------------------
 
@@ -614,17 +637,18 @@ func (f *fakeGitHub) Profile(ctx context.Context, login string) (users.GitHubPro
 // rig is the whole package under test with every dependency faked: no sqlite,
 // no temp dir, no VM driver, so the suite runs in milliseconds.
 type rig struct {
-	ops    *Ops
-	calls  *calls
-	boxes  *fakeSandboxes
-	tmpl   *fakeTemplates
-	accts  *fakeAccounts
-	tagger *fakeTagger
-	sched  *fakeSchedules
-	routes *fakeRoutes
-	minter *fakeMinter
-	github *fakeGitHub
-	nodes  *fakeNodes
+	ops         *Ops
+	calls       *calls
+	boxes       *fakeSandboxes
+	checkpoints *fakeCheckpoints
+	tmpl        *fakeTemplates
+	accts       *fakeAccounts
+	tagger      *fakeTagger
+	sched       *fakeSchedules
+	routes      *fakeRoutes
+	minter      *fakeMinter
+	github      *fakeGitHub
+	nodes       *fakeNodes
 }
 
 // withNodes turns the rig's host into a fleet gateway holding one approved,
@@ -708,10 +732,12 @@ func newRig(t *testing.T) *rig {
 	}}
 	minter := &fakeMinter{c: c}
 	gh := &fakeGitHub{c: c, keys: map[string][]xssh.PublicKey{}}
+	checkpoints := &fakeCheckpoints{c: c, enabled: map[string]bool{"alicebox": true}}
 
 	ops := New(Config{
 		Sandboxes: boxes, Templates: tmpl, Accounts: accts,
-		Tags: tagger, Schedules: sched, Routes: rt, Sessions: minter, GitHub: gh,
+		Checkpoints: checkpoints,
+		Tags:        tagger, Schedules: sched, Routes: rt, Sessions: minter, GitHub: gh,
 		DefaultImage: "base", Domain: "example.test", XtermSubdomain: "xterm",
 		InvitesPerUser: 0,
 		NewName:        func() string { return "generated-name" },
@@ -720,7 +746,7 @@ func newRig(t *testing.T) *rig {
 	})
 	t.Cleanup(ops.Close)
 
-	return &rig{ops: ops, calls: c, boxes: boxes, tmpl: tmpl, accts: accts,
+	return &rig{ops: ops, calls: c, boxes: boxes, checkpoints: checkpoints, tmpl: tmpl, accts: accts,
 		tagger: tagger, sched: sched, routes: rt, minter: minter, github: gh}
 }
 

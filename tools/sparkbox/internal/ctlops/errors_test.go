@@ -171,6 +171,16 @@ func TestDisabledStoresAnswerKindDisabled(t *testing.T) {
 			_, err := o.Archive(ctx, alice(), "alicebox")
 			return err
 		}},
+		{"checkpoint store", func(o *Ops) { o.checkpoints = nil }, func(o *Ops) error {
+			_, err := o.Checkpoint(ctx, alice(), "alicebox")
+			return err
+		}},
+		{"checkpoint target", func(o *Ops) {
+			o.checkpoints.(*fakeCheckpoints).enabled["alicebox"] = false
+		}, func(o *Ops) error {
+			_, err := o.RestoreCheckpoint(ctx, alice(), "alicebox")
+			return err
+		}},
 		{"snapshot create", func(o *Ops) { o.templates.(*fakeTemplates).on = false }, func(o *Ops) error {
 			_, err := o.CreateSnapshot(ctx, alice(), "alicebox", "snap")
 			return err

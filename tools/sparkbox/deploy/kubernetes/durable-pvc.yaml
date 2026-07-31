@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sparkbox-durable
+  namespace: sparkbox-poc
+  labels:
+    app.kubernetes.io/name: sparkbox
+    app.kubernetes.io/part-of: sparky
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: shared-vast
+  resources:
+    requests:
+      storage: 100Gi

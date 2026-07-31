@@ -436,10 +436,47 @@ func (d *Driver) PackRootfs(_ context.Context, name string) (string, error) {
 
 func (d *Driver) UnpackRootfs(_ context.Context, name, inPath string) error {
 	workdir := filepath.Join(d.stateDir, "mock-vms", name)
-	if err := os.MkdirAll(workdir, 0o755); err != nil {
+	parent := filepath.Dir(workdir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err
 	}
-	return untarTree(inPath, workdir)
+	tmp, err := os.MkdirTemp(parent, "."+name+".rootfs-restoring-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp) //nolint:errcheck
+	if err := untarTree(inPath, tmp); err != nil {
+		return err
+	}
+	backup, err := os.MkdirTemp(parent, "."+name+".rootfs-previous-")
+	if err != nil {
+		return err
+	}
+	os.RemoveAll(backup)       //nolint:errcheck // reserve only a unique sibling name
+	defer os.RemoveAll(backup) //nolint:errcheck
+	if err := os.Rename(workdir, backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(tmp, workdir); err != nil {
+		os.Rename(backup, workdir) //nolint:errcheck
+		return err
+	}
+	os.RemoveAll(backup) //nolint:errcheck
+	return nil
+}
+
+func (d *Driver) RootfsPresent(name string) (bool, error) {
+	workdir := filepath.Join(d.stateDir, "mock-vms", name)
+	info, err := os.Stat(workdir)
+	if err == nil {
+		// The directory itself is the mock's disk. A newly created sandbox may
+		// legitimately have no user files yet, so emptiness is not loss.
+		return info.IsDir(), nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (d *Driver) Snapshot(_ context.Context, name, newImage string) error {

@@ -28,6 +28,7 @@ RUN apt-get update \
       iptables \
       openssh-client \
       procps \
+      python3 \
       util-linux \
       zerofree \
       zstd \
@@ -35,11 +36,15 @@ RUN apt-get update \
 
 COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
 COPY deploy/sparkbox-net.sh /usr/local/sbin/sparkbox-net.sh
+COPY deploy/refresh-agent-tools.sh /usr/local/sbin/sparkbox-refresh-tools.sh
+COPY deploy/install-guest-identity.sh /usr/local/sbin/sparkbox-install-guest-identity.sh
 COPY deploy/kubernetes/entrypoint.sh /usr/local/sbin/sparkbox-kubernetes-entrypoint
 
 RUN chmod 0755 \
       /usr/local/bin/sparkbox \
+      /usr/local/sbin/sparkbox-install-guest-identity.sh \
       /usr/local/sbin/sparkbox-net.sh \
+      /usr/local/sbin/sparkbox-refresh-tools.sh \
       /usr/local/sbin/sparkbox-kubernetes-entrypoint
 
 STOPSIGNAL SIGTERM

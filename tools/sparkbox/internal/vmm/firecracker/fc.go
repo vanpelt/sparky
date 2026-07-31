@@ -41,8 +41,8 @@ type Options struct {
 	KernelPath string
 	// ImageDir holds <image>.ext4 rootfs templates.
 	ImageDir string
-	// StateDir holds per-VM dirs (disk copy, socket, snapshots).
-	StateDir string
+	// VMStateDir holds per-VM dirs (disk copy, socket, snapshots).
+	VMStateDir string
 	// FirecrackerBin is the firecracker binary path (default: $PATH lookup).
 	FirecrackerBin string
 	// Subnet is an IPv4 CIDR carved into per-VM /30 slots. Empty uses the
@@ -210,7 +210,7 @@ func sweepStaleTaps() {
 }
 
 func (d *Driver) vmDir(name string) string {
-	return filepath.Join(d.opts.StateDir, "fc-vms", name)
+	return filepath.Join(d.opts.VMStateDir, "fc-vms", name)
 }
 
 func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
@@ -297,13 +297,14 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		return nil, err
 	}
 
-	// CoW-copy the rootfs template: instant on XFS/btrfs via reflink, falls
-	// back to a full copy elsewhere.
+	// CoW-copy the rootfs template. Refuse to fall back to a full 25 GiB copy:
+	// VMStateDir is the hot tier and an incompatible mount is a startup/config
+	// error, not a reason for sandbox creation to become unexpectedly huge.
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	if _, err := os.Stat(rootfs); os.IsNotExist(err) {
 		template := filepath.Join(d.opts.ImageDir, cfg.Image+".ext4")
-		if out, err := exec.CommandContext(ctx, "cp", "--reflink=auto", template, rootfs).CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("copy rootfs: %v: %s", err, out)
+		if err := reflinkClone(ctx, template, rootfs); err != nil {
+			return nil, err
 		}
 	}
 	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
@@ -646,10 +647,40 @@ func (d *Driver) UnpackRootfs(ctx context.Context, name, inPath string) error {
 		return err
 	}
 	rootfs := filepath.Join(dir, "rootfs.ext4")
-	if o, err := exec.CommandContext(ctx, "zstd", "-d", "-f", inPath, "-o", rootfs).CombinedOutput(); err != nil {
+	tmp, err := os.CreateTemp(dir, ".rootfs-restoring-*.ext4")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath) //nolint:errcheck
+		return err
+	}
+	os.Remove(tmpPath)       //nolint:errcheck // zstd creates its output itself.
+	defer os.Remove(tmpPath) //nolint:errcheck
+	if o, err := exec.CommandContext(ctx, "zstd", "-d", "-f", "--sparse", inPath, "-o", tmpPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("decompress rootfs: %v: %s", err, o)
 	}
+	// Rename on the VM-state filesystem atomically replaces the old rootfs only
+	// after zstd has validated and fully decompressed the checkpoint.
+	if err := os.Rename(tmpPath, rootfs); err != nil {
+		return fmt.Errorf("install restored rootfs: %w", err)
+	}
 	return nil
+}
+
+// RootfsPresent reports whether the sandbox's hot disk exists. The manager
+// uses it to refuse a base-image recreate when durable checkpoint metadata says
+// a missing disk must be restored instead.
+func (d *Driver) RootfsPresent(name string) (bool, error) {
+	_, err := os.Stat(d.rootfsPath(name))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // Snapshot implements vmm.Archivable: promote the stopped VM's rootfs into a new
@@ -669,8 +700,8 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	tmp := filepath.Join(d.opts.ImageDir, "."+newImage+".ext4.tmp")
 	final := filepath.Join(d.opts.ImageDir, newImage+".ext4")
 	os.Remove(tmp) //nolint:errcheck // clear any torn prior attempt
-	if o, err := exec.CommandContext(ctx, "cp", "--reflink=auto", rootfs, tmp).CombinedOutput(); err != nil {
-		return fmt.Errorf("copy rootfs: %v: %s", err, o)
+	if err := reflinkClone(ctx, rootfs, tmp); err != nil {
+		return err
 	}
 	if err := sanitizeTemplate(ctx, tmp); err != nil {
 		os.Remove(tmp) //nolint:errcheck
@@ -691,6 +722,19 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 		user = "root"
 	}
 	os.WriteFile(final+".login-user", []byte(user+"\n"), 0o644) //nolint:errcheck
+	return nil
+}
+
+// reflinkClone makes the no-full-copy policy common to fresh VM disks and
+// snapshot staging. Keeping the exact cp invocation here also gives tests one
+// seam for proving that neither path can silently regress to --reflink=auto.
+func reflinkClone(ctx context.Context, source, destination string) error {
+	if out, err := exec.CommandContext(
+		ctx, "cp", "--reflink=always", source, destination,
+	).CombinedOutput(); err != nil {
+		os.Remove(destination) //nolint:errcheck // never let a torn clone pass Create's exists check
+		return fmt.Errorf("copy rootfs: %v: %s", err, out)
+	}
 	return nil
 }
 

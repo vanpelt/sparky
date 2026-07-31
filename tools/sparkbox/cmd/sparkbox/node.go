@@ -67,6 +67,7 @@ type nodeOptions struct {
 	arch       string
 	driverName string
 	stateDir   string
+	vmStateDir string
 	keyDir     string
 
 	kernelPath   string
@@ -124,6 +125,10 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	if err := os.MkdirAll(opts.stateDir, 0o700); err != nil {
 		return err
 	}
+	opts.vmStateDir = effectiveVMStateDir(opts.vmStateDir, opts.stateDir)
+	if err := os.MkdirAll(opts.vmStateDir, 0o700); err != nil {
+		return err
+	}
 	guestNetwork, err := guestnet.Parse(opts.guestSubnet)
 	if err != nil {
 		return err
@@ -173,11 +178,11 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		// The node key doubles as the fake guest's host key. A node holds no
 		// gateway host key, and minting one here would leave a gateway identity
 		// lying on a machine that must never be a gateway.
-		md := mock.New(opts.stateDir, nodeKey)
+		md := mock.New(opts.vmStateDir, nodeKey)
 		md.LoginUser = opts.defaultLogin
 		driver = md
 	case "firecracker":
-		driver, err = newFirecrackerDriver(opts.kernelPath, opts.imageDir, opts.stateDir, opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS)
+		driver, err = newFirecrackerDriver(opts.kernelPath, opts.imageDir, opts.vmStateDir, opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS)
 		if err != nil {
 			return err
 		}

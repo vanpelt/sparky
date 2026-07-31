@@ -518,6 +518,12 @@ a vmlinux, and has **not yet been exercised on real hardware** — see
 [`docs/deploy-hetzner.md`](docs/deploy-hetzner.md) for bring-up and the
 production gap list (jailer, warm snapshots, rate limits).
 
+`--state-dir` holds control state. Set `--vm-state-dir` when guest disks should
+live on a separate hot volume; it defaults to `--state-dir` for existing
+installations. Firecracker requires reflinks for both template clones and
+snapshot staging, so the image and VM-state directories must be on the same
+reflink-capable filesystem.
+
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node + headless Chrome, ~4GB — replacing the
 ~30GB `codex-universal`). It logs in as a non-root **`sparky`** user, declared by

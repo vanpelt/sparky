@@ -27,6 +27,8 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  pause <name>             pause a running sandbox to free a slot\r\n" +
 	"  archive <name>           park a sandbox in object storage (frees host disk)\r\n" +
 	"  restore <name>           bring an archived sandbox back and start it\r\n" +
+	"  checkpoint <name>        save a durable disk checkpoint (cold-boots it)\r\n" +
+	"  checkpoint restore <name>  replace the local disk with its latest checkpoint\r\n" +
 	"  resize <name> <size>     grow a sandbox's root disk, e.g. 25G (cold-boots it)\r\n" +
 	"  rm <name>                delete a sandbox and its disk — permanent, see archive\r\n" +
 	"  tags <name> [<tag>…]     show or set tags (they select which secrets it gets)\r\n" +
@@ -139,6 +141,36 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 			return
 		}
 		fmt.Fprintf(s, "restored %s — it's running\r\n", name)
+		s.Exit(0) //nolint:errcheck
+	case "checkpoint":
+		restore := len(args) >= 2 && args[1] == "restore"
+		if (restore && len(args) != 3) || (!restore && len(args) != 2) {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> checkpoint <name>\r\n"+
+				"       ssh %s@<gateway> checkpoint restore <name>\r\n", ControlUser, ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		name := args[1]
+		op := "checkpoint"
+		if restore {
+			name = args[2]
+			op = "checkpoint restore"
+		}
+		if restore {
+			fmt.Fprintf(s, "restoring %s from its latest checkpoint (local disk will be replaced)…\r\n", name)
+			if _, err := g.ops.RestoreCheckpoint(s.Context(), c, name); err != nil {
+				failCtl(s, log, op, wrapVerbatim(err, ctlops.KindDisabled))
+				return
+			}
+			fmt.Fprintf(s, "restored %s from its latest checkpoint\r\n", name)
+		} else {
+			fmt.Fprintf(s, "checkpointing %s (pause + fsck + compress + copy; this can take a minute)…\r\n", name)
+			if _, err := g.ops.Checkpoint(s.Context(), c, name); err != nil {
+				failCtl(s, log, op, wrapVerbatim(err, ctlops.KindDisabled))
+				return
+			}
+			fmt.Fprintf(s, "checkpointed %s — the local disk was retained\r\n", name)
+		}
 		s.Exit(0) //nolint:errcheck
 	case "resize":
 		name, ok := g.ownedBoxArg(s, c, args, log)

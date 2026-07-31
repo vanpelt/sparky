@@ -202,6 +202,11 @@ type Sandbox struct {
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
 	ArchiveKey string    `json:"archive_key,omitempty"`
 	ArchivedAt time.Time `json:"archived_at,omitempty"`
+	// CheckpointKey identifies the latest immutable durable copy of this
+	// sandbox's rootfs. Unlike an archive it remains set while the local disk is
+	// present, and restoring it never consumes the durable object.
+	CheckpointKey string    `json:"checkpoint_key,omitempty"`
+	CheckpointAt  time.Time `json:"checkpoint_at,omitempty"`
 	// DiskMB is this sandbox's durable root-filesystem usage. Host representation
 	// details (sparse holes and shared reflink extents) and the regenerable
 	// memory snapshot are deliberately excluded. For an archived box it is the
@@ -416,47 +421,51 @@ type ObjectStore interface {
 }
 
 type Manager struct {
-	mu          sync.Mutex
-	ready       singleflight.Group // one restore/resume per sandbox at a time
-	ctx         context.Context    // process lifetime for shared restore/resume work
-	driver      vmm.Driver
-	balloon     vmm.Ballooner    // driver's balloon capability, if it has one; else nil
-	archiver    vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
-	diskReport  vmm.DiskReporter // driver's disk-usage capability; else nil
-	renamer     vmm.Renamer      // driver's VM-rename capability; else nil
-	rebooter    vmm.Rebooter     // driver's snapshot-discard capability; else nil
-	diskResize  vmm.DiskResizer  // driver's disk-grow capability; else nil
-	cpuStats    vmm.CPUStatser   // driver's CPU-time capability; else nil
-	netStats    vmm.NetStatser   // driver's network-counter capability; else nil
-	archive     ObjectStore      // object store for archives; nil disables archiving
-	log         *slog.Logger
-	stateDir    string // dir holding sandboxes.json + transient archive staging
-	path        string // JSON state file
-	boxes       map[string]*Sandbox
-	snaps       map[string]*Snapshot // fork-able templates, keyed by template image name
-	snapsPath   string               // snapshots.json
-	gwPubKey    string
-	routes      *routes.Store           // optional: proxy route bookkeeping
-	schedules   ScheduleCleaner         // optional: platform-scheduler cleanup on destroy
-	frontDoor   FrontDoor               // optional: per-sandbox address plumbing
-	tags        TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
-	envSync     EnvPusher               // optional: secret-env push when a sandbox reaches running
-	sessions    SessionCloser           // optional: hang up attached sessions when a sandbox pauses
-	observer    Observer                // optional: relay record changes to whoever mirrors this host
-	maxPerOwner int                     // max running sandboxes per owner; 0 = unlimited
-	memAdmitPct int                     // RAM admission threshold as % of host; 0 = disabled
-	hostMemMB   int64                   // host RAM in MB for admission; 0 = disabled
-	reserveMB   int64                   // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
-	diskPoolMB  int64                   // per-owner pooled-disk budget in MB; 0 = disabled
-	archivePfx  string                  // object-key prefix for archives (default "archives")
-	nodeName    string                  // this host's name in capacity reports
-	nodeArch    string                  // this host's CPU architecture in capacity reports
-	nodeRelease string                  // this host's sparkbox release tag in capacity reports
-	hostVCPUs   int64                   // host logical CPUs for capacity reports; 0 = unknown
-	actCPUPct   float64                 // activity floor: % of one core over a sample; 0 = off
-	actNetBytes uint64                  // activity floor: bytes per sample; 0 = off
-	vitals      map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
-	metrics     *fleetmetrics.Registry  // optional node-local persistence/readiness metrics
+	mu                 sync.Mutex
+	ready              singleflight.Group // one restore/resume per sandbox at a time
+	ctx                context.Context    // process lifetime for shared restore/resume work
+	driver             vmm.Driver
+	balloon            vmm.Ballooner    // driver's balloon capability, if it has one; else nil
+	archiver           vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
+	diskReport         vmm.DiskReporter // driver's disk-usage capability; else nil
+	renamer            vmm.Renamer      // driver's VM-rename capability; else nil
+	rebooter           vmm.Rebooter     // driver's snapshot-discard capability; else nil
+	diskResize         vmm.DiskResizer  // driver's disk-grow capability; else nil
+	cpuStats           vmm.CPUStatser   // driver's CPU-time capability; else nil
+	netStats           vmm.NetStatser   // driver's network-counter capability; else nil
+	archive            ObjectStore      // object store for archives; nil disables archiving
+	checkpoint         ObjectStore      // immutable durable checkpoints; nil disables checkpointing
+	log                *slog.Logger
+	stateDir           string // dir holding sandboxes.json + transient archive staging
+	checkpointStageDir string // local directory for checkpoint pack/download staging
+	path               string // JSON state file
+	boxes              map[string]*Sandbox
+	snaps              map[string]*Snapshot // fork-able templates, keyed by template image name
+	snapsPath          string               // snapshots.json
+	gwPubKey           string
+	routes             *routes.Store           // optional: proxy route bookkeeping
+	schedules          ScheduleCleaner         // optional: platform-scheduler cleanup on destroy
+	frontDoor          FrontDoor               // optional: per-sandbox address plumbing
+	tags               TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
+	envSync            EnvPusher               // optional: secret-env push when a sandbox reaches running
+	sessions           SessionCloser           // optional: hang up attached sessions when a sandbox pauses
+	observer           Observer                // optional: relay record changes to whoever mirrors this host
+	maxPerOwner        int                     // max running sandboxes per owner; 0 = unlimited
+	memAdmitPct        int                     // RAM admission threshold as % of host; 0 = disabled
+	hostMemMB          int64                   // host RAM in MB for admission; 0 = disabled
+	reserveMB          int64                   // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
+	diskPoolMB         int64                   // per-owner pooled-disk budget in MB; 0 = disabled
+	archivePfx         string                  // object-key prefix for archives (default "archives")
+	checkpointPfx      string                  // object-key prefix for checkpoints (default "checkpoints")
+	nodeName           string                  // this host's name in capacity reports
+	nodeArch           string                  // this host's CPU architecture in capacity reports
+	nodeRelease        string                  // this host's sparkbox release tag in capacity reports
+	hostVCPUs          int64                   // host logical CPUs for capacity reports; 0 = unknown
+	actCPUPct          float64                 // activity floor: % of one core over a sample; 0 = off
+	actNetBytes        uint64                  // activity floor: bytes per sample; 0 = off
+	vitals             map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
+	metrics            *fleetmetrics.Registry  // optional node-local persistence/readiness metrics
+	diskOps            sync.Map                // sandbox name -> *sync.Mutex; serializes rootfs lifecycle work
 
 	// Activity is intentionally kept off mu on the offer path. Lifecycle
 	// operations hold mu across driver calls, which can take seconds; a web
@@ -540,6 +549,14 @@ type Options struct {
 	// ArchivePrefix is the object-key prefix archives are written under
 	// (default "archives"): <prefix>/<owner>/<name>.ext4.zst.
 	ArchivePrefix string
+	// Checkpoint is the store for immutable durable rootfs checkpoints. Nil
+	// disables manual checkpoint/restore.
+	Checkpoint ObjectStore
+	// CheckpointPrefix is the object-key prefix for checkpoints.
+	CheckpointPrefix string
+	// CheckpointStagingDir holds temporary packed/downloaded artifacts. It
+	// should be on the local hot tier; empty defaults to StateDir.
+	CheckpointStagingDir string
 	// DiskPoolMBPerOwner caps an owner's pooled durable usage across all their
 	// sandboxes + archives (0 = unlimited). Soft accounting, enforced at
 	// create/restore — see admit.
@@ -569,41 +586,53 @@ func NewManager(opts Options) (*Manager, error) {
 		lifecycle = context.Background()
 	}
 	m := &Manager{
-		ctx:          lifecycle,
-		driver:       opts.Driver,
-		log:          opts.Logger,
-		stateDir:     opts.StateDir,
-		path:         filepath.Join(opts.StateDir, "sandboxes.json"),
-		snapsPath:    filepath.Join(opts.StateDir, "snapshots.json"),
-		boxes:        map[string]*Sandbox{},
-		snaps:        map[string]*Snapshot{},
-		vitals:       map[string]vitalsSample{},
-		activity:     map[string]time.Time{},
-		markedAt:     map[string]time.Time{},
-		protectUntil: map[string]time.Time{},
-		actCPUPct:    opts.ActivityCPUPct,
-		actNetBytes:  opts.ActivityNetBytes,
-		gwPubKey:     opts.GatewayPublicKey,
-		routes:       opts.Routes,
-		schedules:    opts.Schedules,
-		tags:         opts.Tags,
-		archive:      opts.Archive,
-		archivePfx:   opts.ArchivePrefix,
-		maxPerOwner:  opts.MaxRunningPerOwner,
-		memAdmitPct:  opts.MemAdmissionPct,
-		hostMemMB:    opts.HostMemMB,
-		reserveMB:    opts.MemReserveMB,
-		diskPoolMB:   opts.DiskPoolMBPerOwner,
-		nodeName:     opts.NodeName,
-		nodeArch:     opts.Arch,
-		nodeRelease:  opts.Release,
-		hostVCPUs:    opts.HostVCPUs,
-		frontDoor:    opts.FrontDoor,
-		observer:     opts.Observer,
-		metrics:      opts.Metrics,
+		ctx:                lifecycle,
+		driver:             opts.Driver,
+		log:                opts.Logger,
+		stateDir:           opts.StateDir,
+		path:               filepath.Join(opts.StateDir, "sandboxes.json"),
+		snapsPath:          filepath.Join(opts.StateDir, "snapshots.json"),
+		boxes:              map[string]*Sandbox{},
+		snaps:              map[string]*Snapshot{},
+		vitals:             map[string]vitalsSample{},
+		activity:           map[string]time.Time{},
+		markedAt:           map[string]time.Time{},
+		protectUntil:       map[string]time.Time{},
+		actCPUPct:          opts.ActivityCPUPct,
+		actNetBytes:        opts.ActivityNetBytes,
+		gwPubKey:           opts.GatewayPublicKey,
+		routes:             opts.Routes,
+		schedules:          opts.Schedules,
+		tags:               opts.Tags,
+		archive:            opts.Archive,
+		checkpoint:         opts.Checkpoint,
+		archivePfx:         opts.ArchivePrefix,
+		checkpointPfx:      opts.CheckpointPrefix,
+		checkpointStageDir: opts.CheckpointStagingDir,
+		maxPerOwner:        opts.MaxRunningPerOwner,
+		memAdmitPct:        opts.MemAdmissionPct,
+		hostMemMB:          opts.HostMemMB,
+		reserveMB:          opts.MemReserveMB,
+		diskPoolMB:         opts.DiskPoolMBPerOwner,
+		nodeName:           opts.NodeName,
+		nodeArch:           opts.Arch,
+		nodeRelease:        opts.Release,
+		hostVCPUs:          opts.HostVCPUs,
+		frontDoor:          opts.FrontDoor,
+		observer:           opts.Observer,
+		metrics:            opts.Metrics,
 	}
 	if m.archivePfx == "" {
 		m.archivePfx = "archives"
+	}
+	if m.checkpointPfx == "" {
+		m.checkpointPfx = "checkpoints"
+	}
+	if m.checkpointStageDir == "" {
+		m.checkpointStageDir = opts.StateDir
+	}
+	if err := os.MkdirAll(m.checkpointStageDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create checkpoint staging directory: %w", err)
 	}
 	// The balloon reclaim path is optional — only firecracker (and the mock)
 	// implement it. Detect it once so the reaper and resume paths can use it.
@@ -1031,6 +1060,8 @@ func (m *Manager) EnsureReady(ctx context.Context, name string) (*Sandbox, error
 		return nil, err
 	}
 	result := m.ready.DoChan(name, func() (any, error) {
+		unlock := m.lockDiskOperation(name)
+		defer unlock()
 		operationCtx, cancel := sharedOperationContext(ctx, m.ctx)
 		defer cancel()
 		return m.ensureReady(operationCtx, name)
@@ -1268,6 +1299,24 @@ func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instan
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	presence, canCheckRootfs := m.driver.(vmm.RootfsPresencer)
+	if canCheckRootfs {
+		present, presenceErr := presence.RootfsPresent(b.Name)
+		if presenceErr != nil {
+			return nil, fmt.Errorf("check local rootfs for %s: %w", b.Name, presenceErr)
+		}
+		if !present {
+			if b.CheckpointKey != "" {
+				return nil, &StateError{Code: "checkpoint_restore_required",
+					Msg: fmt.Sprintf("sandbox %q lost its local disk; restore its checkpoint", b.Name)}
+			}
+			return nil, &StateError{Code: "sandbox_unrecoverable",
+				Msg: fmt.Sprintf("sandbox %q lost its local disk and has no checkpoint to restore", b.Name)}
+		}
+	} else if b.CheckpointKey != "" {
+		return nil, &StateError{Code: "checkpoint_restore_required",
+			Msg: fmt.Sprintf("sandbox %q has a checkpoint but the driver cannot verify its local disk; restore the checkpoint", b.Name)}
+	}
 	m.log.Warn("resume failed, recreating", "name", b.Name, "err", err)
 	return m.driver.Create(ctx, vmm.Config{
 		Name: b.Name, Image: b.Image, VCPUs: b.VCPUs, MemMB: b.MemMB,
@@ -1276,6 +1325,8 @@ func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instan
 }
 
 func (m *Manager) Pause(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	return m.pause(ctx, name, "was paused")
 }
 
@@ -1361,6 +1412,8 @@ func (m *Manager) endTurbo(b *Sandbox) {
 // an idle reap, an explicit pause, a reboot and a rename all end it — turbo is
 // a thing you do to the session you are in, not a size you set.
 func (m *Manager) SetTurbo(ctx context.Context, name string, on bool) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if m.rebooter == nil {
 		return errors.New("turbo is not enabled on this host (driver cannot drop snapshots)")
 	}
@@ -1440,7 +1493,7 @@ func (m *Manager) SetTurbo(ctx context.Context, name string, on bool) error {
 		break
 	}
 
-	if _, err := m.EnsureReady(ctx, name); err != nil {
+	if _, err := m.ensureReady(ctx, name); err != nil {
 		// The size is committed but the guest did not come up. Put the record
 		// back, so that the next resume — quite possibly an automatic one, from
 		// a web request or a reconnecting terminal — asks for an allocation this
@@ -1487,6 +1540,8 @@ func (m *Manager) revertTurbo(name string) {
 // Grow only (see vmm.DiskResizer). The new ceiling costs no disk up front: the
 // image is sparse, so it fills in as the guest writes.
 func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if m.diskResize == nil {
 		return errors.New("resize is not enabled on this host (driver cannot resize disks)")
 	}
@@ -1511,7 +1566,7 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 	// reconnects immediately, so re-check under the lock and re-pause once if
 	// the box got resumed out from under us.
 	for attempt := 0; ; attempt++ {
-		if err := m.Pause(ctx, name); err != nil {
+		if err := m.pause(ctx, name, "was paused for a disk resize"); err != nil {
 			return fmt.Errorf("resize %s: pause: %w", name, err)
 		}
 		m.mu.Lock()
@@ -1543,7 +1598,7 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 	}
 	m.refreshDiskUsage(ctx, name)
 
-	if _, err := m.EnsureReady(ctx, name); err != nil {
+	if _, err := m.ensureReady(ctx, name); err != nil {
 		return fmt.Errorf("resize %s: %w", name, err)
 	}
 	m.log.Info("sandbox disk resized", "name", name, "size_mb", sizeMB)
@@ -1552,6 +1607,8 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 }
 
 func (m *Manager) Reboot(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if m.rebooter == nil {
 		return errors.New("reboot is not enabled on this host (driver cannot drop snapshots)")
 	}
@@ -1573,7 +1630,7 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 	// re-check under the lock — held across the drop, like Rename — and
 	// re-pause once if the box was resumed out from under us.
 	for attempt := 0; ; attempt++ {
-		if err := m.Pause(ctx, name); err != nil {
+		if err := m.pause(ctx, name, "was paused for a cold reboot"); err != nil {
 			return fmt.Errorf("reboot %s: pause: %w", name, err)
 		}
 		m.mu.Lock()
@@ -1595,7 +1652,7 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 			return fmt.Errorf("reboot %s: sandbox keeps being resumed mid-reboot; try again", name)
 		}
 	}
-	if _, err := m.EnsureReady(ctx, name); err != nil {
+	if _, err := m.ensureReady(ctx, name); err != nil {
 		return fmt.Errorf("reboot %s: %w", name, err)
 	}
 	m.log.Info("sandbox rebooted", "name", name)
@@ -1619,6 +1676,8 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 // idempotent RenameSandbox both tolerate. The remaining side stores
 // (schedules, tags, front door) follow best-effort and idempotently.
 func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) error {
+	unlock := m.lockDiskOperation(oldName)
+	defer unlock()
 	if m.renamer == nil {
 		return &DisabledError{Code: "rename_disabled", Msg: "rename is not enabled on this host"}
 	}
@@ -1637,7 +1696,7 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 
 	// Pause first so the rootfs is flushed and the VM dir is movable.
 	// Idempotent if already paused.
-	if err := m.Pause(ctx, oldName); err != nil {
+	if err := m.pause(ctx, oldName, "was paused for rename"); err != nil {
 		return fmt.Errorf("rename %s: pause: %w", oldName, err)
 	}
 
@@ -1803,6 +1862,8 @@ func (m *Manager) ArchivingEnabled() bool {
 // The heavy pack/upload runs without m.mu held so it doesn't stall the whole
 // host; the record is only flipped to Archived once the upload is durable.
 func (m *Manager) Archive(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if !m.ArchivingEnabled() {
 		return errors.New("archiving is not enabled on this host")
 	}
@@ -1827,7 +1888,7 @@ func (m *Manager) Archive(ctx context.Context, name string) error {
 	}
 	// Pause so the guest has flushed and unmounted its rootfs. Idempotent
 	// if already paused; uses the manager Pause so state/teardown are consistent.
-	if err := m.Pause(ctx, name); err != nil {
+	if err := m.pause(ctx, name, "was paused for archive"); err != nil {
 		return fmt.Errorf("archive %s: pause: %w", name, err)
 	}
 
@@ -2038,6 +2099,8 @@ func (m *Manager) ResumePinned(ctx context.Context) {
 }
 
 func (m *Manager) Destroy(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.boxes[name]
@@ -2353,7 +2416,10 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 		protected := m.isProtected(b.ID, time.Now())
 		switch {
 		case idle > pauseAfter && !protected:
-			if err := m.pause(ctx, b.Name, fmt.Sprintf("went idle for %s", pauseAfter)); err != nil {
+			unlock := m.lockDiskOperation(b.Name)
+			err := m.pause(ctx, b.Name, fmt.Sprintf("went idle for %s", pauseAfter))
+			unlock()
+			if err != nil {
 				m.log.Error("reaper pause failed", "name", b.Name, "err", err)
 			} else {
 				m.log.Info("reaper paused idle sandbox", "name", b.Name)
