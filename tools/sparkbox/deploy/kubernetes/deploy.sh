@@ -278,6 +278,28 @@ fi
 
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \
+  -e "s|__SPARKBOX_NODE_POOL__|$node_pool|g" \
+  "$script_dir/device-plugin.yaml" | "${k[@]}" apply -f -
+echo "Waiting for the KVM/TUN/loop device plugin..."
+"${k[@]}" -n "$namespace" rollout status daemonset/sparkbox-device-plugin --timeout=5m
+deadline=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  kvm_allocatable=$("${k[@]}" get node "$node" -o 'go-template={{index .status.allocatable "sparkbox.dev/kvm"}}')
+  tun_allocatable=$("${k[@]}" get node "$node" -o 'go-template={{index .status.allocatable "sparkbox.dev/tun"}}')
+  loop_allocatable=$("${k[@]}" get node "$node" -o 'go-template={{index .status.allocatable "sparkbox.dev/loop"}}')
+  if [ "$kvm_allocatable" = 1 ] && [ "$tun_allocatable" = 1 ] && [ "$loop_allocatable" = 1 ]; then
+    break
+  fi
+  sleep 2
+done
+if [ "$kvm_allocatable" != 1 ] || [ "$tun_allocatable" != 1 ] || [ "$loop_allocatable" != 1 ]; then
+  echo "device-plugin resources did not become allocatable on $node" >&2
+  "${k[@]}" -n "$namespace" logs daemonset/sparkbox-device-plugin >&2 || true
+  exit 1
+fi
+
+sed \
+  -e "s|__SPARKBOX_IMAGE__|$image|g" \
   -e "s|__SPARKBOX_PROXY_DOMAIN__|$proxy_domain|g" \
   -e "s|__SPARKBOX_USERS_HASH__|$users_hash|g" \
   "$script_dir/gateway-deployment.yaml" | "${k[@]}" apply -f -
@@ -336,3 +358,4 @@ echo "  Web:  https://my.$proxy_domain"
 echo "  Gateway logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-gateway"
 echo "  VM node logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-node"
 echo "  The VM node init container removed the retired gateway databases, TLS cache, and fleet private keys from its hostPath."
+echo "  KVM, TUN, and the temporary loop-device bundle are allocated by the Sparkbox device plugin; the VM node is not privileged."

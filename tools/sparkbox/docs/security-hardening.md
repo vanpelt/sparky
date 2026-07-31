@@ -64,7 +64,7 @@ admits no node ingress.
 The one-time cutover copies gateway databases and edge certificate caches to
 the RWX volume while the combined process is stopped. The node init container
 then removes those databases, TLS cache, and fleet private keys from the local
-hostPath before the privileged runtime starts. VM inventory and disks never
+hostPath before the VM runtime starts. VM inventory and disks never
 leave the Node-local XFS filesystem.
 
 Sparkbox's `--gateway` branch exits into node mode before opening users, routes,
@@ -74,7 +74,7 @@ ordinary creates automatically select an online fleet node. A 1 MiB local
 admission budget is a second fail-closed guard if a future control path reaches
 the otherwise-unused mock manager.
 
-## KVM device-plugin prior art
+## KVM/TUN device plugin
 
 There is strong prior art. Kubernetes' stable
 [Device Plugin API](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/)
@@ -87,8 +87,9 @@ Because KVM and TUN are shared character devices rather than consumable PCI
 functions, KubeVirt advertises a configurable number of synthetic device IDs
 that all map back to the same host path.
 
-For Sparkbox, a small `sparkbox.dev/kvm` plus `sparkbox.dev/tun` device plugin
-would let the runtime request:
+Sparkbox now runs a small, in-tree plugin that advertises one synthetic
+`sparkbox.dev/kvm` and `sparkbox.dev/tun` allocation per eligible physical
+Node. The VM runtime requests:
 
 ```yaml
 resources:
@@ -97,24 +98,46 @@ resources:
     sparkbox.dev/tun: "1"
 ```
 
-This improves scheduling, health reporting, device-cgroup scoping, and removes
-the two raw device hostPaths. It does **not** by itself make the Pod
-unprivileged:
+The plugin validates that the host paths remain device nodes, registers again
+when the kubelet socket changes, and returns `rwm` `DeviceSpec` entries during
+allocation. The plugin Pod is root only so it can create sockets in the
+kubelet-owned directory; it is not privileged, has no Linux capabilities, has
+a read-only root, mounts each health device read-only, and has no service
+account token.
+
+This improves scheduling and health reporting, applies device-cgroup scoping,
+and removes the KVM/TUN hostPaths from the VM node. The node is now
+`privileged: false`, but it is not yet a low-privilege application Pod:
 
 - TAP creation and route/filter setup still need `CAP_NET_ADMIN`;
 - the Firecracker jailer needs mount-namespace, pivot-root/chroot, `mknod`, and
   uid/gid transition privileges;
-- disk maintenance currently needs root for loop mounts.
+- disk maintenance currently needs `CAP_SYS_ADMIN` and loop devices.
+
+The current plugin therefore also advertises one temporary
+`sparkbox.dev/loop` bundle containing `/dev/loop-control` and `/dev/loop0`
+through `/dev/loop7`. That is deliberately one atomic allocation, not eight
+independent claims: only one Sparkbox VM-node controller may own the host loop
+pool. It is narrower than privileged mode, which bypasses the device cgroup and
+grants every host device, but it remains part of the trusted runtime boundary.
+
+The VM-node container drops every default capability, adds only `CHOWN`,
+`DAC_OVERRIDE`, `FOWNER`, `KILL`, `MKNOD`, `NET_ADMIN`, `SETGID`, `SETUID`,
+`SYS_ADMIN`, and `SYS_CHROOT`, has a read-only root filesystem, and receives a
+bounded `/tmp`. Host PID/network/IPC namespaces and service-account credentials
+remain absent. Seccomp and AppArmor are explicitly unconfined for this
+intermediate step because the jailer must create a mount namespace and pivot
+root; a tested local profile belongs with the narrower runtime helper.
 
 So the useful order is:
 
-1. Replace KVM/TUN hostPaths with a KubeVirt-style device plugin.
-2. Set `privileged: false`, add only the capabilities the runtime still uses,
-   and install a tailored outer seccomp/AppArmor profile. Kubernetes documents
-   the available [kernel-level constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/).
-3. Move disk parsing and, if necessary, jail construction into a narrow
+1. Move disk parsing and, if necessary, jail construction into a narrow
    host-native service or dedicated helper. Then remove `CAP_SYS_ADMIN` from the
    long-lived controller.
+2. Remove the loop bundle after guest identity and tooling move to first boot
+   (or filesystem work moves into a disposable helper microVM).
+3. Install a tailored outer seccomp/AppArmor profile around the remaining
+   runtime. Kubernetes documents the available [kernel-level constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/).
 
 The architectural alternative is a node-level runtime shim or daemon rather
 than a device-owning application Pod. Kata Containers puts the hypervisor in a
@@ -128,7 +151,7 @@ it over a constrained protocol.
 ## Guest disk handling
 
 The guest controls the bytes and directory entries in its rootfs. Mounting that
-filesystem in the privileged management Pod enlarges the trusted computing base
+filesystem in the capability-bearing management Pod enlarges the trusted computing base
 from Firecracker/KVM to the host ext4 driver and every root process that walks
 the mount.
 
@@ -155,7 +178,7 @@ identity on a fork, and starts SSH only afterwards. Snapshot creation then
 becomes a reflink of opaque bytes. Compaction and repair can either be skipped,
 or run in a disposable helper microVM that receives only the target block image
 and returns a replacement. At that point no attacker-controlled filesystem is
-mounted or parsed by the long-lived privileged runtime.
+mounted or parsed by the long-lived VM runtime.
 
 ## Acceptance gates
 

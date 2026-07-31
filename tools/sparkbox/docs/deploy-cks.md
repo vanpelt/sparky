@@ -1,21 +1,27 @@
 # Sparkbox on CoreWeave Kubernetes Service
 
 This proof of concept splits Sparkbox across two trust domains: a non-root
-public gateway and one privileged Firecracker node pinned to a CKS bare-metal
-CPU Node. A public CKS LoadBalancer provides SSH and wildcard HTTPS routing
-under `coreweave.app`; the VM node has no public Service.
+public gateway and one capability-scoped Firecracker node pinned to a CKS
+bare-metal CPU Node. A public CKS LoadBalancer provides SSH and wildcard HTTPS
+routing under `coreweave.app`; the VM node has no public Service.
 
 ## What it creates
 
 - Namespace `sparkbox-poc`.
 - `sparkbox-gateway`, an unprivileged Deployment with no host devices,
   hostPath, Linux capabilities, or writable root filesystem.
-- `sparkbox-node`, a privileged Deployment pinned to one exact amd64 Node.
+- `sparkbox-node`, a non-privileged, capability-scoped Deployment pinned to one
+  exact amd64 Node.
+- `sparkbox-device-plugin`, a capability-free DaemonSet that advertises one
+  `sparkbox.dev/kvm`, `sparkbox.dev/tun`, and temporary `sparkbox.dev/loop`
+  allocation per eligible Node.
 - A Node-local XFS `hostPath` at `/mnt/local/sparkbox-poc` for the VM inventory,
   rootfs template, live sandbox disks, and node identity.
 - A 100 GiB `shared-vast` PVC mounted at `/mnt/sparkbox-durable` for durable
   gateway databases, edge certificate cache, and checkpoint objects.
-- Host device mounts for `/dev/kvm` and `/dev/net/tun` on the VM node only.
+- Kubelet-managed device allocations for `/dev/kvm`, `/dev/net/tun`, and the
+  loop-device bundle used by the remaining guest-disk mount paths. The VM node
+  has no raw device `hostPath` volumes.
 - A public `LoadBalancer` Service selecting only the gateway on ports 443 and
   22, plus an internal ClusterIP Service for the authenticated fleet link.
 - Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
@@ -26,9 +32,16 @@ under `coreweave.app`; the VM node has no public Service.
   node receives a separate Secret containing only the gateway's public host-key
   pin.
 
-The VM node is privileged, but it does not use `hostNetwork`. TAP devices,
-sysctls, NAT, and packet-filter rules therefore live in that Pod's network namespace
-instead of modifying the CKS Node's Calico network namespace.
+The VM node runs as root but with `privileged: false`. It drops the default
+capability set and receives only the capabilities currently required for the
+jailer, TAP/network setup, loop mounts, file ownership, and terminating
+per-VM UIDs. `CAP_SYS_ADMIN` and an unconfined outer seccomp/AppArmor profile
+remain significant privileges while jail construction and guest-disk mounts
+stay in this process; this is an intermediate boundary, not the final runtime
+shim. The Pod does not use host PID, network, IPC, or user namespaces. TAP
+devices, sysctls, NAT, and packet-filter rules therefore live in the Pod's
+network namespace instead of modifying the CKS Node's Cilium network
+namespace.
 
 The named host path survives deletion and replacement of the node Pod on the
 same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost
@@ -38,7 +51,7 @@ this manifest as a production deployment.
 
 On the first split rollout, `deploy.sh` stops the combined Pod, copies its
 SQLite databases and edge caches to VAST, and leaves `sandboxes.json` and VM
-files on the pinned Node. Before the privileged node starts, its init container
+files on the pinned Node. Before the VM node starts, its init container
 removes the retired gateway databases, edge TLS cache, and fleet private keys
 from the hostPath. The identity Secret is a required precondition and remains
 the recovery source for those keys.
@@ -159,7 +172,7 @@ The one-node checkpoint command is temporarily unavailable in the split
 deployment: the gateway no longer has the VM disk, and the VM node deliberately
 does not mount the durable control volume. Existing immutable checkpoint
 objects are retained. Restoring this feature requires a fleet checkpoint RPC
-or a narrow transfer helper; remounting the gateway PVC into the privileged
+or a narrow transfer helper; remounting the gateway PVC into the VM
 node would undo the secret/state separation.
 
 The original combined-Pod behavior was:
@@ -227,10 +240,11 @@ deploy/kubernetes/deploy.sh \
 The script resolves the exact Node, verifies `sparkbox-identity`, derives a
 public-only gateway host-key pin, and reads the LoadBalancer's `ExternalRecords`
 domain. It stops the legacy Deployment, runs the idempotent state-migration
-Job, starts both role-specific Deployments, and uses the operator key to approve
-the node's authenticated fleet enrollment. The public gateway is then selected
-by the existing LoadBalancer and the ingress policies are applied. Sparkbox's
-`autocert` provider obtains certificates on the HTTPS listener.
+Job, starts the device-plugin DaemonSet and waits for all three extended
+resources, starts both role-specific Deployments, and uses the operator key to
+approve the node's authenticated fleet enrollment. The public gateway is then
+selected by the existing LoadBalancer and the ingress policies are applied.
+Sparkbox's `autocert` provider obtains certificates on the HTTPS listener.
 
 The wildcard record does not represent the base name itself. Use any label,
 such as `ssh`, for the SSH gateway. The Kubernetes entrypoint passes this
@@ -263,7 +277,9 @@ is not quota-enforced by Kubernetes; monitor and clean
 ## Observe and troubleshoot
 
 ```sh
-kubectl -n sparkbox-poc get pods,service,pvc,networkpolicy
+kubectl -n sparkbox-poc get pods,daemonset,service,pvc,networkpolicy
+kubectl get node -o custom-columns='NAME:.metadata.name,KVM:.status.allocatable.sparkbox\.dev/kvm,TUN:.status.allocatable.sparkbox\.dev/tun,LOOP:.status.allocatable.sparkbox\.dev/loop'
+kubectl -n sparkbox-poc logs daemonset/sparkbox-device-plugin
 kubectl -n sparkbox-poc logs -f deployment/sparkbox-gateway
 kubectl -n sparkbox-poc logs -f deployment/sparkbox-node
 kubectl -n sparkbox-poc describe pod -l app.kubernetes.io/name=sparkbox
@@ -272,7 +288,10 @@ kubectl -n sparkbox-poc describe pod -l app.kubernetes.io/name=sparkbox
 The startup probe allows 20 minutes because the rootfs is large. Common hard
 failures are:
 
-- `/dev/kvm` or `/dev/net/tun` is unavailable to the privileged Pod.
+- The device plugin cannot see `/dev/kvm`, `/dev/net/tun`, `/dev/loop-control`,
+  or the eight loop block devices on the selected Node.
+- `sparkbox.dev/kvm`, `sparkbox.dev/tun`, or `sparkbox.dev/loop` does not become
+  allocatable before the VM-node rollout.
 - The selected Node is not ready, schedulable, amd64, and in the selected
   NodePool.
 - `sparkbox-identity` is absent, incomplete, or contains invalid key material.

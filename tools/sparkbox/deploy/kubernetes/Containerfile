@@ -14,7 +14,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath \
       -ldflags="-s -w -X main.version=${SPARKBOX_VERSION}" \
-      -o /out/sparkbox ./cmd/sparkbox
+      -o /out/sparkbox ./cmd/sparkbox \
+    && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+      go build -trimpath \
+      -ldflags="-s -w" \
+      -o /out/sparkbox-device-plugin ./cmd/sparkbox-device-plugin
 
 FROM ubuntu:24.04
 
@@ -35,6 +39,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
+COPY --from=build /out/sparkbox-device-plugin /usr/local/bin/sparkbox-device-plugin
 COPY deploy/sparkbox-net.sh /usr/local/sbin/sparkbox-net.sh
 COPY deploy/refresh-agent-tools.sh /usr/local/sbin/sparkbox-refresh-tools.sh
 COPY deploy/install-guest-identity.sh /usr/local/sbin/sparkbox-install-guest-identity.sh
@@ -43,6 +48,7 @@ COPY deploy/kubernetes/gateway-entrypoint.sh /usr/local/sbin/sparkbox-gateway-en
 
 RUN chmod 0755 \
       /usr/local/bin/sparkbox \
+      /usr/local/bin/sparkbox-device-plugin \
       /usr/local/sbin/sparkbox-install-guest-identity.sh \
       /usr/local/sbin/sparkbox-net.sh \
       /usr/local/sbin/sparkbox-refresh-tools.sh \

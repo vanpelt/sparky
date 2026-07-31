@@ -1,0 +1,159 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: sparkbox-device-plugin
+  namespace: sparkbox-poc
+  labels:
+    app.kubernetes.io/name: sparkbox
+    app.kubernetes.io/component: device-plugin
+    app.kubernetes.io/part-of: sparky
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sparkbox
+      app.kubernetes.io/component: device-plugin
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sparkbox
+        app.kubernetes.io/component: device-plugin
+        app.kubernetes.io/part-of: sparky
+    spec:
+      serviceAccountName: sparkbox-device-plugin
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        compute.coreweave.com/node-pool: __SPARKBOX_NODE_POOL__
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: device-plugin
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /usr/local/bin/sparkbox-device-plugin
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test -S /var/lib/kubelet/device-plugins/sparkbox-kvm.sock
+                  && test -S /var/lib/kubelet/device-plugins/sparkbox-tun.sock
+                  && test -S /var/lib/kubelet/device-plugins/sparkbox-loop.sock
+            periodSeconds: 2
+            failureThreshold: 5
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test -S /var/lib/kubelet/device-plugins/sparkbox-kvm.sock
+                  && test -S /var/lib/kubelet/device-plugins/sparkbox-tun.sock
+                  && test -S /var/lib/kubelet/device-plugins/sparkbox-loop.sock
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: plugin-sockets
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: kvm-health
+              mountPath: /host-dev/kvm
+              readOnly: true
+            - name: tun-health
+              mountPath: /host-dev/net/tun
+              readOnly: true
+            - name: loop-control-health
+              mountPath: /host-dev/loop-control
+              readOnly: true
+            - name: loop0-health
+              mountPath: /host-dev/loop0
+              readOnly: true
+            - name: loop1-health
+              mountPath: /host-dev/loop1
+              readOnly: true
+            - name: loop2-health
+              mountPath: /host-dev/loop2
+              readOnly: true
+            - name: loop3-health
+              mountPath: /host-dev/loop3
+              readOnly: true
+            - name: loop4-health
+              mountPath: /host-dev/loop4
+              readOnly: true
+            - name: loop5-health
+              mountPath: /host-dev/loop5
+              readOnly: true
+            - name: loop6-health
+              mountPath: /host-dev/loop6
+              readOnly: true
+            - name: loop7-health
+              mountPath: /host-dev/loop7
+              readOnly: true
+      volumes:
+        - name: plugin-sockets
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: kvm-health
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: tun-health
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: loop-control-health
+          hostPath:
+            path: /dev/loop-control
+            type: CharDevice
+        - name: loop0-health
+          hostPath:
+            path: /dev/loop0
+            type: BlockDevice
+        - name: loop1-health
+          hostPath:
+            path: /dev/loop1
+            type: BlockDevice
+        - name: loop2-health
+          hostPath:
+            path: /dev/loop2
+            type: BlockDevice
+        - name: loop3-health
+          hostPath:
+            path: /dev/loop3
+            type: BlockDevice
+        - name: loop4-health
+          hostPath:
+            path: /dev/loop4
+            type: BlockDevice
+        - name: loop5-health
+          hostPath:
+            path: /dev/loop5
+            type: BlockDevice
+        - name: loop6-health
+          hostPath:
+            path: /dev/loop6
+            type: BlockDevice
+        - name: loop7-health
+          hostPath:
+            path: /dev/loop7
+            type: BlockDevice

@@ -86,7 +86,24 @@ spec:
             - name: SPARKBOX_NODE_KEY_DIR
               value: /var/lib/sparkbox/node-identity
           securityContext:
-            privileged: true
+            allowPrivilegeEscalation: false
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - KILL
+                - MKNOD
+                - NET_ADMIN
+                - SETGID
+                - SETUID
+                - SYS_ADMIN
+                - SYS_CHROOT
+            privileged: false
+            readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
             seccompProfile:
@@ -100,10 +117,16 @@ spec:
               cpu: "4"
               memory: 12Gi
               ephemeral-storage: 40Gi
+              sparkbox.dev/kvm: "1"
+              sparkbox.dev/tun: "1"
+              sparkbox.dev/loop: "1"
             limits:
               cpu: "8"
               memory: 24Gi
               ephemeral-storage: 100Gi
+              sparkbox.dev/kvm: "1"
+              sparkbox.dev/tun: "1"
+              sparkbox.dev/loop: "1"
           startupProbe:
             tcpSocket:
               port: metrics
@@ -125,10 +148,8 @@ spec:
             - name: gateway-trust
               mountPath: /run/sparkbox/trust
               readOnly: true
-            - name: kvm
-              mountPath: /dev/kvm
-            - name: tun
-              mountPath: /dev/net/tun
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: data
           hostPath:
@@ -138,11 +159,6 @@ spec:
           secret:
             secretName: sparkbox-node-trust
             defaultMode: 0444
-        - name: kvm
-          hostPath:
-            path: /dev/kvm
-            type: CharDevice
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

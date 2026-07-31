@@ -107,13 +107,19 @@ fetch_upstream_jailer() {
 }
 
 if [ ! -c /dev/kvm ]; then
-  echo "/dev/kvm is not a character device; Sparkbox needs a privileged KVM-capable Pod" >&2
+  echo "/dev/kvm is not a character device; check the sparkbox.dev/kvm allocation" >&2
   exit 1
 fi
 if [ ! -c /dev/net/tun ]; then
-  echo "/dev/net/tun is not a character device; Sparkbox cannot create guest TAP devices" >&2
+  echo "/dev/net/tun is not a character device; check the sparkbox.dev/tun allocation" >&2
   exit 1
 fi
+for loop_device in /dev/loop-control /dev/loop{0..7}; do
+  if [ ! -b "$loop_device" ] && [ ! -c "$loop_device" ]; then
+    echo "$loop_device is not a device; check the sparkbox.dev/loop allocation" >&2
+    exit 1
+  fi
+done
 
 # Sparkbox clones a large sparse ext4 template for every VM. Reflinks make that
 # operation instant and avoid consuming the template's full logical size.
