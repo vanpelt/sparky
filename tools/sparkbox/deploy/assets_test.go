@@ -111,6 +111,50 @@ func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
 	}
 }
 
+func TestCKSSplitMigrationCommitsOnlyAfterOwnership(t *testing.T) {
+	manifest, err := os.ReadFile("kubernetes/migration-job.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(manifest)
+	marker := strings.LastIndex(got, `touch "$marker"`)
+	ownership := strings.LastIndex(got, "chown -R 65532:65532 /durable/gateway")
+	if marker < 0 || ownership < 0 || marker < ownership {
+		t.Fatalf("migration marker must be written after recursive ownership is fixed")
+	}
+	if strings.Count(got, "chown -R 65532:65532 /durable/gateway") < 2 {
+		t.Fatal("completed migration fast path does not repair ownership")
+	}
+	if strings.Count(got, `test -s "$dst/`) < 2 {
+		t.Fatal("completed migration does not validate both gateway databases")
+	}
+}
+
+func TestCKSCleanInstallSkipsLegacyMigration(t *testing.T) {
+	deployScript, err := os.ReadFile("kubernetes/deploy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(deployScript)
+	for _, want := range []string{
+		"legacy_deployment=0",
+		`if [ "$legacy_deployment" = 1 ]; then`,
+		"No legacy combined Deployment found",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("deploy script missing clean-install guard %q", want)
+		}
+	}
+
+	nodeManifest, err := os.ReadFile("kubernetes/deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nodeManifest), "type: DirectoryOrCreate") {
+		t.Fatal("clean install cannot create the node-local hot tier")
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

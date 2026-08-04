@@ -265,21 +265,27 @@ ssh-keygen -y -f "$gateway_upstream_private_file" > "$gateway_upstream_public_fi
 # The old combined Pod must be stopped before its SQLite WAL and control
 # database are copied. The migration Job copies only gateway-owned state to the
 # RWX volume; sandboxes.json and the Firecracker hot tier remain on this Node.
+legacy_deployment=0
 if "${k[@]}" -n "$namespace" get deployment sparkbox >/dev/null 2>&1; then
+  legacy_deployment=1
   echo "Stopping the combined gateway/VM Pod for the one-time state split..."
   "${k[@]}" -n "$namespace" scale deployment sparkbox --replicas=0
   "${k[@]}" -n "$namespace" rollout status deployment/sparkbox --timeout=5m
 fi
-"${k[@]}" -n "$namespace" delete job sparkbox-split-gateway-state \
-  --ignore-not-found --wait=true
-sed \
-  -e "s|__SPARKBOX_IMAGE__|$image|g" \
-  -e "s|__SPARKBOX_NODE__|$node|g" \
-  "$script_dir/migration-job.yaml" | "${k[@]}" apply -f -
-if ! "${k[@]}" -n "$namespace" wait \
-  --for=condition=complete job/sparkbox-split-gateway-state --timeout=10m; then
-  "${k[@]}" -n "$namespace" logs job/sparkbox-split-gateway-state >&2 || true
-  exit 1
+if [ "$legacy_deployment" = 1 ]; then
+  "${k[@]}" -n "$namespace" delete job sparkbox-split-gateway-state \
+    --ignore-not-found --wait=true
+  sed \
+    -e "s|__SPARKBOX_IMAGE__|$image|g" \
+    -e "s|__SPARKBOX_NODE__|$node|g" \
+    "$script_dir/migration-job.yaml" | "${k[@]}" apply -f -
+  if ! "${k[@]}" -n "$namespace" wait \
+    --for=condition=complete job/sparkbox-split-gateway-state --timeout=10m; then
+    "${k[@]}" -n "$namespace" logs job/sparkbox-split-gateway-state >&2 || true
+    exit 1
+  fi
+else
+  echo "No legacy combined Deployment found; using existing or fresh split gateway state."
 fi
 
 "${k[@]}" apply -f "$script_dir/service-accounts.yaml"

@@ -187,6 +187,18 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, name string) (retErr er
 	if err := m.pause(ctx, name, "was paused to restore a durable checkpoint"); err != nil {
 		return fmt.Errorf("restore checkpoint %s: pause: %w", name, err)
 	}
+	restoredAndBooted := false
+	defer func() {
+		if !wasRunning || restoredAndBooted {
+			return
+		}
+		resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
+		defer cancel()
+		if _, err := m.ensureReady(resumeCtx, name); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf(
+				"restore checkpoint %s: recovery cold boot after restore failure: %w", name, err))
+		}
+	}()
 	if err := m.rebooter.DropSnapshots(name); err != nil {
 		return fmt.Errorf("restore checkpoint %s: drop memory snapshot: %w", name, err)
 	}
@@ -216,6 +228,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, name string) (retErr er
 		if _, err := m.ensureReady(ctx, name); err != nil {
 			return fmt.Errorf("restore checkpoint %s: cold boot: %w", name, err)
 		}
+		restoredAndBooted = true
 	}
 	return nil
 }

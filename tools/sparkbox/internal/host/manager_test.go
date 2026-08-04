@@ -97,6 +97,44 @@ func mustCreate(t *testing.T, m *host.Manager, name, owner string, memMB int64) 
 	}
 }
 
+type failingUnpackDriver struct {
+	*mock.Driver
+	fail atomic.Bool
+}
+
+func (d *failingUnpackDriver) UnpackRootfs(ctx context.Context, name, inPath string) error {
+	if d.fail.Load() {
+		return errors.New("injected unpack failure")
+	}
+	return d.Driver.UnpackRootfs(ctx, name, inPath)
+}
+
+func TestRestoreCheckpointFailureRestartsPreviouslyRunningSandbox(t *testing.T) {
+	store := newMemStore()
+	var driver *failingUnpackDriver
+	m := newTestManagerWith(t, host.Options{Checkpoint: store}, func(base *mock.Driver) vmm.Driver {
+		driver = &failingUnpackDriver{Driver: base}
+		return driver
+	})
+	ctx := context.Background()
+	mustCreate(t, m, "restore-recovery", "alice", 512)
+	if err := m.Checkpoint(ctx, "restore-recovery"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+
+	driver.fail.Store(true)
+	if err := m.RestoreCheckpoint(ctx, "restore-recovery"); err == nil {
+		t.Fatal("restore should fail")
+	}
+	box, ok := m.Get("restore-recovery")
+	if !ok {
+		t.Fatal("sandbox disappeared after failed restore")
+	}
+	if box.State != vmm.StateRunning {
+		t.Fatalf("state after failed restore = %q, want running", box.State)
+	}
+}
+
 func TestPerOwnerRunningCap(t *testing.T) {
 	m := newTestManager(t, host.Options{MaxRunningPerOwner: 2})
 

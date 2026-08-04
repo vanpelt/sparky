@@ -36,6 +36,65 @@ routing under `coreweave.app`; the VM node has no public Service.
   node receives a separate Secret containing only the gateway's public host-key
   pin and public upstream login key.
 
+## Gateway-to-VM traffic
+
+The split CKS deployment currently uses an outbound, host-key-pinned SSH link
+set from the VM node to the gateway: one control connection plus independently
+supervised data lanes. The node is started with `--node-control-transport ssh`;
+it does not publish a gRPC control endpoint. When the gateway needs guest TCP
+port 6743, it opens a `sandbox-stream@sparkbox` channel carrying the sandbox
+name, stream kind `tcp`, and port `6743` on a dedicated authenticated data lane.
+The node resolves the sandbox from its local inventory and dials the guest's
+TAP address at `HostIP:6743`.
+
+```mermaid
+flowchart LR
+    client[Browser or API client]
+    lb[CKS LoadBalancer<br/>public 443]
+
+    subgraph gatewayPod[Unprivileged gateway Pod]
+        edge[Wildcard HTTPS edge]
+        route[Route and fleet inventory]
+        fleet[Fleet SSH listener<br/>ClusterIP 2222]
+        edge -->|sandbox + target port 6743| route
+        route --> fleet
+    end
+
+    subgraph nodePod[Private VM-node Pod]
+        controller[Node controller]
+        resolver[Local sandbox resolver]
+        tap[TAP / guest network]
+        controller --> resolver -->|dial 172.30.x.y:6743| tap
+    end
+
+    vm[Sandbox VM<br/>service on 6743]
+
+    client -->|HTTPS 443| lb --> edge
+    controller -.->|establishes outbound SSH control + data lanes| fleet
+    fleet ==>|opens sandbox-stream on a data lane<br/>tcp / sandbox / 6743| controller
+    tap --> vm
+
+    grpc[Optional mTLS gRPC control plane<br/>inventory and lifecycle only]
+    grpc -.->|not enabled by this CKS manifest| controller
+```
+
+The earlier gRPC work is separate from this stream path. It moves inventory
+and lifecycle control off SSH and can advertise authoritative guest addresses.
+With `--guest-data-transport auto` or `routed` and a real route to the guest
+subnet, the gateway can then dial a roster-approved guest IP directly; gRPC
+itself never tunnels the application bytes. This CKS manifest enables neither
+the node gRPC endpoint nor that routed guest network, so SSH remains its guest
+data plane.
+
+There is also a public-edge distinction. Sparkbox can preserve an arbitrary
+original destination port when the host firewall funnels an any-port range to
+its HTTPS listener, but the CKS LoadBalancer Service exposes only 22 and 443.
+In this deployment, configure the sandbox's HTTPS route to target guest port
+6743 and access it through public port 443. A direct
+`https://<sandbox>.<domain>:6743` requires an additional LoadBalancer port or an
+equivalent any-port funnel; merely listening on 6743 inside the VM does not
+publish that port.
+
 The Sparkbox controller runs as UID/GID 65532, drops every capability, receives
 no devices, and uses `RuntimeDefault` seccomp/AppArmor. A separate root
 `vmm-helper` container owns only the capabilities required for TAP/network
@@ -126,9 +185,9 @@ the policy before starting the gateway and VM node, so the node never comes up
 with unrestricted Pod egress during an ordinary rollout.
 
 Because CKS runs with `--disable-host-rootfs-mounts`, creating a reusable
-template snapshot is currently refused. Pause/resume, checkpoints, archive and
-restore remain available. Re-enable template snapshots only after fork identity
-sanitization runs inside the guest or a disposable mountless helper.
+template snapshot is currently refused. Pause/resume and archive/restore remain
+available. Re-enable template snapshots only after fork identity sanitization
+runs inside the guest or a disposable mountless helper.
 
 The named host path survives deletion and replacement of the node Pod on the
 same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost
@@ -136,13 +195,15 @@ when the Node is replaced. The gateway database, identity Secret, and VAST
 objects survive that loss; VM inventory and guest disks do not. Do not treat
 this manifest as a production deployment.
 
-On the first split rollout, `deploy.sh` stops the combined Pod, copies its
+When a legacy combined Deployment exists, `deploy.sh` stops it, copies its
 SQLite databases and edge caches to VAST, and leaves `sandboxes.json` and VM
-files on the pinned Node. Before the VM node starts, the first init container
-removes the retired gateway databases, edge TLS cache, and fleet private keys
-from the hostPath; the second prepares the trusted base image and exits. The
-identity Secret is a required precondition and remains the recovery source for
-the gateway's keys.
+files on the pinned Node. On a clean split install, the migration is skipped;
+the node-local directory and gateway databases are initialized in their new
+locations. Before the VM node starts, the first init container removes any
+retired gateway databases, edge TLS cache, and fleet private keys from the
+hostPath; the second prepares the trusted base image and exits. The identity
+Secret is a required precondition and remains the recovery source for the
+gateway's keys.
 
 The proposed path to durable identity and recoverable reflink-backed guest
 disks is documented in
@@ -267,9 +328,7 @@ node would undo the secret/state separation. A size-limited ephemeral
 read-only container can initialize it; it is not durable storage and receives
 no gateway data.
 
-The original combined-Pod behavior was:
-
-The CKS entrypoint enables a deliberately small manual checkpoint path:
+The original combined-Pod deployment enabled this manual checkpoint path:
 
 ```sh
 ssh -p 22 ctl@ssh.<domain> checkpoint <sandbox>
@@ -331,8 +390,9 @@ deploy/kubernetes/deploy.sh \
 
 The script resolves the exact Node, verifies `sparkbox-identity`, derives a
 public-only gateway host-key pin, and reads the LoadBalancer's `ExternalRecords`
-domain. It stops the legacy Deployment, runs the idempotent state-migration
-Job, starts the device-plugin DaemonSet and waits for all three extended
+domain. If a legacy combined Deployment exists, it stops it and runs the
+idempotent state-migration Job; a clean split install skips that migration. It
+then starts the device-plugin DaemonSet and waits for all three extended
 resources, starts both role-specific Deployments, and uses the operator key to
 approve the node's authenticated fleet enrollment. The public gateway is then
 selected by the existing LoadBalancer and the ingress policies are applied.

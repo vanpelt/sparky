@@ -34,6 +34,9 @@ spec:
               marker=/durable/gateway/.split-v1-complete
               if [ -f "$marker" ]; then
                 test -s "$dst/sparkbox.db"
+                test -s "$dst/schedules.db"
+                chmod 0700 /durable/gateway "$dst"
+                chown -R 65532:65532 /durable/gateway
                 echo "gateway state was already migrated"
                 exit 0
               fi
@@ -52,9 +55,9 @@ spec:
                   cp -a "$src/$directory" "$dst/$directory"
                 fi
               done
-              touch "$marker"
               chmod 0700 /durable/gateway "$dst"
               chown -R 65532:65532 /durable/gateway
+              touch "$marker"
               echo "migrated gateway databases and edge caches; VM inventory stayed on the node"
           securityContext:
             allowPrivilegeEscalation: false

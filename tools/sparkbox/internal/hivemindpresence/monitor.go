@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -94,8 +96,22 @@ type sessionsResponse struct {
 }
 
 func New(opts Options) (*Monitor, error) {
-	if strings.TrimSpace(opts.APIBase) == "" {
+	apiBase := strings.TrimSpace(opts.APIBase)
+	if apiBase == "" {
 		return nil, fmt.Errorf("hivemind presence: API base is required")
+	}
+	parsedBase, err := url.Parse(apiBase)
+	if err != nil || parsedBase.Host == "" {
+		return nil, fmt.Errorf("hivemind presence: API base must be an absolute URL")
+	}
+	if parsedBase.Scheme != "https" {
+		hostname := parsedBase.Hostname()
+		ip := net.ParseIP(hostname)
+		loopbackHTTP := parsedBase.Scheme == "http" &&
+			(hostname == "localhost" || (ip != nil && ip.IsLoopback()))
+		if !loopbackHTTP {
+			return nil, fmt.Errorf("hivemind presence: API base must use HTTPS (HTTP is allowed only for loopback testing)")
+		}
 	}
 	if opts.Sandboxes == nil || opts.Protector == nil || opts.Identity == nil {
 		return nil, fmt.Errorf("hivemind presence: sandboxes, protector, and identity are required")
@@ -109,7 +125,7 @@ func New(opts Options) (*Monitor, error) {
 		logger = slog.Default()
 	}
 	return &Monitor{
-		apiBase:    strings.TrimRight(opts.APIBase, "/"),
+		apiBase:    strings.TrimRight(apiBase, "/"),
 		audience:   opts.Audience,
 		boxes:      opts.Sandboxes,
 		protector:  opts.Protector,

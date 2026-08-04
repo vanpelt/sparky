@@ -388,7 +388,7 @@ spec:
         - name: data
           hostPath:
             path: /mnt/local/sparkbox-poc
-            type: Directory
+            type: DirectoryOrCreate
         - name: gateway-trust
           secret:
             secretName: sparkbox-node-trust
