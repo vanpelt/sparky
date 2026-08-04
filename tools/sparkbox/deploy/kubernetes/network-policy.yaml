@@ -26,3 +26,67 @@ spec:
           protocol: TCP
         - port: 8081
           protocol: TCP
+---
+# The VM node is an egress gateway for its Firecracker children, so ordinary
+# Pod egress policy protects both the capability-free controller and forwarded
+# guest traffic after the helper's IPv4 masquerade. Keep the positive public
+# CIDR set aligned with sparkbox-net.sh's inner TAP policy: a DNS-derived sluice
+# grant can narrow this set, but can never make a private destination reachable.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vm-node-public-egress
+  namespace: sparkbox-poc
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: sparkbox
+      app.kubernetes.io/component: vm-node
+  egress:
+    - toServices:
+        - k8sService:
+            serviceName: sparkbox-gateway
+            namespace: sparkbox-poc
+      toPorts:
+        - ports:
+            - port: "2222"
+              protocol: TCP
+    - toServices:
+        - k8sService:
+            serviceName: coredns
+            namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toCIDRSet:
+        - cidr: 0.0.0.0/0
+          except:
+            - 0.0.0.0/8
+            - 10.0.0.0/8
+            - 100.64.0.0/10
+            - 127.0.0.0/8
+            - 169.254.0.0/16
+            - 172.16.0.0/12
+            - 192.0.0.0/24
+            - 192.0.2.0/24
+            - 192.88.99.0/24
+            - 192.168.0.0/16
+            - 198.18.0.0/15
+            - 198.51.100.0/24
+            - 203.0.113.0/24
+            - 224.0.0.0/4
+            - 240.0.0.0/4
+        - cidr: ::/0
+          except:
+            - ::/128
+            - ::1/128
+            - ::ffff:0:0/96
+            - 64:ff9b:1::/48
+            - 100::/64
+            - 2001:db8::/32
+            - fc00::/7
+            - fe80::/10
+            - ff00::/8

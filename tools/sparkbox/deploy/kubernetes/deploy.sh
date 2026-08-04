@@ -284,6 +284,7 @@ fi
 
 "${k[@]}" apply -f "$script_dir/service-accounts.yaml"
 "${k[@]}" apply -f "$script_dir/internal-service.yaml"
+"${k[@]}" apply -f "$script_dir/network-policy.yaml"
 
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \
@@ -356,7 +357,6 @@ else
   echo "  ssh -p 22 ctl@ssh.$proxy_domain node approve $node_fingerprint --guest-subnet 172.30.0.0/20" >&2
 fi
 
-"${k[@]}" apply -f "$script_dir/network-policy.yaml"
 "${k[@]}" -n "$namespace" delete deployment sparkbox --ignore-not-found --wait=true
 
 echo

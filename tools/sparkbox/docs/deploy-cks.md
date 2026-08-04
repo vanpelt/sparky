@@ -27,7 +27,9 @@ routing under `coreweave.app`; the VM node has no public Service.
 - A public `LoadBalancer` Service selecting only the gateway on ports 443 and
   22, plus an internal ClusterIP Service for the authenticated fleet link.
 - Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
-  admitted. The node has no admitted ingress.
+  admitted. The node has no admitted ingress. A Cilium egress policy permits
+  the VM node to reach only public IP space, cluster DNS, and the internal
+  gateway fleet service.
 - A Secret containing one operator's **public** SSH key.
 - A separately provisioned `sparkbox-identity` Secret containing the stable
   gateway, OIDC, and node-control identity, mounted only by the gateway. The
@@ -49,6 +51,47 @@ template, then exits before guest work starts. The Pod does not use host PID,
 network, IPC, or user namespaces. TAP devices, sysctls, NAT, and packet-filter
 rules therefore live in the Pod's network namespace instead of modifying the
 CKS Node's Cilium network namespace.
+
+## Egress isolation and sluice composition
+
+CKS applies two independent egress boundaries to the VM node. The helper builds
+stateful iptables chains inside the Pod network namespace before opening its
+Unix socket. Each TAP is pinned to its slot-derived guest address, private and
+non-global destinations are dropped, unsolicited forwarded traffic is dropped,
+and a guest may initiate host traffic only to DNS and the authenticated metadata
+service. The controller can still initiate SSH to a guest because established
+reply traffic is admitted. Failure to install or verify these chains prevents
+the helper from becoming ready.
+
+After guest IPv4 traffic is masqueraded to the Pod address and leaves the Pod
+veth, `vm-node-public-egress` supplies the outer Cilium boundary. Its positive
+allow-list contains public IPv4/IPv6 space with private, loopback, link-local,
+documentation, benchmark, multicast, and reserved ranges excluded. Separate
+service-aware rules permit only CoreDNS on TCP/UDP 53 and
+`sparkbox-gateway` on TCP 2222. This also prevents a compromised application
+controller from using the Pod network to move laterally through the cluster or
+CKS underlay.
+
+The optional sluice TAP firewall remains the finer policy and needs no bypass in
+either boundary. Packet processing is deliberately layered:
+
+```text
+guest -> sluice TC/eBPF allow-set (when tagged) -> TAP iptables ceiling
+      -> IPv4 masquerade -> Cilium Pod egress policy -> public destination
+```
+
+With `--guest-dns gateway`, a guest reaches sluice's node-local TCP/UDP DNS
+listener through the explicit host-DNS rule. Sluice may then narrow a tagged
+TAP to the IPs learned from allowed DNS answers. Even if an answer contains an
+RFC1918, link-local, or cluster address, the inner iptables ceiling still drops
+it and the outer Cilium policy independently refuses it. An untagged TAP in
+sluice's open mode can reach general public space, but it cannot reach internal
+space. Public-IP restrictions therefore remain the responsibility of sluice;
+the CKS controls are the non-bypassable internal-network ceiling.
+
+This manifest requires Cilium's `CiliumNetworkPolicy` CRD. `deploy.sh` applies
+the policy before starting the gateway and VM node, so the node never comes up
+with unrestricted Pod egress during an ordinary rollout.
 
 Because CKS runs with `--disable-host-rootfs-mounts`, creating a reusable
 template snapshot is currently refused. Pause/resume, checkpoints, archive and

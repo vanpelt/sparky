@@ -138,6 +138,8 @@ spec:
           env:
             - name: SPARKBOX_GUEST_SUBNET
               value: 172.30.0.0/20
+            - name: SPARKBOX_RESTRICT_INTERNAL_EGRESS
+              value: "1"
             - name: SPARKBOX_PRIVILEGED_HELPER_SOCKET
               value: /run/sparkbox-vmm/helper.sock
             - name: SPARKBOX_CONTROLLER_UID

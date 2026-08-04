@@ -33,22 +33,26 @@ const (
 	jailedMemName    = "mem.snap"
 	jailedStateName  = "state.snap"
 	userHZ           = 100
+	guestOutChain    = "SPARKBOX_GUEST_OUT"
+	guestInChain     = "SPARKBOX_GUEST_IN"
+	guestHostChain   = "SPARKBOX_GUEST_HOST"
 )
 
 var vmNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}$`)
 
 type ServerOptions struct {
-	SocketPath     string
-	FirecrackerBin string
-	KernelPath     string
-	VMStateDir     string
-	ChrootBase     string
-	Subnet         string
-	Subnet6        string
-	JailerUIDBase  int
-	ControllerUID  int
-	ControllerGID  int
-	Logger         *log.Logger
+	SocketPath             string
+	FirecrackerBin         string
+	KernelPath             string
+	VMStateDir             string
+	ChrootBase             string
+	Subnet                 string
+	Subnet6                string
+	JailerUIDBase          int
+	ControllerUID          int
+	ControllerGID          int
+	RestrictInternalEgress bool
+	Logger                 *log.Logger
 }
 
 type activeVM struct {
@@ -72,6 +76,12 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 		return err
 	}
 	defer unix.Close(s.stateFD) //nolint:errcheck
+	if opts.RestrictInternalEgress {
+		if err := s.validateRestrictedEgress(ctx); err != nil {
+			return err
+		}
+		s.opts.Logger.Printf("restricted guest egress enabled with per-TAP source pinning")
+	}
 	if err := os.MkdirAll(filepath.Dir(opts.SocketPath), 0o750); err != nil {
 		return fmt.Errorf("create helper socket directory: %w", err)
 	}
@@ -639,6 +649,11 @@ func (s *server) createTap(ctx context.Context, slot int) error {
 			return fmt.Errorf("%v: %w: %s", command, err, out)
 		}
 	}
+	if s.opts.RestrictInternalEgress {
+		if err := s.installTapSourceRules(ctx, slot); err != nil {
+			return err
+		}
+	}
 	exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv4.conf."+tap+".rp_filter=1").Run() //nolint:errcheck
 	if s.prefix6 != nil && s.uplink6 != "" {
 		exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv6.conf."+s.uplink6+".proxy_ndp=1").Run()              //nolint:errcheck
@@ -649,11 +664,85 @@ func (s *server) createTap(ctx context.Context, slot int) error {
 }
 
 func (s *server) cleanupSlot(slot int) error {
+	if s.opts.RestrictInternalEgress {
+		s.removeTapSourceRules(slot)
+	}
 	if s.prefix6 != nil && s.uplink6 != "" {
 		exec.Command("ip", "-6", "neigh", "del", "proxy", s.guestIP6(slot), "dev", s.uplink6).Run() //nolint:errcheck
 	}
 	exec.Command("ip", "link", "del", tapName(slot)).Run() //nolint:errcheck
 	return os.RemoveAll(s.jailWorkspace(slot))
+}
+
+type packetFilterRule struct {
+	binary string
+	chain  string
+	args   []string
+}
+
+// validateRestrictedEgress makes the helper fail closed if its entrypoint did
+// not install the immutable base chains. The helper adds only slot-derived
+// anti-spoof rules; the controller cannot choose an interface, source, chain,
+// or arbitrary iptables argument through the Unix protocol.
+func (s *server) validateRestrictedEgress(ctx context.Context) error {
+	checks := []packetFilterRule{
+		{binary: "iptables", chain: "FORWARD", args: []string{"-i", "sbtap+", "-j", guestOutChain}},
+		{binary: "iptables", chain: "FORWARD", args: []string{"-o", "sbtap+", "-j", guestInChain}},
+		{binary: "iptables", chain: "INPUT", args: []string{"-i", "sbtap+", "-j", guestHostChain}},
+	}
+	if s.prefix6 != nil {
+		checks = append(checks,
+			packetFilterRule{binary: "ip6tables", chain: "FORWARD", args: []string{"-i", "sbtap+", "-j", guestOutChain}},
+			packetFilterRule{binary: "ip6tables", chain: "FORWARD", args: []string{"-o", "sbtap+", "-j", guestInChain}},
+			packetFilterRule{binary: "ip6tables", chain: "INPUT", args: []string{"-i", "sbtap+", "-j", guestHostChain}},
+		)
+	}
+	for _, check := range checks {
+		args := append([]string{"-w", "-C", check.chain}, check.args...)
+		if out, err := exec.CommandContext(ctx, check.binary, args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("required restricted-egress rule missing (%s %s): %w: %s", check.binary, strings.Join(args, " "), err, out)
+		}
+	}
+	return nil
+}
+
+func (s *server) tapSourceRules(slot int) []packetFilterRule {
+	tap := tapName(slot)
+	guestSlot, _ := s.network.Slot(slot)
+	rules := []packetFilterRule{{
+		binary: "iptables",
+		chain:  guestOutChain,
+		args:   []string{"-i", tap, "!", "-s", guestSlot.Guest.String() + "/32", "-j", "DROP"},
+	}}
+	if s.prefix6 != nil {
+		rules = append(rules, packetFilterRule{
+			binary: "ip6tables",
+			chain:  guestOutChain,
+			args:   []string{"-i", tap, "!", "-s", s.guestIP6(slot) + "/128", "-j", "DROP"},
+		})
+	}
+	return rules
+}
+
+func (s *server) installTapSourceRules(ctx context.Context, slot int) error {
+	for _, rule := range s.tapSourceRules(slot) {
+		checkArgs := append([]string{"-w", "-C", rule.chain}, rule.args...)
+		if exec.CommandContext(ctx, rule.binary, checkArgs...).Run() == nil {
+			continue
+		}
+		insertArgs := append([]string{"-w", "-I", rule.chain, "1"}, rule.args...)
+		if out, err := exec.CommandContext(ctx, rule.binary, insertArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("pin %s source for slot %d: %w: %s", rule.binary, slot, err, out)
+		}
+	}
+	return nil
+}
+
+func (s *server) removeTapSourceRules(slot int) {
+	for _, rule := range s.tapSourceRules(slot) {
+		deleteArgs := append([]string{"-w", "-D", rule.chain}, rule.args...)
+		exec.Command(rule.binary, deleteArgs...).Run() //nolint:errcheck
+	}
 }
 
 func (s *server) sweepStaleTaps() {

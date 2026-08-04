@@ -12,6 +12,7 @@ type ServerOptions struct {
 	SocketPath, FirecrackerBin, KernelPath, VMStateDir, ChrootBase string
 	Subnet, Subnet6                                                string
 	JailerUIDBase, ControllerUID, ControllerGID                    int
+	RestrictInternalEgress                                         bool
 	Logger                                                         *log.Logger
 }
 

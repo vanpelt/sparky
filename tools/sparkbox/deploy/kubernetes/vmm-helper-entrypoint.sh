@@ -9,9 +9,18 @@ readonly hot_dir="$data_dir/hot"
 readonly vm_state_dir="${SPARKBOX_VM_STATE_DIR:-$hot_dir/controller}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 readonly guest_subnet6="${SPARKBOX_GUEST_SUBNET6:-}"
+readonly restrict_internal_egress="${SPARKBOX_RESTRICT_INTERNAL_EGRESS:-1}"
 readonly helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-/run/sparkbox-vmm/helper.sock}"
 readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
 readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
+
+case "$restrict_internal_egress" in
+	0|1) ;;
+	*)
+		echo "SPARKBOX_RESTRICT_INTERNAL_EGRESS must be 0 or 1" >&2
+		exit 1
+		;;
+esac
 
 for device in /dev/kvm /dev/net/tun; do
 	if [ ! -c "$device" ]; then
@@ -30,16 +39,24 @@ sysctl -q -w net.ipv4.conf.default.rp_filter=1 || true
 
 export SPARKBOX_EDGE_REDIRECT=0
 export SPARKBOX_GUEST_SUBNET="$guest_subnet"
+export SPARKBOX_GUEST_SUBNET6="$guest_subnet6"
+export SPARKBOX_RESTRICT_INTERNAL_EGRESS="$restrict_internal_egress"
 /usr/local/sbin/sparkbox-net.sh
 
-exec /usr/local/bin/sparkbox-vmm-helper serve \
-	--socket "$helper_socket" \
-	--firecracker "$asset_dir/firecracker" \
-	--kernel "$asset_dir/vmlinux" \
-	--vm-state-dir "$vm_state_dir" \
-	--chroot-base "$hot_dir/jailer" \
-	--subnet "$guest_subnet" \
-	--subnet6 "$guest_subnet6" \
-	--jailer-uid-base 100000 \
-	--controller-uid "$controller_uid" \
+helper_args=(
+	serve
+	--socket "$helper_socket"
+	--firecracker "$asset_dir/firecracker"
+	--kernel "$asset_dir/vmlinux"
+	--vm-state-dir "$vm_state_dir"
+	--chroot-base "$hot_dir/jailer"
+	--subnet "$guest_subnet"
+	--subnet6 "$guest_subnet6"
+	--jailer-uid-base 100000
+	--controller-uid "$controller_uid"
 	--controller-gid "$controller_gid"
+)
+if [ "$restrict_internal_egress" = 1 ]; then
+	helper_args+=(--restrict-internal-egress)
+fi
+exec /usr/local/bin/sparkbox-vmm-helper "${helper_args[@]}"

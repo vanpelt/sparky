@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -85,6 +86,26 @@ func TestChrootBaseIsSearchableButNotListable(t *testing.T) {
 	}
 	if got, want := info.Mode().Perm(), os.FileMode(0o711); got != want {
 		t.Fatalf("chroot base mode = %#o, want %#o", got, want)
+	}
+}
+
+func TestTapSourceRulesAreDerivedFromSlot(t *testing.T) {
+	_, prefix6, err := net.ParseCIDR("2001:db8:1234::/64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{network: guestnet.MustParse("172.30.0.0/20"), prefix6: prefix6.IP}
+	rules := s.tapSourceRules(7)
+	if got, want := len(rules), 2; got != want {
+		t.Fatalf("source rules = %d, want %d", got, want)
+	}
+	if got, want := rules[0].binary+" "+rules[0].chain+" "+strings.Join(rules[0].args, " "),
+		"iptables SPARKBOX_GUEST_OUT -i sbtap7 ! -s 172.30.0.30/32 -j DROP"; got != want {
+		t.Fatalf("IPv4 source rule = %q, want %q", got, want)
+	}
+	if got, want := rules[1].binary+" "+rules[1].chain+" "+strings.Join(rules[1].args, " "),
+		"ip6tables SPARKBOX_GUEST_OUT -i sbtap7 ! -s 2001:db8:1234::11/128 -j DROP"; got != want {
+		t.Fatalf("IPv6 source rule = %q, want %q", got, want)
 	}
 }
 
