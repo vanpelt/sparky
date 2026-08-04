@@ -94,6 +94,72 @@ func TestJailerUsesSlotScopedIdentityAndWorkspace(t *testing.T) {
 	}
 }
 
+func TestChrootJailerUsesCurrentMountNamespaceAndClearsIdentity(t *testing.T) {
+	cmd := chrootProcess(context.Background(), "/jails/firecracker/box/root", "firecracker", 100007)
+	if got, want := cmd.Path, "/firecracker"; got != want {
+		t.Fatalf("command path = %q, want %q", got, want)
+	}
+	if got, want := cmd.SysProcAttr.Chroot, "/jails/firecracker/box/root"; got != want {
+		t.Fatalf("chroot = %q, want %q", got, want)
+	}
+	cred := cmd.SysProcAttr.Credential
+	if cred == nil || cred.Uid != 100007 || cred.Gid != 100007 {
+		t.Fatalf("credential = %+v", cred)
+	}
+	if len(cred.Groups) != 1 || cred.Groups[0] != 100007 {
+		t.Fatalf("supplementary groups = %v, want only slot uid", cred.Groups)
+	}
+	if cmd.Env == nil || len(cmd.Env) != 0 {
+		t.Fatalf("environment = %v, want explicitly empty", cmd.Env)
+	}
+	if cmd.SysProcAttr.Cloneflags != 0 || cmd.SysProcAttr.Unshareflags != 0 {
+		t.Fatalf("chroot launcher requested a namespace: clone=%#x unshare=%#x",
+			cmd.SysProcAttr.Cloneflags, cmd.SysProcAttr.Unshareflags)
+	}
+}
+
+func TestCopyJailExecutableRejectsNonRegularSource(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "firecracker")
+	if err := copyJailExecutable(t.TempDir(), destination); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory executable error = %v", err)
+	}
+}
+
+func TestCopyJailExecutablePinsReadOnlyMode(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "firecracker")
+	if err := os.WriteFile(source, []byte("static-vmm"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "firecracker")
+	if err := copyJailExecutable(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o555); got != want {
+		t.Fatalf("jailed executable mode = %o, want %o", got, want)
+	}
+}
+
+func TestChrootAndExternalJailersAreMutuallyExclusive(t *testing.T) {
+	_, err := New(Options{JailerBin: "/jailer", ChrootJailer: true})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("mixed jailers error = %v", err)
+	}
+}
+
+func TestHostMountFreeModeRefusesTemplateSnapshot(t *testing.T) {
+	d := newTestDriver(t)
+	d.opts.DisableHostRootfsMounts = true
+	err := d.Snapshot(context.Background(), "box", "fork")
+	if err == nil || !strings.Contains(err.Error(), "host rootfs mounts are disabled") {
+		t.Fatalf("snapshot error = %v", err)
+	}
+}
+
 func TestJailerPairMustMatch(t *testing.T) {
 	dir := t.TempDir()
 	fake := func(name, version string) string {

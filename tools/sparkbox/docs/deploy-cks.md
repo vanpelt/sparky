@@ -20,8 +20,9 @@ routing under `coreweave.app`; the VM node has no public Service.
 - A 100 GiB `shared-vast` PVC mounted at `/mnt/sparkbox-durable` for durable
   gateway databases, edge certificate cache, and checkpoint objects.
 - Kubelet-managed device allocations for `/dev/kvm`, `/dev/net/tun`, and the
-  loop-device bundle used by the remaining guest-disk mount paths. The VM node
-  has no raw device `hostPath` volumes.
+  loop-device bundle used by the one-shot trusted-template preparation init
+  container. The running VM node receives KVM/TUN only and has no raw device
+  `hostPath` volumes.
 - A public `LoadBalancer` Service selecting only the gateway on ports 443 and
   22, plus an internal ClusterIP Service for the authenticated fleet link.
 - Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
@@ -30,18 +31,25 @@ routing under `coreweave.app`; the VM node has no public Service.
 - A separately provisioned `sparkbox-identity` Secret containing the stable
   gateway, OIDC, and node-control identity, mounted only by the gateway. The
   node receives a separate Secret containing only the gateway's public host-key
-  pin.
+  pin and public upstream login key.
 
 The VM node runs as root but with `privileged: false`. It drops the default
-capability set and receives only the capabilities currently required for the
-jailer, TAP/network setup, loop mounts, file ownership, and terminating
-per-VM UIDs. `CAP_SYS_ADMIN` and an unconfined outer seccomp/AppArmor profile
-remain significant privileges while jail construction and guest-disk mounts
-stay in this process; this is an intermediate boundary, not the final runtime
-shim. The Pod does not use host PID, network, IPC, or user namespaces. TAP
-devices, sysctls, NAT, and packet-filter rules therefore live in the Pod's
-network namespace instead of modifying the CKS Node's Cilium network
+capability set and receives only the capabilities required for TAP/network
+setup, chroot/device construction, file ownership, and terminating per-VM
+UIDs. It does not have `CAP_SYS_ADMIN` or loop devices. Firecracker runs in a
+per-VM chroot as `100000 + slot`, with an empty environment and no capabilities.
+The outer seccomp/AppArmor profile remains unconfined while this launcher is
+validated on CKS. The one-shot preparation init container holds `CAP_SYS_ADMIN`
+and the loop bundle only while patching the trusted base template, then exits
+before guest work starts. The Pod does not use host PID, network, IPC, or user
+namespaces. TAP devices, sysctls, NAT, and packet-filter rules therefore live in
+the Pod's network namespace instead of modifying the CKS Node's Cilium network
 namespace.
+
+Because CKS runs with `--disable-host-rootfs-mounts`, creating a reusable
+template snapshot is currently refused. Pause/resume, checkpoints, archive and
+restore remain available. Re-enable template snapshots only after fork identity
+sanitization runs inside the guest or a disposable mountless helper.
 
 The named host path survives deletion and replacement of the node Pod on the
 same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost
@@ -51,10 +59,11 @@ this manifest as a production deployment.
 
 On the first split rollout, `deploy.sh` stops the combined Pod, copies its
 SQLite databases and edge caches to VAST, and leaves `sandboxes.json` and VM
-files on the pinned Node. Before the VM node starts, its init container
+files on the pinned Node. Before the VM node starts, the first init container
 removes the retired gateway databases, edge TLS cache, and fleet private keys
-from the hostPath. The identity Secret is a required precondition and remains
-the recovery source for those keys.
+from the hostPath; the second prepares the trusted base image and exits. The
+identity Secret is a required precondition and remains the recovery source for
+the gateway's keys.
 
 The proposed path to durable identity and recoverable reflink-backed guest
 disks is documented in

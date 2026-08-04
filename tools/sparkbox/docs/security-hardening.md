@@ -7,10 +7,11 @@ smaller least-privilege node runtime.
 ## Boundary and threat model
 
 The Firecracker microVM is the primary guest/host boundary. Firecracker's
-built-in seccomp filters, deliberately small device model, and KVM are valuable,
-but the production posture also expects the matching `jailer`: it constructs a
-private mount namespace and chroot, gives the VMM only KVM/TUN device nodes,
-drops to an unprivileged uid/gid, and then execs Firecracker. See the upstream
+built-in seccomp filters, deliberately small device model, and KVM are valuable.
+On a conventional host the production posture also expects the matching
+`jailer`: it constructs a private mount namespace and chroot, gives the VMM only
+KVM/TUN device nodes, drops to an unprivileged uid/gid, and then execs
+Firecracker. See the upstream
 [jailer design](https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md)
 and [production host guidance](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md).
 
@@ -19,21 +20,30 @@ not fix a KVM or host-kernel vulnerability, a malicious host-side control
 service, unsafe parsing of a guest disk by the host, or unrestricted guest
 networking.
 
+The stock jailer necessarily calls `unshare(CLONE_NEWNS)`, `mount`, and
+`pivot_root`, which requires `CAP_SYS_ADMIN`. CKS instead uses Sparkbox's
+`--chroot-jailer`: the container runtime has already created the Pod mount
+namespace, and Sparkbox constructs a per-VM chroot in that namespace with only
+the Firecracker executable, KVM/TUN nodes, and explicitly linked VM resources.
+The child is execed as `100000 + network slot`, with that as its only
+supplementary group and an empty environment. It receives no Linux capabilities.
+
 The CKS integration now:
 
-- downloads and checksum-verifies a `jailer` from the same pinned Firecracker
-  v1.16.1 release, and refuses a runtime version mismatch;
+- downloads and checksum-verifies the pinned Firecracker v1.16.1 binary;
 - creates one chroot per VM and exposes only hard links to that VM's kernel,
   rootfs, and snapshot files;
 - assigns each concurrently live VM a different unprivileged uid/gid
   (`100000 + network slot`);
 - keeps Firecracker's own seccomp filter enabled;
-- keeps the VMM in the Pod's existing Kubernetes cgroup. The jailer is not
-  asked to mutate the container runtime's cgroup hierarchy.
+- keeps the VMM in the Pod's existing Kubernetes cgroup and mount namespace.
 
-The direct Firecracker launcher remains available when `--jailer` is empty so
-existing standalone and macOS-nested installations do not change underneath
-this POC.
+The external jailer remains available with `--jailer` for conventional hosts,
+and the direct launcher remains available when neither jail mode is selected.
+The tradeoff is explicit: the CKS launcher gives up the stock jailer's nested,
+per-VMM mount namespace to remove `CAP_SYS_ADMIN`; it retains the chroot,
+distinct UID, device minimization, empty environment, and zero-capability VMM
+inside the container runtime's mount boundary.
 
 ## Gateway/node split
 
@@ -48,7 +58,7 @@ unprivileged gateway Deployment
 authenticated fleet control + guest data path
    |
 dedicated CKS node runtime
-  KVM / TAP / jailer / VM disks / local metadata relay
+  KVM / TAP / chroot launcher / VM disks / local metadata relay
    |
 one jailed Firecracker process per sandbox
 ```
@@ -58,8 +68,9 @@ with `RuntimeDefault` seccomp, every capability dropped, privilege escalation
 disabled, and a read-only container root. It has no `/dev/kvm`, `/dev/net/tun`,
 or hostPath. The node has no public Service and mounts neither the account
 database nor `sparkbox-identity`; it receives only a public gateway host-key
-pin. A default-deny ingress policy admits the gateway's public/fleet ports and
-admits no node ingress.
+pin and the public upstream login key used to prepare the trusted base template.
+A default-deny ingress policy admits the gateway's public/fleet ports and admits
+no node ingress.
 
 The one-time cutover copies gateway databases and edge certificate caches to
 the RWX volume while the combined process is stopped. The node init container
@@ -106,37 +117,39 @@ a read-only root, mounts each health device read-only, and has no service
 account token.
 
 This improves scheduling and health reporting, applies device-cgroup scoping,
-and removes the KVM/TUN hostPaths from the VM node. The node is now
-`privileged: false`, but it is not yet a low-privilege application Pod:
+and removes the KVM/TUN hostPaths from the VM node. The long-lived node is now
+`privileged: false` and has no `CAP_SYS_ADMIN`:
 
 - TAP creation and route/filter setup still need `CAP_NET_ADMIN`;
-- the Firecracker jailer needs mount-namespace, pivot-root/chroot, `mknod`, and
-  uid/gid transition privileges;
-- disk maintenance currently needs `CAP_SYS_ADMIN` and loop devices.
+- chroot construction needs `MKNOD`, `SYS_CHROOT`, and uid/gid transition
+  privileges in the controller before it execs each zero-capability VMM;
+- trusted base-template patching still needs `CAP_SYS_ADMIN` and loop devices,
+  but now runs in a one-shot init container that exits before the controller
+  accepts fleet or guest work.
 
 The current plugin therefore also advertises one temporary
 `sparkbox.dev/loop` bundle containing `/dev/loop-control` and `/dev/loop0`
 through `/dev/loop7`. That is deliberately one atomic allocation, not eight
-independent claims: only one Sparkbox VM-node controller may own the host loop
-pool. It is narrower than privileged mode, which bypasses the device cgroup and
-grants every host device, but it remains part of the trusted runtime boundary.
+independent claims. Only the preparation init container receives it; the
+long-lived node requests KVM and TUN only. The allocation remains held for the
+Pod lifetime, but there is no running process in that container after startup.
 
 The VM-node container drops every default capability, adds only `CHOWN`,
-`DAC_OVERRIDE`, `FOWNER`, `KILL`, `MKNOD`, `NET_ADMIN`, `SETGID`, `SETUID`,
-`SYS_ADMIN`, and `SYS_CHROOT`, has a read-only root filesystem, and receives a
-bounded `/tmp`. Host PID/network/IPC namespaces and service-account credentials
-remain absent. Seccomp and AppArmor are explicitly unconfined for this
-intermediate step because the jailer must create a mount namespace and pivot
-root; a tested local profile belongs with the narrower runtime helper.
+`DAC_OVERRIDE`, `FOWNER`, `KILL`, `MKNOD`, `NET_ADMIN`, `SETGID`, `SETUID`, and
+`SYS_CHROOT`, has a read-only root filesystem, and receives a bounded `/tmp`.
+Host PID/network/IPC namespaces and service-account credentials remain absent.
+Seccomp and AppArmor are still explicitly unconfined while the chroot launcher
+is validated on CKS; selecting a tested outer profile is the next independent
+hardening step.
 
-So the useful order is:
+Remaining useful work is:
 
-1. Move disk parsing and, if necessary, jail construction into a narrow
-   host-native service or dedicated helper. Then remove `CAP_SYS_ADMIN` from the
-   long-lived controller.
-2. Remove the loop bundle after guest identity and tooling move to first boot
-   (or filesystem work moves into a disposable helper microVM).
-3. Install a tailored outer seccomp/AppArmor profile around the remaining
+1. Remove the preparation init container's loop bundle after trusted-template
+   tooling moves into the image build or a disposable helper microVM.
+2. Re-enable template snapshots with guest-side first-boot sanitization or a
+   mountless/disposable sanitizer; CKS currently refuses that operation rather
+   than mounting an attacker-controlled disk.
+3. Install a tailored outer seccomp/AppArmor profile around the controller and
    runtime. Kubernetes documents the available [kernel-level constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/).
 
 The architectural alternative is a node-level runtime shim or daemon rather
@@ -155,19 +168,23 @@ filesystem in the capability-bearing management Pod enlarges the trusted
 computing base from Firecracker/KVM to the host ext4 driver and every root
 process that walks the mount.
 
-This change closes two immediate issues:
+This change closes three immediate issues in CKS:
 
 - snapshot sanitization now uses `os.Root` beneath-root operations, so a guest
   symlink cannot redirect `/etc/hostname`, SSH-key removal, or secret cleanup
   into the management container;
 - the agent-tool refresher no longer loop-mounts `snap-*.ext4` user-derived
-  templates. It patches only release/operator base images.
+  templates. It patches only release/operator base images in the init container;
+- `Create` no longer mounts each VM disk to install the gateway key. The deploy
+  script derives the gateway's public upstream key into the public-only node
+  trust Secret, and the init container bakes it into the trusted base template;
+- template snapshot creation is explicitly refused under
+  `--disable-host-rootfs-mounts` instead of silently recovering the old mount.
 
-The remaining mounts are explicit technical debt:
+The remaining parsing is explicit technical debt:
 
-- `Create` mounts a VM disk to install the gateway public key;
-- snapshot-template creation mounts a cloned guest disk to clear identity;
-- the refresher mounts trusted base images;
+- the startup refresher loop-mounts trusted release/operator base images in the
+  completed init container;
 - `e2fsck`, `resize2fs`, `zerofree`, and `debugfs` parse filesystem metadata in
   host userspace even when they do not mount it.
 
@@ -184,7 +201,7 @@ mounted or parsed by the long-lived VM runtime.
 
 Before calling the CKS sandbox production-strength:
 
-- verify jailer launch, pause/resume, destroy, and stale-jail cleanup on the
+- verify chroot launch, pause/resume, destroy, and stale-jail cleanup on the
   actual CKS kernel and container runtime;
 - prove every VMM runs under its assigned non-root uid with a distinct chroot;
 - deny node-runtime ingress except the authenticated fleet/control path;

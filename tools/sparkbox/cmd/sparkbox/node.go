@@ -70,16 +70,18 @@ type nodeOptions struct {
 	vmStateDir string
 	keyDir     string
 
-	kernelPath       string
-	imageDir         string
-	jailerBin        string
-	jailerChrootBase string
-	jailerUIDBase    int
-	defaultLogin     string
-	guestSubnet      string
-	subnet6          string
-	guestDNS         string
-	sluiceSocket     string
+	kernelPath              string
+	imageDir                string
+	jailerBin               string
+	jailerChrootBase        string
+	jailerUIDBase           int
+	chrootJailer            bool
+	disableHostRootfsMounts bool
+	defaultLogin            string
+	guestSubnet             string
+	subnet6                 string
+	guestDNS                string
+	sluiceSocket            string
 	// metaAddr is where the guest metadata service binds. Empty disables it,
 	// which is what a node that should hand out no workload identity wants —
 	// but the default is the same port a gateway uses, because a guest asks its
@@ -188,6 +190,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		driver, err = newFirecrackerDriver(
 			opts.kernelPath, opts.imageDir, opts.vmStateDir,
 			opts.jailerBin, opts.jailerChrootBase, opts.jailerUIDBase,
+			opts.chrootJailer, opts.disableHostRootfsMounts,
 			opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS,
 		)
 		if err != nil {

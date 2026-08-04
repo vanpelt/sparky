@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -28,11 +29,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	xssh "golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -51,6 +54,12 @@ type Options struct {
 	// jailer from the same Firecracker release as FirecrackerBin. Empty keeps
 	// the legacy direct launcher.
 	JailerBin string
+	// ChrootJailer uses Sparkbox's capability-minimal launcher instead of the
+	// external Firecracker jailer. It gives each VMM the same private chroot and
+	// slot-scoped uid/gid, but relies on the container runtime's existing mount
+	// namespace rather than creating a nested one. This removes the launcher's
+	// CAP_SYS_ADMIN requirement. It is mutually exclusive with JailerBin.
+	ChrootJailer bool
 	// JailerChrootBase is the root-owned directory beneath which the jailer
 	// creates one chroot per live VM. Empty defaults to <VMStateDir>/jailer.
 	JailerChrootBase string
@@ -58,6 +67,11 @@ type Options struct {
 	// Each concurrently reserved network slot gets a distinct identity:
 	// JailerUIDBase + slot. Empty defaults to 100000.
 	JailerUIDBase int
+	// DisableHostRootfsMounts skips per-create key injection and refuses the
+	// template-snapshot operation, the two runtime paths that otherwise loop-
+	// mount an ext4 image in the management process. The selected templates must
+	// already carry the current gateway public key.
+	DisableHostRootfsMounts bool
 	// Subnet is an IPv4 CIDR carved into per-VM /30 slots. Empty uses the
 	// standalone compatibility default 172.30.0.0/16.
 	Subnet string
@@ -151,18 +165,23 @@ func New(opts Options) (*Driver, error) {
 			guestNetwork, guestNetwork.Capacity())
 	}
 	opts.Subnet = guestNetwork.String()
-	if opts.JailerBin != "" {
+	if opts.JailerBin != "" && opts.ChrootJailer {
+		return nil, errors.New("external jailer and chroot jailer are mutually exclusive")
+	}
+	if opts.JailerBin != "" || opts.ChrootJailer {
 		var err error
 		opts.FirecrackerBin, err = executablePath(opts.FirecrackerBin)
 		if err != nil {
 			return nil, fmt.Errorf("firecracker binary: %w", err)
 		}
-		opts.JailerBin, err = executablePath(opts.JailerBin)
-		if err != nil {
-			return nil, fmt.Errorf("jailer binary: %w", err)
-		}
-		if err := validateJailerPair(opts.FirecrackerBin, opts.JailerBin); err != nil {
-			return nil, err
+		if opts.JailerBin != "" {
+			opts.JailerBin, err = executablePath(opts.JailerBin)
+			if err != nil {
+				return nil, fmt.Errorf("jailer binary: %w", err)
+			}
+			if err := validateJailerPair(opts.FirecrackerBin, opts.JailerBin); err != nil {
+				return nil, err
+			}
 		}
 		if opts.JailerChrootBase == "" {
 			opts.JailerChrootBase = filepath.Join(opts.VMStateDir, "jailer")
@@ -305,7 +324,7 @@ func (d *Driver) vmDir(name string) string {
 	return filepath.Join(d.opts.VMStateDir, "fc-vms", name)
 }
 
-func (d *Driver) jailed() bool { return d.opts.JailerBin != "" }
+func (d *Driver) jailed() bool { return d.opts.JailerBin != "" || d.opts.ChrootJailer }
 
 // Slot-derived IDs and identities are unique among live VMs because freeSlot
 // reserves the slot for the lifetime of vmState, including while paused. They
@@ -332,6 +351,119 @@ func (d *Driver) cleanupJail(idx int) error {
 		return nil
 	}
 	return os.RemoveAll(d.jailWorkspace(idx))
+}
+
+// prepareChrootJail builds the small filesystem view used by Sparkbox's
+// no-SYS_ADMIN launcher. The container runtime has already put the Pod in its
+// own mount namespace, so this launcher needs only chroot(2), a distinct uid,
+// and the two device nodes Firecracker opens. The VMM inherits no directory
+// descriptors and receives no capabilities after setuid.
+func (d *Driver) prepareChrootJail(idx int) error {
+	root := d.jailRoot(idx)
+	if err := os.MkdirAll(filepath.Join(root, "dev", "net"), 0o755); err != nil {
+		return fmt.Errorf("create chroot jail: %w", err)
+	}
+	uid := d.jailUID(idx)
+	binName := filepath.Base(d.opts.FirecrackerBin)
+	if err := copyJailExecutable(d.opts.FirecrackerBin, filepath.Join(root, binName)); err != nil {
+		return err
+	}
+	for _, device := range []struct{ source, destination string }{
+		{"/dev/kvm", filepath.Join(root, "dev", "kvm")},
+		{"/dev/net/tun", filepath.Join(root, "dev", "net", "tun")},
+	} {
+		if err := cloneJailDevice(device.source, device.destination, uid); err != nil {
+			return err
+		}
+	}
+	if err := os.Chown(root, uid, uid); err != nil {
+		return fmt.Errorf("own chroot jail root: %w", err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return fmt.Errorf("protect chroot jail root: %w", err)
+	}
+	return nil
+}
+
+func copyJailExecutable(source, destination string) (retErr error) {
+	in, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open firecracker executable: %w", err)
+	}
+	defer in.Close() //nolint:errcheck
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat firecracker executable: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("firecracker executable %s is not a regular file", source)
+	}
+	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o555)
+	if err != nil {
+		return fmt.Errorf("create jailed firecracker executable: %w", err)
+	}
+	defer func() {
+		if err := out.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close jailed firecracker executable: %w", err)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy firecracker executable into jail: %w", err)
+	}
+	// Do not let the controller's umask accidentally make this root-owned copy
+	// non-executable by the slot UID that will exec it.
+	if err := out.Chmod(0o555); err != nil {
+		return fmt.Errorf("set jailed firecracker executable mode: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync jailed firecracker executable: %w", err)
+	}
+	return nil
+}
+
+func cloneJailDevice(source, destination string, uid int) error {
+	var st unix.Stat_t
+	if err := unix.Stat(source, &st); err != nil {
+		return fmt.Errorf("stat jail device %s: %w", source, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFCHR {
+		return fmt.Errorf("jail device %s is not a character device", source)
+	}
+	if err := unix.Mknod(destination, unix.S_IFCHR|0o600, int(st.Rdev)); err != nil {
+		return fmt.Errorf("create jail device %s: %w", destination, err)
+	}
+	if err := os.Chown(destination, uid, uid); err != nil {
+		return fmt.Errorf("own jail device %s: %w", destination, err)
+	}
+	return nil
+}
+
+func (d *Driver) chrootJailerCommand(ctx context.Context, idx int) (*exec.Cmd, error) {
+	if err := d.prepareChrootJail(idx); err != nil {
+		return nil, err
+	}
+	return chrootProcess(ctx, d.jailRoot(idx), filepath.Base(d.opts.FirecrackerBin), d.jailUID(idx)), nil
+}
+
+func chrootProcess(ctx context.Context, root, executable string, jailUID int) *exec.Cmd {
+	uid := uint32(jailUID)
+	cmd := exec.CommandContext(ctx, "/"+executable,
+		"--api-sock", jailedSocketName,
+	)
+	cmd.Dir = "/"
+	// The stock jailer intentionally clears its environment before exec. Keep
+	// the same property: none of the controller's deployment or fleet settings
+	// are inputs to the VMM.
+	cmd.Env = []string{}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Chroot: root,
+		Credential: &syscall.Credential{
+			Uid:    uid,
+			Gid:    uid,
+			Groups: []uint32{uid},
+		},
+	}
+	return cmd
 }
 
 func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
@@ -428,8 +560,10 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 			return nil, err
 		}
 	}
-	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
-		return nil, fmt.Errorf("install gateway key: %w", err)
+	if !d.opts.DisableHostRootfsMounts {
+		if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
+			return nil, fmt.Errorf("install gateway key: %w", err)
+		}
 	}
 
 	d.mu.Lock()
@@ -546,7 +680,7 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 
 	vmCtx, cancel := context.WithCancel(context.Background())
 	var cmd *exec.Cmd
-	if d.jailed() {
+	if d.opts.JailerBin != "" {
 		uid := d.jailUID(st.idx)
 		cmd = exec.CommandContext(vmCtx, d.opts.JailerBin,
 			"--id", jailID(st.idx),
@@ -557,6 +691,13 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			"--",
 			"--api-sock", jailedSocketName,
 		)
+	} else if d.opts.ChrootJailer {
+		cmd, err = d.chrootJailerCommand(vmCtx, st.idx)
+		if err != nil {
+			cancel()
+			d.cleanupJail(st.idx) //nolint:errcheck
+			return fmt.Errorf("prepare chroot jail: %w", err)
+		}
 	} else {
 		cmd = sdk.VMCommandBuilder{}.
 			WithBin(d.opts.FirecrackerBin).
@@ -975,6 +1116,9 @@ func (d *Driver) RootfsPresent(name string) (bool, error) {
 func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	if !imageNameRe.MatchString(newImage) {
 		return fmt.Errorf("invalid snapshot image name %q", newImage)
+	}
+	if d.opts.DisableHostRootfsMounts {
+		return errors.New("template snapshots are disabled because host rootfs mounts are disabled")
 	}
 	rootfs, err := d.stoppedRootfs(name)
 	if err != nil {

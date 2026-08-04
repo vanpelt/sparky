@@ -224,10 +224,13 @@ temporary_dir=$(mktemp -d)
 users_file="$temporary_dir/users.conf"
 gateway_private_file="$temporary_dir/gateway_host_key.pem"
 gateway_public_file="$temporary_dir/gateway_host_key.pub"
+gateway_upstream_private_file="$temporary_dir/gateway_upstream_key.pem"
+gateway_upstream_public_file="$temporary_dir/gateway_upstream_key.pub"
 known_hosts_file="$temporary_dir/known_hosts"
 cleanup() {
   rm -f \
     "$users_file" "$gateway_private_file" "$gateway_public_file" \
+    "$gateway_upstream_private_file" "$gateway_upstream_public_file" \
     "$known_hosts_file"
   rmdir "$temporary_dir" 2>/dev/null || true
 }
@@ -249,8 +252,14 @@ fi
   > "$gateway_private_file"
 chmod 0600 "$gateway_private_file"
 ssh-keygen -y -f "$gateway_private_file" > "$gateway_public_file"
+"${k[@]}" -n "$namespace" get secret "$identity_secret" \
+  -o 'go-template={{index .data "gateway_upstream_key.pem" | base64decode}}' \
+  > "$gateway_upstream_private_file"
+chmod 0600 "$gateway_upstream_private_file"
+ssh-keygen -y -f "$gateway_upstream_private_file" > "$gateway_upstream_public_file"
 "${k[@]}" -n "$namespace" create secret generic sparkbox-node-trust \
   --from-file="gateway_host_key.pub=$gateway_public_file" \
+  --from-file="gateway_upstream_key.pub=$gateway_upstream_public_file" \
   --dry-run=client -o yaml | "${k[@]}" apply -f -
 
 # The old combined Pod must be stopped before its SQLite WAL and control

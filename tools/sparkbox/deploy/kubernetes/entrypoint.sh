@@ -3,6 +3,16 @@
 # this Pod's network namespace, then run the private Sparkbox VM node as PID 1.
 set -euo pipefail
 
+mode=run
+if [ "${1:-}" = prepare ]; then
+  mode=prepare
+  shift
+fi
+if [ "$#" -gt 0 ] && [ "$mode" = prepare ]; then
+  echo "prepare mode accepts no additional arguments" >&2
+  exit 2
+fi
+
 readonly data_dir="${SPARKBOX_DATA_DIR:-/var/lib/sparkbox}"
 readonly asset_dir="$data_dir/assets"
 readonly image_dir="$data_dir/images"
@@ -24,6 +34,9 @@ readonly node_name="${SPARKBOX_NODE_NAME:-cks-poc}"
 readonly cluster_id="${SPARKBOX_CLUSTER_ID:-$node_name}"
 readonly gateway_addr="${SPARKBOX_GATEWAY_ADDR:-}"
 readonly node_key_dir="${SPARKBOX_NODE_KEY_DIR:-$data_dir/node-identity}"
+readonly skip_prepare="${SPARKBOX_SKIP_PREPARE:-false}"
+readonly chroot_jailer="${SPARKBOX_CHROOT_JAILER:-false}"
+readonly disable_host_rootfs_mounts="${SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS:-false}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
 if [ -z "$proxy_advertise_port" ]; then
   if [ "$proxy_tls" = true ]; then
@@ -106,20 +119,23 @@ fetch_upstream_jailer() {
   rm -rf "$temporary_dir"
 }
 
-if [ ! -c /dev/kvm ]; then
-  echo "/dev/kvm is not a character device; check the sparkbox.dev/kvm allocation" >&2
-  exit 1
-fi
-if [ ! -c /dev/net/tun ]; then
-  echo "/dev/net/tun is not a character device; check the sparkbox.dev/tun allocation" >&2
-  exit 1
-fi
-for loop_device in /dev/loop-control /dev/loop{0..7}; do
-  if [ ! -b "$loop_device" ] && [ ! -c "$loop_device" ]; then
-    echo "$loop_device is not a device; check the sparkbox.dev/loop allocation" >&2
+if [ "$mode" = prepare ]; then
+  for loop_device in /dev/loop-control /dev/loop{0..7}; do
+    if [ ! -b "$loop_device" ] && [ ! -c "$loop_device" ]; then
+      echo "$loop_device is not a device; check the sparkbox.dev/loop allocation" >&2
+      exit 1
+    fi
+  done
+else
+  if [ ! -c /dev/kvm ]; then
+    echo "/dev/kvm is not a character device; check the sparkbox.dev/kvm allocation" >&2
     exit 1
   fi
-done
+  if [ ! -c /dev/net/tun ]; then
+    echo "/dev/net/tun is not a character device; check the sparkbox.dev/tun allocation" >&2
+    exit 1
+  fi
+fi
 
 # Sparkbox clones a large sparse ext4 template for every VM. Reflinks make that
 # operation instant and avoid consuming the template's full logical size.
@@ -140,50 +156,60 @@ compressed_rootfs="$asset_dir/universal-${artifact_arch}.ext4.zst"
 rootfs="$image_dir/universal.ext4"
 rootfs_marker="$image_dir/.universal-${release}-${rootfs_sha256}.ready"
 
-fetch_checked \
-  "$artifact_base/$release/firecracker-$artifact_arch" \
-  "$firecracker_sha256" \
-  "$firecracker"
-# Releases cut after jailer support carry this beside Firecracker. Keep the
-# pinned upstream fallback so a new CKS image can roll against the existing
-# v0.5.3 artifact set without losing the security improvement.
-if ! fetch_checked \
-  "$artifact_base/$release/jailer-$artifact_arch" \
-  "$jailer_sha256" \
-  "$jailer"; then
-  fetch_upstream_jailer "$jailer"
-fi
-fetch_checked \
-  "$artifact_base/$release/vmlinux-$artifact_arch" \
-  "$kernel_sha256" \
-  "$kernel"
-fetch_checked \
-  "$artifact_base/$release/universal-$artifact_arch.ext4.zst" \
-  "$rootfs_sha256" \
-  "$compressed_rootfs"
-chmod 0755 "$firecracker" "$jailer"
+if [ "$mode" = prepare ] || [ "$skip_prepare" != true ]; then
+  fetch_checked \
+    "$artifact_base/$release/firecracker-$artifact_arch" \
+    "$firecracker_sha256" \
+    "$firecracker"
+  # Releases cut after jailer support carry this beside Firecracker. Keep the
+  # pinned upstream fallback for deployments that still select the external
+  # jailer. The chroot launcher deliberately needs no jailer binary.
+  if [ "$chroot_jailer" != true ]; then
+    if ! fetch_checked \
+      "$artifact_base/$release/jailer-$artifact_arch" \
+      "$jailer_sha256" \
+      "$jailer"; then
+      fetch_upstream_jailer "$jailer"
+    fi
+    chmod 0755 "$jailer"
+  fi
+  fetch_checked \
+    "$artifact_base/$release/vmlinux-$artifact_arch" \
+    "$kernel_sha256" \
+    "$kernel"
+  fetch_checked \
+    "$artifact_base/$release/universal-$artifact_arch.ext4.zst" \
+    "$rootfs_sha256" \
+    "$compressed_rootfs"
+  chmod 0755 "$firecracker"
 
-if [ ! -f "$rootfs_marker" ] || [ ! -f "$rootfs" ]; then
-  temporary_rootfs="$image_dir/.universal.ext4.decompressing"
-  rm -f "$temporary_rootfs"
-  echo "decompressing universal rootfs (the sparse image has a large logical size)"
-  zstd --decompress --force --sparse -T0 \
-    --output-dir-flat "$image_dir" "$compressed_rootfs"
-  # zstd preserves the source basename, minus .zst.
-  mv "$image_dir/universal-${artifact_arch}.ext4" "$temporary_rootfs"
-  mv "$temporary_rootfs" "$rootfs"
-  rm -f "$image_dir"/.universal-*.ready
-  : > "$rootfs_marker"
+  if [ ! -f "$rootfs_marker" ] || [ ! -f "$rootfs" ]; then
+    temporary_rootfs="$image_dir/.universal.ext4.decompressing"
+    rm -f "$temporary_rootfs"
+    echo "decompressing universal rootfs (the sparse image has a large logical size)"
+    zstd --decompress --force --sparse -T0 \
+      --output-dir-flat "$image_dir" "$compressed_rootfs"
+    # zstd preserves the source basename, minus .zst.
+    mv "$image_dir/universal-${artifact_arch}.ext4" "$temporary_rootfs"
+    mv "$temporary_rootfs" "$rootfs"
+    rm -f "$image_dir"/.universal-*.ready
+    : > "$rootfs_marker"
+  fi
+
+  # The released rootfs intentionally carries no fast-moving agent CLIs. Patch
+  # the template before opening the gateway so every newly created sandbox gets
+  # the same claude/codex/pi/hivemind toolchain and workload-identity payload as
+  # other Sparkbox hosts.
+  IMAGES_DIR="$image_dir" \
+  TOOLS_DIR="$tools_dir" \
+  GUEST_IDENTITY=/usr/local/sbin/sparkbox-install-guest-identity.sh \
+    /usr/local/sbin/sparkbox-refresh-tools.sh
 fi
 
-# The released rootfs intentionally carries no fast-moving agent CLIs. Patch
-# the template before opening the gateway so every newly created sandbox gets
-# the same claude/codex/pi/hivemind toolchain and workload-identity payload as
-# other Sparkbox hosts.
-IMAGES_DIR="$image_dir" \
-TOOLS_DIR="$tools_dir" \
-GUEST_IDENTITY=/usr/local/sbin/sparkbox-install-guest-identity.sh \
-  /usr/local/sbin/sparkbox-refresh-tools.sh
+if [ "$mode" = prepare ]; then
+  echo "VM assets and trusted templates are prepared"
+  exit 0
+fi
 
 # These sysctls and packet-filter rules affect only the Pod network namespace:
 # the CKS node and its Calico data plane remain untouched.
@@ -211,6 +237,13 @@ role_args=(
   --users /etc/sparkbox/users/users.conf
   --cluster-id "$cluster_id"
 )
+jail_args=(--jailer "$jailer")
+if [ "$chroot_jailer" = true ]; then
+  jail_args=(--chroot-jailer)
+fi
+if [ "$disable_host_rootfs_mounts" = true ]; then
+  jail_args+=(--disable-host-rootfs-mounts)
+fi
 metrics_addr=
 if [ -n "$gateway_addr" ]; then
   role_args=(
@@ -233,7 +266,7 @@ exec /usr/local/bin/sparkbox serve \
   --checkpoint-prefix checkpoints \
   --kernel "$kernel" \
   --image-dir "$image_dir" \
-  --jailer "$jailer" \
+  "${jail_args[@]}" \
   --guest-subnet "$guest_subnet" \
   --ssh-addr :2222 \
   --ssh-advertise-host "$ssh_advertise_host" \

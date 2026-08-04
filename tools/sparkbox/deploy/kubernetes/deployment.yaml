@@ -66,6 +66,58 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/sparkbox
+        - name: prepare-vm-assets
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          args:
+            - prepare
+          env:
+            - name: SPARKBOX_PROXY_DOMAIN
+              value: __SPARKBOX_PROXY_DOMAIN__
+            - name: SPARKBOX_RELEASE
+              value: v0.5.3
+            - name: SPARKBOX_CHROOT_JAILER
+              value: "true"
+            - name: GATEWAY_PUBLIC_KEY_FILE
+              value: /run/sparkbox/trust/gateway_upstream_key.pub
+          securityContext:
+            # This one-shot container owns the remaining trusted-template loop
+            # mounts and exits before the VM controller accepts guest traffic.
+            allowPrivilegeEscalation: true
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SYS_ADMIN
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: Unconfined
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 4Gi
+              sparkbox.dev/loop: "1"
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 20Gi
+              sparkbox.dev/loop: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sparkbox
+            - name: gateway-trust
+              mountPath: /run/sparkbox/trust
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: sparkbox-node
           image: __SPARKBOX_IMAGE__
@@ -85,6 +137,12 @@ spec:
               value: cks-poc
             - name: SPARKBOX_NODE_KEY_DIR
               value: /var/lib/sparkbox/node-identity
+            - name: SPARKBOX_SKIP_PREPARE
+              value: "true"
+            - name: SPARKBOX_CHROOT_JAILER
+              value: "true"
+            - name: SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS
+              value: "true"
           securityContext:
             allowPrivilegeEscalation: false
             appArmorProfile:
@@ -100,7 +158,6 @@ spec:
                 - NET_ADMIN
                 - SETGID
                 - SETUID
-                - SYS_ADMIN
                 - SYS_CHROOT
             privileged: false
             readOnlyRootFilesystem: true
@@ -119,14 +176,12 @@ spec:
               ephemeral-storage: 40Gi
               sparkbox.dev/kvm: "1"
               sparkbox.dev/tun: "1"
-              sparkbox.dev/loop: "1"
             limits:
               cpu: "8"
               memory: 24Gi
               ephemeral-storage: 100Gi
               sparkbox.dev/kvm: "1"
               sparkbox.dev/tun: "1"
-              sparkbox.dev/loop: "1"
           startupProbe:
             tcpSocket:
               port: metrics
