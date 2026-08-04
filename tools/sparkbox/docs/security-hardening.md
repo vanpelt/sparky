@@ -147,7 +147,10 @@ the helper into a general root command or arbitrary-path service.
 
 The helper launches Firecracker as `100000 + slot`, outside the controller's
 process namespace, and gives the controller group traverse access only to that
-VM's API socket. The launch-client handshake acknowledges shutdown only after
+VM's API socket. The root-owned jail collection is mode `0711` (searchable but
+not listable), each active VM root is mode `0710` for the controller group, and
+the in-jail KVM/TUN nodes remain mode `0600` for the slot-scoped VMM UID. The
+launch-client handshake acknowledges shutdown only after
 Firecracker has exited and the helper has removed the TAP and chroot, so slot
 reuse cannot race privileged cleanup. CPU metering uses a dedicated read-only
 helper operation rather than sharing the Pod PID namespace.

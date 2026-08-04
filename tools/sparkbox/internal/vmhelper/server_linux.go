@@ -157,7 +157,7 @@ func newServer(opts ServerOptions) (*server, error) {
 			return nil, fmt.Errorf("helper requires character device %s", device)
 		}
 	}
-	if err := os.MkdirAll(opts.ChrootBase, 0o700); err != nil {
+	if err := ensureChrootBase(opts.ChrootBase); err != nil {
 		return nil, fmt.Errorf("create chroot base: %w", err)
 	}
 	stateFD, err := unix.Open(opts.VMStateDir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -175,6 +175,18 @@ func newServer(opts ServerOptions) (*server, error) {
 		s.uplink6 = defaultRoute6Dev()
 	}
 	return s, nil
+}
+
+// ensureChrootBase makes the root-owned jail collection searchable but not
+// listable. The controller needs to traverse this fixed path to the one
+// per-VM API socket that the helper explicitly shares with its group. Each
+// jail root remains 0710, and the VMM device nodes remain 0600 under the
+// slot-scoped UID, so traversal does not expose KVM or TUN to the controller.
+func ensureChrootBase(path string) error {
+	if err := os.MkdirAll(path, 0o711); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o711)
 }
 
 func peerUID(conn *net.UnixConn) (uint32, error) {

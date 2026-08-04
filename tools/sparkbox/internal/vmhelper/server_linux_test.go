@@ -74,6 +74,20 @@ func TestServerRejectsBroadConfiguredRootsBeforeTouchingDevices(t *testing.T) {
 	}
 }
 
+func TestChrootBaseIsSearchableButNotListable(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "jailer")
+	if err := ensureChrootBase(base); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o711); got != want {
+		t.Fatalf("chroot base mode = %#o, want %#o", got, want)
+	}
+}
+
 func TestPeerUIDComesFromUnixCredentials(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "helper.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})

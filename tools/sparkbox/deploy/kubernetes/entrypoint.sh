@@ -230,7 +230,10 @@ if [ "$mode" = prepare ]; then
 	mkdir -p "$hot_dir/jailer"
 	chown 0:0 "$hot_dir" "$hot_dir/jailer"
 	chmod 0755 "$hot_dir"
-	chmod 0700 "$hot_dir/jailer"
+	# The unprivileged controller needs search-only access to the fixed path of
+	# each helper-published Firecracker API socket. It cannot list this directory;
+	# per-VM jail roots further restrict traversal to the controller group.
+	chmod 0711 "$hot_dir/jailer"
 	echo "VM assets and trusted templates are prepared"
 	exit 0
 fi
