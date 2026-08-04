@@ -193,6 +193,34 @@ esac
 	}
 }
 
+func TestCKSServicePreloadsCommonHTTPSPorts(t *testing.T) {
+	manifest, err := os.ReadFile("kubernetes/service.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(manifest)
+	for _, port := range []string{
+		"3000", "3001", "4000", "4200", "5000", "5173", "6006",
+		"7860", "8000", "8080", "8443", "8501", "8888", "9000",
+	} {
+		for _, want := range []string{"name: https-" + port, "port: " + port} {
+			if !strings.Contains(got, want) {
+				t.Errorf("CKS Service missing common HTTPS mapping %q", want)
+			}
+		}
+	}
+	if !strings.Contains(got, "name: http\n") || !strings.Contains(got, "port: 80\n") {
+		t.Fatal("CKS Service missing public HTTP redirect port 80")
+	}
+	if strings.Contains(got, "name: https-8081") {
+		t.Fatal("CKS Service must not advertise internal gateway listener port 8081")
+	}
+	if strings.Count(got, "targetPort: https") != 16 {
+		t.Fatalf("HTTP(S) mappings = %d, want ports 80/443 plus fourteen common HTTPS ports",
+			strings.Count(got, "targetPort: https"))
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

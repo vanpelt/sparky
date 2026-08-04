@@ -24,8 +24,11 @@ routing under `coreweave.app`; the VM node has no public Service.
   loop-device bundle used by the one-shot trusted-template preparation init
   container. At runtime only the VMM helper receives KVM/TUN; the application
   controller receives no devices. There are no raw device `hostPath` volumes.
-- A public `LoadBalancer` Service selecting only the gateway on ports 443 and
-  22, plus an internal ClusterIP Service for the authenticated fleet link.
+- A public `LoadBalancer` Service selecting only the gateway on SSH port 22,
+  HTTP redirect port 80, HTTPS port 443, and common HTTPS development ports
+  3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8443, 8501,
+  8888, and 9000, plus an internal ClusterIP Service for the authenticated
+  fleet link.
 - Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
   admitted. The node has no admitted ingress. A Cilium egress policy permits
   the VM node to reach only public IP space, cluster DNS, and the internal
@@ -88,9 +91,9 @@ data plane.
 
 There is also a public-edge distinction. Sparkbox can preserve an arbitrary
 original destination port when the host firewall funnels an any-port range to
-its HTTPS listener, but the CKS LoadBalancer Service exposes only 22 and 443.
-In this deployment, configure the sandbox's HTTPS route to target guest port
-6743 and access it through public port 443. A direct
+its HTTPS listener. The CKS LoadBalancer preloads several common development
+ports, but does not expose 6743 by default. Configure the sandbox's HTTPS route
+to target guest port 6743 and access it through public port 443. A direct
 `https://<sandbox>.<domain>:6743` requires an additional LoadBalancer port or an
 equivalent any-port funnel; merely listening on 6743 inside the VM does not
 publish that port.
@@ -106,6 +109,13 @@ listener still terminates TLS and enforces Sparkbox route authentication:
 tools/sparkbox/deploy/kubernetes/public-port.sh add 6454
 tools/sparkbox/deploy/kubernetes/public-port.sh list
 ```
+
+Ports 3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8443,
+8501, 8888, and 9000 are declared in `service.yaml` and therefore survive an
+ordinary manifest re-apply. Port 80 feeds the gateway's cleartext-to-HTTPS
+redirect. Use the helper for an additional experimental port such as 6454.
+Port 8081 is intentionally absent: it is the gateway's internal listener and
+is interpreted as the route's default rather than as guest port 8081.
 
 After the load balancer finishes programming the change, both
 `https://foo.<domain>:6454` and `https://bar.<domain>:6454` reach the gateway.
@@ -130,6 +140,15 @@ Gateway to 64 listeners, so it does not express an all-port listener. A future
 Gateway API version of this experiment would dynamically add TLS passthrough
 listeners and continue terminating TLS in Sparkbox; guest-prefix routing remains
 a separate Cilium or WireGuard concern.
+
+The similarly common database ports 3306, 5432, 27017, and 6379 are not
+included. The current gateway accepts HTTPS and forwards HTTP after terminating
+TLS; it is not a generic MySQL, PostgreSQL, MongoDB, or Redis TCP proxy. Those
+protocols also carry neither an HTTP hostname nor Sparkbox's browser session,
+so publishing their ports would bypass the existing sandbox selection and
+private-route authentication model. Raw TCP exposure needs a separate explicit
+route type, protocol-appropriate identity, and an edge that leaves private
+routes unpublished.
 
 The Sparkbox controller runs as UID/GID 65532, drops every capability, receives
 no devices, and uses `RuntimeDefault` seccomp/AppArmor. A separate root
