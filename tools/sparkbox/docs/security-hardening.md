@@ -145,6 +145,12 @@ from immutable startup configuration. A compromised controller can request the
 same start/stop/snapshot operations it could already perform, but cannot turn
 the helper into a general root command or arbitrary-path service.
 
+Firecracker is a child of the helper, so Kubernetes charges guest memory and
+VMM CPU to the helper cgroup. The deployment assigns 7 CPU / 23 GiB of the
+existing 8 CPU / 24 GiB Pod limit to that container and caps the controller at
+1 CPU / 1 GiB. A small sidecar limit would kill the helper as soon as the VMM
+maps guest RAM, even though the controller itself remains nearly idle.
+
 The helper launches Firecracker as `100000 + slot`, outside the controller's
 process namespace, and gives the controller group traverse access only to that
 VM's API socket. The root-owned jail collection is mode `0711` (searchable but

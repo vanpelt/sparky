@@ -175,13 +175,15 @@ spec:
               type: RuntimeDefault
           resources:
             requests:
-              cpu: 50m
-              memory: 32Mi
+              # Firecracker is this container's child, so guest RAM is charged
+              # to this cgroup rather than to the unprivileged controller.
+              cpu: "3500m"
+              memory: 11Gi
               sparkbox.dev/kvm: "1"
               sparkbox.dev/tun: "1"
             limits:
-              cpu: 500m
-              memory: 128Mi
+              cpu: "7"
+              memory: 23Gi
               sparkbox.dev/kvm: "1"
               sparkbox.dev/tun: "1"
           readinessProbe:
@@ -256,12 +258,12 @@ spec:
               protocol: TCP
           resources:
             requests:
-              cpu: "4"
-              memory: 12Gi
+              cpu: 500m
+              memory: 1Gi
               ephemeral-storage: 40Gi
             limits:
-              cpu: "8"
-              memory: 24Gi
+              cpu: "1"
+              memory: 1Gi
               ephemeral-storage: 100Gi
           startupProbe:
             tcpSocket:
