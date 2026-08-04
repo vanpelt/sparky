@@ -155,6 +155,44 @@ func TestCKSCleanInstallSkipsLegacyMigration(t *testing.T) {
 	}
 }
 
+func TestCKSPublicPortPrototypeTargetsOneHTTPSListener(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "kubectl.log")
+	writeExecutable(t, filepath.Join(tmp, "kubectl"), `#!/bin/sh
+printf '%s\n' "$*" >> "$SPARKBOX_TEST_LOG"
+case " $* " in
+  *" get service "*)
+    printf '22\tssh\tssh\n443\thttps\thttps\n'
+    ;;
+esac
+`)
+
+	cmd := exec.Command("bash", "kubernetes/public-port.sh",
+		"--context", "test", "--namespace", "sandbox-test", "add", "6454")
+	cmd.Env = append(os.Environ(),
+		"PATH="+tmp+":"+os.Getenv("PATH"),
+		"SPARKBOX_TEST_LOG="+logPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add public port: %v\n%s", err, out)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(logged)
+	for _, want := range []string{
+		"--context test -n sandbox-test patch service sparkbox",
+		`"name":"https-6454"`,
+		`"port":6454`,
+		`"targetPort":"https"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("public-port patch missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

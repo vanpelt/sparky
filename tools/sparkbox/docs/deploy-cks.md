@@ -95,6 +95,42 @@ In this deployment, configure the sandbox's HTTPS route to target guest port
 equivalent any-port funnel; merely listening on 6743 inside the VM does not
 publish that port.
 
+### Prototype non-default public HTTPS ports
+
+`deploy/kubernetes/public-port.sh` updates the existing LoadBalancer Service
+without granting Kubernetes credentials to the public gateway Pod. Each
+managed public port targets the gateway's one named `https` port, so the same
+listener still terminates TLS and enforces Sparkbox route authentication:
+
+```sh
+tools/sparkbox/deploy/kubernetes/public-port.sh add 6454
+tools/sparkbox/deploy/kubernetes/public-port.sh list
+```
+
+After the load balancer finishes programming the change, both
+`https://foo.<domain>:6454` and `https://bar.<domain>:6454` reach the gateway.
+Sparkbox selects the sandbox from the hostname and selects guest port 6454
+from the HTTP `Host`/HTTP2 `:authority` value. Configure each sandbox route to
+target 6454 before testing it. Removal is deliberately explicit because one
+Service port is shared by every hostname; verify that no route still uses the
+port first:
+
+```sh
+tools/sparkbox/deploy/kubernetes/public-port.sh remove 6454
+```
+
+This is an operator-driven provider experiment, not yet an automatic route
+reconciler. Confirm that changing the Service preserves the allocated public
+address and existing connections before wiring route mutations to it.
+
+Gateway API is useful for a more declarative L4/L7 frontend, but it does not
+provide the missing L3 route from the gateway Pod to the VM-node guest prefix.
+It also requires one numeric `Listener.port` per exposed port and limits a
+Gateway to 64 listeners, so it does not express an all-port listener. A future
+Gateway API version of this experiment would dynamically add TLS passthrough
+listeners and continue terminating TLS in Sparkbox; guest-prefix routing remains
+a separate Cilium or WireGuard concern.
+
 The Sparkbox controller runs as UID/GID 65532, drops every capability, receives
 no devices, and uses `RuntimeDefault` seccomp/AppArmor. A separate root
 `vmm-helper` container owns only the capabilities required for TAP/network
