@@ -328,7 +328,7 @@ echo "Waiting for the private VM node (first boot may refresh Firecracker and ag
 # Pin the administrative SSH connection with the same public host key mounted
 # into the VM node. If the matching operator private key is available, approve
 # a newly enrolled node without an insecure host-key prompt.
-node_fingerprint=$("${k[@]}" -n "$namespace" exec deployment/sparkbox-node -- \
+node_fingerprint=$("${k[@]}" -n "$namespace" exec deployment/sparkbox-node -c sparkbox-node -- \
   ssh-keygen -lf /var/lib/sparkbox/node-identity/node_key.pem -E sha256 | awk '{print $2}')
 printf 'ssh.%s %s\n' "$proxy_domain" "$(cat "$gateway_public_file")" > "$known_hosts_file"
 if [ -f "$private_key" ]; then
@@ -365,6 +365,7 @@ echo "  SSH:  ssh -p 22 ctl@ssh.$proxy_domain help"
 echo "  New:  ssh -p 22 new@ssh.$proxy_domain"
 echo "  Web:  https://my.$proxy_domain"
 echo "  Gateway logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-gateway"
-echo "  VM node logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-node"
+echo "  VM node logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-node -c sparkbox-node"
+echo "  VMM helper logs: kubectl --context $context -n $namespace logs -f deployment/sparkbox-node -c vmm-helper"
 echo "  The VM node init container removed the retired gateway databases, TLS cache, and fleet private keys from its hostPath."
-echo "  KVM, TUN, and the temporary loop-device bundle are allocated by the Sparkbox device plugin; the VM node is not privileged."
+echo "  KVM/TUN are visible only to the narrow VMM helper; the UID 65532 controller has no devices or Linux capabilities."

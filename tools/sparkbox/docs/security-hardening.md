@@ -58,7 +58,12 @@ unprivileged gateway Deployment
 authenticated fleet control + guest data path
    |
 dedicated CKS node runtime
-  KVM / TAP / chroot launcher / VM disks / local metadata relay
+  capability-free UID 65532 controller / VM disks / local metadata relay
+   |
+authenticated path-free Unix protocol
+   |
+narrow VMM helper
+  KVM / TAP / chroot construction / process launch
    |
 one jailed Firecracker process per sandbox
 ```
@@ -100,7 +105,7 @@ that all map back to the same host path.
 
 Sparkbox now runs a small, in-tree plugin that advertises one synthetic
 `sparkbox.dev/kvm` and `sparkbox.dev/tun` allocation per eligible physical
-Node. The VM runtime requests:
+Node. The narrow VMM-helper sidecar requests:
 
 ```yaml
 resources:
@@ -117,30 +122,44 @@ a read-only root, mounts each health device read-only, and has no service
 account token.
 
 This improves scheduling and health reporting, applies device-cgroup scoping,
-and removes the KVM/TUN hostPaths from the VM node. The long-lived node is now
-`privileged: false` and has no `CAP_SYS_ADMIN`:
+and removes the KVM/TUN hostPaths from the VM node. The application controller
+now runs as UID/GID 65532 with every capability dropped, no device allocation,
+`RuntimeDefault` seccomp and AppArmor, privilege escalation disabled, and a
+read-only root filesystem.
 
-- TAP creation and route/filter setup still need `CAP_NET_ADMIN`;
-- chroot construction needs `MKNOD`, `SYS_CHROOT`, and uid/gid transition
-  privileges in the controller before it execs each zero-capability VMM;
-- trusted base-template patching still needs `CAP_SYS_ADMIN` and loop devices,
-  but now runs in a one-shot init container that exits before the controller
-  accepts fleet or guest work.
+The separate `vmm-helper` sidecar owns the remaining long-lived privileges:
+
+- `NET_ADMIN` for TAP creation and Pod-local packet-filter setup;
+- `MKNOD` for the two device nodes inside a per-VM chroot;
+- `SYS_CHROOT`, `SETUID`, and `SETGID` for launching the slot UID;
+- `CHOWN`, `DAC_OVERRIDE`, `DAC_READ_SEARCH`, and `FOWNER` for exact VM
+  resource ownership and descriptor-based hard links;
+- `KILL` for terminating its own Firecracker child after the child changes UID.
+
+The helper has no network listener, service-account token, hostPath device
+mount, shell/command RPC, or caller-controlled path. It listens on a mode-0600
+Unix socket in an `emptyDir`, authenticates the controller UID using Linux
+`SO_PEERCRED`, validates the protocol version, VM name, and subnet-bounded slot,
+and derives every filesystem path, UID, device number, TAP name, and executable
+from immutable startup configuration. A compromised controller can request the
+same start/stop/snapshot operations it could already perform, but cannot turn
+the helper into a general root command or arbitrary-path service.
+
+The helper launches Firecracker as `100000 + slot`, outside the controller's
+process namespace, and gives the controller group traverse access only to that
+VM's API socket. The launch-client handshake acknowledges shutdown only after
+Firecracker has exited and the helper has removed the TAP and chroot, so slot
+reuse cannot race privileged cleanup. CPU metering uses a dedicated read-only
+helper operation rather than sharing the Pod PID namespace.
 
 The current plugin therefore also advertises one temporary
 `sparkbox.dev/loop` bundle containing `/dev/loop-control` and `/dev/loop0`
 through `/dev/loop7`. That is deliberately one atomic allocation, not eight
-independent claims. Only the preparation init container receives it; the
-long-lived node requests KVM and TUN only. The allocation remains held for the
-Pod lifetime, but there is no running process in that container after startup.
-
-The VM-node container drops every default capability, adds only `CHOWN`,
-`DAC_OVERRIDE`, `FOWNER`, `KILL`, `MKNOD`, `NET_ADMIN`, `SETGID`, `SETUID`, and
-`SYS_CHROOT`, has a read-only root filesystem, and receives a bounded `/tmp`.
-Host PID/network/IPC namespaces and service-account credentials remain absent.
-Seccomp and AppArmor are still explicitly unconfined while the chroot launcher
-is validated on CKS; selecting a tested outer profile is the next independent
-hardening step.
+independent claims. Only the preparation init container receives the loop
+bundle. KVM and TUN are allocated only to `vmm-helper`; the controller has no
+`/dev/kvm`, `/dev/net/tun`, or loop devices. Host PID/IPC namespaces and
+service-account credentials remain absent. The two runtime containers share
+only Kubernetes' normal Pod network namespace and explicit data/socket volumes.
 
 Remaining useful work is:
 
@@ -149,8 +168,9 @@ Remaining useful work is:
 2. Re-enable template snapshots with guest-side first-boot sanitization or a
    mountless/disposable sanitizer; CKS currently refuses that operation rather
    than mounting an attacker-controlled disk.
-3. Install a tailored outer seccomp/AppArmor profile around the controller and
-   runtime. Kubernetes documents the available [kernel-level constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/).
+3. Replace `RuntimeDefault` on the helper with a measured syscall allowlist and
+   node-loaded AppArmor profile if CKS exposes a managed profile-installation
+   path. Kubernetes documents the available [kernel-level constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/).
 
 The architectural alternative is a node-level runtime shim or daemon rather
 than a device-owning application Pod. Kata Containers puts the hypervisor in a

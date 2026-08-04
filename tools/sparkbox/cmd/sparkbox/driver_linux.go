@@ -9,13 +9,18 @@ import (
 
 func newFirecrackerDriver(
 	kernelPath, imageDir, vmStateDir, jailerBin, jailerChrootBase string,
-	jailerUIDBase int, chrootJailer, disableHostRootfsMounts bool,
+	jailerUIDBase int, chrootJailer bool,
+	privilegedHelperSocket, privilegedHelperBin string, helperControllerGID int,
+	disableHostRootfsMounts bool,
 	guestSubnet, subnet6, loginUser, guestDNS string,
 ) (vmm.Driver, error) {
 	return fcdriver.New(fcdriver.Options{
 		KernelPath: kernelPath, ImageDir: imageDir, VMStateDir: vmStateDir,
 		JailerBin: jailerBin, ChrootJailer: chrootJailer,
 		JailerChrootBase: jailerChrootBase, JailerUIDBase: jailerUIDBase,
+		PrivilegedHelperSocket:  privilegedHelperSocket,
+		PrivilegedHelperBin:     privilegedHelperBin,
+		HelperControllerGID:     helperControllerGID,
 		DisableHostRootfsMounts: disableHostRootfsMounts,
 		Subnet:                  guestSubnet, Subnet6: subnet6, LoginUser: loginUser, GuestDNS: guestDNS,
 	})

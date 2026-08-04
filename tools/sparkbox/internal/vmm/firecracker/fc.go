@@ -38,6 +38,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -60,6 +61,14 @@ type Options struct {
 	// namespace rather than creating a nested one. This removes the launcher's
 	// CAP_SYS_ADMIN requirement. It is mutually exclusive with JailerBin.
 	ChrootJailer bool
+	// PrivilegedHelperSocket moves TAP creation, chroot construction, and VMM
+	// process launch into the narrowly-scoped sparkbox-vmm-helper. The
+	// controller itself then needs no devices, root identity, or capabilities.
+	// It requires ChrootJailer and is mutually exclusive with JailerBin.
+	PrivilegedHelperSocket string
+	// PrivilegedHelperBin is the unprivileged helper client used as the SDK's
+	// process runner. Empty defaults to sparkbox-vmm-helper on PATH.
+	PrivilegedHelperBin string
 	// JailerChrootBase is the root-owned directory beneath which the jailer
 	// creates one chroot per live VM. Empty defaults to <VMStateDir>/jailer.
 	JailerChrootBase string
@@ -67,6 +76,9 @@ type Options struct {
 	// Each concurrently reserved network slot gets a distinct identity:
 	// JailerUIDBase + slot. Empty defaults to 100000.
 	JailerUIDBase int
+	// HelperControllerGID is the unprivileged controller group granted access
+	// to VM disks and Firecracker API sockets by the privileged helper.
+	HelperControllerGID int
 	// DisableHostRootfsMounts skips per-create key injection and refuses the
 	// template-snapshot operation, the two runtime paths that otherwise loop-
 	// mount an ext4 image in the management process. The selected templates must
@@ -168,6 +180,33 @@ func New(opts Options) (*Driver, error) {
 	if opts.JailerBin != "" && opts.ChrootJailer {
 		return nil, errors.New("external jailer and chroot jailer are mutually exclusive")
 	}
+	if opts.PrivilegedHelperSocket != "" && !opts.ChrootJailer {
+		return nil, errors.New("privileged helper requires the chroot jailer")
+	}
+	if opts.PrivilegedHelperSocket != "" && opts.JailerBin != "" {
+		return nil, errors.New("privileged helper and external jailer are mutually exclusive")
+	}
+	if opts.PrivilegedHelperSocket != "" {
+		if !filepath.IsAbs(opts.PrivilegedHelperSocket) {
+			return nil, errors.New("privileged helper socket must be absolute")
+		}
+		if opts.PrivilegedHelperBin == "" {
+			opts.PrivilegedHelperBin = "sparkbox-vmm-helper"
+		}
+		var err error
+		opts.PrivilegedHelperBin, err = executablePath(opts.PrivilegedHelperBin)
+		if err != nil {
+			return nil, fmt.Errorf("privileged helper client: %w", err)
+		}
+		if opts.HelperControllerGID < 1 {
+			return nil, errors.New("privileged helper controller gid must be positive")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := vmhelper.Ping(ctx, opts.PrivilegedHelperSocket); err != nil {
+			return nil, fmt.Errorf("privileged helper readiness: %w", err)
+		}
+	}
 	if opts.JailerBin != "" || opts.ChrootJailer {
 		var err error
 		opts.FirecrackerBin, err = executablePath(opts.FirecrackerBin)
@@ -196,8 +235,10 @@ func New(opts Options) (*Driver, error) {
 			return nil, fmt.Errorf("jailer uid base %d plus %d VM slots exceeds the Linux uid range",
 				opts.JailerUIDBase, guestNetwork.Capacity())
 		}
-		if err := os.MkdirAll(opts.JailerChrootBase, 0o700); err != nil {
-			return nil, fmt.Errorf("create jailer chroot base: %w", err)
+		if opts.PrivilegedHelperSocket == "" {
+			if err := os.MkdirAll(opts.JailerChrootBase, 0o700); err != nil {
+				return nil, fmt.Errorf("create jailer chroot base: %w", err)
+			}
 		}
 	}
 	if err := validateGuestDNS(opts.GuestDNS); err != nil {
@@ -244,8 +285,10 @@ func New(opts Options) (*Driver, error) {
 		// dropped. Record the uplink now; createTap adds a proxy entry per guest.
 		d.uplink6 = defaultRoute6Dev()
 	}
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
+	if opts.PrivilegedHelperSocket == "" {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
+		}
 	}
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
@@ -253,7 +296,9 @@ func New(opts Options) (*Driver, error) {
 	// A previous process (e.g. before a service restart) leaves its sbtap*
 	// devices behind; the first Create would then fail with "Device or resource
 	// busy". Nothing is running in a fresh process, so sweep them now.
-	sweepStaleTaps()
+	if opts.PrivilegedHelperSocket == "" {
+		sweepStaleTaps()
+	}
 	return d, nil
 }
 
@@ -348,6 +393,11 @@ func (d *Driver) jailRoot(idx int) string {
 
 func (d *Driver) cleanupJail(idx int) error {
 	if !d.jailed() {
+		return nil
+	}
+	if d.opts.PrivilegedHelperSocket != "" {
+		// The helper owns this tree and removes it only after its Firecracker
+		// child has exited. The unprivileged controller cannot race that cleanup.
 		return nil
 	}
 	return os.RemoveAll(d.jailWorkspace(idx))
@@ -691,6 +741,12 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			"--",
 			"--api-sock", jailedSocketName,
 		)
+	} else if d.opts.PrivilegedHelperSocket != "" {
+		cmd = vmhelper.LaunchCommand(
+			d.opts.PrivilegedHelperBin, d.opts.PrivilegedHelperSocket,
+			name, st.idx, snapshot != nil,
+		)
+		cmd.Env = []string{}
 	} else if d.opts.ChrootJailer {
 		cmd, err = d.chrootJailerCommand(vmCtx, st.idx)
 		if err != nil {
@@ -714,7 +770,7 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 		cancel()
 		return err
 	}
-	if d.jailed() {
+	if d.jailed() && d.opts.PrivilegedHelperSocket == "" {
 		stage := jailedResourcesHandler(d.jailRoot(st.idx), d.jailUID(st.idx),
 			d.opts.KernelPath, rootfs, snapshot)
 		if !m.Handlers.FcInit.Has(sdk.CreateLogFilesHandlerName) {
@@ -742,15 +798,13 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	// kills the microVM the instant that first connection closes. The VM's
 	// lifetime is owned by vmCtx, cancelled only by Pause/Destroy via st.cancel.
 	if err := m.Start(vmCtx); err != nil {
-		m.StopVMM() //nolint:errcheck
-		cancel()
+		d.stopMachine(m, cancel)
 		d.cleanupJail(st.idx) //nolint:errcheck
 		return fmt.Errorf("start vm: %w", err)
 	}
 	if snapshot != nil {
 		if err := m.ResumeVM(vmCtx); err != nil {
-			m.StopVMM() //nolint:errcheck
-			cancel()
+			d.stopMachine(m, cancel)
 			d.cleanupJail(st.idx) //nolint:errcheck
 			return fmt.Errorf("resume from snapshot: %w", err)
 		}
@@ -869,8 +923,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 		st.machine.ResumeVM(rctx) //nolint:errcheck // best effort: leave it running rather than wedged
 		return err
 	}
-	st.machine.StopVMM() //nolint:errcheck
-	st.cancel()
+	d.stopVMM(st)
 	var snapshotInstallErr error
 	if d.jailed() {
 		if err := os.Rename(memPath+".next", memPath); err != nil {
@@ -890,6 +943,15 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 }
 
 func (d *Driver) prepareJailedSnapshotOutputs(idx int, memPath, statePath string) error {
+	if d.opts.PrivilegedHelperSocket != "" {
+		name := filepath.Base(filepath.Dir(memPath))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vmhelper.PrepareSnapshotOutputs(ctx, d.opts.PrivilegedHelperSocket, name, idx); err != nil {
+			return fmt.Errorf("privileged helper snapshot outputs: %w", err)
+		}
+		return nil
+	}
 	uid := d.jailUID(idx)
 	root := d.jailRoot(idx)
 	for _, output := range []struct {
@@ -997,8 +1059,7 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 		return nil
 	}
 	if st.machine != nil {
-		st.machine.StopVMM() //nolint:errcheck
-		st.cancel()
+		d.stopVMM(st)
 	}
 	d.deleteTap(st.idx)
 	delete(d.vms, name)
@@ -1412,6 +1473,11 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	if !ok || st.machine == nil {
 		return 0, fmt.Errorf("vm %q not running", name)
 	}
+	if d.opts.PrivilegedHelperSocket != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return vmhelper.CPUTimeNanos(ctx, d.opts.PrivilegedHelperSocket, name, st.idx)
+	}
 	pid, err := st.machine.PID()
 	if err != nil {
 		return 0, err
@@ -1744,12 +1810,32 @@ func (d *Driver) Close() error {
 	var closeErr error
 	for _, st := range d.vms {
 		if st.machine != nil {
-			st.machine.StopVMM() //nolint:errcheck
-			st.cancel()
+			d.stopVMM(st)
 		}
 		closeErr = errors.Join(closeErr, d.cleanupJail(st.idx))
 	}
 	return closeErr
+}
+
+// stopVMM synchronizes helper-owned cleanup before callers rename snapshots,
+// remove VM directories, or reuse the slot. The local launchers historically
+// needed only a signal; the helper client acknowledges after its VMM, TAP, and
+// jail are all gone.
+func (d *Driver) stopVMM(st *vmState) {
+	d.stopMachine(st.machine, st.cancel)
+}
+
+func (d *Driver) stopMachine(machine *sdk.Machine, vmCancel context.CancelFunc) {
+	machine.StopVMM() //nolint:errcheck
+	vmCancel()
+	if d.opts.PrivilegedHelperSocket != "" {
+		if _, err := machine.PID(); err != nil {
+			return
+		}
+		ctx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer waitCancel()
+		machine.Wait(ctx) //nolint:errcheck
+	}
 }
 
 func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
@@ -1777,6 +1863,11 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 // createTap sets up the host side of the VM's network: a tap device owned by
 // this process's user with the host-side /30 address.
 func (d *Driver) createTap(ctx context.Context, idx int) error {
+	if d.opts.PrivilegedHelperSocket != "" {
+		// The helper creates the TAP immediately before launching Firecracker,
+		// in the Pod network namespace shared by both containers.
+		return nil
+	}
 	tap := tapName(idx)
 	cmds := [][]string{
 		{"ip", "tuntap", "add", "dev", tap, "mode", "tap"},
@@ -1820,6 +1911,10 @@ func (d *Driver) createTap(ctx context.Context, idx int) error {
 }
 
 func (d *Driver) deleteTap(idx int) {
+	if d.opts.PrivilegedHelperSocket != "" {
+		// Helper cleanup is synchronized with the launch-client process exit.
+		return
+	}
 	if d.prefix6 != nil && d.uplink6 != "" {
 		exec.Command("ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
 	}

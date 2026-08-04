@@ -18,7 +18,11 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
       go build -trimpath \
       -ldflags="-s -w" \
-      -o /out/sparkbox-device-plugin ./cmd/sparkbox-device-plugin
+	  -o /out/sparkbox-device-plugin ./cmd/sparkbox-device-plugin \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+	  go build -trimpath \
+	  -ldflags="-s -w" \
+	  -o /out/sparkbox-vmm-helper ./cmd/sparkbox-vmm-helper
 
 FROM ubuntu:24.04
 
@@ -40,20 +44,24 @@ RUN apt-get update \
 
 COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
 COPY --from=build /out/sparkbox-device-plugin /usr/local/bin/sparkbox-device-plugin
+COPY --from=build /out/sparkbox-vmm-helper /usr/local/bin/sparkbox-vmm-helper
 COPY deploy/sparkbox-net.sh /usr/local/sbin/sparkbox-net.sh
 COPY deploy/refresh-agent-tools.sh /usr/local/sbin/sparkbox-refresh-tools.sh
 COPY deploy/install-guest-identity.sh /usr/local/sbin/sparkbox-install-guest-identity.sh
 COPY deploy/kubernetes/entrypoint.sh /usr/local/sbin/sparkbox-kubernetes-entrypoint
 COPY deploy/kubernetes/gateway-entrypoint.sh /usr/local/sbin/sparkbox-gateway-entrypoint
+COPY deploy/kubernetes/vmm-helper-entrypoint.sh /usr/local/sbin/sparkbox-vmm-helper-entrypoint
 
 RUN chmod 0755 \
       /usr/local/bin/sparkbox \
       /usr/local/bin/sparkbox-device-plugin \
+	  /usr/local/bin/sparkbox-vmm-helper \
       /usr/local/sbin/sparkbox-install-guest-identity.sh \
       /usr/local/sbin/sparkbox-net.sh \
       /usr/local/sbin/sparkbox-refresh-tools.sh \
       /usr/local/sbin/sparkbox-kubernetes-entrypoint \
-      /usr/local/sbin/sparkbox-gateway-entrypoint
+	  /usr/local/sbin/sparkbox-gateway-entrypoint \
+	  /usr/local/sbin/sparkbox-vmm-helper-entrypoint
 
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/sbin/sparkbox-kubernetes-entrypoint"]

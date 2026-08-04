@@ -133,6 +133,9 @@ func serve(args []string) error {
 		chrootJailer         = fs.Bool("chroot-jailer", false, "firecracker: isolate each VMM with a chroot and slot-scoped uid in the current mount namespace (does not need CAP_SYS_ADMIN; mutually exclusive with --jailer)")
 		jailerChrootBase     = fs.String("jailer-chroot-base", "", "firecracker jailer: root-owned chroot parent (default <vm-state-dir>/jailer)")
 		jailerUIDBase        = fs.Int("jailer-uid-base", 100000, "firecracker jailer: first uid/gid in the per-VM unprivileged identity range")
+		privilegedHelper     = fs.String("privileged-helper-socket", "", "firecracker: Unix socket for the narrow privileged launch/network helper")
+		privilegedHelperBin  = fs.String("privileged-helper-bin", "", "firecracker: helper client executable (default sparkbox-vmm-helper)")
+		helperControllerGID  = fs.Int("helper-controller-gid", 65532, "firecracker helper: group allowed to access VM disks and API sockets")
 		noRootfsMounts       = fs.Bool("disable-host-rootfs-mounts", false, "firecracker: never loop-mount guest ext4 in this process; templates must already carry the gateway key and template snapshots are disabled")
 		guestSubnet          = fs.String("guest-subnet", guestnet.DefaultPrefix, "IPv4 prefix divided into per-sandbox /30s; fleet nodes must set an explicit unique prefix (a /20 provides 1,024 slots)")
 		subnet6              = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
@@ -263,6 +266,8 @@ func serve(args []string) error {
 			kernelPath: *kernelPath, imageDir: *imageDir,
 			jailerBin: *jailerBin, chrootJailer: *chrootJailer,
 			jailerChrootBase: *jailerChrootBase, jailerUIDBase: *jailerUIDBase,
+			privilegedHelperSocket: *privilegedHelper, privilegedHelperBin: *privilegedHelperBin,
+			helperControllerGID:     *helperControllerGID,
 			disableHostRootfsMounts: *noRootfsMounts,
 			defaultLogin:            *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
 			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
@@ -373,7 +378,7 @@ func serve(args []string) error {
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
 			*kernelPath, *imageDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
-			*chrootJailer, *noRootfsMounts,
+			*chrootJailer, *privilegedHelper, *privilegedHelperBin, *helperControllerGID, *noRootfsMounts,
 			*guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)
 		if err != nil {

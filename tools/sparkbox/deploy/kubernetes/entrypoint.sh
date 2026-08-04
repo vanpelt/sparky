@@ -19,6 +19,7 @@ readonly image_dir="$data_dir/images"
 readonly tools_dir="$data_dir/tools"
 readonly control_dir="$data_dir/control"
 readonly hot_dir="$data_dir/hot"
+readonly vm_state_dir="${SPARKBOX_VM_STATE_DIR:-$hot_dir}"
 readonly key_dir="${SPARKBOX_KEY_DIR:-/run/sparkbox/keys}"
 readonly durable_dir="${SPARKBOX_DURABLE_DIR:-/mnt/sparkbox-durable}"
 readonly release="${SPARKBOX_RELEASE:-v0.5.3}"
@@ -37,6 +38,9 @@ readonly node_key_dir="${SPARKBOX_NODE_KEY_DIR:-$data_dir/node-identity}"
 readonly skip_prepare="${SPARKBOX_SKIP_PREPARE:-false}"
 readonly chroot_jailer="${SPARKBOX_CHROOT_JAILER:-false}"
 readonly disable_host_rootfs_mounts="${SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS:-false}"
+readonly privileged_helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-}"
+readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
+readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
 if [ -z "$proxy_advertise_port" ]; then
   if [ "$proxy_tls" = true ]; then
@@ -65,7 +69,7 @@ readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-53ea8dfbe1dadff39c5df6ad62cb82
 
 mkdir -p \
   "$asset_dir" "$image_dir" "$tools_dir" "$control_dir" "$hot_dir" \
-  "$durable_dir/checkpoints" "$node_key_dir"
+	"$vm_state_dir" "$durable_dir/checkpoints" "$node_key_dir"
 
 fetch_checked() {
   local url=$1
@@ -127,20 +131,22 @@ if [ "$mode" = prepare ]; then
     fi
   done
 else
-  if [ ! -c /dev/kvm ]; then
-    echo "/dev/kvm is not a character device; check the sparkbox.dev/kvm allocation" >&2
-    exit 1
-  fi
-  if [ ! -c /dev/net/tun ]; then
-    echo "/dev/net/tun is not a character device; check the sparkbox.dev/tun allocation" >&2
-    exit 1
-  fi
+	if [ -z "$privileged_helper_socket" ]; then
+		if [ ! -c /dev/kvm ]; then
+			echo "/dev/kvm is not a character device; check the sparkbox.dev/kvm allocation" >&2
+			exit 1
+		fi
+		if [ ! -c /dev/net/tun ]; then
+			echo "/dev/net/tun is not a character device; check the sparkbox.dev/tun allocation" >&2
+			exit 1
+		fi
+	fi
 fi
 
 # Sparkbox clones a large sparse ext4 template for every VM. Reflinks make that
 # operation instant and avoid consuming the template's full logical size.
-reflink_source="$hot_dir/.reflink-source"
-reflink_copy="$hot_dir/.reflink-copy"
+reflink_source="$vm_state_dir/.reflink-source"
+reflink_copy="$vm_state_dir/.reflink-copy"
 printf 'sparkbox-reflink-probe\n' > "$reflink_source"
 if ! cp --reflink=always "$reflink_source" "$reflink_copy"; then
   rm -f "$reflink_source" "$reflink_copy"
@@ -207,21 +213,49 @@ if [ "$mode" = prepare ] || [ "$skip_prepare" != true ]; then
 fi
 
 if [ "$mode" = prepare ]; then
-  echo "VM assets and trusted templates are prepared"
-  exit 0
+	# The helper split gives the controller a writable subdirectory rather than
+	# the whole hot tier. Migrate the pre-split layout once while no VMM exists.
+	if [ "$vm_state_dir" != "$hot_dir" ] && [ -d "$hot_dir/fc-vms" ]; then
+		if [ -e "$vm_state_dir/fc-vms" ]; then
+			echo "both legacy and helper VM-state directories exist; refusing an ambiguous migration" >&2
+			exit 1
+		fi
+		mv "$hot_dir/fc-vms" "$vm_state_dir/fc-vms"
+	fi
+	# The runtime controller is deliberately non-root. Preparation is the only
+	# point at which stale high-UID VM files from an earlier deployment are safe
+	# to return to the controller: no Firecracker process exists yet.
+	chown -R "$controller_uid:$controller_gid" \
+		"$control_dir" "$vm_state_dir" "$node_key_dir" "$durable_dir"
+	mkdir -p "$hot_dir/jailer"
+	chown 0:0 "$hot_dir" "$hot_dir/jailer"
+	chmod 0755 "$hot_dir"
+	chmod 0700 "$hot_dir/jailer"
+	echo "VM assets and trusted templates are prepared"
+	exit 0
 fi
 
-# These sysctls and packet-filter rules affect only the Pod network namespace:
-# the CKS node and its Calico data plane remain untouched.
-sysctl -q -w net.ipv4.ip_forward=1
-sysctl -q -w net.ipv6.conf.all.forwarding=1
-sysctl -q -w net.ipv4.conf.all.rp_filter=1
-sysctl -q -w net.ipv4.conf.default.rp_filter=1
-
 export PATH="$asset_dir:$PATH"
-export SPARKBOX_EDGE_REDIRECT=0
-export SPARKBOX_GUEST_SUBNET="$guest_subnet"
-/usr/local/sbin/sparkbox-net.sh
+if [ -n "$privileged_helper_socket" ]; then
+	# Containers start concurrently after init. Wait for the capability-bearing
+	# sidecar to authenticate this UID and finish Pod-network setup.
+	for _ in $(seq 1 60); do
+		if /usr/local/bin/sparkbox-vmm-helper ping --socket "$privileged_helper_socket" >/dev/null 2>&1; then
+			break
+		fi
+		sleep 1
+	done
+	/usr/local/bin/sparkbox-vmm-helper ping --socket "$privileged_helper_socket"
+else
+	# Legacy combined process: these affect only the Pod network namespace.
+	sysctl -q -w net.ipv4.ip_forward=1
+	sysctl -q -w net.ipv6.conf.all.forwarding=1
+	sysctl -q -w net.ipv4.conf.all.rp_filter=1
+	sysctl -q -w net.ipv4.conf.default.rp_filter=1
+	export SPARKBOX_EDGE_REDIRECT=0
+	export SPARKBOX_GUEST_SUBNET="$guest_subnet"
+	/usr/local/sbin/sparkbox-net.sh
+fi
 
 tls_args=()
 if [ "$proxy_tls" = true ]; then
@@ -239,10 +273,17 @@ role_args=(
 )
 jail_args=(--jailer "$jailer")
 if [ "$chroot_jailer" = true ]; then
-  jail_args=(--chroot-jailer)
+	jail_args=(--chroot-jailer --jailer-chroot-base "$hot_dir/jailer")
 fi
 if [ "$disable_host_rootfs_mounts" = true ]; then
-  jail_args+=(--disable-host-rootfs-mounts)
+	jail_args+=(--disable-host-rootfs-mounts)
+fi
+if [ -n "$privileged_helper_socket" ]; then
+	jail_args+=(
+		--privileged-helper-socket "$privileged_helper_socket"
+		--privileged-helper-bin /usr/local/bin/sparkbox-vmm-helper
+		--helper-controller-gid "$controller_gid"
+	)
 fi
 metrics_addr=
 if [ -n "$gateway_addr" ]; then
@@ -261,7 +302,7 @@ fi
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
   --state-dir "$control_dir" \
-  --vm-state-dir "$hot_dir" \
+	--vm-state-dir "$vm_state_dir" \
   --checkpoint-dir "$durable_dir" \
   --checkpoint-prefix checkpoints \
   --kernel "$kernel" \

@@ -76,6 +76,9 @@ type nodeOptions struct {
 	jailerChrootBase        string
 	jailerUIDBase           int
 	chrootJailer            bool
+	privilegedHelperSocket  string
+	privilegedHelperBin     string
+	helperControllerGID     int
 	disableHostRootfsMounts bool
 	defaultLogin            string
 	guestSubnet             string
@@ -190,7 +193,8 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		driver, err = newFirecrackerDriver(
 			opts.kernelPath, opts.imageDir, opts.vmStateDir,
 			opts.jailerBin, opts.jailerChrootBase, opts.jailerUIDBase,
-			opts.chrootJailer, opts.disableHostRootfsMounts,
+			opts.chrootJailer, opts.privilegedHelperSocket, opts.privilegedHelperBin,
+			opts.helperControllerGID, opts.disableHostRootfsMounts,
 			opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS,
 		)
 		if err != nil {
