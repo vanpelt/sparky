@@ -329,7 +329,12 @@ echo "Waiting for the private VM node (first boot may refresh Firecracker and ag
 # Pin the administrative SSH connection with the same public host key mounted
 # into the VM node. If the matching operator private key is available, approve
 # a newly enrolled node without an insecure host-key prompt.
-node_fingerprint=$("${k[@]}" -n "$namespace" exec deployment/sparkbox-node -c sparkbox-node -- \
+# The controller deliberately has no passwd entry for UID 65532. OpenSSH's
+# ssh-keygen asks libc for that entry even when it is only reading a public key,
+# so perform this read-only fingerprint operation in the root helper container.
+# Both containers already mount the same node-identity directory; this does not
+# expose a new path or helper RPC to the controller.
+node_fingerprint=$("${k[@]}" -n "$namespace" exec deployment/sparkbox-node -c vmm-helper -- \
   ssh-keygen -lf /var/lib/sparkbox/node-identity/node_key.pem -E sha256 | awk '{print $2}')
 printf 'ssh.%s %s\n' "$proxy_domain" "$(cat "$gateway_public_file")" > "$known_hosts_file"
 if [ -f "$private_key" ]; then
