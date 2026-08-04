@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,7 @@ type ServerOptions struct {
 	ControllerUID          int
 	ControllerGID          int
 	RestrictInternalEgress bool
+	SluiceSocket           string
 	Logger                 *log.Logger
 }
 
@@ -144,6 +146,9 @@ func newServer(opts ServerOptions) (*server, error) {
 	}
 	if opts.JailerUIDBase < 1 || opts.ControllerUID < 1 || opts.ControllerGID < 1 {
 		return nil, errors.New("helper UIDs and GIDs must be positive")
+	}
+	if opts.SluiceSocket != "" && (!filepath.IsAbs(opts.SluiceSocket) || filepath.Clean(opts.SluiceSocket) != opts.SluiceSocket) {
+		return nil, errors.New("sluice socket path must be absolute and clean")
 	}
 	if opts.Logger == nil {
 		opts.Logger = log.Default()
@@ -314,6 +319,11 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
+	if err := s.waitForSluice(launchCtx, tapName(req.Slot)); err != nil {
+		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.respond(conn, Response{Error: err.Error()})
+		return
+	}
 	if err := s.prepareJail(req); err != nil {
 		s.cleanupSlot(req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: err.Error()})
@@ -380,6 +390,33 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 	} else {
 		s.respond(conn, Response{OK: true})
 	}
+}
+
+func (s *server) waitForSluice(ctx context.Context, tap string) error {
+	if s.opts.SluiceSocket == "" {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", s.opts.SluiceSocket)
+	}}
+	defer transport.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(waitCtx, http.MethodPost, "http://sluice/ready/"+tap, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Transport: transport}).Do(req)
+	if err != nil {
+		return fmt.Errorf("wait for sluice on %s: %w", tap, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("wait for sluice on %s: %s: %s", tap, resp.Status, strings.TrimSpace(string(body)))
+	}
+	s.opts.Logger.Printf("sluice enforcement ready on %s", tap)
+	return nil
 }
 
 func stopProcess(cmd *exec.Cmd, waitCh <-chan error) error {

@@ -36,6 +36,5 @@ exec /usr/local/bin/sluice run \
 	--tap-prefix sbtap \
 	--allow-ip "$dns_ip" \
 	--enforce \
-	--open-untagged \
 	--report-interval 60s \
 	--api-listen "$socket"

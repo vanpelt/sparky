@@ -142,6 +142,8 @@ spec:
               value: "1"
             - name: SPARKBOX_SLUICE_DNS_IP
               value: 172.30.0.53
+            - name: SPARKBOX_SLUICE_SOCKET
+              value: /run/sluice/sluice.sock
             - name: SPARKBOX_PRIVILEGED_HELPER_SOCKET
               value: /run/sparkbox-vmm/helper.sock
             - name: SPARKBOX_CONTROLLER_UID
@@ -211,6 +213,9 @@ spec:
               mountPath: /var/lib/sparkbox
             - name: vmm-socket
               mountPath: /run/sparkbox-vmm
+            - name: sluice-socket
+              mountPath: /run/sluice
+              readOnly: true
         - name: sluice
           image: __SPARKBOX_IMAGE__
           imagePullPolicy: Always
@@ -235,9 +240,13 @@ spec:
                 - NET_BIND_SERVICE
             privileged: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
+            # CKS/containerd clears the permitted/effective capability sets
+            # for a non-root UID (leaving additions only in CapBnd). Run as
+            # root so these three requested capabilities are effective; the
+            # sidecar has no devices, host/data mounts, or writable rootfs.
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
             seccompProfile:
               type: RuntimeDefault
           resources:

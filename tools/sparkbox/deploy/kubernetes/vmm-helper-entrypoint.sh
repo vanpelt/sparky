@@ -11,6 +11,7 @@ readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 readonly guest_subnet6="${SPARKBOX_GUEST_SUBNET6:-}"
 readonly restrict_internal_egress="${SPARKBOX_RESTRICT_INTERNAL_EGRESS:-1}"
 readonly sluice_dns_ip="${SPARKBOX_SLUICE_DNS_IP:-}"
+readonly sluice_socket="${SPARKBOX_SLUICE_SOCKET:-}"
 readonly helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-/run/sparkbox-vmm/helper.sock}"
 readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
 readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
@@ -60,5 +61,8 @@ helper_args=(
 )
 if [ "$restrict_internal_egress" = 1 ]; then
 	helper_args+=(--restrict-internal-egress)
+fi
+if [ -n "$sluice_socket" ]; then
+	helper_args+=(--sluice-socket "$sluice_socket")
 fi
 exec /usr/local/bin/sparkbox-vmm-helper "${helper_args[@]}"

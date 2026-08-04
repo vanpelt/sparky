@@ -46,6 +46,7 @@ func serve(ctx context.Context, logger *log.Logger, args []string) error {
 	subnet := fs.String("subnet", "", "guest IPv4 subnet")
 	subnet6 := fs.String("subnet6", "", "optional guest IPv6 subnet")
 	restrictInternalEgress := fs.Bool("restrict-internal-egress", false, "require restricted guest packet-filter chains and per-TAP anti-spoofing")
+	sluiceSocket := fs.String("sluice-socket", "", "optional Sluice socket that must confirm TAP enforcement before VMM launch")
 	uidBase := fs.Int("jailer-uid-base", 100000, "first per-slot VMM UID")
 	controllerUID := fs.Int("controller-uid", 65532, "only UID accepted on the helper socket")
 	controllerGID := fs.Int("controller-gid", 65532, "group allowed to access VMM files and sockets")
@@ -56,6 +57,7 @@ func serve(ctx context.Context, logger *log.Logger, args []string) error {
 		SocketPath: *socket, FirecrackerBin: *firecracker, KernelPath: *kernel,
 		VMStateDir: *vmState, ChrootBase: *chrootBase, Subnet: *subnet, Subnet6: *subnet6,
 		RestrictInternalEgress: *restrictInternalEgress,
+		SluiceSocket:           *sluiceSocket,
 		JailerUIDBase:          *uidBase, ControllerUID: *controllerUID, ControllerGID: *controllerGID,
 		Logger: logger,
 	})

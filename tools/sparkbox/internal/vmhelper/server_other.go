@@ -13,6 +13,7 @@ type ServerOptions struct {
 	Subnet, Subnet6                                                string
 	JailerUIDBase, ControllerUID, ControllerGID                    int
 	RestrictInternalEgress                                         bool
+	SluiceSocket                                                   string
 	Logger                                                         *log.Logger
 }
 

@@ -69,6 +69,14 @@ func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sluiceEntrypoint, err := os.ReadFile("kubernetes/sluice-entrypoint.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperEntrypoint, err := os.ReadFile("kubernetes/vmm-helper-entrypoint.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := string(manifest)
 	for _, want := range []string{
 		"- name: sluice",
@@ -94,6 +102,12 @@ func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
 		if !strings.Contains(controller, want) {
 			t.Errorf("controller entrypoint missing fail-closed Sluice wiring %q", want)
 		}
+	}
+	if strings.Contains(string(sluiceEntrypoint), "--open-untagged") {
+		t.Error("CKS Sluice must enforce its base allow-list on every TAP")
+	}
+	if !strings.Contains(string(helperEntrypoint), `helper_args+=(--sluice-socket "$sluice_socket")`) {
+		t.Error("VMM helper does not require Sluice readiness before launch")
 	}
 }
 

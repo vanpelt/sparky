@@ -3,7 +3,11 @@
 package vmhelper
 
 import (
+	"context"
+	"io"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +17,29 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 )
+
+func TestWaitForSluiceRequiresReadyAcknowledgement(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "sluice.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotPath := make(chan string, 1)
+	httpServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go httpServer.Serve(listener) //nolint:errcheck
+	defer httpServer.Close()      //nolint:errcheck
+
+	s := &server{opts: ServerOptions{SluiceSocket: socket, Logger: log.New(io.Discard, "", 0)}}
+	if err := s.waitForSluice(context.Background(), "sbtap7"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := <-gotPath, "/ready/sbtap7"; got != want {
+		t.Fatalf("ready path = %q, want %q", got, want)
+	}
+}
 
 func TestServerRequestValidationPinsOperationNameAndSlot(t *testing.T) {
 	s := &server{network: guestnet.MustParse("172.30.0.0/20")}

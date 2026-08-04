@@ -74,18 +74,31 @@ CKS underlay.
 
 The VM node also runs Sluice as a dedicated sidecar. It mounts only its Unix
 control-socket `emptyDir`: it receives no KVM/TUN devices, VMM-helper socket,
-guest disks, host path, or service-account token. It runs as UID/GID 65532 with
-a read-only root filesystem and only `CAP_BPF`, `CAP_NET_ADMIN`, and
+guest disks, host path, or service-account token. It has a read-only root
+filesystem and runs as UID 0 with only `CAP_BPF`, `CAP_NET_ADMIN`, and
 `CAP_NET_BIND_SERVICE`, which are required to load and attach TCX programs and
 bind DNS on port 53. The unprivileged Sparkbox controller waits for Sluice's
 control API before starting, then uses that socket for per-tag policy and usage.
+UID 0 is deliberate on CKS/containerd: a non-root UID receives the requested
+capabilities only in its bounding set, with empty permitted/effective sets, so
+the kernel rejects BPF map creation. A live probe verifies that the root process
+loads the eBPF collection with exactly those three capabilities while retaining
+`RuntimeDefault` seccomp and AppArmor.
 
 The helper creates `172.30.0.53/32` on a Pod-local `sparkdns` dummy interface;
 new guests receive that address as their resolver. Sluice binds only that
-address, pins it in the eBPF allow-set, and runs with `--enforce
---open-untagged`. A VM whose tags carry a network rule is therefore restricted
-to the base image allow-list plus that rule's DNS answers. Untagged VMs retain
-public egress, but still inherit both non-bypassable internal-network ceilings.
+address, pins it in the eBPF allow-set, and runs with `--enforce`. Every VM is
+therefore restricted to the minimal base image allow-list; a VM whose tags
+carry a network rule also receives that rule's DNS answers. CKS deliberately
+does not use Sluice's `--open-untagged` compatibility mode, because a newly
+created TAP would otherwise be unrestricted until its first fleet policy push.
+
+TAP startup is fail closed as well. The VMM helper creates the interface, then
+calls Sluice's host-local readiness endpoint over the shared socket. Sluice
+does an immediate reconciliation and acknowledges only after both TCX programs
+are attached and the allow/enforcement maps are synchronized. The helper does
+not launch Firecracker if that acknowledgement fails, so a guest cannot send
+public traffic during tap discovery or a Sluice restart.
 
 Packet processing is deliberately layered:
 
@@ -98,10 +111,9 @@ With `--guest-dns 172.30.0.53`, a guest reaches Sluice's node-local TCP/UDP DNS
 listener through the explicit host-DNS rule. Sluice narrows a tagged TAP to the
 IPs learned from allowed DNS answers. Even if an answer contains an
 RFC1918, link-local, or cluster address, the inner iptables ceiling still drops
-it and the outer Cilium policy independently refuses it. An untagged TAP in
-Sluice's open mode can reach general public space, but it cannot reach internal
-space. Public-IP restrictions therefore remain the responsibility of Sluice;
-the CKS controls are the non-bypassable internal-network ceiling.
+it and the outer Cilium policy independently refuses it. Public-IP restrictions
+therefore remain the responsibility of Sluice; the CKS controls are the
+non-bypassable internal-network ceiling.
 
 The base rules are baked from `deploy/sluice-allowlist.txt` into each immutable
 runtime image. User-specific rules remain dynamic and are managed in the web
