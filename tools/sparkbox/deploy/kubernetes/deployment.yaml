@@ -140,6 +140,8 @@ spec:
               value: 172.30.0.0/20
             - name: SPARKBOX_RESTRICT_INTERNAL_EGRESS
               value: "1"
+            - name: SPARKBOX_SLUICE_DNS_IP
+              value: 172.30.0.53
             - name: SPARKBOX_PRIVILEGED_HELPER_SOCKET
               value: /run/sparkbox-vmm/helper.sock
             - name: SPARKBOX_CONTROLLER_UID
@@ -209,6 +211,69 @@ spec:
               mountPath: /var/lib/sparkbox
             - name: vmm-socket
               mountPath: /run/sparkbox-vmm
+        - name: sluice
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /usr/local/sbin/sparkbox-sluice-entrypoint
+          env:
+            - name: SPARKBOX_SLUICE_DNS_IP
+              value: 172.30.0.53
+            - name: SPARKBOX_SLUICE_SOCKET
+              value: /run/sluice/sluice.sock
+          securityContext:
+            # TCX loading/attachment and low-port DNS binding are Sluice's only
+            # privileges. It receives no device or host/data volume mounts.
+            allowPrivilegeEscalation: false
+            appArmorProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - BPF
+                - NET_ADMIN
+                - NET_BIND_SERVICE
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            exec:
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --unix-socket
+                - /run/sluice/sluice.sock
+                - http://sluice/report.json
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --unix-socket
+                - /run/sluice/sluice.sock
+                - http://sluice/report.json
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: sluice-socket
+              mountPath: /run/sluice
         - name: sparkbox-node
           image: __SPARKBOX_IMAGE__
           imagePullPolicy: Always
@@ -241,6 +306,10 @@ spec:
               value: "65532"
             - name: SPARKBOX_VM_STATE_DIR
               value: /var/lib/sparkbox/hot/controller
+            - name: SPARKBOX_SLUICE_SOCKET
+              value: /run/sluice/sluice.sock
+            - name: SPARKBOX_GUEST_DNS
+              value: 172.30.0.53
           securityContext:
             allowPrivilegeEscalation: false
             appArmorProfile:
@@ -304,6 +373,8 @@ spec:
               mountPath: /mnt/sparkbox-durable
             - name: vmm-socket
               mountPath: /run/sparkbox-vmm
+            - name: sluice-socket
+              mountPath: /run/sluice
       volumes:
         - name: data
           hostPath:
@@ -320,5 +391,8 @@ spec:
           emptyDir:
             sizeLimit: 1Gi
         - name: vmm-socket
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: sluice-socket
           emptyDir:
             sizeLimit: 1Mi

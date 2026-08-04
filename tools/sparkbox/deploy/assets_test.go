@@ -60,6 +60,43 @@ exit 0
 	}
 }
 
+func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
+	manifest, err := os.ReadFile("kubernetes/deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrypoint, err := os.ReadFile("kubernetes/entrypoint.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(manifest)
+	for _, want := range []string{
+		"- name: sluice",
+		"- BPF",
+		"- NET_ADMIN",
+		"- NET_BIND_SERVICE",
+		"value: 172.30.0.53",
+		"mountPath: /run/sluice",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("CKS manifest missing Sluice invariant %q", want)
+		}
+	}
+	if strings.Contains(got, "name: sluice\n          securityContext:\n            privileged: true") {
+		t.Error("Sluice must not be privileged")
+	}
+	controller := string(entrypoint)
+	for _, want := range []string{
+		"curl --fail --silent --show-error --unix-socket \"$sluice_socket\"",
+		"sluice_args+=(--sluice-socket \"$sluice_socket\")",
+		"sluice_args+=(--guest-dns \"$guest_dns\")",
+	} {
+		if !strings.Contains(controller, want) {
+			t.Errorf("controller entrypoint missing fail-closed Sluice wiring %q", want)
+		}
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

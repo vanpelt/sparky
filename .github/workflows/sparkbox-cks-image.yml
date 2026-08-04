@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/sparkbox-cks-image.yml
       - tools/sparkbox/**
+      - tools/sluice/**
 
 concurrency:
   group: sparkbox-cks-image-${{ github.ref }}
@@ -51,7 +52,7 @@ jobs:
       - name: Build and publish image
         uses: docker/build-push-action@v7
         with:
-          context: tools/sparkbox
+          context: tools
           file: tools/sparkbox/deploy/kubernetes/Containerfile
           platforms: linux/amd64
           push: true

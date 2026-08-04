@@ -39,6 +39,8 @@ readonly skip_prepare="${SPARKBOX_SKIP_PREPARE:-false}"
 readonly chroot_jailer="${SPARKBOX_CHROOT_JAILER:-false}"
 readonly disable_host_rootfs_mounts="${SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS:-false}"
 readonly privileged_helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-}"
+readonly sluice_socket="${SPARKBOX_SLUICE_SOCKET:-}"
+readonly guest_dns="${SPARKBOX_GUEST_DNS:-}"
 readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
 readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
@@ -260,6 +262,27 @@ else
 	/usr/local/sbin/sparkbox-net.sh
 fi
 
+sluice_args=()
+if [ -n "$sluice_socket" ]; then
+	# A node configured for filtering must never start in an accidentally open
+	# state. Sluice creates its socket only after the eBPF collection loaded, so
+	# a successful API probe proves both the control plane and enforcement plane
+	# were initialized before Sparkbox accepts a VM operation.
+	for _ in $(seq 1 60); do
+		if curl --fail --silent --show-error --unix-socket "$sluice_socket" \
+			http://sluice/report.json >/dev/null 2>&1; then
+			break
+		fi
+		sleep 1
+	done
+	curl --fail --silent --show-error --unix-socket "$sluice_socket" \
+		http://sluice/report.json >/dev/null
+	sluice_args+=(--sluice-socket "$sluice_socket")
+fi
+if [ -n "$guest_dns" ]; then
+	sluice_args+=(--guest-dns "$guest_dns")
+fi
+
 tls_args=()
 if [ "$proxy_tls" = true ]; then
   tls_args+=(--proxy-tls --tls-provider "$tls_provider")
@@ -324,6 +347,7 @@ exec /usr/local/bin/sparkbox serve \
   --host-mem-mb "$host_mem_mb" \
   --mem-admission-pct 80 \
   --max-running-per-owner 2 \
+  "${sluice_args[@]}" \
   "${role_args[@]}" \
   "${tls_args[@]}" \
   "$@"

@@ -10,6 +10,7 @@ readonly vm_state_dir="${SPARKBOX_VM_STATE_DIR:-$hot_dir/controller}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 readonly guest_subnet6="${SPARKBOX_GUEST_SUBNET6:-}"
 readonly restrict_internal_egress="${SPARKBOX_RESTRICT_INTERNAL_EGRESS:-1}"
+readonly sluice_dns_ip="${SPARKBOX_SLUICE_DNS_IP:-}"
 readonly helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-/run/sparkbox-vmm/helper.sock}"
 readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
 readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
@@ -41,6 +42,7 @@ export SPARKBOX_EDGE_REDIRECT=0
 export SPARKBOX_GUEST_SUBNET="$guest_subnet"
 export SPARKBOX_GUEST_SUBNET6="$guest_subnet6"
 export SPARKBOX_RESTRICT_INTERNAL_EGRESS="$restrict_internal_egress"
+export SLUICE_DNS_IP="$sluice_dns_ip"
 /usr/local/sbin/sparkbox-net.sh
 
 helper_args=(
