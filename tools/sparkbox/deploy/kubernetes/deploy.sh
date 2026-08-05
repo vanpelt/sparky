@@ -10,6 +10,7 @@ Options:
   --context CONTEXT       kubectl context (default: current context)
   --node-pool NAME        CKS NodePool label value (default: default-node-pool)
   --node NAME             exact CKS Node (default: sole ready eligible pool Node)
+  --proxy-domain DOMAIN   public Sparkbox domain (default: allocated coreweave.app domain)
   --public-key PATH       operator SSH public key (default: ~/.ssh/id_ed25519.pub)
   --private-key PATH      matching operator key used to approve the VM node
                           (default: public-key path without .pub; optional on re-runs)
@@ -22,6 +23,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 context=$(kubectl config current-context)
 node_pool=default-node-pool
 node=
+requested_proxy_domain=
 public_key="${HOME}/.ssh/id_ed25519.pub"
 private_key=
 operator=$(id -un)
@@ -40,6 +42,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --node)
       node=${2:?--node requires a value}
+      shift 2
+      ;;
+    --proxy-domain)
+      requested_proxy_domain=${2:?--proxy-domain requires a value}
       shift 2
       ;;
     --public-key)
@@ -93,6 +99,20 @@ case "$node" in
   -*|*[!a-zA-Z0-9.-]*)
     echo "--node contains unsupported characters" >&2
     exit 2
+    ;;
+esac
+case "$requested_proxy_domain" in
+  '')
+    ;;
+  *)
+    if [[ ! "$requested_proxy_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$ ]]; then
+      echo "--proxy-domain must be a valid DNS name" >&2
+      exit 2
+    fi
+    if [ "${#requested_proxy_domain}" -gt 253 ]; then
+      echo "--proxy-domain must be at most 253 characters" >&2
+      exit 2
+    fi
     ;;
 esac
 case "$image" in
@@ -210,8 +230,8 @@ done
   exit 1
 }
 
-proxy_domain=${external_record#*.}
-case "$proxy_domain" in
+allocated_domain=${external_record#*.}
+case "$allocated_domain" in
   *.coreweave.app)
     ;;
   *)
@@ -219,6 +239,11 @@ case "$proxy_domain" in
     exit 1
     ;;
 esac
+proxy_domain=${requested_proxy_domain:-$allocated_domain}
+if [ "$proxy_domain" != "$allocated_domain" ]; then
+  echo "Configuring custom public domain: $proxy_domain"
+  echo "  DNS apex and wildcard must point to the LoadBalancer before HTTPS is tested."
+fi
 
 temporary_dir=$(mktemp -d)
 users_file="$temporary_dir/users.conf"
@@ -342,12 +367,13 @@ echo "Waiting for the private VM node (first boot may refresh Firecracker and ag
 # expose a new path or helper RPC to the controller.
 node_fingerprint=$("${k[@]}" -n "$namespace" exec deployment/sparkbox-node -c vmm-helper -- \
   ssh-keygen -lf /var/lib/sparkbox/node-identity/node_key.pem -E sha256 | awk '{print $2}')
-printf 'ssh.%s %s\n' "$proxy_domain" "$(cat "$gateway_public_file")" > "$known_hosts_file"
+approval_host="ssh.$allocated_domain"
+printf '%s %s\n' "$approval_host" "$(cat "$gateway_public_file")" > "$known_hosts_file"
 if [ -f "$private_key" ]; then
   ssh_args=(
     ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes
     -o "UserKnownHostsFile=$known_hosts_file" -i "$private_key"
-    -p 22 "ctl@ssh.$proxy_domain"
+    -p 22 "ctl@$approval_host"
   )
   deadline=$((SECONDS + 120))
   roster=
@@ -365,7 +391,7 @@ if [ -f "$private_key" ]; then
   fi
 else
   echo "operator private key not found at $private_key; approve the pending node manually:" >&2
-  echo "  ssh -p 22 ctl@ssh.$proxy_domain node approve $node_fingerprint --guest-subnet 172.30.0.0/20" >&2
+  echo "  ssh -p 22 ctl@$approval_host node approve $node_fingerprint --guest-subnet 172.30.0.0/20" >&2
 fi
 
 "${k[@]}" -n "$namespace" delete deployment sparkbox --ignore-not-found --wait=true

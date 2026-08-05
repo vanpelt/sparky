@@ -183,13 +183,13 @@ spec:
             requests:
               # Firecracker is this container's child, so guest RAM is charged
               # to this cgroup rather than to the unprivileged controller.
-              cpu: "3500m"
-              memory: 11Gi
+              cpu: "48"
+              memory: 400Gi
               sparkbox.dev/kvm: "1"
               sparkbox.dev/tun: "1"
             limits:
-              cpu: "7"
-              memory: 23Gi
+              cpu: "56"
+              memory: 448Gi
               sparkbox.dev/kvm: "1"
               sparkbox.dev/tun: "1"
           readinessProbe:
@@ -251,11 +251,11 @@ spec:
               type: RuntimeDefault
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 250m
+              memory: 256Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "1"
+              memory: 1Gi
           startupProbe:
             exec:
               command:
@@ -294,7 +294,11 @@ spec:
             - name: SPARKBOX_GUEST_SUBNET
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
-              value: "22000"
+              value: "480000"
+            - name: SPARKBOX_MEM_ADMISSION_PCT
+              value: "90"
+            - name: SPARKBOX_MAX_RUNNING_PER_OWNER
+              value: "50"
             - name: SPARKBOX_GATEWAY_ADDR
               value: sparkbox-gateway.sparkbox-poc.svc.cluster.local:2222
             - name: SPARKBOX_NODE_NAME
@@ -338,12 +342,12 @@ spec:
               protocol: TCP
           resources:
             requests:
-              cpu: 500m
-              memory: 1Gi
+              cpu: "1"
+              memory: 2Gi
               ephemeral-storage: 40Gi
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: "2"
+              memory: 2Gi
               ephemeral-storage: 100Gi
           startupProbe:
             tcpSocket:

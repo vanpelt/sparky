@@ -202,10 +202,22 @@ loads the eBPF collection with exactly those three capabilities while retaining
 The helper creates `172.30.0.53/32` on a Pod-local `sparkdns` dummy interface;
 new guests receive that address as their resolver. Sluice binds only that
 address, pins it in the eBPF allow-set, and runs with `--enforce`. Every VM is
-therefore restricted to the minimal base image allow-list; a VM whose tags
-carry a network rule also receives that rule's DNS answers. CKS deliberately
-does not use Sluice's `--open-untagged` compatibility mode, because a newly
-created TAP would otherwise be unrestricted until its first fleet policy push.
+therefore attached to Sluice before Firecracker starts. Sluice runs with
+`--open-untagged`, matching Sparkbox's product model: a VM with no tag bound to
+a network rule has unrestricted public egress, while a governed VM receives
+only the base list plus the DNS answers allowed by its matching rules. The base
+list always includes `hivemind.wandb.tools`, because workload-identity exchange
+is a platform function rather than an optional application dependency.
+
+There is a deliberate transition window when a newly created VM already has a
+governing tag: its TAP is attached before the gateway's first policy snapshot
+names that TAP, so it is open until that push arrives. The helper's readiness
+handshake still guarantees that Sluice and the outer internal-network ceiling
+are active before Firecracker starts; `--open-untagged` changes public-domain
+policy only and does not permit private, link-local, cluster, or metadata
+destinations. Closing this window requires carrying the intended policy into
+the TAP-readiness handshake, not changing the default behavior of every
+untagged sandbox.
 
 TAP startup is fail closed as well. The VMM helper creates the interface, then
 calls Sluice's host-local readiness endpoint over the shared socket. Sluice
@@ -453,6 +465,59 @@ approve the node's authenticated fleet enrollment. The public gateway is then
 selected by the existing LoadBalancer and the ingress policies are applied.
 Sparkbox's `autocert` provider obtains certificates on the HTTPS listener.
 
+### Use a custom public domain
+
+Pass `--proxy-domain` to keep the CKS LoadBalancer while publishing Sparkbox
+under a domain you control:
+
+```sh
+deploy/kubernetes/deploy.sh \
+  --image "$IMAGE" \
+  --proxy-domain catnip.sh \
+  --public-key ~/.ssh/id_ed25519.pub \
+  --user vanpelt
+```
+
+The deploy script still waits for CoreWeave's allocated `coreweave.app` name
+and uses `ssh.<allocated-domain>` for node approval. The custom domain therefore
+does not need to resolve until the deployment is ready. It is used by Sparkbox
+for public links, WebAuthn origins, host routing, and ACME policy.
+
+At the authoritative DNS provider, create these records after the rollout:
+
+```text
+A  @  <LoadBalancer external IPv4>  DNS only
+A  *  <LoadBalancer external IPv4>  DNS only
+```
+
+The apex record makes the bare domain redirect to `my.<domain>`; the wildcard
+covers the dashboard, SSH name, sandboxes, and browser terminals. Keep the
+records DNS-only when using this manifest. SSH on port 22 is not compatible
+with Cloudflare's ordinary HTTP proxy, and several development HTTPS ports are
+outside its default proxy port set. Port 80 must reach Sparkbox for ACME
+HTTP-01 and port 443 for TLS-ALPN-01/on-demand HTTPS certificates.
+
+`autocert` issues a separate certificate for each hostname. This is convenient
+for the POC but Let's Encrypt limits new certificates per registered domain, so
+a high-churn production edge should instead mount a DNS-01 wildcard certificate
+or provide a scoped Cloudflare DNS token and use Sparkbox's `cloudflare` TLS
+provider. Do not add a Cloudflare Tunnel merely for TLS; the CKS LoadBalancer
+already supplies the required public L4 path.
+
+The self-service dashboard at `my.<domain>` is always enabled. The separate
+operator console at `console.<domain>` is enabled only when the optional
+`sparkbox-console` Secret contains a non-empty `password` key:
+
+```sh
+kubectl -n sparkbox-poc create secret generic sparkbox-console \
+  --from-file=password=/path/to/console-password
+kubectl -n sparkbox-poc rollout restart deployment/sparkbox-gateway
+```
+
+The gateway manifest reads this key through `SPARKBOX_CONSOLE_PASSWORD`. It
+marks the Secret reference optional so a new deployment without an operator
+password still starts with only the user console exposed.
+
 The wildcard record does not represent the base name itself. Use any label,
 such as `ssh`, for the SSH gateway. The Kubernetes entrypoint passes this
 public hostname and the load balancer's public ports to Sparkbox, so the login
@@ -475,10 +540,17 @@ The browser dashboard is:
 https://my.<domain>
 ```
 
-New sandboxes receive two vCPUs and 8 GiB RAM by default. This POC admits at
-most two running sandboxes for one owner and limits the Pod to eight CPUs,
-24 GiB RAM, and 100 GiB Kubernetes-accounted ephemeral storage. The host path
-is not quota-enforced by Kubernetes; monitor and clean
+New sandboxes receive two vCPUs and 8 GiB RAM by default. On the 64-vCPU,
+roughly 502-GiB CKS CPU Node used by this deployment, the VMM helper requests
+48 CPUs and 400 GiB and is capped at 56 CPUs and 448 GiB. Sparkbox advertises
+480,000 MB of host memory with a 90% admission threshold, so running guests may
+reserve at most 432,000 MB while leaving room inside the helper cgroup for
+Firecracker and host-side overhead.
+
+The controller and Sluice together request another 1.25 CPUs and 2.25
+GiB, leaving about 10 allocatable CPUs and 87 GiB of scheduler headroom after
+the cluster's existing system workloads. The host path is not quota-enforced
+by Kubernetes; monitor and clean
 `/mnt/local/sparkbox-poc` as part of operating the Node.
 
 ## Observe and troubleshoot

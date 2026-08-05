@@ -53,6 +53,12 @@ spec:
               value: "true"
             - name: SPARKBOX_TLS_PROVIDER
               value: autocert
+            - name: SPARKBOX_CONSOLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sparkbox-console
+                  key: password
+                  optional: true
             - name: SPARKBOX_NODE_NAME
               value: cks-gateway
             - name: SPARKBOX_CLUSTER_ID

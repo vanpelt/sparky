@@ -27,6 +27,8 @@ readonly artifact_base="${SPARKBOX_ARTIFACT_BASE:-https://github.com/vanpelt/spa
 readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:?SPARKBOX_PROXY_DOMAIN is required}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
+readonly mem_admission_pct="${SPARKBOX_MEM_ADMISSION_PCT:-80}"
+readonly max_running_per_owner="${SPARKBOX_MAX_RUNNING_PER_OWNER:-2}"
 readonly proxy_tls="${SPARKBOX_PROXY_TLS:-true}"
 readonly tls_provider="${SPARKBOX_TLS_PROVIDER:-autocert}"
 readonly tls_email="${SPARKBOX_TLS_EMAIL:-}"
@@ -43,6 +45,16 @@ readonly sluice_socket="${SPARKBOX_SLUICE_SOCKET:-}"
 readonly guest_dns="${SPARKBOX_GUEST_DNS:-}"
 readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
 readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
+case "$mem_admission_pct" in
+  ''|*[!0-9]*) echo "SPARKBOX_MEM_ADMISSION_PCT must be an integer from 0 to 100" >&2; exit 2 ;;
+esac
+if [ "$mem_admission_pct" -gt 100 ]; then
+  echo "SPARKBOX_MEM_ADMISSION_PCT must be an integer from 0 to 100" >&2
+  exit 2
+fi
+case "$max_running_per_owner" in
+  ''|*[!0-9]*) echo "SPARKBOX_MAX_RUNNING_PER_OWNER must be a non-negative integer" >&2; exit 2 ;;
+esac
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
 if [ -z "$proxy_advertise_port" ]; then
   if [ "$proxy_tls" = true ]; then
@@ -345,8 +357,8 @@ exec /usr/local/bin/sparkbox serve \
   --proxy-domain "$proxy_domain" \
   --node-name "$node_name" \
   --host-mem-mb "$host_mem_mb" \
-  --mem-admission-pct 80 \
-  --max-running-per-owner 2 \
+  --mem-admission-pct "$mem_admission_pct" \
+  --max-running-per-owner "$max_running_per_owner" \
   "${sluice_args[@]}" \
   "${role_args[@]}" \
   "${tls_args[@]}" \

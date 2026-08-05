@@ -39,3 +39,6 @@ codeload.github.com
 
 # Anthropic API (for agents running in the sandbox)
 api.anthropic.com
+
+# Sparkbox workload-identity federation
+hivemind.wandb.tools

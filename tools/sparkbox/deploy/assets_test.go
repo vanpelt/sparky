@@ -60,7 +60,7 @@ exit 0
 	}
 }
 
-func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
+func TestCKSManifestKeepsSluiceNarrowAndOpenUntilTagged(t *testing.T) {
 	manifest, err := os.ReadFile("kubernetes/deployment.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +85,11 @@ func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
 		"- NET_BIND_SERVICE",
 		"value: 172.30.0.53",
 		"mountPath: /run/sluice",
+		`value: "480000"`,
+		`value: "90"`,
+		`value: "50"`,
+		"memory: 448Gi",
+		`cpu: "56"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("CKS manifest missing Sluice invariant %q", want)
@@ -98,13 +103,22 @@ func TestCKSManifestKeepsSluiceNarrowAndFailClosed(t *testing.T) {
 		"curl --fail --silent --show-error --unix-socket \"$sluice_socket\"",
 		"sluice_args+=(--sluice-socket \"$sluice_socket\")",
 		"sluice_args+=(--guest-dns \"$guest_dns\")",
+		`--mem-admission-pct "$mem_admission_pct"`,
+		`--max-running-per-owner "$max_running_per_owner"`,
 	} {
 		if !strings.Contains(controller, want) {
 			t.Errorf("controller entrypoint missing fail-closed Sluice wiring %q", want)
 		}
 	}
-	if strings.Contains(string(sluiceEntrypoint), "--open-untagged") {
-		t.Error("CKS Sluice must enforce its base allow-list on every TAP")
+	if !strings.Contains(string(sluiceEntrypoint), "--open-untagged") {
+		t.Error("CKS Sluice must leave an ungoverned sandbox open until a network-rule tag applies")
+	}
+	baseAllowlist, err := os.ReadFile("sluice-allowlist.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(baseAllowlist), "hivemind.wandb.tools") {
+		t.Error("CKS base allow-list must permit the platform workload-identity exchange")
 	}
 	if !strings.Contains(string(helperEntrypoint), `helper_args+=(--sluice-socket "$sluice_socket")`) {
 		t.Error("VMM helper does not require Sluice readiness before launch")
