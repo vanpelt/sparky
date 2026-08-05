@@ -51,6 +51,8 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 		// produces and would send an operator looking for the wrong thing.
 		OnIdentityToken:     f.IdentityToken,
 		OnIdentityDoc:       f.IdentityDoc,
+		OnSelfVisibility:    f.SelfVisibility,
+		OnSelfPort:          f.SelfPort,
 		OnCertificateEnroll: f.enrollCertificate,
 	}
 	if opts.Grace == 0 {

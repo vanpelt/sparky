@@ -23,6 +23,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -101,6 +102,30 @@ func (s *fakeRoutes) GetBySubdomain(sub string) (routes.Route, bool, error) {
 	defer s.mu.Unlock()
 	r, ok := s.byID[sub]
 	return r, ok, nil
+}
+
+func (s *fakeRoutes) ListBySandbox(sandbox string) ([]routes.Route, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []routes.Route
+	for _, r := range s.byID {
+		if r.Sandbox == sandbox {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (s *fakeRoutes) SetVisibility(subdomain, visibility string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.byID[subdomain]
+	if !ok {
+		return routes.ErrNoSuchRoute
+	}
+	r.Visibility = visibility
+	s.byID[subdomain] = r
+	return nil
 }
 
 func (s *fakeRoutes) DeleteBySandbox(sandbox string) error {
@@ -243,6 +268,52 @@ func TestRemoteCreateMintsTheGatewaySideRows(t *testing.T) {
 	}
 	if got := r.door.published(); !equalStrings(got, []string{"far-away"}) {
 		t.Errorf("front door published %v, want far-away", got)
+	}
+}
+
+func TestRemoteSandboxCanManageOnlyItsOwnGatewayRoutes(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.routes.Upsert(routes.Route{
+		Subdomain: "web-far-away", Sandbox: "far-away", Owner: "alice", Port: 9000,
+		Visibility: routes.VisibilityPrivate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	visibility, err := r.f.SelfVisibility(context.Background(), "boxb", nodelink.SelfVisibilityReq{
+		Sandbox: "far-away", Visibility: routes.VisibilityPublic,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visibility.Routes != 2 || visibility.Visibility != routes.VisibilityPublic {
+		t.Errorf("visibility = %+v", visibility)
+	}
+	for _, sub := range []string{"far-away", "web-far-away"} {
+		row, _, _ := r.routes.GetBySubdomain(sub)
+		if row.Visibility != routes.VisibilityPublic {
+			t.Errorf("route %s stayed %s", sub, row.Visibility)
+		}
+	}
+
+	port, err := r.f.SelfPort(context.Background(), "boxb", nodelink.SelfPortReq{Sandbox: "far-away", Port: 5173})
+	if err != nil || port.Port != 5173 {
+		t.Fatalf("port = %+v, %v", port, err)
+	}
+	defaultRoute, _, _ := r.routes.GetBySubdomain("far-away")
+	customRoute, _, _ := r.routes.GetBySubdomain("web-far-away")
+	if defaultRoute.Port != 5173 || customRoute.Port != 9000 {
+		t.Errorf("default/custom ports = %d/%d", defaultRoute.Port, customRoute.Port)
+	}
+
+	if _, err := r.f.SelfVisibility(context.Background(), "intruder", nodelink.SelfVisibilityReq{
+		Sandbox: "far-away", Visibility: routes.VisibilityPrivate,
+	}); err == nil {
+		t.Fatal("another node changed route visibility")
 	}
 }
 

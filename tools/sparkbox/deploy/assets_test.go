@@ -60,6 +60,66 @@ exit 0
 	}
 }
 
+func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"etc", "home/sparky/.ssh"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("sparky:x:1000:1000::/home/sparky:/bin/bash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "home/sparky/.ssh/authorized_keys"), []byte("ssh-ed25519 test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "install-guest-identity.sh", root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install guest payload: %v\n%s", err, out)
+	}
+	cli, err := os.ReadFile(filepath.Join(root, "usr/local/bin/sparkbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"$META/self/pin", "$META/self/unpin", "$META/self",
+		"$META/self/visibility/public", "$META/self/visibility/private",
+		"$META/self/port/$2",
+	} {
+		if !strings.Contains(string(cli), want) {
+			t.Errorf("guest CLI missing %q", want)
+		}
+	}
+	rev, err := os.ReadFile(filepath.Join(root, "etc/sparkbox/identity-rev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rev) != "IDENTITY_REV=3\n" {
+		t.Fatalf("identity revision = %q", rev)
+	}
+}
+
+func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
+	got := string(RefreshToolsScript)
+	for _, want := range []string{
+		".agents/AGENTS.md",
+		".codex/AGENTS.md",
+		".claude/CLAUDE.md",
+		"https://docs.catnip.sh/docs.md",
+		"sparkbox pin",
+		"sparkbox unpin",
+		"sparkbox make-public",
+		"sparkbox make-private",
+		"sparkbox set-port PORT",
+		"AGENT_ENV_REV=3",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("template guidance missing %q", want)
+		}
+	}
+}
+
 func TestCKSManifestKeepsSluiceNarrowAndOpenUntilTagged(t *testing.T) {
 	manifest, err := os.ReadFile("kubernetes/deployment.yaml")
 	if err != nil {

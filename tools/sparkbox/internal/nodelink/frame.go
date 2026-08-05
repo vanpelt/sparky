@@ -133,11 +133,13 @@ const (
 	TypeNetPolicy = "net.policy"
 	TypeNetUsage  = "net.usage"
 
-	// Workload identity, NODE -> gateway. The only two requests that travel
-	// that way, and they do so because the fleet's OIDC signing key is the one
-	// piece of gateway material that never leaves the gateway.
-	TypeIdentityToken = "identity.token"
-	TypeIdentityDoc   = "identity.describe"
+	// NODE -> gateway requests. Identity stays upstream because the signing key
+	// never leaves the gateway; route self-service stays upstream because route
+	// state is gateway-owned even when the VM lives on another machine.
+	TypeIdentityToken  = "identity.token"
+	TypeIdentityDoc    = "identity.describe"
+	TypeSelfVisibility = "sandbox.self_visibility"
+	TypeSelfPort       = "sandbox.self_port"
 
 	// Certificate enrollment, NODE -> gateway. The SSH control link is the
 	// bootstrap authentication: the request carries no node name because the
@@ -881,6 +883,30 @@ type IdentityDocResp struct {
 	SandboxID string `json:"sandbox_id"`
 	Image     string `json:"image"`
 	Box       string `json:"box"`
+}
+
+// SelfVisibilityReq is a node relaying a request made from one of its guest
+// taps. The authenticated link supplies the node; the gateway verifies that
+// its placement ledger puts Sandbox there before changing gateway-owned routes.
+type SelfVisibilityReq struct {
+	Sandbox    string `json:"sandbox"`
+	Visibility string `json:"visibility"`
+}
+
+type SelfVisibilityResp struct {
+	Sandbox    string `json:"sandbox"`
+	Visibility string `json:"visibility"`
+	Routes     int    `json:"routes"`
+}
+
+type SelfPortReq struct {
+	Sandbox string `json:"sandbox"`
+	Port    int    `json:"port"`
+}
+
+type SelfPortResp struct {
+	Sandbox string `json:"sandbox"`
+	Port    int    `json:"port"`
 }
 
 // ---------------------------------------------------------------------------
