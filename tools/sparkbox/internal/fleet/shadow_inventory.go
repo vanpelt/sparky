@@ -193,7 +193,10 @@ func snapshotShadowOf(snapshot *host.Snapshot) snapshotShadow {
 type capacityShadow struct {
 	TotalVCPUs, TotalMemMB, BudgetMemMB, UsedVCPUs, UsedMemMB    int64
 	EffectiveMemMB, ReserveMemMB, DiskPoolMBPerOwner, UsedDiskMB int64
+	OwnerMemoryPoolMB, OwnerMemoryBurstMB, EntitledMemMB         int64
+	ResidentMemMB                                                int64
 	Running, Sandboxes                                           int
+	ActiveOwners                                                 int
 }
 
 func capacityShadowOf(capacity host.NodeCapacity) capacityShadow {
@@ -202,7 +205,10 @@ func capacityShadowOf(capacity host.NodeCapacity) capacityShadow {
 		BudgetMemMB: capacity.BudgetMemMB, UsedVCPUs: capacity.UsedVCPUs,
 		UsedMemMB: capacity.UsedMemMB, EffectiveMemMB: capacity.EffectiveMemMB,
 		ReserveMemMB: capacity.ReserveMemMB, DiskPoolMBPerOwner: capacity.DiskPoolMBPerOwner,
-		UsedDiskMB: capacity.UsedDiskMB, Running: capacity.Running,
+		OwnerMemoryPoolMB: capacity.OwnerMemoryPoolMB, OwnerMemoryBurstMB: capacity.OwnerMemoryBurstMB,
+		EntitledMemMB: capacity.EntitledMemMB, ActiveOwners: capacity.ActiveOwners,
+		ResidentMemMB: capacity.ResidentMemMB,
+		UsedDiskMB:    capacity.UsedDiskMB, Running: capacity.Running,
 		Sandboxes: capacity.Sandboxes,
 	}
 }

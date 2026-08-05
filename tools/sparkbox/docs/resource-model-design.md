@@ -352,9 +352,26 @@ the browser terminal's header that restarts a sandbox with **2× its vCPUs and
   the wire — the machine that allocates decides what turbo means, so a gateway
   and a node on different releases cannot disagree.
 
-Open: turbo is currently free and unmetered. The obvious next step is charging
-it against the same burstable budget Part 4 describes, and a per-owner ceiling
-on how many machines may be in turbo at once.
+**Owner-pool integration landed.** A normal VM is charged one effective working
+set (`--mem-reserve-mb`) to the owner's baseline pool. Turbo is charged twice
+that amount and may cross the baseline only up to
+`--owner-memory-burst-mb`. The burst ceiling is borrowed capacity, not a
+reservation: every owner's baseline and burst pools overlap on the node, while
+the node-wide effective-memory budget remains the final admission authority.
+This fixes the subtle overcommit bug where an 8 GiB VM and its 16 GiB turbo
+form both collapsed to the same reserve charge and turbo was effectively free.
+
+A ten-second pressure controller closes the gap between statistical admission
+and reality. It samples Firecracker balloon working-set statistics, compares
+actual resident use with owner baseline/burst ceilings and the node budget, and
+balloons cold unpinned VMs without pausing them. Borrowed turbo allocations are
+reclaimed before ordinary LRU candidates. Node capacity reports effective,
+resident, and entitled memory separately so an operator can see both the real
+load and the intentional owner-pool overcommit ratio.
+
+Still open: a time-based turbo lease, a per-owner simultaneous-turbo policy,
+and cgroup CPU enforcement. Today turbo lasts for one run and naturally returns
+on pause, while the host kernel time-slices its doubled vCPU threads.
 
 ## What we already have (so this is mostly policy, not new mechanics)
 

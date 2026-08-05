@@ -153,3 +153,57 @@ func TestProtectUntilNeverShortensLease(t *testing.T) {
 		t.Fatalf("lease shortened to %v, want %v", got, later)
 	}
 }
+
+func TestOwnerPressureBalloonsColdestWorkingSets(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 128, OwnerMemoryPoolMB: 512})
+	ctx := context.Background()
+	for i, name := range []string{"coldest", "middle", "newest"} {
+		if _, err := m.Create(ctx, name, "alice", "ubuntu", 1, 512); err != nil {
+			t.Fatal(err)
+		}
+		m.boxes[name].LastActive = time.Now().Add(time.Duration(i-3) * time.Hour)
+	}
+
+	// The mock reports a 256 MiB working set for each VM: 768 MiB actual against
+	// a 512 MiB owner pool, despite only 384 MiB of admission charges.
+	m.reconcileMemoryPressure(ctx)
+	if !m.boxes["coldest"].Ballooned || !m.boxes["middle"].Ballooned {
+		t.Fatalf("pressure did not reclaim the two coldest VMs: cold=%v middle=%v newest=%v",
+			m.boxes["coldest"].Ballooned, m.boxes["middle"].Ballooned, m.boxes["newest"].Ballooned)
+	}
+	if m.boxes["newest"].Ballooned {
+		t.Fatal("pressure reclaimed a newer VM after enough cold memory was available")
+	}
+}
+
+func TestPressureReclaimsTurboBeforeNormalVM(t *testing.T) {
+	m := internalManager(t, Options{
+		MemReserveMB: 128, OwnerMemoryPoolMB: 512, OwnerMemoryBurstMB: 1024,
+	})
+	ctx := context.Background()
+	for _, name := range []string{"normal", "fast"} {
+		if _, err := m.Create(ctx, name, "alice", "ubuntu", 1, 512); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.SetTurbo(ctx, "fast", true); err != nil {
+		t.Fatal(err)
+	}
+	// Make normal older to prove the turbo-first rule wins over LRU.
+	m.boxes["normal"].LastActive = time.Now().Add(-2 * time.Hour)
+	m.boxes["fast"].LastActive = time.Now()
+	m.memUsed["normal"], m.memUsed["fast"] = 400, 800
+	m.reclaimMemory(ctx, "alice", 100)
+	if !m.boxes["fast"].Ballooned || m.boxes["normal"].Ballooned {
+		t.Fatalf("turbo was not reclaimed first: normal=%v turbo=%v",
+			m.boxes["normal"].Ballooned, m.boxes["fast"].Ballooned)
+	}
+	stats, err := m.balloon.BalloonStats(ctx, "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Turbo retains twice the 128 MiB baseline floor.
+	if want := int64(1024 - 256); stats.TargetMiB != want {
+		t.Fatalf("turbo balloon target = %d, want %d", stats.TargetMiB, want)
+	}
+}

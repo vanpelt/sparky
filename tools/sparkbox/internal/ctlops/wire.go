@@ -110,7 +110,7 @@ func hostToWire(err error) *WireHostError {
 	var capacity *host.CapacityError
 	if errors.As(err, &capacity) {
 		return &WireHostError{Type: hostCapacity, RequestedMB: capacity.RequestedMB,
-			UsedMB: capacity.UsedMB, BudgetMB: capacity.BudgetMB}
+			UsedMB: capacity.UsedMB, BudgetMB: capacity.BudgetMB, Owner: capacity.Owner}
 	}
 	var quota *host.DiskQuotaError
 	if errors.As(err, &quota) {
@@ -335,7 +335,8 @@ func hostFromWire(h *WireHostError) error {
 		if !saneMB(h.RequestedMB) || !saneMB(h.UsedMB) || !saneMB(h.BudgetMB) || h.BudgetMB == 0 {
 			return nil
 		}
-		return &host.CapacityError{RequestedMB: h.RequestedMB, UsedMB: h.UsedMB, BudgetMB: h.BudgetMB}
+		return &host.CapacityError{Owner: SafeText(h.Owner, maxWireText), RequestedMB: h.RequestedMB,
+			UsedMB: h.UsedMB, BudgetMB: h.BudgetMB}
 	case hostQuota:
 		owner := SafeText(h.Owner, maxWireText)
 		if owner == "" || !saneMB(h.RequestedMB) || !saneMB(h.UsedMB) || !saneMB(h.PoolMB) || h.PoolMB == 0 {

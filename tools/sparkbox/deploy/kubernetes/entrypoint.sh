@@ -29,6 +29,11 @@ readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
 readonly mem_admission_pct="${SPARKBOX_MEM_ADMISSION_PCT:-80}"
 readonly max_running_per_owner="${SPARKBOX_MAX_RUNNING_PER_OWNER:-2}"
+readonly max_sandboxes_per_owner="${SPARKBOX_MAX_SANDBOXES_PER_OWNER:-0}"
+readonly mem_reserve_mb="${SPARKBOX_MEM_RESERVE_MB:-0}"
+readonly owner_memory_pool_mb="${SPARKBOX_OWNER_MEMORY_POOL_MB:-0}"
+readonly owner_memory_burst_mb="${SPARKBOX_OWNER_MEMORY_BURST_MB:-0}"
+readonly disk_pool_mb_per_owner="${SPARKBOX_DISK_POOL_MB_PER_OWNER:-0}"
 readonly proxy_tls="${SPARKBOX_PROXY_TLS:-true}"
 readonly tls_provider="${SPARKBOX_TLS_PROVIDER:-autocert}"
 readonly tls_email="${SPARKBOX_TLS_EMAIL:-}"
@@ -55,6 +60,17 @@ fi
 case "$max_running_per_owner" in
   ''|*[!0-9]*) echo "SPARKBOX_MAX_RUNNING_PER_OWNER must be a non-negative integer" >&2; exit 2 ;;
 esac
+validate_nonnegative() {
+  local name=$1 value=$2
+  case "$value" in
+    ''|*[!0-9]*) echo "$name must be a non-negative integer" >&2; exit 2 ;;
+  esac
+}
+validate_nonnegative SPARKBOX_MEM_RESERVE_MB "$mem_reserve_mb"
+validate_nonnegative SPARKBOX_MAX_SANDBOXES_PER_OWNER "$max_sandboxes_per_owner"
+validate_nonnegative SPARKBOX_OWNER_MEMORY_POOL_MB "$owner_memory_pool_mb"
+validate_nonnegative SPARKBOX_OWNER_MEMORY_BURST_MB "$owner_memory_burst_mb"
+validate_nonnegative SPARKBOX_DISK_POOL_MB_PER_OWNER "$disk_pool_mb_per_owner"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
 if [ -z "$proxy_advertise_port" ]; then
   if [ "$proxy_tls" = true ]; then
@@ -359,6 +375,11 @@ exec /usr/local/bin/sparkbox serve \
   --host-mem-mb "$host_mem_mb" \
   --mem-admission-pct "$mem_admission_pct" \
   --max-running-per-owner "$max_running_per_owner" \
+  --max-sandboxes-per-owner "$max_sandboxes_per_owner" \
+  --mem-reserve-mb "$mem_reserve_mb" \
+  --owner-memory-pool-mb "$owner_memory_pool_mb" \
+  --owner-memory-burst-mb "$owner_memory_burst_mb" \
+  --disk-pool-mb-per-owner "$disk_pool_mb_per_owner" \
   "${sluice_args[@]}" \
   "${role_args[@]}" \
   "${tls_args[@]}" \
