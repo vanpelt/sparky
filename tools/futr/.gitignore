@@ -1,0 +1,6 @@
+# The plaintext page. NEVER commit this — this repo is public, and the whole
+# point of build.py is that only the encrypted artifact ships.
+src/
+
+.venv/
+__pycache__/
