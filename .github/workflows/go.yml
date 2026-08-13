@@ -33,12 +33,20 @@ name: sparkbox CI
 #          caught F0 and F7. It is honest about what a hosted runner cannot do
 #          — see the long comment on the job.
 #
-# Deliberately NO `paths:` filter. A path filter would make this workflow skip
-# entirely on PRs that touch nothing under tools/sparkbox, and a skipped
-# workflow reports no status at all — so a required check would either block
-# forever or, worse, be left un-required and silently stop guarding. A couple of
-# wasted runner-minutes on a docs-only PR is the cheaper failure mode, and it is
-# the same "no silent caps" rule the smoke job follows.
+# Still deliberately NO workflow-level `paths:` filter, for the reason it always
+# had: a filtered-out workflow reports no status AT ALL, so a required check
+# would either block forever or get quietly un-required and stop guarding.
+#
+# But running the whole suite on a PR that touches only docs/ or another tool
+# was pure waste, so the skipping happens one level down instead. The `changes`
+# job diffs the push/PR and the real jobs carry an `if:`. A job skipped by `if:`
+# still POSTS its status — GitHub counts a skipped job as success for a required
+# check — so the guard survives while the runner-minutes don't. That is the
+# whole reason this is a job-level gate and not a `paths:` key.
+#
+# `changes` fails OPEN: a new branch, a force-push that orphaned the old tip, or
+# any diff it cannot compute runs everything. A wrong "nothing changed" is the
+# one failure mode that silently stops guarding, so it must never be the guess.
 
 on:
   push:
@@ -54,9 +62,72 @@ permissions:
   contents: read
 
 jobs:
+  # ------------------------------------------------------------- changes -----
+  # Which module did this push/PR actually touch? Everything else keys off the
+  # two booleans this emits. Deliberately no third-party action: `git diff` is
+  # the whole job, and the supply chain of a CI gate is worth keeping at zero.
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-24.04
+    outputs:
+      sparkbox: ${{ steps.filter.outputs.sparkbox }}
+      sluice: ${{ steps.filter.outputs.sluice }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need real history to diff against the base commit.
+          fetch-depth: 0
+
+      - name: which trees changed
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # No `set -e`: a non-matching grep returns 1 and must not abort.
+          set -uo pipefail
+
+          base=""
+          if [ "$EVENT" = "pull_request" ]; then
+            base="${PR_BASE:-}"
+          elif [ -n "${BEFORE:-}" ] &&
+               [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            base="$BEFORE"
+          fi
+          # A base we cannot actually resolve is the same as no base at all
+          # (force-push, squashed history, first push of a branch).
+          if [ -n "$base" ] && ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "base $base is not in this clone"
+            base=""
+          fi
+
+          if [ -z "$base" ]; then
+            echo "no usable diff base — assuming everything changed"
+            sparkbox=true
+            sluice=true
+          else
+            files="$(git diff --name-only "$base" HEAD)"
+            echo "changed files:"
+            echo "$files" | sed 's/^/  /'
+            # A change to this workflow re-runs everything it controls.
+            printf '%s\n' "$files" \
+              | grep -qE '^(tools/sparkbox/|\.github/workflows/go\.yml$)' \
+              && sparkbox=true || sparkbox=false
+            printf '%s\n' "$files" \
+              | grep -qE '^(tools/sluice/|\.github/workflows/go\.yml$)' \
+              && sluice=true || sluice=false
+          fi
+
+          echo "sparkbox=$sparkbox" >> "$GITHUB_OUTPUT"
+          echo "sluice=$sluice"     >> "$GITHUB_OUTPUT"
+          echo "==> sparkbox=$sparkbox  sluice=$sluice"
+
   # ---------------------------------------------------------------- test -----
   test:
     name: build, vet, test
+    needs: changes
+    if: needs.changes.outputs.sparkbox == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -237,6 +308,8 @@ jobs:
   # neither arch- nor kernel-version-specific.
   sluice:
     name: sluice build, vet, test
+    needs: changes
+    if: needs.changes.outputs.sluice == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -333,6 +406,8 @@ jobs:
   # needs to BUILD the binary, never to run it.
   macos:
     name: darwin build, vet, test (Apple Silicon)
+    needs: changes
+    if: needs.changes.outputs.sparkbox == 'true'
     # macos-15 is arm64, and the label is also the architecture decision:
     # macos-13 is the last Intel image, and sparkbox on darwin is arm64-only on
     # purpose (macOS host provisioning needs Apple Silicon nested virt, so a
@@ -444,7 +519,8 @@ jobs:
   # --------------------------------------------------------------- smoke -----
   smoke:
     name: provision smoke
-    needs: test
+    needs: [changes, test]
+    if: needs.changes.outputs.sparkbox == 'true'
     # aarch64 on purpose, and it is free for public repos. checkVirt
     # (internal/hostsetup/checks.go) hard-FAILs on amd64 when /proc/cpuinfo has
     # no vmx/svm — and Provision aborts on any preflight FAIL outside
