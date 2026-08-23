@@ -120,6 +120,46 @@ func TestCeremonyEndpointsRefuseCrossOrigin(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin begin = %d; want 403", rec.Code)
 	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("cross-origin Content-Type = %q; want application/json", got)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("cross-origin response is not JSON: %v", err)
+	}
+	if body.Error != "cross-origin request refused" {
+		t.Fatalf("cross-origin error = %q", body.Error)
+	}
+}
+
+func TestWebAuthnOriginUsesPublicPort(t *testing.T) {
+	tests := []struct {
+		name   string
+		secure bool
+		port   int
+		want   string
+	}{
+		{name: "https default", secure: true, port: 443, want: "https://login.hivemind.tools"},
+		{name: "https internal port advertised", secure: true, port: 8081, want: "https://login.hivemind.tools:8081"},
+		{name: "http default", port: 80, want: "http://login.hivemind.tools"},
+		{name: "http on port 443", port: 443, want: "http://login.hivemind.tools:443"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, got, err := newRelyingParty(LoginConfig{
+				Domain: "hivemind.tools", Subdomain: "login",
+				Secure: tt.secure, Port: tt.port,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("origin = %q; want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRegisterBeginRequiresSession(t *testing.T) {

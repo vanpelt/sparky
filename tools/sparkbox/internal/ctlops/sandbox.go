@@ -192,6 +192,40 @@ func (o *Ops) Archive(ctx context.Context, c Caller, name string) (SandboxInfo, 
 	return o.reread(op, name, c)
 }
 
+func (o *Ops) Checkpoint(ctx context.Context, c Caller, name string) (SandboxInfo, error) {
+	const op = "checkpoint"
+	if _, err := o.owned(op, name, c); err != nil {
+		return SandboxInfo{}, err
+	}
+	if o.checkpoints == nil || !o.checkpoints.Enabled(name) {
+		return SandboxInfo{}, Disabled(op, "checkpointing is not enabled on this host")
+	}
+	ctx, cancel := withBudget(ctx, ArchiveTimeout)
+	defer cancel()
+	if err := o.checkpoints.Checkpoint(ctx, name); err != nil {
+		return SandboxInfo{}, Fail(op, err)
+	}
+	o.log.Info("sandbox checkpointed", "user", c.Handle, "name", name)
+	return o.reread(op, name, c)
+}
+
+func (o *Ops) RestoreCheckpoint(ctx context.Context, c Caller, name string) (SandboxInfo, error) {
+	const op = "checkpoint.restore"
+	if _, err := o.owned(op, name, c); err != nil {
+		return SandboxInfo{}, err
+	}
+	if o.checkpoints == nil || !o.checkpoints.Enabled(name) {
+		return SandboxInfo{}, Disabled(op, "checkpointing is not enabled on this host")
+	}
+	ctx, cancel := withBudget(ctx, ArchiveTimeout)
+	defer cancel()
+	if err := o.checkpoints.RestoreCheckpoint(ctx, name); err != nil {
+		return SandboxInfo{}, Fail(op, err)
+	}
+	o.log.Info("sandbox checkpoint restored", "user", c.Handle, "name", name)
+	return o.reread(op, name, c)
+}
+
 // Resize grows the root disk. It pauses, DISCARDS the memory snapshot, resizes
 // and cold-boots, so in-guest processes die; surfacing that warning is the
 // caller's job.

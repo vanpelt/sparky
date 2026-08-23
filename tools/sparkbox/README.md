@@ -59,6 +59,28 @@ pasted. The guest is authenticated by its network position (it can only reach
 the metadata endpoint over its own tap), exactly like a cloud IMDS. See
 [`docs/identity-federation-design.md`](docs/identity-federation-design.md).
 
+Sparkbox can also keep an otherwise-idle VM reachable while HiveMind reports a
+live agent session inside it:
+
+```text
+--hivemind-api=https://hivemind.wandb.tools
+--hivemind-audience=https://hivemind.wandb.tools
+--hivemind-presence-interval=1m
+```
+
+The feature is off unless `--hivemind-api` is set. Each host exchanges a fresh
+device-bound OIDC token, asks HiveMind only about that sandbox, and installs
+the returned short lease in the idle reaper. The lightweight lease query runs
+at the configured interval; the heavier paginated session history and count
+refresh at most once every ten minutes. The lease prevents pause but still
+allows memory ballooning, and a history-query failure does not discard a lease
+already received. A successful history response refreshes an in-memory,
+non-persisted list of that VM's HiveMind sessions, including titles and
+dashboard links. Fleet nodes run the same loop locally and relay token minting
+to the gateway, so the signing key remains gateway-only. If
+`--hivemind-audience` is customized, add the same value to the gateway's
+`--oidc-audiences` allowlist.
+
 ## Authenticated forwarding
 
 Web routes are **private by default**: a visitor to `<name>.hivemind.tools`
@@ -322,6 +344,9 @@ the fleet's keys live — 1Password or Scaleway Secret Manager, staged at
 provisioning time or fetched into tmpfs at boot — is
 [`docs/secret-management.md`](docs/secret-management.md).
 
+For the minimal single-Pod Firecracker proof of concept on CoreWeave Kubernetes
+Service, see [`docs/deploy-cks.md`](docs/deploy-cks.md).
+
 ### On a Mac (Apple Silicon)
 
 Same binary-is-the-installer story, same two commands:
@@ -491,7 +516,13 @@ built from OCI images by `hack/build-rootfs.sh`, CoW reflink per-VM copies,
 static tap networking, snapshot-to-disk on pause). Requires `/dev/kvm`, root,
 a vmlinux, and has **not yet been exercised on real hardware** — see
 [`docs/deploy-hetzner.md`](docs/deploy-hetzner.md) for bring-up and the
-production gap list (jailer, warm snapshots, rate limits).
+production gap list (warm snapshots, disk-parser isolation, rate limits).
+
+`--state-dir` holds control state. Set `--vm-state-dir` when guest disks should
+live on a separate hot volume; it defaults to `--state-dir` for existing
+installations. Firecracker requires reflinks for both template clones and
+snapshot staging, so the image and VM-state directories must be on the same
+reflink-capable filesystem.
 
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node + headless Chrome, ~4GB — replacing the
@@ -529,6 +560,7 @@ for. `sparkbox setup` picks its own set, pinned to the tag the manifest names:
 | `sluice-linux-<arch>` | egress gateway (DNS allowlist + eBPF meter) | `setup --sluice`, on either platform — it is a linux daemon even when a Mac puts it inside the nested machine |
 | `vmlinux-<arch>` | **guest** kernel a microVM boots | `setup` |
 | `firecracker-<arch>` | the VMM | `setup` |
+| `jailer-<arch>` | matching Firecracker chroot / privilege-drop launcher | CKS and jailer-enabled hosts |
 | `universal-<arch>.ext4.zst` | guest rootfs template | `setup` |
 | `manifest-<arch>.env` | sha256s + metadata; unqualified name means **linux** | `setup`, `macos/sparkbox-bootstrap.sh` |
 | `sparkbox-darwin-arm64` | the binary a Mac runs | the operator on macOS |
@@ -537,7 +569,8 @@ for. `sparkbox setup` picks its own set, pinned to the tag the manifest names:
 
 To build a release by hand on a build host, `hack/stage-artifacts.sh` stages one
 linux arch into `OUT_DIR` (blank `IMAGE` = build the base image locally; set
-`IMAGE=` to flatten a prebuilt one instead), and `hack/stage-darwin-artifacts.sh`
+`IMAGE=` to flatten a prebuilt one instead). `FIRECRACKER_BIN` and `JAILER_BIN`
+must name the matching release pair. `hack/stage-darwin-artifacts.sh`
 derives the darwin pair from the arm64 manifest that produced.
 
 ## Status / roadmap
@@ -580,7 +613,7 @@ derives the darwin pair from the arm64 manifest that produced.
       (mouse reporting, alternate screen, bracketed paste) and a reason, instead
       of being left wedged against a VM that stopped answering
 - [ ] Warm-snapshot pool (restore instead of cold boot on create)
-- [ ] KSM host tuning + cgroup cpu.max; jailer, I/O limits; net isolation
+- [ ] KSM host tuning + per-VM cgroup cpu.max; I/O limits; net isolation
 - [x] Fleet link layer: a second machine joins with `setup --gateway host:port`,
       enrolls by its own key, is approved by fingerprint (`ctl node approve`),
       and reports arch + capacity over a heartbeat — see *Adding a second

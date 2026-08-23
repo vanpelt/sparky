@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -93,6 +94,44 @@ func mustCreate(t *testing.T, m *host.Manager, name, owner string, memMB int64) 
 	t.Helper()
 	if _, err := m.Create(context.Background(), name, owner, "ubuntu", 1, memMB); err != nil {
 		t.Fatalf("create %s: %v", name, err)
+	}
+}
+
+type failingUnpackDriver struct {
+	*mock.Driver
+	fail atomic.Bool
+}
+
+func (d *failingUnpackDriver) UnpackRootfs(ctx context.Context, name, inPath string) error {
+	if d.fail.Load() {
+		return errors.New("injected unpack failure")
+	}
+	return d.Driver.UnpackRootfs(ctx, name, inPath)
+}
+
+func TestRestoreCheckpointFailureRestartsPreviouslyRunningSandbox(t *testing.T) {
+	store := newMemStore()
+	var driver *failingUnpackDriver
+	m := newTestManagerWith(t, host.Options{Checkpoint: store}, func(base *mock.Driver) vmm.Driver {
+		driver = &failingUnpackDriver{Driver: base}
+		return driver
+	})
+	ctx := context.Background()
+	mustCreate(t, m, "restore-recovery", "alice", 512)
+	if err := m.Checkpoint(ctx, "restore-recovery"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+
+	driver.fail.Store(true)
+	if err := m.RestoreCheckpoint(ctx, "restore-recovery"); err == nil {
+		t.Fatal("restore should fail")
+	}
+	box, ok := m.Get("restore-recovery")
+	if !ok {
+		t.Fatal("sandbox disappeared after failed restore")
+	}
+	if box.State != vmm.StateRunning {
+		t.Fatalf("state after failed restore = %q, want running", box.State)
 	}
 }
 
@@ -331,6 +370,69 @@ func TestWarmEnsureReadyDefersPersistenceUntilActivityFlush(t *testing.T) {
 	}
 }
 
+func TestSandboxIDPersistsAcrossRenameAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	m := newManagerInDir(t, dir, host.Options{})
+	box, err := m.Create(context.Background(), "before", "alice", "ubuntu", 1, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if box.ID == "" {
+		t.Fatal("created sandbox has no immutable ID")
+	}
+	if _, err := uuid.Parse(box.ID); err != nil {
+		t.Fatalf("sandbox ID %q is not a UUID: %v", box.ID, err)
+	}
+	if err := m.Rename(context.Background(), "before", "after", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	renamed, ok := m.Get("after")
+	if !ok || renamed.ID != box.ID {
+		t.Fatalf("rename changed sandbox ID: got %q, want %q", renamed.ID, box.ID)
+	}
+
+	reloaded := newManagerInDir(t, dir, host.Options{})
+	afterRestart, ok := reloaded.Get("after")
+	if !ok || afterRestart.ID != box.ID {
+		t.Fatalf("restart changed sandbox ID: got %q, want %q", afterRestart.ID, box.ID)
+	}
+}
+
+func TestManagerBackfillsLegacySandboxID(t *testing.T) {
+	dir := t.TempDir()
+	m := newManagerInDir(t, dir, host.Options{})
+	mustCreate(t, m, "legacy", "alice", 512)
+
+	statePath := filepath.Join(dir, "sandboxes.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records map[string]map[string]any
+	if err := json.Unmarshal(raw, &records); err != nil {
+		t.Fatal(err)
+	}
+	delete(records["legacy"], "id")
+	raw, err = json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := newManagerInDir(t, dir, host.Options{})
+	backfilled, ok := reloaded.Get("legacy")
+	if !ok || backfilled.ID == "" {
+		t.Fatal("legacy sandbox ID was not backfilled")
+	}
+	restarted := newManagerInDir(t, dir, host.Options{})
+	persisted, ok := restarted.Get("legacy")
+	if !ok || persisted.ID != backfilled.ID {
+		t.Fatalf("backfilled ID was not persisted: got %q, want %q", persisted.ID, backfilled.ID)
+	}
+}
+
 func TestMemAdmission(t *testing.T) {
 	// Budget = 2048 MB * 100% = 2048. Unlimited count so only RAM gates.
 	m := newTestManager(t, host.Options{MemAdmissionPct: 100, HostMemMB: 2048})
@@ -373,6 +475,101 @@ func TestReserveAdmissionMultipliesDensity(t *testing.T) {
 	if capErr.RequestedMB != 1024 || capErr.UsedMB != 8192 || capErr.BudgetMB != 8192 {
 		t.Fatalf("unexpected CapacityError: %+v", capErr)
 	}
+}
+
+func TestOwnerMemoryPoolIsSharedAcrossVMs(t *testing.T) {
+	// The node has ample room, but each owner gets one 8 GiB effective-memory
+	// envelope. Four 8 GiB-ceiling VMs fit at a 2 GiB working-set charge.
+	m := newTestManager(t, host.Options{
+		MemAdmissionPct: 100, HostMemMB: 65536,
+		MemReserveMB: 2048, OwnerMemoryPoolMB: 8192,
+	})
+	for i := 0; i < 4; i++ {
+		mustCreate(t, m, fmt.Sprintf("alice-%d", i), "alice", 8192)
+	}
+	_, err := m.Create(context.Background(), "alice-4", "alice", "ubuntu", 2, 8192)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("want owner *CapacityError, got %v", err)
+	}
+	if capErr.Owner != "alice" || capErr.UsedMB != 8192 || capErr.RequestedMB != 2048 || capErr.BudgetMB != 8192 {
+		t.Fatalf("unexpected owner CapacityError: %+v", capErr)
+	}
+
+	// Bob owns an independent envelope on the same node.
+	mustCreate(t, m, "bob-0", "bob", 8192)
+	owner := m.CapacityForOwner("alice")
+	if owner.MemoryPoolMB != 8192 || owner.EffectiveMemMB != 8192 ||
+		owner.AllocatedMemMB != 4*8192 || owner.RunningSandboxes != 4 || owner.TotalSandboxes != 4 {
+		t.Fatalf("unexpected owner capacity: %+v", owner)
+	}
+
+	// Pausing returns the charge to Alice's pool and admits another child.
+	if err := m.Pause(context.Background(), "alice-0"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "alice-4", "alice", 8192)
+}
+
+func TestOwnerMemoryPoolWithoutOvercommitChargesCeilings(t *testing.T) {
+	m := newTestManager(t, host.Options{OwnerMemoryPoolMB: 8192})
+	mustCreate(t, m, "first", "alice", 8192)
+	_, err := m.Create(context.Background(), "second", "alice", "ubuntu", 2, 8192)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) || capErr.Owner != "alice" {
+		t.Fatalf("want Alice's pooled capacity error, got %v", err)
+	}
+}
+
+func TestOwnerPoolsOverlapOnNodeCapacity(t *testing.T) {
+	m := newTestManager(t, host.Options{
+		HostMemMB: 4096, MemAdmissionPct: 100, MemReserveMB: 256,
+		OwnerMemoryPoolMB: 8192, OwnerMemoryBurstMB: 16384,
+	})
+	mustCreate(t, m, "alice-box", "alice", 8192)
+	mustCreate(t, m, "bob-box", "bob", 8192)
+
+	c := m.Capacity()
+	if c.ActiveOwners != 2 || c.EntitledMemMB != 16384 || c.EffectiveMemMB != 512 {
+		t.Fatalf("overlapping capacity = %+v", c)
+	}
+	if c.EntitledMemMB <= c.BudgetMemMB {
+		t.Fatalf("test did not prove overcommit: entitled %d <= physical budget %d",
+			c.EntitledMemMB, c.BudgetMemMB)
+	}
+}
+
+func TestOwnerBurstConfigurationValidation(t *testing.T) {
+	for _, opts := range []host.Options{
+		{OwnerMemoryBurstMB: 16384},
+		{OwnerMemoryPoolMB: 8192, OwnerMemoryBurstMB: 4096},
+	} {
+		opts.StateDir = t.TempDir()
+		if _, err := host.NewManager(opts); err == nil {
+			t.Fatalf("invalid owner burst config accepted: %+v", opts)
+		}
+	}
+}
+
+func TestTotalSandboxLimitCountsPausedVMs(t *testing.T) {
+	m := newTestManager(t, host.Options{MaxSandboxesPerOwner: 2})
+	mustCreate(t, m, "first", "alice", 1024)
+	if err := m.Pause(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "second", "alice", 1024)
+	_, err := m.Create(context.Background(), "third", "alice", "ubuntu", 2, 1024)
+	var stateErr *host.StateError
+	if !errors.As(err, &stateErr) || stateErr.Code != "sandbox_limit" {
+		t.Fatalf("want sandbox_limit with a paused VM counted, got %v", err)
+	}
+
+	// The cap is per owner, and deleting an identity returns its slot.
+	mustCreate(t, m, "bob-first", "bob", 1024)
+	if err := m.Destroy(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "third", "alice", 1024)
 }
 
 func TestNoLimitsWhenZero(t *testing.T) {

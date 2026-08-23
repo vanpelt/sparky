@@ -10,6 +10,7 @@ require (
 	github.com/gliderlabs/ssh v0.3.8
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/google/go-containerregistry v0.21.9
+	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.19.1
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/libdns v1.1.1
@@ -27,6 +28,7 @@ require (
 	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
+	k8s.io/kubelet v0.35.2
 	modernc.org/sqlite v1.53.0
 )
 
@@ -60,7 +62,6 @@ require (
 	github.com/go-webauthn/x v0.2.6 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
@@ -89,7 +90,7 @@ require (
 	go.mongodb.org/mongo-driver v1.8.3 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect

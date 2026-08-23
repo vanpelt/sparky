@@ -116,6 +116,14 @@ type DiskReporter interface {
 	DiskCapacityMB(ctx context.Context, name string) (int64, error)
 }
 
+// RootfsPresencer is the optional guard against silently recreating a known
+// sandbox from its base image after the hot tier was lost. Absence means
+// "restore required" when a checkpoint exists and "unrecoverable" otherwise,
+// never "fresh clone".
+type RootfsPresencer interface {
+	RootfsPresent(name string) (bool, error)
+}
+
 // Renamer is an optional Driver capability: moving a stopped VM's on-host
 // state to a new name, so the manager can rename a sandbox without a
 // pack/unpack round trip. The caller (host.Manager) pauses first and — for

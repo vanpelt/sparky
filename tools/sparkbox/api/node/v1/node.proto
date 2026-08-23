@@ -122,6 +122,8 @@ message Sandbox {
   // turbo means vcpus and memory_mb above are a doubled allocation this run
   // borrowed, which the node hands back the moment the sandbox pauses.
   bool turbo = 19;
+  // Stable workload identity. Unlike name, this survives sandbox rename.
+  string id = 20;
 }
 
 enum SandboxState {
@@ -160,6 +162,13 @@ message Capacity {
   bool archiving = 16;
   bool snapshots = 17;
   bool network_accounting = 18;
+  // Owner pools are overlapping entitlements. entitled_memory_mb may exceed
+  // budget_memory_mb; effective_memory_mb remains the physical admission load.
+  int64 owner_memory_pool_mb = 19;
+  int64 owner_memory_burst_mb = 20;
+  int64 entitled_memory_mb = 21;
+  int32 active_owners = 22;
+  int64 resident_memory_mb = 23;
 }
 
 message HealthRequest {}
@@ -392,6 +401,7 @@ message IdentityDescription {
   string sandbox = 6;
   string image = 7;
   string node = 8;
+  string sandbox_id = 9;
 }
 
 message DurationRange {

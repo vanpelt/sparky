@@ -133,11 +133,13 @@ const (
 	TypeNetPolicy = "net.policy"
 	TypeNetUsage  = "net.usage"
 
-	// Workload identity, NODE -> gateway. The only two requests that travel
-	// that way, and they do so because the fleet's OIDC signing key is the one
-	// piece of gateway material that never leaves the gateway.
-	TypeIdentityToken = "identity.token"
-	TypeIdentityDoc   = "identity.describe"
+	// NODE -> gateway requests. Identity stays upstream because the signing key
+	// never leaves the gateway; route self-service stays upstream because route
+	// state is gateway-owned even when the VM lives on another machine.
+	TypeIdentityToken  = "identity.token"
+	TypeIdentityDoc    = "identity.describe"
+	TypeSelfVisibility = "sandbox.self_visibility"
+	TypeSelfPort       = "sandbox.self_port"
 
 	// Certificate enrollment, NODE -> gateway. The SSH control link is the
 	// bootstrap authentication: the request carries no node name because the
@@ -611,6 +613,7 @@ type Cancel struct {
 // column is the authorization input, and the gateway overwrites this one from
 // it before the record is indexed.
 type SandboxRow struct {
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Owner       string `json:"owner"`
 	Image       string `json:"image"`
@@ -871,14 +874,39 @@ type IdentityTokenResp struct {
 // Its fields mirror metadata.Doc; they are restated here for the same reason
 // SandboxRow restates host.Sandbox — the wire is its own contract.
 type IdentityDocResp struct {
-	Issuer  string `json:"iss"`
-	Subject string `json:"sub"`
-	Owner   string `json:"owner"`
-	GitHub  string `json:"github,omitempty"`
-	KeyFP   string `json:"key_fp,omitempty"`
+	Issuer    string `json:"iss"`
+	Subject   string `json:"sub"`
+	Owner     string `json:"owner"`
+	GitHub    string `json:"github,omitempty"`
+	KeyFP     string `json:"key_fp,omitempty"`
+	Sandbox   string `json:"sandbox"`
+	SandboxID string `json:"sandbox_id"`
+	Image     string `json:"image"`
+	Box       string `json:"box"`
+}
+
+// SelfVisibilityReq is a node relaying a request made from one of its guest
+// taps. The authenticated link supplies the node; the gateway verifies that
+// its placement ledger puts Sandbox there before changing gateway-owned routes.
+type SelfVisibilityReq struct {
+	Sandbox    string `json:"sandbox"`
+	Visibility string `json:"visibility"`
+}
+
+type SelfVisibilityResp struct {
+	Sandbox    string `json:"sandbox"`
+	Visibility string `json:"visibility"`
+	Routes     int    `json:"routes"`
+}
+
+type SelfPortReq struct {
 	Sandbox string `json:"sandbox"`
-	Image   string `json:"image"`
-	Box     string `json:"box"`
+	Port    int    `json:"port"`
+}
+
+type SelfPortResp struct {
+	Sandbox string `json:"sandbox"`
+	Port    int    `json:"port"`
 }
 
 // ---------------------------------------------------------------------------

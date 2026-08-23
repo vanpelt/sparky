@@ -88,6 +88,9 @@ func TestLoginRejectsBadTokenAndOpenRedirect(t *testing.T) {
 	if got := h.safeReturn("https://ok.hivemind.tools/x"); got != "https://ok.hivemind.tools/x" {
 		t.Fatalf("legit return rejected: %q", got)
 	}
+	if got := h.safeReturn("https://ok.hivemind.tools:6454/x"); got != "https://ok.hivemind.tools:6454/x" {
+		t.Fatalf("legit non-default HTTPS port return rejected: %q", got)
+	}
 	// A TLS edge stays https-only: an http return collapses to the zone root.
 	if got := h.safeReturn("http://ok.hivemind.tools/x"); got != "https://hivemind.tools/" {
 		t.Fatalf("http return on a TLS edge not blocked: %q", got)

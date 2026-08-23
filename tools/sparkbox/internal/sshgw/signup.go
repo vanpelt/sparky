@@ -36,7 +36,7 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 	// dialog is asking again. This is the common case of a re-run.
 	if user != "" {
 		fmt.Fprintf(s, "sparkbox: this key is already registered to %q.\r\n", user)
-		fmt.Fprintf(s, "try:  ssh %s@%s\r\n", NewSandboxUser, g.domainHint())
+		fmt.Fprintf(s, "try:  ssh %s@%s\r\n", NewSandboxUser, g.sshHint())
 		s.Exit(0) //nolint:errcheck
 		return
 	}
@@ -44,7 +44,7 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 	// The dialog needs a terminal to echo and edit input. Without a PTY (`ssh
 	// signup@host < /dev/null`, or a script) there is nothing sensible to do.
 	if _, _, isPty := s.Pty(); !isPty {
-		fmt.Fprintf(s.Stderr(), "sparkbox: signup is interactive — connect from a terminal, with no command or piped stdin:  ssh %s@%s\r\n", SignupUser, g.domainHint())
+		fmt.Fprintf(s.Stderr(), "sparkbox: signup is interactive — connect from a terminal, with no command or piped stdin:  ssh %s@%s\r\n", SignupUser, g.sshHint())
 		s.Exit(2) //nolint:errcheck
 		return
 	}
@@ -105,7 +105,7 @@ func (g *Gateway) handleSignup(s gssh.Session, user string, log *slog.Logger) {
 	emailPrefetch := g.askGitHub(s, t, me, log)
 	g.askEmail(s.Context(), t, handle, emailPrefetch, log)
 
-	fmt.Fprintf(t, "registered as %q. try:  ssh %s@%s\r\n", handle, NewSandboxUser, g.domainHint())
+	fmt.Fprintf(t, "registered as %q. try:  ssh %s@%s\r\n", handle, NewSandboxUser, g.sshHint())
 	s.Exit(0) //nolint:errcheck
 }
 
@@ -218,7 +218,7 @@ func (g *Gateway) askEmail(ctx context.Context, t *term.Terminal, handle string,
 			return
 		}
 		fmt.Fprintf(t, "✓ email set to %s — change it with:  ssh %s@%s email set <addr>\r\n",
-			email, ControlUser, g.domainHint())
+			email, ControlUser, g.sshHint())
 		return
 	}
 }

@@ -1,0 +1,85 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sparkbox-split-gateway-state
+  namespace: sparkbox-poc
+  labels:
+    app.kubernetes.io/name: sparkbox
+    app.kubernetes.io/component: state-migration
+    app.kubernetes.io/part-of: sparky
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sparkbox
+        app.kubernetes.io/component: state-migration
+        app.kubernetes.io/part-of: sparky
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: __SPARKBOX_NODE__
+      containers:
+        - name: migrate
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              src=/source/control
+              dst=/durable/gateway/control
+              marker=/durable/gateway/.split-v1-complete
+              if [ -f "$marker" ]; then
+                test -s "$dst/sparkbox.db"
+                test -s "$dst/schedules.db"
+                chmod 0700 /durable/gateway "$dst"
+                chown -R 65532:65532 /durable/gateway
+                echo "gateway state was already migrated"
+                exit 0
+              fi
+              test -s "$src/sparkbox.db"
+              test -s "$src/schedules.db"
+              mkdir -p "$dst"
+              for file in \
+                sparkbox.db sparkbox.db-shm sparkbox.db-wal \
+                schedules.db schedules.db-shm schedules.db-wal; do
+                if [ -e "$src/$file" ]; then
+                  cp -a "$src/$file" "$dst/$file"
+                fi
+              done
+              for directory in autocert certmagic favicons; do
+                if [ -d "$src/$directory" ]; then
+                  cp -a "$src/$directory" "$dst/$directory"
+                fi
+              done
+              chmod 0700 /durable/gateway "$dst"
+              chown -R 65532:65532 /durable/gateway
+              touch "$marker"
+              echo "migrated gateway databases and edge caches; VM inventory stayed on the node"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: source
+              mountPath: /source
+              readOnly: true
+            - name: durable
+              mountPath: /durable
+      volumes:
+        - name: source
+          hostPath:
+            path: /mnt/local/sparkbox-poc
+            type: Directory
+        - name: durable
+          persistentVolumeClaim:
+            claimName: sparkbox-durable

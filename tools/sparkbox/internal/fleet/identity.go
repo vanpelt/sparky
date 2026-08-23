@@ -58,13 +58,14 @@ type Identity interface {
 // /run/sparkbox/identity.json. It carries no registered JWT claims because
 // nothing here is signed.
 type Claims struct {
-	Subject string
-	Owner   string
-	GitHub  string
-	KeyFP   string
-	Sandbox string
-	Image   string
-	Box     string
+	Subject   string
+	Owner     string
+	GitHub    string
+	KeyFP     string
+	Sandbox   string
+	SandboxID string
+	Image     string
+	Box       string
 }
 
 // SetIdentity installs the signing path. Nil — the default — means this
@@ -103,7 +104,8 @@ func (f *Fleet) IdentityDoc(ctx context.Context, node string, req nodelink.Ident
 	}
 	return nodelink.IdentityDocResp{
 		Issuer: issuer, Subject: c.Subject, Owner: c.Owner, GitHub: c.GitHub,
-		KeyFP: c.KeyFP, Sandbox: c.Sandbox, Image: c.Image, Box: c.Box,
+		KeyFP: c.KeyFP, Sandbox: c.Sandbox, SandboxID: c.SandboxID,
+		Image: c.Image, Box: c.Box,
 	}, nil
 }
 

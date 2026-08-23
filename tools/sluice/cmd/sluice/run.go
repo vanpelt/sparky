@@ -264,17 +264,23 @@ func reconcile(o runOpts, mtr *meter.Meter, im *ipmap.Map, pol *policy.Policy, l
 	// otherwise (classic mode) every tap is enforced against the base list.
 	im.Sweep()
 	snap := im.Snapshot()
+	baseReady := true
 	if err := mtr.SyncAllowed(pol.BaseGrants(snap)); err != nil {
 		log.Warn("sync base allow-set", "err", err)
+		baseReady = false
 	}
 	for ifindex, name := range mtr.Ifaces() {
+		ready := baseReady
 		if err := mtr.SyncAllowedFor(ifindex, pol.TapGrants(name, snap)); err != nil {
 			log.Warn("sync tap allow-set", "iface", name, "err", err)
+			ready = false
 		}
 		enforced := o.enforce && (!o.openUntagged || pol.IsEnforced(name))
 		if err := mtr.SetEnforceFor(ifindex, enforced); err != nil {
 			log.Warn("set tap enforcement", "iface", name, "err", err)
+			ready = false
 		}
+		mtr.SetReady(name, ready)
 	}
 }
 

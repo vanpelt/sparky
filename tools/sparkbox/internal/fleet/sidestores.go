@@ -61,6 +61,8 @@ type RouteRows interface {
 	SandboxRows
 	Upsert(r routes.Route) error
 	GetBySubdomain(subdomain string) (routes.Route, bool, error)
+	ListBySandbox(sandbox string) ([]routes.Route, error)
+	SetVisibility(subdomain, visibility string) error
 }
 
 // sides is the set of gateway stores a remote sandbox's name has to be carried

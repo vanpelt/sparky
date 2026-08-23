@@ -3,10 +3,11 @@
 // it and pushes per-tap egress policy to it. The socket is root-owned and never
 // leaves the box, so there is no auth or TLS — reachability is the permission.
 //
-// Two endpoints:
+// Three endpoints:
 //
 //	GET  /report.json  -> per-tap per-domain bandwidth (report.DomainUsage)
 //	PUT  /policy       -> replace the per-tap allowlists (sbtap<idx> -> patterns)
+//	POST /ready/<tap>  -> wait until TCX attachment + map reconciliation
 //
 // The report joins the eBPF per-tap byte counters to domains through the same
 // IP→domain table the DNS proxy fills, and labels each bucket by tap name so
@@ -22,6 +23,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"regexp"
 	"sort"
 	"time"
 
@@ -36,6 +38,8 @@ type Meter interface {
 	FlowsByIface() (map[uint32]map[netip.Addr]report.Flow, error)
 	// Ifaces maps each attached tap's ifindex to its name.
 	Ifaces() map[uint32]string
+	// Ready reports that a tap is attached and its enforcement maps are synced.
+	Ready(string) bool
 }
 
 // Server answers the control socket. A nil Meter degrades /report.json to an
@@ -64,7 +68,37 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /report.json", s.getReport)
 	mux.HandleFunc("PUT /policy", s.putPolicy)
+	mux.HandleFunc("POST /ready/{tap}", s.readyTap)
 	return mux
+}
+
+var tapNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,15}$`)
+
+func (s *Server) readyTap(w http.ResponseWriter, r *http.Request) {
+	tap := r.PathValue("tap")
+	if !tapNameRE.MatchString(tap) {
+		http.Error(w, "invalid tap name", http.StatusBadRequest)
+		return
+	}
+	if s.meter == nil {
+		http.Error(w, "eBPF meter unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	s.poke()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if s.meter.Ready(tap) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			http.Error(w, "tap was not attached", http.StatusServiceUnavailable)
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // Serve listens on the Unix socket at path until ctx is done. It removes a stale

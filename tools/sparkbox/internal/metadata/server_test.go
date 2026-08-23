@@ -32,6 +32,16 @@ func (f fakeBoxes) GetByHostIP(ip string) (*host.Sandbox, bool) {
 	return b, ok
 }
 
+func (f fakeBoxes) SetPinned(name string, pinned bool) error {
+	for _, b := range f {
+		if b.Name == name {
+			b.Pinned = pinned
+			return nil
+		}
+	}
+	return errors.New("no such sandbox")
+}
+
 // fakeAccounts is a handle -> user record lookup.
 type fakeAccounts map[string]users.User
 
@@ -41,6 +51,21 @@ func (f fakeAccounts) Get(handle string) (users.User, error) {
 		return users.User{}, users.ErrNoSuchUser
 	}
 	return u, nil
+}
+
+type fakeRouteControl struct {
+	visibility string
+	port       int
+}
+
+func (f *fakeRouteControl) SetVisibility(_ context.Context, box *host.Sandbox, visibility string) (RouteVisibility, error) {
+	f.visibility = visibility
+	return RouteVisibility{Sandbox: box.Name, Visibility: visibility, Routes: 2}, nil
+}
+
+func (f *fakeRouteControl) SetPort(_ context.Context, box *host.Sandbox, port int) (RoutePort, error) {
+	f.port = port
+	return RoutePort{Sandbox: box.Name, Port: port}, nil
 }
 
 // fixture builds a server over two running sandboxes in adjacent network
@@ -72,6 +97,7 @@ func fixture(t *testing.T, auds ...string) *Server {
 			},
 			NodeName: "test-box",
 		},
+		RouteControl:    &fakeRouteControl{},
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DefaultAudience: "https://hivemind.wandb.tools",
 	})
@@ -79,13 +105,85 @@ func fixture(t *testing.T, auds ...string) *Server {
 
 // request drives a handler as if a guest at src had connected to dst.
 func request(s *Server, path, src, dst string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("GET", path, nil)
+	return requestMethod(s, http.MethodGet, path, src, dst)
+}
+
+func requestMethod(s *Server, method, path, src, dst string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, nil)
 	r.RemoteAddr = net.JoinHostPort(src, "40000")
 	r = r.WithContext(context.WithValue(r.Context(), localAddrKey{},
 		&net.TCPAddr{IP: net.ParseIP(dst), Port: DefaultPort}))
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, r)
 	return rec
+}
+
+func TestSandboxCanPinAndUnpinItself(t *testing.T) {
+	s := fixture(t)
+	for _, tc := range []struct {
+		path   string
+		pinned bool
+	}{
+		{"/self/pin", true},
+		{"/self/unpin", false},
+	} {
+		rec := requestMethod(s, http.MethodPost, tc.path, "172.30.5.2", "172.30.5.1")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s = %d: %s", tc.path, rec.Code, rec.Body)
+		}
+		var got selfDoc
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Sandbox != "alice-box" || got.Pinned != tc.pinned {
+			t.Errorf("POST %s = %+v", tc.path, got)
+		}
+	}
+	if rec := request(s, "/self", "172.30.5.2", "172.30.5.1"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"pinned":false`) {
+		t.Errorf("GET /self = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestSandboxCannotPinAnotherSandbox(t *testing.T) {
+	s := fixture(t)
+	rec := requestMethod(s, http.MethodPost, "/self/pin", "172.30.5.2", "172.30.9.1")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-slot pin = %d, want 403", rec.Code)
+	}
+	if box, _ := s.mgr.(fakeBoxes).GetByHostIP("172.30.9.2"); box.Pinned {
+		t.Fatal("alice pinned bob by dialing bob's gateway")
+	}
+}
+
+func TestSandboxCanManageItsOwnRoutes(t *testing.T) {
+	s := fixture(t)
+	for _, tc := range []struct {
+		path string
+		body string
+	}{
+		{"/self/visibility/public", `"visibility":"public"`},
+		{"/self/visibility/private", `"visibility":"private"`},
+		{"/self/port/5173", `"port":5173`},
+	} {
+		rec := requestMethod(s, http.MethodPost, tc.path, "172.30.5.2", "172.30.5.1")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.body) {
+			t.Errorf("POST %s = %d %s", tc.path, rec.Code, rec.Body)
+		}
+	}
+	for _, path := range []string{"/self/visibility/secret", "/self/port/0", "/self/port/65536", "/self/port/nope"} {
+		if rec := requestMethod(s, http.MethodPost, path, "172.30.5.2", "172.30.5.1"); rec.Code != http.StatusBadRequest {
+			t.Errorf("POST %s = %d, want 400", path, rec.Code)
+		}
+	}
+}
+
+func TestSandboxCannotManageAnotherSandboxRoutes(t *testing.T) {
+	s := fixture(t)
+	for _, path := range []string{"/self/visibility/public", "/self/port/5173"} {
+		if rec := requestMethod(s, http.MethodPost, path, "172.30.5.2", "172.30.9.1"); rec.Code != http.StatusForbidden {
+			t.Errorf("cross-slot POST %s = %d, want 403", path, rec.Code)
+		}
+	}
 }
 
 func TestTokenIsMintedForTheCallingSandbox(t *testing.T) {

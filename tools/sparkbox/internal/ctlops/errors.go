@@ -301,6 +301,20 @@ func AsError(op string, err error) *Error {
 	}
 	var capacity *host.CapacityError
 	if errors.As(err, &capacity) {
+		if capacity.Owner != "" {
+			return &Error{
+				Kind: KindCapacity, Op: op, Code: "owner_memory_pool_full",
+				Msg: fmt.Sprintf("your memory pool is full (%d MB running + %d MB requested exceeds %d MB)",
+					capacity.UsedMB, capacity.RequestedMB, capacity.BudgetMB),
+				Hint: "Pause a sandbox to return memory to your pool.",
+				Details: map[string]any{
+					"owner": capacity.Owner, "used_mb": capacity.UsedMB,
+					"requested_mb": capacity.RequestedMB, "pool_mb": capacity.BudgetMB,
+				},
+				Verbatim: true,
+				Err:      err,
+			}
+		}
 		return &Error{
 			Kind: KindCapacity, Op: op, Code: "host_at_capacity",
 			Msg: fmt.Sprintf("host is at capacity (%d/%d MB allocated)",

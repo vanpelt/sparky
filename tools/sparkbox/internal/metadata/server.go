@@ -1,7 +1,8 @@
-// Package metadata is the per-sandbox identity endpoint: the unforgeable
-// channel by which a guest learns who it is and gets an OIDC id token, with no
-// secret material ever stored in the VM. Possession of the network position is
-// the authentication — the same model as a cloud provider's IMDS.
+// Package metadata is the per-sandbox identity and self-service endpoint: the
+// unforgeable channel by which a guest learns who it is, gets an OIDC id token,
+// and changes its own lifecycle policy without a credential stored in the VM.
+// Possession of the network position is the authentication — the same model as
+// a cloud provider's IMDS.
 //
 // # How a caller is identified (and why this is safe)
 //
@@ -47,6 +48,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -72,6 +74,7 @@ const (
 // guest address to the sandbox that holds it. *host.Manager satisfies it.
 type Sandboxes interface {
 	GetByHostIP(ip string) (*host.Sandbox, bool)
+	SetPinned(name string, pinned bool) error
 }
 
 // Accounts is the slice of the user store this service needs: the owner's
@@ -90,14 +93,15 @@ type Token struct {
 // token carries, minus the registered ones, so shells and tools can answer "who
 // am I" without parsing a JWT.
 type Doc struct {
-	Issuer  string `json:"iss"`
-	Subject string `json:"sub"`
-	Owner   string `json:"owner"`
-	GitHub  string `json:"github,omitempty"`
-	KeyFP   string `json:"key_fp,omitempty"`
-	Sandbox string `json:"sandbox"`
-	Image   string `json:"image"`
-	Box     string `json:"box"`
+	Issuer    string `json:"iss"`
+	Subject   string `json:"sub"`
+	Owner     string `json:"owner"`
+	GitHub    string `json:"github,omitempty"`
+	KeyFP     string `json:"key_fp,omitempty"`
+	Sandbox   string `json:"sandbox"`
+	SandboxID string `json:"sandbox_id"`
+	Image     string `json:"image"`
+	Box       string `json:"box"`
 }
 
 // Identity turns an authenticated sandbox into credentials. It is the whole of
@@ -112,6 +116,25 @@ type Doc struct {
 type Identity interface {
 	Issue(ctx context.Context, box *host.Sandbox, aud string) (Token, error)
 	Describe(ctx context.Context, box *host.Sandbox) (Doc, error)
+}
+
+// RouteControl changes gateway-owned route state for the already-authenticated
+// calling sandbox. A gateway implementation writes locally; a node relays over
+// its authenticated fleet link.
+type RouteControl interface {
+	SetVisibility(ctx context.Context, box *host.Sandbox, visibility string) (RouteVisibility, error)
+	SetPort(ctx context.Context, box *host.Sandbox, port int) (RoutePort, error)
+}
+
+type RouteVisibility struct {
+	Sandbox    string `json:"sandbox"`
+	Visibility string `json:"visibility"`
+	Routes     int    `json:"routes"`
+}
+
+type RoutePort struct {
+	Sandbox string `json:"sandbox"`
+	Port    int    `json:"port"`
 }
 
 // ErrAudience is what an Identity returns for an audience its issuer will not
@@ -156,7 +179,7 @@ func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
 	return Doc{
 		Issuer: l.Issuer.URL(), Subject: c.Subject, Owner: c.Owner,
 		GitHub: c.GitHub, KeyFP: c.KeyFP,
-		Sandbox: c.Sandbox, Image: c.Image, Box: c.Box,
+		Sandbox: c.Sandbox, SandboxID: c.SandboxID, Image: c.Image, Box: c.Box,
 	}, nil
 }
 
@@ -165,12 +188,13 @@ func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
 // matching on it fails closed for everyone else.
 func (l Local) claims(box *host.Sandbox) oidc.Claims {
 	c := oidc.Claims{
-		Subject: oidc.SubjectFor(box.Owner),
-		Owner:   box.Owner,
-		KeyFP:   box.KeyFP,
-		Sandbox: box.Name,
-		Image:   box.Image,
-		Box:     l.NodeName,
+		Subject:   oidc.SubjectFor(box.Owner),
+		Owner:     box.Owner,
+		KeyFP:     box.KeyFP,
+		Sandbox:   box.Name,
+		SandboxID: box.ID,
+		Image:     box.Image,
+		Box:       l.NodeName,
 	}
 	if l.Users != nil {
 		// Strong provenance only, and this is the load-bearing half of the
@@ -196,6 +220,7 @@ func (l Local) claims(box *host.Sandbox) oidc.Claims {
 type Server struct {
 	mgr      Sandboxes
 	id       Identity
+	routes   RouteControl
 	log      *slog.Logger
 	defAud   string
 	guestNet guestnet.Network
@@ -207,8 +232,9 @@ type Server struct {
 type Options struct {
 	Manager Sandboxes
 	// Identity signs. Local on a gateway, a relay to one on a node.
-	Identity Identity
-	Logger   *slog.Logger
+	Identity     Identity
+	RouteControl RouteControl
+	Logger       *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
 	// GuestSubnet must match the VM driver's IPv4 prefix. Empty uses the
@@ -236,7 +262,7 @@ func NewChecked(opts Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		mgr: opts.Manager, id: opts.Identity, log: log,
+		mgr: opts.Manager, id: opts.Identity, routes: opts.RouteControl, log: log,
 		defAud:   opts.DefaultAudience,
 		guestNet: guestNetwork,
 		recent:   map[string][]time.Time{},
@@ -247,10 +273,112 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /token", s.token)
 	mux.HandleFunc("GET /identity", s.identity)
+	mux.HandleFunc("GET /self", s.self)
+	mux.HandleFunc("POST /self/pin", s.pin)
+	mux.HandleFunc("POST /self/unpin", s.unpin)
+	mux.HandleFunc("POST /self/visibility/{visibility}", s.visibility)
+	mux.HandleFunc("POST /self/port/{port}", s.port)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	return mux
+}
+
+type selfDoc struct {
+	Sandbox string `json:"sandbox"`
+	Pinned  bool   `json:"pinned"`
+}
+
+func (s *Server) self(w http.ResponseWriter, r *http.Request) {
+	box, err := s.caller(r)
+	if err != nil {
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	s.writeSelf(w, box)
+}
+
+func (s *Server) pin(w http.ResponseWriter, r *http.Request)   { s.setPinned(w, r, true) }
+func (s *Server) unpin(w http.ResponseWriter, r *http.Request) { s.setPinned(w, r, false) }
+
+func (s *Server) setPinned(w http.ResponseWriter, r *http.Request, pinned bool) {
+	box, err := s.caller(r)
+	if err != nil {
+		s.log.Warn("metadata self-service refused", "remote", r.RemoteAddr, "err", err)
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	if err := s.mgr.SetPinned(box.Name, pinned); err != nil {
+		s.log.Error("metadata self-service pin failed", "sandbox", box.Name, "pinned", pinned, "err", err)
+		http.Error(w, "sparkbox: could not update this sandbox", http.StatusInternalServerError)
+		return
+	}
+	box.Pinned = pinned
+	s.log.Info("sandbox changed its own pin", "sandbox", box.Name, "owner", box.Owner, "pinned", pinned)
+	s.writeSelf(w, box)
+}
+
+func (s *Server) writeSelf(w http.ResponseWriter, box *host.Sandbox) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(selfDoc{Sandbox: box.Name, Pinned: box.Pinned}) //nolint:errcheck
+}
+
+func (s *Server) visibility(w http.ResponseWriter, r *http.Request) {
+	box, err := s.caller(r)
+	if err != nil {
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	visibility := r.PathValue("visibility")
+	if visibility != "public" && visibility != "private" {
+		http.Error(w, "sparkbox: visibility must be public or private", http.StatusBadRequest)
+		return
+	}
+	if s.routes == nil {
+		http.Error(w, "sparkbox: route self-service is not enabled", http.StatusNotImplemented)
+		return
+	}
+	result, err := s.routes.SetVisibility(r.Context(), box, visibility)
+	if err != nil {
+		s.failRouteControl(w, box, err)
+		return
+	}
+	s.writeJSON(w, result)
+}
+
+func (s *Server) port(w http.ResponseWriter, r *http.Request) {
+	box, err := s.caller(r)
+	if err != nil {
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	port, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil || port < 1 || port > 65535 {
+		http.Error(w, "sparkbox: port must be from 1 through 65535", http.StatusBadRequest)
+		return
+	}
+	if s.routes == nil {
+		http.Error(w, "sparkbox: route self-service is not enabled", http.StatusNotImplemented)
+		return
+	}
+	result, err := s.routes.SetPort(r.Context(), box, port)
+	if err != nil {
+		s.failRouteControl(w, box, err)
+		return
+	}
+	s.writeJSON(w, result)
+}
+
+func (s *Server) failRouteControl(w http.ResponseWriter, box *host.Sandbox, err error) {
+	s.log.Error("metadata route self-service failed", "sandbox", box.Name, "err", err)
+	http.Error(w, "sparkbox: gateway could not update this sandbox's route", http.StatusBadGateway)
+}
+
+func (s *Server) writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(value) //nolint:errcheck
 }
 
 // ListenAndServe runs the metadata service until ctx is done. It binds all

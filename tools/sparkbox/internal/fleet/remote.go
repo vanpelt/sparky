@@ -28,6 +28,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/google/uuid"
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
@@ -150,6 +151,7 @@ func (r *remoteNode) Capacity() host.NodeCapacity { return r.client.Capacity() }
 func (r *remoteNode) record(row nodelink.SandboxRow, name, owner string) *host.Sandbox {
 	node := r.client.Name()
 	b := &host.Sandbox{
+		ID:          safeSandboxID(row.ID),
 		Name:        name,
 		Owner:       owner,
 		Image:       ctlops.SafeText(row.Image, maxDisplayText),
@@ -173,6 +175,14 @@ func (r *remoteNode) record(row nodelink.SandboxRow, name, owner string) *host.S
 	b.HostIP = Host(b.Name, node)
 	b.SSHAddr = net.JoinHostPort(b.HostIP, SSHPort)
 	return b
+}
+
+func safeSandboxID(value string) string {
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return ""
+	}
+	return parsed.String()
 }
 
 // box projects a row out of the link's cache, and answers nil for one this

@@ -7,8 +7,10 @@
 // template's baked fleet key with the gateway public key in vmm.Config.
 //
 // This driver has been exercised end to end on both a Linux KVM host and the
-// nested ARM64 macOS gateway proof of concept. Known gaps vs production: no
-// jailer, no balloon management, no UFFD lazy restore, no I/O rate limits.
+// nested ARM64 macOS gateway proof of concept. Production-style deployments can
+// opt into Firecracker's matching jailer binary; the direct launcher remains
+// available for development and older standalone installations. Known gaps vs
+// production: no UFFD lazy restore and no I/O rate limits.
 package firecracker
 
 import (
@@ -16,6 +18,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -26,13 +29,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	xssh "golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -41,10 +47,43 @@ type Options struct {
 	KernelPath string
 	// ImageDir holds <image>.ext4 rootfs templates.
 	ImageDir string
-	// StateDir holds per-VM dirs (disk copy, socket, snapshots).
-	StateDir string
+	// VMStateDir holds per-VM dirs (disk copy, socket, snapshots).
+	VMStateDir string
 	// FirecrackerBin is the firecracker binary path (default: $PATH lookup).
 	FirecrackerBin string
+	// JailerBin enables Firecracker's jailer when non-empty. It must be the
+	// jailer from the same Firecracker release as FirecrackerBin. Empty keeps
+	// the legacy direct launcher.
+	JailerBin string
+	// ChrootJailer uses Sparkbox's capability-minimal launcher instead of the
+	// external Firecracker jailer. It gives each VMM the same private chroot and
+	// slot-scoped uid/gid, but relies on the container runtime's existing mount
+	// namespace rather than creating a nested one. This removes the launcher's
+	// CAP_SYS_ADMIN requirement. It is mutually exclusive with JailerBin.
+	ChrootJailer bool
+	// PrivilegedHelperSocket moves TAP creation, chroot construction, and VMM
+	// process launch into the narrowly-scoped sparkbox-vmm-helper. The
+	// controller itself then needs no devices, root identity, or capabilities.
+	// It requires ChrootJailer and is mutually exclusive with JailerBin.
+	PrivilegedHelperSocket string
+	// PrivilegedHelperBin is the unprivileged helper client used as the SDK's
+	// process runner. Empty defaults to sparkbox-vmm-helper on PATH.
+	PrivilegedHelperBin string
+	// JailerChrootBase is the root-owned directory beneath which the jailer
+	// creates one chroot per live VM. Empty defaults to <VMStateDir>/jailer.
+	JailerChrootBase string
+	// JailerUIDBase is the first unprivileged uid/gid used for jailed VMMs.
+	// Each concurrently reserved network slot gets a distinct identity:
+	// JailerUIDBase + slot. Empty defaults to 100000.
+	JailerUIDBase int
+	// HelperControllerGID is the unprivileged controller group granted access
+	// to VM disks and Firecracker API sockets by the privileged helper.
+	HelperControllerGID int
+	// DisableHostRootfsMounts skips per-create key injection and refuses the
+	// template-snapshot operation, the two runtime paths that otherwise loop-
+	// mount an ext4 image in the management process. The selected templates must
+	// already carry the current gateway public key.
+	DisableHostRootfsMounts bool
 	// Subnet is an IPv4 CIDR carved into per-VM /30 slots. Empty uses the
 	// standalone compatibility default 172.30.0.0/16.
 	Subnet string
@@ -88,6 +127,15 @@ type Driver struct {
 	uplink6       string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
+const (
+	defaultJailerUIDBase = 100000
+	jailedSocketName     = "fc.sock"
+	jailedKernelName     = "vmlinux"
+	jailedRootfsName     = "rootfs.ext4"
+	jailedMemName        = "mem.snap"
+	jailedStateName      = "state.snap"
+)
+
 // reserveName claims cfg.Name for an in-flight Create so no second Create
 // prepares the same rootfs concurrently, and so the name is still refused
 // while d.mu is released.
@@ -129,6 +177,70 @@ func New(opts Options) (*Driver, error) {
 			guestNetwork, guestNetwork.Capacity())
 	}
 	opts.Subnet = guestNetwork.String()
+	if opts.JailerBin != "" && opts.ChrootJailer {
+		return nil, errors.New("external jailer and chroot jailer are mutually exclusive")
+	}
+	if opts.PrivilegedHelperSocket != "" && !opts.ChrootJailer {
+		return nil, errors.New("privileged helper requires the chroot jailer")
+	}
+	if opts.PrivilegedHelperSocket != "" && opts.JailerBin != "" {
+		return nil, errors.New("privileged helper and external jailer are mutually exclusive")
+	}
+	if opts.PrivilegedHelperSocket != "" {
+		if !filepath.IsAbs(opts.PrivilegedHelperSocket) {
+			return nil, errors.New("privileged helper socket must be absolute")
+		}
+		if opts.PrivilegedHelperBin == "" {
+			opts.PrivilegedHelperBin = "sparkbox-vmm-helper"
+		}
+		var err error
+		opts.PrivilegedHelperBin, err = executablePath(opts.PrivilegedHelperBin)
+		if err != nil {
+			return nil, fmt.Errorf("privileged helper client: %w", err)
+		}
+		if opts.HelperControllerGID < 1 {
+			return nil, errors.New("privileged helper controller gid must be positive")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := vmhelper.Ping(ctx, opts.PrivilegedHelperSocket); err != nil {
+			return nil, fmt.Errorf("privileged helper readiness: %w", err)
+		}
+	}
+	if opts.JailerBin != "" || opts.ChrootJailer {
+		var err error
+		opts.FirecrackerBin, err = executablePath(opts.FirecrackerBin)
+		if err != nil {
+			return nil, fmt.Errorf("firecracker binary: %w", err)
+		}
+		if opts.JailerBin != "" {
+			opts.JailerBin, err = executablePath(opts.JailerBin)
+			if err != nil {
+				return nil, fmt.Errorf("jailer binary: %w", err)
+			}
+			if err := validateJailerPair(opts.FirecrackerBin, opts.JailerBin); err != nil {
+				return nil, err
+			}
+		}
+		if opts.JailerChrootBase == "" {
+			opts.JailerChrootBase = filepath.Join(opts.VMStateDir, "jailer")
+		}
+		if opts.JailerUIDBase == 0 {
+			opts.JailerUIDBase = defaultJailerUIDBase
+		}
+		if opts.JailerUIDBase < 1 {
+			return nil, fmt.Errorf("jailer uid base must be positive")
+		}
+		if opts.JailerUIDBase > int(^uint32(0))-guestNetwork.Capacity() {
+			return nil, fmt.Errorf("jailer uid base %d plus %d VM slots exceeds the Linux uid range",
+				opts.JailerUIDBase, guestNetwork.Capacity())
+		}
+		if opts.PrivilegedHelperSocket == "" {
+			if err := os.MkdirAll(opts.JailerChrootBase, 0o700); err != nil {
+				return nil, fmt.Errorf("create jailer chroot base: %w", err)
+			}
+		}
+	}
 	if err := validateGuestDNS(opts.GuestDNS); err != nil {
 		return nil, err
 	}
@@ -173,8 +285,10 @@ func New(opts Options) (*Driver, error) {
 		// dropped. Record the uplink now; createTap adds a proxy entry per guest.
 		d.uplink6 = defaultRoute6Dev()
 	}
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
+	if opts.PrivilegedHelperSocket == "" {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
+		}
 	}
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
@@ -182,8 +296,50 @@ func New(opts Options) (*Driver, error) {
 	// A previous process (e.g. before a service restart) leaves its sbtap*
 	// devices behind; the first Create would then fail with "Device or resource
 	// busy". Nothing is running in a fresh process, so sweep them now.
-	sweepStaleTaps()
+	if opts.PrivilegedHelperSocket == "" {
+		sweepStaleTaps()
+	}
 	return d, nil
+}
+
+// executablePath resolves a PATH entry once at startup. The jailer requires an
+// absolute --exec-file, and pinning both paths here also prevents a later PATH
+// change from pairing a jailer with a different Firecracker binary.
+func executablePath(name string) (string, error) {
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(resolved)
+}
+
+var executableVersionRE = regexp.MustCompile(`\bv[0-9]+\.[0-9]+\.[0-9]+\b`)
+
+func executableVersion(bin string) (string, error) {
+	out, err := exec.Command(bin, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s --version: %w: %s", bin, err, out)
+	}
+	version := executableVersionRE.FindString(string(out))
+	if version == "" {
+		return "", fmt.Errorf("%s --version did not report a semantic version: %q", bin, out)
+	}
+	return version, nil
+}
+
+func validateJailerPair(firecrackerBin, jailerBin string) error {
+	firecrackerVersion, err := executableVersion(firecrackerBin)
+	if err != nil {
+		return err
+	}
+	jailerVersion, err := executableVersion(jailerBin)
+	if err != nil {
+		return err
+	}
+	if firecrackerVersion != jailerVersion {
+		return fmt.Errorf("firecracker %s and jailer %s do not match", firecrackerVersion, jailerVersion)
+	}
+	return nil
 }
 
 // sweepStaleTaps deletes leftover sbtap* devices from a prior process. Safe at
@@ -210,7 +366,154 @@ func sweepStaleTaps() {
 }
 
 func (d *Driver) vmDir(name string) string {
-	return filepath.Join(d.opts.StateDir, "fc-vms", name)
+	return filepath.Join(d.opts.VMStateDir, "fc-vms", name)
+}
+
+func (d *Driver) jailed() bool { return d.opts.JailerBin != "" || d.opts.ChrootJailer }
+
+// Slot-derived IDs and identities are unique among live VMs because freeSlot
+// reserves the slot for the lifetime of vmState, including while paused. They
+// are deliberately independent of user-chosen sandbox names: jailer IDs accept
+// a narrower alphabet and length than the product's names do.
+func jailID(idx int) string { return fmt.Sprintf("sparkbox-%d", idx) }
+
+func (d *Driver) jailUID(idx int) int { return d.opts.JailerUIDBase + idx }
+
+func (d *Driver) jailWorkspace(idx int) string {
+	return filepath.Join(
+		d.opts.JailerChrootBase,
+		filepath.Base(d.opts.FirecrackerBin),
+		jailID(idx),
+	)
+}
+
+func (d *Driver) jailRoot(idx int) string {
+	return filepath.Join(d.jailWorkspace(idx), "root")
+}
+
+func (d *Driver) cleanupJail(idx int) error {
+	if !d.jailed() {
+		return nil
+	}
+	if d.opts.PrivilegedHelperSocket != "" {
+		// The helper owns this tree and removes it only after its Firecracker
+		// child has exited. The unprivileged controller cannot race that cleanup.
+		return nil
+	}
+	return os.RemoveAll(d.jailWorkspace(idx))
+}
+
+// prepareChrootJail builds the small filesystem view used by Sparkbox's
+// no-SYS_ADMIN launcher. The container runtime has already put the Pod in its
+// own mount namespace, so this launcher needs only chroot(2), a distinct uid,
+// and the two device nodes Firecracker opens. The VMM inherits no directory
+// descriptors and receives no capabilities after setuid.
+func (d *Driver) prepareChrootJail(idx int) error {
+	root := d.jailRoot(idx)
+	if err := os.MkdirAll(filepath.Join(root, "dev", "net"), 0o755); err != nil {
+		return fmt.Errorf("create chroot jail: %w", err)
+	}
+	uid := d.jailUID(idx)
+	binName := filepath.Base(d.opts.FirecrackerBin)
+	if err := copyJailExecutable(d.opts.FirecrackerBin, filepath.Join(root, binName)); err != nil {
+		return err
+	}
+	for _, device := range []struct{ source, destination string }{
+		{"/dev/kvm", filepath.Join(root, "dev", "kvm")},
+		{"/dev/net/tun", filepath.Join(root, "dev", "net", "tun")},
+	} {
+		if err := cloneJailDevice(device.source, device.destination, uid); err != nil {
+			return err
+		}
+	}
+	if err := os.Chown(root, uid, uid); err != nil {
+		return fmt.Errorf("own chroot jail root: %w", err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return fmt.Errorf("protect chroot jail root: %w", err)
+	}
+	return nil
+}
+
+func copyJailExecutable(source, destination string) (retErr error) {
+	in, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open firecracker executable: %w", err)
+	}
+	defer in.Close() //nolint:errcheck
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat firecracker executable: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("firecracker executable %s is not a regular file", source)
+	}
+	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o555)
+	if err != nil {
+		return fmt.Errorf("create jailed firecracker executable: %w", err)
+	}
+	defer func() {
+		if err := out.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close jailed firecracker executable: %w", err)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy firecracker executable into jail: %w", err)
+	}
+	// Do not let the controller's umask accidentally make this root-owned copy
+	// non-executable by the slot UID that will exec it.
+	if err := out.Chmod(0o555); err != nil {
+		return fmt.Errorf("set jailed firecracker executable mode: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync jailed firecracker executable: %w", err)
+	}
+	return nil
+}
+
+func cloneJailDevice(source, destination string, uid int) error {
+	var st unix.Stat_t
+	if err := unix.Stat(source, &st); err != nil {
+		return fmt.Errorf("stat jail device %s: %w", source, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFCHR {
+		return fmt.Errorf("jail device %s is not a character device", source)
+	}
+	if err := unix.Mknod(destination, unix.S_IFCHR|0o600, int(st.Rdev)); err != nil {
+		return fmt.Errorf("create jail device %s: %w", destination, err)
+	}
+	if err := os.Chown(destination, uid, uid); err != nil {
+		return fmt.Errorf("own jail device %s: %w", destination, err)
+	}
+	return nil
+}
+
+func (d *Driver) chrootJailerCommand(ctx context.Context, idx int) (*exec.Cmd, error) {
+	if err := d.prepareChrootJail(idx); err != nil {
+		return nil, err
+	}
+	return chrootProcess(ctx, d.jailRoot(idx), filepath.Base(d.opts.FirecrackerBin), d.jailUID(idx)), nil
+}
+
+func chrootProcess(ctx context.Context, root, executable string, jailUID int) *exec.Cmd {
+	uid := uint32(jailUID)
+	cmd := exec.CommandContext(ctx, "/"+executable,
+		"--api-sock", jailedSocketName,
+	)
+	cmd.Dir = "/"
+	// The stock jailer intentionally clears its environment before exec. Keep
+	// the same property: none of the controller's deployment or fleet settings
+	// are inputs to the VMM.
+	cmd.Env = []string{}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Chroot: root,
+		Credential: &syscall.Credential{
+			Uid:    uid,
+			Gid:    uid,
+			Groups: []uint32{uid},
+		},
+	}
+	return cmd
 }
 
 func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
@@ -297,17 +600,20 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		return nil, err
 	}
 
-	// CoW-copy the rootfs template: instant on XFS/btrfs via reflink, falls
-	// back to a full copy elsewhere.
+	// CoW-copy the rootfs template. Refuse to fall back to a full 25 GiB copy:
+	// VMStateDir is the hot tier and an incompatible mount is a startup/config
+	// error, not a reason for sandbox creation to become unexpectedly huge.
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	if _, err := os.Stat(rootfs); os.IsNotExist(err) {
 		template := filepath.Join(d.opts.ImageDir, cfg.Image+".ext4")
-		if out, err := exec.CommandContext(ctx, "cp", "--reflink=auto", template, rootfs).CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("copy rootfs: %v: %s", err, out)
+		if err := reflinkClone(ctx, template, rootfs); err != nil {
+			return nil, err
 		}
 	}
-	if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
-		return nil, fmt.Errorf("install gateway key: %w", err)
+	if !d.opts.DisableHostRootfsMounts {
+		if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
+			return nil, fmt.Errorf("install gateway key: %w", err)
+		}
 	}
 
 	d.mu.Lock()
@@ -363,6 +669,12 @@ func (d *Driver) freeSlot() (int, error) {
 func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *vmState, rootfs string, snapshot []string) error {
 	dir := d.vmDir(name)
 	sock := filepath.Join(dir, "fc.sock")
+	if d.jailed() {
+		if err := d.cleanupJail(st.idx); err != nil {
+			return fmt.Errorf("clear stale jail: %w", err)
+		}
+		sock = filepath.Join(d.jailRoot(st.idx), jailedSocketName)
+	}
 	os.Remove(sock) //nolint:errcheck
 
 	// Static guest networking via kernel arg — no DHCP daemon needed. The ip=
@@ -381,13 +693,23 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	}
 	kernelArgs += dnsArg
 
+	kernelPath := d.opts.KernelPath
+	drivePath := rootfs
+	snapshotPaths := snapshot
+	if d.jailed() {
+		kernelPath = jailedKernelName
+		drivePath = jailedRootfsName
+		if snapshot != nil {
+			snapshotPaths = []string{jailedMemName, jailedStateName}
+		}
+	}
 	fcCfg := sdk.Config{
 		SocketPath:      sock,
-		KernelImagePath: d.opts.KernelPath,
+		KernelImagePath: kernelPath,
 		KernelArgs:      kernelArgs,
 		Drives: []models.Drive{{
 			DriveID:      strPtr("rootfs"),
-			PathOnHost:   strPtr(rootfs),
+			PathOnHost:   strPtr(drivePath),
 			IsRootDevice: boolPtr(true),
 			IsReadOnly:   boolPtr(false),
 		}},
@@ -402,23 +724,61 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			MemSizeMib: int64Ptr(memMB),
 			Smt:        boolPtr(false),
 		},
-		VMID: name,
+		VMID:              name,
+		DisableValidation: d.jailed(),
 	}
 
 	vmCtx, cancel := context.WithCancel(context.Background())
-	cmd := sdk.VMCommandBuilder{}.
-		WithBin(d.opts.FirecrackerBin).
-		WithSocketPath(sock).
-		Build(vmCtx)
+	var cmd *exec.Cmd
+	if d.opts.JailerBin != "" {
+		uid := d.jailUID(st.idx)
+		cmd = exec.CommandContext(vmCtx, d.opts.JailerBin,
+			"--id", jailID(st.idx),
+			"--uid", strconv.Itoa(uid),
+			"--gid", strconv.Itoa(uid),
+			"--exec-file", d.opts.FirecrackerBin,
+			"--chroot-base-dir", d.opts.JailerChrootBase,
+			"--",
+			"--api-sock", jailedSocketName,
+		)
+	} else if d.opts.PrivilegedHelperSocket != "" {
+		cmd = vmhelper.LaunchCommand(
+			d.opts.PrivilegedHelperBin, d.opts.PrivilegedHelperSocket,
+			name, st.idx, snapshot != nil,
+		)
+		cmd.Env = []string{}
+	} else if d.opts.ChrootJailer {
+		cmd, err = d.chrootJailerCommand(vmCtx, st.idx)
+		if err != nil {
+			cancel()
+			d.cleanupJail(st.idx) //nolint:errcheck
+			return fmt.Errorf("prepare chroot jail: %w", err)
+		}
+	} else {
+		cmd = sdk.VMCommandBuilder{}.
+			WithBin(d.opts.FirecrackerBin).
+			WithSocketPath(sock).
+			Build(vmCtx)
+	}
 
 	opts := []sdk.Opt{sdk.WithProcessRunner(cmd)}
 	if snapshot != nil {
-		opts = append(opts, sdk.WithSnapshot(snapshot[0], snapshot[1]))
+		opts = append(opts, sdk.WithSnapshot(snapshotPaths[0], snapshotPaths[1]))
 	}
 	m, err := sdk.NewMachine(vmCtx, fcCfg, opts...)
 	if err != nil {
 		cancel()
 		return err
+	}
+	if d.jailed() && d.opts.PrivilegedHelperSocket == "" {
+		stage := jailedResourcesHandler(d.jailRoot(st.idx), d.jailUID(st.idx),
+			d.opts.KernelPath, rootfs, snapshot)
+		if !m.Handlers.FcInit.Has(sdk.CreateLogFilesHandlerName) {
+			cancel()
+			return errors.New("firecracker SDK has no create-log-files handler for jail staging")
+		}
+		m.Handlers.FcInit = m.Handlers.FcInit.AppendAfter(
+			sdk.CreateLogFilesHandlerName, stage)
 	}
 	// Attach a deflated memory balloon on fresh boot so the platform can later
 	// reclaim this guest's idle RAM to the host without pausing it (the
@@ -438,19 +798,88 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	// kills the microVM the instant that first connection closes. The VM's
 	// lifetime is owned by vmCtx, cancelled only by Pause/Destroy via st.cancel.
 	if err := m.Start(vmCtx); err != nil {
-		cancel()
+		d.stopMachine(m, cancel)
+		d.cleanupJail(st.idx) //nolint:errcheck
 		return fmt.Errorf("start vm: %w", err)
 	}
 	if snapshot != nil {
 		if err := m.ResumeVM(vmCtx); err != nil {
-			m.StopVMM() //nolint:errcheck
-			cancel()
+			d.stopMachine(m, cancel)
+			d.cleanupJail(st.idx) //nolint:errcheck
 			return fmt.Errorf("resume from snapshot: %w", err)
 		}
 	}
 	st.machine = m
 	st.cancel = cancel
 	st.paused = false
+	return nil
+}
+
+// jailedResourcesHandler runs after the jailer has created and pivoted into its
+// root, but before the SDK sends any boot-source, drive, or snapshot API calls.
+// Only explicitly enumerated resources are linked into the chroot. The writable
+// disk and snapshots are owned by this VM's distinct uid/gid; the shared kernel
+// remains root-owned and read-only.
+func jailedResourcesHandler(root string, uid int, kernel, rootfs string, snapshot []string) sdk.Handler {
+	return sdk.Handler{
+		Name: "sparkbox.StageJailedResources",
+		Fn: func(_ context.Context, _ *sdk.Machine) error {
+			type resource struct {
+				source, name string
+				writable     bool
+			}
+			resources := []resource{
+				{kernel, jailedKernelName, false},
+				{rootfs, jailedRootfsName, true},
+			}
+			if snapshot != nil {
+				resources = append(resources,
+					resource{snapshot[0], jailedMemName, true},
+					resource{snapshot[1], jailedStateName, true},
+				)
+			}
+			for _, resource := range resources {
+				if err := linkJailedResource(root, uid, resource.source, resource.name, resource.writable); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func linkJailedResource(root string, uid int, source, name string, writable bool) error {
+	fi, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("stat jail resource %s: %w", source, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("jail resource %s is not a regular file", source)
+	}
+	if writable {
+		if err := os.Chown(source, uid, uid); err != nil {
+			return fmt.Errorf("own jail resource %s: %w", source, err)
+		}
+		// Do not preserve a template's conventional 0644 mode. Distinct jailed
+		// UIDs are useful only if one VMM cannot read another VM's disk or
+		// snapshots should it ever gain a path outside its own chroot.
+		if err := os.Chmod(source, 0o600); err != nil {
+			return fmt.Errorf("make jail resource writable %s: %w", source, err)
+		}
+	} else {
+		// The jailer drops Firecracker to the slot-scoped uid before the SDK
+		// configures its boot source. The shared kernel therefore has to be
+		// readable by that uid. Keep it immutable to every unprivileged VMM;
+		// the production asset remains root-owned, and 0444 grants read only.
+		if err := os.Chmod(source, 0o444); err != nil {
+			return fmt.Errorf("make shared jail resource readable %s: %w", source, err)
+		}
+	}
+	destination := filepath.Join(root, name)
+	if err := os.Link(source, destination); err != nil {
+		return fmt.Errorf("link jail resource %s to %s (kernel, VM state, and jailer chroots must share a filesystem): %w",
+			source, destination, err)
+	}
 	return nil
 }
 
@@ -468,8 +897,23 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	if err := st.machine.PauseVM(ctx); err != nil {
 		return err
 	}
-	if err := st.machine.CreateSnapshot(ctx,
-		filepath.Join(dir, "mem.snap"), filepath.Join(dir, "state.snap")); err != nil {
+	memPath, statePath := filepath.Join(dir, "mem.snap"), filepath.Join(dir, "state.snap")
+	snapshotMem, snapshotState := memPath, statePath
+	if d.jailed() {
+		// Never snapshot back into the files from which a resumed VM was
+		// loaded. Use new inodes and atomically promote them after Firecracker
+		// exits; this also lets the jailed process create them through relative
+		// paths without exposing its chroot to the rest of VMStateDir.
+		memNext, stateNext := memPath+".next", statePath+".next"
+		if err := d.prepareJailedSnapshotOutputs(st.idx, memNext, stateNext); err != nil {
+			st.machine.ResumeVM(ctx) //nolint:errcheck
+			return err
+		}
+		defer os.Remove(memNext)   //nolint:errcheck
+		defer os.Remove(stateNext) //nolint:errcheck
+		snapshotMem, snapshotState = filepath.Base(memNext), filepath.Base(stateNext)
+	}
+	if err := st.machine.CreateSnapshot(ctx, snapshotMem, snapshotState); err != nil {
 		// Recover on a FRESH context: when the failure IS the caller's ctx
 		// expiring (snapshot outran a deadline), resuming on that same dead
 		// ctx fails instantly and leaves the vCPUs paused — an unreachable,
@@ -479,14 +923,60 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 		st.machine.ResumeVM(rctx) //nolint:errcheck // best effort: leave it running rather than wedged
 		return err
 	}
-	st.machine.StopVMM() //nolint:errcheck
-	st.cancel()
+	d.stopVMM(st)
+	var snapshotInstallErr error
+	if d.jailed() {
+		if err := os.Rename(memPath+".next", memPath); err != nil {
+			snapshotInstallErr = fmt.Errorf("install jailed memory snapshot: %w", err)
+		} else if err := os.Rename(statePath+".next", statePath); err != nil {
+			snapshotInstallErr = fmt.Errorf("install jailed state snapshot: %w", err)
+		}
+		d.cleanupJail(st.idx) //nolint:errcheck
+	}
 	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
 	// Resume recreates it via createTap. Leaving it wedges Resume with
 	// "tuntap add: Device or resource busy" on the still-present device.
 	d.deleteTap(st.idx)
 	st.machine = nil
 	st.paused = true
+	return snapshotInstallErr
+}
+
+func (d *Driver) prepareJailedSnapshotOutputs(idx int, memPath, statePath string) error {
+	if d.opts.PrivilegedHelperSocket != "" {
+		name := filepath.Base(filepath.Dir(memPath))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vmhelper.PrepareSnapshotOutputs(ctx, d.opts.PrivilegedHelperSocket, name, idx); err != nil {
+			return fmt.Errorf("privileged helper snapshot outputs: %w", err)
+		}
+		return nil
+	}
+	uid := d.jailUID(idx)
+	root := d.jailRoot(idx)
+	for _, output := range []struct {
+		host, guest string
+	}{
+		{memPath, filepath.Base(memPath)},
+		{statePath, filepath.Base(statePath)},
+	} {
+		os.Remove(output.host)                       //nolint:errcheck
+		os.Remove(filepath.Join(root, output.guest)) //nolint:errcheck
+		f, err := os.OpenFile(output.host, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("create jailed snapshot output %s: %w", output.host, err)
+		}
+		if err := f.Chown(uid, uid); err != nil {
+			f.Close() //nolint:errcheck
+			return fmt.Errorf("own jailed snapshot output %s: %w", output.host, err)
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if err := os.Link(output.host, filepath.Join(root, output.guest)); err != nil {
+			return fmt.Errorf("link jailed snapshot output %s: %w", output.host, err)
+		}
+	}
 	return nil
 }
 
@@ -569,12 +1059,11 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 		return nil
 	}
 	if st.machine != nil {
-		st.machine.StopVMM() //nolint:errcheck
-		st.cancel()
+		d.stopVMM(st)
 	}
 	d.deleteTap(st.idx)
 	delete(d.vms, name)
-	return os.RemoveAll(d.vmDir(name))
+	return errors.Join(os.RemoveAll(d.vmDir(name)), d.cleanupJail(st.idx))
 }
 
 // imageNameRe bounds a snapshot/template basename so Snapshot can't be tricked
@@ -646,10 +1135,40 @@ func (d *Driver) UnpackRootfs(ctx context.Context, name, inPath string) error {
 		return err
 	}
 	rootfs := filepath.Join(dir, "rootfs.ext4")
-	if o, err := exec.CommandContext(ctx, "zstd", "-d", "-f", inPath, "-o", rootfs).CombinedOutput(); err != nil {
+	tmp, err := os.CreateTemp(dir, ".rootfs-restoring-*.ext4")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath) //nolint:errcheck
+		return err
+	}
+	os.Remove(tmpPath)       //nolint:errcheck // zstd creates its output itself.
+	defer os.Remove(tmpPath) //nolint:errcheck
+	if o, err := exec.CommandContext(ctx, "zstd", "-d", "-f", "--sparse", inPath, "-o", tmpPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("decompress rootfs: %v: %s", err, o)
 	}
+	// Rename on the VM-state filesystem atomically replaces the old rootfs only
+	// after zstd has validated and fully decompressed the checkpoint.
+	if err := os.Rename(tmpPath, rootfs); err != nil {
+		return fmt.Errorf("install restored rootfs: %w", err)
+	}
 	return nil
+}
+
+// RootfsPresent reports whether the sandbox's hot disk exists. The manager
+// uses it to refuse a base-image recreate when durable checkpoint metadata says
+// a missing disk must be restored instead.
+func (d *Driver) RootfsPresent(name string) (bool, error) {
+	_, err := os.Stat(d.rootfsPath(name))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // Snapshot implements vmm.Archivable: promote the stopped VM's rootfs into a new
@@ -658,6 +1177,9 @@ func (d *Driver) UnpackRootfs(ctx context.Context, name, inPath string) error {
 func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	if !imageNameRe.MatchString(newImage) {
 		return fmt.Errorf("invalid snapshot image name %q", newImage)
+	}
+	if d.opts.DisableHostRootfsMounts {
+		return errors.New("template snapshots are disabled because host rootfs mounts are disabled")
 	}
 	rootfs, err := d.stoppedRootfs(name)
 	if err != nil {
@@ -669,8 +1191,8 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	tmp := filepath.Join(d.opts.ImageDir, "."+newImage+".ext4.tmp")
 	final := filepath.Join(d.opts.ImageDir, newImage+".ext4")
 	os.Remove(tmp) //nolint:errcheck // clear any torn prior attempt
-	if o, err := exec.CommandContext(ctx, "cp", "--reflink=auto", rootfs, tmp).CombinedOutput(); err != nil {
-		return fmt.Errorf("copy rootfs: %v: %s", err, o)
+	if err := reflinkClone(ctx, rootfs, tmp); err != nil {
+		return err
 	}
 	if err := sanitizeTemplate(ctx, tmp); err != nil {
 		os.Remove(tmp) //nolint:errcheck
@@ -691,6 +1213,19 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 		user = "root"
 	}
 	os.WriteFile(final+".login-user", []byte(user+"\n"), 0o644) //nolint:errcheck
+	return nil
+}
+
+// reflinkClone makes the no-full-copy policy common to fresh VM disks and
+// snapshot staging. Keeping the exact cp invocation here also gives tests one
+// seam for proving that neither path can silently regress to --reflink=auto.
+func reflinkClone(ctx context.Context, source, destination string) error {
+	if out, err := exec.CommandContext(
+		ctx, "cp", "--reflink=always", source, destination,
+	).CombinedOutput(); err != nil {
+		os.Remove(destination) //nolint:errcheck // never let a torn clone pass Create's exists check
+		return fmt.Errorf("copy rootfs: %v: %s", err, out)
+	}
 	return nil
 }
 
@@ -937,6 +1472,11 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	st, ok := d.vms[name]
 	if !ok || st.machine == nil {
 		return 0, fmt.Errorf("vm %q not running", name)
+	}
+	if d.opts.PrivilegedHelperSocket != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return vmhelper.CPUTimeNanos(ctx, d.opts.PrivilegedHelperSocket, name, st.idx)
 	}
 	pid, err := st.machine.PID()
 	if err != nil {
@@ -1217,42 +1757,85 @@ func sameAuthorizedKey(a, b string) bool {
 // template (blank hostname, no SSH host keys; the sparkbox-netcfg boot hook
 // regenerates them via ssh-keygen -A). Best-effort per file: a template missing
 // any of these is still valid.
-func sanitizeTemplate(ctx context.Context, path string) error {
+func sanitizeTemplate(ctx context.Context, imagePath string) (retErr error) {
 	mnt, err := os.MkdirTemp("", "sparkbox-snap-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(mnt) //nolint:errcheck
-	if o, err := exec.CommandContext(ctx, "mount", "-o", "loop", path, mnt).CombinedOutput(); err != nil {
-		return fmt.Errorf("mount %s: %v: %s", path, err, o)
+	if o, err := exec.CommandContext(ctx, "mount", "-o", "loop", imagePath, mnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount %s: %v: %s", imagePath, err, o)
 	}
-	for _, rel := range []string{"etc/machine-id", "var/lib/dbus/machine-id", "etc/resolv.conf"} {
-		os.Remove(filepath.Join(mnt, rel)) //nolint:errcheck
-	}
-	os.WriteFile(filepath.Join(mnt, "etc/hostname"), nil, 0o644) //nolint:errcheck
-	if keys, _ := filepath.Glob(filepath.Join(mnt, "etc/ssh/ssh_host_*")); keys != nil {
-		for _, k := range keys {
-			os.Remove(k) //nolint:errcheck
+	defer func() {
+		if o, err := exec.Command("umount", mnt).CombinedOutput(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("umount %s: %v: %s", mnt, err, o)
 		}
+	}()
+
+	// Snapshot images came from a guest and every directory entry in them is
+	// attacker-controlled. os.Root gives the sanitization pass openat-style
+	// beneath-root resolution, so an absolute /etc/hostname symlink (or a
+	// relative chain containing ..) cannot redirect these root operations into
+	// the Sparkbox container's filesystem.
+	root, err := os.OpenRoot(mnt)
+	if err != nil {
+		return fmt.Errorf("open snapshot rootfs: %w", err)
 	}
-	os.RemoveAll(filepath.Join(mnt, "var/run/secrets/hivemind")) //nolint:errcheck
-	os.RemoveAll(filepath.Join(mnt, "run/secrets/hivemind"))     //nolint:errcheck
-	if o, err := exec.CommandContext(ctx, "umount", mnt).CombinedOutput(); err != nil {
-		return fmt.Errorf("umount %s: %v: %s", mnt, err, o)
+	defer root.Close() //nolint:errcheck
+	for _, rel := range []string{"etc/machine-id", "var/lib/dbus/machine-id", "etc/resolv.conf"} {
+		root.RemoveAll(rel) //nolint:errcheck
 	}
+	root.RemoveAll("etc/hostname") //nolint:errcheck
+	if err := root.WriteFile("etc/hostname", nil, 0o644); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if sshDir, err := root.Open("etc/ssh"); err == nil {
+		if entries, err := sshDir.ReadDir(-1); err == nil {
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "ssh_host_") {
+					root.RemoveAll(path.Join("etc/ssh", entry.Name())) //nolint:errcheck
+				}
+			}
+		}
+		sshDir.Close() //nolint:errcheck
+	}
+	root.RemoveAll("var/run/secrets/hivemind") //nolint:errcheck
+	root.RemoveAll("run/secrets/hivemind")     //nolint:errcheck
 	return nil
 }
 
 func (d *Driver) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	var closeErr error
 	for _, st := range d.vms {
 		if st.machine != nil {
-			st.machine.StopVMM() //nolint:errcheck
-			st.cancel()
+			d.stopVMM(st)
 		}
+		closeErr = errors.Join(closeErr, d.cleanupJail(st.idx))
 	}
-	return nil
+	return closeErr
+}
+
+// stopVMM synchronizes helper-owned cleanup before callers rename snapshots,
+// remove VM directories, or reuse the slot. The local launchers historically
+// needed only a signal; the helper client acknowledges after its VMM, TAP, and
+// jail are all gone.
+func (d *Driver) stopVMM(st *vmState) {
+	d.stopMachine(st.machine, st.cancel)
+}
+
+func (d *Driver) stopMachine(machine *sdk.Machine, vmCancel context.CancelFunc) {
+	machine.StopVMM() //nolint:errcheck
+	vmCancel()
+	if d.opts.PrivilegedHelperSocket != "" {
+		if _, err := machine.PID(); err != nil {
+			return
+		}
+		ctx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer waitCancel()
+		machine.Wait(ctx) //nolint:errcheck
+	}
 }
 
 func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
@@ -1280,6 +1863,11 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 // createTap sets up the host side of the VM's network: a tap device owned by
 // this process's user with the host-side /30 address.
 func (d *Driver) createTap(ctx context.Context, idx int) error {
+	if d.opts.PrivilegedHelperSocket != "" {
+		// The helper creates the TAP immediately before launching Firecracker,
+		// in the Pod network namespace shared by both containers.
+		return nil
+	}
 	tap := tapName(idx)
 	cmds := [][]string{
 		{"ip", "tuntap", "add", "dev", tap, "mode", "tap"},
@@ -1323,6 +1911,10 @@ func (d *Driver) createTap(ctx context.Context, idx int) error {
 }
 
 func (d *Driver) deleteTap(idx int) {
+	if d.opts.PrivilegedHelperSocket != "" {
+		// Helper cleanup is synchronized with the launch-client process exit.
+		return
+	}
 	if d.prefix6 != nil && d.uplink6 != "" {
 		exec.Command("ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
 	}

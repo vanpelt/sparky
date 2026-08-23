@@ -732,7 +732,9 @@ type Sandbox struct {
 	HostIp string `protobuf:"bytes,18,opt,name=host_ip,json=hostIp,proto3" json:"host_ip,omitempty"`
 	// turbo means vcpus and memory_mb above are a doubled allocation this run
 	// borrowed, which the node hands back the moment the sandbox pauses.
-	Turbo         bool `protobuf:"varint,19,opt,name=turbo,proto3" json:"turbo,omitempty"`
+	Turbo bool `protobuf:"varint,19,opt,name=turbo,proto3" json:"turbo,omitempty"`
+	// Stable workload identity. Unlike name, this survives sandbox rename.
+	Id            string `protobuf:"bytes,20,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -900,6 +902,13 @@ func (x *Sandbox) GetTurbo() bool {
 	return false
 }
 
+func (x *Sandbox) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
 type Snapshot struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -1032,6 +1041,13 @@ type Capacity struct {
 	Archiving          bool                   `protobuf:"varint,16,opt,name=archiving,proto3" json:"archiving,omitempty"`
 	Snapshots          bool                   `protobuf:"varint,17,opt,name=snapshots,proto3" json:"snapshots,omitempty"`
 	NetworkAccounting  bool                   `protobuf:"varint,18,opt,name=network_accounting,json=networkAccounting,proto3" json:"network_accounting,omitempty"`
+	// Owner pools are overlapping entitlements. entitled_memory_mb may exceed
+	// budget_memory_mb; effective_memory_mb remains the physical admission load.
+	OwnerMemoryPoolMb  int64 `protobuf:"varint,19,opt,name=owner_memory_pool_mb,json=ownerMemoryPoolMb,proto3" json:"owner_memory_pool_mb,omitempty"`
+	OwnerMemoryBurstMb int64 `protobuf:"varint,20,opt,name=owner_memory_burst_mb,json=ownerMemoryBurstMb,proto3" json:"owner_memory_burst_mb,omitempty"`
+	EntitledMemoryMb   int64 `protobuf:"varint,21,opt,name=entitled_memory_mb,json=entitledMemoryMb,proto3" json:"entitled_memory_mb,omitempty"`
+	ActiveOwners       int32 `protobuf:"varint,22,opt,name=active_owners,json=activeOwners,proto3" json:"active_owners,omitempty"`
+	ResidentMemoryMb   int64 `protobuf:"varint,23,opt,name=resident_memory_mb,json=residentMemoryMb,proto3" json:"resident_memory_mb,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -1190,6 +1206,41 @@ func (x *Capacity) GetNetworkAccounting() bool {
 		return x.NetworkAccounting
 	}
 	return false
+}
+
+func (x *Capacity) GetOwnerMemoryPoolMb() int64 {
+	if x != nil {
+		return x.OwnerMemoryPoolMb
+	}
+	return 0
+}
+
+func (x *Capacity) GetOwnerMemoryBurstMb() int64 {
+	if x != nil {
+		return x.OwnerMemoryBurstMb
+	}
+	return 0
+}
+
+func (x *Capacity) GetEntitledMemoryMb() int64 {
+	if x != nil {
+		return x.EntitledMemoryMb
+	}
+	return 0
+}
+
+func (x *Capacity) GetActiveOwners() int32 {
+	if x != nil {
+		return x.ActiveOwners
+	}
+	return 0
+}
+
+func (x *Capacity) GetResidentMemoryMb() int64 {
+	if x != nil {
+		return x.ResidentMemoryMb
+	}
+	return 0
 }
 
 type HealthRequest struct {
@@ -3253,6 +3304,7 @@ type IdentityDescription struct {
 	Sandbox        string                 `protobuf:"bytes,6,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
 	Image          string                 `protobuf:"bytes,7,opt,name=image,proto3" json:"image,omitempty"`
 	Node           string                 `protobuf:"bytes,8,opt,name=node,proto3" json:"node,omitempty"`
+	SandboxId      string                 `protobuf:"bytes,9,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -3343,6 +3395,13 @@ func (x *IdentityDescription) GetNode() string {
 	return ""
 }
 
+func (x *IdentityDescription) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
 type DurationRange struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Minimum       *durationpb.Duration   `protobuf:"bytes,1,opt,name=minimum,proto3" json:"minimum,omitempty"`
@@ -3427,7 +3486,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"q\n" +
 	"\bEventGap\x12:\n" +
 	"\x19oldest_available_revision\x18\x01 \x01(\x04R\x17oldestAvailableRevision\x12)\n" +
-	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xa1\x05\n" +
+	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xb1\x05\n" +
 	"\aSandbox\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -3451,7 +3510,8 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\adisk_mb\x18\x10 \x01(\x03R\x06diskMb\x12\"\n" +
 	"\rdisk_total_mb\x18\x11 \x01(\x03R\vdiskTotalMb\x12\x17\n" +
 	"\ahost_ip\x18\x12 \x01(\tR\x06hostIp\x12\x14\n" +
-	"\x05turbo\x18\x13 \x01(\bR\x05turbo\"\xa8\x01\n" +
+	"\x05turbo\x18\x13 \x01(\bR\x05turbo\x12\x0e\n" +
+	"\x02id\x18\x14 \x01(\tR\x02id\"\xa8\x01\n" +
 	"\bSnapshot\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -3459,7 +3519,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\ffrom_sandbox\x18\x04 \x01(\tR\vfromSandbox\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x14\n" +
-	"\x12GetCapacityRequest\"\x96\x05\n" +
+	"\x12GetCapacityRequest\"\xfb\x06\n" +
 	"\bCapacity\x12\"\n" +
 	"\farchitecture\x18\x01 \x01(\tR\farchitecture\x12)\n" +
 	"\x10operating_system\x18\x02 \x01(\tR\x0foperatingSystem\x12\x18\n" +
@@ -3482,7 +3542,12 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\tsandboxes\x18\x0f \x01(\x05R\tsandboxes\x12\x1c\n" +
 	"\tarchiving\x18\x10 \x01(\bR\tarchiving\x12\x1c\n" +
 	"\tsnapshots\x18\x11 \x01(\bR\tsnapshots\x12-\n" +
-	"\x12network_accounting\x18\x12 \x01(\bR\x11networkAccounting\"\x0f\n" +
+	"\x12network_accounting\x18\x12 \x01(\bR\x11networkAccounting\x12/\n" +
+	"\x14owner_memory_pool_mb\x18\x13 \x01(\x03R\x11ownerMemoryPoolMb\x121\n" +
+	"\x15owner_memory_burst_mb\x18\x14 \x01(\x03R\x12ownerMemoryBurstMb\x12,\n" +
+	"\x12entitled_memory_mb\x18\x15 \x01(\x03R\x10entitledMemoryMb\x12#\n" +
+	"\ractive_owners\x18\x16 \x01(\x05R\factiveOwners\x12,\n" +
+	"\x12resident_memory_mb\x18\x17 \x01(\x03R\x10residentMemoryMb\"\x0f\n" +
 	"\rHealthRequest\"\x84\x02\n" +
 	"\x0eHealthResponse\x126\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x1e.sparkbox.node.v1.HealthStatusR\x06status\x12\x12\n" +
@@ -3623,7 +3688,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"3\n" +
 	"\x17DescribeIdentityRequest\x12\x18\n" +
-	"\asandbox\x18\x01 \x01(\tR\asandbox\"\xe2\x01\n" +
+	"\asandbox\x18\x01 \x01(\tR\asandbox\"\x81\x02\n" +
 	"\x13IdentityDescription\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x18\n" +
 	"\asubject\x18\x02 \x01(\tR\asubject\x12\x14\n" +
@@ -3632,7 +3697,9 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x0fkey_fingerprint\x18\x05 \x01(\tR\x0ekeyFingerprint\x12\x18\n" +
 	"\asandbox\x18\x06 \x01(\tR\asandbox\x12\x14\n" +
 	"\x05image\x18\a \x01(\tR\x05image\x12\x12\n" +
-	"\x04node\x18\b \x01(\tR\x04node\"y\n" +
+	"\x04node\x18\b \x01(\tR\x04node\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\t \x01(\tR\tsandboxId\"y\n" +
 	"\rDurationRange\x123\n" +
 	"\aminimum\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\aminimum\x123\n" +
 	"\amaximum\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\amaximum*~\n" +

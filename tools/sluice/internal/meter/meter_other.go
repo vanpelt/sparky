@@ -24,6 +24,8 @@ func Load() (*Meter, error) { return nil, ErrUnsupported }
 func (m *Meter) Attach(string) (bool, error)                { return false, ErrUnsupported }
 func (m *Meter) Detach(string)                              {}
 func (m *Meter) Attached(string) bool                       { return false }
+func (m *Meter) SetReady(string, bool)                      {}
+func (m *Meter) Ready(string) bool                          { return false }
 func (m *Meter) AttachedNames() []string                    { return nil }
 func (m *Meter) Ifaces() map[uint32]string                  { return nil }
 func (m *Meter) Flows() (map[netip.Addr]report.Flow, error) { return nil, ErrUnsupported }

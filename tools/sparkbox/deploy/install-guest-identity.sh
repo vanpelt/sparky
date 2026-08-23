@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=2
+IDENTITY_REV=3
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -35,7 +35,7 @@ while IFS=: read -r u _ _ _ _ home _; do
     && { SANDBOX_USER=$u; break; }
 done < "$MNT/etc/passwd"
 
-mkdir -p "$MNT/usr/local/sbin"
+mkdir -p "$MNT/usr/local/bin" "$MNT/usr/local/sbin"
 
 # Fetch this sandbox's OIDC id token from the host metadata service and park it
 # where hivemind's zero-config auth chain already looks. The host authenticates
@@ -94,6 +94,36 @@ else
 fi
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-token"
+
+# A tiny in-guest control client. The metadata service authenticates the
+# caller from its tap source address, so this carries no operator credential
+# and can only change the sandbox from which the request originated.
+sed -e "s/@@META_PORT@@/$META_PORT/g" > "$MNT/usr/local/bin/sparkbox" <<'EOF'
+#!/bin/sh
+set -eu
+GW=$(ip -4 route show default | awk '{print $3; exit}')
+[ -n "$GW" ] || { echo "sparkbox: no default gateway" >&2; exit 1; }
+META="http://$GW:@@META_PORT@@"
+
+case "${1:-}" in
+  pin)    exec curl -fsS --max-time 10 -X POST "$META/self/pin" ;;
+  unpin)  exec curl -fsS --max-time 10 -X POST "$META/self/unpin" ;;
+  status) exec curl -fsS --max-time 10 "$META/self" ;;
+  make-public)  exec curl -fsS --max-time 10 -X POST "$META/self/visibility/public" ;;
+  make-private) exec curl -fsS --max-time 10 -X POST "$META/self/visibility/private" ;;
+  set-port)
+    case "${2:-}" in ''|*[!0-9]*) echo "sparkbox: port must be from 1 through 65535" >&2; exit 2 ;; esac
+    [ "$2" -ge 1 ] && [ "$2" -le 65535 ] \
+      || { echo "sparkbox: port must be from 1 through 65535" >&2; exit 2; }
+    exec curl -fsS --max-time 10 -X POST "$META/self/port/$2"
+    ;;
+  *)
+    echo "usage: sparkbox <pin|unpin|status|make-public|make-private|set-port PORT>" >&2
+    exit 2
+    ;;
+esac
+EOF
+chmod 0755 "$MNT/usr/local/bin/sparkbox"
 
 # systemd path (ubuntu:24.04 and friends). Slim images without systemd fall
 # back to the tiny rc build-rootfs.sh writes, which calls sparkbox-token once.

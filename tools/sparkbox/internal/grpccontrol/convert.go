@@ -28,6 +28,7 @@ func sandboxToProto(box *host.Sandbox) *nodev1.Sandbox {
 		state = nodev1.SandboxState_SANDBOX_STATE_ARCHIVED
 	}
 	out := &nodev1.Sandbox{
+		Id:             box.ID,
 		Name:           box.Name,
 		Owner:          box.Owner,
 		Image:          box.Image,
@@ -166,7 +167,11 @@ func failureFromError(err error) operationjournal.Failure {
 	case errors.As(err, &limitError):
 		failure.Code, failure.Retryable = "running_limit", false
 	case errors.As(err, &capacityError):
-		failure.Code = "capacity"
+		if capacityError.Owner != "" {
+			failure.Code, failure.Retryable = "owner_memory_pool_full", false
+		} else {
+			failure.Code = "capacity"
+		}
 	case errors.As(err, &quotaError):
 		failure.Code, failure.Retryable = "disk_quota", false
 	}

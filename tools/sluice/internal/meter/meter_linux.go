@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -50,7 +51,9 @@ type Meter struct {
 	fromG    *ebpf.Program
 	toG      *ebpf.Program
 
+	mu    sync.RWMutex
 	links map[string]attachment // ifname -> its attachments
+	ready map[string]bool       // full reconcile completed after attachment
 }
 
 // attachment records the links for one interface plus the ifindex they were
@@ -77,7 +80,7 @@ func Load() (*Meter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load bpf collection: %w", err)
 	}
-	m := &Meter{coll: coll, links: map[string]attachment{}}
+	m := &Meter{coll: coll, links: map[string]attachment{}, ready: map[string]bool{}}
 	for name, dst := range map[string]**ebpf.Map{"flows": &m.flows, "allowed": &m.allowed, "config": &m.config, "enforced": &m.enforced} {
 		mp, ok := coll.Maps[name]
 		if !ok {
@@ -104,6 +107,8 @@ func Load() (*Meter, error) {
 // to the new device. from_guest lands on ingress (packets the guest sent),
 // to_guest on egress (packets bound for the guest).
 func (m *Meter) Attach(ifname string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
 		return false, fmt.Errorf("lookup %s: %w", ifname, err)
@@ -112,7 +117,7 @@ func (m *Meter) Attach(ifname string) (bool, error) {
 		if cur.index == iface.Index {
 			return false, nil // already attached to this exact device
 		}
-		m.Detach(ifname) // same name, new ifindex → drop stale links first
+		m.detachLocked(ifname) // same name, new ifindex → drop stale links first
 	}
 	ingress, err := link.AttachTCX(link.TCXOptions{
 		Interface: iface.Index, Program: m.fromG, Attach: ebpf.AttachTCXIngress,
@@ -128,6 +133,7 @@ func (m *Meter) Attach(ifname string) (bool, error) {
 		return false, fmt.Errorf("attach egress on %s: %w", ifname, err)
 	}
 	m.links[ifname] = attachment{index: iface.Index, links: []link.Link{ingress, egress}}
+	m.ready[ifname] = false
 	return true, nil
 }
 
@@ -136,6 +142,12 @@ func (m *Meter) Attach(ifname string) (bool, error) {
 // churned-through VM doesn't leak map space. The ifindex-0 wildcard is never
 // touched.
 func (m *Meter) Detach(ifname string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.detachLocked(ifname)
+}
+
+func (m *Meter) detachLocked(ifname string) {
 	att, ok := m.links[ifname]
 	for _, l := range att.links {
 		l.Close()
@@ -144,6 +156,7 @@ func (m *Meter) Detach(ifname string) {
 		m.forgetIface(uint32(att.index))
 	}
 	delete(m.links, ifname)
+	delete(m.ready, ifname)
 }
 
 // forgetIface deletes every flows and allowed entry carrying ifindex. Keys are
@@ -184,6 +197,8 @@ func (m *Meter) forgetIface(ifindex uint32) {
 // Ifaces returns a snapshot of the attached taps as ifindex→ifname, letting a
 // caller attribute a per-ifindex flow to a named tap (and thus to a VM).
 func (m *Meter) Ifaces() map[uint32]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make(map[uint32]string, len(m.links))
 	for name, att := range m.links {
 		out[uint32(att.index)] = name
@@ -193,13 +208,35 @@ func (m *Meter) Ifaces() map[uint32]string {
 
 // Attached reports whether ifname currently has the program attached.
 func (m *Meter) Attached(ifname string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	_, ok := m.links[ifname]
 	return ok
+}
+
+// SetReady records whether an attached interface has completed a full
+// allow-set and enforcement reconcile. It is separate from Attached so a VMM
+// launcher cannot race the interval between TCX attachment and map sync.
+func (m *Meter) SetReady(ifname string, ready bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.links[ifname]; ok {
+		m.ready[ifname] = ready
+	}
+}
+
+// Ready reports whether the interface is attached and fully reconciled.
+func (m *Meter) Ready(ifname string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.ready[ifname]
 }
 
 // AttachedNames returns the interfaces the meter is currently attached to, so
 // the reconcile loop can detach ones whose tap has gone away.
 func (m *Meter) AttachedNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make([]string, 0, len(m.links))
 	for name := range m.links {
 		out = append(out, name)
@@ -342,7 +379,7 @@ func (m *Meter) syncAllowedKeyed(ifindex uint32, want []netip.Addr) error {
 
 // Close detaches everything and releases the eBPF objects.
 func (m *Meter) Close() error {
-	for name := range m.links {
+	for _, name := range m.AttachedNames() {
 		m.Detach(name)
 	}
 	if m.coll != nil {

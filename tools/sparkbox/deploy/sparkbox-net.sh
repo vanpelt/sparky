@@ -15,6 +15,8 @@ set -euo pipefail
 # NAT for IPv4 sandbox egress. IPv6 needs none: with --subnet6 each sandbox
 # holds a globally routable /128 and egresses unmasqueraded.
 SPARKBOX_GUEST_SUBNET="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/16}"
+SPARKBOX_GUEST_SUBNET6="${SPARKBOX_GUEST_SUBNET6:-}"
+SPARKBOX_RESTRICT_INTERNAL_EGRESS="${SPARKBOX_RESTRICT_INTERNAL_EGRESS:-0}"
 UPLINK=$(ip route | awk '/default/{print $5; exit}')
 if [ -n "$UPLINK" ]; then
   iptables -t nat -C POSTROUTING -s "$SPARKBOX_GUEST_SUBNET" -o "$UPLINK" -j MASQUERADE 2>/dev/null || \
@@ -30,13 +32,91 @@ fi
 iptables -C INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP 2>/dev/null || \
   iptables -I INPUT -p tcp --dport 8967 ! -i sbtap+ -j DROP
 
-# Sandbox forwarding. On a host that ALSO runs docker, dockerd sets the FORWARD
-# policy to DROP and only whitelists its own bridges — so sandbox tap traffic is
-# dropped and egress silently breaks. Explicitly accept sbtap+ in both
-# directions, inserted at the top so it wins over docker's chain. Harmless on a
-# non-docker host, where the default FORWARD policy is already ACCEPT.
-iptables -C FORWARD -i sbtap+ -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i sbtap+ -j ACCEPT
-iptables -C FORWARD -o sbtap+ -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -o sbtap+ -j ACCEPT
+# Sandbox forwarding. CKS enables the restricted mode, which provides a
+# fail-closed inner boundary in the Pod network namespace. It composes with
+# sluice rather than replacing it: sluice's TC ingress program first narrows a
+# tagged TAP to DNS-derived addresses, then these rules reject host, private,
+# link-local, documentation, multicast, and reserved destinations regardless
+# of what DNS returned. Untagged/open sluice TAPs still inherit this ceiling.
+#
+# Rebuild named chains so a sidecar restart cannot accumulate stale policy.
+# Remove both the legacy blanket accepts and known hooks before inserting the
+# selected policy. `sbtap+` is iptables' interface-prefix syntax.
+while iptables -D FORWARD -i sbtap+ -j ACCEPT 2>/dev/null; do :; done
+while iptables -D FORWARD -o sbtap+ -j ACCEPT 2>/dev/null; do :; done
+while iptables -D FORWARD -i sbtap+ -j SPARKBOX_GUEST_OUT 2>/dev/null; do :; done
+while iptables -D FORWARD -o sbtap+ -j SPARKBOX_GUEST_IN 2>/dev/null; do :; done
+while iptables -D INPUT -i sbtap+ -j SPARKBOX_GUEST_HOST 2>/dev/null; do :; done
+
+if [ "$SPARKBOX_RESTRICT_INTERNAL_EGRESS" = 1 ]; then
+  iptables -N SPARKBOX_GUEST_OUT 2>/dev/null || iptables -F SPARKBOX_GUEST_OUT
+  iptables -N SPARKBOX_GUEST_IN 2>/dev/null || iptables -F SPARKBOX_GUEST_IN
+  iptables -N SPARKBOX_GUEST_HOST 2>/dev/null || iptables -F SPARKBOX_GUEST_HOST
+
+  # A broad subnet check is present from helper startup. The helper inserts a
+  # stricter per-TAP /32 source rule when it creates each device, preventing a
+  # guest from spoofing a sibling's address.
+  iptables -A SPARKBOX_GUEST_OUT ! -s "$SPARKBOX_GUEST_SUBNET" -j DROP
+  for cidr in \
+    0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
+    169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 \
+    192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 \
+    203.0.113.0/24 224.0.0.0/4 240.0.0.0/4; do
+    iptables -A SPARKBOX_GUEST_OUT -d "$cidr" -j DROP
+  done
+  iptables -A SPARKBOX_GUEST_OUT -j ACCEPT
+
+  # No unsolicited network traffic may enter a guest, but replies to a
+  # guest-originated connection are allowed back through the TAP.
+  iptables -A SPARKBOX_GUEST_IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A SPARKBOX_GUEST_IN -j DROP
+
+  # Controller-originated guest SSH uses host OUTPUT and is unaffected. Its
+  # replies arrive through INPUT, so established traffic must precede the host
+  # service allow-list. DNS supports a future node-local sluice resolver; 8967
+  # is Sparkbox's authenticated guest metadata service.
+  iptables -A SPARKBOX_GUEST_HOST -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A SPARKBOX_GUEST_HOST -p udp --dport 53 -j ACCEPT
+  iptables -A SPARKBOX_GUEST_HOST -p tcp --dport 53 -j ACCEPT
+  iptables -A SPARKBOX_GUEST_HOST -p tcp --dport 8967 -j ACCEPT
+  iptables -A SPARKBOX_GUEST_HOST -j DROP
+
+  iptables -I FORWARD 1 -i sbtap+ -j SPARKBOX_GUEST_OUT
+  iptables -I FORWARD 2 -o sbtap+ -j SPARKBOX_GUEST_IN
+  iptables -I INPUT 1 -i sbtap+ -j SPARKBOX_GUEST_HOST
+
+  if [ -n "$SPARKBOX_GUEST_SUBNET6" ]; then
+    while ip6tables -D FORWARD -i sbtap+ -j SPARKBOX_GUEST_OUT 2>/dev/null; do :; done
+    while ip6tables -D FORWARD -o sbtap+ -j SPARKBOX_GUEST_IN 2>/dev/null; do :; done
+    while ip6tables -D INPUT -i sbtap+ -j SPARKBOX_GUEST_HOST 2>/dev/null; do :; done
+    ip6tables -N SPARKBOX_GUEST_OUT 2>/dev/null || ip6tables -F SPARKBOX_GUEST_OUT
+    ip6tables -N SPARKBOX_GUEST_IN 2>/dev/null || ip6tables -F SPARKBOX_GUEST_IN
+    ip6tables -N SPARKBOX_GUEST_HOST 2>/dev/null || ip6tables -F SPARKBOX_GUEST_HOST
+    ip6tables -A SPARKBOX_GUEST_OUT ! -s "$SPARKBOX_GUEST_SUBNET6" -j DROP
+    for cidr in \
+      ::/128 ::1/128 ::ffff:0:0/96 64:ff9b:1::/48 100::/64 \
+      2001:db8::/32 fc00::/7 fe80::/10 ff00::/8; do
+      ip6tables -A SPARKBOX_GUEST_OUT -d "$cidr" -j DROP
+    done
+    ip6tables -A SPARKBOX_GUEST_OUT -j ACCEPT
+    ip6tables -A SPARKBOX_GUEST_IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A SPARKBOX_GUEST_IN -j DROP
+    ip6tables -A SPARKBOX_GUEST_HOST -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A SPARKBOX_GUEST_HOST -p udp --dport 53 -j ACCEPT
+    ip6tables -A SPARKBOX_GUEST_HOST -p tcp --dport 53 -j ACCEPT
+    ip6tables -A SPARKBOX_GUEST_HOST -p tcp --dport 8967 -j ACCEPT
+    ip6tables -A SPARKBOX_GUEST_HOST -j DROP
+    ip6tables -I FORWARD 1 -i sbtap+ -j SPARKBOX_GUEST_OUT
+    ip6tables -I FORWARD 2 -o sbtap+ -j SPARKBOX_GUEST_IN
+    ip6tables -I INPUT 1 -i sbtap+ -j SPARKBOX_GUEST_HOST
+  fi
+else
+  # Standalone installations retain their existing behavior. On a host that
+  # also runs Docker, its FORWARD policy is commonly DROP, so explicit accepts
+  # remain necessary for sandbox egress.
+  iptables -I FORWARD 1 -i sbtap+ -j ACCEPT
+  iptables -I FORWARD 2 -o sbtap+ -j ACCEPT
+fi
 
 # sluice's allowlist resolver needs an address of its OWN on any host that also
 # runs sparkbox's wildcard DNS responder: they are two different DNS servers and

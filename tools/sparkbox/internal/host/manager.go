@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/reserved"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -67,10 +68,17 @@ func (e *LimitError) Error() string {
 // CapacityError is returned when starting a sandbox would push the host's
 // allocated RAM past the admission budget.
 type CapacityError struct {
+	// Owner is set when the exhausted budget is an owner's pooled entitlement;
+	// empty means the node-wide safety budget.
+	Owner                         string
 	RequestedMB, UsedMB, BudgetMB int64
 }
 
 func (e *CapacityError) Error() string {
+	if e.Owner != "" {
+		return fmt.Sprintf("memory pool full for %s: %d MB running + %d MB requested exceeds the %d MB pool",
+			e.Owner, e.UsedMB, e.RequestedMB, e.BudgetMB)
+	}
 	return fmt.Sprintf("host at capacity: %d MB running + %d MB requested exceeds the %d MB budget",
 		e.UsedMB, e.RequestedMB, e.BudgetMB)
 }
@@ -158,6 +166,7 @@ type DisabledError struct {
 func (e *DisabledError) Error() string { return e.Msg }
 
 type Sandbox struct {
+	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	Owner      string    `json:"owner"`
 	Image      string    `json:"image"`
@@ -200,6 +209,11 @@ type Sandbox struct {
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
 	ArchiveKey string    `json:"archive_key,omitempty"`
 	ArchivedAt time.Time `json:"archived_at,omitempty"`
+	// CheckpointKey identifies the latest immutable durable copy of this
+	// sandbox's rootfs. Unlike an archive it remains set while the local disk is
+	// present, and restoring it never consumes the durable object.
+	CheckpointKey string    `json:"checkpoint_key,omitempty"`
+	CheckpointAt  time.Time `json:"checkpoint_at,omitempty"`
 	// DiskMB is this sandbox's durable root-filesystem usage. Host representation
 	// details (sparse holes and shared reflink extents) and the regenerable
 	// memory snapshot are deliberately excluded. For an archived box it is the
@@ -250,6 +264,29 @@ type Sandbox struct {
 	// omitted pair is what every record written before turbo existed looks like.
 	BaseVCPUs int64 `json:"base_vcpus,omitempty"`
 	BaseMemMB int64 `json:"base_mem_mb,omitempty"`
+	// HiveMind is an ephemeral view of sessions attributed to this VM. It is
+	// refreshed from a token-bound API response and deliberately never written
+	// to the sandbox state file.
+	HiveMind *HiveMindSessionSnapshot `json:"-"`
+}
+
+type HiveMindSession struct {
+	ID             string     `json:"id"`
+	Title          string     `json:"title"`
+	URL            string     `json:"url"`
+	State          string     `json:"state"`
+	AgentType      string     `json:"agent_type"`
+	Model          string     `json:"model"`
+	StartedAt      time.Time  `json:"started_at"`
+	EndedAt        *time.Time `json:"ended_at"`
+	LastActivityAt time.Time  `json:"last_activity_at"`
+}
+
+type HiveMindSessionSnapshot struct {
+	ObservedAt time.Time         `json:"observed_at"`
+	Sessions   []HiveMindSession `json:"sessions"`
+	TotalCount int               `json:"total_count"`
+	HasMore    bool              `json:"has_more"`
 }
 
 // TurboFactor is how much a turbo boot multiplies a sandbox's CPU and RAM by.
@@ -391,47 +428,55 @@ type ObjectStore interface {
 }
 
 type Manager struct {
-	mu          sync.Mutex
-	ready       singleflight.Group // one restore/resume per sandbox at a time
-	ctx         context.Context    // process lifetime for shared restore/resume work
-	driver      vmm.Driver
-	balloon     vmm.Ballooner    // driver's balloon capability, if it has one; else nil
-	archiver    vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
-	diskReport  vmm.DiskReporter // driver's disk-usage capability; else nil
-	renamer     vmm.Renamer      // driver's VM-rename capability; else nil
-	rebooter    vmm.Rebooter     // driver's snapshot-discard capability; else nil
-	diskResize  vmm.DiskResizer  // driver's disk-grow capability; else nil
-	cpuStats    vmm.CPUStatser   // driver's CPU-time capability; else nil
-	netStats    vmm.NetStatser   // driver's network-counter capability; else nil
-	archive     ObjectStore      // object store for archives; nil disables archiving
-	log         *slog.Logger
-	stateDir    string // dir holding sandboxes.json + transient archive staging
-	path        string // JSON state file
-	boxes       map[string]*Sandbox
-	snaps       map[string]*Snapshot // fork-able templates, keyed by template image name
-	snapsPath   string               // snapshots.json
-	gwPubKey    string
-	routes      *routes.Store           // optional: proxy route bookkeeping
-	schedules   ScheduleCleaner         // optional: platform-scheduler cleanup on destroy
-	frontDoor   FrontDoor               // optional: per-sandbox address plumbing
-	tags        TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
-	envSync     EnvPusher               // optional: secret-env push when a sandbox reaches running
-	sessions    SessionCloser           // optional: hang up attached sessions when a sandbox pauses
-	observer    Observer                // optional: relay record changes to whoever mirrors this host
-	maxPerOwner int                     // max running sandboxes per owner; 0 = unlimited
-	memAdmitPct int                     // RAM admission threshold as % of host; 0 = disabled
-	hostMemMB   int64                   // host RAM in MB for admission; 0 = disabled
-	reserveMB   int64                   // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
-	diskPoolMB  int64                   // per-owner pooled-disk budget in MB; 0 = disabled
-	archivePfx  string                  // object-key prefix for archives (default "archives")
-	nodeName    string                  // this host's name in capacity reports
-	nodeArch    string                  // this host's CPU architecture in capacity reports
-	nodeRelease string                  // this host's sparkbox release tag in capacity reports
-	hostVCPUs   int64                   // host logical CPUs for capacity reports; 0 = unknown
-	actCPUPct   float64                 // activity floor: % of one core over a sample; 0 = off
-	actNetBytes uint64                  // activity floor: bytes per sample; 0 = off
-	vitals      map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
-	metrics     *fleetmetrics.Registry  // optional node-local persistence/readiness metrics
+	mu                 sync.Mutex
+	ready              singleflight.Group // one restore/resume per sandbox at a time
+	ctx                context.Context    // process lifetime for shared restore/resume work
+	driver             vmm.Driver
+	balloon            vmm.Ballooner    // driver's balloon capability, if it has one; else nil
+	archiver           vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
+	diskReport         vmm.DiskReporter // driver's disk-usage capability; else nil
+	renamer            vmm.Renamer      // driver's VM-rename capability; else nil
+	rebooter           vmm.Rebooter     // driver's snapshot-discard capability; else nil
+	diskResize         vmm.DiskResizer  // driver's disk-grow capability; else nil
+	cpuStats           vmm.CPUStatser   // driver's CPU-time capability; else nil
+	netStats           vmm.NetStatser   // driver's network-counter capability; else nil
+	archive            ObjectStore      // object store for archives; nil disables archiving
+	checkpoint         ObjectStore      // immutable durable checkpoints; nil disables checkpointing
+	log                *slog.Logger
+	stateDir           string // dir holding sandboxes.json + transient archive staging
+	checkpointStageDir string // local directory for checkpoint pack/download staging
+	path               string // JSON state file
+	boxes              map[string]*Sandbox
+	snaps              map[string]*Snapshot // fork-able templates, keyed by template image name
+	snapsPath          string               // snapshots.json
+	gwPubKey           string
+	routes             *routes.Store           // optional: proxy route bookkeeping
+	schedules          ScheduleCleaner         // optional: platform-scheduler cleanup on destroy
+	frontDoor          FrontDoor               // optional: per-sandbox address plumbing
+	tags               TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
+	envSync            EnvPusher               // optional: secret-env push when a sandbox reaches running
+	sessions           SessionCloser           // optional: hang up attached sessions when a sandbox pauses
+	observer           Observer                // optional: relay record changes to whoever mirrors this host
+	maxPerOwner        int                     // max running sandboxes per owner; 0 = unlimited
+	maxBoxesPerOwner   int                     // max total sandbox identities per owner; 0 = unlimited
+	memAdmitPct        int                     // RAM admission threshold as % of host; 0 = disabled
+	hostMemMB          int64                   // host RAM in MB for admission; 0 = disabled
+	reserveMB          int64                   // per-VM working-set floor for admission + balloon; 0 = off (count full ceiling)
+	ownerMemPoolMB     int64                   // per-owner effective-memory budget; 0 = disabled
+	ownerMemBurstMB    int64                   // temporary per-owner ceiling for turbo; 0 = baseline pool
+	diskPoolMB         int64                   // per-owner pooled-disk budget in MB; 0 = disabled
+	archivePfx         string                  // object-key prefix for archives (default "archives")
+	checkpointPfx      string                  // object-key prefix for checkpoints (default "checkpoints")
+	nodeName           string                  // this host's name in capacity reports
+	nodeArch           string                  // this host's CPU architecture in capacity reports
+	nodeRelease        string                  // this host's sparkbox release tag in capacity reports
+	hostVCPUs          int64                   // host logical CPUs for capacity reports; 0 = unknown
+	actCPUPct          float64                 // activity floor: % of one core over a sample; 0 = off
+	actNetBytes        uint64                  // activity floor: bytes per sample; 0 = off
+	vitals             map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
+	memUsed            map[string]int64        // latest observed guest working set per running sandbox
+	metrics            *fleetmetrics.Registry  // optional node-local persistence/readiness metrics
+	diskOps            sync.Map                // sandbox name -> *sync.Mutex; serializes rootfs lifecycle work
 
 	// Activity is intentionally kept off mu on the offer path. Lifecycle
 	// operations hold mu across driver calls, which can take seconds; a web
@@ -441,6 +486,12 @@ type Manager struct {
 	activityMu sync.Mutex
 	activity   map[string]time.Time // dirty timestamps not yet persisted
 	markedAt   map[string]time.Time // last accepted mark, for coalescing
+
+	// protectUntil holds short, external activity leases keyed by immutable
+	// sandbox ID. They are intentionally memory-only: a HiveMind outage or a
+	// process restart must not turn yesterday's observation into a permanent
+	// exemption from scale-to-zero.
+	protectUntil map[string]time.Time
 }
 
 // vitalsSample is the previous reaper-tick reading of a sandbox's resource
@@ -474,6 +525,9 @@ type Options struct {
 	// MaxRunningPerOwner caps how many sandboxes one owner may have running at
 	// once (0 = unlimited). Enforced on create and resume-on-connect.
 	MaxRunningPerOwner int
+	// MaxSandboxesPerOwner caps every non-deleted sandbox identity belonging to
+	// one owner, regardless of whether it is running, paused, or archived.
+	MaxSandboxesPerOwner int
 	// MemAdmissionPct + HostMemMB gate starting a sandbox on host RAM: a start
 	// is refused if running sandboxes' allocated RAM would exceed
 	// HostMemMB*MemAdmissionPct/100. Either being 0 disables the check.
@@ -485,6 +539,15 @@ type Options struct {
 	// this much resident. 0 (the default) keeps the old behaviour — count the
 	// full ceiling, never balloon — so overcommit is opt-in and measurement-set.
 	MemReserveMB int64
+	// OwnerMemoryPoolMB caps the aggregate effective memory charged to one
+	// owner's running sandboxes. VM MemMB values remain ceilings; the owner pool
+	// is the product entitlement they share. Zero disables the owner-level cap.
+	OwnerMemoryPoolMB int64
+	// OwnerMemoryBurstMB is the temporary aggregate effective-memory ceiling an
+	// owner may reach through turbo. It does not reserve node RAM: different
+	// owners' burst ceilings overlap, and node admission remains authoritative.
+	// Zero uses OwnerMemoryPoolMB (no borrowing above the baseline).
+	OwnerMemoryBurstMB int64
 	// NodeName identifies this host in capacity reports (defaults to "local").
 	NodeName string
 	// Arch and Release describe this host in capacity reports: the CPU
@@ -509,6 +572,14 @@ type Options struct {
 	// ArchivePrefix is the object-key prefix archives are written under
 	// (default "archives"): <prefix>/<owner>/<name>.ext4.zst.
 	ArchivePrefix string
+	// Checkpoint is the store for immutable durable rootfs checkpoints. Nil
+	// disables manual checkpoint/restore.
+	Checkpoint ObjectStore
+	// CheckpointPrefix is the object-key prefix for checkpoints.
+	CheckpointPrefix string
+	// CheckpointStagingDir holds temporary packed/downloaded artifacts. It
+	// should be on the local hot tier; empty defaults to StateDir.
+	CheckpointStagingDir string
 	// DiskPoolMBPerOwner caps an owner's pooled durable usage across all their
 	// sandboxes + archives (0 = unlimited). Soft accounting, enforced at
 	// create/restore — see admit.
@@ -533,45 +604,68 @@ type Options struct {
 }
 
 func NewManager(opts Options) (*Manager, error) {
+	if opts.OwnerMemoryBurstMB > 0 && opts.OwnerMemoryPoolMB <= 0 {
+		return nil, errors.New("owner memory burst requires an owner memory pool")
+	}
+	if opts.OwnerMemoryBurstMB > 0 && opts.OwnerMemoryBurstMB < opts.OwnerMemoryPoolMB {
+		return nil, errors.New("owner memory burst must be at least the owner memory pool")
+	}
 	lifecycle := opts.Context
 	if lifecycle == nil {
 		lifecycle = context.Background()
 	}
 	m := &Manager{
-		ctx:         lifecycle,
-		driver:      opts.Driver,
-		log:         opts.Logger,
-		stateDir:    opts.StateDir,
-		path:        filepath.Join(opts.StateDir, "sandboxes.json"),
-		snapsPath:   filepath.Join(opts.StateDir, "snapshots.json"),
-		boxes:       map[string]*Sandbox{},
-		snaps:       map[string]*Snapshot{},
-		vitals:      map[string]vitalsSample{},
-		activity:    map[string]time.Time{},
-		markedAt:    map[string]time.Time{},
-		actCPUPct:   opts.ActivityCPUPct,
-		actNetBytes: opts.ActivityNetBytes,
-		gwPubKey:    opts.GatewayPublicKey,
-		routes:      opts.Routes,
-		schedules:   opts.Schedules,
-		tags:        opts.Tags,
-		archive:     opts.Archive,
-		archivePfx:  opts.ArchivePrefix,
-		maxPerOwner: opts.MaxRunningPerOwner,
-		memAdmitPct: opts.MemAdmissionPct,
-		hostMemMB:   opts.HostMemMB,
-		reserveMB:   opts.MemReserveMB,
-		diskPoolMB:  opts.DiskPoolMBPerOwner,
-		nodeName:    opts.NodeName,
-		nodeArch:    opts.Arch,
-		nodeRelease: opts.Release,
-		hostVCPUs:   opts.HostVCPUs,
-		frontDoor:   opts.FrontDoor,
-		observer:    opts.Observer,
-		metrics:     opts.Metrics,
+		ctx:                lifecycle,
+		driver:             opts.Driver,
+		log:                opts.Logger,
+		stateDir:           opts.StateDir,
+		path:               filepath.Join(opts.StateDir, "sandboxes.json"),
+		snapsPath:          filepath.Join(opts.StateDir, "snapshots.json"),
+		boxes:              map[string]*Sandbox{},
+		snaps:              map[string]*Snapshot{},
+		vitals:             map[string]vitalsSample{},
+		memUsed:            map[string]int64{},
+		activity:           map[string]time.Time{},
+		markedAt:           map[string]time.Time{},
+		protectUntil:       map[string]time.Time{},
+		actCPUPct:          opts.ActivityCPUPct,
+		actNetBytes:        opts.ActivityNetBytes,
+		gwPubKey:           opts.GatewayPublicKey,
+		routes:             opts.Routes,
+		schedules:          opts.Schedules,
+		tags:               opts.Tags,
+		archive:            opts.Archive,
+		checkpoint:         opts.Checkpoint,
+		archivePfx:         opts.ArchivePrefix,
+		checkpointPfx:      opts.CheckpointPrefix,
+		checkpointStageDir: opts.CheckpointStagingDir,
+		maxPerOwner:        opts.MaxRunningPerOwner,
+		maxBoxesPerOwner:   opts.MaxSandboxesPerOwner,
+		memAdmitPct:        opts.MemAdmissionPct,
+		hostMemMB:          opts.HostMemMB,
+		reserveMB:          opts.MemReserveMB,
+		ownerMemPoolMB:     opts.OwnerMemoryPoolMB,
+		ownerMemBurstMB:    opts.OwnerMemoryBurstMB,
+		diskPoolMB:         opts.DiskPoolMBPerOwner,
+		nodeName:           opts.NodeName,
+		nodeArch:           opts.Arch,
+		nodeRelease:        opts.Release,
+		hostVCPUs:          opts.HostVCPUs,
+		frontDoor:          opts.FrontDoor,
+		observer:           opts.Observer,
+		metrics:            opts.Metrics,
 	}
 	if m.archivePfx == "" {
 		m.archivePfx = "archives"
+	}
+	if m.checkpointPfx == "" {
+		m.checkpointPfx = "checkpoints"
+	}
+	if m.checkpointStageDir == "" {
+		m.checkpointStageDir = opts.StateDir
+	}
+	if err := os.MkdirAll(m.checkpointStageDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create checkpoint staging directory: %w", err)
 	}
 	// The balloon reclaim path is optional — only firecracker (and the mock)
 	// implement it. Detect it once so the reaper and resume paths can use it.
@@ -636,6 +730,9 @@ func NewManager(opts Options) (*Manager, error) {
 	// link instead of into this process. Unreachable is a routing verdict some
 	// other process makes about this one, so it is never loaded off disk.
 	for _, b := range m.boxes {
+		if b.ID == "" {
+			b.ID = uuid.NewString()
+		}
 		b.Node = m.nodeName
 		b.Unreachable = false
 	}
@@ -683,6 +780,18 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	if _, ok := m.boxes[name]; ok {
 		return nil, &NameError{Problem: NameTaken, Noun: "sandbox", Name: name}
 	}
+	if m.maxBoxesPerOwner > 0 {
+		owned := 0
+		for _, b := range m.boxes {
+			if b.Owner == owner {
+				owned++
+			}
+		}
+		if owned >= m.maxBoxesPerOwner {
+			return nil, &StateError{Code: "sandbox_limit", Msg: fmt.Sprintf(
+				"sandbox limit reached for %s (%d/%d)", owner, owned, m.maxBoxesPerOwner)}
+		}
+	}
 	if err := m.admit(owner, memMB, 0, ""); err != nil {
 		return nil, err
 	}
@@ -695,6 +804,7 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	}
 	now := time.Now().UTC()
 	b := &Sandbox{
+		ID:   uuid.NewString(),
 		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
 		State: inst.State, SSHAddr: inst.SSHAddr, SSHUser: inst.SSHUser,
 		HostIP: inst.HostIP, GuestV6: inst.GuestV6, CreatedAt: now, LastActive: now,
@@ -730,6 +840,31 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 // disk that start will occupy on the pooled budget (0 for a create — a fresh
 // reflink is ~free until written; the box's own DiskMB for a resume/restore).
 func (m *Manager) admit(owner string, memMB, reqDiskMB int64, exclude string) error {
+	return m.admitCost(owner, reqDiskMB, exclude, m.effectiveMemMB(memMB), m.ownerMemPoolMB)
+}
+
+// admitTurbo is admission for the one operation allowed to borrow above an
+// owner's baseline. Doubling a VM must also double its working-set charge;
+// otherwise MemReserveMB would make normal and turbo VMs cost exactly the same.
+func (m *Manager) admitTurbo(b *Sandbox) error {
+	budget := m.ownerMemBurstMB
+	if budget <= 0 {
+		budget = m.ownerMemPoolMB
+	}
+	baseMemMB := b.MemMB
+	ceiling := b.MemMB * TurboFactor
+	if b.Turbo && b.BaseMemMB > 0 {
+		baseMemMB = b.BaseMemMB
+		ceiling = b.MemMB
+	}
+	cost := m.effectiveMemMB(baseMemMB) * TurboFactor
+	if cost > ceiling {
+		cost = ceiling
+	}
+	return m.admitCost(b.Owner, b.DiskMB, b.Name, cost, budget)
+}
+
+func (m *Manager) admitCost(owner string, reqDiskMB int64, exclude string, cost, ownerBudget int64) error {
 	if m.maxPerOwner > 0 {
 		var running []string
 		for _, b := range m.boxes {
@@ -742,15 +877,30 @@ func (m *Manager) admit(owner string, memMB, reqDiskMB int64, exclude string) er
 			return &LimitError{Max: m.maxPerOwner, Running: running}
 		}
 	}
+	// The plan belongs to the owner, not to each VM. Charge every running child
+	// against one pooled memory entitlement before considering node capacity.
+	// effectiveMemMB deliberately matches node admission: with ballooning on it
+	// is the measured working-set floor; without it an 8 GiB VM consumes the
+	// whole 8 GiB pool.
+	if ownerBudget > 0 {
+		var used int64
+		for _, b := range m.boxes {
+			if b.Name != exclude && b.Owner == owner && b.State == vmm.StateRunning {
+				used += m.sandboxEffectiveMemMB(b)
+			}
+		}
+		if used+cost > ownerBudget {
+			return &CapacityError{Owner: owner, RequestedMB: cost, UsedMB: used, BudgetMB: ownerBudget}
+		}
+	}
 	if m.memAdmitPct > 0 && m.hostMemMB > 0 {
 		var used int64
 		for _, b := range m.boxes {
 			if b.Name != exclude && b.State == vmm.StateRunning {
-				used += m.effectiveMemMB(b.MemMB)
+				used += m.sandboxEffectiveMemMB(b)
 			}
 		}
 		budget := m.hostMemMB * int64(m.memAdmitPct) / 100
-		cost := m.effectiveMemMB(memMB)
 		if used+cost > budget {
 			return &CapacityError{RequestedMB: cost, UsedMB: used, BudgetMB: budget}
 		}
@@ -782,6 +932,31 @@ func (m *Manager) effectiveMemMB(memMB int64) int64 {
 		return m.reserveMB
 	}
 	return memMB
+}
+
+// sandboxEffectiveMemMB is the node and owner charge for an already-running
+// sandbox. Turbo doubles the base working-set charge, not merely the guest
+// ceiling: under overcommit both ceilings would otherwise collapse to the same
+// MemReserveMB and borrowed capacity would be invisible.
+func (m *Manager) sandboxEffectiveMemMB(b *Sandbox) int64 {
+	if b.Turbo && b.BaseMemMB > 0 {
+		cost := m.effectiveMemMB(b.BaseMemMB) * TurboFactor
+		if cost > b.MemMB {
+			return b.MemMB
+		}
+		return cost
+	}
+	return m.effectiveMemMB(b.MemMB)
+}
+
+// observedMemMB returns the last balloon-stat working set, falling back to the
+// conservative admission charge until the first sample arrives. Callers hold
+// m.mu.
+func (m *Manager) observedMemMB(b *Sandbox) int64 {
+	if used, ok := m.memUsed[b.Name]; ok {
+		return used
+	}
+	return m.sandboxEffectiveMemMB(b)
 }
 
 func (m *Manager) Get(name string) (*Sandbox, bool) {
@@ -843,6 +1018,36 @@ func (m *Manager) List() []*Sandbox {
 	return out
 }
 
+func (m *Manager) ObserveHiveMindSessions(sandboxID string, snapshot HiveMindSessionSnapshot) {
+	if sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, box := range m.boxes {
+		if box.ID != sandboxID {
+			continue
+		}
+		snapshot.Sessions = cloneHiveMindSessions(snapshot.Sessions)
+		box.HiveMind = &snapshot
+		return
+	}
+}
+
+func (m *Manager) HiveMindSessions(sandboxID string) (HiveMindSessionSnapshot, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, box := range m.boxes {
+		if box.ID != sandboxID || box.HiveMind == nil {
+			continue
+		}
+		snapshot := *box.HiveMind
+		snapshot.Sessions = cloneHiveMindSessions(snapshot.Sessions)
+		return snapshot, true
+	}
+	return HiveMindSessionSnapshot{}, false
+}
+
 // ListByOwner returns one owner's sandboxes, sorted by name.
 func (m *Manager) ListByOwner(owner string) []*Sandbox {
 	m.mu.Lock()
@@ -881,6 +1086,14 @@ type NodeCapacity struct {
 	// working-set reserve under live overcommit, or the full ceiling when off.
 	// This — not UsedMemMB — is what to compare against BudgetMemMB.
 	EffectiveMemMB int64 `json:"effective_mem_mb"`
+	ResidentMemMB  int64 `json:"resident_mem_mb"`
+	// EntitledMemMB is the sum of one baseline owner pool for every owner with a
+	// running sandbox. It may exceed BudgetMemMB by design: owner pools overlap;
+	// EffectiveMemMB is the physical admission signal.
+	EntitledMemMB      int64 `json:"entitled_mem_mb"`
+	ActiveOwners       int   `json:"active_owners"`
+	OwnerMemoryPoolMB  int64 `json:"owner_memory_pool_mb"`
+	OwnerMemoryBurstMB int64 `json:"owner_memory_burst_mb"`
 	// ReserveMemMB is the per-VM working-set floor; 0 means overcommit is off.
 	ReserveMemMB int64 `json:"reserve_mem_mb"`
 	// UsedDiskMB is the summed durable usage of all sandboxes on this node
@@ -902,6 +1115,59 @@ type NodeCapacity struct {
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
+// OwnerCapacity is one subscriber's pooled entitlement and current allocation
+// on this node. Configured VM memory remains a per-VM ceiling; EffectiveMemMB is
+// the amount admission charges to the shared owner pool.
+type OwnerCapacity struct {
+	Owner            string `json:"owner"`
+	MemoryPoolMB     int64  `json:"memory_pool_mb"`
+	MemoryBurstMB    int64  `json:"memory_burst_mb"`
+	EffectiveMemMB   int64  `json:"effective_memory_mb"`
+	ResidentMemMB    int64  `json:"resident_memory_mb"`
+	BorrowedMemMB    int64  `json:"borrowed_memory_mb"`
+	AllocatedMemMB   int64  `json:"allocated_memory_mb"`
+	DiskPoolMB       int64  `json:"disk_pool_mb"`
+	UsedDiskMB       int64  `json:"used_disk_mb"`
+	RunningSandboxes int    `json:"running_sandboxes"`
+	TotalSandboxes   int    `json:"total_sandboxes"`
+	MaxRunning       int    `json:"max_running"`
+	MaxSandboxes     int    `json:"max_sandboxes"`
+	TurboSandboxes   int    `json:"turbo_sandboxes"`
+}
+
+// CapacityForOwner reports the local portion of an owner's resource envelope.
+// Owners are initially pinned to one node, making this the authoritative pool
+// view; a future distributed owner scheduler can sum these records.
+func (m *Manager) CapacityForOwner(owner string) OwnerCapacity {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := OwnerCapacity{
+		Owner: owner, MemoryPoolMB: m.ownerMemPoolMB, MemoryBurstMB: m.ownerMemBurstMB,
+		DiskPoolMB: m.diskPoolMB,
+		MaxRunning: m.maxPerOwner, MaxSandboxes: m.maxBoxesPerOwner,
+	}
+	for _, b := range m.boxes {
+		if b.Owner != owner {
+			continue
+		}
+		c.TotalSandboxes++
+		c.UsedDiskMB += b.DiskMB
+		if b.State == vmm.StateRunning {
+			c.RunningSandboxes++
+			c.AllocatedMemMB += b.MemMB
+			c.EffectiveMemMB += m.sandboxEffectiveMemMB(b)
+			c.ResidentMemMB += m.observedMemMB(b)
+			if b.Turbo {
+				c.TurboSandboxes++
+			}
+		}
+	}
+	if c.EffectiveMemMB > c.MemoryPoolMB && c.MemoryPoolMB > 0 {
+		c.BorrowedMemMB = c.EffectiveMemMB - c.MemoryPoolMB
+	}
+	return c
+}
+
 // Capacity reports this node's resources. Used* counts only running sandboxes,
 // mirroring the admission check: paused sandboxes cost disk, not RAM/CPU.
 func (m *Manager) Capacity() NodeCapacity {
@@ -915,20 +1181,29 @@ func (m *Manager) Capacity() NodeCapacity {
 		TotalVCPUs:         m.hostVCPUs,
 		TotalMemMB:         m.hostMemMB,
 		ReserveMemMB:       m.reserveMB,
+		OwnerMemoryPoolMB:  m.ownerMemPoolMB,
+		OwnerMemoryBurstMB: m.ownerMemBurstMB,
 		DiskPoolMBPerOwner: m.diskPoolMB,
 		Sandboxes:          len(m.boxes),
 	}
 	if m.memAdmitPct > 0 {
 		c.BudgetMemMB = m.hostMemMB * int64(m.memAdmitPct) / 100
 	}
+	activeOwners := make(map[string]struct{})
 	for _, b := range m.boxes {
 		c.UsedDiskMB += b.DiskMB
 		if b.State == vmm.StateRunning {
+			activeOwners[b.Owner] = struct{}{}
 			c.Running++
 			c.UsedVCPUs += b.VCPUs
 			c.UsedMemMB += b.MemMB
-			c.EffectiveMemMB += m.effectiveMemMB(b.MemMB)
+			c.EffectiveMemMB += m.sandboxEffectiveMemMB(b)
+			c.ResidentMemMB += m.observedMemMB(b)
 		}
+	}
+	c.ActiveOwners = len(activeOwners)
+	if m.ownerMemPoolMB > 0 {
+		c.EntitledMemMB = int64(c.ActiveOwners) * m.ownerMemPoolMB
 	}
 	return c
 }
@@ -965,6 +1240,8 @@ func (m *Manager) EnsureReady(ctx context.Context, name string) (*Sandbox, error
 		return nil, err
 	}
 	result := m.ready.DoChan(name, func() (any, error) {
+		unlock := m.lockDiskOperation(name)
+		defer unlock()
 		operationCtx, cancel := sharedOperationContext(ctx, m.ctx)
 		defer cancel()
 		return m.ensureReady(operationCtx, name)
@@ -1034,8 +1311,14 @@ func (m *Manager) ensureReady(ctx context.Context, name string) (*Sandbox, error
 		// same limits as a fresh create (exclude itself — it isn't running yet).
 		// Its own footprint (rootfs, or the just-restored size) is the disk it
 		// reclaims against the pool.
-		if err := m.admit(b.Owner, b.MemMB, b.DiskMB, b.Name); err != nil {
-			return nil, err
+		var admitErr error
+		if b.Turbo {
+			admitErr = m.admitTurbo(b)
+		} else {
+			admitErr = m.admit(b.Owner, b.MemMB, b.DiskMB, b.Name)
+		}
+		if admitErr != nil {
+			return nil, admitErr
 		}
 		inst, err := m.resumeOrRecreate(ctx, b)
 		if err != nil {
@@ -1202,6 +1485,24 @@ func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instan
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	presence, canCheckRootfs := m.driver.(vmm.RootfsPresencer)
+	if canCheckRootfs {
+		present, presenceErr := presence.RootfsPresent(b.Name)
+		if presenceErr != nil {
+			return nil, fmt.Errorf("check local rootfs for %s: %w", b.Name, presenceErr)
+		}
+		if !present {
+			if b.CheckpointKey != "" {
+				return nil, &StateError{Code: "checkpoint_restore_required",
+					Msg: fmt.Sprintf("sandbox %q lost its local disk; restore its checkpoint", b.Name)}
+			}
+			return nil, &StateError{Code: "sandbox_unrecoverable",
+				Msg: fmt.Sprintf("sandbox %q lost its local disk and has no checkpoint to restore", b.Name)}
+		}
+	} else if b.CheckpointKey != "" {
+		return nil, &StateError{Code: "checkpoint_restore_required",
+			Msg: fmt.Sprintf("sandbox %q has a checkpoint but the driver cannot verify its local disk; restore the checkpoint", b.Name)}
+	}
 	m.log.Warn("resume failed, recreating", "name", b.Name, "err", err)
 	return m.driver.Create(ctx, vmm.Config{
 		Name: b.Name, Image: b.Image, VCPUs: b.VCPUs, MemMB: b.MemMB,
@@ -1210,6 +1511,8 @@ func (m *Manager) resumeOrRecreate(ctx context.Context, b *Sandbox) (*vmm.Instan
 }
 
 func (m *Manager) Pause(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	return m.pause(ctx, name, "was paused")
 }
 
@@ -1243,6 +1546,7 @@ func (m *Manager) pause(ctx context.Context, name, reason string) error {
 	// after a resume starts from zero over an interval spanning the whole pause.
 	// Re-priming costs one tick and keeps that from reading as a rate.
 	delete(m.vitals, name)
+	delete(m.memUsed, name)
 	// Turbo is borrowed for exactly one run, and this is where it is handed
 	// back — every path that stops a VM arrives here, so there is one place
 	// that has to remember rather than four that have to agree.
@@ -1295,6 +1599,8 @@ func (m *Manager) endTurbo(b *Sandbox) {
 // an idle reap, an explicit pause, a reboot and a rename all end it — turbo is
 // a thing you do to the session you are in, not a size you set.
 func (m *Manager) SetTurbo(ctx context.Context, name string, on bool) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if m.rebooter == nil {
 		return errors.New("turbo is not enabled on this host (driver cannot drop snapshots)")
 	}
@@ -1318,7 +1624,7 @@ func (m *Manager) SetTurbo(ctx context.Context, name string, on bool) error {
 		// Check what the boot will cost before anything is torn down. EnsureReady
 		// checks it again for real, but failing here leaves the sandbox running at
 		// its own size rather than paused with an apology.
-		if err := m.admit(b.Owner, b.MemMB*TurboFactor, b.DiskMB, b.Name); err != nil {
+		if err := m.admitTurbo(b); err != nil {
 			m.mu.Unlock()
 			return err
 		}
@@ -1374,7 +1680,7 @@ func (m *Manager) SetTurbo(ctx context.Context, name string, on bool) error {
 		break
 	}
 
-	if _, err := m.EnsureReady(ctx, name); err != nil {
+	if _, err := m.ensureReady(ctx, name); err != nil {
 		// The size is committed but the guest did not come up. Put the record
 		// back, so that the next resume — quite possibly an automatic one, from
 		// a web request or a reconnecting terminal — asks for an allocation this
@@ -1421,6 +1727,8 @@ func (m *Manager) revertTurbo(name string) {
 // Grow only (see vmm.DiskResizer). The new ceiling costs no disk up front: the
 // image is sparse, so it fills in as the guest writes.
 func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if m.diskResize == nil {
 		return errors.New("resize is not enabled on this host (driver cannot resize disks)")
 	}
@@ -1445,7 +1753,7 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 	// reconnects immediately, so re-check under the lock and re-pause once if
 	// the box got resumed out from under us.
 	for attempt := 0; ; attempt++ {
-		if err := m.Pause(ctx, name); err != nil {
+		if err := m.pause(ctx, name, "was paused for a disk resize"); err != nil {
 			return fmt.Errorf("resize %s: pause: %w", name, err)
 		}
 		m.mu.Lock()
@@ -1477,7 +1785,7 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 	}
 	m.refreshDiskUsage(ctx, name)
 
-	if _, err := m.EnsureReady(ctx, name); err != nil {
+	if _, err := m.ensureReady(ctx, name); err != nil {
 		return fmt.Errorf("resize %s: %w", name, err)
 	}
 	m.log.Info("sandbox disk resized", "name", name, "size_mb", sizeMB)
@@ -1486,6 +1794,8 @@ func (m *Manager) Resize(ctx context.Context, name string, sizeMB int64) error {
 }
 
 func (m *Manager) Reboot(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if m.rebooter == nil {
 		return errors.New("reboot is not enabled on this host (driver cannot drop snapshots)")
 	}
@@ -1507,7 +1817,7 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 	// re-check under the lock — held across the drop, like Rename — and
 	// re-pause once if the box was resumed out from under us.
 	for attempt := 0; ; attempt++ {
-		if err := m.Pause(ctx, name); err != nil {
+		if err := m.pause(ctx, name, "was paused for a cold reboot"); err != nil {
 			return fmt.Errorf("reboot %s: pause: %w", name, err)
 		}
 		m.mu.Lock()
@@ -1529,7 +1839,7 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 			return fmt.Errorf("reboot %s: sandbox keeps being resumed mid-reboot; try again", name)
 		}
 	}
-	if _, err := m.EnsureReady(ctx, name); err != nil {
+	if _, err := m.ensureReady(ctx, name); err != nil {
 		return fmt.Errorf("reboot %s: %w", name, err)
 	}
 	m.log.Info("sandbox rebooted", "name", name)
@@ -1553,6 +1863,8 @@ func (m *Manager) Reboot(ctx context.Context, name string) error {
 // idempotent RenameSandbox both tolerate. The remaining side stores
 // (schedules, tags, front door) follow best-effort and idempotently.
 func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) error {
+	unlock := m.lockDiskOperation(oldName)
+	defer unlock()
 	if m.renamer == nil {
 		return &DisabledError{Code: "rename_disabled", Msg: "rename is not enabled on this host"}
 	}
@@ -1571,7 +1883,7 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 
 	// Pause first so the rootfs is flushed and the VM dir is movable.
 	// Idempotent if already paused.
-	if err := m.Pause(ctx, oldName); err != nil {
+	if err := m.pause(ctx, oldName, "was paused for rename"); err != nil {
 		return fmt.Errorf("rename %s: pause: %w", oldName, err)
 	}
 
@@ -1737,6 +2049,8 @@ func (m *Manager) ArchivingEnabled() bool {
 // The heavy pack/upload runs without m.mu held so it doesn't stall the whole
 // host; the record is only flipped to Archived once the upload is durable.
 func (m *Manager) Archive(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	if !m.ArchivingEnabled() {
 		return errors.New("archiving is not enabled on this host")
 	}
@@ -1761,7 +2075,7 @@ func (m *Manager) Archive(ctx context.Context, name string) error {
 	}
 	// Pause so the guest has flushed and unmounted its rootfs. Idempotent
 	// if already paused; uses the manager Pause so state/teardown are consistent.
-	if err := m.Pause(ctx, name); err != nil {
+	if err := m.pause(ctx, name, "was paused for archive"); err != nil {
 		return fmt.Errorf("archive %s: pause: %w", name, err)
 	}
 
@@ -1972,6 +2286,8 @@ func (m *Manager) ResumePinned(ctx context.Context) {
 }
 
 func (m *Manager) Destroy(ctx context.Context, name string) error {
+	unlock := m.lockDiskOperation(name)
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.boxes[name]
@@ -1990,6 +2306,8 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	}
 	delete(m.boxes, name)
 	delete(m.vitals, name)
+	delete(m.memUsed, name)
+	delete(m.protectUntil, b.ID)
 	m.activityMu.Lock()
 	delete(m.activity, name)
 	delete(m.markedAt, name)
@@ -2223,6 +2541,169 @@ func (m *Manager) RunReaper(ctx context.Context, balloonAfter, pauseAfter, inter
 	}
 }
 
+// RunMemoryPressureController keeps intentional overcommit inside its safety
+// rails. Owner pools overlap and admission charges working-set floors, so the
+// controller periodically compares actual balloon-stat working sets with both
+// owner and node budgets. It reclaims cold memory without pausing guests.
+func (m *Manager) RunMemoryPressureController(ctx context.Context, interval time.Duration) {
+	if m.balloon == nil || m.reserveMB <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			m.reconcileMemoryPressure(ctx)
+		}
+	}
+}
+
+func (m *Manager) reconcileMemoryPressure(ctx context.Context) {
+	m.refreshMemoryUsage(ctx)
+
+	type ownerUse struct {
+		used     int64
+		hasTurbo bool
+	}
+	m.mu.Lock()
+	owners := make(map[string]ownerUse)
+	var nodeUsed int64
+	for _, b := range m.boxes {
+		if b.State != vmm.StateRunning {
+			continue
+		}
+		used := m.observedMemMB(b)
+		nodeUsed += used
+		o := owners[b.Owner]
+		o.used += used
+		o.hasTurbo = o.hasTurbo || b.Turbo
+		owners[b.Owner] = o
+	}
+	ownerPool, ownerBurst := m.ownerMemPoolMB, m.ownerMemBurstMB
+	nodeBudget := int64(0)
+	if m.memAdmitPct > 0 && m.hostMemMB > 0 {
+		nodeBudget = m.hostMemMB * int64(m.memAdmitPct) / 100
+	}
+	m.mu.Unlock()
+
+	for owner, usage := range owners {
+		budget := ownerPool
+		if usage.hasTurbo && ownerBurst > 0 {
+			budget = ownerBurst
+		}
+		if budget > 0 && usage.used > budget {
+			m.reclaimMemory(ctx, owner, usage.used-budget)
+		}
+	}
+	if nodeBudget > 0 && nodeUsed > nodeBudget {
+		m.reclaimMemory(ctx, "", nodeUsed-nodeBudget)
+	}
+}
+
+func (m *Manager) refreshMemoryUsage(ctx context.Context) {
+	sampleCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, b := range m.List() {
+		if b.State != vmm.StateRunning {
+			continue
+		}
+		name := b.Name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			used, ok := m.MemStats(sampleCtx, name)
+			if !ok {
+				return
+			}
+			m.mu.Lock()
+			if current, exists := m.boxes[name]; exists && current.State == vmm.StateRunning {
+				m.memUsed[name] = used
+			}
+			m.mu.Unlock()
+		}()
+	}
+	wg.Wait()
+}
+
+// reclaimMemory balloons cold, unpinned VMs until their projected reclaim
+// covers excessMiB. Turbo is borrowed capacity and is reclaimed first.
+func (m *Manager) reclaimMemory(ctx context.Context, owner string, excessMiB int64) {
+	type candidate struct {
+		box         *Sandbox
+		reclaimable int64
+	}
+	var candidates []candidate
+	m.mu.Lock()
+	for _, b := range m.boxes {
+		if b.State != vmm.StateRunning || b.Pinned || b.Ballooned || (owner != "" && b.Owner != owner) {
+			continue
+		}
+		floor := m.workingSetFloor(b)
+		reclaimable := m.observedMemMB(b) - floor
+		if reclaimable > 0 {
+			candidates = append(candidates, candidate{box: copyOf(b), reclaimable: reclaimable})
+		}
+	}
+	m.mu.Unlock()
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].box.Turbo != candidates[j].box.Turbo {
+			return candidates[i].box.Turbo
+		}
+		return candidates[i].box.LastActive.Before(candidates[j].box.LastActive)
+	})
+	remaining := excessMiB
+	for _, c := range candidates {
+		if remaining <= 0 {
+			break
+		}
+		if err := m.balloonDown(ctx, c.box.Name); err != nil {
+			m.log.Warn("memory pressure balloon failed", "name", c.box.Name, "err", err)
+			continue
+		}
+		remaining -= c.reclaimable
+	}
+	if remaining > 0 {
+		m.log.Warn("memory pressure could not be fully reclaimed", "owner", owner,
+			"requested_mb", excessMiB, "remaining_mb", remaining)
+	}
+}
+
+// ProtectUntil prevents the idle reaper from pausing one sandbox before until.
+// It does not change LastActive and it does not prevent ballooning: the lease
+// says an external session still needs the VM reachable, not that the workload
+// is consuming memory. Older or expired observations never shorten a lease.
+func (m *Manager) ProtectUntil(sandboxID string, until time.Time) {
+	if sandboxID == "" || !until.After(time.Now()) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current := m.protectUntil[sandboxID]; until.After(current) {
+		m.protectUntil[sandboxID] = until
+	}
+}
+
+func (m *Manager) isProtected(sandboxID string, now time.Time) bool {
+	if sandboxID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	until := m.protectUntil[sandboxID]
+	if !until.After(now) {
+		delete(m.protectUntil, sandboxID)
+		return false
+	}
+	return true
+}
+
 // reapOnce applies one pass of the idle policy. Split out from RunReaper's loop
 // so the two-stage gradient is unit-testable without a ticker.
 func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Duration) {
@@ -2254,9 +2735,13 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 			continue
 		}
 		idle := time.Since(b.LastActive)
+		protected := m.isProtected(b.ID, time.Now())
 		switch {
-		case idle > pauseAfter:
-			if err := m.pause(ctx, b.Name, fmt.Sprintf("went idle for %s", pauseAfter)); err != nil {
+		case idle > pauseAfter && !protected:
+			unlock := m.lockDiskOperation(b.Name)
+			err := m.pause(ctx, b.Name, fmt.Sprintf("went idle for %s", pauseAfter))
+			unlock()
+			if err != nil {
 				m.log.Error("reaper pause failed", "name", b.Name, "err", err)
 			} else {
 				m.log.Info("reaper paused idle sandbox", "name", b.Name)
@@ -2326,7 +2811,7 @@ func (m *Manager) balloonDown(ctx context.Context, name string) error {
 	if !ok || b.State != vmm.StateRunning || b.Ballooned || m.balloon == nil || m.reserveMB <= 0 {
 		return nil
 	}
-	target := b.MemMB - m.reserveMB
+	target := b.MemMB - m.workingSetFloor(b)
 	if target <= 0 {
 		return nil
 	}
@@ -2337,6 +2822,17 @@ func (m *Manager) balloonDown(ctx context.Context, name string) error {
 	m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
 	m.observe(b, "ballooned")
 	return m.save()
+}
+
+func (m *Manager) workingSetFloor(b *Sandbox) int64 {
+	floor := m.reserveMB
+	if b.Turbo {
+		floor *= TurboFactor
+	}
+	if floor > b.MemMB {
+		return b.MemMB
+	}
+	return floor
 }
 
 // deflate returns a ballooned sandbox's RAM on reactivation. Callers hold m.mu.
@@ -2417,7 +2913,24 @@ func (m *Manager) mergeActivityLocked() map[string]time.Time {
 
 func copyOf(b *Sandbox) *Sandbox {
 	c := *b
+	if b.HiveMind != nil {
+		snapshot := *b.HiveMind
+		snapshot.Sessions = cloneHiveMindSessions(b.HiveMind.Sessions)
+		c.HiveMind = &snapshot
+	}
 	return &c
+}
+
+func cloneHiveMindSessions(sessions []HiveMindSession) []HiveMindSession {
+	out := append([]HiveMindSession(nil), sessions...)
+	for i := range out {
+		if out[i].EndedAt == nil {
+			continue
+		}
+		endedAt := *out[i].EndedAt
+		out[i].EndedAt = &endedAt
+	}
+	return out
 }
 
 // Public copies a record for anything outside the control plane with its three

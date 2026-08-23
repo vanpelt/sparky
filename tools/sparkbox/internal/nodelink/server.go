@@ -64,7 +64,7 @@ const (
 	CodeCertificateNotApproved = "certificate_node_not_approved"
 )
 
-// registerIdentityOps installs the two requests that travel node -> gateway.
+// registerUplinkOps installs requests that travel node -> gateway.
 //
 // Every other Handle on this side of the link answers something a node
 // volunteered; these answer something it needs, and the node blocks a guest's
@@ -75,7 +75,7 @@ const (
 // closed over here rather than read from the request precisely so that no
 // future edit to the payload can introduce a second answer to "which machine
 // is asking".
-func registerIdentityOps(conn *Conn, node string, hooks Hooks) {
+func registerUplinkOps(conn *Conn, node string, hooks Hooks) {
 	conn.Handle(TypeIdentityToken, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		req, err := identityRequest(raw)
 		if err != nil {
@@ -95,6 +95,29 @@ func registerIdentityOps(conn *Conn, node string, hooks Hooks) {
 			return nil, noIssuer()
 		}
 		return hooks.OnIdentityDoc(ctx, node, req)
+	})
+	conn.Handle(TypeSelfVisibility, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfVisibilityReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			(req.Visibility != "public" && req.Visibility != "private") {
+			return nil, ctlops.Invalid(OpLink, "bad_self_visibility_request",
+				"a self-visibility request needs a sandbox and public or private visibility")
+		}
+		if hooks.OnSelfVisibility == nil {
+			return nil, ctlops.Disabled(OpLink, "route visibility is not enabled on this gateway")
+		}
+		return hooks.OnSelfVisibility(ctx, node, req)
+	})
+	conn.Handle(TypeSelfPort, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfPortReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" || req.Port < 1 || req.Port > 65535 {
+			return nil, ctlops.Invalid(OpLink, "bad_self_port_request",
+				"a self-port request needs a sandbox and a port from 1 through 65535")
+		}
+		if hooks.OnSelfPort == nil {
+			return nil, ctlops.Disabled(OpLink, "default route configuration is not enabled on this gateway")
+		}
+		return hooks.OnSelfPort(ctx, node, req)
 	})
 }
 
@@ -319,16 +342,18 @@ type Hooks struct {
 	OnGone      func(node string, m GoneMsg)
 	OnPaused    func(node string, m PausedMsg)
 
-	// OnIdentityToken and OnIdentityDoc answer the two requests that travel
-	// node -> gateway. Both are handed the AUTHENTICATED link name, exactly as
+	// The uplink handlers answer requests that travel node -> gateway. Each is
+	// handed the AUTHENTICATED link name, exactly as
 	// the event hooks are and for exactly the same reason: the node the
 	// gateway will speak for must be the node that asked, never a name in a
 	// payload.
 	//
 	// Nil means this deployment issues no workload identity — it has no OIDC
 	// key — and the node is told so in a sentence rather than left waiting.
-	OnIdentityToken func(ctx context.Context, node string, req IdentityReq) (IdentityTokenResp, error)
-	OnIdentityDoc   func(ctx context.Context, node string, req IdentityReq) (IdentityDocResp, error)
+	OnIdentityToken  func(ctx context.Context, node string, req IdentityReq) (IdentityTokenResp, error)
+	OnIdentityDoc    func(ctx context.Context, node string, req IdentityReq) (IdentityDocResp, error)
+	OnSelfVisibility func(ctx context.Context, node string, req SelfVisibilityReq) (SelfVisibilityResp, error)
+	OnSelfPort       func(ctx context.Context, node string, req SelfPortReq) (SelfPortResp, error)
 	// OnCertificateEnroll receives the same authenticated roster name. The CSR
 	// payload deliberately has no identity field.
 	OnCertificateEnroll func(ctx context.Context, node string, req CertificateEnrollRequest) (CertificateEnrollResponse, error)
@@ -607,7 +632,7 @@ func (c *Client) register() {
 		return InventoryAck{}, nil
 	})
 
-	registerIdentityOps(c.conn, c.node, c.hooks)
+	registerUplinkOps(c.conn, c.node, c.hooks)
 	registerCertificateEnroll(c.conn, c.node, c.hooks)
 
 	c.conn.OnEvent(TypeChanged, func(raw json.RawMessage) {

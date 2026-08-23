@@ -64,8 +64,237 @@ func TestV6Addressing(t *testing.T) {
 func newTestDriver(t *testing.T) *Driver {
 	t.Helper()
 	return &Driver{
-		opts: Options{StateDir: t.TempDir()}, vms: map[string]*vmState{},
+		opts: Options{VMStateDir: t.TempDir()}, vms: map[string]*vmState{},
 		guestNet: guestnet.MustParse(""),
+	}
+}
+
+func TestVMDirUsesVMStateDir(t *testing.T) {
+	hot := t.TempDir()
+	d := &Driver{opts: Options{VMStateDir: hot}}
+	if got, want := d.vmDir("box"), filepath.Join(hot, "fc-vms", "box"); got != want {
+		t.Errorf("vmDir = %q, want %q", got, want)
+	}
+}
+
+func TestJailerUsesSlotScopedIdentityAndWorkspace(t *testing.T) {
+	base := t.TempDir()
+	d := &Driver{opts: Options{
+		FirecrackerBin:   "/opt/sparkbox/firecracker",
+		JailerBin:        "/opt/sparkbox/jailer",
+		JailerChrootBase: base,
+		JailerUIDBase:    100000,
+	}}
+	if got, want := d.jailUID(7), 100007; got != want {
+		t.Fatalf("jail uid = %d, want %d", got, want)
+	}
+	if got, want := d.jailRoot(7),
+		filepath.Join(base, "firecracker", "sparkbox-7", "root"); got != want {
+		t.Fatalf("jail root = %q, want %q", got, want)
+	}
+}
+
+func TestChrootJailerUsesCurrentMountNamespaceAndClearsIdentity(t *testing.T) {
+	cmd := chrootProcess(context.Background(), "/jails/firecracker/box/root", "firecracker", 100007)
+	if got, want := cmd.Path, "/firecracker"; got != want {
+		t.Fatalf("command path = %q, want %q", got, want)
+	}
+	if got, want := cmd.SysProcAttr.Chroot, "/jails/firecracker/box/root"; got != want {
+		t.Fatalf("chroot = %q, want %q", got, want)
+	}
+	cred := cmd.SysProcAttr.Credential
+	if cred == nil || cred.Uid != 100007 || cred.Gid != 100007 {
+		t.Fatalf("credential = %+v", cred)
+	}
+	if len(cred.Groups) != 1 || cred.Groups[0] != 100007 {
+		t.Fatalf("supplementary groups = %v, want only slot uid", cred.Groups)
+	}
+	if cmd.Env == nil || len(cmd.Env) != 0 {
+		t.Fatalf("environment = %v, want explicitly empty", cmd.Env)
+	}
+	if cmd.SysProcAttr.Cloneflags != 0 || cmd.SysProcAttr.Unshareflags != 0 {
+		t.Fatalf("chroot launcher requested a namespace: clone=%#x unshare=%#x",
+			cmd.SysProcAttr.Cloneflags, cmd.SysProcAttr.Unshareflags)
+	}
+}
+
+func TestCopyJailExecutableRejectsNonRegularSource(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "firecracker")
+	if err := copyJailExecutable(t.TempDir(), destination); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory executable error = %v", err)
+	}
+}
+
+func TestCopyJailExecutablePinsReadOnlyMode(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "firecracker")
+	if err := os.WriteFile(source, []byte("static-vmm"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "firecracker")
+	if err := copyJailExecutable(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o555); got != want {
+		t.Fatalf("jailed executable mode = %o, want %o", got, want)
+	}
+}
+
+func TestChrootAndExternalJailersAreMutuallyExclusive(t *testing.T) {
+	_, err := New(Options{JailerBin: "/jailer", ChrootJailer: true})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("mixed jailers error = %v", err)
+	}
+}
+
+func TestHostMountFreeModeRefusesTemplateSnapshot(t *testing.T) {
+	d := newTestDriver(t)
+	d.opts.DisableHostRootfsMounts = true
+	err := d.Snapshot(context.Background(), "box", "fork")
+	if err == nil || !strings.Contains(err.Error(), "host rootfs mounts are disabled") {
+		t.Fatalf("snapshot error = %v", err)
+	}
+}
+
+func TestJailerPairMustMatch(t *testing.T) {
+	dir := t.TempDir()
+	fake := func(name, version string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\necho "+version+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	firecracker := fake("firecracker", "Firecracker v1.16.1")
+	jailer := fake("jailer", "Jailer v1.16.1")
+	if err := validateJailerPair(firecracker, jailer); err != nil {
+		t.Fatal(err)
+	}
+	oldJailer := fake("old-jailer", "Jailer v1.15.0")
+	if err := validateJailerPair(firecracker, oldJailer); err == nil ||
+		!strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("mismatched pair error = %v", err)
+	}
+}
+
+func TestLinkJailedResourceRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "kernel")
+	if err := os.WriteFile(source, []byte("kernel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkJailedResource(root, os.Getuid(), source, "vmlinux", false); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := os.ReadFile(filepath.Join(root, "vmlinux"))
+	if err != nil || string(linked) != "kernel" {
+		t.Fatalf("linked kernel = %q, %v", linked, err)
+	}
+	for _, path := range []string{source, filepath.Join(root, "vmlinux")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := info.Mode().Perm(), os.FileMode(0o444); got != want {
+			t.Errorf("mode of %s = %o, want %o", path, got, want)
+		}
+	}
+
+	symlink := filepath.Join(dir, "symlink")
+	if err := os.Symlink(source, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkJailedResource(root, os.Getuid(), symlink, "bad", false); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlink jail resource error = %v", err)
+	}
+}
+
+func TestUnpackRootfsFailurePreservesExistingDisk(t *testing.T) {
+	d := newTestDriver(t)
+	dir := d.vmDir("box")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(rootfs, []byte("original disk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(t.TempDir(), "checkpoint.ext4.zst")
+	if err := os.WriteFile(in, []byte("not important to fake zstd"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	fakeZstd := filepath.Join(bin, "zstd")
+	script := `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out=$2; shift 2; continue; fi
+  shift
+done
+printf 'partial restored disk' > "$out"
+exit 1
+`
+	if err := os.WriteFile(fakeZstd, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	if err := d.UnpackRootfs(context.Background(), "box", in); err == nil {
+		t.Fatal("UnpackRootfs with failing zstd should fail")
+	}
+	got, err := os.ReadFile(rootfs)
+	if err != nil || string(got) != "original disk" {
+		t.Fatalf("failed restore changed rootfs to %q, %v", got, err)
+	}
+}
+
+func TestReflinkCloneRequiresAlways(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "args")
+	fakeCP := filepath.Join(binDir, "cp")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SPARKBOX_CP_ARGS\"\n: > \"$3\"\n"
+	if err := os.WriteFile(fakeCP, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("SPARKBOX_CP_ARGS", argsPath)
+
+	source := filepath.Join(t.TempDir(), "source.ext4")
+	destination := filepath.Join(t.TempDir(), "destination.ext4")
+	if err := reflinkClone(context.Background(), source, destination); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--reflink=always\n" + source + "\n" + destination + "\n"
+	if string(got) != want {
+		t.Fatalf("cp args = %q, want %q", got, want)
+	}
+
+	// cp may create its destination before discovering that FICLONE cannot work.
+	// A retry must not mistake that torn file for a complete pre-existing disk.
+	failureScript := "#!/bin/sh\nprintf partial > \"$3\"\necho no-reflink >&2\nexit 1\n"
+	if err := os.WriteFile(fakeCP, []byte(failureScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = reflinkClone(context.Background(), source, destination)
+	if err == nil || !strings.Contains(err.Error(), "no-reflink") {
+		t.Fatalf("failed clone error = %v, want cp diagnostic", err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("failed clone left destination behind: %v", err)
 	}
 }
 
