@@ -162,6 +162,13 @@ message Capacity {
   bool archiving = 16;
   bool snapshots = 17;
   bool network_accounting = 18;
+  // Owner pools are overlapping entitlements. entitled_memory_mb may exceed
+  // budget_memory_mb; effective_memory_mb remains the physical admission load.
+  int64 owner_memory_pool_mb = 19;
+  int64 owner_memory_burst_mb = 20;
+  int64 entitled_memory_mb = 21;
+  int32 active_owners = 22;
+  int64 resident_memory_mb = 23;
 }
 
 message HealthRequest {}

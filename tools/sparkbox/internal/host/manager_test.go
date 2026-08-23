@@ -477,6 +477,101 @@ func TestReserveAdmissionMultipliesDensity(t *testing.T) {
 	}
 }
 
+func TestOwnerMemoryPoolIsSharedAcrossVMs(t *testing.T) {
+	// The node has ample room, but each owner gets one 8 GiB effective-memory
+	// envelope. Four 8 GiB-ceiling VMs fit at a 2 GiB working-set charge.
+	m := newTestManager(t, host.Options{
+		MemAdmissionPct: 100, HostMemMB: 65536,
+		MemReserveMB: 2048, OwnerMemoryPoolMB: 8192,
+	})
+	for i := 0; i < 4; i++ {
+		mustCreate(t, m, fmt.Sprintf("alice-%d", i), "alice", 8192)
+	}
+	_, err := m.Create(context.Background(), "alice-4", "alice", "ubuntu", 2, 8192)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("want owner *CapacityError, got %v", err)
+	}
+	if capErr.Owner != "alice" || capErr.UsedMB != 8192 || capErr.RequestedMB != 2048 || capErr.BudgetMB != 8192 {
+		t.Fatalf("unexpected owner CapacityError: %+v", capErr)
+	}
+
+	// Bob owns an independent envelope on the same node.
+	mustCreate(t, m, "bob-0", "bob", 8192)
+	owner := m.CapacityForOwner("alice")
+	if owner.MemoryPoolMB != 8192 || owner.EffectiveMemMB != 8192 ||
+		owner.AllocatedMemMB != 4*8192 || owner.RunningSandboxes != 4 || owner.TotalSandboxes != 4 {
+		t.Fatalf("unexpected owner capacity: %+v", owner)
+	}
+
+	// Pausing returns the charge to Alice's pool and admits another child.
+	if err := m.Pause(context.Background(), "alice-0"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "alice-4", "alice", 8192)
+}
+
+func TestOwnerMemoryPoolWithoutOvercommitChargesCeilings(t *testing.T) {
+	m := newTestManager(t, host.Options{OwnerMemoryPoolMB: 8192})
+	mustCreate(t, m, "first", "alice", 8192)
+	_, err := m.Create(context.Background(), "second", "alice", "ubuntu", 2, 8192)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) || capErr.Owner != "alice" {
+		t.Fatalf("want Alice's pooled capacity error, got %v", err)
+	}
+}
+
+func TestOwnerPoolsOverlapOnNodeCapacity(t *testing.T) {
+	m := newTestManager(t, host.Options{
+		HostMemMB: 4096, MemAdmissionPct: 100, MemReserveMB: 256,
+		OwnerMemoryPoolMB: 8192, OwnerMemoryBurstMB: 16384,
+	})
+	mustCreate(t, m, "alice-box", "alice", 8192)
+	mustCreate(t, m, "bob-box", "bob", 8192)
+
+	c := m.Capacity()
+	if c.ActiveOwners != 2 || c.EntitledMemMB != 16384 || c.EffectiveMemMB != 512 {
+		t.Fatalf("overlapping capacity = %+v", c)
+	}
+	if c.EntitledMemMB <= c.BudgetMemMB {
+		t.Fatalf("test did not prove overcommit: entitled %d <= physical budget %d",
+			c.EntitledMemMB, c.BudgetMemMB)
+	}
+}
+
+func TestOwnerBurstConfigurationValidation(t *testing.T) {
+	for _, opts := range []host.Options{
+		{OwnerMemoryBurstMB: 16384},
+		{OwnerMemoryPoolMB: 8192, OwnerMemoryBurstMB: 4096},
+	} {
+		opts.StateDir = t.TempDir()
+		if _, err := host.NewManager(opts); err == nil {
+			t.Fatalf("invalid owner burst config accepted: %+v", opts)
+		}
+	}
+}
+
+func TestTotalSandboxLimitCountsPausedVMs(t *testing.T) {
+	m := newTestManager(t, host.Options{MaxSandboxesPerOwner: 2})
+	mustCreate(t, m, "first", "alice", 1024)
+	if err := m.Pause(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "second", "alice", 1024)
+	_, err := m.Create(context.Background(), "third", "alice", "ubuntu", 2, 1024)
+	var stateErr *host.StateError
+	if !errors.As(err, &stateErr) || stateErr.Code != "sandbox_limit" {
+		t.Fatalf("want sandbox_limit with a paused VM counted, got %v", err)
+	}
+
+	// The cap is per owner, and deleting an identity returns its slot.
+	mustCreate(t, m, "bob-first", "bob", 1024)
+	if err := m.Destroy(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, m, "third", "alice", 1024)
+}
+
 func TestNoLimitsWhenZero(t *testing.T) {
 	m := newTestManager(t, host.Options{}) // all limits disabled
 	for _, n := range []string{"a1", "a2", "a3", "a4", "a5"} {

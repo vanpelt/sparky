@@ -135,6 +135,76 @@ func TestTurboRefusedOverCapacityLeavesTheBoxAlone(t *testing.T) {
 	}
 }
 
+func TestTurboBorrowsAboveOwnerBaselineAndIsChargedTwice(t *testing.T) {
+	m := newTestManager(t, host.Options{
+		HostMemMB: 4096, MemAdmissionPct: 100, MemReserveMB: 256,
+		OwnerMemoryPoolMB: 1024, OwnerMemoryBurstMB: 2048,
+	})
+	ctx := context.Background()
+	for _, name := range []string{"one", "two", "three", "four"} {
+		mustCreate(t, m, name, "alice", 512)
+	}
+	before := m.CapacityForOwner("alice")
+	if before.EffectiveMemMB != 1024 || before.BorrowedMemMB != 0 {
+		t.Fatalf("baseline = %+v", before)
+	}
+
+	if err := m.SetTurbo(ctx, "one", true); err != nil {
+		t.Fatalf("turbo did not borrow from the owner burst pool: %v", err)
+	}
+	after := m.CapacityForOwner("alice")
+	if after.EffectiveMemMB != 1280 || after.BorrowedMemMB != 256 ||
+		after.MemoryBurstMB != 2048 || after.TurboSandboxes != 1 {
+		t.Fatalf("turbo owner capacity = %+v", after)
+	}
+}
+
+func TestTurboColdBootReadmissionUsesBaseSizeWithoutReserve(t *testing.T) {
+	// The preflight and the post-restart admission must both charge 2×512, not
+	// double the already-doubled record into a phantom 2048 MB request.
+	m := newTestManager(t, host.Options{
+		OwnerMemoryPoolMB: 512, OwnerMemoryBurstMB: 1200,
+	})
+	mustCreate(t, m, "fast", "alice", 512)
+	if err := m.SetTurbo(context.Background(), "fast", true); err != nil {
+		t.Fatalf("turbo readmission double-counted the doubled record: %v", err)
+	}
+	if b, _ := m.Get("fast"); !b.Turbo || b.MemMB != 1024 {
+		t.Fatalf("turbo record = %+v", b)
+	}
+}
+
+func TestTurboCannotBorrowWithoutOwnerBurstPool(t *testing.T) {
+	m := newTestManager(t, host.Options{MemReserveMB: 256, OwnerMemoryPoolMB: 512})
+	ctx := context.Background()
+	mustCreate(t, m, "one", "alice", 512)
+	mustCreate(t, m, "two", "alice", 512)
+
+	err := m.SetTurbo(ctx, "one", true)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) || capErr.Owner != "alice" || capErr.BudgetMB != 512 {
+		t.Fatalf("want owner baseline refusal, got %v", err)
+	}
+	if b, _ := m.Get("one"); b.Turbo || b.State != vmm.StateRunning {
+		t.Fatalf("refused owner burst disturbed VM: %+v", b)
+	}
+}
+
+func TestTurboReserveChargeStillProtectsNode(t *testing.T) {
+	// Normal costs 256 MB. Turbo must cost 512 MB even though its doubled guest
+	// ceiling is still above the same reserve floor.
+	m := newTestManager(t, host.Options{
+		HostMemMB: 500, MemAdmissionPct: 100, MemReserveMB: 256,
+		OwnerMemoryPoolMB: 1024, OwnerMemoryBurstMB: 2048,
+	})
+	mustCreate(t, m, "one", "alice", 512)
+	err := m.SetTurbo(context.Background(), "one", true)
+	var capErr *host.CapacityError
+	if !errors.As(err, &capErr) || capErr.Owner != "" || capErr.RequestedMB != 512 {
+		t.Fatalf("want node capacity refusal charging 512 MB, got %v", err)
+	}
+}
+
 func TestTurboRefusals(t *testing.T) {
 	m := newTestManager(t, host.Options{Archive: newMemStore()})
 	ctx := context.Background()

@@ -176,6 +176,11 @@ func (s *Server) GetCapacity(context.Context, *nodev1.GetCapacityRequest) (*node
 		Archiving:          archiving,
 		Snapshots:          snapshots,
 		NetworkAccounting:  s.config.Network != nil,
+		OwnerMemoryPoolMb:  capacity.OwnerMemoryPoolMB,
+		OwnerMemoryBurstMb: capacity.OwnerMemoryBurstMB,
+		EntitledMemoryMb:   capacity.EntitledMemMB,
+		ActiveOwners:       int32(capacity.ActiveOwners),
+		ResidentMemoryMb:   capacity.ResidentMemMB,
 	}, nil
 }
 

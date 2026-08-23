@@ -118,9 +118,12 @@ func serve(args []string) error {
 		activityCPU          = fs.Float64("activity-cpu-pct", 2, "treat a sandbox as active while it burns at least this % of one host core (0 disables); keeps an unattended build or agent from being reaped. Idle boxes measure ~0.4%")
 		activityNetKB        = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
 		maxPerOwner          = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
+		maxBoxesPerOwner     = fs.Int("max-sandboxes-per-owner", 0, "max total running, paused, and archived sandboxes per owner (0 = unlimited)")
 		memAdmitPct          = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
 		hostMemMB            = fs.Int64("host-mem-mb", 0, "host RAM in MB for admission control (0 = auto-detect from /proc/meminfo)")
 		memReserve           = fs.Int64("mem-reserve-mb", 0, "per-VM working-set floor (MB) enabling live overcommit: admission counts this instead of the full memory ceiling, and idle VMs balloon down to it (0 = off; count the full ceiling, never balloon)")
+		ownerMemPool         = fs.Int64("owner-memory-pool-mb", 0, "aggregate effective-memory entitlement shared by all running VMs belonging to one owner (0 = unlimited)")
+		ownerMemBurst        = fs.Int64("owner-memory-burst-mb", 0, "temporary aggregate effective-memory ceiling available to turbo VMs (0 = use the owner baseline pool)")
 		diskPool             = fs.Int64("disk-pool-mb-per-owner", 0, "cap an owner's pooled on-disk usage across all their sandboxes + archives (0 = unlimited); soft accounting enforced at create/restore")
 		archiveRemote        = fs.String("archive-remote", "", "rclone remote name for sandbox archives (e.g. sparkbox-artifacts); empty disables archive/restore. Needs S3 WRITE creds in the host's rclone.conf")
 		archiveBucket        = fs.String("archive-bucket", "", "bucket within --archive-remote for archives (required to enable archiving)")
@@ -273,8 +276,10 @@ func serve(args []string) error {
 			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
 			idleBalloon: *idleBalloon, idleTimeout: *idleTimeout,
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
-			maxPerOwner: *maxPerOwner, memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
-			memReserve: *memReserve, diskPool: *diskPool,
+			maxPerOwner: *maxPerOwner, maxBoxesPerOwner: *maxBoxesPerOwner,
+			memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
+			memReserve: *memReserve, ownerMemPool: *ownerMemPool,
+			ownerMemBurst: *ownerMemBurst, diskPool: *diskPool,
 			controlTransport: *nodeControlTransport, grpcAddr: *nodeGRPCAddr,
 			guestDataTransport: *guestDataTransport,
 			hivemindAPI:        *hivemindAPI, hivemindAudience: *hivemindAudience,
@@ -520,9 +525,12 @@ func serve(args []string) error {
 		Schedules:            scheduleStore,
 		Tags:                 secretsStore,
 		MaxRunningPerOwner:   *maxPerOwner,
+		MaxSandboxesPerOwner: *maxBoxesPerOwner,
 		MemAdmissionPct:      *memAdmitPct,
 		HostMemMB:            hostMem,
 		MemReserveMB:         *memReserve,
+		OwnerMemoryPoolMB:    *ownerMemPool,
+		OwnerMemoryBurstMB:   *ownerMemBurst,
 		DiskPoolMBPerOwner:   *diskPool,
 		ActivityCPUPct:       *activityCPU,
 		ActivityNetBytes:     uint64(*activityNetKB) * 1024,
@@ -672,8 +680,11 @@ func serve(args []string) error {
 	faviconCache := domainmeta.NewFaviconCache(filepath.Join(*stateDir, "favicons"), nil)
 
 	log.Info("resource limits", "max_running_per_owner", *maxPerOwner,
+		"max_sandboxes_per_owner", *maxBoxesPerOwner,
 		"mem_admission_pct", *memAdmitPct, "host_mem_mb", hostMem,
-		"mem_reserve_mb", *memReserve, "overcommit", *memReserve > 0)
+		"mem_reserve_mb", *memReserve, "owner_memory_pool_mb", *ownerMemPool,
+		"owner_memory_burst_mb", *ownerMemBurst,
+		"overcommit", *memReserve > 0)
 
 	// Browser terminals only exist behind the HTTPS edge, so with no proxy there
 	// is no terminal subdomain to advertise. Threading the empty label through
@@ -780,6 +791,7 @@ func serve(args []string) error {
 			"api", *hivemindAPI, "interval", *hivemindInterval)
 	}
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
+	go mgr.RunMemoryPressureController(ctx, 10*time.Second)
 	// Reconcile egress policy periodically so VM churn (create, resume, destroy)
 	// that bypasses the console's change-time push still converges. The console
 	// also pushes on every rule/tag mutation for immediacy.

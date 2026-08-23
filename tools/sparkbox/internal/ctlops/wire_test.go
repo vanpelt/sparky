@@ -68,6 +68,16 @@ func TestWireRoundTrip(t *testing.T) {
 					t.Errorf("capacity = %+v", e)
 				}
 			}},
+		{"owner-capacity", "start", &host.CapacityError{Owner: "alice", RequestedMB: 256, UsedMB: 8192, BudgetMB: 8192},
+			func(t *testing.T, got *Error) {
+				var e *host.CapacityError
+				if !errors.As(got, &e) {
+					t.Fatalf("cause = %v, want owner *host.CapacityError", got.Err)
+				}
+				if e.Owner != "alice" || e.UsedMB != 8192 || e.BudgetMB != 8192 || got.Code != "owner_memory_pool_full" {
+					t.Errorf("owner capacity = %+v, code = %q", e, got.Code)
+				}
+			}},
 		{"quota", "create", &host.DiskQuotaError{Owner: "alice", RequestedMB: 25000, UsedMB: 90000, PoolMB: 100000},
 			func(t *testing.T, got *Error) {
 				var e *host.DiskQuotaError

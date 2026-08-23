@@ -96,9 +96,12 @@ type nodeOptions struct {
 	activityCPU      float64
 	activityNetKB    int64
 	maxPerOwner      int
+	maxBoxesPerOwner int
 	memAdmitPct      int
 	hostMemMB        int64
 	memReserve       int64
+	ownerMemPool     int64
+	ownerMemBurst    int64
 	diskPool         int64
 	hivemindAPI      string
 	hivemindAudience string
@@ -261,19 +264,22 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	mgr, err := host.NewManager(host.Options{
 		Context: ctx, StateDir: opts.stateDir, Driver: driver,
 		GatewayPublicKey: gwPub, Logger: log,
-		MaxRunningPerOwner: opts.maxPerOwner,
-		MemAdmissionPct:    opts.memAdmitPct,
-		HostMemMB:          hostMem,
-		MemReserveMB:       opts.memReserve,
-		DiskPoolMBPerOwner: opts.diskPool,
-		ActivityCPUPct:     opts.activityCPU,
-		ActivityNetBytes:   uint64(opts.activityNetKB) * 1024,
-		NodeName:           opts.nodeName,
-		Arch:               opts.arch,
-		Release:            version,
-		HostVCPUs:          int64(runtime.NumCPU()),
-		Observer:           observer,
-		Metrics:            opts.metrics,
+		MaxRunningPerOwner:   opts.maxPerOwner,
+		MaxSandboxesPerOwner: opts.maxBoxesPerOwner,
+		MemAdmissionPct:      opts.memAdmitPct,
+		HostMemMB:            hostMem,
+		MemReserveMB:         opts.memReserve,
+		OwnerMemoryPoolMB:    opts.ownerMemPool,
+		OwnerMemoryBurstMB:   opts.ownerMemBurst,
+		DiskPoolMBPerOwner:   opts.diskPool,
+		ActivityCPUPct:       opts.activityCPU,
+		ActivityNetBytes:     uint64(opts.activityNetKB) * 1024,
+		NodeName:             opts.nodeName,
+		Arch:                 opts.arch,
+		Release:              version,
+		HostVCPUs:            int64(runtime.NumCPU()),
+		Observer:             observer,
+		Metrics:              opts.metrics,
 	})
 	if err != nil {
 		return err
@@ -344,6 +350,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			"api", opts.hivemindAPI, "interval", opts.hivemindInterval)
 	}
 	go mgr.RunReaper(ctx, opts.idleBalloon, opts.idleTimeout, time.Minute)
+	go mgr.RunMemoryPressureController(ctx, 10*time.Second)
 	// No push loop here. On a gateway that ticker is what reconciles rule
 	// changes the console did not push; on a node there is nothing local to
 	// reconcile FROM — the policy is whatever the gateway last sent — and a

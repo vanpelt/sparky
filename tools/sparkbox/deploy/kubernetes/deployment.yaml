@@ -299,6 +299,22 @@ spec:
               value: "90"
             - name: SPARKBOX_MAX_RUNNING_PER_OWNER
               value: "50"
+            - name: SPARKBOX_MAX_SANDBOXES_PER_OWNER
+              value: "50"
+            # Each VM keeps its 8 GiB ceiling, but all of an owner's running
+            # VMs share one 8 GiB effective-memory entitlement. A 256 MiB
+            # working-set charge admits up to 32 simultaneously warm children;
+            # the remainder stay durable and resume after another is paused.
+            - name: SPARKBOX_MEM_RESERVE_MB
+              value: "256"
+            - name: SPARKBOX_OWNER_MEMORY_POOL_MB
+              value: "8192"
+            # Turbo may borrow another owner pool while the node's overlapping
+            # working-set budget has room. This is a ceiling, not reserved RAM.
+            - name: SPARKBOX_OWNER_MEMORY_BURST_MB
+              value: "16384"
+            - name: SPARKBOX_DISK_POOL_MB_PER_OWNER
+              value: "102400"
             - name: SPARKBOX_GATEWAY_ADDR
               value: sparkbox-gateway.sparkbox-poc.svc.cluster.local:2222
             - name: SPARKBOX_NODE_NAME

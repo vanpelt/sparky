@@ -1041,6 +1041,13 @@ type Capacity struct {
 	Archiving          bool                   `protobuf:"varint,16,opt,name=archiving,proto3" json:"archiving,omitempty"`
 	Snapshots          bool                   `protobuf:"varint,17,opt,name=snapshots,proto3" json:"snapshots,omitempty"`
 	NetworkAccounting  bool                   `protobuf:"varint,18,opt,name=network_accounting,json=networkAccounting,proto3" json:"network_accounting,omitempty"`
+	// Owner pools are overlapping entitlements. entitled_memory_mb may exceed
+	// budget_memory_mb; effective_memory_mb remains the physical admission load.
+	OwnerMemoryPoolMb  int64 `protobuf:"varint,19,opt,name=owner_memory_pool_mb,json=ownerMemoryPoolMb,proto3" json:"owner_memory_pool_mb,omitempty"`
+	OwnerMemoryBurstMb int64 `protobuf:"varint,20,opt,name=owner_memory_burst_mb,json=ownerMemoryBurstMb,proto3" json:"owner_memory_burst_mb,omitempty"`
+	EntitledMemoryMb   int64 `protobuf:"varint,21,opt,name=entitled_memory_mb,json=entitledMemoryMb,proto3" json:"entitled_memory_mb,omitempty"`
+	ActiveOwners       int32 `protobuf:"varint,22,opt,name=active_owners,json=activeOwners,proto3" json:"active_owners,omitempty"`
+	ResidentMemoryMb   int64 `protobuf:"varint,23,opt,name=resident_memory_mb,json=residentMemoryMb,proto3" json:"resident_memory_mb,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -1199,6 +1206,41 @@ func (x *Capacity) GetNetworkAccounting() bool {
 		return x.NetworkAccounting
 	}
 	return false
+}
+
+func (x *Capacity) GetOwnerMemoryPoolMb() int64 {
+	if x != nil {
+		return x.OwnerMemoryPoolMb
+	}
+	return 0
+}
+
+func (x *Capacity) GetOwnerMemoryBurstMb() int64 {
+	if x != nil {
+		return x.OwnerMemoryBurstMb
+	}
+	return 0
+}
+
+func (x *Capacity) GetEntitledMemoryMb() int64 {
+	if x != nil {
+		return x.EntitledMemoryMb
+	}
+	return 0
+}
+
+func (x *Capacity) GetActiveOwners() int32 {
+	if x != nil {
+		return x.ActiveOwners
+	}
+	return 0
+}
+
+func (x *Capacity) GetResidentMemoryMb() int64 {
+	if x != nil {
+		return x.ResidentMemoryMb
+	}
+	return 0
 }
 
 type HealthRequest struct {
@@ -3477,7 +3519,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\ffrom_sandbox\x18\x04 \x01(\tR\vfromSandbox\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x14\n" +
-	"\x12GetCapacityRequest\"\x96\x05\n" +
+	"\x12GetCapacityRequest\"\xfb\x06\n" +
 	"\bCapacity\x12\"\n" +
 	"\farchitecture\x18\x01 \x01(\tR\farchitecture\x12)\n" +
 	"\x10operating_system\x18\x02 \x01(\tR\x0foperatingSystem\x12\x18\n" +
@@ -3500,7 +3542,12 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\tsandboxes\x18\x0f \x01(\x05R\tsandboxes\x12\x1c\n" +
 	"\tarchiving\x18\x10 \x01(\bR\tarchiving\x12\x1c\n" +
 	"\tsnapshots\x18\x11 \x01(\bR\tsnapshots\x12-\n" +
-	"\x12network_accounting\x18\x12 \x01(\bR\x11networkAccounting\"\x0f\n" +
+	"\x12network_accounting\x18\x12 \x01(\bR\x11networkAccounting\x12/\n" +
+	"\x14owner_memory_pool_mb\x18\x13 \x01(\x03R\x11ownerMemoryPoolMb\x121\n" +
+	"\x15owner_memory_burst_mb\x18\x14 \x01(\x03R\x12ownerMemoryBurstMb\x12,\n" +
+	"\x12entitled_memory_mb\x18\x15 \x01(\x03R\x10entitledMemoryMb\x12#\n" +
+	"\ractive_owners\x18\x16 \x01(\x05R\factiveOwners\x12,\n" +
+	"\x12resident_memory_mb\x18\x17 \x01(\x03R\x10residentMemoryMb\"\x0f\n" +
 	"\rHealthRequest\"\x84\x02\n" +
 	"\x0eHealthResponse\x126\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x1e.sparkbox.node.v1.HealthStatusR\x06status\x12\x12\n" +
