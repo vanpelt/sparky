@@ -880,8 +880,16 @@ func TestFleetPlacesOnANamedNode(t *testing.T) {
 	if !strings.Contains(banner, "on node-b") {
 		t.Errorf("the banner does not say where it landed: %q", banner)
 	}
-	if tags, err := fs.secrets.TagsFor("far-away"); err != nil || len(tags) != 0 {
-		t.Fatalf("tags = %v (err %v); --node was swallowed into the tag list rather than understood", tags, err)
+	// A create with no tags of its own carries exactly the default one, so what
+	// this asserts is that `--node node-b` was UNDERSTOOD rather than swallowed
+	// into the tag list — the failure it was written for would show up here as
+	// a "--node" or "node-b" tag, not as a non-empty set.
+	tags, err := fs.secrets.TagsFor("far-away")
+	if err != nil {
+		t.Fatalf("TagsFor: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != secrets.DefaultTag {
+		t.Fatalf("tags = %v; --node was swallowed into the tag list rather than understood", tags)
 	}
 
 	// The three places that have to agree, and the one that must not.

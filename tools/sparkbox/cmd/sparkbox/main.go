@@ -1277,6 +1277,10 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		Sandboxes: s.Fleet, Templates: s.Fleet, Accounts: s.Users,
 		Checkpoints: s.Checkpoints,
 		Tags:        s.Secrets, Schedules: s.Schedules, Routes: s.Routes,
+		// The same store, through its other half: Tagger is the tag methods and
+		// Secrets is the value methods. One field each so a host that wants
+		// tagging without the secret verbs (or the reverse) stays expressible.
+		Secrets:  s.Secrets,
 		Sessions: s.Sessions,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone

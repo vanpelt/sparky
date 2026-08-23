@@ -484,6 +484,10 @@ func (g *Gateway) handle(s gssh.Session) {
 		// goes on stderr beside the create banner and never in front of the
 		// shell that follows.
 		g.nudgeGitHub(s, s.Stderr(), caller(s, user))
+		// And the other thing a first sandbox is missing. A secret set here
+		// reaches this box immediately: it was just created with the default
+		// tag, which is the tag an untagged secret gets.
+		g.nudgeAgentToken(s, s.Stderr(), caller(s, user))
 		sandboxName = box.Name
 	}
 
