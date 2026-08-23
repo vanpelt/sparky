@@ -44,8 +44,9 @@ const secretUsage = "usage: ssh ctl@<gateway> secret ls\r\n" +
 	"the value is read from stdin, never from the command line, so it stays out\r\n" +
 	"of your shell history. with a terminal (ssh -t) you are prompted instead.\r\n" +
 	"\r\n" +
-	"  claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n" +
-	"  gh auth token      | ssh ctl@<gateway> secret set GITHUB_TOKEN --tag ci\r\n"
+	"  gh auth token | ssh ctl@<gateway> secret set GITHUB_TOKEN --tag ci\r\n" +
+	"  ssh -t ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN   (paste; setup-token\r\n" +
+	"                                                             prints a banner too)\r\n"
 
 func (g *Gateway) controlSecret(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	if len(args) == 0 {
@@ -66,7 +67,7 @@ func (g *Gateway) controlSecret(s gssh.Session, c ctlops.Caller, args []string, 
 		}
 		if len(metas) == 0 {
 			fmt.Fprint(s, "no secrets yet — add one with:\r\n"+
-				"  claude setup-token | ssh ctl@"+g.sshHint()+" secret set CLAUDE_CODE_OAUTH_TOKEN\r\n")
+				"  ssh -t ctl@"+g.sshHint()+" secret set CLAUDE_CODE_OAUTH_TOKEN\r\n")
 		}
 		s.Exit(0) //nolint:errcheck
 
@@ -183,23 +184,43 @@ func readSecretValue(s gssh.Session, name string) (string, error) {
 	return cleanSecretValue(string(raw), name)
 }
 
-// cleanSecretValue trims the whitespace a pipe adds and refuses what is left if
-// it could not be an env var.
+// cleanSecretValue reduces what arrived to the one line that can be an env var,
+// or explains why it cannot.
 //
-// The trailing newline is the important one: every CLI that prints a token ends
-// with one, and a stored value carrying it would be rejected by the store's
-// newline check — which would read to the user as "my token is invalid" rather
-// than "your pipe added a byte".
+// The trailing newline is the ordinary case: every CLI that prints a token ends
+// with one, and storing it would trip the store's own newline check — which
+// reads to the user as "my token is invalid" rather than "your pipe added a
+// byte". Blank lines around the value are the same mistake with more whitespace,
+// so they are dropped too.
+//
+// What is NOT guessed at is which of several candidate lines is the secret.
+// `claude setup-token` prints a banner, an ASCII-art logo, the token, and two
+// sentences of advice; picking the token out of that would mean pattern-matching
+// on another tool's output and silently storing the wrong line the day it
+// changes. So more than one line of content is refused, and the refusal names
+// the way through — a prompt, which is also the only way that keeps a pasted
+// credential out of the shell's history.
 func cleanSecretValue(v, name string) (string, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
+	var lines []string
+	for _, l := range strings.Split(strings.ReplaceAll(v, "\r\n", "\n"), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	switch len(lines) {
+	case 1:
+		return lines[0], nil
+	case 0:
 		return "", fmt.Errorf("no value for %s arrived on stdin — pipe one in, "+
 			"or use `ssh -t` to be prompted", name)
+	default:
+		return "", fmt.Errorf(
+			"that is %d lines of output, and only one of them can be %s — "+
+				"this refuses to guess which.\r\n"+
+				"       paste it at a prompt instead (it will not be echoed, and stays out of your history):\r\n"+
+				"         ssh -t ctl@<gateway> secret set %s",
+			len(lines), name, name)
 	}
-	if strings.ContainsAny(v, "\r\n") {
-		return "", fmt.Errorf("that value spans multiple lines, which an environment variable cannot")
-	}
-	return v, nil
 }
 
 // resyncNote renders the fan-out as a clause, or nothing when there was none.
@@ -232,6 +253,6 @@ func (g *Gateway) nudgeAgentToken(s gssh.Session, w io.Writer, c ctlops.Caller) 
 	if err != nil || len(metas) > 0 {
 		return
 	}
-	fmt.Fprintf(w, "# tip: sign your agents in once —  claude setup-token | ssh %s@%s secret set CLAUDE_CODE_OAUTH_TOKEN\r\n",
+	fmt.Fprintf(w, "# tip: sign your agents in once —  ssh -t %s@%s secret set CLAUDE_CODE_OAUTH_TOKEN\r\n",
 		ControlUser, g.sshHint())
 }

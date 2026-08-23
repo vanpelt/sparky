@@ -68,13 +68,45 @@ func TestCleanSecretValueTrimsWhatAPipeAdds(t *testing.T) {
 	}
 }
 
+// Blank lines around the value are the same mistake as a trailing newline, and
+// several tools pad their output that way.
+func TestCleanSecretValueDropsBlankLines(t *testing.T) {
+	got, err := cleanSecretValue("\n\n  sk-ant-oat-abc123  \n\n", "TOKEN")
+	if err != nil {
+		t.Fatalf("cleanSecretValue: %v", err)
+	}
+	if got != "sk-ant-oat-abc123" {
+		t.Errorf("got %q, want the one line of content", got)
+	}
+}
+
+// Several lines of content is `claude setup-token`'s banner-plus-token output.
+// Guessing which line is the credential would mean pattern-matching another
+// tool's format; the refusal has to point at the prompt instead.
+func TestCleanSecretValueRefusesToGuessAmongLines(t *testing.T) {
+	out := "Welcome to Claude Code v2.1.241\n\n" +
+		"Your OAuth token (valid for 1 year):\n\n" +
+		"sk-ant-oat01-EXAMPLE\n\n" +
+		"Store this token securely.\n"
+	_, err := cleanSecretValue(out, "CLAUDE_CODE_OAUTH_TOKEN")
+	if err == nil {
+		t.Fatal("a banner plus a token was accepted — it may have stored the banner")
+	}
+	if !strings.Contains(err.Error(), "ssh -t") {
+		t.Errorf("refusal %q does not point at the prompt", err)
+	}
+	if strings.Contains(err.Error(), "sk-ant-oat01-EXAMPLE") {
+		t.Errorf("the refusal echoes the credential back: %q", err)
+	}
+}
+
 func TestCleanSecretValueRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, want string
 	}{
 		{"empty", "", "stdin"},
 		{"whitespace only", "  \n\t ", "stdin"},
-		{"multi-line", "line one\nline two", "multiple lines"},
+		{"two lines of content", "line one\nline two", "only one of them"},
 	} {
 		_, err := cleanSecretValue(tc.in, "TOKEN")
 		if err == nil {

@@ -152,7 +152,13 @@ are authenticated. The platform's answer is a per-owner secret, encrypted at
 rest and delivered into the guest's `/etc/environment`.
 
 ```sh
-claude setup-token | ssh ctl@ssh.<domain> secret set CLAUDE_CODE_OAUTH_TOKEN
+# Pipe, for anything that prints exactly one line:
+gh auth token | ssh ctl@ssh.<domain> secret set GITHUB_TOKEN
+
+# Prompt, for anything that prints a banner around it. Not echoed, and it
+# stays out of your shell history:
+ssh -t ctl@ssh.<domain> secret set CLAUDE_CODE_OAUTH_TOKEN
+
 ssh ctl@ssh.<domain> secret ls
 ssh ctl@ssh.<domain> secret rm CLAUDE_CODE_OAUTH_TOKEN
 ```
@@ -160,7 +166,10 @@ ssh ctl@ssh.<domain> secret rm CLAUDE_CODE_OAUTH_TOKEN
 **The value is read from stdin and is never an argument.** `secret set NAME
 VALUE` is refused on purpose: the value would land in your shell history, in
 your local ssh process's argv, and in anything in between that logs commands.
-With a terminal (`ssh -t`) you are prompted instead, unechoed.
+
+Blank lines and the trailing newline every CLI emits are stripped. Several
+*lines of content* are refused rather than guessed at — see the Claude note
+below for the case that matters.
 
 Setting a secret re-pushes it into every running sandbox that selects it, so it
 takes effect immediately rather than at the next resume — which for a pinned box
@@ -190,8 +199,19 @@ to it leaves egress unrestricted, which is the state everything is in today.
 
 ## Claude
 
-`claude setup-token` prints a long-lived OAuth token. Store it as
-`CLAUDE_CODE_OAUTH_TOKEN`. `ANTHROPIC_API_KEY` works too if you bill by API.
+`claude setup-token` mints a long-lived (1-year) OAuth token — but it prints a
+welcome banner, an ASCII-art logo, the token, and two sentences of advice, so it
+**cannot be piped**. Nothing here will pick the token out of that: guessing which
+line is the credential means pattern-matching another tool's output, and storing
+the wrong line the day it changes. Run it, then paste at a prompt:
+
+```sh
+claude setup-token                                    # copy the sk-ant-oat01-… line
+ssh -t ctl@ssh.<domain> secret set CLAUDE_CODE_OAUTH_TOKEN
+```
+
+`ANTHROPIC_API_KEY` works too if you bill by API, and that one pipes fine:
+`printenv ANTHROPIC_API_KEY | ssh ctl@ssh.<domain> secret set ANTHROPIC_API_KEY`.
 
 The guest image is already conditioned for it: `~/.claude.json` is seeded past
 the theme picker and `CLAUDE_CODE_SANDBOXED=1` satisfies the trust dialog, so a

@@ -36,7 +36,8 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	" secrets (pushed into your sandboxes as environment variables)\r\n" +
 	"  secret ls                list your secrets (names and tags; never values)\r\n" +
 	"  secret set <NAME> [--tag <t>]…  read a value from stdin and store it\r\n" +
-	"     claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n" +
+	"     gh auth token | ssh ctl@<gateway> secret set GITHUB_TOKEN   (pipe: one line)\r\n" +
+	"     ssh -t ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN     (prompt: paste)\r\n" +
 	"     the value never goes on the command line, so it stays out of your history.\r\n" +
 	"     untagged secrets and new sandboxes both get the `default` tag, so they meet.\r\n" +
 	"  secret rm <NAME>         delete a secret and strip it from your sandboxes\r\n" +

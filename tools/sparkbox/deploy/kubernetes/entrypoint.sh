@@ -240,6 +240,23 @@ if [ "$mode" = prepare ] || [ "$skip_prepare" != true ]; then
   TOOLS_DIR="$tools_dir" \
   GUEST_IDENTITY=/usr/local/sbin/sparkbox-install-guest-identity.sh \
     /usr/local/sbin/sparkbox-refresh-tools.sh
+
+  # The controller has to READ this template: a fresh sandbox is a
+  # `cp --reflink=always` of it, and that cp runs as the unprivileged
+  # controller, not as root.
+  #
+  # It does not inherit a usable mode on its own. zstd preserves the mode of
+  # the file it decompressed, and the artifact fetched above is 0600 root:root,
+  # so the template came out unreadable by uid $controller_uid and EVERY create
+  # failed with a permission denied — while resumes kept working, because an
+  # existing VM already has its own disk and never touches this file. Group
+  # read rather than 0644: the controller is the only thing that needs it.
+  #
+  # Applied on every prepare rather than only after a decompress, because the
+  # deployments that need it most are the ones whose template was written by an
+  # older image and is sitting there at 0600 right now.
+  chgrp "$controller_gid" "$rootfs"
+  chmod 0640 "$rootfs"
 fi
 
 if [ "$mode" = prepare ]; then
