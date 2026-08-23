@@ -31,6 +31,7 @@ ARCH=$(uname -m)
 REL=$(curl -s https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
 curl -L "https://github.com/firecracker-microvm/firecracker/releases/download/${REL}/firecracker-${REL}-${ARCH}.tgz" | tar xz
 install release-*/firecracker-*[!.debug] /usr/local/bin/firecracker
+install release-*/jailer-*[!.debug] /usr/local/bin/jailer
 
 # 4. Get a guest kernel: use the CI vmlinux Firecracker's quickstart points
 #    at, or build one with their recommended microVM config
@@ -64,6 +65,7 @@ sparkbox serve --driver firecracker \
   --state-dir /srv/sparkbox/state \
   --kernel /srv/sparkbox/vmlinux \
   --image-dir /srv/sparkbox/images \
+  --jailer /usr/local/bin/jailer \
   --users /srv/sparkbox/users.conf \
   --ssh-addr :22 --api-addr 127.0.0.1:8080
 ```
@@ -73,9 +75,10 @@ or keep the gateway on 2222 while iterating.)
 
 ## Production gaps to close before real multi-tenant use
 
-- **Jailer.** Run Firecracker under its jailer (chroot + cgroups + dropped
-  privileges); the SDK supports it (`jailer.go`). Non-negotiable for hostile
-  workloads.
+- **Jailer cgroups.** The launcher now supports the jailer's chroot and dropped
+  per-VM uid/gid. Standalone production hosts should additionally place each
+  VMM in a resource-bounded cgroup; Kubernetes deployments inherit the Pod
+  cgroup as their outer resource boundary.
 - **Warm snapshots.** Boot each template once to sshd-ready, snapshot, and
   make Create() restore a CoW clone of that snapshot instead of cold-booting
   (the sub-second acquisition path from the design doc).

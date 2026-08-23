@@ -144,6 +144,10 @@ jobs:
           sandbox reaches the whole internet, which \`sparkbox doctor\` will
           tell you.
 
+          \`jailer-\$arch\` is the version-matched Firecracker chroot and
+          privilege-drop launcher. CKS enables it by default; a manual
+          \`sparkbox serve\` opts in with \`--jailer /path/to/jailer\`.
+
           \`sparkbox-darwin-arm64\` (Apple Silicon) ships alongside them, pinned
           by \`manifest-darwin-arm64.env\` to the same linux/arm64 artifacts it
           will provision into a nested machine. Host provisioning on macOS is
@@ -271,7 +275,9 @@ jobs:
           ver=${FIRECRACKER_VERSION}
           curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${ver}/firecracker-${ver}-${arch}.tgz" | tar xz
           sudo install "release-${ver}-${arch}/firecracker-${ver}-${arch}" /usr/local/bin/firecracker
+          sudo install "release-${ver}-${arch}/jailer-${ver}-${arch}" /usr/local/bin/jailer
           firecracker --version | head -1
+          jailer --version | head -1
 
       # The kernel is the slowest step (~15 min) and only changes when the
       # script, the config fragment, or KVER does — cache it per arch.

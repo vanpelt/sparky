@@ -27,6 +27,7 @@ require (
 	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
+	k8s.io/kubelet v0.35.2
 	modernc.org/sqlite v1.53.0
 )
 
@@ -84,7 +85,7 @@ require (
 	go.mongodb.org/mongo-driver v1.8.3 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect

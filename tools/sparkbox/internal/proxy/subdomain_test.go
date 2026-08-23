@@ -13,10 +13,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 )
 
 func testServer() *Server {
 	return &Server{domain: "hivemind.tools", log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+func TestTargetPortUsesNonDefaultHTTPSAuthority(t *testing.T) {
+	s := testServer()
+	s.listenPort = 8081
+	req := httptest.NewRequest(http.MethodGet, "https://foo.hivemind.tools/", nil)
+	req.Host = "foo.hivemind.tools:6454"
+
+	if got := s.targetPort(req, routes.Route{Port: routes.DefaultPort}); got != 6454 {
+		t.Fatalf("targetPort = %d, want public authority port 6454", got)
+	}
 }
 
 func TestSubdomainOf(t *testing.T) {

@@ -100,12 +100,15 @@ func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
 		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker")
-		stateDir             = fs.String("state-dir", "./state", "directory for the sqlite store, certs, and VM data")
+		gatewayOnly          = fs.Bool("gateway-only", false, "run the public control plane without local VM capacity; ordinary creates are placed on an attached fleet node")
+		stateDir             = fs.String("state-dir", "./state", "directory for control state: sqlite stores, certificates, and sandbox metadata")
+		vmStateDir           = fs.String("vm-state-dir", "", "directory for per-VM disks, sockets, and memory snapshots (default: --state-dir)")
 		keyDir               = fs.String("key-dir", "", "directory holding fleet private key PEMs, including node-control CA/gateway keys (default: --state-dir); point at tmpfs on a fleet host fed by `sparkbox fetch-secrets`")
 		requireKeys          = fs.Bool("require-keys", false, "fail if any required fleet private key is missing instead of generating one — set on fleet hosts, where a missing key means secret hydration failed and generating a fresh identity would lock the fleet out")
 		usersPath            = fs.String("users", "", "users file: '<user> <authorized_keys line>' per line (required)")
 		sshAddr              = fs.String("ssh-addr", ":2222", "SSH gateway listen address")
 		sshAdvertise         = fs.Int("ssh-advertise-port", 0, "gateway port shown in user-facing instructions when it differs from the listen port (e.g. 22 when an edge DNAT forwards :22 to the gateway); 0 uses the listen port")
+		sshAdvertiseHost     = fs.String("ssh-advertise-host", "", "gateway hostname shown in user-facing instructions when it differs from --proxy-domain (e.g. ssh.example.com); empty uses --proxy-domain")
 		apiAddr              = fs.String("api-addr", "127.0.0.1:8080", "control API listen address (no auth — keep private)")
 		metricsAddr          = fs.String("metrics-addr", "127.0.0.1:9090", "node mode: private Prometheus metrics listen address (empty to disable; gateways expose /metrics on --api-addr)")
 		defaultImage         = fs.String("default-image", "universal", "rootfs template for new sandboxes")
@@ -122,13 +125,24 @@ func serve(args []string) error {
 		archiveRemote        = fs.String("archive-remote", "", "rclone remote name for sandbox archives (e.g. sparkbox-artifacts); empty disables archive/restore. Needs S3 WRITE creds in the host's rclone.conf")
 		archiveBucket        = fs.String("archive-bucket", "", "bucket within --archive-remote for archives (required to enable archiving)")
 		archivePrefix        = fs.String("archive-prefix", "archives", "object-key prefix archives are written under: <prefix>/<owner>/<name>.ext4.zst")
+		checkpointDir        = fs.String("checkpoint-dir", "", "durable mounted directory for immutable manual checkpoints; empty disables checkpoint/restore")
+		checkpointPrefix     = fs.String("checkpoint-prefix", "checkpoints", "object-key prefix beneath --checkpoint-dir")
 		kernelPath           = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir             = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		jailerBin            = fs.String("jailer", "", "firecracker: matching jailer binary; empty launches Firecracker directly (development/legacy)")
+		chrootJailer         = fs.Bool("chroot-jailer", false, "firecracker: isolate each VMM with a chroot and slot-scoped uid in the current mount namespace (does not need CAP_SYS_ADMIN; mutually exclusive with --jailer)")
+		jailerChrootBase     = fs.String("jailer-chroot-base", "", "firecracker jailer: root-owned chroot parent (default <vm-state-dir>/jailer)")
+		jailerUIDBase        = fs.Int("jailer-uid-base", 100000, "firecracker jailer: first uid/gid in the per-VM unprivileged identity range")
+		privilegedHelper     = fs.String("privileged-helper-socket", "", "firecracker: Unix socket for the narrow privileged launch/network helper")
+		privilegedHelperBin  = fs.String("privileged-helper-bin", "", "firecracker: helper client executable (default sparkbox-vmm-helper)")
+		helperControllerGID  = fs.Int("helper-controller-gid", 65532, "firecracker helper: group allowed to access VM disks and API sockets")
+		noRootfsMounts       = fs.Bool("disable-host-rootfs-mounts", false, "firecracker: never loop-mount guest ext4 in this process; templates must already carry the gateway key and template snapshots are disabled")
 		guestSubnet          = fs.String("guest-subnet", guestnet.DefaultPrefix, "IPv4 prefix divided into per-sandbox /30s; fleet nodes must set an explicit unique prefix (a /20 provides 1,024 slots)")
 		subnet6              = fs.String("subnet6", "", "routable IPv6 /64 delegated to the host (e.g. 2001:db8:1c7::/64); gives each sandbox a no-NAT v6 address and a front-door address for hostname SSH routing")
 		guestDNS             = fs.String("guest-dns", "", "resolver to hand guests via the sparkbox_dns kernel arg; \"gateway\" points each guest at its own gateway (172.30.<idx>.1), where the sluice allowlist resolver listens. Empty leaves guests on public DNS")
 		sluiceSocket         = fs.String("sluice-socket", "", "path to the sluice control socket (e.g. /run/sluice.sock); enables per-tag egress rules + per-VM bandwidth in the user console. Empty disables both")
 		proxyAddr            = fs.String("proxy-addr", ":8081", "HTTP proxy edge listen address for <sub>.<domain> (empty to disable)")
+		proxyAdvertise       = fs.Int("proxy-advertise-port", 0, "public HTTP(S) port used for browser origins when it differs from --proxy-addr (e.g. 443 when a load balancer forwards to :8081); 0 uses the listen port")
 		proxyDomain          = fs.String("proxy-domain", "hivemind.tools", "base domain for sandbox web routes")
 		edgeV4               = fs.String("edge-v4", "", "public IPv4 of the proxy edge; when set, each sandbox also gets an A record here so <name>.<domain> resolves over IPv4 (the per-name front-door AAAA otherwise shadows the wildcard A). Point it at the same address the wildcard *.<domain> A does")
 		proxyTLS             = fs.Bool("proxy-tls", false, "terminate TLS for the proxy edge (see --tls-provider)")
@@ -169,6 +183,7 @@ func serve(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*vmStateDir = effectiveVMStateDir(*vmStateDir, *stateDir)
 	guestSubnetSet := false
 	transportFlagsGiven := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) {
@@ -220,6 +235,12 @@ func serve(args []string) error {
 	if *gatewayAddr != "" && !guestSubnetSet {
 		return errors.New("fleet nodes require an explicit unique --guest-subnet (use a non-overlapping /20 for 1,024 sandbox slots)")
 	}
+	if *gatewayOnly && *gatewayAddr != "" {
+		return errors.New("--gateway-only and --gateway are mutually exclusive roles")
+	}
+	if *gatewayOnly && *driverName != "mock" {
+		return errors.New("--gateway-only requires --driver mock so the public gateway never opens a host virtualization device")
+	}
 	// A node has no accounts of its own — every identity in a fleet lives on the
 	// gateway — so the seed file is required of everything except a node.
 	if *usersPath == "" && *gatewayAddr == "" {
@@ -241,9 +262,14 @@ func serve(args []string) error {
 		return serveNode(nodeOptions{
 			gateway: *gatewayAddr, gatewayPub: *gatewayPub, gatewayHostKey: *gatewayHostK,
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
-			driverName: *driverName, stateDir: *stateDir, keyDir: *keyDir,
+			driverName: *driverName, stateDir: *stateDir, vmStateDir: *vmStateDir, keyDir: *keyDir,
 			kernelPath: *kernelPath, imageDir: *imageDir,
-			defaultLogin: *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
+			jailerBin: *jailerBin, chrootJailer: *chrootJailer,
+			jailerChrootBase: *jailerChrootBase, jailerUIDBase: *jailerUIDBase,
+			privilegedHelperSocket: *privilegedHelper, privilegedHelperBin: *privilegedHelperBin,
+			helperControllerGID:     *helperControllerGID,
+			disableHostRootfsMounts: *noRootfsMounts,
+			defaultLogin:            *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
 			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
 			idleBalloon: *idleBalloon, idleTimeout: *idleTimeout,
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
@@ -258,6 +284,9 @@ func serve(args []string) error {
 	}
 
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(*vmStateDir, 0o700); err != nil {
 		return err
 	}
 	// Fleet private keys live in --key-dir (default --state-dir). On a fleet
@@ -343,12 +372,14 @@ func serve(args []string) error {
 	var driver vmm.Driver
 	switch *driverName {
 	case "mock":
-		md := mock.New(*stateDir, hostKey)
+		md := mock.New(*vmStateDir, hostKey)
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			*kernelPath, *imageDir, *stateDir, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
+			*kernelPath, *imageDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
+			*chrootJailer, *privilegedHelper, *privilegedHelperBin, *helperControllerGID, *noRootfsMounts,
+			*guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)
 		if err != nil {
 			return err
@@ -485,22 +516,24 @@ func serve(args []string) error {
 	mgrOpts := host.Options{
 		Context: ctx, StateDir: *stateDir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
-		Routes:             routeStore,
-		Schedules:          scheduleStore,
-		Tags:               secretsStore,
-		MaxRunningPerOwner: *maxPerOwner,
-		MemAdmissionPct:    *memAdmitPct,
-		HostMemMB:          hostMem,
-		MemReserveMB:       *memReserve,
-		DiskPoolMBPerOwner: *diskPool,
-		ActivityCPUPct:     *activityCPU,
-		ActivityNetBytes:   uint64(*activityNetKB) * 1024,
-		ArchivePrefix:      *archivePrefix,
-		NodeName:           nodeName,
-		Arch:               *archFlag,
-		Release:            version,
-		HostVCPUs:          int64(runtime.NumCPU()),
-		Metrics:            metricsRegistry,
+		Routes:               routeStore,
+		Schedules:            scheduleStore,
+		Tags:                 secretsStore,
+		MaxRunningPerOwner:   *maxPerOwner,
+		MemAdmissionPct:      *memAdmitPct,
+		HostMemMB:            hostMem,
+		MemReserveMB:         *memReserve,
+		DiskPoolMBPerOwner:   *diskPool,
+		ActivityCPUPct:       *activityCPU,
+		ActivityNetBytes:     uint64(*activityNetKB) * 1024,
+		ArchivePrefix:        *archivePrefix,
+		CheckpointPrefix:     *checkpointPrefix,
+		CheckpointStagingDir: *vmStateDir,
+		NodeName:             nodeName,
+		Arch:                 *archFlag,
+		Release:              version,
+		HostVCPUs:            int64(runtime.NumCPU()),
+		Metrics:              metricsRegistry,
 	}
 	if doorHooks != nil {
 		mgrOpts.FrontDoor = doorHooks
@@ -511,6 +544,14 @@ func serve(args []string) error {
 	if arch := objstore.New(*archiveRemote, *archiveBucket); arch != nil {
 		mgrOpts.Archive = arch
 		log.Info("sandbox archiving enabled", "remote", *archiveRemote, "bucket", *archiveBucket, "prefix", *archivePrefix)
+	}
+	if *checkpointDir != "" {
+		checkpoints, err := objstore.NewFilesystem(*checkpointDir)
+		if err != nil {
+			return fmt.Errorf("checkpoint store: %w", err)
+		}
+		mgrOpts.Checkpoint = checkpoints
+		log.Info("sandbox checkpointing enabled", "dir", *checkpointDir, "prefix", *checkpointPrefix)
 	}
 	mgr, err := host.NewManager(mgrOpts)
 	if err != nil {
@@ -577,6 +618,10 @@ func serve(args []string) error {
 		return fmt.Errorf("fleet: %w", err)
 	}
 	defer flt.Close()
+	if *gatewayOnly {
+		flt.SetPlacer(fleet.RemoteOnlyPlacer{})
+		log.Info("running as a control-plane-only gateway", "local_vm_capacity", false)
+	}
 	nodeStore.SetRevocationHook(func(name, reason string) {
 		flt.EvictNode(name, reason)
 	})
@@ -646,7 +691,8 @@ func serve(args []string) error {
 	// can stop it.
 	ops := newGatewayOps(gatewayStores{
 		Fleet: flt, Placement: placeStore, Roster: nodeStore,
-		Users: userStore, Secrets: secretsStore,
+		Checkpoints: localCheckpointOps{mgr: mgr},
+		Users:       userStore, Secrets: secretsStore,
 		Schedules: scheduleStore, Routes: routeStore, Sessions: sessionSigner,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
 		GatewayGuestSubnet: *guestSubnet,
@@ -660,7 +706,7 @@ func serve(args []string) error {
 		Manager: mgr, Fleet: flt, Dial: flt.DialContext,
 		Users: userStore, HostKey: hostKey, UpstreamKey: upstreamKey,
 		DefaultImage: *defaultImage, Logger: log,
-		Doors: doors, Domain: *proxyDomain,
+		Doors: doors, Domain: *proxyDomain, SSHHost: advertisedHost(*sshAdvertiseHost, *proxyDomain),
 		OpenSignup: *openSignup, InvitesPerUser: *invitesPer,
 		Schedules: scheduleStore,
 		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
@@ -854,8 +900,9 @@ func serve(args []string) error {
 		// at login.<domain> like the console and issuer do.
 		loginH, lerr := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
 			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
-			TTL: *sessionTTL, Logger: log, Gateway: *proxyDomain, GatewayPort: gatewayPort(*sshAdvertise, *sshAddr),
-			Passkeys: userStore, Subdomain: *loginSub, Port: portOf(*proxyAddr),
+			TTL: *sessionTTL, Logger: log, Gateway: advertisedHost(*sshAdvertiseHost, *proxyDomain),
+			GatewayPort: advertisedPort(*sshAdvertise, *sshAddr),
+			Passkeys:    userStore, Subdomain: *loginSub, Port: advertisedPort(*proxyAdvertise, *proxyAddr),
 			HomeSub: *userConsoleSub,
 		})
 		if lerr != nil {
@@ -1086,6 +1133,15 @@ func nodeNameOr(flagValue string) string {
 	return "local"
 }
 
+// effectiveVMStateDir preserves the historical one-directory layout unless an
+// operator explicitly places the hot VM data elsewhere.
+func effectiveVMStateDir(configured, stateDir string) string {
+	if configured == "" {
+		return stateDir
+	}
+	return configured
+}
+
 func validateTransportFlag(flagName, value string, allowed ...string) error {
 	for _, candidate := range allowed {
 		if value == candidate {
@@ -1165,14 +1221,15 @@ const defaultAudience = "https://hivemind.wandb.tools"
 // They are a struct rather than a dozen parameters so the assembly below reads
 // as the wiring diagram it is.
 type gatewayStores struct {
-	Fleet     *fleet.Fleet
-	Placement *placement.Store
-	Roster    *nodes.Store
-	Users     *users.Store
-	Secrets   *secrets.Store
-	Schedules *schedule.Store
-	Routes    *routes.Store
-	Sessions  *edgeauth.Signer
+	Fleet       *fleet.Fleet
+	Checkpoints ctlops.Checkpoints
+	Placement   *placement.Store
+	Roster      *nodes.Store
+	Users       *users.Store
+	Secrets     *secrets.Store
+	Schedules   *schedule.Store
+	Routes      *routes.Store
+	Sessions    *edgeauth.Signer
 
 	DefaultImage       string
 	Domain             string
@@ -1199,7 +1256,8 @@ type gatewayStores struct {
 func newGatewayOps(s gatewayStores) *ctlops.Ops {
 	return ctlops.New(ctlops.Config{
 		Sandboxes: s.Fleet, Templates: s.Fleet, Accounts: s.Users,
-		Tags: s.Secrets, Schedules: s.Schedules, Routes: s.Routes,
+		Checkpoints: s.Checkpoints,
+		Tags:        s.Secrets, Schedules: s.Schedules, Routes: s.Routes,
 		Sessions: s.Sessions,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
@@ -1216,6 +1274,29 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		XtermSubdomain:     s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
 		Log: s.Log,
 	})
+}
+
+// localCheckpointOps keeps the manual checkpoint v1 explicitly node-local.
+// Enabled is target-aware, so a gateway with a mounted checkpoint directory
+// does not advertise the operation for a sandbox placed on another node.
+type localCheckpointOps struct {
+	mgr *host.Manager
+}
+
+func (c localCheckpointOps) Enabled(name string) bool {
+	if c.mgr == nil || !c.mgr.CheckpointEnabled() {
+		return false
+	}
+	_, ok := c.mgr.Get(name)
+	return ok
+}
+
+func (c localCheckpointOps) Checkpoint(ctx context.Context, name string) error {
+	return c.mgr.Checkpoint(ctx, name)
+}
+
+func (c localCheckpointOps) RestoreCheckpoint(ctx context.Context, name string) error {
+	return c.mgr.RestoreCheckpoint(ctx, name)
 }
 
 // defaultGitHubClientID is the app a stock sparkbox links accounts through.
@@ -1495,14 +1576,22 @@ func firstOr(list []string, def string) string {
 // portOf extracts the numeric port from a listen address like ":443" or
 // "0.0.0.0:8081". Returns 0 when there is no parseable port, which just
 // disables the edge's "dialed me directly" check in the proxy.
-// gatewayPort picks the port user-facing instructions should show for the SSH
-// gateway: the advertised override when set (an edge DNAT can expose the
-// gateway on a different port than it binds), else the listen port.
-func gatewayPort(advertised int, listenAddr string) int {
+// advertisedPort picks the public port user-facing instructions and browser
+// origins should use: the advertised override when set (an edge or load
+// balancer can expose a different port than the process binds), else the
+// listen port.
+func advertisedPort(advertised int, listenAddr string) int {
 	if advertised != 0 {
 		return advertised
 	}
 	return portOf(listenAddr)
+}
+
+func advertisedHost(advertised, fallback string) string {
+	if advertised != "" {
+		return advertised
+	}
+	return fallback
 }
 
 func portOf(addr string) int {

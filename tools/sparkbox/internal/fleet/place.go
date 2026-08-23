@@ -219,6 +219,71 @@ func (defaultPlacer) Place(req Request, nodes []Candidate) (string, error) {
 	return "", ctlops.NotFound(op, "node", req.PreferNode)
 }
 
+// RemoteOnlyPlacer is the placement policy for a gateway that deliberately
+// holds no VMs. It never returns the local candidate: an ordinary create goes
+// to the first online remote machine that fits, while an explicit --node is
+// still honoured when it names an eligible remote machine.
+//
+// Candidates arrive local-first and then name-sorted, so the choice is stable.
+// This is intentionally a small deployment policy rather than a load-aware
+// scheduler; the selected node remains the authority on live admission.
+type RemoteOnlyPlacer struct{}
+
+func (RemoteOnlyPlacer) Place(req Request, nodes []Candidate) (string, error) {
+	const op = "create"
+	if req.PreferNode != "" {
+		for _, c := range nodes {
+			if c.Name != req.PreferNode {
+				continue
+			}
+			if c.Local {
+				return "", ctlops.Disabled(op,
+					"this gateway is control-plane-only and cannot hold sandboxes; choose a VM node")
+			}
+			if !c.Online {
+				return "", nodeOffline(op, c.Name)
+			}
+			if err := c.Fits(req); err != nil {
+				return "", err
+			}
+			return c.Name, nil
+		}
+		return "", ctlops.NotFound(op, "node", req.PreferNode)
+	}
+
+	var (
+		sawRemote bool
+		firstFit  error
+	)
+	for _, c := range nodes {
+		if c.Local {
+			continue
+		}
+		sawRemote = true
+		if !c.Online {
+			continue
+		}
+		if err := c.Fits(req); err != nil {
+			if firstFit == nil {
+				firstFit = err
+			}
+			continue
+		}
+		return c.Name, nil
+	}
+	if firstFit != nil {
+		return "", firstFit
+	}
+	if sawRemote {
+		return "", &ctlops.Error{
+			Kind: ctlops.KindCapacity, Op: op, Code: "no_vm_node_online",
+			Msg: "no VM node is online; wait for a node to reconnect and try again",
+		}
+	}
+	return "", ctlops.Disabled(op,
+		"this gateway has no VM nodes; enrol and approve one before creating a sandbox")
+}
+
 // placementRefused is the sentence a user reads when the machine they named
 // cannot take the sandbox. Verbatim, because every word of it was chosen to say
 // what to do next.

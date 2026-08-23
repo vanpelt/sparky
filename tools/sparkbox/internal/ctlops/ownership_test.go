@@ -40,6 +40,14 @@ func ownCases() []ownCase {
 			_, err := r.ops.Archive(ctx, c, t)
 			return err
 		}},
+		{"Checkpoint", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.Checkpoint(ctx, c, t)
+			return err
+		}},
+		{"RestoreCheckpoint", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.RestoreCheckpoint(ctx, c, t)
+			return err
+		}},
 		{"Resize", "sandbox", func(r *rig, c Caller, t string) error {
 			_, err := r.ops.Resize(ctx, c, t, 25*1024)
 			return err
@@ -190,6 +198,12 @@ func TestOwnerSeesOwnResources(t *testing.T) {
 	}
 	if _, err := r.ops.Tags(ctx, alice(), "alicebox"); err != nil {
 		t.Fatalf("Tags own sandbox: %v", err)
+	}
+	if _, err := r.ops.Checkpoint(ctx, alice(), "alicebox"); err != nil {
+		t.Fatalf("Checkpoint own sandbox: %v", err)
+	}
+	if _, err := r.ops.RestoreCheckpoint(ctx, alice(), "alicebox"); err != nil {
+		t.Fatalf("RestoreCheckpoint own sandbox: %v", err)
 	}
 	if err := r.ops.DeleteSchedule(ctx, alice(), "sch-alice"); err != nil {
 		t.Fatalf("DeleteSchedule own schedule: %v", err)

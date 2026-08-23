@@ -67,7 +67,7 @@ func (m *Manager) stripEnvForPack(ctx context.Context, name string) error {
 	m.mu.Unlock()
 	if err := stripper.StripEnv(ctx, box); err != nil {
 		if woke {
-			if perr := m.Pause(ctx, name); perr != nil {
+			if perr := m.pause(ctx, name, "was re-paused after a failed disk pack"); perr != nil {
 				m.log.Warn("re-pause after failed strip", "name", name, "err", perr)
 			}
 		}

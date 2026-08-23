@@ -66,6 +66,26 @@ func (f *fakeObserver) ObserveHiveMindSessions(
 	f.snapshots[id] = snapshot
 }
 
+func TestNewRejectsInsecureRemoteAPIBase(t *testing.T) {
+	_, err := New(Options{
+		APIBase:   "http://hivemind.example",
+		Sandboxes: fakeBoxes{}, Protector: &fakeProtector{}, Identity: &fakeIdentity{},
+	})
+	if err == nil {
+		t.Fatal("New accepted a remote plaintext API base")
+	}
+}
+
+func TestNewAllowsLoopbackHTTPForTests(t *testing.T) {
+	_, err := New(Options{
+		APIBase:   "http://127.0.0.1:8080",
+		Sandboxes: fakeBoxes{}, Protector: &fakeProtector{}, Identity: &fakeIdentity{},
+	})
+	if err != nil {
+		t.Fatalf("New rejected loopback HTTP: %v", err)
+	}
+}
+
 func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	var mu sync.Mutex
 	exchanges := 0

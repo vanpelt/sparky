@@ -19,13 +19,37 @@ import (
 // between local files and a map, so archive/restore can round-trip with no
 // rclone, network, or object storage.
 type memStore struct {
-	mu   sync.Mutex
-	objs map[string][]byte
+	mu     sync.Mutex
+	objs   map[string][]byte
+	putErr error
+}
+
+type blockingStore struct {
+	*memStore
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingStore) Put(ctx context.Context, key, localPath string) error {
+	s.once.Do(func() { close(s.started) })
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.memStore.Put(ctx, key, localPath)
 }
 
 func newMemStore() *memStore { return &memStore{objs: map[string][]byte{}} }
 
 func (s *memStore) Put(_ context.Context, key, localPath string) error {
+	s.mu.Lock()
+	putErr := s.putErr
+	s.mu.Unlock()
+	if putErr != nil {
+		return putErr
+	}
 	b, err := os.ReadFile(localPath)
 	if err != nil {
 		return err
@@ -34,6 +58,12 @@ func (s *memStore) Put(_ context.Context, key, localPath string) error {
 	defer s.mu.Unlock()
 	s.objs[key] = b
 	return nil
+}
+
+func (s *memStore) failPuts(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.putErr = err
 }
 
 func (s *memStore) Get(_ context.Context, key, localPath string) error {
@@ -137,6 +167,220 @@ func TestArchiveRestoreRoundTrip(t *testing.T) {
 	// Restore consumed the archive (a move, not a copy).
 	if store.len() != 0 {
 		t.Fatalf("object store still has %d objects after restore", store.len())
+	}
+}
+
+func TestCheckpointRestoreRoundTripKeepsLocalAndDurableCopies(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Checkpoint: store})
+	if _, err := m.Create(ctx, "c1", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	marker := workdirFile(dir, "c1", "notes.txt")
+	if err := os.WriteFile(marker, []byte("checkpoint one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Checkpoint(ctx, "c1"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	box, _ := m.Get("c1")
+	if box.CheckpointKey == "" || box.CheckpointAt.IsZero() {
+		t.Fatalf("checkpoint metadata not committed: %+v", box)
+	}
+	if box.State != vmm.StateRunning {
+		t.Fatalf("state after checkpoint = %q, want running", box.State)
+	}
+	if store.len() != 1 {
+		t.Fatalf("durable objects = %d, want 1", store.len())
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "checkpoint one" {
+		t.Fatalf("local disk was not retained: %q, %v", got, err)
+	}
+
+	if err := os.WriteFile(marker, []byte("new local writes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := box.CheckpointKey
+	if err := m.RestoreCheckpoint(ctx, "c1"); err != nil {
+		t.Fatalf("restore checkpoint: %v", err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || string(got) != "checkpoint one" {
+		t.Fatalf("restored marker = %q, %v", got, err)
+	}
+	box, _ = m.Get("c1")
+	if box.CheckpointKey != key || store.len() != 1 {
+		t.Fatalf("restore consumed durable checkpoint: key=%q objects=%d", box.CheckpointKey, store.len())
+	}
+}
+
+func TestFailedSecondCheckpointPreservesPriorPointer(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Checkpoint: store})
+	if _, err := m.Create(ctx, "c2", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	marker := workdirFile(dir, "c2", "notes.txt")
+	if err := os.WriteFile(marker, []byte("committed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Checkpoint(ctx, "c2"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := m.Get("c2")
+
+	if err := os.WriteFile(marker, []byte("not committed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.failPuts(errors.New("VAST unavailable"))
+	if err := m.Checkpoint(ctx, "c2"); err == nil {
+		t.Fatal("second checkpoint should fail")
+	}
+	after, _ := m.Get("c2")
+	if after.CheckpointKey != before.CheckpointKey || !after.CheckpointAt.Equal(before.CheckpointAt) {
+		t.Fatalf("failed checkpoint moved pointer: before=%+v after=%+v", before, after)
+	}
+	if store.len() != 1 {
+		t.Fatalf("failed checkpoint changed durable objects: %d", store.len())
+	}
+
+	store.failPuts(nil)
+	if err := m.RestoreCheckpoint(ctx, "c2"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || string(got) != "committed" {
+		t.Fatalf("prior checkpoint unusable after failed second attempt: %q, %v", got, err)
+	}
+}
+
+func TestSuccessfulCheckpointsUseImmutableGenerationKeys(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, _ := managerWithDir(t, host.Options{Checkpoint: store})
+	if _, err := m.Create(ctx, "generations", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Checkpoint(ctx, "generations"); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := m.Get("generations")
+	if err := m.Checkpoint(ctx, "generations"); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := m.Get("generations")
+	if first.CheckpointKey == second.CheckpointKey {
+		t.Fatalf("second checkpoint reused immutable key %q", first.CheckpointKey)
+	}
+	if store.len() != 2 {
+		t.Fatalf("durable generations = %d, want 2", store.len())
+	}
+}
+
+func TestMissingCheckpointedHotDiskRequiresExplicitRestore(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Checkpoint: store})
+	if _, err := m.Create(ctx, "c3", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	marker := workdirFile(dir, "c3", "notes.txt")
+	if err := os.WriteFile(marker, []byte("recover me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Checkpoint(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Pause(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Dir(marker)
+	if err := os.RemoveAll(workdir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.EnsureReady(ctx, "c3")
+	var stateErr *host.StateError
+	if !errors.As(err, &stateErr) || stateErr.Code != "checkpoint_restore_required" {
+		t.Fatalf("EnsureReady missing hot disk: got %v, want checkpoint_restore_required", err)
+	}
+	if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+		t.Fatalf("EnsureReady silently recreated a base-image disk: %v", err)
+	}
+
+	if err := m.RestoreCheckpoint(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || string(got) != "recover me" {
+		t.Fatalf("explicit restore did not recover marker: %q, %v", got, err)
+	}
+}
+
+func TestMissingHotDiskWithoutCheckpointIsUnrecoverable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	m := newManagerInDir(t, dir, host.Options{})
+	if _, err := m.Create(ctx, "lost", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Pause(ctx, "lost"); err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(dir, "mock-vms", "lost")
+	if err := os.RemoveAll(workdir); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh manager models the host process restarting after the persisted
+	// sandbox record outlived its local disk.
+	restarted := newManagerInDir(t, dir, host.Options{})
+	_, err := restarted.EnsureReady(ctx, "lost")
+	var stateErr *host.StateError
+	if !errors.As(err, &stateErr) || stateErr.Code != "sandbox_unrecoverable" {
+		t.Fatalf("EnsureReady missing hot disk: got %v, want sandbox_unrecoverable", err)
+	}
+	if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+		t.Fatalf("EnsureReady silently recreated a base-image disk: %v", err)
+	}
+}
+
+func TestCheckpointSerializesResumeUntilDiskWorkFinishes(t *testing.T) {
+	ctx := context.Background()
+	store := &blockingStore{
+		memStore: newMemStore(),
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	m, _ := managerWithDir(t, host.Options{Checkpoint: store})
+	if _, err := m.Create(ctx, "c4", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	checkpointDone := make(chan error, 1)
+	go func() { checkpointDone <- m.Checkpoint(ctx, "c4") }()
+	<-store.started
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := m.EnsureReady(ctx, "c4")
+		resumeDone <- err
+	}()
+	select {
+	case err := <-resumeDone:
+		close(store.release)
+		<-checkpointDone
+		t.Fatalf("resume crossed active checkpoint disk work: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(store.release)
+	if err := <-checkpointDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resumeDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

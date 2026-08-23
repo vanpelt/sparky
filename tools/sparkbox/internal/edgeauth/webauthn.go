@@ -132,7 +132,11 @@ func newRelyingParty(cfg LoginConfig) (*webauthn.WebAuthn, string, error) {
 		scheme = "http"
 	}
 	host := cfg.Subdomain + "." + domain
-	if cfg.Port != 0 && cfg.Port != 443 && cfg.Port != 80 {
+	defaultPort := 80
+	if cfg.Secure {
+		defaultPort = 443
+	}
+	if cfg.Port != 0 && cfg.Port != defaultPort {
 		host += ":" + strconv.Itoa(cfg.Port)
 	}
 	origin := scheme + "://" + host
@@ -152,7 +156,7 @@ func newRelyingParty(cfg LoginConfig) (*webauthn.WebAuthn, string, error) {
 // Origin to cross-origin POSTs, so anything not first-party is refused.
 func (h *LoginHandler) requireSameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	if o := r.Header.Get("Origin"); o != "" && o != h.origin {
-		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		h.jsonErr(w, http.StatusForbidden, "cross-origin request refused", nil)
 		return false
 	}
 	return true

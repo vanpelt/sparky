@@ -22,7 +22,7 @@ func (g *Gateway) controlEmail(s gssh.Session, c ctlops.Caller, args []string, l
 		}
 		if addr == "" {
 			fmt.Fprintf(s, "no email set — add one with: ssh %s@%s email set you@example.com\r\n",
-				ControlUser, g.domainHint())
+				ControlUser, g.sshHint())
 		} else {
 			fmt.Fprintf(s, "%s\r\n", addr)
 		}
@@ -204,7 +204,8 @@ func (g *Gateway) controlSessionToken(s gssh.Session, c ctlops.Caller, args []st
 	// resulting 400 says nothing about why.
 	fmt.Fprint(s.Stderr(), "# api:     curl -H \"Authorization: Bearer <token>\" https://api.<domain>/v1/sandboxes\r\n")
 	fmt.Fprint(s.Stderr(), "#          docs at https://api.<domain>/docs; the same header opens https://<name>.<domain>:<port>\r\n")
-	fmt.Fprint(s.Stderr(), "# shell:   TOKEN=$(ssh ctl@<domain> session-token | tr -d '\\r\\n')   # this channel sends CRLF\r\n")
+	fmt.Fprintf(s.Stderr(), "# shell:   TOKEN=$(ssh %s@%s session-token | tr -d '\\r\\n')   # this channel sends CRLF\r\n",
+		ControlUser, g.sshHint())
 	// The offer, for an account that has never taken it. This is the moment
 	// somebody is most likely to be standing at: minting a token is what you do
 	// on the way to signing into the browser for the first time, which is also

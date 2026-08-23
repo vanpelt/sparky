@@ -306,7 +306,7 @@ func (g *Gateway) enrolNode(key xssh.PublicKey, hello nodelink.Hello, log *slog.
 		// their key in front of the one the operator is waiting for.
 		return nodes.Node{}, nodelink.Refusal(nodelink.CodeNodeNameTaken,
 			"node %q is registered to a different key. If that key is not yours, an operator runs:  ssh %s@%s node rm %s",
-			hello.Node, ControlUser, g.domainHint(), hello.Node)
+			hello.Node, ControlUser, g.sshHint(), hello.Node)
 	case errors.Is(err, nodes.ErrTooManyPending):
 		// Every waiting row belongs to a machine that is still knocking, so
 		// there is nothing here to reclaim. Saying so — rather than "full" —
@@ -316,7 +316,7 @@ func (g *Gateway) enrolNode(key xssh.PublicKey, hello nodelink.Hello, log *slog.
 			"too many machines are waiting for approval on this gateway, and all of them are still knocking. "+
 				"A waiting row is only reclaimed after its machine has been quiet for %s; "+
 				"an operator can make room now with:  ssh %s@%s node ls",
-			nodeEnrolStale, ControlUser, g.domainHint())
+			nodeEnrolStale, ControlUser, g.sshHint())
 	default:
 		log.Error("could not enrol a node", "asked_for", hello.Node, "err", err)
 		return nodes.Node{}, ctlops.Fail(nodelink.OpLink, err)
@@ -549,7 +549,7 @@ func (g *Gateway) approvalCommand(row nodes.Node, hello nodelink.Hello) string {
 	}
 	command := fmt.Sprintf(
 		"ssh %s@%s node approve %s --guest-subnet %s",
-		ControlUser, g.domainHint(), row.FP, subnet,
+		ControlUser, g.sshHint(), row.FP, subnet,
 	)
 	if address, err := nodepki.NormalizeGRPCAddr(hello.GRPCAddr); err == nil {
 		command += " --grpc-addr " + address

@@ -92,7 +92,7 @@ func (g *Gateway) linkGitHubByDevice(s gssh.Session, w io.Writer, c ctlops.Calle
 		} else {
 			fmt.Fprintf(w, "%s\r\n", linkMessage("github.link", err))
 		}
-		fmt.Fprintf(w, "  ssh %s@%s github link\r\n", ControlUser, g.domainHint())
+		fmt.Fprintf(w, "  ssh %s@%s github link\r\n", ControlUser, g.sshHint())
 		return ""
 	}
 	fmt.Fprintf(w, "✓ linked to github.com/%s\r\n", me.GitHubLogin)
@@ -112,7 +112,7 @@ func (g *Gateway) linkGitHubByKey(s gssh.Session, w io.Writer, c ctlops.Caller, 
 		t, ok := w.(*term.Terminal)
 		if !ok {
 			fmt.Fprintf(w, "name your GitHub account:  ssh %s@%s github link <login>\r\n",
-				ControlUser, g.domainHint())
+				ControlUser, g.sshHint())
 			return ""
 		}
 		fmt.Fprint(t, "link a GitHub account? enter your GitHub username to verify\r\n")
@@ -131,7 +131,7 @@ func (g *Gateway) linkGitHubByKey(s gssh.Session, w io.Writer, c ctlops.Caller, 
 	if err != nil {
 		fmt.Fprintf(w, "%s\r\n", linkMessage("keys.verify-github", err))
 		fmt.Fprintf(w, "add that key to github.com, then run:  ssh %s@%s github link %s\r\n",
-			ControlUser, g.domainHint(), login)
+			ControlUser, g.sshHint(), login)
 		return ""
 	}
 	fmt.Fprintf(w, "✓ key %s is listed on github.com/%s — verified.\r\n", c.KeyFP, me.GitHubLogin)
@@ -199,5 +199,5 @@ func (g *Gateway) nudgeGitHub(s gssh.Session, w io.Writer, c ctlops.Caller) {
 		return
 	}
 	fmt.Fprintf(w, "# tip: link your GitHub account —  ssh %s@%s github link\r\n",
-		ControlUser, g.domainHint())
+		ControlUser, g.sshHint())
 }

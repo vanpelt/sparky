@@ -168,6 +168,14 @@
       for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
       return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
+    async function responseJSON(response, fallback) {
+      var text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        throw new Error(fallback + " (server returned " + response.status + ")");
+      }
+    }
 
     // The server can't know whether *this browser* holds a passkey before
     // anyone authenticates, so the page remembers: enrollment and each
@@ -191,7 +199,7 @@
       document.getElementById("err").classList.remove("show");
       try {
         var begin = await fetch("/webauthn/login/begin", { method: "POST" });
-        var body = await begin.json();
+        var body = await responseJSON(begin, "could not start sign-in");
         if (!begin.ok) throw new Error(body.error || "could not start sign-in");
         var opts = body.publicKey;
         opts.challenge = b64uDec(opts.challenge);
@@ -211,7 +219,7 @@
             clientExtensionResults: cred.getClientExtensionResults()
           })
         });
-        var out = await fin.json();
+        var out = await responseJSON(fin, "sign-in failed");
         if (!out.ok) {
           // The server refused the assertion — likely revoked via `ctl
           // passkey rm`. Drop the hint so the next visit leads with tokens.

@@ -8,7 +8,11 @@
 # so patching the template is picked up by the next `ssh new@...` instantly.
 # The patch is atomic (reflink copy -> loop mount -> install -> rename), so a
 # concurrent create sees either the old or the new template, never a torn one.
-# Running/paused VMs keep their own rootfs copies and are untouched.
+# Only release/operator base templates are mounted here. User-derived
+# snap-*.ext4 images are deliberately excluded: mounting an untrusted guest
+# filesystem asks the privileged host kernel to parse attacker-controlled ext4
+# metadata and turns the management plane into a second sandbox boundary.
+# Running/paused VMs and their snapshot templates are untouched.
 #
 # Sources (all self-contained single binaries, no guest deps):
 #   claude:   downloads.claude.ai native build, sha256-verified via the release
@@ -53,6 +57,10 @@ TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/tools}
 # lands it next to this script. Templates published before workload identity
 # existed get it here, with no ~65-minute image rebuild.
 GUEST_IDENTITY=${GUEST_IDENTITY:-/usr/local/sbin/sparkbox-install-guest-identity.sh}
+# Optional public-only fleet key to bake into trusted operator templates. CKS
+# uses this from a read-only Secret so the long-lived VM controller never has
+# to loop-mount a guest disk merely to install authorized_keys.
+GATEWAY_PUBLIC_KEY_FILE=${GATEWAY_PUBLIC_KEY_FILE:-}
 CLAUDE_BASE=${CLAUDE_BASE:-https://downloads.claude.ai/claude-code-releases}
 CODEX_REPO=${CODEX_REPO:-openai/codex}
 PI_REPO=${PI_REPO:-earendil-works/pi}
@@ -122,6 +130,14 @@ esac
 # The single line every template must carry to count as current. One line so
 # reading it back is a string compare and not a parse.
 WANT="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
+if [ -n "$GATEWAY_PUBLIC_KEY_FILE" ]; then
+  [ -f "$GATEWAY_PUBLIC_KEY_FILE" ] \
+    || { echo "gateway public key file does not exist: $GATEWAY_PUBLIC_KEY_FILE" >&2; exit 1; }
+  ssh-keygen -lf "$GATEWAY_PUBLIC_KEY_FILE" >/dev/null \
+    || { echo "gateway public key file is not a valid SSH public key: $GATEWAY_PUBLIC_KEY_FILE" >&2; exit 1; }
+  GATEWAY_KEY_SHA=$(sha256sum "$GATEWAY_PUBLIC_KEY_FILE" | awk '{print $1}')
+  WANT="$WANT gateway_key=$GATEWAY_KEY_SHA"
+fi
 TEMPLATE_STAMP=/etc/sparkbox/tools-rev
 
 # Read one template's stamp WITHOUT mounting it. debugfs (e2fsprogs) opens the
@@ -135,7 +151,13 @@ command -v debugfs >/dev/null \
   || echo "WARN: debugfs not found (install e2fsprogs) — no template can be read, so every one will be re-patched on every run" >&2
 
 shopt -s nullglob
-ALL=("$IMAGES_DIR"/*.ext4)
+ALL=()
+for tpl in "$IMAGES_DIR"/*.ext4; do
+  case "$(basename "$tpl")" in
+    snap-*.ext4) continue ;;
+  esac
+  ALL+=("$tpl")
+done
 if [ ${#ALL[@]} = 0 ]; then
   echo "no templates in $IMAGES_DIR — nothing to patch" >&2
   exit 1
@@ -270,6 +292,36 @@ PY
   seed_hivemind_unit "$mnt" "$home" "$uid" "$gid" "$(echo "$pw" | cut -d: -f1)"
 }
 
+# install_gateway_key replaces the release template's build-time fleet key
+# with the key mounted into this one-shot preparation container. These are
+# trusted base templates only (snap-* images never enter STALE), so replacing
+# rather than merging also removes an obsolete release/operator key.
+install_gateway_key() {
+  local mnt=$1
+  [ -n "$GATEWAY_PUBLIC_KEY_FILE" ] || return 0
+
+  local pw home uid gid ssh_dir key
+  pw=$(awk -F: '$3 == 1000 {print; exit}' "$mnt/etc/passwd")
+  [ -n "$pw" ] || pw=$(awk -F: '$1 == "root" {print; exit}' "$mnt/etc/passwd")
+  [ -n "$pw" ] || { echo "   !! template has no uid-1000 or root login" >&2; return 1; }
+  uid=$(echo "$pw" | cut -d: -f3)
+  gid=$(echo "$pw" | cut -d: -f4)
+  home=$(echo "$pw" | cut -d: -f6)
+  case "$home" in
+    /*) ;;
+    *) echo "   !! template login home is not absolute: $home" >&2; return 1 ;;
+  esac
+  key=$(awk 'NF && $1 !~ /^#/ {print; exit}' "$GATEWAY_PUBLIC_KEY_FILE")
+  [ -n "$key" ] || { echo "   !! gateway public key file is empty" >&2; return 1; }
+
+  ssh_dir="$mnt$home/.ssh"
+  mkdir -p "$ssh_dir"
+  printf '%s\n' "$key" > "$ssh_dir/authorized_keys"
+  chown "$uid:$gid" "$ssh_dir" "$ssh_dir/authorized_keys"
+  chmod 0700 "$ssh_dir"
+  chmod 0600 "$ssh_dir/authorized_keys"
+}
+
 # seed_hivemind_unit pre-arms the session-sync daemon so a fresh sandbox is
 # already recording before anyone types anything. Until now `hivemind start` had
 # to be run by hand in every new box, and a session that was never synced is not
@@ -364,6 +416,7 @@ for tpl in "${STALE[@]}"; do
   ln -sfn ../lib/pi/pi "$MNT/usr/local/bin/pi"
   install -m 0755 "$HM_BIN"     "$MNT/usr/local/bin/hivemind"
   seed_agent_env "$MNT"
+  install_gateway_key "$MNT"
   # Workload identity: the token unit + timer that keep
   # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with
   # no secret in the guest and nothing to paste.

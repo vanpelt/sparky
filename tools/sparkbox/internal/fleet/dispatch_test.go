@@ -330,6 +330,62 @@ func TestSetPlacerDecidesEveryCreate(t *testing.T) {
 	}
 }
 
+func TestRemoteOnlyPlacerNeverUsesTheGateway(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	f := newFleet(t, mgr, newIndex(t))
+	f.SetPlacer(fleet.RemoteOnlyPlacer{})
+
+	if _, err := f.Create(context.Background(), "before-node", "alice", "ubuntu", 1, 512); err == nil {
+		t.Fatal("a control-plane-only gateway created a local sandbox without a VM node")
+	}
+	if _, ok := mgr.Get("before-node"); ok {
+		t.Fatal("the gateway manager holds a sandbox after a refused create")
+	}
+
+	nodec := newBuildingNode("node-c")
+	nodeb := newBuildingNode("node-b")
+	attachBuilder(t, f, nodec)
+	attachBuilder(t, f, nodeb)
+
+	b, err := f.Create(context.Background(), "remote", "alice", "ubuntu", 1, 512)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if b.Node != "node-b" || !nodeb.took("create") {
+		t.Fatalf("unnamed create landed on %q; want first name-sorted VM node", b.Node)
+	}
+	if _, ok := mgr.Get("remote"); ok {
+		t.Fatal("the gateway manager holds a remotely placed sandbox")
+	}
+
+	if _, err := f.CreateOn(context.Background(), mgr.NodeName(), "not-local", "alice", "ubuntu", 1, 512); err == nil {
+		t.Fatal("an explicit request for the gateway bypassed remote-only placement")
+	}
+}
+
+func TestRemoteOnlyPlacerSkipsOfflineAndRefusingNodes(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	f := newFleet(t, mgr, newIndex(t))
+	f.SetPlacer(fleet.RemoteOnlyPlacer{})
+
+	offline := newBuildingNode("node-a")
+	offline.setOnline(false)
+	wrongImage := newBuildingNode("node-b")
+	wrongImage.facts.Images = []string{"debian"}
+	ready := newBuildingNode("node-c")
+	attachBuilder(t, f, offline)
+	attachBuilder(t, f, wrongImage)
+	attachBuilder(t, f, ready)
+
+	b, err := f.Create(context.Background(), "placed", "alice", "ubuntu", 1, 512)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if b.Node != "node-c" {
+		t.Fatalf("create landed on %q, want the first online node that fits", b.Node)
+	}
+}
+
 // The candidates a placer is handed include machines that are not answering,
 // so it can tell "asleep" from "no such machine" — and so can whoever reads
 // the sentence it produces.

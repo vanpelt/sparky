@@ -131,6 +131,7 @@ type Gateway struct {
 	dialTimeout time.Duration
 	doors       *frontdoor.Mapper // optional: hostname (dest-IP) routing
 	domain      string            // base domain for user-facing hints, e.g. "hivemind.tools"
+	sshHost     string            // public gateway hostname when the zone apex is not routable
 	// xtermSubdomain is the label the browser terminal is served under, used only
 	// to tell a hung-up browser tab where to come back. Empty falls back to the
 	// SSH reconnect wording.
@@ -177,6 +178,10 @@ type GatewayOptions struct {
 	Doors *frontdoor.Mapper
 	// Domain is the base DNS domain used in user-facing hints (optional).
 	Domain string
+	// SSHHost is the public gateway hostname used in user@host hints. Empty
+	// falls back to Domain. It differs on wildcard-only edges, where the zone
+	// apex is not a DNS record but a label such as ssh.<Domain> is.
+	SSHHost string
 	// OpenSignup drops the invite requirement, letting anyone who can reach the
 	// gateway register a key. Useful for a demo box; off by default.
 	OpenSignup bool
@@ -235,7 +240,7 @@ func New(opts GatewayOptions) *Gateway {
 		hostKey: opts.HostKey, upstreamKey: opts.UpstreamKey,
 		dial:        opts.Dial,
 		dialTimeout: 15 * time.Second,
-		doors:       opts.Doors, domain: opts.Domain,
+		doors:       opts.Doors, domain: opts.Domain, sshHost: opts.SSHHost,
 		xtermSubdomain:  opts.XtermSubdomain,
 		openSignup:      opts.OpenSignup,
 		nodes:           opts.Nodes,
@@ -415,7 +420,7 @@ func (g *Gateway) handle(s gssh.Session) {
 	// Only the signup door admits an unregistered key; anything else reaching
 	// here without a handle is a bug rather than a user error.
 	if user == "" {
-		fail(s, log, "authenticate", fmt.Errorf("this key isn't registered — run: ssh %s@%s", SignupUser, g.domainHint()))
+		fail(s, log, "authenticate", fmt.Errorf("this key isn't registered — run: ssh %s@%s", SignupUser, g.sshHint()))
 		return
 	}
 
@@ -585,6 +590,13 @@ func (g *Gateway) domainHint() string {
 		return g.domain
 	}
 	return "<domain>"
+}
+
+func (g *Gateway) sshHint() string {
+	if g.sshHost != "" {
+		return g.sshHost
+	}
+	return g.domainHint()
 }
 
 // dialUpstream connects to the VM's sshd with the gateway's upstream key,
@@ -935,10 +947,10 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 		// panicked session goroutine — that was closed at the wire.
 		if len(limit.Running) > 0 {
 			fmt.Fprintf(s.Stderr(), "Pause one to free a slot, e.g.:  ssh %s@%s pause %s\r\n",
-				ControlUser, g.domainHint(), limit.Running[0])
+				ControlUser, g.sshHint(), limit.Running[0])
 		} else {
 			fmt.Fprintf(s.Stderr(), "Pause one to free a slot:  ssh %s@%s list\r\n",
-				ControlUser, g.domainHint())
+				ControlUser, g.sshHint())
 		}
 		s.Exit(1) //nolint:errcheck
 		return
@@ -948,7 +960,7 @@ func (g *Gateway) failStart(s gssh.Session, log *slog.Logger, what string, err e
 		log.Info("start refused: host at capacity", "used_mb", capacity.UsedMB, "budget_mb", capacity.BudgetMB)
 		fmt.Fprintf(s.Stderr(),
 			"sparkbox: host is at capacity (%d/%d MB allocated). Try again shortly, or pause a sandbox:  ssh %s@%s list\r\n",
-			capacity.UsedMB, capacity.BudgetMB, ControlUser, g.domainHint())
+			capacity.UsedMB, capacity.BudgetMB, ControlUser, g.sshHint())
 		s.Exit(1) //nolint:errcheck
 		return
 	}

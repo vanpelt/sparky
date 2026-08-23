@@ -64,6 +64,15 @@ func testNodeOptions(t *testing.T, gateway string) nodeOptions {
 	}
 }
 
+func TestEffectiveVMStateDir(t *testing.T) {
+	if got := effectiveVMStateDir("", "/control"); got != "/control" {
+		t.Errorf("default VM state dir = %q, want control dir", got)
+	}
+	if got := effectiveVMStateDir("/hot", "/control"); got != "/hot" {
+		t.Errorf("explicit VM state dir = %q, want /hot", got)
+	}
+}
+
 // runNodeInBackground starts a node and returns its state dir plus the channel
 // its return value will arrive on. Cancelling is left to the caller: half these
 // tests are about what happens while it is still running.

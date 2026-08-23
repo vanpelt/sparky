@@ -17,12 +17,14 @@ import (
 type fakeMeter struct {
 	byIf   map[uint32]map[netip.Addr]report.Flow
 	ifaces map[uint32]string
+	ready  map[string]bool
 }
 
 func (f *fakeMeter) FlowsByIface() (map[uint32]map[netip.Addr]report.Flow, error) {
 	return f.byIf, nil
 }
 func (f *fakeMeter) Ifaces() map[uint32]string { return f.ifaces }
+func (f *fakeMeter) Ready(tap string) bool     { return f.ready[tap] }
 
 func addr(s string) netip.Addr { return netip.MustParseAddr(s) }
 
@@ -91,6 +93,25 @@ func TestPutPolicyReplacesTapsAndPokes(t *testing.T) {
 	case <-poked:
 	default:
 		t.Error("a policy push should poke a reconcile")
+	}
+}
+
+func TestReadyTapWaitsForReconciledAttachment(t *testing.T) {
+	fm := &fakeMeter{ready: map[string]bool{}}
+	poked := make(chan struct{}, 1)
+	s := New(fm, ipmap.New(), policy.New(nil), func() {
+		fm.ready["sbtap3"] = true
+		poked <- struct{}{}
+	}, nil)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/ready/sbtap3", nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-poked:
+	default:
+		t.Error("ready request did not trigger reconciliation")
 	}
 }
 

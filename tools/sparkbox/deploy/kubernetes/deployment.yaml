@@ -1,0 +1,411 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sparkbox-node
+  namespace: sparkbox-poc
+  labels:
+    app.kubernetes.io/name: sparkbox
+    app.kubernetes.io/component: vm-node
+    app.kubernetes.io/part-of: sparky
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sparkbox
+      app.kubernetes.io/component: vm-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sparkbox
+        app.kubernetes.io/component: vm-node
+        app.kubernetes.io/part-of: sparky
+    spec:
+      serviceAccountName: sparkbox-node
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        compute.coreweave.com/node-pool: __SPARKBOX_NODE_POOL__
+        kubernetes.io/hostname: __SPARKBOX_NODE__
+      initContainers:
+        - name: scrub-retired-gateway-state
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              rm -f \
+                /var/lib/sparkbox/control/sparkbox.db \
+                /var/lib/sparkbox/control/sparkbox.db-shm \
+                /var/lib/sparkbox/control/sparkbox.db-wal \
+                /var/lib/sparkbox/control/schedules.db \
+                /var/lib/sparkbox/control/schedules.db-shm \
+                /var/lib/sparkbox/control/schedules.db-wal \
+                /var/lib/sparkbox/control/gateway_host_key.pem \
+                /var/lib/sparkbox/control/gateway_upstream_key.pem \
+                /var/lib/sparkbox/control/oidc_signing_key.pem \
+                /var/lib/sparkbox/control/oidc_signing_key_prev.pem \
+                /var/lib/sparkbox/control/node_ca_key.pem \
+                /var/lib/sparkbox/control/gateway_control_key.pem
+              rm -rf \
+                /var/lib/sparkbox/control/autocert \
+                /var/lib/sparkbox/control/certmagic \
+                /var/lib/sparkbox/control/favicons
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sparkbox
+        - name: prepare-vm-assets
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          args:
+            - prepare
+          env:
+            - name: SPARKBOX_PROXY_DOMAIN
+              value: __SPARKBOX_PROXY_DOMAIN__
+            - name: SPARKBOX_RELEASE
+              value: v0.5.3
+            - name: SPARKBOX_CHROOT_JAILER
+              value: "true"
+            - name: SPARKBOX_CONTROLLER_UID
+              value: "65532"
+            - name: SPARKBOX_CONTROLLER_GID
+              value: "65532"
+            - name: SPARKBOX_VM_STATE_DIR
+              value: /var/lib/sparkbox/hot/controller
+            - name: GATEWAY_PUBLIC_KEY_FILE
+              value: /run/sparkbox/trust/gateway_upstream_key.pub
+          securityContext:
+            # This one-shot container owns the remaining trusted-template loop
+            # mounts and exits before the VM controller accepts guest traffic.
+            allowPrivilegeEscalation: true
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SYS_ADMIN
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: Unconfined
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 4Gi
+              sparkbox.dev/loop: "1"
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 20Gi
+              sparkbox.dev/loop: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sparkbox
+            - name: gateway-trust
+              mountPath: /run/sparkbox/trust
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: checkpoint-scratch
+              mountPath: /mnt/sparkbox-durable
+      containers:
+        - name: vmm-helper
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /usr/local/sbin/sparkbox-vmm-helper-entrypoint
+          env:
+            - name: SPARKBOX_GUEST_SUBNET
+              value: 172.30.0.0/20
+            - name: SPARKBOX_RESTRICT_INTERNAL_EGRESS
+              value: "1"
+            - name: SPARKBOX_SLUICE_DNS_IP
+              value: 172.30.0.53
+            - name: SPARKBOX_SLUICE_SOCKET
+              value: /run/sluice/sluice.sock
+            - name: SPARKBOX_PRIVILEGED_HELPER_SOCKET
+              value: /run/sparkbox-vmm/helper.sock
+            - name: SPARKBOX_CONTROLLER_UID
+              value: "65532"
+            - name: SPARKBOX_CONTROLLER_GID
+              value: "65532"
+            - name: SPARKBOX_VM_STATE_DIR
+              value: /var/lib/sparkbox/hot/controller
+          securityContext:
+            # This is the entire long-lived Linux privilege boundary. Its Unix
+            # socket accepts only UID 65532 and its protocol contains no paths,
+            # commands, device numbers, or caller-selected credentials.
+            allowPrivilegeEscalation: false
+            appArmorProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - DAC_READ_SEARCH
+                - FOWNER
+                - KILL
+                - MKNOD
+                - NET_ADMIN
+                - SETGID
+                - SETUID
+                - SYS_CHROOT
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              # Firecracker is this container's child, so guest RAM is charged
+              # to this cgroup rather than to the unprivileged controller.
+              cpu: "48"
+              memory: 400Gi
+              sparkbox.dev/kvm: "1"
+              sparkbox.dev/tun: "1"
+            limits:
+              cpu: "56"
+              memory: 448Gi
+              sparkbox.dev/kvm: "1"
+              sparkbox.dev/tun: "1"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test -S /run/sparkbox-vmm/helper.sock
+            periodSeconds: 2
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test -S /run/sparkbox-vmm/helper.sock
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sparkbox
+            - name: vmm-socket
+              mountPath: /run/sparkbox-vmm
+            - name: sluice-socket
+              mountPath: /run/sluice
+              readOnly: true
+        - name: sluice
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          command:
+            - /usr/local/sbin/sparkbox-sluice-entrypoint
+          env:
+            - name: SPARKBOX_SLUICE_DNS_IP
+              value: 172.30.0.53
+            - name: SPARKBOX_SLUICE_SOCKET
+              value: /run/sluice/sluice.sock
+          securityContext:
+            # TCX loading/attachment and low-port DNS binding are Sluice's only
+            # privileges. It receives no device or host/data volume mounts.
+            allowPrivilegeEscalation: false
+            appArmorProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - BPF
+                - NET_ADMIN
+                - NET_BIND_SERVICE
+            privileged: false
+            readOnlyRootFilesystem: true
+            # CKS/containerd clears the permitted/effective capability sets
+            # for a non-root UID (leaving additions only in CapBnd). Run as
+            # root so these three requested capabilities are effective; the
+            # sidecar has no devices, host/data mounts, or writable rootfs.
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            exec:
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --unix-socket
+                - /run/sluice/sluice.sock
+                - http://sluice/report.json
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --unix-socket
+                - /run/sluice/sluice.sock
+                - http://sluice/report.json
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: sluice-socket
+              mountPath: /run/sluice
+        - name: sparkbox-node
+          image: __SPARKBOX_IMAGE__
+          imagePullPolicy: Always
+          env:
+            - name: SPARKBOX_PROXY_DOMAIN
+              value: __SPARKBOX_PROXY_DOMAIN__
+            - name: SPARKBOX_RELEASE
+              value: v0.5.3
+            - name: SPARKBOX_GUEST_SUBNET
+              value: 172.30.0.0/20
+            - name: SPARKBOX_HOST_MEM_MB
+              value: "480000"
+            - name: SPARKBOX_MEM_ADMISSION_PCT
+              value: "90"
+            - name: SPARKBOX_MAX_RUNNING_PER_OWNER
+              value: "50"
+            - name: SPARKBOX_GATEWAY_ADDR
+              value: sparkbox-gateway.sparkbox-poc.svc.cluster.local:2222
+            - name: SPARKBOX_NODE_NAME
+              value: cks-poc
+            - name: SPARKBOX_NODE_KEY_DIR
+              value: /var/lib/sparkbox/node-identity
+            - name: SPARKBOX_SKIP_PREPARE
+              value: "true"
+            - name: SPARKBOX_CHROOT_JAILER
+              value: "true"
+            - name: SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS
+              value: "true"
+            - name: SPARKBOX_PRIVILEGED_HELPER_SOCKET
+              value: /run/sparkbox-vmm/helper.sock
+            - name: SPARKBOX_CONTROLLER_UID
+              value: "65532"
+            - name: SPARKBOX_CONTROLLER_GID
+              value: "65532"
+            - name: SPARKBOX_VM_STATE_DIR
+              value: /var/lib/sparkbox/hot/controller
+            - name: SPARKBOX_SLUICE_SOCKET
+              value: /run/sluice/sluice.sock
+            - name: SPARKBOX_GUEST_DNS
+              value: 172.30.0.53
+          securityContext:
+            allowPrivilegeEscalation: false
+            appArmorProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              ephemeral-storage: 40Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 100Gi
+          startupProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 240
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sparkbox
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/sparkbox/control
+              subPath: control
+            - name: data
+              mountPath: /var/lib/sparkbox/hot/controller
+              subPath: hot/controller
+            - name: data
+              mountPath: /var/lib/sparkbox/node-identity
+              subPath: node-identity
+            - name: gateway-trust
+              mountPath: /run/sparkbox/trust
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: checkpoint-scratch
+              mountPath: /mnt/sparkbox-durable
+            - name: vmm-socket
+              mountPath: /run/sparkbox-vmm
+            - name: sluice-socket
+              mountPath: /run/sluice
+      volumes:
+        - name: data
+          hostPath:
+            path: /mnt/local/sparkbox-poc
+            type: DirectoryOrCreate
+        - name: gateway-trust
+          secret:
+            secretName: sparkbox-node-trust
+            defaultMode: 0444
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: checkpoint-scratch
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: vmm-socket
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: sluice-socket
+          emptyDir:
+            sizeLimit: 1Mi

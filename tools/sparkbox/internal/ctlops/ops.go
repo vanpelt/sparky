@@ -59,6 +59,15 @@ type Sandboxes interface {
 	ArchivingEnabled() bool
 }
 
+// Checkpoints is the optional, currently node-local durable checkpoint slice.
+// Enabled is target-specific: a gateway may have a checkpoint store while the
+// requested sandbox lives on a remote node that does not expose this v1.
+type Checkpoints interface {
+	Enabled(name string) bool
+	Checkpoint(ctx context.Context, name string) error
+	RestoreCheckpoint(ctx context.Context, name string) error
+}
+
 // Templates is the snapshot/fork slice, separate because a host whose driver
 // cannot archive has snapshots disabled while ordinary sandboxes still work.
 type Templates interface {
@@ -164,12 +173,13 @@ type Config struct {
 	Templates Templates // required
 	Accounts  Accounts  // required
 
-	Tags      Tagger     // nil: tag operations are KindDisabled
-	Schedules Schedules  // nil: schedule operations are KindDisabled
-	Routes    Routes     // nil: share operations are KindDisabled
-	Sessions  Minter     // nil: MintSessionToken is KindDisabled
-	Nodes     NodeRoster // nil: node operations are KindDisabled
-	GitHub    GitHubKeys // nil: the real github.com client
+	Tags        Tagger      // nil: tag operations are KindDisabled
+	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
+	Schedules   Schedules   // nil: schedule operations are KindDisabled
+	Routes      Routes      // nil: share operations are KindDisabled
+	Sessions    Minter      // nil: MintSessionToken is KindDisabled
+	Nodes       NodeRoster  // nil: node operations are KindDisabled
+	GitHub      GitHubKeys  // nil: the real github.com client
 	// GitHubDevice runs the OAuth device flow. nil — the default, and the state
 	// of any host with no --github-client-id — leaves the key check as the only
 	// way to link, which is what shipped before this existed.
@@ -192,16 +202,17 @@ type Config struct {
 // Ops is the control-plane core. One per process; safe for concurrent use
 // because every store it holds already is.
 type Ops struct {
-	boxes     Sandboxes
-	templates Templates
-	accounts  Accounts
-	tags      Tagger
-	schedules Schedules
-	routes    Routes
-	sessions  Minter
-	nodes     NodeRoster
-	github    GitHubKeys
-	ghDevice  GitHubDeviceFlow
+	boxes       Sandboxes
+	templates   Templates
+	accounts    Accounts
+	tags        Tagger
+	checkpoints Checkpoints
+	schedules   Schedules
+	routes      Routes
+	sessions    Minter
+	nodes       NodeRoster
+	github      GitHubKeys
+	ghDevice    GitHubDeviceFlow
 
 	defaultImage       string
 	domain             string
@@ -228,6 +239,7 @@ func New(cfg Config) *Ops {
 		templates:          cfg.Templates,
 		accounts:           cfg.Accounts,
 		tags:               cfg.Tags,
+		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
 		sessions:           cfg.Sessions,
