@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sparkbox HTTPS proxy</title><style>
+:root{color-scheme:dark;background:#0b0d10;color:#e8edf2;font:17px/1.65 ui-sans-serif,system-ui,sans-serif}body{max-width:760px;margin:0 auto;padding:64px 24px}h1,h2{line-height:1.15}h1{font-size:2.5rem}h2{margin-top:2.4rem}a{color:#74c7ec}code,pre{background:#171b21;border-radius:6px}code{padding:.15rem .35rem}pre{padding:1rem;overflow:auto}aside{border-left:3px solid #74c7ec;padding:.1rem 1rem;color:#c9d2dc}
+</style></head><body>
+<p><a href="/">← Sparkbox docs</a></p><h1>HTTPS proxy</h1>
+<p>Every sandbox has a default hostname under the Sparkbox domain. The edge forwards requests to port <code>8000</code> in the VM unless the URL names another port or the route is configured differently.</p>
+<h2>Start a service</h2>
+<pre><code>python3 -m http.server 8000 --bind 0.0.0.0</code></pre>
+<aside>Bind to <code>0.0.0.0</code>, not <code>127.0.0.1</code>. The proxy reaches the service over the VM's network interface.</aside>
+<h2>Other ports</h2>
+<p>Use the desired port in the public URL, for example <code>https://your-box.catnip.sh:5173</code>. Common development HTTPS ports are exposed by the CKS edge. Run <code>sparkbox set-port PORT</code> inside the VM to change the default hostname's target.</p>
+<h2>Wake on request</h2>
+<p>A request to a paused sandbox asks Sparkbox to resume it before connecting. Cold starts can therefore make the first request slower than subsequent requests.</p>
+<h2>Access</h2>
+<p>Routes are private by default and use the Sparkbox browser session. Run <code>sparkbox make-public</code> or <code>sparkbox make-private</code> inside the VM to change all of its routes together. Make a route public only when the service is intended to be reachable without your account.</p>
+<h2>WebSockets and streaming</h2>
+<p>The edge passes through WebSocket upgrades and streaming HTTP responses. Application-level authentication, secrets, and authorization remain the application's responsibility on public routes.</p>
+</body></html>

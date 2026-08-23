@@ -69,7 +69,7 @@ HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/h
 # the ~/.claude.json onboarding seed + the hivemind daemon unit). Versioned like
 # IDENTITY_REV so bumping it re-patches every template on the next run even when
 # no tool version moved.
-AGENT_ENV_REV=2
+AGENT_ENV_REV=3
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -292,6 +292,63 @@ PY
   seed_hivemind_unit "$mnt" "$home" "$uid" "$gid" "$(echo "$pw" | cut -d: -f1)"
 }
 
+# Install one short, platform-owned guide at the harness-specific global paths.
+# This runs only against trusted base templates (snap-* and live VM rootfs files
+# never enter STALE), so the next sandbox clone inherits it while existing
+# sandboxes remain byte-for-byte untouched.
+install_agent_guidance() {
+  local mnt=$1
+  local pw home uid gid canonical
+  pw=$(awk -F: '$3 == 1000 {print; exit}' "$mnt/etc/passwd") || return 0
+  [ -n "$pw" ] || { echo "   !! no uid-1000 user in template; skipping agent guidance" >&2; return 0; }
+  uid=$(echo "$pw" | cut -d: -f3)
+  gid=$(echo "$pw" | cut -d: -f4)
+  home=$(echo "$pw" | cut -d: -f6)
+  [ -d "$mnt$home" ] || { echo "   !! $home missing in template; skipping agent guidance" >&2; return 0; }
+
+  mkdir -p "$mnt$home/.agents" "$mnt$home/.codex" "$mnt$home/.claude"
+  canonical="$mnt$home/.agents/AGENTS.md"
+  cat > "$canonical" <<'EOF'
+You are running in a Sparkbox microVM.
+
+Sparkbox documentation: https://docs.catnip.sh/docs.md
+
+The HTTPS proxy is documented at https://docs.catnip.sh/proxy.md.
+
+Your disk is persistent. CPU and memory are shared across your Sparkbox owner
+pool; idle guest memory may be reclaimed and returned when it becomes active.
+
+Use `sparkbox pin` before starting work that must stay continuously available,
+such as a server, daemon, or long-running job. Pinning protects the VM from idle
+pause and memory-pressure reclamation. Run `sparkbox unpin` when that work is
+finished so the shared pool can reclaim idle resources. `sparkbox status` shows
+the current pin state.
+
+The VM can also manage its default HTTPS endpoint: `sparkbox set-port PORT`
+changes the forwarded port, `sparkbox make-public` allows unauthenticated
+access to all of this VM's routes, and `sparkbox make-private` restores the
+authenticated default.
+
+Only use documented Sparkbox features. Undocumented local endpoints, metadata
+services, gateway ports, and node services are internal infrastructure and may
+change without notice.
+EOF
+
+  # Respect a future base image that intentionally supplies a regular harness
+  # file. Our own symlinks are safe to update idempotently on every template
+  # refresh, but replacing a real file would silently discard its instructions.
+  for spec in ".codex/AGENTS.md" ".claude/CLAUDE.md"; do
+    if [ -e "$mnt$home/$spec" ] && [ ! -L "$mnt$home/$spec" ]; then
+      echo "   !! $home/$spec is a regular file; leaving it unchanged" >&2
+      continue
+    fi
+    ln -sfn ../.agents/AGENTS.md "$mnt$home/$spec"
+  done
+  chown -R "$uid:$gid" "$mnt$home/.agents" "$mnt$home/.codex" "$mnt$home/.claude"
+  chmod 0755 "$mnt$home/.agents" "$mnt$home/.codex" "$mnt$home/.claude"
+  chmod 0644 "$canonical"
+}
+
 # install_gateway_key replaces the release template's build-time fleet key
 # with the key mounted into this one-shot preparation container. These are
 # trusted base templates only (snap-* images never enter STALE), so replacing
@@ -416,6 +473,7 @@ for tpl in "${STALE[@]}"; do
   ln -sfn ../lib/pi/pi "$MNT/usr/local/bin/pi"
   install -m 0755 "$HM_BIN"     "$MNT/usr/local/bin/hivemind"
   seed_agent_env "$MNT"
+  install_agent_guidance "$MNT"
   install_gateway_key "$MNT"
   # Workload identity: the token unit + timer that keep
   # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with

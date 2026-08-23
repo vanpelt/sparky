@@ -130,7 +130,7 @@ type ClientOptions struct {
 	Manager Manager
 	Emitter *Emitter
 	// Uplink, if set, is bound to each live link so this node can make requests
-	// OF its gateway — today the two workload-identity calls. Nil is a node
+	// OF its gateway — workload identity and guest route self-service. Nil is a node
 	// that never asks for anything, which is every node before this existed.
 	Uplink *Uplink
 	// Net, if set, is the egress gateway on this machine: what a pushed policy

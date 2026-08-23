@@ -36,6 +36,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/grpcidentity"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
@@ -359,8 +360,9 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	if opts.metaAddr != "" {
 		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
-			Identity:    identityRelay,
-			GuestSubnet: opts.guestSubnet,
+			Identity:     identityRelay,
+			RouteControl: relayRouteControl{up: uplink},
+			GuestSubnet:  opts.guestSubnet,
 			// No default audience here: the gateway substitutes its own, which
 			// is the only one that could be right — the allowlist that decides
 			// whether an audience is permitted lives with the issuer.
@@ -433,6 +435,37 @@ type relayIdentity struct {
 
 	mu   sync.RWMutex
 	grpc gatewayIdentityClient
+}
+
+type gatewayRouteControl struct {
+	fleet *fleet.Fleet
+	node  string
+}
+
+func (c gatewayRouteControl) SetVisibility(ctx context.Context, box *host.Sandbox, visibility string) (metadata.RouteVisibility, error) {
+	resp, err := c.fleet.SelfVisibility(ctx, c.node, nodelink.SelfVisibilityReq{Sandbox: box.Name, Visibility: visibility})
+	return metadata.RouteVisibility{Sandbox: resp.Sandbox, Visibility: resp.Visibility, Routes: resp.Routes}, err
+}
+
+func (c gatewayRouteControl) SetPort(ctx context.Context, box *host.Sandbox, port int) (metadata.RoutePort, error) {
+	resp, err := c.fleet.SelfPort(ctx, c.node, nodelink.SelfPortReq{Sandbox: box.Name, Port: port})
+	return metadata.RoutePort{Sandbox: resp.Sandbox, Port: resp.Port}, err
+}
+
+type relayRouteControl struct{ up *nodelink.Uplink }
+
+func (c relayRouteControl) SetVisibility(ctx context.Context, box *host.Sandbox, visibility string) (metadata.RouteVisibility, error) {
+	var resp nodelink.SelfVisibilityResp
+	err := c.up.Request(ctx, nodelink.TypeSelfVisibility,
+		nodelink.SelfVisibilityReq{Sandbox: box.Name, Visibility: visibility}, &resp)
+	return metadata.RouteVisibility{Sandbox: resp.Sandbox, Visibility: resp.Visibility, Routes: resp.Routes}, err
+}
+
+func (c relayRouteControl) SetPort(ctx context.Context, box *host.Sandbox, port int) (metadata.RoutePort, error) {
+	var resp nodelink.SelfPortResp
+	err := c.up.Request(ctx, nodelink.TypeSelfPort,
+		nodelink.SelfPortReq{Sandbox: box.Name, Port: port}, &resp)
+	return metadata.RoutePort{Sandbox: resp.Sandbox, Port: resp.Port}, err
 }
 
 type gatewayIdentityClient interface {

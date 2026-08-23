@@ -35,6 +35,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindpresence"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -859,6 +860,7 @@ func serve(args []string) error {
 		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
 			Identity:        metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
+			RouteControl:    gatewayRouteControl{fleet: flt, node: nodeName},
 			DefaultAudience: firstOr(splitList(*oidcAud), defaultAudience),
 			GuestSubnet:     *guestSubnet,
 		})
@@ -901,6 +903,11 @@ func serve(args []string) error {
 		px := proxy.New(flt, routeStore, *proxyDomain, log)
 		px.SetDialer(flt.DialContext)
 		px.SetMetrics(metricsRegistry)
+		// Public, version-matched environment documentation lives on the edge
+		// itself. "docs" is globally reserved, so a sandbox route can never
+		// shadow this handler.
+		px.SetReserved("docs", guestdocs.Handler())
+		log.Info("guest documentation enabled", "url", "https://docs."+*proxyDomain)
 		// The issuer rides on the existing proxy edge: wildcard DNS already
 		// resolves oidc.<domain> to this host and autocert already issues a cert
 		// per SNI, so serving it is two GET handlers and no new listener.

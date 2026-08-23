@@ -1,7 +1,6 @@
 package nodelink
 
-// The node's request channel, and the identity verbs that are the only thing
-// riding it.
+// The node's request channel for workload identity and guest route controls.
 
 import (
 	"bytes"
@@ -79,7 +78,7 @@ func TestIdentityRequestReachesTheGatewayHook(t *testing.T) {
 	// worth being explicit about: every other Handle in this package is on the
 	// node.
 	node, _ := newPipePair(t, nil, func(c *Conn) {
-		registerIdentityOps(c, "laptop", Hooks{
+		registerUplinkOps(c, "laptop", Hooks{
 			OnIdentityToken: func(_ context.Context, n string, r IdentityReq) (IdentityTokenResp, error) {
 				gotNode, gotReq = n, r
 				return IdentityTokenResp{Token: "jwt", ExpiresAt: exp}, nil
@@ -112,7 +111,7 @@ func TestIdentityRequestReachesTheGatewayHook(t *testing.T) {
 // otherwise an operator debugging a tokenless guest is sent looking for a
 // protocol mismatch that is not there.
 func TestIdentityRequestWithNoHookIsRefusedInWords(t *testing.T) {
-	node, _ := newPipePair(t, nil, func(c *Conn) { registerIdentityOps(c, "laptop", Hooks{}) })
+	node, _ := newPipePair(t, nil, func(c *Conn) { registerUplinkOps(c, "laptop", Hooks{}) })
 	u := NewUplink()
 	defer u.attach(node)()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -130,7 +129,7 @@ func TestIdentityRequestWithNoHookIsRefusedInWords(t *testing.T) {
 func TestIdentityRequestWithoutASandboxIsInvalid(t *testing.T) {
 	reached := false
 	node, _ := newPipePair(t, nil, func(c *Conn) {
-		registerIdentityOps(c, "laptop", Hooks{
+		registerUplinkOps(c, "laptop", Hooks{
 			OnIdentityToken: func(context.Context, string, IdentityReq) (IdentityTokenResp, error) {
 				reached = true
 				return IdentityTokenResp{}, nil
@@ -149,6 +148,43 @@ func TestIdentityRequestWithoutASandboxIsInvalid(t *testing.T) {
 	}
 	if reached {
 		t.Error("a nameless request reached the gateway's hook")
+	}
+}
+
+func TestGuestRouteRequestsReachGatewayWithAuthenticatedNode(t *testing.T) {
+	var gotNode string
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfVisibility: func(_ context.Context, n string, req SelfVisibilityReq) (SelfVisibilityResp, error) {
+				gotNode = n
+				return SelfVisibilityResp{Sandbox: req.Sandbox, Visibility: req.Visibility, Routes: 2}, nil
+			},
+			OnSelfPort: func(_ context.Context, n string, req SelfPortReq) (SelfPortResp, error) {
+				gotNode = n
+				return SelfPortResp{Sandbox: req.Sandbox, Port: req.Port}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var visibility SelfVisibilityResp
+	if err := u.Request(ctx, TypeSelfVisibility,
+		SelfVisibilityReq{Sandbox: "alices-box", Visibility: "public"}, &visibility); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" || visibility.Visibility != "public" || visibility.Routes != 2 {
+		t.Errorf("visibility response = %+v, node = %q", visibility, gotNode)
+	}
+
+	var port SelfPortResp
+	if err := u.Request(ctx, TypeSelfPort, SelfPortReq{Sandbox: "alices-box", Port: 5173}, &port); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" || port.Port != 5173 {
+		t.Errorf("port response = %+v, node = %q", port, gotNode)
 	}
 }
 
