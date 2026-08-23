@@ -540,6 +540,7 @@ func (c *Conn) reply(req *Frame, out any, err error) {
 	f := &Frame{ID: req.ID, Type: TypeReply}
 	if err != nil {
 		f.Err = ctlops.ToWire(req.Type, err)
+		logHandlerError(c, req.Type, f.Err, err)
 	} else {
 		raw, merr := marshalBody(out)
 		if merr != nil {
@@ -551,6 +552,34 @@ func (c *Conn) reply(req *Frame, out any, err error) {
 	if serr := c.out.post(f); serr != nil {
 		c.log.Debug("nodelink: reply not delivered", "type", req.Type, "err", serr)
 	}
+}
+
+// logHandlerError records, on the machine where it happened, the cause of a
+// request this node just refused.
+//
+// Nothing else does, and the wire format is built on the assumption that
+// something does: WireError deliberately drops the wrapped cause because it may
+// name a driver path or an internal address, and ctlops.wireSentence blanks any
+// Msg carrying a control character. Both are right, and together they mean a
+// failure can reach the gateway as "the remote host reported a failure it could
+// not describe" with the real sentence existing nowhere at all. The operator is
+// then debugging a node whose logs are silent about the only thing that went
+// wrong.
+//
+// Internal faults get ERROR because they are this machine's problem. Everything
+// else — a name the caller may not have, a limit they hit, a capability this
+// host does not run — is a well-formed answer that crossed the link intact and
+// is already being shown to whoever asked, so it goes to DEBUG rather than
+// filling an operator's log with other people's typos.
+func logHandlerError(c *Conn, typ string, w *ctlops.WireError, cause error) {
+	if w == nil {
+		return
+	}
+	if w.Kind == ctlops.KindInternal.String() {
+		c.log.Error("nodelink: request failed", "type", typ, "code", w.Code, "err", cause)
+		return
+	}
+	c.log.Debug("nodelink: request refused", "type", typ, "kind", w.Kind, "code", w.Code, "err", cause)
 }
 
 func (c *Conn) cancelInflight(f *Frame) {
