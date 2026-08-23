@@ -3,9 +3,11 @@
 Status: research spike
 Date: 2026-08-23
 Subject: [`smol-machines/smolvm`](https://github.com/smol-machines/smolvm) @ `v1.10.1` / `159fe30`
-Lens: what it means for Sparkbox, especially the CKS/Kubernetes work on
-[`feat/sparkbox-cks-poc`](../deploy/kubernetes/) and
-[`deploy-cks.md`](deploy-cks.md).
+Lens: what it means for Sparkbox, especially the CKS/Kubernetes work in
+[`deploy/kubernetes/`](../deploy/kubernetes/) and [`deploy-cks.md`](deploy-cks.md).
+
+*Updated 2026-08-23 after the CKS work merged to main. The conclusions did not
+move; two of them got independent corroboration from that merge, noted inline.*
 
 ## Name disambiguation, first
 
@@ -113,7 +115,16 @@ process that secretly manages VMs, instead of managing the VMs.
 
 ### Option A — sandboxes become Pods, smolvm's shim becomes the runtime
 
-This is the interesting one. `runtimeClassName: smolvm` on a Pod and every Pod
+This is the interesting one, and Sparkbox's own security review arrived at the
+same doorway from the other side. [`security-hardening.md`](security-hardening.md)
+closes by naming the architectural alternative to a device-owning application
+Pod: "a node-level runtime shim or daemon", citing Kata Containers and
+firecracker-containerd, and concluding "a narrow node runtime owns
+virtualization; the public service calls it over a constrained protocol."
+
+That is precisely what a containerd shim v2 is. The disagreement between that
+paragraph and this section is not about the destination — it is about whether
+the shim should be smolvm's or ours. `runtimeClassName: smolvm` on a Pod and every Pod
 sandbox boots as its own microVM. If a Sparkbox sandbox were a Pod:
 
 - the kubelet allocates `/dev/kvm`; **our device plugin disappears**;
@@ -301,4 +312,4 @@ the outcome. Borrow (1) and (2) now.
 - [smolvm lossless serve restart](https://github.com/smol-machines/smolvm/blob/main/docs/lossless-serve-restart.md)
 - [libkrun](https://github.com/containers/libkrun) / [libkrunfw](https://github.com/containers/libkrunfw) (upstream of their forks)
 - [CelestoAI/SmolVM](https://github.com/CelestoAI/SmolVM) — the name collision, not evaluated
-- Sparkbox: [`deploy-cks.md`](deploy-cks.md), [`cks-reflink-persistence-plan.md`](cks-reflink-persistence-plan.md), [`security-hardening.md`](security-hardening.md) (all on `feat/sparkbox-cks-poc`), and [`internal/vmm/driver.go`](../internal/vmm/driver.go)
+- Sparkbox: [`deploy-cks.md`](deploy-cks.md), [`cks-reflink-persistence-plan.md`](cks-reflink-persistence-plan.md), [`security-hardening.md`](security-hardening.md), and [`internal/vmm/driver.go`](../internal/vmm/driver.go)

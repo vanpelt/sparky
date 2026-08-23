@@ -1,7 +1,8 @@
 # OCI rootfs templates and durable guest volumes
 
-Status: design, first slice landing
-Date: 2026-08-23
+Status: design; three slices landed, see
+[`oci-rootfs-remaining-work.md`](oci-rootfs-remaining-work.md)
+Date: 2026-08-23 (revised the same day, after the CKS work merged to main)
 Companion to [`smolvm-evaluation.md`](smolvm-evaluation.md), which is where
 these two ideas came from. This document makes the design decisions; it does not
 restate the evaluation's reasoning for *why* these two came first.
@@ -42,7 +43,10 @@ Four things are wrong with that, and they are all the same thing:
 - **It needs `CAP_SYS_ADMIN` and a loop device.** On CKS this is a whole
   `sparkbox.dev/loop` device-plugin resource and an init container with
   `SYS_ADMIN` + `AppArmor: Unconfined` + `seccomp: Unconfined`, just to build a
-  filesystem.
+  filesystem. [`security-hardening.md`](security-hardening.md) lists removing
+  that loop bundle as remaining work item 1, conditioned on "trusted-template
+  tooling mov[ing] into the image build or a disposable helper microVM". This
+  design is the first of those two.
 
 ## Where we're going
 
@@ -66,6 +70,20 @@ This is the single highest-leverage line in the design. It deletes:
 - `SYS_ADMIN` from the CKS `prepare-vm-assets` init container;
 - the loop-mount/umount failure modes in both `build-rootfs.sh` and
   `refresh-agent-tools.sh`.
+
+It also lands on the right side of a rule main adopted while this was being
+written. `refresh-agent-tools.sh` now refuses to touch user-derived
+`snap-*.ext4` templates at all, because "mounting an untrusted guest filesystem
+asks the privileged host kernel to parse attacker-controlled ext4 metadata and
+turns the management plane into a second sandbox boundary." A build that never
+mounts anything is not subject to that rule, which is worth more than the
+capability arithmetic: it means the same tooling can eventually be pointed at a
+guest-derived image, which the mounting path can never be.
+
+`ext4.ReadFile` shells out to `debugfs` for the same reason. debugfs parses the
+same attacker-controlled metadata, but in *userspace* — a bug there is a crashed
+helper process, not a compromised host kernel. That is why reading a template's
+stamp this way was already acceptable on main and mounting it was not.
 
 The unpack still needs `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, and `MKNOD` to
 reproduce a container image's ownership and device nodes faithfully — so this is
@@ -104,6 +122,13 @@ Materialization is atomic in the same style as `firecracker.Snapshot`: build to
 `.<key>.ext4.tmp`, `rename` into place. A concurrent create sees the old
 template or the new one, never a torn one.
 
+Main reached the same conclusion independently while this was being written:
+`refresh-agent-tools.sh` now folds `gateway_key=<sha256>` into the stamp it
+compares against, for exactly this reason. The difference is where the fact
+lives — there it is a stamp written *into* the artifact and trusted on the next
+read; here it is an input to the artifact's name, so a mismatch cannot be
+mistaken for a match.
+
 ### Decision: keep the `vmm.Config.Image` seam exactly as it is
 
 The driver resolves `Config.Image` to `<imageDir>/<image>.ext4` today. It keeps
@@ -126,10 +151,18 @@ image, when we expose it, is a control-plane feature rather than a driver one.
 
 ### What it does not solve
 
-Template snapshots are still refused on CKS under `--disable-host-rootfs-mounts`
-— but for a different and smaller reason. `Snapshot` sanitizes a *live guest's*
-rootfs, which is a mount, not a build. Moving that to a mountless path is its own
-piece of work; it is unblocked by this design but not done by it.
+Template snapshots are still refused on CKS. `Snapshot` sanitizes a *live
+guest's* rootfs — an attacker-controlled filesystem — which today means mounting
+it, and that is the thing main just ruled out.
+[`security-hardening.md`](security-hardening.md) names the fix as remaining work
+item 2: "guest-side first-boot sanitization or a mountless/disposable sanitizer".
+
+This design does not do that, but it supplies the missing half of the second
+option: `internal/ext4` writes a filesystem without mounting one, and
+`ext4.ReadFile` reads one without mounting it either. What is still needed is a
+mountless *editor* — the sanitizer has to delete host keys and machine-id from an
+existing image, which is neither of those. `debugfs -w` can do it, and whether
+that is acceptable against a hostile image is a real question, not a formality.
 
 ---
 
@@ -164,6 +197,15 @@ no marginal distribution cost. The mounter is an implementation detail behind th
 interface below; swapping it later is an internal change.
 
 ## Design
+
+### Note: there are now two object-store backends
+
+Main added `objstore.Filesystem`, an immutable store over a mounted filesystem,
+for the VAST PVC. It does not change this design — a guest cannot reach a PVC
+either, for the same virtio-block reason — but it does mean "durable storage" is
+no longer synonymous with "S3 via rclone" on the host side. The guest-facing
+volume path stays S3, because that is the only protocol that crosses the VM
+boundary without a filesystem passthrough.
 
 ### The volume belongs to the owner, not the sandbox
 
