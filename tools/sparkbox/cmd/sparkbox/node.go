@@ -39,6 +39,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/grpcidentity"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindpresence"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
@@ -81,15 +82,18 @@ type nodeOptions struct {
 	// own default gateway on a fixed port and has no way to be told otherwise.
 	metaAddr string
 
-	idleBalloon   time.Duration
-	idleTimeout   time.Duration
-	activityCPU   float64
-	activityNetKB int64
-	maxPerOwner   int
-	memAdmitPct   int
-	hostMemMB     int64
-	memReserve    int64
-	diskPool      int64
+	idleBalloon      time.Duration
+	idleTimeout      time.Duration
+	activityCPU      float64
+	activityNetKB    int64
+	maxPerOwner      int
+	memAdmitPct      int
+	hostMemMB        int64
+	memReserve       int64
+	diskPool         int64
+	hivemindAPI      string
+	hivemindAudience string
+	hivemindInterval time.Duration
 
 	controlTransport   string
 	grpcAddr           string
@@ -306,6 +310,20 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// up, exactly as a gateway does, and — the point of doing it here, before
 	// the link is up — without waiting on a gateway that may be down.
 	mgr.ResumePinned(ctx)
+	if opts.hivemindAPI != "" {
+		monitor, err := hivemindpresence.New(hivemindpresence.Options{
+			APIBase: opts.hivemindAPI, Audience: opts.hivemindAudience,
+			Sandboxes: mgr, Protector: mgr, Identity: identityRelay,
+			Observer: mgr,
+			Logger:   log, UserAgent: "sparkbox/" + version,
+		})
+		if err != nil {
+			return err
+		}
+		go monitor.Run(ctx, opts.hivemindInterval)
+		log.Info("HiveMind session presence enabled",
+			"api", opts.hivemindAPI, "interval", opts.hivemindInterval)
+	}
 	go mgr.RunReaper(ctx, opts.idleBalloon, opts.idleTimeout, time.Minute)
 	// No push loop here. On a gateway that ticker is what reconciles rule
 	// changes the console did not push; on a node there is nothing local to
@@ -491,7 +509,8 @@ func (r *relayIdentity) Describe(ctx context.Context, box *host.Sandbox) (metada
 	}
 	return metadata.Doc{
 		Issuer: resp.Issuer, Subject: resp.Subject, Owner: resp.Owner, GitHub: resp.GitHub,
-		KeyFP: resp.KeyFP, Sandbox: resp.Sandbox, Image: resp.Image, Box: resp.Box,
+		KeyFP: resp.KeyFP, Sandbox: resp.Sandbox, SandboxID: resp.SandboxID,
+		Image: resp.Image, Box: resp.Box,
 	}, nil
 }
 

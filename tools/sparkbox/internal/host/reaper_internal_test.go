@@ -116,3 +116,40 @@ func TestReaperNoBalloonWithoutReserve(t *testing.T) {
 		t.Fatal("short of the pause floor: should still be running")
 	}
 }
+
+func TestPresenceLeasePreventsPauseButAllowsBalloon(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 1024})
+	ctx := context.Background()
+	box, err := m.Create(ctx, "working", "alice", "ubuntu", 1, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.boxes["working"].LastActive = time.Now().Add(-2 * time.Hour)
+	m.ProtectUntil(box.ID, time.Now().Add(10*time.Minute))
+
+	m.reapOnce(ctx, time.Minute, time.Hour)
+
+	if m.boxes["working"].State != vmm.StateRunning {
+		t.Fatalf("presence-protected sandbox was paused: %s", m.boxes["working"].State)
+	}
+	if !m.boxes["working"].Ballooned {
+		t.Fatal("presence lease should still allow idle memory ballooning")
+	}
+
+	// Once the lease expires, the ordinary idle policy resumes.
+	m.protectUntil[box.ID] = time.Now().Add(-time.Second)
+	m.reapOnce(ctx, time.Minute, time.Hour)
+	if m.boxes["working"].State != vmm.StatePaused {
+		t.Fatalf("sandbox with expired lease stayed %s, want paused", m.boxes["working"].State)
+	}
+}
+
+func TestProtectUntilNeverShortensLease(t *testing.T) {
+	m := internalManager(t, Options{})
+	later := time.Now().Add(time.Hour)
+	m.ProtectUntil("sandbox-id", later)
+	m.ProtectUntil("sandbox-id", time.Now().Add(time.Minute))
+	if got := m.protectUntil["sandbox-id"]; !got.Equal(later) {
+		t.Fatalf("lease shortened to %v, want %v", got, later)
+	}
+}

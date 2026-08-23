@@ -36,6 +36,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindpresence"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hostsetup"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
@@ -142,6 +143,9 @@ func serve(args []string) error {
 		tlsEmail             = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
 		oidcSub              = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
 		oidcAud              = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
+		hivemindAPI          = fs.String("hivemind-api", "", "HiveMind API origin used to protect VMs with live agent sessions (empty disables)")
+		hivemindAudience     = fs.String("hivemind-audience", defaultAudience, "OIDC audience used for HiveMind workload-token exchange")
+		hivemindInterval     = fs.Duration("hivemind-presence-interval", time.Minute, "how often to refresh HiveMind session-presence leases")
 		metaAddr             = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
 		dnsAddr              = fs.String("dns-addr", "", "wildcard DNS responder listen address (e.g. <edge-ip>:53); serves *.<domain> -> the edge for a Tailscale split-DNS entry. Empty disables it")
 		dnsAnswer            = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
@@ -247,7 +251,9 @@ func serve(args []string) error {
 			memReserve: *memReserve, diskPool: *diskPool,
 			controlTransport: *nodeControlTransport, grpcAddr: *nodeGRPCAddr,
 			guestDataTransport: *guestDataTransport,
-			metricsAddr:        *metricsAddr, metrics: metricsRegistry, log: log,
+			hivemindAPI:        *hivemindAPI, hivemindAudience: *hivemindAudience,
+			hivemindInterval: *hivemindInterval,
+			metricsAddr:      *metricsAddr, metrics: metricsRegistry, log: log,
 		})
 	}
 
@@ -712,6 +718,21 @@ func serve(args []string) error {
 	// second prohibition, which is the same rule at ingest time.
 	mgr.ResumePinned(ctx)
 
+	if *hivemindAPI != "" {
+		monitor, err := hivemindpresence.New(hivemindpresence.Options{
+			APIBase: *hivemindAPI, Audience: *hivemindAudience,
+			Sandboxes: mgr, Protector: mgr,
+			Observer: mgr,
+			Identity: metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
+			Logger:   log, UserAgent: "sparkbox/" + version,
+		})
+		if err != nil {
+			return err
+		}
+		go monitor.Run(ctx, *hivemindInterval)
+		log.Info("HiveMind session presence enabled",
+			"api", *hivemindAPI, "interval", *hivemindInterval)
+	}
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
 	// Reconcile egress policy periodically so VM churn (create, resume, destroy)
 	// that bypasses the console's change-time push still converges. The console
@@ -1449,7 +1470,7 @@ func (f fleetIdentity) Describe(ctx context.Context, box *host.Sandbox, node str
 	}
 	return doc.Issuer, fleet.Claims{
 		Subject: doc.Subject, Owner: doc.Owner, GitHub: doc.GitHub, KeyFP: doc.KeyFP,
-		Sandbox: doc.Sandbox, Image: doc.Image, Box: doc.Box,
+		Sandbox: doc.Sandbox, SandboxID: doc.SandboxID, Image: doc.Image, Box: doc.Box,
 	}, nil
 }
 

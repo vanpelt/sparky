@@ -99,7 +99,7 @@ func (c *Client) Describe(ctx context.Context, box *host.Sandbox) (metadata.Doc,
 		Issuer: response.GetIssuer(), Subject: response.GetSubject(),
 		Owner: response.GetOwner(), GitHub: response.GetGithub(),
 		KeyFP: response.GetKeyFingerprint(), Sandbox: response.GetSandbox(),
-		Image: response.GetImage(), Box: response.GetNode(),
+		SandboxID: response.GetSandboxId(), Image: response.GetImage(), Box: response.GetNode(),
 	}, nil
 }
 

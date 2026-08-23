@@ -733,7 +733,7 @@ func sandboxRowFromProto(wire *nodev1.Sandbox) nodelink.SandboxRow {
 		return nodelink.SandboxRow{}
 	}
 	return nodelink.SandboxRow{
-		Name: wire.GetName(), Owner: wire.GetOwner(), Image: wire.GetImage(),
+		ID: wire.GetId(), Name: wire.GetName(), Owner: wire.GetOwner(), Image: wire.GetImage(),
 		State: sandboxStateFromProto(wire.GetState()), VCPUs: wire.GetVcpus(),
 		MemMB: wire.GetMemoryMb(), DiskMB: wire.GetDiskMb(),
 		DiskTotalMB: wire.GetDiskTotalMb(), Pinned: wire.GetPinned(),
@@ -780,7 +780,7 @@ func grpcBox(node string, row nodelink.SandboxRow) *host.Sandbox {
 		return nil
 	}
 	box := &host.Sandbox{
-		Name: row.Name, Owner: safeOwner(row.Owner),
+		ID: safeSandboxID(row.ID), Name: row.Name, Owner: safeOwner(row.Owner),
 		Image: ctlops.SafeText(row.Image, maxDisplayText),
 		VCPUs: row.VCPUs, MemMB: row.MemMB, State: safeState(row.State),
 		SSHUser:   ctlops.SafeText(row.SSHUser, maxDisplayText),

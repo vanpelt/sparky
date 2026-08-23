@@ -65,7 +65,8 @@ func TestMintProducesAVerifiableES256Token(t *testing.T) {
 	token, exp, err := iss.Mint(Claims{
 		Subject: SubjectFor("vanpelt"), Audience: "https://hivemind.wandb.tools",
 		Owner: "vanpelt", GitHub: "vanpelt", Sandbox: "tidy-meteor",
-		Image: "universal", Box: "sparkbox-07151236",
+		SandboxID: "8bc9ad3f-7317-4b72-840d-18b3b20470e8",
+		Image:     "universal", Box: "sparkbox-07151236",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +77,8 @@ func TestMintProducesAVerifiableES256Token(t *testing.T) {
 		"iss": "https://oidc.example.test", "sub": "sparkbox:user:vanpelt",
 		"aud": "https://hivemind.wandb.tools", "owner": "vanpelt",
 		"github": "vanpelt", "sandbox": "tidy-meteor", "image": "universal",
-		"box": "sparkbox-07151236",
+		"sandbox_id": "8bc9ad3f-7317-4b72-840d-18b3b20470e8",
+		"box":        "sparkbox-07151236",
 	} {
 		if got, _ := claims[field].(string); got != want {
 			t.Errorf("claim %s = %q, want %q", field, got, want)

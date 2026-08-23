@@ -124,6 +124,7 @@ cheaply answer "who am I" without parsing a JWT.
   "github": "vanpelt",
   "key_fp": "SHA256:…",
   "sandbox": "tidy-meteor",
+  "sandbox_id": "8bc9ad3f-7317-4b72-840d-18b3b20470e8",
   "image": "universal",
   "box": "sparkbox-07151236"
 }
@@ -133,6 +134,10 @@ cheaply answer "who am I" without parsing a JWT.
   account (sub_selector `sparkbox:user:vanpelt`) covers all of a user's
   sandboxes; per-sandbox scoping goes in the CEL policy instead
   (`claims.sandbox == "ci-runner"`, `claims.image == "universal"`, …).
+- `sandbox_id` is the VM's immutable UUID. It is persisted in
+  `sandboxes.json`, survives rename and fleet relay, and lets a relying party
+  bind activity to the VM without treating the mutable `sandbox` name as an
+  identity.
 - `aud` comes from the `?aud=` query (allowlisted per host config, default
   the hivemind SaaS URL) so the same endpoint can later serve other relying
   parties (W&B platform federation, vaults) without a second issuer.

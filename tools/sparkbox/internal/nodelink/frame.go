@@ -611,6 +611,7 @@ type Cancel struct {
 // column is the authorization input, and the gateway overwrites this one from
 // it before the record is indexed.
 type SandboxRow struct {
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Owner       string `json:"owner"`
 	Image       string `json:"image"`
@@ -871,14 +872,15 @@ type IdentityTokenResp struct {
 // Its fields mirror metadata.Doc; they are restated here for the same reason
 // SandboxRow restates host.Sandbox — the wire is its own contract.
 type IdentityDocResp struct {
-	Issuer  string `json:"iss"`
-	Subject string `json:"sub"`
-	Owner   string `json:"owner"`
-	GitHub  string `json:"github,omitempty"`
-	KeyFP   string `json:"key_fp,omitempty"`
-	Sandbox string `json:"sandbox"`
-	Image   string `json:"image"`
-	Box     string `json:"box"`
+	Issuer    string `json:"iss"`
+	Subject   string `json:"sub"`
+	Owner     string `json:"owner"`
+	GitHub    string `json:"github,omitempty"`
+	KeyFP     string `json:"key_fp,omitempty"`
+	Sandbox   string `json:"sandbox"`
+	SandboxID string `json:"sandbox_id"`
+	Image     string `json:"image"`
+	Box       string `json:"box"`
 }
 
 // ---------------------------------------------------------------------------

@@ -26,12 +26,13 @@ type Claims struct {
 	Subject  string
 	Audience string
 
-	Owner   string // sandbox owner's handle
-	GitHub  string // verified github login, empty when unlinked
-	KeyFP   string // ssh key that last authenticated the sandbox's session
-	Sandbox string // sandbox name
-	Image   string // rootfs template
-	Box     string // host node name
+	Owner     string // sandbox owner's handle
+	GitHub    string // verified github login, empty when unlinked
+	KeyFP     string // ssh key that last authenticated the sandbox's session
+	Sandbox   string // sandbox name
+	SandboxID string // immutable sandbox identity, stable across rename
+	Image     string // rootfs template
+	Box       string // host node name
 }
 
 // SubjectFor builds the stable per-user subject. It is deliberately not
@@ -122,7 +123,7 @@ func (i *Issuer) Mint(c Claims) (string, time.Time, error) {
 	}
 	for k, v := range map[string]string{
 		"owner": c.Owner, "github": c.GitHub, "key_fp": c.KeyFP,
-		"sandbox": c.Sandbox, "image": c.Image, "box": c.Box,
+		"sandbox": c.Sandbox, "sandbox_id": c.SandboxID, "image": c.Image, "box": c.Box,
 	} {
 		// `github` must be absent rather than empty when unverified: a policy
 		// like claims.github == "x" should fail closed, and an empty string is a
@@ -189,7 +190,7 @@ func (i *Issuer) Handler() http.Handler {
 			"scopes_supported":                      []string{"openid"},
 			"claims_supported": []string{
 				"iss", "sub", "aud", "exp", "iat", "nbf", "jti",
-				"owner", "github", "key_fp", "sandbox", "image", "box",
+				"owner", "github", "key_fp", "sandbox", "sandbox_id", "image", "box",
 			},
 		})
 	})
