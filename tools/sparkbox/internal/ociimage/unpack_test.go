@@ -28,7 +28,7 @@ type entry struct {
 	mtime    time.Time
 }
 
-func tarball(t *testing.T, entries ...entry) *bytes.Reader {
+func tarStream(t *testing.T, entries ...entry) *bytes.Reader {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -85,7 +85,7 @@ func tarball(t *testing.T, entries ...entry) *bytes.Reader {
 func unpackInto(t *testing.T, entries ...entry) (string, *Result) {
 	t.Helper()
 	dir := t.TempDir()
-	res, err := Unpack(context.Background(), tarball(t, entries...), dir)
+	res, err := Unpack(context.Background(), tarStream(t, entries...), dir)
 	if err != nil {
 		t.Fatalf("Unpack: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestUnpackRefusesPathTraversal(t *testing.T) {
 		"/../escaped",
 	} {
 		dir := t.TempDir()
-		_, err := Unpack(context.Background(), tarball(t, entry{name: name, body: "x"}), dir)
+		_, err := Unpack(context.Background(), tarStream(t, entry{name: name, body: "x"}), dir)
 		if err == nil {
 			// Cleaning may render some of these harmless-but-inside; what must
 			// never happen is a file appearing outside the destination.
@@ -216,7 +216,7 @@ func TestUnpackRefusesPathTraversal(t *testing.T) {
 // face and lands on the host's /etc/passwd if the unpacker just opens it.
 func TestUnpackRefusesWritesThroughASymlinkedParent(t *testing.T) {
 	dir := t.TempDir()
-	_, err := Unpack(context.Background(), tarball(t,
+	_, err := Unpack(context.Background(), tarStream(t,
 		entry{name: "etc", typ: tar.TypeSymlink, link: "/"},
 		entry{name: "etc/passwd", body: "pwned\n"},
 	), dir)
@@ -235,7 +235,7 @@ func TestUnpackRefusesWritesThroughASymlinkedParent(t *testing.T) {
 
 func TestUnpackRefusesAHardlinkEscapingTheTree(t *testing.T) {
 	dir := t.TempDir()
-	_, err := Unpack(context.Background(), tarball(t,
+	_, err := Unpack(context.Background(), tarStream(t,
 		entry{name: "etc", typ: tar.TypeSymlink, link: "/"},
 		entry{name: "stolen", typ: tar.TypeLink, link: "etc/shadow"},
 	), dir)
@@ -312,14 +312,14 @@ func TestUnpackIgnoresEntryTypesWithNoContent(t *testing.T) {
 }
 
 func TestUnpackRejectsABadDestination(t *testing.T) {
-	if _, err := Unpack(context.Background(), tarball(t), filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, err := Unpack(context.Background(), tarStream(t), filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("want error for a missing destination")
 	}
 	file := filepath.Join(t.TempDir(), "afile")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Unpack(context.Background(), tarball(t), file); err == nil {
+	if _, err := Unpack(context.Background(), tarStream(t), file); err == nil {
 		t.Error("want error when the destination is a regular file")
 	}
 }
@@ -327,7 +327,7 @@ func TestUnpackRejectsABadDestination(t *testing.T) {
 func TestUnpackHonoursContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := Unpack(ctx, tarball(t, entry{name: "etc/hostname", body: "x"}), t.TempDir())
+	_, err := Unpack(ctx, tarStream(t, entry{name: "etc/hostname", body: "x"}), t.TempDir())
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want context.Canceled", err)
 	}
