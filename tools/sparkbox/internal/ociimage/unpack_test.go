@@ -85,6 +85,12 @@ func tarStream(t *testing.T, entries ...entry) *bytes.Reader {
 func unpackInto(t *testing.T, entries ...entry) (string, *Result) {
 	t.Helper()
 	dir := t.TempDir()
+	// An unpacked tree contains read-only directories, and t.TempDir's cleanup
+	// is a plain RemoveAll that cannot delete their contents. Cleanups run
+	// LIFO, so this one — registered after TempDir's — runs first. Without it
+	// every test here fails in cleanup when run as a non-root user, which is
+	// how CI runs and is not how a container as root does.
+	t.Cleanup(func() { _ = removeAllForce(dir) })
 	res, err := Unpack(context.Background(), tarStream(t, entries...), dir)
 	if err != nil {
 		t.Fatalf("Unpack: %v", err)

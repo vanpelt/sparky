@@ -181,7 +181,9 @@ func (c *Cache) build(ctx context.Context, img *Image, spec Spec, name string) e
 	if err != nil {
 		return fmt.Errorf("ociimage: staging directory: %w", err)
 	}
-	defer os.RemoveAll(staging)
+	// Not os.RemoveAll: the tree we just wrote is full of read-only directories
+	// and removing an entry needs write permission on its parent.
+	defer removeAllForce(staging)
 
 	fsys := img.Filesystem()
 	res, unpackErr := Unpack(ctx, fsys, staging)

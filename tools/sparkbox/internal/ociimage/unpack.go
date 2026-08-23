@@ -341,3 +341,29 @@ func resolve(root, name string) (string, error) {
 	}
 	return target, nil
 }
+
+// removeAllForce deletes a tree that may contain directories the caller cannot
+// write to.
+//
+// os.RemoveAll cannot: unlinking an entry needs write permission on its
+// *parent*, and an unpacked rootfs is full of read-only directories (0555 is
+// the norm under /usr/share). Running as root hides this completely — root
+// bypasses the check — so it only shows up as a failure once the unpack is
+// unprivileged, at which point it leaks a multi-gigabyte staging tree per
+// build rather than reporting anything.
+//
+// The chmod pass is pre-order, so a directory is made traversable before its
+// entries are listed. Only entries WalkDir reports as directories are touched,
+// and WalkDir does not follow symlinks, so this never chmods through one.
+func removeAllForce(root string) error {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // best effort; RemoveAll reports what actually matters
+		}
+		if d.IsDir() {
+			_ = os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(root)
+}

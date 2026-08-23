@@ -43,11 +43,29 @@ func layerFrom(t *testing.T, files map[string]string) v1.Layer {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	// Directories first so the entries land in a valid order.
-	for _, dir := range []string{"etc/", "usr/", "usr/local/", "usr/local/sbin/"} {
-		if err := tw.WriteHeader(&tar.Header{Name: dir, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+	// Directories first so the entries land in a valid order. usr/share/doc is
+	// deliberately 0555 with a file in it: that is the ordinary shape of a real
+	// rootfs, and it is what makes a plain os.RemoveAll of the staging tree fail
+	// for a non-root build. Every image these tests push carries one so the
+	// cleanup path is covered rather than assumed.
+	for _, dir := range []struct {
+		name string
+		mode int64
+	}{
+		{"etc/", 0o755}, {"usr/", 0o755}, {"usr/local/", 0o755},
+		{"usr/local/sbin/", 0o755}, {"usr/share/", 0o755}, {"usr/share/doc/", 0o555},
+	} {
+		if err := tw.WriteHeader(&tar.Header{Name: dir.name, Typeflag: tar.TypeDir, Mode: dir.mode}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "usr/share/doc/copyright", Typeflag: tar.TypeReg, Mode: 0o444, Size: 4,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("MIT\n")); err != nil {
+		t.Fatal(err)
 	}
 	for path, body := range files {
 		if err := tw.WriteHeader(&tar.Header{
