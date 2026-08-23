@@ -56,6 +56,7 @@ func TestControlUsageListsEveryCommand(t *testing.T) {
 		"list", "pause", "archive", "restore", "resize", "rm", "tags", "pin",
 		"unpin", "snapshot", "fork", "schedule", "whoami", "keys", "passkey",
 		"email", "share", "session-token", "invite", "help",
+		"checkpoint", "github", "node", "secret", "user",
 	} {
 		if !strings.Contains(controlUsage, "  "+cmd) {
 			t.Errorf("ctl usage does not document %q", cmd)

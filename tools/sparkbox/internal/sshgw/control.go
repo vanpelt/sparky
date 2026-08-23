@@ -32,6 +32,14 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  resize <name> <size>     grow a sandbox's root disk, e.g. 25G (cold-boots it)\r\n" +
 	"  rm <name>                delete a sandbox and its disk — permanent, see archive\r\n" +
 	"  tags <name> [<tag>…]     show or set tags (they select which secrets it gets)\r\n" +
+	"\r\n" +
+	" secrets (pushed into your sandboxes as environment variables)\r\n" +
+	"  secret ls                list your secrets (names and tags; never values)\r\n" +
+	"  secret set <NAME> [--tag <t>]…  read a value from stdin and store it\r\n" +
+	"     claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n" +
+	"     the value never goes on the command line, so it stays out of your history.\r\n" +
+	"     untagged secrets and new sandboxes both get the `default` tag, so they meet.\r\n" +
+	"  secret rm <NAME>         delete a secret and strip it from your sandboxes\r\n" +
 	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
 	"  unpin <name>             let a sandbox pause when idle again\r\n" +
 	"\r\n" +
@@ -57,6 +65,12 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  share <name> [public|private]  show or set who can reach a sandbox's URLs\r\n" +
 	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
 	"  invite                   mint a single-use invite code\r\n" +
+	"  user ls                  list the accounts on this host (operators)\r\n" +
+	"  user add <github-login>… admit people by adopting the ssh keys github.com\r\n" +
+	"                             publishes for them — no invite code (operators)\r\n" +
+	"  user sync-github-org <org> [--team <slug>]  do that for a GitHub org or one\r\n" +
+	"                             of its teams (operators). your read:org token, on stdin:\r\n" +
+	"                             gh auth token | ssh ctl@<gateway> user sync-github-org <org>\r\n" +
 	"  node ls                  list the machines in this fleet (operators)\r\n" +
 	"  node approve <SHA256:...> --guest-subnet <CIDR> [--grpc-addr <host:port>]\r\n" +
 	"                             approve that machine and reserve its guest network (operators)\r\n" +
@@ -262,6 +276,10 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlSessionToken(s, c, args[1:], log)
 	case "invite":
 		g.controlInvite(s, c, log)
+	case "secret", "secrets":
+		g.controlSecret(s, c, args[1:], log)
+	case "user", "users":
+		g.controlUser(s, c, args[1:], log)
 	case "node":
 		g.controlNode(s, c, args[1:], log)
 	case "help", "-h", "--help":

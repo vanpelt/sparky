@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ var (
 	_ Templates = (*host.Manager)(nil)
 	_ Accounts  = (*users.Store)(nil)
 	_ Tagger    = (*secrets.Store)(nil)
+	_ Secrets   = (*secrets.Store)(nil)
 	_ Schedules = (*schedule.Store)(nil)
 	_ Routes    = (*routes.Store)(nil)
 	_ Minter    = (*edgeauth.Signer)(nil)
@@ -56,6 +58,16 @@ func (c *calls) all() []string {
 	return append([]string(nil), c.ss...)
 }
 
+// has reports whether an exact recorded call is present.
+func (c *calls) has(call string) bool {
+	for _, s := range c.all() {
+		if s == call {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *calls) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,6 +88,7 @@ var mutatingVerbs = map[string]bool{
 	"NewInvite": true, "schedules.Add": true, "schedules.Delete": true,
 	"SetVisibility": true, "Mint": true,
 	"ApproveNode": true, "RemoveNode": true,
+	"accounts.Create": true, "secrets.Put": true, "secrets.Delete": true,
 }
 
 // mutating reports the recorded calls that could have changed state or woken a
@@ -317,9 +330,62 @@ func (f *fakeAccounts) Get(handle string) (users.User, error) {
 	f.c.add("accounts.Get %s", handle)
 	u, ok := f.users[handle]
 	if !ok {
-		return users.User{}, errors.New("no such user")
+		// The real store's sentinel, not a look-alike: user.go's provisioning
+		// path distinguishes "no such account" from a store failure with
+		// errors.Is, and a fake that only matched by message would let that
+		// branch rot untested.
+		return users.User{}, users.ErrNoSuchUser
 	}
 	return u, nil
+}
+
+// Create registers an account the way users.Store does, including the two
+// refusals provisioning has to handle: a taken handle, and a key some other
+// account already claims.
+func (f *fakeAccounts) Create(handle string, key xssh.PublicKey, label, via, invitedBy string) error {
+	f.c.add("accounts.Create %s via=%s by=%s", handle, via, invitedBy)
+	if f.err != nil {
+		return f.err
+	}
+	if _, taken := f.users[handle]; taken {
+		return users.ErrHandleTaken
+	}
+	fp := xssh.FingerprintSHA256(key)
+	for other, ks := range f.keys {
+		for _, k := range ks {
+			if k.FP == fp && other != handle {
+				return users.ErrKeyLinked
+			}
+		}
+	}
+	if f.users == nil {
+		f.users = map[string]users.User{}
+	}
+	f.users[handle] = users.User{
+		Handle: handle, Status: users.StatusActive, InvitedBy: invitedBy,
+		CreatedAt: time.Unix(0, 0).UTC(),
+	}
+	if f.keys == nil {
+		f.keys = map[string][]users.Key{}
+	}
+	f.keys[handle] = append(f.keys[handle], users.Key{
+		FP: fp, Label: label, Via: via, AddedAt: time.Unix(0, 0).UTC(),
+		AuthorizedKey: string(xssh.MarshalAuthorizedKey(key)),
+	})
+	return nil
+}
+
+func (f *fakeAccounts) List() ([]users.User, error) {
+	f.c.add("accounts.List")
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]users.User, 0, len(f.users))
+	for _, u := range f.users {
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Handle < out[j].Handle })
+	return out, nil
 }
 
 func (f *fakeAccounts) Keys(handle string) ([]users.Key, error) {
@@ -636,6 +702,89 @@ func (f *fakeGitHub) Profile(ctx context.Context, login string) (users.GitHubPro
 
 // rig is the whole package under test with every dependency faked: no sqlite,
 // no temp dir, no VM driver, so the suite runs in milliseconds.
+// fakeSecrets is the value half of secrets.Store. It keeps the store's one
+// structural promise — every row is keyed by (owner, name), so no caller
+// mistake can reach another owner's value — and its one delivery rule, that
+// SandboxesForSecret names the boxes sharing a tag with the secret.
+type fakeSecrets struct {
+	c     *calls
+	vals  map[string]string   // "owner/NAME" -> value
+	tags  map[string][]string // "owner/NAME" -> tags
+	boxes *fakeTagger         // to resolve tag -> sandbox
+	err   error
+	// putErr fails only the write, so a test can prove nothing is reported as
+	// resynced when the value never landed.
+	putErr error
+}
+
+func secretKey(owner, name string) string { return owner + "/" + name }
+
+func (f *fakeSecrets) PutSecret(owner, envName, value string, tags []string) error {
+	f.c.add("secrets.Put %s/%s tags=%v", owner, envName, tags)
+	if f.putErr != nil {
+		return f.putErr
+	}
+	if len(tags) == 0 {
+		tags = []string{secrets.DefaultTag} // the real store's default
+	}
+	f.vals[secretKey(owner, envName)] = value
+	f.tags[secretKey(owner, envName)] = tags
+	return nil
+}
+
+func (f *fakeSecrets) DeleteSecret(owner, envName string) error {
+	f.c.add("secrets.Delete %s/%s", owner, envName)
+	if f.err != nil {
+		return f.err
+	}
+	k := secretKey(owner, envName)
+	if _, ok := f.vals[k]; !ok {
+		return errors.New("no such secret")
+	}
+	delete(f.vals, k)
+	delete(f.tags, k)
+	return nil
+}
+
+func (f *fakeSecrets) ListSecrets(owner string) ([]secrets.SecretMeta, error) {
+	f.c.add("secrets.List %s", owner)
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []secrets.SecretMeta
+	for k, tags := range f.tags {
+		o, name, _ := strings.Cut(k, "/")
+		if o != owner {
+			continue
+		}
+		out = append(out, secrets.SecretMeta{Name: name, Tags: tags, Version: 1})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (f *fakeSecrets) SandboxesForSecret(owner, envName string) ([]string, error) {
+	f.c.add("secrets.SandboxesFor %s/%s", owner, envName)
+	if f.err != nil {
+		return nil, f.err
+	}
+	want := map[string]bool{}
+	for _, t := range f.tags[secretKey(owner, envName)] {
+		want[t] = true
+	}
+	var out []string
+	for box, tags := range f.boxes.tags {
+		for _, t := range tags {
+			if want[t] {
+				out = append(out, box)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 type rig struct {
 	ops         *Ops
 	calls       *calls
@@ -648,6 +797,7 @@ type rig struct {
 	routes      *fakeRoutes
 	minter      *fakeMinter
 	github      *fakeGitHub
+	secrets     *fakeSecrets
 	nodes       *fakeNodes
 }
 
@@ -733,11 +883,13 @@ func newRig(t *testing.T) *rig {
 	minter := &fakeMinter{c: c}
 	gh := &fakeGitHub{c: c, keys: map[string][]xssh.PublicKey{}}
 	checkpoints := &fakeCheckpoints{c: c, enabled: map[string]bool{"alicebox": true}}
+	secretStore := &fakeSecrets{c: c, vals: map[string]string{}, tags: map[string][]string{}, boxes: tagger}
 
 	ops := New(Config{
 		Sandboxes: boxes, Templates: tmpl, Accounts: accts,
 		Checkpoints: checkpoints,
 		Tags:        tagger, Schedules: sched, Routes: rt, Sessions: minter, GitHub: gh,
+		Secrets:      secretStore,
 		DefaultImage: "base", Domain: "example.test", XtermSubdomain: "xterm",
 		InvitesPerUser: 0,
 		NewName:        func() string { return "generated-name" },
@@ -747,7 +899,7 @@ func newRig(t *testing.T) *rig {
 	t.Cleanup(ops.Close)
 
 	return &rig{ops: ops, calls: c, boxes: boxes, checkpoints: checkpoints, tmpl: tmpl, accts: accts,
-		tagger: tagger, sched: sched, routes: rt, minter: minter, github: gh}
+		tagger: tagger, sched: sched, routes: rt, minter: minter, github: gh, secrets: secretStore}
 }
 
 func alice() Caller   { return Caller{Handle: "alice"} }

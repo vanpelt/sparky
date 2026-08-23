@@ -260,6 +260,15 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// a node belongs to the fleet, so they are operator-gated instead of
 		// owner-gated — see TestNodeCommandsAreOperatorGated.
 		"ListNodes": true, "ApproveNode": true, "RemoveNode": true,
+		// Secrets are keyed by (owner, env_name), so the owner scoping is
+		// structural in every store query rather than a name check here: the
+		// caller cannot name another owner's secret because the handle is not
+		// an argument. The env name they DO pass selects only among their own.
+		"ListSecrets": true, "PutSecret": true, "DeleteSecret": true,
+		// Account provisioning names GitHub logins and an org, none of which is
+		// a resource anybody here owns. Operator-gated instead — see
+		// TestProvisioningIsOperatorGated.
+		"ProvisionGitHubUsers": true, "ProvisionGitHubOrg": true, "ListAccounts": true,
 	}
 	covered := map[string]bool{}
 	for _, tc := range ownCases() {
