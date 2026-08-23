@@ -4,6 +4,8 @@ Status: plan
 Date: 2026-08-23
 Design: [`oci-rootfs-and-durable-volumes-design.md`](oci-rootfs-and-durable-volumes-design.md)
 Origin: [`smolvm-evaluation.md`](smolvm-evaluation.md), borrows 1 and 2
+Not here: borrows 3 and 4, and the guest-filesystem question, are in
+[`hardening-and-guest-filesystems.md`](hardening-and-guest-filesystems.md)
 
 Work-item numbering follows [`forward-plan.md`](forward-plan.md)'s convention.
 **R** items are the OCI rootfs (design Part 1); **V** items are durable volumes

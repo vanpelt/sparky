@@ -254,6 +254,11 @@ Landlock. Our per-VM chroot + UID `100000 + slot` is good; a Landlock ruleset
 pinning the VMM to exactly its own VM directory is a strictly additive second
 lock on the same door, and `security-hardening.md` is the right place for it.
 
+Borrows 3 and 4, and the lower-priority items below, are worked out in
+[`hardening-and-guest-filesystems.md`](hardening-and-guest-filesystems.md).
+Borrow 3 turned out to describe a live bug rather than an improvement: a
+control-plane restart currently hard-stops every running VMM, losing guest RAM.
+
 ### Worth noting, lower priority
 
 - **Fork pools with CoW guest RAM and leases** (`src/pool.rs`,
