@@ -887,6 +887,16 @@ jobs:
   # protects `sparkbox setup` protects CKS the same way.
   cks:
     needs: [prepare, publish]
+    # The same explicit gate darwin and publish carry, and for the same reason:
+    # a macOS kernel content-cache HIT skips `macOS kernel build`, and a skipped
+    # ancestor taints every descendant that relies on the implicit success().
+    # v0.6.0 published correctly and then skipped this job, which is how the
+    # rule got a third witness. `always()` restores the run; naming each result
+    # keeps a FAILED release from still publishing an image for it.
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.publish.result == 'success'
     permissions:
       contents: read
       packages: write
