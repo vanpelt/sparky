@@ -281,6 +281,26 @@
   @media (max-width: 860px) { .secret-form { grid-template-columns: 1fr; } }
   .secret-form input { width: 100%; }
   .secret-form .save { align-self: end; }
+
+  /* repos form — one field more than the secrets grid, and a <select> the
+     input rules above cannot reach: they are typed to input[type=…], so an
+     unstyled select would render as a light native control on a dark card. */
+  .repo-form { grid-template-columns: 1.5fr .85fr 1.1fr 1.1fr .95fr auto; }
+  @media (max-width: 860px) { .repo-form { grid-template-columns: 1fr; } }
+  .repo-form select {
+    font: inherit; width: 100%; padding: 7px 10px; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground));
+  }
+  /* the `default` tag warning: amber rather than the red .env-warn above,
+     because it is a consequence to understand, not something broken. */
+  .tag-warn {
+    margin: 0 14px 11px; padding: 8px 11px; font-size: 12.5px;
+    border: 1px solid hsl(var(--amber) / .4); border-radius: calc(var(--radius) - 2px);
+    color: hsl(var(--amber)); background: hsl(var(--amber) / .07);
+  }
+  .tag-warn strong, .tag-warn code { color: hsl(var(--amber)); }
+  .app-ok { color: hsl(var(--green)); }
+  .app-bad { color: hsl(var(--red)); }
   .notice {
     padding: 11px 14px; font-size: 12.5px; color: hsl(var(--muted-foreground));
     border-bottom: 1px solid hsl(var(--border));
@@ -366,6 +386,7 @@
       <button class="tab active" data-tab="machines">Machines</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
+      <button class="tab" data-tab="repos">Repos</button>
     </div>
 
     <!-- MACHINES TAB -->
@@ -490,6 +511,76 @@
         <div id="netrules-empty" class="empty hidden">No rule-sets yet. Add one above, then tag a machine to enforce it.</div>
       </div>
     </div>
+
+    <!-- REPOS TAB -->
+    <div id="tab-repos" class="hidden">
+      <div class="card panel">
+        <div class="panel-head">
+          <h2>Repos</h2>
+          <span class="hint">GitHub checkouts cloned into machines that share a tag</span>
+        </div>
+        <div class="notice">
+          An attachment is <strong>configuration, not a copy</strong>: a machine created with one of
+          these tags clones the repository while it boots, into <code class="mono">~/&lt;name&gt;</code>
+          — or <code class="mono">~/src/&lt;owner&gt;/&lt;name&gt;</code> once more than one is attached.
+          <strong>Tagging a machine that already exists never clones</strong>: the entry appears as
+          not cloned, and <code class="mono">sparkbox repos sync</code> inside the machine does the
+          work when you ask for it. Detaching leaves existing checkouts where they are.
+        </div>
+        <form id="repo-form" class="secret-form repo-form">
+          <div>
+            <label for="rp-slug">Repository</label>
+            <input id="rp-slug" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="wandb/hivemind" maxlength="120" />
+            <div class="field-hint">owner/name on github.com</div>
+          </div>
+          <div>
+            <label for="rp-ref">Branch</label>
+            <input id="rp-ref" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="main" maxlength="255" />
+            <div class="field-hint">optional; default branch if blank</div>
+          </div>
+          <div>
+            <label for="rp-path">Directory</label>
+            <input id="rp-path" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="src/hivemind" maxlength="255" />
+            <div class="field-hint">optional; under the home directory</div>
+          </div>
+          <div>
+            <label for="rp-tags">Tags</label>
+            <input id="rp-tags" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="hm, ml" />
+            <div class="field-hint">comma-separated; matches machine tags</div>
+          </div>
+          <div>
+            <label for="rp-access">Access</label>
+            <select id="rp-access">
+              <option value="read">Read-only</option>
+              <option value="write">Read + push</option>
+            </select>
+            <div class="field-hint">what its git credential may do</div>
+          </div>
+          <button type="submit" class="btn-primary save" id="rp-save">Attach</button>
+        </form>
+        <div id="repo-default-warn" class="tag-warn hidden">
+          The <code class="mono">default</code> tag is carried by <strong>every machine you create
+          from now on</strong>, so this repository is cloned into all of them. Worth wanting on
+          purpose — dotfiles, the repo you always work in — and surprising by accident.
+        </div>
+        <div id="repos-disabled" class="notice hidden">
+          Repos are not enabled on this host.
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Repository</th><th>Tags</th><th>Access</th><th>GitHub App</th><th>Attached</th><th></th></tr>
+            </thead>
+            <tbody id="repo-rows"></tbody>
+          </table>
+        </div>
+        <div id="repos-empty" class="empty hidden">No repositories yet. Attach one above, then tag a machine to clone it.</div>
+      </div>
+    </div>
   </div>
 
   <!-- RENAME -->
@@ -549,6 +640,11 @@
   const ENV_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
   const TAG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
   const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/; // mirrors the host manager's nameRe
+  // owner/name on github.com. Deliberately looser than repos.ValidSlug: the
+  // store owns that grammar and answers 400 with the reason, and a copy that
+  // drifted stricter would refuse a repository the server would have accepted.
+  // This exists only to catch the obvious typo before a round trip.
+  const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 
   // An optional explicit zone, e.g. <meta name="sparkbox-domain" content="catnip.sh">.
   // Unset in production (the console derives its zone from its own hostname); the
@@ -816,6 +912,7 @@
     if (d.fork) return "fork:" + d.fork;
     if (d.del) return "delsnap:" + d.del;
     if (d.delSecret) return "delsecret:" + d.delSecret;
+    if (d.delRepo) return "delrepo:" + d.delRepo;
     return null;
   }
 
@@ -1582,6 +1679,144 @@
     }
   });
 
+  // ---- repos ----
+
+  // The App column's vocabulary. "checking" is a real state rather than a
+  // spinner: the server never asks github.com on the request path, so the
+  // first listing after a page load genuinely does not know yet, and says so
+  // instead of guessing "installed" and being wrong for four seconds.
+  const APP_STATE = {
+    ready: '<span class="app-ok">installed</span>',
+    checking: '<span class="muted">checking…</span>',
+    off: '<span class="muted">–</span>',
+  };
+
+  // "refused" and "no answer" are kept apart on purpose: the first is a thing
+  // to go and fix, the second is a thing to ask about again in a minute, and
+  // the server's sentence for either rides in the tooltip.
+  function appCell(r) {
+    const why = esc(r.app_note || "");
+    if (r.app === "missing") {
+      // The one row with something to do about it, so it carries the URL.
+      return '<span class="app-bad" title="' + why + '">not installed</span>' +
+        (r.install_url
+          ? ' · <a class="linkish" href="' + esc(r.install_url) +
+            '" target="_blank" rel="noopener noreferrer">install</a>'
+          : "");
+    }
+    if (r.app === "blocked") {
+      return '<span class="app-bad" title="' + why + '">refused</span>';
+    }
+    if (r.app === "unknown") {
+      return '<span class="muted" title="' + why + '">no answer</span>';
+    }
+    return APP_STATE[r.app] || APP_STATE.off;
+  }
+
+  function renderRepos(list) {
+    const rows = $("repo-rows");
+    rows.innerHTML = "";
+    for (const r of list) {
+      const tags = (r.tags || []).length
+        ? (r.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
+        : '<span class="muted">– none: reaches no machine</span>';
+      const ref = r.ref ? ' <span class="chip plain">' + esc(r.ref) + "</span>" : "";
+      const where = r.path ? '<div class="muted">~/' + esc(r.path) + "</div>" : "";
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="name mono">' + esc(r.slug) + ref + where + "</td>" +
+        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + (r.access === "write" ? "read + push" : "read-only") + "</td>" +
+        "<td>" + appCell(r) + "</td>" +
+        '<td class="age">' + rel(r.created_at) + "</td>" +
+        '<td class="actions">' +
+          '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm btn-danger" data-del-repo="' + esc(r.slug) + '">Detach</button></td>';
+      rows.appendChild(tr);
+    }
+    $("repos-empty").classList.toggle("hidden", list.length > 0);
+    rows.querySelectorAll("button[data-editrepo]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const r = list.find((x) => x.slug === btn.dataset.editrepo);
+        if (!r) return;
+        $("rp-slug").value = r.slug;
+        $("rp-ref").value = r.ref || "";
+        $("rp-path").value = r.path || "";
+        $("rp-tags").value = (r.tags || []).join(", ");
+        $("rp-access").value = r.access === "write" ? "write" : "read";
+        repoDefaultWarn();
+        $("rp-slug").focus();
+      }));
+    rows.querySelectorAll("button[data-del-repo]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const slug = btn.dataset.delRepo;
+        if (!confirm("Detach " + slug + "? Machines that already cloned it keep their checkout; " +
+          "new machines stop getting one.")) return;
+        mutate("delrepo:" + slug, btn, async () => {
+          await api("/api/repos/" + encodeURIComponent(slug), { method: "DELETE" });
+          toast("detached " + slug);
+        });
+      }));
+    reapplyInflight(rows);
+  }
+
+  function reposDisabled(off) {
+    $("repos-disabled").classList.toggle("hidden", !off);
+    $("repo-form").classList.toggle("hidden", off);
+  }
+
+  function repoTags() {
+    return $("rp-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+  }
+
+  // The `default` tag is on every machine its owner creates from then on, so a
+  // repo attached to it is cloned into all of them. Shown while typing as well
+  // as confirmed on submit: the point is to be read before the click, not to
+  // put one more dialog between someone and a thing they meant to do.
+  function repoDefaultWarn() {
+    $("repo-default-warn").classList.toggle("hidden", repoTags().indexOf("default") < 0);
+  }
+
+  $("rp-tags").addEventListener("input", repoDefaultWarn);
+
+  $("repo-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const slug = $("rp-slug").value.trim();
+    const tags = repoTags();
+    if (!SLUG_RE.test(slug)) return toast("repository must be owner/name, e.g. wandb/hivemind", true);
+    for (const t of tags) {
+      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+    }
+    if (tags.indexOf("default") >= 0 &&
+      !confirm("The default tag is carried by every machine you create from now on, so " + slug +
+        " will be cloned into all of them. Attach it to default?")) return;
+    const btn = $("rp-save");
+    btn.disabled = true;
+    try {
+      await api("/api/repos/" + encodeURIComponent(slug), {
+        method: "PUT",
+        body: {
+          ref: $("rp-ref").value.trim(),
+          path: $("rp-path").value.trim(),
+          access: $("rp-access").value,
+          tags: tags,
+        },
+      });
+      toast(slug + " attached — cloned into new machines carrying its tags");
+      $("rp-slug").value = "";
+      $("rp-ref").value = "";
+      $("rp-path").value = "";
+      $("rp-tags").value = "";
+      $("rp-access").value = "read";
+      repoDefaultWarn();
+      await refresh();
+    } catch (e2) {
+      toast(e2.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // ---- tabs / shell ----
 
   document.querySelectorAll(".tab").forEach((btn) =>
@@ -1590,6 +1825,7 @@
       $("tab-machines").classList.toggle("hidden", btn.dataset.tab !== "machines");
       $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
       $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
+      $("tab-repos").classList.toggle("hidden", btn.dataset.tab !== "repos");
     }));
 
   $("logout-btn").addEventListener("click", async () => {
@@ -1603,9 +1839,9 @@
 
   async function refresh() {
     try {
-      const [rm, rs, rn, rnr] = await Promise.all([
+      const [rm, rs, rn, rnr, rrp] = await Promise.all([
         fetch("/api/machines"), fetch("/api/secrets"), fetch("/api/snapshots"),
-        fetch("/api/network-rules"),
+        fetch("/api/network-rules"), fetch("/api/repos"),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
@@ -1654,6 +1890,18 @@
       } else {
         fresh = false;
         toast("network rules refresh failed: " + (await errText(rnr)), true);
+      }
+      // 501 = repo attachments not enabled on this host; same treatment.
+      if (rrp.status === 501) {
+        reposDisabled(true);
+        renderRepos([]);
+      } else if (rrp.ok) {
+        reposDisabled(false);
+        const rps = await rrp.json();
+        renderRepos(Array.isArray(rps) ? rps : []);
+      } else {
+        fresh = false;
+        toast("repos refresh failed: " + (await errText(rrp)), true);
       }
       if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
       if (!timer) timer = setInterval(refresh, 4000);

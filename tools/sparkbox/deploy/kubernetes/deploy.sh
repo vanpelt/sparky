@@ -13,6 +13,11 @@ Options:
   --proxy-domain DOMAIN   public Sparkbox domain (default: the domain the live
                           gateway already publishes, else the allocated
                           coreweave.app domain)
+  --github-app-client-id ID
+                          client id of the GitHub App that mints repository
+                          credentials (default: whatever the live gateway
+                          already uses). Its private key must be in the
+                          sparkbox-identity Secret as github_app_key.pem.
   --public-key PATH       operator SSH public key (default: ~/.ssh/id_ed25519.pub)
   --private-key PATH      matching operator key used to approve the VM node
                           (default: public-key path without .pub; optional on re-runs)
@@ -26,6 +31,7 @@ context=$(kubectl config current-context)
 node_pool=default-node-pool
 node=
 requested_proxy_domain=
+requested_github_app_client_id=
 public_key="${HOME}/.ssh/id_ed25519.pub"
 private_key=
 operator=$(id -un)
@@ -48,6 +54,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --proxy-domain)
       requested_proxy_domain=${2:?--proxy-domain requires a value}
+      shift 2
+      ;;
+    --github-app-client-id)
+      requested_github_app_client_id=${2:?--github-app-client-id requires a value}
       shift 2
       ;;
     --public-key)
@@ -261,6 +271,24 @@ if [ "$proxy_domain" != "$allocated_domain" ]; then
   echo "  DNS apex and wildcard must point to the LoadBalancer before HTTPS is tested."
 fi
 
+# Same rule as the domain, for the same reason: these flags are not recorded
+# anywhere in the cluster, so a re-run that omits one must carry the live value
+# forward rather than silently switching repo credentials off. A gateway with no
+# client id keeps its repo attachments listed and refuses to mint for them,
+# which looks exactly like a GitHub outage from inside a sandbox.
+deployed_github_app_client_id=$(
+  "${k[@]}" -n "$namespace" get deployment sparkbox-gateway \
+    -o 'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="SPARKBOX_GITHUB_APP_CLIENT_ID")].value}' \
+    2>/dev/null || true
+)
+github_app_client_id=${requested_github_app_client_id:-$deployed_github_app_client_id}
+if [ -n "$github_app_client_id" ]; then
+  echo "GitHub App for repo credentials: $github_app_client_id"
+else
+  echo "No GitHub App configured; repo attachments will be unavailable."
+  echo "  Pass --github-app-client-id and add github_app_key.pem to the sparkbox-identity Secret."
+fi
+
 temporary_dir=$(mktemp -d)
 users_file="$temporary_dir/users.conf"
 gateway_private_file="$temporary_dir/gateway_host_key.pem"
@@ -359,6 +387,7 @@ sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \
   -e "s|__SPARKBOX_PROXY_DOMAIN__|$proxy_domain|g" \
   -e "s|__SPARKBOX_USERS_HASH__|$users_hash|g" \
+  -e "s|__SPARKBOX_GITHUB_APP_CLIENT_ID__|$github_app_client_id|g" \
   "$script_dir/gateway-deployment.yaml" | "${k[@]}" apply -f -
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \

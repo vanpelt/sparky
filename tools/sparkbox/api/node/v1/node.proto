@@ -50,6 +50,14 @@ service NodeControl {
 service GatewayIdentity {
   rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse);
   rpc DescribeIdentity(DescribeIdentityRequest) returns (IdentityDescription);
+
+  // The repo pair lives on this service rather than a service of its own
+  // because it needs precisely the same thing: the caller's authenticated node
+  // identity, on a listener that already requires an mTLS node certificate. A
+  // second service would be a second registration, listener and TLS wiring for
+  // an identical trust decision.
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+  rpc IssueRepoCredential(IssueRepoCredentialRequest) returns (IssueRepoCredentialResponse);
 }
 
 message GetInventoryRequest {}
@@ -402,6 +410,43 @@ message IdentityDescription {
   string image = 7;
   string node = 8;
   string sandbox_id = 9;
+}
+
+// ListReposRequest names a sandbox and nothing else. Its owner, its tags and
+// the attachments those tags carry are all resolved by the gateway from its own
+// ledger; a node that could state any of them would be choosing whose
+// repositories its guests receive.
+message ListReposRequest {
+  string sandbox = 1;
+}
+
+message ListReposResponse {
+  repeated RepoAttachment repos = 1;
+}
+
+message RepoAttachment {
+  string host = 1;
+  string slug = 2;
+  string ref = 3;
+  string path = 4;
+  string access = 5;
+}
+
+// IssueRepoCredentialRequest narrows the token to one repository. The slug is
+// not an authorization input: the gateway verifies it against the attachment
+// set it resolved for itself and refuses anything else.
+message IssueRepoCredentialRequest {
+  string sandbox = 1;
+  string slug = 2;
+}
+
+// IssueRepoCredentialResponse carries a short-lived installation token. It is
+// the only secret on this service besides a signed id token, and neither peer
+// may log it.
+message IssueRepoCredentialResponse {
+  string username = 1;
+  string password = 2;
+  google.protobuf.Timestamp expires_at = 3;
 }
 
 message DurationRange {

@@ -56,6 +56,26 @@ const (
 	// about a sandbox the ledger does not place on it. Nothing legitimate
 	// produces it.
 	CodeNotYours = "identity_not_on_this_node"
+	// CodeNoRepos is a gateway that serves no repo attachments at all — no
+	// attachment store, or no GitHub App key. The guest is told 501, the same
+	// answer a gateway-local sandbox gets from a metadata service with no repo
+	// source wired, so a fleet reads the same on every machine in it.
+	CodeNoRepos = "repos_not_enabled"
+	// CodeNoSuchRepo is a credential asked for a repository this sandbox has no
+	// attachment to. The guest is told 404 — and it must be 404 rather than a
+	// refusal, because git asks the credential helper about every host it
+	// touches and an unattached repository is an ordinary miss, not a fault.
+	CodeNoSuchRepo = "repo_not_attached"
+	// CodeRepoDenied is a credential this fleet will not mint for a repository
+	// the sandbox IS attached to: the owner's GitHub link is not strong enough
+	// to reach an access verb, their account is not active, or the App is not
+	// installed on it. The guest is told 403 and the sentence rides along,
+	// because each of those has a different fix and none of them is a retry.
+	CodeRepoDenied = "repo_denied"
+	// CodeRepoUpstream is github.com not answering, or answering with something
+	// this gateway cannot act on. The guest is told 503: the repair is to wait,
+	// which is the one thing a 500 would talk it out of.
+	CodeRepoUpstream = "repo_upstream_unavailable"
 	// CodeNoCertificateIssuer means this gateway has no internal CA/roster
 	// signer wired. It is distinct from a pending or disabled authenticated row.
 	CodeNoCertificateIssuer = "certificate_not_issued"
@@ -119,6 +139,30 @@ func registerUplinkOps(conn *Conn, node string, hooks Hooks) {
 		}
 		return hooks.OnSelfPort(ctx, node, req)
 	})
+	conn.Handle(TypeSelfRepos, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfReposReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" {
+			return nil, ctlops.Invalid(OpLink, "bad_self_repos_request",
+				"a repo manifest request has to name a sandbox")
+		}
+		if hooks.OnSelfRepos == nil {
+			return nil, noRepos()
+		}
+		return hooks.OnSelfRepos(ctx, node, req)
+	})
+	conn.Handle(TypeSelfRepoCred, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfRepoCredReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			req.Slug == "" || len(req.Slug) > MaxRepoSlugBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_repo_credential_request",
+				"a repo credential request has to name a sandbox and a repository of at most %d bytes",
+				MaxRepoSlugBytes)
+		}
+		if hooks.OnSelfRepoCred == nil {
+			return nil, noRepos()
+		}
+		return hooks.OnSelfRepoCred(ctx, node, req)
+	})
 }
 
 // identityRequest parses and bounds one identity request. The name is checked
@@ -144,6 +188,20 @@ func noIssuer() error {
 	return &ctlops.Error{
 		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoIssuer, Verbatim: true,
 		Msg: "this gateway issues no workload identity: it has no OIDC signing key configured.",
+	}
+}
+
+// noRepos is the repo pair's equivalent, and is built by hand for the same
+// reason: the node switches on CodeNoRepos to decide the guest sees 501 rather
+// than the 500 an unclassifiable failure earns.
+//
+// It is answered here, on the nil hook, rather than left to produce an
+// unregistered-type error, so that a gateway which simply has no App key and
+// one which is too old to speak repos at all are not the same diagnosis.
+func noRepos() error {
+	return &ctlops.Error{
+		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoRepos, Verbatim: true,
+		Msg: "this gateway serves no repo attachments: it has no attachment store or no GitHub App key configured.",
 	}
 }
 
@@ -354,6 +412,11 @@ type Hooks struct {
 	OnIdentityDoc    func(ctx context.Context, node string, req IdentityReq) (IdentityDocResp, error)
 	OnSelfVisibility func(ctx context.Context, node string, req SelfVisibilityReq) (SelfVisibilityResp, error)
 	OnSelfPort       func(ctx context.Context, node string, req SelfPortReq) (SelfPortResp, error)
+	// The repo pair. Nil means this deployment attaches no repositories — no
+	// store, or no GitHub App key — and, as above, the node is told that in a
+	// sentence it can turn into a 501 rather than being left to infer it.
+	OnSelfRepos    func(ctx context.Context, node string, req SelfReposReq) (SelfReposResp, error)
+	OnSelfRepoCred func(ctx context.Context, node string, req SelfRepoCredReq) (SelfRepoCredResp, error)
 	// OnCertificateEnroll receives the same authenticated roster name. The CSR
 	// payload deliberately has no identity field.
 	OnCertificateEnroll func(ctx context.Context, node string, req CertificateEnrollRequest) (CertificateEnrollResponse, error)

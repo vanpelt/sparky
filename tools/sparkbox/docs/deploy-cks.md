@@ -19,10 +19,20 @@ re-run.
 | Public domain | `catnip.sh` (`--proxy-domain`), DNS-only A records at the apex and wildcard |
 | Allocated CKS domain | `sa932e-cvp-hivemind-test-east-06.coreweave.app`, still used for node approval |
 | Operator | `vanpelt` |
+| GitHub App (repo credentials) | `w-b-sparkbox` — App ID `4706326`, client id `Iv23li1tSkGgv8Mayb5D` (`--github-app-client-id`) |
 
 The allocated `coreweave.app` wildcard keeps working alongside `catnip.sh`
 because both resolve to the same LoadBalancer, but only the configured
 `--proxy-domain` is used for published URLs, certificates, and WebAuthn origins.
+
+The GitHub App above is **not** the one `--github-client-id` names for account
+linking. They are deliberately separate: linking asks GitHub who somebody is and
+requests no scope, while this one holds a private key and can mint repository
+credentials. Its key reaches the gateway as `github_app_key.pem` in the
+`sparkbox-identity` Secret, mounted read-only at `/run/sparkbox/keys` — there is
+no path that copies a file onto this host, because the gateway Pod runs non-root
+with a read-only root filesystem and port 22 is Sparkbox's own SSH gateway, which
+has no sftp subsystem. See `docs/github-app-setup.md`.
 
 ## What it creates
 

@@ -226,6 +226,10 @@ func sample(rt route) (path string, body any) {
 	path = specPath(rt.pattern)
 	path = strings.ReplaceAll(path, "{name}", "ghost")
 	path = strings.ReplaceAll(path, "{id}", "ghost")
+	// A repo is addressed by three segments because its slug carries a '/'; the
+	// pair below is the same "nobody owns this" name the sandbox routes use.
+	path = strings.ReplaceAll(path, "{host}", "github.com")
+	path = strings.ReplaceAll(path, "{owner}", "nobody")
 	switch rt.opID {
 	case "keys.rm":
 		path += "?fingerprint=SHA256:none"
@@ -243,6 +247,8 @@ func sample(rt route) (path string, body any) {
 		body = forkRequest{Name: "ghost-fork"}
 	case "schedule.add":
 		body = scheduleRequest{Sandbox: "ghost", Spec: "@daily", Command: "echo hi"}
+	case "repo.add":
+		body = repoRequest{Slug: "nobody/ghost", Tags: []string{"x"}}
 	case "keys.add":
 		body = addKeyRequest{Key: sampleKey}
 	case "keys.verify-github":

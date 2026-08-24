@@ -1,6 +1,7 @@
 package netrules
 
 import (
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -154,5 +155,163 @@ func TestValidation(t *testing.T) {
 	}
 	if err := s.PutRule("alice", "ok", RuleSpec{Allow: []string{"*.example.com", "example.org"}}, []string{"ci"}); err != nil {
 		t.Errorf("valid rule rejected: %v", err)
+	}
+}
+
+// fakeRepoDomains stands in for *repos.Store. It answers for one (sandbox,
+// owner) pair only, so a test that quietly asked about the wrong sandbox — the
+// exact mistake a dropped owner term makes — gets an empty overlay rather than
+// a passing assertion.
+type fakeRepoDomains struct {
+	sandbox, owner string
+	domains        []string
+	err            error
+	calls          int
+}
+
+func (f *fakeRepoDomains) DomainsForSandbox(sandbox, owner string) ([]string, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if sandbox != f.sandbox || owner != f.owner {
+		return []string{}, nil
+	}
+	return append([]string{}, f.domains...), nil
+}
+
+func TestAllowForSandboxOverlaysRepoDomains(t *testing.T) {
+	s := openTest(t)
+	// The user wrote pypi.org, and github.com by hand — the overlay must merge
+	// with the first and de-duplicate against the second.
+	if err := s.PutRule("alice", "ci", RuleSpec{Allow: []string{"pypi.org", "github.com"}}, []string{"ci"}); err != nil {
+		t.Fatal(err)
+	}
+	s.tag(t, "alice-box", "alice", "ci")
+	src := &fakeRepoDomains{sandbox: "alice-box", owner: "alice",
+		domains: []string{"codeload.github.com", "github.com", "objects.githubusercontent.com"}}
+	s.SetRepoDomains(src)
+
+	allow, governed, err := s.AllowForSandbox("alice-box", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !governed {
+		t.Error("a sandbox governed by a rule stays governed with an overlay")
+	}
+	want := []string{"codeload.github.com", "github.com", "objects.githubusercontent.com", "pypi.org"}
+	if !reflect.DeepEqual(allow, want) {
+		t.Errorf("allow = %v, want %v (merged, de-duped, sorted)", allow, want)
+	}
+
+	// The other half: the overlay must not have reached the stored rule-set.
+	// The console renders ListRules into a textarea and PUTs it straight back,
+	// so a leak here would persist the GitHub domains into the user's own rule
+	// and detaching the repo would leave the holes behind.
+	rules, err := s.ListRules("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rules[0].Spec.Allow, []string{"github.com", "pypi.org"}) {
+		t.Errorf("ListRules allow = %v, want only what the user wrote", rules[0].Spec.Allow)
+	}
+	forBox, err := s.RulesForSandbox("alice-box", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(forBox[0].Spec.Allow, []string{"github.com", "pypi.org"}) {
+		t.Errorf("RulesForSandbox allow = %v, want only what the user wrote", forBox[0].Spec.Allow)
+	}
+}
+
+// TestRepoOverlayNeverGovernsAnUngovernedSandbox pins the decision the overlay
+// exists under. governed is what puts a sandbox in the policy snapshot at all,
+// and in sluice's --open-untagged mode an absent sandbox is UNFILTERED. If a
+// repo attachment could set governed, `repo add` would firewall a VM that had
+// unrestricted internet down to three GitHub domains — which looks like a
+// security improvement in a diff and reads as "npm install hangs" on the box.
+func TestRepoOverlayNeverGovernsAnUngovernedSandbox(t *testing.T) {
+	s := openTest(t)
+	s.tag(t, "loose-box", "alice", "ci") // tagged, but no rule-set uses that tag
+	src := &fakeRepoDomains{sandbox: "loose-box", owner: "alice", domains: []string{"github.com"}}
+	s.SetRepoDomains(src)
+
+	allow, governed, err := s.AllowForSandbox("loose-box", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if governed {
+		t.Fatal("a repo attachment must not make an ungoverned sandbox governed")
+	}
+	if len(allow) != 0 {
+		t.Errorf("allow = %v, want none: an ungoverned sandbox already reaches github", allow)
+	}
+	if src.calls != 0 {
+		t.Errorf("repo source consulted %d time(s) for an ungoverned sandbox", src.calls)
+	}
+}
+
+// TestRepoOverlayIsOwnerScopedAndOptional covers the two shapes the wiring can
+// take: no source at all (every deployment before repos existed), and a source
+// that has nothing to say about this sandbox.
+func TestRepoOverlayIsOwnerScopedAndOptional(t *testing.T) {
+	s := openTest(t)
+	s.PutRule("alice", "ci", RuleSpec{Allow: []string{"pypi.org"}}, []string{"ci"})
+	s.tag(t, "alice-box", "alice", "ci")
+
+	allow, governed, err := s.AllowForSandbox("alice-box", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !governed || !reflect.DeepEqual(allow, []string{"pypi.org"}) {
+		t.Fatalf("with no repo source: allow = %v, governed = %v", allow, governed)
+	}
+
+	// A source that answers for bob's sandbox must not widen alice's.
+	s.SetRepoDomains(&fakeRepoDomains{sandbox: "bob-box", owner: "bob", domains: []string{"github.com"}})
+	allow, _, err = s.AllowForSandbox("alice-box", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(allow, []string{"pypi.org"}) {
+		t.Errorf("allow = %v, want [pypi.org]", allow)
+	}
+}
+
+// TestRepoOverlayFailureKeepsTheRuleSetEnforced is the fail-safe direction.
+// Both pushers drop a sandbox whose allow-set errors, and a dropped sandbox is
+// omitted from the snapshot, which sluice reads as unrestricted. A broken repo
+// lookup must therefore cost the clone, never the firewall.
+func TestRepoOverlayFailureKeepsTheRuleSetEnforced(t *testing.T) {
+	s := openTest(t)
+	s.PutRule("alice", "ci", RuleSpec{Allow: []string{"pypi.org"}}, []string{"ci"})
+	s.tag(t, "alice-box", "alice", "ci")
+	s.SetRepoDomains(&fakeRepoDomains{err: errors.New("database is locked")})
+
+	allow, governed, err := s.AllowForSandbox("alice-box", "alice")
+	if err != nil {
+		t.Fatalf("AllowForSandbox = %v, want the overlay failure swallowed", err)
+	}
+	if !governed || !reflect.DeepEqual(allow, []string{"pypi.org"}) {
+		t.Errorf("allow = %v, governed = %v, want the user's rule still enforced", allow, governed)
+	}
+}
+
+// TestRepoOverlayRejectsPatternsSluiceWouldNot guards the one thing the overlay
+// skips that normSpec would have caught on the write path: it bypasses normSpec
+// entirely, so nothing else lower-cases or validates what the source hands over.
+func TestRepoOverlayRejectsPatternsSluiceWouldNot(t *testing.T) {
+	s := openTest(t)
+	s.PutRule("alice", "ci", RuleSpec{Allow: []string{"pypi.org"}}, []string{"ci"})
+	s.tag(t, "alice-box", "alice", "ci")
+	s.SetRepoDomains(&fakeRepoDomains{sandbox: "alice-box", owner: "alice",
+		domains: []string{"https://github.com", "GitHub.com", "*", "github.com"}})
+
+	allow, _, err := s.AllowForSandbox("alice-box", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(allow, []string{"github.com", "pypi.org"}) {
+		t.Errorf("allow = %v, want only the pattern sluice can parse", allow)
 	}
 }

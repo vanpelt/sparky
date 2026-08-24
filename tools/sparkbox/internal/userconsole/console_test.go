@@ -3,25 +3,31 @@ package userconsole
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
@@ -75,6 +81,7 @@ type testConsole struct {
 	routes   *routes.Store
 	secrets  *secrets.Store
 	netrules *netrules.Store
+	repos    *repos.Store
 	signer   *edgeauth.Signer
 	sync     *syncRecorder
 }
@@ -134,10 +141,30 @@ func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 	signer := edgeauth.NewSigner([]byte("test-oidc-ikm"))
 	// Status matters: edgeauth.Require refuses a session whose account is not
 	// active, so a fake that left it blank would model three disabled users.
+	linkedAt := time.Now().Add(-time.Hour)
 	accounts := fakeAccounts{
-		"alice":   {Handle: "alice", Status: users.StatusActive, InvitedBy: "bob"},
-		"mallory": {Handle: "mallory", Status: users.StatusActive, InvitedBy: "bob"},
-		"opsy":    {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
+		// alice carries a GitHub link because the Repos panel's App probe binds
+		// forward from the handle to the stored id — an account with none is a
+		// different test (and a refusal), not the default one.
+		// alice carries a STRONG link: the Repos panel binds forward from the
+		// handle to the stored id for its App probe, and ctlops.AttachGate
+		// refuses to attach at all without a verified, directly-proved link.
+		// An account with a weak or absent link is a different test (and a
+		// refusal), not the default one — see TestRepoAttachNeedsAStrongLink.
+		"alice": {Handle: "alice", Status: users.StatusActive, InvitedBy: "bob",
+			GitHubLogin: "alice-gh", GitHubID: 7,
+			GitHubVia: users.GitHubViaKeys, GitHubVerifiedAt: &linkedAt},
+		"mallory": {Handle: "mallory", Status: users.StatusActive, InvitedBy: "bob",
+			GitHubLogin: "mallory-gh", GitHubID: 9,
+			GitHubVia: users.GitHubViaKeys, GitHubVerifiedAt: &linkedAt},
+		// weakly carries an assertion-provenance link: displayable, but not
+		// proved directly with GitHub, so it may not attach a repository.
+		"weakly": {Handle: "weakly", Status: users.StatusActive, InvitedBy: "bob",
+			GitHubLogin: "weakly-gh", GitHubID: 11,
+			GitHubVia: users.GitHubViaAssertion, GitHubVerifiedAt: &linkedAt},
+		// unlinked has no GitHub account at all.
+		"unlinked": {Handle: "unlinked", Status: users.StatusActive, InvitedBy: "bob"},
+		"opsy":     {Handle: "opsy", Status: users.StatusActive, InvitedBy: users.OperatorInviter},
 	}
 	rec := &syncRecorder{}
 	// netrules shares the same DB file as secrets (that owns sandbox_tags).
@@ -146,14 +173,22 @@ func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { netStore.Close() })
+	// repos joins the same sandbox_tags table, so it must open the same file
+	// the tags live in — on a different one every ReposForSandbox join comes
+	// back empty, silently and with no error.
+	repoStore, err := repos.Open(filepath.Join(dir, "secrets.db"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repoStore.Close() })
 	// A favicon cache with a stub fetcher so tests never hit the network.
 	favicons := domainmeta.NewFaviconCache(filepath.Join(dir, "favicons"),
 		func(ctx context.Context, reg string) ([]byte, string, bool) { return testPNG, "image/png", true })
 	// A net plane whose machines run no sluice, so bandwidth is 501 — the same
 	// answer the old no-socket syncer gave, now raised by the machine holding
 	// the sandbox rather than by the console.
-	h := New(mgr, routeStore, secretStore, netStore, unmeteredPlane{}, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
-	return &testConsole{h: h.Handler(), handler: h, mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, signer: signer, sync: rec}
+	h := New(mgr, routeStore, secretStore, netStore, repoStore, unmeteredPlane{}, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
+	return &testConsole{h: h.Handler(), handler: h, mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, repos: repoStore, signer: signer, sync: rec}
 }
 
 // session mints a cookie for handle, the browser path the SPA rides.
@@ -225,6 +260,9 @@ var apiEndpoints = []struct{ method, path string }{
 	{"GET", "/api/network-rules"},
 	{"PUT", "/api/network-rules/somerule"},
 	{"DELETE", "/api/network-rules/somerule"},
+	{"GET", "/api/repos"},
+	{"PUT", "/api/repos/wandb%2Fhivemind"},
+	{"DELETE", "/api/repos/wandb%2Fhivemind"},
 	{"GET", "/api/machines/somebox/bandwidth"},
 	{"GET", "/api/favicon"},
 }
@@ -261,6 +299,9 @@ func TestCrossOwnerIs404(t *testing.T) {
 	if err := tc.secrets.PutSecret("alice", "ALICE_TOKEN", "hunter2", nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := tc.repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind"}, []string{"hm"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tc.mgr.EnsureReady(ctx, "alices-box"); err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +325,7 @@ func TestCrossOwnerIs404(t *testing.T) {
 		{"POST", "/api/snapshots/alices-snap/fork", map[string]string{"name": "forked"}},
 		{"POST", "/api/snapshots/alices-snap/delete", nil},
 		{"DELETE", "/api/secrets/ALICE_TOKEN", nil},
+		{"DELETE", "/api/repos/wandb%2Fhivemind", nil},
 	}
 	for _, a := range attempts {
 		rec := tc.do(t, a.method, a.path, "mallory", a.body)
@@ -302,6 +344,9 @@ func TestCrossOwnerIs404(t *testing.T) {
 	}
 	if metas, err := tc.secrets.ListSecrets("alice"); err != nil || len(metas) != 1 {
 		t.Fatalf("alice's secret disappeared: %v %v", metas, err)
+	}
+	if list, err := tc.repos.ListRepos("alice"); err != nil || len(list) != 1 {
+		t.Fatalf("alice's repo attachment disappeared: %v %v", list, err)
 	}
 
 	// Listing endpoints are owner-filtered rather than 404: mallory sees none
@@ -808,6 +853,280 @@ func TestNetworkRulesAreOwnerScoped(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &rules) //nolint:errcheck
 	if len(rules) != 1 {
 		t.Errorf("alice's rule was clobbered: %+v", rules)
+	}
+}
+
+// repoRow is the wire shape the SPA reads: repos.Repo's fields flattened, plus
+// the install state the panel renders. Declared here rather than decoding into
+// repoView so a rename of an unexported field cannot quietly change the JSON
+// the page is written against.
+type repoRow struct {
+	Slug       string   `json:"slug"`
+	Ref        string   `json:"ref"`
+	Path       string   `json:"path"`
+	Access     string   `json:"access"`
+	Tags       []string `json:"tags"`
+	App        string   `json:"app"`
+	AppNote    string   `json:"app_note"`
+	InstallURL string   `json:"install_url"`
+}
+
+func TestRepoCRUD(t *testing.T) {
+	tc := newTestConsole(t)
+	// An owner with nothing attached must serialise as [], not null: the SPA's
+	// Array.isArray guard renders null as an empty table with no explanation.
+	rec := tc.do(t, "GET", "/api/repos", "alice", nil)
+	if got := rec.Body.String(); got != "[]\n" {
+		t.Fatalf("empty listing body %q, want []", got)
+	}
+	// The slug rides one path segment percent-encoded; the mux must hand the
+	// handler back the slash, or every attachment lands under a mangled name.
+	rec = tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "alice",
+		map[string]any{"ref": "main", "path": "src/hm", "access": "write", "tags": []string{"hm"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = tc.do(t, "GET", "/api/repos", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d", rec.Code)
+	}
+	var list []repoRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("unexpected listing: %+v", list)
+	}
+	got := list[0]
+	if got.Slug != "wandb/hivemind" || got.Ref != "main" || got.Path != "src/hm" ||
+		got.Access != "write" || len(got.Tags) != 1 || got.Tags[0] != "hm" {
+		t.Fatalf("round trip lost something: %+v", got)
+	}
+	// No App is configured on a test console, so the panel is told exactly
+	// that rather than being left to guess an install state.
+	if got.App != appOff || got.InstallURL != "" {
+		t.Errorf("app state without an App: %q url %q, want %q and no url", got.App, got.InstallURL, appOff)
+	}
+	// An attachment is egress-relevant, so the mutation re-pushes policy — and
+	// it is not a secret, so it must NOT fire the env sync.
+	if n := tc.sync.count("alice"); n != 0 {
+		t.Errorf("attaching a repo fired the secret env push %d times", n)
+	}
+	// A slug that is not owner/name is a 400 from the store's grammar.
+	if rec = tc.do(t, "PUT", "/api/repos/hivemind", "alice", map[string]any{}); rec.Code != http.StatusBadRequest {
+		t.Errorf("bare name: %d, want 400", rec.Code)
+	}
+	// Delete, then delete again is 404 — the same answer a name that never
+	// existed gets.
+	if rec = tc.do(t, "DELETE", "/api/repos/wandb%2Fhivemind", "alice", nil); rec.Code != http.StatusOK {
+		t.Fatalf("detach: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = tc.do(t, "DELETE", "/api/repos/wandb%2Fhivemind", "alice", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("second detach: %d, want 404", rec.Code)
+	}
+}
+
+func TestReposAreOwnerScoped(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "alice", map[string]any{"tags": []string{"hm"}})
+	// mallory sees none of alice's attachments...
+	rec := tc.do(t, "GET", "/api/repos", "mallory", nil)
+	var list []repoRow
+	json.Unmarshal(rec.Body.Bytes(), &list) //nolint:errcheck
+	if len(list) != 0 {
+		t.Errorf("mallory saw alice's repos: %+v", list)
+	}
+	// ...and detaching a slug she does not own is a 404, never a cross-owner
+	// delete and never a 403 that would confirm alice has it attached.
+	if rec := tc.do(t, "DELETE", "/api/repos/wandb%2Fhivemind", "mallory", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("cross-owner detach: %d, want 404", rec.Code)
+	}
+	// mallory may attach the same repository herself: the two rows are
+	// separate attachments, and hers must not disturb alice's.
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "mallory", map[string]any{"tags": []string{"ml"}}); rec.Code != http.StatusOK {
+		t.Fatalf("mallory attach: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = tc.do(t, "GET", "/api/repos", "alice", nil)
+	json.Unmarshal(rec.Body.Bytes(), &list) //nolint:errcheck
+	if len(list) != 1 || len(list[0].Tags) != 1 || list[0].Tags[0] != "hm" {
+		t.Errorf("alice's attachment was clobbered: %+v", list)
+	}
+}
+
+// TestRepoAttachNeedsAStrongLink covers the third door onto the attach verb.
+// ctl and the REST API route through ctlops.AttachGate; the console did not,
+// which meant an account whose GitHub link was never proved directly with
+// GitHub could create attachments the credential path would then refuse to
+// honour — and could widen its tags' effective egress on the way, through the
+// netrules overlay, without ever passing the gate.
+//
+// The two refusals are deliberately different statuses: 409 is "go and link an
+// account", 403 is "the link you have is not good enough".
+func TestRepoAttachNeedsAStrongLink(t *testing.T) {
+	tc := newTestConsole(t)
+
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "unlinked",
+		map[string]any{"tags": []string{"ml"}}); rec.Code != http.StatusConflict {
+		t.Errorf("attach with no link: %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "weakly",
+		map[string]any{"tags": []string{"ml"}}); rec.Code != http.StatusForbidden {
+		t.Errorf("attach with an assertion link: %d, want 403 (%s)", rec.Code, rec.Body)
+	}
+	// Neither refusal may leave a row behind: a listing that shows an
+	// attachment nothing will ever clone is worse than the refusal.
+	for _, who := range []string{"unlinked", "weakly"} {
+		var list []repoView
+		rec := tc.do(t, "GET", "/api/repos", who, nil)
+		json.Unmarshal(rec.Body.Bytes(), &list) //nolint:errcheck
+		if len(list) != 0 {
+			t.Errorf("%s: refused attach still stored %+v", who, list)
+		}
+	}
+}
+
+// TestRepoAppStateIsProbedAndCached drives the three answers a configured App
+// can give about one owner's attachments, through a fake github.com.
+//
+// The states are the point: "not installed" is a thing to go and fix and
+// carries the URL that fixes it, "refused" is an installation this account may
+// not use (bound forward from the handle to the stored github id, never a
+// reverse lookup), and "installed" is the only one that promises a clone will
+// work. The hit count is the other point — the SPA re-lists every four seconds,
+// and a panel that asked github.com on the request path would spend an App's
+// whole rate limit on a tab somebody left open.
+func TestRepoAppStateIsProbedAndCached(t *testing.T) {
+	tc := newTestConsole(t)
+	var hits int64
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/wandb/hivemind/installation":
+			// A User installation owned by the account alice is linked to.
+			io.WriteString(w, `{"id":42,"app_slug":"sparkbox","account":{"id":7,"login":"alice-gh","type":"User"}}`) //nolint:errcheck
+		case "/repos/wandb/somebody-elses/installation":
+			// A User installation owned by somebody else entirely.
+			io.WriteString(w, `{"id":43,"app_slug":"sparkbox","account":{"id":99,"login":"carol","type":"User"}}`) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"Not Found"}`) //nolint:errcheck
+		}
+	}))
+	defer gh.Close()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := ghapp.New(ghapp.Config{
+		ClientID: "Iv23liTEST", Key: key, BaseURL: gh.URL,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc.handler.SetGitHubApp(app)
+
+	for _, slug := range []string{"wandb/hivemind", "wandb/not-attached-anywhere", "wandb/somebody-elses"} {
+		if rec := tc.do(t, "PUT", "/api/repos/"+url.PathEscape(slug), "alice",
+			map[string]any{"tags": []string{"hm"}}); rec.Code != http.StatusOK {
+			t.Fatalf("attach %s: %d %s", slug, rec.Code, rec.Body.String())
+		}
+	}
+
+	// The first listing cannot know yet — the probe runs behind it — so poll
+	// until every row has settled rather than sleeping a guessed interval.
+	var rows []repoRow
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec := tc.do(t, "GET", "/api/repos", "alice", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+		}
+		rows = nil
+		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+			t.Fatal(err)
+		}
+		settled := true
+		for _, r := range rows {
+			if r.App == appChecking {
+				settled = false
+			}
+		}
+		if settled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("app states never settled: %+v", rows)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	byslug := map[string]repoRow{}
+	for _, r := range rows {
+		byslug[r.Slug] = r
+	}
+	if got := byslug["wandb/hivemind"]; got.App != appReady || got.InstallURL != "" {
+		t.Errorf("installed repo: app %q note %q url %q, want %q", got.App, got.AppNote, got.InstallURL, appReady)
+	}
+	if got := byslug["wandb/not-attached-anywhere"]; got.App != appMissing || got.InstallURL == "" {
+		t.Errorf("uninstalled repo: app %q url %q, want %q with an install url", got.App, got.InstallURL, appMissing)
+	}
+	if got := byslug["wandb/somebody-elses"]; got.App != appBlocked || got.AppNote == "" {
+		t.Errorf("someone else's installation: app %q note %q, want %q with a reason", got.App, got.AppNote, appBlocked)
+	}
+
+	// Every further listing is served from the console's own cache, including
+	// the "not installed" row that ghapp itself refuses to remember.
+	settledHits := atomic.LoadInt64(&hits)
+	for i := 0; i < 5; i++ {
+		tc.do(t, "GET", "/api/repos", "alice", nil)
+	}
+	if now := atomic.LoadInt64(&hits); now != settledHits {
+		t.Errorf("five more listings cost %d github calls, want 0", now-settledHits)
+	}
+
+	// A mutation forgets the answer, because "install it and save again" is
+	// exactly the gesture that follows a "not installed" row.
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fnot-attached-anywhere", "alice",
+		map[string]any{"tags": []string{"hm"}}); rec.Code != http.StatusOK {
+		t.Fatalf("re-attach: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := tc.do(t, "GET", "/api/repos", "alice", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	rechecked := false
+	for _, r := range rows {
+		if r.Slug == "wandb/not-attached-anywhere" && r.App == appChecking {
+			rechecked = true
+		}
+	}
+	if !rechecked {
+		t.Errorf("saving an attachment did not re-ask about it: %+v", rows)
+	}
+}
+
+// TestReposDisabledWithoutStore: a host that opened no repos store answers 501
+// with the "not enabled" wording every other optional subsystem uses — and,
+// crucially, does not dereference the nil store and take the console down.
+func TestReposDisabledWithoutStore(t *testing.T) {
+	tc := newTestConsole(t)
+	// The mux holds method values bound to the handler, so clearing the field
+	// after Handler() is exactly the shape of a host built without the store.
+	tc.handler.repos = nil
+	for _, ep := range []struct{ method, path string }{
+		{"GET", "/api/repos"},
+		{"PUT", "/api/repos/wandb%2Fhivemind"},
+		{"DELETE", "/api/repos/wandb%2Fhivemind"},
+	} {
+		rec := tc.do(t, ep.method, ep.path, "alice", map[string]any{})
+		if rec.Code != http.StatusNotImplemented {
+			t.Errorf("%s %s: %d, want 501", ep.method, ep.path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "not enabled") {
+			t.Errorf("%s %s body %q: want the \"not enabled\" wording", ep.method, ep.path, rec.Body.String())
+		}
 	}
 }
 

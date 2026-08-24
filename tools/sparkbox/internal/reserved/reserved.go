@@ -40,6 +40,7 @@ var names = map[string]bool{
 	"login":   true, // browser sign-in       (--login-subdomain)
 	"oidc":    true, // OIDC issuer + JWKS    (--oidc-subdomain)
 	"xterm":   true, // browser terminals     (--xterm-subdomain; see suffixes)
+	"hooks":   true, // github webhooks       (--webhook-subdomain)
 	"new":     true, // ssh new@<domain>      — create a sandbox
 	"ctl":     true, // ssh ctl@<domain>      — control plane
 	"signup":  true, // ssh signup@<domain>   — register

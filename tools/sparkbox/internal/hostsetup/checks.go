@@ -58,6 +58,10 @@ type Check struct {
 // the check can't drift from what a fleet boot writes.
 var fleetKeyFiles = bootsecrets.KeyFiles()
 
+// The keys a host may have and runs fine without. Reported, never failed on:
+// see bootsecrets.OptionalKeyFiles for why they are a separate list.
+var optionalFleetKeyFiles = bootsecrets.OptionalKeyFiles()
+
 // DefaultChecks is the ordered doctor battery. Environment checks come first
 // (they need no config), then artifact/config checks, then live-service checks.
 func DefaultChecks() []Check {
@@ -399,13 +403,33 @@ func checkFleetKeys(p Probe, cfg Config) Result {
 		}
 	}
 	if len(missing) == 0 {
-		return pass("present in " + dir)
+		return pass("present in " + dir + optionalKeyNote(p, dir))
 	}
 	// Absence is not fatal on a standalone host: `sparkbox serve` mints these on
 	// first start (LoadOrCreateKey). It only matters on a fleet host with
 	// --require-keys, which is out of scope for `setup`.
 	return warn(fmt.Sprintf("missing %s in %s", strings.Join(missing, ", "), dir),
 		"generated automatically on first `sparkbox serve` (LoadOrCreateKey); nothing to do for a standalone host")
+}
+
+// optionalKeyNote reports which optional fleet keys this host does not have, as
+// a clause on the fleet-keys line rather than a check of its own — their
+// absence is a configuration statement, not a problem, and a host with none of
+// them is the ordinary case. It is worth one clause because each one silently
+// disables a feature: no node_ca_*.pem is an SSH-only control plane, and no
+// github_app_key.pem is repo attachment without credentials, which surfaces
+// only as a failed clone inside a VM.
+func optionalKeyNote(p Probe, dir string) string {
+	var absent []string
+	for _, f := range optionalFleetKeyFiles {
+		if _, err := p.Stat(filepath.Join(dir, f)); err != nil {
+			absent = append(absent, f)
+		}
+	}
+	if len(absent) == 0 {
+		return ""
+	}
+	return "; optional and not set: " + strings.Join(absent, ", ")
 }
 
 func checkUsers(p Probe, cfg Config) Result {

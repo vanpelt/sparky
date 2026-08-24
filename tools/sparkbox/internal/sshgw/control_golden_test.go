@@ -374,6 +374,23 @@ func TestControlGolden(t *testing.T) {
 		name: "tags on a host with no secrets store", handle: "alice", args: []string{"tags", "alice-box"},
 		wantErr: "sparkbox: tags failed: tagging is not enabled on this host\r\n", wantExit: 1,
 	}, {
+		// This stack has no repo store, and the sentence has to be a statement
+		// about the host — the same one ctlops raises — rather than a complaint
+		// about the command, which is why it beats the usage line.
+		name: "repo on a host with no repo store", handle: "alice", args: []string{"repo"},
+		wantErr: "sparkbox: repo attachments are not enabled on this host\r\n", wantExit: 1,
+	}, {
+		name: "repo ls on a host with no repo store", handle: "alice", args: []string{"repo", "ls"},
+		wantErr: "sparkbox: repo attachments are not enabled on this host\r\n", wantExit: 1,
+	}, {
+		// The App is a second bit: a host can attach repos with no App at all
+		// (public ones clone without a credential), so this refusal is its own.
+		name: "github install with no App configured", handle: "alice", args: []string{"github", "install"},
+		wantErr: "sparkbox: no GitHub App is configured on this host\r\n", wantExit: 1,
+	}, {
+		name: "github with an unknown subcommand", handle: "alice", args: []string{"github", "wat"},
+		wantErr: "unknown github command \"wat\"\r\n" + controlUsage, wantExit: 2,
+	}, {
 		name: "snapshot list when there are none", handle: "alice", args: []string{"snapshot", "list"},
 		wantOut: "no snapshots — create one with:\r\n" +
 			"  ssh ctl@hivemind.tools snapshot create <box> <name>\r\n",
@@ -594,6 +611,14 @@ func TestControlUsageDocumentsTheOtherDoors(t *testing.T) {
 		"https://api.<domain>",
 		"/docs",
 		"session-token",
+		// A repo attachment is the one feature whose whole point is that it
+		// happens before anybody arrives in the sandbox, so the listing that a
+		// terminal user reads while creating one has to mention it — and has to
+		// mention the check, which is the only thing that reports the failure
+		// this design actually has.
+		"repo add <owner>/<name>",
+		"repo check",
+		"github install",
 	} {
 		if !strings.Contains(controlUsage, want) {
 			t.Errorf("ctl usage never mentions %q", want)

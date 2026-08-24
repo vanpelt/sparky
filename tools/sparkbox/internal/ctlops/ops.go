@@ -23,7 +23,9 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
@@ -123,6 +125,44 @@ type Secrets interface {
 	SandboxesForSecret(owner, envName string) ([]string, error)
 }
 
+// Repos is the repo-attachment store — the third reader of the shared
+// sandbox_tags table, after secrets and netrules. A nil one makes every repo
+// operation answer KindDisabled, which is what a host with no repo store is.
+//
+// It is deliberately narrower than *repos.Store. ReposForSandbox is missing
+// because nothing on this surface resolves a guest's manifest: that is
+// internal/metadata's job, over the guest's own tap, and a control-plane verb
+// that could ask "what does that sandbox get" would be a second answer to a
+// question with one authority. Every method here is owner-agnostic for the same
+// reason Secrets' are — ctlops authorizes the caller first, and the handle is a
+// query term rather than a check a handler could forget.
+type Repos interface {
+	PutRepo(owner string, r repos.Repo, tags []string) error
+	DeleteRepo(owner, host, slug string) error
+	ListRepos(owner string) ([]repos.Repo, error)
+	SandboxesForRepo(owner, host, slug string) ([]string, error)
+}
+
+// GitHubApp is the installation half of the GitHub App: which installation
+// covers a repository, and whether the caller's linked GitHub identity may use
+// it. *ghapp.App satisfies it.
+//
+// Minting a token is deliberately NOT on this interface. Installation tokens
+// are handed out in internal/metadata, to a guest that identified itself on a
+// channel it cannot forge, and every one of them is a live credential. Putting
+// MintToken here would mean this package — whose whole job is to render results
+// and write audit lines — held one, and the discipline that keeps a token out
+// of a log is much easier to hold when there is no token in the room.
+//
+// A nil one is a host with no App configured: `repo check` and `github install`
+// answer KindDisabled and `repo add` still records the attachment, because a
+// public repository clones with no credential at all.
+type GitHubApp interface {
+	InstallationFor(ctx context.Context, owner, name string) (ghapp.Installation, error)
+	Authorize(ctx context.Context, inst ghapp.Installation, githubID int64, githubLogin string) error
+	InstallURL() string
+}
+
 // Schedules is the platform-cron store. A nil one makes every schedule
 // operation answer KindDisabled.
 type Schedules interface {
@@ -197,6 +237,7 @@ type Config struct {
 
 	Tags        Tagger      // nil: tag operations are KindDisabled
 	Secrets     Secrets     // nil: secret operations are KindDisabled
+	Repos       Repos       // nil: repo operations are KindDisabled
 	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
 	Schedules   Schedules   // nil: schedule operations are KindDisabled
 	Routes      Routes      // nil: share operations are KindDisabled
@@ -207,6 +248,11 @@ type Config struct {
 	// of any host with no --github-client-id — leaves the key check as the only
 	// way to link, which is what shipped before this existed.
 	GitHubDevice GitHubDeviceFlow
+	// GitHubApp resolves installations and authorizes their use. nil — the
+	// state of any host with no App private key — leaves repo attachment
+	// working as pure configuration, which is all a public repository needs,
+	// and makes `repo check` and `github install` KindDisabled.
+	GitHubApp GitHubApp
 
 	DefaultImage   string // rootfs template new sandboxes get
 	Domain         string // base zone, for the URL fields on results; "" omits them
@@ -230,6 +276,7 @@ type Ops struct {
 	accounts    Accounts
 	tags        Tagger
 	secrets     Secrets
+	repos       Repos
 	checkpoints Checkpoints
 	schedules   Schedules
 	routes      Routes
@@ -237,6 +284,7 @@ type Ops struct {
 	nodes       NodeRoster
 	github      GitHubKeys
 	ghDevice    GitHubDeviceFlow
+	ghApp       GitHubApp
 	// orgMembers reads a GitHub org's roster. A function rather than another
 	// narrow interface because it is one call with no state, and a field rather
 	// than a direct users.ListOrgMembers so provisioning is testable without
@@ -269,6 +317,7 @@ func New(cfg Config) *Ops {
 		accounts:           cfg.Accounts,
 		tags:               cfg.Tags,
 		secrets:            cfg.Secrets,
+		repos:              cfg.Repos,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
@@ -276,6 +325,7 @@ func New(cfg Config) *Ops {
 		nodes:              cfg.Nodes,
 		github:             cfg.GitHub,
 		ghDevice:           cfg.GitHubDevice,
+		ghApp:              cfg.GitHubApp,
 		defaultImage:       cfg.DefaultImage,
 		domain:             normalizeDomain(cfg.Domain),
 		xtermSubdomain:     cfg.XtermSubdomain,
@@ -346,6 +396,14 @@ type Capabilities struct {
 	// the signup and `github link` paths offer, so a client asks rather than
 	// starting a flow that would answer KindDisabled.
 	GitHubDevice bool `json:"github_device"`
+	// Repos reports that repositories can be attached to tags at all. False is
+	// a host with no repo store, where every repo verb answers 501.
+	Repos bool `json:"repos"`
+	// GitHubApp reports that this host holds a GitHub App key, which is what
+	// makes a PRIVATE repository clonable: without one an attachment is still
+	// configuration a public repo clones from, so this is a second bit rather
+	// than a narrowing of Repos.
+	GitHubApp bool `json:"github_app"`
 	// Fleet reports that this host is a gateway other machines can join, which
 	// is what makes the node commands answerable. It says nothing about whether
 	// any machine actually has joined — that is what `nodes.list` is for.
@@ -362,6 +420,8 @@ func (o *Ops) Capabilities() Capabilities {
 		SessionTokens: o.sessions != nil,
 		Terminal:      o.domain != "" && o.xtermSubdomain != "",
 		GitHubDevice:  o.ghDevice != nil,
+		Repos:         o.repos != nil,
+		GitHubApp:     o.ghApp != nil,
 		Fleet:         o.nodes != nil,
 	}
 }

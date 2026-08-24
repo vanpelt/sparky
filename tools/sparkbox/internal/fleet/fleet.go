@@ -176,6 +176,11 @@ type Fleet struct {
 	// until SetIdentity — a deployment with no OIDC key — and a node asking is
 	// then told so rather than left waiting. See identity.go.
 	identity Identity
+	// repos resolves a sandbox's repo attachments and mints the git credential
+	// for one of them, on any machine. Nil until SetRepos — a deployment with
+	// no attachment store or no GitHub App key — with the same answer as
+	// identity: the node is told, not left waiting. See repos.go.
+	repos Repos
 
 	// foreign latches once this fleet can hold a record that is not on this
 	// machine. See hasRemote.

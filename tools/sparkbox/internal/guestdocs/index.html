@@ -15,6 +15,9 @@
 <aside>Pinning consumes shared pool capacity continuously. Use it for active background work, not as a default for every VM.</aside>
 <h2>HTTPS proxy</h2>
 <p>Applications listening in a VM can be reached through Sparkbox's authenticated wildcard HTTPS edge. Use <code>sparkbox set-port PORT</code> to change the default forwarded port, and <code>sparkbox make-public</code> or <code>sparkbox make-private</code> to change access. See the <a href="/proxy">proxy guide</a>.</p>
+<h2>Attached repositories</h2>
+<p>Repositories attached to one of your tags are cloned into this VM at boot, over a short-lived GitHub App token that git fetches on demand — there is no personal access token in the VM and nothing to rotate. Run <code>sparkbox repos</code> to see what is attached and where it landed, and <code>sparkbox repos sync</code> to clone what is missing. Attaching a repository never reaches into a VM that already exists, so an existing VM picks one up with <code>sparkbox repos sync</code>.</p>
+<aside>A clone that already exists is never touched. Syncing adds; it does not update, reset or delete.</aside>
 <h2>Agent harnesses</h2>
 <p>New VMs include current versions of Claude Code, Codex, Pi, and Hivemind. Sparkbox environment guidance is installed at <code>~/.agents/AGENTS.md</code> and linked into each harness's global instruction location. Repository-level instructions still apply normally.</p>
 <h2>Supported surface</h2>
