@@ -63,6 +63,18 @@ has no sftp subsystem. See `docs/github-app-setup.md`.
   the VM node to reach only public IP space, cluster DNS, and the internal
   gateway fleet service.
 - A Secret containing one operator's **public** SSH key.
+- Optionally `sparkbox-github-webhook`, a Secret whose `secret` key holds the
+  GitHub App's webhook secret. Absent, the gateway mounts no webhook receiver at
+  all rather than one that would accept unverified deliveries, so leaving it out
+  is a configuration state and not a failure. Create it with:
+
+  ```sh
+  kubectl -n sparkbox-poc create secret generic sparkbox-github-webhook \
+    --from-literal=secret="$(openssl rand -hex 32)"
+  ```
+
+  then paste the same value into the App's Settings → Webhook → Secret. See
+  `docs/github-webhooks.md`.
 - A separately provisioned `sparkbox-identity` Secret containing the stable
   gateway, OIDC, and node-control identity, mounted only by the gateway. The
   node receives a separate Secret containing only the gateway's public host-key

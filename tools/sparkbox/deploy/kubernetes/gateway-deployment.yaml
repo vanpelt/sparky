@@ -61,6 +61,16 @@ spec:
                   optional: true
             - name: SPARKBOX_GITHUB_APP_CLIENT_ID
               value: __SPARKBOX_GITHUB_APP_CLIENT_ID__
+            # optional, like the console password above: a gateway without it
+            # mounts no webhook receiver at all rather than one that accepts
+            # unverified deliveries, so an absent Secret is a configuration
+            # state and not a failure.
+            - name: SPARKBOX_GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sparkbox-github-webhook
+                  key: secret
+                  optional: true
             - name: SPARKBOX_NODE_NAME
               value: cks-gateway
             - name: SPARKBOX_CLUSTER_ID
