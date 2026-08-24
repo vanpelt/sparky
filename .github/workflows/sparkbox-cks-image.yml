@@ -1,8 +1,45 @@
 name: sparkbox CKS image
 
+# Two callers, one build.
+#
+#   push / workflow_dispatch  an ordinary `edge` build off a branch. Tags are
+#                             the branch, the full SHA, and `edge` on main.
+#
+#   workflow_call             build-artifacts.yml calls this AFTER it publishes
+#                             a release, passing `release_tag`. That adds a tag
+#                             named for the release (v0.6.0), so the image that
+#                             pins SPARKBOX_RELEASE=v0.6.0 is itself findable by
+#                             that version instead of only by SHA.
+#
+# The ordering is the point of the `needs: publish` on the calling side. This
+# image does not embed the release payload — it downloads and SHA-256-verifies
+# firecracker, the kernel and the rootfs at Pod start (deploy/kubernetes/
+# entrypoint.sh) — so an image tagged v0.6.0 whose release was still a draft
+# would be a Pod that CrashLoops on a 404. Publishing first makes the tag mean
+# what it says.
+
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag the image for this release (blank = ordinary edge build)"
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release this image pins (blank = ordinary edge build)"
+        required: false
+        type: string
+        default: ""
   push:
+    # Branches only. Without this a `v*` tag push would ALSO start a standalone
+    # run, which shares this file's concurrency group with the release's `cks`
+    # job (both resolve to sparkbox-cks-image-refs/tags/vX.Y.Z) and would race
+    # it under cancel-in-progress. A release builds this image exactly once,
+    # through workflow_call, after publish.
+    branches: ["**"]
     paths:
       - .github/workflows/sparkbox-cks-image.yml
       - tools/sparkbox/**
@@ -26,6 +63,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Before anything is built: do the checksums baked into entrypoint.sh
+      # actually describe the release it pins? A mismatch is invisible at
+      # build time and splits into two silent failures at run time — a warm
+      # cache silently keeps the PREVIOUS release's kernel and rootfs, a cold
+      # one CrashLoops on a checksum error. v0.6.0 shipped both.
+      - name: pinned checksums match the pinned release
+        run: tools/sparkbox/hack/check-cks-pin.sh amd64
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -44,6 +89,7 @@ jobs:
             type=ref,event=branch
             type=sha,format=long
             type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.release_tag || '' }},enable=${{ (inputs.release_tag || '') != '' }}
           labels: |
             org.opencontainers.image.title=Sparkbox CKS
             org.opencontainers.image.description=Sparkbox Firecracker runtime for CoreWeave Kubernetes Service
@@ -57,7 +103,7 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            SPARKBOX_VERSION=${{ github.sha }}-cks
+            SPARKBOX_VERSION=${{ inputs.release_tag || format('{0}-cks', github.sha) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

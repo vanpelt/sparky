@@ -880,8 +880,16 @@ func TestFleetPlacesOnANamedNode(t *testing.T) {
 	if !strings.Contains(banner, "on node-b") {
 		t.Errorf("the banner does not say where it landed: %q", banner)
 	}
-	if tags, err := fs.secrets.TagsFor("far-away"); err != nil || len(tags) != 0 {
-		t.Fatalf("tags = %v (err %v); --node was swallowed into the tag list rather than understood", tags, err)
+	// A create with no tags of its own carries exactly the default one, so what
+	// this asserts is that `--node node-b` was UNDERSTOOD rather than swallowed
+	// into the tag list — the failure it was written for would show up here as
+	// a "--node" or "node-b" tag, not as a non-empty set.
+	tags, err := fs.secrets.TagsFor("far-away")
+	if err != nil {
+		t.Fatalf("TagsFor: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != secrets.DefaultTag {
+		t.Fatalf("tags = %v; --node was swallowed into the tag list rather than understood", tags)
 	}
 
 	// The three places that have to agree, and the one that must not.
@@ -1594,5 +1602,73 @@ func TestFleetPauseClosesTheSessionWithTheNodesWording(t *testing.T) {
 	}
 	if !strings.Contains(gotBytes, "\x1b[?1000l") {
 		t.Errorf("the goodbye left the terminal unrestored: %q", gotBytes)
+	}
+}
+
+// A booting guest's refusal has to reach the gateway's dial loop AS a refusal
+// to connect, over a real link, with its reason intact.
+//
+// This is the seam behind the CKS failure of 2026-08-24, and it is a seam
+// precisely because every piece of it looked right on its own. A node reports
+// "nothing is listening in there" as an SSH channel rejection with reason
+// ConnectionFailed (nodelink.serveStream); fleet.remoteNode.DialGuest returns
+// that rejection untouched rather than folding it into Unreachable; and
+// sshgw.DialUpstreamVia decides from the reason whether to retry a guest whose
+// sshd has not finished starting. The middle link is the one nothing pinned —
+// and if the reason is ever flattened on its way across, the dial loop silently
+// goes back to giving up one second into an eleven-second boot, which is a
+// failure no unit test on either end can see.
+//
+// So: a REAL sandbox on a REAL other machine, dialed on a port nothing serves,
+// asserted at the point sshgw would read it.
+func TestFleetCarriesABootingGuestsRefusalIntact(t *testing.T) {
+	fs, node := newFleetStack(t)
+	fs.join(t, node)
+
+	if _, banner, _ := fs.session(t, fs.userKey, sshgw.NewSandboxUser+"+still-booting", "--node node-b"); !strings.Contains(banner, `created sandbox "still-booting"`) {
+		t.Fatalf("the create did not happen: %q", banner)
+	}
+	if !node.holds(t, "still-booting") {
+		t.Fatal("the sandbox is not on the other machine, so this dials nothing interesting")
+	}
+
+	// Port 1: the guest is up, nothing is listening there. That is what a
+	// half-booted sshd looks like from the gateway, and the address form is the
+	// synthetic one the router mints — no real address exists here to dial.
+	addr := net.JoinHostPort(fleet.Host("still-booting", "node-b"), "1")
+	conn, err := fs.flt.DialContextNoResume(context.Background(), "tcp", addr)
+	if err == nil {
+		conn.Close()
+		t.Fatal("something accepted a connection on a port nothing serves")
+	}
+
+	var refused *xssh.OpenChannelError
+	if !errors.As(err, &refused) {
+		t.Fatalf("the refusal arrived as %v (%T), not an *ssh.OpenChannelError: "+
+			"sshgw.DialUpstreamVia can no longer tell a booting guest from a dead machine", err, err)
+	}
+	if refused.Reason != xssh.ConnectionFailed {
+		t.Fatalf("reason = %v, want ConnectionFailed: a guest that is still starting now reads as "+
+			"a final answer, and the first attach to a fresh sandbox will fail instead of waiting", refused.Reason)
+	}
+	// The property the retry actually turns on, asserted through the exported
+	// predicate rather than restated here.
+	if !sshgw.RetryableRefusal(refused) {
+		t.Fatal("sshgw would not retry this, so a guest whose sshd is still starting is given up on")
+	}
+	// And the neighbouring row of the same table stays final: a paused sandbox
+	// is a state to act on, not a boot to outwait.
+	if out, errs, code := fs.ctl(t, "pause still-booting"); code != 0 {
+		t.Fatalf("ctl pause exited %d: %s%s", code, out, errs)
+	}
+	_, err = fs.flt.DialContextNoResume(context.Background(), "tcp",
+		net.JoinHostPort(fleet.Host("still-booting", "node-b"), fleet.SSHPort))
+	var paused *xssh.OpenChannelError
+	if !errors.As(err, &paused) {
+		t.Fatalf("dialing a paused sandbox gave %v (%T), want a typed refusal", err, err)
+	}
+	if sshgw.RetryableRefusal(paused) {
+		t.Fatalf("sshgw would retry a paused sandbox (%v/%q) for its whole dial budget "+
+			"instead of saying so at once", paused.Reason, paused.Message)
 	}
 }

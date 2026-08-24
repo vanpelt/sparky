@@ -142,6 +142,10 @@ func (l *localNode) ResyncEnv(ctx context.Context, name string) error {
 	return nil
 }
 
+func (l *localNode) AwaitEnv(ctx context.Context, name string) error {
+	return l.mgr.AwaitEnv(ctx, name)
+}
+
 func (l *localNode) MarkActive(_ context.Context, name string) error {
 	l.mgr.MarkActive(name)
 	return nil

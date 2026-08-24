@@ -1224,7 +1224,15 @@ func reflinkClone(ctx context.Context, source, destination string) error {
 		ctx, "cp", "--reflink=always", source, destination,
 	).CombinedOutput(); err != nil {
 		os.Remove(destination) //nolint:errcheck // never let a torn clone pass Create's exists check
-		return fmt.Errorf("copy rootfs: %v: %s", err, out)
+		// Trimmed, because cp's diagnostic ends in a newline and this sentence
+		// has to survive a trip across the node link. ctlops.wireSentence
+		// blanks any message containing a control character — a correct
+		// defence against a peer forging terminal output — and replaces it
+		// with "the remote host reported a failure it could not describe". So
+		// an untrimmed cp error reaches the operator as no error at all: this
+		// exact newline once turned "cannot open ... Permission denied" into a
+		// sentence that named nothing and cost an afternoon.
+		return fmt.Errorf("copy rootfs: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

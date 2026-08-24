@@ -22,7 +22,7 @@ readonly hot_dir="$data_dir/hot"
 readonly vm_state_dir="${SPARKBOX_VM_STATE_DIR:-$hot_dir}"
 readonly key_dir="${SPARKBOX_KEY_DIR:-/run/sparkbox/keys}"
 readonly durable_dir="${SPARKBOX_DURABLE_DIR:-/mnt/sparkbox-durable}"
-readonly release="${SPARKBOX_RELEASE:-v0.5.3}"
+readonly release="${SPARKBOX_RELEASE:-v0.6.0}"
 readonly artifact_base="${SPARKBOX_ARTIFACT_BASE:-https://github.com/vanpelt/sparky/releases/download}"
 readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:?SPARKBOX_PROXY_DOMAIN is required}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
@@ -94,8 +94,8 @@ esac
 readonly firecracker_sha256="${SPARKBOX_FIRECRACKER_SHA256:-2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7}"
 readonly firecracker_version="${SPARKBOX_FIRECRACKER_VERSION:-v1.16.1}"
 readonly jailer_sha256="${SPARKBOX_JAILER_SHA256:-1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd}"
-readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-1b8c89b6c39303228a91da1862ebdb51f583a0aa6f6c78bbe8da22c79a615ae8}"
-readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-53ea8dfbe1dadff39c5df6ad62cb82aa6bef7fdff51525a0df2d64cbd4ed7c9a}"
+readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-ea519f3d4295d40495c1642de28ca1a22eda33d7b0f959af9a0ecbe8d3cac956}"
+readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-898633555a5f18ba6456e3e27e99419a4ed027405fd5181fadb07e8eec5ee60d}"
 
 mkdir -p \
   "$asset_dir" "$image_dir" "$tools_dir" "$control_dir" "$hot_dir" \
@@ -240,6 +240,23 @@ if [ "$mode" = prepare ] || [ "$skip_prepare" != true ]; then
   TOOLS_DIR="$tools_dir" \
   GUEST_IDENTITY=/usr/local/sbin/sparkbox-install-guest-identity.sh \
     /usr/local/sbin/sparkbox-refresh-tools.sh
+
+  # The controller has to READ this template: a fresh sandbox is a
+  # `cp --reflink=always` of it, and that cp runs as the unprivileged
+  # controller, not as root.
+  #
+  # It does not inherit a usable mode on its own. zstd preserves the mode of
+  # the file it decompressed, and the artifact fetched above is 0600 root:root,
+  # so the template came out unreadable by uid $controller_uid and EVERY create
+  # failed with a permission denied — while resumes kept working, because an
+  # existing VM already has its own disk and never touches this file. Group
+  # read rather than 0644: the controller is the only thing that needs it.
+  #
+  # Applied on every prepare rather than only after a decompress, because the
+  # deployments that need it most are the ones whose template was written by an
+  # older image and is sitting there at 0600 right now.
+  chgrp "$controller_gid" "$rootfs"
+  chmod 0640 "$rootfs"
 fi
 
 if [ "$mode" = prepare ]; then

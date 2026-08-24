@@ -72,6 +72,23 @@ var reservedEnvNames = map[string]bool{
 // tagRe bounds tags to short DNS-label-ish strings safe in URLs and UIs.
 var tagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
+// DefaultTag is the tag a secret gets when its owner names none, and the tag a
+// new sandbox is stamped with when its creator names none (ctlops.Create).
+//
+// It exists because the untagged case was a silent failure, and silent is the
+// operative word. EnvForSandbox is an inner join on tags, so a first-time user
+// who saves CLAUDE_CODE_OAUTH_TOKEN and then runs `ssh new@<gateway>` gets an
+// empty environment, an agent that asks them to log in, and nothing anywhere
+// saying why. Both halves have to default to the same string for the join to
+// find anything, which is why one constant serves both.
+//
+// It is a tag like any other, not a wildcard: a secret tagged `default` reaches
+// exactly the sandboxes tagged `default`, and either side can be retagged to
+// opt out. Worth knowing before writing an egress rule-set against this name —
+// internal/netrules shares the sandbox_tags table, so a rule-set tagged
+// `default` would begin governing every sandbox created since this shipped.
+const DefaultTag = "default"
+
 // maxValueLen caps a secret value at 4 KiB — env vars, not blobs.
 const maxValueLen = 4096
 
@@ -382,6 +399,14 @@ func (s *Store) PutSecret(owner, envName, value string, tags []string) error {
 	tags, err := normTags(tags)
 	if err != nil {
 		return err
+	}
+	if len(tags) == 0 {
+		// A secret with no tags reaches no sandbox at all, so an empty set is
+		// never what the caller wanted — it is either a UI that did not ask or
+		// a user who did not know they had to. Defaulting here rather than in
+		// one caller keeps the console, the ssh channel and the REST API from
+		// disagreeing about what "no tags" means.
+		tags = []string{DefaultTag}
 	}
 	now := time.Now().UTC()
 

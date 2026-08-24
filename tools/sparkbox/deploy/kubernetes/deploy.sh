@@ -10,7 +10,9 @@ Options:
   --context CONTEXT       kubectl context (default: current context)
   --node-pool NAME        CKS NodePool label value (default: default-node-pool)
   --node NAME             exact CKS Node (default: sole ready eligible pool Node)
-  --proxy-domain DOMAIN   public Sparkbox domain (default: allocated coreweave.app domain)
+  --proxy-domain DOMAIN   public Sparkbox domain (default: the domain the live
+                          gateway already publishes, else the allocated
+                          coreweave.app domain)
   --public-key PATH       operator SSH public key (default: ~/.ssh/id_ed25519.pub)
   --private-key PATH      matching operator key used to approve the VM node
                           (default: public-key path without .pub; optional on re-runs)
@@ -239,7 +241,21 @@ case "$allocated_domain" in
     exit 1
     ;;
 esac
-proxy_domain=${requested_proxy_domain:-$allocated_domain}
+# A re-run without --proxy-domain must not silently revert a deployment that
+# already publishes a custom domain: WebAuthn origins, issued certificates, and
+# every published sandbox URL are derived from it. Carry the live gateway's
+# current domain forward unless the operator names a different one.
+deployed_proxy_domain=$(
+  "${k[@]}" -n "$namespace" get deployment sparkbox-gateway \
+    -o 'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="SPARKBOX_PROXY_DOMAIN")].value}' \
+    2>/dev/null || true
+)
+proxy_domain=${requested_proxy_domain:-${deployed_proxy_domain:-$allocated_domain}}
+if [ -z "$requested_proxy_domain" ] && [ -n "$deployed_proxy_domain" ] &&
+  [ "$deployed_proxy_domain" != "$allocated_domain" ]; then
+  echo "Keeping the deployed public domain: $proxy_domain"
+  echo "  Pass --proxy-domain $allocated_domain to move back to the allocated name."
+fi
 if [ "$proxy_domain" != "$allocated_domain" ]; then
   echo "Configuring custom public domain: $proxy_domain"
   echo "  DNS apex and wildcard must point to the LoadBalancer before HTTPS is tested."

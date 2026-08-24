@@ -99,6 +99,87 @@ func TestReaperGradientBalloonThenPause(t *testing.T) {
 	}
 }
 
+// TestBalloonReclaimIsNotReadAsActivity pins the fix for a loop that kept a
+// completely idle sandbox running for fifteen hours.
+//
+// vmm.CPUStatser reads the VMM process's own utime+stime, so inflating a
+// balloon is charged to the very counter the reaper reads for evidence of work:
+// the host releases gigabytes of guest pages and the guest kernel then faults
+// its working set back in. Read as activity, that deflated the balloon and
+// reset the idle clock; two minutes later the reaper ballooned it down again,
+// and the idle clock could never reach the pause threshold.
+func TestBalloonReclaimIsNotReadAsActivity(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 1024, ActivityCPUPct: 2})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "warm", "alice", "ubuntu", 1, 8192); err != nil {
+		t.Fatal(err)
+	}
+	idleSince := time.Now().Add(-5 * time.Minute)
+	m.boxes["warm"].LastActive = idleSince
+	if err := m.balloonDown(ctx, "warm"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.boxes["warm"].Ballooned {
+		t.Fatal("setup: the sandbox should be ballooned")
+	}
+
+	// One minute's interval carrying thirty seconds of VMM CPU: half a core,
+	// more than an order of magnitude past the 2% floor. This is the shape of
+	// the reclaim itself, not of anything the user asked for.
+	spike := func() {
+		now := time.Now()
+		m.vitals["warm"] = vitalsSample{at: now.Add(-time.Minute)}
+		m.applyVitals(ctx, "warm", vitalsSample{at: now, cpuNanos: uint64(30 * time.Second)}, true, false)
+	}
+	spike()
+
+	if !m.boxes["warm"].Ballooned {
+		t.Error("the balloon's own reclaim deflated it — the loop is back")
+	}
+	if got := m.boxes["warm"].LastActive; !got.Equal(idleSince) {
+		t.Errorf("the reclaim reset the idle clock to %s; a sandbox that cannot accumulate idle can never be paused", got)
+	}
+
+	// Once the balloon has settled the same reading means what it says.
+	m.balloonedAt["warm"] = time.Now().Add(-2 * balloonSettle)
+	spike()
+	if m.boxes["warm"].Ballooned {
+		t.Error("a settled sandbox that is genuinely busy must get its RAM back")
+	}
+	if !m.boxes["warm"].LastActive.After(idleSince) {
+		t.Error("a settled sandbox that is genuinely busy must reset the idle clock")
+	}
+}
+
+// TestBalloonedSandboxStillTrustsItsNetwork is the other half: only CPU is
+// compromised by ballooning. Traffic is not, so it stays a valid activity
+// signal in both states — which is what keeps the settle window above from
+// costing a busy sandbox its RAM for three minutes.
+func TestBalloonedSandboxStillTrustsItsNetwork(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 1024, ActivityCPUPct: 2, ActivityNetBytes: 64 * 1024})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "warm", "alice", "ubuntu", 1, 8192); err != nil {
+		t.Fatal(err)
+	}
+	idleSince := time.Now().Add(-5 * time.Minute)
+	m.boxes["warm"].LastActive = idleSince
+	if err := m.balloonDown(ctx, "warm"); err != nil {
+		t.Fatal(err)
+	}
+
+	// No CPU reading at all, a megabyte of traffic: unambiguously the guest.
+	now := time.Now()
+	m.vitals["warm"] = vitalsSample{at: now.Add(-time.Minute)}
+	m.applyVitals(ctx, "warm", vitalsSample{at: now, rx: 1 << 20}, false, true)
+
+	if m.boxes["warm"].Ballooned {
+		t.Error("traffic on a ballooned sandbox must still return its RAM")
+	}
+	if !m.boxes["warm"].LastActive.After(idleSince) {
+		t.Error("traffic on a ballooned sandbox must still reset the idle clock")
+	}
+}
+
 func TestReaperNoBalloonWithoutReserve(t *testing.T) {
 	// Reserve off (0): the balloon stage is skipped entirely — straight to pause,
 	// the pre-overcommit behaviour.

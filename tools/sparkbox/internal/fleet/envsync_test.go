@@ -163,6 +163,54 @@ func TestRemoteLifecycleFiresTheGatewaysEnvPush(t *testing.T) {
 	}
 }
 
+// TestAwaitEnvDeliversBeforeItReturns is the difference between the push and
+// the wait, and it is the entire reason the wait exists.
+//
+// awaitPush above has to poll, because a fired push is a goroutine. This one
+// reads the record on the line after the call. An interactive attach needs that
+// guarantee and cannot get it from the push: it starts the VM and opens a
+// session on it in the same breath, pam_env reads /etc/environment exactly once
+// at session setup, and the session — begun by a call that already returned —
+// wins the race against a push that still has to dial the guest.
+func TestAwaitEnvDeliversBeforeItReturns(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	f := newFleet(t, mgr, newIndex(t))
+	pusher := &recordingPusher{}
+	f.SetEnvPusher(pusher)
+	nodeb := newBuildingNode("boxb")
+	attachBuilder(t, f, nodeb)
+
+	if _, err := f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatalf("CreateOn: %v", err)
+	}
+	// Drain the create's own asynchronous push so what follows is unambiguous.
+	awaitPush(t, pusher, "far-away", "a create on another machine")
+	pusher.mu.Lock()
+	pusher.boxes = nil
+	pusher.mu.Unlock()
+
+	if err := f.AwaitEnv(context.Background(), "far-away"); err != nil {
+		t.Fatalf("AwaitEnv: %v", err)
+	}
+	pushed := pusher.pushed()
+	if len(pushed) != 1 {
+		t.Fatalf("%d deliveries recorded on the line after AwaitEnv, want 1", len(pushed))
+	}
+	if pushed[0].Owner != "alice" {
+		t.Errorf("delivered for owner %q, want the ledger's", pushed[0].Owner)
+	}
+	if pushed[0].State != vmm.StateRunning {
+		t.Errorf("delivered to a %q sandbox; only a running one can be written to", pushed[0].State)
+	}
+
+	// A sandbox nobody has placed is not this fleet's to deliver into, and
+	// saying so with an error would make an attach fail over a box the gateway
+	// does not even hold.
+	if err := f.AwaitEnv(context.Background(), "nobody-here"); err != nil {
+		t.Errorf("AwaitEnv on an unknown sandbox: %v", err)
+	}
+}
+
 // TestALocalSandboxIsNeverPushedByTheFleet is the other half of the split, and
 // the one that is silent when it breaks.
 //
@@ -187,6 +235,14 @@ func TestALocalSandboxIsNeverPushedByTheFleet(t *testing.T) {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
 	noPush(t, pusher, "brave-otter", "a local resume", "which is the local manager's job: two writers over one guest's /etc/environment")
+
+	// The wait obeys the same split as the push: it delegates to the manager,
+	// whose hook owns this guest's env file, rather than becoming the second
+	// writer the whole rule exists to prevent.
+	if err := f.AwaitEnv(context.Background(), "brave-otter"); err != nil {
+		t.Fatalf("AwaitEnv on a local sandbox: %v", err)
+	}
+	noPush(t, pusher, "brave-otter", "AwaitEnv on a local sandbox", "which the local manager delivers: two writers over one guest's /etc/environment")
 
 	f.ResyncEnv(context.Background(), "brave-otter")
 	noPush(t, pusher, "brave-otter", "a local resync", "which is the local manager's job: two writers over one guest's /etc/environment")

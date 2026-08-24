@@ -127,6 +127,49 @@ func TestDialUpstreamViaDoesNotRetryARejectedChannel(t *testing.T) {
 	}
 }
 
+// The other half of the rule above, and the one that was missing: a node's
+// ConnectionFailed is a connection REFUSED inside the guest, not a refusal to
+// carry the connection. Every caller of DialUpstreamVia dials the guest's sshd
+// on a VM it has just started, so that is the boot it is already waiting on and
+// it has to be retried exactly like the local ECONNREFUSED it stands for.
+//
+// Treating it as final made a remote sandbox's first attach fail about a second
+// after its create returned, and cost the same box its secret-env push — which
+// fires once per transition to running, so the secrets did not arrive late,
+// they never arrived at all.
+func TestDialUpstreamViaRetriesAGuestStillBooting(t *testing.T) {
+	var calls atomic.Int64
+	// The node's own words for "nothing is listening in there yet"; see
+	// internal/nodelink.serveStream.
+	booting := &xssh.OpenChannelError{
+		Reason:  xssh.ConnectionFailed,
+		Message: "nothing accepted a connection on that port in the sandbox",
+	}
+	// Refuse the first few dials the way a node does while sshd comes up, then
+	// give a FINAL answer, which is only there to end the loop promptly instead
+	// of spending the whole budget proving a point it has already made.
+	const refusals = 3
+	settled := ctlops.Disabled("dial", "that machine is offline")
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		if calls.Add(1) <= refusals {
+			return nil, booting
+		}
+		return nil, settled
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := DialUpstreamVia(ctx, dial, "box.node.sandbox.invalid:ssh", "sparky", testSigner(t))
+	if !errors.Is(err, settled) {
+		t.Fatalf("dial ended with %v, want the final answer that followed the refusals", err)
+	}
+	if n := calls.Load(); n != refusals+1 {
+		t.Fatalf("dialer called %d times, want %d: a booting guest's ConnectionFailed "+
+			"was taken as a final answer and never retried", n, refusals+1)
+	}
+}
+
 // A nil dialer is the single-box deployment: it must still dial the host
 // network, and a connection refused there must still be retried until the
 // caller's budget runs out.

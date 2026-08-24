@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 )
 
 // Get resolves a sandbox the caller may act on. Missing and not-yours return the
@@ -40,6 +41,7 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	if len(tags) > 0 && o.tags == nil {
 		return SandboxInfo{}, Disabled(op, "tagging is not enabled on this host")
 	}
+	tags = o.defaultTags(tags)
 	name := a.Name
 	if name == "" {
 		name = o.GenerateName()
@@ -49,6 +51,13 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	defer cancel()
 
 	if err := o.nameIsFree(op, name); err != nil {
+		return SandboxInfo{}, err
+	}
+	// Before the first write, for the same reason as nameIsFree: a create that
+	// cannot possibly succeed must not leave tag rows behind for a sandbox that
+	// never exists. build() checks this again on the path that actually places;
+	// this is the copy that runs early enough to matter.
+	if err := o.placeable(op, a.Node); err != nil {
 		return SandboxInfo{}, err
 	}
 	if err := o.stampTags(name, c.Handle, tags); err != nil {
@@ -89,9 +98,26 @@ func (o *Ops) build(ctx context.Context, op, node, name, owner string, vcpus, me
 	}
 	p, ok := o.boxes.(placer)
 	if !ok {
-		return nil, Disabled(op, "this host runs a single machine, so a sandbox can't be placed on a named one.")
+		return nil, Disabled(op, singleMachineRefusal)
 	}
 	return p.CreateOn(ctx, node, name, owner, o.defaultImage, vcpus, memMB)
+}
+
+// singleMachineRefusal is shared by build and placeable so the two spellings of
+// one refusal cannot drift into two different sentences.
+const singleMachineRefusal = "this host runs a single machine, so a sandbox can't be placed on a named one."
+
+// placeable reports whether a named-node create is even possible here. It is a
+// property of the manager this process was built with, not of the request, so
+// it can be answered before anything is written.
+func (o *Ops) placeable(op, node string) error {
+	if node == "" {
+		return nil
+	}
+	if _, ok := o.boxes.(placer); !ok {
+		return Disabled(op, singleMachineRefusal)
+	}
+	return nil
 }
 
 // nameIsFree refuses a name that already names a sandbox — anyone's — BEFORE a
@@ -114,6 +140,24 @@ func (o *Ops) nameIsFree(op, name string) error {
 		return AsError(op, &host.NameError{Problem: host.NameTaken, Noun: "sandbox", Name: name})
 	}
 	return nil
+}
+
+// defaultTags gives a sandbox created with no tags the one tag secrets default
+// to, so the owner's secrets actually reach it.
+//
+// The two defaults are halves of one thing: internal/secrets.PutSecret stamps
+// DefaultTag on an untagged secret, this stamps it on an untagged sandbox, and
+// EnvForSandbox's join is what needs them to agree. Without both, the most
+// common path through the platform — save a token, make a box — delivers
+// nothing and says nothing.
+//
+// It defaults to no tags at all on a host with no tag store, which is the only
+// case where stamping one would turn a working create into a refusal.
+func (o *Ops) defaultTags(tags []string) []string {
+	if len(tags) > 0 || o.tags == nil {
+		return tags
+	}
+	return []string{secrets.DefaultTag}
 }
 
 // stampTags writes a create's tags under the name the sandbox is ABOUT to have.
@@ -386,6 +430,15 @@ func (o *Ops) Attach(ctx context.Context, c Caller, name string) (Endpoint, erro
 // because a ping-driven Touch turns a forgotten browser tab into a permanently
 // pinned VM.
 func (o *Ops) MarkActive(name string) { o.boxes.MarkActive(name) }
+
+// AwaitEnv blocks until the sandbox's secret environment has been delivered,
+// for a transport that is about to open a session on it. Like MarkActive it
+// takes no Caller: it is reached only after the caller's own ownership check,
+// and it neither reads nor reveals anything a resolved sandbox name does not
+// already imply.
+func (o *Ops) AwaitEnv(ctx context.Context, name string) error {
+	return o.boxes.AwaitEnv(ctx, name)
+}
 
 // reread re-resolves a sandbox after a mutation so the result carries the state
 // the manager actually settled on rather than the one we asked for. A record

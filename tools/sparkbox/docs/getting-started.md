@@ -188,7 +188,24 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
 - **IPv6 per sandbox.** With a routed `/64`, set `SUBNET6` + `SUBNET6_FLAG` in
   `sparkbox.env`; see the README's IPv6 section.
 - **Add users.** Operators mint invite codes (`ssh -p 2222 ctl@<host> invite`);
-  newcomers register with `ssh signup@<host>`.
+  newcomers register with `ssh signup@<host>`. For people who are on GitHub
+  there is a shorter path that needs no code and nothing typed at their end —
+  `ssh ctl@<host> user add <login>` adopts the keys github.com publishes for
+  them, and `gh auth token | ssh ctl@<host> user sync-github-org <org>` does a
+  whole organization. See [onboarding-users.md](onboarding-users.md).
+- **Sign the agent CLIs in.** A fresh sandbox has `claude`, `codex`, `pi` and
+  `gh` but no credentials. Store one per owner and it is pushed into their
+  sandboxes' environment:
+  ```sh
+  gh auth token | ssh -p 2222 ctl@<host> secret set GITHUB_TOKEN
+  claude setup-token | ssh -p 2222 ctl@<host> secret set CLAUDE_CODE_OAUTH_TOKEN
+  ```
+  The value is read from stdin, never from argv, so it stays out of shell
+  history. A banner around the value is fine — `claude setup-token` prints one,
+  and the credential is picked out of it by its own shape, with anything
+  ambiguous refused rather than guessed at. `ssh -t … secret set <NAME>` prompts
+  for a paste instead. Untagged secrets and new sandboxes both carry the
+  `default` tag, so they find each other without anyone learning what a tag is.
 - **Health + logs.** `sparkbox doctor` any time; `journalctl -u sparkbox -f`.
 - **Re-provision / upgrade.** Drop in a newer `sparkbox` binary and re-run
   `sparkbox setup` — idempotent, and `--release <tag>` pins the artifacts. If

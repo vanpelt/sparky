@@ -51,6 +51,14 @@ needs no OAuth app — it checks the key you're connected with against
 `github.com/<login>.keys`, which is the same evidence GitHub accepts for a
 push.
 
+An operator can also admit people straight from GitHub, adopting the keys
+github.com publishes for a login so there is no code to deliver and nothing to
+type — one person with `ssh ctl@<domain> user add <login>`, or a whole
+organization with `gh auth token | ssh ctl@<domain> user sync-github-org <org>`.
+Provisioned accounts are ordinary users, never operators. See
+[`docs/onboarding-users.md`](docs/onboarding-users.md), which also covers signing
+the agent CLIs in.
+
 Each sandbox can also prove who it belongs to. Sparkbox is an OIDC issuer at
 `oidc.<domain>`, and every guest gets a fresh 1h ES256 id token dropped at
 `/var/run/secrets/hivemind/token` — the path hivemind's auth chain already
@@ -344,8 +352,10 @@ the fleet's keys live — 1Password or Scaleway Secret Manager, staged at
 provisioning time or fetched into tmpfs at boot — is
 [`docs/secret-management.md`](docs/secret-management.md).
 
-For the minimal single-Pod Firecracker proof of concept on CoreWeave Kubernetes
-Service, see [`docs/deploy-cks.md`](docs/deploy-cks.md).
+For the Firecracker proof of concept on CoreWeave Kubernetes Service — an
+unprivileged public gateway and a capability-scoped VM node, split across two
+Pods and pinned to one bare-metal CPU Node — see
+[`docs/deploy-cks.md`](docs/deploy-cks.md).
 
 ### On a Mac (Apple Silicon)
 

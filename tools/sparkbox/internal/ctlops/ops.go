@@ -26,6 +26,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
@@ -55,6 +56,7 @@ type Sandboxes interface {
 	Destroy(ctx context.Context, name string) error
 	SetPinned(name string, pinned bool) error
 	ResyncEnv(ctx context.Context, name string)
+	AwaitEnv(ctx context.Context, name string) error
 	MarkActive(name string)
 	ArchivingEnabled() bool
 }
@@ -90,6 +92,11 @@ type Accounts interface {
 	RemovePasskey(handle, idPrefix string) error
 	NewInvite(createdBy string) (string, error)
 	InviteCount(handle string) (int, error)
+	// Create and List are the operator-provisioning slice (user.go). They are
+	// on the same interface rather than their own because they are the same
+	// store and the same ownership rule — ctlops decides who may call them.
+	Create(handle string, key xssh.PublicKey, label, via, invitedBy string) error
+	List() ([]users.User, error)
 }
 
 // Tagger is the tag half of secrets.Store. Deliberately identical to the
@@ -99,6 +106,21 @@ type Accounts interface {
 type Tagger interface {
 	TagsFor(sandbox string) ([]string, error)
 	SetTags(sandbox, owner string, tags []string) error
+}
+
+// Secrets is the value half of secrets.Store — the half the user console had
+// to itself until the ssh channel grew the same verbs.
+//
+// There is deliberately no read-a-value method, because the store deliberately
+// has none: values are write-only from every API's point of view and are only
+// ever decrypted on the way into a guest. SandboxesForSecret is what makes a
+// change take effect without waiting for a resume — it names the boxes whose
+// environment just went stale.
+type Secrets interface {
+	PutSecret(owner, envName, value string, tags []string) error
+	DeleteSecret(owner, envName string) error
+	ListSecrets(owner string) ([]secrets.SecretMeta, error)
+	SandboxesForSecret(owner, envName string) ([]string, error)
 }
 
 // Schedules is the platform-cron store. A nil one makes every schedule
@@ -174,6 +196,7 @@ type Config struct {
 	Accounts  Accounts  // required
 
 	Tags        Tagger      // nil: tag operations are KindDisabled
+	Secrets     Secrets     // nil: secret operations are KindDisabled
 	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
 	Schedules   Schedules   // nil: schedule operations are KindDisabled
 	Routes      Routes      // nil: share operations are KindDisabled
@@ -206,6 +229,7 @@ type Ops struct {
 	templates   Templates
 	accounts    Accounts
 	tags        Tagger
+	secrets     Secrets
 	checkpoints Checkpoints
 	schedules   Schedules
 	routes      Routes
@@ -213,6 +237,11 @@ type Ops struct {
 	nodes       NodeRoster
 	github      GitHubKeys
 	ghDevice    GitHubDeviceFlow
+	// orgMembers reads a GitHub org's roster. A function rather than another
+	// narrow interface because it is one call with no state, and a field rather
+	// than a direct users.ListOrgMembers so provisioning is testable without
+	// reaching github.com.
+	orgMembers func(ctx context.Context, org, team, token string) ([]string, error)
 
 	defaultImage       string
 	domain             string
@@ -239,6 +268,7 @@ func New(cfg Config) *Ops {
 		templates:          cfg.Templates,
 		accounts:           cfg.Accounts,
 		tags:               cfg.Tags,
+		secrets:            cfg.Secrets,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
@@ -268,6 +298,9 @@ func New(cfg Config) *Ops {
 	}
 	if o.github == nil {
 		o.github = realGitHub{}
+	}
+	if o.orgMembers == nil {
+		o.orgMembers = users.ListMembers
 	}
 	go o.reapJobs()
 	return o

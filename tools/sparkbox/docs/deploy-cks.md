@@ -5,6 +5,25 @@ public gateway and one capability-scoped Firecracker node pinned to a CKS
 bare-metal CPU Node. A public CKS LoadBalancer provides SSH and wildcard HTTPS
 routing under `coreweave.app`; the VM node has no public Service.
 
+## The live deployment
+
+One instance of this POC is running. Its `deploy.sh` flags are not recorded
+anywhere in the cluster, so they are recorded here; pass them again on every
+re-run.
+
+| | |
+|---|---|
+| kubectl context | `cvp-hivemind-test-east-06_US-EAST-06A` |
+| Namespace | `sparkbox-poc` |
+| NodePool / pinned Node | `default-node-pool` / `g084f44` |
+| Public domain | `catnip.sh` (`--proxy-domain`), DNS-only A records at the apex and wildcard |
+| Allocated CKS domain | `sa932e-cvp-hivemind-test-east-06.coreweave.app`, still used for node approval |
+| Operator | `vanpelt` |
+
+The allocated `coreweave.app` wildcard keeps working alongside `catnip.sh`
+because both resolve to the same LoadBalancer, but only the configured
+`--proxy-domain` is used for published URLs, certificates, and WebAuthn origins.
+
 ## What it creates
 
 - Namespace `sparkbox-poc`.
@@ -291,8 +310,15 @@ changes Sparkbox or the workflow. It needs no registry secret: the workflow's
 `GITHUB_TOKEN` receives `packages: write`.
 
 Every build receives a traceable full-SHA tag and a branch tag. The default
-branch also updates `edge`. Tags can still be moved, including the SHA tag, so
-resolve the workflow result once and deploy the OCI index digest:
+branch also updates `edge`. A release adds one more: `build-artifacts.yml`
+calls this workflow as a reusable job once it has published the release, so a
+`v*` tag also produces `ghcr.io/vanpelt/sparkbox-cks:v0.6.0` built from the
+tagged commit. That job is gated on `publish` deliberately — the image pins the
+release it downloads at Pod start, so tagging an image for a release that is
+still a draft would give you a Pod that CrashLoops on a 404.
+
+Tags can still be moved, including the SHA and version tags, so resolve the
+workflow result once and deploy the OCI index digest:
 
 ```sh
 SHA=<the full commit SHA built by the successful workflow>
@@ -314,7 +340,7 @@ visibility to public so CKS can pull it without an image-pull secret. The image
 contains the current Sparkbox and Sluice binaries, the base Sluice allow-list,
 host networking tools, and the template refresher. At Pod startup it downloads
 and SHA-256-verifies the Firecracker,
-kernel, and universal rootfs artifacts pinned to Sparkbox `v0.5.3`, then
+kernel, and universal rootfs artifacts pinned to Sparkbox `v0.6.0`, then
 downloads the current agent CLI bundles and patches the template. The first
 start downloads the roughly 750 MB release payload plus those CLI bundles and
 decompresses a sparse ext4 image. Later same-Node Pod starts reuse the cached
@@ -504,8 +530,22 @@ or provide a scoped Cloudflare DNS token and use Sparkbox's `cloudflare` TLS
 provider. Do not add a Cloudflare Tunnel merely for TLS; the CKS LoadBalancer
 already supplies the required public L4 path.
 
-The self-service dashboard at `my.<domain>` is always enabled. The separate
-operator console at `console.<domain>` is enabled only when the optional
+The wildcard covers several reserved hostnames in addition to one per sandbox:
+
+| Hostname | Purpose |
+|---|---|
+| `my.<domain>` | user dashboard, always enabled |
+| `console.<domain>` | operator console, only with the `sparkbox-console` Secret |
+| `login.<domain>` | browser sign-in and passkey enrollment |
+| `api.<domain>` | REST API, with its reference at `/docs` |
+| `oidc.<domain>` | OIDC issuer and JWKS for workload identity |
+| `docs.<domain>` | environment guide served to sandbox users |
+| `ssh.<domain>` | SSH gateway on port 22 |
+| `<name>.<domain>` | a sandbox's HTTPS route |
+| `<name>-xterm.<domain>` | a sandbox's browser terminal |
+
+These names are reserved: a sandbox cannot take one. The separate operator
+console at `console.<domain>` is enabled only when the optional
 `sparkbox-console` Secret contains a non-empty `password` key:
 
 ```sh
@@ -576,6 +616,120 @@ the cluster's existing system workloads. The host path is not quota-enforced
 by Kubernetes; monitor and clean
 `/mnt/local/sparkbox-poc` as part of operating the Node.
 
+## Update an existing deployment
+
+Merging to `main` is not a deployment. The CKS image workflow publishes a new
+image, but the cluster keeps running whatever digest its Deployments name until
+someone re-runs `deploy.sh`. Rolling forward is the same script, pointed at a
+newer digest.
+
+First, confirm the workflow for the commit you want actually finished, then
+resolve its digest:
+
+```sh
+gh run list --workflow 'sparkbox CKS image' --branch main --limit 5
+
+SHA=$(git rev-parse origin/main)
+REPO=ghcr.io/vanpelt/sparkbox-cks
+IMAGE="$REPO@$(crane digest "$REPO:sha-$SHA")"
+```
+
+Two commits merged in the same push produce only one image, for the tip. If
+`crane digest` reports a missing tag for a commit in the middle of a push, use
+the tip's digest instead. `:edge` also tracks `main`, but resolve it to a digest
+rather than deploying the moving tag.
+
+Compare it with what is live before changing anything:
+
+```sh
+kubectl -n sparkbox-poc get pods \
+  -o custom-columns='POD:.metadata.name,IMAGE:.spec.containers[0].image'
+```
+
+Then re-run the same deployment command, adding the new digest. `deploy.sh` is
+idempotent: unchanged manifests report `unchanged`, and only the Deployments
+whose Pod template actually changed roll:
+
+```sh
+deploy/kubernetes/deploy.sh \
+  --image "$IMAGE" \
+  --node-pool default-node-pool \
+  --node g084f44 \
+  --public-key ~/.ssh/id_ed25519.pub \
+  --user vanpelt
+```
+
+Re-running rebuilds every Pod template from the manifests in this repository,
+not from the live objects, so any setting that reached the cluster only as a
+`deploy.sh` flag must be passed again. `--proxy-domain` is the one that bites:
+the script now carries the live gateway's domain forward and prints
+`Keeping the deployed public domain`, but older revisions silently reverted to
+the allocated `coreweave.app` name, which invalidates published sandbox URLs and
+the WebAuthn origin. Confirm the domain in the script's closing summary. The
+same applies to `--node`: on a single-Node pool the script infers it, but naming
+it explicitly keeps the hot tier pinned where the guest disks already are.
+
+Extra Service ports added with `public-port.sh` do not survive the re-apply of
+`service.yaml`. Re-add any port outside the declared set afterwards.
+
+### What a rollout costs
+
+The gateway restart is brief and drops in-flight browser sessions and SSH
+control connections; issued certificates and the control databases live on the
+`sparkbox-durable` PVC and are reused, so no ACME re-issuance occurs. The node
+restart stops every running VM. Paused, checkpointed, and archived sandboxes
+keep their disks on the Node-local hot tier and come back; anything unsaved
+inside a running guest does not. Quiesce running sandboxes before a planned
+update:
+
+```sh
+ssh -p 22 ctl@ssh.<domain> list
+ssh -p 22 ctl@ssh.<domain> pause <name>
+```
+
+The node re-enrols with the gateway on start and keeps its `cks-poc` identity
+and approval, so no re-approval is needed. The template refresher runs again and
+re-checks the agent CLIs; cached release artifacts on the same Node are reused,
+so a same-Node update does not re-download the release payload.
+
+### Verify the update
+
+```sh
+kubectl -n sparkbox-poc get pods -o wide
+kubectl -n sparkbox-poc exec deployment/sparkbox-gateway -- sparkbox version
+kubectl -n sparkbox-poc exec deployment/sparkbox-node -c sparkbox-node -- sparkbox version
+
+ssh -p 22 ctl@ssh.<domain> node ls     # both machines approved and online
+ssh -p 22 ctl@ssh.<domain> list        # the inventory survived
+curl -sS -o /dev/null -w '%{http_code}\n' https://my.<domain>/
+```
+
+`sparkbox version` prints the built commit followed by `-cks`, which should
+match the SHA you resolved. Booting one sandbox is the only check that exercises
+the VM path end to end:
+
+```sh
+ssh <name>@ssh.<domain> -- uname -a
+```
+
+## Give someone else an account
+
+The deployment ships with `--open-signup` off and `--invites-per-user` at 0, so
+only operators admit anyone. The fastest route for a colleague who is on GitHub:
+
+```sh
+ssh -p 22 ctl@ssh.<domain> user add <their-github-login>
+```
+
+That adopts the SSH keys github.com publishes for them, so they connect with
+`ssh new@ssh.<domain>` and have nothing to type. Provisioned accounts are
+ordinary users — **do not** add colleagues to the `sparkbox-users` secret
+instead, because seeded accounts are operators and an operator can read every
+other user's private sandbox routes.
+
+Full procedure, including the whole-org sync and signing the agent CLIs in:
+[`onboarding-users.md`](onboarding-users.md).
+
 ## Observe and troubleshoot
 
 ```sh
@@ -583,8 +737,17 @@ kubectl -n sparkbox-poc get pods,daemonset,service,pvc,networkpolicy
 kubectl get node -o custom-columns='NAME:.metadata.name,KVM:.status.allocatable.sparkbox\.dev/kvm,TUN:.status.allocatable.sparkbox\.dev/tun,LOOP:.status.allocatable.sparkbox\.dev/loop'
 kubectl -n sparkbox-poc logs daemonset/sparkbox-device-plugin
 kubectl -n sparkbox-poc logs -f deployment/sparkbox-gateway
-kubectl -n sparkbox-poc logs -f deployment/sparkbox-node
 kubectl -n sparkbox-poc describe pod -l app.kubernetes.io/name=sparkbox
+```
+
+The node Pod runs three containers, so its log commands must name one. The
+controller is the usual starting point; the helper owns VM launch and Sluice
+owns egress:
+
+```sh
+kubectl -n sparkbox-poc logs -f deployment/sparkbox-node -c sparkbox-node
+kubectl -n sparkbox-poc logs -f deployment/sparkbox-node -c vmm-helper
+kubectl -n sparkbox-poc logs -f deployment/sparkbox-node -c sluice
 ```
 
 The startup probe allows 20 minutes because the rootfs is large. Common hard

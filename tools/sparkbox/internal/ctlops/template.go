@@ -68,6 +68,9 @@ func (o *Ops) Fork(ctx context.Context, c Caller, a ForkArgs) (SandboxInfo, erro
 	if len(tags) > 0 && o.tags == nil {
 		return SandboxInfo{}, Disabled(op, "tagging is not enabled on this host")
 	}
+	// A fork is a create: same reasoning as Create's, and a forked box that
+	// silently loses its owner's secrets is the same bug wearing a snapshot.
+	tags = o.defaultTags(tags)
 
 	ctx, cancel := withBudget(ctx, PauseTimeout)
 	defer cancel()
