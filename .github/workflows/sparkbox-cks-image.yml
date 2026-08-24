@@ -28,6 +28,12 @@ on:
         type: string
         default: ""
   push:
+    # Branches only. Without this a `v*` tag push would ALSO start a standalone
+    # run, which shares this file's concurrency group with the release's `cks`
+    # job (both resolve to sparkbox-cks-image-refs/tags/vX.Y.Z) and would race
+    # it under cancel-in-progress. A release builds this image exactly once,
+    # through workflow_call, after publish.
+    branches: ["**"]
     paths:
       - .github/workflows/sparkbox-cks-image.yml
       - tools/sparkbox/**
