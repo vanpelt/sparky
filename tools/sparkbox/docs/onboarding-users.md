@@ -199,15 +199,30 @@ to it leaves egress unrestricted, which is the state everything is in today.
 
 ## Claude
 
-`claude setup-token` mints a long-lived (1-year) OAuth token — but it prints a
-welcome banner, an ASCII-art logo, the token, and two sentences of advice, so it
-**cannot be piped**. Nothing here will pick the token out of that: guessing which
-line is the credential means pattern-matching another tool's output, and storing
-the wrong line the day it changes. Run it, then paste at a prompt:
+`claude setup-token` mints a long-lived (1-year) OAuth token, and prints a
+welcome banner, an ASCII-art logo, the token, and two sentences of advice around
+it. Pipe the lot in anyway:
 
 ```sh
-claude setup-token                                    # copy the sk-ant-oat01-… line
-ssh -t ctl@ssh.<domain> secret set CLAUDE_CODE_OAUTH_TOKEN
+claude setup-token | ssh ctl@ssh.<domain> secret set CLAUDE_CODE_OAUTH_TOKEN
+```
+
+The credential is found by **its own shape** — `sk-ant-oat01-…` and the other
+prefixes in `credentialShapes` — never by anything about the banner around it.
+That is the difference between this and guessing: a line number or a label to
+look for is another program's presentation and changes on its release schedule,
+while the prefix is part of the credential and changes only when the credential
+format does. On that day nothing matches and the pipe is **refused** rather than
+mis-stored.
+
+Everything ambiguous fails closed and points at the prompt: two different
+credentials in one pipe, no credential at all, or a token a terminal broke
+across two lines. A secret nobody stamps a recognisable prefix on still works
+unchanged as long as it arrives on one line — which is every connection string,
+webhook URL and password. And the prompt is always there:
+
+```sh
+ssh -t ctl@ssh.<domain> secret set CLAUDE_CODE_OAUTH_TOKEN   # paste, unechoed
 ```
 
 `ANTHROPIC_API_KEY` works too if you bill by API, and that one pipes fine:
