@@ -95,9 +95,50 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(rev) != "IDENTITY_REV=3\n" {
+	if string(rev) != "IDENTITY_REV=4\n" {
 		t.Fatalf("identity revision = %q", rev)
 	}
+}
+
+// TestTokenTimerFiresNearItsBootTarget pins the accuracy, which is not a tuning
+// knob here but the difference between a guest having a token at startup and
+// not.
+//
+// systemd may delay a timer by up to AccuracySec to coalesce wakeups, and the
+// default is a full minute. On the 45-minute refresh that is free; on
+// OnBootSec=10s it means the first fetch can land anywhere in the first 70
+// seconds — and hivemind makes ONE authentication attempt at startup, so it
+// gives up before the token file exists. The guest then runs unauthenticated
+// until something restarts the daemon.
+func TestTokenTimerFiresNearItsBootTarget(t *testing.T) {
+	timer := timerUnitFrom(t, string(GuestIdentityScript))
+	if strings.Contains(timer, "AccuracySec=1min") {
+		t.Fatal("the boot fetch is back on systemd's default 1-minute slack, " +
+			"which lets it land after hivemind's single startup auth attempt has given up")
+	}
+	for _, want := range []string{"OnBootSec=10s", "AccuracySec=1s"} {
+		if !strings.Contains(timer, want) {
+			t.Errorf("token timer missing %q:\n%s", want, timer)
+		}
+	}
+}
+
+// timerUnitFrom returns the sparkbox-token.timer heredoc body the installer
+// writes, so the assertions above read the unit rather than the whole script
+// and cannot be satisfied by the same string appearing in a comment elsewhere.
+func timerUnitFrom(t *testing.T, script string) string {
+	t.Helper()
+	const marker = "sparkbox-token.timer\" <<'EOF'\n"
+	i := strings.Index(script, marker)
+	if i < 0 {
+		t.Fatal("install-guest-identity.sh no longer writes sparkbox-token.timer from a heredoc")
+	}
+	rest := script[i+len(marker):]
+	j := strings.Index(rest, "\nEOF\n")
+	if j < 0 {
+		t.Fatal("unterminated sparkbox-token.timer heredoc")
+	}
+	return rest[:j]
 }
 
 func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
