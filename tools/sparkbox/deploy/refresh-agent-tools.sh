@@ -66,10 +66,10 @@ CODEX_REPO=${CODEX_REPO:-openai/codex}
 PI_REPO=${PI_REPO:-earendil-works/pi}
 HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
 # Revision of the guest-side agent conditioning below (/etc/environment knobs +
-# the ~/.claude.json onboarding seed + the hivemind daemon unit). Versioned like
-# IDENTITY_REV so bumping it re-patches every template on the next run even when
-# no tool version moved.
-AGENT_ENV_REV=3
+# the ~/.claude.json onboarding seed + the ~/.claude/settings.json permission
+# default + the hivemind daemon unit). Versioned like IDENTITY_REV so bumping it
+# re-patches every template on the next run even when no tool version moved.
+AGENT_ENV_REV=4
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -229,6 +229,12 @@ fi
 #   2. the "is this a project you trust?" dialog, gated per-directory on
 #      `projects[cwd].hasTrustDialogAccepted`
 #
+# A third gate is not first-run but every-turn, and it is the one that actually
+# costs the owner something: each tool call waits for an approval only a human
+# at a terminal can give. A sandbox exists so that work can proceed while nobody
+# is watching, and the VM boundary — not a prompt inside it — is what contains
+# that work, so the guest is seeded to start in `auto` (see below).
+#
 # We satisfy (1) by seeding the config below, and (2) with CLAUDE_CODE_SANDBOXED,
 # a first-class escape hatch in the binary (its trust check opens with
 # `if (CLAUDE_CODE_SANDBOXED) return true`). That flag ALSO stops project-scoped
@@ -288,6 +294,53 @@ os.replace(tmp, path)
 PY
   chown "$uid:$gid" "$mnt$home/.claude.json"
   chmod 0644 "$mnt$home/.claude.json"
+
+  # The starting permission mode goes in ~/.claude/settings.json — the USER
+  # scope — because it has to hold for every directory the owner later clones or
+  # creates. A project-scoped .claude/settings.json would only cover the one
+  # directory that happened to ship it.
+  #
+  # `auto` and not `bypassPermissions`: auto still stops for the things whose
+  # blast radius leaves the box, which is exactly the line the VM boundary does
+  # not draw for us. Seeding a full bypass would make that call once, here, on
+  # behalf of every user of every sandbox; `--dangerously-skip-permissions` stays
+  # theirs to type. skipAutoPermissionPrompt is the one-time "you are entering
+  # auto mode" acknowledgement, which nobody can answer on a machine they have
+  # not connected to yet.
+  #
+  # MERGED, for the reason .claude.json above is: this loop walks fork templates
+  # carrying a real user's settings, and someone who deliberately moved off auto
+  # must not have it put back under them by the next refresh. setdefault only.
+  mkdir -p "$mnt$home/.claude"
+  python3 - "$mnt$home/.claude/settings.json" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    cfg = {}
+except Exception as e:
+    print(f"   !! {path} unreadable ({e}); leaving it alone", file=sys.stderr)
+    sys.exit(0)
+
+perms = cfg.setdefault("permissions", {})
+if not isinstance(perms, dict):
+    print(f"   !! {path} has a non-object permissions block; leaving it alone", file=sys.stderr)
+    sys.exit(0)
+perms.setdefault("defaultMode", "auto")
+cfg.setdefault("skipAutoPermissionPrompt", True)
+
+tmp = path + ".seed-new"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
+PY
+  chown -R "$uid:$gid" "$mnt$home/.claude"
+  chmod 0644 "$mnt$home/.claude/settings.json"
 
   seed_hivemind_unit "$mnt" "$home" "$uid" "$gid" "$(echo "$pw" | cut -d: -f1)"
 }
