@@ -871,3 +871,25 @@ jobs:
           fi
           echo "### published :rocket:" >> "$GITHUB_STEP_SUMMARY"
           echo "- https://github.com/$GH_REPO/releases/tag/$RELEASE" >> "$GITHUB_STEP_SUMMARY"
+
+  # -------------------------------------------------------------------- cks --
+  # The CKS runtime image, built from the SAME commit this release was cut from
+  # and tagged with the release name. Until now the release and the CKS image
+  # were two unrelated tracks that met only at a hand-edited string: the image
+  # was built on push and tagged `edge`/`sha-<sha>`, so nothing tagged v0.6.0
+  # ever existed and a deploy had to resolve a SHA by hand.
+  #
+  # `needs: publish` is load-bearing, not tidiness. The image does not contain
+  # the release payload; deploy/kubernetes/entrypoint.sh downloads firecracker,
+  # the kernel and the rootfs at Pod start from the release this image pins. An
+  # image tagged for a release that is still a DRAFT would therefore be a Pod
+  # that CrashLoops on a 404 from a URL that looks correct. The draft gate that
+  # protects `sparkbox setup` protects CKS the same way.
+  cks:
+    needs: [prepare, publish]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/sparkbox-cks-image.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.release }}

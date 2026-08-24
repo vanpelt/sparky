@@ -310,8 +310,15 @@ changes Sparkbox or the workflow. It needs no registry secret: the workflow's
 `GITHUB_TOKEN` receives `packages: write`.
 
 Every build receives a traceable full-SHA tag and a branch tag. The default
-branch also updates `edge`. Tags can still be moved, including the SHA tag, so
-resolve the workflow result once and deploy the OCI index digest:
+branch also updates `edge`. A release adds one more: `build-artifacts.yml`
+calls this workflow as a reusable job once it has published the release, so a
+`v*` tag also produces `ghcr.io/vanpelt/sparkbox-cks:v0.6.0` built from the
+tagged commit. That job is gated on `publish` deliberately — the image pins the
+release it downloads at Pod start, so tagging an image for a release that is
+still a draft would give you a Pod that CrashLoops on a 404.
+
+Tags can still be moved, including the SHA and version tags, so resolve the
+workflow result once and deploy the OCI index digest:
 
 ```sh
 SHA=<the full commit SHA built by the successful workflow>
@@ -333,7 +340,7 @@ visibility to public so CKS can pull it without an image-pull secret. The image
 contains the current Sparkbox and Sluice binaries, the base Sluice allow-list,
 host networking tools, and the template refresher. At Pod startup it downloads
 and SHA-256-verifies the Firecracker,
-kernel, and universal rootfs artifacts pinned to Sparkbox `v0.5.3`, then
+kernel, and universal rootfs artifacts pinned to Sparkbox `v0.6.0`, then
 downloads the current agent CLI bundles and patches the template. The first
 start downloads the roughly 750 MB release payload plus those CLI bundles and
 decompresses a sparse ext4 image. Later same-Node Pod starts reuse the cached

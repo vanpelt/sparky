@@ -1,7 +1,32 @@
 name: sparkbox CKS image
 
+# Two callers, one build.
+#
+#   push / workflow_dispatch  an ordinary `edge` build off a branch. Tags are
+#                             the branch, the full SHA, and `edge` on main.
+#
+#   workflow_call             build-artifacts.yml calls this AFTER it publishes
+#                             a release, passing `release_tag`. That adds a tag
+#                             named for the release (v0.6.0), so the image that
+#                             pins SPARKBOX_RELEASE=v0.6.0 is itself findable by
+#                             that version instead of only by SHA.
+#
+# The ordering is the point of the `needs: publish` on the calling side. This
+# image does not embed the release payload — it downloads and SHA-256-verifies
+# firecracker, the kernel and the rootfs at Pod start (deploy/kubernetes/
+# entrypoint.sh) — so an image tagged v0.6.0 whose release was still a draft
+# would be a Pod that CrashLoops on a 404. Publishing first makes the tag mean
+# what it says.
+
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release this image pins (blank = ordinary edge build)"
+        required: false
+        type: string
+        default: ""
   push:
     paths:
       - .github/workflows/sparkbox-cks-image.yml
@@ -44,6 +69,7 @@ jobs:
             type=ref,event=branch
             type=sha,format=long
             type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.release_tag || '' }},enable=${{ (inputs.release_tag || '') != '' }}
           labels: |
             org.opencontainers.image.title=Sparkbox CKS
             org.opencontainers.image.description=Sparkbox Firecracker runtime for CoreWeave Kubernetes Service
@@ -57,7 +83,7 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            SPARKBOX_VERSION=${{ github.sha }}-cks
+            SPARKBOX_VERSION=${{ inputs.release_tag || format('{0}-cks', github.sha) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
