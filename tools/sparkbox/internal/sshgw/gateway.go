@@ -425,6 +425,16 @@ func (g *Gateway) handle(s gssh.Session) {
 		return
 	}
 
+	// The budget for STARTING the sandbox, and only that. The env delivery and
+	// the shell dial take their own below, off the session context rather than
+	// off this one: three sequential waits sharing a single 15-second deadline
+	// means whichever runs first can spend the whole thing, and the ones after
+	// it fail instantly with a deadline they were never given a chance to use.
+	// A cold create leaves little of it, so the shell dial — the thing the user
+	// actually asked for — was the step being funded last and out of change.
+	// The browser terminal has always given its three steps three budgets
+	// (internal/xterm.Handler.serve); this is that, at the door that carries
+	// the traffic.
 	ctx, cancel := context.WithTimeout(s.Context(), g.dialTimeout)
 	defer cancel()
 
@@ -536,10 +546,12 @@ func (g *Gateway) handle(s gssh.Session) {
 	// shell holding none of the secrets it had just been given, and an agent
 	// asking the user to log in on the box they had just tokenised.
 	if starting {
-		g.awaitEnv(ctx, s, caller(s, user), sandboxName, log)
+		g.awaitEnv(s.Context(), s, caller(s, user), sandboxName, log)
 	}
 
-	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
+	dialCtx, stopDial := context.WithTimeout(s.Context(), g.dialTimeout)
+	client, err := g.dialUpstream(dialCtx, box.SSHAddr, box.SSHUser)
+	stopDial()
 	if err != nil {
 		failDial(s, log, sandboxName, err)
 		return
@@ -756,21 +768,26 @@ func DialUpstreamVia(ctx context.Context, dial Dialer, addr, user string, key xs
 		} else {
 			lastErr = err
 			// Retrying exists because a freshly booted guest's sshd is not up
-			// yet, which is something only this machine's network can tell us.
-			// A dialer that refused the channel outright has already given a
-			// final answer, so hammering it for the rest of the dial budget
-			// only delays the message the user is going to get anyway.
+			// yet, which is something only the machine holding the guest can
+			// tell us. A refusal that is a final ANSWER must not be retried,
+			// so hammering it for the rest of the dial budget only delays the
+			// message the user is going to get anyway — but a refusal that
+			// merely means "not yet" is the very condition this loop exists
+			// for, whichever machine it comes from. See retryableRefusal.
 			//
-			// A typed *ctlops.Error is the same thing said in this tree's own
+			// A typed *ctlops.Error is a final answer said in this tree's own
 			// vocabulary: the fleet dialer answers one when the machine holding
 			// the sandbox is offline, or when this build cannot carry a
 			// connection to another machine at all. Neither becomes true again
 			// inside a 15-second dial budget, and the sentence it carries is the
 			// one the user needs — so it is delivered at once rather than after
 			// a quarter-minute of silence.
-			var oce *xssh.OpenChannelError
 			var typed *ctlops.Error
-			if errors.As(err, &oce) || errors.As(err, &typed) {
+			if errors.As(err, &typed) {
+				return nil, fmt.Errorf("vm ssh not reachable: %w", err)
+			}
+			var oce *xssh.OpenChannelError
+			if errors.As(err, &oce) && !RetryableRefusal(oce) {
 				return nil, fmt.Errorf("vm ssh not reachable: %w", err)
 			}
 		}
@@ -780,6 +797,40 @@ func DialUpstreamVia(ctx context.Context, dial Dialer, addr, user string, key xs
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// RetryableRefusal reports whether a node's channel-open rejection means "not
+// yet" rather than "no".
+//
+// Every caller of DialUpstreamVia is dialing ONE port — the guest's sshd — on a
+// VM it has just started, so the two are not the same answer and the difference
+// is the whole reason the retry loop exists. On a single box that distinction
+// arrives as a plain ECONNREFUSED from the host's own network stack and the
+// loop handles it without being told anything. In a fleet the same refusal is
+// tunnelled: the node dials the guest, gets ECONNREFUSED because sshd has not
+// finished starting, and reports it as an SSH channel rejection with reason
+// ConnectionFailed (internal/nodelink.serveStream). Reading every rejection as
+// final made a remote sandbox's FIRST attach fail roughly one second after its
+// create returned — and the same misreading silently cost it the secret-env
+// push, which is fired once per transition to running and would not be tried
+// again until the box next paused and resumed. Observed live on the CKS
+// deployment: box created 16:03:22.2, refused 16:03:23.2, guest reachable
+// 16:03:33.5; the user's shell came up nine seconds before it had to, without
+// the token it had been given, and nothing said why.
+//
+// The reasons the node uses for a genuine answer stay final:
+//   - Prohibited — "unknown sandbox" (a placement fault) or "sandbox not
+//     running" (a state the caller must resume, not outwait).
+//   - UnknownChannelType, ResourceShortage — this link cannot carry the stream
+//     at all, or the node is already at its stream limit; neither is a boot
+//     that has yet to finish.
+//
+// ConnectionFailed also covers a malformed stream request, which retrying
+// cannot fix. That is a gateway bug that has never fired, it costs the dial
+// budget rather than correctness, and reason is a far sturdier thing to switch
+// on than another package's message strings.
+func RetryableRefusal(oce *xssh.OpenChannelError) bool {
+	return oce.Reason == xssh.ConnectionFailed
 }
 
 // handshakeDeadline is the earlier of the handshake budget and whatever the

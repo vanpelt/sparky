@@ -69,7 +69,7 @@ HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/h
 # the ~/.claude.json onboarding seed + the ~/.claude/settings.json permission
 # default + the hivemind daemon unit). Versioned like IDENTITY_REV so bumping it
 # re-patches every template on the next run even when no tool version moved.
-AGENT_ENV_REV=4
+AGENT_ENV_REV=5
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -478,11 +478,40 @@ NoNewPrivileges=true
 [Install]
 WantedBy=default.target
 EOF
+  # Don't start before the workload-identity token exists.
+  #
+  # hivemind resolves its credential chain ONCE, at startup. Start it a second
+  # too early and it runs for the life of the box telling the user to run
+  # `hivemind login` — on a box that has a perfectly good OIDC token on disk,
+  # written moments after the daemon gave up looking for it. Measured on a fresh
+  # CKS sandbox: daemon up 1.7s after boot, token written at 11.5s.
+  #
+  # This has to be a WAIT and cannot be an After=: this is a user unit and the
+  # token is written by a system one, and systemd will not order across the two
+  # managers. See install-guest-identity.sh, which also moved the fetch itself
+  # into boot ordering so the wait is normally over before it starts.
+  #
+  # And it has to be a DROP-IN rather than a line in the unit above, because
+  # `hivemind start` rewrites hivemind.service from its own template every time
+  # it runs — it says so: "Updated systemd unit at ...". A drop-in is a separate
+  # file it does not know about, so the guarantee survives the user restarting
+  # their own daemon, which is precisely when they are already troubleshooting.
+  mkdir -p "$unitdir/hivemind.service.d"
+  cat > "$unitdir/hivemind.service.d/10-sparkbox-token.conf" <<'EOF'
+[Service]
+# The leading - keeps a missing or broken waiter from being able to stop
+# the daemon: this drop-in makes the token MORE likely to be there, and must
+# never be the reason nothing starts at all.
+ExecStartPre=-/usr/local/bin/sparkbox-await-token
+EOF
+  chmod 0644 "$unitdir/hivemind.service.d/10-sparkbox-token.conf"
+
   # Enable without a chroot, the same way install-guest-identity.sh does: the
   # .wants symlink IS what `systemctl --user enable` writes.
   ln -sfn ../hivemind.service "$unitdir/default.target.wants/hivemind.service"
   chown -h "$uid:$gid" "$unitdir/default.target.wants/hivemind.service"
   chown "$uid:$gid" "$unitdir/hivemind.service" "$unitdir/default.target.wants" \
+    "$unitdir/hivemind.service.d/10-sparkbox-token.conf" "$unitdir/hivemind.service.d" \
     "$unitdir" "$mnt$home/.config/systemd" "$mnt$home/.config"
   chmod 0644 "$unitdir/hivemind.service"
 

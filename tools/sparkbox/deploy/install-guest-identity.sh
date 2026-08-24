@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=4
+IDENTITY_REV=5
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -125,9 +125,50 @@ esac
 EOF
 chmod 0755 "$MNT/usr/local/bin/sparkbox"
 
+# A token that exists before anything wants to read it.
+#
+# The consumers are user units — hivemind's daemon lingers, so it starts with
+# the machine — and a user unit CANNOT be ordered against a system one: they
+# are run by different managers, and systemd silently drops an After= that
+# crosses that line. So the token has to be there early on its own merits, and
+# the readers have to check rather than be sequenced.
+#
+# Measured on a fresh CKS sandbox before this changed: boot 16:03:22, hivemind
+# daemon up at 16:03:23.97, "Authentication required" at 16:03:24.44, token
+# finally written at 16:03:33.51. Nine seconds late, and hivemind resolves its
+# credential chain once at startup — so the daemon ran for the life of the box
+# saying `hivemind login`, on a box whose token was sitting on disk the whole
+# time. `hivemind stop && hivemind start` fixed it, which is exactly the manual
+# step this integration exists to delete.
+#
+# await-token is the reader's half. It waits for the file rather than for the
+# unit that writes it, which is the only question a user unit can ask, and it
+# gives up rather than blocking forever: a daemon running unauthenticated is a
+# degraded box, a daemon that never starts is a broken one.
+cat > "$MNT/usr/local/bin/sparkbox-await-token" <<'EOF'
+#!/bin/sh
+# Block until this sandbox's OIDC token exists, up to a bounded wait.
+# Exit 0 either way: this gates a daemon's start, it does not decide it.
+set -u
+TOKEN_FILE=${HIVEMIND_OIDC_TOKEN_FILE:-/var/run/secrets/hivemind/token}
+WAIT=${SPARKBOX_TOKEN_WAIT:-60}
+i=0
+while [ "$i" -lt "$WAIT" ]; do
+  [ -s "$TOKEN_FILE" ] && exit 0
+  i=$((i + 1))
+  sleep 1
+done
+echo "sparkbox-await-token: no token at $TOKEN_FILE after ${WAIT}s; starting anyway" >&2
+exit 0
+EOF
+chmod 0755 "$MNT/usr/local/bin/sparkbox-await-token"
+
 # systemd path (ubuntu:24.04 and friends). Slim images without systemd fall
 # back to the tiny rc build-rootfs.sh writes, which calls sparkbox-token once.
 if [ -e "$MNT/lib/systemd/systemd" ]; then
+  # Always present in a real systemd tree; created so this branch depends on
+  # nothing but the systemd binary it just tested for.
+  mkdir -p "$MNT/etc/systemd/system"
   # Refresh on boot, then every 45 minutes. The token lives 1h, so refreshing
   # at ~75% of its life leaves room for a couple of failures before anything
   # expires — the same shape the kubelet uses for projected tokens.
@@ -148,6 +189,12 @@ ExecStart=/usr/local/sbin/sparkbox-token
 # leaving the guest tokenless until the next timer tick.
 Restart=on-failure
 RestartSec=5s
+# Deliberately NOT RemainAfterExit=yes: the timer below re-triggers this unit,
+# and a start job against an already-active oneshot does nothing at all — the
+# 45-minute refresh would silently never run again after the boot fetch.
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
   cat > "$MNT/etc/systemd/system/sparkbox-token.timer" <<'EOF'
@@ -155,25 +202,32 @@ EOF
 Description=refresh the sparkbox workload identity token
 
 [Timer]
-OnBootSec=10s
+# The BOOT fetch is not this timer's job any more — the service is wanted by
+# multi-user.target, so it is ordered into boot behind sparkbox-net and runs as
+# soon as the tap can carry it, instead of at a fixed OnBootSec that had to be
+# guessed and was always going to be either too early to work or too late to be
+# useful. It was 10s, and the daemon that needs the token was up at 1.7s.
+#
+# Both settings are the refresh, from either anchor: OnUnitActiveSec covers the
+# normal case (45 minutes after the last successful fetch) and OnBootSec is the
+# backstop for a boot where the service never became active at all, since an
+# OnUnitActiveSec timer for a unit that has never run has nothing to count from.
+OnBootSec=45min
 OnUnitActiveSec=45min
-# Systemd may delay a timer's firing by up to AccuracySec to coalesce
-# wakeups (default 1min). That's fine for the 45-minute refresh, but it lets
-# the boot-time fetch slip by up to a minute past OnBootSec — long enough
-# for hivemind's single startup auth attempt to give up before a token
-# exists. Keep it tight so the boot fetch actually lands near 10s.
-AccuracySec=1s
 
 [Install]
 WantedBy=timers.target
 EOF
 
-  # Enable without a chroot: symlink into the target's .wants directory. Only
-  # the timer is enabled — it owns the boot fetch (OnBootSec) as well, so the
-  # service must not also be wanted by multi-user.target.
-  mkdir -p "$MNT/etc/systemd/system/timers.target.wants"
+  # Enable without a chroot: symlink into the target's .wants directory. That
+  # symlink IS what `systemctl enable` writes. Both units are enabled now: the
+  # service owns the boot fetch, the timer owns the refresh.
+  mkdir -p "$MNT/etc/systemd/system/timers.target.wants" \
+           "$MNT/etc/systemd/system/multi-user.target.wants"
   ln -sf ../sparkbox-token.timer \
     "$MNT/etc/systemd/system/timers.target.wants/sparkbox-token.timer"
+  ln -sf ../sparkbox-token.service \
+    "$MNT/etc/systemd/system/multi-user.target.wants/sparkbox-token.service"
 fi
 
 # Stamp the tree so refresh-agent-tools.sh can tell a patched template from a

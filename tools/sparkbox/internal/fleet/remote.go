@@ -563,9 +563,15 @@ func (r *remoteNode) Fork(ctx context.Context, snapName, newName, owner string, 
 //     connection, a link that carries no data channels at all — and becomes
 //     Unreachable like every other transport death in this file.
 //
-// There is no retry. A channel-open rejection is an answer, not a hiccup, and
-// the one caller that retries at all (sshgw.DialUpstreamVia) already fast-fails
-// on both of these types rather than spending its 15-second budget on them.
+// There is no retry HERE, and the rejection is returned intact so that the
+// caller can decide, because whether one is an answer or a hiccup depends on
+// what was being dialed and only the caller knows that. The edge proxying a
+// user's app port wants ConnectionFailed as a final 502 — nothing is listening
+// on 3000, and waiting will not change that. sshgw.DialUpstreamVia dialing the
+// guest's SSHD wants the same rejection as "not yet": it has just started the
+// VM, so ECONNREFUSED tunnelled back from the node is the boot it is already
+// waiting on. It retries that one and still fast-fails the rest; see
+// sshgw.RetryableRefusal.
 func (r *remoteNode) DialGuest(ctx context.Context, sandbox, kind string, port int) (net.Conn, error) {
 	c, err := r.client.DialSandbox(ctx, sandbox, kind, port)
 	if err != nil {
