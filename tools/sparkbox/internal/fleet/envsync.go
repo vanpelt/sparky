@@ -117,6 +117,49 @@ func (f *Fleet) pushEnv(ctx context.Context, b *host.Sandbox) {
 	}()
 }
 
+// envAwaiter is the synchronous delivery, asked of the local machine by type
+// assertion rather than added to the Node interface. Only the machine holding
+// the secrets store can answer it at all — a node's push hook is nil by
+// construction — so putting it on Node would mean three implementations that
+// have to return nil to a question they cannot be asked. For a sandbox on
+// another machine the gateway delivers directly, exactly as pushEnv does.
+type envAwaiter interface {
+	AwaitEnv(ctx context.Context, name string) error
+}
+
+// AwaitEnv is pushEnv without the goroutine: it returns once b's secret
+// environment has been written into the guest, or with the error that stopped
+// it. See host.Manager.AwaitEnv for the one caller that needs that and why an
+// interactive attach cannot use the asynchronous push.
+func (f *Fleet) AwaitEnv(ctx context.Context, name string) error {
+	b, ok := f.Get(name)
+	if !ok || b.State != vmm.StateRunning {
+		return nil
+	}
+	row, ok := f.rowFor(name)
+	if !ok {
+		return nil
+	}
+	if row.Node == f.localName {
+		// The manager's own hook owns this one; going around it would put two
+		// writers on one guest's /etc/environment.
+		if a, ok := f.local.(envAwaiter); ok {
+			return a.AwaitEnv(ctx, name)
+		}
+		return nil
+	}
+	f.mu.RLock()
+	p := f.envPush
+	f.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	// serve re-reads the owner from the ledger for the reason pushEnv documents:
+	// the owner decides which secrets are delivered, and a node's own claim about
+	// it is not an authorization input.
+	return p.PushEnv(ctx, f.serve(b, row, true))
+}
+
 // pushEnvByName is pushEnv for the callers that hold a name rather than a
 // record — the ones reacting to something that has already happened, where the
 // current state is whatever the link's cache now says.

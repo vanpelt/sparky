@@ -56,6 +56,7 @@ type Sandboxes interface {
 	Destroy(ctx context.Context, name string) error
 	SetPinned(name string, pinned bool) error
 	ResyncEnv(ctx context.Context, name string)
+	AwaitEnv(ctx context.Context, name string) error
 	MarkActive(name string)
 	ArchivingEnabled() bool
 }

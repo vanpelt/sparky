@@ -431,6 +431,15 @@ func (o *Ops) Attach(ctx context.Context, c Caller, name string) (Endpoint, erro
 // pinned VM.
 func (o *Ops) MarkActive(name string) { o.boxes.MarkActive(name) }
 
+// AwaitEnv blocks until the sandbox's secret environment has been delivered,
+// for a transport that is about to open a session on it. Like MarkActive it
+// takes no Caller: it is reached only after the caller's own ownership check,
+// and it neither reads nor reveals anything a resolved sandbox name does not
+// already imply.
+func (o *Ops) AwaitEnv(ctx context.Context, name string) error {
+	return o.boxes.AwaitEnv(ctx, name)
+}
+
 // reread re-resolves a sandbox after a mutation so the result carries the state
 // the manager actually settled on rather than the one we asked for. A record
 // that vanished under us (a racing destroy) reports the same masked not-found

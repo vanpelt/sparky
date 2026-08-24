@@ -1459,6 +1459,37 @@ func (m *Manager) ResyncEnv(ctx context.Context, name string) {
 	m.pushEnv(ctx, cp)
 }
 
+// AwaitEnv delivers a sandbox's secret environment and returns only once it has
+// actually been written — the synchronous counterpart of pushEnv, for the one
+// caller that cannot use a fire-and-forget push.
+//
+// pushEnv is asynchronous on purpose: no lifecycle operation should be able to
+// stall or fail on an SSH exec into a guest. But an interactive attach both
+// starts a VM and opens a session on it in the same breath, and pam_env reads
+// /etc/environment exactly once, at session setup. The push and the session are
+// then two goroutines racing for the same second, and the session wins — it was
+// begun by the call that already returned, while the push still has to dial. The
+// user's first shell on the box they just saved a token for comes up without it,
+// and, as ever with this feature, nothing anywhere says why.
+//
+// Overlapping an in-flight push is safe and is the normal case: the syncer
+// serializes deliveries per box and each one rewrites the same block from the
+// same store, so this either waits behind the async push and rewrites an
+// identical block, or goes first and makes that one the cheap duplicate. The
+// same idempotence the fleet already leans on for its own overlapping pushes.
+func (m *Manager) AwaitEnv(ctx context.Context, name string) error {
+	m.mu.Lock()
+	p := m.envSync
+	b, ok := m.boxes[name]
+	if p == nil || !ok || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return nil
+	}
+	cp := copyOf(b)
+	m.mu.Unlock()
+	return p.PushEnv(ctx, cp)
+}
+
 func (m *Manager) pushEnv(ctx context.Context, b *Sandbox) {
 	if m.envSync == nil {
 		return

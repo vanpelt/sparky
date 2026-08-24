@@ -185,7 +185,9 @@ func (h *Handler) serve(_ context.Context, conn *websocket.Conn, name string, lo
 		closeWith(conn, statusAttachFailed, "sandbox is gone")
 		return
 	}
-	if box.State != vmm.StateRunning {
+	// Read before the resume below, which is what makes it stop being true.
+	starting := box.State != vmm.StateRunning
+	if starting {
 		// A real state, not a spinner over a hang: an archived sandbox has to
 		// be fetched back out of object storage first, which takes minutes, and
 		// the user deserves to know that is what is happening.
@@ -208,6 +210,14 @@ func (h *Handler) serve(_ context.Context, conn *websocket.Conn, name string, lo
 	// refreshing it on a timer would turn a forgotten tab into a permanently
 	// pinned VM. See touch() for the one throttled exception.
 	defer h.mgr.MarkActive(name)
+
+	// A resume fires the secret-env push asynchronously, and the shell below is
+	// about to be the session that reads /etc/environment — once, at setup. The
+	// SSH gateway waits for the same reason and in the same place; a terminal
+	// opened in a browser must not be the door where the secrets silently miss.
+	if starting {
+		h.awaitEnv(name, log)
+	}
 
 	// The session context is cancelled by exactly one thing — the gateway
 	// hanging this terminal up because the sandbox is going away — and its only
@@ -355,6 +365,35 @@ func (h *Handler) bridge(conn *websocket.Conn, pty PTY, name string) (int, error
 		}
 	}
 	return pty.Wait(), failure
+}
+
+// envAwaiter is the synchronous secret-env delivery, taken by assertion rather
+// than added to Attacher. Attacher is narrow on purpose (see turbo.go) and this
+// is not a capability a deployment chooses: both real managers have it, and a
+// test fake that does not simply skips a delivery there is nothing to deliver.
+type envAwaiter interface {
+	AwaitEnv(ctx context.Context, name string) error
+}
+
+// envAwaitBudget bounds the wait. The push dials the guest's sshd, which the
+// bridge is about to dial anyway, so this mostly overlaps a wait the terminal
+// was already going to make.
+const envAwaitBudget = 30 * time.Second
+
+// awaitEnv delivers the owner's secrets before the PTY exists. Never fatal —
+// the terminal is worth having without them, and the next start pushes again —
+// but always logged, because an environment that quietly failed to arrive is
+// the failure mode this whole path was built to end.
+func (h *Handler) awaitEnv(name string, log *slog.Logger) {
+	a, ok := h.mgr.(envAwaiter)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), envAwaitBudget)
+	defer cancel()
+	if err := a.AwaitEnv(ctx, name); err != nil {
+		log.Warn("secrets not delivered before the terminal opened", "name", name, "err", err)
+	}
 }
 
 // touch marks the sandbox active, at most once per touchInterval, and returns

@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +48,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/api"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -569,6 +571,109 @@ func TestFleetSecretsReachARemoteGuest(t *testing.T) {
 				raw, err := os.ReadFile(filepath.Join(stateDir, "mock-vms", name, "environment"))
 				return err == nil && strings.Contains(string(raw), `API_TOKEN="sekret-value"`)
 			})
+		})
+	}
+}
+
+// gatedPusher holds every delivery until the test releases it, so the question
+// "did the session wait?" has an answer that does not depend on how fast an
+// in-process push happens to be.
+type gatedPusher struct {
+	inner   host.EnvPusher
+	entered chan struct{} // closed-ish signal: a delivery is in flight and held
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *gatedPusher) PushEnv(ctx context.Context, b *host.Sandbox) error {
+	g.once.Do(func() { close(g.entered) })
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return g.inner.PushEnv(ctx, b)
+}
+
+// TestNewDoorDeliversSecretsBeforeOpeningTheSession is the regression that
+// motivated the wait, and it is a race the clock used to decide.
+//
+// `ssh new@<gateway>` creates a sandbox and opens a session on it in one
+// breath, while the secret-env push is fired asynchronously and still has to
+// dial the guest. pam_env reads /etc/environment exactly once, at session
+// setup, so a push landing a second later lands in a file that session will
+// never read again: the user's first shell on the box they had just saved a
+// token for came up without it, and nothing anywhere said why. Observed live,
+// with the guest's own wtmp one second ahead of the env file's mtime.
+//
+// Holding the delivery is what makes the assertion deterministic. With the wait
+// in place the door cannot get past it; without one, the session returns while
+// the push is still held and the guest's env file is still empty.
+func TestNewDoorDeliversSecretsBeforeOpeningTheSession(t *testing.T) {
+	for _, node := range []string{"gw", "node-b"} {
+		t.Run(node, func(t *testing.T) {
+			ds := newDataStack(t)
+			if err := ds.secrets.PutSecret("tester", "API_TOKEN", "sekret-value", []string{"web"}); err != nil {
+				t.Fatal(err)
+			}
+			gate := &gatedPusher{inner: ds.syncer, entered: make(chan struct{}), release: make(chan struct{})}
+			// Both halves of the split, exactly as cmd/sparkbox wires the real
+			// syncer: the manager delivers to a sandbox on this machine, the
+			// fleet to one on any other.
+			ds.mgr.SetEnvSync(gate)
+			ds.flt.SetEnvPusher(gate)
+
+			name := "gated-" + strings.ReplaceAll(node, "-", "")
+			stateDir := ds.dir
+			if node == "node-b" {
+				stateDir = ds.node.dir
+			}
+
+			// Everything that needs the testing.T happens here, on this
+			// goroutine; only the Run is asynchronous.
+			client := ds.dialAs(t, ds.userKey, sshgw.NewSandboxUser+"+"+name)
+			defer client.Close()
+			sess, err := client.NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sess.Close()
+			var out, errs syncBuf
+			sess.Stdout, sess.Stderr = &out, &errs
+			done := make(chan error, 1)
+			go func() { done <- sess.Run("--node " + node + " web") }()
+
+			select {
+			case <-gate.entered:
+			case err := <-done:
+				t.Fatalf("the session ended before any secret delivery was even attempted: %v (%s)", err, errs.String())
+			case <-time.After(30 * time.Second):
+				t.Fatal("no secret delivery was attempted for a sandbox created with the default door")
+			}
+
+			// The crux. A delivery is held; the door must be held with it.
+			select {
+			case err := <-done:
+				t.Fatalf("the session opened before the secrets reached the guest (%v, %s) — "+
+					"pam_env reads /etc/environment once, so this shell can never see them", err, errs.String())
+			case <-time.After(250 * time.Millisecond):
+			}
+
+			close(gate.release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("session: %v (%s)", err, errs.String())
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the session never finished after the delivery was released")
+			}
+
+			// Read once, with no polling: every other assertion in this file
+			// has to wait for a goroutine, and not having to is the point.
+			if got := readGuestEnv(t, stateDir, name); !strings.Contains(got, `API_TOKEN="sekret-value"`) {
+				t.Fatalf("guest env after the session returned = %q, want the tagged secret already in it", got)
+			}
 		})
 	}
 }
