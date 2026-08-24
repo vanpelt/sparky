@@ -47,10 +47,18 @@ name: sparkbox CI
 # `changes` fails OPEN: a new branch, a force-push that orphaned the old tip, or
 # any diff it cannot compute runs everything. A wrong "nothing changed" is the
 # one failure mode that silently stops guarding, so it must never be the guess.
+#
+# `push` is scoped to main, not `["**"]`. A branch with an open PR used to fire
+# TWO identical runs per push — one for the branch push, one for the PR — which
+# doubled the cost of the expensive jobs (`provision smoke` on an arm64 runner
+# most of all) and produced two sets of statuses for the same tree. Now the PR
+# event is the single pre-merge run, and the main push is the post-merge run
+# over the actual squashed commit. The trade-off is deliberate: a branch with no
+# PR open gets no CI, so open the PR (draft is enough) to get checks.
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 concurrency:
