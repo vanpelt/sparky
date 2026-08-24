@@ -197,13 +197,15 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   `gh` but no credentials. Store one per owner and it is pushed into their
   sandboxes' environment:
   ```sh
-  gh auth token | ssh -p 2222 ctl@<host> secret set GITHUB_TOKEN   # pipe: one line
-  ssh -t -p 2222 ctl@<host> secret set CLAUDE_CODE_OAUTH_TOKEN     # prompt: paste
+  gh auth token | ssh -p 2222 ctl@<host> secret set GITHUB_TOKEN
+  claude setup-token | ssh -p 2222 ctl@<host> secret set CLAUDE_CODE_OAUTH_TOKEN
   ```
   The value is read from stdin, never from argv, so it stays out of shell
-  history. `claude setup-token` prints a banner around its token, so paste that
-  one at the prompt rather than piping. Untagged secrets and new sandboxes both carry the `default` tag, so
-  they find each other without anyone learning what a tag is.
+  history. A banner around the value is fine — `claude setup-token` prints one,
+  and the credential is picked out of it by its own shape, with anything
+  ambiguous refused rather than guessed at. `ssh -t … secret set <NAME>` prompts
+  for a paste instead. Untagged secrets and new sandboxes both carry the
+  `default` tag, so they find each other without anyone learning what a tag is.
 - **Health + logs.** `sparkbox doctor` any time; `journalctl -u sparkbox -f`.
 - **Re-provision / upgrade.** Drop in a newer `sparkbox` binary and re-run
   `sparkbox setup` — idempotent, and `--release <tag>` pins the artifacts. If

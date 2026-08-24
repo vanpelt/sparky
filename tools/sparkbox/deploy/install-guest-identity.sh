@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=3
+IDENTITY_REV=4
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -157,7 +157,12 @@ Description=refresh the sparkbox workload identity token
 [Timer]
 OnBootSec=10s
 OnUnitActiveSec=45min
-AccuracySec=1min
+# Systemd may delay a timer's firing by up to AccuracySec to coalesce
+# wakeups (default 1min). That's fine for the 45-minute refresh, but it lets
+# the boot-time fetch slip by up to a minute past OnBootSec — long enough
+# for hivemind's single startup auth attempt to give up before a token
+# exists. Keep it tight so the boot fetch actually lands near 10s.
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

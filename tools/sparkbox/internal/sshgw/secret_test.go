@@ -80,23 +80,130 @@ func TestCleanSecretValueDropsBlankLines(t *testing.T) {
 	}
 }
 
-// Several lines of content is `claude setup-token`'s banner-plus-token output.
-// Guessing which line is the credential would mean pattern-matching another
-// tool's format; the refusal has to point at the prompt instead.
-func TestCleanSecretValueRefusesToGuessAmongLines(t *testing.T) {
-	out := "Welcome to Claude Code v2.1.241\n\n" +
+// A banner around the token is `claude setup-token`'s actual output, and this
+// is the command the whole ctl secret channel exists to be the far end of.
+//
+// The credential is found by its own shape, so nothing here depends on where in
+// the banner it sits, what the surrounding sentences say, or whether the tool
+// paints them. Note the token is also mentioned INSIDE a sentence: the same
+// value twice is one credential, not an ambiguity.
+func TestCleanSecretValuePicksTheCredentialOutOfABanner(t *testing.T) {
+	const token = "sk-ant-oat01-Fk3nQ7pR2sVt8wXy1zA4bC6dE9gH0jK5mN7pQ2sT4vW6xY8zB1cD3fG5hJ7kL9nP1rS3tV5wX7yZ9aC2eF4gH6jM8"
+	out := "\x1b[1mWelcome to Claude Code\x1b[0m v2.1.241\n" +
+		"   ___ __    ___ __ __ ___  ___\n\n" +
 		"Your OAuth token (valid for 1 year):\n\n" +
-		"sk-ant-oat01-EXAMPLE\n\n" +
-		"Store this token securely.\n"
-	_, err := cleanSecretValue(out, "CLAUDE_CODE_OAUTH_TOKEN")
-	if err == nil {
-		t.Fatal("a banner plus a token was accepted — it may have stored the banner")
+		"  \x1b[32m" + token + "\x1b[0m  \n\n" +
+		"Store " + token + " securely. It will not be shown again.\n"
+
+	got, err := cleanSecretValue(out, "CLAUDE_CODE_OAUTH_TOKEN")
+	if err != nil {
+		t.Fatalf("setup-token's own output was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ssh -t") {
-		t.Errorf("refusal %q does not point at the prompt", err)
+	if got != token {
+		t.Errorf("got %q, want the token with the banner and the styling gone", got)
 	}
-	if strings.Contains(err.Error(), "sk-ant-oat01-EXAMPLE") {
-		t.Errorf("the refusal echoes the credential back: %q", err)
+}
+
+// The shapes are matched, not the tools. A GitHub PAT announced by some other
+// program has to come out of that program's chatter too, or this would be the
+// one-off for one CLI that the doc comment says it is not.
+func TestCleanSecretValueFindsEachCredentialShape(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"anthropic oauth", "sk-ant-oat01-" + strings.Repeat("aB3", 20)},
+		{"anthropic api key", "sk-ant-api03-" + strings.Repeat("cD4", 20)},
+		{"github fine-grained pat", "github_pat_" + strings.Repeat("eF5", 12)},
+		{"github classic", "ghp_" + strings.Repeat("gH6", 14)},
+		{"openai project key", "sk-proj-" + strings.Repeat("iJ7", 20)},
+	} {
+		out := "some tool being helpful\n\nhere it is: " + tc.value + "\n\nkeep it safe\n"
+		got, err := cleanSecretValue(out, "TOKEN")
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if got != tc.value {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.value)
+		}
+	}
+}
+
+// The other side of the wrap check: a closing sentence, a rule, or a line of
+// ASCII art under the token is not a wrapped tail, and treating one as though
+// it were would refuse the ordinary banner this feature exists to accept.
+func TestCleanSecretValueDoesNotMistakeDecorationForAWrap(t *testing.T) {
+	const token = "sk-ant-oat01-" + "aB3aB3aB3aB3aB3aB3aB3aB3aB3aB3aB3aB3"
+	for _, under := range []string{
+		"Storeitsecurely",             // one long word, no digits
+		"________________________",    // a rule
+		"____----____----____----",    // the bottom of a logo
+		"It will not be shown again.", // an ordinary sentence
+	} {
+		got, err := cleanSecretValue("Your token:\n"+token+"\n"+under+"\n", "TOKEN")
+		if err != nil {
+			t.Errorf("%q under the token was read as a wrap: %v", under, err)
+			continue
+		}
+		if got != token {
+			t.Errorf("%q under the token: got %q", under, got)
+		}
+	}
+}
+
+// A value nobody stamps a recognisable prefix on stays acceptable on its own
+// line. Most secrets are like this — a connection string, a webhook URL, a
+// password — and requiring a known shape would break every one of them.
+func TestCleanSecretValueStillTakesAnUnrecognisableValue(t *testing.T) {
+	got, err := cleanSecretValue("postgres://u:p@host:5432/db\n", "DATABASE_URL")
+	if err != nil {
+		t.Fatalf("cleanSecretValue: %v", err)
+	}
+	if got != "postgres://u:p@host:5432/db" {
+		t.Errorf("got %q, want the line verbatim", got)
+	}
+}
+
+// The refusals. Each is a case where storing something would mean storing a
+// credential the user did not pipe in, which is worse than the pipe not
+// working: they all have to fail closed and point at the prompt.
+func TestCleanSecretValueRefusesRatherThanGuess(t *testing.T) {
+	const tokenA = "sk-ant-oat01-" + "aB3aB3aB3aB3aB3aB3aB3aB3aB3aB3aB3aB3"
+	const tokenB = "sk-ant-oat01-" + "zY9zY9zY9zY9zY9zY9zY9zY9zY9zY9zY9zY9"
+	for _, tc := range []struct{ name, in, want string }{
+		{
+			// Two genuinely different credentials: an example beside the real
+			// one, or two tools' output concatenated.
+			"two different credentials", "here is one: " + tokenA + "\nand another: " + tokenB,
+			"refuses to guess",
+		},
+		{
+			// Prose only. Nothing here is a credential, so there is nothing to
+			// pick and the banner must not be stored as if it were.
+			"a banner with no credential in it", "Signed in as alice\nNothing to see here",
+			"none of them holds anything shaped like a credential",
+		},
+		{
+			// A terminal broke the token in two, so the second line is the
+			// rest of it. Storing the first half would be storing a
+			// plausible-looking wrong value — the single outcome this whole
+			// design is arranged to avoid.
+			"a wrapped credential", "Your token:\n" + tokenA + "\nqR7sT2vW9xY4zB6cD1fG3hJ5",
+			"broken across two lines",
+		},
+	} {
+		got, err := cleanSecretValue(tc.in, "CLAUDE_CODE_OAUTH_TOKEN")
+		if err == nil {
+			t.Errorf("%s: accepted, storing %q", tc.name, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %q, want it to mention %q", tc.name, err, tc.want)
+		}
+		if !strings.Contains(err.Error(), "ssh -t") {
+			t.Errorf("%s: refusal %q does not point at the prompt", tc.name, err)
+		}
+		if strings.Contains(err.Error(), tokenA) || strings.Contains(err.Error(), tokenB) {
+			t.Errorf("%s: the refusal echoes a credential back: %q", tc.name, err)
+		}
 	}
 }
 
@@ -106,7 +213,7 @@ func TestCleanSecretValueRefusals(t *testing.T) {
 	}{
 		{"empty", "", "stdin"},
 		{"whitespace only", "  \n\t ", "stdin"},
-		{"two lines of content", "line one\nline two", "only one of them"},
+		{"two lines of prose", "line one\nline two", "shaped like a credential"},
 	} {
 		_, err := cleanSecretValue(tc.in, "TOKEN")
 		if err == nil {

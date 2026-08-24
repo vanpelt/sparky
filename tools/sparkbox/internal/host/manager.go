@@ -475,8 +475,12 @@ type Manager struct {
 	actNetBytes        uint64                  // activity floor: bytes per sample; 0 = off
 	vitals             map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
 	memUsed            map[string]int64        // latest observed guest working set per running sandbox
-	metrics            *fleetmetrics.Registry  // optional node-local persistence/readiness metrics
-	diskOps            sync.Map                // sandbox name -> *sync.Mutex; serializes rootfs lifecycle work
+	// balloonedAt is when the reaper last inflated a sandbox's balloon, for the
+	// settle window applyVitals judges CPU against. Cleared by deflate and by
+	// every path that drops the vitals baseline.
+	balloonedAt map[string]time.Time
+	metrics     *fleetmetrics.Registry // optional node-local persistence/readiness metrics
+	diskOps     sync.Map               // sandbox name -> *sync.Mutex; serializes rootfs lifecycle work
 
 	// Activity is intentionally kept off mu on the offer path. Lifecycle
 	// operations hold mu across driver calls, which can take seconds; a web
@@ -624,6 +628,7 @@ func NewManager(opts Options) (*Manager, error) {
 		boxes:              map[string]*Sandbox{},
 		snaps:              map[string]*Snapshot{},
 		vitals:             map[string]vitalsSample{},
+		balloonedAt:        map[string]time.Time{},
 		memUsed:            map[string]int64{},
 		activity:           map[string]time.Time{},
 		markedAt:           map[string]time.Time{},
@@ -1459,6 +1464,37 @@ func (m *Manager) ResyncEnv(ctx context.Context, name string) {
 	m.pushEnv(ctx, cp)
 }
 
+// AwaitEnv delivers a sandbox's secret environment and returns only once it has
+// actually been written — the synchronous counterpart of pushEnv, for the one
+// caller that cannot use a fire-and-forget push.
+//
+// pushEnv is asynchronous on purpose: no lifecycle operation should be able to
+// stall or fail on an SSH exec into a guest. But an interactive attach both
+// starts a VM and opens a session on it in the same breath, and pam_env reads
+// /etc/environment exactly once, at session setup. The push and the session are
+// then two goroutines racing for the same second, and the session wins — it was
+// begun by the call that already returned, while the push still has to dial. The
+// user's first shell on the box they just saved a token for comes up without it,
+// and, as ever with this feature, nothing anywhere says why.
+//
+// Overlapping an in-flight push is safe and is the normal case: the syncer
+// serializes deliveries per box and each one rewrites the same block from the
+// same store, so this either waits behind the async push and rewrites an
+// identical block, or goes first and makes that one the cheap duplicate. The
+// same idempotence the fleet already leans on for its own overlapping pushes.
+func (m *Manager) AwaitEnv(ctx context.Context, name string) error {
+	m.mu.Lock()
+	p := m.envSync
+	b, ok := m.boxes[name]
+	if p == nil || !ok || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return nil
+	}
+	cp := copyOf(b)
+	m.mu.Unlock()
+	return p.PushEnv(ctx, cp)
+}
+
 func (m *Manager) pushEnv(ctx context.Context, b *Sandbox) {
 	if m.envSync == nil {
 		return
@@ -1547,6 +1583,7 @@ func (m *Manager) pause(ctx context.Context, name, reason string) error {
 	// Re-priming costs one tick and keeps that from reading as a rate.
 	delete(m.vitals, name)
 	delete(m.memUsed, name)
+	delete(m.balloonedAt, name)
 	// Turbo is borrowed for exactly one run, and this is where it is handed
 	// back — every path that stops a VM arrives here, so there is one place
 	// that has to remember rather than four that have to agree.
@@ -2307,6 +2344,7 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	delete(m.boxes, name)
 	delete(m.vitals, name)
 	delete(m.memUsed, name)
+	delete(m.balloonedAt, name)
 	delete(m.protectUntil, b.ID)
 	m.activityMu.Lock()
 	delete(m.activity, name)
@@ -2415,6 +2453,13 @@ func (m *Manager) FlushActivity() error {
 // divisor would turn counter noise into a huge apparent rate.
 const minVitalsInterval = 5 * time.Second
 
+// balloonSettle is how long after a balloon-down a sandbox's CPU counter is
+// ignored for activity purposes. Long enough to cover the reclaim burst at the
+// reaper's one-minute cadence; short enough that unattended CPU-only work gets
+// its RAM back promptly. Interactive use never waits on it — MarkActive
+// deflates directly, without consulting a counter at all.
+const balloonSettle = 3 * time.Minute
+
 // refreshVitals samples every running sandbox's CPU and network counters, adds
 // the network delta to its lifetime totals, and resets the idle clock of any
 // sandbox busier than the configured activity floors.
@@ -2498,8 +2543,19 @@ func (m *Manager) applyVitals(ctx context.Context, name string, cur vitalsSample
 		cpuPct = float64(counterDelta(prev.cpuNanos, cur.cpuNanos)) / float64(elapsed.Nanoseconds()) * 100
 	}
 
-	busy := (m.actCPUPct > 0 && cpuOK && cpuPct >= m.actCPUPct) ||
-		(m.actNetBytes > 0 && netOK && netDelta >= m.actNetBytes)
+	// CPU is not evidence of work while a fresh balloon is still settling.
+	// vmm.CPUStatser reads the VMM process's own utime+stime, so inflating a
+	// balloon is charged to the very counter this reads: the host releases
+	// gigabytes of guest pages and the guest kernel then faults its working set
+	// back in, and that by itself clears the activity floor. Believing it closed
+	// a loop — balloon down, read the reclaim as work, deflate and reset the
+	// idle clock, balloon down again a couple of minutes later — under which a
+	// sandbox can never accumulate enough idle to be paused, and one sat warm
+	// for fifteen hours doing nothing. Network is untouched by ballooning, so it
+	// stays a valid signal in both states.
+	cpuBusy := m.actCPUPct > 0 && cpuOK && cpuPct >= m.actCPUPct && m.balloonSettled(name, cur.at)
+	netBusy := m.actNetBytes > 0 && netOK && netDelta >= m.actNetBytes
+	busy := cpuBusy || netBusy
 	if busy {
 		b.LastActive = time.Now().UTC()
 		// Work is happening, so give back the RAM the warm tier reclaimed.
@@ -2509,6 +2565,15 @@ func (m *Manager) applyVitals(ctx context.Context, name string, cur vitalsSample
 		m.observe(b, "touched")
 	}
 	m.save() //nolint:errcheck
+}
+
+// balloonSettled reports whether enough time has passed since the reaper last
+// inflated this sandbox's balloon for its CPU counter to mean what it usually
+// means. A sandbox that was never ballooned is settled by definition. Callers
+// hold m.mu.
+func (m *Manager) balloonSettled(name string, at time.Time) bool {
+	inflated, ok := m.balloonedAt[name]
+	return !ok || at.Sub(inflated) >= balloonSettle
 }
 
 // counterDelta subtracts two readings of a cumulative counter that restarts at
@@ -2819,6 +2884,7 @@ func (m *Manager) balloonDown(ctx context.Context, name string) error {
 		return err
 	}
 	b.Ballooned = true
+	m.balloonedAt[name] = time.Now()
 	m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
 	m.observe(b, "ballooned")
 	return m.save()
@@ -2845,6 +2911,7 @@ func (m *Manager) deflate(ctx context.Context, b *Sandbox) {
 		return
 	}
 	b.Ballooned = false
+	delete(m.balloonedAt, b.Name)
 	m.log.Info("deflated balloon on activity", "name", b.Name)
 	m.observe(b, "deflated")
 }

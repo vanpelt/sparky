@@ -29,6 +29,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // NewSandboxUser is the reserved SSH username that creates a fresh sandbox on
@@ -502,6 +503,14 @@ func (g *Gateway) handle(s gssh.Session) {
 		return
 	}
 
+	// Whether this connection is about to START the VM, read before Prepare
+	// resumes it and thereby destroys the evidence. Both of the paths it covers —
+	// a create through the new door, a resume of anything not already running —
+	// fire an asynchronous secret-env push that the session below must not
+	// out-run. A warm box already has its environment; making every reconnect
+	// wait on a redundant SSH exec into the guest would be a cost for nothing.
+	starting := viaNewDoor || box.State != vmm.StateRunning
+
 	// Resume-on-connect: the user perceives an always-on machine; suspended
 	// sandboxes cost only disk.
 	box, err := host.Prepare(ctx, g.mgr, sandboxName)
@@ -520,6 +529,16 @@ func (g *Gateway) handle(s gssh.Session) {
 	_, _, isPTY := s.Pty()
 	defer g.trackSession(sandboxName, s, isPTY)()
 
+	// The secret environment goes in BEFORE the shell. pam_env reads
+	// /etc/environment once, at session setup, so a push that lands a second
+	// later lands in a file this session will never read again — which is how
+	// `ctl secret set` followed immediately by `ssh new@<gateway>` produced a
+	// shell holding none of the secrets it had just been given, and an agent
+	// asking the user to log in on the box they had just tokenised.
+	if starting {
+		g.awaitEnv(ctx, s, caller(s, user), sandboxName, log)
+	}
+
 	client, err := g.dialUpstream(ctx, box.SSHAddr, box.SSHUser)
 	if err != nil {
 		failDial(s, log, sandboxName, err)
@@ -532,6 +551,33 @@ func (g *Gateway) handle(s gssh.Session) {
 		log.Warn("session ended with error", "err", err)
 	}
 	s.Exit(exitCode) //nolint:errcheck
+}
+
+// envAwaitBudget bounds the wait for a sandbox's secret environment. The push
+// dials the guest's sshd, which the session is about to dial anyway, so this
+// mostly overlaps a wait the connection was already going to make; the bound is
+// there so a guest that never answers costs a delayed shell rather than a hung
+// one.
+const envAwaitBudget = 30 * time.Second
+
+// awaitEnv delivers the caller's secrets into the sandbox before a session is
+// opened on it. Never fatal: a box worth attaching to is worth attaching to
+// without its environment, and the next transition to running pushes again.
+//
+// The failure is reported to the terminal only when the user actually has
+// secrets to miss. Everyone else's push writes an empty block, and telling them
+// their secrets did not arrive would be inventing a problem they do not have —
+// while staying silent for someone who does have them is the exact failure this
+// whole path exists to stop being silent about.
+func (g *Gateway) awaitEnv(ctx context.Context, s gssh.Session, c ctlops.Caller, name string, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, envAwaitBudget)
+	defer cancel()
+	if err := g.ops.AwaitEnv(ctx, name); err != nil {
+		log.Warn("secrets not delivered before the session opened", "name", name, "err", err)
+		if metas, lerr := g.ops.ListSecrets(c); lerr == nil && len(metas) > 0 {
+			fmt.Fprintf(s.Stderr(), "sparkbox: your secrets have not reached %s yet — reconnect to pick them up.\r\n", name)
+		}
+	}
 }
 
 // resolveDoor maps the connection's destination address to a sandbox name.

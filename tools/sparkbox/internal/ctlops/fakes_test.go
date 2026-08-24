@@ -237,8 +237,13 @@ func (f *fakeSandboxes) SetPinned(name string, pinned bool) error {
 }
 
 func (f *fakeSandboxes) ResyncEnv(ctx context.Context, name string) { f.c.add("ResyncEnv %s", name) }
-func (f *fakeSandboxes) MarkActive(name string)                     { f.c.add("Touch %s", name) }
-func (f *fakeSandboxes) ArchivingEnabled() bool                     { return f.archiving }
+
+func (f *fakeSandboxes) AwaitEnv(ctx context.Context, name string) error {
+	f.c.add("AwaitEnv %s", name)
+	return nil
+}
+func (f *fakeSandboxes) MarkActive(name string) { f.c.add("Touch %s", name) }
+func (f *fakeSandboxes) ArchivingEnabled() bool { return f.archiving }
 
 // ---------------------------------------------------------------------------
 

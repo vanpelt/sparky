@@ -95,9 +95,50 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(rev) != "IDENTITY_REV=3\n" {
+	if string(rev) != "IDENTITY_REV=4\n" {
 		t.Fatalf("identity revision = %q", rev)
 	}
+}
+
+// TestTokenTimerFiresNearItsBootTarget pins the accuracy, which is not a tuning
+// knob here but the difference between a guest having a token at startup and
+// not.
+//
+// systemd may delay a timer by up to AccuracySec to coalesce wakeups, and the
+// default is a full minute. On the 45-minute refresh that is free; on
+// OnBootSec=10s it means the first fetch can land anywhere in the first 70
+// seconds — and hivemind makes ONE authentication attempt at startup, so it
+// gives up before the token file exists. The guest then runs unauthenticated
+// until something restarts the daemon.
+func TestTokenTimerFiresNearItsBootTarget(t *testing.T) {
+	timer := timerUnitFrom(t, string(GuestIdentityScript))
+	if strings.Contains(timer, "AccuracySec=1min") {
+		t.Fatal("the boot fetch is back on systemd's default 1-minute slack, " +
+			"which lets it land after hivemind's single startup auth attempt has given up")
+	}
+	for _, want := range []string{"OnBootSec=10s", "AccuracySec=1s"} {
+		if !strings.Contains(timer, want) {
+			t.Errorf("token timer missing %q:\n%s", want, timer)
+		}
+	}
+}
+
+// timerUnitFrom returns the sparkbox-token.timer heredoc body the installer
+// writes, so the assertions above read the unit rather than the whole script
+// and cannot be satisfied by the same string appearing in a comment elsewhere.
+func timerUnitFrom(t *testing.T, script string) string {
+	t.Helper()
+	const marker = "sparkbox-token.timer\" <<'EOF'\n"
+	i := strings.Index(script, marker)
+	if i < 0 {
+		t.Fatal("install-guest-identity.sh no longer writes sparkbox-token.timer from a heredoc")
+	}
+	rest := script[i+len(marker):]
+	j := strings.Index(rest, "\nEOF\n")
+	if j < 0 {
+		t.Fatal("unterminated sparkbox-token.timer heredoc")
+	}
+	return rest[:j]
 }
 
 func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
@@ -112,11 +153,51 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"sparkbox make-public",
 		"sparkbox make-private",
 		"sparkbox set-port PORT",
-		"AGENT_ENV_REV=3",
+		"AGENT_ENV_REV=4",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
 		}
+	}
+}
+
+// TestGuestSeedsAPermissionDefault pins the setting that lets an agent in a
+// sandbox get on with it.
+//
+// A sandbox is provisioned precisely so work can run while nobody is watching,
+// and a per-turn approval prompt is answerable only by a human at a terminal —
+// so a guest that starts in the default mode is a guest that stops on its first
+// tool call and waits forever. The user scope is load-bearing too: the same file
+// under a project directory would cover that one directory and nothing the owner
+// later clones.
+func TestGuestSeedsAPermissionDefault(t *testing.T) {
+	got := string(RefreshToolsScript)
+	for _, want := range []string{
+		`"$mnt$home/.claude/settings.json"`, // user scope, not per-project
+		`perms.setdefault("defaultMode", "auto")`,
+		`cfg.setdefault("skipAutoPermissionPrompt", True)`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("guest permission seed missing %q", want)
+		}
+	}
+	// setdefault throughout, never assignment: the same loop walks fork
+	// templates holding a real user's settings, and someone who deliberately
+	// moved off auto must not have it restored under them by a refresh.
+	for _, never := range []string{
+		`perms["defaultMode"] =`,
+		`cfg["skipAutoPermissionPrompt"] =`,
+	} {
+		if strings.Contains(got, never) {
+			t.Errorf("guest permission seed overwrites the user's own choice: %q", never)
+		}
+	}
+	// Seeding a blanket bypass would make that decision once, here, for every
+	// user of every sandbox. It stays something a person types for themselves.
+	// Matched on the seeded value rather than the bare word, which the comment
+	// above it in the script legitimately uses to explain the choice.
+	if strings.Contains(got, `"defaultMode", "bypassPermissions"`) {
+		t.Error("the template seeds a full permission bypass; `auto` is the line this is allowed to draw")
 	}
 }
 

@@ -1371,6 +1371,54 @@ func TestEnvPushHook(t *testing.T) {
 	waitFor(t, func() bool { return pusher.count("forked") == 1 })
 }
 
+// TestAwaitEnvIsSynchronous pins the one property the interactive doors need
+// and the fire-and-forget hook cannot give them: when it returns, the guest
+// already has the environment.
+//
+// Every test above has to poll (waitFor), because a fired push is a goroutine.
+// This one asserts on the next line, and that difference is the whole fix: a
+// shell opened one second before its secrets landed never saw them, because
+// pam_env reads /etc/environment exactly once, at session setup.
+func TestAwaitEnvIsSynchronous(t *testing.T) {
+	m := newTestManager(t, host.Options{})
+	pusher := &envRecorder{}
+	m.SetEnvSync(pusher)
+	ctx := context.Background()
+
+	mustCreate(t, m, "envy", "alice", 512)
+	waitFor(t, func() bool { return pusher.count("envy") == 1 }) // drain the create's own push
+
+	if err := m.AwaitEnv(ctx, "envy"); err != nil {
+		t.Fatalf("AwaitEnv: %v", err)
+	}
+	if got := pusher.count("envy"); got != 2 {
+		t.Fatalf("push count = %d on the line after AwaitEnv, want 2: the delivery has to have finished before the call returned", got)
+	}
+
+	// A door that waited is owed the news that the wait failed — unlike the
+	// lifecycle hook, whose failures are logged and dropped so no VM operation
+	// ever fails over an SSH exec.
+	bad := &envRecorder{err: errors.New("guest unreachable")}
+	m.SetEnvSync(bad)
+	if err := m.AwaitEnv(ctx, "envy"); err == nil {
+		t.Fatal("AwaitEnv swallowed a delivery failure")
+	}
+	m.SetEnvSync(pusher)
+
+	// And it is never a wake-up source: there is nothing to write into a paused
+	// rootfs's running environment, and the next resume pushes anyway.
+	if err := m.Pause(ctx, "envy"); err != nil {
+		t.Fatal(err)
+	}
+	before := pusher.count("envy")
+	if err := m.AwaitEnv(ctx, "envy"); err != nil {
+		t.Fatalf("AwaitEnv on a paused sandbox: %v", err)
+	}
+	if got := pusher.count("envy"); got != before {
+		t.Fatalf("AwaitEnv pushed into a paused sandbox (%d -> %d)", before, got)
+	}
+}
+
 func TestEnvPushFailureNeverFailsLifecycle(t *testing.T) {
 	m := newTestManager(t, host.Options{})
 	pusher := &envRecorder{err: errors.New("guest unreachable")}

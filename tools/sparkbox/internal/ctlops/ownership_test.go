@@ -256,6 +256,11 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		"StartGitHubLink": true, "FinishGitHubLink": true,
 		"RemovePasskey": true, "MintSessionToken": true, "Invite": true,
 		"Go": true, "GoFrom": true, "Await": true,
+		// AwaitEnv, like MarkActive, takes no Caller to check against: both are
+		// reached only after a transport has resolved and authorized the box,
+		// and both are pass-throughs that reveal nothing a resolved name does
+		// not already imply.
+		"AwaitEnv": true,
 		// The node commands take a machine's name, not a resource anybody owns:
 		// a node belongs to the fleet, so they are operator-gated instead of
 		// owner-gated — see TestNodeCommandsAreOperatorGated.
