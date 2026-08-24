@@ -63,6 +63,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Before anything is built: do the checksums baked into entrypoint.sh
+      # actually describe the release it pins? A mismatch is invisible at
+      # build time and splits into two silent failures at run time — a warm
+      # cache silently keeps the PREVIOUS release's kernel and rootfs, a cold
+      # one CrashLoops on a checksum error. v0.6.0 shipped both.
+      - name: pinned checksums match the pinned release
+        run: tools/sparkbox/hack/check-cks-pin.sh amd64
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR

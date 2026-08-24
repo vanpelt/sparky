@@ -94,8 +94,8 @@ esac
 readonly firecracker_sha256="${SPARKBOX_FIRECRACKER_SHA256:-2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7}"
 readonly firecracker_version="${SPARKBOX_FIRECRACKER_VERSION:-v1.16.1}"
 readonly jailer_sha256="${SPARKBOX_JAILER_SHA256:-1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd}"
-readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-1b8c89b6c39303228a91da1862ebdb51f583a0aa6f6c78bbe8da22c79a615ae8}"
-readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-53ea8dfbe1dadff39c5df6ad62cb82aa6bef7fdff51525a0df2d64cbd4ed7c9a}"
+readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-ea519f3d4295d40495c1642de28ca1a22eda33d7b0f959af9a0ecbe8d3cac956}"
+readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-898633555a5f18ba6456e3e27e99419a4ed027405fd5181fadb07e8eec5ee60d}"
 
 mkdir -p \
   "$asset_dir" "$image_dir" "$tools_dir" "$control_dir" "$hot_dir" \
