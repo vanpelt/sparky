@@ -323,6 +323,21 @@ func installedFor(accountID int64, login string) http.HandlerFunc {
 	}
 }
 
+// installedWithPermissions is installedFor for a deployment whose App was
+// granted more than `contents` — which is what decides how wide a token
+// Credential may ask for. See ghapp.Installation.Narrow.
+func installedWithPermissions(accountID int64, login string, perms map[string]string) http.HandlerFunc {
+	blob, err := json.Marshal(perms)
+	if err != nil {
+		panic(err)
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":42,"app_slug":"sparkbox","account":{"id":%d,"login":%q,"type":"User"},"permissions":%s}`,
+			accountID, login, blob)
+	}
+}
+
 func mintsToken(expires time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -478,9 +493,76 @@ func TestLocalCredentialAsksForWriteOnlyWhenTheAttachmentSaysSo(t *testing.T) {
 	if len(mints) != 1 || !strings.Contains(mints[0], `"contents":"write"`) {
 		t.Errorf("mint body = %v", mints)
 	}
-	// pull_requests is deliberately not implied by write. See Credential.
+	// This installation declares no permissions at all, which is every App that
+	// predates the widened set. It must still get a working `contents` token
+	// rather than a request GitHub refuses wholesale — the fallback that keeps
+	// clones working on an older deployment. See ghapp.Installation.Narrow.
 	if strings.Contains(mints[0], "pull_requests") {
-		t.Errorf("write access silently widened to pull requests: %s", mints[0])
+		t.Errorf("asked an installation for a permission it never declared: %s", mints[0])
+	}
+}
+
+// TestLocalCredentialWidensToWhatTheAppHolds is the `gh` half of the feature.
+// The CLI speaks no credential-helper protocol, so it runs on this same token
+// (see the wrapper in deploy/install-guest-identity.sh) — and `gh pr create` on
+// a token that can push the branch but not open the pull request is a strange
+// half-grant. The set follows the attachment's access level, intersected with
+// what the App was actually granted.
+func TestLocalCredentialWidensToWhatTheAppHolds(t *testing.T) {
+	stub := newGitHubStub(t,
+		installedWithPermissions(4242, "alice-gh", map[string]string{
+			"contents":      "write",
+			"pull_requests": "write",
+			// `issues` is deliberately absent: a permission the App does not
+			// hold must be dropped from the request, not fail the whole mint.
+		}),
+		mintsToken(time.Now().Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	seedTag(t, local.db, "alice-box", "alice", "ci")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind", Access: repos.AccessWrite}, []string{"ci"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind"); err != nil {
+		t.Fatal(err)
+	}
+	_, mints := stub.seen()
+	if len(mints) != 1 {
+		t.Fatalf("mints = %v", mints)
+	}
+	for _, want := range []string{`"contents":"write"`, `"pull_requests":"write"`} {
+		if !strings.Contains(mints[0], want) {
+			t.Errorf("mint body %s is missing %s", mints[0], want)
+		}
+	}
+	if strings.Contains(mints[0], "issues") {
+		t.Errorf("asked for a permission the installation does not hold: %s", mints[0])
+	}
+	// Still one repository. Widening what the token may DO must never widen
+	// what it may do it TO.
+	if !strings.Contains(mints[0], `["hivemind"]`) {
+		t.Errorf("token was not scoped to the one repository: %s", mints[0])
+	}
+}
+
+// A read attachment stays read on every permission in the set: a token that
+// could open a pull request but not push is not what `--write` was withheld for.
+func TestLocalCredentialNeverWidensAReadAttachmentToWrite(t *testing.T) {
+	stub := newGitHubStub(t,
+		installedWithPermissions(4242, "alice-gh", map[string]string{
+			"contents": "write", "pull_requests": "write",
+		}),
+		mintsToken(time.Now().Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	seedTag(t, local.db, "alice-box", "alice", "ci")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind"}, []string{"ci"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind"); err != nil {
+		t.Fatal(err)
+	}
+	_, mints := stub.seen()
+	if len(mints) != 1 || strings.Contains(mints[0], `"write"`) {
+		t.Errorf("a read attachment minted a write token: %v", mints)
 	}
 }
 

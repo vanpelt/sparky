@@ -308,19 +308,29 @@ func (s *Syncer) deliverBlock(ctx context.Context, box *host.Sandbox, block stri
 	defer sess.Close()
 
 	script := rewriteScript(s.envPath, block, strict)
-	// printf is a shell builtin and the decoder path is absolute, so the
-	// outer pipeline works even under a guest-poisoned PATH.
-	cmd := fmt.Sprintf("printf '%%s' %s | /usr/bin/base64 -d | %s",
-		base64.StdEncoding.EncodeToString([]byte(script)), s.shell)
-	out := &cappedWriter{max: maxExecOutput}
-	sess.Stdout, sess.Stderr = out, out
-	if err := sess.Run(cmd); err != nil {
+	if out, err := runScript(sess, s.shell, script); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("rewrite %s on %s: %w", s.envPath, box.Name, ctx.Err())
 		}
-		return fmt.Errorf("rewrite %s on %s: %w (%s)", s.envPath, box.Name, err, strings.TrimSpace(string(out.buf)))
+		return fmt.Errorf("rewrite %s on %s: %w (%s)", s.envPath, box.Name, err, out)
 	}
 	return nil
+}
+
+// runScript pipes script into the guest's shell over an already-open session
+// and returns its capped combined output. Shared by the env rewrite and the
+// repo sync so both cross the guest boundary the same way — base64 in, one
+// bounded read out.
+//
+// printf is a shell builtin and the decoder path is absolute, so the outer
+// pipeline works even under a guest-poisoned PATH.
+func runScript(sess *xssh.Session, shell, script string) (string, error) {
+	cmd := fmt.Sprintf("printf '%%s' %s | /usr/bin/base64 -d | %s",
+		base64.StdEncoding.EncodeToString([]byte(script)), shell)
+	out := &cappedWriter{max: maxExecOutput}
+	sess.Stdout, sess.Stderr = out, out
+	err := sess.Run(cmd)
+	return strings.TrimSpace(string(out.buf)), err
 }
 
 // SyncOwner re-pushes the owner's environment after a tag or secret change.

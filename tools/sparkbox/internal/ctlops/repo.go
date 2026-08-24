@@ -58,6 +58,11 @@ type RepoResult struct {
 	Sandboxes []string   `json:"sandboxes"` // never nil
 	Defaulted bool       `json:"defaulted"`
 	Check     RepoCheck  `json:"check"`
+	// Notes is what could not be said in Sandboxes: one line per already-running
+	// sandbox that selects this attachment and could not be nudged into checking
+	// it out. Empty is the normal case — a box either took the job or was not
+	// running, and neither is worth a line.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // RepoCheck is one attachment's answer to "can the App actually reach this".
@@ -168,9 +173,18 @@ func (o *Ops) AttachRepo(ctx context.Context, c Caller, a RepoArgs) (RepoResult,
 	// answering says nothing about the attachment, and the check is repeatable.
 	check, _ := o.checkRepo(ctx, u, r)
 
+	// The boxes that already carry one of these tags are running RIGHT NOW with
+	// a manifest that just changed under them. Attaching is the same event as
+	// retagging seen from the other side — one changes which repos a tag names,
+	// the other which tags a box has, and both end with a guest whose checkouts
+	// no longer match what its owner asked for. Only the boot pass used to
+	// reconcile that, which meant an attachment made after a box started did
+	// nothing visible until somebody restarted it.
+	notes := o.syncReposFanout(ctx, affected)
+
 	o.log.Info("repo attached", "user", c.Handle, "slug", r.Slug, "tags", want,
 		"access", r.Access, "sandboxes", len(affected), "reachable", check.Reachable)
-	return RepoResult{Repo: r, Sandboxes: affected, Defaulted: defaulted, Check: check}, nil
+	return RepoResult{Repo: r, Sandboxes: affected, Defaulted: defaulted, Check: check, Notes: notes}, nil
 }
 
 // DetachRepo removes one attachment and names the sandboxes that were selecting

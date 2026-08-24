@@ -9,12 +9,14 @@ package ctlops
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
@@ -631,5 +633,107 @@ func TestGitHubInstallURLIsTheHostsOwnApp(t *testing.T) {
 	url, err := r.ops.GitHubInstallURL(alice())
 	if err != nil || url != app.InstallURL() {
 		t.Fatalf("GitHubInstallURL = %q, %v", url, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Retagging and attaching reach the boxes that are already running
+// ---------------------------------------------------------------------------
+
+// The bug this closes: a sandbox created after the feature shipped would accept
+// a tag, report the tag, and check nothing out — because only the boot pass
+// reconciled checkouts, and the box had already booted. Tags decide which repos
+// a sandbox gets in exactly the way they decide which secrets it gets, and
+// SetTags has always re-pushed the secrets.
+func TestSetTagsChecksOutTheReposTheNewTagsImply(t *testing.T) {
+	r := newRig(t)
+	if _, _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"hm"}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.calls.has("ResyncRepos alicebox") {
+		t.Errorf("no checkout sync after a tag change: %v", r.calls.all())
+	}
+	if !r.calls.has("ResyncEnv alicebox") {
+		t.Errorf("the secret re-push regressed: %v", r.calls.all())
+	}
+}
+
+// A guest too old to check anything out must produce a sentence, not silence.
+// The tags ARE set either way, so this is a note beside a success and never an
+// error: failing the call would report a durable change as a rejected one and
+// have the user run it again.
+func TestSetTagsReportsAGuestThatCannotCheckOut(t *testing.T) {
+	r := newRig(t)
+	r.boxes.repoSyncErr = fmt.Errorf("%w: alicebox", host.ErrNoRepoSupport)
+
+	tags, note, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"hm"})
+	if err != nil {
+		t.Fatalf("a guest that cannot check out failed the whole call: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != "hm" {
+		t.Errorf("tags = %v, want the change to have landed anyway", tags)
+	}
+	if !strings.Contains(note, "recreate") {
+		t.Errorf("note = %q, want it to say what to do about an old sandbox", note)
+	}
+
+	// An unreachable guest is a different sentence with the same shape: the
+	// attachment stands and the next boot reconciles it.
+	r.boxes.repoSyncErr = errors.New("dial alicebox: connection refused")
+	_, note, err = r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"hm"})
+	if err != nil {
+		t.Fatalf("an unreachable guest failed the whole call: %v", err)
+	}
+	if !strings.Contains(note, "next start") {
+		t.Errorf("note = %q, want it to say the checkout still happens later", note)
+	}
+}
+
+// Attaching is the same event as retagging seen from the other side: one
+// changes which repos a tag names, the other which tags a box has, and both end
+// with a running guest whose checkouts no longer match what its owner asked for.
+func TestAttachRepoChecksOutIntoTheSandboxesAlreadyCarryingTheTag(t *testing.T) {
+	r := newRig(t)
+	withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaKeys, 99)
+	mustNoErr(t, r.tagger.SetTags("alicebox", "alice", []string{"hm"}))
+	r.calls.reset()
+
+	res, err := r.ops.AttachRepo(context.Background(), alice(),
+		RepoArgs{Slug: "wandb/hivemind", Tags: []string{"hm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sandboxes) != 1 || res.Sandboxes[0] != "alicebox" {
+		t.Fatalf("fan-out = %v, want alicebox", res.Sandboxes)
+	}
+	if !r.calls.has("ResyncRepos alicebox") {
+		t.Errorf("attaching did not reach the box already carrying the tag: %v", r.calls.all())
+	}
+	if len(res.Notes) != 0 {
+		t.Errorf("notes = %v, want none when every box took the job", res.Notes)
+	}
+}
+
+// The fan-out's failures are reported per box and never fail the attach: the
+// row is written before any guest is touched, and telling the user it did not
+// save would be false.
+func TestAttachRepoReportsPerSandboxAndStillAttaches(t *testing.T) {
+	r := newRig(t)
+	withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaKeys, 99)
+	mustNoErr(t, r.tagger.SetTags("alicebox", "alice", []string{"hm"}))
+	r.boxes.repoSyncErr = fmt.Errorf("%w: alicebox", host.ErrNoRepoSupport)
+
+	res, err := r.ops.AttachRepo(context.Background(), alice(),
+		RepoArgs{Slug: "wandb/hivemind", Tags: []string{"hm"}})
+	if err != nil {
+		t.Fatalf("a guest that cannot check out failed the attach: %v", err)
+	}
+	if res.Repo.Slug != "wandb/hivemind" {
+		t.Errorf("the attachment did not land: %+v", res.Repo)
+	}
+	if len(res.Notes) != 1 || !strings.Contains(res.Notes[0], "alicebox") {
+		t.Errorf("notes = %v, want one naming the box that could not check out", res.Notes)
 	}
 }

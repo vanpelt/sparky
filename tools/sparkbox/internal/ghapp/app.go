@@ -121,7 +121,52 @@ type Installation struct {
 	AccountID    int64  `json:"account_id"`
 	AccountLogin string `json:"account_login"`
 	AccountType  string `json:"account_type"` // "User" | "Organization"
+	// Permissions is what this installation actually holds, as GitHub reported
+	// it: permission name to "read" or "write".
+	//
+	// It exists so a caller can ask for a WIDER token than `contents` without
+	// betting the whole mint on the App having been granted every part of it.
+	// A token request naming a permission the installation lacks is refused
+	// wholesale with a 422 — not trimmed — so a `gh` token asking for
+	// pull_requests from an App that was never given it would fail completely,
+	// including the contents half that would have worked. Narrow() does the
+	// intersection up front instead. Empty when GitHub reported none, which
+	// Narrow treats as "grant nothing beyond what is asked for by name".
+	Permissions map[string]string `json:"permissions,omitempty"`
 }
+
+// Narrow returns the subset of want this installation can actually be asked
+// for, downgrading a requested "write" to "read" where that is all the App
+// holds. A permission the installation does not have at all is dropped.
+//
+// The caller decides what an empty result means. For a `gh` token it means the
+// broad request collapsed to nothing and the narrow one should be used instead;
+// no caller should send an empty permission map to MintToken, which refuses it
+// precisely because an absent list means EVERY permission the installation has.
+func (i Installation) Narrow(want map[string]string) map[string]string {
+	out := make(map[string]string, len(want))
+	for name, level := range want {
+		held, ok := i.Permissions[name]
+		if !ok {
+			continue
+		}
+		if level == PermWrite && held != PermWrite {
+			level = held
+		}
+		out[name] = level
+	}
+	return out
+}
+
+// PermRead and PermWrite are the two levels this package asks for. Exported
+// because the caller that decides which one an attachment implies lives in
+// internal/metadata. GitHub also issues "admin" on some permissions; nothing
+// here requests it, and Narrow passes an "admin" grant through unchanged when
+// "read" was asked for, which is what the caller wanted.
+const (
+	PermRead  = "read"
+	PermWrite = "write"
+)
 
 // Token is an installation access token and the moment it dies. It is passed
 // around by value and never persisted; the only copy that outlives a request is
@@ -205,6 +250,7 @@ func (a *App) InstallationFor(ctx context.Context, owner, name string) (Installa
 				Login string `json:"login"`
 				Type  string `json:"type"`
 			} `json:"account"`
+			Permissions map[string]string `json:"permissions"`
 		}
 		path := fmt.Sprintf(installationPath, url.PathEscape(owner), url.PathEscape(name))
 		op := "resolving the installation for " + slug
@@ -230,6 +276,7 @@ func (a *App) InstallationFor(ctx context.Context, owner, name string) (Installa
 			AccountID:    body.Account.ID,
 			AccountLogin: body.Account.Login,
 			AccountType:  body.Account.Type,
+			Permissions:  body.Permissions,
 		}
 		return inst, a.now().Add(installTTL), nil
 	})

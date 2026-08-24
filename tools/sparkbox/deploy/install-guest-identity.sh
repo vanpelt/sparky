@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=6
+IDENTITY_REV=7
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -259,6 +259,82 @@ printf 'username=%s\npassword=%s\n' "${user:-x-access-token}" "$pass"
 EOF
 chmod 0755 "$MNT/usr/local/bin/sparkbox-git-credential"
 
+# `gh`, on the same credential the clone rides.
+#
+# The GitHub CLI does not speak git's credential-helper protocol — it reads a
+# token out of the environment — so the helper above does nothing for it, and a
+# sandbox with a warm checkout of a private repository had a `gh` that answered
+# "You are not logged into any GitHub hosts". Wrapping it is the whole fix: mint
+# the same per-repository, one-hour token the clone uses, hand it to `gh` for the
+# length of one command, and let it die with the process. Nothing is written to
+# ~/.config/gh, so nothing rides into a snapshot, a fork or an archived rootfs —
+# the same property the credential helper has, for the same reason.
+#
+# /usr/local/bin precedes /usr/bin in every PATH the image sets, so this shadows
+# the real binary without moving it. It execs the absolute path, never `gh`, or
+# it would find itself.
+#
+# WHICH repository: the one the user is standing in. `gh` is repository-scoped
+# in the same way git is — `gh pr create` means "here" — so the remote of the
+# current checkout is both the right answer and the narrowest one. Outside a
+# checkout there is no repository to scope to and no token is set; `gh auth
+# status` then says what it always said, which is the honest answer rather than
+# a token for whatever happened to be attached first.
+sed -e "s/@@META_PORT@@/$META_PORT/g" \
+    > "$MNT/usr/local/bin/gh" <<'EOF'
+#!/bin/sh
+# Wrapper: see install-guest-identity.sh. Falls through to the real gh always.
+GH_REAL=/usr/bin/gh
+[ -x "$GH_REAL" ] || GH_REAL=/usr/local/share/sparkbox/gh
+[ -x "$GH_REAL" ] || { echo "gh is not installed in this sandbox" >&2; exit 127; }
+
+# An explicit token from the environment always wins: somebody who exported
+# GH_TOKEN meant it, and silently overriding it with ours would be the same
+# class of surprise this wrapper exists to remove.
+if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
+  exec "$GH_REAL" "$@"
+fi
+
+# Every failure below falls through to an unauthenticated gh. This wrapper must
+# never be the reason a command does not run: `gh --version`, `gh --help` and
+# `gh auth login` all have to work in a directory with no git in it at all.
+slug=$(git config --get remote.origin.url 2>/dev/null) || slug=
+case "$slug" in
+  https://github.com/*) slug=${slug#https://github.com/} ;;
+  git@github.com:*)     slug=${slug#git@github.com:} ;;
+  ssh://git@github.com/*) slug=${slug#ssh://git@github.com/} ;;
+  *) slug= ;;
+esac
+slug=${slug%.git}
+slug=${slug%/}
+# Exactly owner/name, and only the characters github.com issues. Same guard as
+# the credential helper: this is the one place guest-controlled text becomes a
+# query string, and refusing everything outside the set is what makes it safe
+# there without escaping.
+case "$slug" in
+  */*/*|/*) slug= ;;
+  */*) ;;
+  *) slug= ;;
+esac
+case "$slug" in
+  *[!A-Za-z0-9._/-]*) slug= ;;
+esac
+[ -n "$slug" ] || exec "$GH_REAL" "$@"
+
+GW=$(ip -4 route show default | awk '{print $3; exit}' 2>/dev/null) || GW=
+[ -n "$GW" ] || exec "$GH_REAL" "$@"
+
+body=$(curl -fsS --max-time 10 \
+  "http://$GW:@@META_PORT@@/github/credential?slug=$slug" 2>/dev/null) || exec "$GH_REAL" "$@"
+tok=$(printf '%s' "$body" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+[ -n "$tok" ] || exec "$GH_REAL" "$@"
+
+# GH_TOKEN and not `gh auth login --with-token`: the env var is scoped to this
+# one process and leaves no file behind, which is the entire point.
+GH_TOKEN=$tok exec "$GH_REAL" "$@"
+EOF
+chmod 0755 "$MNT/usr/local/bin/gh"
+
 # Point git at the helper, system scope, as literal ini text.
 #
 # Not `git config --system`: this runs on the HOST against a mounted tree, so it
@@ -290,10 +366,18 @@ if [ ! -f "$MNT/etc/sparkbox/motd.base" ]; then
   fi
 fi
 
-# The clone worker. Runs once at boot from sparkbox-repos.service, and on demand
-# from `sparkbox repos sync` — because retagging a live box deliberately does NOT
-# clone: pushing a checkout into a filesystem somebody is already working in can
-# take minutes and can fail halfway, so it is offered rather than imposed.
+# The clone worker. Three callers, all of them running the same reconciliation:
+# sparkbox-repos.service at boot, `sparkbox repos sync` by hand, and the gateway
+# when an owner retags a live box or attaches a repository to a tag it already
+# carries (see internal/envsync/repos.go, which restarts the unit).
+#
+# That last caller is why this must stay idempotent and must never be destructive.
+# It runs against a filesystem somebody is working in, so a repository already
+# checked out is reported present and left exactly alone — the reconciliation
+# only ever ADDS what is missing. Detaching removes nothing from the disk either.
+# A clone that takes minutes costs the person who triggered it nothing, because
+# the gateway returns as soon as the unit accepts the job and the work happens
+# out here on the guest's own clock.
 sed -e "s/@@META_PORT@@/$META_PORT/g" -e "s/@@SANDBOX_USER@@/$SANDBOX_USER/g" \
     > "$MNT/usr/local/sbin/sparkbox-repos" <<'EOF'
 #!/bin/sh

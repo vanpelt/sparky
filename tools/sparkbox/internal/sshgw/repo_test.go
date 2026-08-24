@@ -333,8 +333,8 @@ func TestControlRepoAddListAndDetach(t *testing.T) {
 		"attached wandb/hivemind  (tags: hm; read) — alicebox carries that tag\r\n") {
 		t.Fatalf("re-attach = exit %d, stdout %q", s.code, s.out.String())
 	}
-	if !strings.Contains(s.out.String(), "existing sandboxes are not cloned into") {
-		t.Error("nothing said that a running sandbox is not cloned into — see §2.2")
+	if !strings.Contains(s.out.String(), "checking it out now") {
+		t.Error("nothing said the sandboxes carrying that tag now check the repo out")
 	}
 
 	s = st.run(t, "alice", "repo", "ls")

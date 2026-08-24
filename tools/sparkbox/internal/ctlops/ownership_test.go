@@ -72,7 +72,7 @@ func ownCases() []ownCase {
 			return err
 		}},
 		{"SetTags", "sandbox", func(r *rig, c Caller, t string) error {
-			_, err := r.ops.SetTags(ctx, c, t, []string{"pwned"})
+			_, _, err := r.ops.SetTags(ctx, c, t, []string{"pwned"})
 			return err
 		}},
 		{"Attach", "sandbox", func(r *rig, c Caller, t string) error {

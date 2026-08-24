@@ -323,6 +323,27 @@ type EnvPusher interface {
 	PushEnv(ctx context.Context, box *Sandbox) error
 }
 
+// RepoSyncer nudges a sandbox into reconciling its GitHub checkouts with the
+// attachments its owner's tags imply (see internal/envsync). Optional, and —
+// unlike EnvPusher — never fired from the lifecycle: the guest checks out at
+// boot on its own, so the only moment anything needs to push it is when an
+// owner changes what is attached to a box that is ALREADY running. Errors are
+// returned rather than swallowed, because the caller is a person who just
+// retagged something and is owed the answer.
+type RepoSyncer interface {
+	SyncRepos(ctx context.Context, box *Sandbox) error
+}
+
+// ErrNoRepoSupport is a sandbox whose rootfs predates the repo payload: no
+// checkout binary in the guest, so there is nothing to nudge and never will be
+// until the box is recreated from a current template.
+//
+// It lives here rather than in the package that detects it because it is part
+// of the RepoSyncer contract, and because the surface that must PRINT it —
+// internal/ctlops — cannot import the implementation: envsync reaches ctlops
+// through sshgw, so the dependency only runs one way.
+var ErrNoRepoSupport = errors.New("this sandbox was created before repo support and cannot check repositories out")
+
 // FrontDoor is an optional hook for per-sandbox public-address plumbing (see
 // internal/frontdoor): Ensure is called when a sandbox is created, Remove when
 // it is destroyed. Implementations are expected to be best-effort — a sandbox
@@ -455,6 +476,7 @@ type Manager struct {
 	frontDoor          FrontDoor               // optional: per-sandbox address plumbing
 	tags               TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
 	envSync            EnvPusher               // optional: secret-env push when a sandbox reaches running
+	repoSync           RepoSyncer              // optional: repo checkout nudge when tags or attachments change
 	sessions           SessionCloser           // optional: hang up attached sessions when a sandbox pauses
 	observer           Observer                // optional: relay record changes to whoever mirrors this host
 	maxPerOwner        int                     // max running sandboxes per owner; 0 = unlimited
@@ -1373,6 +1395,41 @@ func (m *Manager) SetEnvSync(p EnvPusher) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.envSync = p
+}
+
+// SetRepoSync installs the repo-checkout nudge, post-construction for the same
+// reason SetEnvSync is: it needs the gateway's upstream SSH key.
+func (m *Manager) SetRepoSync(r RepoSyncer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.repoSync = r
+}
+
+// ResyncRepos asks name's guest to reconcile its checkouts, for a caller that
+// changed which repositories the sandbox is entitled to — its tags, or an
+// attachment on a tag it already carries.
+//
+// Synchronous, unlike ResyncEnv, and that difference is the point. The env push
+// is fire-and-forget because no lifecycle operation may fail on an SSH exec;
+// this one has no lifecycle operation behind it at all — it is a person typing
+// `ctl tags set` and reading the reply — so the one thing it can usefully do is
+// tell them whether the machine took the job. The guest returns the moment it
+// has, and the clone itself runs on the guest's own clock. See
+// envsync.SyncRepos.
+//
+// A sandbox that is not running is not an error: it checks out at its next
+// boot, from whatever is attached then.
+func (m *Manager) ResyncRepos(ctx context.Context, name string) error {
+	m.mu.Lock()
+	r := m.repoSync
+	b, ok := m.boxes[name]
+	if r == nil || !ok || b.State != vmm.StateRunning {
+		m.mu.Unlock()
+		return nil
+	}
+	cp := copyOf(b)
+	m.mu.Unlock()
+	return r.SyncRepos(ctx, cp)
 }
 
 // SetSessions installs the hook that hangs up sessions attached to a sandbox

@@ -272,16 +272,35 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 		return Credential{}, githubError(err)
 	}
 
-	// One repository, one permission. `contents` is all a clone, a fetch and a
-	// push of code need; `pull_requests: write` is deliberately not implied by
-	// an attachment's write access, because "may push a branch" and "may open a
-	// pull request against the default branch" are different grants and the
-	// design leaves that an open question rather than answering it silently.
-	perm := "read"
+	// One repository, and the permissions an attachment's access level implies.
+	//
+	// `contents` alone is what a clone, a fetch and a push of code need, and for
+	// a long time it was all this minted. It is not all a person working in the
+	// sandbox needs: `gh` runs on the same token — see the guest wrapper in
+	// deploy/install-guest-identity.sh — and `gh pr create`, `gh pr list` and
+	// `gh issue` are most of why anybody wants it there. A token that can push a
+	// branch but not open a pull request for it is a strange half-grant, so the
+	// set follows the attachment: read attachments read, write attachments write.
+	//
+	// It is still one repository, still an hour, still never written down. What
+	// widened is what the sandbox may do on GitHub, not who may do it, where the
+	// token lives, or how long it lasts.
+	perm := ghapp.PermRead
 	if entry.Access == repos.AccessWrite {
-		perm = "write"
+		perm = ghapp.PermWrite
 	}
-	tok, err := l.App.MintToken(ctx, inst, []string{name}, map[string]string{"contents": perm})
+	want := map[string]string{"contents": perm, "pull_requests": perm, "issues": perm}
+	// Narrowed to what the App was actually granted, because GitHub refuses a
+	// token request naming a permission the installation lacks OUTRIGHT rather
+	// than trimming it — so asking for pull_requests from an App that was never
+	// given it would lose the contents half too, and break every clone on a
+	// deployment whose App predates this. `contents` is restored unconditionally
+	// after the intersection: it is the one permission the feature cannot work
+	// without, and if the installation truly lacks it the mint should fail
+	// saying so rather than silently produce a token good for nothing.
+	perms := inst.Narrow(want)
+	perms["contents"] = perm
+	tok, err := l.App.MintToken(ctx, inst, []string{name}, perms)
 	if err != nil {
 		return Credential{}, githubError(err)
 	}

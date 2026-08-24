@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -310,7 +311,7 @@ func TestInstallationForResolvesAndCaches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("call %d: got %+v, want %+v", i, got, want)
 		}
 	}
@@ -680,5 +681,52 @@ func TestNothingLeaksTheToken(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "minted a github installation token") {
 		t.Errorf("the mint was not recorded at all: %q", logged.String())
+	}
+}
+
+// TestInstallationForCarriesPermissions: the permission map is what lets a
+// caller ask for a token wider than `contents` without betting the whole mint
+// on the App having been granted every part of it.
+func TestInstallationForCarriesPermissions(t *testing.T) {
+	s := newStub(t)
+	s.json("GET /repos/wandb/hivemind/installation", 200,
+		`{"id":99,"app_slug":"sparky-repos","account":{"id":800,"login":"wandb","type":"Organization"},`+
+			`"permissions":{"contents":"write","metadata":"read","pull_requests":"read"}}`)
+	app := newApp(t, s, nil)
+
+	inst, err := app.InstallationFor(context.Background(), "wandb", "hivemind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inst.Permissions["pull_requests"]; got != "read" {
+		t.Fatalf("pull_requests = %q, want read", got)
+	}
+}
+
+// TestNarrowKeepsTheMintAlive is the reason Narrow exists rather than a bare
+// "ask for everything and see". GitHub refuses a token request naming a
+// permission the installation lacks OUTRIGHT — it does not trim it — so asking
+// an older App for pull_requests would lose the `contents` half too, and break
+// every clone on that deployment. Narrow does the intersection first.
+func TestNarrowKeepsTheMintAlive(t *testing.T) {
+	inst := Installation{Permissions: map[string]string{
+		"contents":      "write",
+		"pull_requests": "read",
+	}}
+	got := inst.Narrow(map[string]string{
+		"contents":      PermWrite,
+		"pull_requests": PermWrite, // held only at read — must downgrade, not drop
+		"issues":        PermWrite, // not held at all — must drop, not fail
+	})
+	want := map[string]string{"contents": "write", "pull_requests": "read"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Narrow = %v, want %v", got, want)
+	}
+
+	// An App granted nothing narrows to nothing rather than to "everything",
+	// which is what an empty permission map means to the API. No caller may
+	// forward this result to MintToken unexamined; MintToken refuses it too.
+	if got := (Installation{}).Narrow(map[string]string{"contents": PermRead}); len(got) != 0 {
+		t.Fatalf("an installation with no permissions narrowed to %v", got)
 	}
 }

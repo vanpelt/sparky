@@ -117,7 +117,7 @@ func TestForkRollsBackTagsOnFailure(t *testing.T) {
 // filtered VM comes back unfiltered.
 func TestCreateNeverTouchesAnotherOwnersTags(t *testing.T) {
 	r := newRig(t)
-	if _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"prod"}); err != nil {
+	if _, _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"prod"}); err != nil {
 		t.Fatalf("seed alice's tags: %v", err)
 	}
 	r.calls.reset()
@@ -141,7 +141,7 @@ func TestCreateNeverTouchesAnotherOwnersTags(t *testing.T) {
 // used to leave the DESTINATION name ungated, which is the same hole.
 func TestForkNeverTouchesAnotherOwnersTags(t *testing.T) {
 	r := newRig(t)
-	if _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"prod"}); err != nil {
+	if _, _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"prod"}); err != nil {
 		t.Fatalf("seed alice's tags: %v", err)
 	}
 	// mallory needs a snapshot of her own, or ownedSnapshot refuses first and
@@ -185,7 +185,7 @@ func TestSetTagsResyncsEnv(t *testing.T) {
 	r := newRig(t)
 	r.calls.reset()
 
-	got, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"b", "a", "a"})
+	got, _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", []string{"b", "a", "a"})
 	if err != nil {
 		t.Fatalf("SetTags: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestSetTagsResyncsEnv(t *testing.T) {
 		t.Errorf("no ResyncEnv after SetTags: %v", calls)
 	}
 	// Clearing is the empty set, not a no-op.
-	if got, err := r.ops.SetTags(context.Background(), alice(), "alicebox", nil); err != nil || len(got) != 0 {
+	if got, _, err := r.ops.SetTags(context.Background(), alice(), "alicebox", nil); err != nil || len(got) != 0 {
 		t.Errorf("clear = %v, %v; want empty", got, err)
 	}
 	if tags := r.tagger.tags["alicebox"]; len(tags) != 0 {

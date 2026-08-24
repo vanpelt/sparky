@@ -42,6 +42,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // Repos resolves what a sandbox should have checked out, and mints the
@@ -265,4 +266,60 @@ func repoFailure(err error) error {
 		Kind: ctlops.KindInternal, Op: nodelink.OpLink, Code: "repo_resolve_failed", Verbatim: true,
 		Msg: "this gateway could not resolve that sandbox's repositories.",
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Nudging a sandbox on another machine into re-checking-out
+// ---------------------------------------------------------------------------
+
+// SetRepoSync installs the checkout nudge the gateway fires for sandboxes on
+// other machines. cmd/sparkbox passes the one *envsync.Syncer here and to
+// Manager.SetRepoSync both, exactly as it does for the env push: one guest exec
+// channel, wired once, reaching every machine in the fleet.
+func (f *Fleet) SetRepoSync(r host.RepoSyncer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repoSync = r
+}
+
+// repoResyncer is the local machine's own synchronous nudge, asked for by type
+// assertion rather than added to the Node interface — envAwaiter's argument,
+// applied to the same question. A node cannot answer it (no repos store, so no
+// hook), so putting it on Node would mean two implementations returning nil to
+// a question they are structurally unable to be asked.
+type repoResyncer interface {
+	ResyncRepos(ctx context.Context, name string) error
+}
+
+// ResyncRepos asks name's guest to reconcile its checkouts, wherever it is.
+//
+// Synchronous and error-returning, because the caller is a person who just
+// changed what is attached and is waiting on the reply — see
+// host.Manager.ResyncRepos. A sandbox that is not running is not an error: it
+// checks out at its next boot from whatever is attached then.
+func (f *Fleet) ResyncRepos(ctx context.Context, name string) error {
+	b, ok := f.Get(name)
+	if !ok || b.State != vmm.StateRunning {
+		return nil
+	}
+	row, ok := f.rowFor(name)
+	if !ok {
+		return nil
+	}
+	if row.Node == f.localName {
+		if r, ok := f.local.(repoResyncer); ok {
+			return r.ResyncRepos(ctx, name)
+		}
+		return nil
+	}
+	f.mu.RLock()
+	r := f.repoSync
+	f.mu.RUnlock()
+	if r == nil {
+		return nil
+	}
+	// serve for the reason every other remote call in this file serves: the
+	// record a node hands back carries the owner that node claims, and the
+	// ledger's column is the only owner this package will act on.
+	return r.SyncRepos(ctx, f.serve(b, row, true))
 }

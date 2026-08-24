@@ -169,6 +169,12 @@ type Fleet struct {
 	// machine, which no node can do for itself. Nil until SetEnvPusher; see
 	// envsync.go.
 	envPush host.EnvPusher
+
+	// repoSync nudges a sandbox on another machine into re-checking-out. Same
+	// split as envPush and for a sharper reason: a node has no repos table at
+	// all, so a relayed ResyncRepos would reach a nil hook over there and an
+	// owner's retag would silently check nothing out. See repos.go.
+	repoSync host.RepoSyncer
 	// rules resolves a sandbox's egress allow-set from its tags. Nil until
 	// SetRules; see netplane.go.
 	rules Rules

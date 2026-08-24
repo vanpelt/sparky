@@ -108,10 +108,34 @@ surface should print it at attach time rather than leave it in a design doc.
 it should see, and `envsync` pushes the difference immediately. The analogous
 push for repos is a clone into a running guest, which is a much bigger action:
 it writes into a filesystem somebody is using, it can take minutes, and it can
-fail halfway. Proposal: **retagging never clones**. It updates the manifest the
-guest can read, `sparkbox repos` shows the new entry as `not cloned`, and
-`sparkbox repos sync` (in-guest, one command, the user's choice) does the work.
-Clone-on-create is the automatic path; clone-on-retag is offered, not imposed.
+fail halfway.
+
+The original proposal here was **retagging never clones** — update the manifest,
+show the new entry as `not cloned`, and leave the work to `sparkbox repos sync`
+inside the guest. That was wrong, and shipping it proved it wrong on the first
+day: a user tagged a running box, watched nothing happen, and reasonably read it
+as a broken feature rather than as a deliberate offer. Tags decide which repos a
+sandbox gets in exactly the way they decide which secrets it gets, and nobody
+expects half of that to be automatic.
+
+**Retagging clones**, and so does attaching a repo to a tag a running box
+already carries. Both go through `Manager.ResyncRepos` /
+`Fleet.ResyncRepos`, which nudge the guest over the same exec channel `envsync`
+uses and return as soon as it has accepted the job — the clone itself runs on
+the guest's clock, under the systemd unit that already owned the boot pass. What
+survives from the original argument is the part that was actually load-bearing:
+
+- the reconciliation only ever **adds**. A repository already checked out is
+  reported present and left alone; detaching removes nothing from the disk.
+- it is **never a wake-up source**. Paused, archived and quiesced boxes are
+  skipped and check out at their next boot.
+- the control-plane call **never blocks on a clone**, and never fails because of
+  one. A guest that could not be reached is a note beside a success, because the
+  tags are set either way.
+
+A sandbox whose rootfs predates the guest payload cannot check anything out at
+all. That is `host.ErrNoRepoSupport`, and it is a named error precisely because
+it is indistinguishable, from the outside, from the bug above.
 
 ---
 
@@ -302,6 +326,40 @@ Shallow by default is tempting and probably wrong for this workload: agents run
 `git log`, `git blame` and `git bisect`. `--filter=blob:none` is the better
 default — full history, blobs on demand — and `--depth` stays available for
 someone who knows their repo is enormous.
+
+## 4.4 `gh`
+
+`gh` does not speak git's credential-helper protocol — it reads a token out of
+the environment — so §4.1 does nothing for it, and the first version of this
+feature produced a sandbox with a warm private checkout and a `gh` that said
+*You are not logged into any GitHub hosts*.
+
+A wrapper on `PATH` ahead of the real binary fixes it: read the origin remote of
+the checkout the caller is standing in, ask the metadata service for that one
+repository's credential, and hand it to `gh` as `GH_TOKEN` for the length of one
+command. Nothing is written to `~/.config/gh`, so nothing rides into a snapshot,
+a fork or an archived rootfs — the same property §4.1 has, for the same reason.
+
+Three rules make it safe to sit in front of every `gh` invocation:
+
+- **It never blocks a command.** No git, no remote, a remote pointing elsewhere,
+  no metadata service — every failure falls through to an unauthenticated `gh`.
+  `gh --version` and `gh auth login` have to work in an empty directory.
+- **An explicit `GH_TOKEN` or `GITHUB_TOKEN` wins.** Somebody who exported one
+  meant it.
+- **The slug is validated before it becomes a query string**, with §4.1's guard:
+  exactly `owner/name`, and only the characters github.com issues.
+
+Scoping to the checkout rather than to everything attached is both the narrowest
+answer and the right one: `gh` is repository-scoped in the way git is — `gh pr
+create` means *here*. Outside a checkout there is no repository to scope to and
+no token is set, which is the honest answer rather than a token for whatever
+happened to be attached first.
+
+This is why the minted permission set is wider than `contents` (Part 3): a token
+that can push a branch but not open a pull request for it is a strange
+half-grant. It follows the attachment's access level, intersected with what the
+App actually holds.
 
 ---
 

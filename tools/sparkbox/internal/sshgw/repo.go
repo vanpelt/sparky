@@ -141,10 +141,18 @@ func (g *Gateway) repoAdd(s gssh.Session, c ctlops.Caller, args []string, log *s
 			secrets.DefaultTag, res.Repo.Slug, res.Repo.Slug)
 	}
 	if len(res.Sandboxes) > 0 {
-		// Retagging and attaching never clone into a running guest (§2.2): the
-		// manifest changes and the occupant decides when the disk does.
-		fmt.Fprintf(s, "note: existing sandboxes are not cloned into — run `sparkbox repos sync`\r\n"+
-			"      inside one, or make a new one, which clones at boot.\r\n")
+		// The running ones have been nudged into checking it out; the paused and
+		// archived ones will at their next boot. Both halves are said, because
+		// "3 sandboxes select it" and "3 sandboxes now have it" are different
+		// claims and only the first is true the moment this prints — a clone
+		// runs on the guest's clock, not this command's.
+		fmt.Fprintf(s, "note: the sandboxes above are checking it out now, or will at their next\r\n"+
+			"      start — run `sparkbox repos` inside one to watch.\r\n")
+	}
+	// One line per box that could not be reached or is too old to check
+	// anything out. Never an error: the attachment is stored either way.
+	for _, n := range res.Notes {
+		fmt.Fprintf(s, "note: %s\r\n", n)
 	}
 	switch {
 	case !res.Check.Checked:

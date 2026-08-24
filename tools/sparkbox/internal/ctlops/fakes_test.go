@@ -82,7 +82,7 @@ var mutatingVerbs = map[string]bool{
 	"Create": true, "EnsureRunning": true, "Pause": true, "Archive": true,
 	"Checkpoint": true, "RestoreCheckpoint": true,
 	"Resize": true, "Reboot": true, "Rename": true, "Destroy": true,
-	"SetPinned": true, "ResyncEnv": true, "Touch": true, "Snapshot": true,
+	"SetPinned": true, "ResyncEnv": true, "ResyncRepos": true, "Touch": true, "Snapshot": true,
 	"DeleteSnapshot": true, "Fork": true, "SetTags": true, "AddKey": true,
 	"RemoveKey": true, "LinkGitHub": true, "SetEmail": true, "RemovePasskey": true,
 	"NewInvite": true, "schedules.Add": true, "schedules.Delete": true,
@@ -111,10 +111,11 @@ func (c *calls) mutating() []string {
 // ---------------------------------------------------------------------------
 
 type fakeSandboxes struct {
-	c         *calls
-	boxes     map[string]*host.Sandbox
-	archiving bool
-	err       error // returned by every mutating method when set
+	c           *calls
+	boxes       map[string]*host.Sandbox
+	archiving   bool
+	err         error // returned by every mutating method when set
+	repoSyncErr error // returned by ResyncRepos when set
 }
 
 func (f *fakeSandboxes) Get(name string) (*host.Sandbox, bool) {
@@ -237,6 +238,14 @@ func (f *fakeSandboxes) SetPinned(name string, pinned bool) error {
 }
 
 func (f *fakeSandboxes) ResyncEnv(ctx context.Context, name string) { f.c.add("ResyncEnv %s", name) }
+
+// ResyncRepos is reached by type assertion rather than through the Sandboxes
+// interface (see Ops.syncRepos), so this method is the whole seam. repoSyncErr
+// is what a caller's guest returns; nil is the ordinary "it took the job".
+func (f *fakeSandboxes) ResyncRepos(ctx context.Context, name string) error {
+	f.c.add("ResyncRepos %s", name)
+	return f.repoSyncErr
+}
 
 func (f *fakeSandboxes) AwaitEnv(ctx context.Context, name string) error {
 	f.c.add("AwaitEnv %s", name)

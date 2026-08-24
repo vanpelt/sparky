@@ -795,7 +795,7 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 		// Bare words are tags too, so `tags box ml prod` works alongside --tag.
 		want = append(parsed, rest...)
 	}
-	set, err := g.ops.SetTags(s.Context(), c, name, want)
+	set, note, err := g.ops.SetTags(s.Context(), c, name, want)
 	if err != nil {
 		failCtl(s, log, "tags", wrapVerbatim(err, ctlops.KindDisabled))
 		return
@@ -804,6 +804,13 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 		fmt.Fprintf(s, "cleared tags on %s\r\n", name)
 	} else {
 		fmt.Fprintf(s, "%s: %s\r\n", name, strings.Join(set, ", "))
+	}
+	// Repos follow tags. The note says whether the box took the checkout job,
+	// and it goes to stderr because the line above is the answer to what was
+	// asked — a script reading tags out of stdout should not have to parse
+	// around advice about a machine.
+	if note != "" {
+		fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n", note)
 	}
 	s.Exit(0) //nolint:errcheck
 }

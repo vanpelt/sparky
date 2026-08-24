@@ -738,7 +738,8 @@ func (h *Handler) setTags(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("user console set tags", "sandbox", name, "tags", len(req.Tags), "handle", handleFrom(r))
 	h.syncOwner(r.Context(), box.Owner)
-	h.pushNet() // tags govern network rules too: re-push this VM's egress policy
+	h.pushNet()       // tags govern network rules too: re-push this VM's egress policy
+	h.syncRepos(name) // and repos: a tag decides which repositories land in this box
 	tags, err := h.secrets.TagsFor(name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -1255,6 +1256,15 @@ func (h *Handler) putRepo(w http.ResponseWriter, r *http.Request) {
 		"access", req.Access, "handle", handle)
 	h.forgetAppProbe(handle, defaultRepoHost, slug)
 	h.pushNet()
+	// The boxes already carrying one of these tags have a manifest that just
+	// changed under them. A failure to resolve them is not this call's failure:
+	// the attachment is stored, and every one of those boxes checks out from
+	// the same ledger at its next start.
+	if affected, err := h.repos.SandboxesForRepo(handle, rp.Host, slug); err != nil {
+		h.log.Warn("resolve sandboxes for repo", "slug", slug, "handle", handle, "err", err)
+	} else {
+		h.syncRepos(affected...)
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -1367,6 +1377,38 @@ func (h *Handler) syncOwner(ctx context.Context, owner string) {
 		return
 	}
 	h.syncer.SyncOwner(ctx, owner)
+}
+
+// syncRepos nudges the sandboxes reached by a repo or tag change into
+// reconciling their checkouts, asynchronously and best-effort.
+//
+// Async here and synchronous in ctlops, deliberately: `ctl tags set` is one
+// person waiting on one box and can afford to report what happened, whereas
+// this is an HTTP handler whose response the browser blocks a control on. The
+// console shows checkout state on its own (the sandbox view reads the guest's
+// report), so a nudge that lands a second after the 200 is invisible in the
+// right way.
+//
+// Reached by type assertion for the reason the ctlops copy is: only a machine
+// with the repos table and the App key can answer at all, and adding it to the
+// Sandboxes interface would put a method on host.Manager's console-facing
+// surface that a node could never implement.
+func (h *Handler) syncRepos(names ...string) {
+	r, ok := h.boxes.(interface {
+		ResyncRepos(ctx context.Context, name string) error
+	})
+	if !ok || len(names) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, name := range names {
+			if err := r.ResyncRepos(ctx, name); err != nil {
+				h.log.Warn("sync checkouts", "sandbox", name, "err", err)
+			}
+		}
+	}()
 }
 
 // pushNet re-pushes the whole fleet's egress policy to sluice after a rule or

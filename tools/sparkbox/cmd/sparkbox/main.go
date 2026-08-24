@@ -730,6 +730,12 @@ func serve(args []string) error {
 	// sandbox on this machine, the fleet for one on any other. There is exactly
 	// one channel into a guest's /etc/environment, and two would race over it.
 	flt.SetEnvPusher(syncer)
+	// And the same syncer again for the checkout nudge, on both sides of the
+	// same split, for the same reason: one guest exec channel. Only the gateway
+	// wires this at all — a node has no repos table, so over there ResyncRepos
+	// finds a nil hook and correctly does nothing.
+	mgr.SetRepoSync(syncer)
+	flt.SetRepoSync(syncer)
 
 	// The rules half of the egress plane. It goes on the FLEET rather than only
 	// into the local syncer because a tag binding is a gateway-wide fact and the

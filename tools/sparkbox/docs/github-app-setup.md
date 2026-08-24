@@ -85,7 +85,8 @@ if you only want the log line:
 |---|---|---|
 | **Contents** | **Read and write** | `git clone`, `git fetch`, `git push` |
 | **Metadata** | Read-only (mandatory, auto-selected) | resolving a repo to its installation |
-| **Pull requests** | Read and write | only if you want agents to open PRs |
+| **Pull requests** | **Read and write** | `gh pr create`, `gh pr list`, `gh pr view` |
+| **Issues** | Read and write (optional) | `gh issue` |
 
 **Organization permissions** — one, and only if you will install on an org:
 
@@ -111,6 +112,21 @@ attachments will be read-only. The app permission is a ceiling, not a grant:
 sparkbox down-scopes every minted token per request, so a `read` attachment gets
 a read-only token regardless. An app capped at read cannot ever be raised
 without every user re-consenting.
+
+**Pull requests** is what makes `gh` useful inside a sandbox. The CLI speaks no
+credential-helper protocol, so it runs on the same per-repository, one-hour
+token `git` does (a wrapper in the guest hands it over as `GH_TOKEN` for the
+length of one command and writes nothing to disk). A token that can push a
+branch but cannot open a pull request for it is a strange half-grant, so the
+minted set follows the attachment's access level across all of these
+permissions: `--write` attachments get write, everything else gets read.
+
+Every one of them is narrowed to what the app actually holds before the token is
+requested, so **granting fewer of these is safe** — an app with Contents alone
+still clones, and `gh` simply cannot open PRs with it. That matters because
+GitHub refuses a token request naming a permission the installation lacks
+*outright* rather than trimming it: without the narrowing step, adding Pull
+requests to this list would have broken every clone on an app that predates it.
 
 Leave **Account permissions** entirely empty.
 

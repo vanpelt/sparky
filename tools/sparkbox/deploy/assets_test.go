@@ -146,8 +146,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=6\n" {
-		t.Fatalf("identity revision = %q", rev)
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=7\n" {
+		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
 
@@ -672,5 +672,124 @@ func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// runGHWrapper executes the installed `gh` wrapper against stub tools and
+// returns what the stub `gh` recorded.
+//
+// The wrapper's path to the real binary is absolute on purpose — a relative
+// `gh` would find the wrapper itself — so the test rewrites it rather than
+// asking the shipped script for a test seam. A seam here would be a variable
+// that decides which binary `gh` means, which is not a knob worth shipping to
+// make an assertion easier.
+func runGHWrapper(t *testing.T, remote string, env []string) (stdout string, sawToken string, ranReal bool) {
+	t.Helper()
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+
+	bin := t.TempDir()
+	real := filepath.Join(bin, "real-gh")
+	tokenLog := filepath.Join(bin, "token")
+	writeExecutable(t, real, `#!/bin/sh
+printf '%s' "${GH_TOKEN-}" > "`+tokenLog+`"
+echo "real gh ran: $*"
+`)
+	writeExecutable(t, filepath.Join(bin, "git"), `#!/bin/sh
+# Only `+"`git config --get remote.origin.url`"+` is consulted.
+[ "$1" = config ] || exit 1
+[ -n "`+remote+`" ] || exit 1
+echo "`+remote+`"
+`)
+	writeExecutable(t, filepath.Join(bin, "ip"), `#!/bin/sh
+[ "$1" = -4 ] && echo "default via 10.0.0.1 dev eth0"
+`)
+	writeExecutable(t, filepath.Join(bin, "curl"), `#!/bin/sh
+# Echo the URL back inside the credential document so the test can assert on
+# exactly what slug the wrapper asked for.
+for a in "$@"; do case "$a" in http*) url=$a ;; esac; done
+printf '{"username":"x-access-token","password":"tok-for %s"}' "$url"
+`)
+
+	script := strings.ReplaceAll(guestFile(t, root, "usr/local/bin/gh"), "/usr/bin/gh", real)
+	wrapper := filepath.Join(bin, "wrapper.sh")
+	writeExecutable(t, wrapper, script)
+
+	cmd := exec.Command("sh", wrapper, "pr", "list")
+	// Prepend, never replace: the wrapper shells out to awk and sed, and a PATH
+	// holding only the stubs would make every branch fail its way to the
+	// unauthenticated fallback — which is what these tests are trying to tell
+	// apart from a real one.
+	cmd.Env = append(append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH")), env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gh wrapper: %v\n%s", err, out)
+	}
+	if body, rerr := os.ReadFile(tokenLog); rerr == nil {
+		ranReal, sawToken = true, string(body)
+	}
+	return string(out), sawToken, ranReal
+}
+
+// TestGuestGHWrapperScopesTheTokenToTheCheckout is the property that makes `gh`
+// usable in a sandbox at all: it has no credential helper, so without this it
+// reports "not logged into any GitHub hosts" beside a warm private checkout.
+//
+// The token must be scoped to the repository the caller is standing in, which
+// is both the right answer for a repository-scoped tool and the narrowest one.
+func TestGuestGHWrapperScopesTheTokenToTheCheckout(t *testing.T) {
+	for _, remote := range []string{
+		"https://github.com/wandb/hivemind.git",
+		"https://github.com/wandb/hivemind",
+		"git@github.com:wandb/hivemind.git",
+		"ssh://git@github.com/wandb/hivemind.git",
+	} {
+		_, token, ranReal := runGHWrapper(t, remote, nil)
+		if !ranReal {
+			t.Fatalf("%s: the real gh never ran", remote)
+		}
+		if !strings.Contains(token, "slug=wandb/hivemind") {
+			t.Errorf("%s: minted for %q, want the checkout's own slug", remote, token)
+		}
+	}
+}
+
+// TestGuestGHWrapperNeverBlocksAGHCommand pins the fallback. This wrapper sits
+// in front of every `gh` invocation in the sandbox, so any failure of its own —
+// no git, no remote, a remote pointing somewhere else, no metadata service —
+// has to fall through to an unauthenticated gh rather than become the reason a
+// command did not run. `gh --version` and `gh auth login` must work in an empty
+// directory.
+func TestGuestGHWrapperNeverBlocksAGHCommand(t *testing.T) {
+	for name, remote := range map[string]string{
+		"no remote at all":     "",
+		"not github":           "https://gitlab.com/wandb/hivemind.git",
+		"three path segments":  "https://github.com/wandb/hivemind/extra",
+		"shell metacharacters": "https://github.com/wandb/hive;mind",
+		"query injection":      "https://github.com/wandb/hivemind&x=1",
+	} {
+		out, token, ranReal := runGHWrapper(t, remote, nil)
+		if !ranReal || !strings.Contains(out, "real gh ran: pr list") {
+			t.Errorf("%s: the real gh did not run (%q)", name, out)
+		}
+		if token != "" {
+			t.Errorf("%s: minted a token for a slug it should have refused: %q", name, token)
+		}
+	}
+}
+
+// TestGuestGHWrapperYieldsToAnExplicitToken: somebody who exported GH_TOKEN
+// meant it. Overriding it with ours would be the same class of surprise the
+// wrapper exists to remove, and would make `gh auth login --with-token`
+// impossible to use in a sandbox that has any repo attached.
+func TestGuestGHWrapperYieldsToAnExplicitToken(t *testing.T) {
+	for _, kv := range []string{"GH_TOKEN=mine", "GITHUB_TOKEN=mine"} {
+		_, token, ranReal := runGHWrapper(t, "https://github.com/wandb/hivemind.git", []string{kv})
+		if !ranReal {
+			t.Fatalf("%s: the real gh never ran", kv)
+		}
+		if strings.Contains(token, "slug=") {
+			t.Errorf("%s: the wrapper overrode an explicit token with %q", kv, token)
+		}
 	}
 }
