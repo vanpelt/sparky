@@ -97,12 +97,14 @@ sentence worth being able to say.
 
 ## 2.2 The two footguns tags bring with them
 
-**`default`.** `secrets.DefaultTag` is stamped on an untagged secret *and* on an
-untagged sandbox, so the two halves meet. A repo attached to `default` therefore
-clones into every sandbox the owner creates from then on. That is a legitimate
-thing to want — dotfiles, a monorepo you always work in — and a surprising thing
-to get by accident. The `netrules` doc already carries this warning; the `ctl`
-surface should print it at attach time rather than leave it in a design doc.
+**`default`.** `secrets.DefaultTag` is stamped on an untagged secret *and* on
+every sandbox at creation, so the two halves meet. A repo attached to `default`
+therefore clones into every sandbox the owner creates from then on — all of
+them, not just the ones created without tags. That is a legitimate thing to want
+— dotfiles, a monorepo you always work in — and a surprising thing to get by
+accident, so `ctl repo add` prints it at attach time rather than leaving it in a
+design doc. (`netrules` handles the same tag by refusing it outright: its rules
+subtract rather than add. See `secrets.DefaultTag`.)
 
 **Retagging a live box.** `SetTags` on a running sandbox changes which secrets
 it should see, and `envsync` pushes the difference immediately. The analogous

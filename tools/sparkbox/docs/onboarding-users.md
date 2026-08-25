@@ -181,21 +181,37 @@ A secret reaches a sandbox only if the two **share a tag**. That inner join used
 to be a silent failure: save a token, run `ssh new@`, and get an empty
 environment with nothing anywhere saying why.
 
-Both halves now default to the tag `default` — an untagged secret gets it, and a
-new sandbox is stamped with it — so the common case works without knowing tags
-exist. Name tags explicitly to opt out:
+Both halves now default to the tag `default`: an untagged secret gets it, and
+**every** sandbox is stamped with it as it is created — including one created
+with tags of its own, so `--tag hm` produces a box tagged `hm default`.
+
+That last part is deliberate. Adding `default` only to *untagged* creates moved
+the silent failure one step along instead of fixing it: naming any tag at all
+then opted the sandbox out of your default-tagged secrets, and the symptom was
+an agent asking you to log in, minutes later, inside the guest, with nothing
+connecting it to the word you typed. Nobody reads `--tag hm` as "and drop my
+credentials".
+
+Opting out is a separate, explicit act, and it sticks — `tags` replaces the
+whole set and never re-adds the default:
 
 ```sh
 gh auth token | ssh ctl@ssh.<domain> secret set GITHUB_TOKEN --tag ci
-ssh ctl@ssh.<domain> tags mybox ci          # only this box gets it
-ssh ctl@ssh.<domain> tags mybox             # clear its tags entirely
+ssh ctl@ssh.<domain> tags mybox ci hm       # exactly these two; default is gone
+ssh ctl@ssh.<domain> tags mybox --clear     # clear its tags entirely
 ```
 
-`default` is an ordinary tag, not a wildcard. One thing to know before writing
-an egress rule-set against that name: `internal/netrules` shares the same
-`sandbox_tags` table, so a **rule-set** tagged `default` would begin governing
-every sandbox created since this shipped. A `default` tag with no rule-set bound
-to it leaves egress unrestricted, which is the state everything is in today.
+`default` is an ordinary tag, not a wildcard — it is just a tag that everything
+starts with.
+
+**Egress rule-sets cannot use it.** Three packages read `sandbox_tags`, and two
+of them only ever add something: a secret or a repository tagged `default`
+appears everywhere. An egress rule-set is subtractive — a *governed* sandbox is
+filtered to exactly its allow list, where an ungoverned one has open egress — so
+one rule-set tagged `default` would cut your whole fleet down to that list on
+the next policy push. `netrules.PutRule` refuses the tag outright and says why,
+which is what makes stamping it on every sandbox safe. Tag rule-sets with a name
+you also put on the sandboxes you mean to govern.
 
 ## Claude
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -313,5 +314,44 @@ func TestRepoOverlayRejectsPatternsSluiceWouldNot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(allow, []string{"github.com", "pypi.org"}) {
 		t.Errorf("allow = %v, want only the pattern sluice can parse", allow)
+	}
+}
+
+// TestPutRuleRefusesTheDefaultTag guards the one asymmetry between this table's
+// three readers. ctlops stamps `default` on every sandbox it creates so the
+// owner's secrets and repos reach it — both additive. An egress rule-set is
+// subtractive: a governed sandbox is filtered to exactly its allow list where an
+// ungoverned one has open egress, so one rule-set tagged `default` would cut the
+// whole fleet down to that list on the next policy push.
+func TestPutRuleRefusesTheDefaultTag(t *testing.T) {
+	s := openTest(t)
+	spec := RuleSpec{Allow: []string{"github.com"}}
+
+	err := s.PutRule("alice", "everything", spec, []string{"ci", "default"})
+	if !errors.Is(err, ErrInvalidRule) {
+		t.Fatalf("PutRule with a default tag = %v, want ErrInvalidRule", err)
+	}
+	// The sentence has to say why, because the refusal is the only place this
+	// rule is ever explained to the person writing it.
+	if got := err.Error(); !strings.Contains(got, "every sandbox carries that tag") {
+		t.Errorf("message = %q, want it to name the reason", got)
+	}
+	// And nothing was written: a partially-applied refusal would leave the rule
+	// governing whatever tags survived.
+	rules, listErr := s.ListRules("alice")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(rules) != 0 {
+		t.Errorf("a refused rule was stored anyway: %+v", rules)
+	}
+
+	// The tag is refused however it is spelled, since normTags runs first.
+	if err := s.PutRule("alice", "shouty", spec, []string{"DEFAULT"}); !errors.Is(err, ErrInvalidRule) {
+		t.Errorf("PutRule with DEFAULT = %v, want ErrInvalidRule", err)
+	}
+	// Any other tag is untouched by this.
+	if err := s.PutRule("alice", "fine", spec, []string{"ci"}); err != nil {
+		t.Errorf("PutRule with an ordinary tag: %v", err)
 	}
 }

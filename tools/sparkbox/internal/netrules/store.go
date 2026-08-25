@@ -21,12 +21,15 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 )
 
 // ErrNoSuchRule is returned when an operation targets a name the owner has no
@@ -165,6 +168,24 @@ func (s *Store) Close() error { return s.db.Close() }
 // set. An update bumps version. The spec's allow patterns are validated and
 // normalised; the tags are validated against tagRe so they match the shared
 // sandbox_tags namespace.
+//
+// It refuses secrets.DefaultTag outright, and that refusal is the reason
+// ctlops.Create is free to stamp that tag on every sandbox it makes.
+//
+// Three packages read sandbox_tags, and this is the only one whose rules
+// SUBTRACT. A secret or a repository tagged `default` reaches every sandbox and
+// adds something to it; an egress rule-set tagged `default` would make every
+// sandbox in the fleet *governed*, and a governed sandbox is filtered to
+// exactly its allow list where an ungoverned one has open egress (see
+// overlayRepoDomains for that gate). So the same word that means "reaches
+// everything" for the other two would silently cut the whole fleet down to
+// three domains, minutes later, on a policy push nobody connected to the rule
+// they had just saved.
+//
+// Refusing at write time is what keeps that from being discoverable only by
+// experiencing it. A rule-set that already carries the tag from before this
+// existed still applies — this validates writes, not reads — so a host that had
+// one wants it retagged before sandboxes start arriving with `default` on them.
 func (s *Store) PutRule(owner, name string, spec RuleSpec, tags []string) error {
 	if owner == "" {
 		return fmt.Errorf("rule needs an owner")
@@ -179,6 +200,13 @@ func (s *Store) PutRule(owner, name string, spec RuleSpec, tags []string) error 
 	tags, err = normTags(tags)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRule, err)
+	}
+	if slices.Contains(tags, secrets.DefaultTag) {
+		return fmt.Errorf(
+			"%w: an egress rule-set cannot be tagged %q — every sandbox carries that tag, "+
+				"so this rule would filter your whole fleet. Tag it with a name you also put "+
+				"on the sandboxes you mean to govern.",
+			ErrInvalidRule, secrets.DefaultTag)
 	}
 	blob, err := json.Marshal(norm)
 	if err != nil {
