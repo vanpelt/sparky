@@ -895,10 +895,19 @@ func noTerminalNotice(raw string, isPty bool, hint string) string {
 	if isPty || raw == "" {
 		return ""
 	}
+	// reconnectHint renders a whole ssh(1) invocation, `ssh ` included, so -t
+	// is spliced into the command it already built rather than prefixed to it —
+	// prefixing produced `ssh -t ssh name@host`, which is a hint that does not
+	// run. Anything not shaped like an ssh command (the browser URL form) is
+	// printed as it came: a URL with -t bolted on would be worse than no hint.
+	fix := hint
+	if rest, ok := strings.CutPrefix(hint, "ssh "); ok {
+		fix = "ssh -t " + rest
+	}
 	return fmt.Sprintf(
 		"sparkbox: no terminal — your ssh client read %q as a command, so it allocated no PTY.\r\n"+
 			"          The shell below is live but has no prompt and no echo. For an interactive one:\r\n"+
-			"              ssh -t %s\r\n", raw, hint)
+			"              %s\r\n", raw, fix)
 }
 
 // pipeSession mirrors the client's session (PTY, env, command, window
