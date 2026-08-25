@@ -2,21 +2,14 @@
 package hivemindpresence
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -38,10 +31,6 @@ type Observer interface {
 	ObserveHiveMindSessions(sandboxID string, snapshot host.HiveMindSessionSnapshot)
 }
 
-type Identity interface {
-	Issue(ctx context.Context, box *host.Sandbox, aud string) (metadata.Token, error)
-}
-
 type Options struct {
 	APIBase    string
 	Audience   string
@@ -52,92 +41,58 @@ type Options struct {
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 	UserAgent  string
+	// Client, when set, is used instead of building one from the fields above.
+	// A gateway that also answers `ctl sessions` passes the same client to both
+	// so the two share one exchange cache; a node leaves it nil.
+	Client *Client
 }
 
 type Monitor struct {
-	apiBase   string
-	audience  string
+	client    *Client
 	boxes     Sandboxes
 	protector Protector
 	observer  Observer
-	identity  Identity
-	http      *http.Client
 	log       *slog.Logger
-	userAgent string
 
-	mu     sync.Mutex
-	tokens map[string]cachedToken
+	mu sync.Mutex
 	// sessionsAt is the last successful catalog refresh per sandbox. Protection
 	// is polled every minute, but the expensive paginated history/count query is
 	// deliberately much less frequent.
 	sessionsAt map[string]time.Time
 }
 
-type cachedToken struct {
-	value     string
-	expiresAt time.Time
-}
-
-type exchangeResponse struct {
-	Token     string `json:"token"`
-	ExpiresAt int64  `json:"expires_at"`
-}
-
-type presenceResponse struct {
-	ObservedAt   time.Time  `json:"observed_at"`
-	ProtectUntil *time.Time `json:"protect_until"`
-}
-
-type sessionsResponse struct {
-	ObservedAt time.Time              `json:"observed_at"`
-	Sessions   []host.HiveMindSession `json:"sessions"`
-	TotalCount int                    `json:"total_count"`
-	HasMore    bool                   `json:"has_more"`
-}
-
 func New(opts Options) (*Monitor, error) {
-	apiBase := strings.TrimSpace(opts.APIBase)
-	if apiBase == "" {
-		return nil, fmt.Errorf("hivemind presence: API base is required")
+	if opts.Sandboxes == nil || opts.Protector == nil {
+		return nil, fmt.Errorf("hivemind presence: sandboxes and protector are required")
 	}
-	parsedBase, err := url.Parse(apiBase)
-	if err != nil || parsedBase.Host == "" {
-		return nil, fmt.Errorf("hivemind presence: API base must be an absolute URL")
-	}
-	if parsedBase.Scheme != "https" {
-		hostname := parsedBase.Hostname()
-		ip := net.ParseIP(hostname)
-		loopbackHTTP := parsedBase.Scheme == "http" &&
-			(hostname == "localhost" || (ip != nil && ip.IsLoopback()))
-		if !loopbackHTTP {
-			return nil, fmt.Errorf("hivemind presence: API base must use HTTPS (HTTP is allowed only for loopback testing)")
-		}
-	}
-	if opts.Sandboxes == nil || opts.Protector == nil || opts.Identity == nil {
-		return nil, fmt.Errorf("hivemind presence: sandboxes, protector, and identity are required")
-	}
-	client := opts.HTTPClient
+	client := opts.Client
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		var err error
+		client, err = NewClient(ClientOptions{
+			APIBase: opts.APIBase, Audience: opts.Audience, Identity: opts.Identity,
+			HTTPClient: opts.HTTPClient, UserAgent: opts.UserAgent,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Monitor{
-		apiBase:    strings.TrimRight(apiBase, "/"),
-		audience:   opts.Audience,
+		client:     client,
 		boxes:      opts.Sandboxes,
 		protector:  opts.Protector,
 		observer:   opts.Observer,
-		identity:   opts.Identity,
-		http:       client,
 		log:        logger,
-		userAgent:  opts.UserAgent,
-		tokens:     map[string]cachedToken{},
 		sessionsAt: map[string]time.Time{},
 	}, nil
 }
+
+// Client is the authenticated HiveMind client this monitor polls with, so a
+// gateway can hand the same one to its control plane.
+func (m *Monitor) Client() *Client { return m.client }
 
 // Run checks immediately, then on interval until ctx is cancelled.
 func (m *Monitor) Run(ctx context.Context, interval time.Duration) {
@@ -168,10 +123,10 @@ func (m *Monitor) Poll(ctx context.Context) {
 			liveIDs[box.ID] = struct{}{}
 		}
 	}
+	m.client.Retain(liveIDs)
 	m.mu.Lock()
-	for sandboxID := range m.tokens {
+	for sandboxID := range m.sessionsAt {
 		if _, exists := liveIDs[sandboxID]; !exists {
-			delete(m.tokens, sandboxID)
 			delete(m.sessionsAt, sandboxID)
 		}
 	}
@@ -203,19 +158,9 @@ func (m *Monitor) Poll(ctx context.Context) {
 }
 
 func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
-	token, err := m.token(ctx, box)
+	presence, err := m.client.Presence(ctx, box)
 	if err != nil {
 		return err
-	}
-	var presence presenceResponse
-	if err := m.post(
-		ctx,
-		"/v1/integrations/runtime/presence",
-		token,
-		[]byte("{}"),
-		&presence,
-	); err != nil {
-		return fmt.Errorf("query: %w", err)
 	}
 	if presence.ProtectUntil != nil && presence.ProtectUntil.After(time.Now()) {
 		m.protector.ProtectUntil(box.ID, presence.ProtectUntil.UTC())
@@ -224,22 +169,11 @@ func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
 		return nil
 	}
 
-	var sessions sessionsResponse
-	if err := m.post(
-		ctx,
-		"/v1/integrations/runtime/sessions?page_size=100",
-		token,
-		[]byte("{}"),
-		&sessions,
-	); err != nil {
-		return fmt.Errorf("sessions: %w", err)
+	snapshot, err := m.client.Sessions(ctx, box, maxPageSize)
+	if err != nil {
+		return err
 	}
-	m.observer.ObserveHiveMindSessions(box.ID, host.HiveMindSessionSnapshot{
-		ObservedAt: sessions.ObservedAt,
-		Sessions:   sessions.Sessions,
-		TotalCount: sessions.TotalCount,
-		HasMore:    sessions.HasMore,
-	})
+	m.observer.ObserveHiveMindSessions(box.ID, snapshot)
 	m.mu.Lock()
 	m.sessionsAt[box.ID] = time.Now()
 	m.mu.Unlock()
@@ -250,73 +184,4 @@ func (m *Monitor) sessionsDue(sandboxID string, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return !m.sessionsAt[sandboxID].Add(sessionRefreshInterval).After(now)
-}
-
-func (m *Monitor) token(ctx context.Context, box *host.Sandbox) (string, error) {
-	now := time.Now()
-	m.mu.Lock()
-	cached := m.tokens[box.ID]
-	m.mu.Unlock()
-	if cached.value != "" && cached.expiresAt.After(now.Add(5*time.Minute)) {
-		return cached.value, nil
-	}
-
-	idToken, err := m.identity.Issue(ctx, box, m.audience)
-	if err != nil {
-		return "", fmt.Errorf("mint identity: %w", err)
-	}
-	body, err := json.Marshal(map[string]string{"id_token": idToken.JWT})
-	if err != nil {
-		return "", err
-	}
-	var exchange exchangeResponse
-	if err := m.post(ctx, "/v1/auth/actions/exchange", "", body, &exchange); err != nil {
-		return "", fmt.Errorf("exchange identity: %w", err)
-	}
-	if exchange.Token == "" || exchange.ExpiresAt <= now.Unix() {
-		return "", fmt.Errorf("exchange identity: HiveMind returned an invalid token")
-	}
-	cached = cachedToken{
-		value:     exchange.Token,
-		expiresAt: time.Unix(exchange.ExpiresAt, 0),
-	}
-	m.mu.Lock()
-	m.tokens[box.ID] = cached
-	m.mu.Unlock()
-	return cached.value, nil
-}
-
-func (m *Monitor) post(
-	ctx context.Context,
-	path string,
-	bearer string,
-	body []byte,
-	out any,
-) error {
-	request, err := http.NewRequestWithContext(
-		ctx, http.MethodPost, m.apiBase+path, bytes.NewReader(body),
-	)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	if m.userAgent != "" {
-		request.Header.Set("User-Agent", m.userAgent)
-	}
-	response, err := m.http.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
-	}
-	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return nil
 }

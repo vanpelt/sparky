@@ -253,6 +253,10 @@ type Config struct {
 	// working as pure configuration, which is all a public repository needs,
 	// and makes `repo check` and `github install` KindDisabled.
 	GitHubApp GitHubApp
+	// HiveMind reads a sandbox's session catalog from the HiveMind SaaS. nil —
+	// the state of any host with no --hivemind-api — makes `sessions`
+	// KindDisabled.
+	HiveMind HiveMind
 
 	DefaultImage   string // rootfs template new sandboxes get
 	Domain         string // base zone, for the URL fields on results; "" omits them
@@ -285,6 +289,7 @@ type Ops struct {
 	github      GitHubKeys
 	ghDevice    GitHubDeviceFlow
 	ghApp       GitHubApp
+	hivemind    HiveMind
 	// orgMembers reads a GitHub org's roster. A function rather than another
 	// narrow interface because it is one call with no state, and a field rather
 	// than a direct users.ListOrgMembers so provisioning is testable without
@@ -326,6 +331,7 @@ func New(cfg Config) *Ops {
 		github:             cfg.GitHub,
 		ghDevice:           cfg.GitHubDevice,
 		ghApp:              cfg.GitHubApp,
+		hivemind:           cfg.HiveMind,
 		defaultImage:       cfg.DefaultImage,
 		domain:             normalizeDomain(cfg.Domain),
 		xtermSubdomain:     cfg.XtermSubdomain,

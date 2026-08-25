@@ -761,6 +761,38 @@ func serve(args []string) error {
 		xtermLabel = ""
 	}
 
+	// The HiveMind client, built once for the two things that ask it questions:
+	// the presence monitor below, which keeps the reaper off a VM whose agent is
+	// mid-conversation, and `ctl sessions`, which tells a person what has run
+	// there. One client so they share an exchange cache — HiveMind remembers an
+	// id token's jti for 24 hours, so every avoided exchange is one fewer
+	// single-use credential minted.
+	//
+	// The identity handed to it is the FLEET's signing path, not this machine's
+	// own: claims are assembled from the ledger's record of the sandbox and the
+	// node it was placed on, so a gateway holding no VMs can still ask about
+	// every VM in the fleet without any node participating in the question.
+	var hivemindClient *hivemindpresence.Client
+	// Declared as the interface rather than assigned from the pointer, for the
+	// reason gatewayStores.Repos is: a nil *Client copied into an interface
+	// field is not nil, and would turn "this host does not ask HiveMind" into a
+	// panic on the first `ctl sessions`.
+	var hivemindOps ctlops.HiveMind
+	if *hivemindAPI != "" {
+		hivemindClient, err = hivemindpresence.NewClient(hivemindpresence.ClientOptions{
+			APIBase: *hivemindAPI, Audience: *hivemindAudience,
+			Identity: hivemindIdentity{
+				id:       fleetIdentity{issuer: issuer, users: userStore, defAud: *hivemindAudience},
+				nodeName: nodeName,
+			},
+			UserAgent: "sparkbox/" + version,
+		})
+		if err != nil {
+			return err
+		}
+		hivemindOps = hivemindClient
+	}
+
 	// One control plane, shared by all three transports. Built here rather than
 	// left to sshgw's nil-Ops fallback because a second Ops would mean a second
 	// job registry and a second reaper goroutine: a job started over REST would
@@ -776,7 +808,8 @@ func serve(args []string) error {
 		XtermSubdomain:     xtermLabel, InvitesPerUser: *invitesPer,
 		GitHubClientID: *githubClientID,
 		Repos:          repoStore, GitHubApp: ghAppOps,
-		Log: log,
+		HiveMind: hivemindOps,
+		Log:      log,
 	})
 	defer ops.Close()
 
@@ -844,11 +877,9 @@ func serve(args []string) error {
 
 	if *hivemindAPI != "" {
 		monitor, err := hivemindpresence.New(hivemindpresence.Options{
-			APIBase: *hivemindAPI, Audience: *hivemindAudience,
-			Sandboxes: mgr, Protector: mgr,
-			Observer: mgr,
-			Identity: metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
-			Logger:   log, UserAgent: "sparkbox/" + version,
+			Client:    hivemindClient,
+			Sandboxes: mgr, Protector: mgr, Observer: mgr,
+			Logger: log,
 		})
 		if err != nil {
 			return err
@@ -1377,6 +1408,9 @@ type gatewayStores struct {
 	// field is the honest nil.
 	Repos     ctlops.Repos
 	GitHubApp ctlops.GitHubApp
+	// HiveMind is the same nil-interface discipline: an unconfigured host must
+	// answer `sessions` with "not enabled here", not with a nil dereference.
+	HiveMind ctlops.HiveMind
 
 	DefaultImage       string
 	Domain             string
@@ -1427,6 +1461,7 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// says plainly it cannot do this.
 		GitHubDevice: githubDevice(s.GitHubClientID),
 		GitHubApp:    s.GitHubApp,
+		HiveMind:     s.HiveMind,
 		DefaultImage: s.DefaultImage, Domain: s.Domain,
 		GatewayGuestSubnet: s.GatewayGuestSubnet,
 		XtermSubdomain:     s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
@@ -1670,6 +1705,36 @@ func pushLoop(ctx context.Context, p netPusher, log *slog.Logger) {
 		case <-t.C:
 		}
 	}
+}
+
+// hivemindIdentity presents the gateway's signing path to the HiveMind client,
+// which asks for a token the way a guest's metadata service does — a sandbox
+// and an audience — and has no node name to offer.
+//
+// The node is read off the sandbox record the fleet resolved, so a token minted
+// for a VM on `laptop` carries `box: laptop` exactly as the one that VM's own
+// metadata service would hand it. An empty Node is a sandbox on this machine,
+// which is the only case where substituting our own name is the truth rather
+// than a guess.
+type hivemindIdentity struct {
+	id       fleetIdentity
+	nodeName string
+}
+
+func (h hivemindIdentity) Issue(
+	ctx context.Context,
+	box *host.Sandbox,
+	aud string,
+) (metadata.Token, error) {
+	node := box.Node
+	if node == "" {
+		node = h.nodeName
+	}
+	jwt, expires, err := h.id.Issue(ctx, box, node, aud)
+	if err != nil {
+		return metadata.Token{}, err
+	}
+	return metadata.Token{JWT: jwt, ExpiresAt: expires}, nil
 }
 
 // fleetIdentity is the gateway's signing path, presented to the fleet.
