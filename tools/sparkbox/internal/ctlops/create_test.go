@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -37,8 +38,11 @@ func TestCreateStampsTagsBeforeCreate(t *testing.T) {
 	if got.Name != "generated-name" {
 		t.Errorf("name = %q, want the generated one", got.Name)
 	}
-	if !slices.Equal(got.Tags, []string{"ml", "prod"}) {
-		t.Errorf("tags = %v, want normalized [ml prod]", got.Tags)
+	// `default` rides along with whatever was asked for, still sorted: a create
+	// that names tags must not thereby opt out of the owner's default-tagged
+	// secrets. See defaultTags.
+	if !slices.Equal(got.Tags, []string{"default", "ml", "prod"}) {
+		t.Errorf("tags = %v, want normalized [default ml prod]", got.Tags)
 	}
 
 	calls := r.calls.all()
@@ -245,5 +249,76 @@ func TestAttachUsesTheResumedRecord(t *testing.T) {
 	}
 	if ep.Name != "alicebox" || ep.SSHUser != "sparky" {
 		t.Errorf("endpoint = %+v", ep)
+	}
+}
+
+// TestCreateAlwaysCarriesTheDefaultTag is the behaviour change: naming a tag
+// used to opt a sandbox OUT of the owner's default-tagged secrets, which is the
+// opposite of what anyone typing `--tag hm` means. The failure was silent and
+// arrived minutes later as an agent asking the user to log in.
+func TestCreateAlwaysCarriesTheDefaultTag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ask  []string
+		want []string
+	}{
+		{"no tags at all", nil, []string{"default"}},
+		{"one named tag", []string{"hm"}, []string{"default", "hm"}},
+		{"already asked for it", []string{"default"}, []string{"default"}},
+		{"asked for it among others", []string{"zeta", "default"}, []string{"default", "zeta"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			got, err := r.ops.Create(context.Background(), alice(),
+				CreateArgs{Name: "box-" + strings.ReplaceAll(tc.name, " ", "-"), Tags: tc.ask})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if !slices.Equal(got.Tags, tc.want) {
+				t.Errorf("tags = %v, want %v", got.Tags, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetTagsNeverReAddsTheDefault is what makes the stamp removable, and it is
+// the whole answer to "can I opt out afterwards": SetTags replaces the set and
+// does not apply defaultTags, so dropping `default` sticks across later edits.
+func TestSetTagsNeverReAddsTheDefault(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.ops.Create(context.Background(), alice(),
+		CreateArgs{Name: "optout", Tags: []string{"hm"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, _, err := r.ops.SetTags(context.Background(), alice(), "optout", []string{"hm"})
+	if err != nil {
+		t.Fatalf("SetTags: %v", err)
+	}
+	if !slices.Equal(got, []string{"hm"}) {
+		t.Fatalf("tags = %v, want [hm] — the default came back", got)
+	}
+	// And a later, unrelated edit must not resurrect it either.
+	got, _, err = r.ops.SetTags(context.Background(), alice(), "optout", []string{"hm", "ml"})
+	if err != nil {
+		t.Fatalf("second SetTags: %v", err)
+	}
+	if !slices.Equal(got, []string{"hm", "ml"}) {
+		t.Errorf("tags = %v, want [hm ml]", got)
+	}
+}
+
+// TestCreateWithoutATagStoreStampsNothing: stamping a tag on a host that cannot
+// store one would turn a working create into a refusal.
+func TestCreateWithoutATagStoreStampsNothing(t *testing.T) {
+	r := newRig(t)
+	r.ops.tags = nil
+
+	got, err := r.ops.Create(context.Background(), alice(), CreateArgs{Name: "plain"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(got.Tags) != 0 {
+		t.Errorf("tags = %v, want none on a host with no tag store", got.Tags)
 	}
 }

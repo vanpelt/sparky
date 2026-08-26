@@ -289,6 +289,9 @@ spec:
           env:
             - name: SPARKBOX_PROXY_DOMAIN
               value: __SPARKBOX_PROXY_DOMAIN__
+            # See the gateway's copy: this half buys the protection lease.
+            - name: SPARKBOX_HIVEMIND_API
+              value: __SPARKBOX_HIVEMIND_API__
             - name: SPARKBOX_RELEASE
               value: v0.6.0
             - name: SPARKBOX_GUEST_SUBNET

@@ -3,6 +3,7 @@ package ctlops
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -144,22 +145,46 @@ func (o *Ops) nameIsFree(op, name string) error {
 	return nil
 }
 
-// defaultTags gives a sandbox created with no tags the one tag secrets default
-// to, so the owner's secrets actually reach it.
+// defaultTags adds secrets.DefaultTag to every sandbox this package creates,
+// on top of whatever its creator asked for.
 //
 // The two defaults are halves of one thing: internal/secrets.PutSecret stamps
-// DefaultTag on an untagged secret, this stamps it on an untagged sandbox, and
+// DefaultTag on an untagged secret, this stamps it on a new sandbox, and
 // EnvForSandbox's join is what needs them to agree. Without both, the most
 // common path through the platform — save a token, make a box — delivers
 // nothing and says nothing.
 //
-// It defaults to no tags at all on a host with no tag store, which is the only
-// case where stamping one would turn a working create into a refusal.
+// It applies to a TAGGED create too, and that is the part worth explaining,
+// because `--tag hm` then produces a sandbox tagged `hm default` rather than
+// `hm`. The alternative was worse in practice: naming any tag at all silently
+// opted the box out of the owner's default-tagged secrets, so `ssh new@host
+// --tag hm` produced a VM whose agent asks you to log in, with nothing anywhere
+// connecting that to the word you typed. Nobody reads `--tag` as "and drop my
+// credentials", and the failure surfaces minutes later inside the guest.
+//
+// It is additive rather than a wildcard so it stays removable: SetTags replaces
+// the whole set and never re-applies this, so `ctl tags <name> hm` drops
+// `default` for good.
+//
+// The blast radius of doing this is bounded by one rule enforced elsewhere:
+// internal/netrules refuses to accept `default` as a rule-set tag. The shared
+// sandbox_tags table has three readers, and the other two only ever ADD
+// something (an environment variable, a checkout) — but an egress rule-set is
+// subtractive, and one tagged `default` would now cut every sandbox in the
+// fleet down to its allowlist. See netrules.PutRule.
+//
+// It adds no tags at all on a host with no tag store, which is the only case
+// where stamping one would turn a working create into a refusal.
 func (o *Ops) defaultTags(tags []string) []string {
-	if len(tags) > 0 || o.tags == nil {
+	if o.tags == nil || slices.Contains(tags, secrets.DefaultTag) {
 		return tags
 	}
-	return []string{secrets.DefaultTag}
+	// Sorted, because the caller normalised before calling and every other
+	// reader of a tag list — the audit line, the ctl output, the golden tests —
+	// assumes NormalizeTags' ordering held.
+	out := append(slices.Clone(tags), secrets.DefaultTag)
+	slices.Sort(out)
+	return out
 }
 
 // stampTags writes a create's tags under the name the sandbox is ABOUT to have.

@@ -813,6 +813,7 @@ type rig struct {
 	github      *fakeGitHub
 	secrets     *fakeSecrets
 	nodes       *fakeNodes
+	hivemind    *fakeHiveMind
 }
 
 // withNodes turns the rig's host into a fleet gateway holding one approved,
@@ -862,6 +863,7 @@ func newRig(t *testing.T) *rig {
 
 	boxes := &fakeSandboxes{c: c, archiving: true, boxes: map[string]*host.Sandbox{
 		"alicebox": {
+			ID:   "11111111-2222-3333-4444-555555555555",
 			Name: "alicebox", Owner: "alice", State: vmm.StateRunning, VCPUs: 2, MemMB: 8192,
 			CreatedAt: now, LastActive: now, SSHAddr: "127.0.0.1:2200", SSHUser: "sparky",
 		},
@@ -898,12 +900,14 @@ func newRig(t *testing.T) *rig {
 	gh := &fakeGitHub{c: c, keys: map[string][]xssh.PublicKey{}}
 	checkpoints := &fakeCheckpoints{c: c, enabled: map[string]bool{"alicebox": true}}
 	secretStore := &fakeSecrets{c: c, vals: map[string]string{}, tags: map[string][]string{}, boxes: tagger}
+	hm := &fakeHiveMind{}
 
 	ops := New(Config{
 		Sandboxes: boxes, Templates: tmpl, Accounts: accts,
 		Checkpoints: checkpoints,
 		Tags:        tagger, Schedules: sched, Routes: rt, Sessions: minter, GitHub: gh,
 		Secrets:      secretStore,
+		HiveMind:     hm,
 		DefaultImage: "base", Domain: "example.test", XtermSubdomain: "xterm",
 		InvitesPerUser: 0,
 		NewName:        func() string { return "generated-name" },
@@ -913,8 +917,32 @@ func newRig(t *testing.T) *rig {
 	t.Cleanup(ops.Close)
 
 	return &rig{ops: ops, calls: c, boxes: boxes, checkpoints: checkpoints, tmpl: tmpl, accts: accts,
-		tagger: tagger, sched: sched, routes: rt, minter: minter, github: gh, secrets: secretStore}
+		tagger: tagger, sched: sched, routes: rt, minter: minter, github: gh, secrets: secretStore,
+		hivemind: hm}
 }
 
 func alice() Caller   { return Caller{Handle: "alice"} }
 func mallory() Caller { return Caller{Handle: "mallory"} }
+
+// fakeHiveMind stands in for the SaaS. It records which sandbox was asked
+// about, because the one property worth pinning at this layer is that the
+// question is bound to the box the caller named and to no other.
+type fakeHiveMind struct {
+	mu       sync.Mutex
+	asked    []string
+	pageSize int
+	snapshot host.HiveMindSessionSnapshot
+	err      error
+}
+
+func (f *fakeHiveMind) Sessions(
+	_ context.Context,
+	box *host.Sandbox,
+	pageSize int,
+) (host.HiveMindSessionSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.asked = append(f.asked, box.ID)
+	f.pageSize = pageSize
+	return f.snapshot, f.err
+}

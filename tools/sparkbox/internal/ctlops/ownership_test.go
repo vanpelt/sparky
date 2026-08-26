@@ -60,6 +60,10 @@ func ownCases() []ownCase {
 			_, err := r.ops.Rename(ctx, c, t, "stolen")
 			return err
 		}},
+		{"Sessions", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.Sessions(ctx, c, t, 0)
+			return err
+		}},
 		{"Destroy", "sandbox", func(r *rig, c Caller, t string) error {
 			return r.ops.Destroy(ctx, c, t)
 		}},

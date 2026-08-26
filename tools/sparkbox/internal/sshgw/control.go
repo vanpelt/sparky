@@ -32,6 +32,7 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  resize <name> <size>     grow a sandbox's root disk, e.g. 25G (cold-boots it)\r\n" +
 	"  rm <name>                delete a sandbox and its disk — permanent, see archive\r\n" +
 	"  tags <name> [<tag>…]     show or set tags (they select which secrets it gets)\r\n" +
+	"  sessions <name>          the HiveMind agent sessions recorded from a sandbox\r\n" +
 	"\r\n" +
 	" secrets (pushed into your sandboxes as environment variables)\r\n" +
 	"  secret ls                list your secrets (names and tags; never values)\r\n" +
@@ -237,6 +238,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		s.Exit(0) //nolint:errcheck
 	case "tags":
 		g.controlTags(s, c, args, log)
+	case "sessions":
+		g.controlSessions(s, c, args, log)
 	case "pin":
 		name, ok := g.ownedBoxArg(s, c, args, log)
 		if !ok {

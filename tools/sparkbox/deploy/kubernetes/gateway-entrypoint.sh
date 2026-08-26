@@ -19,6 +19,10 @@ readonly ssh_advertise_host="${SPARKBOX_SSH_ADVERTISE_HOST:-ssh.$proxy_domain}"
 # both the id and github_app_key.pem simply offers no repo attachments rather
 # than failing to start.
 readonly github_app_client_id="${SPARKBOX_GITHUB_APP_CLIENT_ID:-}"
+# The HiveMind SaaS this fleet federates with. Empty — the default — leaves the
+# presence monitor and `ctl sessions` off entirely; the flag's own default is
+# the same empty string, so passing it unconditionally is safe.
+readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
 readonly node_name="${SPARKBOX_NODE_NAME:-cks-gateway}"
 readonly cluster_id="${SPARKBOX_CLUSTER_ID:-cks-poc}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
@@ -49,6 +53,7 @@ fi
 
 exec /usr/local/bin/sparkbox serve \
   --gateway-only \
+  --hivemind-api "$hivemind_api" \
   --driver mock \
   --state-dir "$state_dir" \
   --vm-state-dir "$vm_state_dir" \

@@ -204,8 +204,9 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   history. A banner around the value is fine — `claude setup-token` prints one,
   and the credential is picked out of it by its own shape, with anything
   ambiguous refused rather than guessed at. `ssh -t … secret set <NAME>` prompts
-  for a paste instead. Untagged secrets and new sandboxes both carry the
-  `default` tag, so they find each other without anyone learning what a tag is.
+  for a paste instead. Untagged secrets carry the `default`
+  tag and so does every new sandbox — including one created with tags of its
+  own — so they find each other without anyone learning what a tag is.
 - **Health + logs.** `sparkbox doctor` any time; `journalctl -u sparkbox -f`.
 - **Re-provision / upgrade.** Drop in a newer `sparkbox` binary and re-run
   `sparkbox setup` — idempotent, and `--release <tag>` pins the artifacts. If
