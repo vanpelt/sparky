@@ -21,12 +21,15 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 )
 
 // ErrNoSuchRule is returned when an operation targets a name the owner has no
@@ -76,7 +79,32 @@ type Store struct {
 	mu  sync.Mutex // serialises writes (sqlite is single-writer)
 	db  *sql.DB
 	log *slog.Logger
+
+	// repoDomains is the optional overlay source (see SetRepoDomains). It is
+	// installed once at wiring time, before anything serves, so it needs no
+	// lock: mu guards writes to the database, not the handle.
+	repoDomains RepoDomains
 }
+
+// RepoDomains is the optional source of the egress domains a sandbox's repo
+// attachments imply — the hosts a `git clone` actually talks to. It is
+// satisfied by *repos.Store, restated here as a one-method interface so
+// netrules keeps zero import of internal/repos: the dependency runs the other
+// way in every other direction, and a fleet built without a repos store must
+// keep compiling and behaving exactly as it did.
+type RepoDomains interface {
+	DomainsForSandbox(sandbox, owner string) ([]string, error)
+}
+
+// SetRepoDomains installs the repo-attachment domain source. Nil — the default,
+// and what every existing construction site and test leaves it as — makes
+// AllowForSandbox byte-identical to what it computed before repos existed.
+//
+// It is a post-construction setter rather than an Open parameter for the same
+// reason Fleet.SetRules is: the two stores share one sqlite file and are opened
+// independently, so neither can be a constructor argument of the other without
+// deciding an ordering that the wiring, not the package, owns.
+func (s *Store) SetRepoDomains(r RepoDomains) { s.repoDomains = r }
 
 // Open opens (creating if needed) the sqlite database at path and applies the
 // schema. It shares the file with internal/secrets/routes on its own connection;
@@ -140,6 +168,24 @@ func (s *Store) Close() error { return s.db.Close() }
 // set. An update bumps version. The spec's allow patterns are validated and
 // normalised; the tags are validated against tagRe so they match the shared
 // sandbox_tags namespace.
+//
+// It refuses secrets.DefaultTag outright, and that refusal is the reason
+// ctlops.Create is free to stamp that tag on every sandbox it makes.
+//
+// Three packages read sandbox_tags, and this is the only one whose rules
+// SUBTRACT. A secret or a repository tagged `default` reaches every sandbox and
+// adds something to it; an egress rule-set tagged `default` would make every
+// sandbox in the fleet *governed*, and a governed sandbox is filtered to
+// exactly its allow list where an ungoverned one has open egress (see
+// overlayRepoDomains for that gate). So the same word that means "reaches
+// everything" for the other two would silently cut the whole fleet down to
+// three domains, minutes later, on a policy push nobody connected to the rule
+// they had just saved.
+//
+// Refusing at write time is what keeps that from being discoverable only by
+// experiencing it. A rule-set that already carries the tag from before this
+// existed still applies — this validates writes, not reads — so a host that had
+// one wants it retagged before sandboxes start arriving with `default` on them.
 func (s *Store) PutRule(owner, name string, spec RuleSpec, tags []string) error {
 	if owner == "" {
 		return fmt.Errorf("rule needs an owner")
@@ -154,6 +200,13 @@ func (s *Store) PutRule(owner, name string, spec RuleSpec, tags []string) error 
 	tags, err = normTags(tags)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRule, err)
+	}
+	if slices.Contains(tags, secrets.DefaultTag) {
+		return fmt.Errorf(
+			"%w: an egress rule-set cannot be tagged %q — every sandbox carries that tag, "+
+				"so this rule would filter your whole fleet. Tag it with a name you also put "+
+				"on the sandboxes you mean to govern.",
+			ErrInvalidRule, secrets.DefaultTag)
 	}
 	blob, err := json.Marshal(norm)
 	if err != nil {
@@ -362,6 +415,19 @@ func (s *Store) SandboxesForRule(owner, name string) ([]string, error) {
 // rule is ungoverned, and the pusher omits it so sluice leaves its egress
 // unrestricted (an empty allow-list, by contrast, is a deliberate deny-all on a
 // governed sandbox). governed is therefore distinct from len(allow) == 0.
+//
+// It is also where a repo attachment's implied domains are unioned in, when a
+// RepoDomains source has been installed. That overlay lives here and not in the
+// pushers because there are two of them — netpush.(*Syncer).Resolve and
+// fleet.(*Fleet).PushNet — each carrying its own copy of the governed handling,
+// so anything added to one caller would fix the single-box deployment and leave
+// the fleet broken, or the reverse.
+//
+// The overlay is applied at READ time and is never written into anybody's
+// stored spec: ListRules keeps showing exactly what the user wrote, the
+// console's Network panel round-trips exactly that back on the next save, and
+// detaching the repo takes the holes away with it. A domain the user did not
+// write is not one they should have to remember to delete.
 func (s *Store) AllowForSandbox(sandbox, owner string) (allow []string, governed bool, err error) {
 	rules, err := s.RulesForSandbox(sandbox, owner)
 	if err != nil {
@@ -377,8 +443,59 @@ func (s *Store) AllowForSandbox(sandbox, owner string) (allow []string, governed
 			}
 		}
 	}
+	out = s.overlayRepoDomains(sandbox, owner, len(rules) > 0, seen, out)
 	sort.Strings(out)
 	return out, len(rules) > 0, nil
+}
+
+// overlayRepoDomains unions the sandbox's repo-implied domains into an
+// already-merged allow-set, de-duplicating against what the user wrote.
+//
+// The governed gate is the whole subtlety, and it is a security decision rather
+// than an optimisation. In the deployment sparkbox actually runs (sluice
+// --enforce --open-untagged) a sandbox ABSENT from the policy snapshot is
+// unfiltered, and a sandbox PRESENT with a short list is filtered to exactly
+// that list — governed is what decides which of the two it gets. So an
+// ungoverned sandbox that acquires a repo attachment must stay ungoverned:
+// making it governed would take a VM with unrestricted internet and cut it down
+// to three GitHub domains, a silent and severe narrowing dressed as a
+// convenience, which nobody asked for by typing `repo add`. There is no way to
+// express "unrestricted, plus these" in a policy whose absence already means
+// unrestricted, and an ungoverned sandbox needs nothing added: its egress is
+// open, GitHub included.
+//
+// A failure to read the repo source is logged and swallowed rather than
+// returned, and that is deliberate too. Both pushers treat an error from
+// AllowForSandbox as "skip this sandbox", and a skipped sandbox is omitted from
+// the full snapshot — which means unrestricted. Propagating the error would let
+// a hiccup in a table that can only ever WIDEN a policy drop the user's
+// firewall entirely. The degraded behaviour instead is a clone that cannot
+// resolve github.com: loud in the guest, harmless everywhere else.
+func (s *Store) overlayRepoDomains(sandbox, owner string, governed bool, seen map[string]bool, out []string) []string {
+	if s.repoDomains == nil || !governed {
+		return out
+	}
+	domains, err := s.repoDomains.DomainsForSandbox(sandbox, owner)
+	if err != nil {
+		s.log.Warn("repo egress overlay unavailable", "sandbox", sandbox, "owner", owner, "err", err)
+		return out
+	}
+	for _, d := range domains {
+		if seen[d] {
+			continue
+		}
+		// The overlay bypasses normSpec, so nothing downstream lower-cases or
+		// strips these. A pattern sluice would reject is a bug in the source
+		// rather than user input, and it is worth saying so out loud instead of
+		// shipping a policy entry that silently matches nothing.
+		if err := validateAllowPattern(d); err != nil {
+			s.log.Warn("repo egress overlay skipped a bad pattern", "sandbox", sandbox, "pattern", d, "err", err)
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
 }
 
 // normSpec validates and normalises a rule spec: each allow pattern is

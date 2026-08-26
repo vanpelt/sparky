@@ -45,7 +45,11 @@ const (
 // keys remain load-bearing. Node-control PKI material is optional at fetch time
 // so an SSH-only fleet can roll out this binary before its new secrets exist;
 // `serve --require-keys --node-control-transport=auto|grpc` is the point that
-// fails closed until the operator uploads them.
+// fails closed until the operator uploads them. The GitHub App key is optional
+// for the same reason and one stronger: most fleets will never create an App,
+// and a fleet that has not is not broken — repo attachment simply answers "not
+// enabled on this host". Making it required would turn a feature nobody opted
+// into a boot failure on every existing host.
 var manifest = []struct {
 	name     string
 	kind     kind
@@ -58,6 +62,19 @@ var manifest = []struct {
 	{"node-control-ca-cert", opaquePEM, "node_ca_cert.pem", false},
 	{"node-control-ca-key", opaquePEM, "node_ca_key.pem", false},
 	{"gateway-control-key", opaquePEM, "gateway_control_key.pem", false},
+	// opaquePEM, not envVar: GitHub hands out an RSA private key, and
+	// writeEnvFile refuses any value containing a newline — a PEM is nothing
+	// but newlines. It also belongs on disk beside the other keys, because
+	// ghapp.LoadKeyIfPresent reads it from KeyDir by name.
+	{"github-app-key", opaquePEM, "github_app_key.pem", false},
+	// envVar, not opaquePEM: the App's webhook secret is a random string an
+	// operator pastes into two places, with no structure and no newlines, so it
+	// travels the same way the console password does. Optional for the same
+	// reason as the key above — and independently of it, because the two are
+	// used by different halves of the App and a fleet may well have one and not
+	// the other. Absent, cmd/sparkbox mounts no webhook receiver at all rather
+	// than mounting one that verifies nothing.
+	{"github-webhook-secret", envVar, "SPARKBOX_GITHUB_WEBHOOK_SECRET", false},
 	{"cloudflare-api-token", envVar, "CLOUDFLARE_API_TOKEN", false},
 	{"console-password", envVar, "SPARKBOX_CONSOLE_PASSWORD", false},
 }
@@ -66,9 +83,26 @@ var manifest = []struct {
 // same files `sparkbox serve` loads and `sparkbox doctor` checks for. Owned
 // here so adding or renaming a fleet key is a one-place change.
 func KeyFiles() []string {
+	return keyFiles(true)
+}
+
+// OptionalKeyFiles lists the fleet key PEMs a host may have and works without:
+// node-control PKI on an SSH-only fleet, and the GitHub App key on a fleet with
+// no App. They are deliberately absent from KeyFiles, because a doctor check
+// that failed on them would fail on every correctly configured standalone host.
+//
+// They still deserve a line in the report. An optional key is invisible
+// otherwise, and "the App is not installed" and "this host never got the key"
+// produce the same symptom inside a VM — a clone that cannot authenticate —
+// with only one of them fixable from the host.
+func OptionalKeyFiles() []string {
+	return keyFiles(false)
+}
+
+func keyFiles(required bool) []string {
 	var out []string
 	for _, s := range manifest {
-		if s.kind != envVar && s.required {
+		if s.kind != envVar && s.required == required {
 			out = append(out, s.dest)
 		}
 	}

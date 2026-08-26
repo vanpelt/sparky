@@ -155,11 +155,13 @@ func linkMessage(op string, err error) string {
 
 // controlGitHub serves `ctl github …`.
 //
-// `link` is the whole command surface on purpose. Unlinking is not offered
-// because a stale link is not a hazard worth a verb — re-linking overwrites it,
-// and the account it names is the one GitHub last vouched for — and showing the
-// current one is `whoami`'s job, which prints it beside everything else about
-// the account.
+// `link` and `install` are the whole command surface on purpose, and they are
+// two halves of the same sentence: `link` proves which GitHub account this
+// handle is, `install` puts the App on the repositories that account wants in
+// its sandboxes. Unlinking is not offered because a stale link is not a hazard
+// worth a verb — re-linking overwrites it, and the account it names is the one
+// GitHub last vouched for — and showing the current one is `whoami`'s job,
+// which prints it beside everything else about the account.
 func (g *Gateway) controlGitHub(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	verb := ""
 	if len(args) > 0 {
@@ -179,6 +181,8 @@ func (g *Gateway) controlGitHub(s gssh.Session, c ctlops.Caller, args []string, 
 			return
 		}
 		s.Exit(0) //nolint:errcheck
+	case "install":
+		g.controlGitHubInstall(s, c, log)
 	default:
 		fmt.Fprintf(s.Stderr(), "unknown github command %q\r\n%s", verb, controlUsage)
 		s.Exit(2) //nolint:errcheck

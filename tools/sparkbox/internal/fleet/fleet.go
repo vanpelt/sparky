@@ -169,6 +169,12 @@ type Fleet struct {
 	// machine, which no node can do for itself. Nil until SetEnvPusher; see
 	// envsync.go.
 	envPush host.EnvPusher
+
+	// repoSync nudges a sandbox on another machine into re-checking-out. Same
+	// split as envPush and for a sharper reason: a node has no repos table at
+	// all, so a relayed ResyncRepos would reach a nil hook over there and an
+	// owner's retag would silently check nothing out. See repos.go.
+	repoSync host.RepoSyncer
 	// rules resolves a sandbox's egress allow-set from its tags. Nil until
 	// SetRules; see netplane.go.
 	rules Rules
@@ -176,6 +182,11 @@ type Fleet struct {
 	// until SetIdentity — a deployment with no OIDC key — and a node asking is
 	// then told so rather than left waiting. See identity.go.
 	identity Identity
+	// repos resolves a sandbox's repo attachments and mints the git credential
+	// for one of them, on any machine. Nil until SetRepos — a deployment with
+	// no attachment store or no GitHub App key — with the same answer as
+	// identity: the node is told, not left waiting. See repos.go.
+	repos Repos
 
 	// foreign latches once this fleet can hold a record that is not on this
 	// machine. See hasRemote.

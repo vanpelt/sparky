@@ -140,6 +140,12 @@ const (
 	TypeIdentityDoc    = "identity.describe"
 	TypeSelfVisibility = "sandbox.self_visibility"
 	TypeSelfPort       = "sandbox.self_port"
+	// The repo pair travels the same direction and for both reasons at once: a
+	// sandbox's attachments are resolved from its owner's tags, which no node
+	// holds, and the GitHub App key that turns one of them into a credential is
+	// in exactly the position the OIDC key is — on the gateway, staying there.
+	TypeSelfRepos    = "sandbox.self_repos"
+	TypeSelfRepoCred = "sandbox.self_repo_credential"
 
 	// Certificate enrollment, NODE -> gateway. The SSH control link is the
 	// bootstrap authentication: the request carries no node name because the
@@ -907,6 +913,66 @@ type SelfPortReq struct {
 type SelfPortResp struct {
 	Sandbox string `json:"sandbox"`
 	Port    int    `json:"port"`
+}
+
+// ---------------------------------------------------------------------------
+// Repo attachments and their credentials
+// ---------------------------------------------------------------------------
+
+// MaxRepoSlugBytes bounds the one string a node is allowed to put in a
+// credential request besides the sandbox name. A slug is `owner/name`, and
+// GitHub's own limits put that under 140 bytes; the ceiling is generous so that
+// a legitimate request can never hit it, and present so that the value reaching
+// a SQL parameter and a URL path is bounded by the wire and not by whatever the
+// guest chose to send.
+const MaxRepoSlugBytes = 256
+
+// SelfReposReq is a node asking what its guest should have checked out. Like
+// IdentityReq it is a name and nothing else: the attachments are the OWNER's,
+// resolved through the owner's tags, and the owner is a ledger column. A node
+// that could name the owner would be choosing whose repositories its VMs see.
+type SelfReposReq struct {
+	Sandbox string `json:"sandbox"`
+}
+
+// SelfReposResp is the manifest, already narrowed to this sandbox.
+type SelfReposResp struct {
+	Repos []SelfRepoEntry `json:"repos"`
+}
+
+// SelfRepoEntry restates the columns internal/repos stores rather than
+// importing them, for the reason SandboxRow restates host.Sandbox: the wire is
+// its own contract and must be free to lag or lead the store's shape.
+type SelfRepoEntry struct {
+	Host   string `json:"host"`
+	Slug   string `json:"slug"`
+	Ref    string `json:"ref,omitempty"`
+	Path   string `json:"path,omitempty"`
+	Access string `json:"access"`
+}
+
+// SelfRepoCredReq names a sandbox and one of its repositories.
+//
+// Slug is the only field on any uplink request that is not a sandbox name, and
+// it is not an authorization input: it NARROWS a credential the gateway would
+// otherwise have to scope to everything the sandbox may reach. The gateway
+// resolves the sandbox's attachment set for itself and refuses a slug that is
+// not in it, so the worst a node can do by lying here is ask for something it
+// is told no about.
+type SelfRepoCredReq struct {
+	Sandbox string `json:"sandbox"`
+	Slug    string `json:"slug"`
+}
+
+// SelfRepoCredResp is a git credential and the moment it stops working.
+//
+// Password is a short-lived installation token. It is the only secret this
+// package carries in either direction, and nothing on the link's path may log
+// a frame body for that reason.
+type SelfRepoCredResp struct {
+	Username  string    `json:"username"`
+	Password  string    `json:"password"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // ---------------------------------------------------------------------------

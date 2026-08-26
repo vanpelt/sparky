@@ -226,6 +226,10 @@ func sample(rt route) (path string, body any) {
 	path = specPath(rt.pattern)
 	path = strings.ReplaceAll(path, "{name}", "ghost")
 	path = strings.ReplaceAll(path, "{id}", "ghost")
+	// A repo is addressed by three segments because its slug carries a '/'; the
+	// pair below is the same "nobody owns this" name the sandbox routes use.
+	path = strings.ReplaceAll(path, "{host}", "github.com")
+	path = strings.ReplaceAll(path, "{owner}", "nobody")
 	switch rt.opID {
 	case "keys.rm":
 		path += "?fingerprint=SHA256:none"
@@ -243,6 +247,8 @@ func sample(rt route) (path string, body any) {
 		body = forkRequest{Name: "ghost-fork"}
 	case "schedule.add":
 		body = scheduleRequest{Sandbox: "ghost", Spec: "@daily", Command: "echo hi"}
+	case "repo.add":
+		body = repoRequest{Slug: "nobody/ghost", Tags: []string{"x"}}
 	case "keys.add":
 		body = addKeyRequest{Key: sampleKey}
 	case "keys.verify-github":
@@ -756,10 +762,11 @@ func TestSandboxLifecycle(t *testing.T) {
 	if box.Name != "demo" || box.Owner != "alice" {
 		t.Fatalf("created %+v", box)
 	}
-	// Tags are normalized on the way in, and the URLs are derived from the
+	// Tags are normalized on the way in and carry `default` alongside what the
+	// caller asked for (ctlops.defaultTags); the URLs are derived from the
 	// configured zone rather than the request's Host.
-	if len(box.Tags) != 2 || box.Tags[0] != "a" || box.Tags[1] != "b" {
-		t.Fatalf("tags %v, want [a b]", box.Tags)
+	if len(box.Tags) != 3 || box.Tags[0] != "a" || box.Tags[1] != "b" || box.Tags[2] != "default" {
+		t.Fatalf("tags %v, want [a b default]", box.Tags)
 	}
 	if box.URL != "https://demo."+testDomain {
 		t.Fatalf("url %q", box.URL)
@@ -770,8 +777,8 @@ func TestSandboxLifecycle(t *testing.T) {
 
 	// The tags really landed before the VM did — the whole reason ctlops owns
 	// the ordering.
-	if got, err := ta.secrets.TagsFor("demo"); err != nil || len(got) != 2 {
-		t.Fatalf("stored tags %v (%v)", got, err)
+	if got, err := ta.secrets.TagsFor("demo"); err != nil || len(got) != 3 {
+		t.Fatalf("stored tags %v (%v), want the requested two plus default", got, err)
 	}
 
 	rec = ta.do(t, "GET", "/v1/sandboxes", "alice", nil)

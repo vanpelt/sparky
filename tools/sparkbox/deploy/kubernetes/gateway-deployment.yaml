@@ -59,6 +59,23 @@ spec:
                   name: sparkbox-console
                   key: password
                   optional: true
+            - name: SPARKBOX_GITHUB_APP_CLIENT_ID
+              value: __SPARKBOX_GITHUB_APP_CLIENT_ID__
+            # The HiveMind SaaS this fleet federates with. The gateway needs it
+            # for `ctl sessions`; the node needs it for the presence lease that
+            # keeps the reaper off a VM whose agent is mid-conversation.
+            - name: SPARKBOX_HIVEMIND_API
+              value: __SPARKBOX_HIVEMIND_API__
+            # optional, like the console password above: a gateway without it
+            # mounts no webhook receiver at all rather than one that accepts
+            # unverified deliveries, so an absent Secret is a configuration
+            # state and not a failure.
+            - name: SPARKBOX_GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sparkbox-github-webhook
+                  key: secret
+                  optional: true
             - name: SPARKBOX_NODE_NAME
               value: cks-gateway
             - name: SPARKBOX_CLUSTER_ID

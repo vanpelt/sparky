@@ -60,6 +60,10 @@ func ownCases() []ownCase {
 			_, err := r.ops.Rename(ctx, c, t, "stolen")
 			return err
 		}},
+		{"Sessions", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.Sessions(ctx, c, t, 0)
+			return err
+		}},
 		{"Destroy", "sandbox", func(r *rig, c Caller, t string) error {
 			return r.ops.Destroy(ctx, c, t)
 		}},
@@ -72,7 +76,7 @@ func ownCases() []ownCase {
 			return err
 		}},
 		{"SetTags", "sandbox", func(r *rig, c Caller, t string) error {
-			_, err := r.ops.SetTags(ctx, c, t, []string{"pwned"})
+			_, _, err := r.ops.SetTags(ctx, c, t, []string{"pwned"})
 			return err
 		}},
 		{"Attach", "sandbox", func(r *rig, c Caller, t string) error {
@@ -270,6 +274,14 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// caller cannot name another owner's secret because the handle is not
 		// an argument. The env name they DO pass selects only among their own.
 		"ListSecrets": true, "PutSecret": true, "DeleteSecret": true,
+		// Repos are keyed by (owner, host, slug) for exactly the same reason,
+		// and the blast radius is bigger: a query that lost its owner term
+		// would put another account's private repository in this caller's
+		// manifest. The slug they pass selects only among their own rows.
+		"ListRepos": true, "AttachRepo": true, "DetachRepo": true, "CheckRepos": true,
+		// GitHubInstallURL names nothing at all: it is this host's App, and the
+		// same URL for everyone who asks.
+		"GitHubInstallURL": true,
 		// Account provisioning names GitHub logins and an org, none of which is
 		// a resource anybody here owns. Operator-gated instead — see
 		// TestProvisioningIsOperatorGated.

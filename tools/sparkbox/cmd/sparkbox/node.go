@@ -328,6 +328,12 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	uplink := nodelink.NewUplink()
 	identityRelay := newRelayIdentity(uplink, opts.controlTransport, log)
 	defer identityRelay.Close()
+	// Repo attachments relay over the same control connection the identity
+	// relay owns: currentGRPC is that relay's accessor, so configureGRPC and
+	// setGRPC keep being the only places the transport's lifecycle is decided.
+	// A second dialer here would mean two connections to one gateway and two
+	// opinions about when mTLS is healthy.
+	reposRelay := newRelayRepos(uplink, identityRelay.currentGRPC, log)
 	if err := startNodeControl(ctx, opts, mgr, netSyncer, uplink, controlState, identityRelay, log); err != nil {
 		return err
 	}
@@ -362,6 +368,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			Manager: mgr, Logger: log,
 			Identity:     identityRelay,
 			RouteControl: relayRouteControl{up: uplink},
+			Repos:        reposRelay,
 			GuestSubnet:  opts.guestSubnet,
 			// No default audience here: the gateway substitutes its own, which
 			// is the only one that could be right — the allowlist that decides
@@ -600,6 +607,25 @@ func relayError(err error) error {
 			// unavailable anyway: it is out of this machine's hands either way,
 			// and the retry costs one request every 45 minutes.
 			return fmt.Errorf("%w: %s", metadata.ErrNoIssuer, typed.Msg)
+		case nodelink.CodeNoRepos:
+			// The gateway attaches no repositories at all. A 501, which is what
+			// a guest on the gateway's own machine is told, so the answer does
+			// not depend on which machine the sandbox landed on.
+			return fmt.Errorf("%w: %s", metadata.ErrNotEnabled, typed.Msg)
+		case nodelink.CodeNoSuchRepo:
+			// The guest asked about a repository it has no attachment to. A 404
+			// and not a refusal: git consults the credential helper about every
+			// host it touches, and a miss is the ordinary answer.
+			return fmt.Errorf("%w: %s", metadata.ErrNoSuchRepo, typed.Msg)
+		case nodelink.CodeRepoDenied:
+			// Attached, and still refused: an owner with no verified GitHub
+			// link, an inactive account, an App that is not installed there. A
+			// 403 carrying the sentence, because each of those has its own fix
+			// and none of them is a retry.
+			return fmt.Errorf("%w: %s", metadata.ErrRepoDenied, typed.Msg)
+		case nodelink.CodeRepoUpstream:
+			// github.com, not this fleet. 503, because waiting is the repair.
+			return fmt.Errorf("%w: %s", metadata.ErrUpstream, typed.Msg)
 		}
 		return err
 	}

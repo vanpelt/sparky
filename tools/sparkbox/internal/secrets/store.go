@@ -72,8 +72,9 @@ var reservedEnvNames = map[string]bool{
 // tagRe bounds tags to short DNS-label-ish strings safe in URLs and UIs.
 var tagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
-// DefaultTag is the tag a secret gets when its owner names none, and the tag a
-// new sandbox is stamped with when its creator names none (ctlops.Create).
+// DefaultTag is the tag a secret gets when its owner names none, and the tag
+// EVERY sandbox is stamped with as it is created (ctlops.Create, which adds it
+// alongside whatever tags the creator asked for).
 //
 // It exists because the untagged case was a silent failure, and silent is the
 // operative word. EnvForSandbox is an inner join on tags, so a first-time user
@@ -82,11 +83,25 @@ var tagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 // saying why. Both halves have to default to the same string for the join to
 // find anything, which is why one constant serves both.
 //
-// It is a tag like any other, not a wildcard: a secret tagged `default` reaches
-// exactly the sandboxes tagged `default`, and either side can be retagged to
-// opt out. Worth knowing before writing an egress rule-set against this name —
-// internal/netrules shares the sandbox_tags table, so a rule-set tagged
-// `default` would begin governing every sandbox created since this shipped.
+// The create side is unconditional because narrowing it to untagged creates
+// moved the same silent failure one step along rather than fixing it: `ssh
+// new@<gateway> --tag hm` then opted the sandbox out of the owner's secrets,
+// which is not what anyone naming a tag means, and it failed the same silent
+// way minutes later inside the guest.
+//
+// It is still not a wildcard. A secret tagged `default` reaches exactly the
+// sandboxes tagged `default`, and either side can be retagged to opt out —
+// ctlops.SetTags replaces the whole set and never re-adds this, so `ctl tags
+// <name> hm` drops it permanently.
+//
+// Three packages read sandbox_tags, and only two of them may safely see this
+// tag. Secrets and internal/repos are additive: a `default` row means an
+// environment variable or a checkout appears everywhere. internal/netrules is
+// subtractive — a governed sandbox is filtered to exactly its allow list where
+// an ungoverned one has open egress — so a rule-set tagged `default` would cut
+// the entire fleet down to that list. netrules.PutRule therefore refuses this
+// tag outright, and that refusal is what makes stamping it on every sandbox
+// safe.
 const DefaultTag = "default"
 
 // maxValueLen caps a secret value at 4 KiB — env vars, not blobs.

@@ -81,7 +81,7 @@ func TestClearingASandboxesTagsIsStillPossible(t *testing.T) {
 	if _, err := r.ops.Create(ctx, alice(), CreateArgs{Name: "fresh"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	got, err := r.ops.SetTags(ctx, alice(), "fresh", nil)
+	got, _, err := r.ops.SetTags(ctx, alice(), "fresh", nil)
 	if err != nil {
 		t.Fatalf("SetTags: %v", err)
 	}

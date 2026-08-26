@@ -40,6 +40,24 @@ From inside the VM:
 - `sparkbox make-public` makes all routes for this VM unauthenticated.
 - `sparkbox make-private` restores authenticated access to all routes.
 
+## Attached repositories
+
+Repositories attached to one of your tags are cloned into this VM at boot, over
+a short-lived GitHub App token that git fetches on demand — there is no personal
+access token in the VM and nothing to rotate.
+
+From inside the VM:
+
+- `sparkbox repos` reports what is attached, where it was cloned, and why
+  anything is missing.
+- `sparkbox repos sync` clones what is not there yet. Attaching a repository to
+  a tag never reaches into a VM that already exists, so this is how an existing
+  VM picks one up.
+
+Attaching and detaching happen outside the VM, with `ssh ctl@<domain> repo add`
+or from the web console. A clone that already exists is never touched: syncing
+adds, and it does not update, reset or delete.
+
 ## Agent harnesses
 
 New VMs include Claude Code, Codex, Pi, and Hivemind. Sparkbox environment

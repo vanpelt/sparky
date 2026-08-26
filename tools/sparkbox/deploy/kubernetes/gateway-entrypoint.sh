@@ -14,6 +14,15 @@ readonly proxy_tls="${SPARKBOX_PROXY_TLS:-true}"
 readonly tls_provider="${SPARKBOX_TLS_PROVIDER:-autocert}"
 readonly tls_email="${SPARKBOX_TLS_EMAIL:-}"
 readonly ssh_advertise_host="${SPARKBOX_SSH_ADVERTISE_HOST:-ssh.$proxy_domain}"
+# The GitHub App that mints repository credentials. Optional and separate from
+# the account-linking app: only this one has a private key, and a host without
+# both the id and github_app_key.pem simply offers no repo attachments rather
+# than failing to start.
+readonly github_app_client_id="${SPARKBOX_GITHUB_APP_CLIENT_ID:-}"
+# The HiveMind SaaS this fleet federates with. Empty — the default — leaves the
+# presence monitor and `ctl sessions` off entirely; the flag's own default is
+# the same empty string, so passing it unconditionally is safe.
+readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
 readonly node_name="${SPARKBOX_NODE_NAME:-cks-gateway}"
 readonly cluster_id="${SPARKBOX_CLUSTER_ID:-cks-poc}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
@@ -37,8 +46,14 @@ if [ "$proxy_tls" = true ]; then
 fi
 
 echo "starting control-plane-only Sparkbox gateway for *.$proxy_domain (TLS: $proxy_tls)"
+github_app_args=()
+if [ -n "$github_app_client_id" ]; then
+  github_app_args=(--github-app-client-id "$github_app_client_id")
+fi
+
 exec /usr/local/bin/sparkbox serve \
   --gateway-only \
+  --hivemind-api "$hivemind_api" \
   --driver mock \
   --state-dir "$state_dir" \
   --vm-state-dir "$vm_state_dir" \
@@ -62,4 +77,5 @@ exec /usr/local/bin/sparkbox serve \
   --mem-admission-pct 100 \
   --max-running-per-owner 2 \
   "${tls_args[@]}" \
+  "${github_app_args[@]}" \
   "$@"

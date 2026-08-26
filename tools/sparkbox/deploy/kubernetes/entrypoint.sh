@@ -26,6 +26,10 @@ readonly release="${SPARKBOX_RELEASE:-v0.6.0}"
 readonly artifact_base="${SPARKBOX_ARTIFACT_BASE:-https://github.com/vanpelt/sparky/releases/download}"
 readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:?SPARKBOX_PROXY_DOMAIN is required}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
+# The HiveMind SaaS this fleet federates with. Empty — the default — leaves the
+# presence monitor and `ctl sessions` off entirely; the flag's own default is
+# the same empty string, so passing it unconditionally is safe.
+readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
 readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
 readonly mem_admission_pct="${SPARKBOX_MEM_ADMISSION_PCT:-80}"
 readonly max_running_per_owner="${SPARKBOX_MAX_RUNNING_PER_OWNER:-2}"
@@ -372,6 +376,7 @@ fi
 
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
+  --hivemind-api "$hivemind_api" \
   --state-dir "$control_dir" \
 	--vm-state-dir "$vm_state_dir" \
   --checkpoint-dir "$durable_dir" \

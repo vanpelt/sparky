@@ -52,6 +52,11 @@ type visibilityRequest struct {
 
 type tagsResponse struct {
 	Tags []string `json:"tags"`
+	// Note is advice about a side effect of the change that succeeded — chiefly
+	// whether the sandbox's repo checkouts could be resynced. Omitted when
+	// there is nothing to say, and never an error: the tags in this same
+	// response are set either way.
+	Note string `json:"note,omitempty"`
 }
 
 func (h *Handler) listSandboxes(w http.ResponseWriter, r *http.Request) {
@@ -235,12 +240,12 @@ func (h *Handler) setTags(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, op, &req) {
 		return
 	}
-	tags, err := h.ops.SetTags(r.Context(), caller(r), r.PathValue("name"), req.Tags)
+	tags, note, err := h.ops.SetTags(r.Context(), caller(r), r.PathValue("name"), req.Tags)
 	if err != nil {
 		h.fail(w, r, op, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, tagsResponse{Tags: tags})
+	writeJSON(w, http.StatusOK, tagsResponse{Tags: tags, Note: note})
 }
 
 type visibilityResponse struct {

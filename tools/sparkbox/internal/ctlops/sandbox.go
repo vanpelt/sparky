@@ -2,6 +2,9 @@ package ctlops
 
 import (
 	"context"
+	"errors"
+	"slices"
+	"sync"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
@@ -142,22 +145,46 @@ func (o *Ops) nameIsFree(op, name string) error {
 	return nil
 }
 
-// defaultTags gives a sandbox created with no tags the one tag secrets default
-// to, so the owner's secrets actually reach it.
+// defaultTags adds secrets.DefaultTag to every sandbox this package creates,
+// on top of whatever its creator asked for.
 //
 // The two defaults are halves of one thing: internal/secrets.PutSecret stamps
-// DefaultTag on an untagged secret, this stamps it on an untagged sandbox, and
+// DefaultTag on an untagged secret, this stamps it on a new sandbox, and
 // EnvForSandbox's join is what needs them to agree. Without both, the most
 // common path through the platform — save a token, make a box — delivers
 // nothing and says nothing.
 //
-// It defaults to no tags at all on a host with no tag store, which is the only
-// case where stamping one would turn a working create into a refusal.
+// It applies to a TAGGED create too, and that is the part worth explaining,
+// because `--tag hm` then produces a sandbox tagged `hm default` rather than
+// `hm`. The alternative was worse in practice: naming any tag at all silently
+// opted the box out of the owner's default-tagged secrets, so `ssh new@host
+// --tag hm` produced a VM whose agent asks you to log in, with nothing anywhere
+// connecting that to the word you typed. Nobody reads `--tag` as "and drop my
+// credentials", and the failure surfaces minutes later inside the guest.
+//
+// It is additive rather than a wildcard so it stays removable: SetTags replaces
+// the whole set and never re-applies this, so `ctl tags <name> hm` drops
+// `default` for good.
+//
+// The blast radius of doing this is bounded by one rule enforced elsewhere:
+// internal/netrules refuses to accept `default` as a rule-set tag. The shared
+// sandbox_tags table has three readers, and the other two only ever ADD
+// something (an environment variable, a checkout) — but an egress rule-set is
+// subtractive, and one tagged `default` would now cut every sandbox in the
+// fleet down to its allowlist. See netrules.PutRule.
+//
+// It adds no tags at all on a host with no tag store, which is the only case
+// where stamping one would turn a working create into a refusal.
 func (o *Ops) defaultTags(tags []string) []string {
-	if len(tags) > 0 || o.tags == nil {
+	if o.tags == nil || slices.Contains(tags, secrets.DefaultTag) {
 		return tags
 	}
-	return []string{secrets.DefaultTag}
+	// Sorted, because the caller normalised before calling and every other
+	// reader of a tag list — the audit line, the ctl output, the golden tests —
+	// assumes NormalizeTags' ordering held.
+	out := append(slices.Clone(tags), secrets.DefaultTag)
+	slices.Sort(out)
+	return out
 }
 
 // stampTags writes a create's tags under the name the sandbox is ABOUT to have.
@@ -380,20 +407,20 @@ func (o *Ops) Tags(ctx context.Context, c Caller, name string) ([]string, error)
 // SetTags replaces the whole set (nil or empty clears it) and then ResyncEnv's
 // the box, so the guest's secret env matches its new tags immediately rather
 // than at the next resume.
-func (o *Ops) SetTags(ctx context.Context, c Caller, name string, tags []string) ([]string, error) {
+func (o *Ops) SetTags(ctx context.Context, c Caller, name string, tags []string) ([]string, string, error) {
 	const op = "tags.set"
 	if _, err := o.owned(op, name, c); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if o.tags == nil {
-		return nil, Disabled(op, "tagging is not enabled on this host")
+		return nil, "", Disabled(op, "tagging is not enabled on this host")
 	}
 	want, err := NormalizeTags(tags)
 	if err != nil {
-		return nil, Invalid(op, "bad_tag", "%v", err)
+		return nil, "", Invalid(op, "bad_tag", "%v", err)
 	}
 	if err := o.tags.SetTags(name, c.Handle, want); err != nil {
-		return nil, Fail(op, err)
+		return nil, "", Fail(op, err)
 	}
 	// Secrets follow tags, so the box needs a re-push to match its new set.
 	o.boxes.ResyncEnv(ctx, name)
@@ -401,7 +428,76 @@ func (o *Ops) SetTags(ctx context.Context, c Caller, name string, tags []string)
 	if want == nil {
 		want = []string{}
 	}
-	return want, nil
+	return want, o.syncRepos(ctx, name), nil
+}
+
+// syncRepos nudges a running sandbox into re-checking-out after something that
+// changed what it is entitled to, and renders the outcome as the one line the
+// caller should print. Empty means there was nothing to say.
+//
+// Repos follow tags exactly as secrets do, and the reason this is a note rather
+// than an error is that the mutation already happened: the tags ARE set, the
+// attachment IS stored, and a guest that could not be reached will check out
+// the same repositories at its next boot regardless. Failing the call would
+// misreport a durable change as a rejected one. Saying nothing, which is what
+// this used to do, is how a sandbox came to accept a tag and then quietly check
+// nothing out — the confusion this note exists to end.
+func (o *Ops) syncRepos(ctx context.Context, name string) string {
+	if o.boxes == nil {
+		return ""
+	}
+	r, ok := o.boxes.(interface {
+		ResyncRepos(ctx context.Context, name string) error
+	})
+	if !ok {
+		return ""
+	}
+	switch err := r.ResyncRepos(ctx, name); {
+	case err == nil:
+		return ""
+	case errors.Is(err, host.ErrNoRepoSupport):
+		// The one failure a person can actually act on, and the one they are
+		// most likely to hit right after this feature ships: every sandbox that
+		// existed before it does.
+		return name + " was created before repo support — recreate it to get checkouts"
+	default:
+		o.log.Warn("could not sync a sandbox's checkouts", "name", name, "err", err)
+		return "could not reach " + name + " to sync its checkouts — it will check them out at its next start"
+	}
+}
+
+// syncReposFanout is syncRepos over the sandboxes one attachment reaches,
+// concurrently, returning only the notes worth printing.
+//
+// Concurrent because each nudge is an SSH dial into a different guest and the
+// caller is a person waiting at a prompt: done in series, attaching a repo to a
+// tag ten boxes carry would take ten round trips before it answered. The
+// caller's ctx bounds the whole fan-out, so a wedged guest cannot hold the
+// command open past the budget the transport already set.
+func (o *Ops) syncReposFanout(ctx context.Context, names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	notes := make([]string, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			notes[i] = o.syncRepos(ctx, name)
+		}()
+	}
+	wg.Wait()
+	out := notes[:0]
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Attach is the owner gate plus resume for an interactive session. It is the

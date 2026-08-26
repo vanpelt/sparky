@@ -8,7 +8,7 @@ import "testing"
 // and then never served.
 func TestLiveDoorsAreReserved(t *testing.T) {
 	for _, n := range []string{
-		"console", "my", "api", "login", "oidc", "xterm", // proxy edge
+		"console", "my", "api", "login", "oidc", "xterm", "hooks", // proxy edge
 		"new", "ctl", "signup", "node", // ssh gateway usernames
 	} {
 		if !Name(n) {

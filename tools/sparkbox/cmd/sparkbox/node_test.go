@@ -432,6 +432,16 @@ func (f *relayGRPCFailure) DescribeIdentity(context.Context, *nodev1.DescribeIde
 	return nil, status.Error(f.code, "identity RPC failed")
 }
 
+func (f *relayGRPCFailure) ListRepos(context.Context, *nodev1.ListReposRequest, ...grpc.CallOption) (*nodev1.ListReposResponse, error) {
+	f.calls++
+	return nil, status.Error(f.code, "repo RPC failed")
+}
+
+func (f *relayGRPCFailure) IssueRepoCredential(context.Context, *nodev1.IssueRepoCredentialRequest, ...grpc.CallOption) (*nodev1.IssueRepoCredentialResponse, error) {
+	f.calls++
+	return nil, status.Error(f.code, "repo RPC failed")
+}
+
 func TestIdentityRelayFallsBackToSSHOnlyForGRPCTransportFailure(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	box := &host.Sandbox{Name: "alpha"}

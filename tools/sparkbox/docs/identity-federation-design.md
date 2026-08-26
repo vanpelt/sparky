@@ -249,6 +249,81 @@ demand).
   localhost-only, but the console (operator-scoped today) can later grow
   per-user views keyed by real records.
 
+## Part 3 — session presence and history
+
+Federation was built so `hivemind start` works with nothing to configure. Once
+it does, HiveMind knows something sparkbox wants back: **which VM an agent
+session actually ran on**. Two things use that.
+
+**The protection lease.** Scale-to-zero decides from local signals — CPU and
+tap bytes — and those go quiet while an agent sits waiting for a person to
+answer a question. A VM reaped mid-turn loses the turn. So `internal/hivemindpresence` asks once a minute whether this
+sandbox has live sessions and, if so, holds `Manager.ProtectUntil` past the
+reaper's reach. It fails **open**: an unreachable API extends nothing and the
+ordinary idle policy resumes, because a HiveMind outage must not pin every VM
+in the fleet running.
+
+**`ctl sessions <name>`.** What has run here, newest first — title, state, agent
+and model, and a dashboard link.
+
+### How a VM is identified
+
+There is no device ID anywhere in either request. `POST
+/v1/auth/actions/exchange` projects the id token's `sandbox_id` claim into a
+signed `partner_device_id`, and both runtime endpoints answer only for that
+tuple. Ingest stamps the same verified tuple onto sessions as they arrive and
+strips any the caller supplied. So a token minted for one sandbox can ask about
+that sandbox and nothing else — which is what lets the **gateway** answer `ctl
+sessions` for a VM on somebody else's hardware without that node participating:
+the claims come from the fleet's own ledger and its own signing key. See
+`docs/partner-federation.md` in wandb/agentstream for the API side.
+
+### Enabling it
+
+`--hivemind-api https://hivemind.wandb.tools` on both halves — the node for the
+lease, the gateway for `ctl sessions` — and `TRUSTED_OIDC_PAT_ISSUERS=sparkbox=oidc.<domain>`
+on the HiveMind side. On CKS that is `deploy.sh --hivemind-api`, which writes
+`SPARKBOX_HIVEMIND_API` into both Deployments and carries the live value
+forward on a re-run. Empty is off, and off is silent by design: a host that
+does not ask answers `sessions` with "not enabled here" rather than an empty
+list, because "we don't ask" and "nothing has run here" must not look alike.
+
+`--hivemind-audience` defaults to the same string as `--oidc-audiences`, which
+is why nothing needs an audience configured on either side.
+
+### Two things that look like bugs and are not
+
+**A session that predates the deploy is invisible here.** The provider tuple is
+stamped at ingest, so only sessions uploaded after the API rolled out carry
+one. `total_count: 0` on a VM you know has been used is expected if it was used
+before then.
+
+**`claude` says "Please run /login" and nothing ever syncs.** `default` is a
+literal tag, not a wildcard (`secrets.DefaultTag`), so a sandbox tagged only
+`hm` gets no secret tagged `default` — including the OAuth token. The agent
+never authenticates, no session exists, and the empty catalog is the honest
+answer to a question about a VM where nothing ran. `ctl tags <name> hm default`.
+
+### Verifying it end to end
+
+From inside a sandbox, without disturbing the daemon's own single-use token
+(`/token` mints a fresh one per call — the daemon's file is not touched):
+
+```bash
+PORT=$(sed -n 's|^META="http://\$GW:\([0-9]*\)"|\1|p' /usr/local/sbin/sparkbox-token)
+GW=$(ip -4 route show default | awk '{print $3; exit}')
+TOK=$(curl -fsS "http://$GW:$PORT/token")
+JWT=$(curl -sS -X POST https://hivemind.wandb.tools/v1/auth/actions/exchange \
+  -H 'Content-Type: application/json' -d "{\"id_token\":\"$TOK\"}" |
+  python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+curl -sS -X POST https://hivemind.wandb.tools/v1/integrations/runtime/presence \
+  -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{}'
+```
+
+`provider_device_id` in the reply is the sandbox UUID. If it is, the whole
+chain — mint, trust, exchange, stamp — is working, and an empty catalog is a
+fact about the VM rather than about the plumbing.
+
 ## Rollout
 
 1. **M1 — issuer + tokens with today's flat users.** ES256 key in secrets;
@@ -285,6 +360,8 @@ Each shipped as proposed:
 | Per-sandbox token endpoint | `internal/metadata` |
 | `signup@` door, `ctl keys`, `ctl invite`, `ctl whoami` | `internal/sshgw` |
 | Guest token unit + timer | `deploy/install-guest-identity.sh` |
+| Presence lease + session catalog | `internal/hivemindpresence` (Part 3) |
+| `ctl sessions <name>` | `internal/ctlops`, `internal/sshgw` |
 
 Notes on the built thing:
 
