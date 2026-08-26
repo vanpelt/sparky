@@ -535,7 +535,8 @@ snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
-(a lean Ubuntu 24.04 + Go/Python·uv/Node + headless Chrome, ~4GB — replacing the
+(a lean Ubuntu 24.04 + Go/Python·uv/Node + headless Chrome and the agent-browser
+CLI, ~4GB — replacing the
 ~30GB `codex-universal`). It logs in as a non-root **`sparky`** user, declared by
 the image's `sparkbox.login-user` label and honored end-to-end (build-rootfs bakes
 the gateway key into `/home/sparky`, the release manifest carries
