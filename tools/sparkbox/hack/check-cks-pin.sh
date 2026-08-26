@@ -29,6 +29,34 @@ value_of() {
 release=$(value_of release)
 [ -n "$release" ] || { echo "could not read release from $entrypoint" >&2; exit 1; }
 
+# entrypoint.sh only supplies the DEFAULT. deploy/kubernetes/deployment.yaml
+# sets SPARKBOX_RELEASE explicitly on both the prepare init container and the
+# node container, and an explicit value wins — so the manifest, not the
+# default, decides what a CKS Pod actually downloads. A manifest naming a
+# release the checksums do not describe reaches the very same pair of silent
+# failures by a different route, and the checks below would never see it.
+deployment="$script_dir/../deploy/kubernetes/deployment.yaml"
+if [ -r "$deployment" ]; then
+  mismatched=$(awk -v want="$release" '
+    /^ *- name: SPARKBOX_RELEASE$/ { expect = 1; next }
+    expect {
+      expect = 0
+      value = $0
+      sub(/^ *value: */, "", value)
+      gsub(/"/, "", value)
+      if (value != want) printf "  FAIL deployment.yaml:%d sets %s\n", NR, value
+    }
+  ' "$deployment")
+  if [ -n "$mismatched" ]; then
+    echo "deployment.yaml disagrees with the release $entrypoint pins ($release):" >&2
+    printf '%s\n' "$mismatched" >&2
+    echo "  An explicit env value overrides the entrypoint default, so the" >&2
+    echo "  manifest is what a Pod obeys. Move all of them together." >&2
+    exit 1
+  fi
+  echo "deployment.yaml agrees: $release"
+fi
+
 manifest_url="https://github.com/vanpelt/sparky/releases/download/$release/manifest-$arch.env"
 manifest=$(curl -fsSL "$manifest_url") || {
   echo "FAIL: cannot fetch $manifest_url" >&2

@@ -78,7 +78,7 @@ spec:
             - name: SPARKBOX_PROXY_DOMAIN
               value: __SPARKBOX_PROXY_DOMAIN__
             - name: SPARKBOX_RELEASE
-              value: v0.6.0
+              value: v0.7.0
             - name: SPARKBOX_CHROOT_JAILER
               value: "true"
             - name: SPARKBOX_CONTROLLER_UID
@@ -293,7 +293,7 @@ spec:
             - name: SPARKBOX_HIVEMIND_API
               value: __SPARKBOX_HIVEMIND_API__
             - name: SPARKBOX_RELEASE
-              value: v0.6.0
+              value: v0.7.0
             - name: SPARKBOX_GUEST_SUBNET
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
