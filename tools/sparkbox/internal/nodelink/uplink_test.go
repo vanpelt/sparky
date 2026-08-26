@@ -1,11 +1,13 @@
 package nodelink
 
-// The node's request channel for workload identity and guest route controls.
+// The node's request channel for workload identity, guest route controls and
+// repo attachments.
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,5 +296,126 @@ func TestCertificateEnrollmentRejectsMalformedGatewayResponse(t *testing.T) {
 	if !errors.As(err, &typed) || typed.Kind != ctlops.KindInternal ||
 		typed.Code != "bad_certificate_response" {
 		t.Fatalf("malformed response error = %#v", err)
+	}
+}
+
+// The repo pair travels the same way, and the assertion that matters is the
+// same one: the hook is handed the AUTHENTICATED link name, and the payload
+// carries nothing else the gateway could mistake for one.
+func TestRepoRequestsReachGatewayWithAuthenticatedNode(t *testing.T) {
+	var gotNode string
+	var gotCred SelfRepoCredReq
+	exp := time.Unix(1700000000, 0).UTC()
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfRepos: func(_ context.Context, n string, req SelfReposReq) (SelfReposResp, error) {
+				gotNode = n
+				return SelfReposResp{Repos: []SelfRepoEntry{
+					{Host: "github.com", Slug: "wandb/hivemind", Ref: "main", Access: "write"},
+				}}, nil
+			},
+			OnSelfRepoCred: func(_ context.Context, n string, req SelfRepoCredReq) (SelfRepoCredResp, error) {
+				gotNode, gotCred = n, req
+				return SelfRepoCredResp{Username: "x-access-token", Password: "ghs_token", ExpiresAt: exp}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var manifest SelfReposResp
+	if err := u.Request(ctx, TypeSelfRepos, SelfReposReq{Sandbox: "alices-box"}, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" {
+		t.Errorf("node = %q; the hook must be handed the authenticated name", gotNode)
+	}
+	if len(manifest.Repos) != 1 || manifest.Repos[0].Slug != "wandb/hivemind" ||
+		manifest.Repos[0].Ref != "main" || manifest.Repos[0].Access != "write" {
+		t.Errorf("manifest = %+v", manifest.Repos)
+	}
+
+	var cred SelfRepoCredResp
+	if err := u.Request(ctx, TypeSelfRepoCred,
+		SelfRepoCredReq{Sandbox: "alices-box", Slug: "wandb/hivemind"}, &cred); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" || gotCred.Sandbox != "alices-box" || gotCred.Slug != "wandb/hivemind" {
+		t.Errorf("credential request = %+v, node = %q", gotCred, gotNode)
+	}
+	if cred.Password != "ghs_token" || !cred.ExpiresAt.Equal(exp) {
+		t.Errorf("credential = %+v", cred)
+	}
+}
+
+// A gateway that attaches no repositories must say so in a sentence the node
+// can classify into the 501 a guest is told, rather than leaving the request to
+// produce the unregistered-type error a version skew also produces — the two
+// have entirely different fixes.
+func TestRepoRequestsWithNoHookAreRefusedInWords(t *testing.T) {
+	node, _ := newPipePair(t, nil, func(c *Conn) { registerUplinkOps(c, "roster-node", Hooks{}) })
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, test := range []struct {
+		typ  string
+		body any
+	}{
+		{typ: TypeSelfRepos, body: SelfReposReq{Sandbox: "x"}},
+		{typ: TypeSelfRepoCred, body: SelfRepoCredReq{Sandbox: "x", Slug: "o/n"}},
+	} {
+		err := u.Request(ctx, test.typ, test.body, &SelfReposResp{})
+		var typed *ctlops.Error
+		if !errors.As(err, &typed) || typed.Code != CodeNoRepos {
+			t.Errorf("%s: err = %v, want code %s", test.typ, err, CodeNoRepos)
+		}
+	}
+}
+
+// Malformed requests must be refused at the door rather than reaching the
+// ledger as an empty-string lookup or the GitHub API as an unbounded path.
+func TestRepoRequestsAreBoundedBeforeTheHook(t *testing.T) {
+	reached := false
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfRepos: func(context.Context, string, SelfReposReq) (SelfReposResp, error) {
+				reached = true
+				return SelfReposResp{}, nil
+			},
+			OnSelfRepoCred: func(context.Context, string, SelfRepoCredReq) (SelfRepoCredResp, error) {
+				reached = true
+				return SelfRepoCredResp{}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, test := range []struct {
+		name string
+		typ  string
+		body any
+	}{
+		{name: "no sandbox", typ: TypeSelfRepos, body: SelfReposReq{}},
+		{name: "credential without a sandbox", typ: TypeSelfRepoCred, body: SelfRepoCredReq{Slug: "o/n"}},
+		{name: "credential without a slug", typ: TypeSelfRepoCred, body: SelfRepoCredReq{Sandbox: "x"}},
+		{name: "oversized slug", typ: TypeSelfRepoCred, body: SelfRepoCredReq{
+			Sandbox: "x", Slug: strings.Repeat("a", MaxRepoSlugBytes+1),
+		}},
+	} {
+		err := u.Request(ctx, test.typ, test.body, &SelfRepoCredResp{})
+		var typed *ctlops.Error
+		if !errors.As(err, &typed) || typed.Kind != ctlops.KindInvalid {
+			t.Errorf("%s: err = %v, want an invalid-request error", test.name, err)
+		}
+	}
+	if reached {
+		t.Error("a malformed request reached the gateway's hook")
 	}
 }

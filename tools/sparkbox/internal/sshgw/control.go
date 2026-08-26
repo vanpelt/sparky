@@ -36,8 +36,10 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	" secrets (pushed into your sandboxes as environment variables)\r\n" +
 	"  secret ls                list your secrets (names and tags; never values)\r\n" +
 	"  secret set <NAME> [--tag <t>]…  read a value from stdin and store it\r\n" +
-	"     gh auth token | ssh ctl@<gateway> secret set GITHUB_TOKEN\r\n" +
 	"     claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n" +
+	"     gh auth token | ssh ctl@<gateway> secret set GITHUB_TOKEN — still works, but\r\n" +
+	"       for repositories prefer `repo add` below: it clones with a one-hour\r\n" +
+	"       credential minted per sandbox, instead of a token of yours living in one.\r\n" +
 	"     a banner around the value is fine — the credential is picked out of it.\r\n" +
 	"     ssh -t ctl@<gateway> secret set <NAME>   prompts instead (paste, unechoed)\r\n" +
 	"     the value never goes on the command line, so it stays out of your history.\r\n" +
@@ -45,6 +47,14 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 	"  secret rm <NAME>         delete a secret and strip it from your sandboxes\r\n" +
 	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
 	"  unpin <name>             let a sandbox pause when idle again\r\n" +
+	"\r\n" +
+	" repos (cloned into your sandboxes at boot, before you get there)\r\n" +
+	"  repo ls                  list the repos attached to your tags\r\n" +
+	"  repo add <owner>/<name> [--tag <t>]… [--write] [--ref <r>] [--path <p>]\r\n" +
+	"     with no --tag it goes on `default`, which every new sandbox of yours has.\r\n" +
+	"  repo rm <owner>/<name>   detach a repo (clones already made are left alone)\r\n" +
+	"  repo check               which attachments the GitHub App can actually reach\r\n" +
+	"  github install           install that App on the repos you want\r\n" +
 	"\r\n" +
 	" snapshots (fork-able disk templates)\r\n" +
 	"  snapshot list            list your snapshots\r\n" +
@@ -281,6 +291,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlInvite(s, c, log)
 	case "secret", "secrets":
 		g.controlSecret(s, c, args[1:], log)
+	case "repo", "repos":
+		g.controlRepo(s, c, args[1:], log)
 	case "user", "users":
 		g.controlUser(s, c, args[1:], log)
 	case "node":
@@ -783,7 +795,7 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 		// Bare words are tags too, so `tags box ml prod` works alongside --tag.
 		want = append(parsed, rest...)
 	}
-	set, err := g.ops.SetTags(s.Context(), c, name, want)
+	set, note, err := g.ops.SetTags(s.Context(), c, name, want)
 	if err != nil {
 		failCtl(s, log, "tags", wrapVerbatim(err, ctlops.KindDisabled))
 		return
@@ -792,6 +804,13 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 		fmt.Fprintf(s, "cleared tags on %s\r\n", name)
 	} else {
 		fmt.Fprintf(s, "%s: %s\r\n", name, strings.Join(set, ", "))
+	}
+	// Repos follow tags. The note says whether the box took the checkout job,
+	// and it goes to stderr because the line above is the answer to what was
+	// asked — a script reading tags out of stdout should not have to parse
+	// around advice about a machine.
+	if note != "" {
+		fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n", note)
 	}
 	s.Exit(0) //nolint:errcheck
 }

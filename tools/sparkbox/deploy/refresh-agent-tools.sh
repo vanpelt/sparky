@@ -69,7 +69,7 @@ HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/h
 # the ~/.claude.json onboarding seed + the ~/.claude/settings.json permission
 # default + the hivemind daemon unit). Versioned like IDENTITY_REV so bumping it
 # re-patches every template on the next run even when no tool version moved.
-AGENT_ENV_REV=5
+AGENT_ENV_REV=6
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -381,6 +381,20 @@ The VM can also manage its default HTTPS endpoint: `sparkbox set-port PORT`
 changes the forwarded port, `sparkbox make-public` allows unauthenticated
 access to all of this VM's routes, and `sparkbox make-private` restores the
 authenticated default.
+
+GitHub repositories attached to this VM are cloned into your home directory at
+boot: `~/<repo>` when one is attached, `~/src/<owner>/<repo>` when several are.
+`sparkbox repos` lists every attachment, where it lives, and whether it cloned.
+Attaching a repository to a VM that is already running deliberately does not
+clone it, because that writes into a filesystem you are working in; run
+`sparkbox repos sync` when you want the new one fetched. A checkout that is
+already there is never touched.
+
+Do not create, paste, or store a GitHub token. git already authenticates to
+github.com through a system credential helper that asks this host for a
+short-lived token scoped to the one repository being fetched, so `git clone`,
+`git fetch` and `git push` on an attached repository just work, and nothing
+durable holds a credential.
 
 Only use documented Sparkbox features. Undocumented local endpoints, metadata
 services, gateway ports, and node services are internal infrastructure and may

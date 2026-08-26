@@ -218,15 +218,21 @@ func (l Local) claims(box *host.Sandbox) oidc.Claims {
 }
 
 type Server struct {
-	mgr      Sandboxes
-	id       Identity
-	routes   RouteControl
-	log      *slog.Logger
-	defAud   string
-	guestNet guestnet.Network
+	mgr        Sandboxes
+	id         Identity
+	routes     RouteControl
+	repoAccess RepoAccess
+	log        *slog.Logger
+	defAud     string
+	guestNet   guestnet.Network
 
 	mu     sync.Mutex
 	recent map[string][]time.Time // sandbox -> mint times inside the window
+
+	// The repo endpoints keep their own window. See credWindow in repos.go for
+	// why sharing the one above would cost the guest its identity.
+	credMu     sync.Mutex
+	credRecent map[string][]time.Time // sandbox+op -> request times inside the window
 }
 
 type Options struct {
@@ -234,7 +240,10 @@ type Options struct {
 	// Identity signs. Local on a gateway, a relay to one on a node.
 	Identity     Identity
 	RouteControl RouteControl
-	Logger       *slog.Logger
+	// Repos serves the two repository endpoints. Nil answers both 501, which
+	// is what a host with no repos store or no GitHub App is.
+	Repos  RepoAccess
+	Logger *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
 	// GuestSubnet must match the VM driver's IPv4 prefix. Empty uses the
@@ -262,7 +271,8 @@ func NewChecked(opts Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		mgr: opts.Manager, id: opts.Identity, routes: opts.RouteControl, log: log,
+		mgr: opts.Manager, id: opts.Identity, routes: opts.RouteControl,
+		repoAccess: opts.Repos, log: log,
 		defAud:   opts.DefaultAudience,
 		guestNet: guestNetwork,
 		recent:   map[string][]time.Time{},
@@ -273,6 +283,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /token", s.token)
 	mux.HandleFunc("GET /identity", s.identity)
+	mux.HandleFunc("GET /repos", s.repoManifest)
+	mux.HandleFunc("GET /github/credential", s.githubCredential)
 	mux.HandleFunc("GET /self", s.self)
 	mux.HandleFunc("POST /self/pin", s.pin)
 	mux.HandleFunc("POST /self/unpin", s.unpin)

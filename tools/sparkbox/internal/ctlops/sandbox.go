@@ -2,6 +2,8 @@ package ctlops
 
 import (
 	"context"
+	"errors"
+	"sync"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
@@ -380,20 +382,20 @@ func (o *Ops) Tags(ctx context.Context, c Caller, name string) ([]string, error)
 // SetTags replaces the whole set (nil or empty clears it) and then ResyncEnv's
 // the box, so the guest's secret env matches its new tags immediately rather
 // than at the next resume.
-func (o *Ops) SetTags(ctx context.Context, c Caller, name string, tags []string) ([]string, error) {
+func (o *Ops) SetTags(ctx context.Context, c Caller, name string, tags []string) ([]string, string, error) {
 	const op = "tags.set"
 	if _, err := o.owned(op, name, c); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if o.tags == nil {
-		return nil, Disabled(op, "tagging is not enabled on this host")
+		return nil, "", Disabled(op, "tagging is not enabled on this host")
 	}
 	want, err := NormalizeTags(tags)
 	if err != nil {
-		return nil, Invalid(op, "bad_tag", "%v", err)
+		return nil, "", Invalid(op, "bad_tag", "%v", err)
 	}
 	if err := o.tags.SetTags(name, c.Handle, want); err != nil {
-		return nil, Fail(op, err)
+		return nil, "", Fail(op, err)
 	}
 	// Secrets follow tags, so the box needs a re-push to match its new set.
 	o.boxes.ResyncEnv(ctx, name)
@@ -401,7 +403,76 @@ func (o *Ops) SetTags(ctx context.Context, c Caller, name string, tags []string)
 	if want == nil {
 		want = []string{}
 	}
-	return want, nil
+	return want, o.syncRepos(ctx, name), nil
+}
+
+// syncRepos nudges a running sandbox into re-checking-out after something that
+// changed what it is entitled to, and renders the outcome as the one line the
+// caller should print. Empty means there was nothing to say.
+//
+// Repos follow tags exactly as secrets do, and the reason this is a note rather
+// than an error is that the mutation already happened: the tags ARE set, the
+// attachment IS stored, and a guest that could not be reached will check out
+// the same repositories at its next boot regardless. Failing the call would
+// misreport a durable change as a rejected one. Saying nothing, which is what
+// this used to do, is how a sandbox came to accept a tag and then quietly check
+// nothing out — the confusion this note exists to end.
+func (o *Ops) syncRepos(ctx context.Context, name string) string {
+	if o.boxes == nil {
+		return ""
+	}
+	r, ok := o.boxes.(interface {
+		ResyncRepos(ctx context.Context, name string) error
+	})
+	if !ok {
+		return ""
+	}
+	switch err := r.ResyncRepos(ctx, name); {
+	case err == nil:
+		return ""
+	case errors.Is(err, host.ErrNoRepoSupport):
+		// The one failure a person can actually act on, and the one they are
+		// most likely to hit right after this feature ships: every sandbox that
+		// existed before it does.
+		return name + " was created before repo support — recreate it to get checkouts"
+	default:
+		o.log.Warn("could not sync a sandbox's checkouts", "name", name, "err", err)
+		return "could not reach " + name + " to sync its checkouts — it will check them out at its next start"
+	}
+}
+
+// syncReposFanout is syncRepos over the sandboxes one attachment reaches,
+// concurrently, returning only the notes worth printing.
+//
+// Concurrent because each nudge is an SSH dial into a different guest and the
+// caller is a person waiting at a prompt: done in series, attaching a repo to a
+// tag ten boxes carry would take ten round trips before it answered. The
+// caller's ctx bounds the whole fan-out, so a wedged guest cannot hold the
+// command open past the budget the transport already set.
+func (o *Ops) syncReposFanout(ctx context.Context, names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	notes := make([]string, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			notes[i] = o.syncRepos(ctx, name)
+		}()
+	}
+	wg.Wait()
+	out := notes[:0]
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Attach is the owner gate plus resume for an interactive session. It is the

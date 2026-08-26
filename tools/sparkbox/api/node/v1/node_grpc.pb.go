@@ -1051,8 +1051,10 @@ var NodeControl_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	GatewayIdentity_IssueToken_FullMethodName       = "/sparkbox.node.v1.GatewayIdentity/IssueToken"
-	GatewayIdentity_DescribeIdentity_FullMethodName = "/sparkbox.node.v1.GatewayIdentity/DescribeIdentity"
+	GatewayIdentity_IssueToken_FullMethodName          = "/sparkbox.node.v1.GatewayIdentity/IssueToken"
+	GatewayIdentity_DescribeIdentity_FullMethodName    = "/sparkbox.node.v1.GatewayIdentity/DescribeIdentity"
+	GatewayIdentity_ListRepos_FullMethodName           = "/sparkbox.node.v1.GatewayIdentity/ListRepos"
+	GatewayIdentity_IssueRepoCredential_FullMethodName = "/sparkbox.node.v1.GatewayIdentity/IssueRepoCredential"
 )
 
 // GatewayIdentityClient is the client API for GatewayIdentity service.
@@ -1065,6 +1067,13 @@ const (
 type GatewayIdentityClient interface {
 	IssueToken(ctx context.Context, in *IssueTokenRequest, opts ...grpc.CallOption) (*IssueTokenResponse, error)
 	DescribeIdentity(ctx context.Context, in *DescribeIdentityRequest, opts ...grpc.CallOption) (*IdentityDescription, error)
+	// The repo pair lives on this service rather than a service of its own
+	// because it needs precisely the same thing: the caller's authenticated node
+	// identity, on a listener that already requires an mTLS node certificate. A
+	// second service would be a second registration, listener and TLS wiring for
+	// an identical trust decision.
+	ListRepos(ctx context.Context, in *ListReposRequest, opts ...grpc.CallOption) (*ListReposResponse, error)
+	IssueRepoCredential(ctx context.Context, in *IssueRepoCredentialRequest, opts ...grpc.CallOption) (*IssueRepoCredentialResponse, error)
 }
 
 type gatewayIdentityClient struct {
@@ -1095,6 +1104,26 @@ func (c *gatewayIdentityClient) DescribeIdentity(ctx context.Context, in *Descri
 	return out, nil
 }
 
+func (c *gatewayIdentityClient) ListRepos(ctx context.Context, in *ListReposRequest, opts ...grpc.CallOption) (*ListReposResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListReposResponse)
+	err := c.cc.Invoke(ctx, GatewayIdentity_ListRepos_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayIdentityClient) IssueRepoCredential(ctx context.Context, in *IssueRepoCredentialRequest, opts ...grpc.CallOption) (*IssueRepoCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueRepoCredentialResponse)
+	err := c.cc.Invoke(ctx, GatewayIdentity_IssueRepoCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayIdentityServer is the server API for GatewayIdentity service.
 // All implementations must embed UnimplementedGatewayIdentityServer
 // for forward compatibility.
@@ -1105,6 +1134,13 @@ func (c *gatewayIdentityClient) DescribeIdentity(ctx context.Context, in *Descri
 type GatewayIdentityServer interface {
 	IssueToken(context.Context, *IssueTokenRequest) (*IssueTokenResponse, error)
 	DescribeIdentity(context.Context, *DescribeIdentityRequest) (*IdentityDescription, error)
+	// The repo pair lives on this service rather than a service of its own
+	// because it needs precisely the same thing: the caller's authenticated node
+	// identity, on a listener that already requires an mTLS node certificate. A
+	// second service would be a second registration, listener and TLS wiring for
+	// an identical trust decision.
+	ListRepos(context.Context, *ListReposRequest) (*ListReposResponse, error)
+	IssueRepoCredential(context.Context, *IssueRepoCredentialRequest) (*IssueRepoCredentialResponse, error)
 	mustEmbedUnimplementedGatewayIdentityServer()
 }
 
@@ -1120,6 +1156,12 @@ func (UnimplementedGatewayIdentityServer) IssueToken(context.Context, *IssueToke
 }
 func (UnimplementedGatewayIdentityServer) DescribeIdentity(context.Context, *DescribeIdentityRequest) (*IdentityDescription, error) {
 	return nil, status.Error(codes.Unimplemented, "method DescribeIdentity not implemented")
+}
+func (UnimplementedGatewayIdentityServer) ListRepos(context.Context, *ListReposRequest) (*ListReposResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRepos not implemented")
+}
+func (UnimplementedGatewayIdentityServer) IssueRepoCredential(context.Context, *IssueRepoCredentialRequest) (*IssueRepoCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IssueRepoCredential not implemented")
 }
 func (UnimplementedGatewayIdentityServer) mustEmbedUnimplementedGatewayIdentityServer() {}
 func (UnimplementedGatewayIdentityServer) testEmbeddedByValue()                         {}
@@ -1178,6 +1220,42 @@ func _GatewayIdentity_DescribeIdentity_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayIdentity_ListRepos_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListReposRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayIdentityServer).ListRepos(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayIdentity_ListRepos_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayIdentityServer).ListRepos(ctx, req.(*ListReposRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayIdentity_IssueRepoCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssueRepoCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayIdentityServer).IssueRepoCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayIdentity_IssueRepoCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayIdentityServer).IssueRepoCredential(ctx, req.(*IssueRepoCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayIdentity_ServiceDesc is the grpc.ServiceDesc for GatewayIdentity service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1192,6 +1270,14 @@ var GatewayIdentity_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DescribeIdentity",
 			Handler:    _GatewayIdentity_DescribeIdentity_Handler,
+		},
+		{
+			MethodName: "ListRepos",
+			Handler:    _GatewayIdentity_ListRepos_Handler,
+		},
+		{
+			MethodName: "IssueRepoCredential",
+			Handler:    _GatewayIdentity_IssueRepoCredential_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

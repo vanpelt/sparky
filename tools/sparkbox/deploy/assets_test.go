@@ -60,43 +60,278 @@ exit 0
 	}
 }
 
-func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
+// fakeGuestTree builds the smallest rootfs the installer will accept: one
+// non-root account owning an authorized_keys (which is how the installer
+// derives the login user), plus the two files the image ships that the payload
+// has to ADD to rather than replace — /etc/gitconfig, which already carries
+// init.defaultBranch, and the static /etc/motd.
+//
+// `systemd` chooses which of the two trees the installer supports it sees.
+// build-rootfs.sh keeps a slim, systemd-less fallback template alive, so
+// everything outside the unit block has to land in both.
+func fakeGuestTree(t *testing.T, systemd bool) string {
+	t.Helper()
 	root := t.TempDir()
-	for _, dir := range []string{"etc", "home/sparky/.ssh"} {
+	dirs := []string{"etc", "home/sparky/.ssh"}
+	if systemd {
+		dirs = append(dirs, "lib/systemd")
+	}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("sparky:x:1000:1000::/home/sparky:/bin/bash\n"), 0o644); err != nil {
-		t.Fatal(err)
+	files := map[string]string{
+		"etc/passwd":                       "sparky:x:1000:1000::/home/sparky:/bin/bash\n",
+		"home/sparky/.ssh/authorized_keys": "ssh-ed25519 test\n",
+		"etc/gitconfig":                    "[init]\n\tdefaultBranch = main\n",
+		"etc/motd":                         "the baked banner\n",
 	}
-	if err := os.WriteFile(filepath.Join(root, "home/sparky/.ssh/authorized_keys"), []byte("ssh-ed25519 test\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if systemd {
+		files["lib/systemd/systemd"] = "#!/bin/false\n"
 	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
 
-	cmd := exec.Command("bash", "install-guest-identity.sh", root)
+// installGuestPayload runs the real installer against tree, so the tests below
+// assert on the bytes a guest actually receives rather than on the script that
+// writes them — the @@TOKEN@@ substitutions in particular are only visible on
+// the far side of it.
+func installGuestPayload(t *testing.T, tree string) {
+	t.Helper()
+	cmd := exec.Command("bash", "install-guest-identity.sh", tree)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install guest payload: %v\n%s", err, out)
 	}
-	cli, err := os.ReadFile(filepath.Join(root, "usr/local/bin/sparkbox"))
+}
+
+func guestFile(t *testing.T, tree, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(tree, name))
 	if err != nil {
 		t.Fatal(err)
 	}
+	return string(body)
+}
+
+func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+
+	cli := guestFile(t, root, "usr/local/bin/sparkbox")
 	for _, want := range []string{
 		"$META/self/pin", "$META/self/unpin", "$META/self",
 		"$META/self/visibility/public", "$META/self/visibility/private",
 		"$META/self/port/$2",
+		// `repos` delegates instead of reimplementing the manifest read: the
+		// rule that reports where a repo lives must be the same rule that put
+		// it there, or the report names a directory nothing cloned into.
+		"SB=/usr/local/sbin/sparkbox-repos",
+		"exec $SB status",
+		"exec $SB sync",
+		// And it delegates as ROOT when it can. The boot unit runs as root and
+		// writes the status file and the login banner; a user-run sync that
+		// could not write them would clone successfully and leave the banner
+		// reporting the old failure at every login, forever. -n so a template
+		// without passwordless sudo degrades instead of hanging on a prompt.
+		"sudo -n /usr/local/sbin/sparkbox-repos",
+		"sudo -n true",
 	} {
-		if !strings.Contains(string(cli), want) {
+		if !strings.Contains(cli, want) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	rev, err := os.ReadFile(filepath.Join(root, "etc/sparkbox/identity-rev"))
-	if err != nil {
-		t.Fatal(err)
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=7\n" {
+		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
-	if string(rev) != "IDENTITY_REV=5\n" {
-		t.Fatalf("identity revision = %q", rev)
+}
+
+// TestGuestCredentialHelperIsSilentAndPathScoped pins the two properties that
+// decide whether a headless clone works at all.
+//
+// Silence first: git falls through to prompting on the terminal when a helper
+// fails, and the boot-time clone has no terminal, so a helper that reports its
+// problems is a helper that hangs. Every failure path here has to be a bare
+// `exit 0`.
+//
+// Then scope: `useHttpPath = true` is what makes git send the repository path,
+// and it is the whole difference between a token scoped to this fetch and a
+// token scoped to every repository the sandbox can reach.
+func TestGuestCredentialHelperIsSilentAndPathScoped(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+
+	helper := guestFile(t, root, "usr/local/bin/sparkbox-git-credential")
+	for _, want := range []string{
+		`[ "${1:-}" = get ] || exit 0`,     // store and erase say nothing
+		"/github/credential?slug=$path",    // the contract's query parameter
+		"path=${path%.git}",                // a clone URL carries the suffix; the ledger does not
+		`printf 'username=%s\npassword=%s`, // git's own reply format
+	} {
+		if !strings.Contains(helper, want) {
+			t.Errorf("credential helper missing %q", want)
+		}
+	}
+	for _, never := range []string{"echo ", ">&2"} {
+		if strings.Contains(helper, never) {
+			t.Errorf("credential helper says %q on a failure path; git responds to a "+
+				"talkative helper by prompting for a username nobody is there to type", never)
+		}
+	}
+	// A token that reaches the filesystem rides into every snapshot, fork and
+	// archived rootfs made from this box. It is minted per request and printed
+	// to git; there is nowhere for it to be written.
+	for _, never := range []string{".git-credentials", "credential.helper store"} {
+		if strings.Contains(helper, never) {
+			t.Errorf("credential helper persists the token via %q", never)
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(root, "usr/local/bin/sparkbox-git-credential")); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("credential helper is not executable (mode %v); git would silently ignore it", fi.Mode())
+	}
+
+	gitcfg := guestFile(t, root, "etc/gitconfig")
+	for _, want := range []string{
+		`[credential "https://github.com"]`,
+		"helper = /usr/local/bin/sparkbox-git-credential", // absolute: a bare word makes git exec `git credential-<word>`
+		"useHttpPath = true",
+	} {
+		if !strings.Contains(gitcfg, want) {
+			t.Errorf("guest /etc/gitconfig missing %q", want)
+		}
+	}
+	if !strings.Contains(gitcfg, "defaultBranch = main") {
+		t.Error("the payload truncated /etc/gitconfig instead of appending to it; the image already writes init.defaultBranch there")
+	}
+}
+
+// TestGuestPayloadRePatchesWithoutAccumulating pins idempotence, which is not a
+// nicety here: refresh-agent-tools.sh re-runs this installer against every
+// template whose IDENTITY_REV is behind, so a step that appends unconditionally
+// appends once per release.
+func TestGuestPayloadRePatchesWithoutAccumulating(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+	base := guestFile(t, root, "etc/sparkbox/motd.base")
+	installGuestPayload(t, root)
+
+	if n := strings.Count(guestFile(t, root, "etc/gitconfig"), "useHttpPath = true"); n != 1 {
+		t.Errorf("credential config written %d times into /etc/gitconfig", n)
+	}
+	// The clone worker rewrites /etc/motd as (this file + status), so a re-patch
+	// that re-captured an already-rewritten banner would compound the status
+	// line into the banner on every refresh.
+	if got := guestFile(t, root, "etc/sparkbox/motd.base"); got != base {
+		t.Errorf("saved login banner changed on re-patch:\n%q\nwant:\n%q", got, base)
+	}
+	if base != "the baked banner\n" {
+		t.Errorf("saved login banner = %q, want the image's own /etc/motd", base)
+	}
+}
+
+// TestRepoCloneNeverBlocksTheFirstAttach is the one assertion in this file that
+// exists because the mistake has already been made. sparkbox-net.service
+// carries Before=ssh.service because it generates the host keys sshd needs, and
+// copying that line into a unit that clones a repository would put a
+// multi-minute network operation in front of the first attach — the same shape
+// as the boot race main@e196d5f fixed, and slower.
+func TestRepoCloneNeverBlocksTheFirstAttach(t *testing.T) {
+	script := string(GuestIdentityScript)
+	unit := heredocBody(t, script, "sparkbox-repos.service\" <<'EOF'\n")
+	if strings.Contains("\n"+unit, "\nBefore=") {
+		t.Errorf("sparkbox-repos.service orders itself before something; a clone must "+
+			"make somebody wait for a directory, never for their shell:\n%s", unit)
+	}
+	for _, want := range []string{
+		"Type=oneshot",
+		// Correct here and wrong on sparkbox-token.service: nothing re-triggers
+		// this unit, so staying active is what stops a stray `systemctl start`
+		// from running the pass a second time.
+		"RemainAfterExit=yes",
+		"After=network-online.target sparkbox-net.service sparkbox-token.service",
+		"ExecStart=/usr/local/sbin/sparkbox-repos sync",
+		"WantedBy=multi-user.target",
+		// A large monorepo outlives systemd's 90-second default and would be
+		// killed mid-clone.
+		"TimeoutStartSec=",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("sparkbox-repos.service missing %q:\n%s", want, unit)
+		}
+	}
+	// [Install] alone does nothing in a tree nothing ever runs `systemctl
+	// enable` against; the symlink IS the enablement.
+	if !strings.Contains(script, "multi-user.target.wants/sparkbox-repos.service") {
+		t.Error("sparkbox-repos.service is never symlinked into multi-user.target.wants, so it never runs at boot")
+	}
+}
+
+// TestRepoWorkerClonesForTheUserAndLeavesCheckoutsAlone reads the installed
+// worker rather than the installer, so the @@SANDBOX_USER@@ substitution is
+// covered too — a hardcoded `sparky` would pass every string check against the
+// script and then clone into the wrong home on a root-login template.
+func TestRepoWorkerClonesForTheUserAndLeavesCheckoutsAlone(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+	worker := guestFile(t, root, "usr/local/sbin/sparkbox-repos")
+
+	for _, want := range []string{
+		`"$META/repos"`,
+		// Full history with blobs on demand. Agents run git log, blame and
+		// bisect, all of which a shallow clone breaks.
+		"--filter=blob:none",
+		// A repository the helper cannot get a token for must fail in seconds,
+		// not block on a username prompt nobody is there to answer.
+		"GIT_TERMINAL_PROMPT=0",
+		// Derived from the tree, not assumed. git refuses to work in a tree
+		// owned by somebody else, so a root-owned checkout in a user's home is
+		// worse than no checkout at all — and a hardcoded `sparky` would clone
+		// into the wrong home on a root-login template.
+		"SANDBOX_USER=sparky",
+		`RUNAS="runuser -u $SANDBOX_USER --"`,
+		// Whatever is already at EITHER default location is left exactly as it
+		// is. Both are probed because the default is a function of how many
+		// attachments the tag carries right now, and that number moves under a
+		// checkout that already exists: attaching a second repo would otherwise
+		// re-clone the first one somewhere else and report the empty copy.
+		`for candidate in "$dest" "$HOME_DIR/$name" "$HOME_DIR/src/$owner/$name"; do`,
+		`if [ -e "$candidate" ]; then`,
+		"continue 2",
+		// The default layout, both halves.
+		`dest="$HOME_DIR/src/$owner/$name"`,
+		`dest="$HOME_DIR/$name"`,
+		// A failed clone is a warning, never a failed boot.
+		`if [ "$MODE" = sync ]; then exit 0; fi`,
+	} {
+		if !strings.Contains(worker, want) {
+			t.Errorf("repo worker missing %q", want)
+		}
+	}
+	// Redirections apply left to right, so `> file 2>/dev/null` still reports
+	// "Permission denied" on the stderr it has not replaced yet. Every
+	// privileged write in this script has to put 2>/dev/null FIRST, or an
+	// unprivileged run sprays raw shell errors over its own output.
+	for _, bad := range []string{
+		`> /etc/.motd.sparkbox 2>/dev/null`,
+		`> "$STATUS_FILE.new" 2>/dev/null`,
+	} {
+		if strings.Contains(worker, bad) {
+			t.Errorf("repo worker has %q: stderr must be redirected before the redirection that can fail", bad)
+		}
+	}
+
+	if strings.Contains(worker, "--depth") {
+		t.Error("repo worker clones shallowly; --filter=blob:none is the default that keeps git log, blame and bisect working")
+	}
+	if strings.Contains(worker, "@@") {
+		t.Error("repo worker still carries an unsubstituted @@TOKEN@@")
 	}
 }
 
@@ -205,7 +440,12 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"sparkbox make-public",
 		"sparkbox make-private",
 		"sparkbox set-port PORT",
-		"AGENT_ENV_REV=5",
+		"sparkbox repos",
+		"sparkbox repos sync",
+		// The sentence that stops an agent solving a private clone the way the
+		// old documentation told it to: by asking for a personal access token.
+		"Do not create, paste, or store a GitHub token",
+		"AGENT_ENV_REV=6",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
@@ -432,5 +672,124 @@ func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// runGHWrapper executes the installed `gh` wrapper against stub tools and
+// returns what the stub `gh` recorded.
+//
+// The wrapper's path to the real binary is absolute on purpose — a relative
+// `gh` would find the wrapper itself — so the test rewrites it rather than
+// asking the shipped script for a test seam. A seam here would be a variable
+// that decides which binary `gh` means, which is not a knob worth shipping to
+// make an assertion easier.
+func runGHWrapper(t *testing.T, remote string, env []string) (stdout string, sawToken string, ranReal bool) {
+	t.Helper()
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+
+	bin := t.TempDir()
+	real := filepath.Join(bin, "real-gh")
+	tokenLog := filepath.Join(bin, "token")
+	writeExecutable(t, real, `#!/bin/sh
+printf '%s' "${GH_TOKEN-}" > "`+tokenLog+`"
+echo "real gh ran: $*"
+`)
+	writeExecutable(t, filepath.Join(bin, "git"), `#!/bin/sh
+# Only `+"`git config --get remote.origin.url`"+` is consulted.
+[ "$1" = config ] || exit 1
+[ -n "`+remote+`" ] || exit 1
+echo "`+remote+`"
+`)
+	writeExecutable(t, filepath.Join(bin, "ip"), `#!/bin/sh
+[ "$1" = -4 ] && echo "default via 10.0.0.1 dev eth0"
+`)
+	writeExecutable(t, filepath.Join(bin, "curl"), `#!/bin/sh
+# Echo the URL back inside the credential document so the test can assert on
+# exactly what slug the wrapper asked for.
+for a in "$@"; do case "$a" in http*) url=$a ;; esac; done
+printf '{"username":"x-access-token","password":"tok-for %s"}' "$url"
+`)
+
+	script := strings.ReplaceAll(guestFile(t, root, "usr/local/bin/gh"), "/usr/bin/gh", real)
+	wrapper := filepath.Join(bin, "wrapper.sh")
+	writeExecutable(t, wrapper, script)
+
+	cmd := exec.Command("sh", wrapper, "pr", "list")
+	// Prepend, never replace: the wrapper shells out to awk and sed, and a PATH
+	// holding only the stubs would make every branch fail its way to the
+	// unauthenticated fallback — which is what these tests are trying to tell
+	// apart from a real one.
+	cmd.Env = append(append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH")), env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gh wrapper: %v\n%s", err, out)
+	}
+	if body, rerr := os.ReadFile(tokenLog); rerr == nil {
+		ranReal, sawToken = true, string(body)
+	}
+	return string(out), sawToken, ranReal
+}
+
+// TestGuestGHWrapperScopesTheTokenToTheCheckout is the property that makes `gh`
+// usable in a sandbox at all: it has no credential helper, so without this it
+// reports "not logged into any GitHub hosts" beside a warm private checkout.
+//
+// The token must be scoped to the repository the caller is standing in, which
+// is both the right answer for a repository-scoped tool and the narrowest one.
+func TestGuestGHWrapperScopesTheTokenToTheCheckout(t *testing.T) {
+	for _, remote := range []string{
+		"https://github.com/wandb/hivemind.git",
+		"https://github.com/wandb/hivemind",
+		"git@github.com:wandb/hivemind.git",
+		"ssh://git@github.com/wandb/hivemind.git",
+	} {
+		_, token, ranReal := runGHWrapper(t, remote, nil)
+		if !ranReal {
+			t.Fatalf("%s: the real gh never ran", remote)
+		}
+		if !strings.Contains(token, "slug=wandb/hivemind") {
+			t.Errorf("%s: minted for %q, want the checkout's own slug", remote, token)
+		}
+	}
+}
+
+// TestGuestGHWrapperNeverBlocksAGHCommand pins the fallback. This wrapper sits
+// in front of every `gh` invocation in the sandbox, so any failure of its own —
+// no git, no remote, a remote pointing somewhere else, no metadata service —
+// has to fall through to an unauthenticated gh rather than become the reason a
+// command did not run. `gh --version` and `gh auth login` must work in an empty
+// directory.
+func TestGuestGHWrapperNeverBlocksAGHCommand(t *testing.T) {
+	for name, remote := range map[string]string{
+		"no remote at all":     "",
+		"not github":           "https://gitlab.com/wandb/hivemind.git",
+		"three path segments":  "https://github.com/wandb/hivemind/extra",
+		"shell metacharacters": "https://github.com/wandb/hive;mind",
+		"query injection":      "https://github.com/wandb/hivemind&x=1",
+	} {
+		out, token, ranReal := runGHWrapper(t, remote, nil)
+		if !ranReal || !strings.Contains(out, "real gh ran: pr list") {
+			t.Errorf("%s: the real gh did not run (%q)", name, out)
+		}
+		if token != "" {
+			t.Errorf("%s: minted a token for a slug it should have refused: %q", name, token)
+		}
+	}
+}
+
+// TestGuestGHWrapperYieldsToAnExplicitToken: somebody who exported GH_TOKEN
+// meant it. Overriding it with ours would be the same class of surprise the
+// wrapper exists to remove, and would make `gh auth login --with-token`
+// impossible to use in a sandbox that has any repo attached.
+func TestGuestGHWrapperYieldsToAnExplicitToken(t *testing.T) {
+	for _, kv := range []string{"GH_TOKEN=mine", "GITHUB_TOKEN=mine"} {
+		_, token, ranReal := runGHWrapper(t, "https://github.com/wandb/hivemind.git", []string{kv})
+		if !ranReal {
+			t.Fatalf("%s: the real gh never ran", kv)
+		}
+		if strings.Contains(token, "slug=") {
+			t.Errorf("%s: the wrapper overrode an explicit token with %q", kv, token)
+		}
 	}
 }

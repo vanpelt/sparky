@@ -32,9 +32,11 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -136,6 +138,7 @@ type Handler struct {
 	routes   *routes.Store            // optional: nil hides web routes and disables port/visibility
 	secrets  *secrets.Store           // optional: nil disables tags + secrets endpoints
 	netrules *netrules.Store          // optional: nil disables network-rule endpoints (501)
+	repos    *repos.Store             // optional: nil disables repo endpoints (501)
 	netplane NetPlane                 // optional: nil disables bandwidth + policy push (501)
 	favicons *domainmeta.FaviconCache // optional: nil serves the globe fallback
 	accounts edgeauth.Accounts
@@ -155,6 +158,23 @@ type Handler struct {
 	// probe carries this machine's name and the fleet dialer: together they
 	// decide which rows are remote and how long their port probes may take.
 	probe webui.Probe
+
+	// app answers "is the GitHub App installed on that repository", the one
+	// fact about an attachment that this host does not own and cannot infer.
+	// Optional: nil renders every row's App state as appOff, which is the
+	// honest answer on a host configured with no App — attachment still works,
+	// public repos still clone, and nothing here pretends to know more.
+	// Set by SetGitHubApp, not by New, because it arrives from a fleet secret
+	// that may be absent.
+	app *ghapp.App
+	// appMu guards the probe cache below.
+	appMu sync.Mutex
+	// appSeen remembers what the App last said about one account's attachment,
+	// keyed by probeKey. See appState for why this cache exists at all.
+	appSeen map[string]appProbe
+	// appBusy is the set of keys with a probe already in flight, so a poll that
+	// arrives mid-probe does not start a second one.
+	appBusy map[string]bool
 }
 
 // New builds a user-console handler for <subdomain>.<domain> (subdomain is
@@ -165,7 +185,8 @@ type Handler struct {
 // ("" when browser terminals are disabled). secure should be true when the
 // proxy edge serves TLS.
 func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Store,
-	netrulesStore *netrules.Store, netPlane NetPlane, favicons *domainmeta.FaviconCache,
+	netrulesStore *netrules.Store, reposStore *repos.Store, netPlane NetPlane,
+	favicons *domainmeta.FaviconCache,
 	accounts edgeauth.Accounts, signer *edgeauth.Signer, syncer OwnerSyncer,
 	subdomain, domain, xtermSub string, secure bool, log *slog.Logger) *Handler {
 	if subdomain == "" {
@@ -178,7 +199,7 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 	domain = strings.TrimPrefix(domain, ".")
 	h := &Handler{
 		mgr: mgr, boxes: mgr, routes: routeStore, secrets: secretsStore,
-		netrules: netrulesStore, netplane: netPlane, favicons: favicons,
+		netrules: netrulesStore, repos: reposStore, netplane: netPlane, favicons: favicons,
 		accounts: accounts, signer: signer, syncer: syncer,
 		domain: domain, xtermSub: strings.Trim(xtermSub, "."), secure: secure, log: log,
 		loginURL: "https://login." + domain + "/",
@@ -214,6 +235,13 @@ func (h *Handler) SetDialer(d Dialer) { h.probe.Dial = d }
 // anyone else's — right for one machine, and the reason a fleet must call this.
 func (h *Handler) SetVitals(v webui.VitalsReader) { h.vitals = v }
 
+// SetGitHubApp gives the Repos panel the App it asks whether an attachment is
+// actually reachable. It is a seam rather than a New parameter because the App
+// is built from a fleet secret that is routinely absent: a host with no key
+// still stores attachments, still clones public repositories, and must still
+// serve this console — it simply stops claiming to know what github.com thinks.
+func (h *Handler) SetGitHubApp(a *ghapp.App) { h.app = a }
+
 func (h *Handler) Handler() http.Handler {
 	auth := edgeauth.Require(h.signer, h.accounts, h.loginURL)
 	csrf := edgeauth.RequireMutation(h.signer, h.accounts, h.loginURL, h.origin)
@@ -246,6 +274,9 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("GET /api/network-rules", require(h.listNetRules))
 	mux.Handle("PUT /api/network-rules/{name}", mutate(h.putNetRule))
 	mux.Handle("DELETE /api/network-rules/{name}", mutate(h.deleteNetRule))
+	mux.Handle("GET /api/repos", require(h.listRepos))
+	mux.Handle("PUT /api/repos/{slug}", mutate(h.putRepo))
+	mux.Handle("DELETE /api/repos/{slug}", mutate(h.deleteRepo))
 	mux.Handle("GET /api/machines/{name}/bandwidth", require(h.bandwidth))
 	mux.Handle("GET /api/favicon", require(h.favicon))
 	mux.HandleFunc("GET /", h.index)
@@ -707,7 +738,8 @@ func (h *Handler) setTags(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("user console set tags", "sandbox", name, "tags", len(req.Tags), "handle", handleFrom(r))
 	h.syncOwner(r.Context(), box.Owner)
-	h.pushNet() // tags govern network rules too: re-push this VM's egress policy
+	h.pushNet()       // tags govern network rules too: re-push this VM's egress policy
+	h.syncRepos(name) // and repos: a tag decides which repositories land in this box
 	tags, err := h.secrets.TagsFor(name)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -934,6 +966,334 @@ func (h *Handler) deleteNetRule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// The install states the Repos panel renders. They are strings rather than a
+// bool because "installed" and "not installed" are only two of the four answers
+// a host can honestly give, and collapsing the other two into false would tell
+// a user their App is missing when the truth is that this host has no App at
+// all, or that github.com did not answer.
+const (
+	appOff      = "off"      // no GitHub App configured on this host
+	appChecking = "checking" // asked; the answer lands in time for the next poll
+	appReady    = "ready"    // installed, and this account may use it
+	appMissing  = "missing"  // the App is not installed on it — clones will fail
+	appBlocked  = "blocked"  // installed, but refused for this account
+	appUnknown  = "unknown"  // github.com did not answer
+)
+
+// How long one probe's answer is trusted, and how long the probe itself may
+// take. The TTL is short because the state it caches is one a user changes on
+// github.com and then comes straight back here to watch flip; the timeout is
+// generous because it is spent on a background goroutine nobody is waiting on.
+const (
+	appProbeTTL     = 90 * time.Second
+	appProbeTimeout = 20 * time.Second
+	// appProbeCap bounds the cache. It is per-host, not per-owner, so it is
+	// sized well above the store's own per-owner attachment cap.
+	appProbeCap = 512
+)
+
+// appProbe is one remembered answer.
+type appProbe struct {
+	state string
+	note  string
+	at    time.Time
+}
+
+// repoView is one attachment as the panel renders it: the stored row plus what
+// the App last said about it. The state is not part of repos.Repo because it is
+// not stored anywhere and is not this host's to store — it is a fact about
+// github.com that changes without any write here. It is on the list response
+// rather than behind a per-row button because "attached, and the App cannot
+// reach it" is the failure mode of this whole feature, and it is otherwise
+// invisible until a clone fails inside a booting guest.
+type repoView struct {
+	repos.Repo
+	App string `json:"app"` // one of the app* constants above
+	// AppNote is the sentence behind a blocked or unknown state — ghapp writes
+	// errors a human reads, and the panel has nowhere else to put the reason.
+	AppNote string `json:"app_note,omitempty"`
+	// InstallURL is where the missing installation gets installed. Only set
+	// when it would help, so the page never renders a call to action next to a
+	// repository that is already reachable.
+	InstallURL string `json:"install_url,omitempty"`
+}
+
+// listRepos returns the session's repo attachments in full, each carrying the
+// App's view of it. Like network rules and unlike secrets, nothing here is
+// sensitive: a slug is configuration.
+func (h *Handler) listRepos(w http.ResponseWriter, r *http.Request) {
+	if h.repos == nil {
+		writeErr(w, http.StatusNotImplemented, "repos are not enabled on this host")
+		return
+	}
+	handle := handleFrom(r)
+	list, err := h.repos.ListRepos(handle)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	// Built with make so an owner with no attachments serialises as [] rather
+	// than null: the SPA's Array.isArray guard renders null as an empty table,
+	// with no error anywhere to explain it.
+	views := make([]repoView, 0, len(list))
+	for _, rp := range list {
+		state, note := h.appState(handle, rp)
+		v := repoView{Repo: rp, App: state, AppNote: note}
+		if state == appMissing {
+			v.InstallURL = h.app.InstallURL()
+		}
+		views = append(views, v)
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+// appState reports what the App last said about one of handle's attachments,
+// and starts a probe when it has nothing fresh to say.
+//
+// It never calls github.com on the request goroutine, which matters more than
+// it looks: the SPA re-lists every four seconds, an owner may hold a hundred
+// attachments, and ghapp deliberately does not cache a failure — so an inline
+// probe would put an uncached fan-out of API calls behind a four-second poll,
+// and would spend the App's rate limit on exactly the rows that are already
+// broken. A miss therefore answers appChecking and the answer lands in time for
+// the next poll; a stale hit answers with the old value while the refresh runs
+// behind it, so a settled row never flickers back to "checking".
+//
+// The answer is per ACCOUNT, not per repository, because it includes
+// ghapp.Authorize — see probeApp. Two people attaching the same slug get two
+// cache entries, which is the point.
+func (h *Handler) appState(handle string, rp repos.Repo) (state, note string) {
+	if h.app == nil {
+		return appOff, ""
+	}
+	owner, name, ok := repos.SplitSlug(rp.Slug)
+	if !ok {
+		// Unreachable through this API — the store refuses such a slug — but a
+		// row written by an older or a future writer must not send nonsense to
+		// github.com on a four-second timer.
+		return appUnknown, "this attachment's slug is not an owner/name repository"
+	}
+	key := probeKey(handle, rp.Host, rp.Slug)
+	h.appMu.Lock()
+	defer h.appMu.Unlock()
+	p, have := h.appSeen[key]
+	if (!have || time.Since(p.at) >= appProbeTTL) && !h.appBusy[key] {
+		if h.appBusy == nil {
+			h.appBusy = map[string]bool{}
+		}
+		h.appBusy[key] = true
+		go h.probeApp(key, handle, owner, name)
+	}
+	if have {
+		return p.state, p.note
+	}
+	return appChecking, ""
+}
+
+// probeApp asks github.com once and records the answer.
+//
+// It is ctlops.checkRepo's two questions in this console's shape, and it asks
+// both for the same reason that one does: an installation the caller may not
+// use is not a reachable repository, and reporting it as one here while
+// `ctl repo check` calls it unreachable would leave two surfaces disagreeing
+// about the only thing either is for. Authorize is also what keeps this panel
+// from answering "is the App installed on <someone else's private repo>" for
+// any slug an account cares to type.
+//
+// Every outcome is recorded, including the failures ghapp refuses to cache:
+// this cache is not ghapp's — it exists to keep a four-second poll off the
+// network, and a repository nobody installed the App on is precisely the row
+// that would otherwise be re-asked fifteen times a minute forever.
+func (h *Handler) probeApp(key, handle, owner, name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), appProbeTimeout)
+	defer cancel()
+	state, note := h.probeOnce(ctx, handle, owner, name)
+
+	h.appMu.Lock()
+	defer h.appMu.Unlock()
+	delete(h.appBusy, key)
+	if h.appSeen == nil {
+		h.appSeen = map[string]appProbe{}
+	}
+	if len(h.appSeen) >= appProbeCap {
+		for k, v := range h.appSeen {
+			if time.Since(v.at) >= appProbeTTL {
+				delete(h.appSeen, k)
+			}
+		}
+		// Still full: this host holds more live attachments than the cap, so
+		// drop the lot. Rebuilding costs one poll's worth of "checking", which
+		// is the right price for a bound that cannot be exceeded.
+		if len(h.appSeen) >= appProbeCap {
+			h.appSeen = map[string]appProbe{}
+		}
+	}
+	h.appSeen[key] = appProbe{state: state, note: note, at: time.Now()}
+}
+
+// attachAllowed is the console's half of the one attachment rule, delegating to
+// ctlops.AttachGate so this door and the ctl/REST doors cannot drift apart. The
+// gate returns a *ctlops.Error, which statusFor already honours — so a missing
+// link is a 409 (something to go and do) and a weak one a 403 (something to
+// redo), rather than one indistinguishable 400.
+func (h *Handler) attachAllowed(handle string) error {
+	u, err := h.accounts.Get(handle)
+	if err != nil {
+		// The session already passed edgeauth, which reads the same record, so
+		// this is a store that broke between two reads rather than an unknown
+		// account. Either way there is no identity to authorize with.
+		return ctlops.Fail("repo.attach", err)
+	}
+	return ctlops.AttachGate("repo.attach", u)
+}
+
+// probeOnce is the two upstream questions, mapped onto the panel's vocabulary.
+// The distinction it preserves is between an answer ("not installed", "you may
+// not use this installation") and no answer at all ("github.com did not
+// respond"): the first two are things to go and fix, the third is a thing to
+// ask again about in a minute, and a UI that renders them alike sends people to
+// fix something that was never broken.
+func (h *Handler) probeOnce(ctx context.Context, handle, owner, name string) (state, note string) {
+	u, err := h.accounts.Get(handle)
+	if err != nil {
+		// The session already passed edgeauth, which reads the same record, so
+		// this is a store that broke between two reads rather than an unknown
+		// account. Either way there is no identity to authorize with.
+		return appUnknown, "could not read this account's GitHub link"
+	}
+	inst, err := h.app.InstallationFor(ctx, owner, name)
+	if err != nil {
+		switch {
+		case errors.Is(err, ghapp.ErrNotInstalled):
+			return appMissing, err.Error()
+		case errors.Is(err, ghapp.ErrNotConfigured):
+			return appOff, ""
+		case errors.Is(err, ghapp.ErrUpstream):
+			return appUnknown, err.Error()
+		}
+		return appBlocked, err.Error()
+	}
+	if err := h.app.Authorize(ctx, inst, u.GitHubID, u.GitHubLogin); err != nil {
+		if errors.Is(err, ghapp.ErrUpstream) {
+			return appUnknown, err.Error()
+		}
+		return appBlocked, err.Error()
+	}
+	return appReady, ""
+}
+
+// probeKey folds the slug because github.com does: wandb/Hivemind and
+// wandb/hivemind are one repository, and the store's own lookups already treat
+// them as one row.
+func probeKey(handle, host, slug string) string {
+	return handle + "\x00" + host + "/" + strings.ToLower(slug)
+}
+
+// forgetAppProbe drops a remembered answer so the next listing re-asks. Called
+// on every repo mutation, because the gesture that follows "the App is not
+// installed on that repository" is: install it on github.com, come back, and
+// save the attachment again — and a cache that outlived that gesture would go
+// on insisting the repository is unreachable for another minute and a half.
+func (h *Handler) forgetAppProbe(handle, host, slug string) {
+	key := probeKey(handle, host, slug)
+	h.appMu.Lock()
+	defer h.appMu.Unlock()
+	delete(h.appSeen, key)
+}
+
+// repoReq is the attach/update body. There is no owner field and never will be:
+// the owner is the session's handle, and the store's WHERE clause is what makes
+// a cross-owner slug answer exactly like a missing one.
+type repoReq struct {
+	Ref    string   `json:"ref"`
+	Path   string   `json:"path"`
+	Access string   `json:"access"`
+	Tags   []string `json:"tags"`
+}
+
+// putRepo attaches a repository to the session's tags, or updates an existing
+// attachment. It re-pushes egress policy because an attachment implies the
+// clone domains in the effective allowlist (the overlay inside
+// netrules.AllowForSandbox): without the push, a tagged machine keeps the old
+// enforced list and the clone it was just promised fails on DNS.
+//
+// It does not call syncOwner — that is the secret env push, and a repo slug is
+// not a secret. Nor does it clone into anything already running: retagging
+// never clones, by design.
+func (h *Handler) putRepo(w http.ResponseWriter, r *http.Request) {
+	if h.repos == nil {
+		writeErr(w, http.StatusNotImplemented, "repos are not enabled on this host")
+		return
+	}
+	slug := r.PathValue("slug")
+	var req repoReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	handle := handleFrom(r)
+	// The same attachment gate ctl and the REST API apply (ctlops.attachIdentity),
+	// applied here because this is the third door onto one verb and a gate on two
+	// of three is not a gate. It is defence in depth rather than the last line —
+	// metadata.LocalRepos.Credential re-checks this before every mint, so a weak
+	// link could never have obtained a credential — but an attachment it will
+	// never honour is a promise the platform cannot keep, and attaching also
+	// widens the tag's effective egress through the netrules overlay, which is a
+	// real change made by an account that never proved the link.
+	if err := h.attachAllowed(handle); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	// Host is left empty on purpose: the store defaults it to github.com and
+	// refuses anything else, so naming it here would only add a second place
+	// for the two to disagree.
+	rp := repos.Repo{Slug: slug, Ref: req.Ref, Path: req.Path, Access: req.Access}
+	if err := h.repos.PutRepo(handle, rp, req.Tags); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("user console attached repo", "slug", slug, "tags", len(req.Tags),
+		"access", req.Access, "handle", handle)
+	h.forgetAppProbe(handle, defaultRepoHost, slug)
+	h.pushNet()
+	// The boxes already carrying one of these tags have a manifest that just
+	// changed under them. A failure to resolve them is not this call's failure:
+	// the attachment is stored, and every one of those boxes checks out from
+	// the same ledger at its next start.
+	if affected, err := h.repos.SandboxesForRepo(handle, rp.Host, slug); err != nil {
+		h.log.Warn("resolve sandboxes for repo", "slug", slug, "handle", handle, "err", err)
+	} else {
+		h.syncRepos(affected...)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// deleteRepo detaches a repository. Nothing is removed from any guest: a clone
+// already on a rootfs stays there — this drops it from the manifest a new
+// sandbox reads, and from the egress overlay the push below recomputes.
+func (h *Handler) deleteRepo(w http.ResponseWriter, r *http.Request) {
+	if h.repos == nil {
+		writeErr(w, http.StatusNotImplemented, "repos are not enabled on this host")
+		return
+	}
+	slug := r.PathValue("slug")
+	handle := handleFrom(r)
+	if err := h.repos.DeleteRepo(handle, defaultRepoHost, slug); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("user console detached repo", "slug", slug, "handle", handle)
+	h.forgetAppProbe(handle, defaultRepoHost, slug)
+	h.pushNet()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// defaultRepoHost is the one host internal/repos accepts. The console has no
+// field for it because there is nothing to choose: GHES would need its own App
+// installation and its own clone domains, and until it has both, a second host
+// here would only produce rows no credential path can serve.
+const defaultRepoHost = "github.com"
+
 // bwDomain is one destination's bandwidth, enriched with a display name so the
 // SPA can render a Ubiquiti-style row without re-deriving it client-side.
 type bwDomain struct {
@@ -1019,6 +1379,38 @@ func (h *Handler) syncOwner(ctx context.Context, owner string) {
 	h.syncer.SyncOwner(ctx, owner)
 }
 
+// syncRepos nudges the sandboxes reached by a repo or tag change into
+// reconciling their checkouts, asynchronously and best-effort.
+//
+// Async here and synchronous in ctlops, deliberately: `ctl tags set` is one
+// person waiting on one box and can afford to report what happened, whereas
+// this is an HTTP handler whose response the browser blocks a control on. The
+// console shows checkout state on its own (the sandbox view reads the guest's
+// report), so a nudge that lands a second after the 200 is invisible in the
+// right way.
+//
+// Reached by type assertion for the reason the ctlops copy is: only a machine
+// with the repos table and the App key can answer at all, and adding it to the
+// Sandboxes interface would put a method on host.Manager's console-facing
+// surface that a node could never implement.
+func (h *Handler) syncRepos(names ...string) {
+	r, ok := h.boxes.(interface {
+		ResyncRepos(ctx context.Context, name string) error
+	})
+	if !ok || len(names) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, name := range names {
+			if err := r.ResyncRepos(ctx, name); err != nil {
+				h.log.Warn("sync checkouts", "sandbox", name, "err", err)
+			}
+		}
+	}()
+}
+
 // pushNet re-pushes the whole fleet's egress policy to sluice after a rule or
 // tag change. Best-effort and async on a fresh context so it never delays or
 // fails the response; the syncer sends a full snapshot, so a single push
@@ -1056,9 +1448,9 @@ func statusFor(err error) int {
 	case err == nil:
 		return http.StatusInternalServerError
 	case errors.Is(err, secrets.ErrNoSuchSecret), errors.Is(err, routes.ErrNoSuchRoute),
-		errors.Is(err, netrules.ErrNoSuchRule):
+		errors.Is(err, netrules.ErrNoSuchRule), errors.Is(err, repos.ErrNoSuchRepo):
 		return http.StatusNotFound
-	case errors.Is(err, netrules.ErrInvalidRule):
+	case errors.Is(err, netrules.ErrInvalidRule), errors.Is(err, repos.ErrInvalidRepo):
 		return http.StatusBadRequest
 	case errors.Is(err, routes.ErrSubdomainTaken):
 		return http.StatusConflict

@@ -3402,6 +3402,292 @@ func (x *IdentityDescription) GetSandboxId() string {
 	return ""
 }
 
+// ListReposRequest names a sandbox and nothing else. Its owner, its tags and
+// the attachments those tags carry are all resolved by the gateway from its own
+// ledger; a node that could state any of them would be choosing whose
+// repositories its guests receive.
+type ListReposRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sandbox       string                 `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListReposRequest) Reset() {
+	*x = ListReposRequest{}
+	mi := &file_node_v1_node_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListReposRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListReposRequest) ProtoMessage() {}
+
+func (x *ListReposRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_node_v1_node_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListReposRequest.ProtoReflect.Descriptor instead.
+func (*ListReposRequest) Descriptor() ([]byte, []int) {
+	return file_node_v1_node_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *ListReposRequest) GetSandbox() string {
+	if x != nil {
+		return x.Sandbox
+	}
+	return ""
+}
+
+type ListReposResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Repos         []*RepoAttachment      `protobuf:"bytes,1,rep,name=repos,proto3" json:"repos,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListReposResponse) Reset() {
+	*x = ListReposResponse{}
+	mi := &file_node_v1_node_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListReposResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListReposResponse) ProtoMessage() {}
+
+func (x *ListReposResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_node_v1_node_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListReposResponse.ProtoReflect.Descriptor instead.
+func (*ListReposResponse) Descriptor() ([]byte, []int) {
+	return file_node_v1_node_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *ListReposResponse) GetRepos() []*RepoAttachment {
+	if x != nil {
+		return x.Repos
+	}
+	return nil
+}
+
+type RepoAttachment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Host          string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
+	Slug          string                 `protobuf:"bytes,2,opt,name=slug,proto3" json:"slug,omitempty"`
+	Ref           string                 `protobuf:"bytes,3,opt,name=ref,proto3" json:"ref,omitempty"`
+	Path          string                 `protobuf:"bytes,4,opt,name=path,proto3" json:"path,omitempty"`
+	Access        string                 `protobuf:"bytes,5,opt,name=access,proto3" json:"access,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RepoAttachment) Reset() {
+	*x = RepoAttachment{}
+	mi := &file_node_v1_node_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RepoAttachment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RepoAttachment) ProtoMessage() {}
+
+func (x *RepoAttachment) ProtoReflect() protoreflect.Message {
+	mi := &file_node_v1_node_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RepoAttachment.ProtoReflect.Descriptor instead.
+func (*RepoAttachment) Descriptor() ([]byte, []int) {
+	return file_node_v1_node_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *RepoAttachment) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *RepoAttachment) GetSlug() string {
+	if x != nil {
+		return x.Slug
+	}
+	return ""
+}
+
+func (x *RepoAttachment) GetRef() string {
+	if x != nil {
+		return x.Ref
+	}
+	return ""
+}
+
+func (x *RepoAttachment) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *RepoAttachment) GetAccess() string {
+	if x != nil {
+		return x.Access
+	}
+	return ""
+}
+
+// IssueRepoCredentialRequest narrows the token to one repository. The slug is
+// not an authorization input: the gateway verifies it against the attachment
+// set it resolved for itself and refuses anything else.
+type IssueRepoCredentialRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sandbox       string                 `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
+	Slug          string                 `protobuf:"bytes,2,opt,name=slug,proto3" json:"slug,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueRepoCredentialRequest) Reset() {
+	*x = IssueRepoCredentialRequest{}
+	mi := &file_node_v1_node_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueRepoCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueRepoCredentialRequest) ProtoMessage() {}
+
+func (x *IssueRepoCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_node_v1_node_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueRepoCredentialRequest.ProtoReflect.Descriptor instead.
+func (*IssueRepoCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_node_v1_node_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *IssueRepoCredentialRequest) GetSandbox() string {
+	if x != nil {
+		return x.Sandbox
+	}
+	return ""
+}
+
+func (x *IssueRepoCredentialRequest) GetSlug() string {
+	if x != nil {
+		return x.Slug
+	}
+	return ""
+}
+
+// IssueRepoCredentialResponse carries a short-lived installation token. It is
+// the only secret on this service besides a signed id token, and neither peer
+// may log it.
+type IssueRepoCredentialResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueRepoCredentialResponse) Reset() {
+	*x = IssueRepoCredentialResponse{}
+	mi := &file_node_v1_node_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueRepoCredentialResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueRepoCredentialResponse) ProtoMessage() {}
+
+func (x *IssueRepoCredentialResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_node_v1_node_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueRepoCredentialResponse.ProtoReflect.Descriptor instead.
+func (*IssueRepoCredentialResponse) Descriptor() ([]byte, []int) {
+	return file_node_v1_node_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *IssueRepoCredentialResponse) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *IssueRepoCredentialResponse) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+func (x *IssueRepoCredentialResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
 type DurationRange struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Minimum       *durationpb.Duration   `protobuf:"bytes,1,opt,name=minimum,proto3" json:"minimum,omitempty"`
@@ -3412,7 +3698,7 @@ type DurationRange struct {
 
 func (x *DurationRange) Reset() {
 	*x = DurationRange{}
-	mi := &file_node_v1_node_proto_msgTypes[48]
+	mi := &file_node_v1_node_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3424,7 +3710,7 @@ func (x *DurationRange) String() string {
 func (*DurationRange) ProtoMessage() {}
 
 func (x *DurationRange) ProtoReflect() protoreflect.Message {
-	mi := &file_node_v1_node_proto_msgTypes[48]
+	mi := &file_node_v1_node_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3437,7 +3723,7 @@ func (x *DurationRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurationRange.ProtoReflect.Descriptor instead.
 func (*DurationRange) Descriptor() ([]byte, []int) {
-	return file_node_v1_node_proto_rawDescGZIP(), []int{48}
+	return file_node_v1_node_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *DurationRange) GetMinimum() *durationpb.Duration {
@@ -3699,7 +3985,25 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x05image\x18\a \x01(\tR\x05image\x12\x12\n" +
 	"\x04node\x18\b \x01(\tR\x04node\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\t \x01(\tR\tsandboxId\"y\n" +
+	"sandbox_id\x18\t \x01(\tR\tsandboxId\",\n" +
+	"\x10ListReposRequest\x12\x18\n" +
+	"\asandbox\x18\x01 \x01(\tR\asandbox\"K\n" +
+	"\x11ListReposResponse\x126\n" +
+	"\x05repos\x18\x01 \x03(\v2 .sparkbox.node.v1.RepoAttachmentR\x05repos\"v\n" +
+	"\x0eRepoAttachment\x12\x12\n" +
+	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
+	"\x04slug\x18\x02 \x01(\tR\x04slug\x12\x10\n" +
+	"\x03ref\x18\x03 \x01(\tR\x03ref\x12\x12\n" +
+	"\x04path\x18\x04 \x01(\tR\x04path\x12\x16\n" +
+	"\x06access\x18\x05 \x01(\tR\x06access\"J\n" +
+	"\x1aIssueRepoCredentialRequest\x12\x18\n" +
+	"\asandbox\x18\x01 \x01(\tR\asandbox\x12\x12\n" +
+	"\x04slug\x18\x02 \x01(\tR\x04slug\"\x90\x01\n" +
+	"\x1bIssueRepoCredentialResponse\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\x129\n" +
+	"\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"y\n" +
 	"\rDurationRange\x123\n" +
 	"\aminimum\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\aminimum\x123\n" +
 	"\amaximum\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\amaximum*~\n" +
@@ -3747,11 +4051,13 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x12ApplyNetworkPolicy\x12+.sparkbox.node.v1.ApplyNetworkPolicyRequest\x1a\x1b.sparkbox.node.v1.Operation\x12f\n" +
 	"\x0fGetNetworkUsage\x12(.sparkbox.node.v1.GetNetworkUsageRequest\x1a).sparkbox.node.v1.GetNetworkUsageResponse\x12R\n" +
 	"\fGetOperation\x12%.sparkbox.node.v1.GetOperationRequest\x1a\x1b.sparkbox.node.v1.Operation\x12X\n" +
-	"\x0eWatchOperation\x12'.sparkbox.node.v1.WatchOperationRequest\x1a\x1b.sparkbox.node.v1.Operation0\x012\xd0\x01\n" +
+	"\x0eWatchOperation\x12'.sparkbox.node.v1.WatchOperationRequest\x1a\x1b.sparkbox.node.v1.Operation0\x012\x9a\x03\n" +
 	"\x0fGatewayIdentity\x12W\n" +
 	"\n" +
 	"IssueToken\x12#.sparkbox.node.v1.IssueTokenRequest\x1a$.sparkbox.node.v1.IssueTokenResponse\x12d\n" +
-	"\x10DescribeIdentity\x12).sparkbox.node.v1.DescribeIdentityRequest\x1a%.sparkbox.node.v1.IdentityDescriptionB=Z;github.com/vanpelt/sparky/tools/sparkbox/api/node/v1;nodev1b\x06proto3"
+	"\x10DescribeIdentity\x12).sparkbox.node.v1.DescribeIdentityRequest\x1a%.sparkbox.node.v1.IdentityDescription\x12T\n" +
+	"\tListRepos\x12\".sparkbox.node.v1.ListReposRequest\x1a#.sparkbox.node.v1.ListReposResponse\x12r\n" +
+	"\x13IssueRepoCredential\x12,.sparkbox.node.v1.IssueRepoCredentialRequest\x1a-.sparkbox.node.v1.IssueRepoCredentialResponseB=Z;github.com/vanpelt/sparky/tools/sparkbox/api/node/v1;nodev1b\x06proto3"
 
 var (
 	file_node_v1_node_proto_rawDescOnce sync.Once
@@ -3766,63 +4072,68 @@ func file_node_v1_node_proto_rawDescGZIP() []byte {
 }
 
 var file_node_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 49)
+var file_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
 var file_node_v1_node_proto_goTypes = []any{
-	(SandboxState)(0),                 // 0: sparkbox.node.v1.SandboxState
-	(HealthStatus)(0),                 // 1: sparkbox.node.v1.HealthStatus
-	(OperationState)(0),               // 2: sparkbox.node.v1.OperationState
-	(*GetInventoryRequest)(nil),       // 3: sparkbox.node.v1.GetInventoryRequest
-	(*WatchEventsRequest)(nil),        // 4: sparkbox.node.v1.WatchEventsRequest
-	(*Inventory)(nil),                 // 5: sparkbox.node.v1.Inventory
-	(*InventoryEvent)(nil),            // 6: sparkbox.node.v1.InventoryEvent
-	(*SandboxChanged)(nil),            // 7: sparkbox.node.v1.SandboxChanged
-	(*SandboxGone)(nil),               // 8: sparkbox.node.v1.SandboxGone
-	(*SnapshotChanged)(nil),           // 9: sparkbox.node.v1.SnapshotChanged
-	(*SnapshotGone)(nil),              // 10: sparkbox.node.v1.SnapshotGone
-	(*EventGap)(nil),                  // 11: sparkbox.node.v1.EventGap
-	(*Sandbox)(nil),                   // 12: sparkbox.node.v1.Sandbox
-	(*Snapshot)(nil),                  // 13: sparkbox.node.v1.Snapshot
-	(*GetCapacityRequest)(nil),        // 14: sparkbox.node.v1.GetCapacityRequest
-	(*Capacity)(nil),                  // 15: sparkbox.node.v1.Capacity
-	(*HealthRequest)(nil),             // 16: sparkbox.node.v1.HealthRequest
-	(*HealthResponse)(nil),            // 17: sparkbox.node.v1.HealthResponse
-	(*GetVitalsRequest)(nil),          // 18: sparkbox.node.v1.GetVitalsRequest
-	(*Vitals)(nil),                    // 19: sparkbox.node.v1.Vitals
-	(*OperationIdentity)(nil),         // 20: sparkbox.node.v1.OperationIdentity
-	(*EnsureRunningRequest)(nil),      // 21: sparkbox.node.v1.EnsureRunningRequest
-	(*CreateRequest)(nil),             // 22: sparkbox.node.v1.CreateRequest
-	(*PauseRequest)(nil),              // 23: sparkbox.node.v1.PauseRequest
-	(*ArchiveRequest)(nil),            // 24: sparkbox.node.v1.ArchiveRequest
-	(*ResizeRequest)(nil),             // 25: sparkbox.node.v1.ResizeRequest
-	(*RebootRequest)(nil),             // 26: sparkbox.node.v1.RebootRequest
-	(*SetTurboRequest)(nil),           // 27: sparkbox.node.v1.SetTurboRequest
-	(*RenameRequest)(nil),             // 28: sparkbox.node.v1.RenameRequest
-	(*DestroyRequest)(nil),            // 29: sparkbox.node.v1.DestroyRequest
-	(*SetPinnedRequest)(nil),          // 30: sparkbox.node.v1.SetPinnedRequest
-	(*ResyncEnvironmentRequest)(nil),  // 31: sparkbox.node.v1.ResyncEnvironmentRequest
-	(*SnapshotRequest)(nil),           // 32: sparkbox.node.v1.SnapshotRequest
-	(*DeleteSnapshotRequest)(nil),     // 33: sparkbox.node.v1.DeleteSnapshotRequest
-	(*ForkRequest)(nil),               // 34: sparkbox.node.v1.ForkRequest
-	(*MarkActiveRequest)(nil),         // 35: sparkbox.node.v1.MarkActiveRequest
-	(*RecordKeyRequest)(nil),          // 36: sparkbox.node.v1.RecordKeyRequest
-	(*NetworkPolicy)(nil),             // 37: sparkbox.node.v1.NetworkPolicy
-	(*ApplyNetworkPolicyRequest)(nil), // 38: sparkbox.node.v1.ApplyNetworkPolicyRequest
-	(*GetNetworkUsageRequest)(nil),    // 39: sparkbox.node.v1.GetNetworkUsageRequest
-	(*NetworkUsage)(nil),              // 40: sparkbox.node.v1.NetworkUsage
-	(*GetNetworkUsageResponse)(nil),   // 41: sparkbox.node.v1.GetNetworkUsageResponse
-	(*GetOperationRequest)(nil),       // 42: sparkbox.node.v1.GetOperationRequest
-	(*WatchOperationRequest)(nil),     // 43: sparkbox.node.v1.WatchOperationRequest
-	(*Operation)(nil),                 // 44: sparkbox.node.v1.Operation
-	(*OperationResult)(nil),           // 45: sparkbox.node.v1.OperationResult
-	(*OperationError)(nil),            // 46: sparkbox.node.v1.OperationError
-	(*IssueTokenRequest)(nil),         // 47: sparkbox.node.v1.IssueTokenRequest
-	(*IssueTokenResponse)(nil),        // 48: sparkbox.node.v1.IssueTokenResponse
-	(*DescribeIdentityRequest)(nil),   // 49: sparkbox.node.v1.DescribeIdentityRequest
-	(*IdentityDescription)(nil),       // 50: sparkbox.node.v1.IdentityDescription
-	(*DurationRange)(nil),             // 51: sparkbox.node.v1.DurationRange
-	(*timestamppb.Timestamp)(nil),     // 52: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),             // 53: google.protobuf.Empty
-	(*durationpb.Duration)(nil),       // 54: google.protobuf.Duration
+	(SandboxState)(0),                   // 0: sparkbox.node.v1.SandboxState
+	(HealthStatus)(0),                   // 1: sparkbox.node.v1.HealthStatus
+	(OperationState)(0),                 // 2: sparkbox.node.v1.OperationState
+	(*GetInventoryRequest)(nil),         // 3: sparkbox.node.v1.GetInventoryRequest
+	(*WatchEventsRequest)(nil),          // 4: sparkbox.node.v1.WatchEventsRequest
+	(*Inventory)(nil),                   // 5: sparkbox.node.v1.Inventory
+	(*InventoryEvent)(nil),              // 6: sparkbox.node.v1.InventoryEvent
+	(*SandboxChanged)(nil),              // 7: sparkbox.node.v1.SandboxChanged
+	(*SandboxGone)(nil),                 // 8: sparkbox.node.v1.SandboxGone
+	(*SnapshotChanged)(nil),             // 9: sparkbox.node.v1.SnapshotChanged
+	(*SnapshotGone)(nil),                // 10: sparkbox.node.v1.SnapshotGone
+	(*EventGap)(nil),                    // 11: sparkbox.node.v1.EventGap
+	(*Sandbox)(nil),                     // 12: sparkbox.node.v1.Sandbox
+	(*Snapshot)(nil),                    // 13: sparkbox.node.v1.Snapshot
+	(*GetCapacityRequest)(nil),          // 14: sparkbox.node.v1.GetCapacityRequest
+	(*Capacity)(nil),                    // 15: sparkbox.node.v1.Capacity
+	(*HealthRequest)(nil),               // 16: sparkbox.node.v1.HealthRequest
+	(*HealthResponse)(nil),              // 17: sparkbox.node.v1.HealthResponse
+	(*GetVitalsRequest)(nil),            // 18: sparkbox.node.v1.GetVitalsRequest
+	(*Vitals)(nil),                      // 19: sparkbox.node.v1.Vitals
+	(*OperationIdentity)(nil),           // 20: sparkbox.node.v1.OperationIdentity
+	(*EnsureRunningRequest)(nil),        // 21: sparkbox.node.v1.EnsureRunningRequest
+	(*CreateRequest)(nil),               // 22: sparkbox.node.v1.CreateRequest
+	(*PauseRequest)(nil),                // 23: sparkbox.node.v1.PauseRequest
+	(*ArchiveRequest)(nil),              // 24: sparkbox.node.v1.ArchiveRequest
+	(*ResizeRequest)(nil),               // 25: sparkbox.node.v1.ResizeRequest
+	(*RebootRequest)(nil),               // 26: sparkbox.node.v1.RebootRequest
+	(*SetTurboRequest)(nil),             // 27: sparkbox.node.v1.SetTurboRequest
+	(*RenameRequest)(nil),               // 28: sparkbox.node.v1.RenameRequest
+	(*DestroyRequest)(nil),              // 29: sparkbox.node.v1.DestroyRequest
+	(*SetPinnedRequest)(nil),            // 30: sparkbox.node.v1.SetPinnedRequest
+	(*ResyncEnvironmentRequest)(nil),    // 31: sparkbox.node.v1.ResyncEnvironmentRequest
+	(*SnapshotRequest)(nil),             // 32: sparkbox.node.v1.SnapshotRequest
+	(*DeleteSnapshotRequest)(nil),       // 33: sparkbox.node.v1.DeleteSnapshotRequest
+	(*ForkRequest)(nil),                 // 34: sparkbox.node.v1.ForkRequest
+	(*MarkActiveRequest)(nil),           // 35: sparkbox.node.v1.MarkActiveRequest
+	(*RecordKeyRequest)(nil),            // 36: sparkbox.node.v1.RecordKeyRequest
+	(*NetworkPolicy)(nil),               // 37: sparkbox.node.v1.NetworkPolicy
+	(*ApplyNetworkPolicyRequest)(nil),   // 38: sparkbox.node.v1.ApplyNetworkPolicyRequest
+	(*GetNetworkUsageRequest)(nil),      // 39: sparkbox.node.v1.GetNetworkUsageRequest
+	(*NetworkUsage)(nil),                // 40: sparkbox.node.v1.NetworkUsage
+	(*GetNetworkUsageResponse)(nil),     // 41: sparkbox.node.v1.GetNetworkUsageResponse
+	(*GetOperationRequest)(nil),         // 42: sparkbox.node.v1.GetOperationRequest
+	(*WatchOperationRequest)(nil),       // 43: sparkbox.node.v1.WatchOperationRequest
+	(*Operation)(nil),                   // 44: sparkbox.node.v1.Operation
+	(*OperationResult)(nil),             // 45: sparkbox.node.v1.OperationResult
+	(*OperationError)(nil),              // 46: sparkbox.node.v1.OperationError
+	(*IssueTokenRequest)(nil),           // 47: sparkbox.node.v1.IssueTokenRequest
+	(*IssueTokenResponse)(nil),          // 48: sparkbox.node.v1.IssueTokenResponse
+	(*DescribeIdentityRequest)(nil),     // 49: sparkbox.node.v1.DescribeIdentityRequest
+	(*IdentityDescription)(nil),         // 50: sparkbox.node.v1.IdentityDescription
+	(*ListReposRequest)(nil),            // 51: sparkbox.node.v1.ListReposRequest
+	(*ListReposResponse)(nil),           // 52: sparkbox.node.v1.ListReposResponse
+	(*RepoAttachment)(nil),              // 53: sparkbox.node.v1.RepoAttachment
+	(*IssueRepoCredentialRequest)(nil),  // 54: sparkbox.node.v1.IssueRepoCredentialRequest
+	(*IssueRepoCredentialResponse)(nil), // 55: sparkbox.node.v1.IssueRepoCredentialResponse
+	(*DurationRange)(nil),               // 56: sparkbox.node.v1.DurationRange
+	(*timestamppb.Timestamp)(nil),       // 57: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),               // 58: google.protobuf.Empty
+	(*durationpb.Duration)(nil),         // 59: google.protobuf.Duration
 }
 var file_node_v1_node_proto_depIdxs = []int32{
 	12, // 0: sparkbox.node.v1.Inventory.sandboxes:type_name -> sparkbox.node.v1.Sandbox
@@ -3835,13 +4146,13 @@ var file_node_v1_node_proto_depIdxs = []int32{
 	12, // 7: sparkbox.node.v1.SandboxChanged.sandbox:type_name -> sparkbox.node.v1.Sandbox
 	13, // 8: sparkbox.node.v1.SnapshotChanged.snapshot:type_name -> sparkbox.node.v1.Snapshot
 	0,  // 9: sparkbox.node.v1.Sandbox.state:type_name -> sparkbox.node.v1.SandboxState
-	52, // 10: sparkbox.node.v1.Sandbox.created_at:type_name -> google.protobuf.Timestamp
-	52, // 11: sparkbox.node.v1.Sandbox.last_active:type_name -> google.protobuf.Timestamp
-	52, // 12: sparkbox.node.v1.Sandbox.archived_at:type_name -> google.protobuf.Timestamp
-	52, // 13: sparkbox.node.v1.Snapshot.created_at:type_name -> google.protobuf.Timestamp
+	57, // 10: sparkbox.node.v1.Sandbox.created_at:type_name -> google.protobuf.Timestamp
+	57, // 11: sparkbox.node.v1.Sandbox.last_active:type_name -> google.protobuf.Timestamp
+	57, // 12: sparkbox.node.v1.Sandbox.archived_at:type_name -> google.protobuf.Timestamp
+	57, // 13: sparkbox.node.v1.Snapshot.created_at:type_name -> google.protobuf.Timestamp
 	1,  // 14: sparkbox.node.v1.HealthResponse.status:type_name -> sparkbox.node.v1.HealthStatus
-	52, // 15: sparkbox.node.v1.HealthResponse.started_at:type_name -> google.protobuf.Timestamp
-	52, // 16: sparkbox.node.v1.OperationIdentity.created_at:type_name -> google.protobuf.Timestamp
+	57, // 15: sparkbox.node.v1.HealthResponse.started_at:type_name -> google.protobuf.Timestamp
+	57, // 16: sparkbox.node.v1.OperationIdentity.created_at:type_name -> google.protobuf.Timestamp
 	20, // 17: sparkbox.node.v1.EnsureRunningRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 18: sparkbox.node.v1.CreateRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 19: sparkbox.node.v1.PauseRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
@@ -3856,80 +4167,86 @@ var file_node_v1_node_proto_depIdxs = []int32{
 	20, // 28: sparkbox.node.v1.SnapshotRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 29: sparkbox.node.v1.DeleteSnapshotRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	20, // 30: sparkbox.node.v1.ForkRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
-	52, // 31: sparkbox.node.v1.MarkActiveRequest.observed_at:type_name -> google.protobuf.Timestamp
+	57, // 31: sparkbox.node.v1.MarkActiveRequest.observed_at:type_name -> google.protobuf.Timestamp
 	20, // 32: sparkbox.node.v1.ApplyNetworkPolicyRequest.operation:type_name -> sparkbox.node.v1.OperationIdentity
 	37, // 33: sparkbox.node.v1.ApplyNetworkPolicyRequest.policies:type_name -> sparkbox.node.v1.NetworkPolicy
 	40, // 34: sparkbox.node.v1.GetNetworkUsageResponse.usage:type_name -> sparkbox.node.v1.NetworkUsage
-	52, // 35: sparkbox.node.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
-	52, // 36: sparkbox.node.v1.Operation.updated_at:type_name -> google.protobuf.Timestamp
+	57, // 35: sparkbox.node.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
+	57, // 36: sparkbox.node.v1.Operation.updated_at:type_name -> google.protobuf.Timestamp
 	2,  // 37: sparkbox.node.v1.Operation.state:type_name -> sparkbox.node.v1.OperationState
 	45, // 38: sparkbox.node.v1.Operation.result:type_name -> sparkbox.node.v1.OperationResult
 	46, // 39: sparkbox.node.v1.Operation.error:type_name -> sparkbox.node.v1.OperationError
 	12, // 40: sparkbox.node.v1.OperationResult.sandbox:type_name -> sparkbox.node.v1.Sandbox
 	13, // 41: sparkbox.node.v1.OperationResult.snapshot:type_name -> sparkbox.node.v1.Snapshot
-	53, // 42: sparkbox.node.v1.OperationResult.empty:type_name -> google.protobuf.Empty
-	52, // 43: sparkbox.node.v1.IssueTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
-	54, // 44: sparkbox.node.v1.DurationRange.minimum:type_name -> google.protobuf.Duration
-	54, // 45: sparkbox.node.v1.DurationRange.maximum:type_name -> google.protobuf.Duration
-	3,  // 46: sparkbox.node.v1.NodeControl.GetInventory:input_type -> sparkbox.node.v1.GetInventoryRequest
-	4,  // 47: sparkbox.node.v1.NodeControl.WatchEvents:input_type -> sparkbox.node.v1.WatchEventsRequest
-	14, // 48: sparkbox.node.v1.NodeControl.GetCapacity:input_type -> sparkbox.node.v1.GetCapacityRequest
-	16, // 49: sparkbox.node.v1.NodeControl.Health:input_type -> sparkbox.node.v1.HealthRequest
-	18, // 50: sparkbox.node.v1.NodeControl.GetVitals:input_type -> sparkbox.node.v1.GetVitalsRequest
-	21, // 51: sparkbox.node.v1.NodeControl.EnsureRunning:input_type -> sparkbox.node.v1.EnsureRunningRequest
-	22, // 52: sparkbox.node.v1.NodeControl.BeginCreate:input_type -> sparkbox.node.v1.CreateRequest
-	23, // 53: sparkbox.node.v1.NodeControl.BeginPause:input_type -> sparkbox.node.v1.PauseRequest
-	24, // 54: sparkbox.node.v1.NodeControl.BeginArchive:input_type -> sparkbox.node.v1.ArchiveRequest
-	25, // 55: sparkbox.node.v1.NodeControl.BeginResize:input_type -> sparkbox.node.v1.ResizeRequest
-	26, // 56: sparkbox.node.v1.NodeControl.BeginReboot:input_type -> sparkbox.node.v1.RebootRequest
-	27, // 57: sparkbox.node.v1.NodeControl.BeginSetTurbo:input_type -> sparkbox.node.v1.SetTurboRequest
-	28, // 58: sparkbox.node.v1.NodeControl.BeginRename:input_type -> sparkbox.node.v1.RenameRequest
-	29, // 59: sparkbox.node.v1.NodeControl.BeginDestroy:input_type -> sparkbox.node.v1.DestroyRequest
-	30, // 60: sparkbox.node.v1.NodeControl.BeginSetPinned:input_type -> sparkbox.node.v1.SetPinnedRequest
-	31, // 61: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:input_type -> sparkbox.node.v1.ResyncEnvironmentRequest
-	32, // 62: sparkbox.node.v1.NodeControl.BeginSnapshot:input_type -> sparkbox.node.v1.SnapshotRequest
-	33, // 63: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:input_type -> sparkbox.node.v1.DeleteSnapshotRequest
-	34, // 64: sparkbox.node.v1.NodeControl.BeginFork:input_type -> sparkbox.node.v1.ForkRequest
-	35, // 65: sparkbox.node.v1.NodeControl.MarkActive:input_type -> sparkbox.node.v1.MarkActiveRequest
-	36, // 66: sparkbox.node.v1.NodeControl.RecordKey:input_type -> sparkbox.node.v1.RecordKeyRequest
-	38, // 67: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:input_type -> sparkbox.node.v1.ApplyNetworkPolicyRequest
-	39, // 68: sparkbox.node.v1.NodeControl.GetNetworkUsage:input_type -> sparkbox.node.v1.GetNetworkUsageRequest
-	42, // 69: sparkbox.node.v1.NodeControl.GetOperation:input_type -> sparkbox.node.v1.GetOperationRequest
-	43, // 70: sparkbox.node.v1.NodeControl.WatchOperation:input_type -> sparkbox.node.v1.WatchOperationRequest
-	47, // 71: sparkbox.node.v1.GatewayIdentity.IssueToken:input_type -> sparkbox.node.v1.IssueTokenRequest
-	49, // 72: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:input_type -> sparkbox.node.v1.DescribeIdentityRequest
-	5,  // 73: sparkbox.node.v1.NodeControl.GetInventory:output_type -> sparkbox.node.v1.Inventory
-	6,  // 74: sparkbox.node.v1.NodeControl.WatchEvents:output_type -> sparkbox.node.v1.InventoryEvent
-	15, // 75: sparkbox.node.v1.NodeControl.GetCapacity:output_type -> sparkbox.node.v1.Capacity
-	17, // 76: sparkbox.node.v1.NodeControl.Health:output_type -> sparkbox.node.v1.HealthResponse
-	19, // 77: sparkbox.node.v1.NodeControl.GetVitals:output_type -> sparkbox.node.v1.Vitals
-	44, // 78: sparkbox.node.v1.NodeControl.EnsureRunning:output_type -> sparkbox.node.v1.Operation
-	44, // 79: sparkbox.node.v1.NodeControl.BeginCreate:output_type -> sparkbox.node.v1.Operation
-	44, // 80: sparkbox.node.v1.NodeControl.BeginPause:output_type -> sparkbox.node.v1.Operation
-	44, // 81: sparkbox.node.v1.NodeControl.BeginArchive:output_type -> sparkbox.node.v1.Operation
-	44, // 82: sparkbox.node.v1.NodeControl.BeginResize:output_type -> sparkbox.node.v1.Operation
-	44, // 83: sparkbox.node.v1.NodeControl.BeginReboot:output_type -> sparkbox.node.v1.Operation
-	44, // 84: sparkbox.node.v1.NodeControl.BeginSetTurbo:output_type -> sparkbox.node.v1.Operation
-	44, // 85: sparkbox.node.v1.NodeControl.BeginRename:output_type -> sparkbox.node.v1.Operation
-	44, // 86: sparkbox.node.v1.NodeControl.BeginDestroy:output_type -> sparkbox.node.v1.Operation
-	44, // 87: sparkbox.node.v1.NodeControl.BeginSetPinned:output_type -> sparkbox.node.v1.Operation
-	44, // 88: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:output_type -> sparkbox.node.v1.Operation
-	44, // 89: sparkbox.node.v1.NodeControl.BeginSnapshot:output_type -> sparkbox.node.v1.Operation
-	44, // 90: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:output_type -> sparkbox.node.v1.Operation
-	44, // 91: sparkbox.node.v1.NodeControl.BeginFork:output_type -> sparkbox.node.v1.Operation
-	53, // 92: sparkbox.node.v1.NodeControl.MarkActive:output_type -> google.protobuf.Empty
-	53, // 93: sparkbox.node.v1.NodeControl.RecordKey:output_type -> google.protobuf.Empty
-	44, // 94: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:output_type -> sparkbox.node.v1.Operation
-	41, // 95: sparkbox.node.v1.NodeControl.GetNetworkUsage:output_type -> sparkbox.node.v1.GetNetworkUsageResponse
-	44, // 96: sparkbox.node.v1.NodeControl.GetOperation:output_type -> sparkbox.node.v1.Operation
-	44, // 97: sparkbox.node.v1.NodeControl.WatchOperation:output_type -> sparkbox.node.v1.Operation
-	48, // 98: sparkbox.node.v1.GatewayIdentity.IssueToken:output_type -> sparkbox.node.v1.IssueTokenResponse
-	50, // 99: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:output_type -> sparkbox.node.v1.IdentityDescription
-	73, // [73:100] is the sub-list for method output_type
-	46, // [46:73] is the sub-list for method input_type
-	46, // [46:46] is the sub-list for extension type_name
-	46, // [46:46] is the sub-list for extension extendee
-	0,  // [0:46] is the sub-list for field type_name
+	58, // 42: sparkbox.node.v1.OperationResult.empty:type_name -> google.protobuf.Empty
+	57, // 43: sparkbox.node.v1.IssueTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	53, // 44: sparkbox.node.v1.ListReposResponse.repos:type_name -> sparkbox.node.v1.RepoAttachment
+	57, // 45: sparkbox.node.v1.IssueRepoCredentialResponse.expires_at:type_name -> google.protobuf.Timestamp
+	59, // 46: sparkbox.node.v1.DurationRange.minimum:type_name -> google.protobuf.Duration
+	59, // 47: sparkbox.node.v1.DurationRange.maximum:type_name -> google.protobuf.Duration
+	3,  // 48: sparkbox.node.v1.NodeControl.GetInventory:input_type -> sparkbox.node.v1.GetInventoryRequest
+	4,  // 49: sparkbox.node.v1.NodeControl.WatchEvents:input_type -> sparkbox.node.v1.WatchEventsRequest
+	14, // 50: sparkbox.node.v1.NodeControl.GetCapacity:input_type -> sparkbox.node.v1.GetCapacityRequest
+	16, // 51: sparkbox.node.v1.NodeControl.Health:input_type -> sparkbox.node.v1.HealthRequest
+	18, // 52: sparkbox.node.v1.NodeControl.GetVitals:input_type -> sparkbox.node.v1.GetVitalsRequest
+	21, // 53: sparkbox.node.v1.NodeControl.EnsureRunning:input_type -> sparkbox.node.v1.EnsureRunningRequest
+	22, // 54: sparkbox.node.v1.NodeControl.BeginCreate:input_type -> sparkbox.node.v1.CreateRequest
+	23, // 55: sparkbox.node.v1.NodeControl.BeginPause:input_type -> sparkbox.node.v1.PauseRequest
+	24, // 56: sparkbox.node.v1.NodeControl.BeginArchive:input_type -> sparkbox.node.v1.ArchiveRequest
+	25, // 57: sparkbox.node.v1.NodeControl.BeginResize:input_type -> sparkbox.node.v1.ResizeRequest
+	26, // 58: sparkbox.node.v1.NodeControl.BeginReboot:input_type -> sparkbox.node.v1.RebootRequest
+	27, // 59: sparkbox.node.v1.NodeControl.BeginSetTurbo:input_type -> sparkbox.node.v1.SetTurboRequest
+	28, // 60: sparkbox.node.v1.NodeControl.BeginRename:input_type -> sparkbox.node.v1.RenameRequest
+	29, // 61: sparkbox.node.v1.NodeControl.BeginDestroy:input_type -> sparkbox.node.v1.DestroyRequest
+	30, // 62: sparkbox.node.v1.NodeControl.BeginSetPinned:input_type -> sparkbox.node.v1.SetPinnedRequest
+	31, // 63: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:input_type -> sparkbox.node.v1.ResyncEnvironmentRequest
+	32, // 64: sparkbox.node.v1.NodeControl.BeginSnapshot:input_type -> sparkbox.node.v1.SnapshotRequest
+	33, // 65: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:input_type -> sparkbox.node.v1.DeleteSnapshotRequest
+	34, // 66: sparkbox.node.v1.NodeControl.BeginFork:input_type -> sparkbox.node.v1.ForkRequest
+	35, // 67: sparkbox.node.v1.NodeControl.MarkActive:input_type -> sparkbox.node.v1.MarkActiveRequest
+	36, // 68: sparkbox.node.v1.NodeControl.RecordKey:input_type -> sparkbox.node.v1.RecordKeyRequest
+	38, // 69: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:input_type -> sparkbox.node.v1.ApplyNetworkPolicyRequest
+	39, // 70: sparkbox.node.v1.NodeControl.GetNetworkUsage:input_type -> sparkbox.node.v1.GetNetworkUsageRequest
+	42, // 71: sparkbox.node.v1.NodeControl.GetOperation:input_type -> sparkbox.node.v1.GetOperationRequest
+	43, // 72: sparkbox.node.v1.NodeControl.WatchOperation:input_type -> sparkbox.node.v1.WatchOperationRequest
+	47, // 73: sparkbox.node.v1.GatewayIdentity.IssueToken:input_type -> sparkbox.node.v1.IssueTokenRequest
+	49, // 74: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:input_type -> sparkbox.node.v1.DescribeIdentityRequest
+	51, // 75: sparkbox.node.v1.GatewayIdentity.ListRepos:input_type -> sparkbox.node.v1.ListReposRequest
+	54, // 76: sparkbox.node.v1.GatewayIdentity.IssueRepoCredential:input_type -> sparkbox.node.v1.IssueRepoCredentialRequest
+	5,  // 77: sparkbox.node.v1.NodeControl.GetInventory:output_type -> sparkbox.node.v1.Inventory
+	6,  // 78: sparkbox.node.v1.NodeControl.WatchEvents:output_type -> sparkbox.node.v1.InventoryEvent
+	15, // 79: sparkbox.node.v1.NodeControl.GetCapacity:output_type -> sparkbox.node.v1.Capacity
+	17, // 80: sparkbox.node.v1.NodeControl.Health:output_type -> sparkbox.node.v1.HealthResponse
+	19, // 81: sparkbox.node.v1.NodeControl.GetVitals:output_type -> sparkbox.node.v1.Vitals
+	44, // 82: sparkbox.node.v1.NodeControl.EnsureRunning:output_type -> sparkbox.node.v1.Operation
+	44, // 83: sparkbox.node.v1.NodeControl.BeginCreate:output_type -> sparkbox.node.v1.Operation
+	44, // 84: sparkbox.node.v1.NodeControl.BeginPause:output_type -> sparkbox.node.v1.Operation
+	44, // 85: sparkbox.node.v1.NodeControl.BeginArchive:output_type -> sparkbox.node.v1.Operation
+	44, // 86: sparkbox.node.v1.NodeControl.BeginResize:output_type -> sparkbox.node.v1.Operation
+	44, // 87: sparkbox.node.v1.NodeControl.BeginReboot:output_type -> sparkbox.node.v1.Operation
+	44, // 88: sparkbox.node.v1.NodeControl.BeginSetTurbo:output_type -> sparkbox.node.v1.Operation
+	44, // 89: sparkbox.node.v1.NodeControl.BeginRename:output_type -> sparkbox.node.v1.Operation
+	44, // 90: sparkbox.node.v1.NodeControl.BeginDestroy:output_type -> sparkbox.node.v1.Operation
+	44, // 91: sparkbox.node.v1.NodeControl.BeginSetPinned:output_type -> sparkbox.node.v1.Operation
+	44, // 92: sparkbox.node.v1.NodeControl.BeginResyncEnvironment:output_type -> sparkbox.node.v1.Operation
+	44, // 93: sparkbox.node.v1.NodeControl.BeginSnapshot:output_type -> sparkbox.node.v1.Operation
+	44, // 94: sparkbox.node.v1.NodeControl.BeginDeleteSnapshot:output_type -> sparkbox.node.v1.Operation
+	44, // 95: sparkbox.node.v1.NodeControl.BeginFork:output_type -> sparkbox.node.v1.Operation
+	58, // 96: sparkbox.node.v1.NodeControl.MarkActive:output_type -> google.protobuf.Empty
+	58, // 97: sparkbox.node.v1.NodeControl.RecordKey:output_type -> google.protobuf.Empty
+	44, // 98: sparkbox.node.v1.NodeControl.ApplyNetworkPolicy:output_type -> sparkbox.node.v1.Operation
+	41, // 99: sparkbox.node.v1.NodeControl.GetNetworkUsage:output_type -> sparkbox.node.v1.GetNetworkUsageResponse
+	44, // 100: sparkbox.node.v1.NodeControl.GetOperation:output_type -> sparkbox.node.v1.Operation
+	44, // 101: sparkbox.node.v1.NodeControl.WatchOperation:output_type -> sparkbox.node.v1.Operation
+	48, // 102: sparkbox.node.v1.GatewayIdentity.IssueToken:output_type -> sparkbox.node.v1.IssueTokenResponse
+	50, // 103: sparkbox.node.v1.GatewayIdentity.DescribeIdentity:output_type -> sparkbox.node.v1.IdentityDescription
+	52, // 104: sparkbox.node.v1.GatewayIdentity.ListRepos:output_type -> sparkbox.node.v1.ListReposResponse
+	55, // 105: sparkbox.node.v1.GatewayIdentity.IssueRepoCredential:output_type -> sparkbox.node.v1.IssueRepoCredentialResponse
+	77, // [77:106] is the sub-list for method output_type
+	48, // [48:77] is the sub-list for method input_type
+	48, // [48:48] is the sub-list for extension type_name
+	48, // [48:48] is the sub-list for extension extendee
+	0,  // [0:48] is the sub-list for field type_name
 }
 
 func init() { file_node_v1_node_proto_init() }
@@ -3955,7 +4272,7 @@ func file_node_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_node_v1_node_proto_rawDesc), len(file_node_v1_node_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   49,
+			NumMessages:   54,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

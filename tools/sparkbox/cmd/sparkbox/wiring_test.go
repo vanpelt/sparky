@@ -28,6 +28,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -142,11 +143,23 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 		t.Fatal(err)
 	}
 
+	// The repo store is not in the optional set below: serve() opens one on
+	// every gateway unconditionally, so a fixture without it would model a host
+	// that does not exist and would let the wiring assertion pass vacuously.
+	repoStore, err := repos.Open(db, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repoStore.Close() }) //nolint:errcheck
+
 	// The optional stores a gateway also passes are left out: nothing here asks
-	// the control plane about tags, schedules, routes or session tokens.
+	// the control plane about tags, schedules, routes or session tokens. The
+	// GitHub App is left out too, and that one is optional in production as
+	// well — its key is a fleet secret most hosts do not hold.
 	return gatewayFixture{
 		stores: gatewayStores{
 			Fleet: flt, Placement: index, Roster: roster, Users: userStore,
+			Repos:        repoStore,
 			DefaultImage: "ubuntu", Domain: "hivemind.tools", Log: log,
 			GatewayGuestSubnet: testGatewayGuestSubnet,
 		},
@@ -182,6 +195,26 @@ func TestGatewayOpsIsAFleetGateway(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Name != "gw" || !list[0].Local {
 		t.Fatalf("node ls = %+v, want this gateway's own machine", list)
+	}
+}
+
+// TestGatewayOpsAttachesRepos is the same wiring assertion as the one above,
+// for the field next to it, and it exists for the same reason: ctlops decides
+// whether repositories can be attached at all by comparing Config.Repos against
+// nil, so a dropped line in newGatewayOps turns `ssh ctl@<gw> repo add` into
+// "repo attachments are not enabled on this host" on a machine with the store
+// plainly open — with nothing in the logs and no other test noticing.
+//
+// It does NOT assert Capabilities().GitHubApp. A host with no App key is a
+// normal host, not a misconfigured one: attachments still record and public
+// repositories still clone with no credential at all.
+func TestGatewayOpsAttachesRepos(t *testing.T) {
+	fx := newGatewayFixture(t)
+	ops := newGatewayOps(fx.stores)
+	t.Cleanup(ops.Close)
+
+	if !ops.Capabilities().Repos {
+		t.Fatal("a gateway with a repo store reports repo attachments disabled; ctlops.Config.Repos is unwired")
 	}
 }
 

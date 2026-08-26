@@ -239,6 +239,13 @@ func (h *Handler) routes() []route {
 		{"POST", "/v1/schedules", "schedule.add", authMutate, h.addSchedule},
 		{"DELETE", "/v1/schedules/{id}", "schedule.rm", authMutate, h.deleteSchedule},
 
+		// Repos. The check is a POST that changes nothing — see checkRepos for
+		// why a read that costs an upstream call must not be a GET.
+		{"GET", "/v1/repos", "repo.list", authRead, h.listRepos},
+		{"POST", "/v1/repos", "repo.add", authMutate, h.addRepo},
+		{"POST", "/v1/repos/check", "repo.check", authRead, h.checkRepos},
+		{"DELETE", "/v1/repos/{host}/{owner}/{name}", "repo.rm", authMutate, h.removeRepo},
+
 		// Account.
 		{"GET", "/v1/account/keys", "keys.list", authRead, h.listKeys},
 		{"POST", "/v1/account/keys", "keys.add", authMutate, h.addKey},

@@ -63,6 +63,7 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 	const caCertPEM = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
 	const caKeyPEM = "-----BEGIN PRIVATE KEY-----\nCAKEY\n-----END PRIVATE KEY-----\n"
 	const controlKeyPEM = "-----BEGIN PRIVATE KEY-----\nCONTROL\n-----END PRIVATE KEY-----\n"
+	const appKeyPEM = "-----BEGIN RSA PRIVATE KEY-----\nAPP\nKEY\n-----END RSA PRIVATE KEY-----\n"
 	srv := fakeSM(t, map[string]struct{ payload, typ string }{
 		"/sparkbox/fleet/gateway-host-key":     sshSecret(hostPEM),
 		"/sparkbox/fleet/gateway-upstream-key": sshSecret(upstreamPEM),
@@ -70,6 +71,7 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 		"/sparkbox/fleet/node-control-ca-cert": {caCertPEM, "opaque"},
 		"/sparkbox/fleet/node-control-ca-key":  {caKeyPEM, "opaque"},
 		"/sparkbox/fleet/gateway-control-key":  {controlKeyPEM, "opaque"},
+		"/sparkbox/fleet/github-app-key":       {appKeyPEM, "opaque"},
 		"/sparkbox/fleet/cloudflare-api-token": {"cf-token", "opaque"},
 		"/sparkbox/fleet/console-password":     {`p@ss "with" quotes`, "opaque"},
 	})
@@ -88,6 +90,10 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 		"node_ca_cert.pem":         caCertPEM,
 		"node_ca_key.pem":          caKeyPEM,
 		"gateway_control_key.pem":  controlKeyPEM,
+		// The GitHub App key is the one secret that would be silently
+		// unrepresentable as an env var: writeEnvFile refuses a newline, and a
+		// PEM is nothing but newlines. Assert it round-trips byte for byte.
+		"github_app_key.pem": appKeyPEM,
 	} {
 		p := filepath.Join(c.KeyDir, name)
 		got, err := os.ReadFile(p)
@@ -237,5 +243,41 @@ func TestFetchFromUntypedSource(t *testing.T) {
 	}
 	if !strings.Contains(string(envBytes), `SPARKBOX_CONSOLE_PASSWORD="hunter2"`) {
 		t.Errorf("env did not trim the trailing newline:\n%s", envBytes)
+	}
+}
+
+// TestGitHubAppKeyIsOptionalAndNotAKeyFilesEntry pins the two properties that
+// keep an App-less fleet booting. required:false means a host that never
+// created an App is not held hostage by a secret it has no way to produce, and
+// KeyFiles() is what `sparkbox doctor` fails on — so the key belongs on the
+// optional list, where it is reported and not demanded.
+func TestGitHubAppKeyIsOptionalAndNotAKeyFilesEntry(t *testing.T) {
+	for _, f := range KeyFiles() {
+		if f == "github_app_key.pem" {
+			t.Fatal("github_app_key.pem is in KeyFiles(): doctor would fail every fleet without a GitHub App")
+		}
+	}
+	var listed bool
+	for _, f := range OptionalKeyFiles() {
+		if f == "github_app_key.pem" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("github_app_key.pem is in neither key list, so nothing reports it at all")
+	}
+
+	// And a fetch without it must still succeed.
+	srv := fakeSM(t, map[string]struct{ payload, typ string }{
+		"/sparkbox/fleet/gateway-host-key":     sshSecret("-----BEGIN OPENSSH PRIVATE KEY-----\nA\n-----END OPENSSH PRIVATE KEY-----\n"),
+		"/sparkbox/fleet/gateway-upstream-key": sshSecret("-----BEGIN OPENSSH PRIVATE KEY-----\nB\n-----END OPENSSH PRIVATE KEY-----\n"),
+		"/sparkbox/fleet/oidc-signing-key":     {"-----BEGIN PRIVATE KEY-----\nC\n-----END PRIVATE KEY-----\n", "opaque"},
+	})
+	dir := t.TempDir()
+	if err := Fetch(context.Background(), cfg(t, srv, dir)); err != nil {
+		t.Fatalf("a fleet with no GitHub App must still boot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keys", "github_app_key.pem")); err == nil {
+		t.Error("wrote github_app_key.pem for a secret that does not exist")
 	}
 }

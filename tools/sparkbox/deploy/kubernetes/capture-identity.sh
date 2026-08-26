@@ -109,8 +109,14 @@ required_files=(
   node_ca_key.pem
   gateway_control_key.pem
 )
+# Optional because a fleet may predate the feature that uses it, but captured
+# for the same reason the required set is: this script REBUILDS the Secret from
+# whatever it captured, so anything present and not listed here is dropped on
+# the next run. github_app_key.pem is the GitHub App's private key; losing it
+# from the Secret silently disables repo cloning on the next capture.
 optional_files=(
   oidc_signing_key_prev.pem
+  github_app_key.pem
 )
 
 if [ -n "$source_dir" ]; then

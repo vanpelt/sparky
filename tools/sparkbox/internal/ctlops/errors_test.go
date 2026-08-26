@@ -141,7 +141,7 @@ func TestDisabledStoresAnswerKindDisabled(t *testing.T) {
 			return err
 		}},
 		{"tags write", func(o *Ops) { o.tags = nil }, func(o *Ops) error {
-			_, err := o.SetTags(ctx, alice(), "alicebox", []string{"a"})
+			_, _, err := o.SetTags(ctx, alice(), "alicebox", []string{"a"})
 			return err
 		}},
 		{"schedule list", func(o *Ops) { o.schedules = nil }, func(o *Ops) error {
@@ -256,7 +256,7 @@ func TestArgumentValidation(t *testing.T) {
 			for i := range many {
 				many[i] = fmt.Sprintf("t%d", i)
 			}
-			_, err := o.SetTags(ctx, alice(), "alicebox", many)
+			_, _, err := o.SetTags(ctx, alice(), "alicebox", many)
 			return err
 		}, "bad_tag", 2},
 	}

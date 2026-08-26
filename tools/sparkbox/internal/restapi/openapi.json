@@ -50,6 +50,10 @@
       "description": "Platform cron: commands the host runs inside a sandbox on a schedule, resuming it if needed."
     },
     {
+      "name": "repos",
+      "description": "GitHub repositories attached to your tags. Every sandbox carrying a tag clones the repos attached to it at boot, using a short-lived installation token it fetches itself — no personal access token is stored anywhere."
+    },
+    {
       "name": "terminal",
       "description": "The browser terminal's WebSocket, the same one https://<name>-xterm.example.com opens."
     },
@@ -960,6 +964,190 @@
         }
       }
     },
+    "/v1/repos": {
+      "get": {
+        "operationId": "repo.list",
+        "tags": ["repos"],
+        "summary": "List the repos attached to your tags",
+        "description": "Configuration, not state: a row here says a repository *should* be in every sandbox carrying one of its tags, not that any particular sandbox has finished cloning it. Retagging a running sandbox never clones into it — the guest's `sparkbox repos` shows the new entry as not cloned, and `sparkbox repos sync` is the user's own decision.",
+        "responses": {
+          "200": {
+            "description": "Your attachments.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RepoList" },
+                "example": {
+                  "repos": [
+                    {
+                      "id": "9f8b1c2d3e4f5a6b",
+                      "owner": "vanpelt",
+                      "host": "github.com",
+                      "slug": "wandb/hivemind",
+                      "ref": "main",
+                      "access": "read",
+                      "tags": ["hm"],
+                      "created_at": "2026-08-01T09:00:00Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "post": {
+        "operationId": "repo.add",
+        "tags": ["repos"],
+        "summary": "Attach a repo to your tags",
+        "description": "Attaching is a piece of configuration; it clones nothing right now. Sandboxes created afterwards with a matching tag check the repo out at boot.\n\nAn empty `tags` takes the `default` tag, which is also stamped on every untagged sandbox — so an untagged attachment reaches every box you create from then on. The answer names the tags it actually used.\n\nWhen this host has a GitHub App configured, the call also asks github.com whether the App can reach the repository and answers with `check`. That probe is advisory: the attachment is saved either way, because the App is usually installed a minute later by somebody who is not you, and refusing the write would leave you with nothing recorded and an errand to run.\n\nAttaching requires a GitHub link proved by a published key or the device flow — a login you merely typed is not evidence anyone may mint an installation token for you. No link at all is the 409; a link proved by somebody else's assertion is the 403.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RepoRequest" },
+              "example": {
+                "slug": "wandb/hivemind",
+                "tags": ["hm"],
+                "ref": "main"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The attachment, the tags it took, and whether the App can reach it.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RepoResult" },
+                "example": {
+                  "repo": {
+                    "id": "9f8b1c2d3e4f5a6b",
+                    "owner": "vanpelt",
+                    "host": "github.com",
+                    "slug": "wandb/hivemind",
+                    "ref": "main",
+                    "access": "read",
+                    "tags": ["hm"],
+                    "created_at": "2026-08-01T09:00:00Z"
+                  },
+                  "sandboxes": ["demo"],
+                  "defaulted": false,
+                  "check": {
+                    "host": "github.com",
+                    "slug": "wandb/hivemind",
+                    "tags": ["hm"],
+                    "access": "read",
+                    "checked": true,
+                    "reachable": false,
+                    "reason": "the GitHub App is not installed on that repository",
+                    "install_url": "https://github.com/apps/sparkbox/installations/new"
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Your GitHub link was not proved directly with GitHub, so it cannot attach repositories. Re-link with `POST /v1/account/github` or the device flow.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "409": {
+            "description": "No GitHub account is linked to this handle, so there is nobody to clone as.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/repos/check": {
+      "post": {
+        "operationId": "repo.check",
+        "tags": ["repos"],
+        "summary": "Ask github.com which attachments actually work",
+        "description": "For every attachment, whether the GitHub App is installed on that repository and holds the access the attachment claims. This is the one question the host cannot answer from its own database, and the failure it catches — an attachment that looks perfect here and produces a clone failure in a boot log — is otherwise invisible until a sandbox starts.\n\nIt is a POST although it changes nothing. A GET is something browsers, link previewers and caches issue unbidden, and each one would spend the installation's upstream rate limit; the CSRF gate is deliberately not applied, since there is no state to protect.",
+        "responses": {
+          "200": {
+            "description": "One row per attachment.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RepoCheckList" },
+                "example": {
+                  "repos": [
+                    {
+                      "host": "github.com",
+                      "slug": "wandb/hivemind",
+                      "tags": ["hm"],
+                      "access": "read",
+                      "checked": true,
+                      "reachable": true
+                    },
+                    {
+                      "host": "github.com",
+                      "slug": "wandb/private-thing",
+                      "tags": ["hm"],
+                      "access": "write",
+                      "checked": true,
+                      "reachable": false,
+                      "reason": "the GitHub App is not installed on that repository",
+                      "install_url": "https://github.com/apps/sparkbox/installations/new"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "501": { "$ref": "#/components/responses/Disabled" },
+          "502": {
+            "description": "github.com could not be reached, so nothing can be said about any attachment.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repos/{host}/{owner}/{name}": {
+      "delete": {
+        "operationId": "repo.rm",
+        "tags": ["repos"],
+        "summary": "Detach a repo",
+        "description": "The slug is spread over two path segments because it contains a '/', and a percent-encoded one would be normalized back into a separator by the proxies in front of this API.\n\nDetaching removes the attachment and nothing else. Checkouts already made in running sandboxes stay exactly where they are — this API never reaches into a filesystem somebody is working in. Someone else's repo answers exactly like one that does not exist.",
+        "parameters": [
+          { "$ref": "#/components/parameters/RepoHost" },
+          { "$ref": "#/components/parameters/RepoOwner" },
+          { "$ref": "#/components/parameters/RepoName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detached. `name` is the slug.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Deleted" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
     "/v1/account/keys": {
       "get": {
         "operationId": "keys.list",
@@ -1606,6 +1794,30 @@
         },
         "example": "node-b"
       },
+      "RepoHost": {
+        "name": "host",
+        "in": "path",
+        "required": true,
+        "description": "The forge the repo lives on. `github.com` is the only value this host serves; the segment exists so a GitHub Enterprise instance can be addressed later without moving the path.",
+        "schema": { "type": "string" },
+        "example": "github.com"
+      },
+      "RepoOwner": {
+        "name": "owner",
+        "in": "path",
+        "required": true,
+        "description": "The first half of the slug: the GitHub user or organization.",
+        "schema": { "type": "string" },
+        "example": "wandb"
+      },
+      "RepoName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "description": "The second half of the slug: the repository name, with no `.git` suffix.",
+        "schema": { "type": "string" },
+        "example": "hivemind"
+      },
       "ScheduleID": {
         "name": "id",
         "in": "path",
@@ -1821,7 +2033,9 @@
           "routes",
           "session_tokens",
           "terminal",
-          "fleet"
+          "fleet",
+          "repos",
+          "github_app"
         ],
         "properties": {
           "archiving": { "type": "boolean", "description": "Object storage is configured." },
@@ -1831,7 +2045,9 @@
           "routes": { "type": "boolean", "description": "The HTTP proxy is enabled." },
           "session_tokens": { "type": "boolean", "description": "Tokens can be minted." },
           "terminal": { "type": "boolean", "description": "Browser terminals are served." },
-          "fleet": { "type": "boolean", "description": "This host is a gateway other machines can join, so the node endpoints answer. It says nothing about whether any machine has joined." }
+          "fleet": { "type": "boolean", "description": "This host is a gateway other machines can join, so the node endpoints answer. It says nothing about whether any machine has joined." },
+          "repos": { "type": "boolean", "description": "The repo store is open, so repositories can be attached to tags at all." },
+          "github_app": { "type": "boolean", "description": "This host holds a GitHub App key, which is what turns an attachment into a clone of a PRIVATE repository. False leaves attachment working and public repos cloning." }
         }
       },
       "Sandbox": {
@@ -2128,6 +2344,149 @@
             "type": "string",
             "description": "Run through the guest's shell.",
             "example": "make nightly"
+          }
+        }
+      },
+      "Repo": {
+        "type": "object",
+        "description": "One repo attachment: a repository, the tags that carry it, and how it should be checked out. There is no credential in this shape and none is stored — the token that clones it is minted per sandbox, lives about an hour, and is scoped to that repository alone.",
+        "required": ["id", "owner", "host", "slug", "access", "tags", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The row id. Nothing addresses an attachment by it — the DELETE path takes host/owner/name — but it is stable across edits and useful as a list key.",
+            "example": "9f8b1c2d3e4f5a6b"
+          },
+          "owner": { "type": "string", "description": "Always you.", "example": "vanpelt" },
+          "host": {
+            "type": "string",
+            "description": "Always `github.com` today.",
+            "example": "github.com"
+          },
+          "slug": { "type": "string", "example": "wandb/hivemind" },
+          "ref": {
+            "type": "string",
+            "description": "Branch or tag to check out. Absent means the repository's default branch.",
+            "example": "main"
+          },
+          "path": {
+            "type": "string",
+            "description": "Clone destination inside the sandbox. Absent takes the default layout: one repo lands in `~/<name>`, more than one in `~/src/<owner>/<name>`.",
+            "example": "src/hm"
+          },
+          "access": {
+            "type": "string",
+            "enum": ["read", "write"],
+            "description": "The permission the minted token asks for. `write` is what lets an agent push a branch."
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Every sandbox carrying one of these tags clones this repo at boot.",
+            "example": ["hm"]
+          },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RepoList": {
+        "type": "object",
+        "required": ["repos"],
+        "properties": {
+          "repos": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Repo" }
+          }
+        }
+      },
+      "RepoResult": {
+        "type": "object",
+        "description": "The stored attachment plus the three things you cannot see from the request: which of your sandboxes now select it, whether it landed on the `default` tag, and what github.com says about it.",
+        "required": ["repo", "sandboxes", "defaulted", "check"],
+        "properties": {
+          "repo": { "$ref": "#/components/schemas/Repo" },
+          "sandboxes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Your existing sandboxes carrying one of the tags. Nothing is cloned into them by this call — retagging never clones — but an attachment that reaches nothing is the mistake worth catching immediately.",
+            "example": ["demo"]
+          },
+          "defaulted": {
+            "type": "boolean",
+            "description": "The request named no tag, so the attachment went on `default` — which every untagged sandbox also carries, meaning this repo now clones into every box you create. Say so to whoever asked."
+          },
+          "check": { "$ref": "#/components/schemas/RepoCheck" }
+        }
+      },
+      "RepoCheck": {
+        "type": "object",
+        "description": "One attachment's answer to \"can the GitHub App actually reach this\". `checked` and `reachable` are two bits because they fail differently: `checked` false means this host holds no App at all, so only public repositories will clone and the attachment itself is fine; `reachable` false means there is an App and it cannot get at this repository, which is yours to fix.",
+        "required": ["host", "slug", "access", "tags", "checked", "reachable"],
+        "properties": {
+          "host": { "type": "string", "example": "github.com" },
+          "slug": { "type": "string", "example": "wandb/hivemind" },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "example": ["hm"]
+          },
+          "access": { "type": "string", "enum": ["read", "write"] },
+          "checked": { "type": "boolean", "description": "This host has a GitHub App, so the answer below means something." },
+          "reachable": { "type": "boolean", "description": "The App is installed on the repository and your GitHub identity may use that installation." },
+          "reason": {
+            "type": "string",
+            "description": "Why not, as a sentence fit to show a user. Absent when reachable.",
+            "example": "the GitHub App is not installed on that repository"
+          },
+          "install_url": {
+            "type": "string",
+            "description": "Present when installing the App is the fix.",
+            "example": "https://github.com/apps/sparkbox/installations/new"
+          }
+        }
+      },
+      "RepoCheckList": {
+        "type": "object",
+        "required": ["repos"],
+        "properties": {
+          "repos": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RepoCheck" }
+          }
+        }
+      },
+      "RepoRequest": {
+        "type": "object",
+        "required": ["slug"],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "`owner/name`, with no `.git` suffix and no URL around it.",
+            "example": "wandb/hivemind"
+          },
+          "host": {
+            "type": "string",
+            "description": "Absent means github.com, which is the only value this host serves.",
+            "example": "github.com"
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "The whole tag set. Empty or absent takes `default`, which every untagged sandbox also carries — so the repo lands in every box you create from then on, and the answer sets `defaulted`.",
+            "example": ["hm"]
+          },
+          "ref": {
+            "type": "string",
+            "description": "Branch or tag. Absent takes the repository's default branch.",
+            "example": "main"
+          },
+          "path": {
+            "type": "string",
+            "description": "Clone destination, relative to the login user's home. Absent takes the default layout.",
+            "example": "src/hm"
+          },
+          "write": {
+            "type": "boolean",
+            "description": "Ask for a token that can push. Absent means read-only, which is what an agent that only reads code should get. The stored row reports this back as `access`."
           }
         }
       },

@@ -99,6 +99,20 @@ _NETRULES = [
     {"name": "ML training", "tags": ["ml"], "version": 1, "updated_at": _iso(7200),
      "spec": {"allow": ["huggingface.co", "*.huggingface.co", "pytorch.org", "anthropic.com"]}},
 ]
+# Repo attachments, one per install state the panel renders: reachable, not
+# installed (the row that carries the one-click URL), and still being asked.
+_REPOS = [
+    {"host": "github.com", "slug": "wandb/hivemind", "ref": "", "path": "",
+     "access": "write", "tags": ["hm"], "created_at": _iso(86400), "app": "ready"},
+    {"host": "github.com", "slug": "wandb/dotfiles", "ref": "", "path": "",
+     "access": "read", "tags": ["default"], "created_at": _iso(604800), "app": "missing",
+     "install_url": "https://github.com/apps/sparkbox/installations/new"},
+    {"host": "github.com", "slug": "torvalds/linux", "ref": "v6.1", "path": "src/linux",
+     "access": "read", "tags": [], "created_at": _iso(300), "app": "blocked",
+     "app_note": "the GitHub App may not do that: you are not an active member of torvalds"},
+]
+
+
 def _dom(domain, display, resolved, tx, rx):
     return {"domain": domain, "display": display, "resolved": resolved,
             "tx_bytes": tx, "rx_bytes": rx, "total": tx + rx}
@@ -122,7 +136,7 @@ _STUB = """
 (function () {
   var tick = 0;
   var ME = %(me)s, SECRETS = %(secrets)s, SNAPSHOTS = %(snapshots)s;
-  var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s;
+  var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s, REPOS = %(repos)s;
   function machines() {
     tick += 1;
     var list = %(machines_fn)s(tick);
@@ -158,6 +172,7 @@ _STUB = """
     if (u.indexOf("/api/secrets") >= 0 && m === "GET") return J(SECRETS);
     if (u.indexOf("/api/snapshots") >= 0 && m === "GET") return J(SNAPSHOTS);
     if (u.indexOf("/api/network-rules") >= 0 && m === "GET") return J(NETRULES);
+    if (u.indexOf("/api/repos") >= 0 && m === "GET") return J(REPOS);
     var bw = u.match(/\\/api\\/machines\\/([^/]+)\\/bandwidth/);
     if (bw && m === "GET") return J(BANDWIDTH[decodeURIComponent(bw[1])] || { name: "", domains: [] });
     if (u.indexOf("/api/machines") >= 0 && m === "GET" &&
@@ -292,6 +307,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
                 "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
                 "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
+                "repos": json.dumps(_REPOS),
             }
         theme = ""
         if "theme=dark" in self.path:

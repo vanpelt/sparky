@@ -487,6 +487,10 @@ func (g *Gateway) handle(s gssh.Session) {
 		}
 		fmt.Fprintf(s.Stderr(), "sparkbox: created sandbox %q%s — reconnect with: %s\r\n",
 			box.Name, tagNote, g.reconnectHint(box.Name, via))
+		// The tags-mean-no-PTY caveat, said at the one moment it can be acted
+		// on. See noTerminalNotice.
+		_, _, isPty := s.Pty()
+		fmt.Fprint(s.Stderr(), noTerminalNotice(s.RawCommand(), isPty, g.reconnectHint(box.Name, via)))
 		// One line, once, to an account that has never linked GitHub. This door
 		// is where the traffic is — it is the only one a user is guaranteed to
 		// come back to — and a first sandbox is the moment the offer is worth
@@ -873,6 +877,38 @@ func splitNewName(user string) (routeTo, requested string) {
 // ssh saw a command word and allocated no PTY, so the shell we open here runs
 // non-interactively — no prompt, no line editing. Callers want `ssh -t`.
 func execsCommand(raw string, tagsOnly bool) bool { return raw != "" && !tagsOnly }
+
+// noTerminalNotice is the sentence for a `new@` session that carried tag words
+// and therefore has no PTY, or "" when there is nothing to say.
+//
+// execsCommand documents why a tag word is not run as a command. What it cannot
+// fix is that the client's ssh decided, before it ever reached this server, that
+// a command word means no terminal — PTY allocation is the CLIENT's request, and
+// a server cannot ask for one after the fact. So the shell opened below is live
+// and does exactly what is typed into it; it just prints no prompt and echoes
+// nothing, which reads as a hang. The last line on screen before that silence is
+// whatever the banner said, so users conclude the thing named there is stuck —
+// a repo checkout, most often, since that is the slowest line the banner has.
+//
+// One line, and it turns a mute terminal into a typo.
+func noTerminalNotice(raw string, isPty bool, hint string) string {
+	if isPty || raw == "" {
+		return ""
+	}
+	// reconnectHint renders a whole ssh(1) invocation, `ssh ` included, so -t
+	// is spliced into the command it already built rather than prefixed to it —
+	// prefixing produced `ssh -t ssh name@host`, which is a hint that does not
+	// run. Anything not shaped like an ssh command (the browser URL form) is
+	// printed as it came: a URL with -t bolted on would be worse than no hint.
+	fix := hint
+	if rest, ok := strings.CutPrefix(hint, "ssh "); ok {
+		fix = "ssh -t " + rest
+	}
+	return fmt.Sprintf(
+		"sparkbox: no terminal — your ssh client read %q as a command, so it allocated no PTY.\r\n"+
+			"          The shell below is live but has no prompt and no echo. For an interactive one:\r\n"+
+			"              %s\r\n", raw, fix)
+}
 
 // pipeSession mirrors the client's session (PTY, env, command, window
 // changes, streams) onto a session inside the VM and returns the exit code.

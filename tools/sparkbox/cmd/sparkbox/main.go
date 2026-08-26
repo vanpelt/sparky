@@ -35,6 +35,8 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghwebhook"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindpresence"
@@ -52,6 +54,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/proxy"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/restapi"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -160,6 +163,7 @@ func serve(args []string) error {
 		tlsProvider          = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail             = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
 		oidcSub              = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
+		webhookSub           = fs.String("webhook-subdomain", ghwebhook.DefaultSubdomain, "subdomain receiving GitHub App webhook deliveries at <webhook-subdomain>.<domain>"+ghwebhook.Path+" (empty disables it). Every delivery is verified against SPARKBOX_GITHUB_WEBHOOK_SECRET, and a host without that secret serves nothing here at all rather than an endpoint that accepts anything — so set the secret on this host before setting the webhook URL in the App")
 		oidcAud              = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
 		hivemindAPI          = fs.String("hivemind-api", "", "HiveMind API origin used to protect VMs with live agent sessions (empty disables)")
 		hivemindAudience     = fs.String("hivemind-audience", defaultAudience, "OIDC audience used for HiveMind workload-token exchange")
@@ -170,6 +174,7 @@ func serve(args []string) error {
 		openSignup           = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
 		invitesPer           = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
 		githubClientID       = fs.String("github-client-id", defaultGitHubClientID, "public client id of the GitHub app used to link accounts via the OAuth device flow (`ssh ctl@<domain> github link`). It is an identifier, not a secret. Empty disables the flow, leaving `keys verify-github` — which needs the user's key published on GitHub — as the only way to link")
+		githubAppClientID    = fs.String("github-app-client-id", "", "client id of the GitHub App that mints repo credentials (`ssh ctl@<domain> repo add`). Distinct from --github-client-id: linking an account and reading a private repository are two different apps with two different consent screens, and only this one has a private key. Empty — or a host with no github_app_key.pem — leaves repo attachments unavailable")
 		nodeNameFlag         = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
 		archFlag             = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
 		noNodeEnrol          = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator must approve its verified fingerprint and network configuration — so this is only worth setting on a gateway that will never gain another node")
@@ -255,10 +260,10 @@ func serve(args []string) error {
 
 	// Node mode forks here, before a single store is opened. Nothing below this
 	// line runs on a node: the users, secrets, routes, schedules, netrules,
-	// placement and roster stores, the OIDC issuer, the SSH gateway, the HTTP
-	// edge and both consoles are all fleet-wide surfaces, and a fleet has exactly
-	// one of each. The surest way for a node never to hold one is never to reach
-	// the line that opens it.
+	// repos, placement and roster stores, the OIDC issuer, the SSH gateway, the
+	// HTTP edge and both consoles are all fleet-wide surfaces, and a fleet has
+	// exactly one of each. The surest way for a node never to hold one is never
+	// to reach the line that opens it.
 	if *gatewayAddr != "" {
 		// Said out loud, because "this host serves nothing" is otherwise
 		// indistinguishable from a crash to whoever is looking at it.
@@ -317,6 +322,43 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("upstream key: %w", err)
 	}
+	// The GitHub App key is the one piece of fleet key material with no
+	// create-if-missing form: nobody can mint the private half of an App that
+	// GitHub has to know about. So it is loaded, never created, and it is NOT
+	// gated on --require-keys — bootsecrets declares it optional precisely so
+	// that every fleet which predates this feature keeps booting. A file that
+	// exists and does not parse is still fatal; that is a broken deploy, not an
+	// absent one.
+	ghAppKey, err := ghapp.LoadKeyIfPresent(keysIn, "github_app_key")
+	if err != nil {
+		return fmt.Errorf("github app key: %w", err)
+	}
+	// Both halves or neither. The key cannot say which App it belongs to and
+	// the client id cannot sign, so a host holding one of them can do nothing
+	// except fail every mint with a message about the other. A nil *ghapp.App
+	// is a supported state rather than a degraded one: attachments still record
+	// and public repositories still clone, with no credential at all.
+	var ghApp *ghapp.App
+	// Interface-typed separately and assigned ONLY inside the branch below: a
+	// nil *ghapp.App put into an interface field is a non-nil interface, which
+	// would tell ctlops the capability exists and panic on the first call.
+	var ghAppOps ctlops.GitHubApp
+	if ghAppKey != nil && *githubAppClientID != "" {
+		ghApp, err = ghapp.New(ghapp.Config{
+			ClientID: *githubAppClientID, Key: ghAppKey, Logger: log,
+		})
+		if err != nil {
+			return fmt.Errorf("github app: %w", err)
+		}
+		ghAppOps = ghApp
+		log.Info("github app credentials enabled", "client_id", *githubAppClientID)
+	} else {
+		reason := "no --github-app-client-id"
+		if ghAppKey == nil {
+			reason = "no " + filepath.Join(keysIn, "github_app_key.pem")
+		}
+		log.Info("github app credentials disabled", "reason", reason)
+	}
 	// The identity store lives in the same sqlite file as the proxy routes.
 	// users.conf stays the bootstrap seed: it is how a freshly provisioned host
 	// knows its first (operator) user before anyone can run `ssh signup@`.
@@ -374,6 +416,23 @@ func serve(args []string) error {
 		return fmt.Errorf("netrules store: %w", err)
 	}
 	defer netrulesStore.Close()
+
+	// Repo attachments (which repositories a tag clones into a sandbox) live in
+	// the same DB on their own connection, for the same reason the rule-sets do:
+	// one sqlite file is the fleet's state, and one connection per store keeps a
+	// long-running read in one of them off the write path of the others.
+	repoStore, err := repos.Open(filepath.Join(*stateDir, "sparkbox.db"), log)
+	if err != nil {
+		return fmt.Errorf("repos store: %w", err)
+	}
+	defer repoStore.Close()
+	// The egress overlay: a sandbox with an attachment reaches github.com even
+	// when its tag's rule-set never mentioned it. It is installed on the rule
+	// store rather than written into anyone's rules, so detaching a repository
+	// takes the hole away with it. It must be installed before the netpush
+	// syncer and flt.SetRules below capture the store, or the first snapshot
+	// pushed after boot is computed without it.
+	netrulesStore.SetRepoDomains(repoStore)
 
 	var driver vmm.Driver
 	switch *driverName {
@@ -671,6 +730,12 @@ func serve(args []string) error {
 	// sandbox on this machine, the fleet for one on any other. There is exactly
 	// one channel into a guest's /etc/environment, and two would race over it.
 	flt.SetEnvPusher(syncer)
+	// And the same syncer again for the checkout nudge, on both sides of the
+	// same split, for the same reason: one guest exec channel. Only the gateway
+	// wires this at all — a node has no repos table, so over there ResyncRepos
+	// finds a nil hook and correctly does nothing.
+	mgr.SetRepoSync(syncer)
+	flt.SetRepoSync(syncer)
 
 	// The rules half of the egress plane. It goes on the FLEET rather than only
 	// into the local syncer because a tag binding is a gateway-wide fact and the
@@ -710,7 +775,8 @@ func serve(args []string) error {
 		GatewayGuestSubnet: *guestSubnet,
 		XtermSubdomain:     xtermLabel, InvitesPerUser: *invitesPer,
 		GitHubClientID: *githubClientID,
-		Log:            log,
+		Repos:          repoStore, GitHubApp: ghAppOps,
+		Log: log,
 	})
 	defer ops.Close()
 
@@ -839,6 +905,18 @@ func serve(args []string) error {
 	// VMs of its own still signs for the ones on its nodes.
 	flt.SetIdentity(fleetIdentity{issuer: issuer, users: userStore,
 		defAud: firstOr(splitList(*oidcAud), defaultAudience)})
+	// One repo resolver, built once and installed on both paths below: the
+	// fleet hands it every node's guests, and the local metadata service hands
+	// it this machine's own. Two resolvers would mean a sandbox could get a
+	// different manifest — or a different refusal — depending on which machine
+	// the placer happened to pick, which is exactly the fact a sandbox must not
+	// be able to observe. LocalRepos is a value; copying it is the intent.
+	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp}
+	// Installed here rather than beside SetRules for the same reason SetIdentity
+	// is: it is unconditional and independent of whether this gateway serves a
+	// metadata endpoint of its own. A --gateway-only control plane holds no VMs
+	// and still has to answer for every one of them on its nodes.
+	flt.SetRepos(newFleetRepos(localRepos))
 	if *gatewayGRPCAddr != "" {
 		identityServer, identityListener, err := newGatewayIdentityServer(
 			ctx, *gatewayGRPCAddr, flt, nodeStore,
@@ -861,6 +939,7 @@ func serve(args []string) error {
 			Manager: mgr, Logger: log,
 			Identity:        metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
 			RouteControl:    gatewayRouteControl{fleet: flt, node: nodeName},
+			Repos:           localRepos,
 			DefaultAudience: firstOr(splitList(*oidcAud), defaultAudience),
 			GuestSubnet:     *guestSubnet,
 		})
@@ -966,7 +1045,11 @@ func serve(args []string) error {
 			// xtermLabel, not *xtermSub: it is already emptied when there is no
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
-			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, repoStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			// The same App the control plane got. Nil-safe: without it the
+			// repo panel still attaches and detaches, and every row's install
+			// state reads as unknown instead of claiming one.
+			uc.SetGitHubApp(ghApp)
 			// Same as the operator console: the fleet answers everything an
 			// owner can act on, and routes the balloon and CPU reads to the
 			// machine holding each sandbox.
@@ -1041,6 +1124,43 @@ func serve(args []string) error {
 			px.SetReserved(*apiSub, restapi.New(apiCfg).Handler())
 			log.Info("rest api enabled", "url", "https://"+*apiSub+"."+*proxyDomain,
 				"docs", "https://"+*apiSub+"."+*proxyDomain+"/docs")
+		}
+
+		// GitHub App webhooks. Deliberately NOT a route under the REST API:
+		// api.<domain> is uniformly authenticated, and an unauthenticated
+		// exception inside it is the kind of thing the next endpoint copies
+		// without re-deriving why this one was allowed to differ. It gets its
+		// own reserved hostname instead, mounted the way the OIDC issuer is —
+		// the wildcard DNS and the wildcard certificate already cover it, so
+		// this costs one handler and no new listener.
+		//
+		// Gateway only, and that is not a choice made here: node mode returns
+		// long before this block, because a fleet has exactly one of every
+		// surface an outside party is configured to talk to.
+		//
+		// The secret arrives through the environment, like the console
+		// password: bootsecrets materializes it into the unit's
+		// EnvironmentFile, which keeps it out of argv and out of `systemctl
+		// show`. Without it there is no receiver to mount — see ghwebhook's
+		// package doc for why an unverifying receiver is worse than none.
+		webhookSecret := os.Getenv("SPARKBOX_GITHUB_WEBHOOK_SECRET")
+		switch {
+		case *webhookSub == "":
+			log.Info("github webhook receiver disabled", "reason", "--webhook-subdomain is empty")
+		case webhookSecret == "":
+			log.Info("github webhook receiver disabled", "reason", "no SPARKBOX_GITHUB_WEBHOOK_SECRET")
+		default:
+			warnSubdomainCollision("github webhooks", *webhookSub, mgr, routeStore, log)
+			rcv, werr := ghwebhook.New(ghwebhook.Config{Secret: webhookSecret, Logger: log})
+			if werr != nil {
+				return fmt.Errorf("github webhook receiver: %w", werr)
+			}
+			px.SetReserved(*webhookSub, rcv.Handler())
+			// The URL is the whole operator-facing product of this block: it is
+			// what gets pasted into the App's Webhook settings, and getting it
+			// from a log line beats deriving it from two flags.
+			log.Info("github webhook receiver enabled",
+				"url", "https://"+*webhookSub+"."+*proxyDomain+ghwebhook.Path)
 		}
 		proxySrv = &http.Server{
 			Addr:    *proxyAddr,
@@ -1249,6 +1369,14 @@ type gatewayStores struct {
 	Schedules   *schedule.Store
 	Routes      *routes.Store
 	Sessions    *edgeauth.Signer
+	// Repos and GitHubApp are declared as the ctlops INTERFACES, not as the
+	// concrete *repos.Store and *ghapp.App, and that is load-bearing: a
+	// concrete field holding a nil pointer becomes a non-nil interface once it
+	// is copied into ctlops.Config, which flips the capability on for a host
+	// that has neither, and the first call panics. Declared this way, an unset
+	// field is the honest nil.
+	Repos     ctlops.Repos
+	GitHubApp ctlops.GitHubApp
 
 	DefaultImage       string
 	Domain             string
@@ -1282,6 +1410,12 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// tagging without the secret verbs (or the reverse) stays expressible.
 		Secrets:  s.Secrets,
 		Sessions: s.Sessions,
+		// The repo half is two fields for the same reason Tagger and Secrets
+		// are: attaching a repository and asking github.com about it are
+		// separate capabilities, and a host with the store but no App key can
+		// still record attachments for the public repositories that need no
+		// credential.
+		Repos: s.Repos,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
 		// cannot say whether a machine is answering, and the fleet alone cannot
@@ -1292,6 +1426,7 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// answer every start with "invalid client" is worse than a host that
 		// says plainly it cannot do this.
 		GitHubDevice: githubDevice(s.GitHubClientID),
+		GitHubApp:    s.GitHubApp,
 		DefaultImage: s.DefaultImage, Domain: s.Domain,
 		GatewayGuestSubnet: s.GatewayGuestSubnet,
 		XtermSubdomain:     s.XtermSubdomain, InvitesPerUser: s.InvitesPerUser,
