@@ -445,7 +445,17 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// The sentence that stops an agent solving a private clone the way the
 		// old documentation told it to: by asking for a personal access token.
 		"Do not create, paste, or store a GitHub token",
-		"AGENT_ENV_REV=6",
+		// The browser is only "out of the box" if the CLI, the Chrome it drives,
+		// and the skill that tells an agent the CLI exists all land together.
+		// Each of these is one of those three, and the env var is the one that
+		// stops the agent trying to download a second Chrome it cannot get.
+		"agent-browser skills get core",
+		".agents/skills/agent-browser",
+		"../../.agents/skills/agent-browser",
+		"../../../.agents/skills/agent-browser",
+		"AGENT_BROWSER_EXECUTABLE_PATH /headless-shell/headless-shell",
+		"AGENT_BROWSER_SOCKET_DIR",
+		"AGENT_ENV_REV=7",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)

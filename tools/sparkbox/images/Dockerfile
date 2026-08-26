@@ -28,6 +28,19 @@ SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
 # and the ubuntu-server/-standard/-dev-tools metapackages — the server set drags
 # in lvm/mdadm/multipath/iscsi/cloud-init that a Firecracker microVM can't use and
 # that our systemd boot-trim below would just have to mask.
+#
+# The browser slice below is wider than /headless-shell itself needs — its whole
+# DT_NEEDED set is glibc plus libnss3/libnspr4/libexpat1, and it renders
+# byte-identically with the X/GTK pile removed. They stay because libgtk-3-0 is
+# what already satisfies 19 of the 21 packages Playwright's own noble dependency
+# list wants, so an agent that runs `npx playwright install chromium` inside a
+# sandbox gets a working browser instead of a dlopen failure. libasound2t64 is
+# the one entry on that list we were missing (+1.4MB). fonts-noto-cjk is the only
+# genuine rendering defect measured: with the previous font set, CJK text
+# screenshots as empty boxes while Latin, Cyrillic, Arabic, symbols and colour
+# emoji all render (fontconfig-config's hard Depends on fonts-dejavu-core is what
+# quietly covers Latin). It costs ~89MB; fonts-droid-fallback is the 7MB version
+# that still breaks Korean.
 RUN rm -f /etc/dpkg/dpkg.cfg.d/excludes /etc/dpkg/dpkg.cfg.d/01_nodoc && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get -y \
@@ -52,8 +65,8 @@ RUN rm -f /etc/dpkg/dpkg.cfg.d/excludes /etc/dpkg/dpkg.cfg.d/01_nodoc && \
       systemd systemd-sysv dbus-user-session \
       docker.io docker-buildx docker-compose-v2 mitmproxy \
       libglib2.0-0 libnss3 libx11-6 libxcomposite1 libxdamage1 libxext6 \
-      libxi6 libxrandr2 libgbm1 libgtk-3-0 fontconfig \
-      fonts-noto-color-emoji fonts-symbola && \
+      libxi6 libxrandr2 libgbm1 libgtk-3-0 libasound2t64 fontconfig \
+      fonts-noto-color-emoji fonts-symbola fonts-noto-cjk && \
     # fd ships as `fdfind` on Debian/Ubuntu; give it its upstream name too.
     ln -sf "$(command -v fdfind)" /usr/local/bin/fd && \
     # Locale so forwarded LC_* stop warning "cannot change locale".
@@ -189,7 +202,22 @@ COPY index.html /var/www/html/index.html
 RUN chmod 644 /var/www/html/index.html
 
 # ---- headless Chrome ------------------------------------------------------
+# Give the binary the names browser tooling actually searches for. Every
+# Chrome-launching CLI a sandbox might reach for (agent-browser, puppeteer-core,
+# lighthouse) scans PATH for google-chrome / google-chrome-stable / chromium /
+# chromium-browser, and none of them has ever heard of `headless-shell` — so
+# having /headless-shell on the PATH (see images/environment) buys nothing on its
+# own. Chrome resolves its bundled .so files through /proc/self/exe, so reaching
+# it through a symlink in another directory still finds libvk_swiftshader.so and
+# friends.
+#
+# This is belt-and-braces, not the mechanism: refresh-agent-tools.sh seeds
+# AGENT_BROWSER_EXECUTABLE_PATH into /etc/environment, which is what makes
+# agent-browser work on templates built before this line existed. Nothing about
+# the browser may depend on a ~65-minute image rebuild reaching the live box.
 COPY --from=chrome /headless-shell /headless-shell
+RUN ln -sf /headless-shell/headless-shell /usr/local/bin/chromium && \
+    ln -sf /headless-shell/headless-shell /usr/local/bin/google-chrome
 
 # ---- host keys ------------------------------------------------------------
 # openssh-server generated per-image host keys during install; do not bake those

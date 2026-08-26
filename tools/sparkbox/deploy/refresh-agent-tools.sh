@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bake up-to-date agent CLIs (Claude Code, Codex, Pi, and Hivemind) and the guest
-# workload-identity payload into the sparkbox rootfs templates WITHOUT rebuilding
-# the image. Runs on the host as root.
+# Bake up-to-date agent CLIs (Claude Code, Codex, Pi, Hivemind, agent-browser) and
+# the guest workload-identity payload into the sparkbox rootfs templates WITHOUT
+# rebuilding the image. Runs on the host as root.
 #
 # Rebuilding the rootfs is a ~65-minute docker+CI affair; this is seconds. The
 # firecracker driver reflinks <image-dir>/<image>.ext4 at every sandbox create,
@@ -24,6 +24,17 @@
 #   hivemind: github.com/wandb/hivemind release binary, version + sha256
 #             resolved from the repo's hivemind-latest.json manifest (the same
 #             manifest the official installer at hivemind.wandb.tools uses).
+#   agent-browser:
+#             registry.npmjs.org tarball for the `agent-browser` package.
+#             Version, URL and digest all come back in ONE unauthenticated GET
+#             of the registry's /latest document — the hivemind-manifest shape,
+#             not the tag-then-SHA256SUMS dance the GitHub-hosted tools need.
+#             npm publishes dist.integrity as base64 sha512; dist.shasum is sha1
+#             and is NOT what we check. The tarball already carries prebuilt
+#             per-platform Rust binaries, so nothing here needs npm or node —
+#             which matters, because the host container that runs this script
+#             (deploy/kubernetes/Containerfile) has curl and python3 and no node
+#             at all.
 #
 # WHICH TEMPLATES ARE CURRENT IS ASKED OF THE TEMPLATES THEMSELVES.
 #
@@ -65,17 +76,21 @@ CLAUDE_BASE=${CLAUDE_BASE:-https://downloads.claude.ai/claude-code-releases}
 CODEX_REPO=${CODEX_REPO:-openai/codex}
 PI_REPO=${PI_REPO:-earendil-works/pi}
 HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-latest.json}
+AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-browser/latest}
 # Revision of the guest-side agent conditioning below (/etc/environment knobs +
 # the ~/.claude.json onboarding seed + the ~/.claude/settings.json permission
-# default + the hivemind daemon unit). Versioned like IDENTITY_REV so bumping it
-# re-patches every template on the next run even when no tool version moved.
-AGENT_ENV_REV=6
+# default + the hivemind daemon unit + the agent-browser env wiring and skill).
+# Versioned like IDENTITY_REV so bumping it re-patches every template on the next
+# run even when no tool version moved.
+AGENT_ENV_REV=7
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
+# AB_ARCH names agent-browser's glibc build, not the musl one beside it in the
+# same tarball: the guest is ubuntu:24.04.
 case "$(uname -m)" in
-  x86_64)  CLAUDE_PLAT=linux-x64;   CODEX_ARCH=x86_64;  PI_ARCH=x64;   HM_PLAT=linux-x86_64 ;;
-  aarch64) CLAUDE_PLAT=linux-arm64; CODEX_ARCH=aarch64; PI_ARCH=arm64; HM_PLAT=linux-arm64 ;;
+  x86_64)  CLAUDE_PLAT=linux-x64;   CODEX_ARCH=x86_64;  PI_ARCH=x64;   HM_PLAT=linux-x86_64; AB_ARCH=x64 ;;
+  aarch64) CLAUDE_PLAT=linux-arm64; CODEX_ARCH=aarch64; PI_ARCH=arm64; HM_PLAT=linux-arm64;  AB_ARCH=arm64 ;;
   *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -116,6 +131,23 @@ case "$HM_VER" in
   [0-9]*.[0-9]*.[0-9]*) ;;
   *) echo "bad hivemind version from manifest: $HM_VER" >&2; exit 1 ;;
 esac
+# agent-browser: npm's /latest document is version + tarball URL + digest in one
+# GET. Insist on sha512 rather than accepting whatever `integrity` names, so a
+# registry that ever downgraded the algorithm fails the run instead of silently
+# weakening the only check we have on this tarball.
+read -r AB_VER AB_URL AB_SHA512 <<EOF
+$(curl -fsSL "$AGENT_BROWSER_LATEST" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+dist = d["dist"]
+if not dist["integrity"].startswith("sha512-"):
+    raise SystemExit("agent-browser dist.integrity is not sha512: " + dist["integrity"])
+print(d["version"], dist["tarball"], dist["integrity"])')
+EOF
+case "$AB_VER" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "bad agent-browser version from $AGENT_BROWSER_LATEST: $AB_VER" >&2; exit 1 ;;
+esac
 
 # The guest identity payload is versioned by the installer itself, so bumping
 # IDENTITY_REV there re-patches every template on the next run.
@@ -129,7 +161,7 @@ esac
 # ---- decide which templates are stale, by asking each one ---------------------
 # The single line every template must carry to count as current. One line so
 # reading it back is a string compare and not a parse.
-WANT="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
+WANT="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER agentbrowser=$AB_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
 if [ -n "$GATEWAY_PUBLIC_KEY_FILE" ]; then
   [ -f "$GATEWAY_PUBLIC_KEY_FILE" ] \
     || { echo "gateway public key file does not exist: $GATEWAY_PUBLIC_KEY_FILE" >&2; exit 1; }
@@ -171,7 +203,7 @@ for tpl in "${ALL[@]}"; do
 done
 
 if [ ${#STALE[@]} = 0 ]; then
-  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, pi $PI_TAG, hivemind $HM_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
+  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, pi $PI_TAG, hivemind $HM_VER, agent-browser $AB_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
   exit 0
 fi
 echo ">> ${#STALE[@]} of ${#ALL[@]} template(s) need patching"
@@ -219,6 +251,28 @@ if [ ! -x "$HM_BIN" ]; then
   chmod 0755 "$HM_BIN.tmp" && mv "$HM_BIN.tmp" "$HM_BIN"
 fi
 
+# One cached tarball serves every template on this box; it is pruned down to a
+# single platform at INSTALL time, not here, so the cache stays a byte-for-byte
+# copy of what the registry served and its digest keeps meaning something.
+AB_TGZ="$TOOLS_DIR/agent-browser-$AB_VER.tgz"
+if [ ! -f "$AB_TGZ" ]; then
+  echo ">> downloading agent-browser $AB_VER (linux-$AB_ARCH)"
+  curl -fsSL "$AB_URL" -o "$AB_TGZ.tmp"
+  # npm's integrity is base64 sha512, so `sha256sum -c` has nothing to compare
+  # against and the hex habit from the other four tools does not transfer.
+  # python3 is already a hard dependency of this script (see the hivemind
+  # manifest parse above), so this needs nothing new on the host.
+  AB_GOT=$(python3 -c 'import base64, hashlib, sys
+with open(sys.argv[1], "rb") as f:
+    print("sha512-" + base64.b64encode(hashlib.sha512(f.read()).digest()).decode())' \
+    "$AB_TGZ.tmp")
+  if [ "$AB_GOT" != "$AB_SHA512" ]; then
+    echo "agent-browser $AB_VER integrity mismatch: got $AB_GOT want $AB_SHA512" >&2
+    rm -f "$AB_TGZ.tmp"; exit 1
+  fi
+  mv "$AB_TGZ.tmp" "$AB_TGZ"
+fi
+
 # ---- guest agent conditioning -------------------------------------------------
 # Claude Code gates its TUI behind two first-run dialogs that have nothing to do
 # with auth, so a sandbox carrying a valid CLAUDE_CODE_OAUTH_TOKEN still lands on
@@ -245,6 +299,23 @@ fi
 # Note this seeds config, never credentials: auth stays the env token that
 # envsync pushes per-tag, and no ~/.claude/.credentials.json is ever written, so
 # there is no credential state to sync between host and guest or across boxes.
+# set_guest_env ASSERTS a value this script owns, instead of defaulting it.
+#
+# The append-if-absent idiom below it (`grep -qs '^KEY=' || echo >>`) is right
+# for a flag that is either set or not and whose value never changes. It is
+# WRONG for a tunable, and templates are the reason: the patch loop reflinks the
+# template it is replacing, so /etc/environment already carries whatever an
+# earlier run appended. Under the skip-if-present form, editing a value in this
+# file and bumping AGENT_ENV_REV re-patches and re-stamps every template — and
+# changes nothing, because the key is already there. The run then reports
+# success for a value that never landed, which is the same shape of lie the
+# header rewrote this script to stop telling.
+set_guest_env() {
+  local mnt=$1 key=$2 val=$3
+  sed -i "/^$key=/d" "$mnt/etc/environment"
+  printf '%s=%s\n' "$key" "$val" >> "$mnt/etc/environment"
+}
+
 seed_agent_env() {
   local mnt=$1
   # The template stays the single source of tool versions; don't let each guest
@@ -253,6 +324,59 @@ seed_agent_env() {
     echo 'DISABLE_AUTOUPDATER=1' >> "$mnt/etc/environment"
   grep -qs '^CLAUDE_CODE_SANDBOXED=' "$mnt/etc/environment" || \
     echo 'CLAUDE_CODE_SANDBOXED=1' >> "$mnt/etc/environment"
+
+  # agent-browser will not otherwise find the Chrome this image already ships.
+  # Its PATH probe looks for google-chrome / google-chrome-stable / chromium /
+  # chromium-browser / brave-browser, and /headless-shell/headless-shell is named
+  # none of those — so having it on PATH (images/environment) buys nothing on its
+  # own. Unset, the CLI reports "Chrome not found" and tells the agent to run
+  # `agent-browser install`, which downloads a SECOND ~170MB Chrome-for-Testing
+  # per sandbox from storage.googleapis.com: a host that is not in the sluice
+  # allowlist, so on a tagged box it does not even fail fast, it NXDOMAINs. On
+  # arm64 it cannot succeed at all — Chrome for Testing publishes no Linux ARM64
+  # build, and arm64 is the DGX.
+  #
+  # This is an env var and not a seeded ~/.agent-browser/config.json even though
+  # config wins over env in agent-browser's precedence, for three reasons: only
+  # /etc/environment reaches the non-interactive `ssh box '<cmd>'` execs agents
+  # actually run (they read no profile); a file in $HOME would become user state
+  # that fork templates carry and that we would then rewrite on every refresh;
+  # and two sources that can disagree is exactly how you get a working `open`
+  # followed by a failing `snapshot`, because the daemon compares the launch
+  # config it cached against what the next command hands it.
+  # Guarded on the binary actually being in THIS template. The script patches
+  # templates it did not build (that is the whole point of install_gateway_key's
+  # "images we did not make" case), and a bad executable path is not a soft
+  # failure: agent-browser does not fall back to its PATH probe, it dies with
+  # `Failed to launch Chrome at "..."`. Pointing at a file that is not there
+  # would take a template whose only problem was an unusual Chrome location and
+  # give it no browser at all.
+  if [ -x "$mnt/headless-shell/headless-shell" ]; then
+    set_guest_env "$mnt" AGENT_BROWSER_EXECUTABLE_PATH /headless-shell/headless-shell
+  else
+    echo "   !! no /headless-shell/headless-shell in template; leaving agent-browser to its PATH probe" >&2
+  fi
+
+  # Chrome is the one tool here that stays resident after the command that
+  # started it returns: the daemon's default idle timeout is a full hour, so one
+  # forgotten session holds a browser's RSS long after the agent moved on, and
+  # the reaper's balloon/CPU feedback loop is what pays for it. Ten minutes is
+  # still long enough that a multi-step browsing task never eats a relaunch.
+  # Unlike the hivemind daemon below, this bound is reasoned rather than
+  # measured — if a sandbox ever looks memory-starved with an idle browser in it,
+  # measure before raising it.
+  set_guest_env "$mnt" AGENT_BROWSER_IDLE_TIMEOUT_MS 600000
+
+  # Deliberately NOT seeded: AGENT_BROWSER_ARGS=--no-sandbox. The guest kernel
+  # can run Chrome's own sandbox — the Firecracker CI 6.1 config both arches
+  # build from has CONFIG_USER_NS=y, and it does not build AppArmor at all, so
+  # Ubuntu 24.04's kernel.apparmor_restrict_unprivileged_userns clamp does not
+  # exist in here to get in the way. Turning the renderer sandbox off for every
+  # sandbox on the fleet would be a call made once, here, on behalf of every user
+  # of a VM that holds their repos and their ~/.ssh — the same call the `auto`
+  # vs `bypassPermissions` comment below refuses to make for them. If a live box
+  # ever disagrees, `unshare -U true` says so in one command, and the fix is one
+  # line here plus an AGENT_ENV_REV bump.
 
   # Resolve the login user from the template itself rather than hardcoding
   # `sparky`, so this tracks the sparkbox.login-user label if it ever changes.
@@ -264,10 +388,25 @@ seed_agent_env() {
   home=$(echo "$pw" | cut -d: -f6)
   [ -d "$mnt$home" ] || { echo "   !! $home missing in template; skipping claude seed" >&2; return 0; }
 
-  # MERGE, never overwrite: this loop also walks `snap-<owner>-<name>.ext4` fork
-  # templates, whose ~/.claude.json is a real user's accumulated state (project
-  # trust, history pointers, theme choice). We assert only the onboarding keys,
-  # and leave a theme already chosen by the user alone.
+  # One daemon per guest, not two. agent-browser puts its socket in
+  # $AGENT_BROWSER_SOCKET_DIR, else $XDG_RUNTIME_DIR/agent-browser, else
+  # $HOME/.agent-browser — and this image exports XDG_RUNTIME_DIR from ~/.bashrc
+  # and ~/.profile but NOT from /etc/environment. Left alone, an interactive
+  # shell and a non-interactive ssh exec would resolve different directories,
+  # drive different daemons, and open different browsers, so a page opened in
+  # one is simply not there to snapshot from the other. Pinning it to $HOME is
+  # what makes the two agree; it also means the socket outlives a cold boot, so
+  # the CLI's stale-socket handling is what has to be right rather than tmpfs.
+  set_guest_env "$mnt" AGENT_BROWSER_SOCKET_DIR "$home/.agent-browser"
+
+  # MERGE, never overwrite. This loop no longer walks `snap-<owner>-<name>.ext4`
+  # fork templates — the candidate list skips them (see the `continue` above), for
+  # the security reason in the header — so the merge discipline is belt-and-braces
+  # rather than the requirement it was written as. Keep it: a base template can
+  # still carry operator state, ~/.claude.json is a real user's accumulated state
+  # wherever it does exist (project trust, history pointers, theme choice), and
+  # the exclusion is a policy that has changed once already. We assert only the
+  # onboarding keys, and leave a theme already chosen by the user alone.
   CLAUDE_VER="$CLAUDE_VER" python3 - "$mnt$home/.claude.json" <<'PY'
 import json, os, sys
 
@@ -334,6 +473,15 @@ if not isinstance(perms, dict):
 perms.setdefault("defaultMode", "auto")
 cfg.setdefault("skipAutoPermissionPrompt", True)
 
+# Deliberately NOT seeded here: an allow rule for Bash(agent-browser:*). The
+# browser can read any local file through file://, run arbitrary JavaScript via
+# `eval`, and reach the network — so a standing fleet-wide grant would hand an
+# agent that ingested a prompt-injected README exactly the capability `auto`
+# exists to keep asking about, and would undo the line the comment above draws.
+# It is not needed for the browser to be usable, either: upstream's SKILL.md
+# carries `allowed-tools: Bash(agent-browser:*)` in its own frontmatter, so the
+# grant applies while the skill that teaches the tool is loaded, and nowhere else.
+
 tmp = path + ".seed-new"
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2)
@@ -396,6 +544,14 @@ short-lived token scoped to the one repository being fetched, so `git clone`,
 `git fetch` and `git push` on an attached repository just work, and nothing
 durable holds a credential.
 
+A headless Chrome and the `agent-browser` CLI are already installed and already
+pointed at each other. Use `agent-browser` for anything that needs a real
+browser, and run `agent-browser skills get core` for the command reference. Do
+not run `agent-browser install` and do not download another browser: that host
+is not on this VM's egress allowlist, and on arm64 it publishes no build at all.
+If this VM carries a tag, its egress is filtered, so pages on the open web may
+not resolve even though a service you are running on this VM will.
+
 Only use documented Sparkbox features. Undocumented local endpoints, metadata
 services, gateway ports, and node services are internal infrastructure and may
 change without notice.
@@ -414,6 +570,66 @@ EOF
   chown -R "$uid:$gid" "$mnt$home/.agents" "$mnt$home/.codex" "$mnt$home/.claude"
   chmod 0755 "$mnt$home/.agents" "$mnt$home/.codex" "$mnt$home/.claude"
   chmod 0644 "$canonical"
+}
+
+# Put agent-browser's own skill where each harness looks for it.
+#
+# Sourced from the copy installed under /usr/local/lib above, NOT from a file
+# vendored into this repo: upstream's SKILL.md is a deliberate ~3.4KB discovery
+# stub whose body says little more than "run `agent-browser skills get core`",
+# precisely so the guidance always matches the installed CLI. A vendored copy
+# would be a second thing to remember to bump every time the tool moves, and a
+# `npx skills add` at guest boot would fetch repo HEAD over a network that a
+# fresh sandbox has only just acquired — the class of bug already recorded in
+# the first-attach race.
+#
+# Same canonical-file-plus-symlinks shape install_agent_guidance uses for
+# AGENTS.md, one directory deeper. Codex was observed reading ~/.agents/skills in
+# one probe and $CODEX_HOME/skills in another; it gets a link either way, because
+# a symlink costs nothing and this does not need us to be right about which.
+install_agent_browser_skill() {
+  local mnt=$1
+  local pw home uid gid src spec target
+  pw=$(awk -F: '$3 == 1000 {print; exit}' "$mnt/etc/passwd") || return 0
+  [ -n "$pw" ] || { echo "   !! no uid-1000 user in template; skipping agent-browser skill" >&2; return 0; }
+  uid=$(echo "$pw" | cut -d: -f3)
+  gid=$(echo "$pw" | cut -d: -f4)
+  home=$(echo "$pw" | cut -d: -f6)
+  [ -d "$mnt$home" ] || { echo "   !! $home missing in template; skipping agent-browser skill" >&2; return 0; }
+
+  # FATAL, unlike the two guards above. Those fire on a malformed template — an
+  # image with no uid-1000 user or no home — where skipping one guest's skill is
+  # the proportionate response. This one fires when the npm tarball's layout
+  # moved under us, which is a live possibility (0.35.0 ships TWO skill trees,
+  # skills/ and skill-data/) and needs a human. Returning 0 here would let the
+  # loop reach the stamp and write agentenv=7 onto a template with no skill in
+  # it, and no later run would ever retry — the exact "claims tools it never
+  # received" failure the header describes.
+  src="$mnt/usr/local/lib/agent-browser/skills/agent-browser/SKILL.md"
+  [ -f "$src" ] || { echo "agent-browser $AB_VER ships no SKILL.md at ${src#"$mnt"}" >&2; exit 1; }
+
+  mkdir -p "$mnt$home/.agents/skills/agent-browser" "$mnt$home/.claude/skills" \
+           "$mnt$home/.codex/skills" "$mnt$home/.pi/agent/skills"
+  install -m 0644 "$src" "$mnt$home/.agents/skills/agent-browser/SKILL.md"
+
+  # The same guard install_agent_guidance carries: a REAL directory at one of
+  # these paths is somebody's own skill of that name, and replacing it would
+  # silently discard it. Links are relative so they survive the home moving or
+  # the login user being renamed, for the reason install_agent_guidance writes
+  # ../.agents/.
+  for spec in ".claude/skills/agent-browser:../../.agents/skills/agent-browser" \
+              ".codex/skills/agent-browser:../../.agents/skills/agent-browser" \
+              ".pi/agent/skills/agent-browser:../../../.agents/skills/agent-browser"; do
+    target=${spec#*:}; spec=${spec%%:*}
+    if [ -e "$mnt$home/$spec" ] && [ ! -L "$mnt$home/$spec" ]; then
+      echo "   !! $home/$spec is not a symlink; leaving it unchanged" >&2
+      continue
+    fi
+    ln -sfn "$target" "$mnt$home/$spec"
+  done
+
+  chown -R "$uid:$gid" "$mnt$home/.agents" "$mnt$home/.claude" \
+    "$mnt$home/.codex" "$mnt$home/.pi"
 }
 
 # install_gateway_key replaces the release template's build-time fleet key
@@ -568,8 +784,33 @@ for tpl in "${STALE[@]}"; do
     || { echo "pi bundle $PI_BUNDLE has no executable pi" >&2; exit 1; }
   ln -sfn ../lib/pi/pi "$MNT/usr/local/bin/pi"
   install -m 0755 "$HM_BIN"     "$MNT/usr/local/bin/hivemind"
+  # agent-browser is a self-contained Rust CDP client, but like pi it is not just
+  # a binary: it resolves its own skill content at <real-binary-dir>/../skill-data,
+  # so the bundle has to stay together under /usr/local/lib with a relative
+  # symlink on PATH. Copying only the executable into /usr/local/bin yields a CLI
+  # whose every `skills` subcommand fails with "Skills directory not found" —
+  # the kind of half-working you would only discover from inside a sandbox.
+  #
+  # The tarball carries SEVEN platform binaries (~87MB of its ~92MB). Keep the
+  # one this box's guests actually run and drop the rest, along with the npm
+  # shim bin/agent-browser.js (it wants node>=24 and buys nothing, because
+  # /usr/local/bin/agent-browser points straight at the ELF) and scripts/, whose
+  # postinstall we never run. ~92MB -> ~13MB.
+  rm -rf "$MNT/usr/local/lib/agent-browser"
+  mkdir -p "$MNT/usr/local/lib/agent-browser"
+  tar -xzf "$AB_TGZ" -C "$MNT/usr/local/lib/agent-browser" --strip-components=1 --no-same-owner
+  find "$MNT/usr/local/lib/agent-browser/bin" -type f ! -name "agent-browser-linux-$AB_ARCH" -delete
+  rm -rf "$MNT/usr/local/lib/agent-browser/scripts"
+  [ -f "$MNT/usr/local/lib/agent-browser/bin/agent-browser-linux-$AB_ARCH" ] \
+    || { echo "agent-browser tarball $AB_TGZ has no linux-$AB_ARCH binary" >&2; exit 1; }
+  # npm ships bin/* mode 0644 and relies on its postinstall to chmod them. We
+  # never run that postinstall, so the exec bit is ours to set or the symlink
+  # below points at something that cannot be executed.
+  chmod 0755 "$MNT/usr/local/lib/agent-browser/bin/agent-browser-linux-$AB_ARCH"
+  ln -sfn "../lib/agent-browser/bin/agent-browser-linux-$AB_ARCH" "$MNT/usr/local/bin/agent-browser"
   seed_agent_env "$MNT"
   install_agent_guidance "$MNT"
+  install_agent_browser_skill "$MNT"
   install_gateway_key "$MNT"
   # Workload identity: the token unit + timer that keep
   # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with
@@ -589,10 +830,12 @@ done
 # The host-side stamp is now a RECORD, not a decision: what counts as current is
 # read out of each template above. Keep writing it because it is what an operator
 # (and `sparkbox doctor`) reads to see which versions this box last resolved.
-printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nPI_TAG=%s\nHIVEMIND_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
-  "$CLAUDE_VER" "$CODEX_TAG" "$PI_TAG" "$HM_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
+printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nPI_TAG=%s\nHIVEMIND_VERSION=%s\nAGENT_BROWSER_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
+  "$CLAUDE_VER" "$CODEX_TAG" "$PI_TAG" "$HM_VER" "$AB_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
 # Drop cached binaries from older versions; keep the current set.
-find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'pi-*' -o -name 'hivemind-*' \) \
+find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'pi-*' \
+    -o -name 'hivemind-*' -o -name 'agent-browser-*' \) \
   ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" \
-  ! -name "$(basename "$PI_BUNDLE")" ! -name "$(basename "$HM_BIN")" -delete
-echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + pi $PI_TAG + hivemind $HM_VER + identity rev $IDENTITY_REV"
+  ! -name "$(basename "$PI_BUNDLE")" ! -name "$(basename "$HM_BIN")" \
+  ! -name "$(basename "$AB_TGZ")" -delete
+echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + pi $PI_TAG + hivemind $HM_VER + agent-browser $AB_VER + identity rev $IDENTITY_REV"
