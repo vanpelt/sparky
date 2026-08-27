@@ -46,6 +46,11 @@ const secretUsage = "usage: ssh ctl@<gateway> secret ls\r\n" +
 	"       <command printing the value> | ssh ctl@<gateway> secret set <NAME> [--tag <t>]…\r\n" +
 	"       ssh ctl@<gateway> secret rm <NAME>\r\n" +
 	"\r\n" +
+	"a secret is pushed into your sandboxes as an environment variable. `ls` shows\r\n" +
+	"names and tags and never a value; `rm` strips it from the sandboxes that have\r\n" +
+	"it. tags are what decide which sandboxes those are — an untagged secret and a\r\n" +
+	"new sandbox both get `default`, so with no tags at all they still meet.\r\n" +
+	"\r\n" +
 	"the value is read from stdin, never from the command line, so it stays out\r\n" +
 	"of your shell history. with a terminal (ssh -t) you are prompted instead.\r\n" +
 	"\r\n" +
@@ -53,7 +58,11 @@ const secretUsage = "usage: ssh ctl@<gateway> secret ls\r\n" +
 	"by its own shape, and anything ambiguous is refused rather than guessed at.\r\n" +
 	"\r\n" +
 	"  gh auth token | ssh ctl@<gateway> secret set GITHUB_TOKEN --tag ci\r\n" +
-	"  claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n"
+	"  claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n" +
+	"\r\n" +
+	"a GITHUB_TOKEN still works, but for repositories prefer `repo add` (see\r\n" +
+	"`help repos`): it clones with a one-hour credential minted per sandbox,\r\n" +
+	"instead of a token of yours living in one.\r\n"
 
 func (g *Gateway) controlSecret(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	if len(args) == 0 {

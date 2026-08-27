@@ -126,7 +126,7 @@ to reconnect on :2222.
 ```sh
 ssh -p 2222 new@<host>          # create a sandbox; it prints the name
 ssh -p 2222 <name>@<host>       # resume + shell in (auto-resumes if paused)
-ssh -p 2222 ctl@<host> help     # account/keys/routes/schedule controls
+ssh -p 2222 ctl@<host> help     # an index of every control; `help <topic>` for detail
 ```
 
 Words after `new@` (or `new+<name>@`) are **tags**, not a command — a new
