@@ -10,7 +10,7 @@ ssh signup@gateway         → registers your key (invite code + handle)
 ssh new@gateway            → creates a sandbox, tells you its name
 ssh -t new+foo@gateway bar → names it `foo`, tags it `bar` (-t: see below)
 ssh <name>@gateway         → resumes it if suspended, drops you in
-ssh ctl@gateway keys list  → manage your account's SSH keys
+ssh ctl@gateway ls         → your sandboxes; `help` indexes the rest, `help <topic>` drills in
 https://<name>.hivemind.tools       → reverse-proxy to a port inside the sandbox
 https://<name>.hivemind.tools:4444  → …any port; private by default, login-gated
 POST /v1/sandboxes         → control API (create/list/pause/resume/destroy/routes)

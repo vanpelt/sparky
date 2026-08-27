@@ -12,91 +12,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
-const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
-	"\r\n" +
-	" creating a sandbox\r\n" +
-	"  (new sandbox)            ssh new@<gateway> [<tag>…]   — creates one and connects\r\n" +
-	"                           ssh new+<name>@<gateway>     — same, but you name it\r\n" +
-	"     the words after new@ are tags, never a command to run — a fresh sandbox\r\n" +
-	"     always gets a shell. Passing any word makes ssh skip the terminal, so use\r\n" +
-	"     `ssh -t new+<name>@<gateway> <tag>…` or you get a shell with no prompt.\r\n" +
-	"  fork <snapshot> <name> [--tag <t>]…  create one from a snapshot you saved\r\n" +
-	"\r\n" +
-	" sandboxes\r\n" +
-	"  list                     list your sandboxes and their state\r\n" +
-	"  pause <name>             pause a running sandbox to free a slot\r\n" +
-	"  archive <name>           park a sandbox in object storage (frees host disk)\r\n" +
-	"  restore <name>           bring an archived sandbox back and start it\r\n" +
-	"  checkpoint <name>        save a durable disk checkpoint (cold-boots it)\r\n" +
-	"  checkpoint restore <name>  replace the local disk with its latest checkpoint\r\n" +
-	"  resize <name> <size>     grow a sandbox's root disk, e.g. 25G (cold-boots it)\r\n" +
-	"  rm <name>                delete a sandbox and its disk — permanent, see archive\r\n" +
-	"  tags <name> [<tag>…]     show or set tags (they select which secrets it gets)\r\n" +
-	"  sessions <name>          the HiveMind agent sessions recorded from a sandbox\r\n" +
-	"\r\n" +
-	" secrets (pushed into your sandboxes as environment variables)\r\n" +
-	"  secret ls                list your secrets (names and tags; never values)\r\n" +
-	"  secret set <NAME> [--tag <t>]…  read a value from stdin and store it\r\n" +
-	"     claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN\r\n" +
-	"     gh auth token | ssh ctl@<gateway> secret set GITHUB_TOKEN — still works, but\r\n" +
-	"       for repositories prefer `repo add` below: it clones with a one-hour\r\n" +
-	"       credential minted per sandbox, instead of a token of yours living in one.\r\n" +
-	"     a banner around the value is fine — the credential is picked out of it.\r\n" +
-	"     ssh -t ctl@<gateway> secret set <NAME>   prompts instead (paste, unechoed)\r\n" +
-	"     the value never goes on the command line, so it stays out of your history.\r\n" +
-	"     untagged secrets and new sandboxes both get the `default` tag, so they meet.\r\n" +
-	"  secret rm <NAME>         delete a secret and strip it from your sandboxes\r\n" +
-	"  pin <name>               keep a sandbox always-on (in-VM cron/daemons run)\r\n" +
-	"  unpin <name>             let a sandbox pause when idle again\r\n" +
-	"\r\n" +
-	" repos (cloned into your sandboxes at boot, before you get there)\r\n" +
-	"  repo ls                  list the repos attached to your tags\r\n" +
-	"  repo add <owner>/<name> [--tag <t>]… [--write] [--ref <r>] [--path <p>]\r\n" +
-	"     with no --tag it goes on `default`, which every new sandbox of yours has.\r\n" +
-	"  repo rm <owner>/<name>   detach a repo (clones already made are left alone)\r\n" +
-	"  repo check               which attachments the GitHub App can actually reach\r\n" +
-	"  github install           install that App on the repos you want\r\n" +
-	"\r\n" +
-	" snapshots (fork-able disk templates)\r\n" +
-	"  snapshot list            list your snapshots\r\n" +
-	"  snapshot create <box> <name>  save <box>'s current disk as a template\r\n" +
-	"  snapshot rm <name>       delete a snapshot template\r\n" +
-	"\r\n" +
-	" other\r\n" +
-	"  schedule list            list your platform-scheduled jobs\r\n" +
-	"  schedule add <box> \"<cron>\" <cmd>  wake <box> on a cron schedule to run <cmd>\r\n" +
-	"  schedule rm <id>         remove a scheduled job\r\n" +
-	"  whoami                   show your account and linked identities\r\n" +
-	"  keys list                list the SSH keys on your account\r\n" +
-	"  keys add \"<key line>\"    link another key\r\n" +
-	"  keys rm <SHA256:...>     unlink a key (never the last one)\r\n" +
-	"  github link [<login>]    link your GitHub account\r\n" +
-	"  keys import-github       adopt every key github.com lists for your login\r\n" +
-	"  keys verify-github       link by proving this key is published on GitHub\r\n" +
-	"  passkey list             list the passkeys enrolled from your browsers\r\n" +
-	"  passkey rm <id>          remove a passkey (id or unique prefix from list)\r\n" +
-	"  email [set <addr>|clear] show or set the email forwarded to private apps\r\n" +
-	"  share <name> [public|private]  show or set who can reach a sandbox's URLs\r\n" +
-	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
-	"  invite                   mint a single-use invite code\r\n" +
-	"  user ls                  list the accounts on this host (operators)\r\n" +
-	"  user add <github-login>… admit people by adopting the ssh keys github.com\r\n" +
-	"                             publishes for them — no invite code (operators)\r\n" +
-	"  user sync-github-org <org> [--team <slug>]  do that for a GitHub org or one\r\n" +
-	"                             of its teams (operators). your read:org token, on stdin:\r\n" +
-	"                             gh auth token | ssh ctl@<gateway> user sync-github-org <org>\r\n" +
-	"  node ls                  list the machines in this fleet (operators)\r\n" +
-	"  node approve <SHA256:...> --guest-subnet <CIDR> [--grpc-addr <host:port>]\r\n" +
-	"                             approve that machine and reserve its guest network (operators)\r\n" +
-	"  node rm <name>           drop a machine from the fleet (operators)\r\n" +
-	"  help                     print this list\r\n" +
-	"\r\n" +
-	" the same sandboxes, without ssh\r\n" +
-	"  a shell in a browser tab   https://<name>-xterm.<domain>\r\n" +
-	"  these commands over HTTP   https://api.<domain>  — docs at /docs\r\n" +
-	"                             authenticate with a `session-token`:\r\n" +
-	"                             curl -H \"Authorization: Bearer $TOKEN\" https://api.<domain>/v1/sandboxes\r\n"
-
 // handleControl serves the `ctl@` out-of-band channel: managing sandboxes and
 // your own account without dialing into a VM. It only ever touches the
 // caller's own sandboxes and keys.
@@ -108,14 +23,18 @@ const controlUsage = "usage: ssh ctl@<gateway> <command>\r\n" +
 // has always printed.
 func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 	args := s.Command()
+	c := caller(s, user)
 	if len(args) == 0 {
-		fmt.Fprint(s.Stderr(), controlUsage)
+		fmt.Fprint(s.Stderr(), controlHelp(g.isOperator(s, c)))
 		s.Exit(2) //nolint:errcheck
 		return
 	}
-	c := caller(s, user)
 	switch args[0] {
-	case "list":
+	// `ls` is what the help documents; `list` is what shipped, what the docs
+	// and other people's scripts say, and what the REST path is called. Both,
+	// forever — the alias costs a word and an alias nobody has to remember is
+	// the whole point.
+	case "ls", "list":
 		boxes, err := g.ops.List(s.Context(), c)
 		if err != nil {
 			failCtl(s, log, "list", err)
@@ -236,6 +155,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		}
 		fmt.Fprintf(s, "removed %s — its disk is gone\r\n", name)
 		s.Exit(0) //nolint:errcheck
+	case "rename", "mv":
+		g.controlRename(s, c, args, log)
 	case "tags":
 		g.controlTags(s, c, args, log)
 	case "sessions":
@@ -301,12 +222,11 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 	case "node":
 		g.controlNode(s, c, args[1:], log)
 	case "help", "-h", "--help":
-		// Asked for, so it goes to stdout and exits 0 — unlike the same text
-		// printed as an error for a bad command.
-		fmt.Fprint(s, controlUsage)
-		s.Exit(0) //nolint:errcheck
+		// Asked for, so it goes to stdout and exits 0 — unlike the index
+		// printed at somebody who mistyped.
+		g.controlHelpCmd(s, c, args[1:])
 	default:
-		fmt.Fprintf(s.Stderr(), "unknown command %q\r\n%s", args[0], controlUsage)
+		fmt.Fprintf(s.Stderr(), "unknown command %q\r\n%s", args[0], controlHelp(g.isOperator(s, c)))
 		s.Exit(2) //nolint:errcheck
 	}
 }
@@ -448,12 +368,12 @@ func (g *Gateway) controlWhoami(s gssh.Session, c ctlops.Caller, log *slog.Logge
 
 func (g *Gateway) controlKeys(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	if len(args) == 0 {
-		fmt.Fprint(s.Stderr(), controlUsage)
+		fmt.Fprint(s.Stderr(), pageFor("account"))
 		s.Exit(2) //nolint:errcheck
 		return
 	}
 	switch args[0] {
-	case "list":
+	case "ls", "list":
 		keys, err := g.ops.ListKeys(s.Context(), c)
 		if err != nil {
 			failCtl(s, log, "keys list", err)
@@ -546,7 +466,7 @@ func (g *Gateway) controlKeys(s gssh.Session, c ctlops.Caller, args []string, lo
 		s.Exit(0) //nolint:errcheck
 
 	default:
-		fmt.Fprintf(s.Stderr(), "unknown keys command %q\r\n%s", args[0], controlUsage)
+		fmt.Fprintf(s.Stderr(), "unknown keys command %q\r\n%s", args[0], pageFor("account"))
 		s.Exit(2) //nolint:errcheck
 	}
 }
@@ -579,12 +499,12 @@ func (g *Gateway) controlSchedule(s gssh.Session, c ctlops.Caller, args []string
 		s.Exit(1) //nolint:errcheck
 		return
 	}
-	sub := "list"
+	sub := "ls"
 	if len(args) > 0 {
 		sub = args[0]
 	}
 	switch sub {
-	case "list":
+	case "ls", "list":
 		entries, err := g.ops.ListSchedules(s.Context(), c)
 		if err != nil {
 			failCtl(s, log, "schedule list", err)
@@ -649,7 +569,7 @@ func (g *Gateway) controlSchedule(s gssh.Session, c ctlops.Caller, args []string
 		fmt.Fprintf(s, "removed %s\r\n", args[1])
 		s.Exit(0) //nolint:errcheck
 	default:
-		fmt.Fprintf(s.Stderr(), "unknown schedule command %q\r\n%s", sub, controlUsage)
+		fmt.Fprintf(s.Stderr(), "unknown schedule command %q\r\n%s", sub, pageFor("schedule"))
 		s.Exit(2) //nolint:errcheck
 	}
 }
@@ -658,12 +578,12 @@ func (g *Gateway) controlSchedule(s gssh.Session, c ctlops.Caller, args []string
 // create <box> <name> | rm <name>. Only ever touches the caller's own sandboxes
 // and snapshots.
 func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
-	sub := "list"
+	sub := "ls"
 	if len(args) > 0 {
 		sub = args[0]
 	}
 	switch sub {
-	case "list":
+	case "ls", "list":
 		snaps, err := g.ops.ListSnapshots(s.Context(), c)
 		if err != nil {
 			failCtl(s, log, "snapshot list", err)
@@ -712,7 +632,7 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 		fmt.Fprintf(s, "deleted snapshot %q\r\n", args[1])
 		s.Exit(0) //nolint:errcheck
 	default:
-		fmt.Fprintf(s.Stderr(), "unknown snapshot command %q\r\n%s", sub, controlUsage)
+		fmt.Fprintf(s.Stderr(), "unknown snapshot command %q\r\n%s", sub, pageFor("snapshots"))
 		s.Exit(2) //nolint:errcheck
 	}
 }
@@ -752,6 +672,49 @@ func (g *Gateway) controlFork(s gssh.Session, c ctlops.Caller, args []string, lo
 	}
 	fmt.Fprintf(s, "created %s from snapshot %q%s — connect with: ssh %s@%s\r\n",
 		name, snapshot, tagNote, name, g.sshHint())
+	s.Exit(0) //nolint:errcheck
+}
+
+// controlRename gives a sandbox a new name — and with it a new default
+// subdomain, a new browser-terminal host and a new `ssh <name>@<gateway>`.
+//
+// The manager pauses the box before it moves the VM directory and drops the
+// memory snapshot (a firecracker state.snap embeds the old absolute paths), so
+// the next start is a cold boot. That is the same bargain `resize` makes, and
+// it is announced the same way and for the same reason: the session goes quiet
+// for the pause, and processes running inside do not come back.
+func (g *Gateway) controlRename(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
+	// Ordered exactly like `resize`, and for its two reasons. The name is
+	// resolved before the missing-destination complaint, so the usage line can
+	// never confirm that a stranger's sandbox is real; and both arity checks
+	// print this command's real grammar rather than letting ownedBoxArg's
+	// one-argument "rename <name>" stand in for it.
+	usage := func() {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> rename <name> <new-name>\r\n", ControlUser)
+		s.Exit(2) //nolint:errcheck
+	}
+	if len(args) < 2 {
+		usage()
+		return
+	}
+	name, ok := g.ownedBoxArg(s, c, args, log)
+	if !ok {
+		return
+	}
+	if len(args) < 3 {
+		usage()
+		return
+	}
+	newName := args[2]
+	fmt.Fprintf(s, "renaming %s to %s (pause + cold boot; running processes restart)…\r\n", name, newName)
+	if _, err := g.ops.Rename(s.Context(), c, name, newName); err != nil {
+		failCtl(s, log, "rename", wrapVerbatim(err, ctlops.KindDisabled))
+		return
+	}
+	// The new address is the point of the command, so it is the sentence. The
+	// guest's own hostname is the one thing that does not move until it reboots,
+	// which it is about to do anyway.
+	fmt.Fprintf(s, "renamed %s → %s — connect with: ssh %s@%s\r\n", name, newName, newName, g.sshHint())
 	s.Exit(0) //nolint:errcheck
 }
 

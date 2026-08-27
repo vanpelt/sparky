@@ -331,17 +331,44 @@ func TestControlGolden(t *testing.T) {
 		wantErr  string
 		wantExit int
 	}{{
-		name: "no command prints usage to stderr", handle: "alice", args: nil,
-		wantErr: controlUsage, wantExit: 2,
+		name: "no command prints the index to stderr", handle: "alice", args: nil,
+		wantErr: controlHelp(false), wantExit: 2,
 	}, {
-		name: "help prints the same text to stdout", handle: "alice", args: []string{"help"},
-		wantOut: controlUsage, wantExit: 0,
+		name: "help prints the same index to stdout", handle: "alice", args: []string{"help"},
+		wantOut: controlHelp(false), wantExit: 0,
+	}, {
+		// The operator rows are presentation only — see help.go — but they are
+		// the difference between the two indexes, so both are pinned.
+		name: "help for an operator lists the operator topics", handle: "opsy", args: []string{"help"},
+		wantOut: controlHelp(true), wantExit: 0,
+	}, {
+		name: "help takes a topic", handle: "alice", args: []string{"help", "secrets"},
+		wantOut: secretUsage, wantExit: 0,
+	}, {
+		// A command name reaches its group's page, because that is what people
+		// type: nobody guesses that `rm` is documented under "sandboxes".
+		name: "help takes a command name too", handle: "alice", args: []string{"help", "rm"},
+		wantOut: sandboxHelp, wantExit: 0,
+	}, {
+		name: "help for an operator topic is invisible to a user", handle: "alice", args: []string{"help", "node"},
+		wantErr: "no help topic \"node\"\r\n" + controlHelp(false), wantExit: 2,
+	}, {
+		name: "help for an operator topic reaches an operator", handle: "opsy", args: []string{"help", "node"},
+		wantOut: nodeHelp, wantExit: 0,
+	}, {
+		name: "help for something that is not a topic", handle: "alice", args: []string{"help", "wat"},
+		wantErr: "no help topic \"wat\"\r\n" + controlHelp(false), wantExit: 2,
 	}, {
 		name: "unknown command names it", handle: "alice", args: []string{"nope"},
-		wantErr: "unknown command \"nope\"\r\n" + controlUsage, wantExit: 2,
+		wantErr: "unknown command \"nope\"\r\n" + controlHelp(false), wantExit: 2,
 	}, {
 		// Owner-scoped: mallory-box exists and is not listed.
 		name: "list is owner-scoped", handle: "alice", args: []string{"list"},
+		wantOut:  "alice-box                running  scale-to-zero\r\n",
+		wantExit: 0,
+	}, {
+		// `ls` is the documented spelling; `list` is the one that shipped.
+		name: "ls is the same command", handle: "alice", args: []string{"ls"},
 		wantOut:  "alice-box                running  scale-to-zero\r\n",
 		wantExit: 0,
 	}, {
@@ -389,7 +416,7 @@ func TestControlGolden(t *testing.T) {
 		wantErr: "sparkbox: no GitHub App is configured on this host\r\n", wantExit: 1,
 	}, {
 		name: "github with an unknown subcommand", handle: "alice", args: []string{"github", "wat"},
-		wantErr: "unknown github command \"wat\"\r\n" + controlUsage, wantExit: 2,
+		wantErr: "unknown github command \"wat\"\r\n" + accountHelp, wantExit: 2,
 	}, {
 		name: "snapshot list when there are none", handle: "alice", args: []string{"snapshot", "list"},
 		wantOut: "no snapshots — create one with:\r\n" +
@@ -400,7 +427,7 @@ func TestControlGolden(t *testing.T) {
 		wantErr: "sparkbox: no snapshot named \"ghost\"\r\n", wantExit: 1,
 	}, {
 		name: "snapshot with an unknown subcommand", handle: "alice", args: []string{"snapshot", "wat"},
-		wantErr: "unknown snapshot command \"wat\"\r\n" + controlUsage, wantExit: 2,
+		wantErr: "unknown snapshot command \"wat\"\r\n" + snapshotHelp, wantExit: 2,
 	}, {
 		name: "schedule list when there are none", handle: "alice", args: []string{"schedule", "list"},
 		wantOut: "no scheduled jobs — add one with:\r\n" +
@@ -455,7 +482,7 @@ func TestControlGolden(t *testing.T) {
 		wantErr: "sparkbox: no key SHA256:nope on this account\r\n", wantExit: 1,
 	}, {
 		name: "keys with no subcommand", handle: "alice", args: []string{"keys"},
-		wantErr: controlUsage, wantExit: 2,
+		wantErr: accountHelp, wantExit: 2,
 	}, {
 		name: "keys import-github without a link", handle: "alice", args: []string{"keys", "import-github"},
 		wantErr: "sparkbox: no GitHub account linked — link one with: " +
@@ -469,10 +496,10 @@ func TestControlGolden(t *testing.T) {
 		wantOut: "no passkeys — enroll one by signing in at https://login.hivemind.tools\r\n", wantExit: 0,
 	}, {
 		name: "passkey rm of an id that matches nothing", handle: "alice", args: []string{"passkey", "rm", "zz"},
-		wantErr: "sparkbox: no passkey matches \"zz\" — see `passkey list`\r\n", wantExit: 1,
+		wantErr: "sparkbox: no passkey matches \"zz\" — see `passkey ls`\r\n", wantExit: 1,
 	}, {
 		name: "passkey with an unknown subcommand", handle: "alice", args: []string{"passkey", "wat"},
-		wantErr: "usage: ssh ctl@<gateway> passkey [list|rm <id>]\r\n", wantExit: 2,
+		wantErr: "usage: ssh ctl@<gateway> passkey [ls|rm <id>]\r\n", wantExit: 2,
 	}, {
 		name: "email when none is set", handle: "alice", args: []string{"email"},
 		wantOut:  "no email set — add one with: ssh ctl@hivemind.tools email set you@example.com\r\n",
@@ -532,8 +559,25 @@ func TestControlGolden(t *testing.T) {
 		name: "node rm without a name", handle: "opsy", args: []string{"node", "rm"},
 		wantErr: "usage: ssh ctl@<gateway> node rm <name>\r\n", wantExit: 2,
 	}, {
+		name: "rename without a name", handle: "alice", args: []string{"rename"},
+		wantErr: "usage: ssh ctl@<gateway> rename <name> <new-name>\r\n", wantExit: 2,
+	}, {
+		// The masking invariant again: the missing destination is reported only
+		// after the source resolves, so this line cannot confirm mallory-box.
+		name: "rename of someone else's sandbox", handle: "alice", args: []string{"rename", "mallory-box"},
+		wantErr: "sparkbox: no sandbox named \"mallory-box\"\r\n", wantExit: 1,
+	}, {
+		name: "rename with nothing to rename it to", handle: "alice", args: []string{"rename", "alice-box"},
+		wantErr: "usage: ssh ctl@<gateway> rename <name> <new-name>\r\n", wantExit: 2,
+	}, {
+		// A reserved name is refused by the manager, and the announcement has
+		// already been printed by then — the same shape `resize` has.
+		name: "rename onto a reserved name", handle: "alice", args: []string{"rename", "alice-box", "console"},
+		wantOut: "renaming alice-box to console (pause + cold boot; running processes restart)…\r\n",
+		wantErr: "sparkbox: rename failed: sandbox name \"console\" is reserved\r\n", wantExit: 1,
+	}, {
 		name: "node with an unknown subcommand", handle: "opsy", args: []string{"node", "wat"},
-		wantErr: "unknown node command \"wat\"\r\n" + controlUsage, wantExit: 2,
+		wantErr: "unknown node command \"wat\"\r\n" + nodeHelp, wantExit: 2,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := st.run(t, tc.handle, tc.args...)
@@ -602,17 +646,37 @@ func TestControlWhoami(t *testing.T) {
 	}
 }
 
-// TestControlUsageDocumentsTheOtherDoors: the ctl listing is the only place a
+// helpSurface is the index plus every page, which is what "the help says so"
+// now means: the index is a teaser and the detail lives one `help <topic>`
+// away, so a claim about the channel's documentation has to be checked against
+// both or it checks nothing.
+func helpSurface() string {
+	var b strings.Builder
+	b.WriteString(controlHelp(true))
+	for _, t := range helpTopics() {
+		b.WriteString(t.page)
+	}
+	return b.String()
+}
+
+// TestControlUsageDocumentsTheOtherDoors: the ctl help is the only place a
 // user who lives in a terminal will ever learn that the same sandboxes are
-// reachable from a browser and from HTTP.
+// reachable from a browser and from HTTP. The first three are held to the
+// index itself — a user who never types `help <topic>` still has to meet them.
 func TestControlUsageDocumentsTheOtherDoors(t *testing.T) {
 	for _, want := range []string{
 		"https://<name>-xterm.<domain>",
 		"https://api.<domain>",
 		"/docs",
+	} {
+		if !strings.Contains(controlHelp(false), want) {
+			t.Errorf("the ctl index never mentions %q", want)
+		}
+	}
+	for _, want := range []string{
 		"session-token",
 		// A repo attachment is the one feature whose whole point is that it
-		// happens before anybody arrives in the sandbox, so the listing that a
+		// happens before anybody arrives in the sandbox, so the help that a
 		// terminal user reads while creating one has to mention it — and has to
 		// mention the check, which is the only thing that reports the failure
 		// this design actually has.
@@ -620,13 +684,45 @@ func TestControlUsageDocumentsTheOtherDoors(t *testing.T) {
 		"repo check",
 		"github install",
 	} {
-		if !strings.Contains(controlUsage, want) {
-			t.Errorf("ctl usage never mentions %q", want)
+		if !strings.Contains(helpSurface(), want) {
+			t.Errorf("ctl help never mentions %q", want)
 		}
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(controlUsage, "\r\n"), "\r\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(helpSurface(), "\r\n"), "\r\n") {
 		if strings.Contains(line, "\n") {
-			t.Errorf("usage line has a bare \\n: %q", line)
+			t.Errorf("help line has a bare \\n: %q", line)
+		}
+	}
+}
+
+// TestControlHelpHidesOperatorTopics: the operator rows are the only difference
+// between the two indexes, and a user must not read a word about them.
+func TestControlHelpHidesOperatorTopics(t *testing.T) {
+	user, op := controlHelp(false), controlHelp(true)
+	if user == op {
+		t.Fatal("the operator index is identical to the user one")
+	}
+	for _, t2 := range helpTopics() {
+		if !t2.operator {
+			continue
+		}
+		if strings.Contains(user, t2.name) {
+			t.Errorf("the user index names the operator topic %q", t2.name)
+		}
+		if !strings.Contains(op, t2.name) {
+			t.Errorf("the operator index omits %q", t2.name)
+		}
+		if _, ok := helpPage(t2.name, false); ok {
+			t.Errorf("help %q is readable by a non-operator", t2.name)
+		}
+	}
+	// Every line of both fits a terminal without wrapping, which is the whole
+	// reason the long listing was broken up.
+	for _, page := range []string{user, op} {
+		for _, line := range strings.Split(page, "\r\n") {
+			if n := len([]rune(line)); n > 80 {
+				t.Errorf("index line is %d columns: %q", n, line)
+			}
 		}
 	}
 }
@@ -675,5 +771,41 @@ func TestControlNodeApproveAndRemove(t *testing.T) {
 	s = st.run(t, "alice", "node", "rm", "node-b")
 	if s.code != 1 || len(st.roster.nodes) != 2 {
 		t.Errorf("a non-operator's rm = exit %d, roster %d rows", s.code, len(st.roster.nodes))
+	}
+}
+
+// TestControlRenameHappyPath is the case the golden table cannot hold: it moves
+// a sandbox, so it runs on a stack of its own.
+//
+// The announcement is checked as well as the result because renaming pauses the
+// VM and moves its directory — the session goes quiet for it, and a caller who
+// was told nothing would reasonably think it had hung.
+func TestControlRenameHappyPath(t *testing.T) {
+	st := newCtlStack(t)
+	if _, err := st.mgr.Create(context.Background(), "before", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+
+	s := st.run(t, "alice", "rename", "before", "after")
+	want := "renaming before to after (pause + cold boot; running processes restart)…\r\n" +
+		"renamed before → after — connect with: ssh after@hivemind.tools\r\n"
+	if s.code != 0 || s.out.String() != want {
+		t.Fatalf("rename = exit %d, stdout %q, stderr %q; want exit 0 and %q",
+			s.code, s.out.String(), s.stderr.String(), want)
+	}
+	if _, ok := st.mgr.Get("before"); ok {
+		t.Error("the old name still resolves")
+	}
+	if b, ok := st.mgr.Get("after"); !ok || b.Owner != "alice" {
+		t.Errorf("the new name resolves to %+v", b)
+	}
+
+	// `mv` is the same command, and the sandbox it names is the one that moved.
+	s = st.run(t, "alice", "mv", "after", "before")
+	if s.code != 0 {
+		t.Fatalf("mv = exit %d, stderr %q", s.code, s.stderr.String())
+	}
+	if _, ok := st.mgr.Get("before"); !ok {
+		t.Error("mv did not move it back")
 	}
 }

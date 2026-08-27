@@ -194,7 +194,7 @@ var notFoundMsg = map[string]string{
 	"snapshot": "no snapshot named %q",
 	"schedule": "no schedule %q",
 	"key":      "no key %s on this account",
-	"passkey":  "no passkey matches %q — see `passkey list`",
+	"passkey":  "no passkey matches %q — see `passkey ls`",
 	"route":    "no route %q",
 	"job":      "no job %q",
 	"node":     "no node named %q",

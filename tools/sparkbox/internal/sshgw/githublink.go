@@ -184,7 +184,7 @@ func (g *Gateway) controlGitHub(s gssh.Session, c ctlops.Caller, args []string, 
 	case "install":
 		g.controlGitHubInstall(s, c, log)
 	default:
-		fmt.Fprintf(s.Stderr(), "unknown github command %q\r\n%s", verb, controlUsage)
+		fmt.Fprintf(s.Stderr(), "unknown github command %q\r\n%s", verb, pageFor("account"))
 		s.Exit(2) //nolint:errcheck
 	}
 }

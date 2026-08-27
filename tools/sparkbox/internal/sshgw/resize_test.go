@@ -48,18 +48,36 @@ func TestParseSizeMBRejects(t *testing.T) {
 	}
 }
 
-// TestControlUsageListsEveryCommand keeps `ctl help` honest: the listing is the
+// TestControlUsageListsEveryCommand keeps `ctl help` honest: the help is the
 // only discovery surface for this channel, so a command that dispatches but is
-// undocumented is invisible.
+// undocumented is invisible. It reads the whole surface — the index plus every
+// page — because that is where the detail lives now.
 func TestControlUsageListsEveryCommand(t *testing.T) {
+	surface := helpSurface()
 	for _, cmd := range []string{
-		"list", "pause", "archive", "restore", "resize", "rm", "tags", "pin",
-		"unpin", "snapshot", "fork", "schedule", "whoami", "keys", "passkey",
-		"email", "share", "session-token", "invite", "help",
-		"checkpoint", "github", "node", "secret", "user",
+		"ls", "pause", "archive", "restore", "resize", "rm", "rename", "tags",
+		"pin", "unpin", "snapshot", "fork", "schedule", "whoami", "keys",
+		"passkey", "email", "share", "session-token", "invite", "help",
+		"checkpoint", "github", "node", "secret", "user", "sessions",
 	} {
-		if !strings.Contains(controlUsage, "  "+cmd) {
-			t.Errorf("ctl usage does not document %q", cmd)
+		if !strings.Contains(surface, "  "+cmd) {
+			t.Errorf("ctl help does not document %q", cmd)
+		}
+	}
+}
+
+// TestHelpReachesEveryTopicByCommandName: `help <thing you typed>` has to work
+// for the command names, not only for the topic headings — that is the whole
+// point of the aliases.
+func TestHelpReachesEveryTopicByCommandName(t *testing.T) {
+	for _, word := range []string{
+		"ls", "rename", "rm", "tags", "pin", "sessions", "resize", "checkpoint",
+		"secret", "repo", "snapshot", "fork", "schedule", "share",
+		"session-token", "whoami", "keys", "github", "passkey", "email",
+		"invite", "user", "node",
+	} {
+		if _, ok := helpPage(word, true); !ok {
+			t.Errorf("help %q reaches no topic", word)
 		}
 	}
 }
