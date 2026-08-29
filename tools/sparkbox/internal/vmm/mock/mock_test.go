@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,10 @@ import (
 // Compile-time capability checks: the mock must offer everything the manager
 // type-asserts for, or the mock-driven manager tests silently skip paths.
 var (
-	_ vmm.Renamer    = (*Driver)(nil)
-	_ vmm.Rebooter   = (*Driver)(nil)
-	_ vmm.CPUStatser = (*Driver)(nil)
+	_ vmm.Renamer          = (*Driver)(nil)
+	_ vmm.Rebooter         = (*Driver)(nil)
+	_ vmm.CPUStatser       = (*Driver)(nil)
+	_ vmm.TemplateReporter = (*Driver)(nil)
 )
 
 // newTestDriver returns a mock driver in a temp state dir plus an
@@ -189,5 +191,79 @@ func TestRenameVMRefusesTakenName(t *testing.T) {
 	err := d.RenameVM("a", "b")
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected already-exists error, got %v", err)
+	}
+}
+
+// TestTemplateUsageMB: the baseline the pooled accounting subtracts has to be
+// measured the same way as the figure it is subtracted FROM, or the difference
+// is not a number of blocks anybody wrote. Under firecracker that identity is
+// one ext4 superblock read serving both DiskUsageMB and TemplateUsageMB; here
+// it is the same tree walk over a workdir the mock's Create copyTree'd out of
+// the template. A fresh fork must therefore net to exactly zero pooled MB.
+func TestTemplateUsageMB(t *testing.T) {
+	d, gwKey := newTestDriver(t)
+	ctx := context.Background()
+	create(t, d, gwKey, "src")
+
+	// 33 MiB, sparse: big enough that the two sides cannot agree by accident.
+	// A round 6 MiB reads back as 6 whether the driver divides by 1024*1024 or
+	// by 1000*1000, so the agreement assertion below could not see the two
+	// measurements drift apart; 33 MiB is 33 one way and 34 the other.
+	workdir := filepath.Join(d.stateDir, "mock-vms", "src")
+	f, err := os.Create(filepath.Join(workdir, "rootfs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(33 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Pause(ctx, "src"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Snapshot(ctx, "src", "snap-alice-cuda"); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	tplMB, err := d.TemplateUsageMB(ctx, "snap-alice-cuda")
+	if err != nil {
+		t.Fatalf("TemplateUsageMB: %v", err)
+	}
+	if tplMB != 33 {
+		t.Fatalf("template measured %d MB, want the 33 MiB written into it", tplMB)
+	}
+
+	// A fork OF the template. Its usage and its baseline are the
+	// same bytes, so the owner is charged nothing for blocks the clone shares.
+	inst, err := d.Create(ctx, vmm.Config{Name: "clone", MemMB: 512, Image: "snap-alice-cuda", GatewayPublicKey: gwKey})
+	if err != nil {
+		t.Fatalf("Create clone: %v", err)
+	}
+	if inst == nil {
+		t.Fatal("Create returned no instance")
+	}
+	cloneMB, err := d.DiskUsageMB(ctx, "clone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cloneMB != tplMB {
+		t.Fatalf("clone uses %d MB against a %d MB template: the two measurements have drifted apart and their difference is meaningless", cloneMB, tplMB)
+	}
+
+	// A template that is gone must be an ERROR, never a zero. host.Manager
+	// keeps the last-known baseline on an error precisely so that deleting a
+	// snapshot does not re-charge every fork of it for the whole template.
+	if err := d.RemoveTemplate(ctx, "snap-alice-cuda"); err != nil {
+		t.Fatal(err)
+	}
+	if mb, err := d.TemplateUsageMB(ctx, "snap-alice-cuda"); err == nil {
+		t.Fatalf("a deleted template reported %d MB and no error", mb)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("deleted template: %v, want an error wrapping os.ErrNotExist", err)
+	}
+	if _, err := d.TemplateUsageMB(ctx, "never-existed"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("unknown template: %v, want an error wrapping os.ErrNotExist", err)
 	}
 }

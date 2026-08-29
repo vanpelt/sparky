@@ -44,6 +44,124 @@ type SnapshotInfo struct {
 	Owner     string    `json:"owner"`
 	FromBox   string    `json:"from_sandbox"`
 	CreatedAt time.Time `json:"created_at"`
+	// Node names the machine whose image directory holds the template file. A
+	// snapshot is a reflink source on ONE machine's disk, so it is also the only
+	// machine a fork — or a create on a tag bound to it — can land on.
+	//
+	// It is filled in only on a host whose sandbox store can place on a named
+	// machine (see placer). On a single-machine host every record carries
+	// Node="local" anyway, because host.NewManager coerces an unset node name to
+	// that word and load() re-stamps every snapshot with it (manager.go:748 and
+	// :789) — so printing it there would invent a fleet nobody has, and this
+	// payload stays byte-identical to the one that shipped.
+	Node string `json:"node,omitempty"`
+	// BoundTags is the tags whose sandboxes boot from this snapshot. Empty for
+	// the overwhelmingly common snapshot nobody has bound, which is why it is
+	// omitempty rather than never-nil like SandboxInfo.Tags: a listing that
+	// printed an empty column for every row would bury the one row it matters on.
+	BoundTags []string `json:"bound_tags,omitempty"`
+}
+
+// TemplateBinding is one tag-to-snapshot binding as a caller sees it. The owner
+// is deliberately absent: a binding is only ever read back under its own owner,
+// so echoing the handle would be the one field on this surface that could
+// differ from the caller's own.
+type TemplateBinding struct {
+	Tag       string    `json:"tag"`
+	Snapshot  string    `json:"snapshot"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TemplateBindResult is what a bind reports back.
+//
+// Previous is what makes a re-point not silent. Without it the person typing
+// `bind` reads the same success line whether they created a binding or quietly
+// changed what every future sandbox on that tag boots from, and there is no way
+// for a transport to warn about something it was never told.
+type TemplateBindResult struct {
+	Binding  TemplateBinding `json:"binding"`
+	Previous string          `json:"previous,omitempty"`
+}
+
+// SelfSnapshotPlan is everything a sandbox is told before it agrees to be
+// paused and captured. It is produced by a PURE READ (PlanSelfSnapshot), which
+// is what makes "the warnings are printed before anything moves" a structural
+// property rather than a matter of ordering discipline: the request that
+// produces this cannot pause anything, and the capture is a second request the
+// user authorizes after reading it.
+//
+// Every hint that names a hostname is filled in HERE rather than by the guest.
+// A sandbox does not know its own domain — nothing in the VM is told the
+// gateway's name — so a shell that composed `ssh ctl@…` would have to guess.
+type SelfSnapshotPlan struct {
+	Sandbox string   `json:"sandbox"`
+	Tags    []string `json:"tags"` // every tag this sandbox carries, `default` included
+	Tag     string   `json:"tag"`  // the one being captured into
+	// Snapshot is the name the capture will take. The commit sends it back
+	// rather than re-deriving it, because a derived name that drifted into the
+	// next minute would capture under a name nobody was shown.
+	Snapshot string `json:"snapshot"`
+	// Node is the machine this capture will land on; "" on a host with one
+	// machine, for the reason SnapshotInfo.Node states.
+	Node string `json:"node,omitempty"`
+	// Bound is the snapshot this tag boots from TODAY, empty when the tag has
+	// no binding. BoundFrom and BoundAt describe it well enough that somebody
+	// can recognise it without going to look, and BoundNode is set only when it
+	// differs from Node — the case where re-pointing also moves where the
+	// owner's future sandboxes are placed.
+	Bound     string    `json:"bound,omitempty"`
+	BoundFrom string    `json:"bound_from,omitempty"`
+	BoundAt   time.Time `json:"bound_at,omitzero"`
+	BoundNode string    `json:"bound_node,omitempty"`
+	// Carriers is every sandbox of this owner's that carries the tag, WITH its
+	// state, because the warning it feeds is about running and paused boxes
+	// alike: neither is re-based by a re-point.
+	Carriers []TaggedSandbox `json:"carriers,omitempty"`
+	// Busy names a rootfs operation already running on this sandbox. A warning
+	// and never a gate — see host.Manager.DiskOperation.
+	Busy   string `json:"busy,omitempty"`
+	Turbo  bool   `json:"turbo,omitempty"`
+	DiskMB int64  `json:"disk_mb,omitempty"`
+	// CtlHint is `ssh ctl@<domain>` and SSHHint is `ssh <sandbox>.<domain>`,
+	// both host-authored for the reason above.
+	CtlHint string `json:"ctl_hint"`
+	SSHHint string `json:"ssh_hint"`
+	// Token digests the facts this plan reported. The commit re-plans and
+	// compares, so a binding or a carrier set that moved while the user was
+	// deciding is refused instead of acted on — the warnings they agreed to
+	// were about a world that no longer exists.
+	Token string `json:"token"`
+}
+
+// TaggedSandbox is one of the owner's sandboxes carrying the tag being
+// captured into. Self marks the box the request came from, which is the one the
+// reader is sitting in and the one whose session is about to end.
+type TaggedSandbox struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Self  bool   `json:"self,omitempty"`
+}
+
+// SnapshotToTagArgs is one capture-and-re-point gesture. Tag is optional: empty
+// makes this exactly CreateSnapshot, which is what keeps `snapshot create` with
+// no --tag byte-identical to what it has always been.
+type SnapshotToTagArgs struct {
+	Sandbox string `json:"sandbox"`
+	Name    string `json:"name"`
+	Tag     string `json:"tag,omitempty"`
+}
+
+// SnapshotToTagResult reports both halves. Bound is false — with no error —
+// only when no tag was asked for; a tag that was asked for and did not bind is
+// an error carrying this same populated Snapshot.
+type SnapshotToTagResult struct {
+	Snapshot SnapshotInfo `json:"snapshot"`
+	Tag      string       `json:"tag,omitempty"`
+	Bound    bool         `json:"bound"`
+	// Previous is what the tag used to boot from, on the same terms as
+	// TemplateBindResult.Previous: a re-point looks exactly like a first bind
+	// and is not.
+	Previous string `json:"previous,omitempty"`
 }
 
 type ScheduleInfo struct {

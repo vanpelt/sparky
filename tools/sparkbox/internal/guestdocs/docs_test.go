@@ -35,3 +35,34 @@ func TestHandler(t *testing.T) {
 		}
 	}
 }
+
+// TestTheLifecycleVerbsAreDocumentedInBothRenderings. This page is what the
+// agent inside a box reads, and the two verbs it documents can end that box's
+// session — so a verb missing from here is a verb somebody discovers by
+// accident, on a VM that then stops.
+func TestTheLifecycleVerbsAreDocumentedInBothRenderings(t *testing.T) {
+	for _, page := range []struct{ path, sample string }{
+		{"/docs.md", "## Saving this VM as your tag's template"},
+		{"/", "Saving a VM"},
+	} {
+		rec := httptest.NewRecorder()
+		Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page.path, nil))
+		body := rec.Body.String()
+		if !strings.Contains(body, page.sample) {
+			t.Errorf("GET %s does not document the capture verb", page.path)
+		}
+		for _, want := range []string{
+			"sparkbox pause",
+			"snapshot",
+			// The three facts somebody has to know BEFORE they run it, because
+			// afterwards their session is gone.
+			"pause",
+			"already carries",
+			"snapshot ls",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s does not mention %q", page.path, want)
+			}
+		}
+	}
+}

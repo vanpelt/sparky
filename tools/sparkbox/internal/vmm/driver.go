@@ -116,6 +116,28 @@ type DiskReporter interface {
 	DiskCapacityMB(ctx context.Context, name string) (int64, error)
 }
 
+// TemplateReporter is an optional Driver capability: measuring the used blocks
+// of a *template* — the image a sandbox was created from — so pooled accounting
+// can subtract the blocks a fork shares rather than charging for them.
+//
+// DiskUsageMB is deliberately representation-independent (it reads the guest's
+// own filesystem counters, not host allocation), which is right for the meter a
+// user sees but wrong for a pool: ten forks of one 8 GiB template each report
+// ~8 GiB used while the host holds one copy plus each fork's writes. Subtracting
+// this baseline charges an owner for what their sandboxes wrote.
+//
+// Kept off DiskReporter on purpose. Capabilities are detected by type assertion,
+// so a third method there would silently disable disk accounting entirely for
+// any driver that can measure a live rootfs but not a template. As a separate
+// interface such a driver loses only the discount.
+//
+// Unlike DiskUsageMB, a missing image is an ERROR, not zero: deleting a template
+// does not retroactively make its blocks the fork's fault, so callers keep the
+// last baseline they measured instead of spiking every fork's charge.
+type TemplateReporter interface {
+	TemplateUsageMB(ctx context.Context, image string) (int64, error)
+}
+
 // RootfsPresencer is the optional guard against silently recreating a known
 // sandbox from its base image after the hot tier was lost. Absence means
 // "restore required" when a checkpoint exists and "unrecoverable" otherwise,

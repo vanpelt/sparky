@@ -575,8 +575,8 @@ func (g *Gateway) controlSchedule(s gssh.Session, c ctlops.Caller, args []string
 }
 
 // controlSnapshot manages the caller's fork-able templates: snapshot list |
-// create <box> <name> | rm <name>. Only ever touches the caller's own sandboxes
-// and snapshots.
+// create <box> <name> | rm <name> | bind <name> --tag <t> | unbind --tag <t>.
+// Only ever touches the caller's own sandboxes and snapshots.
 func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	sub := "ls"
 	if len(args) > 0 {
@@ -596,28 +596,86 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 			return
 		}
 		for _, sn := range snaps {
-			fmt.Fprintf(s, "%-24s from %-20s %s\r\n", sn.Name, sn.FromBox, sn.CreatedAt.Local().Format("2006-01-02 15:04"))
+			// The three columns are unchanged and the two additions are
+			// SUFFIXES, both omitted when they are empty. A host with no
+			// bindings and one machine therefore prints exactly the row it
+			// printed before this feature existed — which is what keeps the
+			// listing inside 80 columns for everybody who is not using either
+			// of them, and keeps every shipped golden row where it was.
+			extra := ""
+			if len(sn.BoundTags) > 0 {
+				extra += "  tags: " + strings.Join(sn.BoundTags, ",")
+			}
+			if sn.Node != "" {
+				extra += "  on " + sn.Node
+			}
+			fmt.Fprintf(s, "%-24s from %-20s %s%s\r\n",
+				sn.Name, sn.FromBox, sn.CreatedAt.Local().Format("2006-01-02 15:04"), extra)
 		}
 		s.Exit(0) //nolint:errcheck
 	case "create":
-		if len(args) < 3 {
-			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> snapshot create <box> <name>\r\n", ControlUser)
+		// parseTags, so that `--tag web` captures and binds in one gesture —
+		// the same ctlops.SnapshotToTag the in-guest `sparkbox snapshot web`
+		// goes through, rather than a second implementation that agrees today.
+		// Not parseCreateArgs: a capture names no machine, because the sandbox
+		// it comes from already does.
+		tags, rest, err := parseTags(args[1:])
+		if err != nil {
+			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
 			s.Exit(2) //nolint:errcheck
 			return
 		}
+		if len(rest) != 2 || len(tags) > 1 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> snapshot create <box> <name> [--tag <tag>]\r\n"+
+				"       at most one tag: a tag has exactly one base image\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		box, name := rest[0], rest[1]
+		tag := ""
+		if len(tags) == 1 {
+			tag = tags[0]
+		}
 		// Resolve before promising: the progress line below must not name a
 		// sandbox the caller cannot act on.
-		if _, err := g.ops.Get(s.Context(), c, args[1]); err != nil {
+		if _, err := g.ops.Get(s.Context(), c, box); err != nil {
 			failCtl(s, log, "snapshot create", err)
 			return
 		}
-		fmt.Fprintf(s, "snapshotting %s → %q (pause + compact; this can take a minute)…\r\n", args[1], args[2])
-		if _, err := g.ops.CreateSnapshot(s.Context(), c, args[1], args[2]); err != nil {
+		// The refresh is named because it is why this now takes longer than it
+		// used to, and the estimate is widened for the same reason. No line
+		// reports its OUTCOME: it is best-effort, and a failure is a gateway
+		// WARN by design — telling a person their template is a few days
+		// behind on tools would invite them to retry a capture that worked.
+		fmt.Fprintf(s, "snapshotting %s → %q (refresh agent tools + pause + compact; this can take a few minutes)…\r\n", box, name)
+		res, err := g.ops.SnapshotToTag(s.Context(), c, ctlops.SnapshotToTagArgs{
+			Sandbox: box, Name: name, Tag: tag,
+		})
+		if err != nil {
+			// The half-failure — captured, not bound — comes through here with
+			// its repair line already in the sentence, which is why this stays
+			// one call site rather than growing a special case.
 			failCtl(s, log, "snapshot create", wrapVerbatim(err, ctlops.KindDisabled))
 			return
 		}
-		fmt.Fprintf(s, "created snapshot %q — fork it with: ssh %s@%s fork %s <new-name>\r\n",
-			args[2], ControlUser, g.sshHint(), args[2])
+		if res.Bound {
+			fmt.Fprintf(s, "created snapshot %q and bound tag %q to it — your next\r\n  ssh %s@%s -- --tag %s\r\nboots from it.\r\n",
+				name, res.Tag, NewSandboxUser, g.sshHint(), res.Tag)
+			if res.Previous != "" {
+				fmt.Fprintf(s, "note: that tag used to boot from %q — sandboxes already created from it are unaffected.\r\n",
+					res.Previous)
+			}
+		} else {
+			fmt.Fprintf(s, "created snapshot %q — fork it with: ssh %s@%s fork %s <new-name>\r\n",
+				name, ControlUser, g.sshHint(), name)
+		}
+		// Stated as the POLICY, not as an outcome. The refresh is best-effort and
+		// silently skipped for a guest the gateway cannot reach — a paused remote
+		// sandbox is the ordinary case — and refreshToolsForPack's bool that says
+		// which happened is dropped long before it could reach this session. A
+		// sentence that claimed it every time would be false on exactly the
+		// captures whose staleness a reader most needs to suspect.
+		fmt.Fprintf(s, "a capture refreshes the agent CLIs first when it can reach the guest; inside a sandbox, `sparkbox update-tools` does it on demand\r\n")
 		s.Exit(0) //nolint:errcheck
 	case "rm":
 		if len(args) < 2 {
@@ -630,6 +688,62 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 			return
 		}
 		fmt.Fprintf(s, "deleted snapshot %q\r\n", args[1])
+		s.Exit(0) //nolint:errcheck
+	case "bind":
+		// parseTags, not parseCreateArgs: a bind names no machine, because the
+		// snapshot already does — it is a file in one machine's image directory
+		// — so `--node` is not a flag this door silently absorbs, it is a bare
+		// word and therefore a usage error below.
+		tags, rest, err := parseTags(args[1:])
+		if err != nil {
+			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		if len(rest) != 1 || len(tags) != 1 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> snapshot bind <snapshot> --tag <tag>\r\n"+
+				"       one tag, one snapshot: a tag has exactly one base image\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		res, err := g.ops.BindTemplate(s.Context(), c, rest[0], tags[0])
+		if err != nil {
+			failCtl(s, log, "snapshot bind", wrapVerbatim(err, ctlops.KindDisabled))
+			return
+		}
+		fmt.Fprintf(s, "tag %q now boots from snapshot %q — create one with:\r\n  ssh %s@%s -- %s\r\n",
+			res.Binding.Tag, res.Binding.Snapshot, NewSandboxUser, g.sshHint(), res.Binding.Tag)
+		if res.Previous != "" {
+			// A re-point is the one outcome that looks identical to a first
+			// bind and is not: sandboxes made from here on boot from something
+			// else. ctlops reports what it replaced precisely so this line can
+			// exist — see TemplateBindResult.Previous.
+			fmt.Fprintf(s, "note: that tag used to boot from %q — sandboxes already created from it are unaffected.\r\n",
+				res.Previous)
+		}
+		s.Exit(0) //nolint:errcheck
+	case "unbind":
+		tags, rest, err := parseTags(args[1:])
+		if err != nil {
+			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		if len(rest) != 0 || len(tags) != 1 {
+			fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> snapshot unbind --tag <tag>\r\n", ControlUser)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		b, err := g.ops.UnbindTemplate(s.Context(), c, tags[0])
+		if err != nil {
+			failCtl(s, log, "snapshot unbind", wrapVerbatim(err, ctlops.KindDisabled))
+			return
+		}
+		// The snapshot is named on the way out because an unbind that only said
+		// "ok" reads the same whether the right tag was dropped or the wrong
+		// one, and nothing is deleted here for the user to check against.
+		fmt.Fprintf(s, "tag %q no longer boots from snapshot %q — new sandboxes on it take the default image again.\r\n",
+			b.Tag, b.Snapshot)
 		s.Exit(0) //nolint:errcheck
 	default:
 		fmt.Fprintf(s.Stderr(), "unknown snapshot command %q\r\n%s", sub, pageFor("snapshots"))

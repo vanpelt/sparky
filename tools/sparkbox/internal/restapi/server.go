@@ -234,6 +234,17 @@ func (h *Handler) routes() []route {
 		{"DELETE", "/v1/snapshots/{name}", "snapshot.rm", authMutate, h.deleteSnapshot},
 		{"POST", "/v1/snapshots/{name}/fork", "fork", authMutate, h.fork},
 
+		// Template bindings — a tag's base image. Deliberately NOT under
+		// /v1/snapshots, and this is not a taste question: a sibling shaped
+		// like /v1/snapshots/bindings/{tag} would give Go 1.22's mux two
+		// four-segment patterns — that one and /v1/snapshots/{name}/fork —
+		// where neither is more specific than the other, which it rejects at
+		// registration with a panic. The server would not boot. The tag is also
+		// the resource here rather than the snapshot: it has exactly one base
+		// image, so PUT sets it and DELETE takes it away.
+		{"PUT", "/v1/templates/{tag}", "snapshot.bind", authMutate, h.bindTemplate},
+		{"DELETE", "/v1/templates/{tag}", "snapshot.unbind", authMutate, h.unbindTemplate},
+
 		// Schedules.
 		{"GET", "/v1/schedules", "schedule.list", authRead, h.listSchedules},
 		{"POST", "/v1/schedules", "schedule.add", authMutate, h.addSchedule},

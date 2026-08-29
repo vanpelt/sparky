@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=9
+IDENTITY_REV=11
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -195,10 +195,107 @@ GW=$(ip -4 route show default | awk '{print $3; exit}')
 [ -n "$GW" ] || { echo "sparkbox: no default gateway" >&2; exit 1; }
 META="http://$GW:@@META_PORT@@"
 
+# _call METHOD URL — print the host's own sentence, on success AND on refusal.
+#
+# Deliberately NOT `curl -f`, which every verb below still uses: -f throws the
+# response BODY away, and the body is the only place the host's explanation
+# exists, so a refused `-f` verb prints curl's generic "The requested URL
+# returned error: 409" and none of the reason. The two verbs that can end this
+# session must never do that — "it was refused" and "it worked" have to be
+# distinguishable from inside a box that is about to stop.
+#
+# Exit codes: 0 ok · 1 declined · 2 usage/invalid · 3 denied · 4 conflict, busy
+# or rate-limited · 5 unsupported or disabled · 75 temporary or ambiguous.
+_call() {
+  # mktemp, not a predictable /tmp name: these verbs run under sudo on a box
+  # whose /tmp is world-writable, and `curl -o` follows a symlink somebody else
+  # left there. The other payload scripts take the same precaution.
+  _d=$(mktemp -d) || { echo "sparkbox: no writable temporary directory" >&2; return 75; }
+  _h=$_d/h; _b=$_d/b
+  _code=$(curl -sS --max-time 20 -H 'Accept: text/plain' -D "$_h" -o "$_b" \
+            -w '%{http_code}' -X "$1" "$2" 2>/dev/null) || _code=000
+  SPARKBOX_TAG=$(sed -n 's/^[Ss]parkbox-[Tt]ag: *//p' "$_h" 2>/dev/null | tr -d '\r')
+  SPARKBOX_SNAPSHOT=$(sed -n 's/^[Ss]parkbox-[Ss]napshot: *//p' "$_h" 2>/dev/null | tr -d '\r')
+  SPARKBOX_PLAN=$(sed -n 's/^[Ss]parkbox-[Pp]lan: *//p' "$_h" 2>/dev/null | tr -d '\r')
+  SPARKBOX_CTL=$(sed -n 's/^[Ss]parkbox-[Cc]tl: *//p' "$_h" 2>/dev/null | tr -d '\r')
+  # A guest is never told its own domain, so every hint that names the gateway
+  # is host-authored. This placeholder is what is left when no reply arrived.
+  [ -n "$SPARKBOX_CTL" ] || SPARKBOX_CTL="ssh ctl@<gateway>"
+  case "$_code" in
+    2*)  cat "$_b"; rm -rf "$_d"; return 0 ;;
+    000) rm -rf "$_d"
+         # The one case this side genuinely cannot resolve: the reply was
+         # written and lost, or never written at all. It claims nothing, and
+         # its exit code is not success.
+         echo "sparkbox: the gateway stopped answering before it confirmed. Either" >&2
+         echo "nothing happened, or it is starting and this sandbox is about to pause." >&2
+         echo "Check from outside the VM:" >&2
+         echo "  $SPARKBOX_CTL snapshot ls" >&2
+         return 75 ;;
+    400) cat "$_b" >&2; rm -rf "$_d"; return 2 ;;
+    403|404) cat "$_b" >&2; rm -rf "$_d"; return 3 ;;
+    409|429) cat "$_b" >&2; rm -rf "$_d"; return 4 ;;
+    501) cat "$_b" >&2; rm -rf "$_d"; return 5 ;;
+    502|503) cat "$_b" >&2; rm -rf "$_d"; return 75 ;;
+    *)   cat "$_b" >&2; rm -rf "$_d"; return 1 ;;
+  esac
+}
+
 case "${1:-}" in
   pin)    exec curl -fsS --max-time 10 -X POST "$META/self/pin" ;;
   unpin)  exec curl -fsS --max-time 10 -X POST "$META/self/unpin" ;;
   status) exec curl -fsS --max-time 10 "$META/self" ;;
+  pause)
+    # The host answers BEFORE it pauses and waits for this process to have read
+    # the answer, so the line below really does arrive. Without that the happy
+    # path would print a curl transport error: a paused VM's kernel is frozen
+    # mid-connection and the reply has nowhere to land.
+    _call POST "$META/self/pause" || exit $?
+    ;;
+  snapshot)
+    shift
+    _yes=0; _tag=""; _name=""
+    for _a in "$@"; do
+      case "$_a" in
+        --yes|-y) _yes=1 ;;
+        -*) echo "usage: sparkbox snapshot [--yes] [TAG [NAME]]" >&2; exit 2 ;;
+        *)  if   [ -z "$_tag"  ]; then _tag=$_a
+            elif [ -z "$_name" ]; then _name=$_a
+            else echo "usage: sparkbox snapshot [--yes] [TAG [NAME]]" >&2; exit 2; fi ;;
+      esac
+    done
+    # The plan mutates nothing. Every refusal a user can act on lands here,
+    # while this sandbox is still running and this session is still open.
+    _call GET "$META/self/snapshot?tag=$_tag&name=$_name" || exit $?
+    if [ "$_yes" -ne 1 ]; then
+      if [ -r /dev/tty ] && [ -t 0 ]; then
+        printf 'Capture and re-point `%s`? [y/N] ' "$SPARKBOX_TAG" > /dev/tty
+        read -r _ans < /dev/tty || _ans=n
+        case "$_ans" in
+          y|Y|yes|YES) ;;
+          *) echo "sparkbox: nothing was captured."; exit 1 ;;
+        esac
+      else
+        # Refusing without a terminal is deliberate. The thing being warned
+        # about is the destruction of the terminal displaying the warning, so
+        # "there is nobody here to read it" is a reason not to proceed. It
+        # prevents accidents, not attacks — an agent that means it passes --yes.
+        echo "sparkbox: this ends your session and re-points a tag, so it wants a" >&2
+        echo "terminal to confirm at. Re-run with --yes if you meant it:" >&2
+        echo "  sparkbox snapshot $SPARKBOX_TAG --yes" >&2
+        exit 2
+      fi
+    fi
+    # The pause freezes dirty page cache into the MEMORY snapshot, but the
+    # capture reads the BLOCK DEVICE — so an unflushed write is present when you
+    # resume and absent from the template. One line, and it is not optional.
+    printf 'flushing writes… '; sync; printf 'ok\n'
+    # The tag, the name and the token are the PLAN's, not re-derived: a commit
+    # that drifted into the next minute would capture under a name nobody was
+    # shown, and the token is what refuses a plan the world moved out from under.
+    _call POST "$META/self/snapshot?tag=$SPARKBOX_TAG&name=$SPARKBOX_SNAPSHOT&plan=$SPARKBOX_PLAN" \
+      || exit $?
+    ;;
   make-public)  exec curl -fsS --max-time 10 -X POST "$META/self/visibility/public" ;;
   make-private) exec curl -fsS --max-time 10 -X POST "$META/self/visibility/private" ;;
   set-port)
@@ -233,8 +330,23 @@ case "${1:-}" in
       *) echo "usage: sparkbox repos [sync]" >&2; exit 2 ;;
     esac
     ;;
+  update-tools)
+    # Same escalation as `repos`, for the same reason and with the same -n
+    # degradation: the installer writes /usr/local/bin, /usr/local/lib and
+    # /var/lib/sparkbox, none of which the login user owns. Without root it
+    # would download 150MB and then fail on the first install.
+    SB=/usr/local/sbin/sparkbox-update-tools
+    if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      SB="sudo -n /usr/local/sbin/sparkbox-update-tools"
+    fi
+    case "${2:-}" in
+      '')        exec $SB ;;
+      --check)   exec $SB --check ;;
+      *) echo "usage: sparkbox update-tools [--check]" >&2; exit 2 ;;
+    esac
+    ;;
   *)
-    echo "usage: sparkbox <pin|unpin|status|make-public|make-private|set-port PORT|repos [sync]>" >&2
+    echo "usage: sparkbox <pin|unpin|status|pause|snapshot [--yes] [TAG [NAME]]|make-public|make-private|set-port PORT|repos [sync]|update-tools [--check]>" >&2
     exit 2
     ;;
 esac
@@ -278,6 +390,351 @@ echo "sparkbox-await-token: no token at $TOKEN_FILE after ${WAIT}s; starting any
 exit 0
 EOF
 chmod 0755 "$MNT/usr/local/bin/sparkbox-await-token"
+
+# ---- agent tool updates -----------------------------------------------------
+
+# Pull this host's verified agent-CLI cache into a sandbox that already exists.
+#
+# refresh-agent-tools.sh can only patch TEMPLATES — a live rootfs is never
+# touched, deliberately — so a VM created a month ago still runs whatever its
+# template shipped with, and DISABLE_AUTOUPDATER=1 in /etc/environment stops each
+# agent from fixing that for itself (one template, one set of versions, no
+# mid-session surprises). This is the sanctioned way to move, and it is a PULL:
+# the guest asks its own host for artifacts that host already downloaded and
+# checksummed, over the tap it already trusts. Nothing here reaches the open
+# internet, so it works unchanged on a tagged VM whose egress is filtered.
+#
+# Sibling of sparkbox-repos below, and the family resemblance is on purpose: the
+# same curl/awk/ip vocabulary, the same non-`-f` fetch with a sentence per status
+# code, the same US-separated flattener. Read the two together.
+sed -e "s/@@META_PORT@@/$META_PORT/g" -e "s/@@SANDBOX_USER@@/$SANDBOX_USER/g" \
+    > "$MNT/usr/local/sbin/sparkbox-update-tools" <<'EOF'
+#!/bin/sh
+# Install the agent CLIs this sandbox's host has cached.
+set -eu
+
+MODE=${1:-install}
+case "$MODE" in
+  install|--check) ;;
+  *) echo "usage: sparkbox-update-tools [--check]" >&2; exit 2 ;;
+esac
+
+# The account the harness config belongs to (the login user; root on legacy
+# templates).
+SANDBOX_USER=@@SANDBOX_USER@@
+
+# Overridable so the deploy tests can install into a tree instead of the machine
+# running them, the same way sparkbox-git-identity takes its gitconfig. It moves
+# paths and nothing else: this script is already root when it matters, and the
+# escalation is the dispatcher's business rather than this file's.
+ROOT=${SPARKBOX_TOOLS_ROOT:-}
+
+# This sandbox's own record of what it has installed, and the only stamp this
+# script ever writes.
+#
+# It is deliberately NOT /etc/sparkbox/tools-rev. That file is the HOST's
+# decision variable: refresh-agent-tools.sh reads it back out of every template
+# with debugfs to decide which ones to patch, and its identity= and agentenv=
+# words name systemd units, /etc/environment keys and harness config that only a
+# host with the template loop-mounted can install. A guest writing its own
+# versions there would make the next refresh believe a template was current that
+# it had never patched — the exact "claims tools it never received" failure that
+# stamp was introduced to stop. We read it once, to learn what this VM booted
+# with, and never write it.
+STATE="$ROOT/var/lib/sparkbox/tools-rev"
+TEMPLATE_STAMP="$ROOT/etc/sparkbox/tools-rev"
+
+# No unverified installs, ever. This is the only check on bytes that are about
+# to become every agent in this VM, so its absence is a refusal and not a
+# warning.
+command -v sha256sum >/dev/null 2>&1 || {
+  echo "sparkbox-update-tools: no sha256sum in this sandbox; refusing to install unverified binaries" >&2
+  exit 1
+}
+
+GW=$(ip -4 route show default | awk '{print $3; exit}')
+[ -n "$GW" ] || { echo "sparkbox-update-tools: no default gateway" >&2; exit 1; }
+META="http://$GW:@@META_PORT@@"
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+
+# Seed our stamp from the template's on the first run, so a VM that has never
+# updated reports the versions it was actually built with instead of "unknown"
+# for everything. Only the five tool words are copied: identity= and agentenv=
+# name payloads this script cannot install, and carrying them would let a later
+# reader mistake this file for the host's.
+if [ ! -f "$STATE" ] && [ -f "$TEMPLATE_STAMP" ]; then
+  mkdir -p "$(dirname "$STATE")"
+  if awk '{
+        line = ""
+        for (i = 1; i <= NF; i++) {
+          n = index($i, "=")
+          if (n == 0) continue
+          k = substr($i, 1, n - 1)
+          if (k == "claude" || k == "codex" || k == "pi" || k == "hivemind" || k == "agentbrowser")
+            line = line (line == "" ? "" : " ") $i
+        }
+        print line
+        exit
+      }' "$TEMPLATE_STAMP" > "$STATE.new"; then
+    chmod 0644 "$STATE.new"
+    mv -f "$STATE.new" "$STATE"
+  else
+    rm -f "$STATE.new"
+  fi
+fi
+
+stamp_get() {
+  [ -f "$STATE" ] || return 0
+  awk -v k="$1" '{
+    for (i = 1; i <= NF; i++) {
+      n = index($i, "=")
+      if (n > 0 && substr($i, 1, n - 1) == k) { print substr($i, n + 1); exit }
+    }
+  }' "$STATE"
+}
+
+give_up() {
+  echo "sparkbox-update-tools: $1" >&2
+  exit 1
+}
+
+# Not `curl -f`: 501 is a real answer — this host serves no tool cache — and it
+# deserves a different sentence from "the metadata service is down".
+code=$(curl -sS --max-time 30 -o "$WORK/manifest.json" -w '%{http_code}' \
+  "$META/tools/manifest" 2>/dev/null) || code=000
+case "$code" in
+  200) ;;
+  501) give_up "this host does not serve an agent tool cache" ;;
+  429) give_up "this sandbox is being rate-limited; try again in a minute" ;;
+  000) give_up "could not reach the metadata service at $META" ;;
+  *)   give_up "the metadata service answered $code for /tools/manifest" ;;
+esac
+
+# Fields are joined with ASCII US for the reason sparkbox-repos spells out: an
+# empty field between two whitespace separators would silently shift every later
+# field left by one, and here that means installing a tarball as if it were a
+# bare binary. US cannot occur in a version, a path or a digest.
+SEP=$(printf '\037')
+
+# Flatten the manifest to one row per tool, with the same tr+awk pair-walk the
+# repo worker uses and for the same reason (no jq, no python: the slim
+# systemd-less fallback template has neither). It only recognises `"key":
+# "value"`, which is why refresh-agent-tools.sh quotes every value including
+# size, and it cannot survive a value containing a quote or a brace — none of
+# these can, being versions, absolute paths and hex digests.
+tr -d '\n\r' < "$WORK/manifest.json" | tr '{' '\n' | awk -F'"' '
+  /"key"/ {
+    name = ""; key = ""; version = ""; file = ""; sha = ""; size = ""
+    kind = ""; bin = ""; dir = ""; exe = ""; link = ""; keep = ""; drop = ""
+    for (i = 2; i + 2 <= NF; i += 2) {
+      if ($(i + 1) !~ /^[ \t]*:[ \t]*$/) continue
+      k = $i; v = $(i + 2)
+      if (k == "name") name = v
+      else if (k == "key") key = v
+      else if (k == "version") version = v
+      else if (k == "file") file = v
+      else if (k == "sha256") sha = v
+      else if (k == "size") size = v
+      else if (k == "kind") kind = v
+      else if (k == "bin") bin = v
+      else if (k == "dir") dir = v
+      else if (k == "exec") exe = v
+      else if (k == "link") link = v
+      else if (k == "keep_only") keep = v
+      else if (k == "drop") drop = v
+    }
+    if (name == "" || key == "" || version == "" || sha == "" || bin == "") next
+    printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+      name, key, version, file, sha, size, kind, bin, dir, exe, link, keep, drop
+  }
+' > "$WORK/rows"
+[ -s "$WORK/rows" ] || give_up "the host published no tools"
+
+# ---- installing one row -----------------------------------------------------
+# These read the row variables the loop below sets, the way the repo worker's
+# helpers read its own. Each returns non-zero to mean "this tool is unchanged",
+# so one bad artifact never takes the other four down with it.
+
+fetch_artifact() {
+  # The manifest comes from our own host, but it still names a path we are about
+  # to write, so refuse a separator rather than trust the far side to have
+  # checked. Same instinct as the credential helper's slug guard.
+  case "$name" in ''|*/*) echo "sparkbox-update-tools: refusing tool name '$name'" >&2; return 1 ;; esac
+  case "$file" in ''|*/*) echo "sparkbox-update-tools: refusing artifact name '$file'" >&2; return 1 ;; esac
+  case "$bin"  in /*) ;; *) echo "sparkbox-update-tools: refusing relative install path '$bin'" >&2; return 1 ;; esac
+
+  # 15 minutes: agent-browser's tarball is ~92MB and a tagged VM's tap may be
+  # bandwidth-metered.
+  if ! curl -fsS --max-time 900 "$META/tools/$name" -o "$WORK/$file.part"; then
+    echo "sparkbox-update-tools: could not download $name $version from $META" >&2
+    rm -f "$WORK/$file.part"
+    return 1
+  fi
+  mv -f "$WORK/$file.part" "$WORK/$file"
+  # Size first, and it earns its place by naming the failure instead of
+  # disguising it. The host serves these bodies under a write deadline, over a
+  # tap its own egress rules may be metering, so a body that simply stops
+  # arriving is the expected failure here — and reported as a checksum mismatch
+  # it reads like a corrupted or tampered artifact, which sends whoever is
+  # holding it looking in entirely the wrong place.
+  got=$(wc -c < "$WORK/$file" | tr -d ' ')
+  if [ -n "$size" ] && [ "$got" != "$size" ]; then
+    echo "sparkbox-update-tools: $name $version arrived as $got bytes, not the $size the host published; not installing" >&2
+    rm -f "$WORK/$file"
+    return 1
+  fi
+  # Verified BEFORE anything is installed, never after: a truncated or wrong
+  # `claude` that has already replaced the working one is not recoverable from
+  # inside the VM.
+  if ! (cd "$WORK" && printf '%s  %s\n' "$sha" "$file" | sha256sum -c - >/dev/null 2>&1); then
+    echo "sparkbox-update-tools: $name $version failed its checksum; not installing" >&2
+    rm -f "$WORK/$file"
+    return 1
+  fi
+}
+
+install_binary() {
+  dest="$ROOT$bin"
+  mkdir -p "$(dirname "$dest")"
+  # Rename into place. Writing over the file directly fails with ETXTBSY the
+  # moment anything in this VM is running claude — which, in a sandbox that
+  # exists to run agents, is the ordinary case and not the unlucky one.
+  install -m 0755 "$WORK/$file" "$dest.sparkbox-new"
+  mv -f "$dest.sparkbox-new" "$dest"
+}
+
+install_bundle() {
+  case "$dir" in /*) ;; *) echo "sparkbox-update-tools: $name has no bundle directory" >&2; return 1 ;; esac
+  [ -n "$exe" ] && [ -n "$link" ] || { echo "sparkbox-update-tools: $name names no executable" >&2; return 1; }
+  d="$ROOT$dir"
+  dest="$ROOT$bin"
+
+  rm -rf "$d.sparkbox-new"
+  mkdir -p "$d.sparkbox-new"
+  # --no-same-owner because the tarball's uids are the publisher's and we are
+  # root; and NO -P, so tar keeps stripping a leading / and refusing ../ members
+  # and an archive that ever carried one lands inside this directory instead of
+  # over the guest's filesystem.
+  tar -xzf "$WORK/$file" -C "$d.sparkbox-new" --strip-components=1 --no-same-owner
+
+  # The ~92MB -> ~13MB prune, and in here it is not housekeeping: these bytes
+  # land in this VM's own 25 GiB ceiling and against its owner's disk pool, once
+  # per sandbox, unlike the template blocks every fork shares.
+  if [ -n "$keep" ]; then
+    case "$keep" in
+      */*) keepdir=${keep%/*}; keepname=${keep##*/} ;;
+      *)   keepdir=.;          keepname=$keep ;;
+    esac
+    find "$d.sparkbox-new/$keepdir" -type f ! -name "$keepname" -delete
+  fi
+  # Unquoted on purpose: drop is a space-separated list from our own host.
+  for unwanted in $drop; do
+    rm -rf "$d.sparkbox-new/$unwanted"
+  done
+
+  if [ ! -f "$d.sparkbox-new/$exe" ]; then
+    echo "sparkbox-update-tools: $name $version ships no $exe" >&2
+    rm -rf "$d.sparkbox-new"
+    return 1
+  fi
+  # npm ships bin/* mode 0644 and chmods them from a postinstall we never run,
+  # so the exec bit is ours to set or the symlink below points at something that
+  # cannot be executed.
+  chmod 0755 "$d.sparkbox-new/$exe"
+
+  # Two renames rather than a delete-then-extract: the window in which $dir does
+  # not exist is one rename wide, and anything still running out of the old tree
+  # holds its inodes until it exits.
+  rm -rf "$d.sparkbox-old"
+  if [ -e "$d" ]; then mv -f "$d" "$d.sparkbox-old"; fi
+  mv -f "$d.sparkbox-new" "$d"
+  rm -rf "$d.sparkbox-old"
+
+  mkdir -p "$(dirname "$dest")"
+  # The manifest's own RELATIVE target, verbatim. Deriving it here is what breaks
+  # these tools: pi and agent-browser resolve their runtime assets against the
+  # real binary's directory (agent-browser looks for ../skill-data), so PATH has
+  # to hold a link INTO the bundle rather than a copy of the executable out of
+  # it — a copy yields a CLI whose every `skills` subcommand fails.
+  ln -sfn "$link" "$dest"
+  refresh_agent_skill "$d"
+}
+
+# Re-point the harnesses at a bundle's own skill file when the template already
+# wired one up. agent-browser's SKILL.md is a deliberate discovery stub whose
+# body is little more than "run `agent-browser skills get core`", so it has to
+# match the CLI now installed. Only ever a REFRESH: creating that wiring from in
+# here would be this script inventing a layout the template owns
+# (refresh-agent-tools.sh's install_agent_browser_skill decides it).
+refresh_agent_skill() {
+  skill="$1/skills/agent-browser/SKILL.md"
+  [ -f "$skill" ] || return 0
+  home=$(awk -F: -v u="$SANDBOX_USER" '$1 == u {print $6; exit}' "$ROOT/etc/passwd")
+  [ -n "$home" ] || return 0
+  dst="$ROOT$home/.agents/skills/agent-browser"
+  [ -d "$dst" ] || return 0
+  if install -m 0644 "$skill" "$dst/SKILL.md" 2>/dev/null; then
+    chown "$SANDBOX_USER" "$dst/SKILL.md" 2>/dev/null || true
+  else
+    echo "sparkbox-update-tools: could not refresh $dst/SKILL.md" >&2
+  fi
+}
+
+install_tool() {
+  fetch_artifact || return 1
+  case "$kind" in
+    binary) install_binary ;;
+    bundle) install_bundle ;;
+    *) echo "sparkbox-update-tools: $name has unknown kind '$kind'" >&2; return 1 ;;
+  esac
+}
+
+# ---- walk the manifest ------------------------------------------------------
+behind=0
+failed=0
+: > "$WORK/stamp"
+printf '%-16s %-18s %-18s %s\n' TOOL INSTALLED AVAILABLE STATUS
+while IFS="$SEP" read -r name key version file sha size kind bin dir exe link keep drop; do
+  have=$(stamp_get "$key")
+  record=$have
+  if [ "$have" = "$version" ]; then
+    status=current
+  elif [ "$MODE" = --check ]; then
+    status=behind
+    behind=$((behind + 1))
+  # stdin is the row list this loop is reading; hand every child /dev/null so
+  # nothing downstream can eat a tool we have not installed yet.
+  elif install_tool </dev/null; then
+    status=updated
+    record=$version
+  else
+    status=failed
+    failed=$((failed + 1))
+  fi
+  printf '%-16s %-18s %-18s %s\n' "$name" "${have:-unknown}" "$version" "$status"
+  if [ -n "$record" ]; then
+    printf '%s=%s\n' "$key" "$record" >> "$WORK/stamp"
+  fi
+done < "$WORK/rows"
+
+if [ "$MODE" = --check ]; then
+  [ "$behind" -eq 0 ] || exit 1
+  exit 0
+fi
+
+# Record only what is actually on this disk: a tool that failed keeps whatever
+# word it had, and one we have never seen installed gets no word at all. Temp
+# file plus rename, because the next run reads this to decide what to download.
+mkdir -p "$(dirname "$STATE")"
+awk '{ printf "%s%s", (NR > 1 ? " " : ""), $0 } END { printf "\n" }' "$WORK/stamp" > "$STATE.new"
+chmod 0644 "$STATE.new"
+mv -f "$STATE.new" "$STATE"
+
+[ "$failed" -eq 0 ] || exit 1
+EOF
+chmod 0755 "$MNT/usr/local/sbin/sparkbox-update-tools"
 
 # ---- GitHub repositories ----------------------------------------------------
 

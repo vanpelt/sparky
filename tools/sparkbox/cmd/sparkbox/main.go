@@ -60,6 +60,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/userconsole"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -169,6 +170,8 @@ func serve(args []string) error {
 		hivemindAudience     = fs.String("hivemind-audience", defaultAudience, "OIDC audience used for HiveMind workload-token exchange")
 		hivemindInterval     = fs.Duration("hivemind-presence-interval", time.Minute, "how often to refresh HiveMind session-presence leases")
 		metaAddr             = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
+		toolsDir             = fs.String("tools-dir", "", "directory of agent CLIs this machine has verified (the refresher's TOOLS_DIR), served to its own guests at /tools so `sparkbox update-tools` can install them without rebuilding the VM. Empty serves no cache and answers 501, which is what a laptop or mock-driver run wants")
+		guestSelfSnapshot    = fs.Bool("guest-self-snapshot", true, "let a sandbox capture ITSELF as the template for a tag it already carries (`sparkbox snapshot <tag>` from inside the VM). On by default: a guest may only re-point a tag it was already given — so it gains persistence over sandboxes it already had the secrets of, and nothing wider — and a self-service verb nobody is told about does not exist. Turn it off when handing boxes to people you would not let re-base their own tags")
 		dnsAddr              = fs.String("dns-addr", "", "wildcard DNS responder listen address (e.g. <edge-ip>:53); serves *.<domain> -> the edge for a Tailscale split-DNS entry. Empty disables it")
 		dnsAnswer            = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
 		openSignup           = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
@@ -279,8 +282,9 @@ func serve(args []string) error {
 			helperControllerGID:     *helperControllerGID,
 			disableHostRootfsMounts: *noRootfsMounts,
 			defaultLogin:            *defaultLogin, guestSubnet: *guestSubnet, subnet6: *subnet6, guestDNS: *guestDNS,
-			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr,
-			idleBalloon: *idleBalloon, idleTimeout: *idleTimeout,
+			sluiceSocket: *sluiceSocket, metaAddr: *metaAddr, toolsDir: *toolsDir,
+			guestSelfSnapshot: *guestSelfSnapshot,
+			idleBalloon:       *idleBalloon, idleTimeout: *idleTimeout,
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
 			maxPerOwner: *maxPerOwner, maxBoxesPerOwner: *maxBoxesPerOwner,
 			memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
@@ -433,6 +437,17 @@ func serve(args []string) error {
 	// syncer and flt.SetRules below capture the store, or the first snapshot
 	// pushed after boot is computed without it.
 	netrulesStore.SetRepoDomains(repoStore)
+
+	// Tag templates (which snapshot a tag's sandboxes boot from) — the fourth
+	// reader of the shared sandbox_tags namespace, opened unconditionally and on
+	// its own connection for the same reasons as the three above. There is no
+	// flag: a host with the store closed would answer `snapshot bind` with "not
+	// enabled here" while plainly holding the database it needs.
+	templateStore, err := templates.Open(filepath.Join(*stateDir, "sparkbox.db"), log)
+	if err != nil {
+		return fmt.Errorf("templates store: %w", err)
+	}
+	defer templateStore.Close()
 
 	var driver vmm.Driver
 	switch *driverName {
@@ -736,6 +751,14 @@ func serve(args []string) error {
 	// finds a nil hook and correctly does nothing.
 	mgr.SetRepoSync(syncer)
 	flt.SetRepoSync(syncer)
+	// And once more for the pre-capture agent-tool refresh, on both sides of
+	// the same split and for the same one-guest-exec-channel reason. Only the
+	// gateway wires this either: a node caches this key's PUBLIC half so it can
+	// authenticate our connections into its guests, and holds no signer with
+	// which to open one itself — which is why the remote half is the fleet's
+	// (see internal/fleet/tools.go) and nothing is wired in node.go.
+	mgr.SetToolSync(syncer)
+	flt.SetToolSync(syncer)
 
 	// The rules half of the egress plane. It goes on the FLEET rather than only
 	// into the local syncer because a tag binding is a gateway-wide fact and the
@@ -808,8 +831,9 @@ func serve(args []string) error {
 		XtermSubdomain:     xtermLabel, InvitesPerUser: *invitesPer,
 		GitHubClientID: *githubClientID,
 		Repos:          repoStore, GitHubApp: ghAppOps,
-		HiveMind: hivemindOps,
-		Log:      log,
+		TemplateTags: templateStore,
+		HiveMind:     hivemindOps,
+		Log:          log,
 	})
 	defer ops.Close()
 
@@ -948,6 +972,12 @@ func serve(args []string) error {
 	// metadata endpoint of its own. A --gateway-only control plane holds no VMs
 	// and still has to answer for every one of them on its nodes.
 	flt.SetRepos(newFleetRepos(localRepos))
+	// The guest lifecycle verbs, installed here for the reason SetIdentity and
+	// SetRepos are: ops was built above with this fleet as its sandbox store,
+	// so the fleet cannot have been handed the thing it delegates to. Also
+	// unconditional, because a gateway holding no VMs of its own still answers
+	// for every one of them on its nodes.
+	flt.SetSelfLifecycle(selfLifecycleOps{ops: ops})
 	if *gatewayGRPCAddr != "" {
 		identityServer, identityListener, err := newGatewayIdentityServer(
 			ctx, *gatewayGRPCAddr, flt, nodeStore,
@@ -968,17 +998,21 @@ func serve(args []string) error {
 	if *metaAddr != "" {
 		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
-			Identity:        metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
-			RouteControl:    gatewayRouteControl{fleet: flt, node: nodeName},
-			Repos:           localRepos,
-			DefaultAudience: firstOr(splitList(*oidcAud), defaultAudience),
-			GuestSubnet:     *guestSubnet,
+			Identity:          metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
+			RouteControl:      gatewayRouteControl{fleet: flt, node: nodeName},
+			Repos:             localRepos,
+			Tools:             localTools(*toolsDir),
+			SelfLifecycle:     gatewaySelfLifecycle{fleet: flt, node: nodeName},
+			AllowSelfSnapshot: *guestSelfSnapshot,
+			DefaultAudience:   firstOr(splitList(*oidcAud), defaultAudience),
+			GuestSubnet:       *guestSubnet,
 		})
 		if err != nil {
 			return fmt.Errorf("guest metadata subnet: %w", err)
 		}
 		go func() { errCh <- meta.ListenAndServe(ctx, *metaAddr) }()
-		log.Info("guest metadata service enabled", "addr", *metaAddr, "issuer", issuer.URL())
+		log.Info("guest metadata service enabled", "addr", *metaAddr, "issuer", issuer.URL(),
+			"tools_dir", *toolsDir)
 	}
 
 	// Wildcard DNS responder for the tailnet edge: answers *.<domain> with the
@@ -1081,6 +1115,9 @@ func serve(args []string) error {
 			// repo panel still attaches and detaches, and every row's install
 			// state reads as unknown instead of claiming one.
 			uc.SetGitHubApp(ghApp)
+			// The Snapshots panel's bound-tags column, read-only: the console
+			// shows which tags boot from which snapshot and cannot change it.
+			uc.SetTemplateTags(templateStore)
 			// Same as the operator console: the fleet answers everything an
 			// owner can act on, and routes the balloon and CPU reads to the
 			// machine holding each sandbox.
@@ -1408,6 +1445,13 @@ type gatewayStores struct {
 	// field is the honest nil.
 	Repos     ctlops.Repos
 	GitHubApp ctlops.GitHubApp
+	// TemplateTags is the same discipline again, and it is worth restating why
+	// it matters here specifically: ctlops.Capabilities reports template_tags
+	// by comparing this against nil, so a concrete *templates.Store field
+	// holding a nil pointer would advertise the feature on a host that has no
+	// store — and the first `snapshot bind` would panic instead of answering
+	// "not enabled on this host".
+	TemplateTags ctlops.TemplateBindings
 	// HiveMind is the same nil-interface discipline: an unconfigured host must
 	// answer `sessions` with "not enabled here", not with a nil dereference.
 	HiveMind ctlops.HiveMind
@@ -1450,6 +1494,10 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// still record attachments for the public repositories that need no
 		// credential.
 		Repos: s.Repos,
+		// The tag-to-base-image bindings. Nil here is a host where every create
+		// takes DefaultImage and bind/unbind answer 501 — which is exactly what
+		// shipped before this store existed.
+		TemplateTags: s.TemplateTags,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
 		// cannot say whether a machine is answering, and the fleet alone cannot
@@ -1777,6 +1825,27 @@ func (f fleetIdentity) Describe(ctx context.Context, box *host.Sandbox, node str
 		GitHubID: doc.GitHubID, KeyFP: doc.KeyFP, Sandbox: doc.Sandbox,
 		SandboxID: doc.SandboxID, Image: doc.Image, Box: doc.Box,
 	}, nil
+}
+
+// localTools is this machine's own agent-CLI cache, or no cache at all.
+//
+// Both the gateway and the node path call it, and each gets its OWN cache over
+// its OWN --tools-dir. That is the design and not a duplication to be tidied
+// away later: every host runs the same refresh timer, so a node already holds
+// the artifacts a guest on it wants, and relaying the request to the gateway
+// would drag ~150MB per guest across the fleet link to deliver bytes that were
+// already on the local disk. metadata.ToolCache says the same thing at greater
+// length.
+//
+// An empty dir returns a nil INTERFACE, not a typed nil: metadata answers 501
+// on `Tools == nil`, and a *LocalTools{Dir: ""} stuffed into the field would be
+// a non-nil interface that turned the routes on for a host with no cache — the
+// same trap the gateway store wiring documents.
+func localTools(dir string) metadata.ToolCache {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	return &metadata.LocalTools{Dir: dir}
 }
 
 // splitList parses a comma-separated flag into a trimmed, non-empty list.

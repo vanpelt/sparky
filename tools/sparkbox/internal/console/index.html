@@ -458,12 +458,17 @@
         ? ""
         : '<button class="btn-outline btn-sm" data-act="archive" data-name="' + b.name +
           '" title="park this sandbox in object storage and free its host disk">Archive</button>';
-      // Snapshot works from any live state (running/paused/pinned) — it pauses,
-      // then captures the disk as a fork-able template.
+      // Snapshot works from any live state (running/paused/pinned) — it
+      // refreshes the agent CLIs, pauses, then captures the disk as a fork-able
+      // template. This console POSTs to /api/sandboxes/{name}/snapshot, which
+      // calls boxes.Snapshot directly and never goes through ctlops (see
+      // console.go) — and it gets the refresh anyway, because the refresh lives
+      // in host.Manager.Snapshot and fleet.Fleet.Snapshot. That is the third
+      // reason it was placed there rather than in the control-plane layer.
       const snapBtn = isArchived
         ? ""
         : '<button class="btn-outline btn-sm" data-act="snapshot" data-name="' + b.name +
-          '" title="save this disk as a fork-able template">Snapshot</button>';
+          '" title="save this disk as a fork-able template; the agent CLIs are brought up to date first">Snapshot</button>';
       // Remove is offered on every row (archived included — that's where the
       // object-storage cleanup matters most), styled danger and confirmed.
       const delBtn = '<button class="btn-outline btn-sm btn-danger" data-del-box="' + b.name +
@@ -534,7 +539,7 @@
       });
       if (r.status === 401) return show("login");
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-      toast("snapshot " + snap + " created");
+      toast("snapshot " + snap + " created with the agent CLIs up to date");
       await refresh();
     } catch (e) {
       toast(e.message, true);

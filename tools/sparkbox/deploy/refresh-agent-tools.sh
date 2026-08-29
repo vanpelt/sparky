@@ -14,6 +14,16 @@
 # metadata and turns the management plane into a second sandbox boundary.
 # Running/paused VMs and their snapshot templates are untouched.
 #
+# A template is a snapshot of the tools on the day it was patched, so a VM that
+# has been alive for a month is running whatever its template shipped with. That
+# VM cannot be fixed from out here — the whole point of the atomic-rename scheme
+# above is that a live rootfs is never touched — so the answer is a pull, not a
+# push: this run also publishes $TOOLS_DIR/manifest.json describing the artifacts
+# it just verified, the host serves that directory to its own guests over the
+# metadata tap, and `sparkbox update-tools` inside a VM installs from it. See
+# write_tools_manifest below and install-guest-identity.sh's
+# sparkbox-update-tools.
+#
 # Sources (all self-contained single binaries, no guest deps):
 #   claude:   downloads.claude.ai native build, sha256-verified via the release
 #             manifest (same scheme as the official install.sh)
@@ -84,7 +94,7 @@ AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-br
 # like IDENTITY_REV so bumping it re-patches every template on the next run even
 # when no tool version moved — editing any of it without bumping this ships the
 # change to nobody.
-AGENT_ENV_REV=9
+AGENT_ENV_REV=10
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -163,7 +173,16 @@ esac
 # ---- decide which templates are stale, by asking each one ---------------------
 # The single line every template must carry to count as current. One line so
 # reading it back is a string compare and not a parse.
-WANT="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER agentbrowser=$AB_VER identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
+#
+# TOOLS_REV is the leading half of it: the five words that name a payload a
+# GUEST could install for itself. It goes into the manifest below and is what
+# `sparkbox update-tools` compares against, which is exactly why identity= and
+# agentenv= are not in it — those name systemd units, /etc/environment keys and
+# harness config that only a host with the template loop-mounted can write, and
+# a guest that thought it could satisfy them would report itself current after
+# installing nothing of the sort.
+TOOLS_REV="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER agentbrowser=$AB_VER"
+WANT="$TOOLS_REV identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
 if [ -n "$GATEWAY_PUBLIC_KEY_FILE" ]; then
   [ -f "$GATEWAY_PUBLIC_KEY_FILE" ] \
     || { echo "gateway public key file does not exist: $GATEWAY_PUBLIC_KEY_FILE" >&2; exit 1; }
@@ -204,11 +223,129 @@ for tpl in "${ALL[@]}"; do
   STALE+=("$tpl")
 done
 
-if [ ${#STALE[@]} = 0 ]; then
-  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, pi $PI_TAG, hivemind $HM_VER, agent-browser $AB_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
-  exit 0
-fi
-echo ">> ${#STALE[@]} of ${#ALL[@]} template(s) need patching"
+# ---- the cache is this run's product, not a side effect of patching ----------
+#
+# Everything from here to the "already current" exit below used to sit AFTER it.
+# That was wrong the moment the host started serving $TOOLS_DIR to its guests:
+# the early exit is an `exit 0` and it precedes every download, so a box whose
+# templates all carry a current stamp — the freshest boxes, the ones that have
+# been refreshing on their timer all along — reached the end of the run with an
+# EMPTY $TOOLS_DIR and nothing for `sparkbox update-tools` to pull.
+#
+# So the run now always resolves, downloads and verifies the artifacts, and then
+# asks the separate question of whether any template needs patching. On a warm
+# cache this costs nothing: every fetch below is `[ ! -x ]`/`[ ! -f ]`-guarded
+# and the version resolution already ran above. What it does change is that a
+# broken upstream now fails a run that used to exit 0 without looking, which is
+# the honest outcome — a host that cannot verify an artifact has no business
+# publishing a manifest that says it did.
+
+# write_tools_manifest publishes what a guest needs to install these same
+# artifacts itself. internal/metadata serves this file and the files it names.
+#
+# Two rules it exists to enforce, both learned the hard way elsewhere:
+#
+#   The digests are recomputed from the files ON DISK on every run, never
+#   carried over from the download block above. A warm cache skips that block
+#   entirely, so a digest remembered from the day the file arrived would be a
+#   claim about bytes nobody looked at this run — the same shape of lie the
+#   header describes the old host-side stamp telling.
+#
+#   The LAYOUT is data, not something the guest derives. pi and agent-browser
+#   are bundles, not binaries: each resolves its own runtime assets relative to
+#   the real executable (agent-browser looks for ../skill-data), so a guest that
+#   copied the executable into /usr/local/bin would get a CLI whose every
+#   `skills` subcommand fails. The install shape — kind, bin, dir, exec, the
+#   RELATIVE symlink, the bin/ prune and the directories to drop — is written
+#   here beside the patch loop that performs it, so the two cannot drift.
+#
+# Every value is a QUOTED JSON string, `size` included. The guest parses this
+# with tr+awk and no JSON library (install-guest-identity.sh explains why it
+# holds to curl/awk/ip), and that pair-walk only recognises `"key": "value"` —
+# an unquoted number reads back as empty.
+write_tools_manifest() {
+  CLAUDE_BIN="$CLAUDE_BIN" CODEX_BIN="$CODEX_BIN" PI_BUNDLE="$PI_BUNDLE" \
+  HM_BIN="$HM_BIN" AB_TGZ="$AB_TGZ" \
+  CLAUDE_VER="$CLAUDE_VER" CODEX_TAG="$CODEX_TAG" PI_TAG="$PI_TAG" \
+  HM_VER="$HM_VER" AB_VER="$AB_VER" AB_ARCH="$AB_ARCH" \
+  TOOLS_ARCH="$(uname -m)" TOOLS_REV="$TOOLS_REV" \
+  python3 - "$TOOLS_DIR/manifest.json" <<'PY'
+import datetime, hashlib, json, os, sys
+
+out = sys.argv[1]
+env = os.environ
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        # Chunked: the agent-browser tarball is ~92MB and this also runs in the
+        # CKS prepare-vm-assets init container, which is memory-capped.
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def tool(name, key, version, src, kind, **layout):
+    e = {
+        "name": name,
+        "key": key,
+        "version": version,
+        "file": os.path.basename(src),
+        "sha256": digest(src),
+        "size": str(os.path.getsize(src)),
+        "kind": kind,
+        "bin": "",
+        "dir": "",
+        "exec": "",
+        "link": "",
+        "keep_only": "",
+        "drop": "",
+    }
+    e.update(layout)
+    return e
+
+
+ab_exec = "bin/agent-browser-linux-" + env["AB_ARCH"]
+tools = [
+    tool("claude", "claude", env["CLAUDE_VER"], env["CLAUDE_BIN"], "binary",
+         bin="/usr/local/bin/claude"),
+    tool("codex", "codex", env["CODEX_TAG"], env["CODEX_BIN"], "binary",
+         bin="/usr/local/bin/codex"),
+    tool("pi", "pi", env["PI_TAG"], env["PI_BUNDLE"], "bundle",
+         bin="/usr/local/bin/pi", dir="/usr/local/lib/pi", exec="pi",
+         link="../lib/pi/pi"),
+    tool("hivemind", "hivemind", env["HM_VER"], env["HM_BIN"], "binary",
+         bin="/usr/local/bin/hivemind"),
+    # keep_only and drop are the ~92MB -> ~13MB prune the patch loop performs:
+    # the tarball carries seven platform binaries and a postinstall we never
+    # run. In a guest it is not merely tidy — those bytes land in that VM's own
+    # 25 GiB ceiling and against its owner's pool, once per sandbox.
+    tool("agent-browser", "agentbrowser", env["AB_VER"], env["AB_TGZ"], "bundle",
+         bin="/usr/local/bin/agent-browser", dir="/usr/local/lib/agent-browser",
+         exec=ab_exec, link="../lib/agent-browser/" + ab_exec,
+         keep_only=ab_exec, drop="scripts"),
+]
+
+doc = {
+    "arch": env["TOOLS_ARCH"],
+    "rev": env["TOOLS_REV"],
+    "generated_at": datetime.datetime.now(datetime.timezone.utc)
+        .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "tools": tools,
+}
+
+tmp = out + ".new"
+with open(tmp, "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o644)
+# Rename into place: the metadata server may be reading this while we write it,
+# and it memoises on (size, mtime) — a half-written file it happened to parse
+# would be cached until the next run moved those numbers again.
+os.replace(tmp, out)
+PY
+}
 
 # ---- download (cached by version, so reruns are free) ------------------------
 CLAUDE_BIN="$TOOLS_DIR/claude-$CLAUDE_VER-$CLAUDE_PLAT"
@@ -274,6 +411,28 @@ with open(sys.argv[1], "rb") as f:
   fi
   mv "$AB_TGZ.tmp" "$AB_TGZ"
 fi
+
+# The host-side stamp is now a RECORD, not a decision: what counts as current is
+# read out of each template above. Keep writing it because it is what an operator
+# (and `sparkbox doctor`) reads to see which versions this box last resolved.
+printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nPI_TAG=%s\nHIVEMIND_VERSION=%s\nAGENT_BROWSER_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
+  "$CLAUDE_VER" "$CODEX_TAG" "$PI_TAG" "$HM_VER" "$AB_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
+# Drop cached binaries from older versions; keep the current set. Before the
+# manifest is written, never after: a manifest naming a file this prune has
+# already deleted would hand every guest a 404 for the length of a refresh
+# interval.
+find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'pi-*' \
+    -o -name 'hivemind-*' -o -name 'agent-browser-*' \) \
+  ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" \
+  ! -name "$(basename "$PI_BUNDLE")" ! -name "$(basename "$HM_BIN")" \
+  ! -name "$(basename "$AB_TGZ")" -delete
+write_tools_manifest
+
+if [ ${#STALE[@]} = 0 ]; then
+  echo "templates already current (claude $CLAUDE_VER, codex $CODEX_TAG, pi $PI_TAG, hivemind $HM_VER, agent-browser $AB_VER, identity rev $IDENTITY_REV, agent env rev $AGENT_ENV_REV): ${#ALL[@]} checked, 0 stale"
+  exit 0
+fi
+echo ">> ${#STALE[@]} of ${#ALL[@]} template(s) need patching"
 
 # ---- guest agent conditioning -------------------------------------------------
 # Claude Code gates its TUI behind two first-run dialogs that have nothing to do
@@ -620,6 +779,15 @@ is not on this VM's egress allowlist, and on arm64 it publishes no build at all.
 If this VM carries a tag, its egress is filtered, so pages on the open web may
 not resolve even though a service you are running on this VM will.
 
+The agent CLIs here — claude, codex, pi, hivemind and agent-browser — came from
+the template this VM was created from, and their own auto-updaters are turned
+off, so a VM that has been alive a while keeps the versions that template
+shipped with. `sparkbox update-tools --check` compares them against what this
+host has cached, and `sparkbox update-tools` installs the difference. It pulls
+from the host over the same channel as everything else here, not from the open
+internet, so it works even on a VM whose egress is filtered by its tag. A newly
+created VM normally reports everything current.
+
 Only use documented Sparkbox features. Undocumented local endpoints, metadata
 services, gateway ports, and node services are internal infrastructure and may
 change without notice.
@@ -894,16 +1062,4 @@ for tpl in "${STALE[@]}"; do
   mv -f "$TMP" "$tpl"; TMP=""
   patched=$((patched + 1))
 done
-
-# The host-side stamp is now a RECORD, not a decision: what counts as current is
-# read out of each template above. Keep writing it because it is what an operator
-# (and `sparkbox doctor`) reads to see which versions this box last resolved.
-printf 'CLAUDE_VERSION=%s\nCODEX_TAG=%s\nPI_TAG=%s\nHIVEMIND_VERSION=%s\nAGENT_BROWSER_VERSION=%s\nIDENTITY_REV=%s\nAGENT_ENV_REV=%s\n' \
-  "$CLAUDE_VER" "$CODEX_TAG" "$PI_TAG" "$HM_VER" "$AB_VER" "$IDENTITY_REV" "$AGENT_ENV_REV" > "$STAMP"
-# Drop cached binaries from older versions; keep the current set.
-find "$TOOLS_DIR" -maxdepth 1 -type f \( -name 'claude-*' -o -name 'codex-*' -o -name 'pi-*' \
-    -o -name 'hivemind-*' -o -name 'agent-browser-*' \) \
-  ! -name "$(basename "$CLAUDE_BIN")" ! -name "$(basename "$CODEX_BIN")" \
-  ! -name "$(basename "$PI_BUNDLE")" ! -name "$(basename "$HM_BIN")" \
-  ! -name "$(basename "$AB_TGZ")" -delete
 echo ">> done: $patched template(s) now ship claude $CLAUDE_VER + codex $CODEX_TAG + pi $PI_TAG + hivemind $HM_VER + agent-browser $AB_VER + identity rev $IDENTITY_REV"

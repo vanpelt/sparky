@@ -193,7 +193,7 @@ func TestCapabilities(t *testing.T) {
 	got := r.ops.Capabilities()
 	want := Capabilities{
 		Archiving: true, Snapshots: true, Scheduling: true, Tags: true,
-		Routes: true, SessionTokens: true, Terminal: true,
+		Routes: true, SessionTokens: true, Terminal: true, TemplateTags: true,
 	}
 	if got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
@@ -201,6 +201,7 @@ func TestCapabilities(t *testing.T) {
 
 	r2 := newRig(t)
 	r2.ops.tags, r2.ops.schedules, r2.ops.routes, r2.ops.sessions = nil, nil, nil, nil
+	r2.ops.templateTags = nil
 	r2.ops.xtermSubdomain = ""
 	r2.boxes.archiving, r2.tmpl.on = false, false
 	if got := r2.ops.Capabilities(); got != (Capabilities{}) {

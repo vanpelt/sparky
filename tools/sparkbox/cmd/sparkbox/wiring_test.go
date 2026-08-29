@@ -30,6 +30,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/placement"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
@@ -152,6 +153,17 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 	}
 	t.Cleanup(func() { repoStore.Close() }) //nolint:errcheck
 
+	// Nor is the template-bindings store, for the same reason and with the same
+	// consequence: serve() opens one on every gateway unconditionally, so a
+	// fixture without it would model a host that does not exist and would let
+	// TestGatewayOpsBindsTemplates pass vacuously — the capability is false
+	// either way when the field is dropped.
+	templateStore, err := templates.Open(db, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { templateStore.Close() }) //nolint:errcheck
+
 	// The optional stores a gateway also passes are left out: nothing here asks
 	// the control plane about tags, schedules, routes or session tokens. The
 	// GitHub App is left out too, and that one is optional in production as
@@ -160,6 +172,7 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 		stores: gatewayStores{
 			Fleet: flt, Placement: index, Roster: roster, Users: userStore,
 			Repos:        repoStore,
+			TemplateTags: templateStore,
 			DefaultImage: "ubuntu", Domain: "hivemind.tools", Log: log,
 			GatewayGuestSubnet: testGatewayGuestSubnet,
 		},
@@ -215,6 +228,43 @@ func TestGatewayOpsAttachesRepos(t *testing.T) {
 
 	if !ops.Capabilities().Repos {
 		t.Fatal("a gateway with a repo store reports repo attachments disabled; ctlops.Config.Repos is unwired")
+	}
+}
+
+// TestGatewayOpsBindsTemplates is the third of these wiring assertions, and it
+// exists for the reason the two above do: ctlops decides whether a tag can name
+// a base image at all by comparing Config.TemplateTags against nil, so a dropped
+// line in newGatewayOps turns `ssh ctl@<gw> snapshot bind` into "template
+// bindings are not enabled on this host" on a machine with the store plainly
+// open — and every create silently takes the operator's default image.
+//
+// The field is declared on gatewayStores as the ctlops INTERFACE for a reason
+// this test cannot see: a concrete *templates.Store holding a typed nil becomes
+// a NON-nil interface when it is copied into ctlops.Config, which would make the
+// capability report true on a host that has no store at all and panic on the
+// first call. See the comment on gatewayStores.Repos.
+func TestGatewayOpsBindsTemplates(t *testing.T) {
+	fx := newGatewayFixture(t)
+	ops := newGatewayOps(fx.stores)
+	t.Cleanup(ops.Close)
+
+	if !ops.Capabilities().TemplateTags {
+		t.Fatal("a gateway with a template store reports bindings disabled; ctlops.Config.TemplateTags is unwired")
+	}
+}
+
+// TestGatewayOpsWithoutATemplateStoreSaysSo is the other half, and it is what
+// makes the assertion above mean something: an unset field must report false.
+// Without this, a concrete-typed field holding a nil pointer would satisfy the
+// test above on every host, including the ones that cannot bind anything.
+func TestGatewayOpsWithoutATemplateStoreSaysSo(t *testing.T) {
+	fx := newGatewayFixture(t)
+	fx.stores.TemplateTags = nil
+	ops := newGatewayOps(fx.stores)
+	t.Cleanup(ops.Close)
+
+	if ops.Capabilities().TemplateTags {
+		t.Fatal("a gateway with no template store advertises bindings; the field is not the honest nil")
 	}
 }
 

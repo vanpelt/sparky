@@ -1411,6 +1411,36 @@ func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
 	return capacity, err
 }
 
+// TemplateUsageMB implements vmm.TemplateReporter: the used blocks of a base or
+// snapshot template in ImageDir, read through the SAME ext4DiskMB DiskUsageMB
+// uses. That identity is the whole point — the two figures come off the same
+// superblock fields on the same basis, so the manager can subtract one from the
+// other and get the blocks a fork actually wrote.
+//
+// A template is a better subject for this passive read than a live rootfs:
+// nothing writes one in place. Snapshot stages under a dotted .tmp name and
+// renames, and deploy/refresh-agent-tools.sh patches base images by
+// reflink/mount/atomic-rename, so the superblock we read is always quiesced.
+//
+// image arrives from a persisted sandbox record, so re-apply imageNameRe before
+// joining it: a record carrying "../../etc/passwd" must not walk out of
+// ImageDir. (Create's own template join deliberately does not do this and is
+// left alone — tightening it is an unrelated behaviour change.)
+//
+// A missing template is an error, not zero, per the vmm.TemplateReporter
+// contract: the manager keeps its last baseline rather than spiking every
+// fork's pooled charge when a snapshot is deleted.
+func (d *Driver) TemplateUsageMB(_ context.Context, image string) (int64, error) {
+	if !imageNameRe.MatchString(image) {
+		return 0, fmt.Errorf("invalid template image name %q", image)
+	}
+	if d.opts.ImageDir == "" {
+		return 0, errors.New("no image dir configured; cannot measure a template")
+	}
+	used, _, err := ext4DiskMB(filepath.Join(d.opts.ImageDir, image+".ext4"))
+	return used, err
+}
+
 // --- Renamer + Rebooter + CPUStatser: the user-console capabilities --------
 
 // DropSnapshots implements vmm.Rebooter: delete the stopped VM's memory

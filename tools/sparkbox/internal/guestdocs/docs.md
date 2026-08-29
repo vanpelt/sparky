@@ -29,6 +29,53 @@ A pinned VM is not idle-paused and is protected from memory-pressure
 reclamation. Pinning consumes shared capacity continuously, so do not use it as
 the default for every VM.
 
+## Pausing this VM
+
+- Run `sparkbox pause` to stop this VM now instead of waiting for the idle
+  reaper. Memory and processes are snapshotted, so reconnecting picks up exactly
+  where you left off.
+- The gateway confirms before it pauses, so the line you see is the host's own,
+  not a guess.
+- A pinned VM comes back up on its own at the next host restart. `sparkbox
+  unpin` first if you want it to stay down.
+
+## Saving this VM as your tag's template
+
+A tag on a VM already selects three things: the secrets it is handed, the
+repositories checked out into it, and the egress it is allowed. It can also
+select the **disk it boots from** — the template every new VM on that tag starts
+as a copy of.
+
+`sparkbox snapshot <tag>` captures this VM's disk and points that tag at it. So
+the next `--tag <tag>` VM your account creates starts with everything you have
+installed here.
+
+- **It is bound to a tag this VM already carries.** You cannot point a tag this
+  VM was never given at it; ask for the tag first (`ssh ctl@<domain> tags <this
+  vm> <tag>`), or do the whole thing from outside. The image and the secrets it
+  was built with then stay together.
+- **It pauses this VM and ends your session.** There is no way to capture
+  without pausing: the capture reads the block device, and only a paused VM has
+  finished writing to it. Nothing is lost — reconnecting resumes this VM with its
+  processes intact — but the capture itself runs after you are gone.
+- **It prints what it is about to do and asks first.** The tag it will re-point,
+  what that tag boots from today, and every VM of yours carrying it. Pass
+  `--yes` to skip the question; without a terminal to ask at, it refuses rather
+  than proceeding.
+- **Re-pointing does not re-base a VM that already exists.** Running or paused,
+  every VM keeps the disk it was created from, this one included. Only VMs
+  created afterwards boot from the new template.
+- **The previous template is kept.** Nothing is deleted, and the old binding can
+  be restored from outside with one `snapshot bind`.
+
+The outcome lands minutes later, with this VM paused, so there is nowhere in
+here for it to be reported. Read it from outside:
+
+    ssh ctl@<domain> snapshot ls
+
+`default` cannot carry a template: every VM you create carries that tag, so the
+binding would reach all of them.
+
 ## HTTPS proxy
 
 Applications listening in the VM can be reached through Sparkbox's
@@ -75,6 +122,29 @@ asks for one on the first commit.
 New VMs include Claude Code, Codex, Pi, and Hivemind. Sparkbox environment
 guidance is installed at `~/.agents/AGENTS.md` and linked into each harness's
 global instruction location. Repository-level instructions still apply.
+
+## Updating the agent tools
+
+The agent CLIs in a VM — `claude`, `codex`, `pi`, `hivemind` and
+`agent-browser` — come from the template the VM was created from, and their own
+auto-updaters are turned off so that one template means one set of versions and
+no mid-session surprises. A VM that has been alive for a while therefore keeps
+what its template shipped with, and this is the sanctioned way to move it.
+
+From inside the VM:
+
+- `sparkbox update-tools --check` lists each tool, the version installed here,
+  the version the host has cached, and whether it is behind. It exits non-zero
+  when anything is.
+- `sparkbox update-tools` installs the difference. Each artifact is checked
+  against the host's digest before it replaces anything, and one that fails is
+  skipped rather than installed.
+
+It pulls from this VM's own host rather than from the internet, so it works
+unchanged on a VM whose egress is filtered by its tag. A newly created VM
+normally reports everything current. Each update writes into this VM's own disk
+and counts against the owner's pool, so it is a command to run when something is
+actually behind, not on a timer.
 
 ## Supported surface
 

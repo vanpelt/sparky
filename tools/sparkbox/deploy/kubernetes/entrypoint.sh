@@ -374,6 +374,11 @@ else
   echo "starting legacy combined Sparkbox gateway for *.$proxy_domain (TLS: $proxy_tls)"
 fi
 
+# --tools-dir is the same $tools_dir the refresher above filled (TOOLS_DIR),
+# now served to this machine's own guests at /tools so `sparkbox update-tools`
+# can install into a VM whose template predates the current CLIs. Both
+# containers mount the same data hostPath; sparkbox-node mounts it readOnly,
+# which is all serving ever needs. It is never relayed to the gateway.
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
   --hivemind-api "$hivemind_api" \
@@ -383,6 +388,7 @@ exec /usr/local/bin/sparkbox serve \
   --checkpoint-prefix checkpoints \
   --kernel "$kernel" \
   --image-dir "$image_dir" \
+  --tools-dir "$tools_dir" \
   "${jail_args[@]}" \
   --guest-subnet "$guest_subnet" \
   --ssh-addr :2222 \

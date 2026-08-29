@@ -210,6 +210,7 @@ write_files:
         --key-dir /run/sparkbox/keys --require-keys \
         --kernel /srv/sparkbox/vmlinux \
         --image-dir /srv/sparkbox/data/images \
+        --tools-dir /srv/sparkbox/tools \
         --users /srv/sparkbox/users.conf \
         --ssh-addr :22 --api-addr 127.0.0.1:8080 \
         --proxy-addr :8081 --proxy-domain ${PROXY_DOMAIN} \

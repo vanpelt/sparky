@@ -217,6 +217,39 @@ The remaining parsing is explicit technical debt:
 - `e2fsck`, `resize2fs`, `zerofree`, and `debugfs` parse filesystem metadata in
   host userspace even when they do not mount it.
 
+## Open: a template captured on a fleet node keeps its secrets
+
+**Not introduced by tag templates and not fixed by them; found while reading the
+capture path and recorded here because it is the highest-priority follow-up in
+this area.**
+
+Before a rootfs is packed — for an archive bound for object storage, or for a
+snapshot template every fork copies byte-for-byte — `Manager.stripEnvForPack`
+rewrites the managed `/etc/environment` block to empty, so plaintext secret values
+never ride along. It reaches that rewriter by type-asserting `m.envSync`, which
+is installed by `Manager.SetEnvSync`.
+
+**A node never calls `SetEnvSync`.** That is deliberate and correct on its own
+terms: a node opens no secrets store, and an owner's decrypted secrets must not
+sit on every machine that happens to run one of their sandboxes (the KEK is
+derived from a key only the gateway holds). The gateway compensates for the
+*push* by doing it itself over the fleet dialer for remote sandboxes
+(`internal/fleet/envsync.go`). Nothing compensates for the *strip*.
+
+So a snapshot or archive captured on a node silently skips the strip and carries
+plaintext secret values in `/etc/environment`. Every fork of that template copies
+them, and with tag templates a bound template hands them to every sandbox created
+on that tag — including sandboxes belonging to someone the credentials were never
+issued to, if the template is ever shared. Treat it as a cross-tenant credential
+leak, not a hygiene issue.
+
+The shape of the fix already exists: the pre-capture agent-tool refresh added in
+`Fleet.Snapshot` is a gateway-side step over the same channel, run before the
+node's capture, and the strip belongs in the same position. It needs its own
+tests — a remote capture whose packed rootfs contains no secret values, and a
+capture refused rather than proceeding when the strip fails, matching the local
+path, which fails the caller rather than packing an uncleared disk.
+
 The end state should put first-boot/fork identity work inside the microVM. Pass a
 public gateway key and a "regenerate identity" marker over a bounded boot or
 metadata channel; an early guest service installs the key, clears machine/SSH
@@ -237,6 +270,7 @@ Before calling the CKS sandbox production-strength:
 - default-deny guest east-west, metadata, node, and control-plane traffic, then
   explicitly allow required egress;
 - remove host parsing of user-derived disks;
+- strip the managed secret block on a remote capture as well as a local one;
 - run Firecracker/KVM advisories and kernel updates as a release gate;
 - fuzz/authorize the node control API and cap VM count, memory, disk, file
   descriptors, CPU, and network independently of guest cooperation.

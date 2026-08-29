@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -417,5 +418,161 @@ func TestRepoRequestsAreBoundedBeforeTheHook(t *testing.T) {
 	}
 	if reached {
 		t.Error("a malformed request reached the gateway's hook")
+	}
+}
+
+// TestGuestLifecycleRequestsReachGatewayWithAuthenticatedNode round-trips the
+// three frames a guest's own `sparkbox pause` and `sparkbox snapshot` produce
+// on a node.
+//
+// The plan is the one worth crossing a wire in a test: it is restated field for
+// field on this side rather than embedded, so an addition on one side and not
+// the other is exactly the drift that would leave a guest reading a warning
+// with a fact missing from it.
+func TestGuestLifecycleRequestsReachGatewayWithAuthenticatedNode(t *testing.T) {
+	var gotNode string
+	plan := ctlops.SelfSnapshotPlan{
+		Sandbox: "alices-box", Tags: []string{"default", "web"}, Tag: "web",
+		Snapshot: "web-260829-1412", Node: "sparky",
+		Bound: "web-260812-0930", BoundFrom: "blue-meadow", BoundNode: "laptop",
+		BoundAt:  time.Date(2026, 8, 12, 9, 30, 0, 0, time.UTC),
+		Busy:     "archive",
+		Turbo:    true,
+		DiskMB:   4300,
+		CtlHint:  "ssh ctl@catnip.sh",
+		SSHHint:  "ssh alices-box.catnip.sh",
+		Token:    "tok-abc",
+		Carriers: []ctlops.TaggedSandbox{{Name: "alices-box", State: "running", Self: true}},
+	}
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfPause: func(_ context.Context, n string, req SelfPauseReq) (SelfPauseResp, error) {
+				gotNode = n
+				return SelfPauseResp{Sandbox: req.Sandbox}, nil
+			},
+			OnSelfSnapshotPlan: func(_ context.Context, n string, req SelfSnapshotPlanReq) (SelfSnapshotPlanResp, error) {
+				gotNode = n
+				return SelfSnapshotPlanFrom(plan), nil
+			},
+			OnSelfSnapshot: func(_ context.Context, n string, req SelfSnapshotReq) (SelfSnapshotResp, error) {
+				gotNode = n
+				return SelfSnapshotResp{Sandbox: req.Sandbox, Snapshot: req.Name, Tag: req.Tag}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var paused SelfPauseResp
+	if err := u.Request(ctx, TypeSelfPause, SelfPauseReq{Sandbox: "alices-box"}, &paused); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" || paused.Sandbox != "alices-box" {
+		t.Errorf("pause response = %+v, node = %q", paused, gotNode)
+	}
+
+	var wire SelfSnapshotPlanResp
+	if err := u.Request(ctx, TypeSelfSnapshotPlan,
+		SelfSnapshotPlanReq{Sandbox: "alices-box", Tag: "web"}, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.Plan(); !reflect.DeepEqual(got, plan) {
+		t.Errorf("the plan lost something crossing the link:\n got %+v\nwant %+v", got, plan)
+	}
+
+	var captured SelfSnapshotResp
+	if err := u.Request(ctx, TypeSelfSnapshot,
+		SelfSnapshotReq{Sandbox: "alices-box", Tag: "web", Name: "web-260829-1412"}, &captured); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" || captured.Snapshot != "web-260829-1412" || captured.Tag != "web" {
+		t.Errorf("capture response = %+v, node = %q", captured, gotNode)
+	}
+}
+
+// TestGuestLifecycleRequestsAreCheckedBeforeTheyReachTheGateway: a malformed
+// frame is the node's mistake and must be told so, rather than reaching the
+// ledger as an empty-string lookup or an unbounded string on its way to a
+// filename.
+func TestGuestLifecycleRequestsAreCheckedBeforeTheyReachTheGateway(t *testing.T) {
+	reached := false
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfPause: func(context.Context, string, SelfPauseReq) (SelfPauseResp, error) {
+				reached = true
+				return SelfPauseResp{}, nil
+			},
+			OnSelfSnapshot: func(context.Context, string, SelfSnapshotReq) (SelfSnapshotResp, error) {
+				reached = true
+				return SelfSnapshotResp{}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for name, call := range map[string]func() error{
+		"a pause naming no sandbox": func() error {
+			return u.Request(ctx, TypeSelfPause, SelfPauseReq{}, &SelfPauseResp{})
+		},
+		"a capture naming no sandbox": func() error {
+			return u.Request(ctx, TypeSelfSnapshot, SelfSnapshotReq{Tag: "web", Name: "n"}, &SelfSnapshotResp{})
+		},
+		"a capture with no plan behind it": func() error {
+			return u.Request(ctx, TypeSelfSnapshot, SelfSnapshotReq{Sandbox: "alices-box"}, &SelfSnapshotResp{})
+		},
+		"a tag longer than any tag can be": func() error {
+			return u.Request(ctx, TypeSelfSnapshot, SelfSnapshotReq{
+				Sandbox: "alices-box", Name: "n", Tag: strings.Repeat("a", MaxSelfTagBytes+1),
+			}, &SelfSnapshotResp{})
+		},
+	} {
+		err := call()
+		var typed *ctlops.Error
+		if !errors.As(err, &typed) || typed.Kind != ctlops.KindInvalid {
+			t.Errorf("%s: err = %v, want an invalid-request error", name, err)
+		}
+	}
+	if reached {
+		t.Error("a malformed lifecycle request reached the gateway's hook")
+	}
+}
+
+// TestGuestLifecycleWithoutAControlPlaneIsToldSo. Answered on the nil hook
+// rather than left to produce an unregistered-type error, so "this deployment
+// does not do that" and "this gateway is too old to speak it" are not the same
+// diagnosis — and so the node can turn it into the same 501 a gateway-local
+// guest would get.
+func TestGuestLifecycleWithoutAControlPlaneIsToldSo(t *testing.T) {
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for name, call := range map[string]func() error{
+		"pause": func() error {
+			return u.Request(ctx, TypeSelfPause, SelfPauseReq{Sandbox: "alices-box"}, &SelfPauseResp{})
+		},
+		"plan": func() error {
+			return u.Request(ctx, TypeSelfSnapshotPlan,
+				SelfSnapshotPlanReq{Sandbox: "alices-box"}, &SelfSnapshotPlanResp{})
+		},
+		"capture": func() error {
+			return u.Request(ctx, TypeSelfSnapshot,
+				SelfSnapshotReq{Sandbox: "alices-box", Tag: "web", Name: "n"}, &SelfSnapshotResp{})
+		},
+	} {
+		err := call()
+		var typed *ctlops.Error
+		if !errors.As(err, &typed) || typed.Code != CodeNoSelfLifecycle {
+			t.Errorf("%s: err = %v, want code %s", name, err, CodeNoSelfLifecycle)
+		}
 	}
 }

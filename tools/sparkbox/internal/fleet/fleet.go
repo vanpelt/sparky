@@ -175,6 +175,12 @@ type Fleet struct {
 	// all, so a relayed ResyncRepos would reach a nil hook over there and an
 	// owner's retag would silently check nothing out. See repos.go.
 	repoSync host.RepoSyncer
+	// toolSync installs the host's cached agent CLIs into a sandbox on another
+	// machine just before it is captured as a template. Same split again, and
+	// the sharpest reason of the three: a node holds only the gateway's
+	// upstream PUBLIC key, so it has no signer with which to open a session
+	// into its own guests. Nil until SetToolSync; see tools.go.
+	toolSync host.ToolRefresher
 	// rules resolves a sandbox's egress allow-set from its tags. Nil until
 	// SetRules; see netplane.go.
 	rules Rules
@@ -182,6 +188,12 @@ type Fleet struct {
 	// until SetIdentity — a deployment with no OIDC key — and a node asking is
 	// then told so rather than left waiting. See identity.go.
 	identity Identity
+	// selfLife runs the two lifecycle verbs a guest can aim at its own VM:
+	// pause, and capture-into-a-tag. It is the control plane itself, installed
+	// post-construction by SetSelfLifecycle because Ops is built with this
+	// fleet as its sandbox store. Nil — a deployment with no control plane —
+	// answers the node in a sentence rather than leaving it waiting.
+	selfLife SelfLifecycle
 	// repos resolves a sandbox's repo attachments and mints the git credential
 	// for one of them, on any machine. Nil until SetRepos — a deployment with
 	// no attachment store or no GitHub App key — with the same answer as
@@ -1362,6 +1374,10 @@ func (f *Fleet) Snapshot(ctx context.Context, box, snapName, owner string) (*hos
 	if err != nil {
 		return nil, err
 	}
+	// Before the hang-up and before the node pauses anything: this is the last
+	// moment a running remote guest can be reached, and only this machine can
+	// reach it. See refreshToolsBefore.
+	f.refreshToolsBefore(ctx, n, box)
 	f.hangUpBefore(n, box)
 	return n.Snapshotter(ctx, box, snapName, owner)
 }

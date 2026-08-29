@@ -20,6 +20,7 @@ package fleet
 import (
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -104,7 +105,50 @@ func (f *Fleet) candidate(n Node, local bool) Candidate {
 	if facts.Arch == "" && local {
 		facts.Arch = f.localArch
 	}
+	facts.Images = withLiveTemplates(facts.Images, n.Templates())
 	return Candidate{Name: n.Name(), Local: local, Online: online, Facts: facts, Capacity: capacity}
+}
+
+// withLiveTemplates folds the templates a machine holds right now into the image
+// list Fits reads.
+//
+// The two lists have different freshness. Facts.Images is a directory listing
+// the node took once, while composing its hello (cmd/sparkbox/node.go:764), and
+// a gateway only ever sees it again on a reconnect. Templates() is the live
+// inventory, kept current by the snapshot rows the link streams. So a snapshot
+// captured on a remote machine after its link came up is in the inventory and
+// absent from Images — and Fits below would answer `node %q does not have the
+// %q image` for a create the tag-template path now routes to that very machine
+// precisely because it is the one holding the template.
+//
+// Strictly additive: Fits only ever refuses on an image it cannot find, so a
+// longer list can turn a refusal into a pass and never the reverse.
+//
+// That is also why an empty Images is left empty rather than replaced by the
+// template names. Fits skips the check entirely when a node reported no list,
+// because unknown must not read as refused; seeding it with two snapshot names
+// would turn that silence into a list, and a plain `ubuntu` create onto a
+// machine whose image directory failed to read would start being refused.
+//
+// The clone is not defensive habit. facts is a copy of the node's Hello struct,
+// but the Images header still points at the node's own backing array
+// (nodelink/server.go:855 hands the stored Hello back by value), so appending
+// into it could scribble on what the next candidate reads.
+func withLiveTemplates(images []string, templates []*host.Snapshot) []string {
+	if len(images) == 0 {
+		return images
+	}
+	var extra []string
+	for _, s := range templates {
+		if s == nil || s.Image == "" || hasImage(images, s.Image) || hasImage(extra, s.Image) {
+			continue
+		}
+		extra = append(extra, s.Image)
+	}
+	if len(extra) == 0 {
+		return images
+	}
+	return append(slices.Clone(images), extra...)
 }
 
 // Fits reports whether this machine could take the request, and says why not

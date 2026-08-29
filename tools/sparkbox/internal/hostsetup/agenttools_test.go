@@ -150,6 +150,13 @@ func TestCloudInitAgentToolsPathsMatchSetup(t *testing.T) {
 		"Environment=IMAGES_DIR=" + cfg.ImageDir,
 		"Environment=TOOLS_DIR=" + cfg.toolsDir(),
 		"IMAGES_DIR=" + cfg.ImageDir + " TOOLS_DIR=" + cfg.toolsDir() + " \\",
+		// The serve unit has to name the same directory the refresher fills, or
+		// a host provisioned purely by cloud-init answers 501 to every
+		// `sparkbox update-tools` until some later `sparkbox setup` rewrites the
+		// unit from the template. This file is the OTHER provisioner (the dual
+		// cloud-init/`sparkbox setup` split), and it is the half that has no
+		// Go-rendered template to keep it honest.
+		"--tools-dir " + cfg.toolsDir() + " \\",
 	} {
 		if !bytes.Contains(got, []byte(want)) {
 			t.Errorf("cloud-init agent-tools path is not aligned with setup: missing %q", want)

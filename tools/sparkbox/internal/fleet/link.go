@@ -55,6 +55,9 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 		OnSelfPort:          f.SelfPort,
 		OnSelfRepos:         f.SelfRepos,
 		OnSelfRepoCred:      f.SelfRepoCredential,
+		OnSelfPause:         f.SelfPause,
+		OnSelfSnapshotPlan:  f.SelfSnapshotPlan,
+		OnSelfSnapshot:      f.SelfSnapshot,
 		OnCertificateEnroll: f.enrollCertificate,
 	}
 	if opts.Grace == 0 {

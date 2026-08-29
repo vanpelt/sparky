@@ -227,6 +227,20 @@ type Sandbox struct {
 	// 0 when the driver can't say, which the consoles render as a bare figure
 	// with no meter.
 	DiskTotalMB int64 `json:"disk_total_mb,omitempty"`
+	// BaseDiskMB is the used-blocks figure of the template named by Image, as
+	// last measured by the driver. Every one of those blocks physically exists
+	// once on the host and is shared by reflink with every other sandbox forked
+	// from the same image, so pooled accounting subtracts it (pooledDiskMB) and
+	// charges an owner only for what their sandboxes wrote. 0 when the driver
+	// can't measure templates, which simply restores the old raw charging.
+	//
+	// Node-local: it is an artifact of this machine's image dir, so it is
+	// deliberately absent from the field-by-field node-link and gRPC inventory
+	// conversions (nodelink/frame.go, grpccontrol/convert.go) — which is why
+	// refreshDiskUsage saves without firing m.observe when only this moves.
+	// It does ride along in the consoles' JSON, which embed the whole record;
+	// neither page reads it, and neither should: the meters stay raw.
+	BaseDiskMB int64 `json:"base_disk_mb,omitempty"`
 	// RenamedFrom journals an in-flight rename (see Rename): the record is
 	// saved under its new name with this set to the old name before the VM dir
 	// moves on disk, so a crash between the two converges at the next load
@@ -344,6 +358,30 @@ type RepoSyncer interface {
 // through sshgw, so the dependency only runs one way.
 var ErrNoRepoSupport = errors.New("this sandbox was created before repo support and cannot check repositories out")
 
+// ToolRefresher installs the agent CLIs this host has cached into a running
+// sandbox (see internal/envsync). Optional, and fired from exactly one place:
+// immediately before a snapshot capture, so a template starts current instead
+// of frozen at the tool versions of the day it was taken. Every fork copies
+// that disk byte-for-byte, so a template captured stale stays stale for every
+// sandbox anybody ever makes from it.
+//
+// Unlike RepoSyncer's nudge this must be SYNCHRONOUS: the caller is about to
+// pause the guest, and a pause landing halfway through writing /usr/local/bin/
+// claude would freeze a truncated executable into the template.
+type ToolRefresher interface {
+	RefreshTools(ctx context.Context, box *Sandbox) error
+}
+
+// ErrNoToolRefresh is a guest with no updater in it — a sandbox created before
+// the tool payload existed. Named rather than silent for the same reason
+// ErrNoRepoSupport is: the box otherwise reports a successful snapshot of tools
+// nothing could have updated.
+//
+// It lives here, beside the interface it belongs to, because internal/ctlops
+// may have to print it and cannot import envsync (envsync reaches ctlops
+// through sshgw, so that dependency only runs one way).
+var ErrNoToolRefresh = errors.New("this sandbox was created before agent-tool updates and cannot refresh them")
+
 // FrontDoor is an optional hook for per-sandbox public-address plumbing (see
 // internal/frontdoor): Ensure is called when a sandbox is created, Remove when
 // it is destroyed. Implementations are expected to be best-effort — a sandbox
@@ -453,16 +491,17 @@ type Manager struct {
 	ready              singleflight.Group // one restore/resume per sandbox at a time
 	ctx                context.Context    // process lifetime for shared restore/resume work
 	driver             vmm.Driver
-	balloon            vmm.Ballooner    // driver's balloon capability, if it has one; else nil
-	archiver           vmm.Archivable   // driver's pack/unpack/snapshot capability; else nil
-	diskReport         vmm.DiskReporter // driver's disk-usage capability; else nil
-	renamer            vmm.Renamer      // driver's VM-rename capability; else nil
-	rebooter           vmm.Rebooter     // driver's snapshot-discard capability; else nil
-	diskResize         vmm.DiskResizer  // driver's disk-grow capability; else nil
-	cpuStats           vmm.CPUStatser   // driver's CPU-time capability; else nil
-	netStats           vmm.NetStatser   // driver's network-counter capability; else nil
-	archive            ObjectStore      // object store for archives; nil disables archiving
-	checkpoint         ObjectStore      // immutable durable checkpoints; nil disables checkpointing
+	balloon            vmm.Ballooner        // driver's balloon capability, if it has one; else nil
+	archiver           vmm.Archivable       // driver's pack/unpack/snapshot capability; else nil
+	diskReport         vmm.DiskReporter     // driver's disk-usage capability; else nil
+	templateReport     vmm.TemplateReporter // driver's template-measurement capability; else nil
+	renamer            vmm.Renamer          // driver's VM-rename capability; else nil
+	rebooter           vmm.Rebooter         // driver's snapshot-discard capability; else nil
+	diskResize         vmm.DiskResizer      // driver's disk-grow capability; else nil
+	cpuStats           vmm.CPUStatser       // driver's CPU-time capability; else nil
+	netStats           vmm.NetStatser       // driver's network-counter capability; else nil
+	archive            ObjectStore          // object store for archives; nil disables archiving
+	checkpoint         ObjectStore          // immutable durable checkpoints; nil disables checkpointing
 	log                *slog.Logger
 	stateDir           string // dir holding sandboxes.json + transient archive staging
 	checkpointStageDir string // local directory for checkpoint pack/download staging
@@ -477,6 +516,7 @@ type Manager struct {
 	tags               TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
 	envSync            EnvPusher               // optional: secret-env push when a sandbox reaches running
 	repoSync           RepoSyncer              // optional: repo checkout nudge when tags or attachments change
+	toolSync           ToolRefresher           // optional: agent-CLI refresh run once, just before a snapshot capture
 	sessions           SessionCloser           // optional: hang up attached sessions when a sandbox pauses
 	observer           Observer                // optional: relay record changes to whoever mirrors this host
 	maxPerOwner        int                     // max running sandboxes per owner; 0 = unlimited
@@ -707,6 +747,13 @@ func NewManager(opts Options) (*Manager, error) {
 	if dr, ok := opts.Driver.(vmm.DiskReporter); ok {
 		m.diskReport = dr
 	}
+	// Template measurement is asserted separately from DiskReporter so a driver
+	// that can read a live rootfs but not an image dir keeps its accounting and
+	// loses only the reflink discount (every sandbox then charges its raw usage,
+	// which is what happened before this existed).
+	if tr, ok := opts.Driver.(vmm.TemplateReporter); ok {
+		m.templateReport = tr
+	}
 	// And the user-console capabilities: rename, cold-boot reboot, CPU stats.
 	if rn, ok := opts.Driver.(vmm.Renamer); ok {
 		m.renamer = rn
@@ -861,6 +908,36 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	return copyOf(b), m.save()
 }
 
+// pooledDiskMB is what this sandbox costs its owner's pooled-disk budget: the
+// blocks it wrote, not the template blocks it shares. A fork's rootfs reports
+// the template's contents as used (DiskUsageMB reads the guest's own filesystem
+// counters, which know nothing of reflink), so ten forks of one image would each
+// be charged the full template while the host holds a single copy. Subtracting
+// BaseDiskMB makes the pool measure the thing the operator is actually buying.
+//
+// Floored at zero: the refresher replaces base templates by atomic rename, so a
+// baseline re-measured against a newer template can exceed an older clone's
+// usage, and a negative charge would credit an owner for other sandboxes' bytes.
+//
+// An archived sandbox pays full freight. Archive replaces DiskMB with the
+// compressed artifact's size (see Archive), which lives in object storage and
+// gets no dedup at all — subtracting a local template's baseline from it would
+// discount bytes the owner genuinely occupies. (Sharing across archives is the
+// deferred delta-archive design, not this.)
+//
+// Only the pooled-budget call sites use this. The per-sandbox ceiling, both
+// consoles' meters and every wire projection keep the raw DiskMB, which is the
+// number a user can reconcile with `df` inside their guest.
+func (b *Sandbox) pooledDiskMB() int64 {
+	if b.State == vmm.StateArchived {
+		return b.DiskMB
+	}
+	if b.BaseDiskMB >= b.DiskMB {
+		return 0
+	}
+	return b.DiskMB - b.BaseDiskMB
+}
+
 // admit enforces the per-owner limits before a start (create or resume/restore).
 // Callers must hold m.mu. exclude is the name of the sandbox being started (so
 // it isn't counted against its own start), or "" for a create. reqDiskMB is the
@@ -888,7 +965,7 @@ func (m *Manager) admitTurbo(b *Sandbox) error {
 	if cost > ceiling {
 		cost = ceiling
 	}
-	return m.admitCost(b.Owner, b.DiskMB, b.Name, cost, budget)
+	return m.admitCost(b.Owner, b.pooledDiskMB(), b.Name, cost, budget)
 }
 
 func (m *Manager) admitCost(owner string, reqDiskMB int64, exclude string, cost, ownerBudget int64) error {
@@ -934,12 +1011,14 @@ func (m *Manager) admitCost(owner string, reqDiskMB int64, exclude string, cost,
 	}
 	// Pooled per-owner disk (soft accounting): the sum of each running/paused
 	// root filesystem's used blocks plus archived boxes' object-storage size
-	// must stay under the owner's pool.
+	// must stay under the owner's pool. Each live box is charged its pooled
+	// figure — what it wrote on top of its template — because template blocks
+	// exist once on the host however many sandboxes were forked from them.
 	if m.diskPoolMB > 0 {
 		var used int64
 		for _, b := range m.boxes {
 			if b.Name != exclude && b.Owner == owner {
-				used += b.DiskMB
+				used += b.pooledDiskMB()
 			}
 		}
 		if used+reqDiskMB > m.diskPoolMB {
@@ -1124,7 +1203,9 @@ type NodeCapacity struct {
 	// ReserveMemMB is the per-VM working-set floor; 0 means overcommit is off.
 	ReserveMemMB int64 `json:"reserve_mem_mb"`
 	// UsedDiskMB is the summed durable usage of all sandboxes on this node
-	// (used root-filesystem blocks + archived boxes' object-storage size).
+	// (used root-filesystem blocks + archived boxes' object-storage size), on
+	// the same basis pooled admission charges: net of the template blocks forks
+	// share, so it is a lower bound on physical bytes rather than a `du`.
 	// DiskPoolMBPerOwner is the per-owner pooled budget (0 = unlimited).
 	UsedDiskMB         int64 `json:"used_disk_mb"`
 	DiskPoolMBPerOwner int64 `json:"disk_pool_mb_per_owner"`
@@ -1146,20 +1227,24 @@ type NodeCapacity struct {
 // on this node. Configured VM memory remains a per-VM ceiling; EffectiveMemMB is
 // the amount admission charges to the shared owner pool.
 type OwnerCapacity struct {
-	Owner            string `json:"owner"`
-	MemoryPoolMB     int64  `json:"memory_pool_mb"`
-	MemoryBurstMB    int64  `json:"memory_burst_mb"`
-	EffectiveMemMB   int64  `json:"effective_memory_mb"`
-	ResidentMemMB    int64  `json:"resident_memory_mb"`
-	BorrowedMemMB    int64  `json:"borrowed_memory_mb"`
-	AllocatedMemMB   int64  `json:"allocated_memory_mb"`
-	DiskPoolMB       int64  `json:"disk_pool_mb"`
-	UsedDiskMB       int64  `json:"used_disk_mb"`
-	RunningSandboxes int    `json:"running_sandboxes"`
-	TotalSandboxes   int    `json:"total_sandboxes"`
-	MaxRunning       int    `json:"max_running"`
-	MaxSandboxes     int    `json:"max_sandboxes"`
-	TurboSandboxes   int    `json:"turbo_sandboxes"`
+	Owner          string `json:"owner"`
+	MemoryPoolMB   int64  `json:"memory_pool_mb"`
+	MemoryBurstMB  int64  `json:"memory_burst_mb"`
+	EffectiveMemMB int64  `json:"effective_memory_mb"`
+	ResidentMemMB  int64  `json:"resident_memory_mb"`
+	BorrowedMemMB  int64  `json:"borrowed_memory_mb"`
+	AllocatedMemMB int64  `json:"allocated_memory_mb"`
+	DiskPoolMB     int64  `json:"disk_pool_mb"`
+	// UsedDiskMB is what this owner's sandboxes charge the pool: their written
+	// blocks, net of the template blocks every clone shares. It is therefore a
+	// lower bound on the physical bytes they occupy, and it is smaller than the
+	// per-sandbox figures the consoles show, which stay raw.
+	UsedDiskMB       int64 `json:"used_disk_mb"`
+	RunningSandboxes int   `json:"running_sandboxes"`
+	TotalSandboxes   int   `json:"total_sandboxes"`
+	MaxRunning       int   `json:"max_running"`
+	MaxSandboxes     int   `json:"max_sandboxes"`
+	TurboSandboxes   int   `json:"turbo_sandboxes"`
 }
 
 // CapacityForOwner reports the local portion of an owner's resource envelope.
@@ -1178,7 +1263,7 @@ func (m *Manager) CapacityForOwner(owner string) OwnerCapacity {
 			continue
 		}
 		c.TotalSandboxes++
-		c.UsedDiskMB += b.DiskMB
+		c.UsedDiskMB += b.pooledDiskMB()
 		if b.State == vmm.StateRunning {
 			c.RunningSandboxes++
 			c.AllocatedMemMB += b.MemMB
@@ -1218,7 +1303,7 @@ func (m *Manager) Capacity() NodeCapacity {
 	}
 	activeOwners := make(map[string]struct{})
 	for _, b := range m.boxes {
-		c.UsedDiskMB += b.DiskMB
+		c.UsedDiskMB += b.pooledDiskMB()
 		if b.State == vmm.StateRunning {
 			activeOwners[b.Owner] = struct{}{}
 			c.Running++
@@ -1337,12 +1422,13 @@ func (m *Manager) ensureReady(ctx context.Context, name string) (*Sandbox, error
 		// Resuming brings this sandbox back to running, so it's subject to the
 		// same limits as a fresh create (exclude itself — it isn't running yet).
 		// Its own footprint (rootfs, or the just-restored size) is the disk it
-		// reclaims against the pool.
+		// reclaims against the pool — net of the template blocks it shares, on
+		// the same basis the pooled sum above is computed.
 		var admitErr error
 		if b.Turbo {
 			admitErr = m.admitTurbo(b)
 		} else {
-			admitErr = m.admit(b.Owner, b.MemMB, b.DiskMB, b.Name)
+			admitErr = m.admit(b.Owner, b.MemMB, b.pooledDiskMB(), b.Name)
 		}
 		if admitErr != nil {
 			return nil, admitErr
@@ -1403,6 +1489,20 @@ func (m *Manager) SetRepoSync(r RepoSyncer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.repoSync = r
+}
+
+// SetToolSync installs the pre-capture agent-tool refresh, post-construction
+// for the same reason SetRepoSync is: it needs the gateway's upstream SSH key.
+//
+// Only a GATEWAY wires this. A node caches the gateway's upstream PUBLIC key
+// and holds no signer, so it cannot open a session into its own guests; the
+// refresh for a sandbox on another machine is done from the gateway side
+// instead (fleet.Fleet.refreshToolsBefore). This hook covers the sandboxes on
+// THIS machine, which on a single-box deployment is all of them.
+func (m *Manager) SetToolSync(t ToolRefresher) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.toolSync = t
 }
 
 // ResyncRepos asks name's guest to reconcile its checkouts, for a caller that
@@ -2242,6 +2342,13 @@ func (m *Manager) restore(ctx context.Context, name, key string) error {
 	b.State = vmm.StatePaused // rootfs present, no snapshot → resumeOrRecreate cold-boots it
 	b.ArchiveKey = ""
 	b.ArchivedAt = time.Time{}
+	// UnpackRootfs decompressed a full image, so this rootfs shares no extents
+	// with any template and the reflink discount no longer applies. The next
+	// refresh tick re-measures and may hand the discount back even though every
+	// block was written fresh — a bounded over-credit in the user's favour on a
+	// soft budget, deliberately preferred over a persisted "was cloned" bit that
+	// create, both restore paths and resumeOrRecreate would all have to maintain.
+	b.BaseDiskMB = 0
 	m.observe(b, "restored")
 	err := m.save()
 	m.mu.Unlock()
@@ -2893,6 +3000,11 @@ func (m *Manager) RefreshDiskUsage(ctx context.Context) {
 // refreshDiskUsage measures a sandbox's current durable filesystem usage via
 // the driver and updates its DiskMB for pooled accounting. The driver call is
 // made without m.mu held; the brief locked section only stores the result.
+//
+// The template baseline is re-measured here rather than stamped at create time
+// because the refresher replaces base templates by atomic rename: a create-time
+// figure would describe an image that no longer exists. Re-reading each tick
+// keeps it within one template revision of the truth.
 func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 	if m.diskReport == nil {
 		return
@@ -2904,6 +3016,7 @@ func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 	// Ceiling is best-effort and independent: a driver that can't report it just
 	// leaves the consoles showing a bare usage figure with no meter.
 	capMB, capErr := m.diskReport.DiskCapacityMB(ctx, name)
+	baseMB, baseErr := m.templateUsageMB(ctx, name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.boxes[name]
@@ -2916,11 +3029,54 @@ func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 		b.DiskTotalMB = capMB
 		changed = true
 	}
+	// A failed measurement KEEPS the stored baseline. Deleting a snapshot makes
+	// its template unreadable, and treating that as "baseline 0" would spike the
+	// pooled charge of every sandbox forked from it by the whole template size —
+	// on a tick, with nobody having written a byte. Same for a transient read
+	// error. baseChanged is tracked apart from `changed` because BaseDiskMB is
+	// node-local and never crosses the node link, so a move in it alone is worth
+	// persisting but not worth waking the observer for.
+	baseChanged := false
+	if baseErr == nil && b.BaseDiskMB != baseMB {
+		b.BaseDiskMB = baseMB
+		baseChanged = true
+	}
 	if changed {
 		m.observe(b, "disk")
+	}
+	if changed || baseChanged {
 		m.save() //nolint:errcheck
 	}
 }
+
+// templateUsageMB measures the used blocks of the template a sandbox was
+// created from, for the pooled-disk baseline. The record is read under a brief
+// lock and the driver call made outside it, matching refreshDiskUsage's shape:
+// reading an image dir can touch a cold disk and must not hold up admission.
+//
+// An error (no such capability, no such image, unreadable superblock) leaves
+// the caller's stored baseline alone — see refreshDiskUsage.
+func (m *Manager) templateUsageMB(ctx context.Context, name string) (int64, error) {
+	if m.templateReport == nil {
+		return 0, errNoTemplateReport
+	}
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	var image string
+	if ok {
+		image = b.Image
+	}
+	m.mu.Unlock()
+	if !ok || image == "" {
+		return 0, fmt.Errorf("sandbox %q has no image to measure", name)
+	}
+	return m.templateReport.TemplateUsageMB(ctx, image)
+}
+
+// errNoTemplateReport is the "driver can't measure templates" answer. It is an
+// error rather than a zero so callers keep whatever baseline they already had
+// instead of re-charging shared blocks — see the vmm.TemplateReporter contract.
+var errNoTemplateReport = errors.New("driver cannot measure template usage")
 
 // balloonDown reclaims a running sandbox's idle RAM to the host by inflating
 // its balloon to leave only the working-set reserve, without pausing it. A

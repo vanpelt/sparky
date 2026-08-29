@@ -280,9 +280,42 @@ plan that shipped it).
   admission: the driver reports each VM's `du` (`vmm.DiskReporter.DiskUsageMB`),
   the reaper refreshes `Sandbox.DiskMB` each tick, and `admit` refuses a create/
   restore that would push the owner over (`DiskQuotaError`). Archived boxes count
-  their compressed object-storage size; conservative (reflink-shared base blocks
-  are counted per VM), never under. Hard XFS `prjquota` (Part 4) remains the exact
-  future replacement.
+  their compressed object-storage size. Hard XFS `prjquota` (Part 4) remains the
+  exact future replacement.
+
+- **The pooled sum is baseline-subtracted.** The paragraph above used to end
+  "conservative (reflink-shared base blocks are counted per VM), never under" —
+  it no longer does, and the difference is the point. `DiskUsageMB` reads the
+  guest's own ext4 counters, which know nothing of reflink, so ten sandboxes
+  forked from one 8 GB image each reported ~8 GB while the host held a single
+  copy: a pool was worth roughly one image however the operator sized it, and
+  every incentive ran against the sharing the design is built on. The manager now
+  also measures the template named by `Sandbox.Image` through
+  `vmm.TemplateReporter.TemplateUsageMB` — the *same* ext4 superblock read, which
+  is what makes the two subtractable — stores it as `Sandbox.BaseDiskMB`, and
+  charges the pool `max(0, DiskMB - BaseDiskMB)`. An owner pays for blocks their
+  sandboxes wrote. Notes:
+  - The per-VM 25 GB ceiling, both consoles' meters, the REST/gRPC projections and
+    every per-sandbox figure a user sees stay **raw**: that is the number they can
+    reconcile against `df` inside the guest. Only the pooled sums move.
+  - **This enlarges every existing `--disk-pool-mb-per-owner` setting** the moment
+    the first reaper tick backfills baselines. It only ever loosens — it can never
+    refuse a create that used to succeed — but it is a live policy change on a
+    binary swap with no flag, so re-check the number against what you meant.
+  - An **archived** box pays full freight: `Archive` replaces `DiskMB` with the
+    compressed artifact's size, and object storage dedups nothing against a local
+    template. Delta archives are still the deferred Part 7.
+  - The baseline is re-measured each tick rather than stamped at create time,
+    because the agent-tools refresher replaces base templates by atomic rename —
+    a create-time figure would describe an image that no longer exists. A
+    measurement error (a deleted snapshot, an unreadable image) **keeps** the
+    stored value; treating it as zero would spike every fork's charge by a whole
+    template with nobody having written a byte.
+  - A restore or checkpoint-restore clears the baseline, because `UnpackRootfs`
+    writes a full image that shares no extents. The next tick may hand the
+    discount back anyway — a bounded over-credit in the user's favour on a soft
+    knob, deliberately preferred over a persisted "was cloned" bit that create,
+    both restore paths and `resumeOrRecreate` would each have to maintain.
 
 - **Archive → object storage (a 6th state below Stopped).** `ctl@ archive <name>`
   / the console Archive button / `POST …/archive` pause the VM, drop its memory

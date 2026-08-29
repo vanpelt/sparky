@@ -76,6 +76,13 @@ const (
 	// this gateway cannot act on. The guest is told 503: the repair is to wait,
 	// which is the one thing a 500 would talk it out of.
 	CodeRepoUpstream = "repo_upstream_unavailable"
+	// CodeNoSelfLifecycle is a gateway with no guest self-service lifecycle
+	// wired — no control plane installed on the fleet. Answered on the nil hook
+	// rather than left to produce an unregistered-type error, for the reason
+	// noRepos gives: "this deployment does not do that" and "this gateway is too
+	// old to speak it" must not read as the same diagnosis to whoever is
+	// looking at the node's log.
+	CodeNoSelfLifecycle = "self_lifecycle_not_enabled"
 	// CodeNoCertificateIssuer means this gateway has no internal CA/roster
 	// signer wired. It is distinct from a pending or disabled authenticated row.
 	CodeNoCertificateIssuer = "certificate_not_issued"
@@ -138,6 +145,43 @@ func registerUplinkOps(conn *Conn, node string, hooks Hooks) {
 			return nil, ctlops.Disabled(OpLink, "default route configuration is not enabled on this gateway")
 		}
 		return hooks.OnSelfPort(ctx, node, req)
+	})
+	conn.Handle(TypeSelfPause, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfPauseReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" {
+			return nil, ctlops.Invalid(OpLink, "bad_self_pause_request",
+				"a self-pause request has to name a sandbox")
+		}
+		if hooks.OnSelfPause == nil {
+			return nil, noSelfLifecycle()
+		}
+		return hooks.OnSelfPause(ctx, node, req)
+	})
+	conn.Handle(TypeSelfSnapshotPlan, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfSnapshotPlanReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			len(req.Tag) > MaxSelfTagBytes || len(req.Name) > MaxSelfNameBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_snapshot_plan_request",
+				"a capture plan needs a sandbox, a tag of at most %d bytes and a name of at most %d bytes",
+				MaxSelfTagBytes, MaxSelfNameBytes)
+		}
+		if hooks.OnSelfSnapshotPlan == nil {
+			return nil, noSelfLifecycle()
+		}
+		return hooks.OnSelfSnapshotPlan(ctx, node, req)
+	})
+	conn.Handle(TypeSelfSnapshot, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfSnapshotReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			req.Tag == "" || req.Name == "" ||
+			len(req.Tag) > MaxSelfTagBytes || len(req.Name) > MaxSelfNameBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_snapshot_request",
+				"a capture needs a sandbox, the plan's tag and the plan's snapshot name")
+		}
+		if hooks.OnSelfSnapshot == nil {
+			return nil, noSelfLifecycle()
+		}
+		return hooks.OnSelfSnapshot(ctx, node, req)
 	})
 	conn.Handle(TypeSelfRepos, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var req SelfReposReq
@@ -202,6 +246,17 @@ func noRepos() error {
 	return &ctlops.Error{
 		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoRepos, Verbatim: true,
 		Msg: "this gateway serves no repo attachments: it has no attachment store or no GitHub App key configured.",
+	}
+}
+
+// noSelfLifecycle is the lifecycle trio's equivalent of noRepos, hand-built for
+// the same reason: the node maps CodeNoSelfLifecycle onto the 501 a
+// gateway-local guest would get from a metadata service with no lifecycle
+// wired, so the two machines answer the same thing.
+func noSelfLifecycle() error {
+	return &ctlops.Error{
+		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoSelfLifecycle, Verbatim: true,
+		Msg: "this gateway does not run guest self-service lifecycle: no control plane is installed on its fleet.",
 	}
 }
 
@@ -417,6 +472,14 @@ type Hooks struct {
 	// sentence it can turn into a 501 rather than being left to infer it.
 	OnSelfRepos    func(ctx context.Context, node string, req SelfReposReq) (SelfReposResp, error)
 	OnSelfRepoCred func(ctx context.Context, node string, req SelfRepoCredReq) (SelfRepoCredResp, error)
+	// The lifecycle trio. OnSelfSnapshotPlan is a pure read and answers every
+	// refusal a guest can act on; OnSelfPause and OnSelfSnapshot are the two
+	// that stop the VM, and both return the instant the work is accepted — the
+	// node's guest has already been told, and the box it would report to is
+	// about to be paused.
+	OnSelfPause        func(ctx context.Context, node string, req SelfPauseReq) (SelfPauseResp, error)
+	OnSelfSnapshotPlan func(ctx context.Context, node string, req SelfSnapshotPlanReq) (SelfSnapshotPlanResp, error)
+	OnSelfSnapshot     func(ctx context.Context, node string, req SelfSnapshotReq) (SelfSnapshotResp, error)
 	// OnCertificateEnroll receives the same authenticated roster name. The CSR
 	// payload deliberately has no identity field.
 	OnCertificateEnroll func(ctx context.Context, node string, req CertificateEnrollRequest) (CertificateEnrollResponse, error)

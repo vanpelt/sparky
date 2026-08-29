@@ -63,16 +63,28 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	if err := o.placeable(op, a.Node); err != nil {
 		return SandboxInfo{}, err
 	}
+	// Which disk this sandbox boots from, decided from the tags computed above
+	// and not from a sandbox_tags join: no rows exist for this name yet, and
+	// none may be written before the two refusals below — same reason as
+	// nameIsFree and placeable. resolveTemplate falls back to the default image,
+	// so tpl.Image is always the image to build.
+	tpl, err := o.resolveTemplate(op, c.Handle, tags)
+	if err != nil {
+		return SandboxInfo{}, err
+	}
+	if err := o.templateNodeAgrees(op, a.Node, tpl); err != nil {
+		return SandboxInfo{}, err
+	}
 	if err := o.stampTags(name, c.Handle, tags); err != nil {
 		return SandboxInfo{}, Fail(op, err)
 	}
-	box, err := o.build(ctx, op, a.Node, name, c.Handle, a.VCPUs, a.MemMB)
+	box, err := o.build(ctx, op, a.Node, name, c.Handle, tpl, a.VCPUs, a.MemMB)
 	if err != nil {
 		// Don't strand tag rows for a sandbox that never came into being.
 		o.clearTags(name, c.Handle, tags)
 		return SandboxInfo{}, Fail(op, err)
 	}
-	o.log.Info("sandbox created", "user", c.Handle, "name", name, "node", a.Node, "tags", tags)
+	o.log.Info("sandbox created", "user", c.Handle, "name", name, "node", a.Node, "tags", tags, "image", tpl.Image)
 	return o.info(box), nil
 }
 
@@ -88,22 +100,48 @@ type placer interface {
 	CreateOn(ctx context.Context, node, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
 }
 
-// build runs the create on the machine the caller asked for, or on whichever
-// one the store chooses when they did not ask.
+// build runs the create on the machine the caller asked for, on the one holding
+// the tag's bound template when they did not, or on whichever one the store
+// chooses when neither names a machine.
 //
 // Naming a machine on a host that has no fleet is a request this deployment
 // cannot satisfy at all, and it is answered as such rather than silently built
 // here: a caller who says --node laptop and gets a sandbox on the gateway has
 // been told nothing and has to discover it later, on the machine's bill.
-func (o *Ops) build(ctx context.Context, op, node, name, owner string, vcpus, memMB int64) (*host.Sandbox, error) {
-	if node == "" {
-		return o.boxes.Create(ctx, name, owner, o.defaultImage, vcpus, memMB)
+//
+// THE placer ASSERTION COMES FIRST, AND THAT ORDER IS THE CORRECTNESS OF EVERY
+// SINGLE-MACHINE HOST. host.NewManager coerces an unset node name to "local"
+// (manager.go:748) and load() re-stamps every snapshot record with it
+// (manager.go:789), so on a one-machine host EVERY snapshot carries
+// Node="local". Reading tpl.Node before asking whether this store can place at
+// all would therefore turn every tag-templated create on every single-machine
+// deployment into "this host runs a single machine, so a sandbox can't be placed
+// on a named one." The absence of CreateOn IS the statement that there is one
+// machine and the template is on it.
+//
+// Setting node from the template is also what makes placement follow it: handing
+// a snapshot image to Sandboxes.Create does NOT place on the template's machine,
+// because fleet.pick short-circuits to the local machine when no placer is
+// installed and no node was preferred.
+func (o *Ops) build(ctx context.Context, op, node, name, owner string, tpl resolvedTemplate, vcpus, memMB int64) (*host.Sandbox, error) {
+	p, canPlace := o.boxes.(placer)
+	if node == "" && canPlace {
+		node = tpl.Node
 	}
-	p, ok := o.boxes.(placer)
-	if !ok {
+	if node == "" {
+		return o.boxes.Create(ctx, name, owner, tpl.Image, vcpus, memMB)
+	}
+	if !canPlace {
 		return nil, Disabled(op, singleMachineRefusal)
 	}
-	return p.CreateOn(ctx, node, name, owner, o.defaultImage, vcpus, memMB)
+	box, err := p.CreateOn(ctx, node, name, owner, tpl.Image, vcpus, memMB)
+	// Only a failure on the machine the BINDING chose gets the explanation: a
+	// caller who named the machine themselves already knows why the sentence is
+	// about it, and rewriting that one would be noise.
+	if err != nil && tpl.Tag != "" && node == tpl.Node {
+		return nil, o.templatePlacementFailed(op, tpl, err)
+	}
+	return box, err
 }
 
 // singleMachineRefusal is shared by build and placeable so the two spellings of
@@ -113,6 +151,10 @@ const singleMachineRefusal = "this host runs a single machine, so a sandbox can'
 // placeable reports whether a named-node create is even possible here. It is a
 // property of the manager this process was built with, not of the request, so
 // it can be answered before anything is written.
+//
+// It takes only the CALLER's own --node. A machine chosen for them by a template
+// binding is build()'s business, and it can only have been chosen on a host that
+// already satisfies placer.
 func (o *Ops) placeable(op, node string) error {
 	if node == "" {
 		return nil
@@ -172,6 +214,11 @@ func (o *Ops) nameIsFree(op, name string) error {
 // something (an environment variable, a checkout) — but an egress rule-set is
 // subtractive, and one tagged `default` would now cut every sandbox in the
 // fleet down to its allowlist. See netrules.PutRule.
+//
+// internal/templates is the fourth reader and refuses the same word for the
+// third shape of the same reason: a template REPLACES, so a snapshot bound to
+// `default` would become the base image of every sandbox this handle ever makes.
+// See templates.Bind.
 //
 // It adds no tags at all on a host with no tag store, which is the only case
 // where stamping one would turn a working create into a refusal.

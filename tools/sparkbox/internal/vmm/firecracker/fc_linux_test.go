@@ -22,9 +22,10 @@ import (
 // Compile-time capability checks, mirroring the mock's: the manager
 // type-asserts for these, so losing one silently degrades the fleet.
 var (
-	_ vmm.Renamer    = (*Driver)(nil)
-	_ vmm.Rebooter   = (*Driver)(nil)
-	_ vmm.CPUStatser = (*Driver)(nil)
+	_ vmm.Renamer          = (*Driver)(nil)
+	_ vmm.Rebooter         = (*Driver)(nil)
+	_ vmm.CPUStatser       = (*Driver)(nil)
+	_ vmm.TemplateReporter = (*Driver)(nil)
 )
 
 // TestV6Addressing checks the per-slot /127 carving from the delegated /64.
@@ -615,6 +616,57 @@ func TestExt4DiskRejectsInvalidSuperblock(t *testing.T) {
 	}
 	if _, _, err := ext4DiskMB(path); err == nil || !strings.Contains(err.Error(), "magic") {
 		t.Fatalf("ext4DiskMB error = %v, want invalid-magic diagnostic", err)
+	}
+}
+
+// TestTemplateUsageMB pins the three properties the pooled-disk baseline rests
+// on: the template figure is produced by the same superblock read DiskUsageMB
+// uses (so the manager may subtract one from the other), a template that isn't
+// there is an error rather than a silent zero (so a deleted snapshot keeps every
+// fork's stored baseline instead of spiking its charge), and a name out of a
+// persisted record cannot walk out of ImageDir.
+func TestTemplateUsageMB(t *testing.T) {
+	ctx := context.Background()
+	parent := t.TempDir()
+	imageDir := filepath.Join(parent, "images")
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := newTestDriver(t)
+	d.opts.ImageDir = imageDir
+
+	// Identical geometry on both sides: a template in the image dir and a
+	// sandbox rootfs. If the two ever stopped sharing ext4DiskMB, subtracting
+	// them would silently start comparing different bases.
+	const blocks, free, overhead = uint32(6_553_600), uint32(5_789_327), uint32(146_887)
+	writeExt4Superblock(t, filepath.Join(imageDir, "snap-alice-cuda.ext4"), blocks, free, overhead)
+	if err := os.MkdirAll(d.vmDir("box"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExt4Superblock(t, d.rootfsPath("box"), blocks, free, overhead)
+
+	base, err := d.TemplateUsageMB(ctx, "snap-alice-cuda")
+	if err != nil {
+		t.Fatalf("TemplateUsageMB: %v", err)
+	}
+	used, err := d.DiskUsageMB(ctx, "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != used || base == 0 {
+		t.Fatalf("TemplateUsageMB = %d, DiskUsageMB = %d; want the same non-zero figure", base, used)
+	}
+
+	if _, err := d.TemplateUsageMB(ctx, "snap-alice-gone"); err == nil {
+		t.Fatal("a missing template must be an error, not 0 — the manager keeps its last baseline on error")
+	}
+
+	// A traversal name is refused before any filesystem access: plant the file a
+	// naive join would reach and prove its figure never comes back.
+	writeExt4Superblock(t, filepath.Join(parent, "escape.ext4"), blocks, free, overhead)
+	got, err := d.TemplateUsageMB(ctx, "../escape")
+	if err == nil || !strings.Contains(err.Error(), "invalid template image name") {
+		t.Fatalf("TemplateUsageMB(%q) = %d, %v; want an image-name refusal", "../escape", got, err)
 	}
 }
 

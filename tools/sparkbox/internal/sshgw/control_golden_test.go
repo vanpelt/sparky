@@ -31,6 +31,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
@@ -423,11 +424,62 @@ func TestControlGolden(t *testing.T) {
 			"  ssh ctl@hivemind.tools snapshot create <box> <name>\r\n",
 		wantExit: 0,
 	}, {
+		// `create` grew a --tag, so its arity check moved into parseTags — which
+		// means a missing name is now a usage line rather than an index panic,
+		// and it names the flag.
+		name: "snapshot create without a name", handle: "alice", args: []string{"snapshot", "create", "mybox"},
+		wantErr: "usage: ssh ctl@<gateway> snapshot create <box> <name> [--tag <tag>]\r\n" +
+			"       at most one tag: a tag has exactly one base image\r\n",
+		wantExit: 2,
+	}, {
+		// Two tags is refused for the reason `bind` refuses it: a tag has one
+		// base image, so naming two says nothing about which snapshot either of
+		// them gets — and refusing before the capture is what keeps this verb
+		// free of a partial-failure mode.
+		name: "snapshot create with two tags", handle: "alice",
+		args: []string{"snapshot", "create", "mybox", "base", "--tag", "cuda", "--tag", "ml"},
+		wantErr: "usage: ssh ctl@<gateway> snapshot create <box> <name> [--tag <tag>]\r\n" +
+			"       at most one tag: a tag has exactly one base image\r\n",
+		wantExit: 2,
+	}, {
+		// The ownership gate still runs first, before the progress line: the
+		// line below must never name a sandbox the caller cannot act on.
+		name: "snapshot create --tag on someone else's sandbox", handle: "alice",
+		args:     []string{"snapshot", "create", "mallory-box", "base", "--tag", "cuda"},
+		wantErr:  "sparkbox: no sandbox named \"mallory-box\"\r\n",
+		wantExit: 1,
+	}, {
 		name: "snapshot rm of a snapshot you don't have", handle: "alice", args: []string{"snapshot", "rm", "ghost"},
 		wantErr: "sparkbox: no snapshot named \"ghost\"\r\n", wantExit: 1,
 	}, {
 		name: "snapshot with an unknown subcommand", handle: "alice", args: []string{"snapshot", "wat"},
 		wantErr: "unknown snapshot command \"wat\"\r\n" + snapshotHelp, wantExit: 2,
+	}, {
+		// The arity checks run in this package, before ctlops is asked
+		// anything, so they answer identically on a host with no binding store
+		// — which is what this stack is.
+		name: "snapshot bind without a tag", handle: "alice", args: []string{"snapshot", "bind", "base"},
+		wantErr: "usage: ssh ctl@<gateway> snapshot bind <snapshot> --tag <tag>\r\n" +
+			"       one tag, one snapshot: a tag has exactly one base image\r\n",
+		wantExit: 2,
+	}, {
+		name: "snapshot bind with two tags", handle: "alice",
+		args: []string{"snapshot", "bind", "base", "--tag", "cuda", "--tag", "ml"},
+		wantErr: "usage: ssh ctl@<gateway> snapshot bind <snapshot> --tag <tag>\r\n" +
+			"       one tag, one snapshot: a tag has exactly one base image\r\n",
+		wantExit: 2,
+	}, {
+		name: "snapshot unbind without a tag", handle: "alice", args: []string{"snapshot", "unbind"},
+		wantErr:  "usage: ssh ctl@<gateway> snapshot unbind --tag <tag>\r\n",
+		wantExit: 2,
+	}, {
+		// This stack has no template store, so a well-formed bind reports the
+		// host's state rather than the caller's mistake — and does it wrapped,
+		// exactly as `snapshot create` reports a driver that cannot snapshot.
+		name: "snapshot bind on a host with no binding store", handle: "alice",
+		args:     []string{"snapshot", "bind", "base", "--tag", "cuda"},
+		wantErr:  "sparkbox: snapshot bind failed: template bindings are not enabled on this host\r\n",
+		wantExit: 1,
 	}, {
 		name: "schedule list when there are none", handle: "alice", args: []string{"schedule", "list"},
 		wantOut: "no scheduled jobs — add one with:\r\n" +
@@ -692,6 +744,138 @@ func TestControlUsageDocumentsTheOtherDoors(t *testing.T) {
 		if strings.Contains(line, "\n") {
 			t.Errorf("help line has a bare \\n: %q", line)
 		}
+	}
+}
+
+// newCtlStackBindings is the stack with a template-binding store open, which
+// the golden table's stack deliberately is not: `snapshot bind` on a host
+// without one is itself a shipped answer (see the golden row), so a fixture
+// that always wired the store could not render it.
+func newCtlStackBindings(t *testing.T) *ctlStack {
+	t.Helper()
+	dir := t.TempDir()
+	return newCtlStackWith(t, testRoster(), func(cfg *ctlops.Config) {
+		store, err := templates.Open(filepath.Join(dir, "templates.db"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { store.Close() }) //nolint:errcheck
+		cfg.TemplateTags = store
+	})
+}
+
+// TestControlSnapshotBindingsAreMasked: the two refusals a stranger and a
+// typo share. Binding somebody else's snapshot must read exactly like binding
+// one that was never taken, because the alternative confirms that another
+// owner holds that name.
+func TestControlSnapshotBindingsAreMasked(t *testing.T) {
+	st := newCtlStackBindings(t)
+	ctx := context.Background()
+	if _, err := st.mgr.Create(ctx, "mallory-box", "mallory", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.mgr.Snapshot(ctx, "mallory-box", "mallorys", "mallory"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{{
+		name: "a snapshot nobody has",
+		args: []string{"snapshot", "bind", "ghost", "--tag", "cuda"},
+		want: "sparkbox: no snapshot named \"ghost\"\r\n",
+	}, {
+		// The same sentence, byte for byte, for a name that is real and is not
+		// alice's. This is the whole ownership boundary in one assertion.
+		name: "a snapshot somebody else has",
+		args: []string{"snapshot", "bind", "mallorys", "--tag", "cuda"},
+		want: "sparkbox: no snapshot named \"mallorys\"\r\n",
+	}, {
+		name: "a tag with no binding",
+		args: []string{"snapshot", "unbind", "--tag", "ghost"},
+		want: "sparkbox: no tag \"ghost\" has a template bound\r\n",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := st.run(t, "alice", tc.args...)
+			if s.stderr.String() != tc.want || s.code != 1 {
+				t.Errorf("stderr = %q exit %d, want %q exit 1", s.stderr.String(), s.code, tc.want)
+			}
+			if s.out.Len() != 0 {
+				t.Errorf("a refusal wrote to stdout: %q", s.out.String())
+			}
+		})
+	}
+}
+
+// TestControlSnapshotBindRoundTrip walks bind → re-point → ls → unbind through
+// the door, because every one of those four lines is something a user reads and
+// nothing else in the tree renders them.
+func TestControlSnapshotBindRoundTrip(t *testing.T) {
+	st := newCtlStackBindings(t)
+	ctx := context.Background()
+	if _, err := st.mgr.Create(ctx, "alice-box", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"base", "newer"} {
+		if _, err := st.mgr.Snapshot(ctx, "alice-box", name, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := st.run(t, "alice", "snapshot", "bind", "base", "--tag", "cuda")
+	want := "tag \"cuda\" now boots from snapshot \"base\" — create one with:\r\n" +
+		"  ssh new@hivemind.tools -- cuda\r\n"
+	if s.out.String() != want || s.code != 0 {
+		t.Fatalf("bind printed %q exit %d, want %q exit 0", s.out.String(), s.code, want)
+	}
+
+	// The re-point. Without the second line a user cannot tell that they just
+	// changed what every future sandbox on `cuda` boots from.
+	s = st.run(t, "alice", "snapshot", "bind", "newer", "--tag", "cuda")
+	if !strings.Contains(s.out.String(), "that tag used to boot from \"base\"") {
+		t.Errorf("a re-point did not say what it replaced: %q", s.out.String())
+	}
+
+	// The listing's new column, appended to the three that shipped: the row
+	// still begins with the name/from/date it always did.
+	s = st.run(t, "alice", "snapshot", "ls")
+	var bound, plain string
+	for _, line := range strings.Split(strings.TrimSuffix(s.out.String(), "\r\n"), "\r\n") {
+		if strings.HasPrefix(line, "newer") {
+			bound = line
+		}
+		if strings.HasPrefix(line, "base") {
+			plain = line
+		}
+	}
+	if !strings.HasSuffix(bound, "  tags: cuda") {
+		t.Errorf("the bound row reads %q, want a trailing tags column", bound)
+	}
+	if !strings.HasPrefix(bound, "newer                    from alice-box") {
+		t.Errorf("the bound row's first two columns moved: %q", bound)
+	}
+	// A snapshot nobody bound prints exactly what it printed before this
+	// feature existed — no empty column, and no machine name on a host that has
+	// only one. That is what keeps the listing inside 80 columns.
+	if strings.Contains(plain, "tags:") || strings.Contains(plain, "  on ") {
+		t.Errorf("an unbound row grew a column: %q", plain)
+	}
+
+	// `default` is refused, and the store's own sentence is what the user
+	// reads: two wordings for one rule is how people come to believe there are
+	// two rules.
+	s = st.run(t, "alice", "snapshot", "bind", "base", "--tag", "default")
+	if s.code != 2 || !strings.Contains(s.stderr.String(), "default") {
+		t.Errorf("binding `default` said %q exit %d", s.stderr.String(), s.code)
+	}
+
+	s = st.run(t, "alice", "snapshot", "unbind", "--tag", "cuda")
+	wantUnbind := "tag \"cuda\" no longer boots from snapshot \"newer\" — " +
+		"new sandboxes on it take the default image again.\r\n"
+	if s.out.String() != wantUnbind || s.code != 0 {
+		t.Fatalf("unbind printed %q exit %d, want %q exit 0", s.out.String(), s.code, wantUnbind)
 	}
 }
 

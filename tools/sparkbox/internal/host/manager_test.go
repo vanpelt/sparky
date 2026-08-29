@@ -1434,3 +1434,93 @@ func TestEnvPushFailureNeverFailsLifecycle(t *testing.T) {
 	}
 	waitFor(t, func() bool { return pusher.count("flaky") == 2 })
 }
+
+// seedTemplateAndFork builds an owner a template holding mb MB of "installed
+// tooling" and returns the manager plus its state dir. The point of a template
+// is that its blocks exist once on the host however many sandboxes fork it, so
+// every pooled-disk test below needs a fork whose usage is entirely inherited.
+func seedTemplateAndFork(t *testing.T, opts host.Options, mb int) (*host.Manager, string) {
+	t.Helper()
+	ctx := context.Background()
+	m, dir := managerWithDir(t, opts)
+	if _, err := m.Create(ctx, "base", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workdirFile(dir, "base", "tooling.bin"), make([]byte, mb*1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Snapshot(ctx, "base", "golden", "alice"); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	m.RefreshDiskUsage(ctx)
+	return m, dir
+}
+
+// TestPooledDiskSubtractsTemplateBaseline: two forks of one 6 MB template must
+// both fit an 8 MB pool, because the host holds a single copy of those blocks.
+// Charging each fork the whole template made a pool worth roughly one image no
+// matter how the operator sized it, which is the incentive the reflink design
+// exists to remove. The per-sandbox figure stays raw — a user reconciles it
+// against `df` inside their guest — so only the pooled sum moves.
+func TestPooledDiskSubtractsTemplateBaseline(t *testing.T) {
+	ctx := context.Background()
+	m, _ := seedTemplateAndFork(t, host.Options{DiskPoolMBPerOwner: 8}, 6)
+
+	for _, name := range []string{"f1", "f2"} {
+		if _, err := m.Fork(ctx, "golden", name, "alice", 0, 0); err != nil {
+			t.Fatalf("fork %s refused: %v — both forks share the template's blocks", name, err)
+		}
+		m.RefreshDiskUsage(ctx)
+	}
+
+	for _, name := range []string{"f1", "f2"} {
+		b, ok := m.Get(name)
+		if !ok {
+			t.Fatalf("fork %s missing", name)
+		}
+		if b.DiskMB < 6 {
+			t.Fatalf("%s DiskMB = %d, want the raw >= 6 the guest itself reports", name, b.DiskMB)
+		}
+		if b.BaseDiskMB < 6 {
+			t.Fatalf("%s BaseDiskMB = %d, want the template's >= 6", name, b.BaseDiskMB)
+		}
+	}
+	// Only "base" wrote anything of its own; the forks inherited every block.
+	if got := m.CapacityForOwner("alice").UsedDiskMB; got != 6 {
+		t.Fatalf("owner pooled disk = %d MB, want 6 (base's own bytes, forks netting to zero)", got)
+	}
+}
+
+// TestDeletedSnapshotKeepsForkBaseline: deleting a template removes the file the
+// baseline is measured from, but its blocks are still shared by every fork. A
+// measurement error must therefore keep the stored figure — treating it as zero
+// would spike every fork's pooled charge by a whole template on the next reaper
+// tick, with nobody having written a byte.
+func TestDeletedSnapshotKeepsForkBaseline(t *testing.T) {
+	ctx := context.Background()
+	m, _ := seedTemplateAndFork(t, host.Options{DiskPoolMBPerOwner: 8}, 6)
+	if _, err := m.Fork(ctx, "golden", "f1", "alice", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.RefreshDiskUsage(ctx)
+	before, _ := m.Get("f1")
+	if before.BaseDiskMB < 6 {
+		t.Fatalf("f1 BaseDiskMB = %d before the delete; the test proves nothing", before.BaseDiskMB)
+	}
+
+	if err := m.DeleteSnapshot(ctx, "golden", "alice"); err != nil {
+		t.Fatalf("delete snapshot: %v", err)
+	}
+	m.RefreshDiskUsage(ctx)
+
+	after, _ := m.Get("f1")
+	if after.BaseDiskMB != before.BaseDiskMB {
+		t.Fatalf("f1 BaseDiskMB %d -> %d across a template delete; the last known baseline must survive",
+			before.BaseDiskMB, after.BaseDiskMB)
+	}
+	// And the owner keeps their headroom: without the surviving baseline the
+	// pool would read 12 of 8 MB used and refuse this.
+	if _, err := m.Create(ctx, "f3", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatalf("create after a template delete: %v", err)
+	}
+}

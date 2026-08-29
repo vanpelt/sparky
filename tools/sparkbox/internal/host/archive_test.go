@@ -805,3 +805,61 @@ func TestArchiveWithoutStripperProceeds(t *testing.T) {
 		t.Fatalf("object store has %d objects, want 1", store.len())
 	}
 }
+
+// TestArchivedSandboxPaysFullFreight: archiving replaces DiskMB with the
+// compressed artifact's size in object storage, where nothing is deduplicated
+// against a local ext4 template. Subtracting a reflink baseline from that figure
+// would discount bytes the owner genuinely occupies, so the pooled charge
+// short-circuits to raw for an archived box — and a restore, which decompresses
+// a whole fresh image, drops the baseline outright.
+func TestArchivedSandboxPaysFullFreight(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m, dir := managerWithDir(t, host.Options{Archive: store})
+
+	if _, err := m.Create(ctx, "base", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workdirFile(dir, "base", "tooling.bin"), make([]byte, 6*1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Snapshot(ctx, "base", "golden", "alice"); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if _, err := m.Fork(ctx, "golden", "clone", "alice", 0, 0); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	m.RefreshDiskUsage(ctx)
+
+	clone, _ := m.Get("clone")
+	if clone.BaseDiskMB == 0 {
+		t.Fatal("fork has no template baseline; the archive short-circuit would be vacuous")
+	}
+	if got := m.CapacityForOwner("alice").UsedDiskMB; got != 6 {
+		t.Fatalf("pooled disk before archive = %d MB, want 6 (the fork's blocks are shared)", got)
+	}
+
+	if err := m.Archive(ctx, "clone"); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	archived, _ := m.Get("clone")
+	if archived.DiskMB == 0 {
+		t.Fatal("archived box recorded no artifact size")
+	}
+	if archived.BaseDiskMB == 0 {
+		t.Fatal("archive cleared the baseline; the short-circuit, not the field, is what must handle this")
+	}
+	if got, want := m.CapacityForOwner("alice").UsedDiskMB, 6+archived.DiskMB; got != want {
+		t.Fatalf("pooled disk after archive = %d MB, want %d — an archive is charged in full", got, want)
+	}
+
+	// EnsureReady restores and resumes; UnpackRootfs wrote every block fresh, so
+	// the box shares nothing with the template any more.
+	if _, err := m.EnsureReady(ctx, "clone"); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, _ := m.Get("clone")
+	if restored.BaseDiskMB != 0 {
+		t.Fatalf("BaseDiskMB = %d immediately after restore, want 0", restored.BaseDiskMB)
+	}
+}

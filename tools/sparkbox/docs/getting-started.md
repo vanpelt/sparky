@@ -207,6 +207,30 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   for a paste instead. Untagged secrets carry the `default`
   tag and so does every new sandbox — including one created with tags of its
   own — so they find each other without anyone learning what a tag is.
+- **Tag templates.** A tag already picks a sandbox's secrets, repos and egress;
+  bind a snapshot to it and the tag also picks the disk every sandbox carrying it
+  boots from.
+  ```sh
+  ssh -p 2222 ctl@<host> snapshot create dev-box cuda-base
+  ssh -p 2222 ctl@<host> snapshot bind cuda-base --tag cuda
+  ssh -t new@<host> cuda        # boots from cuda-base, no name to remember
+  ```
+  `snapshot ls` shows which snapshots are bound; `snapshot unbind --tag cuda`
+  takes it away without deleting anything. `default` cannot be bound — every
+  sandbox you create carries it. Someone inside a sandbox can capture it into a
+  tag it already carries with `sparkbox snapshot <tag>`, which prints what it
+  will re-point and asks first; `--guest-self-snapshot=false` turns that door
+  off. Capturing needs a host that can loop-mount the image, so a deployment run
+  with `--disable-host-rootfs-mounts` refuses it. See
+  [tag-templates-design.md](tag-templates-design.md).
+- **Agent CLI drift.** A template is frozen at the tool versions of the day it
+  was captured, so `snapshot create` refreshes them first and a long-lived
+  sandbox catches up on demand with `sparkbox update-tools` (`--check` to look
+  without installing). It pulls from its own host's verified cache — `setup`
+  points `--tools-dir` at `<root>/tools`, the same directory the refresher unit
+  fills — so it works inside a sandbox whose egress is filtered by its tag, and
+  nothing crosses a fleet link. It writes ~150 MB into that sandbox's own disk
+  and against its owner's pool, so it is a command, not a timer.
 - **Health + logs.** `sparkbox doctor` any time; `journalctl -u sparkbox -f`.
 - **Re-provision / upgrade.** Drop in a newer `sparkbox` binary and re-run
   `sparkbox setup` — idempotent, and `--release <tag>` pins the artifacts. If

@@ -440,6 +440,18 @@ func (s *Server) failRepos(w http.ResponseWriter, what string, box *host.Sandbox
 // refactor away from being one budget again. The key carries the operation as
 // well as the sandbox, so a clone loop cannot spend the manifest's budget
 // either.
+//
+// The /tools endpoints take this window too, under the key "<sandbox> tools".
+// They are the same CLASS of traffic as a clone — bulk, guest-initiated, and
+// nobody's identity depends on it — so they belong on this side of the fence
+// rather than on the mint's, where a guest pulling five artifacts could cost
+// itself an OIDC refresh.
+//
+// Note what this does NOT bound: credBurst is requests per window, not
+// simultaneous streams. A fleet-wide `sparkbox update-tools` is N guests each
+// pulling ~150MB off one host at the same time, and nothing here says no to
+// that. Acceptable for a command somebody runs by hand; think again before
+// putting it on a timer.
 func (s *Server) allowRepoCall(key string) bool {
 	s.credMu.Lock()
 	defer s.credMu.Unlock()

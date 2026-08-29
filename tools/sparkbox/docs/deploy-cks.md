@@ -34,6 +34,35 @@ no path that copies a file onto this host, because the gateway Pod runs non-root
 with a read-only root filesystem and port 22 is Sparkbox's own SSH gateway, which
 has no sftp subsystem. See `docs/github-app-setup.md`.
 
+### Template snapshots are refused here
+
+**`snapshot create` does not work on this cluster, and nothing built on top of it
+does either.** The node runs with `--disable-host-rootfs-mounts`, and the driver
+refuses `Snapshot` outright under that flag
+(`internal/vmm/firecracker/fc.go:1181-1183`) rather than silently recovering the
+loop mount it was turned off to prevent. This is a property of the deployment,
+not a knob: there is no flag combination that enables it while the node is
+hardened this way.
+
+What that costs, in order of how likely somebody is to try it:
+
+- `ssh ctl@<domain> snapshot create <box> <name>` refuses. So does the same call
+  on REST, in the user console, and `sparkbox snapshot <tag>` from inside a VM.
+- **Tag templates are therefore inert here.** `snapshot bind` has nothing to
+  point at, so every create resolves to the operator's default image and
+  `--tag <t>` keeps meaning only secrets, repos and egress. The stores, the
+  verbs and the REST routes are all present and answer correctly; there is
+  simply never a snapshot for a binding to name. See
+  `docs/tag-templates-design.md`.
+- Pause/resume and archive/restore are unaffected and remain the way to keep a
+  VM's state. `fork` has nothing to fork from.
+
+Re-enable template snapshots only after fork identity sanitization runs inside
+the guest, or in a disposable mountless helper — `docs/security-hardening.md`
+describes the end state. Until then, do not read a green `go test ./...` as
+evidence that any of this works on the cluster: the whole snapshot path is
+exercised against the mock driver, and no part of it has been validated here.
+
 ## What it creates
 
 - Namespace `sparkbox-poc`.
@@ -293,9 +322,8 @@ the policy before starting the gateway and VM node, so the node never comes up
 with unrestricted Pod egress during an ordinary rollout.
 
 Because CKS runs with `--disable-host-rootfs-mounts`, creating a reusable
-template snapshot is currently refused. Pause/resume and archive/restore remain
-available. Re-enable template snapshots only after fork identity sanitization
-runs inside the guest or a disposable mountless helper.
+template snapshot is refused — see *Template snapshots are refused here*.
+Pause/resume and archive/restore remain available.
 
 The named host path survives deletion and replacement of the node Pod on the
 same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost
@@ -322,7 +350,20 @@ Pod start, the Kubernetes bootstrap runs the same atomic template refresher as
 other Sparkbox hosts. It installs current `claude`, `codex`, `pi`, and
 `hivemind` binaries plus the guest workload-identity services before opening the
 gateway. New sandboxes therefore have the complete agent toolchain without a
-rootfs rebuild. Existing sandbox disks are not rewritten by a later refresh.
+rootfs rebuild.
+
+A later refresh still never rewrites an existing sandbox disk from the outside —
+mounting a live or user-derived rootfs is exactly what this deployment refuses —
+but an existing sandbox is no longer stuck with what its template shipped with.
+The refresher now also publishes `manifest.json` into `TOOLS_DIR` describing the
+artifacts it verified, `entrypoint.sh` passes that same directory to `serve` as
+`--tools-dir`, and the host serves it to its own guests over the metadata tap. A
+VM updates itself with `sparkbox update-tools` (`--check` reports without
+installing). Each artifact is verified against the host's digest inside the guest
+before it replaces anything, and nothing crosses the fleet link: every machine
+serves its own cache. Note that this writes ~150 MB into that VM's own disk and
+counts against its owner's pool, so it is a command to run when something is
+behind, not something to put on a timer.
 
 ## Runtime image from GitHub Actions
 
@@ -644,6 +685,19 @@ Merging to `main` is not a deployment. The CKS image workflow publishes a new
 image, but the cluster keeps running whatever digest its Deployments name until
 someone re-runs `deploy.sh`. Rolling forward is the same script, pointed at a
 newer digest.
+
+**Deploy note — pooled disk budgets get larger on the roll that carries the
+baseline change.** The pooled per-owner disk sum now subtracts the template a
+sandbox was cloned from: an owner is charged `max(0, DiskMB - BaseDiskMB)`
+instead of the raw figure, because `DiskUsageMB` reads the guest's own ext4
+counters and knows nothing about reflink, so ten sandboxes forked from one 8 GB
+image each reported ~8 GB while the host held a single copy. This takes effect on
+a binary swap, with no flag, the moment the first reaper tick backfills
+baselines — so `--disk-pool-mb-per-owner` means something more generous
+afterwards than it meant before. It only ever loosens: it can never refuse a
+create that used to succeed, and the per-VM hard ceiling, both consoles' meters
+and every per-sandbox figure a user sees stay raw. Re-check the number against
+what you meant. The reasoning is in `docs/resource-model-design.md`.
 
 First, confirm the workflow for the commit you want actually finished, then
 resolve its digest:

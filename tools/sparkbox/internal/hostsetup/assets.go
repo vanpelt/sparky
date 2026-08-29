@@ -31,11 +31,18 @@ type serviceParams struct {
 	// the template while nothing installed a binary there (F0); it is now the
 	// same value stepInstallBinary copies this executable to, so the unit can
 	// never name a path setup did not populate.
-	BinPath      string
-	EnvPath      string
-	StateDir     string
-	KernelPath   string
-	ImageDir     string
+	BinPath    string
+	EnvPath    string
+	StateDir   string
+	KernelPath string
+	ImageDir   string
+	// ToolsDir is the agent-CLI cache the gateway serves to its own guests at
+	// /tools. It is rendered ALWAYS, not through OptFlags: like --state-dir it
+	// is filesystem layout rather than an optional subsystem, and it is the
+	// SAME value the refresher unit receives as TOOLS_DIR (both come from
+	// Config.toolsDir), so the process that fills the cache and the process
+	// that serves it cannot end up naming different directories.
+	ToolsDir     string
 	DefaultImage string
 	UsersPath    string
 	// The four listen addresses. They used to be a mix of a MoveAdminSSH branch
@@ -72,6 +79,7 @@ func renderService(cfg Config) (string, error) {
 		StateDir:     cfg.StateDir,
 		KernelPath:   cfg.KernelPath,
 		ImageDir:     cfg.ImageDir,
+		ToolsDir:     cfg.toolsDir(),
 		DefaultImage: cfg.DefaultImage,
 		UsersPath:    cfg.UsersPath,
 		SSHAddr:      cfg.sshAddr(),

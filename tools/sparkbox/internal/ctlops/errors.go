@@ -202,6 +202,10 @@ var notFoundMsg = map[string]string{
 	// operator who mistypes a fingerprint and reads `no node named "SHA256:…"`
 	// will go looking for a node whose *name* is a fingerprint.
 	"node_fp": "no node in this fleet holds the key %s",
+	// Keyed separately from "snapshot" for the same reason: somebody who
+	// mistypes a tag and reads `no snapshot named "cuda"` goes looking for a
+	// snapshot, when what is missing is the binding that would have named one.
+	"template_binding": "no tag %q has a template bound",
 }
 
 // NotFound is the ONE constructor for the masked answer. Existence and

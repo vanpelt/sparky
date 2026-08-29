@@ -72,6 +72,18 @@ var reservedEnvNames = map[string]bool{
 // tagRe bounds tags to short DNS-label-ish strings safe in URLs and UIs.
 var tagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
+// ValidTag reports whether a tag is one this store can hold. It is the same
+// filter tagRe applies on the way in, asked as a question.
+//
+// Exported for one caller with a hard ordering problem. ctlops.NormalizeTags
+// deliberately does NOT validate the charset (ctlops/parse.go says why), so a
+// malformed tag is normally discovered by the store at write time — which is
+// fine for `ctl tags` and wrong for a guest-initiated capture, where the write
+// happens two minutes after the sandbox was paused and there is nobody left in
+// the session to read the refusal. PlanSelfSnapshot asks here instead, while
+// the VM is still running and the terminal still exists.
+func ValidTag(tag string) bool { return tagRe.MatchString(tag) }
+
 // DefaultTag is the tag a secret gets when its owner names none, and the tag
 // EVERY sandbox is stamped with as it is created (ctlops.Create, which adds it
 // alongside whatever tags the creator asked for).
