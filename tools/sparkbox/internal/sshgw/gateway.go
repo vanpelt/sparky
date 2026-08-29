@@ -37,7 +37,7 @@ import (
 const NewSandboxUser = "new"
 
 // ControlUser is the reserved SSH username for the out-of-band control channel:
-// `ssh ctl@gateway list` / `ssh ctl@gateway pause <name>`. It never routes to a
+// `ssh ctl@gateway ls` / `ssh ctl@gateway pause <name>`. It never routes to a
 // VM, so no sandbox may be named "ctl".
 const ControlUser = "ctl"
 

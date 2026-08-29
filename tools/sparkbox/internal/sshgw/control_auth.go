@@ -112,7 +112,7 @@ func (g *Gateway) controlShare(s gssh.Session, c ctlops.Caller, args []string, l
 // or stolen browser credential can be killed from any machine with your key.
 func (g *Gateway) controlPasskey(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	usage := func() {
-		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> passkey [list|rm <id>]\r\n", ControlUser)
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> passkey [ls|rm <id>]\r\n", ControlUser)
 		s.Exit(2) //nolint:errcheck
 	}
 	if len(args) == 0 {

@@ -36,9 +36,9 @@ func (g *Gateway) controlNode(s gssh.Session, c ctlops.Caller, args []string, lo
 		sub = args[0]
 	}
 	switch sub {
-	// `ls` is what the usage line documents and `list` is what every other
-	// collection on this channel is called; accepting both costs one case and
-	// saves an operator an exit 2 for guessing the wrong one.
+	// `ls` is what the help documents; `list` is the spelling that shipped
+	// first. Accepting both costs one case and saves an operator an exit 2 for
+	// guessing the wrong one — every collection on this channel does it.
 	case "list", "ls":
 		nodes, err := g.ops.ListNodes(s.Context(), c)
 		if err != nil {
@@ -85,7 +85,7 @@ func (g *Gateway) controlNode(s gssh.Session, c ctlops.Caller, args []string, lo
 		fmt.Fprintf(s, "removed node %q — it may enrol again and wait for approval\r\n", args[1])
 		s.Exit(0) //nolint:errcheck
 	default:
-		fmt.Fprintf(s.Stderr(), "unknown node command %q\r\n%s", sub, controlUsage)
+		fmt.Fprintf(s.Stderr(), "unknown node command %q\r\n%s", sub, pageFor("nodes"))
 		s.Exit(2) //nolint:errcheck
 	}
 }
