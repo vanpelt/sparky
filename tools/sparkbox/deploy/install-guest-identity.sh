@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=8
+IDENTITY_REV=9
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -134,11 +134,18 @@ END='# <<< sparkbox identity (managed) <<<'
 # Field extraction without a JSON parser: python3 is not a dependency this early
 # path may take on, and both values have grammars too narrow to need one — a
 # GitHub login is [A-Za-z0-9-] and an account number is digits. "github" cannot
-# match inside "github_id" because the pattern demands the quote that opens a
-# string value, and github_id's value is a bare number.
-login=$(sed -n 's/.*"github":"\([A-Za-z0-9-]*\)".*/\1/p' "$IDENTITY_FILE" | head -1)
-ghid=$(sed -n 's/.*"github_id":\([0-9]*\).*/\1/p' "$IDENTITY_FILE" | head -1)
-owner=$(sed -n 's/.*"owner":"\([^"]*\)".*/\1/p' "$IDENTITY_FILE" | head -1)
+# match inside "github_id" because the pattern demands the colon immediately
+# after the name.
+#
+# [[:space:]]* after every colon is load-bearing, not defensive. The metadata
+# service serves /identity through an encoder with SetIndent("", "  "), so the
+# file on disk reads `"github": "vanpelt"` WITH a space — and patterns written
+# for the compact form matched nothing, silently, taking every linked account
+# down the "no GitHub account" path. Whitespace after a colon is JSON's to
+# choose, so the reader has to tolerate it either way.
+login=$(sed -n 's/.*"github":[[:space:]]*"\([A-Za-z0-9-]*\)".*/\1/p' "$IDENTITY_FILE" | head -1)
+ghid=$(sed -n 's/.*"github_id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$IDENTITY_FILE" | head -1)
+owner=$(sed -n 's/.*"owner":[[:space:]]*"\([^"]*\)".*/\1/p' "$IDENTITY_FILE" | head -1)
 
 if [ -n "$login" ] && [ -n "$ghid" ] && [ "$ghid" != 0 ]; then
   body="[user]

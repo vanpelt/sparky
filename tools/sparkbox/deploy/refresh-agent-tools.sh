@@ -80,10 +80,11 @@ AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-br
 # Revision of the guest-side agent conditioning below (/etc/environment knobs +
 # the ~/.claude.json onboarding seed + the ~/.claude/settings.json permission
 # default + the hivemind daemon unit + the agent-browser env wiring and skill +
-# the ~/.agents/AGENTS.md guidance text). Versioned like IDENTITY_REV so bumping
-# it re-patches every template on the next run even when no tool version moved —
-# editing the guidance without bumping this ships it to nobody.
-AGENT_ENV_REV=8
+# the ~/.agents/AGENTS.md guidance text + the docker-compose shim). Versioned
+# like IDENTITY_REV so bumping it re-patches every template on the next run even
+# when no tool version moved — editing any of it without bumping this ships the
+# change to nobody.
+AGENT_ENV_REV=9
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -492,6 +493,42 @@ PY
   chmod 0644 "$mnt$home/.claude/settings.json"
 
   seed_hivemind_unit "$mnt" "$home" "$uid" "$gid" "$(echo "$pw" | cut -d: -f1)"
+  install_docker_compose_shim "$mnt"
+}
+
+# `docker-compose` (hyphenated), forwarding to the v2 plugin the image ships.
+#
+# Ubuntu's docker-compose-v2 package installs ONLY
+# /usr/libexec/docker/cli-plugins/docker-compose, so `docker compose` works and
+# `docker-compose` is not a command at all. Every Makefile, README and CI script
+# written before 2023 calls the hyphenated form, so the first thing an agent
+# meets in a real repository is a missing binary — and its own repair is to
+# write this file itself, somewhere only that VM has it.
+#
+# NOT the `docker-compose` package in noble: that is Compose v1 (1.29.2), a
+# Python rewrite that upstream retired in 2023, and it would shadow v2 with a
+# tool that names containers and networks differently and cannot read the
+# current Compose spec. Installing it would make the command exist and the
+# builds wrong, which is worse than absent.
+#
+# NOT a symlink to the plugin either, though that does run: invoked directly the
+# binary takes Compose's standalone path, which resolves the daemon from the
+# environment rather than through the docker CLI's contexts and config. `exec
+# docker compose` is identical to what a person typing `docker compose` gets,
+# by construction rather than by matching behaviour.
+install_docker_compose_shim() {
+  local mnt=$1
+  [ -x "$mnt/usr/libexec/docker/cli-plugins/docker-compose" ] || {
+    echo "   .. no compose plugin in template; skipping docker-compose shim" >&2
+    return 0
+  }
+  cat > "$mnt/usr/local/bin/docker-compose" <<'EOF'
+#!/bin/sh
+# Sparkbox: `docker-compose` is not a command on Ubuntu 24.04, which ships only
+# the v2 plugin. Forward to it so tooling written for the hyphenated name works.
+exec docker compose "$@"
+EOF
+  chmod 0755 "$mnt/usr/local/bin/docker-compose"
 }
 
 # Install one short, platform-owned guide at the harness-specific global paths.

@@ -1,12 +1,16 @@
 package deploy
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 )
 
 func TestRestrictedNetScriptBuildsSluiceCompatibleCeiling(t *testing.T) {
@@ -147,7 +151,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=8\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=9\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -167,12 +171,35 @@ func TestGuestGitIdentityWritesAnAttributableAuthor(t *testing.T) {
 	installGuestPayload(t, root)
 	writer := filepath.Join(root, "usr/local/sbin/sparkbox-git-identity")
 
-	// The exact bytes metadata.Doc marshals to, so the extraction is tested
-	// against the encoder's output shape and not against a hand-tidied sample.
-	doc := func(extra string) string {
-		return `{"iss":"https://catnip.sh/oidc","sub":"user:vanpelt","owner":"vanpelt",` +
-			extra + `"key_fp":"SHA256:x","sandbox":"dazzling-canyon",` +
-			`"sandbox_id":"sb_01","image":"ubuntu","box":"sparky"}`
+	// Built from the real metadata.Doc rather than a hand-written sample, and
+	// rendered in BOTH encodings.
+	//
+	// The first version of this test wrote compact JSON by hand while claiming
+	// to be "the exact bytes metadata.Doc marshals to", and the guest's sed
+	// patterns were written to match it. They were wrong: /identity is served
+	// through an encoder with SetIndent("", "  "), so the file on disk reads
+	// `"github": "vanpelt"` WITH a space, and every linked account fell
+	// silently down the "no GitHub account linked" path.
+	//
+	// So the shape is no longer this test's to assume. The struct supplies the
+	// field names, encoding/json supplies the punctuation, and both spacings
+	// run — because which one a guest sees is the metadata service's choice and
+	// can change again without anyone touching this file.
+	docJSON := func(t *testing.T, indent bool, github string, githubID int64) string {
+		t.Helper()
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		if indent {
+			enc.SetIndent("", "  ")
+		}
+		if err := enc.Encode(metadata.Doc{
+			Issuer: "https://catnip.sh/oidc", Subject: "user:vanpelt", Owner: "vanpelt",
+			GitHub: github, GitHubID: githubID, KeyFP: "SHA256:x",
+			Sandbox: "dazzling-canyon", SandboxID: "sb_01", Image: "ubuntu", Box: "sparky",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
 	}
 	run := func(t *testing.T, identity, gitconfig string) string {
 		t.Helper()
@@ -198,65 +225,82 @@ func TestGuestGitIdentityWritesAnAttributableAuthor(t *testing.T) {
 
 	const helper = "[credential \"https://github.com\"]\n\thelper = /usr/local/bin/sparkbox-git-credential\n"
 
-	t.Run("linked account gets the attributable address", func(t *testing.T) {
-		got := run(t, doc(`"github":"vanpelt","github_id":271676,`), helper)
-		for _, want := range []string{
-			"\tname = vanpelt\n",
-			"\temail = 271676+vanpelt@users.noreply.github.com\n",
-			// Rewriting the file must not cost the guest its credential
-			// helper, which lives in the same file and is what makes a
-			// private clone work at all.
-			"helper = /usr/local/bin/sparkbox-git-credential",
-		} {
-			if !strings.Contains(got, want) {
-				t.Errorf("gitconfig missing %q:\n%s", want, got)
+	for _, enc := range []struct {
+		name   string
+		indent bool
+	}{
+		// The one the service actually serves goes first: it is the one that
+		// was broken, and the one a regression would break again.
+		{name: "indented", indent: true},
+		{name: "compact"},
+	} {
+		t.Run(enc.name, func(t *testing.T) {
+			doc := func(github string, id int64) string {
+				return docJSON(t, enc.indent, github, id)
 			}
-		}
-	})
 
-	t.Run("no account number falls back to the legacy form", func(t *testing.T) {
-		got := run(t, doc(`"github":"adrnswanberg",`), "")
-		if !strings.Contains(got, "\temail = adrnswanberg@users.noreply.github.com\n") {
-			t.Errorf("expected the legacy noreply address:\n%s", got)
-		}
-		// "github" must not have matched inside "github_id", and an absent
-		// number must not become a literal 0 in the address.
-		if strings.Contains(got, "0+") {
-			t.Errorf("a missing account number leaked into the address:\n%s", got)
-		}
-	})
+			t.Run("linked account gets the attributable address", func(t *testing.T) {
+				got := run(t, doc("vanpelt", 271676), helper)
+				for _, want := range []string{
+					"\tname = vanpelt\n",
+					"\temail = 271676+vanpelt@users.noreply.github.com\n",
+					// Rewriting the file must not cost the guest its credential
+					// helper, which lives in the same file and is what makes a
+					// private clone work at all.
+					"helper = /usr/local/bin/sparkbox-git-credential",
+				} {
+					if !strings.Contains(got, want) {
+						t.Errorf("gitconfig missing %q:\n%s", want, got)
+					}
+				}
+			})
 
-	t.Run("unlinked account is told, not guessed at", func(t *testing.T) {
-		got := run(t, doc(""), "")
-		// A Sparkbox handle is not a GitHub login. Writing
-		// <handle>@users.noreply.github.com would hand a stranger's account
-		// the authorship of this person's commits, so the block must carry no
-		// address at all — every line of it a comment.
-		if strings.Contains(got, "[user]") || strings.Contains(got, "@users.noreply.github.com") {
-			t.Errorf("guessed an address for an unlinked account:\n%s", got)
-		}
-		if !strings.Contains(got, "git config --global user.email") {
-			t.Errorf("unlinked block does not say how to fix it:\n%s", got)
-		}
-	})
+			t.Run("no account number falls back to the legacy form", func(t *testing.T) {
+				got := run(t, doc("adrnswanberg", 0), "")
+				if !strings.Contains(got, "\temail = adrnswanberg@users.noreply.github.com\n") {
+					t.Errorf("expected the legacy noreply address:\n%s", got)
+				}
+				// "github" must not have matched inside "github_id", and an
+				// absent number must not become a literal 0 in the address.
+				if strings.Contains(got, "0+") {
+					t.Errorf("a missing account number leaked into the address:\n%s", got)
+				}
+			})
 
-	t.Run("rewriting corrects rather than accumulates", func(t *testing.T) {
-		// The identity can change under a running VM — a handle rename, or a
-		// GitHub link made after boot — and this runs again on every token
-		// refresh, so a second pass has to replace the block it wrote.
-		first := run(t, doc(`"github":"vanpelt","github_id":271676,`), helper)
-		second := run(t, doc(`"github":"vanpelt","github_id":271676,`), first)
-		if n := strings.Count(second, "sparkbox identity (managed)"); n != 2 {
-			t.Errorf("expected exactly one managed block (2 markers), got %d:\n%s", n, second)
-		}
-		renamed := run(t, doc(`"github":"newlogin","github_id":42,`), first)
-		if strings.Contains(renamed, "271676+vanpelt") {
-			t.Errorf("stale identity survived the rewrite:\n%s", renamed)
-		}
-		if !strings.Contains(renamed, "42+newlogin@users.noreply.github.com") {
-			t.Errorf("rename did not take:\n%s", renamed)
-		}
-	})
+			t.Run("unlinked account is told, not guessed at", func(t *testing.T) {
+				got := run(t, doc("", 0), "")
+				// A Sparkbox handle is not a GitHub login. Writing
+				// <handle>@users.noreply.github.com would hand a stranger's
+				// account the authorship of this person's commits, so the block
+				// must carry no address at all — every line of it a comment.
+				if strings.Contains(got, "[user]") || strings.Contains(got, "@users.noreply.github.com") {
+					t.Errorf("guessed an address for an unlinked account:\n%s", got)
+				}
+				if !strings.Contains(got, "git config --global user.email") {
+					t.Errorf("unlinked block does not say how to fix it:\n%s", got)
+				}
+			})
+
+			t.Run("rewriting corrects rather than accumulates", func(t *testing.T) {
+				// The identity can change under a running VM — a handle rename,
+				// or a GitHub link made after boot — and this runs again on
+				// every token refresh, so a second pass has to replace the
+				// block it wrote.
+				first := run(t, doc("vanpelt", 271676), helper)
+				second := run(t, doc("vanpelt", 271676), first)
+				if n := strings.Count(second, "sparkbox identity (managed)"); n != 2 {
+					t.Errorf("expected exactly one managed block (2 markers), got %d:\n%s", n, second)
+				}
+				renamed := run(t, doc("newlogin", 42), first)
+				if strings.Contains(renamed, "271676+vanpelt") {
+					t.Errorf("stale identity survived the rewrite:\n%s", renamed)
+				}
+				if !strings.Contains(renamed, "42+newlogin@users.noreply.github.com") {
+					t.Errorf("rename did not take:\n%s", renamed)
+				}
+			})
+		})
+	}
 
 	t.Run("no identity file is a no-op", func(t *testing.T) {
 		// This runs on the boot path. A guest whose metadata fetch failed must
@@ -611,11 +655,76 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// The unlinked case is real and supported, and it is the one case
 		// where the agent must NOT leave the author alone — it must ask.
 		"ask them to run `git config --global user.name`",
-		"AGENT_ENV_REV=8",
+		"AGENT_ENV_REV=9",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
 		}
+	}
+}
+
+// TestGuestGetsAHyphenatedDockerCompose covers the command Ubuntu 24.04 does
+// not ship.
+//
+// docker-compose-v2 installs only the CLI plugin, so `docker compose` works and
+// `docker-compose` does not exist — while essentially every Makefile, README
+// and CI script written before 2023 calls the hyphenated form. An agent that
+// meets that writes the shim into its own ~/.local/bin, which fixes one VM and
+// nothing else.
+//
+// The two things this must NOT be are asserted as well. Compose v1 would make
+// the command exist and the builds subtly wrong; a symlink would take Compose's
+// standalone path, which finds the daemon from the environment rather than
+// through the docker CLI's contexts and config.
+func TestGuestGetsAHyphenatedDockerCompose(t *testing.T) {
+	got := string(RefreshToolsScript)
+	for _, want := range []string{
+		`"$mnt/usr/local/bin/docker-compose"`,
+		`exec docker compose "$@"`,
+		// Guarded on the plugin actually being there, so a template without it
+		// gets no command rather than one that fails confusingly.
+		`[ -x "$mnt/usr/libexec/docker/cli-plugins/docker-compose" ]`,
+		"install_docker_compose_shim",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("guest conditioning missing %q", want)
+		}
+	}
+	if strings.Contains(got, "apt-get install -y docker-compose\n") {
+		t.Error("installs Compose v1, which shadows v2 with a tool that names containers differently")
+	}
+	if strings.Contains(got, "ln -s /usr/libexec/docker/cli-plugins/docker-compose") {
+		t.Error("symlinks the plugin, taking the standalone path instead of the docker CLI's")
+	}
+
+	// And run it, against a fake docker, because "forwards to docker compose"
+	// is a claim about argument handling: an unquoted "$@" would split
+	// `-f my compose.yml` into two arguments and the failure would look like a
+	// missing file rather than a broken shim.
+	shim := heredocBody(t, got, `"$mnt/usr/local/bin/docker-compose" <<'EOF'`+"\n")
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "docker-compose")
+	if err := os.WriteFile(shimPath, []byte(shim+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "docker.log")
+	writeExecutable(t, filepath.Join(dir, "docker"), `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$SPARKBOX_TEST_LOG"
+printf -- '--\n' >> "$SPARKBOX_TEST_LOG"
+`)
+	cmd := exec.Command("sh", shimPath, "-f", "with space.yml", "up", "-d")
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"),
+		"SPARKBOX_TEST_LOG="+logPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("shim: %v\n%s", err, out)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "compose\n-f\nwith space.yml\nup\n-d\n--\n"
+	if string(logged) != want {
+		t.Errorf("docker received:\n%q\nwant:\n%q", logged, want)
 	}
 }
 
