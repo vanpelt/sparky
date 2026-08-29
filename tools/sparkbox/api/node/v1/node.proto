@@ -410,6 +410,12 @@ message IdentityDescription {
   string image = 7;
   string node = 8;
   string sandbox_id = 9;
+  // github_id is GitHub's immutable account number for the owner, present on
+  // the same terms as `github` above: only for a strongly-proved link, 0
+  // otherwise. A login is renameable and a released one is re-registerable by a
+  // stranger, so the number is what a guest needs to write a commit address
+  // that github.com will actually attribute.
+  int64 github_id = 10;
 }
 
 // ListReposRequest names a sandbox and nothing else. Its owner, its tags and

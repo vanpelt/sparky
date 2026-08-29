@@ -61,6 +61,7 @@ type Claims struct {
 	Subject   string
 	Owner     string
 	GitHub    string
+	GitHubID  int64
 	KeyFP     string
 	Sandbox   string
 	SandboxID string
@@ -104,8 +105,8 @@ func (f *Fleet) IdentityDoc(ctx context.Context, node string, req nodelink.Ident
 	}
 	return nodelink.IdentityDocResp{
 		Issuer: issuer, Subject: c.Subject, Owner: c.Owner, GitHub: c.GitHub,
-		KeyFP: c.KeyFP, Sandbox: c.Sandbox, SandboxID: c.SandboxID,
-		Image: c.Image, Box: c.Box,
+		GitHubID: c.GitHubID, KeyFP: c.KeyFP, Sandbox: c.Sandbox,
+		SandboxID: c.SandboxID, Image: c.Image, Box: c.Box,
 	}, nil
 }
 

@@ -575,8 +575,8 @@ func (r *relayIdentity) Describe(ctx context.Context, box *host.Sandbox) (metada
 	}
 	return metadata.Doc{
 		Issuer: resp.Issuer, Subject: resp.Subject, Owner: resp.Owner, GitHub: resp.GitHub,
-		KeyFP: resp.KeyFP, Sandbox: resp.Sandbox, SandboxID: resp.SandboxID,
-		Image: resp.Image, Box: resp.Box,
+		GitHubID: resp.GitHubID, KeyFP: resp.KeyFP, Sandbox: resp.Sandbox,
+		SandboxID: resp.SandboxID, Image: resp.Image, Box: resp.Box,
 	}, nil
 }
 

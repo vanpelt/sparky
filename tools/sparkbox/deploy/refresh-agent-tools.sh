@@ -569,6 +569,11 @@ short-lived token scoped to the one repository being fetched, so `git clone`,
 `git fetch` and `git push` on an attached repository just work, and nothing
 durable holds a credential.
 
+git's author is already set, to the GitHub account that owns this VM, so commits
+you make are attributed to that person. Do not change it and do not invent one
+of your own: an author you make up cannot be corrected on a branch that has been
+pushed.
+
 A headless Chrome and the `agent-browser` CLI are already installed and already
 pointed at each other. Use `agent-browser` for anything that needs a real
 browser, and run `agent-browser skills get core` for the command reference. Do

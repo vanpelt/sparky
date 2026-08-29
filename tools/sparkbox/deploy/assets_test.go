@@ -146,8 +146,145 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=7\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=8\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
+	}
+}
+
+// TestGuestGitIdentityWritesAnAttributableAuthor runs the installed writer
+// against a real tree, because every property worth pinning here is a property
+// of the file it produces rather than of the script that produces it.
+//
+// The address is the point. `<id>+<login>@users.noreply.github.com` is the only
+// form github.com links back to an account created after 2017-07-18, so a
+// sandbox that commits under anything else produces history authored by nobody
+// — which is exactly what a user notices a week later, on a push they cannot
+// re-author. The legacy fallback is deliberate and second: naming the right
+// person unattributed still beats naming no one.
+func TestGuestGitIdentityWritesAnAttributableAuthor(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	writer := filepath.Join(root, "usr/local/sbin/sparkbox-git-identity")
+
+	// The exact bytes metadata.Doc marshals to, so the extraction is tested
+	// against the encoder's output shape and not against a hand-tidied sample.
+	doc := func(extra string) string {
+		return `{"iss":"https://catnip.sh/oidc","sub":"user:vanpelt","owner":"vanpelt",` +
+			extra + `"key_fp":"SHA256:x","sandbox":"dazzling-canyon",` +
+			`"sandbox_id":"sb_01","image":"ubuntu","box":"sparky"}`
+	}
+	run := func(t *testing.T, identity, gitconfig string) string {
+		t.Helper()
+		idPath := filepath.Join(t.TempDir(), "identity.json")
+		if err := os.WriteFile(idPath, []byte(identity), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := filepath.Join(t.TempDir(), "gitconfig")
+		if err := os.WriteFile(cfgPath, []byte(gitconfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", writer, idPath)
+		cmd.Env = append(os.Environ(), "SPARKBOX_GITCONFIG="+cfgPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sparkbox-git-identity: %v\n%s", err, out)
+		}
+		body, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	const helper = "[credential \"https://github.com\"]\n\thelper = /usr/local/bin/sparkbox-git-credential\n"
+
+	t.Run("linked account gets the attributable address", func(t *testing.T) {
+		got := run(t, doc(`"github":"vanpelt","github_id":271676,`), helper)
+		for _, want := range []string{
+			"\tname = vanpelt\n",
+			"\temail = 271676+vanpelt@users.noreply.github.com\n",
+			// Rewriting the file must not cost the guest its credential
+			// helper, which lives in the same file and is what makes a
+			// private clone work at all.
+			"helper = /usr/local/bin/sparkbox-git-credential",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("gitconfig missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("no account number falls back to the legacy form", func(t *testing.T) {
+		got := run(t, doc(`"github":"adrnswanberg",`), "")
+		if !strings.Contains(got, "\temail = adrnswanberg@users.noreply.github.com\n") {
+			t.Errorf("expected the legacy noreply address:\n%s", got)
+		}
+		// "github" must not have matched inside "github_id", and an absent
+		// number must not become a literal 0 in the address.
+		if strings.Contains(got, "0+") {
+			t.Errorf("a missing account number leaked into the address:\n%s", got)
+		}
+	})
+
+	t.Run("unlinked account is told, not guessed at", func(t *testing.T) {
+		got := run(t, doc(""), "")
+		// A Sparkbox handle is not a GitHub login. Writing
+		// <handle>@users.noreply.github.com would hand a stranger's account
+		// the authorship of this person's commits, so the block must carry no
+		// address at all — every line of it a comment.
+		if strings.Contains(got, "[user]") || strings.Contains(got, "@users.noreply.github.com") {
+			t.Errorf("guessed an address for an unlinked account:\n%s", got)
+		}
+		if !strings.Contains(got, "git config --global user.email") {
+			t.Errorf("unlinked block does not say how to fix it:\n%s", got)
+		}
+	})
+
+	t.Run("rewriting corrects rather than accumulates", func(t *testing.T) {
+		// The identity can change under a running VM — a handle rename, or a
+		// GitHub link made after boot — and this runs again on every token
+		// refresh, so a second pass has to replace the block it wrote.
+		first := run(t, doc(`"github":"vanpelt","github_id":271676,`), helper)
+		second := run(t, doc(`"github":"vanpelt","github_id":271676,`), first)
+		if n := strings.Count(second, "sparkbox identity (managed)"); n != 2 {
+			t.Errorf("expected exactly one managed block (2 markers), got %d:\n%s", n, second)
+		}
+		renamed := run(t, doc(`"github":"newlogin","github_id":42,`), first)
+		if strings.Contains(renamed, "271676+vanpelt") {
+			t.Errorf("stale identity survived the rewrite:\n%s", renamed)
+		}
+		if !strings.Contains(renamed, "42+newlogin@users.noreply.github.com") {
+			t.Errorf("rename did not take:\n%s", renamed)
+		}
+	})
+
+	t.Run("no identity file is a no-op", func(t *testing.T) {
+		// This runs on the boot path. A guest whose metadata fetch failed must
+		// still boot, not die in a unit that exits non-zero.
+		cfgPath := filepath.Join(t.TempDir(), "gitconfig")
+		cmd := exec.Command("sh", writer, filepath.Join(t.TempDir(), "absent.json"))
+		cmd.Env = append(os.Environ(), "SPARKBOX_GITCONFIG="+cfgPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("a missing identity must be a no-op, got %v\n%s", err, out)
+		}
+		if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+			t.Errorf("wrote a gitconfig with no identity to write from")
+		}
+	})
+}
+
+// TestGuestTokenScriptWritesTheGitAuthor pins the wiring: the writer above is
+// only reached because the token script calls it, and it is called there rather
+// than from its own unit because that script is the one thing already holding a
+// fresh per-VM identity on every boot AND on the refresh timer.
+func TestGuestTokenScriptWritesTheGitAuthor(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	token := guestFile(t, root, "usr/local/sbin/sparkbox-token")
+	// Absolute path: a bare name depends on the unit's PATH carrying
+	// /usr/local/sbin, and `|| true` because a git author is a convenience and
+	// the token this script exists to fetch is not.
+	if !strings.Contains(token, `/usr/local/sbin/sparkbox-git-identity "$IDENTITY_FILE" || true`) {
+		t.Error("sparkbox-token no longer writes the git author, so a fresh sandbox cannot commit")
 	}
 }
 
@@ -467,6 +604,9 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"hivemind tag api_url=https://$(hostname).catnip.sh:8080",
 		"hivemind tag --list",
 		"hivemind tag --remove KEY",
+		// An agent that hits "Please tell me who you are" and answers it
+		// invents an author that cannot be corrected once pushed.
+		"git's author is already set",
 		"AGENT_ENV_REV=8",
 	} {
 		if !strings.Contains(got, want) {

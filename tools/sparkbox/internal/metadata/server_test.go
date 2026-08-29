@@ -92,6 +92,7 @@ func fixture(t *testing.T, auds ...string) *Server {
 			Issuer: iss,
 			Users: fakeAccounts{
 				"alice": {Handle: "alice", Status: "active", GitHubLogin: "alice-gh",
+					GitHubID:         271676,
 					GitHubVerifiedAt: &verified, GitHubVia: users.GitHubViaKeys},
 				"bob": {Handle: "bob", Status: "active"}, // never linked GitHub
 			},
@@ -378,6 +379,65 @@ func TestGitHubClaimRequiresStrongProvenance(t *testing.T) {
 	}
 	if _, present := decodeClaims(t, rec.Body.String())["github"]; present {
 		t.Error("a third party's word for a github account reached the token claims")
+	}
+}
+
+// TestIdentityDocCarriesTheGitHubAccountNumber pins the fact the guest needs to
+// write a commit address github.com will attribute.
+//
+// The number is in the DOCUMENT and deliberately not in the token. Nothing
+// federates on it — a relying party matching an account number instead of the
+// login this platform actually proved would be reading the wrong fact — but a
+// guest cannot build `<id>+<login>@users.noreply.github.com` without it, and
+// that is the only noreply form github.com links to an account created after
+// 2017-07-18. See deploy/install-guest-identity.sh.
+func TestIdentityDocCarriesTheGitHubAccountNumber(t *testing.T) {
+	s := fixture(t)
+	rec := request(s, "/identity", "172.30.5.2", "172.30.5.1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /identity = %d", rec.Code)
+	}
+	var doc Doc
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.GitHub != "alice-gh" || doc.GitHubID != 271676 {
+		t.Errorf("identity doc = github %q id %d, want alice-gh / 271676", doc.GitHub, doc.GitHubID)
+	}
+
+	// It must not have reached the signed claims on its way there.
+	tok := request(s, "/token", "172.30.5.2", "172.30.5.1")
+	if tok.Code != http.StatusOK {
+		t.Fatalf("GET /token = %d", tok.Code)
+	}
+	if _, present := decodeClaims(t, tok.Body.String())["github_id"]; present {
+		t.Error("the account number widened the token's federation surface")
+	}
+}
+
+// TestGitHubAccountNumberRidesTheSameGateAsTheLogin: a number recorded beside a
+// link nobody proved is no better evidence than the login was, so it must be
+// withheld on exactly the terms the login is. Otherwise a guest writes commits
+// attributing them to an account this host never verified its owner controls.
+func TestGitHubAccountNumberRidesTheSameGateAsTheLogin(t *testing.T) {
+	verified := time.Unix(0, 0).UTC()
+	s := fixture(t)
+	local := s.id.(Local)
+	local.Users = fakeAccounts{"alice": {
+		Handle: "alice", Status: "active", GitHubLogin: "alice-gh", GitHubID: 271676,
+		GitHubVerifiedAt: &verified, GitHubVia: users.GitHubViaAssertion,
+	}}
+	s.id = local
+	rec := request(s, "/identity", "172.30.5.2", "172.30.5.1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /identity = %d", rec.Code)
+	}
+	var doc Doc
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.GitHub != "" || doc.GitHubID != 0 {
+		t.Errorf("assertion-linked account leaked github %q id %d", doc.GitHub, doc.GitHubID)
 	}
 }
 
