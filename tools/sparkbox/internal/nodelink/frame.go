@@ -884,6 +884,7 @@ type IdentityDocResp struct {
 	Subject   string `json:"sub"`
 	Owner     string `json:"owner"`
 	GitHub    string `json:"github,omitempty"`
+	GitHubID  int64  `json:"github_id,omitempty"`
 	KeyFP     string `json:"key_fp,omitempty"`
 	Sandbox   string `json:"sandbox"`
 	SandboxID string `json:"sandbox_id"`

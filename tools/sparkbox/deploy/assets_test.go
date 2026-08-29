@@ -1,11 +1,16 @@
 package deploy
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 )
 
 func TestRestrictedNetScriptBuildsSluiceCompatibleCeiling(t *testing.T) {
@@ -146,8 +151,185 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=7\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=9\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
+	}
+}
+
+// TestGuestGitIdentityWritesAnAttributableAuthor runs the installed writer
+// against a real tree, because every property worth pinning here is a property
+// of the file it produces rather than of the script that produces it.
+//
+// The address is the point. `<id>+<login>@users.noreply.github.com` is the only
+// form github.com links back to an account created after 2017-07-18, so a
+// sandbox that commits under anything else produces history authored by nobody
+// — which is exactly what a user notices a week later, on a push they cannot
+// re-author. The legacy fallback is deliberate and second: naming the right
+// person unattributed still beats naming no one.
+func TestGuestGitIdentityWritesAnAttributableAuthor(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	writer := filepath.Join(root, "usr/local/sbin/sparkbox-git-identity")
+
+	// Built from the real metadata.Doc rather than a hand-written sample, and
+	// rendered in BOTH encodings.
+	//
+	// The first version of this test wrote compact JSON by hand while claiming
+	// to be "the exact bytes metadata.Doc marshals to", and the guest's sed
+	// patterns were written to match it. They were wrong: /identity is served
+	// through an encoder with SetIndent("", "  "), so the file on disk reads
+	// `"github": "vanpelt"` WITH a space, and every linked account fell
+	// silently down the "no GitHub account linked" path.
+	//
+	// So the shape is no longer this test's to assume. The struct supplies the
+	// field names, encoding/json supplies the punctuation, and both spacings
+	// run — because which one a guest sees is the metadata service's choice and
+	// can change again without anyone touching this file.
+	docJSON := func(t *testing.T, indent bool, github string, githubID int64) string {
+		t.Helper()
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		if indent {
+			enc.SetIndent("", "  ")
+		}
+		if err := enc.Encode(metadata.Doc{
+			Issuer: "https://catnip.sh/oidc", Subject: "user:vanpelt", Owner: "vanpelt",
+			GitHub: github, GitHubID: githubID, KeyFP: "SHA256:x",
+			Sandbox: "dazzling-canyon", SandboxID: "sb_01", Image: "ubuntu", Box: "sparky",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	run := func(t *testing.T, identity, gitconfig string) string {
+		t.Helper()
+		idPath := filepath.Join(t.TempDir(), "identity.json")
+		if err := os.WriteFile(idPath, []byte(identity), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := filepath.Join(t.TempDir(), "gitconfig")
+		if err := os.WriteFile(cfgPath, []byte(gitconfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", writer, idPath)
+		cmd.Env = append(os.Environ(), "SPARKBOX_GITCONFIG="+cfgPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sparkbox-git-identity: %v\n%s", err, out)
+		}
+		body, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	const helper = "[credential \"https://github.com\"]\n\thelper = /usr/local/bin/sparkbox-git-credential\n"
+
+	for _, enc := range []struct {
+		name   string
+		indent bool
+	}{
+		// The one the service actually serves goes first: it is the one that
+		// was broken, and the one a regression would break again.
+		{name: "indented", indent: true},
+		{name: "compact"},
+	} {
+		t.Run(enc.name, func(t *testing.T) {
+			doc := func(github string, id int64) string {
+				return docJSON(t, enc.indent, github, id)
+			}
+
+			t.Run("linked account gets the attributable address", func(t *testing.T) {
+				got := run(t, doc("vanpelt", 271676), helper)
+				for _, want := range []string{
+					"\tname = vanpelt\n",
+					"\temail = 271676+vanpelt@users.noreply.github.com\n",
+					// Rewriting the file must not cost the guest its credential
+					// helper, which lives in the same file and is what makes a
+					// private clone work at all.
+					"helper = /usr/local/bin/sparkbox-git-credential",
+				} {
+					if !strings.Contains(got, want) {
+						t.Errorf("gitconfig missing %q:\n%s", want, got)
+					}
+				}
+			})
+
+			t.Run("no account number falls back to the legacy form", func(t *testing.T) {
+				got := run(t, doc("adrnswanberg", 0), "")
+				if !strings.Contains(got, "\temail = adrnswanberg@users.noreply.github.com\n") {
+					t.Errorf("expected the legacy noreply address:\n%s", got)
+				}
+				// "github" must not have matched inside "github_id", and an
+				// absent number must not become a literal 0 in the address.
+				if strings.Contains(got, "0+") {
+					t.Errorf("a missing account number leaked into the address:\n%s", got)
+				}
+			})
+
+			t.Run("unlinked account is told, not guessed at", func(t *testing.T) {
+				got := run(t, doc("", 0), "")
+				// A Sparkbox handle is not a GitHub login. Writing
+				// <handle>@users.noreply.github.com would hand a stranger's
+				// account the authorship of this person's commits, so the block
+				// must carry no address at all — every line of it a comment.
+				if strings.Contains(got, "[user]") || strings.Contains(got, "@users.noreply.github.com") {
+					t.Errorf("guessed an address for an unlinked account:\n%s", got)
+				}
+				if !strings.Contains(got, "git config --global user.email") {
+					t.Errorf("unlinked block does not say how to fix it:\n%s", got)
+				}
+			})
+
+			t.Run("rewriting corrects rather than accumulates", func(t *testing.T) {
+				// The identity can change under a running VM — a handle rename,
+				// or a GitHub link made after boot — and this runs again on
+				// every token refresh, so a second pass has to replace the
+				// block it wrote.
+				first := run(t, doc("vanpelt", 271676), helper)
+				second := run(t, doc("vanpelt", 271676), first)
+				if n := strings.Count(second, "sparkbox identity (managed)"); n != 2 {
+					t.Errorf("expected exactly one managed block (2 markers), got %d:\n%s", n, second)
+				}
+				renamed := run(t, doc("newlogin", 42), first)
+				if strings.Contains(renamed, "271676+vanpelt") {
+					t.Errorf("stale identity survived the rewrite:\n%s", renamed)
+				}
+				if !strings.Contains(renamed, "42+newlogin@users.noreply.github.com") {
+					t.Errorf("rename did not take:\n%s", renamed)
+				}
+			})
+		})
+	}
+
+	t.Run("no identity file is a no-op", func(t *testing.T) {
+		// This runs on the boot path. A guest whose metadata fetch failed must
+		// still boot, not die in a unit that exits non-zero.
+		cfgPath := filepath.Join(t.TempDir(), "gitconfig")
+		cmd := exec.Command("sh", writer, filepath.Join(t.TempDir(), "absent.json"))
+		cmd.Env = append(os.Environ(), "SPARKBOX_GITCONFIG="+cfgPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("a missing identity must be a no-op, got %v\n%s", err, out)
+		}
+		if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+			t.Errorf("wrote a gitconfig with no identity to write from")
+		}
+	})
+}
+
+// TestGuestTokenScriptWritesTheGitAuthor pins the wiring: the writer above is
+// only reached because the token script calls it, and it is called there rather
+// than from its own unit because that script is the one thing already holding a
+// fresh per-VM identity on every boot AND on the refresh timer.
+func TestGuestTokenScriptWritesTheGitAuthor(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	token := guestFile(t, root, "usr/local/sbin/sparkbox-token")
+	// Absolute path: a bare name depends on the unit's PATH carrying
+	// /usr/local/sbin, and `|| true` because a git author is a convenience and
+	// the token this script exists to fetch is not.
+	if !strings.Contains(token, `/usr/local/sbin/sparkbox-git-identity "$IDENTITY_FILE" || true`) {
+		t.Error("sparkbox-token no longer writes the git author, so a fresh sandbox cannot commit")
 	}
 }
 
@@ -455,11 +637,94 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"../../../.agents/skills/agent-browser",
 		"AGENT_BROWSER_EXECUTABLE_PATH /headless-shell/headless-shell",
 		"AGENT_BROWSER_SOCKET_DIR",
-		"AGENT_ENV_REV=7",
+		// The VM's own name and public URL, which the guidance can only express
+		// as $(hostname): this file is baked into a shared template and read by
+		// every clone of it, so no sandbox's name can be literal here. The
+		// sparkbox-netcfg boot hook makes the hostname the sandbox name.
+		"https://$(hostname).catnip.sh",
+		// A dev service is only reachable if the default route points at the
+		// port a person opens, and only findable later if the other ports are
+		// recorded somewhere the session carries with it.
+		"sparkbox set-port 5173",
+		"hivemind tag api_url=https://$(hostname).catnip.sh:8080",
+		"hivemind tag --list",
+		"hivemind tag --remove KEY",
+		// An agent that hits "Please tell me who you are" and answers it
+		// invents an author that cannot be corrected once pushed.
+		"git's author is usually already set",
+		// The unlinked case is real and supported, and it is the one case
+		// where the agent must NOT leave the author alone — it must ask.
+		"ask them to run `git config --global user.name`",
+		"AGENT_ENV_REV=9",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
 		}
+	}
+}
+
+// TestGuestGetsAHyphenatedDockerCompose covers the command Ubuntu 24.04 does
+// not ship.
+//
+// docker-compose-v2 installs only the CLI plugin, so `docker compose` works and
+// `docker-compose` does not exist — while essentially every Makefile, README
+// and CI script written before 2023 calls the hyphenated form. An agent that
+// meets that writes the shim into its own ~/.local/bin, which fixes one VM and
+// nothing else.
+//
+// The two things this must NOT be are asserted as well. Compose v1 would make
+// the command exist and the builds subtly wrong; a symlink would take Compose's
+// standalone path, which finds the daemon from the environment rather than
+// through the docker CLI's contexts and config.
+func TestGuestGetsAHyphenatedDockerCompose(t *testing.T) {
+	got := string(RefreshToolsScript)
+	for _, want := range []string{
+		`"$mnt/usr/local/bin/docker-compose"`,
+		`exec docker compose "$@"`,
+		// Guarded on the plugin actually being there, so a template without it
+		// gets no command rather than one that fails confusingly.
+		`[ -x "$mnt/usr/libexec/docker/cli-plugins/docker-compose" ]`,
+		"install_docker_compose_shim",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("guest conditioning missing %q", want)
+		}
+	}
+	if strings.Contains(got, "apt-get install -y docker-compose\n") {
+		t.Error("installs Compose v1, which shadows v2 with a tool that names containers differently")
+	}
+	if strings.Contains(got, "ln -s /usr/libexec/docker/cli-plugins/docker-compose") {
+		t.Error("symlinks the plugin, taking the standalone path instead of the docker CLI's")
+	}
+
+	// And run it, against a fake docker, because "forwards to docker compose"
+	// is a claim about argument handling: an unquoted "$@" would split
+	// `-f my compose.yml` into two arguments and the failure would look like a
+	// missing file rather than a broken shim.
+	shim := heredocBody(t, got, `"$mnt/usr/local/bin/docker-compose" <<'EOF'`+"\n")
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "docker-compose")
+	if err := os.WriteFile(shimPath, []byte(shim+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "docker.log")
+	writeExecutable(t, filepath.Join(dir, "docker"), `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$SPARKBOX_TEST_LOG"
+printf -- '--\n' >> "$SPARKBOX_TEST_LOG"
+`)
+	cmd := exec.Command("sh", shimPath, "-f", "with space.yml", "up", "-d")
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"),
+		"SPARKBOX_TEST_LOG="+logPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("shim: %v\n%s", err, out)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "compose\n-f\nwith space.yml\nup\n-d\n--\n"
+	if string(logged) != want {
+		t.Errorf("docker received:\n%q\nwant:\n%q", logged, want)
 	}
 }
 
@@ -584,6 +849,90 @@ func TestCKSSplitMigrationCommitsOnlyAfterOwnership(t *testing.T) {
 	}
 	if strings.Count(got, `test -s "$dst/`) < 2 {
 		t.Fatal("completed migration does not validate both gateway databases")
+	}
+}
+
+// TestCKSManifestPlaceholdersAreAllSubstituted is the general form of a bug
+// this repository has now had twice: a value that reaches the cluster only as a
+// deploy.sh flag, and a manifest that names it.
+//
+// A `__PLACEHOLDER__` with no matching `-e "s|__PLACEHOLDER__|"` in deploy.sh
+// does not fail the deploy. kubectl applies the literal string, and the symptom
+// surfaces later and somewhere else — a Pod env var whose value is the word
+// __HIVEMIND_MANIFEST__, an image reference that cannot be pulled. Checking the
+// two files against each other costs nothing and catches the whole class.
+func TestCKSManifestPlaceholdersAreAllSubstituted(t *testing.T) {
+	deployScript, err := os.ReadFile("kubernetes/deploy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(deployScript)
+
+	manifests, err := filepath.Glob("kubernetes/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) == 0 {
+		t.Fatal("no CKS manifests found; this test is not checking anything")
+	}
+	placeholder := regexp.MustCompile(`__[A-Z0-9_]+__`)
+	for _, path := range manifests {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range placeholder.FindAllString(string(body), -1) {
+			if !strings.Contains(script, "s|"+name+"|") {
+				t.Errorf("%s uses %s but deploy.sh never substitutes it, so the literal reaches the cluster",
+					filepath.Base(path), name)
+			}
+		}
+	}
+}
+
+// TestCKSGuestHivemindIsAFlagNotAHandEdit pins the shape of the override rather
+// than any particular version.
+//
+// The pin it replaces lived only as a hand-edited live object that no file in
+// this repository recorded, so every clean deploy.sh run — by anyone, for any
+// reason — reverted it in silence, and the symptom was `hivemind: No such
+// command` in a sandbox created days later. Three properties keep that from
+// coming back: the flag exists, the manifest carries the value through, and the
+// default URL is written down in exactly ONE place.
+func TestCKSGuestHivemindIsAFlagNotAHandEdit(t *testing.T) {
+	deployScript, err := os.ReadFile("kubernetes/deploy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(deployScript)
+	for _, want := range []string{
+		"--hivemind-manifest)",
+		"requested_hivemind_manifest=",
+		// Dropping the pin is allowed. Dropping it quietly is not.
+		"NOTE: dropping the guest hivemind pin",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("deploy.sh missing %q", want)
+		}
+	}
+
+	manifest, err := os.ReadFile("kubernetes/deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), "name: HIVEMIND_MANIFEST") {
+		t.Error("the node manifest never passes HIVEMIND_MANIFEST to prepare-vm-assets")
+	}
+
+	// One source of truth for the default. deploy.sh substitutes an empty value
+	// when the flag is absent, and refresh-agent-tools.sh's ${VAR:-default}
+	// covers empty as well as unset — so the latest-release URL must appear
+	// there and nowhere else. Two copies is how they drift.
+	if strings.Contains(script, "hivemind-latest.json") {
+		t.Error("deploy.sh hard-codes the default manifest URL; refresh-agent-tools.sh already owns it")
+	}
+	if !strings.Contains(string(RefreshToolsScript), "HIVEMIND_MANIFEST:-https://") {
+		t.Error("refresh-agent-tools.sh no longer defaults HIVEMIND_MANIFEST, so an unpinned deploy resolves nothing")
 	}
 }
 

@@ -573,11 +573,24 @@ func (r *relayIdentity) Describe(ctx context.Context, box *host.Sandbox) (metada
 	if err := r.up.Request(ctx, nodelink.TypeIdentityDoc, req, &resp); err != nil {
 		return metadata.Doc{}, relayError(err)
 	}
+	return docFromRelay(resp), nil
+}
+
+// docFromRelay converts the SSH fallback's wire struct into what the metadata
+// service hands a guest.
+//
+// A named function rather than a literal inline above so it can be tested
+// exhaustively: this conversion fails SILENTLY. A field the wire carries and
+// this does not copy produces a document that is well-formed, a guest that
+// carries on, and a symptom somewhere else entirely — a dropped GitHubID, for
+// instance, leaves the guest writing the legacy noreply address that github.com
+// declines to attribute, with nothing anywhere reporting an error.
+func docFromRelay(resp nodelink.IdentityDocResp) metadata.Doc {
 	return metadata.Doc{
 		Issuer: resp.Issuer, Subject: resp.Subject, Owner: resp.Owner, GitHub: resp.GitHub,
-		KeyFP: resp.KeyFP, Sandbox: resp.Sandbox, SandboxID: resp.SandboxID,
-		Image: resp.Image, Box: resp.Box,
-	}, nil
+		GitHubID: resp.GitHubID, KeyFP: resp.KeyFP, Sandbox: resp.Sandbox,
+		SandboxID: resp.SandboxID, Image: resp.Image, Box: resp.Box,
+	}
 }
 
 // relayError turns what came back off the link into what metadata classifies

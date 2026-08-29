@@ -128,6 +128,7 @@ func (s *Server) DescribeIdentity(ctx context.Context, request *nodev1.DescribeI
 		SandboxId:      response.SandboxID,
 		Image:          response.Image,
 		Node:           response.Box,
+		GithubId:       response.GitHubID,
 	}, nil
 }
 

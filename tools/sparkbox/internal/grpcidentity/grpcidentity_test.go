@@ -54,7 +54,7 @@ func (g *identityGateway) IdentityDoc(_ context.Context, node string, request no
 	g.mu.Unlock()
 	return nodelink.IdentityDocResp{
 		Issuer: "https://oidc.example", Subject: "sparkbox:user:alice",
-		Owner: "alice", GitHub: "alice-gh", KeyFP: "SHA256:key",
+		Owner: "alice", GitHub: "alice-gh", GitHubID: 271676, KeyFP: "SHA256:key",
 		Sandbox: request.Sandbox, Image: "universal", Box: node,
 	}, nil
 }
@@ -163,6 +163,13 @@ func TestGatewayIdentityUsesAuthenticatedNodeAndMapsEveryCall(t *testing.T) {
 	if doc.Owner != "alice" || doc.Sandbox != "alpha" || doc.Box != "node-a" ||
 		doc.GitHub != "alice-gh" || doc.KeyFP != "SHA256:key" {
 		t.Fatalf("doc = %+v", doc)
+	}
+	// The account number specifically, because dropping it on either side of
+	// this hop is silent: the guest still gets a login, still writes a git
+	// author, and only ever produces the legacy noreply address that github.com
+	// declines to attribute for a modern account.
+	if doc.GitHubID != 271676 {
+		t.Errorf("github id = %d, want 271676 — lost crossing the gRPC hop", doc.GitHubID)
 	}
 	// The repo pair rides the same service, and the assertion is the same one:
 	// what the gateway is told about WHO is asking comes from the certificate

@@ -3305,8 +3305,14 @@ type IdentityDescription struct {
 	Image          string                 `protobuf:"bytes,7,opt,name=image,proto3" json:"image,omitempty"`
 	Node           string                 `protobuf:"bytes,8,opt,name=node,proto3" json:"node,omitempty"`
 	SandboxId      string                 `protobuf:"bytes,9,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// github_id is GitHub's immutable account number for the owner, present on
+	// the same terms as `github` above: only for a strongly-proved link, 0
+	// otherwise. A login is renameable and a released one is re-registerable by a
+	// stranger, so the number is what a guest needs to write a commit address
+	// that github.com will actually attribute.
+	GithubId      int64 `protobuf:"varint,10,opt,name=github_id,json=githubId,proto3" json:"github_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *IdentityDescription) Reset() {
@@ -3400,6 +3406,13 @@ func (x *IdentityDescription) GetSandboxId() string {
 		return x.SandboxId
 	}
 	return ""
+}
+
+func (x *IdentityDescription) GetGithubId() int64 {
+	if x != nil {
+		return x.GithubId
+	}
+	return 0
 }
 
 // ListReposRequest names a sandbox and nothing else. Its owner, its tags and
@@ -3974,7 +3987,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"3\n" +
 	"\x17DescribeIdentityRequest\x12\x18\n" +
-	"\asandbox\x18\x01 \x01(\tR\asandbox\"\x81\x02\n" +
+	"\asandbox\x18\x01 \x01(\tR\asandbox\"\x9e\x02\n" +
 	"\x13IdentityDescription\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x18\n" +
 	"\asubject\x18\x02 \x01(\tR\asubject\x12\x14\n" +
@@ -3985,7 +3998,9 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x05image\x18\a \x01(\tR\x05image\x12\x12\n" +
 	"\x04node\x18\b \x01(\tR\x04node\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\t \x01(\tR\tsandboxId\",\n" +
+	"sandbox_id\x18\t \x01(\tR\tsandboxId\x12\x1b\n" +
+	"\tgithub_id\x18\n" +
+	" \x01(\x03R\bgithubId\",\n" +
 	"\x10ListReposRequest\x12\x18\n" +
 	"\asandbox\x18\x01 \x01(\tR\asandbox\"K\n" +
 	"\x11ListReposResponse\x126\n" +

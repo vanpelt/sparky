@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=7
+IDENTITY_REV=9
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -89,11 +89,101 @@ TMP="$IDENTITY_FILE.tmp"
 if curl -fsS --max-time 10 "$META/identity" -o "$TMP"; then
   chmod 0644 "$TMP"
   mv -f "$TMP" "$IDENTITY_FILE"
+  /usr/local/sbin/sparkbox-git-identity "$IDENTITY_FILE" || true
 else
   rm -f "$TMP"
 fi
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-token"
+
+# Give git an author, so `git commit` in a fresh sandbox does not stop on
+# "Please tell me who you are".
+#
+# System scope, NOT --global: /etc/gitconfig is the lowest precedence git reads,
+# so a person who runs `git config --global user.email ...` still wins and we
+# never overwrite an answer they gave. Rewritten between markers on every run
+# rather than appended under a grep guard like the credential helper above,
+# because unlike that helper this content is per-VM and can change under us — a
+# handle rename or a GitHub link made after the box booted must be able to
+# correct it.
+#
+# The address is GitHub's `<id>+<login>@users.noreply.github.com`. The account
+# NUMBER is what makes it attribute: the legacy `<login>@users.noreply...` form
+# is only linked for accounts created before 2017-07-18, so a modern account
+# committing under it appears on github.com as nobody. When the host reports no
+# number we still write that legacy form, because a commit that names the right
+# person unattributed beats a commit that names nobody at all.
+#
+# When the host reports no GitHub login we write NOTHING but a comment. The
+# handle is not usable as a substitute: handles and GitHub logins are separate
+# namespaces here, so `<handle>@users.noreply.github.com` would hand a
+# stranger's GitHub account the authorship of this person's commits.
+cat > "$MNT/usr/local/sbin/sparkbox-git-identity" <<'EOF'
+#!/bin/sh
+# Write the [user] block in /etc/gitconfig from this sandbox's identity.
+set -eu
+IDENTITY_FILE=${1:-/run/sparkbox/identity.json}
+# Overridable so the deploy tests can run this against a tree instead of the
+# machine running them, the same way the token script takes its paths.
+GITCONFIG=${SPARKBOX_GITCONFIG:-/etc/gitconfig}
+BEGIN='# >>> sparkbox identity (managed) >>>'
+END='# <<< sparkbox identity (managed) <<<'
+
+[ -s "$IDENTITY_FILE" ] || exit 0
+
+# Field extraction without a JSON parser: python3 is not a dependency this early
+# path may take on, and both values have grammars too narrow to need one — a
+# GitHub login is [A-Za-z0-9-] and an account number is digits. "github" cannot
+# match inside "github_id" because the pattern demands the colon immediately
+# after the name.
+#
+# [[:space:]]* after every colon is load-bearing, not defensive. The metadata
+# service serves /identity through an encoder with SetIndent("", "  "), so the
+# file on disk reads `"github": "vanpelt"` WITH a space — and patterns written
+# for the compact form matched nothing, silently, taking every linked account
+# down the "no GitHub account" path. Whitespace after a colon is JSON's to
+# choose, so the reader has to tolerate it either way.
+login=$(sed -n 's/.*"github":[[:space:]]*"\([A-Za-z0-9-]*\)".*/\1/p' "$IDENTITY_FILE" | head -1)
+ghid=$(sed -n 's/.*"github_id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$IDENTITY_FILE" | head -1)
+owner=$(sed -n 's/.*"owner":[[:space:]]*"\([^"]*\)".*/\1/p' "$IDENTITY_FILE" | head -1)
+
+if [ -n "$login" ] && [ -n "$ghid" ] && [ "$ghid" != 0 ]; then
+  body="[user]
+	name = $login
+	email = $ghid+$login@users.noreply.github.com"
+elif [ -n "$login" ]; then
+  body="[user]
+	name = $login
+	email = $login@users.noreply.github.com"
+else
+  body="# No GitHub account is linked to ${owner:-this account}, and a Sparkbox
+# handle is not a GitHub login, so no address here could be yours. Set one:
+#   git config --global user.name  \"Your Name\"
+#   git config --global user.email \"you@example.com\""
+fi
+
+# Rewrite in place: strip any previous block, append the current one. awk rather
+# than sed -i so the whole file is rebuilt in one pass and a partial write can
+# never leave a half-deleted marker behind; the temp-file-plus-rename is what
+# makes that true even if we are killed mid-boot.
+umask 022
+tmp=$(mktemp "$GITCONFIG.sparkbox.XXXXXX") || exit 0
+if [ -f "$GITCONFIG" ]; then
+  awk -v b="$BEGIN" -v e="$END" '
+    $0 == b { skip = 1; next }
+    $0 == e { skip = 0; next }
+    !skip   { print }
+  ' "$GITCONFIG" > "$tmp" || { rm -f "$tmp"; exit 0; }
+fi
+{
+  printf '%s\n' "$BEGIN"
+  printf '%s\n' "$body"
+  printf '%s\n' "$END"
+} >> "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$GITCONFIG"
+EOF
+chmod 0755 "$MNT/usr/local/sbin/sparkbox-git-identity"
 
 # A tiny in-guest control client. The metadata service authenticates the
 # caller from its tap source address, so this carries no operator credential

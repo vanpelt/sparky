@@ -22,6 +22,11 @@ Options:
                           https://hivemind.wandb.tools (default: whatever the
                           live gateway already uses; empty turns the presence
                           lease and `ctl sessions` off)
+  --hivemind-manifest URL release manifest deciding which hivemind new sandboxes
+                          get, e.g. .../manifests/hivemind-1.0.8rc1.json
+                          (default: the latest release). Use it to put a release
+                          candidate on real hardware; NOT carried forward, so a
+                          later run without it returns to latest.
   --public-key PATH       operator SSH public key (default: ~/.ssh/id_ed25519.pub)
   --private-key PATH      matching operator key used to approve the VM node
                           (default: public-key path without .pub; optional on re-runs)
@@ -37,6 +42,7 @@ node=
 requested_proxy_domain=
 requested_github_app_client_id=
 requested_hivemind_api=
+requested_hivemind_manifest=
 public_key="${HOME}/.ssh/id_ed25519.pub"
 private_key=
 operator=$(id -un)
@@ -63,6 +69,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --github-app-client-id)
       requested_github_app_client_id=${2:?--github-app-client-id requires a value}
+      shift 2
+      ;;
+    --hivemind-manifest)
+      requested_hivemind_manifest=${2:?--hivemind-manifest requires a value}
       shift 2
       ;;
     --hivemind-api)
@@ -315,6 +325,34 @@ else
   echo "  the idle reaper, and \`ctl sessions\` is unavailable. Pass --hivemind-api."
 fi
 
+# Deliberately NOT carried forward, unlike the three above, and the asymmetry is
+# the point. Those three are permanent facts about this deployment, so losing one
+# is always a mistake. A manifest override is the opposite: it is how a release
+# candidate gets onto real hardware, it is meant to end, and a test pin that
+# silently reinstates itself on every future deploy is the worse failure.
+#
+# What it must not do is vanish QUIETLY. Before this flag existed the pin was a
+# hand-edited live object that no file recorded, so a clean run by anyone dropped
+# it with no output at all — and the only symptom was `hivemind: No such command`
+# inside a sandbox created days later. Hence the notice below: the default is
+# latest, and choosing it out loud is what makes that safe.
+deployed_hivemind_manifest=$(
+  "${k[@]}" -n "$namespace" get deployment sparkbox-node \
+    -o 'jsonpath={.spec.template.spec.initContainers[?(@.name=="prepare-vm-assets")].env[?(@.name=="HIVEMIND_MANIFEST")].value}' \
+    2>/dev/null || true
+)
+hivemind_manifest=$requested_hivemind_manifest
+if [ -n "$hivemind_manifest" ]; then
+  echo "Guest hivemind pinned: $hivemind_manifest"
+  echo "  Only NEWLY CREATED sandboxes take this; existing ones keep what is on their disk."
+elif [ -n "$deployed_hivemind_manifest" ]; then
+  echo "NOTE: dropping the guest hivemind pin this deployment was carrying:"
+  echo "  $deployed_hivemind_manifest"
+  echo "  New sandboxes return to the latest release. Pass --hivemind-manifest to keep it."
+else
+  echo "Guest hivemind: latest release"
+fi
+
 temporary_dir=$(mktemp -d)
 users_file="$temporary_dir/users.conf"
 gateway_private_file="$temporary_dir/gateway_host_key.pem"
@@ -422,6 +460,7 @@ sed \
   -e "s|__SPARKBOX_NODE_POOL__|$node_pool|g" \
   -e "s|__SPARKBOX_NODE__|$node|g" \
   -e "s|__SPARKBOX_HIVEMIND_API__|$hivemind_api|g" \
+  -e "s|__HIVEMIND_MANIFEST__|$hivemind_manifest|g" \
   "$script_dir/deployment.yaml" | "${k[@]}" apply -f -
 "${k[@]}" apply -f "$script_dir/service.yaml"
 

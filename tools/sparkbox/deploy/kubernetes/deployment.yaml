@@ -87,6 +87,13 @@ spec:
               value: "65532"
             - name: SPARKBOX_VM_STATE_DIR
               value: /var/lib/sparkbox/hot/controller
+            # Which hivemind a newly patched template gets. Empty is the
+            # normal state and means the latest release: refresh-agent-tools.sh
+            # reads this with ${HIVEMIND_MANIFEST:-<latest>}, whose :- covers
+            # empty as well as unset, so the default URL stays written down in
+            # exactly one place. Set it with deploy.sh --hivemind-manifest.
+            - name: HIVEMIND_MANIFEST
+              value: "__HIVEMIND_MANIFEST__"
             - name: GATEWAY_PUBLIC_KEY_FILE
               value: /run/sparkbox/trust/gateway_upstream_key.pub
           securityContext:

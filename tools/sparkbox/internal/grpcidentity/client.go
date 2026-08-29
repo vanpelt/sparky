@@ -98,7 +98,8 @@ func (c *Client) Describe(ctx context.Context, box *host.Sandbox) (metadata.Doc,
 	return metadata.Doc{
 		Issuer: response.GetIssuer(), Subject: response.GetSubject(),
 		Owner: response.GetOwner(), GitHub: response.GetGithub(),
-		KeyFP: response.GetKeyFingerprint(), Sandbox: response.GetSandbox(),
+		GitHubID: response.GetGithubId(),
+		KeyFP:    response.GetKeyFingerprint(), Sandbox: response.GetSandbox(),
 		SandboxID: response.GetSandboxId(), Image: response.GetImage(), Box: response.GetNode(),
 	}, nil
 }

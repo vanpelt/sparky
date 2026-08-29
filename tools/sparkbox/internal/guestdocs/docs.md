@@ -58,6 +58,18 @@ Attaching and detaching happen outside the VM, with `ssh ctl@<domain> repo add`
 or from the web console. A clone that already exists is never touched: syncing
 adds, and it does not update, reset or delete.
 
+## Commit authorship
+
+git's author is configured at boot from the GitHub account linked to this VM's
+owner, as `<id>+<login>@users.noreply.github.com` — the address github.com links
+back to that account, without publishing a real one. Commits made in the VM are
+therefore attributed on push with nothing to set up.
+
+It is written in system scope, so `git config --global user.name` and
+`git config --global user.email` still override it per VM and are never
+overwritten. An owner with no GitHub account linked gets no author, and git
+asks for one on the first commit.
+
 ## Agent harnesses
 
 New VMs include Claude Code, Codex, Pi, and Hivemind. Sparkbox environment

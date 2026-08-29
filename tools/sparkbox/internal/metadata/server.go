@@ -102,6 +102,13 @@ type Doc struct {
 	SandboxID string `json:"sandbox_id"`
 	Image     string `json:"image"`
 	Box       string `json:"box"`
+	// GitHubID is GitHub's immutable account number for the owner, on the same
+	// terms as GitHub above and 0 when that is empty. It is here and not in the
+	// token because nothing federates on it: the guest needs it to write the
+	// `<id>+<login>@users.noreply.github.com` address that attributes a commit,
+	// and a relying party matching on an account number instead of the login
+	// this platform actually proved would be reading the wrong fact.
+	GitHubID int64 `json:"github_id,omitempty"`
 }
 
 // Identity turns an authenticated sandbox into credentials. It is the whole of
@@ -175,10 +182,10 @@ func (l Local) Issue(_ context.Context, box *host.Sandbox, aud string) (Token, e
 }
 
 func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
-	c := l.claims(box)
+	c, id := l.claimsWithGitHubID(box)
 	return Doc{
 		Issuer: l.Issuer.URL(), Subject: c.Subject, Owner: c.Owner,
-		GitHub: c.GitHub, KeyFP: c.KeyFP,
+		GitHub: c.GitHub, GitHubID: id, KeyFP: c.KeyFP,
 		Sandbox: c.Sandbox, SandboxID: c.SandboxID, Image: c.Image, Box: c.Box,
 	}, nil
 }
@@ -187,6 +194,19 @@ func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
 // The `github` claim is present only when the owner verified it, so a policy
 // matching on it fails closed for everyone else.
 func (l Local) claims(box *host.Sandbox) oidc.Claims {
+	c, _ := l.claimsWithGitHubID(box)
+	return c
+}
+
+// claimsWithGitHubID assembles the claims and the owner's GitHub account number
+// from ONE account snapshot.
+//
+// The single read is the point, not an optimisation. Two reads — one for the
+// login, one for the number — can straddle a concurrent relink or rename and
+// hand back a document pairing one account's login with another's number, or a
+// login with the 0 of an account that no longer has it. Both values are the
+// same statement about the same account, so they have to be read as one.
+func (l Local) claimsWithGitHubID(box *host.Sandbox) (oidc.Claims, int64) {
 	c := oidc.Claims{
 		Subject:   oidc.SubjectFor(box.Owner),
 		Owner:     box.Owner,
@@ -196,25 +216,40 @@ func (l Local) claims(box *host.Sandbox) oidc.Claims {
 		Image:     box.Image,
 		Box:       l.NodeName,
 	}
-	if l.Users != nil {
-		// Strong provenance only, and this is the load-bearing half of the
-		// condition rather than a refinement of it.
-		//
-		// docs/identity-federation-design.md tells relying parties that `github`
-		// is a strong external anchor — hivemind is invited to write
-		// `claims.github == "vanpelt"` in a policy — and that is a promise about
-		// where the fact came from, not merely that somebody recorded one. A
-		// link established by a third party's signed word would make this claim
-		// mean "somebody said so", and if that third party is also the one
-		// reading the policy it would be authorizing against a fact it asserted.
-		// So an `assertion` link is a fine thing for a console to display and
-		// not a thing an id token may carry. See docs/github-linking-design.md.
-		if u, err := l.Users.Get(box.Owner); err == nil &&
-			u.GitHubVerifiedAt != nil && users.StrongGitHubLink(u.GitHubVia) {
-			c.GitHub = u.GitHubLogin
-		}
+	login, id := l.githubOwner(box.Owner)
+	c.GitHub = login
+	return c, id
+}
+
+// githubOwner is the owner's GitHub login and immutable account number, or
+// ("", 0) when this host cannot vouch for either. Both come from one account
+// read, so a caller that needs both gets a consistent pair.
+//
+// Strong provenance only, and this is the load-bearing half of the condition
+// rather than a refinement of it.
+//
+// docs/identity-federation-design.md tells relying parties that `github` is a
+// strong external anchor — hivemind is invited to write `claims.github ==
+// "vanpelt"` in a policy — and that is a promise about where the fact came
+// from, not merely that somebody recorded one. A link established by a third
+// party's signed word would make this claim mean "somebody said so", and if
+// that third party is also the one reading the policy it would be authorizing
+// against a fact it asserted. So an `assertion` link is a fine thing for a
+// console to display and not a thing an id token may carry. See
+// docs/github-linking-design.md.
+//
+// The number rides the same gate rather than a looser one, because it is the
+// same statement: an account number recorded beside an unproved login is no
+// better evidence than the login was.
+func (l Local) githubOwner(owner string) (login string, id int64) {
+	if l.Users == nil {
+		return "", 0
 	}
-	return c
+	u, err := l.Users.Get(owner)
+	if err != nil || u.GitHubVerifiedAt == nil || !users.StrongGitHubLink(u.GitHubVia) {
+		return "", 0
+	}
+	return u.GitHubLogin, u.GitHubID
 }
 
 type Server struct {

@@ -1773,8 +1773,9 @@ func (f fleetIdentity) Describe(ctx context.Context, box *host.Sandbox, node str
 		return "", fleet.Claims{}, err
 	}
 	return doc.Issuer, fleet.Claims{
-		Subject: doc.Subject, Owner: doc.Owner, GitHub: doc.GitHub, KeyFP: doc.KeyFP,
-		Sandbox: doc.Sandbox, SandboxID: doc.SandboxID, Image: doc.Image, Box: doc.Box,
+		Subject: doc.Subject, Owner: doc.Owner, GitHub: doc.GitHub,
+		GitHubID: doc.GitHubID, KeyFP: doc.KeyFP, Sandbox: doc.Sandbox,
+		SandboxID: doc.SandboxID, Image: doc.Image, Box: doc.Box,
 	}, nil
 }
 

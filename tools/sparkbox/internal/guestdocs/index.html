@@ -18,6 +18,9 @@
 <h2>Attached repositories</h2>
 <p>Repositories attached to one of your tags are cloned into this VM at boot, over a short-lived GitHub App token that git fetches on demand — there is no personal access token in the VM and nothing to rotate. Run <code>sparkbox repos</code> to see what is attached and where it landed, and <code>sparkbox repos sync</code> to clone what is missing. Attaching a repository never reaches into a VM that already exists, so an existing VM picks one up with <code>sparkbox repos sync</code>.</p>
 <aside>A clone that already exists is never touched. Syncing adds; it does not update, reset or delete.</aside>
+<h2>Commit authorship</h2>
+<p>git's author is configured at boot from the GitHub account linked to the VM owner, as <code>&lt;id&gt;+&lt;login&gt;@users.noreply.github.com</code> — the address github.com links back to that account without publishing a real one. Commits made in a VM are attributed on push with nothing to set up.</p>
+<aside>It is written in system scope, so <code>git config --global user.email</code> still overrides it and is never overwritten. An owner with no linked GitHub account gets no author, and git asks for one on the first commit.</aside>
 <h2>Agent harnesses</h2>
 <p>New VMs include current versions of Claude Code, Codex, Pi, and Hivemind. Sparkbox environment guidance is installed at <code>~/.agents/AGENTS.md</code> and linked into each harness's global instruction location. Repository-level instructions still apply normally.</p>
 <h2>Supported surface</h2>
