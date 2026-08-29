@@ -455,7 +455,19 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"../../../.agents/skills/agent-browser",
 		"AGENT_BROWSER_EXECUTABLE_PATH /headless-shell/headless-shell",
 		"AGENT_BROWSER_SOCKET_DIR",
-		"AGENT_ENV_REV=7",
+		// The VM's own name and public URL, which the guidance can only express
+		// as $(hostname): this file is baked into a shared template and read by
+		// every clone of it, so no sandbox's name can be literal here. The
+		// sparkbox-netcfg boot hook makes the hostname the sandbox name.
+		"https://$(hostname).catnip.sh",
+		// A dev service is only reachable if the default route points at the
+		// port a person opens, and only findable later if the other ports are
+		// recorded somewhere the session carries with it.
+		"sparkbox set-port 5173",
+		"hivemind tag api_url=https://$(hostname).catnip.sh:8080",
+		"hivemind tag --list",
+		"hivemind tag --remove KEY",
+		"AGENT_ENV_REV=8",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)

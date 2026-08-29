@@ -79,10 +79,11 @@ HIVEMIND_MANIFEST=${HIVEMIND_MANIFEST:-https://raw.githubusercontent.com/wandb/h
 AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-browser/latest}
 # Revision of the guest-side agent conditioning below (/etc/environment knobs +
 # the ~/.claude.json onboarding seed + the ~/.claude/settings.json permission
-# default + the hivemind daemon unit + the agent-browser env wiring and skill).
-# Versioned like IDENTITY_REV so bumping it re-patches every template on the next
-# run even when no tool version moved.
-AGENT_ENV_REV=7
+# default + the hivemind daemon unit + the agent-browser env wiring and skill +
+# the ~/.agents/AGENTS.md guidance text). Versioned like IDENTITY_REV so bumping
+# it re-patches every template on the next run even when no tool version moved —
+# editing the guidance without bumping this ships it to nobody.
+AGENT_ENV_REV=8
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -529,6 +530,30 @@ The VM can also manage its default HTTPS endpoint: `sparkbox set-port PORT`
 changes the forwarded port, `sparkbox make-public` allows unauthenticated
 access to all of this VM's routes, and `sparkbox make-private` restores the
 authenticated default.
+
+This VM's name is its hostname, so `$(hostname)` is the name and
+`https://$(hostname).catnip.sh` is the default endpoint above. Any other port is
+reached by naming it in the URL, as `https://$(hostname).catnip.sh:5173`. The
+edge exposes the common development ports — 3000, 3001, 4000, 4200, 5000, 5173,
+6006, 7860, 8000, 8080, 8443, 8501, 8888 and 9000 — so listen on one of those,
+and on 0.0.0.0 rather than 127.0.0.1, or nothing outside the VM can reach it.
+
+When you start a dev service, point the default endpoint at the port a person
+should open. A stack serving an API on 8080 and a Vite frontend on 5173 gets
+`sparkbox set-port 5173`, because the frontend is the human entrypoint; run
+`sparkbox pin` as well so the VM is not idle-paused out from under it. Record
+the other ports as session labels rather than leaving them undiscoverable:
+
+    hivemind tag api_url=https://$(hostname).catnip.sh:8080
+
+`hivemind tag` labels the session you are working in, so it can be found later
+by what it was about. A bare word is a tag (`hivemind tag nightly`) and
+`KEY=VALUE` records a value (`hivemind tag pr=1234`). Labels expire on their
+own: `--pin` keeps one indefinitely, `--ttl 2h` sets your own window.
+`hivemind tag --list` shows what this session carries and
+`hivemind tag --remove KEY` clears one. Label whatever makes a session worth
+finding again — the issue or PR being worked, an experiment name, and the URL of
+any service you started.
 
 GitHub repositories attached to this VM are cloned into your home directory at
 boot: `~/<repo>` when one is attached, `~/src/<owner>/<repo>` when several are.
