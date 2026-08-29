@@ -607,7 +607,10 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"hivemind tag --remove KEY",
 		// An agent that hits "Please tell me who you are" and answers it
 		// invents an author that cannot be corrected once pushed.
-		"git's author is already set",
+		"git's author is usually already set",
+		// The unlinked case is real and supported, and it is the one case
+		// where the agent must NOT leave the author alone — it must ask.
+		"ask them to run `git config --global user.name`",
 		"AGENT_ENV_REV=8",
 	} {
 		if !strings.Contains(got, want) {

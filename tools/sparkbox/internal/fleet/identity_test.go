@@ -43,6 +43,7 @@ func (r *recordingIdentity) Describe(_ context.Context, box *host.Sandbox, node 
 	}
 	return "https://oidc.example.test", fleet.Claims{
 		Subject: "sparkbox:user:" + box.Owner, Owner: box.Owner,
+		GitHub: box.Owner + "-gh", GitHubID: 271676,
 		Sandbox: box.Name, Image: box.Image, Box: node,
 	}, nil
 }
@@ -154,6 +155,13 @@ func TestIdentityDocHonoursThePlacementCheck(t *testing.T) {
 	}
 	if doc.Owner != "alice" || doc.Box != "laptop" || doc.Issuer != "https://oidc.example.test" {
 		t.Errorf("doc = %+v", doc)
+	}
+	// The GitHub pair specifically. It is the gateway's half of the hop the
+	// node completes, and losing the account number here is invisible: the
+	// guest still gets a login and still writes a git author, just one
+	// github.com will not attribute for an account created after 2017.
+	if doc.GitHub != "alice-gh" || doc.GitHubID != 271676 {
+		t.Errorf("doc github = %q id %d, want alice-gh / 271676", doc.GitHub, doc.GitHubID)
 	}
 	other := newFakeNode("intruder")
 	attach(t, f, other)

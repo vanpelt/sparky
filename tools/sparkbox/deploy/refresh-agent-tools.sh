@@ -520,11 +520,11 @@ The HTTPS proxy is documented at https://docs.catnip.sh/proxy.md.
 Your disk is persistent. CPU and memory are shared across your Sparkbox owner
 pool; idle guest memory may be reclaimed and returned when it becomes active.
 
-Use `sparkbox pin` before starting work that must stay continuously available,
-such as a server, daemon, or long-running job. Pinning protects the VM from idle
-pause and memory-pressure reclamation. Run `sparkbox unpin` when that work is
-finished so the shared pool can reclaim idle resources. `sparkbox status` shows
-the current pin state.
+`sparkbox pin` protects the VM from idle pause and memory-pressure
+reclamation, and `sparkbox unpin` returns it to the shared pool; `sparkbox
+status` shows the current state. Pin only when the owner asks you to. A request
+to a paused VM wakes it, so a service stays reachable without being pinned, and
+pinning consumes shared capacity for as long as it lasts.
 
 The VM can also manage its default HTTPS endpoint: `sparkbox set-port PORT`
 changes the forwarded port, `sparkbox make-public` allows unauthenticated
@@ -540,8 +540,7 @@ and on 0.0.0.0 rather than 127.0.0.1, or nothing outside the VM can reach it.
 
 When you start a dev service, point the default endpoint at the port a person
 should open. A stack serving an API on 8080 and a Vite frontend on 5173 gets
-`sparkbox set-port 5173`, because the frontend is the human entrypoint; run
-`sparkbox pin` as well so the VM is not idle-paused out from under it. Record
+`sparkbox set-port 5173`, because the frontend is the human entrypoint. Record
 the other ports as session labels rather than leaving them undiscoverable:
 
     hivemind tag api_url=https://$(hostname).catnip.sh:8080
@@ -569,10 +568,12 @@ short-lived token scoped to the one repository being fetched, so `git clone`,
 `git fetch` and `git push` on an attached repository just work, and nothing
 durable holds a credential.
 
-git's author is already set, to the GitHub account that owns this VM, so commits
-you make are attributed to that person. Do not change it and do not invent one
-of your own: an author you make up cannot be corrected on a branch that has been
-pushed.
+git's author is usually already set, to the GitHub account that owns this VM, so
+commits you make are attributed to that person. Leave it alone: an author you
+invent cannot be corrected on a branch that has been pushed. If git does ask who
+you are, this VM's owner has no GitHub account linked and only they can answer —
+ask them to run `git config --global user.name` and `user.email`, and do not
+choose a value yourself.
 
 A headless Chrome and the `agent-browser` CLI are already installed and already
 pointed at each other. Use `agent-browser` for anything that needs a real

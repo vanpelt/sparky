@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -414,6 +415,47 @@ func TestRelayErrorKeepsTheUnderlyingCause(t *testing.T) {
 	got := relayError(nodelink.ErrNoLink)
 	if !errors.Is(got, nodelink.ErrNoLink) {
 		t.Errorf("err = %v, want the transport cause preserved for the node's own log", got)
+	}
+}
+
+// TestRelayDocCopiesEveryWireField walks the wire struct by reflection rather
+// than asserting a field list, so it fails when a field is ADDED to
+// nodelink.IdentityDocResp and not mapped — the failure mode this conversion
+// actually has.
+//
+// Copying it wrong is loud; copying it short is silent. The guest gets a
+// well-formed document, believes it, and the symptom lands somewhere else: a
+// dropped GitHubID leaves it writing the legacy noreply address that github.com
+// will not attribute for a modern account, with no error raised anywhere.
+func TestRelayDocCopiesEveryWireField(t *testing.T) {
+	var resp nodelink.IdentityDocResp
+	v := reflect.ValueOf(&resp).Elem()
+	// Distinct non-zero values, so a field copied from the WRONG source field
+	// is caught as well as one not copied at all.
+	for i := 0; i < v.NumField(); i++ {
+		switch f := v.Field(i); f.Kind() {
+		case reflect.String:
+			f.SetString("value-" + v.Type().Field(i).Name)
+		case reflect.Int64, reflect.Int:
+			f.SetInt(int64(1000 + i))
+		default:
+			t.Fatalf("IdentityDocResp.%s is a %s this test cannot populate; extend it",
+				v.Type().Field(i).Name, f.Kind())
+		}
+	}
+
+	doc := reflect.ValueOf(docFromRelay(resp))
+	for i := 0; i < v.NumField(); i++ {
+		name := v.Type().Field(i).Name
+		got := doc.FieldByName(name)
+		if !got.IsValid() {
+			t.Errorf("metadata.Doc has no %s, so the wire carries a field nothing reads", name)
+			continue
+		}
+		if !got.Equal(v.Field(i)) {
+			t.Errorf("%s = %v, want %v — dropped or mis-sourced crossing the SSH fallback",
+				name, got.Interface(), v.Field(i).Interface())
+		}
 	}
 }
 

@@ -182,8 +182,7 @@ func (l Local) Issue(_ context.Context, box *host.Sandbox, aud string) (Token, e
 }
 
 func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
-	c := l.claims(box)
-	_, id := l.githubOwner(box.Owner)
+	c, id := l.claimsWithGitHubID(box)
 	return Doc{
 		Issuer: l.Issuer.URL(), Subject: c.Subject, Owner: c.Owner,
 		GitHub: c.GitHub, GitHubID: id, KeyFP: c.KeyFP,
@@ -195,6 +194,19 @@ func (l Local) Describe(_ context.Context, box *host.Sandbox) (Doc, error) {
 // The `github` claim is present only when the owner verified it, so a policy
 // matching on it fails closed for everyone else.
 func (l Local) claims(box *host.Sandbox) oidc.Claims {
+	c, _ := l.claimsWithGitHubID(box)
+	return c
+}
+
+// claimsWithGitHubID assembles the claims and the owner's GitHub account number
+// from ONE account snapshot.
+//
+// The single read is the point, not an optimisation. Two reads — one for the
+// login, one for the number — can straddle a concurrent relink or rename and
+// hand back a document pairing one account's login with another's number, or a
+// login with the 0 of an account that no longer has it. Both values are the
+// same statement about the same account, so they have to be read as one.
+func (l Local) claimsWithGitHubID(box *host.Sandbox) (oidc.Claims, int64) {
 	c := oidc.Claims{
 		Subject:   oidc.SubjectFor(box.Owner),
 		Owner:     box.Owner,
@@ -204,12 +216,14 @@ func (l Local) claims(box *host.Sandbox) oidc.Claims {
 		Image:     box.Image,
 		Box:       l.NodeName,
 	}
-	c.GitHub, _ = l.githubOwner(box.Owner)
-	return c
+	login, id := l.githubOwner(box.Owner)
+	c.GitHub = login
+	return c, id
 }
 
 // githubOwner is the owner's GitHub login and immutable account number, or
-// ("", 0) when this host cannot vouch for either.
+// ("", 0) when this host cannot vouch for either. Both come from one account
+// read, so a caller that needs both gets a consistent pair.
 //
 // Strong provenance only, and this is the load-bearing half of the condition
 // rather than a refinement of it.
