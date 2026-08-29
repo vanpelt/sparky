@@ -201,8 +201,9 @@ Lowest risk, highest near-term value, and it does not foreclose Option A.
 
 Sparkbox's rootfs pipeline is a monolithic ext4 template plus
 `deploy/refresh-agent-tools.sh` running on every Pod start to patch current
-`claude`/`codex`/`pi`/`hivemind` binaries into it, with the documented wart that
-"existing sandbox disks are not rewritten by a later refresh". smolvm pulls OCI
+`claude`/`codex`/`pi`/`hivemind`/`agent-browser` binaries into it, with the
+documented wart that "existing sandbox disks are not rewritten by a later
+refresh". smolvm pulls OCI
 images from any registry with no daemon (`crates/smolvm-oci-layer`,
 `crates/smolvm-registry`) and treats the image as the machine's root.
 

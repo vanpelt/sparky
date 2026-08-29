@@ -98,10 +98,10 @@ The reason agent CLIs were pulled *out* of the image is that a rebuild is a
 ~65-minute CI affair. That doesn't change. What changes is that a rebuild is no
 longer the unit of *distribution*.
 
-Put `claude`, `codex`, `pi`, and `hivemind` in a final thin layer over the
-expensive base. Bumping them rebuilds one layer in seconds, and a host that
-already has the base pulls only that layer — tens of MB, not 750. That is the
-whole argument for OCI here, and it is what retires `refresh-agent-tools.sh`
+Put `claude`, `codex`, `pi`, `hivemind`, and `agent-browser` in a final thin
+layer over the expensive base. Bumping them rebuilds one layer in seconds, and a
+host that already has the base pulls only that layer — tens of MB, not 750. That
+is the whole argument for OCI here, and it is what retires `refresh-agent-tools.sh`
 rather than merely relocating it.
 
 The corollary matters too: a template is now identified by a **digest**, so

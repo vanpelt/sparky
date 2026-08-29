@@ -59,8 +59,9 @@ places that already have an anti-drift mechanism holding them together:
 - `deploy/install-guest-identity.sh` — the OIDC token unit and timer (it exists
   *only* because two callers needed the same payload);
 - `deploy/refresh-agent-tools.sh` — the agent CLIs, the `/etc/environment`
-  knobs, the `~/.claude.json` onboarding seed, the hivemind daemon unit, and
-  since main, `install_agent_guidance`.
+  knobs, the `~/.claude.json` onboarding seed, the hivemind daemon unit,
+  `install_agent_guidance`, and since #43 the `agent-browser` tarball, its env
+  wiring and its skill.
 
 Two of those three move into the **image build** rather than the overlay. The
 overlay's job is only what is host-specific and cannot be baked: the gateway
@@ -105,10 +106,11 @@ present. `doctor` reports the resolved digest and the template it maps to.
 `ghcr.io/vanpelt/sparkbox-rootfs` with a full-SHA tag and a moving `edge`, the
 same scheme `sparkbox-cks-image.yml` uses for the runtime image.
 
-The layer split is the point: agent CLIs (`claude`, `codex`, `pi`, `hivemind`)
-and the guidance payload go in a **final thin layer** over the expensive base.
-Bumping them then rebuilds one layer in seconds and a host pulls tens of MB, not
-750. Without the split this is a distribution change with no benefit.
+The layer split is the point: agent CLIs (`claude`, `codex`, `pi`, `hivemind`,
+`agent-browser`) and the guidance payload go in a **final thin layer** over the
+expensive base. Bumping them then rebuilds one layer in seconds and a host pulls
+tens of MB, not 750. Without the split this is a distribution change with no
+benefit.
 
 **Acceptance:** bumping a `claude` version produces a new digest whose pull, on
 a host that already has the previous digest, transfers only the tools layer.
