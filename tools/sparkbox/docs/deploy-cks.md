@@ -694,6 +694,32 @@ it explicitly keeps the hot tier pinned where the guest disks already are.
 Extra Service ports added with `public-port.sh` do not survive the re-apply of
 `service.yaml`. Re-add any port outside the declared set afterwards.
 
+### Put a hivemind release candidate on real hardware
+
+Newly created sandboxes get the latest hivemind release. To test a candidate
+first, name its manifest:
+
+```sh
+deploy/kubernetes/deploy.sh \
+  --image "$IMAGE" \
+  --hivemind-manifest https://raw.githubusercontent.com/wandb/hivemind/main/manifests/hivemind-1.0.8rc1.json \
+  ...
+```
+
+Pin the exact `hivemind-<version>.json`. The sibling `hivemind-prerelease.json`
+is a moving pointer that advances to rc2, rc3, and so on, which is drift rather
+than a pin.
+
+This reaches **newly created** sandboxes only: the refresher patches the rootfs
+template, and an existing VM keeps the hivemind on its own disk across
+pause/resume.
+
+Unlike `--proxy-domain` and `--hivemind-api`, this is **not** carried forward —
+a test pin is meant to end, and one that silently reinstated itself on every
+future deploy would be the worse failure. A run that drops one says so in its
+output rather than reverting in silence, which is what the previous
+hand-edited-live-object arrangement did.
+
 ### What a rollout costs
 
 The gateway restart is brief and drops in-flight browser sessions and SSH

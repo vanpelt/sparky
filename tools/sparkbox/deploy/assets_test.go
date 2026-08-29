@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -736,6 +737,90 @@ func TestCKSSplitMigrationCommitsOnlyAfterOwnership(t *testing.T) {
 	}
 	if strings.Count(got, `test -s "$dst/`) < 2 {
 		t.Fatal("completed migration does not validate both gateway databases")
+	}
+}
+
+// TestCKSManifestPlaceholdersAreAllSubstituted is the general form of a bug
+// this repository has now had twice: a value that reaches the cluster only as a
+// deploy.sh flag, and a manifest that names it.
+//
+// A `__PLACEHOLDER__` with no matching `-e "s|__PLACEHOLDER__|"` in deploy.sh
+// does not fail the deploy. kubectl applies the literal string, and the symptom
+// surfaces later and somewhere else — a Pod env var whose value is the word
+// __HIVEMIND_MANIFEST__, an image reference that cannot be pulled. Checking the
+// two files against each other costs nothing and catches the whole class.
+func TestCKSManifestPlaceholdersAreAllSubstituted(t *testing.T) {
+	deployScript, err := os.ReadFile("kubernetes/deploy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(deployScript)
+
+	manifests, err := filepath.Glob("kubernetes/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) == 0 {
+		t.Fatal("no CKS manifests found; this test is not checking anything")
+	}
+	placeholder := regexp.MustCompile(`__[A-Z0-9_]+__`)
+	for _, path := range manifests {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range placeholder.FindAllString(string(body), -1) {
+			if !strings.Contains(script, "s|"+name+"|") {
+				t.Errorf("%s uses %s but deploy.sh never substitutes it, so the literal reaches the cluster",
+					filepath.Base(path), name)
+			}
+		}
+	}
+}
+
+// TestCKSGuestHivemindIsAFlagNotAHandEdit pins the shape of the override rather
+// than any particular version.
+//
+// The pin it replaces lived only as a hand-edited live object that no file in
+// this repository recorded, so every clean deploy.sh run — by anyone, for any
+// reason — reverted it in silence, and the symptom was `hivemind: No such
+// command` in a sandbox created days later. Three properties keep that from
+// coming back: the flag exists, the manifest carries the value through, and the
+// default URL is written down in exactly ONE place.
+func TestCKSGuestHivemindIsAFlagNotAHandEdit(t *testing.T) {
+	deployScript, err := os.ReadFile("kubernetes/deploy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(deployScript)
+	for _, want := range []string{
+		"--hivemind-manifest)",
+		"requested_hivemind_manifest=",
+		// Dropping the pin is allowed. Dropping it quietly is not.
+		"NOTE: dropping the guest hivemind pin",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("deploy.sh missing %q", want)
+		}
+	}
+
+	manifest, err := os.ReadFile("kubernetes/deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), "name: HIVEMIND_MANIFEST") {
+		t.Error("the node manifest never passes HIVEMIND_MANIFEST to prepare-vm-assets")
+	}
+
+	// One source of truth for the default. deploy.sh substitutes an empty value
+	// when the flag is absent, and refresh-agent-tools.sh's ${VAR:-default}
+	// covers empty as well as unset — so the latest-release URL must appear
+	// there and nowhere else. Two copies is how they drift.
+	if strings.Contains(script, "hivemind-latest.json") {
+		t.Error("deploy.sh hard-codes the default manifest URL; refresh-agent-tools.sh already owns it")
+	}
+	if !strings.Contains(string(RefreshToolsScript), "HIVEMIND_MANIFEST:-https://") {
+		t.Error("refresh-agent-tools.sh no longer defaults HIVEMIND_MANIFEST, so an unpinned deploy resolves nothing")
 	}
 }
 
