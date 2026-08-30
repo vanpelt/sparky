@@ -133,13 +133,13 @@ pbcopy` puts precisely the right bytes on the clipboard.
 With a branch:
 
 ```html
-<div align="right"><a href="https://go.catnip.sh/wandb/hivemind?ref=feat/x"><img src="https://go.catnip.sh/badge.svg" alt="Open in Sparkbox" height="28"></a></div>
+<a href="https://go.catnip.sh/wandb/hivemind?ref=feat/x"><img align="right" src="https://go.catnip.sh/badge.svg" alt="Open in Sparkbox" height="28"></a>
 ```
 
 Without one — the `README` / default-branch form:
 
 ```html
-<div align="right"><a href="https://go.catnip.sh/wandb/hivemind"><img src="https://go.catnip.sh/badge.svg" alt="Open in Sparkbox" height="28"></a></div>
+<a href="https://go.catnip.sh/wandb/hivemind"><img align="right" src="https://go.catnip.sh/badge.svg" alt="Open in Sparkbox" height="28"></a>
 ```
 
 **One line, zero indent, both non-negotiable.** Four leading spaces in a
@@ -159,7 +159,8 @@ nothing in them was stripped.
 |---|---|---|
 | `<a href="…?a=1&b=2">` | kept; `&` escaped to `&amp;`; `rel="nofollow"` added | query strings are safe in a comment. We still keep the repository in the path (Part 1) — the sanitizer protects the *rendered* link, not the person retyping it |
 | `<img align="right" height="28" width="124">` | `align`, `height` and `width` all kept | `height` is the one we use. `style` is **not** on the allowlist, which is why the badge carries its own appearance inside the SVG |
-| `<div align="right">…</div>` | kept; stacks above the following heading rather than floating beside it | we accept the stack. `align="right"` on the `<img>` itself floats it next to a heading, which reads better in a PR *description* and unpredictably in a *comment* — one shape for both is worth more than a nicer layout in one of them |
+| `<div align="right">…</div>` | kept; the button becomes a block that STACKS above whatever follows | the shape we do **not** use. It costs the button a line of its own and puts it above the heading rather than beside it |
+| `align="right"` on the `<img>` itself | kept; floats the image, so following content flows up beside it | **this is the shape we emit.** Paste it as the first thing in the comment and the button lands in the top-right corner with the heading beside it — the placement a reader's eye already goes to |
 | `<picture><source media="(prefers-color-scheme: dark)" …><img …></picture>` | kept, wrapped in GitHub's `<themed-picture>` | a dark-mode variant demonstrably works. Declined — see below |
 | every `src` | rewritten to `https://camo.githubusercontent.com/<sha256>/<hex of the url>` | decisive; see the next two sections |
 | a bare `<img>` with **both** `width` and `height` | GitHub injects `max-width:100%; height:auto; max-height:<h>px; aspect-ratio:<w>/<h>; background-color: var(--bgColor-muted); border-radius:6px` | the ratio is computed from the *declared attributes*, not from the image |

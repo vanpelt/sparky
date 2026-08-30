@@ -230,14 +230,33 @@ func (g *Gateway) badgeMarkdown(slug, ref string) string {
 	if ref != "" {
 		href += "?ref=" + ref
 	}
-	// `<div align="right">`, `<a>` and `<img>` are the three elements GitHub's
-	// markdown sanitizer reliably keeps, and `height` is on its attribute
-	// allowlist where `style` is not. There is no `width`: height alone lets
-	// the aspect ratio hold if the badge is ever redrawn wider. The alt text
-	// reads as an action so a blocked or broken image degrades to a sentence
-	// somebody can still act on rather than to a filename.
-	return `<div align="right"><a href="` + href + `"><img src="` + host +
-		`/badge.svg" alt="Open in Sparkbox" height="28"></a></div>`
+	// `<a>` and `<img>` are elements GitHub's markdown sanitizer reliably keeps,
+	// and `align` and `height` are on its attribute allowlist where `style` is
+	// not — all three confirmed by rendering this exact line through GitHub's
+	// own /markdown API rather than from memory.
+	//
+	// `align="right"` goes on the IMG, which floats it, and that is the
+	// difference between the two shapes that survive the sanitizer. Wrapped in
+	// a `<div align="right">` the button is a block that STACKS above whatever
+	// follows, taking a line of its own; floated, the next heading flows up
+	// beside it and the button lands in the comment's top-right corner — which
+	// is where a reader's eye already goes and where the affordance belongs on
+	// a bot comment whose first line is a heading.
+	//
+	// Paste it as the FIRST thing in the comment, ahead of the heading, or the
+	// float has nothing to sit beside. The doc says so; this comment says why
+	// it matters.
+	//
+	// There is no `width`, and that asymmetry is load-bearing rather than an
+	// oversight: GitHub injects `aspect-ratio: <width>/<height>` computed from
+	// the attributes it finds, so declaring both would pin the ratio inside
+	// every comment already posted and letterbox them all the day the badge is
+	// redrawn. Height alone lets the SVG's own dimensions govern forever.
+	//
+	// The alt text reads as an action so a blocked or broken image degrades to
+	// a sentence somebody can still act on rather than to a filename.
+	return `<a href="` + href + `"><img align="right" src="` + host +
+		`/badge.svg" alt="Open in Sparkbox" height="28"></a>`
 }
 
 // parseBadge reads `<owner>/<name> [--ref <r>]`.

@@ -162,8 +162,8 @@ func TestControlBadgeMarkdown(t *testing.T) {
 	}
 
 	s := st.run(t, "alice", "badge", "wandb/hivemind", "--ref", "feat/x")
-	want := `<div align="right"><a href="https://go.hivemind.tools/wandb/hivemind?ref=feat/x">` +
-		`<img src="https://go.hivemind.tools/badge.svg" alt="Open in Sparkbox" height="28"></a></div>` + "\r\n"
+	want := `<a href="https://go.hivemind.tools/wandb/hivemind?ref=feat/x">` +
+		`<img align="right" src="https://go.hivemind.tools/badge.svg" alt="Open in Sparkbox" height="28"></a>` + "\r\n"
 	if got := s.out.String(); got != want {
 		t.Errorf("stdout =\n%q\nwant\n%q", got, want)
 	}
@@ -172,12 +172,25 @@ func TestControlBadgeMarkdown(t *testing.T) {
 	}
 	checkBadgeSession(t, s)
 
+	// The float is the layout decision, pinned by name: wrapped in a
+	// `<div align="right">` the button takes a line of its own above the
+	// heading, floated it sits in the comment's top-right with the heading
+	// beside it. And no `width`, ever — GitHub computes an injected
+	// aspect-ratio from the attributes it finds, which would letterbox every
+	// comment already posted the day the badge is redrawn.
+	if strings.Contains(s.out.String(), "<div") {
+		t.Error("the snippet wraps the button in a block; it must float so the heading flows beside it")
+	}
+	if strings.Contains(s.out.String(), "width=") {
+		t.Error("the snippet declares a width, which pins GitHub's injected aspect-ratio in every posted comment")
+	}
+
 	// No --ref means no ref at all, and in particular never a placeholder: a
 	// literal like BRANCH satisfies every validator between here and the guest
 	// and only fails at the clone, in a VM belonging to whoever clicked.
 	s = st.run(t, "alice", "badge", "wandb/hivemind")
-	want = `<div align="right"><a href="https://go.hivemind.tools/wandb/hivemind">` +
-		`<img src="https://go.hivemind.tools/badge.svg" alt="Open in Sparkbox" height="28"></a></div>` + "\r\n"
+	want = `<a href="https://go.hivemind.tools/wandb/hivemind">` +
+		`<img align="right" src="https://go.hivemind.tools/badge.svg" alt="Open in Sparkbox" height="28"></a>` + "\r\n"
 	if got := s.out.String(); got != want {
 		t.Errorf("stdout =\n%q\nwant\n%q", got, want)
 	}
