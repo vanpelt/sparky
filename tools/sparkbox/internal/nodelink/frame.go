@@ -140,6 +140,14 @@ const (
 	TypeIdentityDoc    = "identity.describe"
 	TypeSelfVisibility = "sandbox.self_visibility"
 	TypeSelfPort       = "sandbox.self_port"
+	// The lifecycle trio travels the same direction for a third reason: the
+	// gateway owns the placement ledger and the tag-to-template bindings, and a
+	// capture is one operation the fleet has to be able to record under the
+	// owner it knows rather than the one a node reports. The plan is a pure read
+	// so the guest learns every refusal while its VM is still running.
+	TypeSelfPause        = "sandbox.self_pause"
+	TypeSelfSnapshotPlan = "sandbox.self_snapshot_plan"
+	TypeSelfSnapshot     = "sandbox.self_snapshot"
 	// The repo pair travels the same direction and for both reasons at once: a
 	// sandbox's attachments are resolved from its owner's tags, which no node
 	// holds, and the GitHub App key that turns one of them into a credential is
@@ -914,6 +922,123 @@ type SelfPortReq struct {
 type SelfPortResp struct {
 	Sandbox string `json:"sandbox"`
 	Port    int    `json:"port"`
+}
+
+// ---------------------------------------------------------------------------
+// Guest-initiated lifecycle: pause, and capture-into-a-tag
+// ---------------------------------------------------------------------------
+
+// MaxSelfTagBytes and MaxSelfNameBytes bound the two strings a node may put in
+// a capture request besides the sandbox name. Neither is an authorization
+// input — the gateway re-derives the plan and refuses a tag this sandbox does
+// not carry — and the ceilings are generous against the grammars that actually
+// have to fit (a tag is at most 40 characters, a snapshot name 41), so a
+// legitimate request can never reach them. They are here so what arrives at a
+// SQL parameter and a filename is bounded by the wire rather than by whatever
+// the guest chose to send.
+const (
+	MaxSelfTagBytes  = 128
+	MaxSelfNameBytes = 128
+)
+
+// SelfPauseReq is a node relaying `sparkbox pause` from one of its guests. A
+// name and nothing else, for the reason IdentityReq is: everything that decides
+// the answer is the gateway's own ledger.
+type SelfPauseReq struct {
+	Sandbox string `json:"sandbox"`
+}
+
+type SelfPauseResp struct {
+	Sandbox string `json:"sandbox"`
+}
+
+// SelfSnapshotPlanReq asks what a capture from inside this sandbox would do.
+// Tag and Name are both optional: empty means "derive it", and the gateway
+// answers with what it derived so the commit can send those exact values back.
+type SelfSnapshotPlanReq struct {
+	Sandbox string `json:"sandbox"`
+	Tag     string `json:"tag,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+// SelfSnapshotPlanResp restates ctlops.SelfSnapshotPlan field for field rather
+// than embedding it, for the reason SandboxRow restates host.Sandbox and
+// SelfRepoEntry restates a repos row: the wire is its own contract and has to
+// be free to lag or lead the control plane's shape. The two conversions below
+// are the only place the mirror is maintained, so a field added on one side and
+// forgotten on the other is a compile error in exactly one file.
+type SelfSnapshotPlanResp struct {
+	Sandbox   string                `json:"sandbox"`
+	Tags      []string              `json:"tags,omitempty"`
+	Tag       string                `json:"tag"`
+	Snapshot  string                `json:"snapshot"`
+	Node      string                `json:"node,omitempty"`
+	Bound     string                `json:"bound,omitempty"`
+	BoundFrom string                `json:"bound_from,omitempty"`
+	BoundAt   time.Time             `json:"bound_at,omitzero"`
+	BoundNode string                `json:"bound_node,omitempty"`
+	Carriers  []SelfSnapshotCarrier `json:"carriers,omitempty"`
+	Busy      string                `json:"busy,omitempty"`
+	Turbo     bool                  `json:"turbo,omitempty"`
+	DiskMB    int64                 `json:"disk_mb,omitempty"`
+	CtlHint   string                `json:"ctl_hint,omitempty"`
+	SSHHint   string                `json:"ssh_hint,omitempty"`
+	Token     string                `json:"token"`
+}
+
+type SelfSnapshotCarrier struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Self  bool   `json:"self,omitempty"`
+}
+
+// SelfSnapshotPlanFrom renders a plan onto the wire.
+func SelfSnapshotPlanFrom(p ctlops.SelfSnapshotPlan) SelfSnapshotPlanResp {
+	resp := SelfSnapshotPlanResp{
+		Sandbox: p.Sandbox, Tags: p.Tags, Tag: p.Tag, Snapshot: p.Snapshot, Node: p.Node,
+		Bound: p.Bound, BoundFrom: p.BoundFrom, BoundAt: p.BoundAt, BoundNode: p.BoundNode,
+		Busy: p.Busy, Turbo: p.Turbo, DiskMB: p.DiskMB,
+		CtlHint: p.CtlHint, SSHHint: p.SSHHint, Token: p.Token,
+	}
+	for _, c := range p.Carriers {
+		resp.Carriers = append(resp.Carriers, SelfSnapshotCarrier{Name: c.Name, State: c.State, Self: c.Self})
+	}
+	return resp
+}
+
+// Plan reads the wire back into the control plane's shape, for the node's
+// metadata service to render. Nothing here is trusted as authorization: by the
+// time this runs the gateway has already decided, and every string in it is
+// host-authored.
+func (r SelfSnapshotPlanResp) Plan() ctlops.SelfSnapshotPlan {
+	p := ctlops.SelfSnapshotPlan{
+		Sandbox: r.Sandbox, Tags: r.Tags, Tag: r.Tag, Snapshot: r.Snapshot, Node: r.Node,
+		Bound: r.Bound, BoundFrom: r.BoundFrom, BoundAt: r.BoundAt, BoundNode: r.BoundNode,
+		Busy: r.Busy, Turbo: r.Turbo, DiskMB: r.DiskMB,
+		CtlHint: r.CtlHint, SSHHint: r.SSHHint, Token: r.Token,
+	}
+	for _, c := range r.Carriers {
+		p.Carriers = append(p.Carriers, ctlops.TaggedSandbox{Name: c.Name, State: c.State, Self: c.Self})
+	}
+	return p
+}
+
+// SelfSnapshotReq commits a capture the guest has already been shown a plan
+// for. Tag and Name are the PLAN's, not values the guest composed, and the
+// gateway re-plans and compares before it accepts them anyway.
+type SelfSnapshotReq struct {
+	Sandbox string `json:"sandbox"`
+	Tag     string `json:"tag"`
+	Name    string `json:"name"`
+}
+
+// SelfSnapshotResp is the acceptance. The capture itself outlives this reply by
+// minutes and the VM is paused for most of them, so there is nothing here about
+// the outcome — that is read from `snapshot ls` afterwards, from outside.
+type SelfSnapshotResp struct {
+	Sandbox  string `json:"sandbox"`
+	Snapshot string `json:"snapshot"`
+	Tag      string `json:"tag"`
 }
 
 // ---------------------------------------------------------------------------

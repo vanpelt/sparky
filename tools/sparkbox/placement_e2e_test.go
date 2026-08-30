@@ -49,10 +49,12 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -923,4 +925,114 @@ func (ds *dataStack) getEdgeHTML(t *testing.T, name string) (int, string, string
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body), resp.Header.Get("Content-Type")
+}
+
+// ---------------------------------------------------------------------------
+// Tag templates: a binding is a placement directive
+// ---------------------------------------------------------------------------
+
+// TestTagTemplatePlacesOnTheTemplatesMachine is the only end-to-end proof of
+// Part 4 of the tag-templates design, and it is here rather than in
+// internal/ctlops because the property only exists on two machines.
+//
+// A snapshot is a file in ONE machine's image directory. Binding a tag to one
+// therefore turns `--tag cuda` into a placement directive: the create must land
+// where the template is, with nobody having typed --node. Both halves of that
+// are easy to get wrong in opposite directions — fleet.pick short-circuits to
+// the local machine whenever nothing names a node, and Candidate.Fits refuses a
+// remote machine whose hello-time image listing predates the snapshot — so this
+// runs under eachPlacement and asserts the same thing twice: once where "the
+// template's machine" is this one, and once where it is the other.
+//
+// The Ops is built here rather than taken from the harness because the shared
+// one is deliberately assembled without the fleet-owned stores this needs, and
+// because the binding store is what is under test.
+func TestTagTemplatePlacesOnTheTemplatesMachine(t *testing.T) {
+	eachPlacement(t, func(t *testing.T, ds *dataStack, node string) {
+		ctx := context.Background()
+		store, err := templates.Open(filepath.Join(ds.dir, "sparkbox.db"), ds.log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { store.Close() }) //nolint:errcheck
+		ops := ctlops.New(ctlops.Config{
+			Sandboxes: ds.flt, Templates: ds.flt, Accounts: ds.users,
+			Tags: ds.secrets, TemplateTags: store,
+			DefaultImage: "ubuntu", Domain: proxyDomain, Log: ds.log,
+		})
+		t.Cleanup(ops.Close)
+		who := ctlops.Caller{Handle: "tester"}
+
+		// The template is captured on the pass's machine, through the door a
+		// user would use for the create and through the control plane for the
+		// capture — a node has no signer with which to reach its own guests, so
+		// a remote capture is the gateway's work either way.
+		ds.placeOn(t, node, "tplbox")
+		snap, err := ops.CreateSnapshot(ctx, who, "tplbox", "cuda-base")
+		if err != nil {
+			t.Fatalf("snapshotting %s on %s: %v", "tplbox", node, err)
+		}
+		if snap.Node != node {
+			t.Fatalf("the snapshot records node %q, want %q", snap.Node, node)
+		}
+
+		// This used to bounce the link, because a node reported its templates
+		// only in a full inventory frame and there is still no snapshot event:
+		// a template captured after the link came up was invisible to
+		// fleet.Snapshots, fleet.templateNode and therefore to `snapshot ls`,
+		// `fork` and `bind`, until the node reconnected. A cluster hit that on
+		// its first real capture — `snapshot create` said it worked and
+		// `snapshot bind` then answered "no snapshot named test1".
+		//
+		// The gateway now records the capture it just performed
+		// (nodelink.Client.NoteSnapshot; see internal/fleet/remote_test.go),
+		// so the template is listable the moment Snapshot returns and no
+		// reconnect is needed. Asserted rather than deleted, because "visible
+		// immediately" is the property that replaced the bounce.
+		list, err := ops.ListSnapshots(ctx, who)
+		if err != nil {
+			t.Fatalf("listing snapshots straight after a capture on %s: %v", node, err)
+		}
+		found := false
+		for _, s := range list {
+			if s.Name == "cuda-base" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the snapshot taken on %s is not listable until the link reconnects; "+
+				"that is the stale-cache bug that made `snapshot bind` answer no-such-snapshot on a real cluster", node)
+		}
+
+		if _, err := ops.BindTemplate(ctx, who, "cuda-base", "cuda"); err != nil {
+			t.Fatalf("binding cuda: %v", err)
+		}
+
+		// The whole point: no --node anywhere in this call.
+		box, err := ops.Create(ctx, who, ctlops.CreateArgs{Name: "forked", Tags: []string{"cuda"}})
+		if err != nil {
+			t.Fatalf("creating on the bound tag with no --node: %v", err)
+		}
+		if box.Node != node {
+			t.Errorf("the tagged create reports node %q, want the template's machine %q", box.Node, node)
+		}
+		// The ledger is the authority the edge, the reaper and the next restart
+		// all read, so it is what the claim is asserted against.
+		row, ok, err := ds.index.Get("forked")
+		if err != nil || !ok {
+			t.Fatalf("no ledger row for the tagged create: ok=%v err=%v", ok, err)
+		}
+		if row.Node != node {
+			t.Errorf("the tagged sandbox landed on %q, want the template's machine %q", row.Node, node)
+		}
+		// And it really is the template's disk, not the stock image that a
+		// silent fallback would have handed over.
+		built, ok := ds.flt.Get("forked")
+		if !ok {
+			t.Fatal("the fleet does not know the sandbox it just created")
+		}
+		if built.Image == "ubuntu" || built.Image == "" {
+			t.Errorf("the tagged sandbox booted image %q, want the bound template's", built.Image)
+		}
+	})
 }

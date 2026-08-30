@@ -18,6 +18,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
@@ -35,6 +36,8 @@ var (
 	_ Schedules = (*schedule.Store)(nil)
 	_ Routes    = (*routes.Store)(nil)
 	_ Minter    = (*edgeauth.Signer)(nil)
+
+	_ TemplateBindings = (*templates.Store)(nil)
 )
 
 // calls is the shared recorder every fake writes to. Ownership tests assert on
@@ -89,6 +92,10 @@ var mutatingVerbs = map[string]bool{
 	"SetVisibility": true, "Mint": true,
 	"ApproveNode": true, "RemoveNode": true,
 	"accounts.Create": true, "secrets.Put": true, "secrets.Delete": true,
+	// The binding verbs. Omitting them here would not fail anything visibly —
+	// it would quietly drop the new verbs out of every ownership assertion,
+	// since mutating() only reports what this table names.
+	"Bind": true, "Unbind": true,
 }
 
 // mutating reports the recorded calls that could have changed state or woken a
@@ -284,6 +291,10 @@ type fakeTemplates struct {
 	boxes *fakeSandboxes
 	on    bool
 	err   error
+	// node is stamped onto every capture, the way host.Manager stamps its own
+	// name (snapshot.go). Placement tests set it, or re-stamp a fixture record
+	// directly, to say which machine holds a template.
+	node string
 }
 
 func (f *fakeTemplates) Snapshots(owner string) []*host.Snapshot {
@@ -303,7 +314,14 @@ func (f *fakeTemplates) Snapshot(ctx context.Context, box, snapName, owner strin
 	if f.err != nil {
 		return nil, f.err
 	}
-	s := &host.Snapshot{Name: snapName, Owner: owner, FromBox: box, CreatedAt: time.Unix(0, 0).UTC()}
+	s := &host.Snapshot{
+		Name: snapName, Owner: owner, FromBox: box, Node: f.node,
+		// The real manager derives the template basename from (owner, name) and
+		// stores it on the record; resolveTemplate reads it back rather than
+		// recomputing the rule, so the fake has to carry it too.
+		Image:     "snap-" + owner + "-" + snapName,
+		CreatedAt: time.Unix(0, 0).UTC(),
+	}
 	f.snaps[owner+"/"+snapName] = s
 	cp := *s
 	return &cp, nil
@@ -799,6 +817,110 @@ func (f *fakeSecrets) SandboxesForSecret(owner, envName string) ([]string, error
 	return out, nil
 }
 
+// ---------------------------------------------------------------------------
+
+// fakeTemplateTags is templates.Store in a map. It reproduces the two store
+// behaviours ctlops actually depends on — Bind reports the snapshot it replaced,
+// and the `default` tag is refused with an ErrInvalidBinding whose sentence the
+// caller passes through untouched — so the pass-through can be asserted without
+// a sqlite file. The exact wording lives in internal/templates and is tested
+// there; what this fake pins is that ctlops does not rewrite it.
+type fakeTemplateTags struct {
+	c    *calls
+	rows map[string]templates.Binding // "owner\x00tag"
+	err  error                        // returned by every method when set
+}
+
+func bindKey(owner, tag string) string { return owner + "\x00" + tag }
+
+// defaultTagRefusal is the shape of the store's refusal, not its text: a
+// sentence naming the tag and wrapping the sentinel.
+func defaultTagRefusal() error {
+	return fmt.Errorf("%w: a template cannot be bound to the %q tag — every sandbox you create carries "+
+		"that tag, so this snapshot would silently become the base image for all of them.",
+		templates.ErrInvalidBinding, secrets.DefaultTag)
+}
+
+func (f *fakeTemplateTags) Bind(owner, tag, snapshot string) (templates.Binding, string, error) {
+	f.c.add("Bind %s tag=%s snapshot=%s", owner, tag, snapshot)
+	if f.err != nil {
+		return templates.Binding{}, "", f.err
+	}
+	if strings.EqualFold(tag, secrets.DefaultTag) {
+		return templates.Binding{}, "", defaultTagRefusal()
+	}
+	prev := ""
+	if old, ok := f.rows[bindKey(owner, tag)]; ok {
+		prev = old.Snapshot
+	}
+	b := templates.Binding{Owner: owner, Tag: tag, Snapshot: snapshot, CreatedAt: time.Unix(0, 0).UTC()}
+	f.rows[bindKey(owner, tag)] = b
+	return b, prev, nil
+}
+
+func (f *fakeTemplateTags) Unbind(owner, tag string) (templates.Binding, error) {
+	f.c.add("Unbind %s tag=%s", owner, tag)
+	if f.err != nil {
+		return templates.Binding{}, f.err
+	}
+	b, ok := f.rows[bindKey(owner, tag)]
+	if !ok {
+		return templates.Binding{}, templates.ErrNoSuchBinding
+	}
+	delete(f.rows, bindKey(owner, tag))
+	return b, nil
+}
+
+func (f *fakeTemplateTags) BindingsForOwner(owner string) ([]templates.Binding, error) {
+	f.c.add("BindingsForOwner %s", owner)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.selectRows(owner, nil), nil
+}
+
+func (f *fakeTemplateTags) BindingsForTags(owner string, tags []string) ([]templates.Binding, error) {
+	f.c.add("BindingsForTags %s tags=%v", owner, tags)
+	if len(tags) == 0 {
+		// The store answers without touching the database, and the resolver
+		// leans on that: an untagged create must not pay a query.
+		return nil, nil
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	want := map[string]bool{}
+	for _, t := range tags {
+		want[t] = true
+	}
+	return f.selectRows(owner, want), nil
+}
+
+// selectRows returns the owner's bindings ordered by tag, which is the store's
+// ORDER BY and the reason the ambiguity message reads the same way every time.
+func (f *fakeTemplateTags) selectRows(owner string, want map[string]bool) []templates.Binding {
+	var out []templates.Binding
+	for _, b := range f.rows {
+		if b.Owner != owner || (want != nil && !want[b.Tag]) {
+			continue
+		}
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Tag < out[j].Tag })
+	return out
+}
+
+// bind is the test-only seeder: it writes a row without going through Ops, so a
+// test can set up a binding without recording a Bind call it would then have to
+// filter out of its own assertions.
+func (f *fakeTemplateTags) bind(owner, tag, snapshot string) {
+	f.rows[bindKey(owner, tag)] = templates.Binding{
+		Owner: owner, Tag: tag, Snapshot: snapshot, CreatedAt: time.Unix(0, 0).UTC(),
+	}
+}
+
+// ---------------------------------------------------------------------------
+
 type rig struct {
 	ops         *Ops
 	calls       *calls
@@ -812,6 +934,7 @@ type rig struct {
 	minter      *fakeMinter
 	github      *fakeGitHub
 	secrets     *fakeSecrets
+	bindings    *fakeTemplateTags
 	nodes       *fakeNodes
 	hivemind    *fakeHiveMind
 }
@@ -869,7 +992,8 @@ func newRig(t *testing.T) *rig {
 		},
 	}}
 	tmpl := &fakeTemplates{c: c, on: true, boxes: boxes, snaps: map[string]*host.Snapshot{
-		"alice/alicesnap": {Name: "alicesnap", Owner: "alice", FromBox: "alicebox", CreatedAt: now},
+		"alice/alicesnap": {Name: "alicesnap", Owner: "alice", FromBox: "alicebox",
+			Image: "snap-alice-alicesnap", CreatedAt: now},
 	}}
 	accts := &fakeAccounts{
 		c: c,
@@ -900,6 +1024,7 @@ func newRig(t *testing.T) *rig {
 	gh := &fakeGitHub{c: c, keys: map[string][]xssh.PublicKey{}}
 	checkpoints := &fakeCheckpoints{c: c, enabled: map[string]bool{"alicebox": true}}
 	secretStore := &fakeSecrets{c: c, vals: map[string]string{}, tags: map[string][]string{}, boxes: tagger}
+	bindings := &fakeTemplateTags{c: c, rows: map[string]templates.Binding{}}
 	hm := &fakeHiveMind{}
 
 	ops := New(Config{
@@ -907,6 +1032,7 @@ func newRig(t *testing.T) *rig {
 		Checkpoints: checkpoints,
 		Tags:        tagger, Schedules: sched, Routes: rt, Sessions: minter, GitHub: gh,
 		Secrets:      secretStore,
+		TemplateTags: bindings,
 		HiveMind:     hm,
 		DefaultImage: "base", Domain: "example.test", XtermSubdomain: "xterm",
 		InvitesPerUser: 0,
@@ -918,7 +1044,7 @@ func newRig(t *testing.T) *rig {
 
 	return &rig{ops: ops, calls: c, boxes: boxes, checkpoints: checkpoints, tmpl: tmpl, accts: accts,
 		tagger: tagger, sched: sched, routes: rt, minter: minter, github: gh, secrets: secretStore,
-		hivemind: hm}
+		bindings: bindings, hivemind: hm}
 }
 
 func alice() Caller   { return Caller{Handle: "alice"} }

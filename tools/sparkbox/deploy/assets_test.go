@@ -1,8 +1,11 @@
 package deploy
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -115,6 +118,15 @@ func installGuestPayload(t *testing.T, tree string) {
 	}
 }
 
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 func guestFile(t *testing.T, tree, name string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join(tree, name))
@@ -146,12 +158,42 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		// without passwordless sudo degrades instead of hanging on a prompt.
 		"sudo -n /usr/local/sbin/sparkbox-repos",
 		"sudo -n true",
+		// `update-tools` delegates the same way and for the same reason: the
+		// installer writes /usr/local/bin, /usr/local/lib and /var/lib/sparkbox,
+		// none of which the login user owns, so an unprivileged run would
+		// download 150MB and then fail on its first install.
+		"SB=/usr/local/sbin/sparkbox-update-tools",
+		"sudo -n /usr/local/sbin/sparkbox-update-tools",
+		"exec $SB --check",
+		// The two verbs that can end the session go through _call, which reads
+		// the status from -w '%{http_code}' instead of letting `curl -f` throw
+		// the host's own sentence away. A `-f` here would be a regression that
+		// no output test elsewhere could catch, because -f hides exactly the
+		// text those tests read.
+		"$META/self/pause",
+		"$META/self/snapshot?tag=",
+		"-w '%{http_code}'",
+		// The commit sends the PLAN's tag, name and token, never values the
+		// shell re-derived: the derived name carries a minute in it.
+		"plan=$SPARKBOX_PLAN",
+		// The sync is not optional. A pause freezes dirty page cache into the
+		// MEMORY snapshot while the capture reads the BLOCK DEVICE, so an
+		// unflushed write is present on resume and absent from the template.
+		"sync; printf 'ok\\n'",
 	} {
 		if !strings.Contains(cli, want) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=9\n" {
+	// The usage line is the only discovery surface an agent in a VM has for
+	// these verbs, so a verb that is not in it is a verb nobody finds.
+	if !strings.Contains(cli, "update-tools [--check]>") {
+		t.Errorf("guest CLI usage line does not mention update-tools:\n%s", cli)
+	}
+	if !strings.Contains(cli, "pause|snapshot [--yes] [TAG [NAME]]|") {
+		t.Errorf("guest CLI usage line does not mention pause or snapshot:\n%s", cli)
+	}
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=12\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -517,6 +559,381 @@ func TestRepoWorkerClonesForTheUserAndLeavesCheckoutsAlone(t *testing.T) {
 	}
 }
 
+// toolsManifestFields is the wire contract between the two scripts in this
+// directory: refresh-agent-tools.sh's write_tools_manifest emits these keys and
+// install-guest-identity.sh's sparkbox-update-tools reads them back. Nothing
+// else joins the two — the manifest travels through internal/metadata as opaque
+// bytes — so a field renamed on one side and not the other produces an install
+// that silently skips whatever that field decided.
+var toolsManifestFields = []string{
+	"name", "key", "version", "file", "sha256", "size",
+	"kind", "bin", "dir", "exec", "link", "keep_only", "drop",
+}
+
+func TestToolsManifestFieldsAppearOnBothSidesOfTheWire(t *testing.T) {
+	for _, field := range toolsManifestFields {
+		quoted := `"` + field + `"`
+		if !strings.Contains(string(RefreshToolsScript), quoted) {
+			t.Errorf("refresh-agent-tools.sh never writes a %s field", quoted)
+		}
+		if !strings.Contains(string(GuestIdentityScript), quoted) {
+			t.Errorf("the guest updater never reads a %s field", quoted)
+		}
+	}
+	// The guest's stamp and the host's are different files with different
+	// meanings, and the guest owns only the first. /etc/sparkbox/tools-rev is
+	// what refresh-agent-tools.sh reads back with debugfs to decide which
+	// templates to patch; a guest writing its own versions there would make the
+	// next refresh believe a template was current that it never patched.
+	if !strings.Contains(string(GuestIdentityScript), "/var/lib/sparkbox/tools-rev") {
+		t.Error("the guest updater keeps no stamp of its own at /var/lib/sparkbox/tools-rev")
+	}
+}
+
+// writeTarGz builds one of the bundle artifacts the refresher caches, so the
+// guest's tar path (strip-components, the bin/ prune, the exec bit npm does not
+// set) runs against a real archive rather than a directory copy.
+func writeTarGz(t *testing.T, path string, files []struct {
+	name string
+	body string
+	mode int64
+}) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for _, file := range files {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: file.name, Mode: file.mode, Size: int64(len(file.body)), Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(file.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hostToolsCache builds the $TOOLS_DIR a refresher run leaves behind, and
+// writes the manifest with refresh-agent-tools.sh's OWN writer rather than a
+// hand-rolled copy of it. That is the point of this helper: the guest parses
+// JSON with tr+awk and no library, so the only assertion worth making is that
+// the bytes the host actually emits are the bytes the guest can actually read.
+//
+// The versions are deliberately absurd (9.9.9) so nothing here can accidentally
+// agree with a real release, and the arch is pinned so the fixture is the same
+// on an x86 CI runner and an arm64 laptop.
+func hostToolsCache(t *testing.T) string {
+	t.Helper()
+	for _, tool := range []string{"python3", "sha256sum", "tar"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("no %s on this machine; the guest updater needs it", tool)
+		}
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"claude-9.9.9-linux-arm64":   "#!/bin/sh\necho claude 9.9.9\n",
+		"codex-rust-v9.9.9-aarch64":  "#!/bin/sh\necho codex\n",
+		"hivemind-9.9.9-linux-arm64": "#!/bin/sh\necho hivemind\n",
+	} {
+		writeExecutable(t, filepath.Join(dir, name), body)
+	}
+	type entry = struct {
+		name string
+		body string
+		mode int64
+	}
+	// pi's bundle: the executable is not alone in it, which is why the guest
+	// installs the tree and links into it.
+	writeTarGz(t, filepath.Join(dir, "pi-v9.9.9-linux-arm64.tar.gz"), []entry{
+		{"pi-v9.9.9/pi", "#!/bin/sh\necho pi\n", 0o755},
+		{"pi-v9.9.9/lib/data", "runtime asset\n", 0o644},
+	})
+	// agent-browser's: seven platform binaries in upstream, two here, plus the
+	// scripts/ directory whose postinstall we never run and the SKILL.md the
+	// harnesses link to. Mode 0644 on bin/* is what npm really publishes.
+	writeTarGz(t, filepath.Join(dir, "agent-browser-9.9.9.tgz"), []entry{
+		{"package/bin/agent-browser-linux-arm64", "#!/bin/sh\necho ab\n", 0o644},
+		{"package/bin/agent-browser-linux-x64", strings.Repeat("x", 512), 0o644},
+		{"package/bin/agent-browser.js", "require('./x')\n", 0o644},
+		{"package/scripts/postinstall.js", "chmod()\n", 0o644},
+		{"package/skills/agent-browser/SKILL.md", "# agent-browser 9.9.9\n", 0o644},
+		{"package/skill-data/core.md", "the command reference\n", 0o644},
+	})
+
+	script := string(RefreshToolsScript)
+	const marker = "\nwrite_tools_manifest() {\n"
+	i := strings.Index(script, marker)
+	if i < 0 {
+		t.Fatal("refresh-agent-tools.sh no longer defines write_tools_manifest")
+	}
+	const end = "\nPY\n}\n"
+	j := strings.Index(script[i:], end)
+	if j < 0 {
+		t.Fatal("write_tools_manifest is unterminated")
+	}
+	driver := `set -euo pipefail
+TOOLS_DIR=$1
+CLAUDE_BIN="$TOOLS_DIR/claude-9.9.9-linux-arm64"
+CODEX_BIN="$TOOLS_DIR/codex-rust-v9.9.9-aarch64"
+PI_BUNDLE="$TOOLS_DIR/pi-v9.9.9-linux-arm64.tar.gz"
+HM_BIN="$TOOLS_DIR/hivemind-9.9.9-linux-arm64"
+AB_TGZ="$TOOLS_DIR/agent-browser-9.9.9.tgz"
+CLAUDE_VER=9.9.9; CODEX_TAG=rust-v9.9.9; PI_TAG=v9.9.9; HM_VER=9.9.9; AB_VER=9.9.9
+AB_ARCH=arm64
+TOOLS_REV="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER agentbrowser=$AB_VER"
+` + script[i+1:i+j+len(end)] + `
+write_tools_manifest
+`
+	cmd := exec.Command("bash", "-c", driver, "manifest", dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write_tools_manifest: %v\n%s", err, out)
+	}
+
+	// The host serves each artifact under the tool's NAME and resolves the file
+	// through the manifest; these links are that indirection, so the fixture
+	// cannot accidentally pass by the guest guessing a filename.
+	if err := os.Mkdir(filepath.Join(dir, "by-name"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, file := range map[string]string{
+		"claude":        "claude-9.9.9-linux-arm64",
+		"codex":         "codex-rust-v9.9.9-aarch64",
+		"pi":            "pi-v9.9.9-linux-arm64.tar.gz",
+		"hivemind":      "hivemind-9.9.9-linux-arm64",
+		"agent-browser": "agent-browser-9.9.9.tgz",
+	} {
+		if err := os.Symlink(filepath.Join("..", file), filepath.Join(dir, "by-name", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// guestUpdater installs the payload into a fake rootfs, stubs the two host
+// commands the updater shells out to, and returns a runner for the INSTALLED
+// script — so the @@META_PORT@@ and @@SANDBOX_USER@@ substitutions are covered
+// the way the repo worker's are.
+func guestUpdater(t *testing.T, cache string) (root string, run func(args ...string) (string, error)) {
+	t.Helper()
+	root = fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	// What this VM booted with. The updater may read it and must never write it.
+	if err := os.WriteFile(filepath.Join(root, "etc/sparkbox/tools-rev"),
+		[]byte("claude=1.0.0 codex=rust-v1.0.0 pi=v1.0.0 hivemind=1.0.0 agentbrowser=1.0.0 identity=10 agentenv=10\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	skills := filepath.Join(root, "home/sparky/.agents/skills/agent-browser")
+	if err := os.MkdirAll(skills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skills, "SKILL.md"), []byte("# agent-browser 1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "ip"), `#!/bin/sh
+[ "$1" = -4 ] && echo "default via 10.0.0.1 dev eth0"
+`)
+	// Serves $SPARKBOX_TEST_CACHE, honouring the two call shapes the updater
+	// makes: the -w '%{http_code}' probe for the manifest and the -o fetch for
+	// an artifact.
+	writeExecutable(t, filepath.Join(bin, "curl"), `#!/bin/sh
+out=; url=; code=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-o) out=$2; shift 2 ;;
+		-w) code=1; shift 2 ;;
+		http*) url=$1; shift ;;
+		*) shift ;;
+	esac
+done
+name=${url##*/}
+src="$SPARKBOX_TEST_CACHE/by-name/$name"
+[ "$name" = manifest ] && src="$SPARKBOX_TEST_CACHE/manifest.json"
+if [ -f "$src" ]; then
+	if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
+	if [ "$code" = 1 ]; then printf '200'; fi
+	exit 0
+fi
+if [ "$code" = 1 ]; then printf '404'; fi
+exit 22
+`)
+	run = func(args ...string) (string, error) {
+		cmd := exec.Command("sh", append([]string{filepath.Join(root, "usr/local/sbin/sparkbox-update-tools")}, args...)...)
+		// Prepend, never replace: the script also runs awk, tar, install and
+		// sha256sum, and a PATH holding only the stubs would fail every branch.
+		cmd.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"SPARKBOX_TEST_CACHE="+cache,
+			"SPARKBOX_TOOLS_ROOT="+root,
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	return root, run
+}
+
+// TestGuestToolUpdaterInstallsFromTheHostCache is the end-to-end half of this
+// stage: the host's own manifest writer feeds the guest's own installer, and
+// what lands on disk is what the patch loop would have baked into a template.
+//
+// The properties that are not obvious, and that this exists to hold:
+//   - pi and agent-browser install as BUNDLES reached by a relative symlink.
+//     Copying the executable out gives a CLI whose every `skills` subcommand
+//     fails, because both resolve their assets against the real binary's path.
+//   - agent-browser's bin/ is pruned to the one platform this box runs. Upstream
+//     ships seven, ~92MB of ~13MB useful, and in a guest those bytes come out of
+//     that VM's own 25 GiB ceiling and its owner's pool, once per sandbox.
+//   - the exec bit is ours to set: npm publishes bin/* mode 0644 and chmods them
+//     from a postinstall this never runs.
+//   - the stamp the guest writes is its own, at /var/lib/sparkbox/tools-rev.
+func TestGuestToolUpdaterInstallsFromTheHostCache(t *testing.T) {
+	cache := hostToolsCache(t)
+	root, run := guestUpdater(t, cache)
+	template := guestFile(t, root, "etc/sparkbox/tools-rev")
+
+	// --check first, on a VM that has never updated: the versions it reports as
+	// installed can only have come from the template's stamp, and the identity=
+	// and agentenv= words in it must not be along for the ride.
+	out, err := run("--check")
+	if err == nil {
+		t.Errorf("--check exited 0 with five tools behind:\n%s", out)
+	}
+	for _, want := range []string{"claude", "1.0.0", "9.9.9", "behind", "agent-browser", "rust-v9.9.9"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--check output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "identity") || strings.Contains(out, "agentenv") {
+		t.Errorf("--check reports host-only payload words it cannot install:\n%s", out)
+	}
+
+	if out, err := run(); err != nil {
+		t.Fatalf("update-tools: %v\n%s", err, out)
+	}
+
+	// A plain binary, byte-identical and executable.
+	claude := filepath.Join(root, "usr/local/bin/claude")
+	if got := guestFile(t, root, "usr/local/bin/claude"); got != "#!/bin/sh\necho claude 9.9.9\n" {
+		t.Errorf("installed claude = %q", got)
+	}
+	if info, serr := os.Stat(claude); serr != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("installed claude mode = %v (%v), want 0755", info.Mode().Perm(), serr)
+	}
+
+	// The two bundles, each reached by the manifest's own relative link.
+	for bin, wantTarget := range map[string]string{
+		"usr/local/bin/pi":            "../lib/pi/pi",
+		"usr/local/bin/agent-browser": "../lib/agent-browser/bin/agent-browser-linux-arm64",
+	} {
+		target, lerr := os.Readlink(filepath.Join(root, bin))
+		if lerr != nil {
+			t.Errorf("%s is not a symlink into its bundle: %v", bin, lerr)
+			continue
+		}
+		if target != wantTarget {
+			t.Errorf("%s -> %q, want the manifest's own %q", bin, target, wantTarget)
+		}
+	}
+	if got := guestFile(t, root, "usr/local/lib/pi/lib/data"); got != "runtime asset\n" {
+		t.Errorf("pi's bundle lost its runtime assets: %q", got)
+	}
+
+	// The prune, and the exec bit npm leaves off.
+	abBin := filepath.Join(root, "usr/local/lib/agent-browser/bin")
+	names, err := os.ReadDir(abBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0].Name() != "agent-browser-linux-arm64" {
+		var got []string
+		for _, e := range names {
+			got = append(got, e.Name())
+		}
+		t.Errorf("agent-browser bin/ = %v, want only this box's platform binary", got)
+	}
+	if info, serr := os.Stat(filepath.Join(abBin, "agent-browser-linux-arm64")); serr != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("agent-browser binary mode = %v (%v), want 0755", info.Mode().Perm(), serr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "usr/local/lib/agent-browser/scripts")); !os.IsNotExist(serr) {
+		t.Errorf("agent-browser's scripts/ survived the install (%v); its postinstall never runs", serr)
+	}
+	// The skill stub has to track the CLI it describes, but only where the
+	// template already wired one up.
+	if got := guestFile(t, root, "home/sparky/.agents/skills/agent-browser/SKILL.md"); got != "# agent-browser 9.9.9\n" {
+		t.Errorf("harness SKILL.md = %q, want the installed bundle's copy", got)
+	}
+
+	// The guest's own stamp, and the host's decision variable left alone.
+	wantStamp := "claude=9.9.9 codex=rust-v9.9.9 pi=v9.9.9 hivemind=9.9.9 agentbrowser=9.9.9\n"
+	if got := guestFile(t, root, "var/lib/sparkbox/tools-rev"); got != wantStamp {
+		t.Errorf("guest stamp = %q, want %q", got, wantStamp)
+	}
+	if got := guestFile(t, root, "etc/sparkbox/tools-rev"); got != template {
+		t.Errorf("the guest wrote the TEMPLATE's stamp (%q, was %q); refresh-agent-tools.sh reads that file "+
+			"back to decide which templates to patch, so a guest writing it makes a template read as current "+
+			"that was never patched", got, template)
+	}
+
+	out, err = run("--check")
+	if err != nil {
+		t.Errorf("--check after a successful update: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "behind") {
+		t.Errorf("--check still reports a tool behind after installing it:\n%s", out)
+	}
+}
+
+// TestGuestToolUpdaterRefusesBytesTheManifestDoesNotDescribe: this is the only
+// check on artifacts that are about to become every agent in the VM, and it has
+// to happen BEFORE the install — a truncated `claude` that has already replaced
+// the working one cannot be repaired from inside the sandbox. One bad artifact
+// must also not take the other four down with it.
+func TestGuestToolUpdaterRefusesBytesTheManifestDoesNotDescribe(t *testing.T) {
+	for name, swap := range map[string]string{
+		// Same length, different bytes: only the digest can tell.
+		"a substituted artifact": "#!/bin/sh\necho claude 9.9.8\n",
+		// Short: what a body cut off by the host's write deadline looks like.
+		"a truncated download": "#!/bin/sh\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cache := hostToolsCache(t)
+			if err := os.WriteFile(filepath.Join(cache, "claude-9.9.9-linux-arm64"), []byte(swap), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			root, run := guestUpdater(t, cache)
+
+			out, err := run()
+			if err == nil {
+				t.Errorf("update-tools exited 0 after refusing an artifact:\n%s", out)
+			}
+			if _, serr := os.Stat(filepath.Join(root, "usr/local/bin/claude")); !os.IsNotExist(serr) {
+				t.Errorf("claude was installed from bytes the manifest does not describe (%v)", serr)
+			}
+			// The other four are independent and must still land.
+			if got := guestFile(t, root, "usr/local/bin/codex"); got != "#!/bin/sh\necho codex\n" {
+				t.Errorf("one refused artifact took codex down with it: %q", got)
+			}
+			// And the stamp keeps claude at what is actually on this disk.
+			if got := guestFile(t, root, "var/lib/sparkbox/tools-rev"); !strings.Contains(got, "claude=1.0.0") {
+				t.Errorf("guest stamp = %q, want claude still recorded at the version it actually has", got)
+			}
+		})
+	}
+}
+
 // TestTokenLandsBeforeAnythingReadsIt pins WHO owns the boot fetch, which is
 // not a tuning question but the difference between a guest having a token at
 // startup and not.
@@ -655,7 +1072,11 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// The unlinked case is real and supported, and it is the one case
 		// where the agent must NOT leave the author alone — it must ask.
 		"ask them to run `git config --global user.name`",
-		"AGENT_ENV_REV=9",
+		// The tools in a VM are its template's, frozen on the day that template
+		// was patched, and every agent's own updater is off. An agent that does
+		// not know the pull exists has no way to move them.
+		"sparkbox update-tools --check",
+		"AGENT_ENV_REV=10",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
@@ -1150,5 +1571,439 @@ func TestGuestGHWrapperYieldsToAnExplicitToken(t *testing.T) {
 		if strings.Contains(token, "slug=") {
 			t.Errorf("%s: the wrapper overrode an explicit token with %q", kv, token)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The in-guest lifecycle verbs, driven for real
+// ---------------------------------------------------------------------------
+
+// guestSelfService installs the payload and returns a runner for the INSTALLED
+// /usr/local/bin/sparkbox against a stubbed metadata endpoint.
+//
+// This is the half `go test ./...` cannot otherwise reach. The exit-code table
+// and the "never print success when it was refused" rule live entirely in
+// POSIX sh, and both are frozen into every template this feature captures — a
+// box forked from one can never be fixed in place — so they are pinned here by
+// running the script rather than by reading it.
+//
+// reply(method, code, headers, body) stages what the fake curl answers.
+func guestSelfService(t *testing.T) (
+	reply func(method, code, headers, body string),
+	requests func() []string,
+	run func(args ...string) (stdout, stderr string, code int),
+) {
+	t.Helper()
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+
+	fixtures := t.TempDir()
+	log := filepath.Join(fixtures, "requests.log")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "ip"), `#!/bin/sh
+[ "$1" = -4 ] && echo "default via 10.0.0.1 dev eth0"
+`)
+	// Honours the exact call shape _call makes: -D headers, -o body,
+	// -w '%{http_code}', -X METHOD. A staged code of 000 stands for a
+	// connection that died, which real curl reports by exiting non-zero.
+	writeExecutable(t, filepath.Join(bin, "curl"), `#!/bin/sh
+out=; hdr=; method=GET; url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -D) hdr=$2; shift 2 ;;
+    -X) method=$2; shift 2 ;;
+    http*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+echo "$method $url" >> "$SPARKBOX_TEST_LOG"
+d=$SPARKBOX_TEST_DIR/$method
+code=$(cat "$d.code" 2>/dev/null || echo 200)
+[ -n "$hdr" ] && [ -f "$d.headers" ] && cp "$d.headers" "$hdr"
+if [ -f "$d.body" ]; then
+  if [ -n "$out" ]; then cp "$d.body" "$out"; else cat "$d.body"; fi
+fi
+if [ "$code" = 000 ]; then exit 7; fi
+printf '%s' "$code"
+`)
+
+	reply = func(method, code, headers, body string) {
+		t.Helper()
+		for suffix, content := range map[string]string{".code": code, ".headers": headers, ".body": body} {
+			if err := os.WriteFile(filepath.Join(fixtures, method+suffix), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	requests = func() []string {
+		body, err := os.ReadFile(log)
+		if err != nil {
+			return nil
+		}
+		return strings.Fields(strings.TrimSpace(strings.ReplaceAll(string(body), "\n", " ")))
+	}
+	run = func(args ...string) (string, string, int) {
+		t.Helper()
+		cmd := exec.Command("sh", append([]string{filepath.Join(root, "usr/local/bin/sparkbox")}, args...)...)
+		// Prepend, never replace: the script also runs sed, tr and sync.
+		cmd.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"SPARKBOX_TEST_DIR="+fixtures,
+			"SPARKBOX_TEST_LOG="+log)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		exit := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exit = ee.ExitCode()
+		} else if err != nil {
+			t.Fatalf("run sparkbox %v: %v", args, err)
+		}
+		return stdout.String(), stderr.String(), exit
+	}
+	return reply, requests, run
+}
+
+const guestPlanHeaders = "HTTP/1.1 200 OK\r\n" +
+	"Sparkbox-Tag: web\r\n" +
+	"Sparkbox-Snapshot: web-260829-1412\r\n" +
+	"Sparkbox-Plan: tok-abc\r\n" +
+	"Sparkbox-Ctl: ssh ctl@catnip.sh\r\n\r\n"
+
+const guestPlanBody = "\n  this sandbox   quiet-lake   tags: default, web\n  capture as     web-260829-1412   (new)\n"
+
+// TestGuestCaptureSendsThePlansOwnValuesBack: the commit must carry the tag,
+// the name and the token the PLAN reported, never anything re-derived in the
+// shell. The derived name has a minute in it, so a slow prompt is all it would
+// take to capture under a name nobody was shown.
+func TestGuestCaptureSendsThePlansOwnValuesBack(t *testing.T) {
+	reply, requests, run := guestSelfService(t)
+	reply("GET", "200", guestPlanHeaders, guestPlanBody)
+	reply("POST", "202", "HTTP/1.1 202 Accepted\r\n\r\n",
+		"accepted — capturing quiet-lake as web-260829-1412, then binding `web` to it.\n")
+
+	stdout, stderr, code := run("snapshot", "web", "--yes")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	// The host's own body, both halves, printed verbatim.
+	for _, want := range []string{"this sandbox   quiet-lake", "flushing writes… ok", "accepted — capturing"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	// The happy path must NOT print a transport error. Before the host learned
+	// to answer before it pauses, this is exactly what it printed instead.
+	if stderr != "" {
+		t.Errorf("the happy path wrote to stderr:\n%s", stderr)
+	}
+	got := requests()
+	if len(got) != 4 || got[0] != "GET" || got[2] != "POST" {
+		t.Fatalf("requests = %v, want a GET plan then a POST commit", got)
+	}
+	if !strings.Contains(got[1], "/self/snapshot?tag=web&name=") {
+		t.Errorf("the plan was not asked for: %s", got[1])
+	}
+	for _, want := range []string{"tag=web", "name=web-260829-1412", "plan=tok-abc"} {
+		if !strings.Contains(got[3], want) {
+			t.Errorf("the commit URL %s does not carry the plan's %s", got[3], want)
+		}
+	}
+}
+
+// TestGuestCaptureWantsATerminalToConfirmAt. The thing being warned about is the
+// destruction of the terminal displaying the warning, so with nobody there to
+// read it the answer is no. It costs a legitimate script one flag.
+func TestGuestCaptureWantsATerminalToConfirmAt(t *testing.T) {
+	reply, requests, run := guestSelfService(t)
+	reply("GET", "200", guestPlanHeaders, guestPlanBody)
+
+	stdout, stderr, code := run("snapshot", "web")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	// The warnings still print, so the session log holds the record.
+	if !strings.Contains(stdout, "this sandbox   quiet-lake") {
+		t.Errorf("the plan was not printed:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "Re-run with --yes if you meant it") ||
+		!strings.Contains(stderr, "sparkbox snapshot web --yes") {
+		t.Errorf("stderr does not name the flag or the tag:\n%s", stderr)
+	}
+	if got := requests(); len(got) != 2 || got[0] != "GET" {
+		t.Errorf("requests = %v — nothing may be committed without a confirmation", got)
+	}
+}
+
+// TestGuestVerbsPrintTheHostsOwnRefusal is the reason these two verbs drop
+// `curl -f`: -f throws the body away, and the body is the only place the host's
+// explanation exists. Every other verb still prints curl's generic "returned
+// error: 409" instead of the reason.
+func TestGuestVerbsPrintTheHostsOwnRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, body string
+		wantExit           int
+	}{
+		{"invalid", "400", "sparkbox: invalid tag \"Web_1\" (want [a-z0-9][a-z0-9-]*, max 40 chars)\n", 2},
+		{"denied", "403", "sparkbox: quiet-lake does not carry the tag `cuda`.\n", 3},
+		{"conflict", "409", "sparkbox: a snapshot named \"web-260829-1412\" already exists.\n", 4},
+		{"rate limited", "429", "sparkbox: too many captures from this sandbox (3 per hour).\n", 4},
+		{"unsupported", "501", "sparkbox: this host cannot capture templates.\n", 5},
+		{"gateway down", "503", "sparkbox: the gateway that owns your tags is not reachable right now.\n", 75},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reply, requests, run := guestSelfService(t)
+			reply("GET", tc.status, "HTTP/1.1 "+tc.status+"\r\n\r\n", tc.body)
+
+			stdout, stderr, code := run("snapshot", "cuda", "--yes")
+			if code != tc.wantExit {
+				t.Errorf("exit = %d, want %d", code, tc.wantExit)
+			}
+			if stderr != tc.body {
+				t.Errorf("stderr = %q, want the host's sentence %q", stderr, tc.body)
+			}
+			if stdout != "" {
+				t.Errorf("a refusal printed to stdout: %q", stdout)
+			}
+			if got := requests(); len(got) != 2 {
+				t.Errorf("requests = %v — a refused plan must not be committed", got)
+			}
+		})
+	}
+}
+
+// TestGuestVerbsNeverReportSuccessAfterATransportFailure. This is the one case
+// the guest genuinely cannot resolve — the reply was written and lost, or never
+// written — and the whole requirement is that it claims nothing and exits
+// non-zero.
+func TestGuestVerbsNeverReportSuccessAfterATransportFailure(t *testing.T) {
+	for _, verb := range [][]string{{"pause"}, {"snapshot", "web", "--yes"}} {
+		t.Run(verb[0], func(t *testing.T) {
+			reply, _, run := guestSelfService(t)
+			reply("GET", "000", "", "")
+			reply("POST", "000", "", "")
+
+			stdout, stderr, code := run(verb...)
+			if code != 75 {
+				t.Errorf("exit = %d, want 75", code)
+			}
+			if !strings.Contains(stderr, "stopped answering before it confirmed") {
+				t.Errorf("stderr does not say the outcome is unknown:\n%s", stderr)
+			}
+			// The guest does not know its own domain, so the fallback that gets
+			// printed when no reply arrived has to be a placeholder rather than a
+			// guess at a gateway name.
+			if !strings.Contains(stderr, "ssh ctl@<gateway> snapshot ls") {
+				t.Errorf("stderr does not point at where the truth is:\n%s", stderr)
+			}
+			if strings.Contains(stdout, "accepted") || strings.Contains(stdout, "pausing") {
+				t.Errorf("it reported success after the connection died:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// TestGuestPauseIsAcknowledgedBeforeItStops: the host answers first and the
+// guest prints that answer. The verb exists precisely so a person does not have
+// to read a curl error and guess whether their box stopped.
+func TestGuestPauseIsAcknowledgedBeforeItStops(t *testing.T) {
+	reply, requests, run := guestSelfService(t)
+	reply("POST", "202", "HTTP/1.1 202 Accepted\r\n\r\n",
+		"pausing quiet-lake — memory and processes are snapshotted, so\n`ssh quiet-lake.catnip.sh` picks up exactly here.\n")
+
+	stdout, stderr, code := run("pause")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "pausing quiet-lake") {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if got := requests(); len(got) != 2 || got[0] != "POST" || !strings.HasSuffix(got[1], "/self/pause") {
+		t.Errorf("requests = %v", got)
+	}
+}
+
+func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
+	for _, args := range [][]string{{"snapshot", "--wat"}, {"snapshot", "web", "a", "b"}} {
+		reply, requests, run := guestSelfService(t)
+		reply("GET", "200", guestPlanHeaders, guestPlanBody)
+		_, stderr, code := run(args...)
+		if code != 2 {
+			t.Errorf("%v: exit = %d, want 2", args, code)
+		}
+		if !strings.Contains(stderr, "usage: sparkbox snapshot [--yes] [TAG [NAME]]") {
+			t.Errorf("%v: stderr = %q", args, stderr)
+		}
+		if got := requests(); len(got) != 0 {
+			t.Errorf("%v: a malformed invocation reached the host: %v", args, got)
+		}
+	}
+}
+
+// TestGuestForkIdentityResetRunsAgainstATree exercises the installed script the
+// way the guest does, because every property worth pinning is a property of
+// what it does to a filesystem rather than of the text that produces it.
+//
+// This is the hook that replaced the host's loop mount. Capturing a template
+// used to end with the host mounting the captured ext4 and deleting these same
+// paths, and that mount is what CKS refuses outright — so the whole snapshot
+// feature was refused with it. Nothing here needs host enforcement: a template
+// is bound (owner, tag) and masked from every other owner, so the only person
+// who boots it is the person who made it. See docs/cks-snapshot-design.md.
+func TestGuestForkIdentityResetRunsAgainstATree(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+	script := filepath.Join(root, "usr/local/sbin/sparkbox-identity-reset")
+
+	// guest builds a rootfs already carrying an identity, and cmdline is what
+	// the HOST says this boot is — the two inputs whose disagreement is the
+	// whole signal.
+	type guest struct{ dir string }
+	newGuest := func(t *testing.T, stamp string) guest {
+		t.Helper()
+		dir := t.TempDir()
+		for _, sub := range []string{"etc/ssh", "var/lib/dbus", "var/lib/sparkbox"} {
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write := func(rel, body string) {
+			if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write("etc/ssh/ssh_host_ed25519_key", "PARENT PRIVATE KEY")
+		write("etc/ssh/ssh_host_rsa_key", "PARENT PRIVATE KEY")
+		write("etc/machine-id", "00000000000000000000000000000001\n")
+		write("var/lib/dbus/machine-id", "00000000000000000000000000000001\n")
+		if stamp != "" {
+			write("var/lib/sparkbox/sandbox", stamp+"\n")
+		}
+		return guest{dir: dir}
+	}
+	run := func(t *testing.T, g guest, cmdline string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "cmdline")
+		if err := os.WriteFile(path, []byte(cmdline), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", script)
+		cmd.Env = append(os.Environ(), "SPARKBOX_ROOT="+g.dir, "SPARKBOX_CMDLINE="+path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("identity reset: %v\n%s", err, out)
+		}
+	}
+	hostKeys := func(t *testing.T, g guest) []string {
+		t.Helper()
+		found, err := filepath.Glob(filepath.Join(g.dir, "etc/ssh/ssh_host_*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	const forkCmdline = "console=ttyS0 quiet sparkbox_host=forked-box systemd.machine_id=aabbccddeeff00112233445566778899"
+
+	t.Run("a fork sheds the identity it inherited", func(t *testing.T) {
+		g := newGuest(t, "parent-box")
+		run(t, g, forkCmdline)
+
+		// Replaced, not merely deleted: the script generates the new pair
+		// itself rather than trusting a later unit to notice they are missing.
+		// A fork with NO host keys is an unreachable box — sshd exits on "no
+		// hostkeys available" — which is a worse outcome than the one this
+		// whole hook exists to prevent.
+		keys := hostKeys(t, g)
+		if len(keys) == 0 {
+			t.Fatal("a fork was left with no SSH host keys at all; sshd exits on \"no hostkeys available\" and the sandbox is unreachable")
+		}
+		for _, k := range keys {
+			if strings.Contains(string(readFile(t, k)), "PARENT PRIVATE KEY") {
+				t.Errorf("%s still holds the parent's key material; anyone who can reach both boxes can impersonate either", k)
+			}
+		}
+		if got := guestFile(t, g.dir, "etc/machine-id"); got != "aabbccddeeff00112233445566778899\n" {
+			t.Errorf("machine-id = %q, want the one the host put on the cmdline", got)
+		}
+		if _, err := os.Stat(filepath.Join(g.dir, "var/lib/dbus/machine-id")); !os.IsNotExist(err) {
+			t.Errorf("the dbus machine id survived the fork (%v); dbus regenerates it only when it is absent", err)
+		}
+		if got := guestFile(t, g.dir, "var/lib/sparkbox/sandbox"); got != "forked-box\n" {
+			t.Errorf("stamp = %q, want the name this boot was given", got)
+		}
+	})
+
+	t.Run("a resume changes nothing", func(t *testing.T) {
+		// The overwhelmingly common boot. Regenerating here would hand somebody
+		// a host-key warning every time their sandbox woke up.
+		g := newGuest(t, "forked-box")
+		run(t, g, forkCmdline)
+
+		if keys := hostKeys(t, g); len(keys) != 2 {
+			t.Errorf("a resume regenerated host keys (%v left); every wake would then look like a MITM to ssh", keys)
+		}
+		if got := guestFile(t, g.dir, "etc/machine-id"); got != "00000000000000000000000000000001\n" {
+			t.Errorf("a resume rewrote machine-id to %q", got)
+		}
+	})
+
+	t.Run("no marker leaves the guest alone", func(t *testing.T) {
+		// An older host, or a boot this cannot reason about. Doing nothing costs
+		// a fork a shared host key it would have had anyway before this existed;
+		// resetting on a guess costs a running sandbox its identity.
+		g := newGuest(t, "parent-box")
+		run(t, g, "console=ttyS0 quiet")
+
+		if keys := hostKeys(t, g); len(keys) != 2 {
+			t.Errorf("host keys were reset with no sparkbox_host= to compare against (%v left)", keys)
+		}
+		if got := guestFile(t, g.dir, "var/lib/sparkbox/sandbox"); got != "parent-box\n" {
+			t.Errorf("stamp = %q, want it untouched", got)
+		}
+	})
+
+	t.Run("a first boot with no stamp at all is a fork", func(t *testing.T) {
+		// Templates captured before this hook existed have no stamp, and they
+		// are exactly the disks most likely to be carrying somebody else's keys.
+		g := newGuest(t, "")
+		run(t, g, forkCmdline)
+
+		for _, k := range hostKeys(t, g) {
+			if strings.Contains(string(readFile(t, k)), "PARENT PRIVATE KEY") {
+				t.Errorf("%s still holds the key material the template shipped with", k)
+			}
+		}
+	})
+}
+
+// The unit runs before sshd, and before the unit that would otherwise generate
+// what it removes.
+//
+// The script no longer DEPENDS on that second ordering — it makes its own keys,
+// precisely so the worst failure here cannot be a quiet one — but the ordering
+// is still what keeps the two from doing the same work twice, and
+// Before=ssh.service remains load-bearing on its own: a fork must never be
+// reachable under the identity it inherited, not even for the seconds between
+// sshd binding and this unit running.
+func TestGuestForkIdentityResetIsOrderedBeforeKeyGeneration(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+
+	unit := guestFile(t, root, "etc/systemd/system/sparkbox-identity-reset.service")
+	for _, want := range []string{
+		"Before=sparkbox-net.service ssh.service sshd.service",
+		"DefaultDependencies=no",
+		"ExecStart=/usr/local/sbin/sparkbox-identity-reset",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("the identity reset unit is missing %q:\n%s", want, unit)
+		}
+	}
+	// A unit nothing enables is a unit that never runs, and the failure is
+	// invisible: forks simply keep their parent's identity.
+	link := filepath.Join(root, "etc/systemd/system/multi-user.target.wants/sparkbox-identity-reset.service")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the identity reset unit is not enabled: %v", err)
 	}
 }

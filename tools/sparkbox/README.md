@@ -127,7 +127,7 @@ AUTH="Authorization: Bearer $TOKEN"
 curl -sH "$AUTH" $API/v1/whoami
 curl -sH "$AUTH" $API/v1/capabilities
 # {"archiving":true,"snapshots":true,"scheduling":true,"tags":true,
-#  "routes":true,"session_tokens":true,"terminal":true}
+#  "routes":true,"session_tokens":true,"terminal":true,"template_tags":true}
 
 # create one (unnamed → an adjective-noun name), then list them
 curl -sH "$AUTH" -H 'Content-Type: application/json' \
@@ -186,6 +186,64 @@ not, so a forgotten tab cannot pin a sandbox warm forever.
 > to explain it. `<name>-xterm.<domain>` needs nothing beyond the `*.<domain>`
 > record and certificate every sandbox front door already uses. The cost is a
 > reserved name suffix: sandboxes and routes may not end in `-xterm`.
+
+## A tag can also name the disk you boot from
+
+A tag on a sandbox already selects three things: the secrets pushed into it, the
+repositories checked out, and the egress it is allowed. It can also select the
+**rootfs**. Bind a snapshot to a tag and every sandbox you create carrying that
+tag starts as a reflink copy of it — a fork you do not have to remember the name
+of.
+
+```
+ssh ctl@<domain> snapshot create dev-box cuda-base   # capture a customized box
+ssh ctl@<domain> snapshot bind cuda-base --tag cuda  # point the tag at it
+ssh -t new@<domain> cuda                             # boots from cuda-base
+ssh ctl@<domain> snapshot unbind --tag cuda          # back to the default image
+```
+
+`snapshot ls` shows which snapshots are bound. On REST it is
+`PUT`/`DELETE /v1/templates/{tag}`.
+
+A tag has exactly one base image, so binding again re-points it and reports what
+it replaced; sandboxes already created from the old one keep the disk they were
+built from. A create whose tags bind two *different* snapshots is refused with
+both named rather than resolved by a precedence rule — a sandbox has one disk,
+and a coin flip means somebody finds out twenty minutes later that they have the
+wrong CUDA. `default` cannot be bound: every sandbox you create carries it, so
+the binding would quietly become the base image for all of them.
+
+On a fleet a binding is also a placement directive, because a snapshot is a file
+in one machine's image directory: a tagged create lands on the machine holding
+the template, and an explicit `--node` naming a different one is refused rather
+than silently overridden either way.
+
+Two things follow from templates being frozen disks. The agent CLIs in a template
+are whatever was current the day it was captured, so `snapshot create` now
+refreshes them from the host's verified cache first, and a long-lived sandbox can
+do the same on demand with `sparkbox update-tools` from inside — served by its
+own host over the metadata tap, so it works on a sandbox whose egress is filtered
+by its tag, and no artifact crosses the fleet link. And the person who knows a box
+is worth keeping is the one sitting in it, so they can capture it themselves:
+
+```
+sparkbox snapshot cuda      # from inside the VM: prints the plan, asks, then
+                            # pauses this box and captures it
+```
+
+That prints what it will re-point, which of your sandboxes carry the tag, and
+that re-pointing re-bases none of them, then asks — with no terminal to ask at it
+refuses rather than proceeding. A sandbox may only re-point a tag it already
+carries, so a compromised box gains persistence over tags it already held the
+secrets for and nothing wider. `--guest-self-snapshot=false` turns the door off.
+
+Design and the full refusal list:
+[`docs/tag-templates-design.md`](docs/tag-templates-design.md).
+
+> Template snapshots need to loop-mount the captured image on the host, so a
+> deployment hardened with `--disable-host-rootfs-mounts` — which is how the CKS
+> cluster runs — refuses `snapshot create` outright, and everything above is
+> inert there.
 
 ## Architecture
 
@@ -642,3 +700,16 @@ derives the darwin pair from the arm64 manifest that produced.
 - [x] Guest identity on nodes: the node runs the metadata service and relays
       only the signing step, which the gateway answers after checking its ledger
       places that sandbox on the machine that asked
+- [x] Tag templates: a tag names the rootfs its sandboxes boot from
+      (`snapshot bind <name> --tag <t>`), placement follows the machine holding
+      the template, ambiguous and `default` bindings are refused, and pooled disk
+      no longer charges every fork for the template's shared blocks. Captures
+      refresh the agent CLIs first, a VM updates its own with
+      `sparkbox update-tools`, and a VM can capture itself into a tag it carries
+      — all of it inert wherever host rootfs mounts are disabled
+- [ ] Strip the managed secret block on a capture taken on a *node*: the strip
+      is installed on the gateway only, so a template captured on a node carries
+      plaintext secrets into every fork (`docs/security-hardening.md`)
+- [ ] Template replication across machines, and delta archives for forks —
+      both written down and deliberately unbuilt
+      ([`docs/tag-templates-design.md`](docs/tag-templates-design.md))

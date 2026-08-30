@@ -16,6 +16,14 @@ fi
 readonly data_dir="${SPARKBOX_DATA_DIR:-/var/lib/sparkbox}"
 readonly asset_dir="$data_dir/assets"
 readonly image_dir="$data_dir/images"
+# Captured templates go beside the operator's base images, not into them: the VM
+# controller mounts $image_dir READ-ONLY (only the privileged prepare-vm-assets
+# one-shot writes it, and it exits before any guest runs), which is what stops a
+# compromised controller from rewriting the rootfs every future sandbox boots
+# from. `snapshot create` needs somewhere writable, and this is it — same
+# hostPath volume, so `cp --reflink=always` still works between a VM's disk and
+# a capture of it. See docs/cks-snapshot-design.md.
+readonly template_dir="$data_dir/templates"
 readonly tools_dir="$data_dir/tools"
 readonly control_dir="$data_dir/control"
 readonly hot_dir="$data_dir/hot"
@@ -102,7 +110,7 @@ readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-b1950cd506bff00f0ef45317a1de62
 readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-f23166fae715dc40811ccd508d533398628a2b8f4822cb4337f310c7979a7ee9}"
 
 mkdir -p \
-  "$asset_dir" "$image_dir" "$tools_dir" "$control_dir" "$hot_dir" \
+  "$asset_dir" "$image_dir" "$template_dir" "$tools_dir" "$control_dir" "$hot_dir" \
 	"$vm_state_dir" "$durable_dir/checkpoints" "$node_key_dir"
 
 fetch_checked() {
@@ -276,8 +284,11 @@ if [ "$mode" = prepare ]; then
 	# The runtime controller is deliberately non-root. Preparation is the only
 	# point at which stale high-UID VM files from an earlier deployment are safe
 	# to return to the controller: no Firecracker process exists yet.
+	# $template_dir and not $image_dir: captures are the controller's to write,
+	# the operator's base images are not. That asymmetry IS the read-only mount
+	# on /var/lib/sparkbox, and handing the controller both would erase it.
 	chown -R "$controller_uid:$controller_gid" \
-		"$control_dir" "$vm_state_dir" "$node_key_dir" "$durable_dir"
+		"$control_dir" "$vm_state_dir" "$node_key_dir" "$durable_dir" "$template_dir"
 	mkdir -p "$hot_dir/jailer"
 	chown 0:0 "$hot_dir" "$hot_dir/jailer"
 	chmod 0755 "$hot_dir"
@@ -374,6 +385,11 @@ else
   echo "starting legacy combined Sparkbox gateway for *.$proxy_domain (TLS: $proxy_tls)"
 fi
 
+# --tools-dir is the same $tools_dir the refresher above filled (TOOLS_DIR),
+# now served to this machine's own guests at /tools so `sparkbox update-tools`
+# can install into a VM whose template predates the current CLIs. Both
+# containers mount the same data hostPath; sparkbox-node mounts it readOnly,
+# which is all serving ever needs. It is never relayed to the gateway.
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
   --hivemind-api "$hivemind_api" \
@@ -383,6 +399,8 @@ exec /usr/local/bin/sparkbox serve \
   --checkpoint-prefix checkpoints \
   --kernel "$kernel" \
   --image-dir "$image_dir" \
+  --template-dir "$template_dir" \
+  --tools-dir "$tools_dir" \
   "${jail_args[@]}" \
   --guest-subnet "$guest_subnet" \
   --ssh-addr :2222 \

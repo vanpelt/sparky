@@ -764,7 +764,7 @@
         "operationId": "snapshot.create",
         "tags": ["snapshots"],
         "summary": "Capture a sandbox as a template",
-        "description": "**Pauses the sandbox.** The managed secret-environment block is stripped from the disk, the guest is paused, and the disk is compacted into a template. Name must match `^[a-z0-9][a-z0-9-]{0,40}$` and be unique among your snapshots. Budget: 15 minutes.",
+        "description": "**Pauses the sandbox.** The managed secret-environment block is stripped from the disk, the agent CLIs are refreshed from the host's verified cache so the template does not start life frozen at the tool versions of the day it was captured, the guest is paused, and the disk is compacted into a template. The refresh is best-effort: if it fails, or if the sandbox was already paused on a multi-machine deployment (waking it is not this operation's to do), the capture proceeds with the tools the disk holds and still returns 201 — a slightly stale template is not a failed one. Name must match `^[a-z0-9][a-z0-9-]{0,40}$` and be unique among your snapshots. Budget: 15 minutes.",
         "parameters": [
           { "$ref": "#/components/parameters/Prefer" },
           { "$ref": "#/components/parameters/IdempotencyKey" }
@@ -808,7 +808,7 @@
         "operationId": "snapshot.rm",
         "tags": ["snapshots"],
         "summary": "Delete a snapshot",
-        "description": "Sandboxes already forked from it are unaffected.",
+        "description": "Sandboxes already forked from it are unaffected. A snapshot a tag is bound to is refused instead: unbind the tag first.",
         "parameters": [
           { "$ref": "#/components/parameters/SnapshotName" },
           { "$ref": "#/components/parameters/IdempotencyKey" }
@@ -823,7 +823,15 @@
             }
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "A tag is bound to this snapshot, so it is the base image of every sandbox that tag creates from now on. Unbind the tag first.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
         }
       }
     },
@@ -870,6 +878,69 @@
           },
           "429": { "$ref": "#/components/responses/RunningLimit" },
           "507": { "$ref": "#/components/responses/DiskPoolFull" }
+        }
+      }
+    },
+    "/v1/templates/{tag}": {
+      "put": {
+        "operationId": "snapshot.bind",
+        "tags": ["snapshots"],
+        "summary": "Make a snapshot the base image of a tag",
+        "description": "Binds one of your snapshots to one of your tags, so every sandbox you create carrying that tag boots from it instead of the host's default image — a fork you do not have to remember.\n\nA tag has exactly one base image, so binding again re-points it and answers with the snapshot it replaced in `previous`. Sandboxes already created from the old one are untouched. The `default` tag cannot be bound: it is stamped on every sandbox you create, so the binding would silently become the base image of all of them.\n\nBecause a snapshot is a file in one machine's image directory, a binding is also a placement directive: a tagged create lands on the machine holding the template, and a create that names a different `node` is refused with `template_node_conflict`. A create whose tags bind two *different* snapshots is refused with `template_ambiguous` rather than guessed at — a sandbox has one disk.\n\nThis is a single write and never a job: no 202, and no `Prefer`.",
+        "parameters": [
+          { "$ref": "#/components/parameters/TagName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TemplateBindRequest" },
+              "example": { "snapshot": "base" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The binding, and the snapshot it replaced if it re-pointed one.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TemplateBindResult" },
+                "example": {
+                  "binding": { "tag": "cuda", "snapshot": "base", "created_at": "2026-07-22T09:00:00Z" },
+                  "previous": "base-old"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "delete": {
+        "operationId": "snapshot.unbind",
+        "tags": ["snapshots"],
+        "summary": "Drop a tag's base image",
+        "description": "Removes the binding and answers with what it was. Nothing is deleted: sandboxes already built from the template keep running on their own disk, and the next create on that tag takes the host's default image again.\n\nA tag you have not bound answers 404, exactly as a tag belonging to someone else does.",
+        "parameters": [
+          { "$ref": "#/components/parameters/TagName" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The binding that was dropped.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TemplateBinding" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
         }
       }
     },
@@ -1783,6 +1854,17 @@
         },
         "example": "base"
       },
+      "TagName": {
+        "name": "tag",
+        "in": "path",
+        "required": true,
+        "description": "One of your tags. `default` is refused: every sandbox you create carries it.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+        },
+        "example": "cuda"
+      },
       "NodeName": {
         "name": "name",
         "in": "path",
@@ -2035,7 +2117,8 @@
           "terminal",
           "fleet",
           "repos",
-          "github_app"
+          "github_app",
+          "template_tags"
         ],
         "properties": {
           "archiving": { "type": "boolean", "description": "Object storage is configured." },
@@ -2047,7 +2130,8 @@
           "terminal": { "type": "boolean", "description": "Browser terminals are served." },
           "fleet": { "type": "boolean", "description": "This host is a gateway other machines can join, so the node endpoints answer. It says nothing about whether any machine has joined." },
           "repos": { "type": "boolean", "description": "The repo store is open, so repositories can be attached to tags at all." },
-          "github_app": { "type": "boolean", "description": "This host holds a GitHub App key, which is what turns an attachment into a clone of a PRIVATE repository. False leaves attachment working and public repos cloning." }
+          "github_app": { "type": "boolean", "description": "This host holds a GitHub App key, which is what turns an attachment into a clone of a PRIVATE repository. False leaves attachment working and public repos cloning." },
+          "template_tags": { "type": "boolean", "description": "A tag can name the base image its sandboxes boot from, so `/v1/templates/{tag}` answers. False is a host with no binding store, where every create takes the operator's default image — a different statement from `snapshots`, since a host can hold snapshots to fork by name with nowhere to record a binding." }
         }
       },
       "Sandbox": {
@@ -2256,7 +2340,18 @@
             "description": "The sandbox it was captured from.",
             "example": "demo"
           },
-          "created_at": { "type": "string", "format": "date-time" }
+          "created_at": { "type": "string", "format": "date-time" },
+          "bound_tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "The tags whose sandboxes boot from this snapshot. Absent when nobody has bound it, which is the ordinary case.",
+            "example": ["cuda"]
+          },
+          "node": {
+            "type": "string",
+            "description": "The machine whose image directory holds the template file, and therefore the only machine a fork — or a create on a tag bound to it — can land on. Absent on a single-machine host.",
+            "example": "dgx"
+          }
         }
       },
       "SnapshotList": {
@@ -2293,6 +2388,39 @@
           "tags": {
             "type": "array",
             "items": { "type": "string" }
+          }
+        }
+      },
+      "TemplateBindRequest": {
+        "type": "object",
+        "required": ["snapshot"],
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,40}$",
+            "description": "One of your snapshots. Someone else's answers 404, exactly as a name nobody holds does."
+          }
+        }
+      },
+      "TemplateBinding": {
+        "type": "object",
+        "required": ["tag", "snapshot", "created_at"],
+        "description": "One tag-to-snapshot binding. The owner is absent because a binding is only ever read back under its own owner.",
+        "properties": {
+          "tag": { "type": "string", "example": "cuda" },
+          "snapshot": { "type": "string", "example": "base" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TemplateBindResult": {
+        "type": "object",
+        "required": ["binding"],
+        "properties": {
+          "binding": { "$ref": "#/components/schemas/TemplateBinding" },
+          "previous": {
+            "type": "string",
+            "description": "The snapshot this bind replaced, when it re-pointed an existing binding. Absent for a first bind. It is here so a client can warn that what the tag boots from has changed.",
+            "example": "base-old"
           }
         }
       },

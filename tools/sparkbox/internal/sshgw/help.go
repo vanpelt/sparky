@@ -65,10 +65,13 @@ func helpTopics() []helpTopic {
 		page:    repoUsage,
 	}, {
 		name:    "snapshots",
-		aliases: []string{"snapshot", "fork"},
-		verbs:   "snapshot ls · create · rm · fork",
-		blurb:   "disk templates to fork from",
-		page:    snapshotHelp,
+		aliases: []string{"snapshot", "fork", "bind", "unbind"},
+		// 34 runes, exactly helpVerbWidth, so the row still lands inside 80 once
+		// its blurb is appended — TestControlHelpHidesOperatorTopics is what
+		// says so, and it is why `rm` gave up its place to `bind`.
+		verbs: "snapshot ls · create · bind · fork",
+		blurb: "disk templates to boot from",
+		page:  snapshotHelp,
 	}, {
 		name:    "schedule",
 		aliases: []string{"cron"},
@@ -197,6 +200,8 @@ const sandboxHelp = "usage: ssh ctl@<gateway> <command> <name>\r\n" +
 	"     always gets a shell. Passing any word makes ssh skip the terminal, so use\r\n" +
 	"     `ssh -t new+<name>@<gateway> <tag>…` or you get a shell with no prompt.\r\n" +
 	"  fork <snapshot> <name> [--tag <t>]…  create one from a snapshot you saved\r\n" +
+	"     a tag you have bound a snapshot to boots from it, so `ssh new@<gateway>\r\n" +
+	"     <tag>` is a fork you do not have to remember — see `help snapshots`.\r\n" +
 	"\r\n" +
 	" living with one\r\n" +
 	"  ls                       list your sandboxes and their state\r\n" +
@@ -219,8 +224,10 @@ const sandboxHelp = "usage: ssh ctl@<gateway> <command> <name>\r\n" +
 	"processes running inside do not survive either one.\r\n"
 
 const snapshotHelp = "usage: ssh ctl@<gateway> snapshot ls\r\n" +
-	"       ssh ctl@<gateway> snapshot create <box> <name>\r\n" +
+	"       ssh ctl@<gateway> snapshot create <box> <name> [--tag <tag>]\r\n" +
 	"       ssh ctl@<gateway> snapshot rm <name>\r\n" +
+	"       ssh ctl@<gateway> snapshot bind <name> --tag <tag>\r\n" +
+	"       ssh ctl@<gateway> snapshot unbind --tag <tag>\r\n" +
 	"       ssh ctl@<gateway> fork <snapshot> <new-name> [--tag <t>]…\r\n" +
 	"\r\n" +
 	"a snapshot is a disk template: `create` pauses a sandbox and compacts its disk\r\n" +
@@ -228,7 +235,29 @@ const snapshotHelp = "usage: ssh ctl@<gateway> snapshot ls\r\n" +
 	"machine holding the template, so it takes no --node.\r\n" +
 	"\r\n" +
 	"the fork gets the tags you give it, not the ones the original had — tags are\r\n" +
-	"what select the secrets and repos it will be handed.\r\n"
+	"what select the secrets and repos it will be handed.\r\n" +
+	"\r\n" +
+	"`bind` makes a snapshot the base disk of a tag, so `ssh new@<gateway> <tag>`\r\n" +
+	"boots from it instead of the stock image — a fork you don't have to remember.\r\n" +
+	"a tag has exactly one base image, so binding again re-points it and says what\r\n" +
+	"it replaced, and a create whose tags bind two different snapshots is refused\r\n" +
+	"rather than guessed at: a sandbox has one disk. `default` cannot be bound —\r\n" +
+	"every sandbox you make carries it, so the binding would reach all of them.\r\n" +
+	"`snapshot ls` shows which of your snapshots are bound, and `unbind` takes the\r\n" +
+	"binding away without deleting anything.\r\n" +
+	"\r\n" +
+	"`create --tag <t>` does both halves as one operation, which is also what\r\n" +
+	"`sparkbox snapshot <t>` runs from INSIDE a sandbox: it prints what it is about\r\n" +
+	"to re-point, asks, then pauses that box and captures it. a sandbox may only\r\n" +
+	"re-point a tag it already carries. if the capture succeeds and the binding\r\n" +
+	"fails, the snapshot is kept and the message carries the one `bind` that\r\n" +
+	"finishes it — a re-run would capture a different disk.\r\n" +
+	"\r\n" +
+	"`create` brings the agent CLIs up to date before it captures, so a template\r\n" +
+	"does not start life frozen at the versions of the day you took it — inside a\r\n" +
+	"sandbox, `sparkbox update-tools` does the same on demand. a sandbox that is\r\n" +
+	"already paused on a multi-machine deployment is captured as it is: waking it\r\n" +
+	"is a bigger act than the one you asked for.\r\n"
 
 const scheduleHelp = "usage: ssh ctl@<gateway> schedule ls\r\n" +
 	"       ssh ctl@<gateway> schedule add <box> \"<cron>\" <command>\r\n" +

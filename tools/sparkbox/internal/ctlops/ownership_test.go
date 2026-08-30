@@ -108,6 +108,27 @@ func ownCases() []ownCase {
 			_, err := r.ops.Fork(ctx, c, ForkArgs{Snapshot: t, Name: "stolen-fork"})
 			return err
 		}},
+		// The SNAPSHOT is the resource: a bind names one, so the ownership gate
+		// has to mask it exactly as fork and rm do — and must reach no store.
+		{"BindTemplate", "snapshot", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.BindTemplate(ctx, c, t, "cuda")
+			return err
+		}},
+		// The two guest-initiated verbs. The SANDBOX is the resource on both,
+		// and they matter here more than most: they are the only methods whose
+		// Caller is synthesized from a sandbox record rather than proved by a
+		// key, so a name that resolved to somebody else's box would elevate a
+		// guest into another account.
+		{"PlanSelfSnapshot", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.PlanSelfSnapshot(ctx, c, t, "cuda", "")
+			return err
+		}},
+		{"SnapshotToTag", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.SnapshotToTag(ctx, c, SnapshotToTagArgs{
+				Sandbox: t, Name: "stolen-snap", Tag: "cuda",
+			})
+			return err
+		}},
 		{"DeleteSchedule", "schedule", func(r *rig, c Caller, t string) error {
 			return r.ops.DeleteSchedule(ctx, c, t)
 		}},
@@ -279,6 +300,11 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// would put another account's private repository in this caller's
 		// manifest. The slug they pass selects only among their own rows.
 		"ListRepos": true, "AttachRepo": true, "DetachRepo": true, "CheckRepos": true,
+		// An unbind names a tag, and a binding is keyed (owner, tag), so the
+		// owner scoping is structural in the store query for the same reason
+		// ListSecrets' and ListRepos' are: the handle is not an argument, and
+		// the tag the caller passes selects only among their own rows.
+		"UnbindTemplate": true,
 		// GitHubInstallURL names nothing at all: it is this host's App, and the
 		// same URL for everyone who asks.
 		"GitHubInstallURL": true,

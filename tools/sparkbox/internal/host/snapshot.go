@@ -37,9 +37,12 @@ func templateImage(owner, name string) string { return "snap-" + owner + "-" + n
 func (m *Manager) Snapshotter() bool { return m.archiver != nil }
 
 // Snapshot captures the named sandbox's current rootfs as a reusable template
-// owned by `owner`, so `owner` can Fork fresh sandboxes from it. The sandbox is
-// paused first (a consistent, unmounted rootfs), then the driver compacts +
-// sanitizes it into the image dir. The heavy driver work runs without m.mu held.
+// owned by `owner`, so `owner` can Fork fresh sandboxes from it. The managed
+// secret block is stripped, the agent CLIs are refreshed from this host's cache
+// so the template does not start life frozen at yesterday's tool versions, the
+// sandbox is paused (a consistent, unmounted rootfs), and then the driver
+// compacts + sanitizes it into the image dir. The heavy driver work runs
+// without m.mu held.
 func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*Snapshot, error) {
 	unlock := m.lockDiskOperation(box)
 	defer unlock()
@@ -69,6 +72,13 @@ func (m *Manager) Snapshot(ctx context.Context, box, snapName, owner string) (*S
 	if err := m.stripEnvForPack(ctx, box); err != nil {
 		return nil, fmt.Errorf("snapshot %q: %w", snapName, err)
 	}
+	// Here and nowhere else: the strip has just made the guest reachable, the
+	// pause below is about to make it unreachable, and this is the only pack
+	// whose product is a disk other sandboxes will boot from. Archive and
+	// checkpoint restore the same box's own disk, so they gain nothing from a
+	// refresh and would only pay its minutes. Best-effort — see
+	// refreshToolsForPack.
+	m.refreshToolsForPack(ctx, box)
 	// Pause so the guest has flushed + unmounted its rootfs before we fsck/mount
 	// it. Idempotent if already paused.
 	if err := m.pause(ctx, box, "was paused for a template snapshot"); err != nil {

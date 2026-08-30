@@ -525,6 +525,31 @@ func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
 	return mockDiskCapacityMB, nil
 }
 
+// TemplateUsageMB implements vmm.TemplateReporter over the mock's template
+// dirs, with the same arithmetic DiskUsageMB uses on a workdir. Create seeds a
+// fork by copyTree-ing the template, so a fresh fork's usage and its baseline
+// are identical and its pooled figure nets to zero — which is exactly the
+// property the pooled accounting rests on, and this is what lets `go test ./...`
+// exercise the whole subtraction with no KVM.
+//
+// A template this driver does not hold is an error wrapping os.ErrNotExist, not
+// zero, per the vmm.TemplateReporter contract: a deleted snapshot must leave the
+// manager's stored baseline alone rather than re-charge every fork for it.
+func (d *Driver) TemplateUsageMB(_ context.Context, image string) (int64, error) {
+	tpl := filepath.Join(d.stateDir, "mock-templates", image)
+	if !dirExists(tpl) {
+		return 0, fmt.Errorf("mock template %q: %w", image, os.ErrNotExist)
+	}
+	var total int64
+	filepath.Walk(tpl, func(_ string, info os.FileInfo, err error) error { //nolint:errcheck
+		if err == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total / (1024 * 1024), nil
+}
+
 // ResizeDisk implements vmm.DiskResizer. It records the new ceiling rather than
 // moving real bytes, but keeps the two rules that matter to callers: it refuses
 // a VM the driver still has running, and it refuses to shrink.

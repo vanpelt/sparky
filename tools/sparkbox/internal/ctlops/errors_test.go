@@ -185,6 +185,14 @@ func TestDisabledStoresAnswerKindDisabled(t *testing.T) {
 			_, err := o.CreateSnapshot(ctx, alice(), "alicebox", "snap")
 			return err
 		}},
+		{"template bind", func(o *Ops) { o.templateTags = nil }, func(o *Ops) error {
+			_, err := o.BindTemplate(ctx, alice(), "alicesnap", "cuda")
+			return err
+		}},
+		{"template unbind", func(o *Ops) { o.templateTags = nil }, func(o *Ops) error {
+			_, err := o.UnbindTemplate(ctx, alice(), "cuda")
+			return err
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

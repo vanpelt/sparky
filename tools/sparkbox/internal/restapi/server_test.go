@@ -27,6 +27,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
 )
@@ -55,6 +56,7 @@ type testAPI struct {
 	secrets *secrets.Store
 	routes  *routes.Store
 	sched   *schedule.Store
+	binds   *templates.Store
 	signer  *edgeauth.Signer
 }
 
@@ -96,6 +98,14 @@ func newTestAPI(t *testing.T) *testAPI {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { secretStore.Close() })
+	// Wired unconditionally, because serve() opens one on every gateway: a
+	// fixture without it would model a host that does not exist, and the
+	// binding routes would answer 501 in every test that touched them.
+	bindStore, err := templates.Open(db, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { bindStore.Close() })
 
 	mgr, err := host.NewManager(host.Options{
 		StateDir: dir, Driver: driver,
@@ -121,6 +131,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		Sandboxes: mgr, Templates: mgr, Accounts: userStore,
 		Tags: secretStore, Schedules: schedStore, Routes: routeStore,
 		Sessions: signer, GitHub: stubGitHub{},
+		TemplateTags: bindStore,
 		DefaultImage: "ubuntu", Domain: testDomain, XtermSubdomain: "xterm",
 		Log: log,
 	})
@@ -132,7 +143,8 @@ func newTestAPI(t *testing.T) *testAPI {
 	})
 	return &testAPI{
 		h: h.Handler(), handler: h, mgr: mgr, driver: driver, users: userStore,
-		secrets: secretStore, routes: routeStore, sched: schedStore, signer: signer,
+		secrets: secretStore, routes: routeStore, sched: schedStore, binds: bindStore,
+		signer: signer,
 	}
 }
 
@@ -1353,5 +1365,174 @@ func TestCreateOnANamedNodeWithoutAFleet(t *testing.T) {
 	}
 	if _, ok := ta.mgr.Get("demo"); ok {
 		t.Error("the refused create built the sandbox here anyway")
+	}
+}
+
+// TestTemplateBindingRoundTrip walks the pair of routes a client actually uses:
+// bind, re-point, read the tag back off the snapshot listing, unbind, and
+// unbind again.
+//
+// The last step is the one worth having. A second DELETE must 404 rather than
+// report a cheerful success, because that answer is what tells a script it was
+// looking at a tag it had already dropped — and it is the same 404 somebody
+// else's tag produces, which is why nothing here can confirm a tag exists.
+func TestTemplateBindingRoundTrip(t *testing.T) {
+	ta := newTestAPI(t)
+	ctx := context.Background()
+	ta.create(t, "alices-box", "alice")
+	for _, name := range []string{"base", "newer"} {
+		if _, err := ta.mgr.Snapshot(ctx, "alices-box", name, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := ta.do(t, "PUT", "/v1/templates/cuda", "alice", bindRequest{Snapshot: "base"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bind: status %d (%s)", rec.Code, rec.Body)
+	}
+	var res ctlops.TemplateBindResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Binding.Tag != "cuda" || res.Binding.Snapshot != "base" {
+		t.Fatalf("bind answered %+v", res.Binding)
+	}
+	if res.Previous != "" {
+		t.Errorf("a first bind reported replacing %q", res.Previous)
+	}
+
+	// A re-point is the outcome that looks identical to a first bind and is
+	// not: every sandbox created on the tag from here on boots from the new
+	// disk, so the answer has to name the old one.
+	rec = ta.do(t, "PUT", "/v1/templates/cuda", "alice", bindRequest{Snapshot: "newer"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-point: status %d (%s)", rec.Code, rec.Body)
+	}
+	res = ctlops.TemplateBindResult{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Previous != "base" {
+		t.Errorf("re-point reported previous %q, want \"base\"", res.Previous)
+	}
+
+	// The listing carries the binding, and only on the row it belongs to.
+	rec = ta.do(t, "GET", "/v1/snapshots", "alice", nil)
+	var list snapshotList
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, s := range list.Snapshots {
+		got[s.Name] = s.BoundTags
+	}
+	if len(got["newer"]) != 1 || got["newer"][0] != "cuda" {
+		t.Errorf("newer's bound_tags = %v, want [cuda]", got["newer"])
+	}
+	if len(got["base"]) != 0 {
+		t.Errorf("base kept bound_tags %v after the tag was re-pointed away", got["base"])
+	}
+
+	rec = ta.do(t, "DELETE", "/v1/templates/cuda", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unbind: status %d (%s)", rec.Code, rec.Body)
+	}
+	var dropped ctlops.TemplateBinding
+	if err := json.Unmarshal(rec.Body.Bytes(), &dropped); err != nil {
+		t.Fatal(err)
+	}
+	if dropped.Snapshot != "newer" {
+		t.Errorf("unbind answered %+v, want the binding it dropped", dropped)
+	}
+	if rec := ta.do(t, "DELETE", "/v1/templates/cuda", "alice", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("a second unbind: status %d, want 404 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// TestTemplateBindingIsOwnerScoped: mallory may not point one of her tags at
+// alice's snapshot, and the refusal must be the one a name nobody holds gets.
+// The ownership gate runs before the tag is looked at for exactly this reason —
+// a "bad tag" for one and a 404 for the other would confirm alice's template.
+func TestTemplateBindingIsOwnerScoped(t *testing.T) {
+	ta := newTestAPI(t)
+	ta.create(t, "alices-box", "alice")
+	if _, err := ta.mgr.Snapshot(context.Background(), "alices-box", "alices-snap", "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	hers := ta.do(t, "PUT", "/v1/templates/cuda", "mallory", bindRequest{Snapshot: "alices-snap"})
+	nobodys := ta.do(t, "PUT", "/v1/templates/cuda", "mallory", bindRequest{Snapshot: "nobodys-snap"})
+	if hers.Code != http.StatusNotFound {
+		t.Fatalf("binding alice's snapshot as mallory: status %d, want 404 (%s)", hers.Code, hers.Body)
+	}
+	a, b := decodeErr(t, hers), decodeErr(t, nobodys)
+	if a.Kind != b.Kind || a.Code != b.Code || nobodys.Code != hers.Code {
+		t.Errorf("the two refusals differ: %+v vs %+v", a, b)
+	}
+	// The message differs only by the name the caller typed, exactly as it does
+	// for every other cross-owner probe on this API.
+	if strings.ReplaceAll(a.Message, "alices", "nobodys") != b.Message {
+		t.Errorf("messages differ beyond the name: %q vs %q", a.Message, b.Message)
+	}
+	if list, err := ta.binds.BindingsForOwner("mallory"); err != nil || len(list) != 0 {
+		t.Errorf("a refused bind wrote %v (err %v)", list, err)
+	}
+}
+
+// TestCapabilitiesReportsTemplateTags is the wiring assertion for this fixture:
+// the flag is what a client reads before offering the bind UI at all, and a
+// dropped Config field would leave it false with every other test still green.
+func TestCapabilitiesReportsTemplateTags(t *testing.T) {
+	ta := newTestAPI(t)
+	rec := ta.do(t, "GET", "/v1/capabilities", "alice", nil)
+	var caps map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil {
+		t.Fatal(err)
+	}
+	if caps["template_tags"] != true {
+		t.Errorf("template_tags = %v on a host with a binding store", caps["template_tags"])
+	}
+}
+
+// TestDeletingABoundSnapshotIs409 is the assertion behind the 409 this route
+// now documents. `DELETE /v1/snapshots/{name}` gained a status code when
+// bindings landed — a bound snapshot is the base image of every sandbox its
+// tags create from now on, so removing it is refused rather than allowed to
+// turn each of those creates into `template_missing`.
+//
+// It is a separate test from the binding round trip because the code that
+// refuses lives on the SNAPSHOT verb, not on either binding route, and because
+// openapi.json is hand-authored: without this, the document's 409 would be a
+// claim nothing checks. The unbind-then-delete half is what proves the refusal
+// is a lock with a key rather than a snapshot nobody can ever remove.
+func TestDeletingABoundSnapshotIs409(t *testing.T) {
+	ta := newTestAPI(t)
+	ta.create(t, "alices-box", "alice")
+	if _, err := ta.mgr.Snapshot(context.Background(), "alices-box", "base", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := ta.do(t, "PUT", "/v1/templates/cuda", "alice",
+		bindRequest{Snapshot: "base"}); rec.Code != http.StatusOK {
+		t.Fatalf("bind: status %d (%s)", rec.Code, rec.Body)
+	}
+
+	rec := ta.do(t, "DELETE", "/v1/snapshots/base", "alice", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("deleting a bound snapshot: status %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	if e := decodeErr(t, rec); e.Code != "snapshot_bound" || !strings.Contains(e.Message, "cuda") {
+		t.Errorf("refusal = %+v, want snapshot_bound naming the tag", e)
+	}
+	// The refusal must not have deleted it anyway: a create on the tag still
+	// has a template to boot.
+	if got := ta.mgr.Snapshots("alice"); len(got) != 1 || got[0].Name != "base" {
+		t.Fatalf("the refused delete removed the snapshot: %v", got)
+	}
+
+	if rec := ta.do(t, "DELETE", "/v1/templates/cuda", "alice", nil); rec.Code != http.StatusOK {
+		t.Fatalf("unbind: status %d (%s)", rec.Code, rec.Body)
+	}
+	if rec := ta.do(t, "DELETE", "/v1/snapshots/base", "alice", nil); rec.Code != http.StatusOK {
+		t.Fatalf("deleting an unbound snapshot: status %d, want 200 (%s)", rec.Code, rec.Body)
 	}
 }

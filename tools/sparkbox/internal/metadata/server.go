@@ -257,9 +257,17 @@ type Server struct {
 	id         Identity
 	routes     RouteControl
 	repoAccess RepoAccess
-	log        *slog.Logger
-	defAud     string
-	guestNet   guestnet.Network
+	tools      ToolCache
+	lifecycle  SelfLifecycle
+	// allowSelfSnapshot is the operator's kill switch for capture-from-inside.
+	// Default on, because the carried-tag restriction already bounds it and a
+	// self-service feature nobody is told about does not exist; the flag is for
+	// an operator handing boxes to third parties. `pause` is not behind it —
+	// see SelfLifecycle.
+	allowSelfSnapshot bool
+	log               *slog.Logger
+	defAud            string
+	guestNet          guestnet.Network
 
 	mu     sync.Mutex
 	recent map[string][]time.Time // sandbox -> mint times inside the window
@@ -268,6 +276,16 @@ type Server struct {
 	// why sharing the one above would cost the guest its identity.
 	credMu     sync.Mutex
 	credRecent map[string][]time.Time // sandbox+op -> request times inside the window
+
+	// And the lifecycle endpoints keep a third. See allowSelfCall.
+	selfMu     sync.Mutex
+	selfRecent map[string][]time.Time // sandbox+op -> request times inside the window
+
+	// base is the process's lifetime, stashed by ListenAndServe so a capture
+	// that outlives the request that accepted it is still bounded by the life
+	// of the service. See ackThenAct.
+	baseMu sync.Mutex
+	base   context.Context
 }
 
 type Options struct {
@@ -277,8 +295,19 @@ type Options struct {
 	RouteControl RouteControl
 	// Repos serves the two repository endpoints. Nil answers both 501, which
 	// is what a host with no repos store or no GitHub App is.
-	Repos  RepoAccess
-	Logger *slog.Logger
+	Repos RepoAccess
+	// Tools serves this machine's own agent-CLI cache. Nil answers both /tools
+	// routes 501, which is what a host started without --tools-dir is. It is
+	// never a relay to another machine — see ToolCache.
+	Tools ToolCache
+	// SelfLifecycle runs `sparkbox pause` and `sparkbox snapshot <tag>` for the
+	// calling sandbox. Nil answers all three lifecycle routes 501, which is
+	// what a host with no control plane on its fleet is.
+	SelfLifecycle SelfLifecycle
+	// AllowSelfSnapshot is the operator's switch for the capture verb alone.
+	// The gateway and node wiring both default it to true; `pause` ignores it.
+	AllowSelfSnapshot bool
+	Logger            *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
 	// GuestSubnet must match the VM driver's IPv4 prefix. Empty uses the
@@ -307,10 +336,12 @@ func NewChecked(opts Options) (*Server, error) {
 	}
 	return &Server{
 		mgr: opts.Manager, id: opts.Identity, routes: opts.RouteControl,
-		repoAccess: opts.Repos, log: log,
-		defAud:   opts.DefaultAudience,
-		guestNet: guestNetwork,
-		recent:   map[string][]time.Time{},
+		repoAccess: opts.Repos, tools: opts.Tools, log: log,
+		lifecycle:         opts.SelfLifecycle,
+		allowSelfSnapshot: opts.AllowSelfSnapshot,
+		defAud:            opts.DefaultAudience,
+		guestNet:          guestNetwork,
+		recent:            map[string][]time.Time{},
 	}, nil
 }
 
@@ -320,11 +351,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /identity", s.identity)
 	mux.HandleFunc("GET /repos", s.repoManifest)
 	mux.HandleFunc("GET /github/credential", s.githubCredential)
+	// The literal pattern is more specific than the wildcard one, so
+	// /tools/manifest can never be routed as a tool named "manifest" — which is
+	// also why parseToolManifest refuses that name outright rather than
+	// publishing something unreachable.
+	//
+	// {name} matches exactly one path segment, but a percent-encoded separator
+	// still arrives decoded in PathValue. That is not what keeps the cache
+	// directory safe: toolFile checks the shape and LocalTools.Open looks the
+	// name up among the manifest's own entries, opening the basename that entry
+	// stored, so no request ever reaches a filepath.Join.
+	mux.HandleFunc("GET /tools/manifest", s.toolManifest)
+	mux.HandleFunc("GET /tools/{name}", s.toolFile)
 	mux.HandleFunc("GET /self", s.self)
 	mux.HandleFunc("POST /self/pin", s.pin)
 	mux.HandleFunc("POST /self/unpin", s.unpin)
 	mux.HandleFunc("POST /self/visibility/{visibility}", s.visibility)
 	mux.HandleFunc("POST /self/port/{port}", s.port)
+	// The lifecycle trio. GET and POST on one path is the whole design: the GET
+	// is the plan — a pure read carrying every refusal and both warnings — and
+	// the POST is the commit that acts on one. See selflifecycle.go.
+	mux.HandleFunc("POST /self/pause", s.selfPause)
+	mux.HandleFunc("GET /self/snapshot", s.selfSnapshotPlan)
+	mux.HandleFunc("POST /self/snapshot", s.selfSnapshotCommit)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -433,6 +482,10 @@ func (s *Server) writeJSON(w http.ResponseWriter, value any) {
 // checked against the guest range, so a connection arriving on the public NIC
 // is refused. Deployments additionally firewall the port to sbtap+ only.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+	// Stashed before anything can be served: a capture accepted on one request
+	// outlives it by minutes, and this is what bounds that worker by the life of
+	// the process rather than by a request that has already been answered.
+	s.setBaseContext(ctx)
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      s.Handler(),

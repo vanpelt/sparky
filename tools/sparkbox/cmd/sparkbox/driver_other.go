@@ -10,7 +10,7 @@ import (
 )
 
 func newFirecrackerDriver(
-	kernelPath, imageDir, vmStateDir, jailerBin, jailerChrootBase string,
+	kernelPath, imageDir, templateDir, vmStateDir, jailerBin, jailerChrootBase string,
 	jailerUIDBase int, chrootJailer bool,
 	privilegedHelperSocket, privilegedHelperBin string, helperControllerGID int,
 	disableHostRootfsMounts bool,

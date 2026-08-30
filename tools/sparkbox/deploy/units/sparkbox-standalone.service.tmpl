@@ -29,6 +29,11 @@ Type=simple
 # would swallow the domain as its value, and `--dns-addr ""` would end the flag
 # list outright.
 #
+# --tools-dir is NOT one of those: it is filesystem layout like --state-dir, it
+# always has a value (setup derives it from the same Root the refresher unit's
+# TOOLS_DIR comes from), and the host that fills that cache and the gateway that
+# serves it to its guests must never be able to name different directories.
+#
 # EXTRA_FLAGS is appended LAST on purpose. Go's flag package lets a repeated
 # flag win, so anything in it overrides the templated flags above — that is the
 # escape hatch for a `serve` flag `sparkbox setup` has no flag of its own for
@@ -49,6 +54,7 @@ ExecStart={{.BinPath}} serve --driver firecracker \
   --state-dir {{.StateDir}} \
   --kernel {{.KernelPath}} \
   --image-dir {{.ImageDir}} \
+  --tools-dir {{.ToolsDir}} \
   --default-image {{.DefaultImage}} \
   --users {{.UsersPath}} \
   --ssh-addr {{.SSHAddr}} --api-addr {{.APIAddr}} \

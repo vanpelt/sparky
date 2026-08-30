@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
@@ -641,4 +642,86 @@ func mustFail(t *testing.T, run func() error) error {
 		t.Fatal("want an error")
 	}
 	return err
+}
+
+// A template captured on a remote machine after its link came up is in that
+// machine's live inventory and absent from the image listing it sent at hello.
+// A binding-driven create aims at the machine holding the template, so the
+// filter reading only the stale listing would refuse exactly that machine, for
+// exactly the image it holds.
+func TestPlacementSeesANodesLiveTemplates(t *testing.T) {
+	const template = "snap-alice-cuda-base"
+	mgr := newManager(t, host.Options{})
+	f := newFleet(t, mgr, newIndex(t))
+	nodeb := newBuildingNode("boxb")
+	// Spare capacity on purpose. If the union appended in place instead of
+	// cloning, the write would land in this array — the node's own — and the
+	// scribble is what the read below catches.
+	images := make([]string, 1, 4)
+	images[0] = "ubuntu"
+	nodeb.facts.Images = images
+	nodeb.snaps = []*host.Snapshot{{
+		Name: "cuda-base", Owner: "alice", Image: template, FromBox: "elsewhere",
+	}}
+	attachBuilder(t, f, nodeb)
+
+	b, err := f.CreateOn(context.Background(), "boxb", "far-away", "alice", template, 1, 512)
+	if err != nil {
+		t.Fatalf("create from a template that machine is holding: %v", err)
+	}
+	if b.Node != "boxb" || !nodeb.took("create") {
+		t.Fatalf("the create landed on %q; want the machine with the template", b.Node)
+	}
+	if len(nodeb.facts.Images) != 1 || images[:2][1] != "" {
+		t.Errorf("the union wrote into the node's own image list: %q", images[:2])
+	}
+
+	// The same fact as the placer sees it: the template is in the candidate's
+	// image list, the hello-time entry survives beside it, and Fits agrees.
+	var seen []fleet.Candidate
+	f.SetPlacer(placerFunc(func(_ fleet.Request, nodes []fleet.Candidate) (string, error) {
+		seen = nodes
+		return "boxb", nil
+	}))
+	if _, err := f.Create(context.Background(), "second", "alice", template, 1, 512); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var remote fleet.Candidate
+	for _, c := range seen {
+		if c.Name == "boxb" {
+			remote = c
+		}
+	}
+	if !slices.Contains(remote.Facts.Images, template) || !slices.Contains(remote.Facts.Images, "ubuntu") {
+		t.Fatalf("the candidate's images are %q", remote.Facts.Images)
+	}
+	if err := remote.Fits(fleet.Request{Image: template, MemMB: 512}); err != nil {
+		t.Errorf("Fits refused the machine holding the template: %v", err)
+	}
+	if err := remote.Fits(fleet.Request{Image: "alpine", MemMB: 512}); err == nil {
+		t.Error("the union stopped Fits refusing an image nobody has")
+	}
+}
+
+// A machine that reported no image list at all is not made refusable by holding
+// a template. Fits skips the check on an empty list because unknown must not
+// read as refused; replacing that silence with the two names in the inventory
+// would start refusing ordinary creates on a machine whose image directory
+// merely failed to read.
+func TestPlacementDoesNotTurnASilentImageListIntoARefusal(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	f := newFleet(t, mgr, newIndex(t))
+	nodeb := newBuildingNode("boxb")
+	nodeb.facts = fleet.Facts{Node: "boxb"} // no arch, no image list
+	nodeb.snaps = []*host.Snapshot{{
+		Name: "cuda-base", Owner: "alice", Image: "snap-alice-cuda-base", FromBox: "elsewhere",
+	}}
+	attachBuilder(t, f, nodeb)
+
+	if _, err := f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatalf("CreateOn onto a machine that reported no images: %v", err)
+	}
+	if !nodeb.took("create") {
+		t.Fatal("the machine was never asked")
+	}
 }

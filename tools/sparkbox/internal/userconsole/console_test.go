@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/mock"
@@ -1238,5 +1240,104 @@ func TestTurboEndpointDoublesAndIsOwnerScoped(t *testing.T) {
 	}
 	if box, _ := tc.mgr.Get("webby"); box.Turbo || box.MemMB != 512 {
 		t.Fatalf("turbo off left %+v", box)
+	}
+}
+
+// fakeBindings is the one question the Snapshots panel asks of the binding
+// store, answered from a map. The real store is not used here because what is
+// under test is the projection — that one new key appears and none of the
+// shipped ones move — not sqlite.
+type fakeBindings struct {
+	rows []templates.Binding
+	err  error
+}
+
+func (f fakeBindings) BindingsForOwner(owner string) ([]templates.Binding, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []templates.Binding
+	for _, b := range f.rows {
+		if b.Owner == owner {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// TestSnapshotListStaysDecodableAsHostSnapshots is the compatibility half of
+// the bound-tags column: the payload gained a key and lost nothing, so anything
+// that decoded this endpoint into []*host.Snapshot before still does.
+//
+// It is asserted rather than assumed because the obvious implementation — a
+// fresh struct with the four fields somebody remembered — silently drops
+// whatever host.Snapshot grows next, and nothing else here would notice.
+func TestSnapshotListStaysDecodableAsHostSnapshots(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "zippy", "alice")
+	ctx := context.Background()
+	if _, err := tc.mgr.Snapshot(ctx, "zippy", "base", "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before the seam is set: a host with no binding store serves the same
+	// shape, with no bound_tags key at all.
+	body := tc.do(t, "GET", "/api/snapshots", "alice", nil).Body.Bytes()
+	var plain []*host.Snapshot
+	if err := json.Unmarshal(body, &plain); err != nil {
+		t.Fatalf("decoding into []*host.Snapshot: %v (%s)", err, body)
+	}
+	if len(plain) != 1 || plain[0].Name != "base" || plain[0].FromBox != "zippy" {
+		t.Fatalf("the snapshot's own fields did not survive the embedding: %s", body)
+	}
+	if strings.Contains(string(body), "bound_tags") {
+		t.Errorf("an unbound snapshot on a store-less host carries bound_tags: %s", body)
+	}
+
+	tc.handler.SetTemplateTags(fakeBindings{rows: []templates.Binding{
+		{Owner: "alice", Tag: "cuda", Snapshot: "base"},
+		{Owner: "alice", Tag: "ml", Snapshot: "base"},
+		// mallory's binding names the same snapshot name on purpose: the store
+		// is owner-scoped, and so is this projection.
+		{Owner: "mallory", Tag: "theirs", Snapshot: "base"},
+	}})
+
+	var rows []struct {
+		Name      string   `json:"name"`
+		FromBox   string   `json:"from_box"`
+		BoundTags []string `json:"bound_tags"`
+	}
+	body = tc.do(t, "GET", "/api/snapshots", "alice", nil).Body.Bytes()
+	if err := json.Unmarshal(body, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].FromBox != "zippy" {
+		t.Fatalf("the row changed shape: %s", body)
+	}
+	if len(rows[0].BoundTags) != 2 || rows[0].BoundTags[0] != "cuda" || rows[0].BoundTags[1] != "ml" {
+		t.Errorf("bound_tags = %v, want [cuda ml] and nothing of mallory's", rows[0].BoundTags)
+	}
+	if err := json.Unmarshal(body, &plain); err != nil {
+		t.Fatalf("the bound payload no longer decodes into []*host.Snapshot: %v (%s)", err, body)
+	}
+}
+
+// TestSnapshotListSurvivesABindingStoreError: the bindings are decoration, so a
+// store that cannot answer costs the column and not the panel.
+func TestSnapshotListSurvivesABindingStoreError(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "zippy", "alice")
+	if _, err := tc.mgr.Snapshot(context.Background(), "zippy", "base", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	tc.handler.SetTemplateTags(fakeBindings{err: errors.New("database is locked")})
+
+	rec := tc.do(t, "GET", "/api/snapshots", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want the rows anyway (%s)", rec.Code, rec.Body)
+	}
+	var plain []*host.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &plain); err != nil || len(plain) != 1 {
+		t.Fatalf("rows = %v (err %v), want the snapshot listed", plain, err)
 	}
 }

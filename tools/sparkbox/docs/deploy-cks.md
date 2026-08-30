@@ -34,6 +34,51 @@ no path that copies a file onto this host, because the gateway Pod runs non-root
 with a read-only root filesystem and port 22 is Sparkbox's own SSH gateway, which
 has no sftp subsystem. See `docs/github-app-setup.md`.
 
+### Template snapshots, and what they cost here
+
+Template snapshots **work** on this cluster as of the change described in
+[cks-snapshot-design.md](cks-snapshot-design.md). They did not before, and the
+reason is worth keeping because it constrains what may be added next.
+
+The node runs with `--disable-host-rootfs-mounts`, and it always will: the VM
+controller container runs as uid 65532 with `capabilities: drop ALL` and cannot
+call `mount(2)`, because putting the host kernel's ext4 driver in front of a
+guest-authored filesystem would enlarge the trusted computing base past
+Firecracker and KVM. `Driver.Snapshot` used to refuse outright under that flag.
+It no longer does, because only one of its four steps ever needed a mount:
+
+- `cp --reflink=always`, `e2fsck -fy` and `zerofree` all operate on the image
+  file, and this cluster already runs them for checkpoints;
+- `sanitizeTemplate` — six deletions of per-guest identity — is the one that
+  mounted, and that work now happens inside the fork, at its first boot, before
+  sshd (`sparkbox-identity-reset`, plus `systemd.machine_id=` on the kernel
+  command line). It is still run at capture time on hosts where mounting is
+  allowed, as defence in depth.
+
+Captured templates are written to `/var/lib/sparkbox/templates`, not to
+`/var/lib/sparkbox/images`. The image dir is part of the read-only mount — only
+`prepare-vm-assets` writes it, as root, before any guest runs — and that is what
+stops a compromised controller substituting the rootfs every future sandbox
+boots from. The capture dir is a separate writable `subPath` on the same
+hostPath volume, so reflink cloning still works, and an image name always
+resolves against `images` first so nothing written there can shadow a base
+image.
+
+`installAuthorizedKey` keeps its guard: that is a real mount of a real guest
+disk on the create path, and it stays off. **A consequence worth knowing before
+rotating the gateway's upstream key: templates captured here carry whatever
+gateway key their base image had, and nothing re-injects it on a fork.** A key
+rotation invalidates every existing template.
+
+Two limits that are not bugs but will bite:
+
+- **Templates live on the node-local hot tier**, which CoreWeave reclaims with
+  the Node. A template does not survive Node replacement and `snapshot create`
+  does not say so.
+- **Templates are unmetered and uncollected.** `admitCost` counts running
+  sandboxes; a 25 GiB template is charged to nobody and swept by nothing but
+  `snapshot rm`. See the deferred section of the design doc.
+
 ## What it creates
 
 - Namespace `sparkbox-poc`.
@@ -292,10 +337,9 @@ This manifest requires Cilium's `CiliumNetworkPolicy` CRD. `deploy.sh` applies
 the policy before starting the gateway and VM node, so the node never comes up
 with unrestricted Pod egress during an ordinary rollout.
 
-Because CKS runs with `--disable-host-rootfs-mounts`, creating a reusable
-template snapshot is currently refused. Pause/resume and archive/restore remain
-available. Re-enable template snapshots only after fork identity sanitization
-runs inside the guest or a disposable mountless helper.
+CKS runs with `--disable-host-rootfs-mounts`, which no longer refuses a template
+snapshot — see *Template snapshots, and what they cost here*. Pause/resume and
+archive/restore are unaffected.
 
 The named host path survives deletion and replacement of the node Pod on the
 same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost
@@ -322,7 +366,20 @@ Pod start, the Kubernetes bootstrap runs the same atomic template refresher as
 other Sparkbox hosts. It installs current `claude`, `codex`, `pi`, and
 `hivemind` binaries plus the guest workload-identity services before opening the
 gateway. New sandboxes therefore have the complete agent toolchain without a
-rootfs rebuild. Existing sandbox disks are not rewritten by a later refresh.
+rootfs rebuild.
+
+A later refresh still never rewrites an existing sandbox disk from the outside —
+mounting a live or user-derived rootfs is exactly what this deployment refuses —
+but an existing sandbox is no longer stuck with what its template shipped with.
+The refresher now also publishes `manifest.json` into `TOOLS_DIR` describing the
+artifacts it verified, `entrypoint.sh` passes that same directory to `serve` as
+`--tools-dir`, and the host serves it to its own guests over the metadata tap. A
+VM updates itself with `sparkbox update-tools` (`--check` reports without
+installing). Each artifact is verified against the host's digest inside the guest
+before it replaces anything, and nothing crosses the fleet link: every machine
+serves its own cache. Note that this writes ~150 MB into that VM's own disk and
+counts against its owner's pool, so it is a command to run when something is
+behind, not something to put on a timer.
 
 ## Runtime image from GitHub Actions
 
@@ -644,6 +701,19 @@ Merging to `main` is not a deployment. The CKS image workflow publishes a new
 image, but the cluster keeps running whatever digest its Deployments name until
 someone re-runs `deploy.sh`. Rolling forward is the same script, pointed at a
 newer digest.
+
+**Deploy note — pooled disk budgets get larger on the roll that carries the
+baseline change.** The pooled per-owner disk sum now subtracts the template a
+sandbox was cloned from: an owner is charged `max(0, DiskMB - BaseDiskMB)`
+instead of the raw figure, because `DiskUsageMB` reads the guest's own ext4
+counters and knows nothing about reflink, so ten sandboxes forked from one 8 GB
+image each reported ~8 GB while the host held a single copy. This takes effect on
+a binary swap, with no flag, the moment the first reaper tick backfills
+baselines — so `--disk-pool-mb-per-owner` means something more generous
+afterwards than it meant before. It only ever loosens: it can never refuse a
+create that used to succeed, and the per-VM hard ceiling, both consoles' meters
+and every per-sandbox figure a user sees stay raw. Re-check the number against
+what you meant. The reasoning is in `docs/resource-model-design.md`.
 
 First, confirm the workflow for the commit you want actually finished, then
 resolve its digest:

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +20,74 @@ func (m *Manager) lockDiskOperation(name string) func() {
 	value, _ := m.diskOps.LoadOrStore(name, &sync.Mutex{})
 	lock := value.(*sync.Mutex)
 	lock.Lock()
-	return lock.Unlock
+	op := callingDiskOperation()
+	m.diskOps.Store(diskOpKey(name), op)
+	return func() {
+		m.diskOps.Delete(diskOpKey(name))
+		lock.Unlock()
+	}
+}
+
+// diskOpKey is where lockDiskOperation records WHAT currently holds a
+// sandbox's disk lock, in the same map as the mutex itself.
+//
+// The NUL is what keeps the two kinds of entry apart: a sandbox name is a DNS
+// label, so no name can ever produce this key and no reader of the mutex
+// entries can ever find a string where it expects a *sync.Mutex.
+func diskOpKey(name string) string { return name + "\x00op" }
+
+// DiskOperation names the rootfs operation currently holding name's disk lock,
+// if any.
+//
+// It exists for ONE caller and one purpose: ctlops.PlanSelfSnapshot warns a
+// guest that its capture will queue behind an archive already in flight.
+// lockDiskOperation is a plain blocking mutex with no busy error, so without
+// this a capture issued during an archive answers "your session is about to
+// end" and then leaves the box running for up to fifteen minutes — a transcript
+// that lies about timing.
+//
+// It is a WARNING and never a gate, and the racy read is why: the operation can
+// finish a microsecond after this returns, and a gate built on that would
+// refuse work that was about to be possible. A stale warning costs a sentence.
+//
+// Never blocks. Reading the recorded name rather than probing the mutex is the
+// point — a TryLock here would take the lock the caller is asking about.
+func (m *Manager) DiskOperation(name string) (string, bool) {
+	v, ok := m.diskOps.Load(diskOpKey(name))
+	if !ok {
+		return "", false
+	}
+	op, ok := v.(string)
+	return op, ok && op != ""
+}
+
+// callingDiskOperation names lockDiskOperation's caller — "snapshot",
+// "archive", "resize" — from the call stack.
+//
+// Read rather than passed because passing it would mean editing all eleven disk
+// lock sites across four files for a string only a warning renders, and a
+// parameter every one of them could get wrong is worse evidence than the
+// function name that is already true by construction. If this ever decides
+// anything, make it an argument instead.
+func callingDiskOperation() string {
+	pc, _, _, ok := runtime.Caller(2) // 0 here, 1 lockDiskOperation, 2 its caller
+	if !ok {
+		return ""
+	}
+	fn := runtime.FuncForPC(pc)
+	if fn == nil {
+		return ""
+	}
+	name := fn.Name() // …/internal/host.(*Manager).Snapshot
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	// A closure reads as "func1"; a bare method name is the only useful answer,
+	// and an empty one renders as no warning at all rather than as noise.
+	if name == "" || strings.HasPrefix(name, "func") {
+		return ""
+	}
+	return strings.ToLower(name)
 }
 
 // CheckpointEnabled reports whether this host can create and restore durable
@@ -217,6 +286,10 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, name string) (retErr er
 	}
 	b.State = vmm.StatePaused
 	b.SSHAddr, b.HostIP, b.GuestV6 = "", "", ""
+	// UnpackRootfs wrote a full image, so this rootfs no longer shares extents
+	// with the template it was forked from; drop the pooled-disk discount until
+	// the next refresh tick re-measures it. Same reasoning as Manager.restore.
+	b.BaseDiskMB = 0
 	m.log.Info("sandbox restored from checkpoint", "name", name, "key", key)
 	m.observe(b, "checkpoint-restored")
 	err = m.save()

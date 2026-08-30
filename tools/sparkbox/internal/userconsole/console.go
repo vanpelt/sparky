@@ -39,6 +39,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
@@ -175,6 +176,26 @@ type Handler struct {
 	// appBusy is the set of keys with a probe already in flight, so a poll that
 	// arrives mid-probe does not start a second one.
 	appBusy map[string]bool
+
+	// binds answers which of the session's tags boot from which snapshot, for
+	// the Snapshots panel's read-only Tags column. Optional: nil is a host with
+	// no binding store, where the column is simply empty. Set by
+	// SetTemplateTags.
+	binds TemplateTags
+}
+
+// TemplateTags is the one question this console asks of the tag-to-base-image
+// store: which of an owner's tags boot from which of their snapshots.
+//
+// *templates.Store satisfies it. It is a one-method seam rather than the whole
+// store because that is all a READ-ONLY column needs, and this milestone ships
+// no bind or unbind route here on purpose: those two are ownership-checked
+// writes that belong in internal/ctlops, and this handler does not go through
+// ctlops at all (see listSnapshots and deleteSnapshot, which call the manager
+// directly). Adding them here would mean a second authorization path for the
+// same operation, which is the thing this package must not grow.
+type TemplateTags interface {
+	BindingsForOwner(owner string) ([]templates.Binding, error)
 }
 
 // New builds a user-console handler for <subdomain>.<domain> (subdomain is
@@ -241,6 +262,16 @@ func (h *Handler) SetVitals(v webui.VitalsReader) { h.vitals = v }
 // still stores attachments, still clones public repositories, and must still
 // serve this console — it simply stops claiming to know what github.com thinks.
 func (h *Handler) SetGitHubApp(a *ghapp.App) { h.app = a }
+
+// SetTemplateTags gives the Snapshots panel its Tags column. It is a seam for
+// the same reason SetGitHubApp is: a host with no binding store still serves
+// this console, still lists snapshots and still forks them — it simply has no
+// bindings to show.
+//
+// It grants no writes. Binding and unbinding are ctlops operations reached over
+// ssh and REST; nothing on this console may point a tag at a snapshot, and the
+// panel says so by having no control for it.
+func (h *Handler) SetTemplateTags(t TemplateTags) { h.binds = t }
 
 func (h *Handler) Handler() http.Handler {
 	auth := edgeauth.Require(h.signer, h.accounts, h.loginURL)
@@ -790,14 +821,58 @@ func (h *Handler) setVisibility(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// snapshotRow is one snapshot as this console serves it: the stored record,
+// plus the tags whose sandboxes boot from it.
+//
+// The embedded POINTER is what keeps this a compatible change. encoding/json
+// promotes an embedded struct's fields inline, so the object on the wire is the
+// one that shipped with exactly one new key — a client decoding into
+// []*host.Snapshot still works, which is what console_test.go asserts.
+type snapshotRow struct {
+	*host.Snapshot
+	// BoundTags is omitempty rather than never-nil: a column printed empty on
+	// every row of a panel where almost nothing is bound buries the one row
+	// where it matters.
+	BoundTags []string `json:"bound_tags,omitempty"`
+}
+
 // listSnapshots lists the session's own snapshots — owner-scoped, unlike the
 // operator console's AllSnapshots.
 func (h *Handler) listSnapshots(w http.ResponseWriter, r *http.Request) {
-	snaps := h.boxes.Snapshots(handleFrom(r))
-	if snaps == nil {
-		snaps = []*host.Snapshot{}
+	handle := handleFrom(r)
+	snaps := h.boxes.Snapshots(handle)
+	out := make([]snapshotRow, 0, len(snaps))
+	bound := h.boundTags(handle)
+	for _, s := range snaps {
+		out = append(out, snapshotRow{Snapshot: s, BoundTags: bound[s.Name]})
 	}
-	writeJSON(w, http.StatusOK, snaps)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// boundTags maps the owner's snapshot names to the tags bound to them, or
+// nothing at all when there is no store or the store is unhappy.
+//
+// A store failure is logged and served as empty rather than failing the
+// request: the bindings are decoration on a row here, and a Snapshots panel
+// that goes blank because one extra column could not be filled in is worse than
+// one that renders the rows. The authoritative refusals live where the writes
+// do — ctlops refuses to delete a bound snapshot, and refuses a create whose
+// tags disagree — not in this projection.
+func (h *Handler) boundTags(owner string) map[string][]string {
+	if h.binds == nil {
+		return nil
+	}
+	list, err := h.binds.BindingsForOwner(owner)
+	if err != nil {
+		h.log.Warn("user console could not read template bindings", "handle", owner, "err", err)
+		return nil
+	}
+	m := make(map[string][]string, len(list))
+	for _, b := range list {
+		// The store orders by tag, so the column reads the same way twice.
+		m[b.Snapshot] = append(m[b.Snapshot], b.Tag)
+	}
+	return m
 }
 
 type forkReq struct {
@@ -829,6 +904,16 @@ func (h *Handler) fork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, webui.Public(box))
 }
 
+// deleteSnapshot removes one of the session's snapshots.
+//
+// KNOWN GAP, stated rather than papered over: this calls the manager directly,
+// so it does NOT pass ctlops.DeleteSnapshot's refusal to delete a snapshot a tag
+// is bound to. A delete from this panel can therefore leave a binding pointing
+// at a file that is gone. What catches it is ctlops.resolveTemplate, which
+// refuses the next create on that tag with `template_missing` instead of quietly
+// falling back to the stock image — which is exactly why that fallback must
+// never be added. Routing this console through ctlops is a separate change with
+// its own ordering bug to solve (see ctlops/sandbox.go's comment on Create).
 func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	snap := r.PathValue("snapshot")
 	ctx, cancel := context.WithTimeout(r.Context(), pauseTimeout)

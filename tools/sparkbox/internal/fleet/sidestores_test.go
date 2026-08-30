@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
@@ -517,4 +518,196 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// recordingSelfLifecycle is a control plane that only remembers which sandbox
+// RECORD it was handed. The record is the whole security property: the owner
+// the operation runs as is read off it, so a node that could reach one it does
+// not hold would be choosing whose authority its guests act under.
+type recordingSelfLifecycle struct {
+	boxes   []string
+	args    []ctlops.SnapshotToTagArgs
+	plan    ctlops.SelfSnapshotPlan
+	planTag string
+}
+
+func (l *recordingSelfLifecycle) Pause(_ context.Context, box *host.Sandbox) error {
+	l.boxes = append(l.boxes, "pause:"+box.Name+"@"+box.Owner)
+	return nil
+}
+
+// PlanSnapshot echoes the tag and name it was asked for, the way the real one
+// does once it has authorized them. planTag overrides that echo, which is how a
+// test says "the control plane plans something else than it was asked for".
+func (l *recordingSelfLifecycle) PlanSnapshot(_ context.Context, box *host.Sandbox, tag, name string) (ctlops.SelfSnapshotPlan, error) {
+	l.boxes = append(l.boxes, "plan:"+box.Name+"@"+box.Owner)
+	p := l.plan
+	p.Sandbox, p.Tag = box.Name, tag
+	if name != "" {
+		p.Snapshot = name
+	}
+	if l.planTag != "" {
+		p.Tag = l.planTag
+	}
+	return p, nil
+}
+
+func (l *recordingSelfLifecycle) Snapshot(_ context.Context, box *host.Sandbox, a ctlops.SnapshotToTagArgs) error {
+	l.boxes = append(l.boxes, "capture:"+box.Name+"@"+box.Owner)
+	l.args = append(l.args, a)
+	return nil
+}
+
+// TestRemoteSandboxCanRunOnlyItsOwnLifecycleVerbs extends the same
+// placement-ledger rule to the two verbs that stop a VM. It is the identical
+// check SelfVisibility gets, and it has to be, because these two are strictly
+// sharper: one stops somebody's machine and the other re-points what their
+// future sandboxes boot from.
+func TestRemoteSandboxCanRunOnlyItsOwnLifecycleVerbs(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	life := &recordingSelfLifecycle{plan: ctlops.SelfSnapshotPlan{Snapshot: "web-260829-1412", Token: "tok"}}
+	r.f.SetSelfLifecycle(life)
+	ctx := context.Background()
+
+	if _, err := r.f.SelfPause(ctx, "boxb", nodelink.SelfPauseReq{Sandbox: "far-away"}); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	plan, err := r.f.SelfSnapshotPlan(ctx, "boxb", nodelink.SelfSnapshotPlanReq{Sandbox: "far-away", Tag: "web"})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.Snapshot != "web-260829-1412" || plan.Token != "tok" {
+		t.Errorf("plan crossed the fleet as %+v", plan)
+	}
+	if _, err := r.f.SelfSnapshot(ctx, "boxb", nodelink.SelfSnapshotReq{
+		Sandbox: "far-away", Tag: "web", Name: "web-260829-1412",
+	}); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	// The owner comes off the ledger's record, not off anything the node said.
+	// The second "plan" is the commit's own: SelfSnapshot re-derives the tag and
+	// the name on this side before it captures anything.
+	want := []string{"pause:far-away@alice", "plan:far-away@alice",
+		"plan:far-away@alice", "capture:far-away@alice"}
+	if !equalStrings(life.boxes, want) {
+		t.Errorf("lifecycle saw %v, want %v", life.boxes, want)
+	}
+	if len(life.args) != 1 || life.args[0].Sandbox != "far-away" {
+		t.Errorf("capture args = %+v", life.args)
+	}
+
+	for name, call := range map[string]func() error{
+		"pause": func() error {
+			_, err := r.f.SelfPause(ctx, "intruder", nodelink.SelfPauseReq{Sandbox: "far-away"})
+			return err
+		},
+		"plan": func() error {
+			_, err := r.f.SelfSnapshotPlan(ctx, "intruder", nodelink.SelfSnapshotPlanReq{Sandbox: "far-away"})
+			return err
+		},
+		"capture": func() error {
+			_, err := r.f.SelfSnapshot(ctx, "intruder", nodelink.SelfSnapshotReq{
+				Sandbox: "far-away", Tag: "web", Name: "web-260829-1412"})
+			return err
+		},
+	} {
+		if err := call(); codeOf(err) != nodelink.CodeNotYours {
+			t.Errorf("cross-node %s = %v (code %q), want %s", name, err, codeOf(err), nodelink.CodeNotYours)
+		}
+	}
+	if len(life.boxes) != 4 {
+		t.Errorf("a cross-node request reached the control plane: %v", life.boxes)
+	}
+}
+
+// TestAGatewayWillNotCaptureIntoATagItsOwnPlanDoesNotName.
+//
+// The plan token is checked by the metadata service that answered the guest,
+// and on a node that service runs on the node. So the tag and the name a node
+// hands up are, by themselves, a node's assertion. This is the check that makes
+// them the gateway's answer instead: a guest may re-point only a tag its own
+// sandbox carries (ctlops.PlanSelfSnapshot), and without a re-plan here an
+// enrolled node could re-point any tag belonging to an owner whose sandbox it
+// happens to run — which then hands that tag's secrets to every sandbox created
+// on it afterwards, on any machine.
+func TestAGatewayWillNotCaptureIntoATagItsOwnPlanDoesNotName(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	// The control plane plans `web` — the tag this sandbox actually carries —
+	// whatever it is asked for.
+	life := &recordingSelfLifecycle{
+		plan:    ctlops.SelfSnapshotPlan{Snapshot: "web-260829-1412", Token: "tok"},
+		planTag: "web",
+	}
+	r.f.SetSelfLifecycle(life)
+	ctx := context.Background()
+
+	_, err := r.f.SelfSnapshot(ctx, "boxb", nodelink.SelfSnapshotReq{
+		Sandbox: "far-away", Tag: "prod", Name: "web-260829-1412"})
+	if code := codeOf(err); code != "plan_stale" {
+		t.Fatalf("a relayed tag the gateway's plan does not name = %v (code %q), want plan_stale", err, code)
+	}
+	if len(life.args) != 0 {
+		t.Errorf("the capture ran anyway: %+v", life.args)
+	}
+
+	// And a commit that never planned at all is refused rather than run under a
+	// name the gateway derives on the spot: the plan is what names the snapshot,
+	// so a capture whose name nobody was shown is not the gesture this is.
+	life.boxes, life.args = nil, nil
+	_, err = r.f.SelfSnapshot(ctx, "boxb", nodelink.SelfSnapshotReq{Sandbox: "far-away", Tag: "web"})
+	if code := codeOf(err); code != "plan_stale" {
+		t.Fatalf("a commit with no planned name = %v (code %q), want plan_stale", err, code)
+	}
+	if len(life.args) != 0 {
+		t.Errorf("the capture ran anyway: %+v", life.args)
+	}
+
+	// And the pair the gateway's own plan does produce still goes through, so
+	// this refuses forgery rather than the feature.
+	if _, err := r.f.SelfSnapshot(ctx, "boxb", nodelink.SelfSnapshotReq{
+		Sandbox: "far-away", Tag: "web", Name: "web-260829-1412"}); err != nil {
+		t.Fatalf("the honest capture was refused: %v", err)
+	}
+	if len(life.args) != 1 || life.args[0].Tag != "web" || life.args[0].Name != "web-260829-1412" {
+		t.Errorf("capture args = %+v", life.args)
+	}
+}
+
+// TestGuestLifecycleWithoutAControlPlaneIsRefusedNotDropped: a gateway with no
+// Ops installed answers a node in a sentence it can turn into a 501, rather
+// than leaving a guest waiting on a hook that will never answer.
+func TestGuestLifecycleWithoutAControlPlaneIsRefusedNotDropped(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for name, call := range map[string]func() error{
+		"pause": func() error {
+			_, err := r.f.SelfPause(ctx, "boxb", nodelink.SelfPauseReq{Sandbox: "far-away"})
+			return err
+		},
+		"plan": func() error {
+			_, err := r.f.SelfSnapshotPlan(ctx, "boxb", nodelink.SelfSnapshotPlanReq{Sandbox: "far-away"})
+			return err
+		},
+		"capture": func() error {
+			_, err := r.f.SelfSnapshot(ctx, "boxb", nodelink.SelfSnapshotReq{
+				Sandbox: "far-away", Tag: "web", Name: "web-260829-1412"})
+			return err
+		},
+	} {
+		if err := call(); !ctlops.IsKind(err, ctlops.KindDisabled) {
+			t.Errorf("%s with no control plane = %v, want KindDisabled", name, err)
+		}
+	}
 }

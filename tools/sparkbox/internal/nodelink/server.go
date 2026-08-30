@@ -76,6 +76,13 @@ const (
 	// this gateway cannot act on. The guest is told 503: the repair is to wait,
 	// which is the one thing a 500 would talk it out of.
 	CodeRepoUpstream = "repo_upstream_unavailable"
+	// CodeNoSelfLifecycle is a gateway with no guest self-service lifecycle
+	// wired — no control plane installed on the fleet. Answered on the nil hook
+	// rather than left to produce an unregistered-type error, for the reason
+	// noRepos gives: "this deployment does not do that" and "this gateway is too
+	// old to speak it" must not read as the same diagnosis to whoever is
+	// looking at the node's log.
+	CodeNoSelfLifecycle = "self_lifecycle_not_enabled"
 	// CodeNoCertificateIssuer means this gateway has no internal CA/roster
 	// signer wired. It is distinct from a pending or disabled authenticated row.
 	CodeNoCertificateIssuer = "certificate_not_issued"
@@ -138,6 +145,43 @@ func registerUplinkOps(conn *Conn, node string, hooks Hooks) {
 			return nil, ctlops.Disabled(OpLink, "default route configuration is not enabled on this gateway")
 		}
 		return hooks.OnSelfPort(ctx, node, req)
+	})
+	conn.Handle(TypeSelfPause, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfPauseReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" {
+			return nil, ctlops.Invalid(OpLink, "bad_self_pause_request",
+				"a self-pause request has to name a sandbox")
+		}
+		if hooks.OnSelfPause == nil {
+			return nil, noSelfLifecycle()
+		}
+		return hooks.OnSelfPause(ctx, node, req)
+	})
+	conn.Handle(TypeSelfSnapshotPlan, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfSnapshotPlanReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			len(req.Tag) > MaxSelfTagBytes || len(req.Name) > MaxSelfNameBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_snapshot_plan_request",
+				"a capture plan needs a sandbox, a tag of at most %d bytes and a name of at most %d bytes",
+				MaxSelfTagBytes, MaxSelfNameBytes)
+		}
+		if hooks.OnSelfSnapshotPlan == nil {
+			return nil, noSelfLifecycle()
+		}
+		return hooks.OnSelfSnapshotPlan(ctx, node, req)
+	})
+	conn.Handle(TypeSelfSnapshot, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfSnapshotReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			req.Tag == "" || req.Name == "" ||
+			len(req.Tag) > MaxSelfTagBytes || len(req.Name) > MaxSelfNameBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_snapshot_request",
+				"a capture needs a sandbox, the plan's tag and the plan's snapshot name")
+		}
+		if hooks.OnSelfSnapshot == nil {
+			return nil, noSelfLifecycle()
+		}
+		return hooks.OnSelfSnapshot(ctx, node, req)
 	})
 	conn.Handle(TypeSelfRepos, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var req SelfReposReq
@@ -202,6 +246,17 @@ func noRepos() error {
 	return &ctlops.Error{
 		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoRepos, Verbatim: true,
 		Msg: "this gateway serves no repo attachments: it has no attachment store or no GitHub App key configured.",
+	}
+}
+
+// noSelfLifecycle is the lifecycle trio's equivalent of noRepos, hand-built for
+// the same reason: the node maps CodeNoSelfLifecycle onto the 501 a
+// gateway-local guest would get from a metadata service with no lifecycle
+// wired, so the two machines answer the same thing.
+func noSelfLifecycle() error {
+	return &ctlops.Error{
+		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoSelfLifecycle, Verbatim: true,
+		Msg: "this gateway does not run guest self-service lifecycle: no control plane is installed on its fleet.",
 	}
 }
 
@@ -417,6 +472,14 @@ type Hooks struct {
 	// sentence it can turn into a 501 rather than being left to infer it.
 	OnSelfRepos    func(ctx context.Context, node string, req SelfReposReq) (SelfReposResp, error)
 	OnSelfRepoCred func(ctx context.Context, node string, req SelfRepoCredReq) (SelfRepoCredResp, error)
+	// The lifecycle trio. OnSelfSnapshotPlan is a pure read and answers every
+	// refusal a guest can act on; OnSelfPause and OnSelfSnapshot are the two
+	// that stop the VM, and both return the instant the work is accepted — the
+	// node's guest has already been told, and the box it would report to is
+	// about to be paused.
+	OnSelfPause        func(ctx context.Context, node string, req SelfPauseReq) (SelfPauseResp, error)
+	OnSelfSnapshotPlan func(ctx context.Context, node string, req SelfSnapshotPlanReq) (SelfSnapshotPlanResp, error)
+	OnSelfSnapshot     func(ctx context.Context, node string, req SelfSnapshotReq) (SelfSnapshotResp, error)
 	// OnCertificateEnroll receives the same authenticated roster name. The CSR
 	// payload deliberately has no identity field.
 	OnCertificateEnroll func(ctx context.Context, node string, req CertificateEnrollRequest) (CertificateEnrollResponse, error)
@@ -901,6 +964,49 @@ func (c *Client) Box(name string) (SandboxRow, bool) {
 	defer c.mu.Unlock()
 	row, ok := c.boxes[name]
 	return row, ok
+}
+
+// NoteSnapshot and ForgetSnapshot fold a template this gateway just created or
+// deleted on the node into its cached picture, rather than waiting for the next
+// inventory.
+//
+// Without them a capture succeeds and then does not exist. The cached snapshot
+// set is only ever written wholesale by ingest, which runs when a link comes up
+// or when the gateway asks for a fresh inventory — and nothing asks after a
+// capture. So `snapshot create` reported success while `snapshot ls` stayed
+// empty and `snapshot bind` answered "no snapshot named ..." (masked
+// not-found, which reads as a permissions bug) until the link happened to
+// reconnect. On a deployment where every sandbox is remote, that is every
+// capture there is.
+//
+// Sandbox rows never had this problem: the node streams sandbox.changed and
+// TypeGone for those. Templates have no such event, and the gateway does not
+// need one, because every mutation of a node's template set ORIGINATES here —
+// Fleet.Snapshot and Fleet.DeleteSnapshot are the only two callers, and each
+// already holds the answer it is recording. The gRPC transport has done exactly
+// this since it was written (GRPCControl.putSnapshot / deleteSnapshot); this is
+// the SSH transport catching up, and the asymmetry is why the bug was invisible
+// until a cluster on the SSH transport captured its first template.
+//
+// Capped like the sandbox cache and for the same reason. A refusal is silent
+// here rather than logged loudly: the create itself succeeded and the caller is
+// about to hear so, and the next inventory reconciles it.
+func (c *Client) NoteSnapshot(row SnapshotRow) {
+	if row.Name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.snaps[row.Name]; !known && len(c.snaps) >= MaxSandboxesPerNode {
+		return
+	}
+	c.snaps[row.Name] = row
+}
+
+func (c *Client) ForgetSnapshot(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.snaps, name)
 }
 
 // Snapshot is the node's last known inventory, name-sorted so every listing

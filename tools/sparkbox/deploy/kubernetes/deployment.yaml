@@ -400,6 +400,18 @@ spec:
             - name: data
               mountPath: /var/lib/sparkbox/hot/controller
               subPath: hot/controller
+            # Writable, and deliberately NOT /var/lib/sparkbox/images. The base
+            # images this node boots are laid down by prepare-vm-assets, which
+            # runs as root with SYS_ADMIN and exits before any guest starts, and
+            # the controller then reads them through the read-only mount above —
+            # so a compromised controller cannot substitute the rootfs every
+            # future sandbox is created from. Captured templates are
+            # user-derived and have to be writable, so they live here instead.
+            # Same volume, so reflink cloning between a VM disk and a capture of
+            # it still works. See docs/cks-snapshot-design.md.
+            - name: data
+              mountPath: /var/lib/sparkbox/templates
+              subPath: templates
             - name: data
               mountPath: /var/lib/sparkbox/node-identity
               subPath: node-identity

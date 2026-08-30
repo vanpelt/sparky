@@ -518,6 +518,12 @@ func (r *remoteNode) Snapshotter(ctx context.Context, box, snapName, owner strin
 	// The name and the sandbox it came from are this gateway's own: they were
 	// the request. See record.
 	s.Name, s.FromBox, s.Owner = snapName, box, owner
+	// And into the cached picture, or the template this call just made would not
+	// exist as far as `snapshot ls`, `snapshot bind` and Fork are concerned
+	// until this link next reconnects. See Client.NoteSnapshot.
+	row := resp.Snapshot
+	row.Name, row.Owner, row.FromBox = snapName, owner, box
+	r.client.NoteSnapshot(row)
 	return s, nil
 }
 
@@ -527,6 +533,9 @@ func (r *remoteNode) DeleteSnapshot(ctx context.Context, snapName, owner string)
 	if err := r.client.Do(ctx, nodelink.TypeSnapshotDelete, req, &resp); err != nil {
 		return r.fail("snapshot.rm", snapName, err)
 	}
+	// The other half of NoteSnapshot: a template left in the cache after it is
+	// gone is a name `snapshot ls` keeps offering and Fork then fails on.
+	r.client.ForgetSnapshot(snapName)
 	return nil
 }
 

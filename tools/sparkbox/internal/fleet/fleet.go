@@ -175,6 +175,17 @@ type Fleet struct {
 	// all, so a relayed ResyncRepos would reach a nil hook over there and an
 	// owner's retag would silently check nothing out. See repos.go.
 	repoSync host.RepoSyncer
+	// toolSync installs the host's cached agent CLIs into a sandbox on another
+	// machine just before it is captured as a template. Same split again, and
+	// the sharpest reason of the three: a node holds only the gateway's
+	// upstream PUBLIC key, so it has no signer with which to open a session
+	// into its own guests. Nil until SetToolSync; see tools.go.
+	toolSync host.ToolRefresher
+	// packs counts the in-flight rootfs packs (snapshot, archive) holding a
+	// sandbox against the gateway's own lifecycle env pushes, so a push cannot
+	// refill the managed block between the pre-pack strip and the capture. Keyed
+	// by sandbox name; see beginPack in strip.go.
+	packs map[string]int
 	// rules resolves a sandbox's egress allow-set from its tags. Nil until
 	// SetRules; see netplane.go.
 	rules Rules
@@ -182,6 +193,12 @@ type Fleet struct {
 	// until SetIdentity — a deployment with no OIDC key — and a node asking is
 	// then told so rather than left waiting. See identity.go.
 	identity Identity
+	// selfLife runs the two lifecycle verbs a guest can aim at its own VM:
+	// pause, and capture-into-a-tag. It is the control plane itself, installed
+	// post-construction by SetSelfLifecycle because Ops is built with this
+	// fleet as its sandbox store. Nil — a deployment with no control plane —
+	// answers the node in a sentence rather than leaving it waiting.
+	selfLife SelfLifecycle
 	// repos resolves a sandbox's repo attachments and mints the git credential
 	// for one of them, on any machine. Nil until SetRepos — a deployment with
 	// no attachment store or no GitHub App key — with the same answer as
@@ -1050,6 +1067,15 @@ func (f *Fleet) Archive(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	// An archive is packed into object storage and can outlive every sandbox it
+	// came from, so it wants the strip at least as much as a template does. No
+	// tool refresh: this rootfs is restored as the same box, never forked, so
+	// updating its CLIs would only spend the minutes.
+	release := f.beginPack(name)
+	defer release()
+	if err := f.stripEnvBefore(ctx, n, name); err != nil {
+		return err
+	}
 	f.hangUpBefore(n, name)
 	return n.Archive(ctx, name)
 }
@@ -1362,6 +1388,23 @@ func (f *Fleet) Snapshot(ctx context.Context, box, snapName, owner string) (*hos
 	if err != nil {
 		return nil, err
 	}
+	// The hold goes on before anything touches the guest, because the strip
+	// below may wake it and the gateway's own reaction to that wake is a push.
+	// See beginPack.
+	release := f.beginPack(box)
+	defer release()
+	// Every fork of this template copies the rootfs byte-for-byte, so the
+	// managed secret block comes out before the node freezes it — and a strip
+	// that fails refuses the capture rather than shipping the disk. See
+	// stripEnvBefore.
+	if err := f.stripEnvBefore(ctx, n, box); err != nil {
+		return nil, err
+	}
+	// Before the hang-up and before the node pauses anything: this is the last
+	// moment a running remote guest can be reached, and only this machine can
+	// reach it. See refreshToolsBefore. It runs AFTER the strip because the
+	// strip is what guarantees the guest is awake to be installed into.
+	f.refreshToolsBefore(ctx, n, box)
 	f.hangUpBefore(n, box)
 	return n.Snapshotter(ctx, box, snapName, owner)
 }

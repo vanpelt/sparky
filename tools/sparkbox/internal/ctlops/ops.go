@@ -29,6 +29,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 )
 
@@ -143,6 +144,29 @@ type Repos interface {
 	SandboxesForRepo(owner, host, slug string) ([]string, error)
 }
 
+// TemplateBindings is the tag-to-base-image store — the fourth reader of the
+// shared sandbox_tags namespace, after secrets, netrules and repos. A nil one
+// makes bind and unbind answer KindDisabled and leaves every create booting from
+// Config.DefaultImage, which is exactly what shipped before bindings existed.
+//
+// The package is named `templates` and this package already has a `Templates`
+// interface (the snapshot/fork slice above). The two coexist without ambiguity
+// because Go resolves the identifier by scope: `templates.Binding` is the
+// package, `Templates` is the type. They are not the same object — one is the
+// driver's snapshot capability, the other is a sqlite table of pointers into it.
+//
+// templates.TemplatesForSandbox is deliberately absent, for the reason
+// Repos.ReposForSandbox is: nothing on this surface should be able to ask "what
+// would that box boot from", because the create path answers that question from
+// the tags it just computed and a second answer with different inputs is a
+// second authority.
+type TemplateBindings interface {
+	Bind(owner, tag, snapshot string) (templates.Binding, string, error)
+	Unbind(owner, tag string) (templates.Binding, error)
+	BindingsForOwner(owner string) ([]templates.Binding, error)
+	BindingsForTags(owner string, tags []string) ([]templates.Binding, error)
+}
+
 // GitHubApp is the installation half of the GitHub App: which installation
 // covers a repository, and whether the caller's linked GitHub identity may use
 // it. *ghapp.App satisfies it.
@@ -235,15 +259,16 @@ type Config struct {
 	Templates Templates // required
 	Accounts  Accounts  // required
 
-	Tags        Tagger      // nil: tag operations are KindDisabled
-	Secrets     Secrets     // nil: secret operations are KindDisabled
-	Repos       Repos       // nil: repo operations are KindDisabled
-	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
-	Schedules   Schedules   // nil: schedule operations are KindDisabled
-	Routes      Routes      // nil: share operations are KindDisabled
-	Sessions    Minter      // nil: MintSessionToken is KindDisabled
-	Nodes       NodeRoster  // nil: node operations are KindDisabled
-	GitHub      GitHubKeys  // nil: the real github.com client
+	Tags         Tagger           // nil: tag operations are KindDisabled
+	Secrets      Secrets          // nil: secret operations are KindDisabled
+	Repos        Repos            // nil: repo operations are KindDisabled
+	TemplateTags TemplateBindings // nil: bind is KindDisabled and creates use DefaultImage
+	Checkpoints  Checkpoints      // nil: manual durable checkpoints are KindDisabled
+	Schedules    Schedules        // nil: schedule operations are KindDisabled
+	Routes       Routes           // nil: share operations are KindDisabled
+	Sessions     Minter           // nil: MintSessionToken is KindDisabled
+	Nodes        NodeRoster       // nil: node operations are KindDisabled
+	GitHub       GitHubKeys       // nil: the real github.com client
 	// GitHubDevice runs the OAuth device flow. nil — the default, and the state
 	// of any host with no --github-client-id — leaves the key check as the only
 	// way to link, which is what shipped before this existed.
@@ -275,21 +300,22 @@ type Config struct {
 // Ops is the control-plane core. One per process; safe for concurrent use
 // because every store it holds already is.
 type Ops struct {
-	boxes       Sandboxes
-	templates   Templates
-	accounts    Accounts
-	tags        Tagger
-	secrets     Secrets
-	repos       Repos
-	checkpoints Checkpoints
-	schedules   Schedules
-	routes      Routes
-	sessions    Minter
-	nodes       NodeRoster
-	github      GitHubKeys
-	ghDevice    GitHubDeviceFlow
-	ghApp       GitHubApp
-	hivemind    HiveMind
+	boxes        Sandboxes
+	templates    Templates
+	accounts     Accounts
+	tags         Tagger
+	secrets      Secrets
+	repos        Repos
+	templateTags TemplateBindings
+	checkpoints  Checkpoints
+	schedules    Schedules
+	routes       Routes
+	sessions     Minter
+	nodes        NodeRoster
+	github       GitHubKeys
+	ghDevice     GitHubDeviceFlow
+	ghApp        GitHubApp
+	hivemind     HiveMind
 	// orgMembers reads a GitHub org's roster. A function rather than another
 	// narrow interface because it is one call with no state, and a field rather
 	// than a direct users.ListOrgMembers so provisioning is testable without
@@ -323,6 +349,7 @@ func New(cfg Config) *Ops {
 		tags:               cfg.Tags,
 		secrets:            cfg.Secrets,
 		repos:              cfg.Repos,
+		templateTags:       cfg.TemplateTags,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
@@ -414,6 +441,12 @@ type Capabilities struct {
 	// is what makes the node commands answerable. It says nothing about whether
 	// any machine actually has joined — that is what `nodes.list` is for.
 	Fleet bool `json:"fleet"`
+	// TemplateTags reports that a tag can name the base image a sandbox boots
+	// from. False is a host with no binding store, where bind and unbind answer
+	// 501 and every create takes the operator's default image — which is a
+	// different statement from Snapshots, since a host can hold snapshots to
+	// fork by name while having nowhere to record a binding.
+	TemplateTags bool `json:"template_tags"`
 }
 
 func (o *Ops) Capabilities() Capabilities {
@@ -429,6 +462,7 @@ func (o *Ops) Capabilities() Capabilities {
 		Repos:         o.repos != nil,
 		GitHubApp:     o.ghApp != nil,
 		Fleet:         o.nodes != nil,
+		TemplateTags:  o.templateTags != nil,
 	}
 }
 

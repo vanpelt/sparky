@@ -216,6 +216,7 @@ func TestRenderServiceReproducesTheLiveDGXGateway(t *testing.T) {
 		"--archive-bucket catnip-sparkbox",
 		"--ssh-advertise-port 22",
 		"--tls-provider cloudflare",
+		"--tools-dir " + cfg.toolsDir(),
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("ExecStart missing %q:\n%s", want, cmd)
@@ -236,6 +237,32 @@ func TestRenderServiceReproducesTheLiveDGXGateway(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("sparkbox.env %s = %q, want %q — the dedicated-edge-IP mode must come from --edge-ip", k, got[k], v)
 		}
+	}
+}
+
+// TestServedToolsDirIsTheRefreshersToolsDir is the one thing that makes the
+// guest's `sparkbox update-tools` work at all: refresh-agent-tools.sh downloads
+// the CLIs and writes manifest.json into TOOLS_DIR, and the gateway serves
+// --tools-dir to its own guests. Two different paths would give every guest a
+// 501 on a box whose cache is perfectly well filled, and nothing would say so —
+// so both are rendered from Config.toolsDir and this asserts they still are.
+//
+// The refresher unit's half is asserted in agenttools_test.go; this is the
+// serve half, and the comparison between them is the point.
+func TestServedToolsDirIsTheRefreshersToolsDir(t *testing.T) {
+	cfg := DefaultConfig()
+	cmd := execStart(renderOrDie(t, cfg))
+	if !strings.Contains(cmd, "--tools-dir "+cfg.toolsDir()+" ") {
+		t.Fatalf("ExecStart does not serve this host's tool cache:\n%s", cmd)
+	}
+	// Not an optional subsystem: a gateway with no --tools-dir answers 501 to
+	// every guest, so this is rendered even on a config that turns nothing on.
+	unit, err := renderRefreshToolsService(cfg, "/usr/local/sbin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unit, "TOOLS_DIR="+cfg.toolsDir()) {
+		t.Fatalf("the refresher unit does not fill the directory the gateway serves:\n%s", unit)
 	}
 }
 

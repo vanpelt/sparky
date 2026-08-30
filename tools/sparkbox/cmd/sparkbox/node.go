@@ -73,6 +73,7 @@ type nodeOptions struct {
 
 	kernelPath              string
 	imageDir                string
+	templateDir             string
 	jailerBin               string
 	jailerChrootBase        string
 	jailerUIDBase           int
@@ -91,6 +92,17 @@ type nodeOptions struct {
 	// but the default is the same port a gateway uses, because a guest asks its
 	// own default gateway on a fixed port and has no way to be told otherwise.
 	metaAddr string
+	// toolsDir is this node's OWN agent-CLI cache, served to its own guests and
+	// NEVER relayed to the gateway. Identity and repo access relay because a
+	// fleet has one signing key and one attachment ledger; tools are neither.
+	// This machine runs the same refresher on the same timer, so the artifacts
+	// are already here, and pulling a ~92MB tarball over the fleet link to hand
+	// a guest bytes off the local disk would defeat the entire point.
+	toolsDir string
+	// guestSelfSnapshot lets a guest capture itself into one of its own tags.
+	// The same operator switch the gateway carries, threaded here so a fleet
+	// answers the same way on every machine in it.
+	guestSelfSnapshot bool
 
 	idleBalloon      time.Duration
 	idleTimeout      time.Duration
@@ -195,7 +207,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			opts.kernelPath, opts.imageDir, opts.vmStateDir,
+			opts.kernelPath, opts.imageDir, opts.templateDir, opts.vmStateDir,
 			opts.jailerBin, opts.jailerChrootBase, opts.jailerUIDBase,
 			opts.chrootJailer, opts.privilegedHelperSocket, opts.privilegedHelperBin,
 			opts.helperControllerGID, opts.disableHostRootfsMounts,
@@ -369,7 +381,15 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			Identity:     identityRelay,
 			RouteControl: relayRouteControl{up: uplink},
 			Repos:        reposRelay,
-			GuestSubnet:  opts.guestSubnet,
+			Tools:        localTools(opts.toolsDir),
+			// Wired on the node in the same release as on the gateway, and that
+			// is not a scheduling nicety. metadata's own rule (repos.go's
+			// githubError) is that a guest must not be able to tell which
+			// machine its sandbox landed on from the status it got, and a 501
+			// here beside a 202 on the gateway is exactly that leak.
+			SelfLifecycle:     relaySelfLifecycle{up: uplink},
+			AllowSelfSnapshot: opts.guestSelfSnapshot,
+			GuestSubnet:       opts.guestSubnet,
 			// No default audience here: the gateway substitutes its own, which
 			// is the only one that could be right — the allowlist that decides
 			// whether an audience is permitted lives with the issuer.
@@ -383,7 +403,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			}
 		}()
 		log.Info("guest metadata service enabled", "addr", opts.metaAddr,
-			"signing", "relayed to the gateway")
+			"signing", "relayed to the gateway", "tools_dir", opts.toolsDir)
 	}
 
 	log.Info("sparkbox node up", "node", opts.nodeName, "gateway", opts.gateway,
@@ -473,6 +493,65 @@ func (c relayRouteControl) SetPort(ctx context.Context, box *host.Sandbox, port 
 	err := c.up.Request(ctx, nodelink.TypeSelfPort,
 		nodelink.SelfPortReq{Sandbox: box.Name, Port: port}, &resp)
 	return metadata.RoutePort{Sandbox: resp.Sandbox, Port: resp.Port}, err
+}
+
+// gatewaySelfLifecycle is the guest lifecycle path on a GATEWAY — and it goes
+// through the fleet, with this machine's own node name, exactly as
+// gatewayRouteControl does.
+//
+// That is the point rather than an accident of reuse: the gateway's own guests
+// and a node's guests then take one authorization path (fleet.selfServiceBox,
+// the placement-ledger check) instead of two that agree today and can drift
+// tomorrow.
+type gatewaySelfLifecycle struct {
+	fleet *fleet.Fleet
+	node  string
+}
+
+func (c gatewaySelfLifecycle) Pause(ctx context.Context, box *host.Sandbox) error {
+	_, err := c.fleet.SelfPause(ctx, c.node, nodelink.SelfPauseReq{Sandbox: box.Name})
+	return err
+}
+
+func (c gatewaySelfLifecycle) PlanSnapshot(ctx context.Context, box *host.Sandbox, tag, name string) (ctlops.SelfSnapshotPlan, error) {
+	resp, err := c.fleet.SelfSnapshotPlan(ctx, c.node,
+		nodelink.SelfSnapshotPlanReq{Sandbox: box.Name, Tag: tag, Name: name})
+	if err != nil {
+		return ctlops.SelfSnapshotPlan{}, err
+	}
+	return resp.Plan(), nil
+}
+
+func (c gatewaySelfLifecycle) Snapshot(ctx context.Context, box *host.Sandbox, a ctlops.SnapshotToTagArgs) error {
+	_, err := c.fleet.SelfSnapshot(ctx, c.node,
+		nodelink.SelfSnapshotReq{Sandbox: box.Name, Tag: a.Tag, Name: a.Name})
+	return err
+}
+
+// relaySelfLifecycle is the same three verbs on a NODE: the name of the sandbox
+// and the operation's own arguments, and nothing else. The owner, the tags, the
+// bindings and every refusal are the gateway's to decide from its ledger.
+type relaySelfLifecycle struct{ up *nodelink.Uplink }
+
+func (c relaySelfLifecycle) Pause(ctx context.Context, box *host.Sandbox) error {
+	var resp nodelink.SelfPauseResp
+	return c.up.Request(ctx, nodelink.TypeSelfPause, nodelink.SelfPauseReq{Sandbox: box.Name}, &resp)
+}
+
+func (c relaySelfLifecycle) PlanSnapshot(ctx context.Context, box *host.Sandbox, tag, name string) (ctlops.SelfSnapshotPlan, error) {
+	var resp nodelink.SelfSnapshotPlanResp
+	err := c.up.Request(ctx, nodelink.TypeSelfSnapshotPlan,
+		nodelink.SelfSnapshotPlanReq{Sandbox: box.Name, Tag: tag, Name: name}, &resp)
+	if err != nil {
+		return ctlops.SelfSnapshotPlan{}, err
+	}
+	return resp.Plan(), nil
+}
+
+func (c relaySelfLifecycle) Snapshot(ctx context.Context, box *host.Sandbox, a ctlops.SnapshotToTagArgs) error {
+	var resp nodelink.SelfSnapshotResp
+	return c.up.Request(ctx, nodelink.TypeSelfSnapshot,
+		nodelink.SelfSnapshotReq{Sandbox: box.Name, Tag: a.Tag, Name: a.Name}, &resp)
 }
 
 type gatewayIdentityClient interface {
@@ -671,7 +750,7 @@ func nodeHello(opts nodeOptions, mgr *host.Manager, net *netpush.Syncer) nodelin
 		// which is also the honest answer.
 		Release: version, Version: version,
 		Driver:       opts.driverName,
-		Images:       imageNames(opts.imageDir),
+		Images:       imageNames(opts.imageDir, opts.templateDir),
 		Archiving:    mgr.ArchivingEnabled(),
 		Snapshots:    mgr.Snapshotter(),
 		GuestSubnet:  opts.guestSubnet,
@@ -753,20 +832,33 @@ func readPublicKey(value string) (xssh.PublicKey, error) {
 // mock driver has no templates at all, and a node with no images is a node
 // nothing gets placed on — not a node that refuses to start. os.ReadDir returns
 // entries sorted by name, and stripping a shared suffix preserves that.
-func imageNames(dir string) []string {
-	if dir == "" {
-		return nil
-	}
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
+// imageNames is what this machine tells the gateway it can boot, across every
+// directory it reads templates from — the operator's base images and, where the
+// two are split, the captures written beside them. A machine that omitted its
+// captures would advertise itself as unable to boot disks it is holding.
+//
+// Deduplicated because the dirs may be the same one (they are on every
+// single-machine host, where TemplateDir is empty).
+func imageNames(dirs ...string) []string {
 	var out []string
-	for _, e := range ents {
-		if e.IsDir() {
+	seen := map[string]bool{}
+	for _, dir := range dirs {
+		if dir == "" {
 			continue
 		}
-		if name, ok := strings.CutSuffix(e.Name(), ".ext4"); ok {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() {
+				continue
+			}
+			name, ok := strings.CutSuffix(e.Name(), ".ext4")
+			if !ok || seen[name] {
+				continue
+			}
+			seen[name] = true
 			out = append(out, name)
 		}
 	}
