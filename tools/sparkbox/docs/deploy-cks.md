@@ -34,34 +34,50 @@ no path that copies a file onto this host, because the gateway Pod runs non-root
 with a read-only root filesystem and port 22 is Sparkbox's own SSH gateway, which
 has no sftp subsystem. See `docs/github-app-setup.md`.
 
-### Template snapshots are refused here
+### Template snapshots, and what they cost here
 
-**`snapshot create` does not work on this cluster, and nothing built on top of it
-does either.** The node runs with `--disable-host-rootfs-mounts`, and the driver
-refuses `Snapshot` outright under that flag
-(`internal/vmm/firecracker/fc.go:1181-1183`) rather than silently recovering the
-loop mount it was turned off to prevent. This is a property of the deployment,
-not a knob: there is no flag combination that enables it while the node is
-hardened this way.
+Template snapshots **work** on this cluster as of the change described in
+[cks-snapshot-design.md](cks-snapshot-design.md). They did not before, and the
+reason is worth keeping because it constrains what may be added next.
 
-What that costs, in order of how likely somebody is to try it:
+The node runs with `--disable-host-rootfs-mounts`, and it always will: the VM
+controller container runs as uid 65532 with `capabilities: drop ALL` and cannot
+call `mount(2)`, because putting the host kernel's ext4 driver in front of a
+guest-authored filesystem would enlarge the trusted computing base past
+Firecracker and KVM. `Driver.Snapshot` used to refuse outright under that flag.
+It no longer does, because only one of its four steps ever needed a mount:
 
-- `ssh ctl@<domain> snapshot create <box> <name>` refuses. So does the same call
-  on REST, in the user console, and `sparkbox snapshot <tag>` from inside a VM.
-- **Tag templates are therefore inert here.** `snapshot bind` has nothing to
-  point at, so every create resolves to the operator's default image and
-  `--tag <t>` keeps meaning only secrets, repos and egress. The stores, the
-  verbs and the REST routes are all present and answer correctly; there is
-  simply never a snapshot for a binding to name. See
-  `docs/tag-templates-design.md`.
-- Pause/resume and archive/restore are unaffected and remain the way to keep a
-  VM's state. `fork` has nothing to fork from.
+- `cp --reflink=always`, `e2fsck -fy` and `zerofree` all operate on the image
+  file, and this cluster already runs them for checkpoints;
+- `sanitizeTemplate` — six deletions of per-guest identity — is the one that
+  mounted, and that work now happens inside the fork, at its first boot, before
+  sshd (`sparkbox-identity-reset`, plus `systemd.machine_id=` on the kernel
+  command line). It is still run at capture time on hosts where mounting is
+  allowed, as defence in depth.
 
-Re-enable template snapshots only after fork identity sanitization runs inside
-the guest, or in a disposable mountless helper — `docs/security-hardening.md`
-describes the end state. Until then, do not read a green `go test ./...` as
-evidence that any of this works on the cluster: the whole snapshot path is
-exercised against the mock driver, and no part of it has been validated here.
+Captured templates are written to `/var/lib/sparkbox/templates`, not to
+`/var/lib/sparkbox/images`. The image dir is part of the read-only mount — only
+`prepare-vm-assets` writes it, as root, before any guest runs — and that is what
+stops a compromised controller substituting the rootfs every future sandbox
+boots from. The capture dir is a separate writable `subPath` on the same
+hostPath volume, so reflink cloning still works, and an image name always
+resolves against `images` first so nothing written there can shadow a base
+image.
+
+`installAuthorizedKey` keeps its guard: that is a real mount of a real guest
+disk on the create path, and it stays off. **A consequence worth knowing before
+rotating the gateway's upstream key: templates captured here carry whatever
+gateway key their base image had, and nothing re-injects it on a fork.** A key
+rotation invalidates every existing template.
+
+Two limits that are not bugs but will bite:
+
+- **Templates live on the node-local hot tier**, which CoreWeave reclaims with
+  the Node. A template does not survive Node replacement and `snapshot create`
+  does not say so.
+- **Templates are unmetered and uncollected.** `admitCost` counts running
+  sandboxes; a 25 GiB template is charged to nobody and swept by nothing but
+  `snapshot rm`. See the deferred section of the design doc.
 
 ## What it creates
 
@@ -321,9 +337,9 @@ This manifest requires Cilium's `CiliumNetworkPolicy` CRD. `deploy.sh` applies
 the policy before starting the gateway and VM node, so the node never comes up
 with unrestricted Pod egress during an ordinary rollout.
 
-Because CKS runs with `--disable-host-rootfs-mounts`, creating a reusable
-template snapshot is refused — see *Template snapshots are refused here*.
-Pause/resume and archive/restore remain available.
+CKS runs with `--disable-host-rootfs-mounts`, which no longer refuses a template
+snapshot — see *Template snapshots, and what they cost here*. Pause/resume and
+archive/restore are unaffected.
 
 The named host path survives deletion and replacement of the node Pod on the
 same Node. It is still an ephemeral hot tier: CoreWeave local storage is lost

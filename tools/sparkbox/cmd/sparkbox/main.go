@@ -137,6 +137,7 @@ func serve(args []string) error {
 		checkpointPrefix     = fs.String("checkpoint-prefix", "checkpoints", "object-key prefix beneath --checkpoint-dir")
 		kernelPath           = fs.String("kernel", "", "firecracker: vmlinux path")
 		imageDir             = fs.String("image-dir", "", "firecracker: directory of <image>.ext4 templates")
+		templateDir          = fs.String("template-dir", "", "firecracker: directory captured snapshot templates are written to (default: --image-dir). Set it where --image-dir is read-only to this process, as on a hardened node whose base images are laid down by a privileged one-shot")
 		jailerBin            = fs.String("jailer", "", "firecracker: matching jailer binary; empty launches Firecracker directly (development/legacy)")
 		chrootJailer         = fs.Bool("chroot-jailer", false, "firecracker: isolate each VMM with a chroot and slot-scoped uid in the current mount namespace (does not need CAP_SYS_ADMIN; mutually exclusive with --jailer)")
 		jailerChrootBase     = fs.String("jailer-chroot-base", "", "firecracker jailer: root-owned chroot parent (default <vm-state-dir>/jailer)")
@@ -275,7 +276,7 @@ func serve(args []string) error {
 			gateway: *gatewayAddr, gatewayPub: *gatewayPub, gatewayHostKey: *gatewayHostK,
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
 			driverName: *driverName, stateDir: *stateDir, vmStateDir: *vmStateDir, keyDir: *keyDir,
-			kernelPath: *kernelPath, imageDir: *imageDir,
+			kernelPath: *kernelPath, imageDir: *imageDir, templateDir: *templateDir,
 			jailerBin: *jailerBin, chrootJailer: *chrootJailer,
 			jailerChrootBase: *jailerChrootBase, jailerUIDBase: *jailerUIDBase,
 			privilegedHelperSocket: *privilegedHelper, privilegedHelperBin: *privilegedHelperBin,
@@ -457,7 +458,7 @@ func serve(args []string) error {
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			*kernelPath, *imageDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
+			*kernelPath, *imageDir, *templateDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
 			*chrootJailer, *privilegedHelper, *privilegedHelperBin, *helperControllerGID, *noRootfsMounts,
 			*guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)

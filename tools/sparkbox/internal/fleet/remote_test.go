@@ -735,3 +735,70 @@ func TestRemoteDialGuestOnALinkThatCarriesNoStreams(t *testing.T) {
 		t.Errorf("refusal = %q, want no plumbing detail in a sentence a user reads", e.Msg)
 	}
 }
+
+// A capture on a machine over the SSH link is in that machine's cached
+// inventory the moment it returns.
+//
+// This is the bug the CKS cluster found on its first real `snapshot create`.
+// The capture succeeded and said so, and then `snapshot ls` was empty and
+// `snapshot bind` answered "no snapshot named test1" — masked not-found, which
+// reads like a permissions problem rather than a stale cache. The cached
+// template set is only ever written wholesale by an inventory, which arrives
+// when a link comes up and never after a capture, so the template stayed
+// invisible until the link happened to reconnect.
+//
+// The gRPC transport has recorded its own captures since it was written
+// (GRPCControl.putSnapshot), which is exactly why this went unnoticed: it is
+// only reachable on a deployment using the SSH transport, and only for a
+// sandbox on another machine — which on CKS is every sandbox there is.
+func TestRemoteCaptureIsVisibleWithoutWaitingForAnInventory(t *testing.T) {
+	rig := newRemoteRig(t, answers(okReply))
+	ctx := context.Background()
+
+	if got := rig.node.Templates(); len(got) != 0 {
+		t.Fatalf("the machine reported %d templates before anything made one", len(got))
+	}
+	snap, err := rig.node.Snapshotter(ctx, "demo", "gold", "alice")
+	if err != nil {
+		t.Fatalf("Snapshotter: %v", err)
+	}
+	if snap.Name != "gold" {
+		t.Fatalf("capture returned %q, want the name this gateway asked for", snap.Name)
+	}
+
+	got := rig.node.Templates()
+	if len(got) != 1 {
+		t.Fatalf("the machine reports %d templates after a successful capture, want 1; "+
+			"`snapshot ls` reads exactly this, so a capture missing here is one that succeeded and then did not exist", len(got))
+	}
+	// The gateway's own name, not the one the machine echoed back — okReply
+	// answers "base" whatever it was asked for, the way a confused or hostile
+	// node would. A cache keyed on the node's answer would leave `snapshot bind
+	// gold` failing while `snapshot ls` offered a name nobody created.
+	if got[0].Name != "gold" {
+		t.Errorf("cached template is named %q, want the gateway's own %q", got[0].Name, "gold")
+	}
+	if got[0].Owner != "alice" || got[0].FromBox != "demo" {
+		t.Errorf("cached template = %+v, want this gateway's owner and source box", got[0])
+	}
+	assertAttributed(t, got[0])
+}
+
+// And the other half: a deleted template stops being offered.
+//
+// A name left in the cache is one `snapshot ls` keeps listing and `fork` then
+// fails on, which is the same confusion in the opposite direction.
+func TestRemoteDeleteDropsTheTemplateFromTheCache(t *testing.T) {
+	rig := newRemoteRig(t, answers(okReply))
+	ctx := context.Background()
+
+	if _, err := rig.node.Snapshotter(ctx, "demo", "gold", "alice"); err != nil {
+		t.Fatalf("Snapshotter: %v", err)
+	}
+	if err := rig.node.DeleteSnapshot(ctx, "gold", "alice"); err != nil {
+		t.Fatalf("DeleteSnapshot: %v", err)
+	}
+	if got := rig.node.Templates(); len(got) != 0 {
+		t.Fatalf("the machine still reports %d templates after the only one was deleted", len(got))
+	}
+}

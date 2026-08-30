@@ -73,6 +73,7 @@ type nodeOptions struct {
 
 	kernelPath              string
 	imageDir                string
+	templateDir             string
 	jailerBin               string
 	jailerChrootBase        string
 	jailerUIDBase           int
@@ -206,7 +207,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		driver = md
 	case "firecracker":
 		driver, err = newFirecrackerDriver(
-			opts.kernelPath, opts.imageDir, opts.vmStateDir,
+			opts.kernelPath, opts.imageDir, opts.templateDir, opts.vmStateDir,
 			opts.jailerBin, opts.jailerChrootBase, opts.jailerUIDBase,
 			opts.chrootJailer, opts.privilegedHelperSocket, opts.privilegedHelperBin,
 			opts.helperControllerGID, opts.disableHostRootfsMounts,
@@ -749,7 +750,7 @@ func nodeHello(opts nodeOptions, mgr *host.Manager, net *netpush.Syncer) nodelin
 		// which is also the honest answer.
 		Release: version, Version: version,
 		Driver:       opts.driverName,
-		Images:       imageNames(opts.imageDir),
+		Images:       imageNames(opts.imageDir, opts.templateDir),
 		Archiving:    mgr.ArchivingEnabled(),
 		Snapshots:    mgr.Snapshotter(),
 		GuestSubnet:  opts.guestSubnet,
@@ -831,20 +832,33 @@ func readPublicKey(value string) (xssh.PublicKey, error) {
 // mock driver has no templates at all, and a node with no images is a node
 // nothing gets placed on — not a node that refuses to start. os.ReadDir returns
 // entries sorted by name, and stripping a shared suffix preserves that.
-func imageNames(dir string) []string {
-	if dir == "" {
-		return nil
-	}
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
+// imageNames is what this machine tells the gateway it can boot, across every
+// directory it reads templates from — the operator's base images and, where the
+// two are split, the captures written beside them. A machine that omitted its
+// captures would advertise itself as unable to boot disks it is holding.
+//
+// Deduplicated because the dirs may be the same one (they are on every
+// single-machine host, where TemplateDir is empty).
+func imageNames(dirs ...string) []string {
 	var out []string
-	for _, e := range ents {
-		if e.IsDir() {
+	seen := map[string]bool{}
+	for _, dir := range dirs {
+		if dir == "" {
 			continue
 		}
-		if name, ok := strings.CutSuffix(e.Name(), ".ext4"); ok {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() {
+				continue
+			}
+			name, ok := strings.CutSuffix(e.Name(), ".ext4")
+			if !ok || seen[name] {
+				continue
+			}
+			seen[name] = true
 			out = append(out, name)
 		}
 	}

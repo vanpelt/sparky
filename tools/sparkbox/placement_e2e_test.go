@@ -976,31 +976,33 @@ func TestTagTemplatePlacesOnTheTemplatesMachine(t *testing.T) {
 			t.Fatalf("the snapshot records node %q, want %q", snap.Node, node)
 		}
 
-		// PRE-EXISTING FLEET GAP, and the reason this bounces the link. A node
-		// reports its templates only in a full inventory frame (nodelink's
-		// InventoryMsg), and host.Observer carries sandbox events ONLY — there
-		// is no snapshot event — so a template captured after the link came up
-		// is invisible to fleet.Snapshots, fleet.templateNode and therefore to
-		// `snapshot ls`, `fork` and `bind`, until the node reconnects. That is
-		// not something this milestone introduced and not something it fixes;
-		// it is stated here because a reader would otherwise take the reconnect
-		// for harness noise. The bounce runs in BOTH passes so the two bodies
-		// stay identical, which is this file's whole rule.
-		ds.unplug()
-		ds.unplug = ds.relink(t, ds.node)
-
-		waitFor(t, "the gateway to see the snapshot taken on "+node, func() bool {
-			list, err := ops.ListSnapshots(ctx, who)
-			if err != nil {
-				return false
+		// This used to bounce the link, because a node reported its templates
+		// only in a full inventory frame and there is still no snapshot event:
+		// a template captured after the link came up was invisible to
+		// fleet.Snapshots, fleet.templateNode and therefore to `snapshot ls`,
+		// `fork` and `bind`, until the node reconnected. A cluster hit that on
+		// its first real capture — `snapshot create` said it worked and
+		// `snapshot bind` then answered "no snapshot named test1".
+		//
+		// The gateway now records the capture it just performed
+		// (nodelink.Client.NoteSnapshot; see internal/fleet/remote_test.go),
+		// so the template is listable the moment Snapshot returns and no
+		// reconnect is needed. Asserted rather than deleted, because "visible
+		// immediately" is the property that replaced the bounce.
+		list, err := ops.ListSnapshots(ctx, who)
+		if err != nil {
+			t.Fatalf("listing snapshots straight after a capture on %s: %v", node, err)
+		}
+		found := false
+		for _, s := range list {
+			if s.Name == "cuda-base" {
+				found = true
 			}
-			for _, s := range list {
-				if s.Name == "cuda-base" {
-					return true
-				}
-			}
-			return false
-		})
+		}
+		if !found {
+			t.Fatalf("the snapshot taken on %s is not listable until the link reconnects; "+
+				"that is the stale-cache bug that made `snapshot bind` answer no-such-snapshot on a real cluster", node)
+		}
 
 		if _, err := ops.BindTemplate(ctx, who, "cuda-base", "cuda"); err != nil {
 			t.Fatalf("binding cuda: %v", err)

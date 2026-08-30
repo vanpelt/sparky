@@ -75,13 +75,13 @@ func (f *Fleet) SetToolSync(t host.ToolRefresher) {
 //     lock and after the pre-pack strip has safely woken the guest — neither of
 //     which this side can do. Doing it here as well would put two installers on
 //     one /usr/local/bin.
-//   - A remote sandbox that is not running. Nothing here may wake it: the wake
-//     fires the manager's asynchronous env push, which is exactly what the
-//     strip's own resumeOrRecreate exists to avoid. The node cannot wake it for
-//     us either (no signer), so it is captured as-is. That makes a paused
-//     sandbox on a fleet capture stale where the same sandbox on a one-machine
-//     host would not — an asymmetry the user cannot see, recorded here and in
-//     `snapshot` help.
+//   - A remote sandbox that is not running. Nothing here wakes one, and after
+//     stripEnvBefore nothing needs to: that step runs first, wakes a paused
+//     guest to clear its secrets, and leaves it running for this one. So
+//     reaching here on a paused box means the strip decided there was nothing
+//     to strip — a deployment with no secrets wired at all — and the box is
+//     captured with whatever tools it has. Waking it here instead would mean
+//     two callers deciding independently to resume the same guest.
 func (f *Fleet) refreshToolsBefore(ctx context.Context, n Node, name string) {
 	if n == nil || n.Name() == f.localName {
 		return
@@ -105,13 +105,9 @@ func (f *Fleet) refreshToolsBefore(ctx context.Context, n Node, name string) {
 	// claim, while the dialer needs the synthetic fleet address and the ledger
 	// is the only owner this package acts on.
 	//
-	// NOTE for whoever fixes the neighbouring hole: nothing strips the managed
-	// secret block for a REMOTE snapshot or archive. host.Manager.stripEnvForPack
-	// type-asserts m.envSync, a node never calls SetEnvSync (see envsync.go), so
-	// a template captured on a node carries plaintext secrets in /etc/environment
-	// and every fork copies them. This hook is the SHAPE of the fix — a
-	// gateway-side pre-capture step over the same channel — but it is a separate,
-	// higher-priority change with its own tests, and it is not smuggled in here.
+	// The neighbouring hole this hook was once only the SHAPE of a fix for — a
+	// remote pack keeping its plaintext secrets, because a node never calls
+	// SetEnvSync — is closed in strip.go, which runs immediately before this.
 	// WithTimeout takes the earlier of the two deadlines, so a caller already on
 	// a tighter budget still wins; see toolRefreshBudget for why inheriting the
 	// caller's is not good enough.

@@ -118,6 +118,15 @@ func installGuestPayload(t *testing.T, tree string) {
 	}
 }
 
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 func guestFile(t *testing.T, tree, name string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join(tree, name))
@@ -184,7 +193,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "pause|snapshot [--yes] [TAG [NAME]]|") {
 		t.Errorf("guest CLI usage line does not mention pause or snapshot:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=11\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=12\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -1830,5 +1839,171 @@ func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
 		if got := requests(); len(got) != 0 {
 			t.Errorf("%v: a malformed invocation reached the host: %v", args, got)
 		}
+	}
+}
+
+// TestGuestForkIdentityResetRunsAgainstATree exercises the installed script the
+// way the guest does, because every property worth pinning is a property of
+// what it does to a filesystem rather than of the text that produces it.
+//
+// This is the hook that replaced the host's loop mount. Capturing a template
+// used to end with the host mounting the captured ext4 and deleting these same
+// paths, and that mount is what CKS refuses outright — so the whole snapshot
+// feature was refused with it. Nothing here needs host enforcement: a template
+// is bound (owner, tag) and masked from every other owner, so the only person
+// who boots it is the person who made it. See docs/cks-snapshot-design.md.
+func TestGuestForkIdentityResetRunsAgainstATree(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+	script := filepath.Join(root, "usr/local/sbin/sparkbox-identity-reset")
+
+	// guest builds a rootfs already carrying an identity, and cmdline is what
+	// the HOST says this boot is — the two inputs whose disagreement is the
+	// whole signal.
+	type guest struct{ dir string }
+	newGuest := func(t *testing.T, stamp string) guest {
+		t.Helper()
+		dir := t.TempDir()
+		for _, sub := range []string{"etc/ssh", "var/lib/dbus", "var/lib/sparkbox"} {
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write := func(rel, body string) {
+			if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write("etc/ssh/ssh_host_ed25519_key", "PARENT PRIVATE KEY")
+		write("etc/ssh/ssh_host_rsa_key", "PARENT PRIVATE KEY")
+		write("etc/machine-id", "00000000000000000000000000000001\n")
+		write("var/lib/dbus/machine-id", "00000000000000000000000000000001\n")
+		if stamp != "" {
+			write("var/lib/sparkbox/sandbox", stamp+"\n")
+		}
+		return guest{dir: dir}
+	}
+	run := func(t *testing.T, g guest, cmdline string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "cmdline")
+		if err := os.WriteFile(path, []byte(cmdline), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", script)
+		cmd.Env = append(os.Environ(), "SPARKBOX_ROOT="+g.dir, "SPARKBOX_CMDLINE="+path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("identity reset: %v\n%s", err, out)
+		}
+	}
+	hostKeys := func(t *testing.T, g guest) []string {
+		t.Helper()
+		found, err := filepath.Glob(filepath.Join(g.dir, "etc/ssh/ssh_host_*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	const forkCmdline = "console=ttyS0 quiet sparkbox_host=forked-box systemd.machine_id=aabbccddeeff00112233445566778899"
+
+	t.Run("a fork sheds the identity it inherited", func(t *testing.T) {
+		g := newGuest(t, "parent-box")
+		run(t, g, forkCmdline)
+
+		// Replaced, not merely deleted: the script generates the new pair
+		// itself rather than trusting a later unit to notice they are missing.
+		// A fork with NO host keys is an unreachable box — sshd exits on "no
+		// hostkeys available" — which is a worse outcome than the one this
+		// whole hook exists to prevent.
+		keys := hostKeys(t, g)
+		if len(keys) == 0 {
+			t.Fatal("a fork was left with no SSH host keys at all; sshd exits on \"no hostkeys available\" and the sandbox is unreachable")
+		}
+		for _, k := range keys {
+			if strings.Contains(string(readFile(t, k)), "PARENT PRIVATE KEY") {
+				t.Errorf("%s still holds the parent's key material; anyone who can reach both boxes can impersonate either", k)
+			}
+		}
+		if got := guestFile(t, g.dir, "etc/machine-id"); got != "aabbccddeeff00112233445566778899\n" {
+			t.Errorf("machine-id = %q, want the one the host put on the cmdline", got)
+		}
+		if _, err := os.Stat(filepath.Join(g.dir, "var/lib/dbus/machine-id")); !os.IsNotExist(err) {
+			t.Errorf("the dbus machine id survived the fork (%v); dbus regenerates it only when it is absent", err)
+		}
+		if got := guestFile(t, g.dir, "var/lib/sparkbox/sandbox"); got != "forked-box\n" {
+			t.Errorf("stamp = %q, want the name this boot was given", got)
+		}
+	})
+
+	t.Run("a resume changes nothing", func(t *testing.T) {
+		// The overwhelmingly common boot. Regenerating here would hand somebody
+		// a host-key warning every time their sandbox woke up.
+		g := newGuest(t, "forked-box")
+		run(t, g, forkCmdline)
+
+		if keys := hostKeys(t, g); len(keys) != 2 {
+			t.Errorf("a resume regenerated host keys (%v left); every wake would then look like a MITM to ssh", keys)
+		}
+		if got := guestFile(t, g.dir, "etc/machine-id"); got != "00000000000000000000000000000001\n" {
+			t.Errorf("a resume rewrote machine-id to %q", got)
+		}
+	})
+
+	t.Run("no marker leaves the guest alone", func(t *testing.T) {
+		// An older host, or a boot this cannot reason about. Doing nothing costs
+		// a fork a shared host key it would have had anyway before this existed;
+		// resetting on a guess costs a running sandbox its identity.
+		g := newGuest(t, "parent-box")
+		run(t, g, "console=ttyS0 quiet")
+
+		if keys := hostKeys(t, g); len(keys) != 2 {
+			t.Errorf("host keys were reset with no sparkbox_host= to compare against (%v left)", keys)
+		}
+		if got := guestFile(t, g.dir, "var/lib/sparkbox/sandbox"); got != "parent-box\n" {
+			t.Errorf("stamp = %q, want it untouched", got)
+		}
+	})
+
+	t.Run("a first boot with no stamp at all is a fork", func(t *testing.T) {
+		// Templates captured before this hook existed have no stamp, and they
+		// are exactly the disks most likely to be carrying somebody else's keys.
+		g := newGuest(t, "")
+		run(t, g, forkCmdline)
+
+		for _, k := range hostKeys(t, g) {
+			if strings.Contains(string(readFile(t, k)), "PARENT PRIVATE KEY") {
+				t.Errorf("%s still holds the key material the template shipped with", k)
+			}
+		}
+	})
+}
+
+// The unit runs before sshd, and before the unit that would otherwise generate
+// what it removes.
+//
+// The script no longer DEPENDS on that second ordering — it makes its own keys,
+// precisely so the worst failure here cannot be a quiet one — but the ordering
+// is still what keeps the two from doing the same work twice, and
+// Before=ssh.service remains load-bearing on its own: a fork must never be
+// reachable under the identity it inherited, not even for the seconds between
+// sshd binding and this unit running.
+func TestGuestForkIdentityResetIsOrderedBeforeKeyGeneration(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+
+	unit := guestFile(t, root, "etc/systemd/system/sparkbox-identity-reset.service")
+	for _, want := range []string{
+		"Before=sparkbox-net.service ssh.service sshd.service",
+		"DefaultDependencies=no",
+		"ExecStart=/usr/local/sbin/sparkbox-identity-reset",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("the identity reset unit is missing %q:\n%s", want, unit)
+		}
+	}
+	// A unit nothing enables is a unit that never runs, and the failure is
+	// invisible: forks simply keep their parent's identity.
+	link := filepath.Join(root, "etc/systemd/system/multi-user.target.wants/sparkbox-identity-reset.service")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the identity reset unit is not enabled: %v", err)
 	}
 }

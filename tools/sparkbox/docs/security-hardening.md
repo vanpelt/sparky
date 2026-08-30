@@ -174,9 +174,9 @@ Remaining useful work is:
 
 1. Remove the preparation init container's loop bundle after trusted-template
    tooling moves into the image build or a disposable helper microVM.
-2. Re-enable template snapshots with guest-side first-boot sanitization or a
-   mountless/disposable sanitizer; CKS currently refuses that operation rather
-   than mounting an attacker-controlled disk.
+2. **Done** — template snapshots are re-enabled with guest-side first-boot
+   sanitization (`sparkbox-identity-reset`), so CKS no longer refuses the
+   operation and no attacker-controlled filesystem is mounted to support it.
 3. Replace `RuntimeDefault` on the helper with a measured syscall allowlist and
    node-loaded AppArmor profile if CKS exposes a managed profile-installation
    path. Kubernetes documents the available [kernel-level constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/).
@@ -207,8 +207,11 @@ This change closes three immediate issues in CKS:
 - `Create` no longer mounts each VM disk to install the gateway key. The deploy
   script derives the gateway's public upstream key into the public-only node
   trust Secret, and the init container bakes it into the trusted base template;
-- template snapshot creation is explicitly refused under
-  `--disable-host-rootfs-mounts` instead of silently recovering the old mount.
+- template snapshot creation no longer needs the mount at all. It was refused
+  under `--disable-host-rootfs-mounts` rather than silently recovering the old
+  mount; the sanitization that required it now runs inside the fork at first
+  boot, so a capture on a mountless host is a reflink plus `e2fsck` and
+  `zerofree`. See `docs/cks-snapshot-design.md`.
 
 The remaining parsing is explicit technical debt:
 
@@ -217,11 +220,12 @@ The remaining parsing is explicit technical debt:
 - `e2fsck`, `resize2fs`, `zerofree`, and `debugfs` parse filesystem metadata in
   host userspace even when they do not mount it.
 
-## Open: a template captured on a fleet node keeps its secrets
+## Closed: a template captured on a fleet node kept its secrets
 
-**Not introduced by tag templates and not fixed by them; found while reading the
-capture path and recorded here because it is the highest-priority follow-up in
-this area.**
+**Found while reading the capture path during tag templates, fixed in
+`internal/fleet/strip.go`. Kept here because the reasoning is the reason the
+fix has the shape it does, and because the same gap will reappear in any future
+pack path that a node performs and a gateway does not compensate for.**
 
 Before a rootfs is packed — for an archive bound for object storage, or for a
 snapshot template every fork copies byte-for-byte — `Manager.stripEnvForPack`
@@ -243,12 +247,23 @@ on that tag — including sandboxes belonging to someone the credentials were ne
 issued to, if the template is ever shared. Treat it as a cross-tenant credential
 leak, not a hygiene issue.
 
-The shape of the fix already exists: the pre-capture agent-tool refresh added in
-`Fleet.Snapshot` is a gateway-side step over the same channel, run before the
-node's capture, and the strip belongs in the same position. It needs its own
-tests — a remote capture whose packed rootfs contains no secret values, and a
-capture refused rather than proceeding when the strip fails, matching the local
-path, which fails the caller rather than packing an uncleared disk.
+**The fix** is `Fleet.stripEnvBefore`, a gateway-side step over the same guest
+exec channel the pre-capture agent-tool refresh uses, run before the node is
+asked to pack. It differs from that refresh in three ways, each forced:
+
+- it FAILS the operation, matching the local path, which fails the caller rather
+  than packing an uncleared disk;
+- it WAKES a paused guest, because archiving one is the ordinary case and a
+  sleeping box cannot be rewritten — through the node directly rather than
+  through `Fleet.EnsureRunning`, whose own env push would race the strip;
+- it holds the box against lifecycle pushes for the duration of the pack
+  (`beginPack`). The existing envsync `quiesced` flag is not enough: it stops
+  change-time pushes, while `PushEnv` — which is what the gateway's own
+  `ApplyChanged` fires when the node announces the wake — clears it by design,
+  and that push would refill the block between the strip and the capture.
+
+`Fleet.Archive` gets all of it too: an archive outlives every sandbox it came
+from and goes to object storage.
 
 The end state should put first-boot/fork identity work inside the microVM. Pass a
 public gateway key and a "regenerate identity" marker over a bounded boot or
