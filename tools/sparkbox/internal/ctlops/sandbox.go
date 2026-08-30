@@ -75,13 +75,26 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	if err := o.templateNodeAgrees(op, a.Node, tpl); err != nil {
 		return SandboxInfo{}, err
 	}
+	// Resolved here, with the other refusals and before the first write: a
+	// --ref naming a repository these tags do not select cannot possibly do
+	// what was asked, and must not leave rows behind for a sandbox that never
+	// exists.
+	refs, err := o.resolveRepoRefs(op, c.Handle, tags, a.Refs)
+	if err != nil {
+		return SandboxInfo{}, err
+	}
 	if err := o.stampTags(name, c.Handle, tags); err != nil {
+		return SandboxInfo{}, Fail(op, err)
+	}
+	if err := o.writeRepoRefs(c.Handle, name, refs); err != nil {
+		o.clearTags(name, c.Handle, tags)
 		return SandboxInfo{}, Fail(op, err)
 	}
 	box, err := o.build(ctx, op, a.Node, name, c.Handle, tpl, a.VCPUs, a.MemMB)
 	if err != nil {
 		// Don't strand tag rows for a sandbox that never came into being.
 		o.clearTags(name, c.Handle, tags)
+		o.clearRepoRefs(c.Handle, name, refs)
 		return SandboxInfo{}, Fail(op, err)
 	}
 	o.log.Info("sandbox created", "user", c.Handle, "name", name, "node", a.Node, "tags", tags, "image", tpl.Image)

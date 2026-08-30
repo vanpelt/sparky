@@ -2233,6 +2233,11 @@
             "type": "string",
             "description": "The machine to build on, as `GET /v1/nodes` names it. Omit to let the gateway choose, which on a single-box deployment is its own machine. An unknown name is 404; one whose machine is offline is 503."
           },
+          "refs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RepoRef" },
+            "description": "Per-instance branch overrides: which branch THIS sandbox's checkouts start on, whatever the attachment says. A `slug` naming a repository the tags do not select is 400, and so is an entry with no `slug` when the tags select more than one."
+          },
           "vcpus": {
             "type": "integer",
             "format": "int64",
@@ -2388,6 +2393,26 @@
           "tags": {
             "type": "array",
             "items": { "type": "string" }
+          },
+          "refs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RepoRef" },
+            "description": "Per-instance branch overrides, and a fork is the case they exist for: the snapshot already holds the checkout, on whatever branch it was captured on, so this is the only way to ask for a different one."
+          }
+        }
+      },
+      "RepoRef": {
+        "type": "object",
+        "required": ["ref"],
+        "description": "One repository's branch, for one sandbox. It overlays the attachment's own ref for this sandbox only and never changes the attachment.",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "`owner/name`. Omit to mean the sandbox's one attachment; with more than one attached, omitting it is 400."
+          },
+          "ref": {
+            "type": "string",
+            "description": "The branch or tag to check out."
           }
         }
       },

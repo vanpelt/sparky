@@ -199,9 +199,13 @@ const sandboxHelp = "usage: ssh ctl@<gateway> <command> <name>\r\n" +
 	"     the words after new@ are tags, never a command to run — a fresh sandbox\r\n" +
 	"     always gets a shell. Passing any word makes ssh skip the terminal, so use\r\n" +
 	"     `ssh -t new+<name>@<gateway> <tag>…` or you get a shell with no prompt.\r\n" +
-	"  fork <snapshot> <name> [--tag <t>]…  create one from a snapshot you saved\r\n" +
+	"  fork <snapshot> <name> [--tag <t>]… [--ref <branch>]…\r\n" +
+	"                                 create one from a snapshot you saved\r\n" +
 	"     a tag you have bound a snapshot to boots from it, so `ssh new@<gateway>\r\n" +
 	"     <tag>` is a fork you do not have to remember — see `help snapshots`.\r\n" +
+	"     --ref names the branch this ONE sandbox's checkout starts on, whatever\r\n" +
+	"     the attachment says: `--ref feat/x`, or `--ref <owner>/<repo>=feat/x`\r\n" +
+	"     when more than one repository is attached. see `help repos`.\r\n" +
 	"\r\n" +
 	" living with one\r\n" +
 	"  ls                       list your sandboxes and their state\r\n" +

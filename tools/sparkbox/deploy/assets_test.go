@@ -521,6 +521,12 @@ func TestRepoWorkerClonesForTheUserAndLeavesCheckoutsAlone(t *testing.T) {
 		// into the wrong home on a root-login template.
 		"SANDBOX_USER=sparky",
 		`RUNAS="runuser -u $SANDBOX_USER --"`,
+		// The drop is skipped only under a root override, where there is no
+		// such account on this kernel to drop to. Pinned so the guard cannot
+		// widen into "skip the drop when something else is unset" — a
+		// root-owned checkout in a user's home is one every later git command
+		// in that directory refuses for dubious ownership.
+		`if [ -z "$R" ] && [ "$(id -u)" = 0 ] && [ "$SANDBOX_USER" != root ]; then`,
 		// Whatever is already at EITHER default location keeps its place. Both
 		// are probed because the default is a function of how many attachments
 		// the tag carries right now, and that number moves under a checkout

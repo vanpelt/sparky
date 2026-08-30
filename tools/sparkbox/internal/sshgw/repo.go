@@ -40,6 +40,16 @@ const repoUsage = "usage: ssh ctl@<gateway> repo ls\r\n" +
 	"nothing here is a credential. the token that clones a private repo is minted\r\n" +
 	"inside the sandbox, expires in an hour, and is never stored anywhere.\r\n" +
 	"\r\n" +
+	"the attachment's --ref is where a CLONE starts and pins nothing after that.\r\n" +
+	"to start ONE sandbox on a different branch, say so when you create it:\r\n" +
+	"\r\n" +
+	"  ssh new+box@<gateway> hm --ref feat/x\r\n" +
+	"  ssh ctl@<gateway> fork cuda-12 box --ref wandb/hivemind=feat/x\r\n" +
+	"\r\n" +
+	"inside a sandbox, `sparkbox repos sync` brings checkouts forward. it can only\r\n" +
+	"fetch, fast-forward a clean tree, or tell you why it did neither — uncommitted\r\n" +
+	"work, untracked files and unpushed commits are reported and left alone.\r\n" +
+	"\r\n" +
 	"  ssh ctl@<gateway> repo add wandb/hivemind --tag hm\r\n" +
 	"  ssh ctl@<gateway> repo check\r\n"
 

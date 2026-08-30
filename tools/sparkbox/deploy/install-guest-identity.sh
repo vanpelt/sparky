@@ -1021,8 +1021,14 @@ HOME_DIR="$R$HOME_DIR"
 # home is worse than no checkout at all — it is one that every later git command
 # in that directory rejects for dubious ownership. If privilege cannot be
 # dropped we clone nothing rather than clone it wrong.
+#
+# Skipped entirely when R is set, and that is not a loosening: with a root
+# override this is not the machine /etc/passwd describes, the accounts in that
+# tree are not this kernel's accounts, and there is nobody to drop TO — `id
+# sparky` fails and the whole run gives up. The checkouts under a tree belong to
+# whoever is driving it.
 RUNAS=
-if [ "$(id -u)" = 0 ] && [ "$SANDBOX_USER" != root ]; then
+if [ -z "$R" ] && [ "$(id -u)" = 0 ] && [ "$SANDBOX_USER" != root ]; then
   if ! id "$SANDBOX_USER" >/dev/null 2>&1; then
     give_up "no such user: $SANDBOX_USER"
   elif command -v runuser >/dev/null 2>&1; then

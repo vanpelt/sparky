@@ -753,8 +753,8 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 
 // controlFork creates a new sandbox from one of the caller's snapshots.
 func (g *Gateway) controlFork(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
-	tags, node, rest, err := parseCreateArgs(args)
-	if err == nil && node != "" {
+	parsed, err := parseCreateArgs(args)
+	if err == nil && parsed.Node != "" {
 		// A fork has no --node to give: a snapshot is a file in one machine's
 		// image directory, so the fork happens where the template is or not at
 		// all. Saying so is the whole reason this door parses a flag it does not
@@ -766,23 +766,25 @@ func (g *Gateway) controlFork(s gssh.Session, c ctlops.Caller, args []string, lo
 		s.Exit(2) //nolint:errcheck
 		return
 	}
-	if len(rest) < 2 {
-		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> fork <snapshot> <new-name> [--tag <t>]…\r\n"+
+	if len(parsed.Rest) < 2 {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> fork <snapshot> <new-name> [--tag <t>]… [--ref <branch>]…\r\n"+
 			"       list your snapshots with: ssh %s@<gateway> snapshot list\r\n", ControlUser, ControlUser)
 		s.Exit(2) //nolint:errcheck
 		return
 	}
-	snapshot, name := rest[0], rest[1]
+	snapshot, name := parsed.Rest[0], parsed.Rest[1]
 	// ctlops stamps the tags before the fork and clears them again if it fails,
 	// for the same reason the new@ door does: a fork is a create, and the
 	// secret-env push it kicks off asynchronously is decided by the tags.
-	if _, err := g.ops.Fork(s.Context(), c, ctlops.ForkArgs{Snapshot: snapshot, Name: name, Tags: tags}); err != nil {
+	if _, err := g.ops.Fork(s.Context(), c, ctlops.ForkArgs{
+		Snapshot: snapshot, Name: name, Tags: parsed.Tags, Refs: parsed.Refs,
+	}); err != nil {
 		failCtl(s, log, "fork", wrapVerbatim(err, ctlops.KindDisabled))
 		return
 	}
 	tagNote := ""
-	if len(tags) > 0 {
-		tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
+	if len(parsed.Tags) > 0 {
+		tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(parsed.Tags, ", "))
 	}
 	fmt.Fprintf(s, "created %s from snapshot %q%s — connect with: ssh %s@%s\r\n",
 		name, snapshot, tagNote, name, g.sshHint())
@@ -860,12 +862,19 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 	}
 	var want []string
 	if !(len(args) == 3 && args[2] == "--clear") {
-		parsed, node, rest, err := parseCreateArgs(args[2:])
-		if err == nil && node != "" {
+		parsed, err := parseCreateArgs(args[2:])
+		if err == nil && parsed.Node != "" {
 			// Tags do not move a sandbox, and a --node here would be read as
 			// two tags if this door did not know the flag at all. See
 			// parseCreateArgs.
 			err = fmt.Errorf("tags has no --node: a sandbox is placed when it is created")
+		}
+		if err == nil && len(parsed.Refs) > 0 {
+			// Same shape of refusal, and the reason is the one --ref rests on:
+			// it says which branch a sandbox STARTS on, decided once when it is
+			// created. Retagging a box that already exists cannot re-run that,
+			// and a --ref quietly accepted here would look like it had.
+			err = fmt.Errorf("tags has no --ref: it decides where a checkout starts, so it is a create-time choice — use `git switch` in the box")
 		}
 		if err != nil {
 			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
@@ -873,7 +882,7 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 			return
 		}
 		// Bare words are tags too, so `tags box ml prod` works alongside --tag.
-		want = append(parsed, rest...)
+		want = append(parsed.Tags, parsed.Rest...)
 	}
 	set, note, err := g.ops.SetTags(s.Context(), c, name, want)
 	if err != nil {

@@ -4,10 +4,16 @@ How a checkout stops being a thing that happens once, at clone time, and becomes
 a thing the platform keeps current — across a fork of somebody's snapshot, and
 across a create that asks for a different branch.
 
-This is a proposal. Nothing in it is built. It sits on top of
-`docs/tag-templates-design.md` (Parts 2 and 5 shipped on `feat/tag-templates`)
-and `docs/github-repos-design.md`, and it exists because those two features
-compose into a problem neither of them has on its own.
+**Built**, on `feat/repos-in-templates`. It sits on top of
+`docs/tag-templates-design.md` and `docs/github-repos-design.md`, and it exists
+because those two features compose into a problem neither of them has on its
+own.
+
+Three things changed on the way from plan to code, each noted where it belongs:
+an attachment's empty ref pins nothing rather than meaning "the default branch"
+(Part 3), `unmanaged` is not a state the reconciler can honestly report
+(Part 3), and the pre-capture `git fetch` was dropped for a reason worth
+reading (Part 6).
 
 ---
 
@@ -110,23 +116,43 @@ For a checkout that exists, at path `$dest`, with a desired ref `$ref` (`""`
 meaning "the repository's default branch"):
 
 ```
-not a git worktree at all      -> report `present`, touch nothing, ever
-a fetch that fails             -> report `offline`, touch nothing
-dirty (see below)              -> fetch, report `dirty`, touch nothing
+not a git worktree at all      -> `present`, touch nothing, ever
 mid-operation (rebase/merge/
-  bisect/cherry-pick in flight)-> report `busy`, do not even fetch
-HEAD detached                  -> fetch, report `detached`, touch nothing
-on $ref, ff possible           -> fast-forward, report `updated`
-on $ref, diverged or ahead     -> report `ahead`, touch nothing
-on some other branch           -> ADOPT MODE ONLY (Part 4); else report `moved`
+  bisect/cherry-pick in flight)-> `failed`, do not even fetch
+a fetch that fails             -> `stale`, touch nothing
+HEAD detached                  -> `stale`, nothing to fast-forward
+on some other branch than $ref -> ADOPT MODE ONLY (Part 4); else `stale`
+no upstream anywhere           -> `ready`, it is a local branch somebody made
+ahead, or diverged             -> `stale`, touch nothing
+up to date                     -> `ready`
+behind, tree dirty             -> `stale`, touch nothing
+behind, tree clean             -> fast-forward, `ready`
 ```
 
-"Dirty" is `git status --porcelain` non-empty, which includes untracked files on
-purpose. An untracked `notes.md` is not a reason to refuse a fast-forward in
-principle, but distinguishing "untracked file that would be clobbered by the
-merge" from "untracked file that would not" is git's job and git only does it
-inside the operation. Treating any dirt as a stop is one rule instead of two and
-it errs in the safe direction.
+Two refinements the implementation forced, both improvements:
+
+**Dirt is a modifier, not a state.** The plan had it as a row above the
+fast-forward rows, which would report `dirty` on every boot of a checkout that
+had a scratch file in it and nothing to do — and a status line that says
+something every time stops being read. It only matters, and is only mentioned,
+when it stopped something. "Dirty" is still `git status --porcelain` non-empty,
+untracked files included on purpose: distinguishing "untracked file the merge
+would clobber" from "one it would not" is git's job and git only does it inside
+the operation, so treating any dirt as a stop is one rule instead of two and it
+errs in the safe direction.
+
+**An empty ref pins nothing.** The plan read a missing ref as "the repository's
+default branch", which would have meant a fork with no explicit `--ref` getting
+yanked onto `main` from whatever branch its template was captured on. An
+attachment's ref decides where a CLONE starts and says nothing about a checkout
+that already exists, so an empty one means "keep the branch this is on current"
+and only a named ref can ever move HEAD. That also removes `moved` from every
+sandbox that never asked for a branch.
+
+`unmanaged` is **not** implemented and should not be. It only has a meaning if
+the platform tracks which checkouts it made, which it does not; without that,
+"a git repository in the home directory the manifest does not mention" is mostly
+somebody's hand-made clone, and reporting it is noise dressed as diligence.
 
 The fast-forward is `git merge --ff-only <upstream>` after a `git fetch`, never
 `git pull` (which will happily merge or rebase depending on config the user set),
@@ -146,9 +172,9 @@ Two mechanical notes:
   `objects.githubusercontent.com` for a tagged sandbox (`internal/repos/store.go`,
   `cloneDomains`), and a fetch talks to exactly those.
 
-A checkout the manifest no longer mentions — the repository was detached, or the
-fork's tags do not select it — is reported `unmanaged` and is never touched, on
-the same rule that `repo rm` promises the existing clone "is left alone".
+A checkout the manifest no longer mentions is never visited at all: the loop
+iterates the manifest, so a detached repository's clone simply stops being
+reported, which is the same thing `repo rm` already promises about it.
 
 ---
 
@@ -304,23 +330,9 @@ have something worth capturing — and it is still theirs after the pause. A
 capture path that commits, stashes, resets or checks out on their behalf is the
 reconciler's forbidden act with a nicer trigger.
 
-So the capture does three things, and all three are non-destructive.
+So the capture does two things, both non-destructive.
 
-**One: it fetches.** A sibling of `refreshToolsForPack`
-(`internal/host/archive.go:111`), in the same position and under the same four
-ordering constraints that comment already spells out — after `stripEnvForPack`
-(the only step that may wake a paused guest safely), before the pause (the last
-moment the guest is reachable), synchronous (a pause landing mid-write freezes a
-torn object into a template every fork copies), and inside `lockDiskOperation`.
-Best-effort, a `WARN` and carry on, for the same reason: a snapshot that failed
-because GitHub was slow is worse than a snapshot whose objects are an hour old.
-
-The payoff is real and it is not tidiness. A template whose object store is
-current makes every fork's first fetch incremental instead of a month of history,
-and adopt-mode's `git switch` to a branch that already exists locally needs
-almost nothing from the network.
-
-**Two: it reports, in the session, before the prompt.** `sparkbox snapshot <tag>`
+**One: it reports, in the session, before the prompt.** `sparkbox snapshot <tag>`
 already has the right shape for this: `PlanSelfSnapshot`
 (`internal/ctlops/selfsnapshot.go`) is a pure read that answers every refusal a
 person can act on **while the VM is fully alive and the terminal still exists**,
@@ -337,16 +349,36 @@ repos:
 `--yes` skips the prompt and not the survey; the lines still print. Nobody is
 blocked and nobody is surprised later.
 
-**Three: it refuses one thing.** A checkout with a rebase, merge, cherry-pick or
-bisect in flight fails the plan, with the directory and `git rebase --abort` in
-the message. This is the one state where "capture it as-is" produces a template
+**Two: it refuses one thing.** A checkout with a rebase, merge, cherry-pick or
+bisect in flight fails the plan (`sparkbox-repos survey`, exit 3), with the
+directory and `git rebase --abort` in the message. This is the one state where "capture it as-is" produces a template
 that is actively broken for every fork rather than merely stale, and the plan is
 the only place to say so where somebody is still there to read it. `--allow-busy`
 exists for the person who genuinely means it.
 
 `ctl snapshot create <box> <name>` — the operator door, run from outside — gets
-the fetch and not the survey. There is no session inside the guest to print into,
-and the gateway is not going to grow a way to read a guest's working trees.
+neither. There is no session inside the guest to print into, and the gateway is
+not going to grow a way to read a guest's working trees.
+
+## The pre-capture fetch, and why it is not here
+
+The plan had a third act: a `git fetch` in the guest just before the pause, a
+sibling of `refreshToolsForPack` (`internal/host/archive.go:111`), so a
+template's object store would be current and every fork's first fetch
+incremental.
+
+It was dropped, and the arithmetic is the reason. The payoff is one smaller
+fetch on a fork's first boot — which fetches anyway, on its own clock, at the
+moment the objects are actually wanted. The cost is a second fleet-wide guest
+capability: an interface in `internal/host`, a field and a setter on the
+manager, a call in `Manager.Snapshot`, an implementation in `internal/envsync`
+and the gateway-does-it-for-a-node half in `internal/fleet` — or, the
+alternative, folding it into `host.ToolRefresher` and leaving an interface whose
+name describes half of what it does.
+
+A capability that exists to make an operation which already works slightly
+cheaper is worth neither. Written down here so the next person weighing it
+starts from the measurement rather than from the idea.
 
 ---
 
@@ -357,15 +389,16 @@ vocabulary above has to survive the trip to both. The counts collapse to three
 buckets, because a banner read in the second before somebody starts typing cannot
 carry seven:
 
-- **ready** — `present`, `updated`, `unmanaged`
-- **stale** — `dirty`, `ahead`, `moved`, `detached`, `offline`
-- **failed** — clone failed, `busy`
+- **ready** — present, up to date, fast-forwarded, switched, no upstream
+- **need a look** — dirty, ahead, diverged, on another branch, detached, offline
+- **not cloned** — a manifest entry with nothing on disk yet
+- **failed** — the clone failed, or a git operation is in flight
 
-with `stale` and `failed` both appending the existing `— run \`sparkbox repos\``
-pointer, and the per-repository table carrying the real word and the sentence
-that fixes it. `busy` counting as failed rather than stale is deliberate: an
-inherited half-finished rebase is a thing to go and deal with, not a thing to be
-told about twice a day.
+with the last three appending the existing `— run \`sparkbox repos\`` pointer,
+and the per-repository table carrying the real sentence. An operation in flight
+counting as failed rather than as needing a look is deliberate: an inherited
+half-finished rebase is a thing to go and deal with, not a thing to be told
+about twice a day.
 
 The `sync` path keeps the guarantee it has now — a sync that cannot run is a
 warning and never a failed boot, because this unit is ordered beside sshd and
@@ -392,42 +425,57 @@ fixable the next time anybody looks.
 
 ---
 
-# Part 9 — build order
+# Part 9 — what shipped, in the order it shipped
 
-1. **The refresh half** (Part 3) — the state vocabulary, fetch, fast-forward-only,
-   and the reporting in Part 7. Useful the day it lands on every long-lived box
-   that has drifted, entirely independent of templates, and it is the piece that
-   proves the never-lose-work rule under real trees before anything is allowed to
-   switch a branch.
-2. **`sparkbox_fresh=1` and adopt mode** (Part 4). Small on the host, and the
-   thing to test hardest is that no non-Create path emits the arg.
-3. **The capture survey and the pre-capture fetch** (Part 6). Independent of 4,
-   and it is what makes a captured template worth adopting from.
-4. **`--ref` and `sandbox_repo_refs`** (Part 5), including the destroy/rename
-   registration and the no-such-attachment refusal. Last, because until 1 and 2
-   exist it can only affect a clone that was going to happen anyway — which is a
-   feature that looks finished and silently does nothing on the fork path, the
-   exact failure mode tag templates shipped with.
+1. **The refresh half** (Part 3) — the state vocabulary, fetch,
+   fast-forward-only, and the reporting in Part 7. `deploy/install-guest-identity.sh`,
+   `refresh_checkout`. Tested by running the real worker against real git
+   repositories (`deploy/repos_refresh_test.go`): the dirty tree keeps its
+   edits, its untracked files and its HEAD; the unpushed commit survives ahead
+   and diverged; a non-repository is untouched.
+2. **`sparkbox_fresh=1` and adopt mode** (Part 4). `Driver.Create` threads
+   whether it reflinked into `Driver.kernelArgs`, extracted from `boot` so the
+   marker is testable without a VMM.
+3. **The capture survey** (Part 6). `sparkbox-repos survey`, called by the
+   in-guest `sparkbox snapshot` before its prompt, with `--allow-busy`.
+4. **`--ref` and `sandbox_repo_refs`** (Part 5), including the
+   destroy/rename registration in `internal/host` AND `internal/fleet`, the
+   no-such-attachment refusal, and the REST body.
+
+The string assertions that remain on the guest worker are an **allow-list** of
+the verbs `gitq` may run, not a ban-list of the ones it may not. A ban-list is a
+guess at the next dangerous verb somebody reaches for, and it trips over the
+prose and the report strings that name those verbs.
 
 ---
 
-# Part 10 — open questions
+# Part 10 — the questions, answered
 
-- **Should adopt mode run on a create from a stock template too?** It is a no-op
-  there — the home directory is empty and the clone takes `--branch <ref>` — so
-  the answer only matters if the stock template ever ships with a checkout in it.
-  Making the mode unconditional on a fresh disk is one fewer branch and is
-  probably right.
-- **Does `--ref` on a tag with several attachments and no scoped spelling mean
-  "all of them" or is it a refusal?** "All" is convenient and is wrong more often
-  as the attachment count grows. Refusing above one attachment, with the scoped
-  form in the message, is the conservative read and costs a person one retype.
-- **Should a `moved` checkout in refresh mode ever converge?** A box that has sat
-  on `feat/x` for a month while the manifest says `main` is arguably drift the
-  platform should mention every time and arguably a decision the user made once.
-  It is currently a banner line forever, which is the annoying-but-safe answer.
-- **Does the survey belong in `ctl snapshot create` as an opt-in?** It would mean
-  the gateway asking a guest to describe its own working trees over the exec
-  channel, which is a new kind of thing for that channel to carry. Probably no,
-  but it is the obvious request the first time somebody captures a broken template
-  from outside.
+- **Should adopt mode run on a create from a stock template too?** Yes, and it
+  is unconditional on a fresh disk. It is a no-op there — the home directory is
+  empty and the clone takes `--branch <ref>` — and one fewer branch is worth
+  more than an optimisation nobody can observe.
+- **Does a bare `--ref` on a tag with several attachments mean "all of them"?**
+  No: refused, with the scoped spelling in the message. "All" is convenient and
+  is wrong more often as the attachment count grows, and the cost of being
+  wrong is a build on the wrong branch discovered twenty minutes later.
+- **Should a `moved` checkout in refresh mode ever converge?** No. It is a line
+  in the report forever, which is the annoying-but-safe answer, and `git switch`
+  is one word for anybody who disagrees.
+- **Does the survey belong in `ctl snapshot create`?** Still no, and now for a
+  sharper reason than when it was a guess: the survey reads working trees, and
+  the guest exec channel carrying a description of somebody's uncommitted work
+  back to the gateway is a new kind of thing for that channel to carry. The
+  in-guest verb is where a person is standing anyway.
+
+Still open:
+
+- **Should a sandbox's ref override show up in `ctl ls` or `ctl get`?** It is a
+  fact about the box that is invisible from outside it, which is the shape of
+  thing that makes somebody debug "why is this one different" for an hour. Not
+  built, because the display question ("only when it differs from the
+  attachment?") deserves an answer before a column exists.
+- **A `git fetch` on a timer** inside a long-lived box, so `sparkbox repos`
+  reports ahead/behind without anybody running a sync. Cheap, and it changes the
+  status line from "what the last fetch knew" to "what is true", which is what
+  people will assume it already says.

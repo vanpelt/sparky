@@ -600,6 +600,7 @@ func serve(args []string) error {
 		Routes:               routeStore,
 		Schedules:            scheduleStore,
 		Tags:                 secretsStore,
+		RepoRefs:             repoStore,
 		MaxRunningPerOwner:   *maxPerOwner,
 		MaxSandboxesPerOwner: *maxBoxesPerOwner,
 		MemAdmissionPct:      *memAdmitPct,
@@ -679,7 +680,7 @@ func serve(args []string) error {
 	fleetOpts := fleet.Options{
 		Context: ctx, Local: mgr, LocalName: nodeName, LocalArch: *archFlag,
 		Index: placeStore, Log: log, Metrics: metricsRegistry,
-		Routes: routeStore, Schedules: scheduleStore, Tags: secretsStore,
+		Routes: routeStore, Schedules: scheduleStore, Tags: secretsStore, RepoRefs: repoStore,
 		LocalNet: netSyncer,
 	}
 	if nodeIssuer != nil {

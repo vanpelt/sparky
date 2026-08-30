@@ -47,6 +47,25 @@ type fakeRepos struct {
 	// putErr fails only the write, so a test can prove nothing is reported as
 	// attached when the row never landed.
 	putErr error
+	// refs is the per-sandbox --ref overlay, keyed by "owner\x00sandbox".
+	refs    map[string][]repos.SandboxRef
+	refsErr error
+}
+
+func (f *fakeRepos) SetSandboxRefs(owner, sandbox string, refs []repos.SandboxRef) error {
+	f.c.add("repos.SetSandboxRefs %s/%s n=%d", owner, sandbox, len(refs))
+	if f.refsErr != nil {
+		return f.refsErr
+	}
+	if f.refs == nil {
+		f.refs = map[string][]repos.SandboxRef{}
+	}
+	if len(refs) == 0 {
+		delete(f.refs, owner+"\x00"+sandbox)
+		return nil
+	}
+	f.refs[owner+"\x00"+sandbox] = refs
+	return nil
 }
 
 func repoKey(owner, host, slug string) string {

@@ -451,12 +451,12 @@ func (g *Gateway) handle(s gssh.Session) {
 		// Which is exactly why --node has to be understood HERE and cannot be
 		// left to fall through: an unrecognised flag is not refused at this door,
 		// it is quietly turned into two tags. See parseCreateArgs.
-		flagged, node, bare, err := parseCreateArgs(s.Command())
+		parsed, err := parseCreateArgs(s.Command())
 		if err != nil {
 			failUsage(s, log, err)
 			return
 		}
-		tags, err := ctlops.NormalizeTags(append(flagged, bare...))
+		tags, err := ctlops.NormalizeTags(append(parsed.Tags, parsed.Rest...))
 		if err != nil {
 			failUsage(s, log, err)
 			return
@@ -465,7 +465,9 @@ func (g *Gateway) handle(s gssh.Session) {
 		// didn't, stamps the tags before Create (the secret-env push is fired
 		// asynchronously and the tags decide its contents) and clears them again
 		// if the create fails.
-		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{Name: requestedName, Tags: tags, Node: node})
+		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{
+			Name: requestedName, Tags: tags, Node: parsed.Node, Refs: parsed.Refs,
+		})
 		if err != nil {
 			g.failStart(s, log, "create sandbox", err)
 			return
@@ -478,7 +480,7 @@ func (g *Gateway) handle(s gssh.Session) {
 		// deployment there is one answer and printing it every time would be
 		// noise, but a user who named a machine is owed confirmation from the
 		// record rather than from their own request.
-		if node != "" && box.Node != "" {
+		if parsed.Node != "" && box.Node != "" {
 			tagNote = " on " + box.Node + tagNote
 		}
 		via := viaGateway

@@ -142,6 +142,10 @@ type Repos interface {
 	DeleteRepo(owner, host, slug string) error
 	ListRepos(owner string) ([]repos.Repo, error)
 	SandboxesForRepo(owner, host, slug string) ([]string, error)
+	// SetSandboxRefs is the only method here keyed by a sandbox rather than by
+	// an owner and a tag, because `--ref` is the only thing on this surface
+	// that is about one instance. See reporef.go.
+	SetSandboxRefs(owner, sandbox string, refs []repos.SandboxRef) error
 }
 
 // TemplateBindings is the tag-to-base-image store — the fourth reader of the

@@ -192,12 +192,25 @@ func (o *Ops) Fork(ctx context.Context, c Caller, a ForkArgs) (SandboxInfo, erro
 	if err := o.nameIsFree(op, a.Name); err != nil {
 		return SandboxInfo{}, err
 	}
+	// A fork is the case --ref exists for: the snapshot already HAS the
+	// checkout, on whatever branch it was captured on, so this is the only way
+	// to ask for a different one. Resolved before the first write, as in
+	// Create.
+	refs, err := o.resolveRepoRefs(op, c.Handle, tags, a.Refs)
+	if err != nil {
+		return SandboxInfo{}, err
+	}
 	if err := o.stampTags(a.Name, c.Handle, tags); err != nil {
+		return SandboxInfo{}, Fail(op, err)
+	}
+	if err := o.writeRepoRefs(c.Handle, a.Name, refs); err != nil {
+		o.clearTags(a.Name, c.Handle, tags)
 		return SandboxInfo{}, Fail(op, err)
 	}
 	box, err := o.templates.Fork(ctx, a.Snapshot, a.Name, c.Handle, 0, 0)
 	if err != nil {
 		o.clearTags(a.Name, c.Handle, tags)
+		o.clearRepoRefs(c.Handle, a.Name, refs)
 		return SandboxInfo{}, Fail(op, err)
 	}
 	o.log.Info("sandbox forked", "user", c.Handle, "snapshot", a.Snapshot, "name", a.Name, "tags", tags)
