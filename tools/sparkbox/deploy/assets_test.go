@@ -148,7 +148,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		// `repos` delegates instead of reimplementing the manifest read: the
 		// rule that reports where a repo lives must be the same rule that put
 		// it there, or the report names a directory nothing cloned into.
-		"SB=/usr/local/sbin/sparkbox-repos",
+		"SPARKBOX_REPOS_BIN=${SPARKBOX_REPOS_BIN:-/usr/local/sbin/sparkbox-repos}",
+		"SB=$SPARKBOX_REPOS_BIN",
 		"exec $SB status",
 		"exec $SB sync",
 		// And it delegates as ROOT when it can. The boot unit runs as root and
@@ -156,7 +157,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		// could not write them would clone successfully and leave the banner
 		// reporting the old failure at every login, forever. -n so a template
 		// without passwordless sudo degrades instead of hanging on a prompt.
-		"sudo -n /usr/local/sbin/sparkbox-repos",
+		`SB="sudo -n $SPARKBOX_REPOS_BIN"`,
 		"sudo -n true",
 		// `update-tools` delegates the same way and for the same reason: the
 		// installer writes /usr/local/bin, /usr/local/lib and /var/lib/sparkbox,
@@ -190,10 +191,10 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "update-tools [--check]>") {
 		t.Errorf("guest CLI usage line does not mention update-tools:\n%s", cli)
 	}
-	if !strings.Contains(cli, "pause|snapshot [--yes] [TAG [NAME]]|") {
+	if !strings.Contains(cli, "pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|") {
 		t.Errorf("guest CLI usage line does not mention pause or snapshot:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=12\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=13\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -1871,7 +1872,7 @@ func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
 		if code != 2 {
 			t.Errorf("%v: exit = %d, want 2", args, code)
 		}
-		if !strings.Contains(stderr, "usage: sparkbox snapshot [--yes] [TAG [NAME]]") {
+		if !strings.Contains(stderr, "usage: sparkbox snapshot [--yes] [--allow-busy] [TAG [NAME]]") {
 			t.Errorf("%v: stderr = %q", args, stderr)
 		}
 		if got := requests(); len(got) != 0 {

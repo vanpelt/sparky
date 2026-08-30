@@ -62,6 +62,15 @@ installed here.
   what that tag boots from today, and every VM of yours carrying it. Pass
   `--yes` to skip the question; without a terminal to ask at, it refuses rather
   than proceeding.
+- **It shows you the state of every checkout it is about to freeze.** Which
+  branch each is on, what is not pushed, what is uncommitted. All of that is
+  captured exactly as it stands — nothing is committed, stashed or reset on your
+  behalf — and every VM forked from this template inherits it. It is printed so
+  it is not a surprise later, not because anything is wrong.
+- **A git operation in flight stops it.** A rebase, merge, cherry-pick or bisect
+  half-done in a checkout is copied into the template byte-for-byte, lock file
+  and all, so every fork would come up with a git that refuses to run. Finish or
+  abort it, or pass `--allow-busy` if you meant to.
 - **Re-pointing does not re-base a VM that already exists.** Running or paused,
   every VM keeps the disk it was created from, this one included. Only VMs
   created afterwards boot from the new template.

@@ -1,9 +1,11 @@
 package deploy
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -153,22 +155,36 @@ func (w *repoWorld) pushToRemote(name string) {
 	w.git(scratch, "push", "-q", "origin", "main")
 }
 
-// run executes the worker and returns the report line for the one attachment.
+// run executes the worker, requires it to succeed, and returns the report line
+// for the one attachment.
 func (w *repoWorld) run(mode string) string {
+	w.t.Helper()
+	line, code := w.runCode(mode)
+	if code != 0 {
+		w.t.Fatalf("sparkbox-repos %s exited %d: %s", mode, code, line)
+	}
+	return line
+}
+
+func (w *repoWorld) runCode(mode string) (string, int) {
 	w.t.Helper()
 	cmd := exec.Command("sh", filepath.Join(w.root, "usr/local/sbin/sparkbox-repos"), mode)
 	cmd.Env = w.env
 	out, err := cmd.CombinedOutput()
-	if err != nil {
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
 		w.t.Fatalf("sparkbox-repos %s: %v\n%s", mode, err, out)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.Contains(line, "wandb/hivemind") {
-			return line
+			return line, code
 		}
 	}
 	w.t.Fatalf("sparkbox-repos %s reported nothing about the attachment:\n%s", mode, out)
-	return ""
+	return "", code
 }
 
 func (w *repoWorld) branch() string { return w.git(w.checkout, "rev-parse", "--abbrev-ref", "HEAD") }
@@ -355,4 +371,130 @@ func TestRepoRefreshSurvivesAnUnreachableRemote(t *testing.T) {
 	if w.head() != before {
 		t.Error("an unreachable remote moved HEAD")
 	}
+}
+
+// The capture survey.
+//
+// A template is a byte-for-byte copy of a disk somebody is working on, and the
+// gateway that answers the capture plan cannot see inside it. So the one place
+// that can tell the person what they are about to freeze into every future fork
+// is the guest, in the session, before the prompt — which is what these cover.
+//
+// The stub stands in for sparkbox-repos; what the real one reports is proven
+// against real git repositories above. What is under test here is the wiring
+// and the single refusal.
+func guestCaptureWithSurvey(t *testing.T, surveyOut string, surveyExit int) (
+	requests func() []string,
+	run func(args ...string) (string, string, int),
+) {
+	t.Helper()
+	reply, requests, baseRun := guestSelfService(t)
+	reply("GET", "200", guestPlanHeaders, guestPlanBody)
+	reply("POST", "202", "HTTP/1.1 202 Accepted\r\n\r\n", "accepted — capturing.\n")
+
+	stub := filepath.Join(t.TempDir(), "sparkbox-repos")
+	writeExecutable(t, stub, "#!/bin/sh\n"+
+		"[ \"$1\" = survey ] || { echo 'wrong mode' >&2; exit 9; }\n"+
+		"cat <<'REPORT'\n"+surveyOut+"\nREPORT\n"+
+		"exit "+strconv.Itoa(surveyExit)+"\n")
+
+	run = func(args ...string) (string, string, int) {
+		t.Helper()
+		t.Setenv("SPARKBOX_REPOS_BIN", stub)
+		return baseRun(args...)
+	}
+	return requests, run
+}
+
+// A checkout with uncommitted work in it is a SURPRISE, not a defect: the
+// person may well mean to capture it. It is printed and the capture proceeds.
+func TestGuestCaptureShowsWhatItWouldFreeze(t *testing.T) {
+	requests, run := guestCaptureWithSurvey(t,
+		"wandb/hivemind    ready  read  ~/hivemind  on feat/x, 2 not pushed, uncommitted changes", 0)
+
+	stdout, stderr, code := run("snapshot", "web", "--yes")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	for _, want := range []string{"repos, as they would be captured", "2 not pushed", "uncommitted changes"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the capture never showed %q:\n%s", want, stdout)
+		}
+	}
+	if got := requests(); len(got) != 4 {
+		t.Errorf("the capture did not proceed past the survey: %v", got)
+	}
+}
+
+// The one refusal. A git operation in flight is copied into the template
+// verbatim, so every fork inherits a git that refuses to run — in a box whose
+// owner never saw the rebase. Refused before the commit, and nothing reaches
+// the host but the plan that was already read.
+func TestGuestCaptureRefusesAnOperationInFlight(t *testing.T) {
+	requests, run := guestCaptureWithSurvey(t,
+		"wandb/hivemind    failed  read  ~/hivemind  a rebase is in progress — git rebase --abort", 3)
+
+	stdout, stderr, code := run("snapshot", "web", "--yes")
+	if code != 3 {
+		t.Fatalf("exit = %d, want 3\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "--allow-busy") {
+		t.Errorf("the refusal does not say how to override it:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "rebase --abort") {
+		t.Errorf("the refusal does not show which checkout, or the way out:\n%s", stdout)
+	}
+	for _, got := range requests() {
+		if got == "POST" {
+			t.Errorf("a refused capture still committed: %v", requests())
+		}
+	}
+}
+
+// …and the override means it. Somebody who says they meant to capture a box
+// mid-rebase gets to.
+func TestGuestCaptureAllowsAnOperationInFlightWhenTold(t *testing.T) {
+	requests, run := guestCaptureWithSurvey(t,
+		"wandb/hivemind    failed  read  ~/hivemind  a rebase is in progress — git rebase --abort", 3)
+
+	stdout, stderr, code := run("snapshot", "web", "--yes", "--allow-busy")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if got := requests(); len(got) != 4 {
+		t.Errorf("--allow-busy did not let the capture through: %v", got)
+	}
+}
+
+// `survey` is what `sparkbox snapshot` asks before it freezes this disk into a
+// template every future fork copies. It is `status` with an opinion: no
+// network, the counts taken against the remote-tracking refs this checkout
+// already has, and every fact that would surprise somebody named in one line.
+func TestRepoSurveyNamesWhatACaptureWouldFreeze(t *testing.T) {
+	w := newRepoWorld(t)
+	w.write(filepath.Join(w.checkout, "local.txt"), "mine\n")
+	w.git(w.checkout, "add", "-A")
+	w.git(w.checkout, "commit", "-qm", "mine")
+	w.write(filepath.Join(w.checkout, "scratch.txt"), "notes\n")
+
+	line, code := w.runCode("survey")
+	if code != 0 {
+		t.Errorf("a surprising checkout is not a defect; survey exited %d", code)
+	}
+	w.want(t, line, "on main", "1 not pushed", "uncommitted changes")
+}
+
+// The one thing a survey refuses. Exit 3 is the signal `sparkbox snapshot`
+// turns into a refusal, and it has to be distinguishable from "the survey could
+// not run" (exit 1) and from an ordinary dirty tree (exit 0).
+func TestRepoSurveyExitsThreeOnAnOperationInFlight(t *testing.T) {
+	w := newRepoWorld(t)
+	if err := os.MkdirAll(filepath.Join(w.checkout, ".git/rebase-merge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line, code := w.runCode("survey")
+	if code != 3 {
+		t.Errorf("survey exited %d over a rebase in flight, want 3: %s", code, line)
+	}
+	w.want(t, line, "rebase", "--abort")
 }

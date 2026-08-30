@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=12
+IDENTITY_REV=13
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -195,6 +195,12 @@ GW=$(ip -4 route show default | awk '{print $3; exit}')
 [ -n "$GW" ] || { echo "sparkbox: no default gateway" >&2; exit 1; }
 META="http://$GW:@@META_PORT@@"
 
+# The checkout worker, named once so the `repos` verb and the capture survey
+# cannot drift onto two different binaries. Overridable so the deploy tests can
+# point it at a stub, the same way the other guest scripts take their roots; it
+# is never derived from a request.
+SPARKBOX_REPOS_BIN=${SPARKBOX_REPOS_BIN:-/usr/local/sbin/sparkbox-repos}
+
 # _call METHOD URL — print the host's own sentence, on success AND on refusal.
 #
 # Deliberately NOT `curl -f`, which every verb below still uses: -f throws the
@@ -254,19 +260,56 @@ case "${1:-}" in
     ;;
   snapshot)
     shift
-    _yes=0; _tag=""; _name=""
+    _yes=0; _busyok=0; _tag=""; _name=""
     for _a in "$@"; do
       case "$_a" in
         --yes|-y) _yes=1 ;;
-        -*) echo "usage: sparkbox snapshot [--yes] [TAG [NAME]]" >&2; exit 2 ;;
+        --allow-busy) _busyok=1 ;;
+        -*) echo "usage: sparkbox snapshot [--yes] [--allow-busy] [TAG [NAME]]" >&2; exit 2 ;;
         *)  if   [ -z "$_tag"  ]; then _tag=$_a
             elif [ -z "$_name" ]; then _name=$_a
-            else echo "usage: sparkbox snapshot [--yes] [TAG [NAME]]" >&2; exit 2; fi ;;
+            else echo "usage: sparkbox snapshot [--yes] [--allow-busy] [TAG [NAME]]" >&2; exit 2; fi ;;
       esac
     done
     # The plan mutates nothing. Every refusal a user can act on lands here,
     # while this sandbox is still running and this session is still open.
     _call GET "$META/self/snapshot?tag=$_tag&name=$_name" || exit $?
+
+    # The repository survey, and it belongs HERE rather than in the plan the
+    # gateway just answered: the gateway cannot see inside this filesystem and
+    # is never going to grow a way to read a guest's working trees. This is the
+    # only place that can, and it is the last moment somebody is still sitting
+    # in front of the box about to be frozen.
+    #
+    # Everything it prints is a statement, not an offer. A capture does not OWN
+    # this sandbox — it is one somebody is working in, which is precisely why it
+    # is worth capturing — so nothing here commits, stashes, resets or checks
+    # out on their behalf. What it does is make sure that what is about to be
+    # copied into every future fork is what they think it is.
+    if [ -x "$SPARKBOX_REPOS_BIN" ]; then
+      # `_survey=$(cmd); _srv=$?` would be wrong under `set -e`: the assignment
+      # TAKES the command's status, so a survey exiting 3 kills this script
+      # before the line that reads $? — silently, with the survey it just
+      # captured still in the variable. || is what makes the status readable.
+      _srv=0
+      _survey=$("$SPARKBOX_REPOS_BIN" survey 2>/dev/null) || _srv=$?
+      case "$_survey" in
+        ""|"no repos are attached"*) ;;
+        *) printf 'repos, as they would be captured:\n%s\n\n' "$_survey" ;;
+      esac
+      # Exit 3 is a git operation in flight. It is the one state that makes a
+      # capture actively BROKEN rather than merely surprising: the index lock
+      # and the rebase directory are copied byte-for-byte, so every fork
+      # inherits a git that refuses to run, in a box whose owner never saw the
+      # rebase. Everything else the survey found is printed and not refused.
+      if [ "$_srv" = 3 ] && [ "$_busyok" -ne 1 ]; then
+        echo "sparkbox: a git operation is in progress in one of the checkouts above." >&2
+        echo "A template freezes that state byte-for-byte, so every fork of this one" >&2
+        echo "would inherit a git that refuses to run. Finish or abort it first, or" >&2
+        echo "pass --allow-busy if you meant to capture it mid-flight." >&2
+        exit 3
+      fi
+    fi
     if [ "$_yes" -ne 1 ]; then
       if [ -r /dev/tty ] && [ -t 0 ]; then
         printf 'Capture and re-point `%s`? [y/N] ' "$SPARKBOX_TAG" > /dev/tty
@@ -320,14 +363,15 @@ case "${1:-}" in
     # costs nothing and asks for nothing; -n means a template that ever stops
     # doing so degrades to the unprivileged path instead of hanging on a
     # password prompt nobody is there to answer.
-    SB=/usr/local/sbin/sparkbox-repos
+    SB=$SPARKBOX_REPOS_BIN
     if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-      SB="sudo -n /usr/local/sbin/sparkbox-repos"
+      SB="sudo -n $SPARKBOX_REPOS_BIN"
     fi
     case "${2:-}" in
       ''|status) exec $SB status ;;
+      survey)    exec $SB survey ;;
       sync)      exec $SB sync ;;
-      *) echo "usage: sparkbox repos [sync]" >&2; exit 2 ;;
+      *) echo "usage: sparkbox repos [survey|sync]" >&2; exit 2 ;;
     esac
     ;;
   update-tools)
@@ -346,7 +390,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: sparkbox <pin|unpin|status|pause|snapshot [--yes] [TAG [NAME]]|make-public|make-private|set-port PORT|repos [sync]|update-tools [--check]>" >&2
+    echo "usage: sparkbox <pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repos [survey|sync]|update-tools [--check]>" >&2
     exit 2
     ;;
 esac
@@ -933,8 +977,8 @@ set -eu
 
 MODE=${1:-sync}
 case "$MODE" in
-  sync|status) ;;
-  *) echo "usage: sparkbox-repos [status|sync]" >&2; exit 2 ;;
+  sync|status|survey) ;;
+  *) echo "usage: sparkbox-repos [status|survey|sync]" >&2; exit 2 ;;
 esac
 
 # The account the checkouts belong to (the login user; root on legacy templates).
@@ -1208,14 +1252,25 @@ refresh_checkout() {
   if [ -n "$(gitq "$_dest" status --porcelain || true)" ]; then _dirty=1; fi
   _branch=$(gitq "$_dest" symbolic-ref --short -q HEAD) || _branch=
 
-  # `status` asks what is here and expects an answer at once, so it stays off
-  # the network entirely — no fetch, and therefore no ahead/behind.
+  # `status` and `survey` ask what is HERE and expect an answer at once, so they
+  # stay off the network entirely. The counts they give are therefore against
+  # the remote-tracking refs this checkout already has — what the last fetch
+  # knew — which is exactly the right basis for the question `survey` is asked:
+  # what would a capture of this disk freeze into a template.
   if [ "$MODE" != sync ]; then
     if [ -z "$_branch" ]; then
-      report_add ready "$_slug" "$_access" "$_dest" "detached HEAD${_dirty:+, uncommitted changes}"
+      _note="detached HEAD"
     else
-      report_add ready "$_slug" "$_access" "$_dest" "on $_branch${_dirty:+, uncommitted changes}"
+      _note="on $_branch"
+      if gitq "$_dest" rev-parse --verify --quiet "refs/remotes/origin/$_branch" >/dev/null; then
+        _n=$(gitq "$_dest" rev-list --count "origin/$_branch..HEAD" || echo 0)
+        if [ "$_n" != 0 ]; then _note="$_note, $_n not pushed"; fi
+      else
+        _note="$_note, no remote branch"
+      fi
     fi
+    if [ -n "$_dirty" ]; then _note="$_note, uncommitted changes"; fi
+    report_add ready "$_slug" "$_access" "$_dest" "$_note"
     return 0
   fi
 
@@ -1380,6 +1435,21 @@ while IFS="$SEP" read -r state slug access dest detail; do
   esac
   printf '%-40s %-8s %-6s %-26s %s\n' "$slug" "$state" "$access" "$dest" "$detail"
 done < "$WORK/report"
+
+# `survey` is `status` with an opinion, and it exists for one caller: the
+# in-guest `sparkbox snapshot`, which has to decide whether this disk is fit to
+# be frozen into a template. Exit 3 says at least one checkout has a git
+# operation in flight — a rebase, a merge, a bisect. Those are the one state
+# that makes a capture actively BROKEN rather than merely stale: the lock file
+# and the rebase directory are copied byte-for-byte, so every fork of that
+# template inherits a git that refuses to run, in a box whose owner never saw
+# the rebase. Everything else a survey reports is a surprise, not a defect, and
+# is printed rather than refused.
+if [ "$MODE" = survey ]; then
+  while IFS="$SEP" read -r state rest; do
+    if [ "$state" = failed ]; then exit 3; fi
+  done < "$WORK/report"
+fi
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-repos"
 
