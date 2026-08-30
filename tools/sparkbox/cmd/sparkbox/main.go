@@ -42,6 +42,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindpresence"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hostsetup"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/launch"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
@@ -161,6 +162,7 @@ func serve(args []string) error {
 		userConsoleSub       = fs.String("user-console-subdomain", "my", "subdomain serving the per-user console (empty disables it)")
 		apiSub               = fs.String("api-subdomain", "api", "subdomain serving the authenticated REST API and its OpenAPI docs at <api-subdomain>.<domain>/docs (empty disables it); authenticate with a token from 'ssh ctl@<domain> session-token'")
 		xtermSub             = fs.String("xterm-subdomain", xterm.DefaultSubdomain, "name suffix serving browser terminals at <name>-<xterm-subdomain>.<domain> (empty disables them); it is one label on purpose, so the zone's existing *.<domain> wildcard covers it in both DNS and TLS with nothing further to publish. Sandbox and route names ending in -<xterm-subdomain> are refused, since the edge answers them here")
+		launchSub            = fs.String("launch-subdomain", launch.DefaultSubdomain, "subdomain serving one-click launch links at <launch-subdomain>.<domain>/<owner>/<repo> (empty disables it); 'ssh ctl@<domain> badge <owner>/<repo>' prints the button to paste into a pull request. Disabled on its own when --xterm-subdomain is empty, since the link's whole payoff is a terminal to land in. The label appears in links people paste into permanent places — moving it later breaks every comment already written")
 		sessionTTL           = fs.Duration("session-ttl", 12*time.Hour, "lifetime of a browser session cookie minted for private routes")
 		tlsProvider          = fs.String("tls-provider", "cloudflare", "TLS certs when --proxy-tls: cloudflare (DNS-01 wildcard, needs CLOUDFLARE_API_TOKEN) | autocert (per-host on-demand)")
 		tlsEmail             = fs.String("tls-email", "", "ACME account email (recommended for cert-expiry notices)")
@@ -786,6 +788,28 @@ func serve(args []string) error {
 		xtermLabel = ""
 	}
 
+	// Launch links are derived from the terminal label rather than gated only
+	// on their own flag, because a launch link's entire payoff is the terminal
+	// it hands the clicker to. SandboxInfo.TerminalURL is composed by ctlops
+	// from --xterm-subdomain and is left EMPTY when that label is, so a door
+	// mounted without one would resolve a sandbox correctly and then redirect
+	// the visitor to the empty string — or, if it rebuilt the host itself,
+	// to https://<name>-.<domain>, which nothing answers. A door that cannot
+	// finish the trip is worse than no door: the URL it fails at was pasted
+	// into a pull request comment that outlives this deployment.
+	//
+	// Nothing here tests repoStore: repos.Open is called unconditionally above
+	// and its error aborts startup, so the store is never nil by this point and
+	// a second guard would only read as though it could be.
+	//
+	// It is computed here, beside xtermLabel and far above the proxy edge that
+	// mounts it, because the label is a fact about this host's configuration
+	// rather than about the HTTP server — the same reason xtermLabel is.
+	launchLabel := *launchSub
+	if xtermLabel == "" {
+		launchLabel = ""
+	}
+
 	// The HiveMind client, built once for the two things that ask it questions:
 	// the presence monitor below, which keeps the reaper off a VM whose agent is
 	// mid-conversation, and `ctl sessions`, which tells a person what has run
@@ -848,7 +872,14 @@ func serve(args []string) error {
 		Schedules: scheduleStore,
 		Routes:    routeStore, Session: sessionSigner, Tags: secretsStore,
 		Ops: ops, XtermSubdomain: xtermLabel,
-		Nodes: nodeStore, NodeJoiner: flt, NodeEnrol: !*noNodeEnrol,
+		// launchLabel, not *launchSub, for the same reason the line above uses
+		// xtermLabel: it is already empty when the door was not mounted, so
+		// `ctl badge` cannot print a button for a URL nothing answers on. This
+		// is also why launchLabel is derived up beside xtermLabel rather than
+		// down in the proxy edge block — that block runs ~200 lines after this
+		// one, and the gateway is built first.
+		LaunchSubdomain: launchLabel,
+		Nodes:           nodeStore, NodeJoiner: flt, NodeEnrol: !*noNodeEnrol,
 	})
 	// The gateway knows which terminals are attached to which sandbox, so it is
 	// what the manager calls to release them when a sandbox is paused. The
@@ -1166,6 +1197,76 @@ func serve(args []string) error {
 			})
 			px.SetReservedSuffix(xtermLabel, xt.Handler())
 			log.Info("browser terminals enabled", "url", "https://<name>-"+xtermLabel+"."+*proxyDomain)
+		}
+
+		// One-click launch links: the door a button in a pull request comment
+		// points at. Mounted immediately after the terminals because that is
+		// where it hands people — a click resolves the clicker's own sandbox on
+		// the linked repository and 303s to that sandbox's TerminalURL, and
+		// launchLabel is already empty when there is no terminal to reach.
+		//
+		// It is a reserved subdomain and not a suffix: the whole point of the
+		// URL is that a human can read it back out of a comment months later,
+		// so it is one fixed label with the repository in the path.
+		//
+		// Both disabled cases are logged rather than passed over in silence.
+		// The flag defaults to a live label, so an operator who never touched
+		// it and finds go.<domain> answering nothing needs the reason on the
+		// same line as the fact, and the two reasons are different flags.
+		switch {
+		case *launchSub == "":
+			log.Info("launch links disabled", "reason", "--launch-subdomain is empty")
+		case launchLabel == "":
+			// Inside this block --proxy-addr is set, so the only thing that can
+			// have emptied the derived label is --xterm-subdomain. Name that
+			// flag: the operator did not touch --launch-subdomain and would
+			// otherwise go looking at the wrong one.
+			log.Info("launch links disabled", "reason", "no browser terminals to land in (--xterm-subdomain is empty)")
+		default:
+			// Only a warning, and deliberately so — warnSubdomainCollision logs
+			// and returns, blocking and removing nothing. Reserved dispatch
+			// wins at the edge before any route lookup, so a sandbox, route or
+			// handle that took this name before it was claimed goes dark on the
+			// next restart with only this line to say why. Renaming the
+			// squatter is an operator decision on a live host, which is why it
+			// is a pre-deploy check and not a startup failure here.
+			warnSubdomainCollision("launch links", launchLabel, mgr, routeStore, log)
+			// The user console's own label, threaded rather than composed, for
+			// the same reason restapi is handed xtermLabel: a host that moved
+			// the console must not have a launch page whose "your sandboxes"
+			// link points at a hostname nothing serves. Empty when there is no
+			// user console, which the handler treats as a supported state.
+			launchHome := ""
+			if *userConsoleSub != "" {
+				launchHome = "https://" + *userConsoleSub + "." + *proxyDomain + "/"
+			}
+			// ops, not a second control plane: the create a click performs is
+			// the same create `ctl new` performs, through the same ownership
+			// checks, the same 15s budget and the same tags-before-create
+			// ordering. repoStore is passed concretely because ctlops cannot
+			// answer "does this person already have a sandbox on this
+			// repository at this ref?" — see the launch package's Attachments
+			// doc for why that narrowness was left alone rather than widened.
+			px.SetReserved(launchLabel, launch.New(launch.Config{
+				Ops: ops, Repos: repoStore, Accounts: userStore, Signer: sessionSigner,
+				Subdomain: launchLabel, Domain: *proxyDomain,
+				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
+				HomeURL:  launchHome,
+				Log:      log,
+			}).Handler())
+			log.Info("launch links enabled",
+				"url", "https://"+launchLabel+"."+*proxyDomain+"/<owner>/<repo>",
+				"badge", "https://"+launchLabel+"."+*proxyDomain+"/badge.svg")
+			if *openSignup {
+				// Worth a warning rather than a refusal, because the
+				// combination is a legitimate demo posture and refusing it here
+				// would be this file inventing a policy. But say it out loud:
+				// with open signup, "anyone who clicks signs in as themselves"
+				// stops meaning "anyone we already know".
+				log.Warn("launch links are mounted on a host with --open-signup: "+
+					"anyone who can register can create a sandbox from a link in a public comment",
+					"subdomain", launchLabel)
+			}
 		}
 
 		// The REST API mirrors the ctl@ command surface for callers that have a

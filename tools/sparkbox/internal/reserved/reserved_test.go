@@ -6,9 +6,16 @@ import "testing"
 // these has a handler mounted at it, and reserved dispatch runs before the route
 // lookup, so a sandbox or route allowed to take one would be created, listed,
 // and then never served.
+//
+// `go` joined this list when cmd/sparkbox began mounting internal/launch there
+// (--launch-subdomain), and it is the one entry whose reservation outlives the
+// deployment: the button pasted into a public GitHub comment points at
+// go.<domain>, and that comment is immutable. Freeing this label would not
+// merely relabel a surface — it would hand whoever took it every click of every
+// link already written.
 func TestLiveDoorsAreReserved(t *testing.T) {
 	for _, n := range []string{
-		"console", "my", "api", "login", "oidc", "xterm", "hooks", // proxy edge
+		"console", "my", "api", "login", "oidc", "xterm", "hooks", "go", // proxy edge
 		"new", "ctl", "signup", "node", // ssh gateway usernames
 	} {
 		if !Name(n) {
@@ -22,13 +29,12 @@ func TestLiveDoorsAreReserved(t *testing.T) {
 // silently shadowed — and it is the only direction that works, because a label
 // cannot be taken back from whoever created a sandbox at it first.
 //
-// `go` is the launch door (--launch-subdomain): the button pasted into a public
-// GitHub comment points at go.<domain>, so this one is load-bearing the moment
-// the first comment is written and permanently after, since those comments are
-// immutable and outlive any decision to relabel the surface.
+// `go` used to be here and has moved to TestLiveDoorsAreReserved, because
+// cmd/sparkbox now mounts internal/launch at it. `launch` stays: it is the word
+// somebody types when they half-remember the door, and nothing answers there.
 func TestNamesClaimedAheadOfTheirHandler(t *testing.T) {
 	for _, n := range []string{
-		"go", "launch", // the launch door and the word people will guess
+		"launch",                   // the word people guess for the launch door at `go`
 		"terminal", "shell", "ssh", // synonyms for surfaces that exist
 		"webhook", "webhooks", "nodes", "sandbox", "sandboxes",
 		"secrets", "keys", "token", "tokens", "id", "identity",

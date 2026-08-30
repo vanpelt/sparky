@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{.Title}}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  /* The design system the two consoles and the browser terminal share, pasted
+     in by webui.Compose at package init. This page cannot go through
+     webui.Build the way index.html does: Build minifies, and tdewolff has no
+     knowledge of template actions, so it is entitled to requote or move the
+     bytes around one and hand template.Must a parse error at startup on every
+     host. See webui.Compose's own comment for the full argument.
+
+     Note that a doubled-brace sequence anywhere in this file — including
+     inside a comment like this one — is an ACTION to html/template, which
+     parses the whole file and does not care that CSS considers this text
+     inert. That is how this comment first broke the build. */
+  /*SHARED_CSS*/
+
+  /* ---------- page-local ----------
+     Everything below is layout and the handful of components shared.css does
+     not define. It is deliberately small: the point of this screen is that
+     somebody arriving from a stranger's pull-request comment recognises it as
+     the same product as my.<domain> and the terminal they are about to land
+     in, so the tokens, the card, the pill and the button all come from above.
+
+     There is no <script> anywhere on this page, which is what lets the
+     Content-Security-Policy the handler sets be an honest `default-src 'none'`
+     — see page.go. Nothing here may grow one. */
+  body { display: grid; place-items: start center; padding: 40px 20px 64px; min-height: 100%; }
+  .wrap { width: 100%; max-width: 620px; }
+
+  /* The mark does NOT follow the theme, matching the consoles and the login
+     page: --primary inverts to near-white in dark mode and the bolt's gold
+     would fall to about 2:1 against it. */
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    line-height: 1; text-indent: 0.02em;
+  }
+  .brand span { font-size: 13px; font-weight: 600; }
+
+  .sheet { padding: 26px 28px; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 8px; }
+  .lead { margin: 0 0 18px; color: hsl(var(--muted-foreground)); font-size: 13.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  h1 .mono { font-size: 18px; font-weight: 600; }
+
+  /* The facts block: one label/value row per thing the create will do. A
+     definition list rather than a table because it is prose the visitor reads
+     top to bottom, not data they scan across. */
+  .facts { margin: 0 0 20px; border-top: 1px solid hsl(var(--border)); }
+  .facts > div {
+    display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+    padding: 10px 0; border-bottom: 1px solid hsl(var(--border));
+  }
+  .facts dt {
+    flex: none; width: 108px; font-size: 11px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .04em; color: hsl(var(--muted-foreground));
+  }
+  .facts dd { margin: 0; flex: 1 1 240px; min-width: 0; font-size: 13.5px; word-break: break-word; }
+  .facts dd .sub { display: block; margin-top: 3px; font-size: 12px; color: hsl(var(--muted-foreground)); }
+
+  /* Tag and repository pills. .badge is shared.css's shape in the consoles;
+     it is redefined here because shared.css carries the tokens and the tooltip,
+     not the console-local components — see internal/userconsole/index.html,
+     which defines its own copy for the same reason. */
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+    font-weight: 500; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid hsl(var(--border)); color: hsl(var(--foreground));
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 999px; flex: none; }
+  /* A state pill is a word, not an identifier: it drops back to the body face
+     so "running" does not read like a value you could type somewhere. Tags and
+     repository names keep the monospace, because they ARE things you type. */
+  .badge.state { font-family: inherit; color: hsl(var(--muted-foreground)); }
+  .badge.running .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .16); }
+  .badge.paused .dot { background: hsl(var(--muted-foreground)); }
+  .badge.archived .dot { background: hsl(var(--violet)); }
+  .badge.offline { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); }
+  .badge.offline .dot { background: hsl(var(--red)); }
+
+  /* The one sentence about what running somebody else's branch means. Amber
+     rather than red on purpose: this is not an error and not a refusal, it is
+     the thing the visitor is agreeing to, and a red panel over a routine
+     action teaches people to click through red panels. */
+  .caution {
+    display: flex; gap: 10px; padding: 11px 13px; margin: 0 0 20px;
+    border: 1px solid hsl(var(--amber) / .35); border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--amber) / .07); font-size: 12.5px; line-height: 1.5;
+  }
+  .caution svg { width: 15px; height: 15px; flex: none; margin-top: 2px; color: hsl(var(--amber)); }
+
+  .actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  form { margin: 0; }
+  /* Both anchor variants, not just a.btn-primary. shared.css hangs the
+     structural button rules — display, border, padding — off the `button`
+     ELEMENT selector, so an <a> carrying only a .btn-* class inherits the
+     colours and none of the geometry: it renders as an underlined text link
+     sitting beside a real button. The only anchor on these pages is the
+     "Your sandboxes" link, and it is a .btn-outline, so listing a.btn-primary
+     alone left the one case that actually occurs looking broken. Matches what
+     internal/userconsole/index.html already does for its own anchor-buttons. */
+  button, a.btn-primary, a.btn-outline {
+    font-size: 13.5px; padding: 8px 15px; font-weight: 550; justify-content: center;
+    text-decoration: none; border-radius: calc(var(--radius) - 2px);
+    display: inline-flex; align-items: center;
+    border: 1px solid hsl(var(--border));
+  }
+  .btn-primary { border-color: hsl(var(--primary)); }
+  .note { font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+
+  /* The escape hatch: every other sandbox of theirs on this repository. It is
+     a list a human reads and chooses from, so an unreachable box stays in it —
+     "you have one on feat/y, on a machine that is not answering" is
+     information, where redirecting to it would be a hang. */
+  .others { margin-top: 22px; }
+  .others h2 {
+    font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); margin: 0 0 8px;
+  }
+  .box {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 9px 12px; margin-bottom: 6px; text-decoration: none;
+    border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px);
+    color: hsl(var(--foreground)); background: hsl(var(--card));
+  }
+  .box:hover { background: hsl(var(--muted)); }
+  .box .name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+  .box .branch { font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+  .box .grow { flex: 1 1 auto; }
+
+  /* Copy-pasteable command lines. user-select:all so one click selects the
+     whole command — the visitor on the attach screen has to run it in a
+     terminal somewhere else, and a half-selected ssh line is a support
+     ticket. */
+  pre.cmd {
+    margin: 0 0 18px; padding: 10px 12px; overflow-x: auto;
+    background: hsl(var(--muted)); border-radius: calc(var(--radius) - 2px);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; color: hsl(var(--foreground)); user-select: all;
+  }
+  .steps { margin: 0 0 6px; padding-left: 20px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+  .steps li { margin: 6px 0; }
+  .steps strong { color: hsl(var(--foreground)); font-weight: 550; }
+
+  .foot { margin: 18px 2px 0; font-size: 12px; color: hsl(var(--muted-foreground)); }
+  .foot code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
+
+  <div class="card sheet">
+    <h1>{{.Heading}}{{if .HeadingSlug}} <span class="mono">{{.HeadingSlug}}</span>{{end}}</h1>
+    {{if .Lead}}<p class="lead">{{.Lead}}</p>{{end}}
+
+    {{if .Facts}}
+    <dl class="facts">
+      {{range .Facts}}
+      <div>
+        <dt>{{.Label}}</dt>
+        <dd>
+          {{if .Pills}}<span class="pills">{{range .Pills}}<span class="badge">{{.}}</span>{{end}}</span>
+          {{else if .Mono}}<span class="mono">{{.Value}}</span>
+          {{else}}{{.Value}}{{end}}
+          {{if .Sub}}<span class="sub">{{.Sub}}</span>{{end}}
+        </dd>
+      </div>
+      {{end}}
+    </dl>
+    {{end}}
+
+    {{if .Caution}}
+    <div class="caution">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+      <span>{{.Caution}}</span>
+    </div>
+    {{end}}
+
+    {{if .Command}}<pre class="cmd">{{.Command}}</pre>{{end}}
+
+    {{if .Steps}}
+    <ol class="steps">
+      {{range .Steps}}<li>{{if .Lead}}<strong>{{.Lead}}</strong> {{end}}{{.Body}}</li>{{end}}
+    </ol>
+    {{end}}
+
+    {{if or .Action .Home}}
+    <div class="actions">
+      {{if .Action}}
+      <form method="post" action="{{.Action}}">
+        <button class="btn-primary" type="submit">{{.Submit}}</button>
+      </form>
+      {{end}}
+      {{if .Home}}<a class="btn-outline" href="{{.Home}}">Your sandboxes</a>{{end}}
+      {{if .ActionNote}}<span class="note">{{.ActionNote}}</span>{{end}}
+    </div>
+    {{end}}
+  </div>
+
+  {{if .Others}}
+  <section class="others">
+    <h2>Your sandboxes on this repository</h2>
+    {{range .Others}}
+    <a class="box" href="{{.URL}}">
+      <span class="name">{{.Name}}</span>
+      <span class="branch">{{.Branch}}</span>
+      <span class="grow"></span>
+      <span class="badge state {{.StateClass}}"><span class="dot"></span>{{.State}}</span>
+    </a>
+    {{end}}
+  </section>
+  {{end}}
+
+  <p class="foot">{{.Foot}}</p>
+</main>
+</body>
+</html>

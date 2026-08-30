@@ -58,7 +58,7 @@ func TestControlUsageListsEveryCommand(t *testing.T) {
 		"ls", "pause", "archive", "restore", "resize", "rm", "rename", "tags",
 		"pin", "unpin", "snapshot", "fork", "schedule", "whoami", "keys",
 		"passkey", "email", "share", "session-token", "invite", "help",
-		"checkpoint", "github", "node", "secret", "user", "sessions",
+		"checkpoint", "github", "node", "secret", "user", "sessions", "badge",
 	} {
 		if !strings.Contains(surface, "  "+cmd) {
 			t.Errorf("ctl help does not document %q", cmd)
@@ -74,7 +74,7 @@ func TestHelpReachesEveryTopicByCommandName(t *testing.T) {
 		"ls", "rename", "rm", "tags", "pin", "sessions", "resize", "checkpoint",
 		"secret", "repo", "snapshot", "fork", "schedule", "share",
 		"session-token", "whoami", "keys", "github", "passkey", "email",
-		"invite", "user", "node",
+		"invite", "user", "node", "badge",
 	} {
 		if _, ok := helpPage(word, true); !ok {
 			t.Errorf("help %q reaches no topic", word)

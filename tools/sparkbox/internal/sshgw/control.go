@@ -217,6 +217,13 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlSecret(s, c, args[1:], log)
 	case "repo", "repos":
 		g.controlRepo(s, c, args[1:], log)
+	// `badge` sits beside the repo verbs rather than under them because what it
+	// prints is about a repository the way `repo add` is, and because it is the
+	// one command on this channel whose output is meant to be copied out of the
+	// terminal — burying it as `repo badge` would hide it behind a verb people
+	// only type when they are attaching something.
+	case "badge":
+		g.controlBadge(s, c, args[1:], log)
 	case "user", "users":
 		g.controlUser(s, c, args[1:], log)
 	case "node":
