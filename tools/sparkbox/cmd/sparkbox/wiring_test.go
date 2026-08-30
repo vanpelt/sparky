@@ -579,3 +579,42 @@ func TestGatewayNodeListingIsWhatAnOperatorReads(t *testing.T) {
 		t.Errorf("%s's line does not carry the fingerprint an operator compared: %q", fw.node.name, lines[1])
 	}
 }
+
+// A node advertises what it can boot from BOTH directories it reads templates
+// from. Captures live in a writable dir separate from the operator's read-only
+// image dir on a hardened node, and a machine that listed only the latter would
+// tell the gateway it cannot boot disks it is holding.
+func TestImageNamesMergesBothTemplateDirectories(t *testing.T) {
+	images, templates := t.TempDir(), t.TempDir()
+	write := func(dir, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(images, "universal.ext4")
+	write(images, "shared.ext4")
+	write(images, "notes.txt") // not a template
+	write(templates, "snap-alice-gold.ext4")
+	write(templates, "shared.ext4") // the same name in both dirs
+
+	got := map[string]int{}
+	for _, n := range imageNames(images, templates) {
+		got[n]++
+	}
+	for _, want := range []string{"universal", "shared", "snap-alice-gold"} {
+		if got[want] == 0 {
+			t.Errorf("%q is missing from the advertised images %v", want, got)
+		}
+	}
+	if got["shared"] > 1 {
+		t.Errorf("a name present in both directories was advertised %d times", got["shared"])
+	}
+	if got["notes"] != 0 || got["notes.txt"] != 0 {
+		t.Errorf("a non-template file was advertised as an image: %v", got)
+	}
+	// The single-machine shape: one directory, an empty second one, unchanged.
+	if len(imageNames(images, "")) != 2 {
+		t.Errorf("imageNames with no template dir = %v, want the 2 in the image dir", imageNames(images, ""))
+	}
+}

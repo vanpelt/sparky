@@ -55,6 +55,15 @@ It no longer does, because only one of its four steps ever needed a mount:
   command line). It is still run at capture time on hosts where mounting is
   allowed, as defence in depth.
 
+Captured templates are written to `/var/lib/sparkbox/templates`, not to
+`/var/lib/sparkbox/images`. The image dir is part of the read-only mount — only
+`prepare-vm-assets` writes it, as root, before any guest runs — and that is what
+stops a compromised controller substituting the rootfs every future sandbox
+boots from. The capture dir is a separate writable `subPath` on the same
+hostPath volume, so reflink cloning still works, and an image name always
+resolves against `images` first so nothing written there can shadow a base
+image.
+
 `installAuthorizedKey` keeps its guard: that is a real mount of a real guest
 disk on the create path, and it stays off. **A consequence worth knowing before
 rotating the gateway's upstream key: templates captured here carry whatever

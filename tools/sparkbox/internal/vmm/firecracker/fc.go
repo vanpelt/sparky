@@ -49,6 +49,19 @@ type Options struct {
 	KernelPath string
 	// ImageDir holds <image>.ext4 rootfs templates.
 	ImageDir string
+	// TemplateDir is where CAPTURED templates are written, and it exists
+	// because on a hardened node ImageDir is read-only to this process.
+	//
+	// The operator's base images are laid down by a privileged one-shot that
+	// exits before any guest runs, and the long-lived VM controller then mounts
+	// that directory read-only — so a compromised controller cannot rewrite the
+	// rootfs every future sandbox boots from. That is worth keeping, and it is
+	// also exactly what a user-driven `snapshot create` needs to violate.
+	//
+	// So captures go somewhere else, writable, holding only user-derived disks.
+	// Empty means "the same place as ImageDir", which is every single-machine
+	// host and is how this behaved before the split existed.
+	TemplateDir string
 	// VMStateDir holds per-VM dirs (disk copy, socket, snapshots).
 	VMStateDir string
 	// FirecrackerBin is the firecracker binary path (default: $PATH lookup).
@@ -607,7 +620,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 	// error, not a reason for sandbox creation to become unexpectedly huge.
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	if _, err := os.Stat(rootfs); os.IsNotExist(err) {
-		template := filepath.Join(d.opts.ImageDir, cfg.Image+".ext4")
+		template := d.templatePath(cfg.Image)
 		if err := reflinkClone(ctx, template, rootfs); err != nil {
 			return nil, err
 		}
@@ -1187,8 +1200,9 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	if d.opts.ImageDir == "" {
 		return fmt.Errorf("no image dir configured; cannot snapshot")
 	}
-	tmp := filepath.Join(d.opts.ImageDir, "."+newImage+".ext4.tmp")
-	final := filepath.Join(d.opts.ImageDir, newImage+".ext4")
+	out := d.captureDir()
+	tmp := filepath.Join(out, "."+newImage+".ext4.tmp")
+	final := filepath.Join(out, newImage+".ext4")
 	os.Remove(tmp) //nolint:errcheck // clear any torn prior attempt
 	if err := reflinkClone(ctx, rootfs, tmp); err != nil {
 		return err
@@ -1256,6 +1270,35 @@ func reflinkClone(ctx context.Context, source, destination string) error {
 	return nil
 }
 
+// captureDir is where a new template is written. See Options.TemplateDir.
+func (d *Driver) captureDir() string {
+	if d.opts.TemplateDir != "" {
+		return d.opts.TemplateDir
+	}
+	return d.opts.ImageDir
+}
+
+// templatePath resolves an image name to the file backing it, looking in the
+// operator's ImageDir FIRST and only then in the writable capture dir.
+//
+// The order is the security half. A capture dir is writable by this process; an
+// ImageDir on a hardened node is not. Resolving the writable one first would let
+// anything able to write a file there shadow `universal` — the trusted base
+// every fresh sandbox boots from — which is precisely the substitution the
+// read-only mount exists to prevent. Names cannot collide in practice either
+// (a capture is always `snap-<owner>-<name>`), so this ordering costs nothing
+// and closes the case where that stops being true.
+func (d *Driver) templatePath(image string) string {
+	base := filepath.Join(d.opts.ImageDir, image+".ext4")
+	if d.opts.TemplateDir == "" {
+		return base
+	}
+	if _, err := os.Stat(base); err == nil {
+		return base
+	}
+	return filepath.Join(d.opts.TemplateDir, image+".ext4")
+}
+
 // RemoveTemplate implements vmm.Archivable: delete a snapshot template + sidecar.
 func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
 	if !imageNameRe.MatchString(image) {
@@ -1264,7 +1307,11 @@ func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
 	if d.opts.ImageDir == "" {
 		return nil
 	}
-	final := filepath.Join(d.opts.ImageDir, image+".ext4")
+	// captureDir, not templatePath: this deletes, and the operator's base images
+	// are not the control plane's to delete. A name that resolves into ImageDir
+	// simply is not found here, which is the right answer for a verb whose only
+	// caller is `snapshot rm`.
+	final := filepath.Join(d.captureDir(), image+".ext4")
 	os.Remove(final + ".login-user") //nolint:errcheck
 	if err := os.Remove(final); err != nil && !os.IsNotExist(err) {
 		return err
@@ -1456,7 +1503,7 @@ func (d *Driver) TemplateUsageMB(_ context.Context, image string) (int64, error)
 	if d.opts.ImageDir == "" {
 		return 0, errors.New("no image dir configured; cannot measure a template")
 	}
-	used, _, err := ext4DiskMB(filepath.Join(d.opts.ImageDir, image+".ext4"))
+	used, _, err := ext4DiskMB(d.templatePath(image))
 	return used, err
 }
 

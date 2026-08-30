@@ -160,15 +160,57 @@ asked to capture. Three differences from that one, all forced:
 `Fleet.Archive` needs all of this exactly as much as `Fleet.Snapshot` does, and
 gets it in the same place.
 
+### 5. Captures are written to a directory of their own
+
+Found on the cluster, on the first real `snapshot create`, after §1–§4 were
+already deployed:
+
+```
+cp: cannot create regular file
+'/var/lib/sparkbox/images/.snap-vanpelt-test1.ext4.tmp': Read-only file system
+```
+
+The strip and the pause had both worked; the driver got as far as the reflink.
+`/var/lib/sparkbox` is mounted **read-only** into the VM controller, with
+writable `subPath` carve-outs for `control`, `hot/controller` and
+`node-identity` — and `images` deliberately not among them. The operator's base
+images are laid down by `prepare-vm-assets`, which runs as root with
+`SYS_ADMIN` and exits before any guest starts; the controller then only reads
+them. That is what stops a compromised controller substituting the rootfs every
+future sandbox is created from, and it is worth strictly more than the
+convenience of writing captures next to base images.
+
+So captures get `TemplateDir`, a writable directory holding only user-derived
+disks, with its own `subPath` mount and its own `chown` to the controller uid.
+It is on the same hostPath volume, so `cp --reflink=always` between a VM's disk
+and a capture of it still works. Empty means "the same place as `ImageDir`",
+which is every single-machine host and is exactly how this behaved before.
+
+Resolution looks in `ImageDir` **first** and only then in the capture dir. That
+ordering is the security half: resolving the writable directory first would let
+anything able to write a file there shadow `universal`, which is the precise
+substitution the read-only mount exists to prevent. Names cannot collide in
+practice — a capture is always `snap-<owner>-<name>` — so the ordering costs
+nothing and closes the case where that stops being true. `RemoveTemplate`
+likewise deletes only from the capture dir: its one caller is `snapshot rm`, and
+an operator base image is not the control plane's to delete.
+
+The lesson generalises past this change: **a hardened node's filesystem is
+read-only by default and every new thing the controller writes needs its own
+carve-out**, chosen deliberately rather than inherited from a directory that
+already existed.
+
 ## Order of work
 
 1. The gateway-side strip and the packing gate (§4). Needed for archive on any
    fleet, independent of snapshots.
 2. Guest-side fork identity regeneration and the cmdline machine id (§1, §2).
 3. Drop the refusal (§3).
-4. Turn it on for CKS and prove it on the cluster.
+4. A writable capture directory (§5).
+5. Prove it on the cluster.
 
-1 and 2 are the work. 3 is a conditional and a deletion.
+1 and 2 are the work. 3 is a conditional and a deletion. 4 was not foreseen and
+came out of running 1–3 on the cluster.
 
 ## Deliberately deferred
 
