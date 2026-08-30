@@ -93,6 +93,13 @@ func (f *Fleet) pushEnv(ctx context.Context, b *host.Sandbox) {
 	if b == nil || b.State != vmm.StateRunning {
 		return
 	}
+	if f.packing(b.Name) {
+		// A pack has cleared this box's managed block and the machine holding it
+		// is about to freeze that disk. Pushing now would refill it — see
+		// beginPack. The push is not owed either: the next real transition to
+		// running fires one, and a fork gets its own at create time.
+		return
+	}
 	f.mu.RLock()
 	p := f.envPush
 	f.mu.RUnlock()
@@ -134,6 +141,12 @@ type envAwaiter interface {
 func (f *Fleet) AwaitEnv(ctx context.Context, name string) error {
 	b, ok := f.Get(name)
 	if !ok || b.State != vmm.StateRunning {
+		return nil
+	}
+	if f.packing(name) {
+		// Same reason as pushEnv, and the synchronous caller has the same
+		// remedy: the attach it is waiting for is about to be hung up by the
+		// pack anyway.
 		return nil
 	}
 	row, ok := f.rowFor(name)
