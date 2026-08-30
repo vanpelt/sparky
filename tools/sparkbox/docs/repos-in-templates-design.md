@@ -238,6 +238,39 @@ than one path and the argument must default to **off** at each of them. A
 `sparkbox_fresh=1` that leaks onto a reboot is the branch-yank this whole section
 exists to prevent.
 
+## The marker is consumed, not merely read
+
+This paragraph exists because the first implementation got it wrong and a live
+cluster is what found it.
+
+`/proc/cmdline` is the kernel's **boot** command line, and a resume restores the
+kernel's memory — so a guest keeps whatever cmdline it first booted with for as
+long as it lives. `sparkbox_fresh=1` is still there after every pause/resume
+cycle, no matter what the host passes to `boot` on the resume path, because the
+guest never reads a new one. Adoption gated on the marker alone therefore stays
+armed for the entire life of a VM that never cold-boots, and a `sparkbox repos
+sync` run by hand a week later would move somebody off the branch they switched
+to. Which is precisely the regression the marker was introduced to prevent.
+
+So the worker stamps `/var/lib/sparkbox/repos-adopted` with the sandbox name
+once its adoption pass is over, and adopts only when the marker is present AND
+that stamp does not already name this sandbox. It is the same trick
+`sparkbox-identity-reset` plays with `/var/lib/sparkbox/sandbox`, and both
+halves are load-bearing:
+
+| | what it alone would let through |
+| --- | --- |
+| marker, no stamp | a second sync in the same boot, or any sync after a resume |
+| stamp, no marker | a **rename** — new name, inherited stamp — which must never move a branch |
+
+A fork is the one case that satisfies both: a disk the host just laid down
+(marker), under a name its parent's stamp does not match (stamp).
+
+The stamp is written whatever the pass decided, including when it decided to
+leave a dirty inherited tree alone. A capture inherited with uncommitted work is
+not a job to retry on the next sync; it is a thing for a person to look at, and
+re-arming adoption behind them is how they lose it.
+
 ---
 
 # Part 5 — `--ref`, and where a per-instance override lives

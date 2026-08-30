@@ -498,3 +498,78 @@ func TestRepoSurveyExitsThreeOnAnOperationInFlight(t *testing.T) {
 	}
 	w.want(t, line, "rebase", "--abort")
 }
+
+// The bug real hardware found, pinned.
+//
+// /proc/cmdline is the kernel's BOOT command line, and a resume restores the
+// kernel's memory — so a guest keeps whatever cmdline it first booted with for
+// as long as it lives, `sparkbox_fresh=1` included. Adoption gated on the
+// marker alone therefore stays armed for the entire life of a VM that never
+// cold-boots, and a `sparkbox repos sync` run by hand a week later would yank
+// somebody off the branch they switched to. Which is the precise regression the
+// marker was introduced to prevent.
+//
+// The marker is consumed, not merely read: a stamp records which sandbox last
+// adopted. This is what proves the second sync is a no-op even though the
+// marker is still there, because on real hardware it always still is.
+func TestAdoptionHappensOncePerDiskNotOncePerSync(t *testing.T) {
+	w := newRepoWorld(t)
+	w.manifest("feat/x")
+	w.fresh(true)
+
+	w.want(t, w.run("sync"), "ready", "switched to feat/x")
+	if got := w.branch(); got != "feat/x" {
+		t.Fatalf("adoption did not run at all: on %q", got)
+	}
+
+	// The user goes back to main and leaves the tree clean. The marker is still
+	// on the command line — it will be until this VM cold-boots — so this is
+	// exactly the state the bug lived in.
+	w.git(w.checkout, "switch", "-q", "main")
+	line := w.run("sync")
+	if got := w.branch(); got != "main" {
+		t.Errorf("a second sync switched the branch back to %q; adoption re-armed itself", got)
+	}
+	w.want(t, line, "stale", "on main, not feat/x")
+}
+
+// A fork of an already-adopted disk must still adopt: it inherits its parent's
+// stamp, and what makes it different is that the host gave it a different name.
+// Marker and stamp each exclude what the other cannot — without the stamp a
+// second sync adopts, without the marker a RENAME does.
+func TestAForkOfAnAdoptedDiskStillAdopts(t *testing.T) {
+	w := newRepoWorld(t)
+	w.manifest("feat/x")
+	w.fresh(true)
+	w.run("sync")
+	w.git(w.checkout, "switch", "-q", "main")
+
+	// The fork: the same disk, byte for byte, under a name of its own.
+	w.write(filepath.Join(w.root, "cmdline"),
+		"console=ttyS0 sparkbox_host=forked-otter sparkbox_fresh=1\n")
+
+	w.want(t, w.run("sync"), "ready", "switched to feat/x")
+	if got := w.branch(); got != "feat/x" {
+		t.Errorf("a fork of an adopted disk did not adopt: on %q", got)
+	}
+}
+
+// A rename gives a sandbox a new name on the SAME disk, and no new disk means
+// no marker — so the stamp mismatching must not be enough on its own.
+func TestARenameNeverAdopts(t *testing.T) {
+	w := newRepoWorld(t)
+	w.manifest("feat/x")
+	w.fresh(true)
+	w.run("sync")
+	w.git(w.checkout, "switch", "-q", "main")
+
+	// Renamed: new sparkbox_host, and no sparkbox_fresh because Driver.Create
+	// reflinked nothing.
+	w.write(filepath.Join(w.root, "cmdline"),
+		"console=ttyS0 sparkbox_host=renamed-otter\n")
+
+	w.want(t, w.run("sync"), "stale", "on main, not feat/x")
+	if got := w.branch(); got != "main" {
+		t.Errorf("a rename moved the branch to %q", got)
+	}
+}

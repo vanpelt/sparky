@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=13
+IDENTITY_REV=14
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -1054,12 +1054,56 @@ fi
 # A host that predates the marker emits nothing and every guest stays in refresh
 # mode, which is the correct degradation: a fork keeps the branch it inherited
 # and says so.
+#
+# THE MARKER ALONE IS NOT ENOUGH, and this is the part that is easy to get
+# wrong — it was, and real hardware is what found it. /proc/cmdline is the
+# kernel's boot command line, and a resume restores the kernel's memory, so a
+# guest keeps whatever cmdline it FIRST booted with for as long as it lives.
+# `sparkbox_fresh=1` is therefore still there after every pause/resume cycle,
+# and adoption gated on it alone would stay armed for the entire life of a VM
+# that never cold-boots — so a `sparkbox repos sync` run by hand next week would
+# yank somebody off the branch they switched to, which is the exact regression
+# this marker exists to prevent.
+#
+# So the marker is CONSUMED rather than merely read. The stamp records which
+# sandbox last adopted, which is the same trick sparkbox-identity-reset plays
+# with /var/lib/sparkbox/sandbox, and each half excludes what the other cannot:
+#
+#   marker without stamp  a fork's disk carries its parent's stamp, so the
+#                         stamp alone would let a RENAME adopt (new name, old
+#                         stamp) — and a rename must never move a branch.
+#   stamp without marker  a second sync in the same boot, or any sync after a
+#                         resume, would adopt again.
+#
+# A fork gets a fresh disk (marker) and a name its parent's stamp does not match
+# (stamp), which is the one case that wants adoption.
 ADOPT=0
+ADOPT_STAMP="$R/var/lib/sparkbox/repos-adopted"
+ADOPT_HOST=""
 if [ "$MODE" = sync ]; then
   for tok in $(cat "$CMDLINE" 2>/dev/null); do
-    case "$tok" in sparkbox_fresh=1) ADOPT=1 ;; esac
+    case "$tok" in
+      sparkbox_fresh=1) ADOPT=1 ;;
+      sparkbox_host=*)  ADOPT_HOST="${tok#sparkbox_host=}" ;;
+    esac
   done
+  if [ "$ADOPT" = 1 ] && [ "$(cat "$ADOPT_STAMP" 2>/dev/null)" = "$ADOPT_HOST" ]; then
+    # This disk has already had its inherited checkouts adopted, under this
+    # name. Whatever branch they are on now is somebody's choice.
+    ADOPT=0
+  fi
 fi
+
+# Written once the adoption pass is over, whatever it decided — including when
+# it decided to leave a dirty tree alone. A capture inherited with uncommitted
+# work is not a job to retry on the next sync; it is a thing for a person to
+# look at, and re-arming adoption behind them is how they lose it.
+stamp_adoption() {
+  [ -n "$ADOPT_HOST" ] || return 0
+  mkdir -p "$(dirname "$ADOPT_STAMP")" 2>/dev/null || true
+  printf '%s\n' "$ADOPT_HOST" 2>/dev/null > "$ADOPT_STAMP.new" || return 0
+  mv -f "$ADOPT_STAMP.new" "$ADOPT_STAMP" 2>/dev/null || rm -f "$ADOPT_STAMP.new"
+}
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM HUP
@@ -1421,6 +1465,10 @@ while IFS="$SEP" read -r host slug ref path access; do
     report_add failed "$slug" "$access" "$dest" "clone failed, see $LOG_FILE"
   fi
 done < "$WORK/rows"
+
+if [ "$ADOPT" = 1 ]; then
+  stamp_adoption
+fi
 
 if [ "$MODE" = sync ]; then
   cp -f "$WORK/log" "$LOG_FILE" 2>/dev/null || true
