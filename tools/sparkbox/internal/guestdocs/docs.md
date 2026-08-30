@@ -95,15 +95,24 @@ access token in the VM and nothing to rotate.
 
 From inside the VM:
 
-- `sparkbox repos` reports what is attached, where it was cloned, and why
-  anything is missing.
-- `sparkbox repos sync` clones what is not there yet. Attaching a repository to
-  a tag never reaches into a VM that already exists, so this is how an existing
-  VM picks one up.
+- `sparkbox repos` reports what is attached, where it was cloned, and the state
+  of each checkout — up to date, behind, dirty, on another branch.
+- `sparkbox repos sync` clones what is not there yet and brings what is there
+  forward. Attaching a repository to a tag never reaches into a VM that already
+  exists, so this is how an existing VM picks one up.
 
 Attaching and detaching happen outside the VM, with `ssh ctl@<domain> repo add`
-or from the web console. A clone that already exists is never touched: syncing
-adds, and it does not update, reset or delete.
+or from the web console.
+
+A sync can do exactly three things to a checkout that already exists: fetch it,
+fast-forward it when the tree is clean, or say why it did neither. It never
+resets, rebases, merges anything but a fast-forward, stashes or deletes —
+uncommitted edits, untracked files and unpushed commits are reported and left
+alone. The one exception is narrow and deliberate: on the first boot of a VM
+whose disk was just forked from a snapshot, a clean inherited checkout may be
+switched to the branch the attachment names. Nobody has logged into that disk
+yet, so there is no work in flight to lose; on every later run the branch you
+are on is yours.
 
 ## Commit authorship
 

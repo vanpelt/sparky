@@ -520,14 +520,20 @@ func TestRepoWorkerClonesForTheUserAndLeavesCheckoutsAlone(t *testing.T) {
 		// into the wrong home on a root-login template.
 		"SANDBOX_USER=sparky",
 		`RUNAS="runuser -u $SANDBOX_USER --"`,
-		// Whatever is already at EITHER default location is left exactly as it
-		// is. Both are probed because the default is a function of how many
-		// attachments the tag carries right now, and that number moves under a
-		// checkout that already exists: attaching a second repo would otherwise
-		// re-clone the first one somewhere else and report the empty copy.
+		// Whatever is already at EITHER default location keeps its place. Both
+		// are probed because the default is a function of how many attachments
+		// the tag carries right now, and that number moves under a checkout
+		// that already exists: attaching a second repo would otherwise re-clone
+		// the first one somewhere else and report the empty copy.
+		//
+		// What happens to the one that is found is refresh_checkout's, and it
+		// is tested for real in repos_refresh_test.go rather than by string.
 		`for candidate in "$dest" "$HOME_DIR/$name" "$HOME_DIR/src/$owner/$name"; do`,
-		`if [ -e "$candidate" ]; then`,
-		"continue 2",
+		`if [ -e "$candidate" ]; then found=$candidate; break; fi`,
+		`refresh_checkout "$found" "$slug" "$access" "$ref"`,
+		// The three acts the refresh is allowed. Everything else is a way to
+		// lose somebody's work.
+		"--ff-only",
 		// The default layout, both halves.
 		`dest="$HOME_DIR/src/$owner/$name"`,
 		`dest="$HOME_DIR/$name"`,
@@ -553,6 +559,38 @@ func TestRepoWorkerClonesForTheUserAndLeavesCheckoutsAlone(t *testing.T) {
 
 	if strings.Contains(worker, "--depth") {
 		t.Error("repo worker clones shallowly; --filter=blob:none is the default that keeps git log, blame and bisect working")
+	}
+	// An allow-list rather than a ban-list, and the difference matters: a ban
+	// list is a guess at the next dangerous verb somebody reaches for, and it
+	// also trips over the prose and the report strings that NAME those verbs.
+	//
+	// Every git this worker runs against an existing checkout goes through
+	// gitq. This worker runs as root, unattended, on a filesystem somebody is
+	// working in, fired by events they did not cause, with no terminal to ask
+	// in and no way to be undone — so what it may run there is a closed set:
+	// read the state, fetch, switch a clean tree, fast-forward. Anything else
+	// arriving in that position is a way to lose work, `git pull` included (it
+	// merges or rebases depending on config the user set, so it is a
+	// fast-forward right up until it silently is not).
+	allowed := map[string]bool{
+		"rev-parse": true, "status": true, "symbolic-ref": true,
+		"fetch": true, "switch": true, "rev-list": true, "merge": true,
+	}
+	calls := regexp.MustCompile(`gitq "\$_dest" ([a-z-]+)`).FindAllStringSubmatch(worker, -1)
+	if len(calls) == 0 {
+		t.Error("no gitq calls found; the refresh either moved or stopped going through the one wrapper")
+	}
+	for _, call := range calls {
+		if !allowed[call[1]] {
+			t.Errorf("repo worker runs `git %s` against an existing checkout; it may only read, fetch, switch a clean tree, or fast-forward", call[1])
+		}
+	}
+	// The one allowed verb that is only safe with its flag. A merge without
+	// --ff-only writes a commit into somebody's branch.
+	for _, merge := range regexp.MustCompile(`gitq "\$_dest" merge[^\n]*`).FindAllString(worker, -1) {
+		if !strings.Contains(merge, "--ff-only") {
+			t.Errorf("repo worker merges without --ff-only: %s", merge)
+		}
 	}
 	if strings.Contains(worker, "@@") {
 		t.Error("repo worker still carries an unsubstituted @@TOKEN@@")

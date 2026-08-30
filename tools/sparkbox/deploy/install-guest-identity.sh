@@ -939,9 +939,15 @@ esac
 
 # The account the checkouts belong to (the login user; root on legacy templates).
 SANDBOX_USER=@@SANDBOX_USER@@
-STATUS_FILE=/run/sparkbox/repos.status
-LOG_FILE=/run/sparkbox/repos.log
-MOTD_BASE=/etc/sparkbox/motd.base
+
+# R and CMDLINE are overridable so the deploy tests can drive this against a
+# tree instead of the machine running them, the same way sparkbox-identity-reset
+# and sparkbox-update-tools take theirs. Nothing else reads them.
+R=${SPARKBOX_REPOS_ROOT:-}
+CMDLINE=${SPARKBOX_CMDLINE:-/proc/cmdline}
+STATUS_FILE="$R/run/sparkbox/repos.status"
+LOG_FILE="$R/run/sparkbox/repos.log"
+MOTD_BASE="$R/etc/sparkbox/motd.base"
 
 # A sync that cannot run is a warning, never a failed boot. This unit is ordered
 # into boot beside sshd, and exiting nonzero would mark the whole machine
@@ -958,8 +964,12 @@ GW=$(ip -4 route show default | awk '{print $3; exit}')
 [ -n "$GW" ] || give_up "no default gateway"
 META="http://$GW:@@META_PORT@@"
 
-HOME_DIR=$(awk -F: -v u="$SANDBOX_USER" '$1 == u {print $6; exit}' /etc/passwd)
+HOME_DIR=$(awk -F: -v u="$SANDBOX_USER" '$1 == u {print $6; exit}' "$R/etc/passwd")
 [ -n "$HOME_DIR" ] || give_up "no home directory for $SANDBOX_USER in /etc/passwd"
+# Rooted for the same reason everything else here is: /etc/passwd records the
+# path a guest sees, and a test driving this against a tree needs the checkouts
+# inside that tree. Empty R leaves it exactly as passwd spelled it.
+HOME_DIR="$R$HOME_DIR"
 
 # Checkouts belong to whoever will edit them, and this unit runs as root.
 # Dropping privilege before `git clone` is not tidiness: git refuses to operate
@@ -978,6 +988,27 @@ if [ "$(id -u)" = 0 ] && [ "$SANDBOX_USER" != root ]; then
   else
     give_up "cannot drop privilege to $SANDBOX_USER (no runuser, no sudo)"
   fi
+fi
+
+# May this run move a checkout it did not make?
+#
+# sparkbox_fresh=1 is written by the host on the first boot of a rootfs it has
+# just copied from a template (internal/vmm/firecracker, Driver.Create) and on
+# no other boot. That is the single moment a branch switch is safe: the disk
+# came out of somebody's snapshot, nobody has logged in, and there is no work in
+# flight to lose. Every other run — a boot after a resume, `sparkbox repos sync`
+# by hand, the gateway nudging a box after a retag — happens against a
+# filesystem somebody is working in, where the manifest naming a branch is not a
+# reason to take them off theirs.
+#
+# A host that predates the marker emits nothing and every guest stays in refresh
+# mode, which is the correct degradation: a fork keeps the branch it inherited
+# and says so.
+ADOPT=0
+if [ "$MODE" = sync ]; then
+  for tok in $(cat "$CMDLINE" 2>/dev/null); do
+    case "$tok" in sparkbox_fresh=1) ADOPT=1 ;; esac
+  done
 fi
 
 WORK=$(mktemp -d)
@@ -1043,23 +1074,29 @@ report_add() {
 status_line() {
   inflight=${1:-}
   if [ -n "$inflight" ]; then
-    printf 'repos: cloning %s…' "$inflight"
+    printf 'repos: %s %s…' "${2:-cloning}" "$inflight"
     return 0
   fi
-  ready=0; pending=0; failed=0
+  # The per-repository words collapse to four counts. A banner is read in the
+  # second before somebody starts typing and cannot carry the whole vocabulary;
+  # the word that says what is actually wrong lives one command away, in the
+  # table below.
+  ready=0; stale=0; pending=0; failed=0
   while IFS="$SEP" read -r state rest; do
     case "$state" in
       ready)  ready=$((ready + 1)) ;;
+      stale)  stale=$((stale + 1)) ;;
       failed) failed=$((failed + 1)) ;;
       *)      pending=$((pending + 1)) ;;
     esac
   done < "$WORK/report"
   out=""
   if [ "$ready" -gt 0 ];   then out="$ready ready"; fi
+  if [ "$stale" -gt 0 ];   then out="${out:+$out, }$stale need a look"; fi
   if [ "$pending" -gt 0 ]; then out="${out:+$out, }$pending not cloned"; fi
   if [ "$failed" -gt 0 ];  then out="${out:+$out, }$failed failed"; fi
   if [ -z "$out" ]; then out="none attached"; fi
-  if [ "$failed" -gt 0 ] || [ "$pending" -gt 0 ]; then
+  if [ "$failed" -gt 0 ] || [ "$pending" -gt 0 ] || [ "$stale" -gt 0 ]; then
     out="$out — run \`sparkbox repos\`"
   fi
   printf 'repos: %s' "$out"
@@ -1080,13 +1117,13 @@ publish_motd() {
   if {
         cat "$MOTD_BASE"
         if [ -f "$STATUS_FILE" ]; then printf '\n'; cat "$STATUS_FILE"; fi
-      } 2>/dev/null > /etc/.motd.sparkbox; then
-    mv -f /etc/.motd.sparkbox /etc/motd 2>/dev/null || rm -f /etc/.motd.sparkbox
+      } 2>/dev/null > "$R/etc/.motd.sparkbox"; then
+    mv -f "$R/etc/.motd.sparkbox" "$R/etc/motd" 2>/dev/null || rm -f "$R/etc/.motd.sparkbox"
   fi
 }
 
 publish() {
-  mkdir -p /run/sparkbox 2>/dev/null || true
+  mkdir -p "$R/run/sparkbox" 2>/dev/null || true
   # Same redirection-order rule as publish_motd above.
   if printf '  %s\n' "$1" 2>/dev/null > "$STATUS_FILE.new"; then
     chmod 0644 "$STATUS_FILE.new" 2>/dev/null || true
@@ -1100,6 +1137,155 @@ publish() {
 clear_status() {
   rm -f "$STATUS_FILE" 2>/dev/null || true
   publish_motd
+}
+
+# git inside a checkout, as the person who owns it: no terminal to block on, no
+# stdin to eat a manifest row, and stderr in the log the report points at.
+gitq() {
+  _gd=$1; shift
+  $RUNAS env GIT_TERMINAL_PROMPT=0 git -C "$_gd" "$@" </dev/null 2>>"$WORK/log"
+}
+
+# What happens to a checkout that is already there.
+#
+# THE RULE, and it is not a preference to be weighed against convenience: this
+# function may FETCH, it may FAST-FORWARD a clean tree, and it may SAY
+# something. It may do nothing else. It runs as root, unattended, on a
+# filesystem somebody is working in, fired by events they did not cause — a
+# teammate's retag, a boot after the reaper paused them — with no terminal to
+# ask in and no way to be undone. `git reset --hard`, `git clean`, `git checkout
+# -f`, `git rebase` and any merge that is not a fast-forward are all wrong here
+# whatever the manifest says.
+#
+# `git pull` is on that list too, less obviously: it merges or rebases depending
+# on config the user set, so it is a fast-forward right up until somebody sets
+# pull.rebase and it silently is not.
+#
+# The third act is the feature, not the fallback. A fork that comes up with an
+# inherited dirty tree and a line saying so is a good outcome; one that comes up
+# clean because something threw the dirt away is an incident.
+refresh_checkout() {
+  _dest=$1; _slug=$2; _access=$3; _want=$4
+  _dirty=; _branch=; _switched=; _gitdir=
+
+  # Not a git worktree at all — an empty directory somebody made, a tarball they
+  # unpacked, a checkout of something else. Left exactly as it is, which is what
+  # this worker has always promised about an occupied path.
+  if ! gitq "$_dest" rev-parse --git-dir >/dev/null; then
+    report_add ready "$_slug" "$_access" "$_dest" present
+    return 0
+  fi
+  _gitdir=$(gitq "$_dest" rev-parse --absolute-git-dir) || _gitdir="$_dest/.git"
+
+  # An operation left in flight. Reported and never touched: aborting one is a
+  # decision with a wrong answer, and a fetch during it is noise. This is the
+  # state a capture freezes into an image when it pauses a box mid-rebase — the
+  # lock and the rebase directory are copied byte-for-byte — so every fork of
+  # that template inherits a git that refuses to run, and this is the line that
+  # says why.
+  for _m in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+    [ -e "$_gitdir/$_m" ] || continue
+    case "$_m" in
+      rebase-merge|rebase-apply) _op="a rebase";      _fix="git rebase --abort" ;;
+      MERGE_HEAD)                _op="a merge";       _fix="git merge --abort" ;;
+      CHERRY_PICK_HEAD)          _op="a cherry-pick"; _fix="git cherry-pick --abort" ;;
+      REVERT_HEAD)               _op="a revert";      _fix="git revert --abort" ;;
+      *)                         _op="a bisect";      _fix="git bisect reset" ;;
+    esac
+    report_add failed "$_slug" "$_access" "$_dest" "$_op is in progress — $_fix"
+    return 0
+  done
+
+  # Untracked files count as dirt on purpose. Telling "an untracked file the
+  # merge would clobber" from "one it would not" is git's job and git only does
+  # it inside the operation; one rule instead of two, erring towards not
+  # touching anything.
+  #
+  # Dirt is a MODIFIER here rather than a state of its own, and it is only worth
+  # reporting when it stopped something. Nagging about a scratch file in a
+  # checkout that was already current, on every boot, is how a status line stops
+  # being read.
+  if [ -n "$(gitq "$_dest" status --porcelain || true)" ]; then _dirty=1; fi
+  _branch=$(gitq "$_dest" symbolic-ref --short -q HEAD) || _branch=
+
+  # `status` asks what is here and expects an answer at once, so it stays off
+  # the network entirely — no fetch, and therefore no ahead/behind.
+  if [ "$MODE" != sync ]; then
+    if [ -z "$_branch" ]; then
+      report_add ready "$_slug" "$_access" "$_dest" "detached HEAD${_dirty:+, uncommitted changes}"
+    else
+      report_add ready "$_slug" "$_access" "$_dest" "on $_branch${_dirty:+, uncommitted changes}"
+    fi
+    return 0
+  fi
+
+  publish "$(status_line "$_slug" updating)"
+  if ! gitq "$_dest" fetch --quiet origin >>"$WORK/log"; then
+    report_add stale "$_slug" "$_access" "$_dest" "could not reach the remote, see $LOG_FILE"
+    return 0
+  fi
+
+  if [ -z "$_branch" ]; then
+    report_add stale "$_slug" "$_access" "$_dest" "detached HEAD, nothing to fast-forward"
+    return 0
+  fi
+
+  # An attachment with no ref pins nothing: it decides where a CLONE starts and
+  # says nothing about where a checkout that already exists should be. So an
+  # empty want means "keep whatever branch this is on current", and only a named
+  # one can ever move HEAD.
+  if [ -n "$_want" ] && [ "$_want" != "$_branch" ]; then
+    if [ "$ADOPT" != 1 ]; then
+      report_add stale "$_slug" "$_access" "$_dest" "on $_branch, not $_want — \`git switch $_want\` if you meant to"
+      return 0
+    fi
+    if [ -n "$_dirty" ]; then
+      report_add stale "$_slug" "$_access" "$_dest" "inherited on $_branch with uncommitted changes; left as captured"
+      return 0
+    fi
+    # The first form is what git does by itself when the branch exists only on
+    # the remote; the second is for a git too old to guess, and for a remote
+    # whose HEAD this clone never learned.
+    if ! gitq "$_dest" switch --quiet "$_want" >>"$WORK/log" &&
+       ! gitq "$_dest" switch --quiet --track -c "$_want" "origin/$_want" >>"$WORK/log"; then
+      report_add failed "$_slug" "$_access" "$_dest" "could not switch to $_want, see $LOG_FILE"
+      return 0
+    fi
+    _branch=$_want
+    _switched=1
+  fi
+
+  # What this branch actually tracks, falling back to the remote branch of the
+  # same name: a checkout that arrived inside a template may carry no tracking
+  # config at all, and a branch with no upstream anywhere is a local branch
+  # somebody made, which is theirs.
+  _up=$(gitq "$_dest" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}') || _up=
+  if [ -z "$_up" ] && gitq "$_dest" rev-parse --verify --quiet "refs/remotes/origin/$_branch" >/dev/null; then
+    _up="origin/$_branch"
+  fi
+  if [ -z "$_up" ]; then
+    report_add ready "$_slug" "$_access" "$_dest" "${_switched:+switched to }$_branch, no upstream"
+    return 0
+  fi
+
+  # left...right counts commits the upstream has that we do not, then ours it
+  # does not. `set --` is safe in here: the four arguments were saved above.
+  set -- $(gitq "$_dest" rev-list --left-right --count "$_up...HEAD" || echo "0 0")
+  _behind=${1:-0}; _ahead=${2:-0}
+
+  if [ "$_ahead" != 0 ] && [ "$_behind" != 0 ]; then
+    report_add stale "$_slug" "$_access" "$_dest" "diverged from $_up ($_ahead ahead, $_behind behind)"
+  elif [ "$_ahead" != 0 ]; then
+    report_add stale "$_slug" "$_access" "$_dest" "$_ahead not pushed to $_up"
+  elif [ "$_behind" = 0 ]; then
+    report_add ready "$_slug" "$_access" "$_dest" "${_switched:+switched to }$_branch, up to date"
+  elif [ -n "$_dirty" ]; then
+    report_add stale "$_slug" "$_access" "$_dest" "$_behind behind $_up, uncommitted changes"
+  elif gitq "$_dest" merge --ff-only --quiet "$_up" >>"$WORK/log"; then
+    report_add ready "$_slug" "$_access" "$_dest" "${_switched:+switched to }$_branch, $_behind fast-forwarded"
+  else
+    report_add failed "$_slug" "$_access" "$_dest" "could not fast-forward $_behind, see $LOG_FILE"
+  fi
 }
 
 while IFS="$SEP" read -r host slug ref path access; do
@@ -1134,13 +1320,19 @@ while IFS="$SEP" read -r host slug ref path access; do
   #
   # An explicit --path is exempt: it is stable by construction, and someone who
   # named a directory does not want us guessing at two others.
+  #
+  # What happens to the one it finds is refresh_checkout's, and the promise the
+  # paragraph above makes is unchanged by it: the checkout stays where it is,
+  # and nothing in this worker can lose work that is in it.
+  found=
   for candidate in "$dest" "$HOME_DIR/$name" "$HOME_DIR/src/$owner/$name"; do
     [ -n "$path" ] && candidate=$dest
-    if [ -e "$candidate" ]; then
-      report_add ready "$slug" "$access" "$candidate" present
-      continue 2
-    fi
+    if [ -e "$candidate" ]; then found=$candidate; break; fi
   done
+  if [ -n "$found" ]; then
+    refresh_checkout "$found" "$slug" "$access" "$ref"
+    continue
+  fi
   if [ "$MODE" != sync ]; then
     report_add pending "$slug" "$access" "$dest" 'run `sparkbox repos sync`'
     continue

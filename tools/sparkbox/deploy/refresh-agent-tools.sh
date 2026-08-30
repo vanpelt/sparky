@@ -752,11 +752,18 @@ any service you started.
 
 GitHub repositories attached to this VM are cloned into your home directory at
 boot: `~/<repo>` when one is attached, `~/src/<owner>/<repo>` when several are.
-`sparkbox repos` lists every attachment, where it lives, and whether it cloned.
+`sparkbox repos` lists every attachment, where it lives, and its git state.
 Attaching a repository to a VM that is already running deliberately does not
 clone it, because that writes into a filesystem you are working in; run
-`sparkbox repos sync` when you want the new one fetched. A checkout that is
-already there is never touched.
+`sparkbox repos sync` when you want the new one fetched.
+
+`sparkbox repos sync` also brings existing checkouts forward, and it can only do
+three things to one: fetch it, fast-forward it when the tree is clean, or tell
+you why it did neither. It never resets, rebases, stashes or discards anything —
+uncommitted work, untracked files and unpushed commits are all reported and left
+exactly where they are. If a VM was forked from a snapshot that had a checkout
+in it, the first boot is also allowed to switch that checkout to the branch the
+attachment names, and only then, and only if the tree is clean.
 
 Do not create, paste, or store a GitHub token. git already authenticates to
 github.com through a system credential helper that asks this host for a
