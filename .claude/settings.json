@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(deploy/kubernetes/deploy.sh:*)",
+      "Bash(tools/sparkbox/deploy/kubernetes/deploy.sh:*)",
+      "Bash(./deploy/kubernetes/deploy.sh:*)",
+      "Bash(cd tools/sparkbox)"
+    ]
+  }
+}
