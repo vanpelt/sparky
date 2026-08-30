@@ -118,8 +118,16 @@ func (d *Driver) Create(_ context.Context, cfg vmm.Config) (*vmm.Instance, error
 	if _, ok := d.vms[cfg.Name]; ok {
 		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
 	}
-	workdir := filepath.Join(d.stateDir, "mock-vms", cfg.Name)
+	workdir := d.vmDir(cfg.Name)
 	seed := isEmptyDir(workdir) // fresh dir? then a snapshot template may seed it
+	// Same rule the firecracker driver enforces: a disk under a name the ledger
+	// has never issued is the residue of an unfinished destroy, and adopting it
+	// would hand its previous owner's home directory to whoever claimed the name
+	// next. See vmm.Config.NewSandbox.
+	if cfg.NewSandbox && !seed {
+		return nil, fmt.Errorf("workdir for %q is not empty (%s); "+
+			"a previous sandbox of this name did not finish being destroyed", cfg.Name, workdir)
+	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return nil, err
 	}
@@ -333,7 +341,10 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	defer d.mu.Unlock()
 	vm, ok := d.vms[name]
 	if !ok {
-		return nil
+		// No record, but possibly a disk: d.vms is per-process and nothing
+		// rehydrates it, so a controller that restarted since this VM last
+		// booted must still reclaim the workdir. See the firecracker driver.
+		return os.RemoveAll(d.vmDir(name))
 	}
 	if vm.server != nil {
 		vm.server.Close() //nolint:errcheck
@@ -410,6 +421,14 @@ func (d *Driver) workdirFor(name string) string {
 	if vm, ok := d.vms[name]; ok {
 		return vm.workdir
 	}
+	return d.vmDir(name)
+}
+
+// vmDir is where a sandbox's "disk" lives, derived from its name alone so the
+// lifecycle paths that run without a record (Destroy after a restart, Create
+// before there is one) agree with the ones that have one. Caller need not hold
+// d.mu — it reads only immutable driver config.
+func (d *Driver) vmDir(name string) string {
 	return filepath.Join(d.stateDir, "mock-vms", name)
 }
 

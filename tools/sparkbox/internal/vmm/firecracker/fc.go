@@ -628,12 +628,24 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 	// record proves nothing and this stat is what decides.
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	fresh := false
-	if _, err := os.Stat(rootfs); os.IsNotExist(err) {
+	switch _, err := os.Stat(rootfs); {
+	case os.IsNotExist(err):
 		template := d.templatePath(cfg.Image)
 		if err := reflinkClone(ctx, template, rootfs); err != nil {
 			return nil, err
 		}
 		fresh = true
+	case err != nil:
+		return nil, err
+	case cfg.NewSandbox:
+		// A disk under a name the ledger has never issued is residue, not
+		// state, and booting it would hand its previous owner's home directory
+		// to whoever claimed the name next. Refuse rather than reclaim: the
+		// ledger says this name is free, but a ledger can be restored from a
+		// backup and 25 GiB of somebody's work is not recoverable from a wrong
+		// guess. RenameVM already refuses a destination dir for the same reason.
+		return nil, fmt.Errorf("vm dir for %q already holds a rootfs (%s); "+
+			"a previous sandbox of this name did not finish being destroyed", cfg.Name, rootfs)
 	}
 	if !d.opts.DisableHostRootfsMounts {
 		if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
@@ -1114,7 +1126,15 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	defer d.mu.Unlock()
 	st, ok := d.vms[name]
 	if !ok {
-		return nil
+		// No record does not mean no disk. d.vms is per-process and nothing
+		// rehydrates it: after the controller restarts, every sandbox it has
+		// not booted since is absent from the map while its rootfs sits in
+		// VMStateDir exactly where the previous process left it. Returning
+		// early here reported a successful destroy and leaked the disk — and
+		// worse, left it for Create to adopt under a re-used name. There is no
+		// jail to clean without an idx, and there cannot be: a jail workspace
+		// belongs to a live vmState, so a name with no record has no jail.
+		return os.RemoveAll(d.vmDir(name))
 	}
 	if st.machine != nil {
 		d.stopVMM(st)

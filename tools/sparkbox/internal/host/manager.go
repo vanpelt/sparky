@@ -895,6 +895,11 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	inst, err := m.driver.Create(ctx, vmm.Config{
 		Name: name, Image: image, VCPUs: vcpus, MemMB: memMB,
 		GatewayPublicKey: m.gwPubKey,
+		// The name-taken check above just proved this sandbox is new to the
+		// ledger, so a disk already under the name is not its state — see
+		// vmm.Config.NewSandbox. The other Create call site (resumeOrRecreate)
+		// cold-boots a sandbox we already know, where that disk is the point.
+		NewSandbox: true,
 	})
 	if err != nil {
 		return nil, err

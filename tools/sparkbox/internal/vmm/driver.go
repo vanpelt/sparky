@@ -31,6 +31,15 @@ type Config struct {
 	// GatewayPublicKey is the SSH public key (authorized_keys line) that the
 	// gateway will authenticate with when dialing into the VM.
 	GatewayPublicKey string
+	// NewSandbox marks a Create that brings a name into existence, as opposed
+	// to cold-booting a sandbox the ledger already knows (a restart, a resume
+	// that failed, a restore). Drivers key a sandbox's disk by name, and names
+	// are reusable, so the two cases disagree about what a disk already sitting
+	// under this name means: on a cold boot it is the sandbox's own state, and
+	// on a new sandbox it is the residue of a destroy that did not finish.
+	// Adopting that residue would hand its previous owner's home directory to
+	// whoever claimed the name next, so drivers must refuse it.
+	NewSandbox bool
 }
 
 // Instance is a running or paused sandbox VM.
