@@ -187,6 +187,46 @@ not, so a forgotten tab cannot pin a sandbox warm forever.
 > record and certificate every sandbox front door already uses. The cost is a
 > reserved name suffix: sandboxes and routes may not end in `-xterm`.
 
+The third way in needs neither an ssh client nor a token: a **button in a pull
+request**. `ssh ctl@<domain> badge wandb/hivemind --ref feat/x` prints one line
+of markdown to stdout (everything else goes to stderr, so `| pbcopy` gives you
+exactly the snippet), and whoever clicks it signs in, gets *their own* sandbox
+with the repository checked out on that branch, and lands in the browser
+terminal above.
+
+```
+https://go.<domain>/<owner>/<repo>[?ref=<branch>]
+```
+
+The repository is in the path so that the no-branch form contains no `&` at all
+and the branch form contains exactly one — a comment is immutable, and `&amp;`
+is then the only escaping a human retyping the link can get wrong, in one place.
+There is no `tag=`, `node=` or `name=` parameter and there will not be: tags
+decide which of the clicker's secrets are pushed into the VM
+(`secrets.Store.EnvForSandbox` joins on `sandbox_tags`), so a tag in a public
+comment would be a stranger choosing which of *your* credentials meet a branch
+*they* picked. Tags come only from your own attachment. Click the same button
+tomorrow and it finds the sandbox it made you rather than building a second one:
+a link's branch is matched against the effective ref the checkout manifest is
+built from, with the attachment's own default folded out on both sides.
+
+The badge is one static, parameterless SVG served outside the auth gate, because
+GitHub proxies every image through camo — no cookies, no identity, one heavily
+cached object per URL — and a gated image is a broken image on both of the
+middleware's branches. The landing page ships zero JavaScript, which is what
+lets it send an honest `default-src 'none'` and makes the create a bare form
+POST.
+
+`--launch-subdomain` moves or disables the door (empty disables it; so does an
+empty `--xterm-subdomain`, since the whole payoff is a terminal to land in). It
+defaults to `go` and should be treated as a one-time decision — the label is
+inside links people paste into places nobody can edit. **Before mounting it on a
+live host, run the squatter check in
+[`docs/launch-links.md`](docs/launch-links.md#part-7--pre-deploy-check-do-this-before-the-mount-ships):**
+reserved dispatch wins before the route lookup and names are validated only at
+create time, so a sandbox or route already called `go` goes dark silently at the
+next deploy, with one warning line to explain it.
+
 ## A tag can also name the disk you boot from
 
 A tag on a sandbox already selects three things: the secrets pushed into it, the

@@ -549,7 +549,9 @@ func (c *Conn) reply(req *Frame, out any, err error) {
 			f.Body = raw
 		}
 	}
-	if serr := c.out.post(f); serr != nil {
+	// postReply, not post: a reply has a caller waiting out a deadline on it,
+	// so it is worth a bounded wait for room that an event is not.
+	if serr := c.out.postReply(f); serr != nil {
 		c.log.Debug("nodelink: reply not delivered", "type", req.Type, "err", serr)
 	}
 }

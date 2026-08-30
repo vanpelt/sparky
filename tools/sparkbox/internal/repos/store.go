@@ -255,10 +255,17 @@ func (s *Store) PutRepo(owner string, r Repo, tags []string) error {
 		return err
 	}
 	ref := strings.TrimSpace(r.Ref)
-	if ref != "" && !refRe.MatchString(ref) {
-		return fmt.Errorf("%w: ref %q (want a branch or tag name, no leading '-')", ErrInvalidRepo, r.Ref)
-	}
-	if strings.Contains(ref, "..") {
+	// An empty ref is legal on an attachment and means "whatever branch the
+	// repository calls default", so it never reaches ValidRef, which has no way
+	// to express that. Everything else goes through the shared grammar so this
+	// path and SetSandboxRefs below cannot drift; the two halves of the rule are
+	// only teased apart again to name which one the ref broke, because
+	// "a/../b is not a branch name" is a sentence that helps nobody find their
+	// mistake. refRe is consulted here to pick a sentence, never to decide.
+	if ref != "" && !ValidRef(ref) {
+		if !refRe.MatchString(ref) {
+			return fmt.Errorf("%w: ref %q (want a branch or tag name, no leading '-')", ErrInvalidRepo, r.Ref)
+		}
 		return fmt.Errorf("%w: ref %q (\"..\" is not a ref)", ErrInvalidRepo, r.Ref)
 	}
 	path, err := normPath(r.Path)
@@ -470,7 +477,12 @@ func (s *Store) SetSandboxRefs(owner, sandbox string, refs []SandboxRef) error {
 		if ref == "" {
 			return fmt.Errorf("%w: a ref override for %s cannot be empty", ErrInvalidRepo, slug)
 		}
-		if !refRe.MatchString(ref) || strings.Contains(ref, "..") {
+		// The same grammar PutRepo applies to an attachment's ref, asked in the
+		// one place that owns it. An override is the value that ends up on the
+		// `git clone --branch` command line just as surely as a default does, so
+		// the two paths being allowed to disagree about what a ref is would mean
+		// a ref refused at attach time could still arrive by way of an override.
+		if !ValidRef(ref) {
 			return fmt.Errorf("%w: ref %q (want a branch or tag name, no leading '-')", ErrInvalidRepo, r.Ref)
 		}
 		normed = append(normed, norm{host, slug, ref})
@@ -698,6 +710,31 @@ func validRepoName(name string) bool {
 		return false
 	}
 	return !strings.HasSuffix(strings.ToLower(name), ".git")
+}
+
+// ValidRef reports whether ref is a branch or tag name a clone can take, and is
+// the one authority on that grammar for everybody — PutRepo and SetSandboxRefs
+// below both ask it rather than restating the rule, and so must any package
+// that validates a ref before handing it to this store.
+//
+// It is a function and not an exported regexp on purpose. The rule has two
+// halves and only one of them is expressible as a pattern: refRe bounds the
+// characters, and the separate '..' refusal is Go-side because a ref like
+// "a/../b" matches refRe perfectly well. A caller that reached for the regexp
+// alone would duplicate exactly half the rule, believe it had all of it, and
+// store a ref whose checkout walks out of the directory the person configured —
+// which is the same hazard validRelPath exists to close for clone paths. Handing
+// out one bool is what keeps the halves from drifting apart.
+//
+// refRe's leading-alphanumeric rule is the load-bearing one, for the reason its
+// own comment gives: the ref reaches the guest as the argument of
+// `git clone --branch <ref>`, so a value starting with '-' is not a branch at
+// all but an option, and "--upload-pack=sh" is a command the clone would run.
+// An empty ref is refused here; the callers that treat "" as "the repository's
+// default branch" check for it themselves before asking, because to this
+// function an empty string is simply not a ref.
+func ValidRef(ref string) bool {
+	return refRe.MatchString(ref) && !strings.Contains(ref, "..")
 }
 
 // NormalizeAccess folds an access word to its canonical form; "" means read,

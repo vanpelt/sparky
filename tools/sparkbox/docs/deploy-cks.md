@@ -893,6 +893,29 @@ it is redeployed for a replacement Node. Automated checkpoint creation,
 checkpoint discovery, and automatic recovery remain work described in
 [`cks-reflink-persistence-plan.md`](cks-reflink-persistence-plan.md).
 
+### Guest disks with no sandbox
+
+Every sandbox's rootfs lives in one directory named after it, so the node's own
+ledger and the directory listing should hold exactly the same names:
+
+```sh
+kubectl -n sparkbox-poc exec deployment/sparkbox-node -c sparkbox-node -- \
+  sh -c 'ls /var/lib/sparkbox/hot/controller/fc-vms; echo ---; \
+         cat /var/lib/sparkbox/control/sandboxes.json'
+```
+
+A directory with no ledger row is an orphan: 25 GiB reachable only by `ls`.
+Destroy used to leave one behind whenever the controller had restarted since
+the sandbox last booted, which on this cluster is every deploy — eight had
+accumulated by 2026-08-30. That is fixed, and a create now refuses a name whose
+disk is still there rather than booting the previous tenant's filesystem, so a
+refusal reading `did not finish being destroyed` means an orphan of this kind.
+
+Nothing sweeps them automatically and nothing should: "delete every directory
+with no ledger row" fails the same way the bug did if the ledger ever loads
+empty, and it would take the whole node with it. Confirm against both lists
+above, then remove the directory by hand.
+
 ## Remove the POC
 
 Deleting the namespace removes the Service, public address, Pod, identity

@@ -137,7 +137,15 @@ type Gateway struct {
 	// to tell a hung-up browser tab where to come back. Empty falls back to the
 	// SSH reconnect wording.
 	xtermSubdomain string
-	openSignup     bool // signup without an invite code
+	// launchSubdomain is the label the launch door is served under, and `ctl
+	// badge` builds the URL it prints from it. It is held here rather than read
+	// from ctlops because that markdown goes into a pull-request comment that
+	// outlives this deployment: a host that renamed the label and left this
+	// stale would mint buttons that 404 forever, with nobody able to edit the
+	// comment they are sitting in. Empty means this host serves no launch door,
+	// which is what `badge` refuses on — see badge.go.
+	launchSubdomain string
+	openSignup      bool // signup without an invite code
 	// nodes and joiner are the fleet door: the roster the connecting key is
 	// resolved against, and whatever owns a link once it is admitted. Both nil
 	// on a single-box deployment, which is what keeps that door shut.
@@ -207,6 +215,16 @@ type GatewayOptions struct {
 	// ("xterm"), used only so a hung-up terminal tab is told a URL rather than
 	// an ssh command. Empty is fine on a host that serves no terminal.
 	XtermSubdomain string
+	// LaunchSubdomain is the label the one-click launch door is served under
+	// ("go"), used only so `ctl badge` can print the URL of a button somebody
+	// pastes into a pull request. Empty is fine on a host that serves no launch
+	// door; `badge` then says so instead of printing a link to nowhere.
+	//
+	// cmd/sparkbox passes the label it actually mounted the door on, never the
+	// flag's raw value, for the reason the launchLabel derivation there gives:
+	// with no browser terminal there is nothing for a clicker to land in, so
+	// the door is not mounted and this must be empty too.
+	LaunchSubdomain string
 	// Nodes, if set, is the fleet's node roster and opens the `node@` door.
 	// Nil keeps it shut, which is a single-box deployment.
 	Nodes NodeRoster
@@ -243,6 +261,7 @@ func New(opts GatewayOptions) *Gateway {
 		dialTimeout: 15 * time.Second,
 		doors:       opts.Doors, domain: opts.Domain, sshHost: opts.SSHHost,
 		xtermSubdomain:  opts.XtermSubdomain,
+		launchSubdomain: opts.LaunchSubdomain,
 		openSignup:      opts.OpenSignup,
 		nodes:           opts.Nodes,
 		joiner:          opts.NodeJoiner,

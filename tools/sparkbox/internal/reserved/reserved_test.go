@@ -6,13 +6,46 @@ import "testing"
 // these has a handler mounted at it, and reserved dispatch runs before the route
 // lookup, so a sandbox or route allowed to take one would be created, listed,
 // and then never served.
+//
+// `go` joined this list when cmd/sparkbox began mounting internal/launch there
+// (--launch-subdomain), and it is the one entry whose reservation outlives the
+// deployment: the button pasted into a public GitHub comment points at
+// go.<domain>, and that comment is immutable. Freeing this label would not
+// merely relabel a surface — it would hand whoever took it every click of every
+// link already written.
 func TestLiveDoorsAreReserved(t *testing.T) {
 	for _, n := range []string{
-		"console", "my", "api", "login", "oidc", "xterm", "hooks", // proxy edge
+		"console", "my", "api", "login", "oidc", "xterm", "hooks", "go", // proxy edge
 		"new", "ctl", "signup", "node", // ssh gateway usernames
 	} {
 		if !Name(n) {
 			t.Errorf("Name(%q) = false — something answers there today", n)
+		}
+	}
+}
+
+// Names claimed BEFORE anything is mounted at them. This is the direction the
+// package doc says is cheap — a name with no handler is refused rather than
+// silently shadowed — and it is the only direction that works, because a label
+// cannot be taken back from whoever created a sandbox at it first.
+//
+// `go` used to be here and has moved to TestLiveDoorsAreReserved, because
+// cmd/sparkbox now mounts internal/launch at it. `launch` stays: it is the word
+// somebody types when they half-remember the door, and nothing answers there.
+func TestNamesClaimedAheadOfTheirHandler(t *testing.T) {
+	for _, n := range []string{
+		"launch",                   // the word people guess for the launch door at `go`
+		"terminal", "shell", "ssh", // synonyms for surfaces that exist
+		"webhook", "webhooks", "nodes", "sandbox", "sandboxes",
+		"secrets", "keys", "token", "tokens", "id", "identity",
+		"repos", "tags", "agent", "agents", "mcp", "badge", "badges",
+		"github", "git", // trusted-by-familiarity on our zone
+		"secure", "update", "updates", "download", "downloads", "install",
+		"pay", "payment", "payments", "checkout",
+		"wpad", "mta-sts", "acme", "localhost", // protocol auto-discovery
+	} {
+		if !Name(n) {
+			t.Errorf("Name(%q) = false — this label is claimed", n)
 		}
 	}
 }
@@ -32,6 +65,19 @@ func TestOrdinaryNamesAreNotSweptUp(t *testing.T) {
 	for _, n := range []string{
 		"xtermite", "myxterm", "xterm-web", "admin-panel", "apis", "console-2",
 		"crafty-axolotl", "demo", "foo", "bar", "fancy", "bubbly-wren",
+		// The short additions are the ones most at risk of sweeping up an
+		// ordinary name, and `go` is two characters long. Exact match is what
+		// keeps these free; a careless switch to prefix matching takes them all.
+		"gopher", "going", "golang", "webapp", "gitea", "appetite",
+		// `app` and `web` are claimed by NOBODY, on purpose — see the note
+		// beside "github" in reserved.go. internal/routes and internal/nodelink
+		// both name their fixture sandbox "web", so this line is what tells a
+		// future reader that their passing tests are a decision, not an accident.
+		"app", "web",
+		// Words that merely CONTAIN a claimed one, from the groups added
+		// alongside the launch door. A person's sandbox is allowed to be about
+		// tokens without being the platform's page about tokens.
+		"token-service", "my-secrets", "update-checker", "dev", "test", "staging",
 	} {
 		if Name(n) {
 			t.Errorf("Name(%q) = true, want false", n)

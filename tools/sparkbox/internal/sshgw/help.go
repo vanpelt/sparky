@@ -58,8 +58,12 @@ func helpTopics() []helpTopic {
 		blurb:   "env vars your sandboxes get",
 		page:    secretUsage,
 	}, {
-		name:    "repos",
-		aliases: []string{"repo"},
+		name: "repos",
+		// `badge` is an alias here rather than a topic of its own: the page it
+		// would want is this one, and a tenth index row would cost the listing
+		// its 80-column budget for a command that is two lines of prose. So
+		// `help badge` lands on the repos page, which documents it.
+		aliases: []string{"repo", "badge"},
 		verbs:   "repo ls · add · rm · check",
 		blurb:   "cloned in before you arrive",
 		page:    repoUsage,

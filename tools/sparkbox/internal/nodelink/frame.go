@@ -254,6 +254,17 @@ const (
 	// microseconds; a peer that is not is the exact case this design exists to
 	// survive, so the wait is short and unconditional rather than a promise.
 	flushGrace = 250 * time.Millisecond
+	// replyGrace is how long a reply waits for room in a full queue before it
+	// is given up on. It is the difference between the two kinds of frame this
+	// writer carries: an event nobody asked for may be dropped the instant the
+	// queue is full, but a reply has a caller blocked on it, and dropping one
+	// costs that caller its entire deadline for work the handler already
+	// finished. The wait is short because the goroutine offering a reply may be
+	// the read loop, which has to come back; it is long enough to outlast the
+	// scheduling jitter of a busy machine, which is what fills this queue in
+	// practice, and far too short to outlast a peer that has genuinely stopped
+	// reading.
+	replyGrace = 250 * time.Millisecond
 )
 
 // writer owns one direction of a live link.
@@ -369,6 +380,58 @@ func (w *writer) post(f *Frame) error {
 			kind = "reply"
 		}
 		w.metrics.IncDropped(w.node, w.transport, kind)
+		return ErrLinkBacklogged
+	}
+}
+
+// postReply queues one reply, waiting a bounded moment for room rather than
+// abandoning it the instant the queue is full.
+//
+// A reply is the one frame class with somebody on the other end of it, and that
+// makes dropping one worse than refusing the request outright: the work
+// succeeded, and the caller hears nothing until its own deadline expires, so a
+// link that is merely behind turns completed work into timeouts that read as a
+// dead node. The ping path is where this bites hardest. Pings are answered on
+// the read goroutine and are deliberately never refused, so that a machine at
+// its op ceiling can still prove it is alive — and a dropped ping reply defeats
+// exactly that, because a gateway that pings a loaded node and hears nothing
+// concludes the node is gone.
+//
+// The wait is bounded rather than absent because this may run on the read loop,
+// which must come back. A peer that has truly stopped reading gets replyGrace
+// and then the drop; in the meantime the read loop paces itself to the
+// transport, which is the right answer to a peer asking questions faster than
+// the link can carry the answers.
+func (w *writer) postReply(f *Frame) error {
+	line, err := w.enc.line(f)
+	if err != nil {
+		return err
+	}
+	w.run()
+	select {
+	case <-w.dead:
+		return w.reason()
+	default:
+	}
+	// The queue is empty on a healthy link, so the common case costs no timer.
+	select {
+	case w.q <- line:
+		w.queued()
+		return nil
+	case <-w.dead:
+		return w.reason()
+	default:
+	}
+	t := time.NewTimer(replyGrace)
+	defer t.Stop()
+	select {
+	case w.q <- line:
+		w.queued()
+		return nil
+	case <-w.dead:
+		return w.reason()
+	case <-t.C:
+		w.metrics.IncDropped(w.node, w.transport, "reply")
 		return ErrLinkBacklogged
 	}
 }
