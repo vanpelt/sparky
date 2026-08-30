@@ -248,6 +248,74 @@ func TestSlugGrammar(t *testing.T) {
 	}
 }
 
+// ValidRef is the one authority two write paths in this package and every
+// caller outside it share, so the whole grammar is pinned here rather than
+// inferred from whichever refusal happens to be convenient to trigger through a
+// store. The rows that matter most are the ones where the two halves of the
+// rule disagree: an option-shaped ref is caught by the regexp, a traversing ref
+// is caught only by the separate '..' check, and a caller that reached for the
+// regexp on its own would sail straight past the second kind.
+func TestRefGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		want bool
+		why  string
+	}{
+		{"main", true, "the ordinary case"},
+		{"feat/x", true, "a slash is how people name feature branches"},
+		{"release/2026/08", true, "and more than one slash is still a branch"},
+		{"v1.2.3", true, "a tag carries dots"},
+		{"2fa", true, "a ref may lead with a digit"},
+		{"my_branch-2.x", true, "underscore, hyphen and dot are all interior-legal"},
+		{"a", true, "one character is a whole ref"},
+		{"a" + strings.Repeat("x", 254), true, "255 is the ceiling, not one below it"},
+
+		{"", false, "the empty string is not a ref; a caller that means the default branch says so itself"},
+		{"-upload-pack=evil", false, "the load-bearing refusal: this is an option to `git clone --branch`, not a branch"},
+		{"--upload-pack=sh", false, "and the doubled form is the one that actually runs a command"},
+		{".hidden", false, "a leading dot is not alphanumeric, so refRe refuses it before '..' is even considered"},
+		{"..", false, "the parent directory is not a branch"},
+		{"a..b", false, "matches refRe perfectly and is still refused, which is why ValidRef is a function"},
+		{"../x", false, "leading traversal"},
+		{"feat/../../etc", false, "traversal in the middle, the shape a checkout path would follow out of the tree"},
+		{"x..", false, "trailing traversal"},
+		{"feat x", false, "a space is not in the character class"},
+		{"feat~1", false, "nor is a revision suffix"},
+		{"a" + strings.Repeat("x", 255), false, "256 characters is one over the ceiling"},
+	} {
+		if got := ValidRef(tc.ref); got != tc.want {
+			t.Errorf("ValidRef(%q) = %v, want %v: %s", tc.ref, got, tc.want, tc.why)
+		}
+	}
+}
+
+// Routing both write paths through ValidRef folded two refusals into one bool,
+// and the thing a person reads is still the sentence. PutRepo has always told a
+// traversing ref apart from an option-shaped one — they are different mistakes
+// with different fixes — so this pins that the fold did not quietly collapse
+// them into a single unhelpful message.
+func TestRefRefusalsKeepTheirOwnSentences(t *testing.T) {
+	s := openTest(t)
+	optionShaped := s.PutRepo("alice", Repo{Slug: "a/b", Ref: "--upload-pack=sh"}, nil)
+	traversing := s.PutRepo("alice", Repo{Slug: "a/b", Ref: "a/../b"}, nil)
+	if optionShaped == nil || traversing == nil {
+		t.Fatalf("a hostile ref was accepted: option-shaped=%v traversing=%v", optionShaped, traversing)
+	}
+	if !strings.Contains(optionShaped.Error(), "want a branch or tag name, no leading '-'") {
+		t.Errorf("option-shaped ref: %v", optionShaped)
+	}
+	if !strings.Contains(traversing.Error(), `".." is not a ref`) {
+		t.Errorf("traversing ref lost its own sentence: %v", traversing)
+	}
+
+	// SetSandboxRefs deliberately says only the one sentence, because an
+	// override is written by machinery rather than typed at a prompt.
+	override := s.SetSandboxRefs("alice", "alpha", []SandboxRef{{Slug: "a/b", Ref: "a/../b"}})
+	if override == nil || !strings.Contains(override.Error(), "want a branch or tag name, no leading '-'") {
+		t.Errorf("SetSandboxRefs traversing ref: %v", override)
+	}
+}
+
 func TestValidationRejectsAndWrapsErrInvalidRepo(t *testing.T) {
 	s := openTest(t)
 	for _, tc := range []struct {

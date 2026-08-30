@@ -30,7 +30,8 @@ var sharedCSS string
 var sharedJS string
 
 // Markers a page template embeds inside its own <style>/<script> blocks,
-// replaced with the shared design system before minification.
+// replaced with the shared design system by Compose — and so by Build, which
+// minifies and pre-gzips what Compose returns.
 const (
 	cssMarker = "/*SHARED_CSS*/"
 	jsMarker  = "/*SHARED_JS*/"
@@ -71,15 +72,50 @@ type Page struct {
 	gzip []byte
 }
 
+// Compose substitutes the shared design system into a page template and hands
+// back the result with nothing else done to it — no minification, no gzip.
+// It exists for the one kind of page Build cannot serve: HTML that is also a
+// Go text/template or html/template source, parsed at startup and executed
+// per request.
+//
+// The minifier is why those two cases have to be separated. tdewolff/minify
+// tokenises HTML, CSS and JS; it has no knowledge whatsoever of {{...}}
+// template actions, so it is free to move, requote or delete the bytes around
+// one. An action that spans a tag boundary, or that sits in an attribute the
+// minifier decides to unquote, comes back out as markup the template parser
+// then refuses — which means a panic inside template.Must at package init, on
+// every host, at startup, for a page nobody has even requested yet — or, worse
+// because it is silent, as a template that still parses but renders the wrong
+// thing. internal/edgeauth/login.html is the standing counter-example in this
+// tree: it is a template, so it could not go through Build, and it ended up
+// pasting its own copy of the design tokens rather than run a minifier over
+// template syntax. Compose is the way out of that trade — a template page gets
+// 100% of the design-system reuse and none of the minifier risk, at the cost
+// of shipping a few unminified kilobytes on a page nobody loads in a loop.
+//
+// Callers that are plain HTML with no template actions should keep using
+// Build, which is Compose plus the minify-and-pre-gzip pipeline.
+//
+// Note that substitution is single-shot, by bytes.Replace(..., 1): a template
+// carrying a SECOND /*SHARED_CSS*/ keeps that one verbatim in the shipped
+// page, where it reads as a stray CSS comment. One marker each is the contract.
+func Compose(tmpl []byte) []byte {
+	out := bytes.Replace(tmpl, []byte(cssMarker), []byte(sharedCSS), 1)
+	return bytes.Replace(out, []byte(jsMarker), []byte(sharedJS), 1)
+}
+
 // Build composes a page template — an index.html embedding the
 // /*SHARED_CSS*/ and /*SHARED_JS*/ markers inside its own <style> and
 // <script> blocks — against the shared design system, minifies it, and
 // pre-gzips the result. Intended for a package-level var initialized from
 // embedded, developer-controlled HTML, so a malformed template panics
 // immediately rather than surfacing as a runtime error.
+//
+// The substitution half is Compose's, deliberately not a second copy of those
+// two Replace calls: two implementations of the same marker contract are two
+// places to add a third marker and one place to forget it.
 func Build(tmpl []byte) *Page {
-	out := bytes.Replace(tmpl, []byte(cssMarker), []byte(sharedCSS), 1)
-	out = bytes.Replace(out, []byte(jsMarker), []byte(sharedJS), 1)
+	out := Compose(tmpl)
 
 	var buf bytes.Buffer
 	if err := minifier.Minify("text/html", &buf, bytes.NewReader(out)); err != nil {
