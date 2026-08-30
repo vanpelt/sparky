@@ -1160,6 +1160,31 @@ func TestDestroyCleansTags(t *testing.T) {
 	}
 }
 
+// The per-sandbox repo ref override is the only side store whose survival is a
+// CORRECTNESS bug rather than clutter: sandbox names are reusable, so a row that
+// outlives its sandbox decides what the next box of that name checks out —
+// possibly somebody else's box, if the name was freed. Both halves of its
+// lifecycle are wired next to the tag hooks, and this is what proves it.
+func TestSandboxLifecycleCarriesRepoRefOverrides(t *testing.T) {
+	refs := &tagRecorder{}
+	m := newTestManager(t, host.Options{RepoRefs: refs})
+	ctx := context.Background()
+	mustCreate(t, m, "before", "alice", 512)
+
+	if err := m.Rename(ctx, "before", "after", "alice"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if len(refs.renamed) != 1 || refs.renamed[0] != "before>after" {
+		t.Fatalf("repo ref-override rename calls = %v, want [before>after]", refs.renamed)
+	}
+	if err := m.Destroy(ctx, "after"); err != nil {
+		t.Fatal(err)
+	}
+	if len(refs.deleted) != 1 || refs.deleted[0] != "after" {
+		t.Fatalf("repo ref-override delete calls = %v, want [after]", refs.deleted)
+	}
+}
+
 func TestRebootColdBoots(t *testing.T) {
 	var rd *recordingDriver
 	m := newTestManagerWith(t, host.Options{}, func(d *mock.Driver) vmm.Driver {

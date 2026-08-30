@@ -70,16 +70,74 @@ func parseTags(args []string) (tags, rest []string, err error) {
 // because parseTags is the tag grammar and has exactly one job — the tests that
 // pin it are a tripwire for that grammar changing shape, and they should not
 // have to move for a flag that is not a tag.
-func parseCreateArgs(args []string) (tags []string, node string, rest []string, err error) {
-	node, rest, err = splitNodeFlag(args)
+func parseCreateArgs(args []string) (created, error) {
+	node, rest, err := splitNodeFlag(args)
 	if err != nil {
-		return nil, "", nil, err
+		return created{}, err
 	}
-	tags, rest, err = parseTags(rest)
+	refs, rest, err := splitRefFlag(rest)
 	if err != nil {
-		return nil, "", nil, err
+		return created{}, err
 	}
-	return tags, node, rest, nil
+	tags, rest, err := parseTags(rest)
+	if err != nil {
+		return created{}, err
+	}
+	return created{Tags: tags, Node: node, Refs: refs, Rest: rest}, nil
+}
+
+// created is what the grammar above resolved. A struct rather than four
+// returns because the two []string are easy to swap at a call site and the
+// compiler would not notice — `rest` becoming the tag list is a sandbox coming
+// up tagged `--ref`.
+type created struct {
+	Tags []string
+	Node string
+	Refs []ctlops.RepoRef
+	Rest []string
+}
+
+// splitRefFlag pulls `--ref` out, in the same two spellings and with the same
+// consume-the-next-argument rule as the other two.
+//
+// Unlike --node it ACCUMULATES, because it can name a different branch for each
+// attached repository: `--ref wandb/hivemind=feat/x --ref wandb/other=main`.
+// The bare form `--ref feat/x` names no repository and is only unambiguous when
+// the tags select exactly one — which this grammar cannot know and does not
+// try to. ctlops.resolveRepoRefs is where that is refused, because that is
+// where the attachments are.
+func splitRefFlag(args []string) (refs []ctlops.RepoRef, rest []string, err error) {
+	add := func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("--ref needs a value, e.g. --ref main or --ref owner/repo=main")
+		}
+		r := ctlops.ParseRepoRef(value)
+		if strings.TrimSpace(r.Ref) == "" {
+			return fmt.Errorf("--ref %s names no branch; write it as owner/repo=branch", value)
+		}
+		refs = append(refs, r)
+		return nil
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--ref":
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("--ref needs a value, e.g. --ref main")
+			}
+			if err := add(args[i+1]); err != nil {
+				return nil, nil, err
+			}
+			i++
+		case strings.HasPrefix(a, "--ref="):
+			if err := add(strings.TrimPrefix(a, "--ref=")); err != nil {
+				return nil, nil, err
+			}
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return refs, rest, nil
 }
 
 // splitNodeFlag pulls `--node x` / `--node=x` out of an argument list. Its shape

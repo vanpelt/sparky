@@ -62,6 +62,15 @@ installed here.
   what that tag boots from today, and every VM of yours carrying it. Pass
   `--yes` to skip the question; without a terminal to ask at, it refuses rather
   than proceeding.
+- **It shows you the state of every checkout it is about to freeze.** Which
+  branch each is on, what is not pushed, what is uncommitted. All of that is
+  captured exactly as it stands — nothing is committed, stashed or reset on your
+  behalf — and every VM forked from this template inherits it. It is printed so
+  it is not a surprise later, not because anything is wrong.
+- **A git operation in flight stops it.** A rebase, merge, cherry-pick or bisect
+  half-done in a checkout is copied into the template byte-for-byte, lock file
+  and all, so every fork would come up with a git that refuses to run. Finish or
+  abort it, or pass `--allow-busy` if you meant to.
 - **Re-pointing does not re-base a VM that already exists.** Running or paused,
   every VM keeps the disk it was created from, this one included. Only VMs
   created afterwards boot from the new template.
@@ -95,15 +104,24 @@ access token in the VM and nothing to rotate.
 
 From inside the VM:
 
-- `sparkbox repos` reports what is attached, where it was cloned, and why
-  anything is missing.
-- `sparkbox repos sync` clones what is not there yet. Attaching a repository to
-  a tag never reaches into a VM that already exists, so this is how an existing
-  VM picks one up.
+- `sparkbox repos` reports what is attached, where it was cloned, and the state
+  of each checkout — up to date, behind, dirty, on another branch.
+- `sparkbox repos sync` clones what is not there yet and brings what is there
+  forward. Attaching a repository to a tag never reaches into a VM that already
+  exists, so this is how an existing VM picks one up.
 
 Attaching and detaching happen outside the VM, with `ssh ctl@<domain> repo add`
-or from the web console. A clone that already exists is never touched: syncing
-adds, and it does not update, reset or delete.
+or from the web console.
+
+A sync can do exactly three things to a checkout that already exists: fetch it,
+fast-forward it when the tree is clean, or say why it did neither. It never
+resets, rebases, merges anything but a fast-forward, stashes or deletes —
+uncommitted edits, untracked files and unpushed commits are reported and left
+alone. The one exception is narrow and deliberate: on the first boot of a VM
+whose disk was just forked from a snapshot, a clean inherited checkout may be
+switched to the branch the attachment names. Nobody has logged into that disk
+yet, so there is no work in flight to lose; on every later run the branch you
+are on is yours.
 
 ## Commit authorship
 

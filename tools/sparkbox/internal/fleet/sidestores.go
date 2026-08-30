@@ -41,8 +41,8 @@ import (
 )
 
 // SandboxRows is a name-keyed side store the fleet has to keep in step with a
-// sandbox on another machine. Satisfied structurally by *schedule.Store and
-// *secrets.Store, which are the SAME objects host.Options is given: there is one
+// sandbox on another machine. Satisfied structurally by *schedule.Store,
+// *secrets.Store and *repos.Store, which are the SAME objects host.Options is given: there is one
 // set of rows per deployment, and the fleet reaches them directly only for the
 // sandboxes the local manager will never be told about.
 type SandboxRows interface {
@@ -73,6 +73,7 @@ type sides struct {
 	routes    RouteRows
 	schedules SandboxRows
 	tags      SandboxRows
+	repoRefs  SandboxRows
 	frontDoor host.FrontDoor
 }
 
@@ -129,6 +130,13 @@ func (f *Fleet) sweep(ctx context.Context, name string) {
 		if err := f.sides.tags.DeleteBySandbox(name); err != nil {
 			f.log.Error("could not delete the tag rows of a sandbox destroyed on another machine",
 				"name", name, "err", err)
+		}
+	}
+	if f.sides.repoRefs != nil {
+		if err := f.sides.repoRefs.DeleteBySandbox(name); err != nil {
+			f.log.Error("could not delete the repo ref overrides of a sandbox destroyed on another machine",
+				"name", name, "err", err,
+				"next", "whoever takes this name next gets the branch that sandbox asked for; delete the row by hand")
 		}
 	}
 	if f.sides.frontDoor != nil {
@@ -197,6 +205,12 @@ func (f *Fleet) carry(ctx context.Context, oldName, newName string) (undo func()
 				"old", oldName, "new", newName, "err", err)
 		}
 	}
+	if f.sides.repoRefs != nil {
+		if err := f.sides.repoRefs.RenameSandbox(oldName, newName); err != nil {
+			f.log.Warn("repo ref-override rename failed for a sandbox on another machine",
+				"old", oldName, "new", newName, "err", err)
+		}
+	}
 	if f.sides.frontDoor != nil {
 		f.sides.frontDoor.Remove(ctx, oldName)
 		f.sides.frontDoor.Ensure(ctx, newName)
@@ -219,6 +233,11 @@ func (f *Fleet) carryBack(ctx context.Context, oldName, newName string) {
 	if f.sides.tags != nil {
 		if err := f.sides.tags.RenameSandbox(newName, oldName); err != nil {
 			f.log.Warn("tag rename rollback failed", "old", oldName, "new", newName, "err", err)
+		}
+	}
+	if f.sides.repoRefs != nil {
+		if err := f.sides.repoRefs.RenameSandbox(newName, oldName); err != nil {
+			f.log.Warn("repo ref-override rename rollback failed", "old", oldName, "new", newName, "err", err)
 		}
 	}
 	if f.sides.frontDoor != nil {

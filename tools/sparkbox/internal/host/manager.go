@@ -323,6 +323,22 @@ type TagCleaner interface {
 	RenameSandbox(old, new string) error
 }
 
+// RepoRefCleaner keeps per-sandbox repo ref overrides (see internal/repos,
+// SetSandboxRefs) in step with the sandbox lifecycle. Same two methods as
+// TagCleaner and deliberately a separate name, because it guards a different
+// thing and its absence is a different bug.
+//
+// It is not optional the way the others are pleasant-to-have. Every other table
+// in internal/repos is keyed by a TAG, which outlives sandboxes on purpose;
+// this one is keyed by a sandbox NAME, and names are reusable. A row left
+// behind by a destroyed sandbox silently decides what its name-successor checks
+// out — a different box, possibly a different person's. Satisfied structurally
+// by *repos.Store (avoids importing it).
+type RepoRefCleaner interface {
+	DeleteBySandbox(sandbox string) error
+	RenameSandbox(old, new string) error
+}
+
 // sandboxRenamer is the rename hook side stores (routes, schedules) grow so
 // their sandbox-keyed rows follow a rename. Detected with a type assertion at
 // call time, so a store that predates the method is simply skipped.
@@ -514,6 +530,7 @@ type Manager struct {
 	schedules          ScheduleCleaner         // optional: platform-scheduler cleanup on destroy
 	frontDoor          FrontDoor               // optional: per-sandbox address plumbing
 	tags               TagCleaner              // optional: sandbox tag-row cleanup on destroy/rename
+	repoRefs           RepoRefCleaner          // optional: per-sandbox repo ref overrides, cleaned on destroy and moved on rename
 	envSync            EnvPusher               // optional: secret-env push when a sandbox reaches running
 	repoSync           RepoSyncer              // optional: repo checkout nudge when tags or attachments change
 	toolSync           ToolRefresher           // optional: agent-CLI refresh run once, just before a snapshot capture
@@ -588,6 +605,11 @@ type Options struct {
 	// Tags, if set, has a sandbox's tag rows deleted on destroy and moved on
 	// rename. Satisfied structurally by *secrets.Store.
 	Tags TagCleaner
+	// RepoRefs, if set, has a sandbox's per-instance repo ref overrides deleted
+	// on destroy and moved on rename. Satisfied structurally by *repos.Store.
+	// See RepoRefCleaner for why leaving this nil on a host that HAS the
+	// overrides is a correctness bug rather than a missing feature.
+	RepoRefs RepoRefCleaner
 	// MaxRunningPerOwner caps how many sandboxes one owner may have running at
 	// once (0 = unlimited). Enforced on create and resume-on-connect.
 	MaxRunningPerOwner int
@@ -701,6 +723,7 @@ func NewManager(opts Options) (*Manager, error) {
 		routes:             opts.Routes,
 		schedules:          opts.Schedules,
 		tags:               opts.Tags,
+		repoRefs:           opts.RepoRefs,
 		archive:            opts.Archive,
 		checkpoint:         opts.Checkpoint,
 		archivePfx:         opts.ArchivePrefix,
@@ -2179,6 +2202,11 @@ func (m *Manager) Rename(ctx context.Context, oldName, newName, owner string) er
 			m.log.Warn("tag rename failed", "old", oldName, "new", newName, "err", err)
 		}
 	}
+	if m.repoRefs != nil {
+		if err := m.repoRefs.RenameSandbox(oldName, newName); err != nil {
+			m.log.Warn("repo ref-override rename failed", "old", oldName, "new", newName, "err", err)
+		}
+	}
 	if m.frontDoor != nil {
 		m.frontDoor.Remove(ctx, oldName)
 		m.frontDoor.Ensure(ctx, newName)
@@ -2527,6 +2555,13 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	if m.tags != nil {
 		if err := m.tags.DeleteBySandbox(name); err != nil {
 			m.log.Warn("tag cleanup failed", "name", name, "err", err)
+		}
+	}
+	// Not merely tidiness: this name can be created again, by anybody, and a
+	// surviving override would decide what THAT sandbox checks out.
+	if m.repoRefs != nil {
+		if err := m.repoRefs.DeleteBySandbox(name); err != nil {
+			m.log.Warn("repo ref-override cleanup failed", "name", name, "err", err)
 		}
 	}
 	if m.frontDoor != nil {

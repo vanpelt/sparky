@@ -117,6 +117,15 @@ func TestParseRepoAddRefusals(t *testing.T) {
 type fakeRepoStore struct {
 	rows  map[string]repos.Repo
 	boxes map[string][]string // sandbox -> tags
+	refs  map[string][]repos.SandboxRef
+}
+
+func (f *fakeRepoStore) SetSandboxRefs(owner, sandbox string, refs []repos.SandboxRef) error {
+	if f.refs == nil {
+		f.refs = map[string][]repos.SandboxRef{}
+	}
+	f.refs[owner+"/"+sandbox] = refs
+	return nil
 }
 
 func (f *fakeRepoStore) PutRepo(owner string, r repos.Repo, tags []string) error {

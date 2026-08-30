@@ -501,7 +501,7 @@ func TestControlGolden(t *testing.T) {
 		wantErr: "sparkbox: no schedule \"sc_ghost\"\r\n", wantExit: 1,
 	}, {
 		name: "fork without both names", handle: "alice", args: []string{"fork", "snap"},
-		wantErr: "usage: ssh ctl@<gateway> fork <snapshot> <new-name> [--tag <t>]…\r\n" +
+		wantErr: "usage: ssh ctl@<gateway> fork <snapshot> <new-name> [--tag <t>]… [--ref <branch>]…\r\n" +
 			"       list your snapshots with: ssh ctl@<gateway> snapshot list\r\n",
 		wantExit: 2,
 	}, {

@@ -399,3 +399,112 @@ func TestConcurrentStoresNoBusyErrors(t *testing.T) {
 		must(t, err)
 	}
 }
+
+// The per-sandbox ref overlay: one instance asking for a branch that is not the
+// attachment's, without disturbing the attachment or any other sandbox on the
+// same tag.
+func TestSandboxRefOverrideAppliesToOneSandboxOnly(t *testing.T) {
+	s := openTest(t)
+	s.tag(t, "alpha", "van", "web")
+	s.tag(t, "beta", "van", "web")
+	if err := s.PutRepo("van", Repo{Host: "github.com", Slug: "wandb/hivemind", Ref: "main"}, []string{"web"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetSandboxRefs("van", "alpha", []SandboxRef{{Slug: "wandb/hivemind", Ref: "feat/x"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := refFor(t, s, "alpha", "van"); got != "feat/x" {
+		t.Errorf("alpha's manifest ref = %q, want the override feat/x", got)
+	}
+	if got := refFor(t, s, "beta", "van"); got != "main" {
+		t.Errorf("beta's manifest ref = %q; an override reached a sandbox that never asked for it", got)
+	}
+	// The attachment itself is configuration and must be untouched: the next
+	// sandbox on this tag still starts where the tag says.
+	list, err := s.ListRepos("van")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Ref != "main" {
+		t.Errorf("the override rewrote the attachment: %+v", list)
+	}
+}
+
+// Sandbox names are reusable, so a row that outlives its sandbox decides what a
+// DIFFERENT sandbox checks out. This is the reason the store has a lifecycle at
+// all, and host.Manager is what calls these two.
+func TestSandboxRefOverrideDiesWithItsSandbox(t *testing.T) {
+	s := openTest(t)
+	s.tag(t, "alpha", "van", "web")
+	if err := s.PutRepo("van", Repo{Host: "github.com", Slug: "wandb/hivemind", Ref: "main"}, []string{"web"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSandboxRefs("van", "alpha", []SandboxRef{{Slug: "wandb/hivemind", Ref: "feat/x"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RenameSandbox("alpha", "gamma"); err != nil {
+		t.Fatal(err)
+	}
+	s.tag(t, "gamma", "van", "web")
+	if got := refFor(t, s, "gamma", "van"); got != "feat/x" {
+		t.Errorf("after a rename the sandbox lost the branch it asked for: %q", got)
+	}
+
+	if err := s.DeleteBySandbox("gamma"); err != nil {
+		t.Fatal(err)
+	}
+	if got := refFor(t, s, "gamma", "van"); got != "main" {
+		t.Errorf("a destroyed sandbox's override survived and now decides what its name-successor checks out: %q", got)
+	}
+	if left, err := s.SandboxRefs("van", "gamma"); err != nil || len(left) != 0 {
+		t.Errorf("SandboxRefs after delete = %+v, %v", left, err)
+	}
+}
+
+// An override that overrides nothing is a row that can only confuse the next
+// reader, and a ref the guest would hand to git as an option is the thing refRe
+// exists to stop.
+func TestSandboxRefOverrideRefusesEmptyAndHostileRefs(t *testing.T) {
+	s := openTest(t)
+	for _, ref := range []string{"", "   ", "--upload-pack=sh", "feat/../x"} {
+		if err := s.SetSandboxRefs("van", "alpha", []SandboxRef{{Slug: "wandb/hivemind", Ref: ref}}); err == nil {
+			t.Errorf("SetSandboxRefs accepted ref %q", ref)
+		} else if !errors.Is(err, ErrInvalidRepo) {
+			t.Errorf("ref %q: err = %v, want ErrInvalidRepo", ref, err)
+		}
+	}
+}
+
+// A second SetSandboxRefs states the whole answer for that sandbox, so dropping
+// an override is passing a list without it.
+func TestSandboxRefOverrideIsReplacedWholesale(t *testing.T) {
+	s := openTest(t)
+	s.tag(t, "alpha", "van", "web")
+	if err := s.PutRepo("van", Repo{Host: "github.com", Slug: "wandb/hivemind", Ref: "main"}, []string{"web"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSandboxRefs("van", "alpha", []SandboxRef{{Slug: "wandb/hivemind", Ref: "feat/x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSandboxRefs("van", "alpha", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := refFor(t, s, "alpha", "van"); got != "main" {
+		t.Errorf("clearing the overrides left %q behind", got)
+	}
+}
+
+func refFor(t *testing.T, s *Store, sandbox, owner string) string {
+	t.Helper()
+	list, err := s.ReposForSandbox(sandbox, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("ReposForSandbox(%s) = %d repos, want 1", sandbox, len(list))
+	}
+	return list[0].Ref
+}

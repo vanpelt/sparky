@@ -90,8 +90,8 @@ type Options struct {
 		req nodelink.CertificateEnrollRequest,
 	) (nodelink.CertificateEnrollResponse, error)
 
-	// Routes, Schedules, Tags and FrontDoor are the gateway-owned stores keyed
-	// by a sandbox's NAME. They must be the SAME objects host.Options is given:
+	// Routes, Schedules, Tags, RepoRefs and FrontDoor are the gateway-owned
+	// stores keyed by a sandbox's NAME. They must be the SAME objects host.Options is given:
 	// one set of rows per deployment, reached from here only for the sandboxes
 	// the local manager will never be told about. Any of them may be nil, which
 	// is what a unit test's fleet and a deployment with no front door pass.
@@ -99,11 +99,17 @@ type Options struct {
 	// A single-box deployment never uses them — every placement is local, and
 	// the local manager does its own half — so leaving them unwired costs it
 	// nothing. A deployment with a second machine that leaves them unwired
-	// silently strands a remote sandbox's routes, schedules and tags. See
-	// sidestores.go.
+	// silently strands a remote sandbox's routes, schedules, tags and the
+	// branch it was created asking for. See sidestores.go.
+	//
+	// RepoRefs is the one whose absence is not merely untidy: its rows are
+	// keyed by a sandbox name, names are reusable, and a stranded row decides
+	// what the NEXT sandbox of that name checks out. Satisfied structurally by
+	// *repos.Store — see internal/host's RepoRefCleaner for the same argument.
 	Routes    RouteRows
 	Schedules SandboxRows
 	Tags      SandboxRows
+	RepoRefs  SandboxRows
 	FrontDoor host.FrontDoor
 
 	// NodeGrace is how long a machine that has gone quiet still counts as
@@ -272,6 +278,7 @@ func New(opts Options) (*Fleet, error) {
 			routes:    opts.Routes,
 			schedules: opts.Schedules,
 			tags:      opts.Tags,
+			repoRefs:  opts.RepoRefs,
 			frontDoor: opts.FrontDoor,
 		},
 		nodeGrace:      orDuration(opts.NodeGrace, nodelink.DefaultGrace),

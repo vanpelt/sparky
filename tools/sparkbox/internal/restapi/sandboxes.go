@@ -31,6 +31,10 @@ type createRequest struct {
 	Node  string `json:"node,omitempty"`
 	VCPUs int64  `json:"vcpus"`
 	MemMB int64  `json:"mem_mb"`
+	// Refs is the REST form of --ref: which branch THIS sandbox's checkouts
+	// start on, whatever the attachment says. Omit `slug` to mean "the
+	// attachment", which is refused when the tags select more than one.
+	Refs []ctlops.RepoRef `json:"refs,omitempty"`
 }
 
 type resizeRequest struct {
@@ -99,7 +103,10 @@ func (h *Handler) createSandbox(w http.ResponseWriter, r *http.Request) {
 		name = h.ops.GenerateName()
 	}
 	c := caller(r)
-	args := ctlops.CreateArgs{Name: name, Tags: req.Tags, Node: req.Node, VCPUs: req.VCPUs, MemMB: req.MemMB}
+	args := ctlops.CreateArgs{
+		Name: name, Tags: req.Tags, Node: req.Node,
+		VCPUs: req.VCPUs, MemMB: req.MemMB, Refs: req.Refs,
+	}
 	// The chosen machine rides in the job's resource ref. A ref is compared
 	// whole by the job de-duplicator (ctlops.Ops.Go), so two creates of one name
 	// onto two machines would otherwise collapse into a single job and the

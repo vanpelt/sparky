@@ -19,6 +19,10 @@ type snapshotRequest struct {
 type forkRequest struct {
 	Name string   `json:"name"`
 	Tags []string `json:"tags"`
+	// Refs is the REST form of --ref, and a fork is the case it exists for: the
+	// snapshot already holds the checkout, on whatever branch it was captured
+	// on, so this is the only way to ask for a different one.
+	Refs []ctlops.RepoRef `json:"refs,omitempty"`
 }
 
 // bindRequest points a tag at a snapshot. The tag is in the path and the
@@ -82,7 +86,7 @@ func (h *Handler) fork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := caller(r)
-	args := ctlops.ForkArgs{Snapshot: r.PathValue("name"), Name: req.Name, Tags: req.Tags}
+	args := ctlops.ForkArgs{Snapshot: r.PathValue("name"), Name: req.Name, Tags: req.Tags, Refs: req.Refs}
 	// The job's resource is the sandbox being made, not the snapshot being read:
 	// two forks of one template are different work and must not de-duplicate
 	// into each other.

@@ -311,12 +311,19 @@ type CreateArgs struct {
 	Node  string
 	VCPUs int64 // 0 takes the manager default (2)
 	MemMB int64 // 0 takes the manager default (8192)
+	// Refs are the per-instance branch overrides: which branch THIS sandbox's
+	// checkouts start on, whatever the attachment says. Resolved and refused
+	// before any row is written, and written beside the tags for the same
+	// reason they are — the boot that reads the manifest happens once the
+	// sandbox exists, and both have to be true by then. See reporef.go.
+	Refs []RepoRef
 }
 
 type ForkArgs struct {
 	Snapshot string
 	Name     string
-	Tags     []string // same ordering constraint as CreateArgs
+	Tags     []string  // same ordering constraint as CreateArgs
+	Refs     []RepoRef // same as CreateArgs, and the case it exists for
 }
 
 type ScheduleArgs struct {

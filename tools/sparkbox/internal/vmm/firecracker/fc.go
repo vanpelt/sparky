@@ -618,12 +618,22 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 	// CoW-copy the rootfs template. Refuse to fall back to a full 25 GiB copy:
 	// VMStateDir is the hot tier and an incompatible mount is a startup/config
 	// error, not a reason for sandbox creation to become unexpectedly huge.
+	//
+	// Whether this branch is taken is the only honest answer to "is this disk
+	// new", and the guest needs that answer: sparkbox-repos may switch an
+	// inherited checkout onto the branch the manifest asks for on a disk nobody
+	// has logged into yet, and may never do it on one somebody is working in.
+	// Create runs for a cold boot of an EXISTING sandbox too — the manager
+	// re-creates after DropSnapshots and after a restart — so the absence of a
+	// record proves nothing and this stat is what decides.
 	rootfs := filepath.Join(dir, "rootfs.ext4")
+	fresh := false
 	if _, err := os.Stat(rootfs); os.IsNotExist(err) {
 		template := d.templatePath(cfg.Image)
 		if err := reflinkClone(ctx, template, rootfs); err != nil {
 			return nil, err
 		}
+		fresh = true
 	}
 	if !d.opts.DisableHostRootfsMounts {
 		if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
@@ -651,7 +661,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		d.deleteTap(st.idx)
 		return nil, err
 	}
-	if err := d.boot(ctx, cfg.Name, cfg.VCPUs, cfg.MemMB, st, rootfs, nil); err != nil {
+	if err := d.boot(ctx, cfg.Name, cfg.VCPUs, cfg.MemMB, st, rootfs, nil, fresh); err != nil {
 		d.deleteTap(st.idx)
 		return nil, err
 	}
@@ -681,7 +691,49 @@ func (d *Driver) freeSlot() (int, error) {
 
 // boot starts a Firecracker process for the VM; snapshot, when non-nil, is
 // the [memPath, statePath] pair to restore from instead of a cold boot.
-func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *vmState, rootfs string, snapshot []string) error {
+// kernelArgs assembles the guest command line. Extracted from boot so it can
+// be read and tested without a VMM: every value on it is something the host
+// asserts and the guest cannot forge, and three of them (sparkbox_host,
+// systemd.machine_id, sparkbox_fresh) decide what the guest does to its own
+// disk on the way up.
+func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
+	// Static guest networking via kernel arg — no DHCP daemon needed. The ip=
+	// arg is IPv4-only; IPv6 is applied inside the guest by the sparkbox-netcfg
+	// hook (build-rootfs.sh), which reads sparkbox_ip6/sparkbox_gw6 here.
+	kernelArgs := fmt.Sprintf(
+		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s systemd.machine_id=%s",
+		d.guestIP(idx), d.hostIP(idx), name, machineIDFor(name))
+	if d.prefix6 != nil {
+		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
+			d.guestIP6(idx), d.hostIP6(idx))
+	}
+	dnsArg, err := guestDNSArg(d.opts.GuestDNS, d.hostIP(idx))
+	if err != nil {
+		return "", err
+	}
+	kernelArgs += dnsArg
+	// The first boot of a disk that was just copied from a template. Written by
+	// the host and unforgeable by a guest, exactly like sparkbox_host, and read
+	// by sparkbox-repos to decide whether it may ADOPT an inherited checkout —
+	// switch it to the branch the manifest names — rather than merely report that
+	// it is on a different one. That is safe here and nowhere else: nobody has
+	// logged in yet, so there is no work in flight to lose.
+	//
+	// Absent on a resume, on a cold boot of an existing sandbox, and on every
+	// host built before this existed. All three degrade the same way: a guest
+	// that keeps the branch it inherited and says so.
+	if fresh {
+		kernelArgs += " sparkbox_fresh=1"
+	}
+
+	return kernelArgs, nil
+}
+
+// boot starts the VMM for name. fresh says the caller just laid this rootfs
+// down from a template and no guest has ever run on it — see the sparkbox_fresh
+// kernel arg below. It must stay false on every path that reuses a disk,
+// because the guest reads it as permission to move somebody's git checkout.
+func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *vmState, rootfs string, snapshot []string, fresh bool) error {
 	dir := d.vmDir(name)
 	sock := filepath.Join(dir, "fc.sock")
 	if d.jailed() {
@@ -692,21 +744,10 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	}
 	os.Remove(sock) //nolint:errcheck
 
-	// Static guest networking via kernel arg — no DHCP daemon needed. The ip=
-	// arg is IPv4-only; IPv6 is applied inside the guest by the sparkbox-netcfg
-	// hook (build-rootfs.sh), which reads sparkbox_ip6/sparkbox_gw6 here.
-	kernelArgs := fmt.Sprintf(
-		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s systemd.machine_id=%s",
-		d.guestIP(st.idx), d.hostIP(st.idx), name, machineIDFor(name))
-	if d.prefix6 != nil {
-		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
-			d.guestIP6(st.idx), d.hostIP6(st.idx))
-	}
-	dnsArg, err := guestDNSArg(d.opts.GuestDNS, d.hostIP(st.idx))
+	kernelArgs, err := d.kernelArgs(name, st.idx, fresh)
 	if err != nil {
 		return err
 	}
-	kernelArgs += dnsArg
 
 	kernelPath := d.opts.KernelPath
 	drivePath := rootfs
@@ -1015,7 +1056,9 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 	}
 	// Snapshots don't carry vcpu/mem config into NewMachine; they're baked
 	// into the state file. Zero values here are ignored on the restore path.
-	if err := d.boot(ctx, name, 0, 0, st, filepath.Join(dir, "rootfs.ext4"), []string{mem, state}); err != nil {
+	// fresh=false: a resume restores the memory of a guest that already ran on
+	// this disk, so nothing about it is a first boot.
+	if err := d.boot(ctx, name, 0, 0, st, filepath.Join(dir, "rootfs.ext4"), []string{mem, state}, false); err != nil {
 		return nil, err
 	}
 	return d.instance(name, st), nil

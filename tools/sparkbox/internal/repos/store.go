@@ -205,6 +205,17 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			tag     TEXT NOT NULL,
 			PRIMARY KEY (repo_id, tag)
 		);
+
+		CREATE TABLE IF NOT EXISTS sandbox_repo_refs (
+			owner      TEXT NOT NULL,
+			sandbox    TEXT NOT NULL,
+			host       TEXT NOT NULL,
+			slug       TEXT NOT NULL COLLATE NOCASE,
+			ref        TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (owner, sandbox, host, slug)
+		);
+		CREATE INDEX IF NOT EXISTS sandbox_repo_refs_box ON sandbox_repo_refs(owner, sandbox);
 	`); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
@@ -372,6 +383,13 @@ func (s *Store) ListRepos(owner string) ([]Repo, error) {
 // ReposForSandbox returns every attachment of the sandbox's owner that shares a
 // tag with the sandbox — the checkout manifest for that guest.
 //
+// The LEFT JOIN is the per-sandbox ref overlay (SetSandboxRefs): one instance
+// asking for a branch that is not the attachment's. It is the only thing in
+// this store keyed by a sandbox rather than by a tag, because it is the only
+// one that is about an instance rather than about a configuration — see
+// SetSandboxRefs for what that costs. Owner is on both sides of it too, for
+// exactly the reason the paragraph below gives about the tag join.
+//
 // Owner scoping is structural: the join requires bt.owner = r.owner AND
 // r.owner = ?. The first term looks redundant next to the second and is not.
 // Without it, any tag name two people happen to share (ci, prod, dev) joins
@@ -380,10 +398,15 @@ func (s *Store) ListRepos(owner string) ([]Repo, error) {
 // this; it has to be in the SQL.
 func (s *Store) ReposForSandbox(sandbox, owner string) ([]Repo, error) {
 	rows, err := s.db.Query(`
-		SELECT DISTINCT r.id, r.owner, r.host, r.slug, r.ref, r.path, r.access, r.created_at
+		SELECT DISTINCT r.id, r.owner, r.host, r.slug,
+		       COALESCE(NULLIF(o.ref, ''), r.ref) AS ref,
+		       r.path, r.access, r.created_at
 		FROM repos r
 		JOIN repo_tags rt ON r.id = rt.repo_id
 		JOIN sandbox_tags bt ON bt.tag = rt.tag AND bt.owner = r.owner
+		LEFT JOIN sandbox_repo_refs o
+		       ON o.owner = r.owner AND o.sandbox = bt.sandbox
+		      AND o.host = r.host AND o.slug = r.slug
 		WHERE bt.sandbox = ? AND r.owner = ?
 		ORDER BY r.host, r.slug`, sandbox, owner)
 	if err != nil {
@@ -395,6 +418,129 @@ func (s *Store) ReposForSandbox(sandbox, owner string) ([]Repo, error) {
 		return nil, err
 	}
 	return s.attachTags(owner, out, ids)
+}
+
+// SandboxRef is one instance's answer to "which branch, in this box" for one
+// attachment. Host and Slug select the attachment; Ref is what the guest's
+// manifest reports instead of the attachment's own.
+type SandboxRef struct {
+	Host string
+	Slug string
+	Ref  string
+}
+
+// SetSandboxRefs replaces the per-sandbox ref overrides for one sandbox.
+//
+// This is the store's only sandbox-keyed table and the only one that is about
+// an INSTANCE rather than a configuration. A tag says "every box like this
+// checks out hivemind"; this says "this one box, the one somebody just asked
+// for, starts on feat/x". There is no tag that can mean the second thing, and
+// inventing one would leave a tag behind that re-points every future create.
+//
+// The cost of being sandbox-keyed is a lifecycle, and it is not optional:
+// sandbox names are REUSABLE. Destroy `box`, create `box`, and a surviving row
+// silently decides what a different sandbox — possibly created by a different
+// person, if the name was freed — checks out. DeleteBySandbox and
+// RenameSandbox below are what the manager calls, next to the ones it already
+// calls for tags, routes and schedules.
+//
+// Replace-wholesale rather than merge, matching PutRepo's tag set: the caller
+// states the whole answer for this sandbox, so removing an override is passing
+// a list without it.
+func (s *Store) SetSandboxRefs(owner, sandbox string, refs []SandboxRef) error {
+	if owner == "" || sandbox == "" {
+		return fmt.Errorf("%w: a ref override needs an owner and a sandbox", ErrInvalidRepo)
+	}
+	type norm struct{ host, slug, ref string }
+	normed := make([]norm, 0, len(refs))
+	for _, r := range refs {
+		host, err := normHost(r.Host)
+		if err != nil {
+			return err
+		}
+		slug, err := normSlug(r.Slug)
+		if err != nil {
+			return err
+		}
+		ref := strings.TrimSpace(r.Ref)
+		// Unlike an attachment's ref, an empty one here is meaningless rather
+		// than a default: an override that overrides nothing is a row that can
+		// only confuse the next reader. The way to have no override is to not
+		// write one.
+		if ref == "" {
+			return fmt.Errorf("%w: a ref override for %s cannot be empty", ErrInvalidRepo, slug)
+		}
+		if !refRe.MatchString(ref) || strings.Contains(ref, "..") {
+			return fmt.Errorf("%w: ref %q (want a branch or tag name, no leading '-')", ErrInvalidRepo, r.Ref)
+		}
+		normed = append(normed, norm{host, slug, ref})
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM sandbox_repo_refs WHERE owner = ? AND sandbox = ?`, owner, sandbox); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, n := range normed {
+		if _, err := tx.Exec(`
+			INSERT INTO sandbox_repo_refs (owner, sandbox, host, slug, ref, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`, owner, sandbox, n.host, n.slug, n.ref, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// SandboxRefs lists one sandbox's overrides, for display and for the tests that
+// prove the lifecycle below actually runs.
+func (s *Store) SandboxRefs(owner, sandbox string) ([]SandboxRef, error) {
+	rows, err := s.db.Query(`
+		SELECT host, slug, ref FROM sandbox_repo_refs
+		WHERE owner = ? AND sandbox = ? ORDER BY host, slug`, owner, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SandboxRef{}
+	for rows.Next() {
+		var r SandboxRef
+		if err := rows.Scan(&r.Host, &r.Slug, &r.Ref); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteBySandbox drops a destroyed sandbox's overrides. Called from
+// host.Manager.Destroy beside the tag, route and schedule cleanups, and the
+// reason it must be is in SetSandboxRefs: names come back.
+//
+// Owner-free on purpose, exactly like the tag and route cleanups it sits with:
+// the caller is the manager destroying a sandbox by name, one name belongs to
+// one sandbox across the whole host, and requiring an owner here would leave
+// rows behind whenever the manager's idea of the owner and the store's differ.
+func (s *Store) DeleteBySandbox(sandbox string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM sandbox_repo_refs WHERE sandbox = ?`, sandbox)
+	return err
+}
+
+// RenameSandbox moves a sandbox's overrides to its new name so the checkout it
+// asked for survives the rename. Idempotent, like the routes store's, so a
+// crashed move can be re-run.
+func (s *Store) RenameSandbox(old, new string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE sandbox_repo_refs SET sandbox = ? WHERE sandbox = ?`, new, old)
+	return err
 }
 
 // SandboxesForRepo returns which of the owner's sandboxes carry the attachment —
