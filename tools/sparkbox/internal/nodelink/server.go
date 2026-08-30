@@ -966,6 +966,49 @@ func (c *Client) Box(name string) (SandboxRow, bool) {
 	return row, ok
 }
 
+// NoteSnapshot and ForgetSnapshot fold a template this gateway just created or
+// deleted on the node into its cached picture, rather than waiting for the next
+// inventory.
+//
+// Without them a capture succeeds and then does not exist. The cached snapshot
+// set is only ever written wholesale by ingest, which runs when a link comes up
+// or when the gateway asks for a fresh inventory — and nothing asks after a
+// capture. So `snapshot create` reported success while `snapshot ls` stayed
+// empty and `snapshot bind` answered "no snapshot named ..." (masked
+// not-found, which reads as a permissions bug) until the link happened to
+// reconnect. On a deployment where every sandbox is remote, that is every
+// capture there is.
+//
+// Sandbox rows never had this problem: the node streams sandbox.changed and
+// TypeGone for those. Templates have no such event, and the gateway does not
+// need one, because every mutation of a node's template set ORIGINATES here —
+// Fleet.Snapshot and Fleet.DeleteSnapshot are the only two callers, and each
+// already holds the answer it is recording. The gRPC transport has done exactly
+// this since it was written (GRPCControl.putSnapshot / deleteSnapshot); this is
+// the SSH transport catching up, and the asymmetry is why the bug was invisible
+// until a cluster on the SSH transport captured its first template.
+//
+// Capped like the sandbox cache and for the same reason. A refusal is silent
+// here rather than logged loudly: the create itself succeeded and the caller is
+// about to hear so, and the next inventory reconciles it.
+func (c *Client) NoteSnapshot(row SnapshotRow) {
+	if row.Name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.snaps[row.Name]; !known && len(c.snaps) >= MaxSandboxesPerNode {
+		return
+	}
+	c.snaps[row.Name] = row
+}
+
+func (c *Client) ForgetSnapshot(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.snaps, name)
+}
+
 // Snapshot is the node's last known inventory, name-sorted so every listing
 // built from it is stable whatever the map iteration does.
 func (c *Client) Snapshot() ([]SandboxRow, []SnapshotRow) {

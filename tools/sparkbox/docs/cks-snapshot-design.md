@@ -200,6 +200,33 @@ read-only by default and every new thing the controller writes needs its own
 carve-out**, chosen deliberately rather than inherited from a directory that
 already existed.
 
+### 6. A capture has to reach the gateway's cache
+
+Found on the cluster immediately after §5, on the first capture that actually
+completed. `snapshot create` reported success; `snapshot ls` was empty and
+`snapshot bind test1 --tag t1` answered `no snapshot named "test1"` — the masked
+not-found, which reads like a permissions problem rather than a stale cache.
+
+A gateway answers `snapshot ls`, `snapshot bind` and `fork` from each node's
+cached inventory, and that cached template set is only ever written wholesale,
+from an `InventoryMsg` — which arrives when a link comes up and when the gateway
+asks for a fresh one, and nothing asks after a capture. Sandbox rows do not have
+this problem because a node streams `sandbox.changed` and `TypeGone` for them.
+Templates have no such event.
+
+They do not need one. Every mutation of a node's template set ORIGINATES at the
+gateway — `Fleet.Snapshot` and `Fleet.DeleteSnapshot` are the only two callers,
+and each already holds the answer it would be told. So the gateway records what
+it just did: `Client.NoteSnapshot` and `Client.ForgetSnapshot`.
+
+**The gRPC transport had done exactly this since it was written**
+(`GRPCControl.putSnapshot` / `deleteSnapshot`). Only the SSH transport was
+missing it, which is why nothing caught it: the gap is reachable only on a
+deployment using SSH control, and only for a sandbox on another machine — which
+on CKS is every sandbox there is. Two transports implementing one interface will
+drift exactly where only one of them is exercised, and the parity tests in this
+package compare inventories rather than the side effects of verbs.
+
 ## Order of work
 
 1. The gateway-side strip and the packing gate (§4). Needed for archive on any
@@ -207,10 +234,12 @@ already existed.
 2. Guest-side fork identity regeneration and the cmdline machine id (§1, §2).
 3. Drop the refusal (§3).
 4. A writable capture directory (§5).
-5. Prove it on the cluster.
+5. Recording a capture in the gateway's cache (§6).
+6. Prove it on the cluster.
 
-1 and 2 are the work. 3 is a conditional and a deletion. 4 was not foreseen and
-came out of running 1–3 on the cluster.
+1 and 2 are the work. 3 is a conditional and a deletion. 4 and 5 were not
+foreseen: each came out of running the previous ones on the cluster, and each
+was a property of the deployment rather than of the feature.
 
 ## Deliberately deferred
 
