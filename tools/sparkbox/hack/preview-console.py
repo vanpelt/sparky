@@ -219,6 +219,13 @@ def _vitals():
                          _VITALS["mem"] + random.uniform(-42, 40) + util * 34))
     rx, tx = int(_VITALS["rx"]), int(_VITALS["tx"])
     return {
+        # The three constants the page cannot work out for itself: its own
+        # name (the host is <name>-xterm.<zone>, so the first label is not it),
+        # the ssh line, whose advertised port only the server knows, and the
+        # console to link at. The menu hides the rows these are missing from,
+        # so a preview without them would silently be a different menu.
+        "name": "brave-meadow", "ssh": "ssh brave-meadow@catnip.sh",
+        "console": "https://my.catnip.sh/",
         "state": "running", "at_ms": int(now * 1000),
         "vcpus": _V_VCPUS * (2 if _VITALS["turbo"] else 1),
         "mem_mb": _V_MEM_MB * (2 if _VITALS["turbo"] else 1),

@@ -150,7 +150,7 @@ func (s *Server) ListRepos(ctx context.Context, request *nodev1.ListReposRequest
 	for _, repo := range response.Repos {
 		repos = append(repos, &nodev1.RepoAttachment{
 			Host: repo.Host, Slug: repo.Slug, Ref: repo.Ref,
-			Path: repo.Path, Access: repo.Access,
+			Path: repo.Path, Access: repo.Access, Instance: repo.Instance,
 		})
 	}
 	return &nodev1.ListReposResponse{Repos: repos}, nil

@@ -147,19 +147,21 @@ func (h *Handler) render(w http.ResponseWriter, status int, data pageData) {
 	// visitor's own repositories and sandboxes either way. It is not a thing a
 	// shared cache may keep.
 	head.Set("Cache-Control", "no-store")
-	// An honest default-src 'none'. It is honest because this page has no
-	// <script> element at all: the create is a bare form POST, so there is
-	// nothing to allow and no 'unsafe-inline' script exception, and no nonce
-	// machinery. style-src is the one exception, for the inline <style> the
-	// design system is composed into; img-src covers the data: favicon.
-	// base-uri 'none' stops an injected <base> from re-aiming the form's
-	// relative action, and form-action is composed by pageCSP — it cannot be a
-	// bare 'self', for a reason worth reading there before tightening it.
+	// default-src 'none', with three named exceptions and no fourth: style-src
+	// for the inline <style> the design system is composed into, img-src for
+	// this origin and the data: favicon, and script-src naming the sha256 of
+	// progress.js — the one script on the page — and nothing else. No
+	// 'unsafe-inline', no nonce machinery, no host: a script the browser is
+	// willing to run here is a script whose bytes hash to a constant compiled
+	// into this binary. base-uri 'none' stops an injected <base> from re-aiming
+	// the form's relative action, and form-action is composed by pageCSP — it
+	// cannot be a bare 'self', for a reason worth reading there before
+	// tightening it.
 	//
-	// If a future change adds one line of JavaScript to this page, this header
-	// has to be weakened to admit it — which is the point. The zero-JS
-	// constraint is what makes the policy this strict, and the policy is what
-	// makes the constraint visible to whoever tries to relax it.
+	// The create is still a plain form POST that the server re-validates from
+	// the path, the query and the session; progress.js only paints the wait.
+	// Turning it off leaves the page working, which is the property that lets
+	// the policy stay this narrow.
 	head.Set("Content-Security-Policy", h.csp)
 	// The handoff after a create is a top-level navigation to the terminal,
 	// which sets frame-ancestors 'none' itself. This page refuses framing for
@@ -199,11 +201,16 @@ func (h *Handler) render(w http.ResponseWriter, status int, data pageData) {
 //
 // Everything is 'none' except what this page provably needs: an inline <style>
 // block (the design system arrives through webui.Compose, not a stylesheet
-// request), and images from this origin or a data: URI. There is no script-src
-// because default-src 'none' already forbids scripts, and these pages have no
-// <script> element at all — which is the property that lets the policy be this
-// strict, and the policy is what makes that property visible to whoever tries
-// to relax it.
+// request), images from this origin or a data: URI, and exactly one script,
+// admitted by the hash of its bytes.
+//
+// That script-src clause is the narrowest form that admits anything at all. It
+// names no host, so nothing can be fetched; it carries no 'unsafe-inline', so
+// an injected <script> — or an onclick, or a javascript: URL — is refused even
+// though it sits in the same document as the one we wrote; and the digest is
+// computed at package init from the same bytes the template embeds
+// (assets.go), so the two cannot drift apart without the browser noticing
+// first and refusing to run either.
 //
 // form-action is the one directive that cannot be 'self'. A successful create
 // answers 303 to the sandbox's terminal on a DIFFERENT host —
@@ -227,6 +234,7 @@ func pageCSP(domain string) string {
 		formAction += " https://*." + domain
 	}
 	return "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; " +
+		"script-src " + progressJSHash + "; " +
 		"form-action " + formAction + "; base-uri 'none'; frame-ancestors 'none'"
 }
 

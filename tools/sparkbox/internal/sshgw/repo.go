@@ -32,7 +32,6 @@ const repoUsage = "usage: ssh ctl@<gateway> repo ls\r\n" +
 	"       ssh ctl@<gateway> repo add <owner>/<name> [--tag <t>]… [--write] [--ref <r>] [--path <p>]\r\n" +
 	"       ssh ctl@<gateway> repo rm <owner>/<name>\r\n" +
 	"       ssh ctl@<gateway> repo check\r\n" +
-	"       ssh ctl@<gateway> badge <owner>/<name> [--ref <r>]\r\n" +
 	"\r\n" +
 	"an attachment is carried by a tag: every sandbox of yours with that tag clones\r\n" +
 	"the repo at boot, before you get there. with no --tag it goes on `default`,\r\n" +
@@ -54,17 +53,12 @@ const repoUsage = "usage: ssh ctl@<gateway> repo ls\r\n" +
 	"  ssh ctl@<gateway> repo add wandb/hivemind --tag hm\r\n" +
 	"  ssh ctl@<gateway> repo check\r\n" +
 	"\r\n" +
-	// `badge` is documented on this page rather than on one of its own because
-	// a badge is a thing about an attached repository, and because the help
-	// index is already tuned to the column (see helpVerbWidth) — a tenth topic
-	// row would push it past 80. The bare-verb example line below is also
-	// load-bearing: TestControlUsageListsEveryCommand looks for "  badge" with
-	// two spaces, which the indented synopsis line above does not provide.
-	"a badge is a button to paste into a pull request. whoever clicks it signs in\r\n" +
-	"and lands in a sandbox of their own with this repo checked out — one per\r\n" +
-	"person, never yours, and the branch is whichever one you named here.\r\n" +
-	"\r\n" +
-	"  badge wandb/hivemind --ref feat/x   a button to paste into a PR comment\r\n"
+	// One line about `badge`, and a pointer. It used to be documented at
+	// length right here — the argument being that a badge is a thing about an
+	// attached repository — and the cost was that every mistyped `badge`
+	// printed this whole page: the fork examples, the ref rules, the sync
+	// prose, none of it about the button. It has its own page now.
+	"to hand this repo to somebody as a one-click sandbox, see `help badge`.\r\n"
 
 // controlRepo serves `ctl repo …`.
 func (g *Gateway) controlRepo(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {

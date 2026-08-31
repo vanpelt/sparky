@@ -1,6 +1,8 @@
 package launch
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"flag"
 	"net/http"
 	"net/url"
@@ -197,7 +199,7 @@ func TestConfirmPageRenders(t *testing.T) {
 		// The other repository those tags drag in.
 		"wandb/notebooks",
 		// One form, no fields, posting back to this same door.
-		`<form method="post" action="/wandb/hivemind?ref=feat%2Fx">`,
+		`<form method="post" action="/wandb/hivemind?ref=feat%2Fx" data-busy="Creating…">`,
 		"Create a sandbox",
 		// The sentence about running a branch somebody else chose.
 		"chose the branch",
@@ -214,7 +216,7 @@ func TestConfirmPageRenders(t *testing.T) {
 	if strings.Contains(body, "<input") {
 		t.Error("the form grew a field; the server re-parses the path and query and needs nothing from the body")
 	}
-	assertZeroScript(t, body)
+	assertOneScript(t, body)
 	assertPageHeaders(t, rec.Header())
 
 	if *updateGolden {
@@ -291,7 +293,7 @@ func TestNotAttachedPageTeaches(t *testing.T) {
 	if strings.Contains(body, "<form") || strings.Contains(body, "<button") {
 		t.Error("the not-attached page offers a create button; it would build a sandbox with an empty working tree")
 	}
-	assertZeroScript(t, body)
+	assertOneScript(t, body)
 	assertPageHeaders(t, rec.Header())
 }
 
@@ -331,7 +333,7 @@ func TestUntaggedAttachmentRefusesRatherThanBuildingAnEmptyBox(t *testing.T) {
 	if want := "ssh ctl@example.test repo add " + testSlug + " --tag &lt;t&gt;"; !strings.Contains(body, want) {
 		t.Errorf("the page does not carry the tagging command %q", want)
 	}
-	assertZeroScript(t, body)
+	assertOneScript(t, body)
 	assertPageHeaders(t, rec.Header())
 }
 
@@ -430,7 +432,7 @@ func TestPageIsSelfContained(t *testing.T) {
 			t.Errorf("the page pulls in %q; default-src 'none' would block it and the page would render bare", banned)
 		}
 	}
-	assertZeroScript(t, body)
+	assertOneScript(t, body)
 }
 
 // TestNotFoundIsPlainAndUngated: a path that is not a repository is not a thing
@@ -509,19 +511,50 @@ func TestHomeRedirectsToTheConsole(t *testing.T) {
 	}
 }
 
-// assertZeroScript is the invariant the whole design rests on.
+// assertOneScript is the invariant the whole design rests on.
 //
-// No <script> element means default-src 'none' is an honest policy rather than
-// a decorative one, and it means the create is a form the server re-validates
-// rather than a fetch with a 401/CORS hazard class behind it. If this ever
-// fails, the Content-Security-Policy in page.go has to be weakened to match —
-// which is the conversation this assertion is here to force.
-func assertZeroScript(t *testing.T, body string) {
+// The page carries exactly one script — progress.js, inline — and the policy
+// admits it by the sha256 of its bytes and by nothing else. That is what keeps
+// `default-src 'none'` an honest statement rather than a decorative one: an
+// injected <script>, an onclick, a javascript: URL and a second file all remain
+// refused by the browser, because none of them hash to the one digest in the
+// header.
+//
+// So this asserts the three halves of that claim together — one element, no
+// remote source, no inline-handler surface — and then does the arithmetic the
+// browser will do, over the body as it was actually rendered. A template edit
+// that so much as reindents the script breaks the digest, and this is where
+// that is discovered rather than on a stranger's first click.
+func assertOneScript(t *testing.T, body string) {
 	t.Helper()
-	for _, banned := range []string{"<script", "javascript:", "onclick=", "onload=", "onsubmit="} {
-		if strings.Contains(strings.ToLower(body), banned) {
-			t.Errorf("the page contains %q; the zero-JavaScript rule is what makes default-src 'none' honest", banned)
+	lower := strings.ToLower(body)
+	if n := strings.Count(lower, "<script"); n != 1 {
+		t.Errorf("the page has %d <script> elements; the policy admits exactly one, by hash", n)
+		return
+	}
+	// Every way of running code that a hash cannot cover. An attribute handler
+	// and a javascript: URL are governed by 'unsafe-inline' and 'unsafe-hashes',
+	// neither of which this policy grants, so any of these would silently not
+	// run — and a page whose behaviour depends on something the CSP refuses is
+	// worse than one with no behaviour at all.
+	for _, banned := range []string{"javascript:", "onclick=", "onload=", "onsubmit=", "onerror=", "<script src", "<script  src"} {
+		if strings.Contains(lower, banned) {
+			t.Errorf("the page contains %q, which this Content-Security-Policy does not admit", banned)
 		}
+	}
+
+	inline, err := inlineScript([]byte(body))
+	if err != nil {
+		t.Fatalf("the page's script: %v", err)
+	}
+	sum := sha256.Sum256(inline)
+	want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	if want != progressJSHash {
+		t.Errorf("the rendered script hashes to %s, but the policy admits %s — the browser would refuse to run it",
+			want, progressJSHash)
+	}
+	if !strings.Contains(pageCSP("example.test"), "script-src "+progressJSHash+";") {
+		t.Errorf("the policy does not admit the page's own script: %s", pageCSP("example.test"))
 	}
 }
 
@@ -551,8 +584,21 @@ func assertPageHeaders(t *testing.T, head http.Header) {
 	if !strings.HasPrefix(policy, "default-src 'none'") {
 		t.Error("the policy no longer starts from default-src 'none'")
 	}
-	if strings.Contains(policy, "script-src") {
-		t.Error("a script-src clause appeared; this page has no scripts, so the honest policy names none")
+	// The one script clause, in the only form that is narrower than nothing at
+	// all: a digest, with no host and no 'unsafe-inline' beside it. Both of
+	// those would admit an injected script as readily as our own.
+	if !strings.Contains(policy, "script-src 'sha256-") {
+		t.Error("script-src no longer admits the page's script by hash")
+	}
+	// Read against the script-src clause alone: style-src legitimately carries
+	// 'unsafe-inline' for the composed <style>, and a substring search over the
+	// whole policy would call that a script hazard.
+	scriptSrc := policy[strings.Index(policy, "script-src "):]
+	scriptSrc = scriptSrc[:strings.Index(scriptSrc, ";")]
+	for _, loose := range []string{"'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'", "'self'", "*", "https:"} {
+		if strings.Contains(scriptSrc, loose) {
+			t.Errorf("script-src grew %q (%q); the hash alone is what makes default-src 'none' honest", loose, scriptSrc)
+		}
 	}
 	// form-action has to reach the terminal host a successful create redirects
 	// to. Firefox applies this directive to every hop of the redirect chain, so

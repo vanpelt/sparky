@@ -26,9 +26,12 @@
      the same product as my.<domain> and the terminal they are about to land
      in, so the tokens, the card, the pill and the button all come from above.
 
-     There is no <script> anywhere on this page, which is what lets the
-     Content-Security-Policy the handler sets be an honest `default-src 'none'`
-     — see page.go. Nothing here may grow one. */
+     There is exactly ONE <script> on this page — progress.js, substituted in
+     at the bottom of the body — and the Content-Security-Policy admits it by
+     the sha256 of its bytes and nothing else: no 'unsafe-inline', no nonce, no
+     host. See page.go. A second script, or an inline handler on any element
+     here, would need that policy weakened to something that also admits
+     whatever a future injection puts on the page, so neither may be added. */
   body { display: grid; place-items: start center; padding: 40px 20px 64px; min-height: 100%; }
   .wrap { width: 100%; max-width: 620px; }
 
@@ -153,6 +156,37 @@
 
   .foot { margin: 18px 2px 0; font-size: 12px; color: hsl(var(--muted-foreground)); }
   .foot code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* ---------- the busy state ----------
+     What the page looks like between pressing the button and landing in a
+     terminal, which is up to fifteen seconds of a VM being built. progress.js
+     puts `creating` on the body; everything below is what that means. The
+     rules are written so that a page with no JavaScript is the page we had
+     before — the spinner and the note are hidden by default and nothing
+     reveals them but that class. */
+  .busy { display: none; }
+  body.creating .busy { display: inline-flex; align-items: center; gap: 8px; }
+  /* The alternative note ("or open one you already have") is about a choice
+     that is no longer open once the create is running. */
+  body.creating .note:not(.busy) { display: none; }
+  body.creating form button, body.creating a.btn-outline { pointer-events: none; }
+  body.creating a.btn-outline { opacity: .45; }
+  body.creating form button { opacity: .9; }
+  /* One spinner, in the button, drawn in currentColor so it inherits the
+     primary foreground it sits on. The note below says the same thing in words
+     and does not need a second one — two spinners on one row read as two things
+     happening. */
+  body.creating form button::before {
+    content: ""; width: 12px; height: 12px; margin-right: 8px; flex: none;
+    border: 2px solid currentColor; border-top-color: transparent;
+    border-radius: 999px; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* A spinner is motion for its own sake, and this page also says what is
+     happening in words. Somebody who asked for less of it keeps the words. */
+  @media (prefers-reduced-motion: reduce) {
+    body.creating form button::before { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -197,12 +231,13 @@
     {{if or .Action .Home}}
     <div class="actions">
       {{if .Action}}
-      <form method="post" action="{{.Action}}">
+      <form method="post" action="{{.Action}}" data-busy="Creating…">
         <button class="btn-primary" type="submit">{{.Submit}}</button>
       </form>
       {{end}}
       {{if .Home}}<a class="btn-outline" href="{{.Home}}">Your sandboxes</a>{{end}}
       {{if .ActionNote}}<span class="note">{{.ActionNote}}</span>{{end}}
+      {{if .Action}}<span class="note busy">Building your sandbox — this takes a few seconds. Keep this tab open.</span>{{end}}
     </div>
     {{end}}
   </div>
@@ -223,5 +258,12 @@
 
   <p class="foot">{{.Foot}}</p>
 </main>
+<!-- The one script on this page, substituted in from progress.js at package
+     init (assets.go) and admitted by the sha256 in the Content-Security-Policy
+     that page.go writes. The marker is replaced with the file's exact bytes, so
+     the digest in the header and the bytes in this element cannot drift apart
+     without the browser refusing to run it — which is the property that keeps
+     `default-src 'none'` honest now that the page is no longer script-free. -->
+<script>/*PAGE_JS*/</script>
 </body>
 </html>

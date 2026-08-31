@@ -160,11 +160,43 @@ nothing in them was stripped.
 | `<a href="…?a=1&b=2">` | kept; `&` escaped to `&amp;`; `rel="nofollow"` added | query strings are safe in a comment. We still keep the repository in the path (Part 1) — the sanitizer protects the *rendered* link, not the person retyping it |
 | `<img align="right" height="28" width="124">` | `align`, `height` and `width` all kept | `height` is the one we use. `style` is **not** on the allowlist, which is why the badge carries its own appearance inside the SVG |
 | `<div align="right">…</div>` | kept; the button becomes a block that STACKS above whatever follows | the shape we do **not** use. It costs the button a line of its own and puts it above the heading rather than beside it |
+| `<a target="_blank" rel="noopener">` | **both stripped**; the sanitizer then adds its own `rel="nofollow"` | the badge cannot open a new tab. See below — this one is asked often enough to be worth writing down |
 | `align="right"` on the `<img>` itself | kept; floats the image, so following content flows up beside it | **this is the shape we emit.** Paste it as the first thing in the comment and the button lands in the top-right corner with the heading beside it — the placement a reader's eye already goes to |
 | `<picture><source media="(prefers-color-scheme: dark)" …><img …></picture>` | kept, wrapped in GitHub's `<themed-picture>` | a dark-mode variant demonstrably works. Declined — see below |
 | every `src` | rewritten to `https://camo.githubusercontent.com/<sha256>/<hex of the url>` | decisive; see the next two sections |
 | a bare `<img>` with **both** `width` and `height` | GitHub injects `max-width:100%; height:auto; max-height:<h>px; aspect-ratio:<w>/<h>; background-color: var(--bgColor-muted); border-radius:6px` | the ratio is computed from the *declared attributes*, not from the image |
 | a bare `<img>` with **`height` only** | GitHub injects `max-width:100%; height:auto; max-height:<h>px` — and nothing else | **this is the form we emit.** No `aspect-ratio` is injected, so the badge's own intrinsic ratio governs and it cannot be letterboxed |
+
+### The badge cannot open a new tab, and nothing can change that
+
+Re-verified against GitHub's `POST /markdown` on 2026-08-30:
+
+```
+in:  <a href="https://example.com" target="_blank" rel="noopener"><img …></a>
+out: <a href="https://example.com" rel="nofollow"><img …></a>
+```
+
+`target` is dropped and the author's `rel` is replaced with GitHub's own. So a
+click navigates the tab the reader is in, away from the pull request, and no
+spelling of the markdown changes that — it is the sanitizer, not the renderer,
+and it is applied to every comment on the site.
+
+Three workarounds were considered and all three are worse:
+
+- **A landing page that calls `window.open`.** Popup blockers require a user
+  gesture in the *same* task; a script running after a navigation has none, so
+  this is blocked in Chrome and Safari — silently, which is the worst kind.
+- **`target="_blank"` on the confirm page's own form** (that one survives, it is
+  our HTML). It would leave a stale confirm page in the original tab and does
+  nothing at all for the fast path, which is a 303 on the GET with no form in
+  it.
+- **A `javascript:` or intermediate-redirect trick.** Refused by the same
+  sanitizer, and by this door's `default-src 'none'`.
+
+What is true and worth telling people: **Back returns to the pull request in one
+press.** The GET redirect and the POST redirect are both 303s, which replace
+rather than stack, so there is no redirect loop to fight through. `⌘`/`ctrl`- or
+middle-clicking the badge opens a new tab the way it does for any link.
 
 ### Camo is why the badge is one invariant image
 
@@ -334,11 +366,30 @@ any kind — under the handle from the verified session, never from the URL:
 all. This is the repeat click, the one that happens fifty times a day: a cookie
 check, three reads, one header.
 
-**Step 4b, no match — the confirm page.** 200, server-rendered, and **zero
-`<script>` elements**, which is what lets it send an honest
+**Step 4b, no match — the confirm page.** 200, server-rendered, and **exactly
+one `<script>`** — `internal/launch/progress.js`, inline — admitted by the
+sha256 of its bytes and by nothing else:
 `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:;
-form-action 'self'; base-uri 'none'; frame-ancestors 'none'` next to `no-store`,
-`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `nosniff`. It names
+script-src 'sha256-…'; form-action 'self' https://*.<domain>; base-uri 'none';
+frame-ancestors 'none'`, next to `no-store`, `X-Frame-Options: DENY`,
+`Referrer-Policy: same-origin` and `nosniff`.
+
+The digest is computed at package init from the **rendered** page, not from the
+file on disk, and that is load-bearing: `html/template` lexes a `<script>`
+element as JavaScript and strips its comments on the way out, so the bytes a
+browser hashes are never the bytes in the source file for any script carrying a
+comment. Hashing the file yields a policy that is right about the intent and
+wrong about the document, and the failure mode is the whole script silently not
+running in production while every test passes.
+
+`Referrer-Policy` is `same-origin` and **not** `no-referrer`, which looks like
+the weaker choice and is the only working one: under `no-referrer` a browser
+serializes the `Origin` of this page's own same-origin form POST as the literal
+`null`, which the first-party check refuses — so the button would 403 every
+time, in real browsers only, where a test that sets `Origin` by hand can never
+see it.
+
+It names
 the repository under the casing its owner attached it with, the branch (or "its
 default branch"), the exact tag set, the also-clones inventory, the sentence
 about running a stranger's branch, and "Your sandboxes on this repository" —
@@ -347,10 +398,20 @@ every near miss, with its branch and state, each one a link to its own terminal.
 The create control is a bare form with no fields and no hidden inputs:
 
 ```html
-<form method="post" action="/wandb/hivemind?ref=feat/x">
+<form method="post" action="/wandb/hivemind?ref=feat/x" data-busy="Creating…">
   <button type="submit">Create a sandbox</button>
 </form>
 ```
+
+`progress.js` is the whole reason there is any script here. The create behind
+that button takes up to fifteen seconds and a plain form POST paints nothing
+while it runs — the page simply sits there, and what people do with a page that
+sits there is press the button again. On submit it puts `creating` on the
+`<body>`, which spins the button, relabels it, and reveals "Building your
+sandbox — this takes a few seconds. Keep this tab open." It never calls
+`preventDefault` on the first submit: with JavaScript off the form posts exactly
+as it did before and only the spinner is lost. It is the presentational half of
+the same fix `singleflight` is the server half of.
 
 **Step 5, the POST.** Gated by `edgeauth.Require` *wrapping* a launch-local
 first-party check, in that order — so an expired session is a sign-in bounce and
@@ -380,7 +441,42 @@ Then, collapsed by `singleflight` on `handle \0 lower(slug) \0 ref`:
 The whole create is synchronous and capped at 15 seconds by `Ops.Create` itself.
 
 **Step 6, the handoff.** The browser lands on `<name>-xterm.<domain>`, same
-zone, same cookie, no second sign-in. The launch package calls nothing else: the
+zone, same cookie, no second sign-in — and **in the checkout the link named**.
+The clone worker publishes that path to `/run/sparkbox/repos.dir` and
+`/etc/profile.d/50-sparkbox-repo.sh` cds a login shell into it, guarded on the
+shell being interactive (`case $- in *i*)`, never `[ -n "$PS1" ]` — dash sets a
+PS1 in every shell it starts), on starting in `$HOME`, and on the path being a
+directory under that home (`SPARKBOX_NO_REPO_CD=1` opts out).
+
+Which checkout, when the box holds several, is decided by the manifest's
+`instance` flag rather than by counting. The gateway sets it on the attachment
+this sandbox carries a **ref override** for — the row `--ref` writes, which a
+launch link produces whenever the URL or the attachment names a branch. That is
+the only asymmetry in the data worth reading: two repositories both riding `hm`
+are both wanted, in an order that means nothing, but naming a branch is a person
+saying what they came to work on. Failing a mark, one checkout is still its own
+answer. Failing both — several unmarked, or several marked — there is no answer
+and the login stays in `$HOME`, because a shell that opens in the wrong
+repository is worse than one in `$HOME`: every agent started from it inherits
+that directory, and it looks deliberate.
+
+The banner ends with the same directory the shell started in, or names the
+parent the checkouts share, or points at the problem — a path is no use for a
+clone that failed:
+
+```
+repos: 1 ready in ~/hivemind
+repos: 2 ready in ~/src/wandb/hivemind      the launch link's repository
+repos: 3 ready in ~/src
+repos: 2 ready, 1 failed — run `sparkbox repos`
+```
+
+The gap this leaves: a launch link with no `?ref=` on a repository whose
+attachment pins no ref writes no override row, so nothing is marked and a
+multi-repo box lands in `$HOME`. Closing it needs either a GitHub App call on
+the click path to learn the default branch, or a per-sandbox "primary repo" of
+its own — the same call `docs/github-repos-design.md` declines to make for the
+reuse-matching residual. The launch package calls nothing else: the
 terminal's own WebSocket owns the boot, under a 15-minute budget that covers a
 cold start and even an archive restore, and it renders progress while it waits.
 Blocking a browser on the resume here instead would die behind a proxy's idle

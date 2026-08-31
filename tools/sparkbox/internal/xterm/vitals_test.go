@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -300,5 +301,89 @@ func TestVitalsSurviveAMachineThatIsNotAnswering(t *testing.T) {
 	// draw the empty instrument at the right scale.
 	if got["vcpus"] != float64(4) || got["mem_mb"] != float64(8192) {
 		t.Errorf("ceilings = %v/%v, want the record's 4/8192", got["vcpus"], got["mem_mb"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What the page cannot work out for itself
+// ---------------------------------------------------------------------------
+
+// The name, the ssh line and the console link ride this poll because the page
+// has no other way to learn any of them.
+//
+// The name is the one that was actually wrong: the host is
+// `<name>-<subdomain>.<zone>` — one label — so the page's
+// `hostname.split(".")[0]` yields "demo-xterm", which is what its header and
+// its turbo dialog used to say. The subdomain is configurable, so there is no
+// suffix a page can safely strip either, which is why this is a field and not a
+// client-side fix.
+func TestVitalsCarriesTheNameSSHAndConsole(t *testing.T) {
+	hz := newHarness(t, runningBox("demo", "alice"))
+	hz.h.sshCommand = sshCommand("catnip.sh", 22)
+	hz.h.consoleURL = "https://my.catnip.sh/"
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	for field, want := range map[string]any{
+		"name":    "demo",
+		"ssh":     "ssh demo@catnip.sh",
+		"console": "https://my.catnip.sh/",
+	} {
+		if got := m[field]; got != want {
+			t.Errorf("%s = %v, want %v", field, got, want)
+		}
+	}
+	if got, _ := m["name"].(string); strings.Contains(got, "-xterm") {
+		t.Errorf("name = %q — that is the host label, not the sandbox", got)
+	}
+}
+
+// A host that advertises no SSH endpoint and runs no console omits both fields
+// rather than sending empty strings. The page keys its menu rows off their
+// presence, so an empty string would render "Copy the ssh command" over a blank
+// line and a link to nowhere.
+func TestVitalsOmitsWhatThisHostDoesNotHave(t *testing.T) {
+	hz := newHarness(t, runningBox("demo", "alice"))
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	for _, field := range []string{"ssh", "console"} {
+		if _, present := m[field]; present {
+			t.Errorf("%s was sent as %v on a host that has none", field, m[field])
+		}
+	}
+	// The name is not optional: every host knows it.
+	if m["name"] != "demo" {
+		t.Errorf("name = %v, want demo", m["name"])
+	}
+}
+
+// The command has to be the one a person can paste. That means the ADVERTISED
+// port — the one an edge DNAT sends to the gateway, not the one it binds — and
+// no `-p` at all when it is the port ssh would have used anyway.
+func TestSSHCommandSpellsTheAdvertisedEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{"the default port is left unsaid", "catnip.sh", 22, "ssh demo@catnip.sh"},
+		{"an unparsed port is not a port to type", "catnip.sh", 0, "ssh demo@catnip.sh"},
+		{"anything else is spelled out", "catnip.sh", 2222, "ssh -p 2222 demo@catnip.sh"},
+		{"a gateway on its own hostname", "gw.catnip.sh", 22, "ssh demo@gw.catnip.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := sshCommand(tc.host, tc.port)
+			if cmd == nil {
+				t.Fatal("no command for a configured host")
+			}
+			if got := cmd("demo"); got != tc.want {
+				t.Errorf("= %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// No host is not a command with a hole in it. A `ssh demo@` line pasted
+	// into a terminal is worse than no row at all.
+	if sshCommand("", 22) != nil {
+		t.Error("a host with no advertised SSH endpoint still produced a command")
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	xssh "golang.org/x/crypto/ssh"
@@ -135,6 +136,23 @@ type Config struct {
 	// the URL it asked for. Empty turns the redirect into a plain 401.
 	LoginURL string
 
+	// SSHHost and SSHPort are what the page's "copy the ssh command" row
+	// spells, and they are the ADVERTISED pair — the hostname and port a person
+	// types, which on a host with an edge DNAT is not the address the gateway
+	// binds. main already computes both for the login page and the ctl channel;
+	// they are threaded here rather than recomposed so all three surfaces
+	// cannot disagree about what to tell somebody to type.
+	//
+	// Empty SSHHost drops the row rather than printing a command that would
+	// resolve to somebody else's machine. Port 0 or 22 prints no -p.
+	SSHHost string
+	SSHPort int
+	// ConsoleURL is the user console this sandbox's owner came from, linked
+	// from the page's menu. Empty renders no link — a host with no console has
+	// no hostname to guess, and the launch door treats the same emptiness the
+	// same way.
+	ConsoleURL string
+
 	// Track registers a live terminal with the SSH gateway's session registry
 	// and returns the unregister func — *sshgw.Gateway's tracker, passed as a
 	// function so neither package imports the other. Nil skips registration,
@@ -167,6 +185,11 @@ type Handler struct {
 	domain    string
 	subdomain string
 	loginURL  string
+	// sshCommand is the whole `ssh …` line, composed once in New rather than
+	// per request: it is a function of configuration and the sandbox name, and
+	// the name is the only half that varies.
+	sshCommand func(sandbox string) string
+	consoleURL string
 
 	track func(sandbox string, s SessionConn, isPTY bool) func()
 	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -200,13 +223,15 @@ func New(cfg Config) *Handler {
 	h := &Handler{
 		mgr: cfg.Sandboxes, accounts: cfg.Accounts, sessions: cfg.Sessions,
 		upstreamKey: cfg.UpstreamKey, vitalsOf: cfg.Vitals, turbocharger: cfg.Turbo,
-		probe:     webui.Probe{Node: cfg.Node},
-		domain:    strings.ToLower(strings.Trim(cfg.Domain, ".")),
-		subdomain: strings.ToLower(sub),
-		loginURL:  cfg.LoginURL,
-		track:     cfg.Track,
-		dial:      cfg.Dial,
-		log:       cfg.Log,
+		probe:      webui.Probe{Node: cfg.Node},
+		domain:     strings.ToLower(strings.Trim(cfg.Domain, ".")),
+		subdomain:  strings.ToLower(sub),
+		loginURL:   cfg.LoginURL,
+		sshCommand: sshCommand(cfg.SSHHost, cfg.SSHPort),
+		consoleURL: cfg.ConsoleURL,
+		track:      cfg.Track,
+		dial:       cfg.Dial,
+		log:        cfg.Log,
 	}
 	h.open = h.dialPTY
 
@@ -237,6 +262,29 @@ func (h *Handler) Handler() http.Handler { return h }
 // the collision warnings in main quote the handler rather than a second copy of
 // the string.
 func (h *Handler) Subdomain() string { return h.subdomain }
+
+// sshCommand builds the `ssh …` line for a sandbox name, or nil when this host
+// advertises no SSH endpoint to put in one.
+//
+// A closure over the configuration rather than a method taking three arguments,
+// so the "is there anything to show" question is answered once, at startup, and
+// the page's data path is a nil check.
+//
+// The port is omitted at 22 and at 0. Printing `-p 22` is not wrong, but this
+// string exists to be pasted into a terminal by somebody who has never used
+// this host, and every token in it that does not have to be there is one more
+// thing to wonder about. 0 means main could not parse a listen address, which
+// is a fact about the process and not a port anybody should type.
+func sshCommand(host string, port int) func(string) string {
+	if host == "" {
+		return nil
+	}
+	prefix := "ssh "
+	if port != 0 && port != 22 {
+		prefix = "ssh -p " + strconv.Itoa(port) + " "
+	}
+	return func(sandbox string) string { return prefix + sandbox + "@" + host }
+}
 
 // SandboxName reads the target sandbox out of a request host.
 //

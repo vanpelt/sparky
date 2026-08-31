@@ -184,7 +184,60 @@
   header .btn-outline:hover:not(:disabled) { background: hsl(var(--muted)); }
   header .btn-ghost { border-color: transparent; color: hsl(var(--muted-foreground)); }
   header .btn-ghost:hover:not(:disabled) { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
-  @media (max-width: 560px) { .hide-sm { display: none } }
+
+  /* ---------- menu ----------
+     One button on the bar, a card under it. The panel is positioned against
+     the button rather than the header so it stays glued to it at every width,
+     and it is the only thing on this page allowed a shadow — it is the only
+     thing that floats. */
+  .menu { position: relative; display: inline-flex; flex: none; }
+  .menu-btn { padding: 5px 7px; }
+  .menu-btn svg { width: 17px; height: 17px; display: block; }
+  .menu.open .menu-btn { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+  .menu-panel {
+    position: absolute; top: calc(100% + 7px); right: 0; z-index: 30;
+    width: 300px; max-width: calc(100vw - 16px); padding: 5px;
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    box-shadow: 0 16px 38px -14px hsl(240 10% 3.9% / .5);
+    /* visibility rather than display, so the panel can transition — and so it
+       leaves the tab order while closed, which `opacity: 0` alone would not
+       do. The delayed visibility on the way out is what lets the fade finish
+       before the panel is taken away. */
+    opacity: 0; visibility: hidden; transform: translateY(-4px);
+    transition: opacity .12s ease, transform .12s ease, visibility 0s linear .12s;
+  }
+  .menu.open .menu-panel {
+    opacity: 1; visibility: visible; transform: none;
+    transition: opacity .12s ease, transform .12s ease;
+  }
+  /* Items are two lines: what it does, and what that means. The second line is
+     the whole reason these moved out of the bar — a 44px strip had room for
+     "Clear" and no room at all to say that it clears the window and not the
+     sandbox. */
+  .menu-item, .menu-row {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    padding: 7px 9px; border-radius: calc(var(--radius) - 3px);
+    background: transparent; border: 1px solid transparent;
+    color: hsl(var(--foreground)); font-size: 13px; text-decoration: none;
+  }
+  .menu-item:hover:not(:disabled), .menu-item:focus-visible { background: hsl(var(--muted)); }
+  .menu-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+  .menu-label { font-weight: 500; line-height: 1.25; }
+  .menu-sub { font-size: 11.5px; line-height: 1.35; color: hsl(var(--muted-foreground)); }
+  /* The one line that must not wrap, and the only one clipped: a command broken
+     over two lines reads as two commands. The sentences under the other items
+     wrap instead, because a sentence cut off at "Nothing in the sandbox c…" is
+     worse than a sentence on two lines. */
+  #ssh-cmd { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .menu-icon { width: 14px; height: 14px; flex: none; color: hsl(var(--muted-foreground)); }
+  .menu-item:hover .menu-icon { color: hsl(var(--foreground)); }
+  .menu-sep { height: 1px; margin: 5px 8px; background: hsl(var(--border)); }
+  /* The copied line flashes its own row rather than only raising a toast: the
+     pointer is already there, and a toast at the bottom of a full-screen
+     terminal is a long way from the thing you just clicked. */
+  #ssh-btn.copied { background: hsl(var(--green) / .14); }
+  #ssh-btn.copied .menu-icon { color: hsl(var(--green)); }
 
   /* ---------- terminal ---------- */
   #screen { position: relative; min-height: 0; background: hsl(var(--background)); }
@@ -313,17 +366,103 @@
     <span class="status" id="status" data-state="connecting" role="status" title="Connecting">
       <span class="dot"></span><span class="sr-only" id="status-text">connecting</span>
     </span>
-    <!-- The turbo switch, hidden until GET /vitals says this host will accept
-         one. Its lamp is painted from that same poll rather than from what this
-         page last did, so it goes dark when the idle reaper hands the borrowed
-         resources back — which is a thing that happens to the sandbox, not a
-         thing the page did. -->
-    <span class="tip hidden" id="turbo-tip" data-tip="Turbo — 2× resources">
-      <button class="turbo hide-sm" id="turbo-btn" data-on="0" aria-pressed="false"
-        aria-label="Turn on turbo: restart this sandbox with double the CPU and RAM"><span class="led"></span>Turbo</button>
-    </span>
-    <button class="btn-ghost hide-sm" id="clear-btn" title="Clear the scrollback">Clear</button>
-    <button class="btn-outline" id="reconnect-btn">Reconnect</button>
+    <!-- Everything you can DO to this sandbox, behind one button.
+         The bar used to carry three controls in a row — a turbo switch, Clear
+         and Reconnect — which spent a third of a 44px bar on things nobody
+         presses in a normal session, hid two of them on a phone (`hide-sm`),
+         and put "Reconnect" in permanent view of a terminal that was
+         connected. A menu holds all of it at any width, has room to say what
+         each item does, and lets the item that is about the connection change
+         its wording with the connection. -->
+    <div class="menu" id="menu">
+      <!-- A disclosure, not an ARIA `menu`. The menu role comes with a keyboard
+           contract — arrow keys move between items, Home and End jump the ends,
+           and Tab leaves the whole widget — and a panel that claims the role
+           without implementing it is worse for a screen-reader user than one
+           that never claimed it: it promises keys that do nothing. This is
+           `aria-expanded` over a plain group of buttons and one link, which Tab
+           already walks correctly. -->
+      <button class="btn-ghost menu-btn" id="menu-btn" aria-expanded="false"
+        aria-controls="menu-panel" aria-label="Sandbox menu" title="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
+          <path d="M3 6h18M3 12h18M3 18h18"/>
+        </svg>
+      </button>
+      <div class="menu-panel" id="menu-panel" aria-label="Sandbox menu">
+        <!-- The ssh line first: it is the one item that is information as much
+             as it is an action, and it is what somebody opening this menu for
+             the first time is most often after. The command is rendered in
+             full rather than described, so it can be read without being
+             copied. -->
+        <button class="menu-item hidden" id="ssh-btn">
+          <span class="menu-lines">
+            <span class="menu-label">Copy the ssh command</span>
+            <span class="menu-sub mono" id="ssh-cmd">&nbsp;</span>
+          </span>
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="9" y="9" width="12" height="12" rx="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+        </button>
+
+        <div class="menu-sep"></div>
+
+        <!-- The turbo switch, hidden until GET /vitals says this host will
+             accept one. Its lamp is painted from that same poll rather than
+             from what this page last did, so it goes dark when the idle reaper
+             hands the borrowed resources back — which is a thing that happens
+             to the sandbox, not a thing the page did.
+
+             It keeps the physical push-button it has everywhere else in the
+             product (shared.css) rather than becoming a plain menu row: the
+             point of that switch is that it looks like the same switch
+             wherever you meet it. What the menu adds is the sentence beside
+             it, which is what the tooltip used to have to carry. -->
+        <div class="menu-row hidden" id="turbo-row">
+          <span class="menu-lines">
+            <span class="menu-label">Turbo</span>
+            <span class="menu-sub" id="turbo-sub">2&#215; the CPU and RAM, for one run</span>
+          </span>
+          <button class="turbo" id="turbo-btn" data-on="0" aria-pressed="false"
+            aria-label="Turn on turbo: restart this sandbox with double the CPU and RAM"><span class="led"></span>Turbo</button>
+        </div>
+
+        <button class="menu-item" id="clear-btn">
+          <span class="menu-lines">
+            <span class="menu-label">Clear the scrollback</span>
+            <span class="menu-sub">Empties this window; the sandbox is untouched.</span>
+          </span>
+        </button>
+
+        <!-- Label and sentence both move with the connection: while a shell is
+             attached this is "start a new shell", which is what pressing it
+             actually does, and only a disconnected page calls it Reconnect. A
+             button reading "Reconnect" on a working terminal is a puzzle. -->
+        <button class="menu-item" id="reconnect-btn">
+          <span class="menu-lines">
+            <span class="menu-label" id="reconnect-label">Reconnect</span>
+            <span class="menu-sub" id="reconnect-sub">Open a shell in this sandbox.</span>
+          </span>
+        </button>
+
+        <div class="menu-sep hidden" id="console-sep"></div>
+        <!-- The only link off this page, and it opens a tab of its own: the
+             shell in the grid behind this menu is a live session, and
+             navigating away from it in the same tab ends it. -->
+        <a class="menu-item hidden" id="console-link" target="_blank" rel="noopener">
+          <span class="menu-lines">
+            <span class="menu-label">Your sandboxes</span>
+            <span class="menu-sub" id="console-host">The sparkbox console</span>
+          </span>
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <path d="M15 3h6v6"/><path d="M10 14 21 3"/>
+          </svg>
+        </a>
+      </div>
+    </div>
   </header>
 
   <!-- Turbo restarts the guest, which ends the shell in the grid behind this.
@@ -358,15 +497,29 @@
   (function () {
     /*SHARED_JS*/
 
-    // The sandbox is named by DNS, not by a query parameter: the server routed
-    // this page here by the host's first label, and reading it back from the
-    // same place keeps the two from ever disagreeing.
-    const SANDBOX = location.hostname.split(".")[0];
-    document.title = SANDBOX + " — sparkbox terminal";
-    $("sandbox-name").textContent = SANDBOX;
-    // On a narrow bar the name is the thing that gives way, so keep the whole
-    // of it one hover (or long-press) away.
-    $("sandbox-name").title = SANDBOX;
+    // The sandbox's name, first as a guess and then as a fact.
+    //
+    // The host is `<name>-<subdomain>.<zone>` — ONE label, because that is the
+    // only shape the zone's wildcard certificate covers — so the first label is
+    // `demo-xterm` and not `demo`, and the subdomain is configurable, so there
+    // is no suffix this page can safely strip either. The server is the only
+    // authority and it sends the name on the /vitals poll this page already
+    // makes (paintIdentity below).
+    //
+    // The guess is still painted immediately, because the alternative is an
+    // empty header for as long as one same-origin request takes and because
+    // `demo-xterm` is recognisable as the sandbox you asked for. It is
+    // corrected on the first reading, which also fixes what the turbo dialog
+    // and the toasts call this box — they all read SANDBOX.
+    let SANDBOX = location.hostname.split(".")[0];
+    function paintName() {
+      document.title = SANDBOX + " — sparkbox terminal";
+      $("sandbox-name").textContent = SANDBOX;
+      // On a narrow bar the name is the thing that gives way, so keep the whole
+      // of it one hover (or long-press) away.
+      $("sandbox-name").title = SANDBOX;
+    }
+    paintName();
 
     // xterm.js needs concrete colours; the rest of the page reads CSS
     // variables. Two palettes, picked from the same signal shared.css uses so
@@ -452,6 +605,22 @@
       $("status").setAttribute("data-state", state);
       $("status-text").textContent = text;
       $("status").title = STATUS_HINT[text] || text;
+      paintConnAction(text === "connected");
+    }
+
+    // The menu's connection item, worded for the state it is in.
+    //
+    // Pressing it does the same thing either way — drop whatever socket is
+    // there and open a new one — but those are two different acts to the person
+    // pressing it, and one of them was previously offered as a permanent
+    // "Reconnect" button on a terminal that was plainly connected. On a live
+    // shell this is a restart, and it costs you the session you are in, which
+    // is the part worth saying out loud.
+    function paintConnAction(live) {
+      $("reconnect-label").textContent = live ? "Start a new shell" : "Reconnect";
+      $("reconnect-sub").textContent = live
+        ? "Ends this shell and opens a fresh one."
+        : "Open a shell in this sandbox.";
     }
 
     function overlay(title, msg, opts) {
@@ -635,9 +804,118 @@
     window.addEventListener("resize", refit);
     if (window.ResizeObserver) new ResizeObserver(refit).observe($("screen"));
 
-    $("reconnect-btn").addEventListener("click", () => { attempt = 0; connect(); });
+    // ---- menu -------------------------------------------------------------
+    // Opening it takes focus off the terminal, so closing it has to give focus
+    // back — otherwise the next keystroke goes nowhere and the shell looks
+    // frozen. That is the whole reason closeMenu takes an argument: a menu
+    // closed by pressing Escape returns focus to the button that opened it (a
+    // keyboard user is still navigating), and one closed by any other means
+    // returns it to the shell.
+    const menu = $("menu");
+    function menuIsOpen() { return menu.classList.contains("open"); }
+    function openMenu() {
+      menu.classList.add("open");
+      $("menu-btn").setAttribute("aria-expanded", "true");
+    }
+    function closeMenu(toButton) {
+      if (!menuIsOpen()) return;
+      menu.classList.remove("open");
+      $("menu-btn").setAttribute("aria-expanded", "false");
+      if (toButton) $("menu-btn").focus(); else term.focus();
+    }
+    $("menu-btn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (menuIsOpen()) closeMenu(false); else openMenu();
+    });
+    // Any click that is not inside the menu closes it, including one in the
+    // terminal — where the mousedown handler below is about to take focus
+    // anyway, so closeMenu's own focus call is harmless.
+    document.addEventListener("click", (e) => {
+      if (!menu.contains(e.target)) closeMenu(false);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && menuIsOpen()) closeMenu(true);
+    }, true);
+
+    $("reconnect-btn").addEventListener("click", () => { closeMenu(false); attempt = 0; connect(); });
     $("overlay-btn").addEventListener("click", () => { attempt = 0; connect(); });
-    $("clear-btn").addEventListener("click", () => { term.clear(); term.focus(); });
+    $("clear-btn").addEventListener("click", () => { closeMenu(false); term.clear(); term.focus(); });
+    // A link out is a navigation, so the menu is closed but focus is NOT pulled
+    // back to a terminal the browser is about to leave for another tab.
+    $("console-link").addEventListener("click", () => {
+      menu.classList.remove("open");
+      $("menu-btn").setAttribute("aria-expanded", "false");
+    });
+
+    // ---- the ssh line -----------------------------------------------------
+    // navigator.clipboard is unavailable outside a secure context — which is
+    // every `--proxy-tls=false` dev loop — and can be refused by permission
+    // policy even inside one. The textarea fallback is the pre-2020 way and
+    // works in both, so the button is never a control that silently does
+    // nothing.
+    function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      return new Promise((resolve, reject) => {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        // Off-screen rather than hidden: a display:none element cannot be
+        // selected, and a visible one scrolls the page under the menu.
+        ta.setAttribute("readonly", "");
+        ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        ok ? resolve() : reject(new Error("copy refused"));
+      });
+    }
+
+    let sshLine = "";
+    $("ssh-btn").addEventListener("click", () => {
+      if (!sshLine) return;
+      copyText(sshLine).then(() => {
+        const row = $("ssh-btn");
+        row.classList.add("copied");
+        clearTimeout(row._flash);
+        row._flash = setTimeout(() => row.classList.remove("copied"), 900);
+        toast("Copied  " + sshLine);
+        closeMenu(false);
+      }).catch(() => {
+        // The command stays on screen, so the honest failure message is the one
+        // that points at it rather than one that says "copy failed" and leaves
+        // the menu shut.
+        toast("Couldn't reach the clipboard — select the command and copy it", true);
+      });
+    });
+
+    // paintIdentity applies the three facts only the server can know: what this
+    // sandbox is called, the ssh command that reaches it, and where the
+    // console is. All three are constants for the life of the page, so this
+    // does its work once and then costs a boolean per poll.
+    let identityDone = false;
+    function paintIdentity(v) {
+      if (identityDone) return;
+      identityDone = true;
+      if (v.name && v.name !== SANDBOX) { SANDBOX = v.name; paintName(); }
+      if (v.ssh) {
+        sshLine = v.ssh;
+        $("ssh-cmd").textContent = v.ssh;
+        $("ssh-btn").setAttribute("aria-label", "Copy the command " + v.ssh + " to the clipboard");
+        $("ssh-btn").classList.remove("hidden");
+      }
+      if (v.console) {
+        const link = $("console-link");
+        link.href = v.console;
+        // The hostname rather than the URL: it is the half a person recognises,
+        // and the scheme and trailing slash are noise in a menu.
+        try { $("console-host").textContent = new URL(v.console).host; } catch (e) { /* keep the default */ }
+        link.classList.remove("hidden");
+        $("console-sep").classList.remove("hidden");
+      }
+    }
     $("screen").addEventListener("mousedown", () => {
       // Don't steal a selection the user is making, only a stray click.
       if (!term.hasSelection()) setTimeout(() => term.focus(), 0);
@@ -728,6 +1006,7 @@
 
     function paintVitals(v) {
       vLast = v;
+      paintIdentity(v);
       paintTurbo(v);
       const live = v.state === "running";
       $("vitals").setAttribute("data-live", live ? "1" : "0");
@@ -857,7 +1136,7 @@
     // honest: it reports the sandbox, not the button.
     function paintTurbo(v) {
       if (!v.turbo_available) return;
-      $("turbo-tip").classList.remove("hidden");
+      $("turbo-row").classList.remove("hidden");
       turboOn = !!v.turbo;
       const btn = $("turbo-btn");
       btn.setAttribute("data-on", turboOn ? "1" : "0");
@@ -865,9 +1144,13 @@
       btn.setAttribute("aria-label", turboOn
         ? "Turn off turbo and restart this sandbox at its usual size"
         : "Turn on turbo: restart this sandbox with " + TURBO_FACTOR + "× the CPU and RAM");
-      $("turbo-tip").setAttribute("data-tip", turboPending ? "Restarting…"
-        : turboOn ? "Turbo on — " + v.vcpus + " vCPU · " + gb(v.mem_mb) + " GB"
-        : "Turbo — " + TURBO_FACTOR + "× resources");
+      // The sentence beside the switch, which the bar's tooltip used to carry.
+      // With room to be a sentence it says the sizes rather than a factor,
+      // because "2× resources" is only meaningful if you already know what 1×
+      // is on this host.
+      $("turbo-sub").textContent = turboPending ? "Restarting…"
+        : turboOn ? "On — " + v.vcpus + " vCPU and " + gb(v.mem_mb) + " GB, until this sandbox pauses"
+        : TURBO_FACTOR + "× the CPU and RAM, for one run";
     }
 
     $("turbo-btn").addEventListener("click", () => {
@@ -888,6 +1171,7 @@
         : "Restarts " + SANDBOX + " back at " + next + ", down from " + size(vcpus, mem) + ".") +
         " This shell ends and a new one opens when it comes back." +
         (on ? " Turbo lasts until the sandbox pauses — an idle pause counts." : "");
+      closeMenu(false);
       $("turbo-dlg").showModal();
       $("turbo-go").focus();
     });

@@ -3508,12 +3508,18 @@ func (x *ListReposResponse) GetRepos() []*RepoAttachment {
 }
 
 type RepoAttachment struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Host          string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
-	Slug          string                 `protobuf:"bytes,2,opt,name=slug,proto3" json:"slug,omitempty"`
-	Ref           string                 `protobuf:"bytes,3,opt,name=ref,proto3" json:"ref,omitempty"`
-	Path          string                 `protobuf:"bytes,4,opt,name=path,proto3" json:"path,omitempty"`
-	Access        string                 `protobuf:"bytes,5,opt,name=access,proto3" json:"access,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Host   string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
+	Slug   string                 `protobuf:"bytes,2,opt,name=slug,proto3" json:"slug,omitempty"`
+	Ref    string                 `protobuf:"bytes,3,opt,name=ref,proto3" json:"ref,omitempty"`
+	Path   string                 `protobuf:"bytes,4,opt,name=path,proto3" json:"path,omitempty"`
+	Access string                 `protobuf:"bytes,5,opt,name=access,proto3" json:"access,omitempty"`
+	// instance marks the attachment this sandbox was created naming — a launch
+	// link's repository, or the one a `--ref <owner>/<repo>=<branch>` singled
+	// out. The guest starts its login shell in that checkout. It is derived by
+	// the gateway from its own ledger, like every other field here; a node
+	// stating it would be choosing where its guests' shells begin.
+	Instance      bool `protobuf:"varint,6,opt,name=instance,proto3" json:"instance,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3581,6 +3587,13 @@ func (x *RepoAttachment) GetAccess() string {
 		return x.Access
 	}
 	return ""
+}
+
+func (x *RepoAttachment) GetInstance() bool {
+	if x != nil {
+		return x.Instance
+	}
+	return false
 }
 
 // IssueRepoCredentialRequest narrows the token to one repository. The slug is
@@ -4004,13 +4017,14 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x10ListReposRequest\x12\x18\n" +
 	"\asandbox\x18\x01 \x01(\tR\asandbox\"K\n" +
 	"\x11ListReposResponse\x126\n" +
-	"\x05repos\x18\x01 \x03(\v2 .sparkbox.node.v1.RepoAttachmentR\x05repos\"v\n" +
+	"\x05repos\x18\x01 \x03(\v2 .sparkbox.node.v1.RepoAttachmentR\x05repos\"\x92\x01\n" +
 	"\x0eRepoAttachment\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04slug\x18\x02 \x01(\tR\x04slug\x12\x10\n" +
 	"\x03ref\x18\x03 \x01(\tR\x03ref\x12\x12\n" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x12\x16\n" +
-	"\x06access\x18\x05 \x01(\tR\x06access\"J\n" +
+	"\x06access\x18\x05 \x01(\tR\x06access\x12\x1a\n" +
+	"\binstance\x18\x06 \x01(\bR\binstance\"J\n" +
 	"\x1aIssueRepoCredentialRequest\x12\x18\n" +
 	"\asandbox\x18\x01 \x01(\tR\asandbox\x12\x12\n" +
 	"\x04slug\x18\x02 \x01(\tR\x04slug\"\x90\x01\n" +

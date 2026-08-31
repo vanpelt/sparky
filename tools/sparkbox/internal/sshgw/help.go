@@ -58,15 +58,22 @@ func helpTopics() []helpTopic {
 		blurb:   "env vars your sandboxes get",
 		page:    secretUsage,
 	}, {
-		name: "repos",
-		// `badge` is an alias here rather than a topic of its own: the page it
-		// would want is this one, and a tenth index row would cost the listing
-		// its 80-column budget for a command that is two lines of prose. So
-		// `help badge` lands on the repos page, which documents it.
-		aliases: []string{"repo", "badge"},
+		name:    "repos",
+		aliases: []string{"repo"},
 		verbs:   "repo ls · add · rm · check",
 		blurb:   "cloned in before you arrive",
 		page:    repoUsage,
+	}, {
+		// A topic of its own, which it was not: `help badge` used to land on the
+		// repos page and every mistyped `badge` printed it — a page about
+		// attaching repositories, forks and ref overrides, for somebody who
+		// forgot a slug. The row costs the index its tenth line and stays
+		// inside 80 columns, which is what
+		// TestControlHelpHidesOperatorTopics holds it to.
+		name:  "badge",
+		verbs: "badge <owner>/<name>",
+		blurb: "a button for a PR comment",
+		page:  badgeUsage,
 	}, {
 		name:    "snapshots",
 		aliases: []string{"snapshot", "fork", "bind", "unbind"},

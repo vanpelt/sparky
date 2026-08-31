@@ -1133,11 +1133,12 @@ type SelfReposResp struct {
 // importing them, for the reason SandboxRow restates host.Sandbox: the wire is
 // its own contract and must be free to lag or lead the store's shape.
 type SelfRepoEntry struct {
-	Host   string `json:"host"`
-	Slug   string `json:"slug"`
-	Ref    string `json:"ref,omitempty"`
-	Path   string `json:"path,omitempty"`
-	Access string `json:"access"`
+	Host     string `json:"host"`
+	Slug     string `json:"slug"`
+	Ref      string `json:"ref,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Access   string `json:"access"`
+	Instance bool   `json:"instance,omitempty"`
 }
 
 // SelfRepoCredReq names a sandbox and one of its repositories.

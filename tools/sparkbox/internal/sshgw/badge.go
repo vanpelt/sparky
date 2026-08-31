@@ -44,6 +44,31 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 )
 
+// badgeUsage is `badge`'s own page, and its own for a reason worth stating: it
+// used to print repoUsage, which is a page about attaching repositories — the
+// fork examples, the per-instance `--ref` grammar, the `repos sync` rules. None
+// of that is about the button, and all of it landed on somebody who had merely
+// forgotten a slug. What a person needs here is the shape of the command, the
+// two forms of it, and the one fact that surprises them: the notes are on
+// stderr, so a pipe carries only the markdown.
+//
+// It is deliberately short. This page is printed by every refusal on this verb,
+// so its length is the price of a typo.
+const badgeUsage = "usage: ssh ctl@<gateway> badge <owner>/<name> [--ref <r>]\r\n" +
+	"\r\n" +
+	"prints ONE line of markdown: a button to paste at the TOP of a pull request\r\n" +
+	"comment, above the heading, where it floats into the top-right corner.\r\n" +
+	"whoever clicks it signs in and lands in a sandbox of their own with this repo\r\n" +
+	"checked out — theirs, never yours, and one per person.\r\n" +
+	"\r\n" +
+	"  badge wandb/hivemind                the branch your attachment points at\r\n" +
+	"  badge wandb/hivemind --ref feat/x   one branch, named in the link\r\n" +
+	"  badge wandb/hivemind | pbcopy       the snippet and nothing else\r\n" +
+	"\r\n" +
+	"the notes are printed on stderr, so a pipe carries only the markdown. the\r\n" +
+	"person clicking needs the repo attached to their OWN account — see\r\n" +
+	"`help repos`.\r\n"
+
 // controlBadge prints the launch button for one repository, plus every true
 // thing about it the user cannot see from here: whether they have it attached
 // at all, whether the ref they asked for is already the attachment's own, which
@@ -73,13 +98,13 @@ func (g *Gateway) controlBadge(s gssh.Session, c ctlops.Caller, args []string, l
 		return
 	}
 	if len(args) == 0 {
-		fmt.Fprint(s.Stderr(), repoUsage)
+		fmt.Fprint(s.Stderr(), badgeUsage)
 		s.Exit(2) //nolint:errcheck
 		return
 	}
 	slug, ref, err := parseBadge(args)
 	if err != nil {
-		fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n%s", err, repoUsage)
+		fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n%s", err, badgeUsage)
 		s.Exit(2) //nolint:errcheck
 		return
 	}
@@ -89,7 +114,7 @@ func (g *Gateway) controlBadge(s gssh.Session, c ctlops.Caller, args []string, l
 	// node.js — and this is also the same function the launch door validates
 	// the path with, so a slug this accepts is one that door will accept back.
 	if !repos.ValidSlug(slug) {
-		fmt.Fprintf(s.Stderr(), "sparkbox: %q is not an owner/name repository\r\n%s", slug, repoUsage)
+		fmt.Fprintf(s.Stderr(), "sparkbox: %q is not an owner/name repository\r\n%s", slug, badgeUsage)
 		s.Exit(2) //nolint:errcheck
 		return
 	}
