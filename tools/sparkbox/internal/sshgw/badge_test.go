@@ -99,16 +99,16 @@ func TestControlBadgeGrammar(t *testing.T) {
 		wantExit int
 	}{{
 		name: "no arguments print the page that documents it", args: []string{"badge"},
-		wantErr: repoUsage, wantExit: 2,
+		wantErr: badgeUsage, wantExit: 2,
 	}, {
 		name: "a bare word that is not a repository", args: []string{"badge", "hivemind"},
-		wantErr: "sparkbox: \"hivemind\" is not an owner/name repository\r\n" + repoUsage, wantExit: 2,
+		wantErr: "sparkbox: \"hivemind\" is not an owner/name repository\r\n" + badgeUsage, wantExit: 2,
 	}, {
 		// The owner half is a GitHub login grammar, so this is refused for the
 		// owner and not for the dot — repos.ValidSlug is what says so, and
 		// node.js in the next case is what proves it is not a dot rule.
 		name: "a slug with a hostname in it", args: []string{"badge", "github.com/wandb/hivemind"},
-		wantErr:  "sparkbox: \"github.com/wandb/hivemind\" is not an owner/name repository\r\n" + repoUsage,
+		wantErr:  "sparkbox: \"github.com/wandb/hivemind\" is not an owner/name repository\r\n" + badgeUsage,
 		wantExit: 2,
 	}, {
 		name: "a ref that is an option in disguise",
@@ -124,18 +124,18 @@ func TestControlBadgeGrammar(t *testing.T) {
 		wantExit: 2,
 	}, {
 		name: "a dangling --ref", args: []string{"badge", "wandb/hivemind", "--ref"},
-		wantErr: "sparkbox: --ref needs a value, e.g. --ref feat/x\r\n" + repoUsage, wantExit: 2,
+		wantErr: "sparkbox: --ref needs a value, e.g. --ref feat/x\r\n" + badgeUsage, wantExit: 2,
 	}, {
 		name: "an unknown flag", args: []string{"badge", "wandb/hivemind", "--tag", "hm"},
-		wantErr: "sparkbox: unknown flag \"--tag\"\r\n" + repoUsage, wantExit: 2,
+		wantErr: "sparkbox: unknown flag \"--tag\"\r\n" + badgeUsage, wantExit: 2,
 	}, {
 		name: "two repositories", args: []string{"badge", "wandb/hivemind", "wandb/sparky"},
 		wantErr: "sparkbox: one repository at a time — \"wandb/hivemind\" and \"wandb/sparky\" " +
-			"both look like repositories\r\n" + repoUsage,
+			"both look like repositories\r\n" + badgeUsage,
 		wantExit: 2,
 	}, {
 		name: "a flag with nothing to make a button for", args: []string{"badge", "--ref", "feat/x"},
-		wantErr:  "sparkbox: name the repository to make a button for, as <owner>/<name>\r\n" + repoUsage,
+		wantErr:  "sparkbox: name the repository to make a button for, as <owner>/<name>\r\n" + badgeUsage,
 		wantExit: 2,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -395,12 +395,32 @@ func TestParseBadge(t *testing.T) {
 // `badge` is dispatched, so it has to be findable: the help is this channel's
 // only discovery surface, and TestControlUsageListsEveryCommand covers the
 // index while this covers the page a person is sent to.
-func TestBadgeIsDocumentedOnTheReposPage(t *testing.T) {
+//
+// That page is `badge`'s own now. It used to be the repos page, and the cost
+// was that a forgotten slug answered with forks, ref overrides and sync rules —
+// so the page a refusal prints is pinned here to the one about the button.
+func TestBadgeHasItsOwnHelpPage(t *testing.T) {
 	page, ok := helpPage("badge", false)
 	if !ok {
 		t.Fatal("help badge reaches no topic")
 	}
+	if page != badgeUsage {
+		t.Errorf("help badge does not print the badge page:\n%s", page)
+	}
 	if !strings.Contains(page, "badge <owner>/<name> [--ref <r>]") {
-		t.Errorf("the repos page has no badge synopsis:\n%s", page)
+		t.Errorf("the badge page has no synopsis:\n%s", page)
+	}
+	// The two paragraphs that belong to `repo`, checked by the words that are
+	// unique to them: a refusal on this verb must not print either.
+	for _, stray := range []string{"fork cuda-12", "repos sync", "--write"} {
+		if strings.Contains(page, stray) {
+			t.Errorf("the badge page still carries the repos page's %q", stray)
+		}
+	}
+	// And the pointer the other way stays, because `badge` is a thing you do
+	// with an attachment and `help repos` is where somebody looking for it will
+	// be standing.
+	if repos, _ := helpPage("repos", false); !strings.Contains(repos, "help badge") {
+		t.Error("the repos page no longer points at the badge page")
 	}
 }
