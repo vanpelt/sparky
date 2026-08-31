@@ -219,7 +219,7 @@
                       "state": "running",
                       "pinned": false,
                       "tags": ["prod"],
-                      "vcpus": 2,
+                      "vcpus": 4,
                       "mem_mb": 8192,
                       "disk_mb": 25600,
                       "created_at": "2026-07-19T10:04:11Z",
@@ -2178,7 +2178,7 @@
             "items": { "type": "string" },
             "description": "Never null. Selects which secrets reach the guest's environment."
           },
-          "vcpus": { "type": "integer", "format": "int64", "example": 2 },
+          "vcpus": { "type": "integer", "format": "int64", "example": 4 },
           "mem_mb": { "type": "integer", "format": "int64", "example": 8192 },
           "turbo": {
             "type": "boolean",
@@ -2241,7 +2241,7 @@
           "vcpus": {
             "type": "integer",
             "format": "int64",
-            "description": "0 takes the host default (2)."
+            "description": "0 takes the host default (4)."
           },
           "mem_mb": {
             "type": "integer",

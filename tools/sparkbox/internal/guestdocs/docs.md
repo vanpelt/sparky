@@ -17,6 +17,9 @@ allocation, subject to the owner's burst ceiling and node availability.
 Resource sharing changes performance, not disk persistence. Memory pressure
 does not delete or recreate the VM.
 
+A new VM starts with 4 vCPUs and 8 GB of RAM. Turbo restarts it with 8 vCPUs
+and 16 GB for that run; the next pause returns it to its normal size.
+
 ## Reading boot logs
 
 When diagnosing a systemd unit, use the merged journal view:

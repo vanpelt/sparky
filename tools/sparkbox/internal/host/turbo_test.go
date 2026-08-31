@@ -63,6 +63,26 @@ func TestTurboDoublesAndColdBoots(t *testing.T) {
 	}
 }
 
+func TestDefaultSandboxAndTurboSizes(t *testing.T) {
+	m := newTestManager(t, host.Options{})
+	ctx := context.Background()
+	b, err := m.Create(ctx, "default-size", "alice", "ubuntu", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.VCPUs != 4 || b.MemMB != 8192 {
+		t.Fatalf("default size = %d vCPU / %d MB, want 4 / 8192", b.VCPUs, b.MemMB)
+	}
+
+	if err := m.SetTurbo(ctx, "default-size", true); err != nil {
+		t.Fatalf("turbo on: %v", err)
+	}
+	b, _ = m.Get("default-size")
+	if !b.Turbo || b.VCPUs != 8 || b.MemMB != 16384 || b.BaseVCPUs != 4 || b.BaseMemMB != 8192 {
+		t.Fatalf("turbo default = %+v, want 8 vCPU / 16384 MB over a 4 / 8192 base", b)
+	}
+}
+
 // Turbo lasts one run. Pause is the single place that hands it back, so an
 // idle reap, an explicit pause and a reboot all end it — this covers the
 // explicit one, and the reaper and Reboot reach the same code path.

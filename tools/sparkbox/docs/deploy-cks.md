@@ -659,7 +659,7 @@ The browser dashboard is:
 https://my.<domain>
 ```
 
-New sandboxes receive two vCPUs and 8 GiB RAM by default. On the 64-vCPU,
+New sandboxes receive four vCPUs and 8 GiB RAM by default. On the 64-vCPU,
 roughly 502-GiB CKS CPU Node used by this deployment, the VMM helper requests
 48 CPUs and 400 GiB and is capped at 56 CPUs and 448 GiB. Sparkbox advertises
 480,000 MB of host memory with a 90% admission threshold, so running guests may
