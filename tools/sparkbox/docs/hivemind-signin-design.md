@@ -326,12 +326,18 @@ chosen with that in mind.
 
 ---
 
-# Part 5 — what shipped, and what HiveMind still owes
+# Part 5 — what shipped, on both sides
 
-M1's sparkbox half is built (branch `feat/hivemind-signin`, stacked on
-`feat/launch-and-terminal-polish`). Nothing is deployed: the door needs the
-HiveMind endpoints in §5.2 before it can do anything, and a gateway configured
-for it without `--hivemind-api` warns and does not mount it.
+M1 is built on both sides — sparkbox on branch `feat/hivemind-signin`
+(stacked on `feat/launch-and-terminal-polish`), HiveMind on `agentstream-py`
+branch `feat/sparkbox-handoff`. Nothing is deployed. A gateway configured for
+this without `--hivemind-api` warns and does not mount the door.
+
+The two halves have been run against each other: `internal/hivemindsignin`'s
+real client redeeming a real code from HiveMind's real route, over loopback —
+claims parsed, second redemption refused, unknown code refused. What has *not*
+happened is a browser going all the way through, because that needs both sides
+deployed.
 
 ## 5.1 The sparkbox half (built)
 
@@ -364,20 +370,28 @@ Three decisions worth knowing without reading the code:
   ordering is what makes that gate cost nothing in the common case: the strong
   link comes from `github.com/<login>.keys`, not from HiveMind.
 
-## 5.2 The HiveMind half (owed)
+## 5.2 The HiveMind half (built)
 
-Two endpoints and a button. The wire shapes below are what
-`internal/hivemindsignin` already parses and what its tests pin.
+Two endpoints and a button, in `agentstream-py` on branch
+`feat/sparkbox-handoff`. Its own account of this is `docs/sparkbox-handoff.md`
+there; what follows is the contract, which is what this repository depends on.
 
-**`POST /v1/handoff/start`** — authenticated by the dashboard session.
-Mints a code, stores it in Redis under a 60-second TTL against
-`{sub, github, github_id, orgs, email, dest}`, and returns the code plus the
-sparkbox POST target. `dest` is fixed **here**, from what the button was for —
-never read back from the browser later. That is the half of the login-CSRF
-mitigation HiveMind owns (§4.1).
+| where | what |
+| --- | --- |
+| `backend/api/src/agentstream_api/sparkbox.py` | config, destination validation, the one-time code store (Redis `SETEX` 60s / `GETDEL`, memory fallback) |
+| `backend/api/src/agentstream_api/handlers/sparkbox_handoff.py` | `/v1/handoff/config`, `/start`, `/redeem` |
+| `backend/dashboard/src/pages/settings/Integrations.tsx` | the button, in Settings → Integrations |
 
-**`POST /v1/handoff/redeem`** — unauthenticated, rate-limited by IP. `GETDEL`
-semantics: the code is spent by reading it.
+**`POST /v1/handoff/start`** — authenticated by the dashboard session. Mints a
+code against `{sub, github, github_id, orgs, email, dest}` under a 60-second
+TTL, and returns the code plus this door's URL. `dest` is fixed **there**, from
+what the button was for, and never read back out of the browser — the half of
+the login-CSRF mitigation (§4.1) HiveMind owns. It refuses a service account
+and refuses an impersonating admin, either of which would otherwise create an
+account here in a name that is not theirs.
+
+**`POST /v1/handoff/redeem`** — unauthenticated; the code in the body is the
+authentication.
 
 ```jsonc
 // request
@@ -385,35 +399,41 @@ semantics: the code is spent by reading it.
 
 // 200
 {
-  "sub": "hivemind:user:<id>",   // audit only; sparkbox resolves on `github`
+  "sub": "hivemind:user:usr_…",  // audit only; sparkbox resolves on `github`
   "github": "vanpelt",           // REQUIRED — absent fails the sign-in closed
   "github_id": 12345,
-  "orgs": ["wandb"],             // live membership, not a signup-time snapshot
+  "orgs": ["wandb"],
   "email": "vanpelt@wandb.com",  // optional
   "dest": "https://my.catnip.sh/"
 }
 ```
 
-Unknown, spent and expired must all answer `404`, `410`, `401` or `403` — any of
-the four, they are one outcome to the browser holding the code. A `5xx` means
-something else went wrong and sparkbox says "try again" rather than "start
-again", so do not use one for a bad code.
+Unknown, spent and expired all answer **410** — one outcome, because the
+browser holding the code cannot act on the difference. Nothing about a bad code
+answers 5xx, which this side reads as "try again" rather than "start again";
+that is why `code` carries no length limit in the request model, so an
+over-long one is a 410 and not pydantic's 422.
 
-**The button** renders an auto-submitting form:
+**The button** posts an auto-submitted form to `login.<domain>/handoff` with
+one hidden `code` field.
 
-```html
-<form method="POST" action="https://login.catnip.sh/handoff">
-  <input type="hidden" name="code" value="hmh_…">
-</form>
-```
+Two operator notes:
 
-Do not set `Referrer-Policy: no-referrer` on that page.
+- Enabling is `SPARKBOX_DOMAIN=catnip.sh` (empty disables everything), and it
+  should be turned on only *after* a gateway is running with
+  `--hivemind-signin-orgs` — otherwise the button posts at a door that is not
+  mounted.
+- `SPARKBOX_SIGNIN_ORGS` over there decides who is *shown* the button. It is a
+  display hint that should be kept equal to `--hivemind-signin-orgs`; the gate
+  stays here, because this is the side that creates accounts.
 
 ## 5.3 M2 — the `go.` destination
 
 `dest = https://go.catnip.sh/<owner>/<repo>` should work the moment a strong
-link lands, because the launch door's own gate is `edgeauth.Require`. It is
-untested end to end and should not be assumed.
+link lands, because the launch door's own gate is `edgeauth.Require`. HiveMind
+can now ask for it — `POST /v1/handoff/start` takes `{"repo": "owner/name",
+"ref": "branch"}` and resolves it to that URL at mint time — but no button
+sends it yet, and nothing has been through end to end. Do not assume it.
 
 ---
 
