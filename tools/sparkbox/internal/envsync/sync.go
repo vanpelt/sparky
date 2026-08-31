@@ -234,16 +234,20 @@ func (s *Syncer) sanitizeEnv(boxName string, env map[string]string) (map[string]
 	return env, nil
 }
 
-// StripEnv rewrites box's managed block to empty. It is the pre-pack hygiene
-// pass (host.EnvStripper) that Archive and Snapshot fire before handing the
-// rootfs to the driver's pack, so a packed artifact never carries plaintext
-// secret values. Unlike PushEnv it never consults the store — the block must
-// come out even (especially) when the store is undecryptable or disabled —
-// and an unreachable box is an error rather than a skip: the manager only
-// calls it with a running box copy, and a silent skip here would let an
-// uncleared rootfs into object storage. The strip runs strict: if the guest
-// file's markers are unbalanced in a way the rewrite cannot prove clean, it
-// fails, and so does the pack.
+// StripEnv is the guest-side pre-pack hygiene pass (host.EnvStripper). In one
+// SSH exec it rewrites box's managed environment block to empty, blanks the
+// machine id, removes dbus's copy, and clears the journal. Archive and Snapshot
+// run it before pausing and handing the rootfs to the driver's pack, including
+// on fleet nodes that cannot host-mount a guest-authored filesystem. A packed
+// artifact therefore carries neither plaintext secret values nor the identity
+// and logs of the machine it came from.
+//
+// Unlike PushEnv it never consults the store — the block must come out even
+// (especially) when the store is undecryptable or disabled — and an unreachable
+// box is an error rather than a skip: the manager only calls it with a running
+// box copy, and a silent skip here would let an uncleared rootfs into storage.
+// The strip runs strict: if the guest file's markers are unbalanced in a way
+// the rewrite cannot prove clean, it fails, and so does the pack.
 //
 // A successful strip quiesces the box (see boxState) so a change-time push
 // cannot rewrite secrets before the pack; a failed strip lifts the quiesce
@@ -282,8 +286,10 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 }
 
 // deliverBlock runs the rewrite script on box's guest over SSH, replacing the
-// managed block with block. Shared delivery channel for PushEnv and StripEnv;
-// callers hold the box's per-box mutex.
+// managed block with block. In strict (pre-pack) mode the same script also
+// removes the guest identity and journal before it flushes the filesystem.
+// Shared delivery channel for PushEnv and StripEnv; callers hold the box's
+// per-box mutex.
 func (s *Syncer) deliverBlock(ctx context.Context, box *host.Sandbox, block string, strict bool) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -411,10 +417,16 @@ func renderBlock(env map[string]string) string {
 // stock mode.
 func rewriteScript(envPath, block string, strict bool) string {
 	strictFlag := 0
+	root := ""
 	if strict {
 		strictFlag = 1
+		// Tests and the mock driver use a relative guest target rooted in the
+		// VM workdir. Production's /etc/environment means the real guest root.
+		if !strings.HasPrefix(envPath, "/") {
+			root = "."
+		}
 	}
-	return fmt.Sprintf(`set -eu
+	script := fmt.Sprintf(`set -eu
 f='%s'
 tmp="$f.sparkbox.$$"
 trap 'rm -f "$tmp"' EXIT HUP INT TERM
@@ -435,4 +447,14 @@ printf '%%s' %s | /usr/bin/base64 -d >> "$tmp"
 chmod 0644 "$tmp"
 mv "$tmp" "$f"
 `, envPath, BlockBegin, BlockEnd, strictFlag, base64.StdEncoding.EncodeToString([]byte(block)))
+	if !strict {
+		return script
+	}
+	return script + fmt.Sprintf(`r='%s'
+mkdir -p "$r/etc"
+: > "$r/etc/machine-id"
+rm -f "$r/var/lib/dbus/machine-id"
+rm -rf "$r/var/log/journal/"*
+sync
+`, root)
 }

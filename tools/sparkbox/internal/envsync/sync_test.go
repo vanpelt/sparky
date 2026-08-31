@@ -375,6 +375,75 @@ func TestStripEnvClearsManagedBlock(t *testing.T) {
 	}
 }
 
+func TestStripEnvClearsCapturedGuestIdentityAndJournal(t *testing.T) {
+	te := newTestEnv(t)
+	box := te.create(t, "boxa", "alice")
+	te.seedEnv(t, "boxa", bakedEnv)
+	guestRoot := filepath.Join(te.dir, "mock-vms", "boxa")
+	writeGuest := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(guestRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeGuest("etc/machine-id", "parent-machine-id\n")
+	writeGuest("var/lib/dbus/machine-id", "parent-machine-id\n")
+	writeGuest("var/log/journal/parent-machine-id/system.journal", "parent logs")
+	writeGuest("var/log/journal/parent-machine-id/user-1000.journal", "parent user logs")
+
+	if err := te.syncer.StripEnv(context.Background(), box); err != nil {
+		t.Fatalf("StripEnv: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(guestRoot, "etc/machine-id")); err != nil || len(got) != 0 {
+		t.Fatalf("machine-id after strip = %q, %v; want an existing empty file", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(guestRoot, "var/lib/dbus/machine-id")); !os.IsNotExist(err) {
+		t.Fatalf("dbus machine-id survived strip (stat err = %v)", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(guestRoot, "var/log/journal"))
+	if err != nil {
+		t.Fatalf("read journal directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("journal directory contains %v after strip, want empty", entries)
+	}
+}
+
+func TestPushEnvDoesNotClearLiveGuestIdentityOrJournal(t *testing.T) {
+	te := newTestEnv(t)
+	box := te.create(t, "boxa", "alice")
+	te.seedEnv(t, "boxa", bakedEnv)
+	guestRoot := filepath.Join(te.dir, "mock-vms", "boxa")
+	journal := filepath.Join(guestRoot, "var/log/journal/machine/system.journal")
+	if err := os.MkdirAll(filepath.Dir(journal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	machineID := filepath.Join(guestRoot, "etc/machine-id")
+	if err := os.MkdirAll(filepath.Dir(machineID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(machineID, []byte("live-machine-id\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journal, []byte("live logs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := te.syncer.PushEnv(context.Background(), box); err != nil {
+		t.Fatalf("PushEnv: %v", err)
+	}
+	if got, err := os.ReadFile(machineID); err != nil || string(got) != "live-machine-id\n" {
+		t.Fatalf("ordinary push changed machine-id to %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(journal); err != nil || string(got) != "live logs" {
+		t.Fatalf("ordinary push changed journal to %q, %v", got, err)
+	}
+}
+
 func TestStripEnvUnreachableBoxIsAnError(t *testing.T) {
 	te := newTestEnv(t)
 	te.create(t, "boxa", "alice")

@@ -58,6 +58,17 @@ echo ">> exporting $IMAGE"
 CID=$($DOCKER create "$IMAGE" /bin/true)
 $DOCKER export "$CID" | tar -x -C "$MNT"
 
+# A reusable image is not a machine yet. systemd only honors the per-sandbox
+# systemd.machine_id= kernel argument when /etc/machine-id is empty; an id
+# inherited from the OCI image makes PID 1 and journald use that shared value
+# for the whole first boot, even though the guest reset hook corrects the file
+# milliseconds later. Keep the documented image-builder form (present but
+# zero-length), drop dbus's alias, and never publish the image's journal.
+mkdir -p "$MNT/etc"
+: > "$MNT/etc/machine-id"
+rm -f "$MNT/var/lib/dbus/machine-id"
+rm -rf "$MNT/var/log/journal/"*
+
 if [ ! -x "$MNT/usr/sbin/sshd" ]; then
   echo "sshd missing in $IMAGE — bake it into the image (see hack/images/Dockerfile) or use a base that ships sshd" >&2
   exit 1

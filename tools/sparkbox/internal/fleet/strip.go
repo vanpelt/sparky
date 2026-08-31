@@ -1,7 +1,9 @@
 package fleet
 
-// Clearing the managed secret block from a sandbox on another machine, before
-// that machine packs its rootfs into something durable.
+// Running the guest-side hygiene pass on a sandbox on another machine, before
+// that machine packs its rootfs into something durable. Besides clearing the
+// managed secret block, the current pass removes the source machine identity
+// and journal so a mount-free node can produce a clean template.
 //
 // This is the third and sharpest instance of envsync.go's split. THE NODE HAS
 // NO SECRETS STORE, so `host.Manager.stripEnvForPack` — which finds its
@@ -81,9 +83,9 @@ func (f *Fleet) packing(name string) bool {
 	return held
 }
 
-// stripEnvBefore clears the managed secret block from a sandbox on another
+// stripEnvBefore runs the shared pre-pack sanitizer on a sandbox on another
 // machine so the rootfs that machine is about to pack carries no plaintext
-// secret values.
+// secret values, source identity, or source journal.
 //
 // Called from Fleet.Snapshot and Fleet.Archive, inside a pack hold, before
 // anything else touches the guest. Three deliberate differences from

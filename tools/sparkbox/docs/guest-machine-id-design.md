@@ -5,9 +5,11 @@ carries its ancestors' system logs, and what to change so neither is true.
 
 ## Status
 
-Diagnosed on the live CKS cluster on 2026-08-31, from three sandboxes. Nothing
-here is built. The fix is two edits in two places that already do adjacent work,
-and it is small enough that the argument below is longer than the change.
+Diagnosed on the live CKS cluster on 2026-08-31, from three sandboxes.
+Implemented on 2026-08-31 in the base-image builder and the shared guest-side
+pre-capture pass; the portable mock-guest coverage is in place, while the
+first-boot and mount-free snapshot checks in Part 6 still require Linux/KVM and
+a CKS host respectively.
 
 The bug is **first-boot only** and self-corrects on the second cold boot, which
 is exactly what made it invisible until somebody installed a unit that runs at
