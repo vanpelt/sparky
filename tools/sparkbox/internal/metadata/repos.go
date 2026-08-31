@@ -54,6 +54,22 @@ type RepoEntry struct {
 	Ref    string `json:"ref,omitempty"`
 	Path   string `json:"path,omitempty"`
 	Access string `json:"access"`
+
+	// Instance says this sandbox carries a ref override for this attachment —
+	// somebody named this repository's branch when the box was made, through a
+	// launch link, a `--ref <owner>/<repo>=<branch>` at create, or a fork.
+	//
+	// It is the answer to "which of these is the one I came for", and it is the
+	// only honest one available. A tag's attachments are otherwise symmetric:
+	// two repositories both riding `hm` are both wanted, in an order that means
+	// nothing. Naming a branch is not symmetric — it is a person saying what
+	// they intend to work on — so the guest starts a login shell in that
+	// checkout and leaves the others where they are.
+	//
+	// The effective Ref above already folds the override in (a launch link on
+	// the default branch produces the same string an attachment would), which
+	// is why the fact needs its own field rather than being read off it.
+	Instance bool `json:"instance,omitempty"`
 }
 
 // Credential is one installation token in the shape git's credential protocol
@@ -168,11 +184,36 @@ func (l LocalRepos) Manifest(_ context.Context, box *host.Sandbox) (Manifest, er
 	if err != nil {
 		return Manifest{}, err
 	}
+	// Which of these the box was created for, read from the one table in the
+	// store that is about an INSTANCE rather than a configuration. Its error is
+	// returned rather than swallowed: it is the same sqlite file the query
+	// above just read, so a failure here is not "no overrides", it is a store
+	// in trouble, and answering with a confident empty mark would be a guess.
+	refs, err := l.Repos.SandboxRefs(box.Owner, box.Name)
+	if err != nil {
+		return Manifest{}, err
+	}
+	chosen := map[string]bool{}
+	for _, r := range refs {
+		chosen[instanceKey(r.Host, r.Slug)] = true
+	}
 	out := make([]RepoEntry, 0, len(attached))
 	for _, r := range attached {
-		out = append(out, RepoEntry{Host: r.Host, Slug: r.Slug, Ref: r.Ref, Path: r.Path, Access: r.Access})
+		out = append(out, RepoEntry{
+			Host: r.Host, Slug: r.Slug, Ref: r.Ref, Path: r.Path, Access: r.Access,
+			Instance: chosen[instanceKey(r.Host, r.Slug)],
+		})
 	}
 	return Manifest{Repos: out}, nil
+}
+
+// instanceKey matches an override row to an attachment. Slugs are stored
+// COLLATE NOCASE and GitHub treats them case-insensitively, so `Wandb/Hivemind`
+// in a launch URL has to find the attachment spelled `wandb/hivemind` — a
+// case-sensitive compare here would silently drop the mark for exactly the
+// people who typed the repository's display name.
+func instanceKey(host, slug string) string {
+	return strings.ToLower(host) + "\x00" + strings.ToLower(slug)
 }
 
 // Credential mints a GitHub installation token scoped to one repository this

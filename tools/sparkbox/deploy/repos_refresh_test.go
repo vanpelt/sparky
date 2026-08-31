@@ -605,12 +605,12 @@ func TestRepoSyncPublishesWhereTheCheckoutIs(t *testing.T) {
 
 // The cd target is removed the moment it stops being unambiguous.
 //
-// Two attachments have no single right answer — a launch link's sandbox holds
-// the repository the link named plus everything the clicker keeps on `default`,
-// and nothing in the guest knows which one was clicked for — so the file goes
-// and the banner names the parent they share instead. It is removed rather than
-// left stale, because a stale one lands every login in whichever repository
-// happened to be attached first.
+// Two UNMARKED attachments have no single right answer — both ride the tag,
+// both were wanted, and the order they arrive in means nothing — so the file
+// goes and the banner names the parent they share instead. It is removed rather
+// than left stale, because a stale one lands every login in whichever
+// repository happened to be attached first. (When one of them IS marked, the
+// answer exists; see TestRepoSyncLandsInTheRepositoryTheBoxWasMadeFor.)
 func TestRepoSyncWillNotGuessBetweenTwoCheckouts(t *testing.T) {
 	w := newRepoWorld(t)
 	w.run("sync")
@@ -628,6 +628,64 @@ func TestRepoSyncWillNotGuessBetweenTwoCheckouts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(w.root, "run/sparkbox/repos.dir")); !os.IsNotExist(err) {
 		body, _ := os.ReadFile(filepath.Join(w.root, "run/sparkbox/repos.dir"))
 		t.Errorf("a two-attachment sandbox published a cd target anyway: %q (%v)", body, err)
+	}
+}
+
+// A launch link's sandbox lands in the repository the link named, however many
+// other checkouts came along for the ride.
+//
+// This is the case the count rule could not answer. Clicking a button on a pull
+// request builds a box holding the repository somebody chose AND everything the
+// clicker keeps on those tags, so "exactly one checkout" is precisely what a
+// launch arrival does not have. The asymmetry the guest reads is the manifest's
+// `instance` flag: the gateway sets it on the attachment this sandbox carries a
+// ref override for, which is the one whose branch a person named.
+func TestRepoSyncLandsInTheRepositoryTheBoxWasMadeFor(t *testing.T) {
+	w := newRepoWorld(t)
+	// A second checkout, already on disk at the multi-attachment default, so
+	// both rows come back ready and the banner is about placement rather than
+	// about a clone that could not reach a remote.
+	other := filepath.Join(w.root, "home/sparky/src/wandb/notebooks")
+	w.git(w.root, "clone", "-q", w.remote, other)
+	// `instance` sits BEFORE `access` on purpose: it is the manifest's only
+	// unquoted value, and a parser that mishandled it would shift every field
+	// after it — the access mode would arrive as a directory name.
+	w.write(filepath.Join(w.root, "manifest.json"),
+		`{"repos":[{"host":"github.com","slug":"wandb/hivemind","ref":"","path":"","instance":true,"access":"read"},`+
+			`{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","access":"read"}]}`)
+	w.run("sync")
+
+	if got := strings.TrimSpace(guestFile(t, w.root, "run/sparkbox/repos.dir")); got != w.checkout {
+		t.Errorf("repos.dir = %q, want the named repository at %q", got, w.checkout)
+	}
+	banner := guestFile(t, w.root, "etc/motd")
+	if !strings.Contains(banner, "repos: 2 ready in ~/hivemind") {
+		t.Errorf("the banner does not name where the shell will start:\n%s", banner)
+	}
+	// The flag must not have eaten the fields after it.
+	if line, _ := w.runCode("status"); !strings.Contains(line, "read") {
+		t.Errorf("the access mode did not survive the unquoted flag: %q", line)
+	}
+}
+
+// Two NAMED repositories are the same ambiguity one level up, and get the same
+// answer: none. `--ref a=x --ref b=y` says both matter and says nothing about
+// which one the shell belongs in.
+func TestRepoSyncWillNotGuessBetweenTwoNamedRepositories(t *testing.T) {
+	w := newRepoWorld(t)
+	other := filepath.Join(w.root, "home/sparky/src/wandb/notebooks")
+	w.git(w.root, "clone", "-q", w.remote, other)
+	w.write(filepath.Join(w.root, "manifest.json"),
+		`{"repos":[{"host":"github.com","slug":"wandb/hivemind","ref":"","path":"","instance":true,"access":"read"},`+
+			`{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","instance":true,"access":"read"}]}`)
+	w.run("sync")
+
+	if _, err := os.Stat(filepath.Join(w.root, "run/sparkbox/repos.dir")); !os.IsNotExist(err) {
+		body, _ := os.ReadFile(filepath.Join(w.root, "run/sparkbox/repos.dir"))
+		t.Errorf("two named repositories still published a cd target: %q (%v)", body, err)
+	}
+	if banner := guestFile(t, w.root, "etc/motd"); strings.Contains(banner, "in ~/hivemind") {
+		t.Errorf("the banner picked one of two named repositories:\n%s", banner)
 	}
 }
 

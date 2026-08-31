@@ -326,6 +326,16 @@ machine in the fleet the day the overlay lands.
 Precedence, most specific first: the sandbox override, then the attachment's own
 `ref`, then the repository's default branch.
 
+**A second thing rides this table, added later:** the existence of an override
+row is also the answer to "which of these repositories is this box FOR". A tag's
+attachments are symmetric and their order means nothing, so a guest holding
+several cannot pick one to start a login shell in — but an override is a person
+naming a branch, which is not symmetric at all. `LocalRepos.Manifest` therefore
+marks those entries `instance: true` (the manifest's one non-string value, and
+the only new field on the wire since this design was written), and the guest's
+clone worker publishes that checkout's path as its `cd` target. The precedence
+above is untouched; this reads the row's presence, not its value.
+
 ## The cost, named
 
 A per-sandbox table needs a per-sandbox lifecycle, and this is the part that is

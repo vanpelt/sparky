@@ -728,3 +728,82 @@ func TestLocalCredentialWithoutAUserStoreRefuses(t *testing.T) {
 		t.Errorf("github was reached with no account to bind to (%d calls)", calls)
 	}
 }
+
+// The manifest says which attachment this sandbox was created for.
+//
+// Two repositories on one tag are otherwise symmetric — both wanted, in an
+// order that means nothing — and the guest has to pick one to start a login
+// shell in or pick none. A per-sandbox ref override is the one asymmetry in the
+// data: somebody named that repository's branch when they made the box.
+func TestLocalManifestMarksTheRepositoryTheSandboxWasMadeFor(t *testing.T) {
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), nil)
+	seedTag(t, local.db, "alice-box", "alice", "hm")
+	for _, slug := range []string{"wandb/hivemind", "wandb/agentstream"} {
+		if err := local.Repos.PutRepo("alice", repos.Repo{Slug: slug}, []string{"hm"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := local.Repos.SetSandboxRefs("alice", "alice-box", []repos.SandboxRef{
+		{Host: "github.com", Slug: "wandb/hivemind", Ref: "feat/x"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := local.Manifest(context.Background(), aliceBox())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Repos) != 2 {
+		t.Fatalf("manifest = %+v, want both attachments", manifest.Repos)
+	}
+	for _, r := range manifest.Repos {
+		want := r.Slug == "wandb/hivemind"
+		if r.Instance != want {
+			t.Errorf("%s instance = %v, want %v", r.Slug, r.Instance, want)
+		}
+	}
+}
+
+// A sandbox nobody named a branch for marks nothing, however many attachments
+// it has. Marking one anyway would be the guess this field exists to avoid.
+func TestLocalManifestMarksNothingWithoutAnOverride(t *testing.T) {
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), nil)
+	seedTag(t, local.db, "alice-box", "alice", "hm")
+	for _, slug := range []string{"wandb/hivemind", "wandb/agentstream"} {
+		if err := local.Repos.PutRepo("alice", repos.Repo{Slug: slug, Ref: "main"}, []string{"hm"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := local.Manifest(context.Background(), aliceBox())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range manifest.Repos {
+		if r.Instance {
+			t.Errorf("%s was marked with no override in play: %+v", r.Slug, r)
+		}
+	}
+}
+
+// The override's slug is matched case-insensitively, because that is how the
+// store collates it and how GitHub treats it: a launch URL spelled
+// `Wandb/HiveMind` attaches to `wandb/hivemind` and must mark the same row.
+func TestLocalManifestMatchesTheOverrideWhateverTheCase(t *testing.T) {
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), nil)
+	seedTag(t, local.db, "alice-box", "alice", "hm")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind"}, []string{"hm"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Repos.SetSandboxRefs("alice", "alice-box", []repos.SandboxRef{
+		{Host: "GitHub.com", Slug: "Wandb/HiveMind", Ref: "feat/x"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := local.Manifest(context.Background(), aliceBox())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Repos) != 1 || !manifest.Repos[0].Instance {
+		t.Fatalf("manifest = %+v, want the attachment marked", manifest.Repos)
+	}
+}

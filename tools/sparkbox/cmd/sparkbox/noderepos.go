@@ -100,7 +100,7 @@ func (r *relayRepos) Manifest(ctx context.Context, box *host.Sandbox) (metadata.
 	for _, repo := range resp.Repos {
 		manifest.Repos = append(manifest.Repos, metadata.RepoEntry{
 			Host: repo.Host, Slug: repo.Slug, Ref: repo.Ref,
-			Path: repo.Path, Access: repo.Access,
+			Path: repo.Path, Access: repo.Access, Instance: repo.Instance,
 		})
 	}
 	return manifest, nil
@@ -168,7 +168,7 @@ func (a fleetRepos) Manifest(ctx context.Context, box *host.Sandbox) ([]fleet.Re
 	for _, repo := range manifest.Repos {
 		out = append(out, fleet.RepoAttachment{
 			Host: repo.Host, Slug: repo.Slug, Ref: repo.Ref,
-			Path: repo.Path, Access: repo.Access,
+			Path: repo.Path, Access: repo.Access, Instance: repo.Instance,
 		})
 	}
 	return out, nil
