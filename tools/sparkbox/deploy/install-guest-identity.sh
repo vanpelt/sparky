@@ -986,12 +986,19 @@ cat > "$MNT/etc/profile.d/50-sparkbox-repo.sh" <<'EOF'
 # directory they share and the person picks.
 #
 # Four guards, each closing a way this would otherwise be wrong:
-#   - PS1 — interactive only, so `ssh box <command>`, scp, rsync and every
-#     script that runs a login shell are untouched;
+#   - $- carries `i` — interactive only, so `ssh box <command>`, scp, rsync and
+#     every script that runs a login shell are untouched;
 #   - $PWD = $HOME — a shell that started somewhere on purpose stays there;
 #   - the path must be under $HOME and be a directory, so this file can never
 #     send a login somewhere surprising;
 #   - SPARKBOX_NO_REPO_CD=1 in the environment turns it off entirely.
+#
+# The first guard asks the shell's own option flags and not `[ -n "$PS1" ]`,
+# which is the more familiar spelling and is wrong: bash unsets an inherited
+# PS1 when it is not interactive, but dash SETS one ("# ") regardless, so under
+# /bin/sh on a Debian the PS1 test says "interactive" for every script on the
+# machine. $- carries `i` if and only if the shell really is interactive, in
+# both.
 #
 # `cd` failing is not an error worth a message at login: the guards above have
 # already established the directory is there, so a failure here means a
@@ -1000,17 +1007,19 @@ cat > "$MNT/etc/profile.d/50-sparkbox-repo.sh" <<'EOF'
 # deploy tests drive this file against a tree instead of the machine running
 # them. Nothing in a guest sets it.
 sparkbox_repo_file=${SPARKBOX_REPOS_DIR_FILE:-/run/sparkbox/repos.dir}
-if [ -n "${PS1:-}" ] && [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ]; then
-  if [ -r "$sparkbox_repo_file" ]; then
-    sparkbox_repo_dir=$(cat "$sparkbox_repo_file" 2>/dev/null) || sparkbox_repo_dir=
-    case "$sparkbox_repo_dir" in
-      "$HOME"/*)
-        if [ -d "$sparkbox_repo_dir" ]; then cd "$sparkbox_repo_dir" || true; fi
-        ;;
-    esac
-    unset sparkbox_repo_dir
-  fi
-fi
+case $- in
+  *i*)
+    if [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ] && [ -r "$sparkbox_repo_file" ]; then
+      sparkbox_repo_dir=$(cat "$sparkbox_repo_file" 2>/dev/null) || sparkbox_repo_dir=
+      case "$sparkbox_repo_dir" in
+        "$HOME"/*)
+          if [ -d "$sparkbox_repo_dir" ]; then cd "$sparkbox_repo_dir" || true; fi
+          ;;
+      esac
+      unset sparkbox_repo_dir
+    fi
+    ;;
+esac
 unset sparkbox_repo_file
 EOF
 chmod 0644 "$MNT/etc/profile.d/50-sparkbox-repo.sh"

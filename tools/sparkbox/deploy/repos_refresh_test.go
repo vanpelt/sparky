@@ -684,12 +684,10 @@ func TestLoginSnippetLandsInTheCheckout(t *testing.T) {
 		} else if err := os.WriteFile(pointer, []byte(target+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		// PS1 is assigned INSIDE the shell rather than exported into it,
-		// because that is where it lives: bash unsets an inherited PS1 in a
-		// non-interactive shell, which is exactly why `[ -n "$PS1" ]` is the
-		// interactivity test the snippet uses. Exporting it here would test a
-		// condition that can never hold on the machine under test.
-		cmd := exec.Command("sh", "-c", `PS1="$ "; . `+snippet+"; pwd")
+		// `set -i` rather than `sh -i`, which both dash and bash accept and
+		// which is the flag the snippet reads. An actual interactive shell is
+		// not usable here: `bash -ic` with no terminal blocks.
+		cmd := exec.Command("sh", "-c", "set -i; . "+snippet+"; pwd")
 		cmd.Dir = from
 		cmd.Env = append([]string{
 			"HOME=" + home,
@@ -725,8 +723,10 @@ func TestLoginSnippetLandsInTheCheckout(t *testing.T) {
 		t.Errorf("a missing directory was cd-ed into anyway: %q", got)
 	}
 	// The opt-out, and the non-interactive case: `ssh box <command>`, scp and
-	// rsync all run without a PS1 and must not have their working directory
-	// moved under them.
+	// rsync all run a shell with no `i` in $- and must not have their working
+	// directory moved under them. That second case is why the guard cannot be
+	// `[ -n "$PS1" ]`: dash sets a PS1 in every shell it starts, so under
+	// /bin/sh on the Linux runner this is the assertion that catches it.
 	if got := sourced(t, home, repo, "SPARKBOX_NO_REPO_CD=1"); got != home {
 		t.Errorf("SPARKBOX_NO_REPO_CD did not turn it off: %q", got)
 	}
@@ -735,7 +735,7 @@ func TestLoginSnippetLandsInTheCheckout(t *testing.T) {
 	cmd.Env = []string{"HOME=" + home, "SPARKBOX_REPOS_DIR_FILE=" + pointer, "PATH=" + os.Getenv("PATH")}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("sourcing without PS1: %v\n%s", err, out)
+		t.Fatalf("sourcing in a non-interactive shell: %v\n%s", err, out)
 	}
 	if got := strings.TrimSpace(string(out)); got != home {
 		t.Errorf("a non-interactive shell was moved to %q", got)
