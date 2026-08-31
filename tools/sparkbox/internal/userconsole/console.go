@@ -187,15 +187,18 @@ type Handler struct {
 // TemplateTags is the one question this console asks of the tag-to-base-image
 // store: which of an owner's tags boot from which of their snapshots.
 //
-// *templates.Store satisfies it. It is a one-method seam rather than the whole
-// store because that is all a READ-ONLY column needs, and this milestone ships
-// no bind or unbind route here on purpose: those two are ownership-checked
-// writes that belong in internal/ctlops, and this handler does not go through
-// ctlops at all (see listSnapshots and deleteSnapshot, which call the manager
-// directly). Adding them here would mean a second authorization path for the
-// same operation, which is the thing this package must not grow.
+// *templates.Store satisfies it. Both methods are READS and that is the whole
+// reason the seam is this narrow: no bind, unbind or port write lives here on
+// purpose, because those are ownership-checked writes that belong in
+// internal/ctlops, and this handler does not go through ctlops at all (see
+// listSnapshots and deleteSnapshot, which call the manager directly). Adding
+// one here would mean a second authorization path for the same operation,
+// which is the thing this package must not grow.
 type TemplateTags interface {
 	BindingsForOwner(owner string) ([]templates.Binding, error)
+	// SnapshotPorts is the other column: the default port each template was
+	// captured on, for the snapshots that carry one.
+	SnapshotPorts(owner string) (map[string]int, error)
 }
 
 // New builds a user-console handler for <subdomain>.<domain> (subdomain is
@@ -834,6 +837,12 @@ type snapshotRow struct {
 	// every row of a panel where almost nothing is bound buries the one row
 	// where it matters.
 	BoundTags []string `json:"bound_tags,omitempty"`
+	// Port is the default port a sandbox booted from this template inherits,
+	// omitted for the templates captured from a box on the stock one. It is
+	// shown for the same reason it is shown in `snapshot ls`: a box whose URL
+	// answers nothing because its template chose 5173 has no other way to
+	// explain itself, and this panel is where its owner is already looking.
+	Port int `json:"port,omitempty"`
 }
 
 // listSnapshots lists the session's own snapshots — owner-scoped, unlike the
@@ -843,8 +852,9 @@ func (h *Handler) listSnapshots(w http.ResponseWriter, r *http.Request) {
 	snaps := h.boxes.Snapshots(handle)
 	out := make([]snapshotRow, 0, len(snaps))
 	bound := h.boundTags(handle)
+	ports := h.snapshotPorts(handle)
 	for _, s := range snaps {
-		out = append(out, snapshotRow{Snapshot: s, BoundTags: bound[s.Name]})
+		out = append(out, snapshotRow{Snapshot: s, BoundTags: bound[s.Name], Port: ports[s.Name]})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -873,6 +883,22 @@ func (h *Handler) boundTags(owner string) map[string][]string {
 		m[b.Snapshot] = append(m[b.Snapshot], b.Tag)
 	}
 	return m
+}
+
+// snapshotPorts maps the owner's snapshot names to the default port each was
+// captured on, and swallows a store failure for exactly the reason boundTags
+// does: it is one more column on a panel, and losing the Snapshots list because
+// it could not be filled is the worse outcome.
+func (h *Handler) snapshotPorts(owner string) map[string]int {
+	if h.binds == nil {
+		return nil
+	}
+	ports, err := h.binds.SnapshotPorts(owner)
+	if err != nil {
+		h.log.Warn("user console could not read template ports", "handle", owner, "err", err)
+		return nil
+	}
+	return ports
 }
 
 type forkReq struct {

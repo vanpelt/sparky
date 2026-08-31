@@ -55,6 +55,14 @@ type SnapshotInfo struct {
 	// :789) — so printing it there would invent a fleet nobody has, and this
 	// payload stays byte-identical to the one that shipped.
 	Node string `json:"node,omitempty"`
+	// Port is the default port the source sandbox served on, carried forward so
+	// a sandbox booted from this template lands on it too. Zero — omitted — for
+	// a template captured from a box on the stock port, which is most of them.
+	//
+	// It is reported at all because the alternative is invisible magic: a fork
+	// that quietly routes to 5173 with nothing listening there looks broken in
+	// a way nothing on the box explains, and this is the line that explains it.
+	Port int `json:"port,omitempty"`
 	// BoundTags is the tags whose sandboxes boot from this snapshot. Empty for
 	// the overwhelmingly common snapshot nobody has bound, which is why it is
 	// omitempty rather than never-nil like SandboxInfo.Tags: a listing that

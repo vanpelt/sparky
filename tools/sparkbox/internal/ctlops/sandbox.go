@@ -97,6 +97,10 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 		o.clearRepoRefs(c.Handle, name, refs)
 		return SandboxInfo{}, Fail(op, err)
 	}
+	// After the build, because the row it corrects does not exist until the
+	// manager (or the fleet, for a sandbox on another machine) has made it. See
+	// adoptTemplatePort for why correcting is the right shape here.
+	o.adoptTemplatePort(name, c.Handle, tpl.Port)
 	o.log.Info("sandbox created", "user", c.Handle, "name", name, "node", a.Node, "tags", tags, "image", tpl.Image)
 	return o.info(box), nil
 }

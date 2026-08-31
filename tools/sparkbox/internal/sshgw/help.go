@@ -268,6 +268,12 @@ const snapshotHelp = "usage: ssh ctl@<gateway> snapshot ls\r\n" +
 	"fails, the snapshot is kept and the message carries the one `bind` that\r\n" +
 	"finishes it — a re-run would capture a different disk.\r\n" +
 	"\r\n" +
+	"a capture also carries the port the sandbox was serving on, so a box created\r\n" +
+	"from the template answers on its own URL with nothing to set up. `snapshot ls`\r\n" +
+	"prints that port on the rows that have one; a template captured from a box on\r\n" +
+	"the stock port prints none, and its sandboxes get the stock port. `sparkbox\r\n" +
+	"port <n>` from inside a sandbox moves it either way.\r\n" +
+	"\r\n" +
 	"`create` brings the agent CLIs up to date before it captures, so a template\r\n" +
 	"does not start life frozen at the versions of the day you took it — inside a\r\n" +
 	"sandbox, `sparkbox update-tools` does the same on demand. a sandbox that is\r\n" +

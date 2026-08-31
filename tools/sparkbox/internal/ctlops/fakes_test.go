@@ -96,6 +96,9 @@ var mutatingVerbs = map[string]bool{
 	// it would quietly drop the new verbs out of every ownership assertion,
 	// since mutating() only reports what this table names.
 	"Bind": true, "Unbind": true,
+	// The template-port verbs, for the same reason. Upsert is the route write
+	// that points a new sandbox at the port its template was captured on.
+	"SetSnapshotPort": true, "ForgetSnapshotPort": true, "Upsert": true,
 }
 
 // mutating reports the recorded calls that could have changed state or woken a
@@ -629,6 +632,47 @@ func (f *fakeRoutes) ListBySandbox(sandbox string) ([]routes.Route, error) {
 	return f.rs[sandbox], nil
 }
 
+// GetBySubdomain scans the by-sandbox map, since the fake's index is the
+// sandbox and the store's is the subdomain. Small enough that a second index
+// would be more bookkeeping than the tests are worth.
+func (f *fakeRoutes) GetBySubdomain(subdomain string) (routes.Route, bool, error) {
+	f.c.add("GetBySubdomain %s", subdomain)
+	if f.err != nil {
+		return routes.Route{}, false, f.err
+	}
+	for _, list := range f.rs {
+		for _, r := range list {
+			if r.Subdomain == subdomain {
+				return r, true, nil
+			}
+		}
+	}
+	return routes.Route{}, false, nil
+}
+
+// Upsert reproduces the one behaviour ctlops leans on: an existing row has its
+// port replaced and everything else — visibility above all — left alone. See
+// routes.Store.Upsert, where that is enforced by the ON CONFLICT clause.
+func (f *fakeRoutes) Upsert(r routes.Route) error {
+	f.c.add("Upsert %s -> %s:%d", r.Subdomain, r.Sandbox, r.Port)
+	if f.err != nil {
+		return f.err
+	}
+	for box, list := range f.rs {
+		for i := range list {
+			if list[i].Subdomain == r.Subdomain {
+				f.rs[box][i].Port = r.Port
+				return nil
+			}
+		}
+	}
+	if r.Visibility == "" {
+		r.Visibility = routes.VisibilityPrivate
+	}
+	f.rs[r.Sandbox] = append(f.rs[r.Sandbox], r)
+	return nil
+}
+
 func (f *fakeRoutes) SetVisibility(subdomain, visibility string) error {
 	f.c.add("SetVisibility %s %s", subdomain, visibility)
 	if f.err != nil {
@@ -846,10 +890,58 @@ func (f *fakeSecrets) SandboxesForSecret(owner, envName string) ([]string, error
 type fakeTemplateTags struct {
 	c    *calls
 	rows map[string]templates.Binding // "owner\x00tag"
-	err  error                        // returned by every method when set
+	// ports is the snapshot_ports table: "owner\x00snapshot" -> port. Sparse,
+	// exactly like the real one, so a lookup for a snapshot captured on the
+	// stock port answers 0 here too.
+	ports   map[string]int
+	err     error // returned by every method when set
+	portErr error // returned by the port methods only, when set
 }
 
 func bindKey(owner, tag string) string { return owner + "\x00" + tag }
+
+func (f *fakeTemplateTags) SetSnapshotPort(owner, snapshot string, port int) error {
+	f.c.add("SetSnapshotPort %s snapshot=%s port=%d", owner, snapshot, port)
+	if f.portErr != nil {
+		return f.portErr
+	}
+	if f.ports == nil {
+		f.ports = map[string]int{}
+	}
+	f.ports[bindKey(owner, snapshot)] = port
+	return nil
+}
+
+func (f *fakeTemplateTags) SnapshotPort(owner, snapshot string) (int, error) {
+	f.c.add("SnapshotPort %s snapshot=%s", owner, snapshot)
+	if f.portErr != nil {
+		return 0, f.portErr
+	}
+	return f.ports[bindKey(owner, snapshot)], nil
+}
+
+func (f *fakeTemplateTags) SnapshotPorts(owner string) (map[string]int, error) {
+	f.c.add("SnapshotPorts %s", owner)
+	if f.portErr != nil {
+		return nil, f.portErr
+	}
+	out := map[string]int{}
+	for k, port := range f.ports {
+		if o, snap, ok := strings.Cut(k, "\x00"); ok && o == owner {
+			out[snap] = port
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeTemplateTags) ForgetSnapshotPort(owner, snapshot string) error {
+	f.c.add("ForgetSnapshotPort %s snapshot=%s", owner, snapshot)
+	if f.portErr != nil {
+		return f.portErr
+	}
+	delete(f.ports, bindKey(owner, snapshot))
+	return nil
+}
 
 // defaultTagRefusal is the shape of the store's refusal, not its text: a
 // sentence naming the tag and wrapping the sentinel.
@@ -1042,7 +1134,7 @@ func newRig(t *testing.T) *rig {
 	gh := &fakeGitHub{c: c, keys: map[string][]xssh.PublicKey{}}
 	checkpoints := &fakeCheckpoints{c: c, enabled: map[string]bool{"alicebox": true}}
 	secretStore := &fakeSecrets{c: c, vals: map[string]string{}, tags: map[string][]string{}, boxes: tagger}
-	bindings := &fakeTemplateTags{c: c, rows: map[string]templates.Binding{}}
+	bindings := &fakeTemplateTags{c: c, rows: map[string]templates.Binding{}, ports: map[string]int{}}
 	hm := &fakeHiveMind{}
 
 	ops := New(Config{
