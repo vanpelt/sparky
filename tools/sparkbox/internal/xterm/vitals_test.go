@@ -27,12 +27,14 @@ import (
 // the reader was not consulted at all; err makes it fail the way a machine that
 // has stopped answering does.
 type fakeVitals struct {
-	mu    sync.Mutex
-	cpu   map[string]float64
-	mem   map[string]int64
-	net   map[string][2]uint64
-	err   error
-	calls int
+	mu           sync.Mutex
+	cpu          map[string]float64
+	mem          map[string]int64
+	net          map[string][2]uint64
+	ports        map[string][]int
+	portsChecked map[string]bool
+	err          error
+	calls        int
 }
 
 func (f *fakeVitals) count() int {
@@ -59,6 +61,10 @@ func (f *fakeVitals) Vitals(_ context.Context, name string) (host.Vitals, error)
 		rx, tx := n[0], n[1]
 		v.NetRxBytes, v.NetTxBytes = &rx, &tx
 	}
+	if ports, ok := f.ports[name]; ok {
+		v.ListeningPorts = append([]int(nil), ports...)
+	}
+	v.PortsChecked = f.portsChecked[name]
 	return v, nil
 }
 
@@ -146,6 +152,36 @@ func TestVitalsServesLiveCounters(t *testing.T) {
 	// latency into the numbers.
 	if at, ok := m["at_ms"].(float64); !ok || at <= 0 {
 		t.Errorf("at_ms = %v, want a positive timestamp", m["at_ms"])
+	}
+}
+
+func TestVitalsCarriesListeningPortsAndCurrentDefault(t *testing.T) {
+	fv := &fakeVitals{
+		ports:        map[string][]int{"demo": {3000, 8000}},
+		portsChecked: map[string]bool{"demo": true},
+	}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
+	hz.h.proxyPort = func(string) (int, bool) { return 3000, true }
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	if m["proxy_port"] != float64(3000) || m["ports_checked"] != true {
+		t.Fatalf("proxy availability = %v, want port 3000 checked", m)
+	}
+	ports, ok := m["listening_ports"].([]any)
+	if !ok || len(ports) != 2 || ports[0] != float64(3000) || ports[1] != float64(8000) {
+		t.Fatalf("listening_ports = %v, want [3000 8000]", m["listening_ports"])
+	}
+}
+
+func TestVitalsDistinguishesCheckedWithNoListeners(t *testing.T) {
+	fv := &fakeVitals{portsChecked: map[string]bool{"demo": true}}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	if m["ports_checked"] != true {
+		t.Fatalf("ports_checked = %v, want true", m["ports_checked"])
+	}
+	if _, present := m["listening_ports"]; present {
+		t.Fatalf("empty listening_ports should be omitted: %v", m)
 	}
 }
 

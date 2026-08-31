@@ -152,6 +152,10 @@ type Config struct {
 	// no hostname to guess, and the launch door treats the same emptiness the
 	// same way.
 	ConsoleURL string
+	// ProxyPort resolves the sandbox's current default route port. Nil uses the
+	// platform default. It is separate from Proxy's stable portless URL because
+	// the page needs the numeric port to explain why that URL is not ready yet.
+	ProxyPort func(sandbox string) (int, bool)
 
 	// Track registers a live terminal with the SSH gateway's session registry
 	// and returns the unregister func — *sshgw.Gateway's tracker, passed as a
@@ -193,7 +197,8 @@ type Handler struct {
 	// proxyURL composes the sandbox's default HTTPS route. Like sshCommand it
 	// is nil when this host has no advertised domain, so the page never guesses
 	// a public hostname from its configurable terminal label.
-	proxyURL func(sandbox string) string
+	proxyURL  func(sandbox string) string
+	proxyPort func(sandbox string) (int, bool)
 
 	track func(sandbox string, s SessionConn, isPTY bool) func()
 	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -234,6 +239,7 @@ func New(cfg Config) *Handler {
 		sshCommand: sshCommand(cfg.SSHHost, cfg.SSHPort),
 		consoleURL: cfg.ConsoleURL,
 		proxyURL:   sandboxProxyURL(cfg.Domain),
+		proxyPort:  cfg.ProxyPort,
 		track:      cfg.Track,
 		dial:       cfg.Dial,
 		log:        cfg.Log,

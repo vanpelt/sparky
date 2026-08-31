@@ -560,6 +560,9 @@ type Manager struct {
 	balloonedAt map[string]time.Time
 	metrics     *fleetmetrics.Registry // optional node-local persistence/readiness metrics
 	diskOps     sync.Map               // sandbox name -> *sync.Mutex; serializes rootfs lifecycle work
+	portScans   singleflight.Group     // one supported-port scan per sandbox at a time
+	portScanMu  sync.Mutex
+	portScan    map[string]portScanSample // short-lived results keyed by sandbox name
 
 	// Activity is intentionally kept off mu on the offer path. Lifecycle
 	// operations hold mu across driver calls, which can take seconds; a web

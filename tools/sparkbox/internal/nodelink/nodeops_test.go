@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -136,7 +137,10 @@ func (m *opsManager) Vitals(ctx context.Context, name string) (host.Vitals, erro
 		return host.Vitals{}, nil
 	}
 	secs, used, rx, tx := 12.5, int64(700), uint64(4096), uint64(2048)
-	return host.Vitals{CPUSeconds: &secs, MemUsedMB: &used, NetRxBytes: &rx, NetTxBytes: &tx}, nil
+	return host.Vitals{
+		CPUSeconds: &secs, MemUsedMB: &used, NetRxBytes: &rx, NetTxBytes: &tx,
+		ListeningPorts: []int{3000, 8000}, PortsChecked: true,
+	}, nil
 }
 
 func (m *opsManager) simple(ctx context.Context, verb string, args ...any) error {
@@ -338,6 +342,9 @@ func TestNodeRunsEveryLifecycleVerb(t *testing.T) {
 				if got.NetRxBytes == nil || *got.NetRxBytes != 4096 ||
 					got.NetTxBytes == nil || *got.NetTxBytes != 2048 {
 					t.Errorf("tap counters = %v/%v, want 4096/2048", got.NetRxBytes, got.NetTxBytes)
+				}
+				if !got.PortsChecked || !reflect.DeepEqual(got.ListeningPorts, []int{3000, 8000}) {
+					t.Errorf("ports = %v checked=%v, want [3000 8000] checked", got.ListeningPorts, got.PortsChecked)
 				}
 			},
 		},
@@ -652,7 +659,7 @@ func TestVitalsAbsenceCrossesTheWireAsAbsence(t *testing.T) {
 		t.Fatalf("vitals: %v", err)
 	}
 	if resp.CPUSeconds != nil || resp.MemUsedMB != nil ||
-		resp.NetRxBytes != nil || resp.NetTxBytes != nil {
+		resp.NetRxBytes != nil || resp.NetTxBytes != nil || resp.PortsChecked || len(resp.ListeningPorts) != 0 {
 		t.Fatalf("a machine with no reading answered %+v, want every field absent", resp)
 	}
 

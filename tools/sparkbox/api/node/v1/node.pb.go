@@ -1413,6 +1413,8 @@ type Vitals struct {
 	MemoryUsedMb   int64                  `protobuf:"varint,2,opt,name=memory_used_mb,json=memoryUsedMb,proto3" json:"memory_used_mb,omitempty"`
 	NetworkRxBytes uint64                 `protobuf:"varint,3,opt,name=network_rx_bytes,json=networkRxBytes,proto3" json:"network_rx_bytes,omitempty"`
 	NetworkTxBytes uint64                 `protobuf:"varint,4,opt,name=network_tx_bytes,json=networkTxBytes,proto3" json:"network_tx_bytes,omitempty"`
+	ListeningPorts []int32                `protobuf:"varint,5,rep,packed,name=listening_ports,json=listeningPorts,proto3" json:"listening_ports,omitempty"`
+	PortsChecked   bool                   `protobuf:"varint,6,opt,name=ports_checked,json=portsChecked,proto3" json:"ports_checked,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1473,6 +1475,20 @@ func (x *Vitals) GetNetworkTxBytes() uint64 {
 		return x.NetworkTxBytes
 	}
 	return 0
+}
+
+func (x *Vitals) GetListeningPorts() []int32 {
+	if x != nil {
+		return x.ListeningPorts
+	}
+	return nil
+}
+
+func (x *Vitals) GetPortsChecked() bool {
+	if x != nil {
+		return x.PortsChecked
+	}
+	return false
 }
 
 // OperationIdentity is required on every mutation. request_hash is a SHA-256
@@ -3870,13 +3886,15 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x12inventory_revision\x18\x05 \x01(\x04R\x11inventoryRevision\x12\"\n" +
 	"\fcapabilities\x18\x06 \x03(\tR\fcapabilities\",\n" +
 	"\x10GetVitalsRequest\x12\x18\n" +
-	"\asandbox\x18\x01 \x01(\tR\asandbox\"\xa3\x01\n" +
+	"\asandbox\x18\x01 \x01(\tR\asandbox\"\xf1\x01\n" +
 	"\x06Vitals\x12\x1f\n" +
 	"\vcpu_seconds\x18\x01 \x01(\x01R\n" +
 	"cpuSeconds\x12$\n" +
 	"\x0ememory_used_mb\x18\x02 \x01(\x03R\fmemoryUsedMb\x12(\n" +
 	"\x10network_rx_bytes\x18\x03 \x01(\x04R\x0enetworkRxBytes\x12(\n" +
-	"\x10network_tx_bytes\x18\x04 \x01(\x04R\x0enetworkTxBytes\"\xdb\x01\n" +
+	"\x10network_tx_bytes\x18\x04 \x01(\x04R\x0enetworkTxBytes\x12'\n" +
+	"\x0flistening_ports\x18\x05 \x03(\x05R\x0elisteningPorts\x12#\n" +
+	"\rports_checked\x18\x06 \x01(\bR\fportsChecked\"\xdb\x01\n" +
 	"\x11OperationIdentity\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12'\n" +
 	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\x12!\n" +

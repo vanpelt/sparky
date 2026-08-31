@@ -142,10 +142,12 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 			return VitalsResp{}, err
 		}
 		return VitalsResp{
-			CPUSeconds: v.CPUSeconds,
-			MemUsedMB:  v.MemUsedMB,
-			NetRxBytes: v.NetRxBytes,
-			NetTxBytes: v.NetTxBytes,
+			CPUSeconds:     v.CPUSeconds,
+			MemUsedMB:      v.MemUsedMB,
+			NetRxBytes:     v.NetRxBytes,
+			NetTxBytes:     v.NetTxBytes,
+			ListeningPorts: v.ListeningPorts,
+			PortsChecked:   v.PortsChecked,
 		}, nil
 	})
 

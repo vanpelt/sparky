@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
@@ -77,6 +78,12 @@ type vitals struct {
 	// the route store's current default port, including changes made while this
 	// terminal is open.
 	Proxy string `json:"proxy,omitempty"`
+	// ProxyPort is the guest port selected by the portless Proxy URL.
+	ProxyPort int `json:"proxy_port,omitempty"`
+	// ListeningPorts contains the supported public ports accepting TCP
+	// connections. PortsChecked makes an empty list authoritative.
+	ListeningPorts []int `json:"listening_ports,omitempty"`
+	PortsChecked   bool  `json:"ports_checked,omitempty"`
 
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
@@ -146,6 +153,12 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.proxyURL != nil {
 		out.Proxy = h.proxyURL(box.Name)
+		out.ProxyPort = routes.DefaultPort
+		if h.proxyPort != nil {
+			if port, ok := h.proxyPort(box.Name); ok && port > 0 {
+				out.ProxyPort = port
+			}
+		}
 	}
 	h.readVitals(r.Context(), box, &out)
 
@@ -178,4 +191,6 @@ func (h *Handler) readVitals(ctx context.Context, box *host.Sandbox, out *vitals
 	}
 	out.CPUSeconds, out.MemUsedMB = v.CPUSeconds, v.MemUsedMB
 	out.NetRxBytes, out.NetTxBytes = v.NetRxBytes, v.NetTxBytes
+	out.ListeningPorts = append([]int(nil), v.ListeningPorts...)
+	out.PortsChecked = v.PortsChecked
 }

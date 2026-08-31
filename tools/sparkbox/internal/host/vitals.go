@@ -14,7 +14,13 @@ package host
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"sync"
+	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/publicports"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // Vitals is what one machine can currently say about one sandbox.
@@ -36,6 +42,11 @@ type Vitals struct {
 	// below the previous one as that reset rather than a negative rate.
 	NetRxBytes *uint64
 	NetTxBytes *uint64
+	// ListeningPorts are the supported public HTTP ports that accepted a TCP
+	// connection at this reading. PortsChecked distinguishes an authoritative
+	// empty result from a node or driver that could not perform the scan.
+	ListeningPorts []int
+	PortsChecked   bool
 }
 
 // Empty reports whether this reading carries nothing at all. It is what tells
@@ -43,7 +54,16 @@ type Vitals struct {
 // machine answered with numbers", which are rendered identically but logged
 // differently.
 func (v Vitals) Empty() bool {
-	return v.CPUSeconds == nil && v.MemUsedMB == nil && v.NetRxBytes == nil && v.NetTxBytes == nil
+	return v.CPUSeconds == nil && v.MemUsedMB == nil && v.NetRxBytes == nil && v.NetTxBytes == nil && !v.PortsChecked
+}
+
+const portScanTTL = 3 * time.Second
+const portDialTimeout = 150 * time.Millisecond
+
+type portScanSample struct {
+	hostIP string
+	at     time.Time
+	ports  []int
 }
 
 // Vitals reads all three counters for one sandbox on THIS machine.
@@ -64,7 +84,7 @@ func (m *Manager) Vitals(ctx context.Context, name string) (Vitals, error) {
 		out Vitals
 		wg  sync.WaitGroup
 	)
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		if secs, ok := m.CPUSeconds(ctx, name); ok {
@@ -83,6 +103,75 @@ func (m *Manager) Vitals(ctx context.Context, name string) (Vitals, error) {
 			out.NetRxBytes, out.NetTxBytes = &rx, &tx
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		box, ok := m.Get(name)
+		if !ok || box.State != vmm.StateRunning || box.HostIP == "" {
+			return
+		}
+		ports, err := m.listeningPorts(ctx, name, box.HostIP)
+		if err == nil {
+			out.ListeningPorts = ports
+			out.PortsChecked = true
+		}
+	}()
 	wg.Wait()
 	return out, nil
+}
+
+func (m *Manager) listeningPorts(ctx context.Context, name, hostIP string) ([]int, error) {
+	m.portScanMu.Lock()
+	if sample, ok := m.portScan[name]; ok && sample.hostIP == hostIP && time.Since(sample.at) < portScanTTL {
+		ports := append([]int(nil), sample.ports...)
+		m.portScanMu.Unlock()
+		return ports, nil
+	}
+	m.portScanMu.Unlock()
+
+	value, err, _ := m.portScans.Do(name, func() (any, error) {
+		ports, err := scanListeningPorts(ctx, hostIP, publicports.CommonHTTPS())
+		if err != nil {
+			return nil, err
+		}
+		m.portScanMu.Lock()
+		if m.portScan == nil {
+			m.portScan = make(map[string]portScanSample)
+		}
+		m.portScan[name] = portScanSample{hostIP: hostIP, at: time.Now(), ports: append([]int(nil), ports...)}
+		m.portScanMu.Unlock()
+		return ports, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return append([]int(nil), value.([]int)...), nil
+}
+
+func scanListeningPorts(ctx context.Context, hostIP string, ports []int) ([]int, error) {
+	open := make([]bool, len(ports))
+	var wg sync.WaitGroup
+	wg.Add(len(ports))
+	for i, port := range ports {
+		i, port := i, port
+		go func() {
+			defer wg.Done()
+			conn, err := (&net.Dialer{Timeout: portDialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(hostIP, strconv.Itoa(port)))
+			if err != nil {
+				return
+			}
+			open[i] = true
+			conn.Close() //nolint:errcheck
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	listening := make([]int, 0, len(ports))
+	for i, port := range ports {
+		if open[i] {
+			listening = append(listening, port)
+		}
+	}
+	return listening, nil
 }

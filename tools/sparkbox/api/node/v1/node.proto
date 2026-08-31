@@ -206,6 +206,8 @@ message Vitals {
   int64 memory_used_mb = 2;
   uint64 network_rx_bytes = 3;
   uint64 network_tx_bytes = 4;
+  repeated int32 listening_ports = 5;
+  bool ports_checked = 6;
 }
 
 // OperationIdentity is required on every mutation. request_hash is a SHA-256

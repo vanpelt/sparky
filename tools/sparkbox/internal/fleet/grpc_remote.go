@@ -1061,8 +1061,13 @@ func (g *GRPCControl) Vitals(ctx context.Context, name string) (host.Vitals, err
 	}
 	cpu, memory := wire.GetCpuSeconds(), wire.GetMemoryUsedMb()
 	rx, tx := wire.GetNetworkRxBytes(), wire.GetNetworkTxBytes()
+	ports := make([]int, len(wire.GetListeningPorts()))
+	for i, port := range wire.GetListeningPorts() {
+		ports[i] = int(port)
+	}
 	return host.Vitals{
 		CPUSeconds: &cpu, MemUsedMB: &memory, NetRxBytes: &rx, NetTxBytes: &tx,
+		ListeningPorts: ports, PortsChecked: wire.GetPortsChecked(),
 	}, nil
 }
 

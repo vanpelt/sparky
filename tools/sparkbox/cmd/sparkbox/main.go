@@ -1239,6 +1239,10 @@ func serve(args []string) error {
 				// console must not have a terminal linking at a hostname
 				// nothing serves.
 				ConsoleURL: consoleURL,
+				ProxyPort: func(sandbox string) (int, bool) {
+					route, ok, err := routeStore.GetBySubdomain(sandbox)
+					return route.Port, ok && err == nil
+				},
 				// The gateway owns the one live-session registry the manager
 				// closes on pause; a browser terminal that kept its own would be
 				// silently stranded when the reaper pauses its sandbox.

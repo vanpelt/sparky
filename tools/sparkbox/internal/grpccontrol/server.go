@@ -289,6 +289,10 @@ func (s *Server) GetVitals(ctx context.Context, request *nodev1.GetVitalsRequest
 	if vitals.NetTxBytes != nil {
 		out.NetworkTxBytes = *vitals.NetTxBytes
 	}
+	for _, port := range vitals.ListeningPorts {
+		out.ListeningPorts = append(out.ListeningPorts, int32(port))
+	}
+	out.PortsChecked = vitals.PortsChecked
 	return out, nil
 }
 
