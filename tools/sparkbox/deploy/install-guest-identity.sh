@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=14
+IDENTITY_REV=15
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -957,6 +957,64 @@ if [ ! -f "$MNT/etc/sparkbox/motd.base" ]; then
   fi
 fi
 
+# Land an interactive login in the checkout.
+#
+# A sandbox opened from a launch link is the case this is for: somebody clicks a
+# button in a pull-request comment and arrives at a shell they did not open, in
+# a box they did not name, holding a repository somebody else chose. Coming up
+# in $HOME and having to guess whether the code is in ~/hivemind or
+# ~/src/wandb/hivemind is a bad first ten seconds of a product whose whole pitch
+# is that the checkout was waiting for you.
+#
+# /etc/profile.d and not /etc/bash.bashrc, which is where the image's other
+# interactive polish lives: bash.bashrc is read by every interactive shell,
+# including the ones a person opens inside a directory they chose on purpose,
+# and a `cd` there would move them out of it. profile.d is read by LOGIN shells
+# — the ssh session and the browser terminal, which are exactly the two arrivals
+# this is about.
+#
+# It is installed here rather than baked into images/Dockerfile so that
+# refresh-agent-tools.sh carries it to templates that are already published,
+# the same as everything else in this payload.
+mkdir -p "$MNT/etc/profile.d"
+cat > "$MNT/etc/profile.d/50-sparkbox-repo.sh" <<'EOF'
+# sparkbox: start a login shell in this sandbox's checkout.
+#
+# /run/sparkbox/repos.dir is written by /usr/local/sbin/sparkbox-repos when the
+# sandbox has exactly one attachment and its checkout exists. One is the only
+# count with an unambiguous answer; with several, the login banner names the
+# directory they share and the person picks.
+#
+# Four guards, each closing a way this would otherwise be wrong:
+#   - PS1 — interactive only, so `ssh box <command>`, scp, rsync and every
+#     script that runs a login shell are untouched;
+#   - $PWD = $HOME — a shell that started somewhere on purpose stays there;
+#   - the path must be under $HOME and be a directory, so this file can never
+#     send a login somewhere surprising;
+#   - SPARKBOX_NO_REPO_CD=1 in the environment turns it off entirely.
+#
+# `cd` failing is not an error worth a message at login: the guards above have
+# already established the directory is there, so a failure here means a
+# permission problem somebody will meet again in a second, with better context.
+# Overridable for the same reason the worker's $SPARKBOX_REPOS_ROOT is: the
+# deploy tests drive this file against a tree instead of the machine running
+# them. Nothing in a guest sets it.
+sparkbox_repo_file=${SPARKBOX_REPOS_DIR_FILE:-/run/sparkbox/repos.dir}
+if [ -n "${PS1:-}" ] && [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ]; then
+  if [ -r "$sparkbox_repo_file" ]; then
+    sparkbox_repo_dir=$(cat "$sparkbox_repo_file" 2>/dev/null) || sparkbox_repo_dir=
+    case "$sparkbox_repo_dir" in
+      "$HOME"/*)
+        if [ -d "$sparkbox_repo_dir" ]; then cd "$sparkbox_repo_dir" || true; fi
+        ;;
+    esac
+    unset sparkbox_repo_dir
+  fi
+fi
+unset sparkbox_repo_file
+EOF
+chmod 0644 "$MNT/etc/profile.d/50-sparkbox-repo.sh"
+
 # The clone worker. Three callers, all of them running the same reconciliation:
 # sparkbox-repos.service at boot, `sparkbox repos sync` by hand, and the gateway
 # when an owner retags a live box or attaches a repository to a tag it already
@@ -992,6 +1050,11 @@ CMDLINE=${SPARKBOX_CMDLINE:-/proc/cmdline}
 STATUS_FILE="$R/run/sparkbox/repos.status"
 LOG_FILE="$R/run/sparkbox/repos.log"
 MOTD_BASE="$R/etc/sparkbox/motd.base"
+# Where an interactive login should start. One bare path on one line, because
+# the only thing that reads it is /etc/profile.d/50-sparkbox-repo.sh, and what
+# it does with it is `cd`. See publish_cd for when it is written and when it is
+# deliberately not.
+CD_FILE="$R/run/sparkbox/repos.dir"
 
 # A sync that cannot run is a warning, never a failed boot. This unit is ordered
 # into boot beside sshd, and exiting nonzero would mark the whole machine
@@ -1163,8 +1226,27 @@ report_add() {
   printf "%s${SEP}%s${SEP}%s${SEP}%s${SEP}%s\n" "$1" "$2" "$3" "$4" "$5" >> "$WORK/report"
 }
 
-# The one line the login banner gets: counts, and a pointer. A banner is read in
-# the second before somebody starts typing, and the list is one command away.
+# The home-relative spelling of a path. The banner is read by the person whose
+# home it is, and `~/hivemind` is both shorter and the thing they can type.
+tilde() {
+  case "$1" in
+    "$HOME_DIR")   printf '~' ;;
+    "$HOME_DIR"/*) printf '~/%s' "${1#"$HOME_DIR"/}" ;;
+    *)             printf '%s' "$1" ;;
+  esac
+}
+
+# The one line the login banner gets: counts, and then either a pointer or a
+# place.
+#
+# The place is the half people asked for. Somebody arriving from a launch link
+# lands in a shell they did not open, in a box they did not name, holding a
+# repository somebody else chose — and the first question is always "where is
+# it". A count alone does not answer that, and `sparkbox repos` to find out is a
+# command you have to know exists. So when everything is in order the line ends
+# with the directory: the one checkout's own path, or the parent the several
+# share. When something is NOT in order the pointer wins, because a path is no
+# use for a clone that failed.
 status_line() {
   inflight=${1:-}
   if [ -n "$inflight" ]; then
@@ -1175,8 +1257,18 @@ status_line() {
   # second before somebody starts typing and cannot carry the whole vocabulary;
   # the word that says what is actually wrong lives one command away, in the
   # table below.
-  ready=0; stale=0; pending=0; failed=0
-  while IFS="$SEP" read -r state rest; do
+  ready=0; stale=0; pending=0; failed=0; rows=0; only=; scattered=
+  while IFS="$SEP" read -r state slug access dest detail; do
+    rows=$((rows + 1))
+    only=$dest
+    # Whether the several share a parent worth naming. The multi-attachment
+    # default layout is ~/src/<owner>/<name>, so they usually do — but an
+    # explicit --path can put one anywhere, and "in ~/src" would then be a
+    # sentence that is wrong about where somebody's work is.
+    case "$dest" in
+      "$HOME_DIR"/src/*) ;;
+      *) scattered=1 ;;
+    esac
     case "$state" in
       ready)  ready=$((ready + 1)) ;;
       stale)  stale=$((stale + 1)) ;;
@@ -1192,6 +1284,10 @@ status_line() {
   if [ -z "$out" ]; then out="none attached"; fi
   if [ "$failed" -gt 0 ] || [ "$pending" -gt 0 ] || [ "$stale" -gt 0 ]; then
     out="$out — run \`sparkbox repos\`"
+  elif [ "$rows" = 1 ] && [ -n "$only" ]; then
+    out="$out in $(tilde "$only")"
+  elif [ "$rows" -gt 1 ] && [ -z "$scattered" ]; then
+    out="$out in $(tilde "$HOME_DIR/src")"
   fi
   printf 'repos: %s' "$out"
 }
@@ -1226,10 +1322,39 @@ publish() {
   publish_motd
 }
 
+# Where an interactive login should start, for the one case with an
+# unambiguous answer: this sandbox has exactly one attachment and its checkout
+# is on disk. /etc/profile.d/50-sparkbox-repo.sh reads it and cds there.
+#
+# Exactly one, and no cleverness about picking a favourite from several. A
+# launch link's sandbox usually holds more than the repository the link named —
+# every attachment on `default` comes too — and nothing in the guest knows which
+# of them the person clicked for. Guessing would put somebody in the wrong tree
+# with no sign that a choice was made; the banner naming ~/src is the honest
+# answer to that shape.
+#
+# Rewritten on every run and REMOVED first, so a sandbox that gains a second
+# attachment stops landing logins in the first one, and so does a checkout that
+# has been deleted. The file is /run, which is a tmpfs — it is rebuilt on the
+# boot after a cold start and survives a resume in memory, both correct.
+publish_cd() {
+  rm -f "$CD_FILE" 2>/dev/null || true
+  [ "$(awk 'END {print NR}' "$WORK/report")" = 1 ] || return 0
+  _cd=$(awk -F"$SEP" 'NR == 1 {print $4}' "$WORK/report")
+  [ -n "$_cd" ] || return 0
+  [ -d "$_cd" ] || return 0
+  mkdir -p "$R/run/sparkbox" 2>/dev/null || true
+  # Same redirection-order rule as publish_motd.
+  if printf '%s\n' "$_cd" 2>/dev/null > "$CD_FILE.new"; then
+    chmod 0644 "$CD_FILE.new" 2>/dev/null || true
+    mv -f "$CD_FILE.new" "$CD_FILE" 2>/dev/null || rm -f "$CD_FILE.new"
+  fi
+}
+
 # Put the banner back exactly as the image baked it. Also the repair path for
 # the boot after the last attachment was detached.
 clear_status() {
-  rm -f "$STATUS_FILE" 2>/dev/null || true
+  rm -f "$STATUS_FILE" "$CD_FILE" 2>/dev/null || true
   publish_motd
 }
 
@@ -1483,6 +1608,7 @@ if [ "$count" -eq 0 ]; then
   exit 0
 fi
 publish "$(status_line)"
+publish_cd
 while IFS="$SEP" read -r state slug access dest detail; do
   case "$dest" in
     "$HOME_DIR"/*) dest="~/${dest#"$HOME_DIR"/}" ;;

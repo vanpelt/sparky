@@ -573,3 +573,171 @@ func TestARenameNeverAdopts(t *testing.T) {
 		t.Errorf("a rename moved the branch to %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Where the checkout is
+// ---------------------------------------------------------------------------
+
+// A sandbox with one attachment publishes where it went, twice: in the login
+// banner, in words, and in /run/sparkbox/repos.dir, as the bare path a login
+// shell cds into.
+//
+// This is the launch-link arrival: a shell somebody did not open, in a box they
+// did not name, holding a repository somebody else chose. "1 ready" alone does
+// not answer the only question they have.
+func TestRepoSyncPublishesWhereTheCheckoutIs(t *testing.T) {
+	w := newRepoWorld(t)
+	w.run("sync")
+
+	banner := guestFile(t, w.root, "etc/motd")
+	if !strings.Contains(banner, "repos: 1 ready in ~/hivemind") {
+		t.Errorf("the login banner does not name the checkout:\n%s", banner)
+	}
+	// The baked banner is still above it — the rewrite is (image banner +
+	// status) and never one replacing the other.
+	if !strings.Contains(banner, "the baked banner") {
+		t.Errorf("the rewrite lost the image's own banner:\n%s", banner)
+	}
+	if got := strings.TrimSpace(guestFile(t, w.root, "run/sparkbox/repos.dir")); got != w.checkout {
+		t.Errorf("repos.dir = %q, want the checkout at %q", got, w.checkout)
+	}
+}
+
+// The cd target is removed the moment it stops being unambiguous.
+//
+// Two attachments have no single right answer — a launch link's sandbox holds
+// the repository the link named plus everything the clicker keeps on `default`,
+// and nothing in the guest knows which one was clicked for — so the file goes
+// and the banner names the parent they share instead. It is removed rather than
+// left stale, because a stale one lands every login in whichever repository
+// happened to be attached first.
+func TestRepoSyncWillNotGuessBetweenTwoCheckouts(t *testing.T) {
+	w := newRepoWorld(t)
+	w.run("sync")
+	if _, err := os.Stat(filepath.Join(w.root, "run/sparkbox/repos.dir")); err != nil {
+		t.Fatalf("the one-attachment case did not publish a cd target: %v", err)
+	}
+
+	// A second attachment, which also moves the default layout to
+	// ~/src/<owner>/<name> for the repository being cloned.
+	w.write(filepath.Join(w.root, "manifest.json"),
+		`{"repos":[{"host":"github.com","slug":"wandb/hivemind","ref":"","path":"","access":"read"},`+
+			`{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","access":"read"}]}`)
+	w.runCode("sync")
+
+	if _, err := os.Stat(filepath.Join(w.root, "run/sparkbox/repos.dir")); !os.IsNotExist(err) {
+		body, _ := os.ReadFile(filepath.Join(w.root, "run/sparkbox/repos.dir"))
+		t.Errorf("a two-attachment sandbox published a cd target anyway: %q (%v)", body, err)
+	}
+}
+
+// The banner's location half is silent when something is wrong, because a
+// pointer at the failure is worth more than a path.
+func TestRepoBannerPointsAtTheProblemRatherThanThePath(t *testing.T) {
+	w := newRepoWorld(t)
+	w.write(filepath.Join(w.checkout, "scratch.txt"), "notes\n")
+	w.pushToRemote("c.txt")
+	w.want(t, w.run("sync"), "stale")
+
+	banner := guestFile(t, w.root, "etc/motd")
+	if !strings.Contains(banner, "run `sparkbox repos`") {
+		t.Errorf("the banner does not point at the report:\n%s", banner)
+	}
+	if strings.Contains(banner, "~/hivemind") {
+		t.Errorf("the banner named a path for a checkout that needs a look:\n%s", banner)
+	}
+}
+
+// The login snippet itself, driven as a shell would source it.
+//
+// Every case here is a way it could send somebody somewhere they did not ask to
+// be, which for a file that runs on every login of every sandbox is the whole
+// risk of the feature.
+func TestLoginSnippetLandsInTheCheckout(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	// The physical path, because that is what `pwd` prints and what a shell
+	// puts in $PWD: on macOS a temp directory lives under /var, which is a
+	// symlink to /private/var, and the snippet's own `[ "$PWD" = "$HOME" ]`
+	// guard would be comparing the two spellings of one directory.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	snippet := filepath.Join(root, "etc/profile.d/50-sparkbox-repo.sh")
+
+	home := filepath.Join(root, "home/sparky")
+	repo := filepath.Join(home, "hivemind")
+	elsewhere := filepath.Join(root, "elsewhere")
+	for _, dir := range []string{repo, elsewhere} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pointer := filepath.Join(root, "repos.dir")
+
+	// sourced runs the snippet the way /etc/profile does — `.` in a shell whose
+	// working directory is `from` — and reports where that shell ended up.
+	sourced := func(t *testing.T, from, target string, env ...string) string {
+		t.Helper()
+		if target == "" {
+			os.Remove(pointer) //nolint:errcheck
+		} else if err := os.WriteFile(pointer, []byte(target+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// PS1 is assigned INSIDE the shell rather than exported into it,
+		// because that is where it lives: bash unsets an inherited PS1 in a
+		// non-interactive shell, which is exactly why `[ -n "$PS1" ]` is the
+		// interactivity test the snippet uses. Exporting it here would test a
+		// condition that can never hold on the machine under test.
+		cmd := exec.Command("sh", "-c", `PS1="$ "; . `+snippet+"; pwd")
+		cmd.Dir = from
+		cmd.Env = append([]string{
+			"HOME=" + home,
+			"SPARKBOX_REPOS_DIR_FILE=" + pointer,
+			"PATH=" + os.Getenv("PATH"),
+		}, env...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("sourcing the login snippet: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	if got := sourced(t, home, repo); got != repo {
+		t.Errorf("a login in $HOME landed in %q, want the checkout %q", got, repo)
+	}
+	// A shell that started somewhere on purpose keeps it. This is the case that
+	// makes the feature safe to have at all.
+	if got := sourced(t, elsewhere, repo); got != elsewhere {
+		t.Errorf("a shell started in %q was moved to %q", elsewhere, got)
+	}
+	// Nothing published yet — the boot's clone has not finished, or nothing is
+	// attached.
+	if got := sourced(t, home, ""); got != home {
+		t.Errorf("with no cd target the login moved to %q", got)
+	}
+	// A path outside the home directory is refused whatever wrote it.
+	if got := sourced(t, home, elsewhere); got != home {
+		t.Errorf("a cd target outside $HOME was honoured: %q", got)
+	}
+	// A directory that is gone: the checkout was deleted since the last sync.
+	if got := sourced(t, home, filepath.Join(home, "deleted")); got != home {
+		t.Errorf("a missing directory was cd-ed into anyway: %q", got)
+	}
+	// The opt-out, and the non-interactive case: `ssh box <command>`, scp and
+	// rsync all run without a PS1 and must not have their working directory
+	// moved under them.
+	if got := sourced(t, home, repo, "SPARKBOX_NO_REPO_CD=1"); got != home {
+		t.Errorf("SPARKBOX_NO_REPO_CD did not turn it off: %q", got)
+	}
+	cmd := exec.Command("sh", "-c", ". "+snippet+"; pwd")
+	cmd.Dir = home
+	cmd.Env = []string{"HOME=" + home, "SPARKBOX_REPOS_DIR_FILE=" + pointer, "PATH=" + os.Getenv("PATH")}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sourcing without PS1: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != home {
+		t.Errorf("a non-interactive shell was moved to %q", got)
+	}
+}
