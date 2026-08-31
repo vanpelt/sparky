@@ -406,6 +406,18 @@
           </svg>
         </button>
 
+        <a class="menu-item hidden" id="proxy-link" target="_blank" rel="noopener">
+          <span class="menu-lines">
+            <span class="menu-label">Proxy</span>
+            <span class="menu-sub mono" id="proxy-host">Default HTTPS endpoint</span>
+          </span>
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <path d="M15 3h6v6"/><path d="M10 14 21 3"/>
+          </svg>
+        </a>
+
         <div class="menu-sep"></div>
 
         <!-- The turbo switch, hidden until GET /vitals says this host will
@@ -842,9 +854,11 @@
     $("clear-btn").addEventListener("click", () => { closeMenu(false); term.clear(); term.focus(); });
     // A link out is a navigation, so the menu is closed but focus is NOT pulled
     // back to a terminal the browser is about to leave for another tab.
-    $("console-link").addEventListener("click", () => {
-      menu.classList.remove("open");
-      $("menu-btn").setAttribute("aria-expanded", "false");
+    ["proxy-link", "console-link"].forEach((id) => {
+      $(id).addEventListener("click", () => {
+        menu.classList.remove("open");
+        $("menu-btn").setAttribute("aria-expanded", "false");
+      });
     });
 
     // ---- the ssh line -----------------------------------------------------
@@ -891,10 +905,10 @@
       });
     });
 
-    // paintIdentity applies the three facts only the server can know: what this
-    // sandbox is called, the ssh command that reaches it, and where the
-    // console is. All three are constants for the life of the page, so this
-    // does its work once and then costs a boolean per poll.
+    // paintIdentity applies the four facts only the server can know: what this
+    // sandbox is called, the ssh command that reaches it, its default proxy,
+    // and where the console is. All four are constants for the life of the
+    // page, so this does its work once and then costs a boolean per poll.
     let identityDone = false;
     function paintIdentity(v) {
       if (identityDone) return;
@@ -905,6 +919,12 @@
         $("ssh-cmd").textContent = v.ssh;
         $("ssh-btn").setAttribute("aria-label", "Copy the command " + v.ssh + " to the clipboard");
         $("ssh-btn").classList.remove("hidden");
+      }
+      if (v.proxy) {
+        const link = $("proxy-link");
+        link.href = v.proxy;
+        try { $("proxy-host").textContent = new URL(v.proxy).host; } catch (e) { /* keep the default */ }
+        link.classList.remove("hidden");
       }
       if (v.console) {
         const link = $("console-link");

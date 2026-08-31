@@ -308,8 +308,8 @@ func TestVitalsSurviveAMachineThatIsNotAnswering(t *testing.T) {
 // What the page cannot work out for itself
 // ---------------------------------------------------------------------------
 
-// The name, the ssh line and the console link ride this poll because the page
-// has no other way to learn any of them.
+// The name, the ssh line, the proxy link and the console link ride this poll
+// because the page has no other way to learn any of them.
 //
 // The name is the one that was actually wrong: the host is
 // `<name>-<subdomain>.<zone>` — one label — so the page's
@@ -326,6 +326,7 @@ func TestVitalsCarriesTheNameSSHAndConsole(t *testing.T) {
 	for field, want := range map[string]any{
 		"name":    "demo",
 		"ssh":     "ssh demo@catnip.sh",
+		"proxy":   "https://demo.hivemind.tools/",
 		"console": "https://my.catnip.sh/",
 	} {
 		if got := m[field]; got != want {
@@ -353,6 +354,25 @@ func TestVitalsOmitsWhatThisHostDoesNotHave(t *testing.T) {
 	// The name is not optional: every host knows it.
 	if m["name"] != "demo" {
 		t.Errorf("name = %v, want demo", m["name"])
+	}
+}
+
+func TestSandboxProxyURL(t *testing.T) {
+	for _, tc := range []struct {
+		domain string
+		want   string
+	}{
+		{"Catnip.SH.", "https://demo.catnip.sh/"},
+		{"", ""},
+	} {
+		build := sandboxProxyURL(tc.domain)
+		got := ""
+		if build != nil {
+			got = build("demo")
+		}
+		if got != tc.want {
+			t.Errorf("sandboxProxyURL(%q) = %q, want %q", tc.domain, got, tc.want)
+		}
 	}
 }
 

@@ -10,10 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/publicports"
 )
 
 func TestRestrictedNetScriptBuildsSluiceCompatibleCeiling(t *testing.T) {
@@ -1130,6 +1132,10 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 			t.Errorf("template guidance missing %q", want)
 		}
 	}
+	flat := strings.Join(strings.Fields(got), " ")
+	if !strings.Contains(flat, publicports.HumanList()) {
+		t.Errorf("template guidance common HTTPS ports drifted from publicports: want %q", publicports.HumanList())
+	}
 }
 
 // TestGuestGetsAHyphenatedDockerCompose covers the command Ubuntu 24.04 does
@@ -1474,10 +1480,8 @@ func TestCKSServicePreloadsCommonHTTPSPorts(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(manifest)
-	for _, port := range []string{
-		"3000", "3001", "4000", "4200", "5000", "5173", "6006",
-		"7860", "8000", "8080", "8443", "8501", "8888", "9000",
-	} {
+	for _, n := range publicports.CommonHTTPS() {
+		port := strconv.Itoa(n)
 		for _, want := range []string{"name: https-" + port, "port: " + port} {
 			if !strings.Contains(got, want) {
 				t.Errorf("CKS Service missing common HTTPS mapping %q", want)
@@ -1490,9 +1494,10 @@ func TestCKSServicePreloadsCommonHTTPSPorts(t *testing.T) {
 	if strings.Contains(got, "name: https-8081") {
 		t.Fatal("CKS Service must not advertise internal gateway listener port 8081")
 	}
-	if strings.Count(got, "targetPort: https") != 16 {
-		t.Fatalf("HTTP(S) mappings = %d, want ports 80/443 plus fourteen common HTTPS ports",
-			strings.Count(got, "targetPort: https"))
+	wantMappings := len(publicports.CommonHTTPS()) + 2 // HTTP redirect and default HTTPS.
+	if strings.Count(got, "targetPort: https") != wantMappings {
+		t.Fatalf("HTTP(S) mappings = %d, want %d (ports 80/443 plus common HTTPS ports)",
+			strings.Count(got, "targetPort: https"), wantMappings)
 	}
 }
 

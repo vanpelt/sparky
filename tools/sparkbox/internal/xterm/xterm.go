@@ -190,6 +190,10 @@ type Handler struct {
 	// the name is the only half that varies.
 	sshCommand func(sandbox string) string
 	consoleURL string
+	// proxyURL composes the sandbox's default HTTPS route. Like sshCommand it
+	// is nil when this host has no advertised domain, so the page never guesses
+	// a public hostname from its configurable terminal label.
+	proxyURL func(sandbox string) string
 
 	track func(sandbox string, s SessionConn, isPTY bool) func()
 	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -229,6 +233,7 @@ func New(cfg Config) *Handler {
 		loginURL:   cfg.LoginURL,
 		sshCommand: sshCommand(cfg.SSHHost, cfg.SSHPort),
 		consoleURL: cfg.ConsoleURL,
+		proxyURL:   sandboxProxyURL(cfg.Domain),
 		track:      cfg.Track,
 		dial:       cfg.Dial,
 		log:        cfg.Log,
@@ -284,6 +289,20 @@ func sshCommand(host string, port int) func(string) string {
 		prefix = "ssh -p " + strconv.Itoa(port) + " "
 	}
 	return func(sandbox string) string { return prefix + sandbox + "@" + host }
+}
+
+// sandboxProxyURL builds the stable, portless URL whose route store selects
+// the sandbox's current default port. The public proxy is an HTTPS product
+// surface even when a local development process has TLS termination disabled,
+// matching the console and launch URLs main advertises.
+func sandboxProxyURL(domain string) func(string) string {
+	domain = strings.ToLower(strings.Trim(domain, "."))
+	if domain == "" {
+		return nil
+	}
+	return func(sandbox string) string {
+		return "https://" + sandbox + "." + domain + "/"
+	}
 }
 
 // SandboxName reads the target sandbox out of a request host.

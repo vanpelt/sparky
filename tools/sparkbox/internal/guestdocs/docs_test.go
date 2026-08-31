@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/publicports"
 )
 
 func TestHandler(t *testing.T) {
@@ -32,6 +34,20 @@ func TestHandler(t *testing.T) {
 			if !strings.Contains(rec.Header().Get("Content-Type"), wantType) {
 				t.Errorf("GET %s content type = %q, want %s", tc.path, rec.Header().Get("Content-Type"), wantType)
 			}
+		}
+	}
+}
+
+func TestPublicPortListComesFromSourceOfTruth(t *testing.T) {
+	for _, path := range []string{"/", "/proxy", "/docs.md", "/proxy.md"} {
+		rec := httptest.NewRecorder()
+		Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		body := rec.Body.String()
+		if !strings.Contains(body, publicports.HumanList()) {
+			t.Errorf("GET %s does not contain the common HTTPS ports", path)
+		}
+		if strings.Contains(body, portsMarker) {
+			t.Errorf("GET %s still contains the unexpanded port marker", path)
 		}
 	}
 }

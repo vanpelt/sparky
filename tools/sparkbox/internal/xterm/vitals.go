@@ -73,6 +73,10 @@ type vitals struct {
 	// Console is the user console's URL, for the menu's one link off this page.
 	// Absent when the host runs no console.
 	Console string `json:"console,omitempty"`
+	// Proxy is the sandbox's default HTTPS endpoint. Its portless URL follows
+	// the route store's current default port, including changes made while this
+	// terminal is open.
+	Proxy string `json:"proxy,omitempty"`
 
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
@@ -139,6 +143,9 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.sshCommand != nil {
 		out.SSH = h.sshCommand(box.Name)
+	}
+	if h.proxyURL != nil {
+		out.Proxy = h.proxyURL(box.Name)
 	}
 	h.readVitals(r.Context(), box, &out)
 

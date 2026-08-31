@@ -177,6 +177,9 @@ The browser terminal is `https://<name>-xterm.<domain>` — an xterm.js page ove
 an authenticated WebSocket into a real PTY in that sandbox, with the same
 resume-on-connect as `ssh <name>@<domain>`. Open it and you get a shell; nothing
 to install, and the sign-in is the same passkey/token flow as any private route.
+Its hamburger menu links straight to the sandbox's default proxy endpoint at
+`https://<name>.<domain>`, following whichever guest port the default route
+currently selects.
 One host per sandbox, so the browser's own origin isolation keeps one sandbox's
 page from scripting another's socket. The identical bridge is mounted at
 `wss://api.<domain>/v1/sandboxes/<name>/terminal` for clients that are not

@@ -103,6 +103,7 @@ binding would reach all of them.
 
 Applications listening in the VM can be reached through Sparkbox's
 authenticated wildcard HTTPS edge. See [the proxy guide](./proxy.md).
+The explicitly exposed development ports are {{COMMON_HTTPS_PORTS}}.
 
 From inside the VM:
 
