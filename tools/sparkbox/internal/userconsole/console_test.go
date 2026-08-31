@@ -1248,8 +1248,9 @@ func TestTurboEndpointDoublesAndIsOwnerScoped(t *testing.T) {
 // under test is the projection — that one new key appears and none of the
 // shipped ones move — not sqlite.
 type fakeBindings struct {
-	rows []templates.Binding
-	err  error
+	rows  []templates.Binding
+	ports map[string]int // "owner\x00snapshot" -> port, sparse like the store
+	err   error
 }
 
 func (f fakeBindings) BindingsForOwner(owner string) ([]templates.Binding, error) {
@@ -1260,6 +1261,19 @@ func (f fakeBindings) BindingsForOwner(owner string) ([]templates.Binding, error
 	for _, b := range f.rows {
 		if b.Owner == owner {
 			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+func (f fakeBindings) SnapshotPorts(owner string) (map[string]int, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := map[string]int{}
+	for k, port := range f.ports {
+		if o, snap, ok := strings.Cut(k, "\x00"); ok && o == owner {
+			out[snap] = port
 		}
 	}
 	return out, nil
@@ -1300,12 +1314,18 @@ func TestSnapshotListStaysDecodableAsHostSnapshots(t *testing.T) {
 		// mallory's binding names the same snapshot name on purpose: the store
 		// is owner-scoped, and so is this projection.
 		{Owner: "mallory", Tag: "theirs", Snapshot: "base"},
+	}, ports: map[string]int{
+		"alice\x00base": 5173,
+		// Same snapshot name under another owner, for the same reason the
+		// binding above uses one: both columns are owner-scoped.
+		"mallory\x00base": 3000,
 	}})
 
 	var rows []struct {
 		Name      string   `json:"name"`
 		FromBox   string   `json:"from_box"`
 		BoundTags []string `json:"bound_tags"`
+		Port      int      `json:"port"`
 	}
 	body = tc.do(t, "GET", "/api/snapshots", "alice", nil).Body.Bytes()
 	if err := json.Unmarshal(body, &rows); err != nil {
@@ -1316,6 +1336,9 @@ func TestSnapshotListStaysDecodableAsHostSnapshots(t *testing.T) {
 	}
 	if len(rows[0].BoundTags) != 2 || rows[0].BoundTags[0] != "cuda" || rows[0].BoundTags[1] != "ml" {
 		t.Errorf("bound_tags = %v, want [cuda ml] and nothing of mallory's", rows[0].BoundTags)
+	}
+	if rows[0].Port != 5173 {
+		t.Errorf("port = %d, want alice's 5173 and not mallory's 3000", rows[0].Port)
 	}
 	if err := json.Unmarshal(body, &plain); err != nil {
 		t.Fatalf("the bound payload no longer decodes into []*host.Snapshot: %v (%s)", err, body)

@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 )
 
 func (o *Ops) ListSnapshots(ctx context.Context, c Caller) ([]SnapshotInfo, error) {
 	snaps := o.templates.Snapshots(c.Handle)
 	bound := o.boundTagsMap(c.Handle)
+	ports := o.snapshotPortMap(c.Handle)
 	// Node is reported only where a machine name means something. See
 	// SnapshotInfo.Node: a single-machine host stamps "local" on every record,
 	// and printing it there would invent a fleet nobody has.
@@ -17,7 +20,7 @@ func (o *Ops) ListSnapshots(ctx context.Context, c Caller) ([]SnapshotInfo, erro
 	for _, s := range snaps {
 		si := SnapshotInfo{
 			Name: s.Name, Owner: s.Owner, FromBox: s.FromBox, CreatedAt: s.CreatedAt,
-			BoundTags: bound[s.Name],
+			BoundTags: bound[s.Name], Port: ports[s.Name],
 		}
 		if named {
 			si.Node = s.Node
@@ -56,7 +59,122 @@ func (o *Ops) CreateSnapshot(ctx context.Context, c Caller, sandbox, name string
 	if _, named := o.boxes.(placer); named {
 		si.Node = s.Node
 	}
+	si.Port = o.captureDefaultPort(c.Handle, sandbox, s.Name)
 	return si, nil
+}
+
+// captureDefaultPort records the port the captured sandbox served on, so a
+// sandbox booted from this template lands on it instead of the stock default.
+// It returns the port it recorded, or 0 when there was nothing worth recording.
+//
+// The port is read HERE, at capture, and not at bind: this is the only moment
+// the source sandbox is known to still exist and to still be serving what the
+// template contains. A binding made a week later would be reading a route that
+// has since moved, or none at all.
+//
+// It is BEST EFFORT, and that is a deliberate asymmetry with resolveTemplate's
+// refusal to fall back to the default image. The expensive, unrepeatable half
+// of a capture has already succeeded by the time this runs — the sandbox is
+// paused and a re-run would compact a different filesystem — so failing the
+// whole operation over the port would throw away minutes to reach a state the
+// user can fix with one `sparkbox port`. The failure is also self-announcing in
+// a way the wrong rootfs is not: a box that boots on 8000 with the dev server
+// on 5173 says so immediately, where a box missing its toolchain says nothing
+// for twenty minutes. The port that was recorded travels back in SnapshotInfo
+// and prints in `snapshot ls`, so silence there is the signal.
+func (o *Ops) captureDefaultPort(owner, sandbox, snapshot string) int {
+	if o.routes == nil || o.templateTags == nil {
+		return 0
+	}
+	// The DEFAULT route only — subdomain == the sandbox's own name. The custom
+	// routes an owner adds with `share` are furniture for one box, and cloning
+	// them onto every fork would hand out subdomains nobody asked for.
+	row, ok, err := o.routes.GetBySubdomain(sandbox)
+	if err != nil {
+		o.log.Error("could not read the default route of a sandbox being captured",
+			"user", owner, "sandbox", sandbox, "snapshot", snapshot, "err", err,
+			"next", "the template keeps the stock default port; set it on a new box with `sparkbox port`")
+		return 0
+	}
+	// Not this sandbox's own default route, so there is no port here that
+	// belongs to the template. Nothing to record and nothing to warn about.
+	if !ok || row.Sandbox != sandbox || row.Port == 0 || row.Port == routes.DefaultPort {
+		return 0
+	}
+	if err := o.templateTags.SetSnapshotPort(owner, snapshot, row.Port); err != nil {
+		o.log.Error("could not record the default port of a new snapshot",
+			"user", owner, "snapshot", snapshot, "port", row.Port, "err", err,
+			"next", "the template keeps the stock default port; set it on a new box with `sparkbox port`")
+		return 0
+	}
+	o.log.Info("snapshot carries a default port", "user", owner, "snapshot", snapshot, "port", row.Port)
+	return row.Port
+}
+
+// adoptTemplatePort points a just-created sandbox's default route at the port
+// its template was captured on.
+//
+// It is a SECOND write, correcting the routes.DefaultPort row that
+// host.Manager.Create (or fleet.mint, for a sandbox on another machine) has
+// already written. Threading the port down through Create, CreateOn and the
+// node link instead would put it on the wire in three more places to close a
+// window nobody can observe: the row is corrected before this call returns and
+// the caller has not yet been told the sandbox's name. Upsert's ON CONFLICT
+// touches only the port, so this cannot disturb a route's visibility.
+//
+// Best-effort, for the same reason the capture is: the sandbox exists and
+// boots, and failing a create the user would have to repeat — paying another
+// cold boot — over a port they can change in one command is the worse trade.
+func (o *Ops) adoptTemplatePort(name, owner string, port int) {
+	if port == 0 || o.routes == nil {
+		return
+	}
+	if err := o.routes.Upsert(routes.Route{
+		Subdomain: name, Sandbox: name, Owner: owner, Port: port,
+	}); err != nil {
+		o.log.Error("could not point a new sandbox's default route at its template's port",
+			"name", name, "owner", owner, "port", port, "err", err,
+			"next", "the sandbox serves on the stock default port; `sparkbox port` from inside it moves the route")
+		return
+	}
+	o.log.Info("sandbox inherited its template's default port", "name", name, "owner", owner, "port", port)
+}
+
+// snapshotPortMap is every port this owner has recorded, for the listing paths.
+// It reads the table once rather than once per row, and answers an empty map on
+// failure: a port column is decoration on a listing, and losing `snapshot ls`
+// entirely because one of its five columns could not be filled is a trade
+// nobody wants. See boundTagsMap, which swallows for the same reason.
+func (o *Ops) snapshotPortMap(owner string) map[string]int {
+	if o.templateTags == nil {
+		return nil
+	}
+	ports, err := o.templateTags.SnapshotPorts(owner)
+	if err != nil {
+		o.log.Error("could not read the default ports recorded for snapshots",
+			"user", owner, "err", err)
+		return nil
+	}
+	return ports
+}
+
+// templatePort is the port recorded for one of the caller's snapshots, or 0.
+//
+// A store failure answers 0 rather than failing whatever asked. Every caller is
+// on a create path where the alternative is refusing to make a sandbox at all
+// over a routing detail — see adoptTemplatePort — so the error is logged where
+// an operator can see it and the create goes on.
+func (o *Ops) templatePort(owner, snapshot string) int {
+	if o.templateTags == nil {
+		return 0
+	}
+	port, err := o.templateTags.SnapshotPort(owner, snapshot)
+	if err != nil {
+		o.log.Error("could not read the default port recorded for a snapshot",
+			"user", owner, "snapshot", snapshot, "err", err)
+		return 0
+	}
+	return port
 }
 
 // SnapshotToTag captures a sandbox and points a tag at what it captured. It is
@@ -149,6 +267,19 @@ func (o *Ops) DeleteSnapshot(ctx context.Context, c Caller, name string) error {
 	if err := o.templates.DeleteSnapshot(ctx, name, c.Handle); err != nil {
 		return Fail(op, err)
 	}
+	// After the template file is gone, and not fatally. A port row that outlives
+	// its snapshot would be inherited by the next capture to take the name — a
+	// create landing on a port from a template its owner already deleted — but
+	// a delete that has already removed the disk cannot be un-done by returning
+	// an error here, and reporting failure for a snapshot that is genuinely gone
+	// would send the user back to re-run a command that now has nothing to do.
+	if o.templateTags != nil {
+		if err := o.templateTags.ForgetSnapshotPort(c.Handle, name); err != nil {
+			o.log.Error("could not forget the default port of a deleted snapshot",
+				"user", c.Handle, "snapshot", name, "err", err,
+				"next", "a snapshot later captured under this name would inherit that port; clear it by capturing over it")
+		}
+	}
 	o.log.Info("snapshot deleted", "user", c.Handle, "snapshot", name)
 	return nil
 }
@@ -213,6 +344,11 @@ func (o *Ops) Fork(ctx context.Context, c Caller, a ForkArgs) (SandboxInfo, erro
 		o.clearRepoRefs(c.Handle, a.Name, refs)
 		return SandboxInfo{}, Fail(op, err)
 	}
+	// A fork consults the SNAPSHOT it was told to boot and never a binding —
+	// see this function's own comment — so the port comes from the same place
+	// the disk did, by name. That is exactly the rule tag templates follow too;
+	// the two paths differ in how they choose a snapshot, not in what one is.
+	o.adoptTemplatePort(a.Name, c.Handle, o.templatePort(c.Handle, a.Snapshot))
 	o.log.Info("sandbox forked", "user", c.Handle, "snapshot", a.Snapshot, "name", a.Name, "tags", tags)
 	return o.info(box), nil
 }

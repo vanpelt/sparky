@@ -171,6 +171,7 @@ type ctlStack struct {
 	mgr    *host.Manager
 	users  *users.Store
 	roster *fakeRoster
+	routes *routes.Store
 	key    gssh.PublicKey
 	log    *slog.Logger
 }
@@ -272,7 +273,7 @@ func newCtlStackWith(t *testing.T, roster *fakeRoster, tweaks ...func(*ctlops.Co
 	opts.Ops = ops
 
 	gw := New(opts)
-	return &ctlStack{gw: gw, mgr: mgr, users: userStore, roster: roster, key: pub, log: log}
+	return &ctlStack{gw: gw, mgr: mgr, users: userStore, roster: roster, routes: routeStore, key: pub, log: log}
 }
 
 // newCtlStackGitHub builds the stack with the GitHub halves wired: device is
@@ -762,6 +763,78 @@ func newCtlStackBindings(t *testing.T) *ctlStack {
 		t.Cleanup(func() { store.Close() }) //nolint:errcheck
 		cfg.TemplateTags = store
 	})
+}
+
+// TestControlSnapshotListShowsTheTemplatePort walks the port column through the
+// door: a box moved off the stock port, captured, and listed.
+//
+// It is here rather than only in ctlops because this suffix is the only place a
+// user can learn that a sandbox forked from this template will have its URL
+// pointed somewhere other than 8000 — a fact that otherwise shows up as a URL
+// that answers nothing.
+func TestControlSnapshotListShowsTheTemplatePort(t *testing.T) {
+	st := newCtlStackBindings(t)
+	ctx := context.Background()
+	for _, name := range []string{"web-box", "stock-box"} {
+		if _, err := st.mgr.Create(ctx, name, "alice", "ubuntu", 1, 512); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What `sparkbox port 5173` does from inside the guest.
+	if err := st.routes.Upsert(routes.Route{
+		Subdomain: "web-box", Sandbox: "web-box", Owner: "alice", Port: 5173,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.routes.Upsert(routes.Route{
+		Subdomain: "stock-box", Sandbox: "stock-box", Owner: "alice", Port: routes.DefaultPort,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ box, snap string }{{"web-box", "websnap"}, {"stock-box", "stocksnap"}} {
+		if s := st.run(t, "alice", "snapshot", "create", tc.box, tc.snap); s.code != 0 {
+			t.Fatalf("capture of %s: exit %d (%s)", tc.box, s.code, s.stderr.String())
+		}
+	}
+
+	s := st.run(t, "alice", "snapshot", "ls")
+	var web, stock string
+	for _, line := range strings.Split(strings.TrimSuffix(s.out.String(), "\r\n"), "\r\n") {
+		switch {
+		case strings.HasPrefix(line, "websnap"):
+			web = line
+		case strings.HasPrefix(line, "stocksnap"):
+			stock = line
+		}
+	}
+	if !strings.HasSuffix(web, "  port 5173") {
+		t.Errorf("the row reads %q, want a trailing port column", web)
+	}
+	if !strings.HasPrefix(web, "websnap                  from web-box") {
+		t.Errorf("the row's first two columns moved: %q", web)
+	}
+	// A capture from a box on the stock port prints exactly what it printed
+	// before this feature existed. That is what keeps the listing inside 80
+	// columns for everybody not using it.
+	if strings.Contains(stock, "port") {
+		t.Errorf("a stock-port row grew a column: %q", stock)
+	}
+
+	// And the row goes back to its shipped shape when the snapshot goes, rather
+	// than handing the port to whatever is captured under that name next.
+	if s := st.run(t, "alice", "snapshot", "rm", "websnap"); s.code != 0 {
+		t.Fatalf("rm: exit %d (%s)", s.code, s.stderr.String())
+	}
+	if s := st.run(t, "alice", "snapshot", "create", "stock-box", "websnap"); s.code != 0 {
+		t.Fatalf("re-capture: exit %d (%s)", s.code, s.stderr.String())
+	}
+	s = st.run(t, "alice", "snapshot", "ls")
+	for _, line := range strings.Split(s.out.String(), "\r\n") {
+		if strings.HasPrefix(line, "websnap") && strings.Contains(line, "port") {
+			t.Errorf("a re-captured name inherited the deleted template's port: %q", line)
+		}
+	}
 }
 
 // TestControlSnapshotBindingsAreMasked: the two refusals a stranger and a

@@ -613,6 +613,14 @@ func (g *Gateway) controlSnapshot(s gssh.Session, c ctlops.Caller, args []string
 			if len(sn.BoundTags) > 0 {
 				extra += "  tags: " + strings.Join(sn.BoundTags, ",")
 			}
+			// A third suffix under the same rule, and omitted for every
+			// snapshot captured from a box on the stock port. It is here rather
+			// than left implicit because a fork that routes to a port nothing is
+			// listening on looks like a broken sandbox, and this is the only
+			// place the user can find out that the template chose it.
+			if sn.Port != 0 {
+				extra += fmt.Sprintf("  port %d", sn.Port)
+			}
 			if sn.Node != "" {
 				extra += "  on " + sn.Node
 			}

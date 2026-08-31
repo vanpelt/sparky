@@ -174,6 +174,14 @@ type TemplateBindings interface {
 	Unbind(owner, tag string) (templates.Binding, error)
 	BindingsForOwner(owner string) ([]templates.Binding, error)
 	BindingsForTags(owner string, tags []string) ([]templates.Binding, error)
+	// The port half of a template. It is on this interface rather than a
+	// second one because it shares the store's lifecycle exactly: a host with
+	// no bindings has no way to boot a template by tag either, so a port it
+	// recorded could only ever be read by `fork`.
+	SetSnapshotPort(owner, snapshot string, port int) error
+	SnapshotPort(owner, snapshot string) (int, error)
+	SnapshotPorts(owner string) (map[string]int, error)
+	ForgetSnapshotPort(owner, snapshot string) error
 }
 
 // GitHubApp is the installation half of the GitHub App: which installation
@@ -205,10 +213,17 @@ type Schedules interface {
 	Delete(id string) error
 }
 
-// Routes is the web-route store, driven only by the `share` commands.
+// Routes is the web-route store, driven by the `share` commands and by the
+// default port a sandbox inherits from the template it booted from.
+//
+// Upsert is on it for that second reason alone, and it is the narrow kind:
+// *routes.Store's ON CONFLICT touches only the port, so pointing a route
+// somewhere new cannot quietly un-share it.
 type Routes interface {
 	ListBySandbox(sandbox string) ([]routes.Route, error)
 	SetVisibility(subdomain, visibility string) error
+	GetBySubdomain(subdomain string) (routes.Route, bool, error)
+	Upsert(r routes.Route) error
 }
 
 // NodeRoster is the fleet's node registry. Nil makes every node operation

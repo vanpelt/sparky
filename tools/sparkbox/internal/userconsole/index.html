@@ -1435,7 +1435,14 @@
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(s.name) + "</td>" +
-        '<td class="muted">' + esc(s.from_box || "–") + "</td>" +
+        // The port rides in the From cell rather than a column of its own: it
+        // is set on almost no snapshot, and a sixth column empty on every row
+        // would bury the one row where it matters. A machine forked from this
+        // template has its URL pointed here, which is otherwise unexplainable
+        // from anywhere in this console.
+        '<td class="muted">' + esc(s.from_box || "–") +
+          (s.port ? ' <span class="mono" title="machines from this template serve on port ' +
+            esc(String(s.port)) + '">:' + esc(String(s.port)) + "</span>" : "") + "</td>" +
         // Read-only: a tag is bound over ssh or the REST API, never here. The
         // column exists so somebody about to delete a snapshot can see that
         // every future sandbox on those tags boots from it.
