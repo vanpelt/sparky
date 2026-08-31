@@ -52,7 +52,12 @@ spec:
             - name: SPARKBOX_PROXY_TLS
               value: "true"
             - name: SPARKBOX_TLS_PROVIDER
-              value: autocert
+              value: cloudflare
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sparkbox-cloudflare
+                  key: api-token
             - name: SPARKBOX_CONSOLE_PASSWORD
               valueFrom:
                 secretKeyRef:

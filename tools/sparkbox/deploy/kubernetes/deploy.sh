@@ -253,6 +253,21 @@ if [ "${#missing_identity_files[@]}" -gt 0 ]; then
   exit 1
 fi
 
+cloudflare_secret=sparkbox-cloudflare
+if ! "${k[@]}" -n "$namespace" get secret "$cloudflare_secret" >/dev/null 2>&1; then
+  echo "required Secret $namespace/$cloudflare_secret is absent" >&2
+  echo "create it with a scoped Cloudflare Zone:Read + DNS:Edit token under the api-token key" >&2
+  exit 1
+fi
+cloudflare_token_present=$(
+  "${k[@]}" -n "$namespace" get secret "$cloudflare_secret" \
+    -o 'go-template={{if index .data "api-token"}}yes{{end}}'
+)
+if [ "$cloudflare_token_present" != yes ]; then
+  echo "Secret $namespace/$cloudflare_secret has no api-token key" >&2
+  exit 1
+fi
+
 "${k[@]}" apply -f "$script_dir/durable-pvc.yaml"
 if ! "${k[@]}" -n "$namespace" get service sparkbox >/dev/null 2>&1; then
   "${k[@]}" apply -f "$script_dir/service.yaml"
