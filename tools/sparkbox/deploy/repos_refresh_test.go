@@ -647,12 +647,16 @@ func TestRepoSyncLandsInTheRepositoryTheBoxWasMadeFor(t *testing.T) {
 	// about a clone that could not reach a remote.
 	other := filepath.Join(w.root, "home/sparky/src/wandb/notebooks")
 	w.git(w.root, "clone", "-q", w.remote, other)
-	// `instance` sits BEFORE `access` on purpose: it is the manifest's only
-	// unquoted value, and a parser that mishandled it would shift every field
-	// after it — the access mode would arrive as a directory name.
+	// The marked entry is spelled exactly as the gateway emits it — `instance`
+	// LAST, which is where Go marshals it, and so the position that broke the
+	// first version of the parser: a trailing key has no field after it, and the
+	// record ends `true}]}` rather than in a single brace. The second entry
+	// carries the flag mid-record instead, where a parser that mishandled the
+	// unquoted value would shift every field after it and report an access mode
+	// as a directory name.
 	w.write(filepath.Join(w.root, "manifest.json"),
-		`{"repos":[{"host":"github.com","slug":"wandb/hivemind","ref":"","path":"","instance":true,"access":"read"},`+
-			`{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","access":"read"}]}`)
+		`{"repos":[{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","access":"read"},`+
+			`{"host":"github.com","slug":"wandb/hivemind","ref":"","path":"","access":"read","instance":true}]}`)
 	w.run("sync")
 
 	if got := strings.TrimSpace(guestFile(t, w.root, "run/sparkbox/repos.dir")); got != w.checkout {
@@ -677,7 +681,7 @@ func TestRepoSyncWillNotGuessBetweenTwoNamedRepositories(t *testing.T) {
 	w.git(w.root, "clone", "-q", w.remote, other)
 	w.write(filepath.Join(w.root, "manifest.json"),
 		`{"repos":[{"host":"github.com","slug":"wandb/hivemind","ref":"","path":"","instance":true,"access":"read"},`+
-			`{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","instance":true,"access":"read"}]}`)
+			`{"host":"github.com","slug":"wandb/notebooks","ref":"","path":"src/wandb/notebooks","access":"read","instance":true}]}`)
 	w.run("sync")
 
 	if _, err := os.Stat(filepath.Join(w.root, "run/sparkbox/repos.dir")); !os.IsNotExist(err) {

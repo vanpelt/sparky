@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=16
+IDENTITY_REV=17
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -1216,15 +1216,23 @@ SEP=$(printf '\037')
 # its own branch ahead of the `:` guard the string keys share. The field parity
 # the loop relies on survives it: an unquoted value contributes no quote
 # characters, so the key after it still lands on an even index.
+#
+# It is also the only key that can be LAST, because Go marshals it last, and
+# last is the position that breaks the obvious loop: a trailing `"instance":true}`
+# has no field after the key, so a bound of `i + 2 <= NF` never reaches it and a
+# tail of `}]}` is not the single optional brace a first draft allows for. The
+# loop therefore walks to NF and stops short only for the string keys, which do
+# need a value field, and the branch accepts any non-alphanumeric tail.
 tr -d '\n\r' < "$WORK/manifest.json" | tr '{' '\n' | awk -F'"' '
   /"slug"/ {
     host = ""; slug = ""; ref = ""; path = ""; access = ""; instance = ""
-    for (i = 2; i + 2 <= NF; i += 2) {
+    for (i = 2; i <= NF; i += 2) {
       key = $i
-      if (key == "instance" && $(i + 1) ~ /^[ \t]*:[ \t]*true[ \t]*[,}]?[ \t]*$/) {
+      if (key == "instance" && $(i + 1) ~ /^[ \t]*:[ \t]*true[^A-Za-z0-9_]*$/) {
         instance = 1
         continue
       }
+      if (i + 2 > NF) break
       if ($(i + 1) !~ /^[ \t]*:[ \t]*$/) continue
       val = $(i + 2)
       if (key == "host") host = val
