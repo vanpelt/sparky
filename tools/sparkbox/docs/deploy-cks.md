@@ -49,11 +49,11 @@ It no longer does, because only one of its four steps ever needed a mount:
 
 - `cp --reflink=always`, `e2fsck -fy` and `zerofree` all operate on the image
   file, and this cluster already runs them for checkpoints;
-- `sanitizeTemplate` — six deletions of per-guest identity — is the one that
-  mounted, and that work now happens inside the fork, at its first boot, before
-  sshd (`sparkbox-identity-reset`, plus `systemd.machine_id=` on the kernel
-  command line). It is still run at capture time on hosts where mounting is
-  allowed, as defence in depth.
+- `sanitizeTemplate` is the one that mounted, and its required work now happens
+  inside the source guest before capture: the pre-pack hook clears the machine
+  id, dbus alias, and journal before the pause. `sparkbox-identity-reset` remains
+  a first-boot backstop for SSH identity and old templates. The host-side pass
+  still runs where mounting is allowed, as defence in depth.
 
 Captured templates are written to `/var/lib/sparkbox/templates`, not to
 `/var/lib/sparkbox/images`. The image dir is part of the read-only mount — only
@@ -659,7 +659,7 @@ The browser dashboard is:
 https://my.<domain>
 ```
 
-New sandboxes receive two vCPUs and 8 GiB RAM by default. On the 64-vCPU,
+New sandboxes receive four vCPUs and 8 GiB RAM by default. On the 64-vCPU,
 roughly 502-GiB CKS CPU Node used by this deployment, the VMM helper requests
 48 CPUs and 400 GiB and is capped at 56 CPUs and 448 GiB. Sparkbox advertises
 480,000 MB of host memory with a 90% admission threshold, so running guests may

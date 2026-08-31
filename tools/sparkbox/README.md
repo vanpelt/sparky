@@ -293,12 +293,15 @@ carries, so a compromised box gains persistence over tags it already held the
 secrets for and nothing wider. `--guest-self-snapshot=false` turns the door off.
 
 Design and the full refusal list:
-[`docs/tag-templates-design.md`](docs/tag-templates-design.md).
+[`docs/tag-templates-design.md`](docs/tag-templates-design.md). Hardened hosts
+using `--disable-host-rootfs-mounts` support the same flow: the required secret,
+machine-identity, and journal cleanup runs inside the guest before it is paused,
+so the host never mounts a guest-authored filesystem.
 
-> Template snapshots need to loop-mount the captured image on the host, so a
-> deployment hardened with `--disable-host-rootfs-mounts` — which is how the CKS
-> cluster runs — refuses `snapshot create` outright, and everything above is
-> inert there.
+When diagnosing a boot unit from inside a guest, `sudo journalctl -m -u <unit>`
+is the useful default. `--merge` reads every machine-id directory on the disk,
+including the boot immediately before the current one; plain `journalctl` only
+selects the current machine id.
 
 ## Architecture
 

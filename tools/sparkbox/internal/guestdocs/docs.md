@@ -17,6 +17,20 @@ allocation, subject to the owner's burst ceiling and node availability.
 Resource sharing changes performance, not disk persistence. Memory pressure
 does not delete or recreate the VM.
 
+A new VM starts with 4 vCPUs and 8 GB of RAM. Turbo restarts it with 8 vCPUs
+and 16 GB for that run; the next pause returns it to its normal size.
+
+## Reading boot logs
+
+When diagnosing a systemd unit, use the merged journal view:
+
+    sudo journalctl --merge -u <unit>
+
+`--merge` (`-m`) reads every machine-id directory on the disk, including the
+boot immediately before the current one. Plain `journalctl` selects only the
+current machine id, so it can hide the previous boot's entries after a rename
+or when inspecting an older VM or template.
+
 ## Pinning this VM
 
 - Run `sparkbox pin` before starting a server, daemon, or long-running job that

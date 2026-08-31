@@ -8,19 +8,21 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-// EnvStripper is the optional pre-pack counterpart to EnvPusher: rewrite a
-// sandbox's managed /etc/environment block to empty (see internal/envsync) so
-// a packed rootfs — an archive bound for object storage, or a snapshot
-// template every fork copies byte-for-byte — never carries plaintext secret
-// values. Detected on the env-sync hook with a type assertion, so a pusher
-// that predates the method is simply skipped.
+// EnvStripper is the optional pre-pack counterpart to EnvPusher. Its primary
+// contract is to rewrite a sandbox's managed /etc/environment block to empty
+// (see internal/envsync); the current implementation also clears the guest's
+// machine identity and journal in that same SSH exec. A packed rootfs — an
+// archive bound for object storage, or a snapshot template every fork copies
+// byte-for-byte — therefore carries neither plaintext secret values nor the
+// source guest's identity and logs. Detected on the env-sync hook with a type
+// assertion, so a pusher that predates the method is simply skipped.
 type EnvStripper interface {
 	StripEnv(ctx context.Context, box *Sandbox) error
 }
 
-// stripEnvForPack clears name's managed env block before Archive/Snapshot hand
-// the rootfs to the driver's pack. The strip rides the same SSH channel as the
-// push, so the guest must be reachable: an already-paused sandbox is woken at
+// stripEnvForPack runs name's guest-side hygiene before Archive/Snapshot hand
+// the rootfs to the driver's pack. The pass rides the same SSH channel as the
+// env push, so the guest must be reachable: an already-paused sandbox is woken at
 // the driver level — never via EnsureRunning, whose env-push hook would race
 // the strip by rewriting the secrets — and the caller pauses it again
 // immediately after, which is also when the settled state is save()d. A box the

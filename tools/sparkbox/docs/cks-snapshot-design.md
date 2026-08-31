@@ -5,6 +5,12 @@ which added `snapshot bind` and made a tag select a rootfs, and to
 [security-hardening.md](security-hardening.md), which is why none of it works on
 the cluster.
 
+Status: implemented. The later
+[guest machine-id follow-up](guest-machine-id-design.md) moved machine-id and
+journal cleanup into the same guest-side pre-capture pass described in §4, so
+mount-free captures are clean before their first boot rather than relying on a
+boot-time repair.
+
 ## The problem, stated exactly
 
 `snapshot create` is refused on CKS. `internal/vmm/firecracker/fc.go` returns

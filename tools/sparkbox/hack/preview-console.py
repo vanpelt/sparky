@@ -54,7 +54,7 @@ def _iso(sec_ago):
 
 def _machines(tick):
     return [
-        {"name": "dazzling-canyon", "state": "paused", "vcpus": 2,
+        {"name": "dazzling-canyon", "state": "paused", "vcpus": 4,
          "mem_mb": 8192, "mem_used_mb": None, "disk_mb": 614, "disk_total_mb": 25600,
          "cpu_seconds": None, "image": "universal", "last_active": _iso(600),
          "net_rx_bytes": 48213, "net_tx_bytes": 9004,
@@ -63,18 +63,18 @@ def _machines(tick):
              {"subdomain": "app", "port": 4444, "visibility": "public", "listening": False},
              {"subdomain": "dazzling-canyon", "port": 8000, "visibility": "public", "listening": False},
          ]},
-        {"name": "brave-meadow", "state": "running", "vcpus": 4,
+        {"name": "brave-meadow", "state": "running", "vcpus": 8,
          "mem_mb": 16384, "mem_used_mb": 6820, "disk_mb": 12040, "disk_total_mb": 25600,
          "cpu_seconds": 1200 + tick * 3.1, "image": "universal", "last_active": _iso(4),
          "net_rx_bytes": 4923847112, "net_tx_bytes": 812394002,
          "pinned": True, "env_undecryptable": False, "tags": ["ml", "prod"],
-         "turbo": True, "base_vcpus": 2, "base_mem_mb": 8192,
+         "turbo": True, "base_vcpus": 4, "base_mem_mb": 8192,
          "routes": [
              {"subdomain": "brave-meadow", "port": 8080, "visibility": "private", "listening": True},
              {"subdomain": "api", "port": 3000, "visibility": "public", "listening": True},
              {"subdomain": "notebook", "port": 8888, "visibility": "private", "listening": False},
          ]},
-        {"name": "cold-harbor", "state": "archived", "vcpus": 2,
+        {"name": "cold-harbor", "state": "archived", "vcpus": 4,
          "mem_mb": 8192, "mem_used_mb": None, "disk_mb": 0, "disk_total_mb": 25600,
          "cpu_seconds": None, "image": "universal", "last_active": _iso(90000),
          "net_rx_bytes": 73400320, "net_tx_bytes": 15728640,

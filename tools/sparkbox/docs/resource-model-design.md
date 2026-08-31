@@ -409,9 +409,9 @@ on pause, while the host kernel time-slices its doubled vCPU threads.
 ## What we already have (so this is mostly policy, not new mechanics)
 
 - Snapshot pause/resume, resume-on-connect over SSH **and** HTTP, thin CoW rootfs,
-  a per-minute reaper, RAM admission, `ctl@ pause`, fixed 2 vCPU / 8 GB matching
-  exe.dev's ceiling. The Firecracker driver, tap/NDP lifecycle, and state
-  persistence (`sandboxes.json`) are all in place.
+  a per-minute reaper, RAM admission, `ctl@ pause`, and a 4 vCPU / 8 GB default
+  allocation (8 vCPU / 16 GB for a Turbo run). The Firecracker driver, tap/NDP
+  lifecycle, and state persistence (`sandboxes.json`) are all in place.
 - The genuinely new engineering is: the Stopped state + snapshot GC, XFS project
   quotas + pooled accounting, the platform scheduler, wake-on-arbitrary-port,
   balloon + cpu.max, LRU eviction, and the resume clock-step.

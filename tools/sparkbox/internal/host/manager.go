@@ -42,7 +42,7 @@ func reservedName(name string) bool { return reserved.Name(name) }
 // `new@` path always does; the HTTP API may override). Bounded only by host
 // capacity — an 8c/16t/64GB box fits ~8 of these before overcommit.
 const (
-	defaultVCPUs int64 = 2
+	defaultVCPUs int64 = 4
 	defaultMemMB int64 = 8192
 
 	// activityInterval is the shortest gap between activity marks we retain for

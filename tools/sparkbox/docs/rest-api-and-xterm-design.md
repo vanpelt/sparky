@@ -639,7 +639,7 @@ type Endpoint struct {
 type CreateArgs struct {
 	Name  string   // "" generates an adjective-noun name
 	Tags  []string // normalized and stamped BEFORE Create, rolled back on failure
-	VCPUs int64    // 0 takes the manager default (2)
+	VCPUs int64    // 0 takes the manager default (4)
 	MemMB int64    // 0 takes the manager default (8192)
 }
 
@@ -1484,7 +1484,7 @@ the room that buys pays for the rest of this section.
 and none at all to say that it clears the *window* and not the sandbox. A menu
 row is two lines — the action, then the consequence — which is also what let the
 turbo switch drop its tooltip: the sentence beside it now names the sizes
-(`On — 4 vCPU and 8 GB, until this sandbox pauses`) rather than a factor, and
+(`On — 8 vCPU and 16 GB, until this sandbox pauses`) rather than a factor, and
 "2× resources" is only meaningful to somebody who already knows what 1× is on
 this host. The switch itself keeps the physical push-button it has everywhere
 else in the product; the point of that shape is that it is the same switch
