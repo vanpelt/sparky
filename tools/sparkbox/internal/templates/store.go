@@ -47,9 +47,9 @@ import (
 // well as on the wire.
 var ErrNoSuchBinding = errors.New("no such template binding")
 
-// ErrInvalidBinding wraps every validation failure (bad tag, snapshot name, the
-// `default` refusal, or a full binding list) so callers can map the whole
-// family to 400 without message matching.
+// ErrInvalidBinding wraps every validation failure (bad tag, snapshot name, a
+// port outside 1-65535, the `default` refusal, or a full binding list) so
+// callers can map the whole family to 400 without message matching.
 var ErrInvalidBinding = errors.New("invalid template binding")
 
 // tagRe matches internal/secrets so the tag namespaces align exactly.
@@ -133,6 +133,22 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 	// image basename. The image name is derived from the pair and can be
 	// recomputed; the name is what the owner typed, what `snapshot ls`
 	// prints, and what an error has to say back to them.
+	//
+	// snapshot_ports is keyed on the snapshot rather than the tag, and that is
+	// the whole reason it is a second table instead of a column on the first.
+	// The port is a fact about the CAPTURE — it is read off the source
+	// sandbox's route in the same breath as the rootfs is compacted — while a
+	// binding is made later, possibly much later, by which time the source box
+	// may be gone or serving something else. Hanging it off the tag would mean
+	// `snapshot create` had nowhere to put it and `snapshot bind` had to guess.
+	// It also has no created_at for the same reason: it is a property of a
+	// snapshot, not an event in its life.
+	//
+	// A row is written only when the source's port differs from the stock
+	// default, so absence means "whatever this host serves by default" rather
+	// than "unknown". The two are indistinguishable in effect — a box that
+	// explicitly serves 8000 and a box nobody touched both want 8000 — which is
+	// what makes the sparse encoding lossless.
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS sandbox_tags (
 			sandbox    TEXT NOT NULL,
@@ -152,6 +168,13 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			PRIMARY KEY (owner, tag)
 		);
 		CREATE INDEX IF NOT EXISTS template_tags_snapshot ON template_tags(owner, snapshot);
+
+		CREATE TABLE IF NOT EXISTS snapshot_ports (
+			owner    TEXT NOT NULL,
+			snapshot TEXT NOT NULL,
+			port     INTEGER NOT NULL,
+			PRIMARY KEY (owner, snapshot)
+		);
 	`); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
@@ -386,6 +409,110 @@ func (s *Store) TemplatesForSandbox(sandbox, owner string) ([]Binding, error) {
 	}
 	defer rows.Close()
 	return scanBindings(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot ports
+// ---------------------------------------------------------------------------
+//
+// The port a snapshot's source sandbox served on, so a sandbox booted from the
+// template lands on it too. A snapshot is a rootfs and the default port is a
+// row in internal/routes, so without this the two halves of "it worked on the
+// box I captured" cannot travel together: the disk carries the dev server, the
+// route carries the 8000 nobody is listening on.
+//
+// It lives on the GATEWAY, next to the bindings, and not on host.Snapshot. On a
+// fleet the snapshot record belongs to the node that holds the template file —
+// the gateway caches it and re-reads it from the node on every reconnect (see
+// fleet.remoteNode.Snapshotter) — so a field stamped here would evaporate, and
+// making it survive would mean carrying a port through nodelink and the node
+// proto. Routes are gateway state even for a sandbox running on another
+// machine, so the fact never needs to leave this process.
+
+// SetSnapshotPort records the default port a snapshot was captured on,
+// replacing any port already recorded for it. Callers record only a port that
+// differs from the host default; see the schema comment in Open.
+//
+// Re-capturing under a name that already exists overwrites rather than
+// accumulates, which is what keeps a deleted-and-retaken name from inheriting
+// the port of the template it replaced.
+func (s *Store) SetSnapshotPort(owner, snapshot string, port int) error {
+	if owner == "" {
+		return fmt.Errorf("%w: a snapshot port needs an owner", ErrInvalidBinding)
+	}
+	snapshot = strings.TrimSpace(snapshot)
+	if !snapNameRe.MatchString(snapshot) {
+		return fmt.Errorf("%w: snapshot %q (want [a-z0-9][a-z0-9-]*, max 41 chars)", ErrInvalidBinding, snapshot)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%w: port %d (want 1-65535)", ErrInvalidBinding, port)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		INSERT INTO snapshot_ports (owner, snapshot, port) VALUES (?, ?, ?)
+		ON CONFLICT(owner, snapshot) DO UPDATE SET port = excluded.port`,
+		owner, snapshot, port)
+	return err
+}
+
+// SnapshotPort returns the port recorded for the owner's snapshot, or 0 when
+// none is — which is every snapshot captured from a sandbox on the stock port,
+// and every snapshot that predates this table.
+//
+// Zero rather than ErrNoSuchBinding: "no recorded port" is the ordinary case
+// and not a condition any caller wants to branch on twice, and 0 is not a port
+// SetSnapshotPort will store.
+func (s *Store) SnapshotPort(owner, snapshot string) (int, error) {
+	var port int
+	err := s.db.QueryRow(`SELECT port FROM snapshot_ports WHERE owner = ? AND snapshot = ?`,
+		owner, snapshot).Scan(&port)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return port, nil
+}
+
+// SnapshotPorts returns every port this owner has recorded, keyed by snapshot
+// name — the listing counterpart of SnapshotPort, so `snapshot ls` reads the
+// table once instead of once per row.
+//
+// Only snapshots WITH a port appear. A caller indexing the map gets 0 for the
+// ordinary snapshot that has none, which is the same answer SnapshotPort gives
+// it, so the two can be swapped without a caller changing how it reads them.
+func (s *Store) SnapshotPorts(owner string) (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT snapshot, port FROM snapshot_ports WHERE owner = ?`, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var name string
+		var port int
+		if err := rows.Scan(&name, &port); err != nil {
+			return nil, err
+		}
+		out[name] = port
+	}
+	return out, rows.Err()
+}
+
+// ForgetSnapshotPort drops the row for a snapshot that is being deleted. A row
+// left behind would be inherited by the next snapshot to take that name, which
+// is a create landing on a port from a template its owner already threw away.
+//
+// Deleting a port nobody recorded is not an error: the overwhelmingly common
+// snapshot has no row, and a delete path that had to know which kind it was
+// deleting would have to ask first.
+func (s *Store) ForgetSnapshotPort(owner, snapshot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM snapshot_ports WHERE owner = ? AND snapshot = ?`, owner, snapshot)
+	return err
 }
 
 // scanBindings drains a binding query. Every query in this store selects the

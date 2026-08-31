@@ -217,7 +217,10 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   ```
   `snapshot ls` shows which snapshots are bound; `snapshot unbind --tag cuda`
   takes it away without deleting anything. `default` cannot be bound — every
-  sandbox you create carries it. Someone inside a sandbox can capture it into a
+  sandbox you create carries it. A capture also carries the port the sandbox was
+  serving on, so if `dev-box` was on 5173 then every box on `cuda` answers its
+  own URL there with nothing to set up; `snapshot ls` prints that port on the
+  rows that have one, and `sparkbox port <n>` from inside a sandbox moves it. Someone inside a sandbox can capture it into a
   tag it already carries with `sparkbox snapshot <tag>`, which prints what it
   will re-point and asks first; `--guest-self-snapshot=false` turns that door
   off. Capturing needs a host that can loop-mount the image, so a deployment run

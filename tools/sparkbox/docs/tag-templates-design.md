@@ -12,7 +12,8 @@ written down and unbuilt, deliberately. Part 9's open questions have answers now
 and carry them inline. Part 10 records the guest-side verbs, which were designed
 after this document and shipped with the rest of it; Part 11 lists the surfaces
 and the error codes that are now a compatibility surface; Part 12 records two
-gaps this work found and did not introduce.
+gaps this work found and did not introduce; Part 13 is the default port a
+template carries, added after the rest and built.
 
 **None of it does anything on CKS.** `internal/vmm/firecracker/fc.go:1181-1183`
 refuses `Driver.Snapshot` outright when `DisableHostRootfsMounts` is set, and
@@ -856,3 +857,108 @@ for anything not in the owner's list. That masking is correct — it is what sto
 a refusal confirming another owner's snapshot exists — but here it makes a
 timing problem read like a permissions bug. The fix is an inventory refresh (or a
 snapshot event) after a remote capture; it is not made here.
+
+---
+
+# Part 13 — the port a template carries
+
+A template is a rootfs, and the port a sandbox serves on is not in it. It is a
+row in `internal/routes` — `{subdomain: <name>, sandbox: <name>, port: 8000}`,
+written at create time by `host.Manager.Create` for a local sandbox and by
+`fleet.mint` for one on a node — and `sparkbox port 5173` from inside a guest
+only moves that row. So a snapshot taken from a box whose dev server is on 5173
+produced sandboxes whose URL answered nothing, and the first thing anyone did
+with a fresh box off their own template was set the port again by hand.
+
+That is the opposite of what binding a tag to a snapshot is for. The whole
+promise of `ssh new@<gateway> web` is a box that works the way the box it was
+captured from worked.
+
+## Where the port lives
+
+On the gateway, in `internal/templates`, in a `snapshot_ports` table keyed
+`(owner, snapshot)` — beside the bindings and in the same database.
+
+It is deliberately **not** a field on `host.Snapshot`. On a fleet, that record
+belongs to the machine holding the template file: the gateway builds its copy
+from the node's reply in `fleet.remoteNode.Snapshotter` and re-reads the node's
+inventory on every reconnect, so a field stamped gateway-side would evaporate on
+the next link flap. Making it survive would mean carrying a port through
+`internal/nodelink` and `api/node/v1`. None of that is necessary, because routes
+are gateway state even for a sandbox running on another machine — the port never
+has to leave this process, and so it does not.
+
+It is keyed on the snapshot rather than the tag for the same kind of reason: the
+port is a fact about the **capture**, read off the source sandbox in the same
+breath as the disk is compacted, while a binding is made later and by then the
+source box may be gone or serving something else. Hanging it off the tag would
+leave `snapshot create` with nowhere to put it and `snapshot bind` guessing.
+
+The table is sparse. A row exists only when the source's port differs from
+`routes.DefaultPort`, so absence means "whatever this host serves by default"
+rather than "unknown". The two are indistinguishable in effect — a box that
+explicitly serves 8000 and a box nobody touched both want 8000 — which is what
+makes the sparse encoding lossless rather than merely smaller.
+
+## The two halves
+
+**Capture.** `ctlops.CreateSnapshot` reads the source sandbox's own default
+route (subdomain == its name; the custom routes an owner adds with `share` are
+furniture for one box and are not cloned onto every fork) and records the port
+if it is not the stock one. Every capture door goes through here — `ctl snapshot
+create`, `--tag`, the REST create, and `sparkbox snapshot <t>` from inside the
+box — because they all funnel through `SnapshotToTag`.
+
+**Apply.** `ctlops.Create` corrects the fresh sandbox's route after `build()`
+returns, and `ctlops.Fork` does the same after the fork. It is a *second* write,
+replacing the `DefaultPort` row the manager or `fleet.mint` has already made.
+Threading the port down through `Create`, `CreateOn` and the node link instead
+would put it on the wire in three more places to close a window nobody can
+observe: the row is corrected before the call returns and the caller has not yet
+been told the sandbox's name. `routes.Store.Upsert`'s `ON CONFLICT` touches only
+the port, so this cannot re-privatise a route its owner made public.
+
+A fork reads the port of the snapshot it was told to boot, by name, and never
+consults a binding — the same rule that already governs which disk a fork uses.
+
+## Best effort, on purpose
+
+Both halves are best-effort with a loud log, which is a deliberate asymmetry
+with `resolveTemplate`'s refusal to fall back to the default image.
+
+By the time the capture half runs, the expensive and unrepeatable work has
+already succeeded: the sandbox is paused and a re-run would compact a different
+filesystem. Failing the whole operation over the port would throw away minutes
+to reach a state the user fixes with one `sparkbox port`. The apply half is the
+same trade in the other direction — refusing to hand over a sandbox that exists
+and boots, over a routing detail, costs another cold boot.
+
+The severities are genuinely different, too. A template that quietly booted the
+stock rootfs is invisible for twenty minutes and then reads as a broken
+toolchain. A box on the wrong port says so immediately.
+
+## Where it shows
+
+`snapshot ls` prints `port <n>` as a third optional suffix, under the same rule
+as the bound-tags and node columns: omitted entirely when there is none, so a
+host using none of the three prints the row it printed before any of them
+existed. The user console's Snapshots panel shows it beside the source box
+rather than in a sixth column, for the same reason. The REST `Snapshot` schema
+gained an omitempty `port`.
+
+It is reported at all because the alternative is invisible magic: a sandbox
+whose URL answers nothing because its template chose 5173 has no other way to
+explain itself, and these are the places its owner is already looking.
+
+## Not done
+
+The in-guest `sparkbox snapshot <tag>` flow does not mention the port in the
+plan it asks you to confirm. The plan's digest covers every fact the plan
+reports, so adding one means adding it to the digest; and the commit
+acknowledges before the capture runs, so there is no point at which the captured
+port could be reported back to a guest that is about to be paused. The port
+still travels — it just arrives silently, and shows up in `snapshot ls`.
+
+Route **visibility** is not carried. It is the same mechanism and about five
+more lines, and it is left out on purpose: a fork silently inheriting `public`
+is a surprise in the wrong direction, unlike a port.

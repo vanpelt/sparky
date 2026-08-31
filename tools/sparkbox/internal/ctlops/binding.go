@@ -43,6 +43,12 @@ type resolvedTemplate struct {
 	Node     string // the machine holding it; "" when no binding was involved
 	Tag      string // the tag that bound it
 	Snapshot string // the user-facing snapshot name the tag points at
+	// Port is the default port the snapshot was captured on, or 0 for the stock
+	// one. It rides here rather than being looked up again after the build
+	// because this is the function that already knows WHICH snapshot the tags
+	// resolved to — a second lookup downstream would have to re-run the
+	// ambiguity rules to find out, and could disagree with this one.
+	Port int
 }
 
 // BindTemplate points one of the caller's tags at one of their snapshots, so
@@ -181,7 +187,10 @@ func (o *Ops) resolveTemplate(op, owner string, tags []string) (resolvedTemplate
 			// The tag reported is the first in the store's tag order, which is
 			// deterministic; when several tags agree they are interchangeable
 			// by construction, since they all named this one snapshot.
-			return resolvedTemplate{Image: s.Image, Node: s.Node, Tag: want.Tag, Snapshot: s.Name}, nil
+			return resolvedTemplate{
+				Image: s.Image, Node: s.Node, Tag: want.Tag, Snapshot: s.Name,
+				Port: o.templatePort(owner, s.Name),
+			}, nil
 		}
 	}
 	// The binding points at a snapshot that is gone — deleted through a surface

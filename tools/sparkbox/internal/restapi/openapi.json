@@ -2352,6 +2352,11 @@
             "description": "The tags whose sandboxes boot from this snapshot. Absent when nobody has bound it, which is the ordinary case.",
             "example": ["cuda"]
           },
+          "port": {
+            "type": "integer",
+            "description": "The default port the source sandbox served on, carried forward so a sandbox created from this template has its `<name>.<domain>` URL pointed there too. Absent for a template captured from a sandbox on the stock port, which is the ordinary case.",
+            "example": 5173
+          },
           "node": {
             "type": "string",
             "description": "The machine whose image directory holds the template file, and therefore the only machine a fork — or a create on a tag bound to it — can land on. Absent on a single-machine host.",
