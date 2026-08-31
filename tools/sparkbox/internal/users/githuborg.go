@@ -45,6 +45,13 @@ var (
 	githubTeamMembersURL = "https://api.github.com/orgs/%s/teams/%s/members"
 )
 
+// ValidGitHubLogin reports whether login could be a GitHub account name. It is
+// the same grammar orgs and teams are checked against — GitHub draws them from
+// one namespace — and it exists as its own name so a caller that means "a
+// person" does not have to say ValidGitHubOrg and leave a reader wondering
+// whether that was a mistake.
+func ValidGitHubLogin(login string) bool { return githubLoginOK(login) }
+
 // ValidGitHubTeam reports whether slug could be a team slug. Teams are slugged
 // by GitHub itself into the lower-case dashed form, which is a subset of what a
 // login may be, so the login grammar is a safe superset to check against.

@@ -87,14 +87,16 @@ func (s *Signer) Mint(id Identity, ttl time.Duration) (string, time.Time, error)
 		return "", time.Time{}, err
 	}
 	payload := base64.RawURLEncoding.EncodeToString(body)
-	return TokenPrefix + payload + "." + s.mac(payload), exp, nil
+	return TokenPrefix + payload + "." + s.mac(TokenPrefix, payload), exp, nil
 }
 
 // mac is the base64url HMAC-SHA256 over the versioned payload. The prefix is
-// part of the signed input so a token can't be replayed under a future format.
-func (s *Signer) mac(payload string) string {
+// part of the signed input so a token can't be replayed under a future format —
+// and, since TicketPrefix is a different string, so a credential minted for one
+// purpose can never verify as the other. See MintTicket.
+func (s *Signer) mac(prefix, payload string) string {
 	m := hmac.New(sha256.New, s.key)
-	m.Write([]byte(TokenPrefix))
+	m.Write([]byte(prefix))
 	m.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
@@ -110,7 +112,7 @@ func (s *Signer) Verify(token string) (Identity, bool) {
 		return Identity{}, false
 	}
 	// Constant-time compare so a caller can't time-probe the MAC byte by byte.
-	if subtle.ConstantTimeCompare([]byte(sig), []byte(s.mac(payload))) != 1 {
+	if subtle.ConstantTimeCompare([]byte(sig), []byte(s.mac(TokenPrefix, payload))) != 1 {
 		return Identity{}, false
 	}
 	body, err := base64.RawURLEncoding.DecodeString(payload)

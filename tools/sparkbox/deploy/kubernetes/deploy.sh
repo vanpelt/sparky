@@ -22,6 +22,13 @@ Options:
                           https://hivemind.wandb.tools (default: whatever the
                           live gateway already uses; empty turns the presence
                           lease and `ctl sessions` off)
+  --hivemind-signin-orgs ORGS
+                          comma-separated GitHub orgs whose HiveMind users may
+                          sign in at https://login.<domain>/handoff, getting an
+                          account on first arrival (default: whatever the live
+                          gateway already uses; empty closes the door). Needs
+                          --hivemind-api, which is the back channel the
+                          single-use handoff code is redeemed over
   --hivemind-manifest URL release manifest deciding which hivemind new sandboxes
                           get, e.g. .../manifests/hivemind-1.0.8rc1.json
                           (default: the latest release). Use it to put a release
@@ -42,6 +49,7 @@ node=
 requested_proxy_domain=
 requested_github_app_client_id=
 requested_hivemind_api=
+requested_hivemind_signin_orgs=
 requested_hivemind_manifest=
 public_key="${HOME}/.ssh/id_ed25519.pub"
 private_key=
@@ -77,6 +85,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --hivemind-api)
       requested_hivemind_api=${2:?--hivemind-api requires a value}
+      shift 2
+      ;;
+    --hivemind-signin-orgs)
+      requested_hivemind_signin_orgs=${2:?--hivemind-signin-orgs requires a value}
       shift 2
       ;;
     --public-key)
@@ -325,6 +337,27 @@ else
   echo "  the idle reaper, and \`ctl sessions\` is unavailable. Pass --hivemind-api."
 fi
 
+# Carried forward for the same reason again, and with a sharper failure: dropping
+# the allowlist does not degrade the sign-in door, it CLOSES it, and the only
+# symptom is a colleague's HiveMind button answering "can't sign you in" with
+# nothing in the deploy output to connect it to.
+deployed_hivemind_signin_orgs=$(
+  "${k[@]}" -n "$namespace" get deployment sparkbox-gateway \
+    -o 'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="SPARKBOX_HIVEMIND_SIGNIN_ORGS")].value}' \
+    2>/dev/null || true
+)
+hivemind_signin_orgs=${requested_hivemind_signin_orgs:-$deployed_hivemind_signin_orgs}
+if [ -n "$hivemind_signin_orgs" ]; then
+  if [ -n "$hivemind_api" ]; then
+    echo "HiveMind sign-in: $hivemind_signin_orgs"
+  else
+    # Not fatal, because the gateway itself only warns — but say it here too,
+    # where somebody is watching, rather than leaving it in a pod log.
+    echo "HiveMind sign-in orgs are set ($hivemind_signin_orgs) but --hivemind-api is"
+    echo "  empty, so the door will NOT be mounted: there is nothing to redeem against."
+  fi
+fi
+
 # Deliberately NOT carried forward, unlike the three above, and the asymmetry is
 # the point. Those three are permanent facts about this deployment, so losing one
 # is always a mistake. A manifest override is the opposite: it is how a release
@@ -453,6 +486,7 @@ sed \
   -e "s|__SPARKBOX_USERS_HASH__|$users_hash|g" \
   -e "s|__SPARKBOX_GITHUB_APP_CLIENT_ID__|$github_app_client_id|g" \
   -e "s|__SPARKBOX_HIVEMIND_API__|$hivemind_api|g" \
+  -e "s|__SPARKBOX_HIVEMIND_SIGNIN_ORGS__|$hivemind_signin_orgs|g" \
   "$script_dir/gateway-deployment.yaml" | "${k[@]}" apply -f -
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \

@@ -348,6 +348,44 @@ func (s *Store) List() ([]User, error) {
 // Create registers a new user with one initial key. invitedBy records who
 // authorised the account ("operator" for seeded entries).
 func (s *Store) Create(handle string, key xssh.PublicKey, label, via, invitedBy string) error {
+	return s.create(handle, invitedBy, func(tx *sql.Tx, now time.Time) error {
+		return addKeyTx(tx, handle, key, label, via, now)
+	})
+}
+
+// CreateKeyless registers a new user with NO ssh key at all.
+//
+// # Why an account may exist with no key
+//
+// This package's doc says "SSH public keys are the sole credential", and for
+// every door that predates the browser that was simply true: you arrived over
+// SSH, so you arrived holding a key. Two things have since made a keyless
+// account a real state rather than a broken one — passkeys (internal/users
+// /passkeys.go), which authenticate a person to the edge with no key involved,
+// and federated sign-in (internal/edgeauth/handoff.go), where another service
+// vouches for somebody who has never opened a terminal.
+//
+// So the invariant was never "an account has a key"; it was "an account has a
+// credential". Create still takes one because every caller of it has one in
+// hand, and a signature that made the key optional would let a caller forget.
+// This is the separate door for the callers that genuinely have none, and its
+// separateness is the point: `grep CreateKeyless` is the list of ways an
+// account can come to exist without one.
+//
+// What such an account cannot do is exactly what it should not: it cannot
+// authenticate over SSH — Lookup matches on key bytes and there are none — so
+// it cannot reach the ctl channel or open a sandbox shell until a key is added
+// or a passkey enrolled. It is a browser account until it is more than one.
+func (s *Store) CreateKeyless(handle, invitedBy string) error {
+	return s.create(handle, invitedBy, nil)
+}
+
+// create is the shared body: validate, refuse a taken handle, insert the row,
+// and give the caller its one chance to add a credential inside the same
+// transaction — so an account and its first key are one atomic fact, and a
+// failure to record the key leaves no account behind to be adopted by whoever
+// asks for the handle next.
+func (s *Store) create(handle, invitedBy string, credential func(*sql.Tx, time.Time) error) error {
 	if !ValidHandle(handle) {
 		return fmt.Errorf("invalid handle %q (2-32 chars of a-z, 0-9, dash; some names are reserved)", handle)
 	}
@@ -371,8 +409,10 @@ func (s *Store) Create(handle string, key xssh.PublicKey, label, via, invitedBy 
 		handle, now, invitedBy); err != nil {
 		return err
 	}
-	if err := addKeyTx(tx, handle, key, label, via, now); err != nil {
-		return err
+	if credential != nil {
+		if err := credential(tx, now); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -441,8 +481,16 @@ func (s *Store) Keys(handle string) ([]Key, error) {
 	return out, rows.Err()
 }
 
-// RemoveKey unlinks a key by fingerprint, refusing to remove the account's
-// last key (which would lock the user out for good).
+// RemoveKey unlinks a key by fingerprint, refusing to remove the account's last
+// key when that key is its last credential of any kind.
+//
+// The rule is about lockout, not about keys, so it counts passkeys too: an
+// account that can still sign in to the edge with a passkey is not locked out
+// by dropping its final ssh key, and refusing there would strand somebody who
+// has deliberately moved to the browser. It is also the same question
+// CreateKeyless answers from the other end — an account may legitimately hold
+// no key — and the two must not disagree, or an account could be created in a
+// state this method insists is impossible to reach.
 func (s *Store) RemoveKey(handle, fp string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -465,7 +513,13 @@ func (s *Store) RemoveKey(handle, fp string) error {
 		return err
 	}
 	if n <= 1 {
-		return ErrLastKey
+		var passkeys int
+		if err := tx.QueryRow(`SELECT count(*) FROM user_passkeys WHERE handle = ?`, handle).Scan(&passkeys); err != nil {
+			return err
+		}
+		if passkeys == 0 {
+			return ErrLastKey
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM user_keys WHERE handle = ? AND fp = ?`, handle, fp); err != nil {
 		return err

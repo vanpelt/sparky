@@ -504,3 +504,56 @@ func TestParseAuthorizedKeysSkipsJunk(t *testing.T) {
 		t.Errorf("got %d keys, want 1", len(keys))
 	}
 }
+
+// An account may exist with no ssh key at all — the federated sign-in door
+// (internal/edgeauth/handoff.go) makes one for somebody who publishes none.
+// What it must NOT be able to do is authenticate over ssh.
+func TestCreateKeyless(t *testing.T) {
+	s := testStore(t)
+	if err := s.CreateKeyless("browseronly", "federated@hivemind"); err != nil {
+		t.Fatalf("CreateKeyless: %v", err)
+	}
+	u, err := s.Get("browseronly")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !u.Active() || u.InvitedBy != "federated@hivemind" {
+		t.Fatalf("user = %+v", u)
+	}
+	keys, err := s.Keys("browseronly")
+	if err != nil {
+		t.Fatalf("Keys: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("a keyless account holds %d keys", len(keys))
+	}
+	if err := s.CreateKeyless("browseronly", "federated@hivemind"); !errors.Is(err, ErrHandleTaken) {
+		t.Fatalf("second CreateKeyless: %v, want ErrHandleTaken", err)
+	}
+	if !ValidHandle("browseronly") {
+		t.Fatal("fixture handle is not valid")
+	}
+}
+
+// The last-key rule is about lockout, not about keys: an account that can still
+// sign in with a passkey may drop its final ssh key.
+func TestRemoveKeyAllowsTheLastOneWhenAPasskeyRemains(t *testing.T) {
+	s := testStore(t)
+	key, _ := newKey(t, "laptop")
+	fp := xssh.FingerprintSHA256(key)
+	if err := s.Create("alice", key, "laptop", "seed", "operator"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.RemoveKey("alice", fp); !errors.Is(err, ErrLastKey) {
+		t.Fatalf("RemoveKey with no other credential = %v, want ErrLastKey", err)
+	}
+	if err := s.AddPasskey("alice", "phone", testCred("cred-1")); err != nil {
+		t.Fatalf("AddPasskey: %v", err)
+	}
+	if err := s.RemoveKey("alice", fp); err != nil {
+		t.Fatalf("RemoveKey with a passkey: %v", err)
+	}
+	if keys, _ := s.Keys("alice"); len(keys) != 0 {
+		t.Fatalf("key not removed: %d remain", len(keys))
+	}
+}

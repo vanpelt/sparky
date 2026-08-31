@@ -102,6 +102,21 @@ identity upstream as `X-Forwarded-User` / `X-Forwarded-Email` /
 `X-Forwarded-Preferred-Username` (oauth2-proxy names; client-supplied copies are
 stripped first), so the app behind the port can do its own authorization.
 
+Somebody already signed in to HiveMind can skip the paste entirely. With
+
+```text
+--hivemind-signin-orgs=wandb
+```
+
+(and `--hivemind-api`, which is the back channel), the edge mounts a federated
+door at `https://login.<domain>/handoff`: HiveMind's dashboard POSTs a
+single-use code, sparkbox redeems it server-to-server, checks the visitor is in
+one of the named GitHub orgs, and signs them in — creating the account on first
+arrival from the keys `github.com/<login>` publishes. It never silently swaps a
+session for a different account or creates one without asking. An empty org list
+is off, never everyone. See
+[`docs/hivemind-signin-design.md`](docs/hivemind-signin-design.md).
+
 Publish a port to the world with `ssh ctl@<domain> share <name> public`
 (`private` re-gates it); set the forwarded address with `ssh ctl@<domain> email
 set you@example.com`. Any port works without pre-registering a route: a boot-time

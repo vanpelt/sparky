@@ -52,6 +52,9 @@ type LoginConfig struct {
 	// URL was carried (someone opened login.<domain> directly). The natural
 	// value is the user console ("my") — the zone apex serves nothing.
 	HomeSub string
+	// Handoff, when non-nil, mounts the federated sign-in door at
+	// POST /handoff — see handoff.go. Nil means the routes do not exist.
+	Handoff *HandoffConfig
 }
 
 // LoginHandler serves the browser login: passkey sign-in when enabled, and the
@@ -77,6 +80,23 @@ func NewLoginHandler(cfg LoginConfig) (*LoginHandler, error) {
 	if cfg.Subdomain == "" {
 		cfg.Subdomain = "login"
 	}
+	if hc := cfg.Handoff; hc != nil {
+		// Refused rather than defaulted. Each of these is a way for the door to
+		// be mounted and quietly wrong — an allowlist that matches everyone, a
+		// redeem that answers nothing, an admission that cannot write — and a
+		// sign-in door that is quietly wrong is the one kind this host must not
+		// serve. See HandoffConfig on why the empty allowlist is in this list.
+		switch {
+		case hc.Redeem == nil:
+			return nil, fmt.Errorf("edgeauth: federated sign-in needs a redeemer")
+		case hc.Admit == nil:
+			return nil, fmt.Errorf("edgeauth: federated sign-in needs an admitter")
+		case hc.Accounts == nil:
+			return nil, fmt.Errorf("edgeauth: federated sign-in needs an account store")
+		case len(hc.Orgs) == 0:
+			return nil, fmt.Errorf("edgeauth: federated sign-in needs at least one allowed GitHub org")
+		}
+	}
 	h := &LoginHandler{
 		cfg:        cfg,
 		cookieDom:  "." + strings.TrimPrefix(cfg.Domain, "."),
@@ -97,6 +117,7 @@ func (h *LoginHandler) Handler() http.Handler {
 	mux.HandleFunc("GET /", h.page)
 	mux.HandleFunc("POST /session", h.session)
 	mux.HandleFunc("POST /logout", h.logout)
+	h.handoffRoutes(mux)
 	if h.wa != nil {
 		mux.HandleFunc("GET /enroll", h.enrollPage)
 		mux.HandleFunc("POST /webauthn/login/begin", h.loginBegin)
@@ -113,16 +134,12 @@ func (h *LoginHandler) page(w http.ResponseWriter, r *http.Request) {
 	ret := h.safeReturn(r.URL.Query().Get("return"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	portFlag := ""
-	if h.cfg.GatewayPort != 0 && h.cfg.GatewayPort != 22 {
-		portFlag = fmt.Sprintf("-p%d ", h.cfg.GatewayPort)
-	}
 	err := loginTpl.Execute(w, struct {
 		Return   string
 		Gateway  string
 		PortFlag string
 		Passkeys bool
-	}{ret, h.cfg.Gateway, portFlag, h.wa != nil})
+	}{ret, h.cfg.Gateway, h.portFlag(), h.wa != nil})
 	if err != nil && h.cfg.Logger != nil {
 		h.cfg.Logger.Error("login page render failed", "err", err)
 	}
