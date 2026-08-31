@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=17
+IDENTITY_REV=18
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -201,6 +201,13 @@ META="http://$GW:@@META_PORT@@"
 # is never derived from a request.
 SPARKBOX_REPOS_BIN=${SPARKBOX_REPOS_BIN:-/usr/local/sbin/sparkbox-repos}
 
+# The identity snapshot sparkbox-token leaves behind, read by `whoami` when the
+# host cannot be reached. Overridable on the same terms as the worker above and
+# as SPARKBOX_GITCONFIG in sparkbox-git-identity: the deploy tests run this
+# script on a machine that has its own /run/sparkbox, and a test that read it
+# would pass or fail depending on whose laptop ran it.
+SPARKBOX_IDENTITY_FILE=${SPARKBOX_IDENTITY_FILE:-/run/sparkbox/identity.json}
+
 # _call METHOD URL — print the host's own sentence, on success AND on refusal.
 #
 # Deliberately NOT `curl -f`, which every verb below still uses: -f throws the
@@ -347,6 +354,75 @@ case "${1:-}" in
       || { echo "sparkbox: port must be from 1 through 65535" >&2; exit 2; }
     exec curl -fsS --max-time 10 -X POST "$META/self/port/$2"
     ;;
+  whoami)
+    # Who is this VM's owner, on github.com? The question `gh api user` asks and
+    # cannot answer here: the credential this sandbox carries is a GitHub App
+    # INSTALLATION token, which is a server-to-server credential with no
+    # authenticated user behind it at all — GET /user answers it "Resource not
+    # accessible by integration" no matter which permissions the App is granted,
+    # because there is no permission that invents a user. The fact does exist on
+    # this host, from the account link, so this is where it is served from.
+    #
+    # Live from the host first, the on-disk snapshot second. /identity mints
+    # nothing (unlike /token, whose every response burns a jti), so asking on
+    # each invocation is cheap — and it is the only way a GitHub account linked
+    # AFTER this box booted shows up before the next token refresh rewrites the
+    # file.
+    shift
+    _json=0
+    for _a in "$@"; do
+      case "$_a" in
+        --json) _json=1 ;;
+        *) echo "usage: sparkbox whoami [--json]" >&2; exit 2 ;;
+      esac
+    done
+    _doc=""
+    _d=$(mktemp -d) || { echo "sparkbox: no writable temporary directory" >&2; exit 75; }
+    # >/dev/null, because -o writes the body to the file and anything curl still
+    # prints on stdout would be concatenated onto the document we are about to
+    # read.
+    if curl -fsS --max-time 10 -o "$_d/doc" "$META/identity" >/dev/null 2>&1 \
+       && [ -s "$_d/doc" ]; then
+      _doc=$(cat "$_d/doc")
+    elif [ -s "$SPARKBOX_IDENTITY_FILE" ]; then
+      _doc=$(cat "$SPARKBOX_IDENTITY_FILE")
+    fi
+    rm -rf "$_d"
+    if [ -z "$_doc" ]; then
+      echo "sparkbox: could not read this sandbox's identity from the host, and" >&2
+      echo "$SPARKBOX_IDENTITY_FILE is missing. Try again in a moment." >&2
+      exit 75
+    fi
+    if [ "$_json" -eq 1 ]; then
+      printf '%s\n' "$_doc"
+    fi
+    # Field extraction without a JSON parser, on the same terms as
+    # sparkbox-git-identity: a GitHub login is [A-Za-z0-9-], an account number
+    # is digits, and "github" cannot match inside "github_id" because the
+    # pattern demands the colon immediately after the name. [[:space:]]* after
+    # every colon is load-bearing — the host serves this pretty-printed.
+    _login=$(printf '%s' "$_doc" | sed -n 's/.*"github":[[:space:]]*"\([A-Za-z0-9-]*\)".*/\1/p' | head -1)
+    _ghid=$(printf '%s' "$_doc" | sed -n 's/.*"github_id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    _owner=$(printf '%s' "$_doc" | sed -n 's/.*"owner":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    _box=$(printf '%s' "$_doc" | sed -n 's/.*"sandbox":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ "$_json" -ne 1 ]; then
+      [ -n "$_login" ] && echo "github: $_login"
+      [ -n "$_ghid" ] && [ "$_ghid" != 0 ] && echo "github_id: $_ghid"
+      [ -n "$_owner" ] && echo "owner: $_owner"
+      [ -n "$_box" ] && echo "sandbox: $_box"
+    fi
+    # No link, no answer — and saying so with exit 0 would let a script read an
+    # empty login as this person's login. The owner handle is NOT a substitute:
+    # handles and GitHub logins are separate namespaces here, which is the same
+    # reason the git author is left unset in this case.
+    if [ -z "$_login" ]; then
+      echo "sparkbox: no GitHub account is linked to ${_owner:-this account}, so there is" >&2
+      echo "no GitHub login or id to report. Link one from outside the VM:" >&2
+      echo "  ssh ctl@<gateway> github link" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   repos)
     # Delegated rather than reimplemented: the clone layout rule (~/<name> for a
     # single attachment, ~/src/<owner>/<name> for several) has to be the SAME
@@ -390,7 +466,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: sparkbox <pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repos [survey|sync]|update-tools [--check]>" >&2
+    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repos [survey|sync]|update-tools [--check]>" >&2
     exit 2
     ;;
 esac

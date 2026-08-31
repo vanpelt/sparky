@@ -123,6 +123,28 @@ switched to the branch the attachment names. Nobody has logged into that disk
 yet, so there is no work in flight to lose; on every later run the branch you
 are on is yours.
 
+## Who this VM belongs to
+
+    sparkbox whoami
+
+reports the GitHub login and account number of this VM's owner, plus the owner's
+Sparkbox handle and the VM's name, as `key: value` lines. `--json` prints the
+host's identity document instead, for anything that would rather parse it.
+
+`gh api user` cannot answer this, and no change to the GitHub App will make it.
+The credential a VM carries for github.com is a GitHub App *installation* token
+— a server-to-server credential scoped to the attached repositories, with no
+authenticated user behind it — so `GET /user` refuses it with "Resource not
+accessible by integration" regardless of which permissions the App holds. There
+is no permission that invents a user. Everything repository-scoped (`gh pr
+create`, `gh api repos/...`) works normally on that token; only the endpoints
+that ask "who is holding this credential" do not.
+
+An owner with no linked GitHub account has no login to report, and the Sparkbox
+handle is not a substitute — handles and GitHub logins are separate namespaces,
+so a handle could be somebody else's login. `whoami` says so and exits non-zero
+rather than answering with one.
+
 ## Commit authorship
 
 git's author is configured at boot from the GitHub account linked to this VM's

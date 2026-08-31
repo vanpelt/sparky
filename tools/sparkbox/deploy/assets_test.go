@@ -194,7 +194,10 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|") {
 		t.Errorf("guest CLI usage line does not mention pause or snapshot:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=17\n" {
+	if !strings.Contains(cli, "usage: sparkbox <whoami [--json]|") {
+		t.Errorf("guest CLI usage line does not mention whoami:\n%s", cli)
+	}
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=18\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -1884,6 +1887,156 @@ func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
 		if got := requests(); len(got) != 0 {
 			t.Errorf("%v: a malformed invocation reached the host: %v", args, got)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `sparkbox whoami`
+// ---------------------------------------------------------------------------
+
+// guestIdentityDoc is the host's answer, pretty-printed exactly as the metadata
+// service serves it — SetIndent("", "  "), so every colon is followed by a
+// space. That whitespace is the detail that has already broken one reader here
+// (see sparkbox-git-identity), which is why the fixture carries it rather than
+// the compact form a hand-written test would reach for.
+const guestIdentityDoc = `{
+  "iss": "https://catnip.sh",
+  "sub": "sandbox:quiet-lake",
+  "owner": "alice",
+  "github": "alice-gh",
+  "key_fp": "SHA256:x",
+  "sandbox": "quiet-lake",
+  "sandbox_id": "sbx_123",
+  "image": "default",
+  "box": "quiet-lake",
+  "github_id": 271676
+}`
+
+// TestGuestWhoamiAnswersWhatGhCannot. `gh api user` inside a sandbox is a 403:
+// the credential the box carries is a GitHub App INSTALLATION token, which has
+// no authenticated user behind it, and no permission grant invents one. The
+// fact is on the host, from the account link, so the verb reads it from there —
+// and prints it in a shape a script can cut on, because the thing asking is
+// usually an agent.
+func TestGuestWhoamiAnswersWhatGhCannot(t *testing.T) {
+	reply, requests, run := guestSelfService(t)
+	reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", guestIdentityDoc)
+
+	stdout, stderr, code := run("whoami")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{
+		"github: alice-gh\n",
+		"github_id: 271676\n",
+		"owner: alice\n",
+		"sandbox: quiet-lake\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("whoami did not report %q:\n%s", want, stdout)
+		}
+	}
+	// The account number is the half that makes an answer usable: it is what
+	// attributes a commit, and it is what a relying party should match on
+	// instead of a renameable login. A reader that matched "github" inside
+	// "github_id" would report the number as the login.
+	if strings.Contains(stdout, "github: 271676") {
+		t.Errorf("the login reader matched the account number:\n%s", stdout)
+	}
+	if got := requests(); len(got) != 2 || got[0] != "GET" || !strings.HasSuffix(got[1], "/identity") {
+		t.Errorf("requests = %v — whoami must read /identity, which mints nothing", got)
+	}
+}
+
+// TestGuestWhoamiJSONIsTheHostsOwnDocument: --json passes the host's answer
+// through verbatim rather than reassembling it, so a field this shell reader
+// does not know about still reaches whatever asked.
+func TestGuestWhoamiJSONIsTheHostsOwnDocument(t *testing.T) {
+	reply, _, run := guestSelfService(t)
+	reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", guestIdentityDoc)
+
+	stdout, stderr, code := run("whoami", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != guestIdentityDoc {
+		t.Errorf("--json did not pass the host's document through:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "github: ") {
+		t.Errorf("--json also printed the human form, so nothing can parse it:\n%s", stdout)
+	}
+}
+
+// TestGuestWhoamiFallsBackToTheIdentityOnDisk. The live read is preferred
+// because a GitHub account linked after this box booted is only in the host's
+// answer — but a host that cannot be reached must not turn "who am I" into an
+// error, when sparkbox-token already left the answer on disk.
+func TestGuestWhoamiFallsBackToTheIdentityOnDisk(t *testing.T) {
+	onDisk := filepath.Join(t.TempDir(), "identity.json")
+	if err := os.WriteFile(onDisk, []byte(guestIdentityDoc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPARKBOX_IDENTITY_FILE", onDisk)
+
+	reply, _, run := guestSelfService(t)
+	reply("GET", "000", "", "") // the gateway did not answer
+
+	stdout, stderr, code := run("whoami")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "github: alice-gh") || !strings.Contains(stdout, "github_id: 271676") {
+		t.Errorf("the on-disk snapshot was not read:\n%s", stdout)
+	}
+}
+
+// TestGuestWhoamiRefusesToInventALogin. An owner with no GitHub link has no
+// GitHub login, and the sparkbox handle is not one: handles and GitHub logins
+// are separate namespaces, so answering with the handle would hand a stranger's
+// account whatever the caller does next. Exit non-zero for the same reason —
+// a script reading an empty login as this person's login is the failure mode
+// worth spending an exit code on.
+func TestGuestWhoamiRefusesToInventALogin(t *testing.T) {
+	t.Setenv("SPARKBOX_IDENTITY_FILE", filepath.Join(t.TempDir(), "absent.json"))
+	reply, _, run := guestSelfService(t)
+	reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n",
+		"{\n  \"owner\": \"alice\",\n  \"sandbox\": \"quiet-lake\"\n}")
+
+	stdout, stderr, code := run("whoami")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 — no login is not success", code)
+	}
+	if strings.Contains(stdout, "github:") || strings.Contains(stdout, "alice-gh") {
+		t.Errorf("whoami named a GitHub account that is not linked:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "owner: alice") {
+		t.Errorf("whoami dropped what it does know:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "no GitHub account is linked to alice") {
+		t.Errorf("stderr does not say why there is no answer:\n%s", stderr)
+	}
+	// A guest is never told its own domain, so the pointer at the fix has to be
+	// a placeholder rather than a guess at a gateway name.
+	if !strings.Contains(stderr, "ssh ctl@<gateway> github link") {
+		t.Errorf("stderr does not point at how to link one:\n%s", stderr)
+	}
+}
+
+// TestGuestWhoamiSaysNothingWhenItKnowsNothing: no host, no file, no claim.
+func TestGuestWhoamiSaysNothingWhenItKnowsNothing(t *testing.T) {
+	t.Setenv("SPARKBOX_IDENTITY_FILE", filepath.Join(t.TempDir(), "absent.json"))
+	reply, _, run := guestSelfService(t)
+	reply("GET", "000", "", "")
+
+	stdout, stderr, code := run("whoami")
+	if code != 75 {
+		t.Errorf("exit = %d, want 75 (temporary or ambiguous)", code)
+	}
+	if stdout != "" {
+		t.Errorf("it answered anyway: %q", stdout)
+	}
+	if !strings.Contains(stderr, "could not read this sandbox's identity") {
+		t.Errorf("stderr = %q", stderr)
 	}
 }
 

@@ -363,6 +363,28 @@ that can push a branch but not open a pull request for it is a strange
 half-grant. It follows the attachment's access level, intersected with what the
 App actually holds.
 
+### `gh api user`, and why it is not a permission
+
+One endpoint stays refused no matter how the App is configured. `GET /user`
+means *the user holding this credential*, and an installation token is held by
+an installation, not a person — it is a server-to-server credential, minted from
+the App's private key with no human in the exchange at any point. GitHub answers
+it `403 Resource not accessible by integration`, and there is no permission to
+add: the App's permission list says what an installation may touch, not who it
+is. Only a *user-to-server* token carries an authenticated user, and getting one
+means a second OAuth consent per person plus a refresh token per sandbox to
+store — a durable per-user secret in exactly the place Part 3 spent its whole
+argument removing one from.
+
+The fact itself is not missing, though. The host already knows the owner's
+GitHub login and account number from the account link, already serves them on
+`/identity`, and already writes the commit author from them (§4.2). So the
+answer is a verb and not a scope: `sparkbox whoami` prints the login, the
+account number, the owner handle and the sandbox name, `--json` passes the
+host's document through, and an owner with no link gets a refusal rather than
+their sparkbox handle — handles and GitHub logins are separate namespaces, and
+substituting one is the same mistake the git author writer refuses to make.
+
 ---
 
 # Part 5 — the seams this touches
