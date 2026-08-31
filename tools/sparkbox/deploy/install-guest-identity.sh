@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=15
+IDENTITY_REV=16
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -1211,12 +1211,22 @@ SEP=$(printf '\037')
 # containing a quote, a backslash or a brace — so splitting on '"' can never
 # land inside a value. If that grammar ever loosens, this has to become a parser
 # rather than a slightly cleverer awk.
+#
+# "instance" is the one UNQUOTED value, being a JSON boolean, so it is read by
+# its own branch ahead of the `:` guard the string keys share. The field parity
+# the loop relies on survives it: an unquoted value contributes no quote
+# characters, so the key after it still lands on an even index.
 tr -d '\n\r' < "$WORK/manifest.json" | tr '{' '\n' | awk -F'"' '
   /"slug"/ {
-    host = ""; slug = ""; ref = ""; path = ""; access = ""
+    host = ""; slug = ""; ref = ""; path = ""; access = ""; instance = ""
     for (i = 2; i + 2 <= NF; i += 2) {
+      key = $i
+      if (key == "instance" && $(i + 1) ~ /^[ \t]*:[ \t]*true[ \t]*[,}]?[ \t]*$/) {
+        instance = 1
+        continue
+      }
       if ($(i + 1) !~ /^[ \t]*:[ \t]*$/) continue
-      key = $i; val = $(i + 2)
+      val = $(i + 2)
       if (key == "host") host = val
       else if (key == "slug") slug = val
       else if (key == "ref") ref = val
@@ -1226,13 +1236,22 @@ tr -d '\n\r' < "$WORK/manifest.json" | tr '{' '\n' | awk -F'"' '
     if (slug == "") next
     if (host == "") host = "github.com"
     if (access == "") access = "read"
-    printf "%s\037%s\037%s\037%s\037%s\n", host, slug, ref, path, access
+    printf "%s\037%s\037%s\037%s\037%s\037%s\n", host, slug, ref, path, access, instance
   }
 ' > "$WORK/rows"
 count=$(awk 'END {print NR}' "$WORK/rows")
 
 report_add() {
   printf "%s${SEP}%s${SEP}%s${SEP}%s${SEP}%s\n" "$1" "$2" "$3" "$4" "$5" >> "$WORK/report"
+  # The row's own record of "this is the repository the box was made for". It
+  # is written here, from the loop's $instance, because this is the one place
+  # that sees a checkout's FINAL directory: the default layout is a function of
+  # how many attachments there are, and a clone already sitting at the other
+  # default is reported where it actually sits rather than where the arithmetic
+  # said. Recording the computed path instead would name a directory that
+  # sometimes does not exist.
+  [ "${instance:-}" = 1 ] && printf '%s\n' "$4" >> "$WORK/pick"
+  return 0
 }
 
 # The home-relative spelling of a path. The banner is read by the person whose
@@ -1253,9 +1272,11 @@ tilde() {
 # repository somebody else chose — and the first question is always "where is
 # it". A count alone does not answer that, and `sparkbox repos` to find out is a
 # command you have to know exists. So when everything is in order the line ends
-# with the directory: the one checkout's own path, or the parent the several
-# share. When something is NOT in order the pointer wins, because a path is no
-# use for a clone that failed.
+# with a directory, and it is THE SAME directory the shell started in whenever
+# there is one — cd_target decides both, so the banner cannot say `~/src` while
+# the prompt sits two levels down. Failing that it is the parent the several
+# checkouts share. When something is NOT in order the pointer wins, because a
+# path is no use for a clone that failed.
 status_line() {
   inflight=${1:-}
   if [ -n "$inflight" ]; then
@@ -1266,10 +1287,9 @@ status_line() {
   # second before somebody starts typing and cannot carry the whole vocabulary;
   # the word that says what is actually wrong lives one command away, in the
   # table below.
-  ready=0; stale=0; pending=0; failed=0; rows=0; only=; scattered=
+  ready=0; stale=0; pending=0; failed=0; rows=0; scattered=
   while IFS="$SEP" read -r state slug access dest detail; do
     rows=$((rows + 1))
-    only=$dest
     # Whether the several share a parent worth naming. The multi-attachment
     # default layout is ~/src/<owner>/<name>, so they usually do — but an
     # explicit --path can put one anywhere, and "in ~/src" would then be a
@@ -1293,8 +1313,8 @@ status_line() {
   if [ -z "$out" ]; then out="none attached"; fi
   if [ "$failed" -gt 0 ] || [ "$pending" -gt 0 ] || [ "$stale" -gt 0 ]; then
     out="$out — run \`sparkbox repos\`"
-  elif [ "$rows" = 1 ] && [ -n "$only" ]; then
-    out="$out in $(tilde "$only")"
+  elif place=$(cd_target); then
+    out="$out in $(tilde "$place")"
   elif [ "$rows" -gt 1 ] && [ -z "$scattered" ]; then
     out="$out in $(tilde "$HOME_DIR/src")"
   fi
@@ -1346,12 +1366,41 @@ publish() {
 # attachment stops landing logins in the first one, and so does a checkout that
 # has been deleted. The file is /run, which is a tmpfs — it is rebuilt on the
 # boot after a cold start and survives a resume in memory, both correct.
+# Where a login shell should start, or nothing.
+#
+# Two ways to have an answer, in this order:
+#
+#   the repository this box was created for — a launch link's, or the one a
+#   `--ref <owner>/<repo>=<branch>` named. Somebody said what they came to work
+#   on, and saying it is not something the other attachments did;
+#
+#   otherwise, the single checkout, because with one there is nothing else it
+#   could mean.
+#
+# Everything else deliberately has no answer. Two repositories both riding a tag
+# are both wanted, in an order that means nothing, and a shell that opens inside
+# the wrong one is worse than a shell in $HOME: every agent and script started
+# from it inherits that directory, and it looks deliberate. The banner names the
+# place instead. Two NAMED repositories are the same problem one level up, which
+# is why more than one pick is also no answer.
+cd_target() {
+  if [ -s "$WORK/pick" ] && [ "$(awk 'END {print NR}' "$WORK/pick")" = 1 ]; then
+    _cd=$(head -n 1 "$WORK/pick")
+  elif [ "$(awk 'END {print NR}' "$WORK/report")" = 1 ]; then
+    _cd=$(awk -F"$SEP" 'NR == 1 {print $4}' "$WORK/report")
+  else
+    return 1
+  fi
+  [ -n "$_cd" ] || return 1
+  # The directory has to be there NOW. A checkout that failed, or one somebody
+  # deleted since the last sync, is a `cd` that fails at every login.
+  [ -d "$_cd" ] || return 1
+  printf '%s\n' "$_cd"
+}
+
 publish_cd() {
   rm -f "$CD_FILE" 2>/dev/null || true
-  [ "$(awk 'END {print NR}' "$WORK/report")" = 1 ] || return 0
-  _cd=$(awk -F"$SEP" 'NR == 1 {print $4}' "$WORK/report")
-  [ -n "$_cd" ] || return 0
-  [ -d "$_cd" ] || return 0
+  _cd=$(cd_target) || return 0
   mkdir -p "$R/run/sparkbox" 2>/dev/null || true
   # Same redirection-order rule as publish_motd.
   if printf '%s\n' "$_cd" 2>/dev/null > "$CD_FILE.new"; then
@@ -1527,7 +1576,7 @@ refresh_checkout() {
   fi
 }
 
-while IFS="$SEP" read -r host slug ref path access; do
+while IFS="$SEP" read -r host slug ref path access instance; do
   owner=${slug%%/*}
   name=${slug##*/}
   # Default layout: ~/<name> for a single attachment, ~/src/<owner>/<name> once

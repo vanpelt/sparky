@@ -67,11 +67,12 @@ type Repos interface {
 // internal/repos' columns rather than importing them, so this package stays
 // free of the store the way it is free of the OIDC issuer.
 type RepoAttachment struct {
-	Host   string
-	Slug   string
-	Ref    string
-	Path   string
-	Access string
+	Host     string
+	Slug     string
+	Ref      string
+	Path     string
+	Access   string
+	Instance bool
 }
 
 // RepoCredential is what git is told, and it is a secret with an expiry. It is
@@ -143,6 +144,7 @@ func (f *Fleet) SelfRepos(ctx context.Context, node string, req nodelink.SelfRep
 	for _, r := range rows {
 		out = append(out, nodelink.SelfRepoEntry{
 			Host: r.Host, Slug: r.Slug, Ref: r.Ref, Path: r.Path, Access: r.Access,
+			Instance: r.Instance,
 		})
 	}
 	f.log.Debug("resolved a repo manifest for a sandbox on another machine",

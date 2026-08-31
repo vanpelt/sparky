@@ -436,6 +436,12 @@ message RepoAttachment {
   string ref = 3;
   string path = 4;
   string access = 5;
+  // instance marks the attachment this sandbox was created naming — a launch
+  // link's repository, or the one a `--ref <owner>/<repo>=<branch>` singled
+  // out. The guest starts its login shell in that checkout. It is derived by
+  // the gateway from its own ledger, like every other field here; a node
+  // stating it would be choosing where its guests' shells begin.
+  bool instance = 6;
 }
 
 // IssueRepoCredentialRequest narrows the token to one repository. The slug is

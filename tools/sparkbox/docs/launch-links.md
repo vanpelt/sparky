@@ -441,21 +441,42 @@ Then, collapsed by `singleflight` on `handle \0 lower(slug) \0 ref`:
 The whole create is synchronous and capped at 15 seconds by `Ops.Create` itself.
 
 **Step 6, the handoff.** The browser lands on `<name>-xterm.<domain>`, same
-zone, same cookie, no second sign-in — and, when the sandbox holds exactly one
-checkout, **in that checkout's directory**. The clone worker publishes the path
-to `/run/sparkbox/repos.dir` and `/etc/profile.d/50-sparkbox-repo.sh` cds a
-login shell into it, guarded on being interactive, on starting in `$HOME`, and
-on the path being a directory under that home (`SPARKBOX_NO_REPO_CD=1` opts
-out). With more than one checkout there is no unambiguous answer — a launch
-link's sandbox also clones everything the clicker keeps on `default`, and
-nothing in the guest knows which repository was clicked for — so the login stays
-in `$HOME` and the banner names the directory they share:
+zone, same cookie, no second sign-in — and **in the checkout the link named**.
+The clone worker publishes that path to `/run/sparkbox/repos.dir` and
+`/etc/profile.d/50-sparkbox-repo.sh` cds a login shell into it, guarded on the
+shell being interactive (`case $- in *i*)`, never `[ -n "$PS1" ]` — dash sets a
+PS1 in every shell it starts), on starting in `$HOME`, and on the path being a
+directory under that home (`SPARKBOX_NO_REPO_CD=1` opts out).
+
+Which checkout, when the box holds several, is decided by the manifest's
+`instance` flag rather than by counting. The gateway sets it on the attachment
+this sandbox carries a **ref override** for — the row `--ref` writes, which a
+launch link produces whenever the URL or the attachment names a branch. That is
+the only asymmetry in the data worth reading: two repositories both riding `hm`
+are both wanted, in an order that means nothing, but naming a branch is a person
+saying what they came to work on. Failing a mark, one checkout is still its own
+answer. Failing both — several unmarked, or several marked — there is no answer
+and the login stays in `$HOME`, because a shell that opens in the wrong
+repository is worse than one in `$HOME`: every agent started from it inherits
+that directory, and it looks deliberate.
+
+The banner ends with the same directory the shell started in, or names the
+parent the checkouts share, or points at the problem — a path is no use for a
+clone that failed:
 
 ```
 repos: 1 ready in ~/hivemind
+repos: 2 ready in ~/src/wandb/hivemind      the launch link's repository
 repos: 3 ready in ~/src
 repos: 2 ready, 1 failed — run `sparkbox repos`
-``` The launch package calls nothing else: the
+```
+
+The gap this leaves: a launch link with no `?ref=` on a repository whose
+attachment pins no ref writes no override row, so nothing is marked and a
+multi-repo box lands in `$HOME`. Closing it needs either a GitHub App call on
+the click path to learn the default branch, or a per-sandbox "primary repo" of
+its own — the same call `docs/github-repos-design.md` declines to make for the
+reuse-matching residual. The launch package calls nothing else: the
 terminal's own WebSocket owns the boot, under a 15-minute budget that covers a
 cold start and even an archive restore, and it renders progress while it waits.
 Blocking a browser on the resume here instead would die behind a proxy's idle

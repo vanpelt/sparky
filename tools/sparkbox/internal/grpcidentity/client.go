@@ -126,6 +126,7 @@ func (c *Client) Manifest(ctx context.Context, box *host.Sandbox) (metadata.Mani
 		manifest.Repos = append(manifest.Repos, metadata.RepoEntry{
 			Host: repo.GetHost(), Slug: repo.GetSlug(), Ref: repo.GetRef(),
 			Path: repo.GetPath(), Access: repo.GetAccess(),
+			Instance: repo.GetInstance(),
 		})
 	}
 	return manifest, nil
