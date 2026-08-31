@@ -1171,6 +1171,15 @@ func serve(args []string) error {
 		// The host is <name>-xterm.<domain> — one label, so it costs no wildcard
 		// of its own in either DNS or TLS. It buys that with a name suffix the
 		// platform has to reserve; see proxy.SetReservedSuffix.
+		// The user console's URL, composed once: both the browser terminal's
+		// menu and the launch door link to it, and a second spelling of it is a
+		// second thing to get wrong on a host that moved the label. Empty when
+		// there is no console, which both consumers treat as "render no link".
+		consoleURL := ""
+		if *userConsoleSub != "" {
+			consoleURL = "https://" + *userConsoleSub + "." + *proxyDomain + "/"
+		}
+
 		var xt *xterm.Handler
 		if xtermLabel != "" {
 			warnXtermSuffixCollision(xtermLabel, mgr, routeStore, log)
@@ -1187,6 +1196,17 @@ func serve(args []string) error {
 				Turbo:  flt,
 				Domain: *proxyDomain, Subdomain: xtermLabel,
 				LoginURL: "https://" + *loginSub + "." + *proxyDomain + "/",
+				// The same advertised pair the login page and `ctl` print, so
+				// the ssh command the terminal offers to copy is the one that
+				// works — an edge DNAT means the port people type is not the
+				// port the gateway binds.
+				SSHHost: advertisedHost(*sshAdvertiseHost, *proxyDomain),
+				SSHPort: advertisedPort(*sshAdvertise, *sshAddr),
+				// Threaded rather than composed in the page, for the reason the
+				// launch door is handed the same string: a host that moved its
+				// console must not have a terminal linking at a hostname
+				// nothing serves.
+				ConsoleURL: consoleURL,
 				// The gateway owns the one live-session registry the manager
 				// closes on pause; a browser terminal that kept its own would be
 				// silently stranded when the reaper pauses its sandbox.
@@ -1236,10 +1256,7 @@ func serve(args []string) error {
 			// the console must not have a launch page whose "your sandboxes"
 			// link points at a hostname nothing serves. Empty when there is no
 			// user console, which the handler treats as a supported state.
-			launchHome := ""
-			if *userConsoleSub != "" {
-				launchHome = "https://" + *userConsoleSub + "." + *proxyDomain + "/"
-			}
+			launchHome := consoleURL
 			// ops, not a second control plane: the create a click performs is
 			// the same create `ctl new` performs, through the same ownership
 			// checks, the same 15s budget and the same tags-before-create

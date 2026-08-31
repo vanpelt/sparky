@@ -1471,6 +1471,72 @@ threshold — network at 980px, memory at 700px — ordered by value per pixel. 
 CPU sparkline is the last thing standing, because "is this machine doing
 anything" is the question the strip exists to answer. Verified down to 360px.
 
+## The menu — a third pass at the bar
+
+The bar carried three controls in a row: a turbo switch, `Clear` and
+`Reconnect`. That spent a third of a 44px strip on things nobody presses in a
+normal session, hid two of them below 560px (`hide-sm`) so a phone could not
+reach them at all, and left a button reading **Reconnect** in permanent view of
+a terminal that was plainly connected. They now live behind one hamburger, and
+the room that buys pays for the rest of this section.
+
+**Every item says what it does.** A 44px strip had space for the word "Clear"
+and none at all to say that it clears the *window* and not the sandbox. A menu
+row is two lines — the action, then the consequence — which is also what let the
+turbo switch drop its tooltip: the sentence beside it now names the sizes
+(`On — 4 vCPU and 8 GB, until this sandbox pauses`) rather than a factor, and
+"2× resources" is only meaningful to somebody who already knows what 1× is on
+this host. The switch itself keeps the physical push-button it has everywhere
+else in the product; the point of that shape is that it is the same switch
+wherever you meet it.
+
+**The connection item is worded for the state it is in.** Pressing it does one
+thing either way — drop whatever socket is there and open a new one — but those
+are two different acts to the person pressing it. On a live shell it reads
+*Start a new shell*, "ends this shell and opens a fresh one"; only a
+disconnected page calls it *Reconnect*. `setStatus` paints it, so it cannot
+drift from the lamp beside it. The overlay keeps its own button, which is the
+path anybody disconnected actually takes.
+
+**`ssh <name>@<host>`, copied.** The first row is the command that reaches the
+same shell from a terminal, rendered in full so it can be read without being
+copied, with the whole row as the copy button. `navigator.clipboard` is
+unavailable outside a secure context — every `--proxy-tls=false` dev loop — so
+there is a `document.execCommand` fallback behind it and a failure says
+"select the command and copy it" rather than silently doing nothing.
+
+**Three facts the page cannot derive, so `/vitals` carries them.** The response
+gained `name`, `ssh` and `console`, and each is on the server side for a
+reason:
+
+- `name` — the host is `<name>-<subdomain>.<zone>`, ONE label (that is what the
+  wildcard certificate covers), so the page's `hostname.split(".")[0]` yields
+  `demo-xterm`. That is what the header and the turbo dialog used to say. The
+  subdomain is configurable, so there is no suffix the page could safely strip
+  either.
+- `ssh` — only the server knows the ADVERTISED host and port. An edge DNAT
+  means the port people type is not the port the gateway binds, and `main`
+  already computes that pair for the login page and the `ctl` channel; it is
+  threaded in rather than recomposed so the three cannot disagree.
+- `console` — the user console's label is configurable, and a link to a
+  hostname nothing serves is worse than no link. Same string the launch door is
+  handed, computed once in `main`.
+
+They are constants for the life of the page, so it applies them on the first
+reading and skips the work thereafter. Absent means "no such thing on this
+host", which the page renders by leaving the row out entirely — an empty `ssh`
+string would draw "Copy the ssh command" over a blank line.
+
+**The console link is the only link off this page, and it opens a tab of its
+own.** The shell in the grid behind the menu is a live session; navigating away
+from it in the same tab ends it.
+
+Focus is the detail that makes the menu usable rather than merely present.
+Opening it takes focus off the terminal, so closing it has to give focus back —
+otherwise the next keystroke goes nowhere and the shell looks frozen. Escape
+returns focus to the button that opened it (a keyboard user is still
+navigating); every other route back returns it to the shell.
+
 ## Vitals across the fleet — added after the strip shipped
 
 The strip shipped reading the local manager, which meant a sandbox on a fleet

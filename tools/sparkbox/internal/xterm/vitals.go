@@ -54,6 +54,26 @@ type VitalsReader = webui.VitalsReader
 // would fold request latency into every rate: a response held up 300ms would
 // show as a CPU spike that never happened.
 type vitals struct {
+	// Name is the sandbox this page is attached to, resolved by the server.
+	//
+	// The page cannot work it out for itself and used to try: the host is
+	// `<name>-<subdomain>.<zone>`, one label, so the obvious
+	// `hostname.split(".")[0]` yields `demo-xterm` — which is what the header
+	// and the turbo dialog both said. The subdomain is configurable, so there
+	// is no suffix the page can safely strip either. It is one field on a
+	// response the page already makes, and it is the only authority.
+	Name string `json:"name"`
+	// SSH is the whole command that opens this same shell from a terminal,
+	// ready to paste. Absent when this host advertises no SSH endpoint.
+	//
+	// It is composed here and not in the page because only the server knows the
+	// ADVERTISED host and port — an edge DNAT means the port people type is not
+	// the port the gateway binds, and the page has no way to learn either.
+	SSH string `json:"ssh,omitempty"`
+	// Console is the user console's URL, for the menu's one link off this page.
+	// Absent when the host runs no console.
+	Console string `json:"console,omitempty"`
+
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
 	State vmm.State `json:"state"`
@@ -105,6 +125,8 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := vitals{
+		Name:           box.Name,
+		Console:        h.consoleURL,
 		State:          box.State,
 		AtMS:           time.Now().UnixMilli(),
 		VCPUs:          box.VCPUs,
@@ -114,6 +136,9 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 		Ballooned:      box.Ballooned,
 		LifeRxBytes:    box.NetRxBytes,
 		LifeTxBytes:    box.NetTxBytes,
+	}
+	if h.sshCommand != nil {
+		out.SSH = h.sshCommand(box.Name)
 	}
 	h.readVitals(r.Context(), box, &out)
 
