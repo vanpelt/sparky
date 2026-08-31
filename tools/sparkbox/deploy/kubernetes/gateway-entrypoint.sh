@@ -23,6 +23,10 @@ readonly github_app_client_id="${SPARKBOX_GITHUB_APP_CLIENT_ID:-}"
 # presence monitor and `ctl sessions` off entirely; the flag's own default is
 # the same empty string, so passing it unconditionally is safe.
 readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
+# GitHub orgs whose HiveMind users may sign in at login.<domain>/handoff. Empty —
+# the default — leaves the door unmounted, which is also what happens if this is
+# set and hivemind_api is not: there would be nothing to redeem a code against.
+readonly hivemind_signin_orgs="${SPARKBOX_HIVEMIND_SIGNIN_ORGS:-}"
 readonly node_name="${SPARKBOX_NODE_NAME:-cks-gateway}"
 readonly cluster_id="${SPARKBOX_CLUSTER_ID:-cks-poc}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
@@ -54,6 +58,7 @@ fi
 exec /usr/local/bin/sparkbox serve \
   --gateway-only \
   --hivemind-api "$hivemind_api" \
+  --hivemind-signin-orgs "$hivemind_signin_orgs" \
   --driver mock \
   --state-dir "$state_dir" \
   --vm-state-dir "$vm_state_dir" \

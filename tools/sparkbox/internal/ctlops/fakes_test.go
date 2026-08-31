@@ -374,6 +374,24 @@ func (f *fakeAccounts) Get(handle string) (users.User, error) {
 // Create registers an account the way users.Store does, including the two
 // refusals provisioning has to handle: a taken handle, and a key some other
 // account already claims.
+func (f *fakeAccounts) CreateKeyless(handle, invitedBy string) error {
+	f.c.add("accounts.CreateKeyless %s by=%s", handle, invitedBy)
+	if f.err != nil {
+		return f.err
+	}
+	if _, taken := f.users[handle]; taken {
+		return users.ErrHandleTaken
+	}
+	if f.users == nil {
+		f.users = map[string]users.User{}
+	}
+	f.users[handle] = users.User{
+		Handle: handle, Status: users.StatusActive, InvitedBy: invitedBy,
+		CreatedAt: time.Unix(0, 0).UTC(),
+	}
+	return nil
+}
+
 func (f *fakeAccounts) Create(handle string, key xssh.PublicKey, label, via, invitedBy string) error {
 	f.c.add("accounts.Create %s via=%s by=%s", handle, via, invitedBy)
 	if f.err != nil {

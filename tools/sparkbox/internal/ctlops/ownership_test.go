@@ -312,6 +312,13 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// a resource anybody here owns. Operator-gated instead — see
 		// TestProvisioningIsOperatorGated.
 		"ProvisionGitHubUsers": true, "ProvisionGitHubOrg": true, "ListAccounts": true,
+		// AdmitGitHubLogin names a GitHub login and takes no Caller at all: the
+		// thing that was proved is a redeemed federated handoff, not somebody
+		// asking. It is the only method here with nobody to check the target
+		// against, which is exactly why federated.go's doc comment carries the
+		// contract instead — see TestAdmitIsNotOperatorReachable for the half
+		// that is testable.
+		"AdmitGitHubLogin": true,
 	}
 	covered := map[string]bool{}
 	for _, tc := range ownCases() {

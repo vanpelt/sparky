@@ -144,7 +144,17 @@ seeded from `users.conf`, not anybody who skipped it once. So:
 
 ---
 
-# Part 3 — the Hivemind handshake (design note, not built)
+# Part 3 — the Hivemind handshake (design note; the sign-in half is now built)
+
+> **Since this was written**, `docs/hivemind-signin-design.md` took the shape in
+> §3.3 further than linking: HiveMind's word now also *creates* the account and
+> establishes the browser session (`internal/edgeauth/handoff.go`). The
+> constraint in §3.2 survived intact and is the thing to keep: an
+> assertion-derived link is recorded `assertion`, stays out of
+> `users.StrongGitHubLink`, and never reaches the `github` claim. §3.3's
+> "try the key check first" became "adopt the keys github.com publishes, and
+> record `github-keys` when there are any" — the same trade, made at account
+> creation rather than at link time. §3.4's five questions are answered there.
 
 Hivemind already knows its users' GitHub identities, and sparkbox already
 federates *to* Hivemind over OIDC. The proposal: Hivemind signs an assertion

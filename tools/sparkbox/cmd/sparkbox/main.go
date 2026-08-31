@@ -40,6 +40,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindpresence"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/hivemindsignin"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/hostsetup"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/launch"
@@ -172,6 +173,7 @@ func serve(args []string) error {
 		hivemindAPI          = fs.String("hivemind-api", "", "HiveMind API origin used to protect VMs with live agent sessions (empty disables)")
 		hivemindAudience     = fs.String("hivemind-audience", defaultAudience, "OIDC audience used for HiveMind workload-token exchange")
 		hivemindInterval     = fs.Duration("hivemind-presence-interval", time.Minute, "how often to refresh HiveMind session-presence leases")
+		hivemindSigninOrgs   = fs.String("hivemind-signin-orgs", "", "comma-separated GitHub organizations whose HiveMind users may sign in to this sparkbox at https://<login-subdomain>.<domain>"+edgeauth.HandoffPath+", creating an account on first arrival (empty disables the door). Needs --hivemind-api, which is the back channel the single-use handoff code is redeemed over. There is no wildcard: an empty list is off, never everyone")
 		metaAddr             = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
 		toolsDir             = fs.String("tools-dir", "", "directory of agent CLIs this machine has verified (the refresher's TOOLS_DIR), served to its own guests at /tools so `sparkbox update-tools` can install them without rebuilding the VM. Empty serves no cache and answers 501, which is what a laptop or mock-driver run wants")
 		guestSelfSnapshot    = fs.Bool("guest-self-snapshot", true, "let a sandbox capture ITSELF as the template for a tag it already carries (`sparkbox snapshot <tag>` from inside the VM). On by default: a guest may only re-point a tag it was already given — so it gains persistence over sandboxes it already had the secrets of, and nothing wider — and a self-service verb nobody is told about does not exist. Turn it off when handing boxes to people you would not let re-base their own tags")
@@ -1094,15 +1096,45 @@ func serve(args []string) error {
 		// Authenticated forwarding: private routes are gated behind a session the
 		// visitor mints from their SSH key, and the browser sign-in rides the edge
 		// at login.<domain> like the console and issuer do.
+		//
+		// The federated door rides the same handler when an operator has named
+		// the orgs that may come through it. It is deliberately two conditions
+		// rather than one flag: the orgs are the policy, and --hivemind-api is
+		// the back channel a code is redeemed over, so a host with the policy
+		// and no channel is a misconfiguration worth a line in the log rather
+		// than a door that silently is not there.
+		var handoff *edgeauth.HandoffConfig
+		if orgs := splitList(*hivemindSigninOrgs); len(orgs) > 0 {
+			if *hivemindAPI == "" {
+				log.Warn("hivemind sign-in is configured but --hivemind-api is empty; "+
+					"the door is not mounted (there is nothing to redeem a code against)",
+					"orgs", orgs)
+			} else {
+				redeemer, rerr := hivemindsignin.New(hivemindsignin.Options{
+					APIBase: *hivemindAPI, UserAgent: "sparkbox/" + version,
+				})
+				if rerr != nil {
+					return fmt.Errorf("hivemind sign-in: %w", rerr)
+				}
+				handoff = &edgeauth.HandoffConfig{
+					Redeem: redeemer, Admit: ops, Accounts: userStore, Orgs: orgs,
+				}
+			}
+		}
 		loginH, lerr := edgeauth.NewLoginHandler(edgeauth.LoginConfig{
 			Signer: sessionSigner, Domain: *proxyDomain, Secure: *proxyTLS,
 			TTL: *sessionTTL, Logger: log, Gateway: advertisedHost(*sshAdvertiseHost, *proxyDomain),
 			GatewayPort: advertisedPort(*sshAdvertise, *sshAddr),
 			Passkeys:    userStore, Subdomain: *loginSub, Port: advertisedPort(*proxyAdvertise, *proxyAddr),
-			HomeSub: *userConsoleSub,
+			HomeSub: *userConsoleSub, Handoff: handoff,
 		})
 		if lerr != nil {
 			return fmt.Errorf("login handler: %w", lerr)
+		}
+		if handoff != nil {
+			log.Info("hivemind sign-in enabled",
+				"url", "https://"+*loginSub+"."+*proxyDomain+edgeauth.HandoffPath,
+				"orgs", handoff.Orgs, "redeem", *hivemindAPI+hivemindsignin.Path)
 		}
 		px.SetAuth(*loginSub, loginH.Handler(), sessionSigner, userStore)
 		px.SetListenPort(portOf(*proxyAddr))

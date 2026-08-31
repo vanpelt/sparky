@@ -100,6 +100,11 @@ type Accounts interface {
 	// store and the same ownership rule — ctlops decides who may call them.
 	Create(handle string, key xssh.PublicKey, label, via, invitedBy string) error
 	List() ([]users.User, error)
+	// CreateKeyless is federated.go's floor: an account for somebody who
+	// publishes no ssh key and arrived through the browser. Kept beside Create
+	// rather than on its own interface for the same reason — one store, and
+	// ctlops decides who may reach it.
+	CreateKeyless(handle, invitedBy string) error
 }
 
 // Tagger is the tag half of secrets.Store. Deliberately identical to the

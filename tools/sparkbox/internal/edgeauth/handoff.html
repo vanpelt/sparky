@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{.Heading}} · sparkbox</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<style>
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --danger: 0 72% 51%;
+    --radius: 0.6rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 5.5%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); max-width: 480px; width: 100%;
+    padding: 28px 30px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    line-height: 1; text-indent: 0.02em;
+  }
+  .brand span { font-size: 13px; font-weight: 600; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 4px 0 10px; }
+  p { margin: 0 0 8px; color: hsl(var(--muted-foreground)); }
+  .detail {
+    margin-top: 12px; padding: 10px 12px; border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--muted)); color: hsl(var(--muted-foreground));
+    font-size: 13px; overflow-wrap: anywhere;
+  }
+  button, .go {
+    margin-top: 16px; width: 100%; padding: 10px 14px; border: 0; cursor: pointer;
+    border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 600;
+    background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+    display: block; text-align: center; text-decoration: none;
+  }
+  .alt {
+    margin-top: 10px; width: 100%; background: none; border: 0;
+    padding: 4px; cursor: pointer; text-align: center; font-size: 13px;
+    color: hsl(var(--muted-foreground)); text-decoration: underline;
+    text-underline-offset: 3px; display: block;
+  }
+  .failed h1 { color: hsl(var(--danger)); }
+</style>
+</head>
+<body>
+  <main class="card{{if .Failed}} failed{{end}}">
+    <div class="brand"><div class="logo">&#9889;&#65039;</div><span>sparkbox</span></div>
+    <h1>{{.Heading}}</h1>
+    <p>{{.Body}}</p>
+    {{if .Detail}}<div class="detail">{{.Detail}}</div>{{end}}
+    {{if .Ticket}}
+    <form method="POST" action="/handoff/confirm">
+      <input type="hidden" name="ticket" value="{{.Ticket}}" />
+      <button type="submit">{{.Confirm}}</button>
+    </form>
+    {{if .StayAs}}<a class="alt" href="{{.Dest}}">Stay signed in as {{.StayAs}}</a>{{end}}
+    {{else if .Continue}}
+    <a class="go" href="{{.Continue}}">Continue</a>
+    {{else if .Failed}}
+    <a class="alt" href="/">Sign in another way</a>
+    {{end}}
+  </main>
+</body>
+</html>
