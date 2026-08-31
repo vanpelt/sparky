@@ -410,7 +410,7 @@ func TestLimitScreenNamesThePauseCommand(t *testing.T) {
 	if !strings.Contains(body, `<form method="post"`) {
 		t.Error("the limit screen dropped the retry button")
 	}
-	assertZeroScript(t, body)
+	assertOneScript(t, body)
 	assertPageHeaders(t, rec.Header())
 }
 
