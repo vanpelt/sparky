@@ -100,9 +100,9 @@ Two limits that are not bugs but will bite:
   controller receives no devices. There are no raw device `hostPath` volumes.
 - A public `LoadBalancer` Service selecting only the gateway on SSH port 22,
   HTTP redirect port 80, HTTPS port 443, and common HTTPS development ports
-  3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8443, 8501,
-  8888, and 9000, plus an internal ClusterIP Service for the authenticated
-  fleet link.
+  3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8081, 8082,
+  8083, 8123, 8443, 8501, 8888, 9000, and 16686, plus an internal ClusterIP
+  Service for the authenticated fleet link.
 - Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
   admitted. The node has no admitted ingress. A Cilium egress policy permits
   the VM node to reach only public IP space, cluster DNS, and the internal
@@ -196,12 +196,13 @@ tools/sparkbox/deploy/kubernetes/public-port.sh add 6454
 tools/sparkbox/deploy/kubernetes/public-port.sh list
 ```
 
-Ports 3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8443,
-8501, 8888, and 9000 are declared in `service.yaml` and therefore survive an
-ordinary manifest re-apply. Port 80 feeds the gateway's cleartext-to-HTTPS
-redirect. Use the helper for an additional experimental port such as 6454.
-Port 8081 is intentionally absent: it is the gateway's internal listener and
-is interpreted as the route's default rather than as guest port 8081.
+Ports 3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8081, 8082,
+8083, 8123, 8443, 8501, 8888, 9000, and 16686 are declared in `service.yaml`
+and therefore survive an ordinary manifest re-apply. Port 80 feeds the
+gateway's cleartext-to-HTTPS redirect. Use the helper for an additional
+experimental port such as 6454. Public 8081 shares the gateway's internal 8081
+listener; its explicit HTTP authority selects guest port 8081, while an
+unqualified internal request still selects the sandbox's default route.
 
 After the load balancer finishes programming the change, both
 `https://foo.<domain>:6454` and `https://bar.<domain>:6454` reach the gateway.
@@ -659,14 +660,14 @@ The browser dashboard is:
 https://my.<domain>
 ```
 
-New sandboxes receive four vCPUs and 8 GiB RAM by default. On the 64-vCPU,
+New sandboxes receive four vCPUs and 12 GiB RAM by default. On the 64-vCPU,
 roughly 502-GiB CKS CPU Node used by this deployment, the VMM helper requests
 48 CPUs and 400 GiB and is capped at 56 CPUs and 448 GiB. Sparkbox advertises
 480,000 MB of host memory with a 90% admission threshold, so running guests may
 reserve at most 432,000 MB while leaving room inside the helper cgroup for
 Firecracker and host-side overhead.
 
-The VM is no longer the subscription boundary. Each VM retains its 8 GiB
+The VM is no longer the subscription boundary. Each VM retains its 12 GiB
 ceiling, while every owner's running VMs share an 8,192 MB effective-memory
 pool. Admission charges a 256 MB configured working-set floor per warm VM, so at
 most 32 may be resident for one owner at once; paused and archived VMs retain
@@ -681,10 +682,11 @@ running working-set charges against its 432,000 MB safety budget, so many mostly
 idle owner pools can share the same physical memory. Turbo may temporarily take
 an owner to a 16,384 MB burst ceiling when that overlapping node budget has
 room. A turbo VM costs twice its normal working-set charge; pausing it returns
-the borrowed charge immediately. Every ten seconds the node samples actual
-guest working sets. If an owner or the node crosses its active ceiling, Sparkbox
-balloons turbo first and then the least-recently-active unpinned VMs until the
-projected resident set is back inside the budget; guests remain running.
+the borrowed charge immediately. Every minute the node samples actual guest
+working sets. If an owner or the node crosses its active ceiling, Sparkbox
+balloons turbo first and then the least-recently-active unpinned VMs that have
+been quiet for at least two minutes. Pressure reclaim is capped at the measured
+overage; guests remain running.
 
 An owner may retain at most 50 sandbox identities in total, including paused
 and archived boxes. Up to 50 may run at once when a larger owner plan permits

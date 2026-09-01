@@ -220,7 +220,7 @@
                       "pinned": false,
                       "tags": ["prod"],
                       "vcpus": 4,
-                      "mem_mb": 8192,
+                      "mem_mb": 12288,
                       "disk_mb": 25600,
                       "created_at": "2026-07-19T10:04:11Z",
                       "last_active": "2026-07-21T18:22:03Z",
@@ -2179,7 +2179,7 @@
             "description": "Never null. Selects which secrets reach the guest's environment."
           },
           "vcpus": { "type": "integer", "format": "int64", "example": 4 },
-          "mem_mb": { "type": "integer", "format": "int64", "example": 8192 },
+          "mem_mb": { "type": "integer", "format": "int64", "example": 12288 },
           "turbo": {
             "type": "boolean",
             "description": "`vcpus` and `mem_mb` above are a doubled allocation this run borrowed. The host hands it back the moment the sandbox pauses — an idle pause included — so the next resume comes up at the sandbox's own size."
@@ -2246,7 +2246,7 @@
           "mem_mb": {
             "type": "integer",
             "format": "int64",
-            "description": "0 takes the host default (8192)."
+            "description": "0 takes the host default (12288)."
           }
         }
       },

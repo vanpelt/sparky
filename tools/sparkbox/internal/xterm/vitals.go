@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
@@ -73,6 +74,18 @@ type vitals struct {
 	// Console is the user console's URL, for the menu's one link off this page.
 	// Absent when the host runs no console.
 	Console string `json:"console,omitempty"`
+	// Proxy is the sandbox's default HTTPS endpoint. Its portless URL follows
+	// the route store's current default port, including changes made while this
+	// terminal is open.
+	Proxy string `json:"proxy,omitempty"`
+	// ProxyPort is the guest port selected by the portless Proxy URL.
+	ProxyPort int `json:"proxy_port,omitempty"`
+	// ListeningPorts contains supported public ports that spoke HTTP, regardless
+	// of application status. PortServices adds optional display names discovered
+	// from the same bounded response. PortsChecked makes an empty list authoritative.
+	ListeningPorts []int              `json:"listening_ports,omitempty"`
+	PortServices   []host.PortService `json:"port_services,omitempty"`
+	PortsChecked   bool               `json:"ports_checked,omitempty"`
 
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
@@ -140,6 +153,15 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 	if h.sshCommand != nil {
 		out.SSH = h.sshCommand(box.Name)
 	}
+	if h.proxyURL != nil {
+		out.Proxy = h.proxyURL(box.Name)
+		out.ProxyPort = routes.DefaultPort
+		if h.proxyPort != nil {
+			if port, ok := h.proxyPort(box.Name); ok && port > 0 {
+				out.ProxyPort = port
+			}
+		}
+	}
 	h.readVitals(r.Context(), box, &out)
 
 	// edgeauth.Require already sets no-store on everything behind the gate;
@@ -171,4 +193,7 @@ func (h *Handler) readVitals(ctx context.Context, box *host.Sandbox, out *vitals
 	}
 	out.CPUSeconds, out.MemUsedMB = v.CPUSeconds, v.MemUsedMB
 	out.NetRxBytes, out.NetTxBytes = v.NetRxBytes, v.NetTxBytes
+	out.ListeningPorts = append([]int(nil), v.ListeningPorts...)
+	out.PortServices = append([]host.PortService(nil), v.PortServices...)
+	out.PortsChecked = v.PortsChecked
 }

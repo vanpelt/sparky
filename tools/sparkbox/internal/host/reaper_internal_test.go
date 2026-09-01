@@ -257,6 +257,37 @@ func TestOwnerPressureBalloonsColdestWorkingSets(t *testing.T) {
 	}
 }
 
+// A cold boot commonly crosses the steady-state owner pool while its page
+// cache and dev stack are coming up. That burst is exactly when balloon reclaim
+// is most harmful, and the vitals sampler needs a full interval before it can
+// distinguish the startup from an idle VM.
+func TestOwnerPressureDoesNotBalloonRecentActivity(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 128, OwnerMemoryPoolMB: 256})
+	ctx := context.Background()
+	for _, name := range []string{"cold", "starting"} {
+		if _, err := m.Create(ctx, name, "alice", "ubuntu", 1, 512); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.boxes["cold"].LastActive = time.Now().Add(-time.Hour)
+	m.boxes["starting"].LastActive = time.Now().Add(-time.Hour)
+	if err := m.balloonDown(ctx, "starting"); err != nil {
+		t.Fatal(err)
+	}
+	// This is the interactive loop that caused the live failure: activity
+	// deflates a previously reclaimed VM immediately before pressure runs again.
+	m.applyActivity("starting", time.Now())
+
+	m.reconcileMemoryPressure(ctx)
+
+	if !m.boxes["cold"].Ballooned {
+		t.Fatal("pressure did not reclaim the inactive sandbox")
+	}
+	if m.boxes["starting"].Ballooned {
+		t.Fatal("pressure reclaimed a freshly active sandbox before vitals could sample it")
+	}
+}
+
 func TestPressureReclaimsTurboBeforeNormalVM(t *testing.T) {
 	m := internalManager(t, Options{
 		MemReserveMB: 128, OwnerMemoryPoolMB: 512, OwnerMemoryBurstMB: 1024,
@@ -272,7 +303,7 @@ func TestPressureReclaimsTurboBeforeNormalVM(t *testing.T) {
 	}
 	// Make normal older to prove the turbo-first rule wins over LRU.
 	m.boxes["normal"].LastActive = time.Now().Add(-2 * time.Hour)
-	m.boxes["fast"].LastActive = time.Now()
+	m.boxes["fast"].LastActive = time.Now().Add(-time.Hour)
 	m.memUsed["normal"], m.memUsed["fast"] = 400, 800
 	m.reclaimMemory(ctx, "alice", 100)
 	if !m.boxes["fast"].Ballooned || m.boxes["normal"].Ballooned {
@@ -283,8 +314,9 @@ func TestPressureReclaimsTurboBeforeNormalVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Turbo retains twice the 128 MiB baseline floor.
-	if want := int64(1024 - 256); stats.TargetMiB != want {
-		t.Fatalf("turbo balloon target = %d, want %d", stats.TargetMiB, want)
+	// Pressure was only 100 MiB over budget. Reclaiming the entire 768 MiB above
+	// the turbo reserve would make a small correction needlessly destructive.
+	if want := int64(100); stats.TargetMiB != want {
+		t.Fatalf("turbo pressure balloon target = %d, want only the %d MiB excess", stats.TargetMiB, want)
 	}
 }

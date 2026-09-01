@@ -32,6 +32,9 @@ spec:
     # Common web-development ports share the same TLS/authenticated gateway
     # listener. Sparkbox recovers the non-default port from Host/:authority and
     # forwards to that port on the selected sandbox.
+    #
+    # Source of truth: internal/publicports. Any change to these Service ports
+    # must update that Go package too; the deploy contract test enforces parity.
     - name: https-3000
       protocol: TCP
       port: 3000
@@ -72,6 +75,22 @@ spec:
       protocol: TCP
       port: 8080
       targetPort: https
+    - name: https-8081
+      protocol: TCP
+      port: 8081
+      targetPort: https
+    - name: https-8082
+      protocol: TCP
+      port: 8082
+      targetPort: https
+    - name: https-8083
+      protocol: TCP
+      port: 8083
+      targetPort: https
+    - name: https-8123
+      protocol: TCP
+      port: 8123
+      targetPort: https
     - name: https-8443
       protocol: TCP
       port: 8443
@@ -87,4 +106,8 @@ spec:
     - name: https-9000
       protocol: TCP
       port: 9000
+      targetPort: https
+    - name: https-16686
+      protocol: TCP
+      port: 16686
       targetPort: https

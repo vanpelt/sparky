@@ -731,8 +731,9 @@ This VM's name is its hostname, so `$(hostname)` is the name and
 `https://$(hostname).catnip.sh` is the default endpoint above. Any other port is
 reached by naming it in the URL, as `https://$(hostname).catnip.sh:5173`. The
 edge exposes the common development ports — 3000, 3001, 4000, 4200, 5000, 5173,
-6006, 7860, 8000, 8080, 8443, 8501, 8888 and 9000 — so listen on one of those,
-and on 0.0.0.0 rather than 127.0.0.1, or nothing outside the VM can reach it.
+6006, 7860, 8000, 8080, 8081, 8082, 8083, 8123, 8443, 8501, 8888, 9000 and
+16686 — so listen on one of those, and on 0.0.0.0 rather than 127.0.0.1, or
+nothing outside the VM can reach it.
 
 When you start a dev service, point the default endpoint at the port a person
 should open. A stack serving an API on 8080 and a Vite frontend on 5173 gets

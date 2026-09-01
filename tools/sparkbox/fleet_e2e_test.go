@@ -482,9 +482,10 @@ func newNodeSide(t *testing.T, log *slog.Logger, gatewayPub string) *nodeSide {
 		// anything in it to carry.
 		GatewayPublicKey: gatewayPub,
 		NodeName:         "node-b", Arch: "arm64", Release: "2026-07-22",
-		// Room for one default-sized sandbox and not two, which is what lets a
-		// test watch this machine refuse the second one in its own words.
-		HostMemMB: 16384, MemAdmissionPct: 75, HostVCPUs: 8,
+		// Room for one default-sized sandbox plus the small explicit fixtures,
+		// but not two defaults. Tests can still watch this machine refuse a
+		// second default-sized sandbox in its own words.
+		HostMemMB: 18432, MemAdmissionPct: 75, HostVCPUs: 8,
 		Observer: emitter,
 	})
 	if err != nil {

@@ -358,7 +358,7 @@
     const sum = (k) => nodes.reduce((a, x) => a + (x[k] || 0), 0);
     const phys = sum("total_mem_mb");
     const budget = sum("budget_mem_mb") || phys;
-    const alloc = sum("used_mem_mb");          // provisioned ceiling (sum of 8GBs)
+    const alloc = sum("used_mem_mb");          // provisioned ceiling (sum of VM limits)
     const effective = sum("effective_mem_mb"); // what admission actually charges
     const reserve = nodes.reduce((m, x) => Math.max(m, x.reserve_mem_mb || 0), 0);
     const usedCpu = sum("used_vcpus"), totalCpu = sum("total_vcpus");
@@ -399,12 +399,12 @@
       : "no running sandboxes";
 
     // Card 4 — Headroom: how many more you can actually start (admission math).
-    const perVM = reserve > 0 ? reserve : 8192;
+    const perVM = reserve > 0 ? reserve : 12288;
     const remain = Math.max(0, budget - effective);
     $("c-free").innerHTML = "~" + Math.floor(remain / perVM) + " <small>more</small>";
     $("c-free-sub").textContent = reserve > 0
       ? "at " + gb(reserve) + " GB reserve/VM · " + gb(budget) + " GB RAM budget"
-      : "at 8 GB/VM — overcommit off";
+      : "at 12 GB/VM — overcommit off";
   }
 
   // routeChips renders each web route as a linked pill with a health dot:
@@ -493,7 +493,7 @@
         ? '<span class="badge offline" title="the machine holding this sandbox is not answering the control plane; the sandbox itself is very likely still running"><span class="dot"></span>node offline</span>'
         : "";
       // Show real RAM use against the ceiling when the guest reports it — the
-      // overcommit story in one number (e.g. "0.3 / 8 GB").
+      // overcommit story in one number (e.g. "0.3 / 12 GB").
       const mem = typeof b.mem_used_mb === "number"
         ? gb(b.mem_used_mb) + " / " + gb(b.mem_mb)
         : gb(b.mem_mb);

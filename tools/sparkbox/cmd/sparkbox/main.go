@@ -948,7 +948,7 @@ func serve(args []string) error {
 			"api", *hivemindAPI, "interval", *hivemindInterval)
 	}
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
-	go mgr.RunMemoryPressureController(ctx, 10*time.Second)
+	go mgr.RunMemoryPressureController(ctx, time.Minute)
 	// Reconcile egress policy periodically so VM churn (create, resume, destroy)
 	// that bypasses the console's change-time push still converges. The console
 	// also pushes on every rule/tag mutation for immediacy.
@@ -1239,6 +1239,10 @@ func serve(args []string) error {
 				// console must not have a terminal linking at a hostname
 				// nothing serves.
 				ConsoleURL: consoleURL,
+				ProxyPort: func(sandbox string) (int, bool) {
+					route, ok, err := routeStore.GetBySubdomain(sandbox)
+					return route.Port, ok && err == nil
+				},
 				// The gateway owns the one live-session registry the manager
 				// closes on pause; a browser terminal that kept its own would be
 				// silently stranded when the reaper pauses its sandbox.

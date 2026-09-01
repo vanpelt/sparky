@@ -27,12 +27,15 @@ import (
 // the reader was not consulted at all; err makes it fail the way a machine that
 // has stopped answering does.
 type fakeVitals struct {
-	mu    sync.Mutex
-	cpu   map[string]float64
-	mem   map[string]int64
-	net   map[string][2]uint64
-	err   error
-	calls int
+	mu           sync.Mutex
+	cpu          map[string]float64
+	mem          map[string]int64
+	net          map[string][2]uint64
+	ports        map[string][]int
+	services     map[string][]host.PortService
+	portsChecked map[string]bool
+	err          error
+	calls        int
 }
 
 func (f *fakeVitals) count() int {
@@ -59,6 +62,13 @@ func (f *fakeVitals) Vitals(_ context.Context, name string) (host.Vitals, error)
 		rx, tx := n[0], n[1]
 		v.NetRxBytes, v.NetTxBytes = &rx, &tx
 	}
+	if ports, ok := f.ports[name]; ok {
+		v.ListeningPorts = append([]int(nil), ports...)
+	}
+	if services, ok := f.services[name]; ok {
+		v.PortServices = append([]host.PortService(nil), services...)
+	}
+	v.PortsChecked = f.portsChecked[name]
 	return v, nil
 }
 
@@ -146,6 +156,41 @@ func TestVitalsServesLiveCounters(t *testing.T) {
 	// latency into the numbers.
 	if at, ok := m["at_ms"].(float64); !ok || at <= 0 {
 		t.Errorf("at_ms = %v, want a positive timestamp", m["at_ms"])
+	}
+}
+
+func TestVitalsCarriesListeningPortsAndCurrentDefault(t *testing.T) {
+	fv := &fakeVitals{
+		ports:        map[string][]int{"demo": {3000, 8000}},
+		services:     map[string][]host.PortService{"demo": {{Port: 3000, Name: "Vite"}, {Port: 8000, Name: "JSON API"}}},
+		portsChecked: map[string]bool{"demo": true},
+	}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
+	hz.h.proxyPort = func(string) (int, bool) { return 3000, true }
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	if m["proxy_port"] != float64(3000) || m["ports_checked"] != true {
+		t.Fatalf("proxy availability = %v, want port 3000 checked", m)
+	}
+	ports, ok := m["listening_ports"].([]any)
+	if !ok || len(ports) != 2 || ports[0] != float64(3000) || ports[1] != float64(8000) {
+		t.Fatalf("listening_ports = %v, want [3000 8000]", m["listening_ports"])
+	}
+	services, ok := m["port_services"].([]any)
+	if !ok || len(services) != 2 || services[1].(map[string]any)["name"] != "JSON API" {
+		t.Fatalf("port_services = %v, want named metadata", m["port_services"])
+	}
+}
+
+func TestVitalsDistinguishesCheckedWithNoListeners(t *testing.T) {
+	fv := &fakeVitals{portsChecked: map[string]bool{"demo": true}}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	if m["ports_checked"] != true {
+		t.Fatalf("ports_checked = %v, want true", m["ports_checked"])
+	}
+	if _, present := m["listening_ports"]; present {
+		t.Fatalf("empty listening_ports should be omitted: %v", m)
 	}
 }
 
@@ -308,8 +353,8 @@ func TestVitalsSurviveAMachineThatIsNotAnswering(t *testing.T) {
 // What the page cannot work out for itself
 // ---------------------------------------------------------------------------
 
-// The name, the ssh line and the console link ride this poll because the page
-// has no other way to learn any of them.
+// The name, the ssh line, the proxy link and the console link ride this poll
+// because the page has no other way to learn any of them.
 //
 // The name is the one that was actually wrong: the host is
 // `<name>-<subdomain>.<zone>` — one label — so the page's
@@ -326,6 +371,7 @@ func TestVitalsCarriesTheNameSSHAndConsole(t *testing.T) {
 	for field, want := range map[string]any{
 		"name":    "demo",
 		"ssh":     "ssh demo@catnip.sh",
+		"proxy":   "https://demo.hivemind.tools/",
 		"console": "https://my.catnip.sh/",
 	} {
 		if got := m[field]; got != want {
@@ -353,6 +399,25 @@ func TestVitalsOmitsWhatThisHostDoesNotHave(t *testing.T) {
 	// The name is not optional: every host knows it.
 	if m["name"] != "demo" {
 		t.Errorf("name = %v, want demo", m["name"])
+	}
+}
+
+func TestSandboxProxyURL(t *testing.T) {
+	for _, tc := range []struct {
+		domain string
+		want   string
+	}{
+		{"Catnip.SH.", "https://demo.catnip.sh/"},
+		{"", ""},
+	} {
+		build := sandboxProxyURL(tc.domain)
+		got := ""
+		if build != nil {
+			got = build("demo")
+		}
+		if got != tc.want {
+			t.Errorf("sandboxProxyURL(%q) = %q, want %q", tc.domain, got, tc.want)
+		}
 	}
 }
 

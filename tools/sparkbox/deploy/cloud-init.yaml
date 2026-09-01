@@ -236,7 +236,7 @@ write_files:
       [ -e /dev/kvm ] || { echo "no /dev/kvm — not a KVM host"; exit 1; }
 
       # Swap safety-valve for memory overcommit: sandbox RAM is oversubscribed
-      # (admission charges a working-set floor, not the 8GB ceiling), so a burst
+      # (admission charges a working-set floor, not the 12GB ceiling), so a burst
       # of simultaneously-busy sandboxes should spill to disk, not OOM the host.
       # 16G on root (dd, not fallocate, so swapon never trips over holes).
       if ! swapon --show | grep -q '/swapfile'; then

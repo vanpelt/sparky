@@ -40,10 +40,10 @@ func reservedName(name string) bool { return reserved.Name(name) }
 
 // Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
 // `new@` path always does; the HTTP API may override). Bounded only by host
-// capacity — an 8c/16t/64GB box fits ~8 of these before overcommit.
+// capacity — an 8c/16t/64GB box fits ~5 of these before overcommit.
 const (
 	defaultVCPUs int64 = 4
-	defaultMemMB int64 = 8192
+	defaultMemMB int64 = 12288
 
 	// activityInterval is the shortest gap between activity marks we retain for
 	// one sandbox. A mark is deliberately approximate: the idle thresholds are
@@ -560,6 +560,9 @@ type Manager struct {
 	balloonedAt map[string]time.Time
 	metrics     *fleetmetrics.Registry // optional node-local persistence/readiness metrics
 	diskOps     sync.Map               // sandbox name -> *sync.Mutex; serializes rootfs lifecycle work
+	portScans   singleflight.Group     // one supported-port scan per sandbox at a time
+	portScanMu  sync.Mutex
+	portScan    map[string]portScanSample // short-lived results keyed by sandbox name
 
 	// Activity is intentionally kept off mu on the offer path. Lifecycle
 	// operations hold mu across driver calls, which can take seconds; a web
@@ -2657,6 +2660,20 @@ func (m *Manager) FlushActivity() error {
 // divisor would turn counter noise into a huge apparent rate.
 const minVitalsInterval = 5 * time.Second
 
+// memoryPressureInterval is deliberately no faster than the vitals sampler.
+// Ballooning is expensive guest work, not a cheap accounting adjustment: a
+// tight controller can otherwise act repeatedly before CPU/network activity has
+// had a chance to prove that a freshly-started workload is busy.
+const memoryPressureInterval = time.Minute
+
+// memoryPressureIdle is the minimum quiet period before pooled-memory pressure
+// may reclaim a sandbox. Admission leaves host headroom for short bursts; this
+// grace period lets the minute-cadence vitals sampler distinguish a cold page
+// cache being populated from genuinely cold memory. In particular, a new VM
+// must never be ballooned on the controller's first tick merely because its
+// owner is above the steady-state pool while the dev stack is starting.
+const memoryPressureIdle = 2 * time.Minute
+
 // balloonSettle is how long after a balloon-down a sandbox's CPU counter is
 // ignored for activity purposes. Long enough to cover the reclaim burst at the
 // reaper's one-minute cadence; short enough that unattended CPU-only work gets
@@ -2819,7 +2836,7 @@ func (m *Manager) RunMemoryPressureController(ctx context.Context, interval time
 		return
 	}
 	if interval <= 0 {
-		interval = 10 * time.Second
+		interval = memoryPressureInterval
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -2902,7 +2919,11 @@ func (m *Manager) refreshMemoryUsage(ctx context.Context) {
 }
 
 // reclaimMemory balloons cold, unpinned VMs until their projected reclaim
-// covers excessMiB. Turbo is borrowed capacity and is reclaimed first.
+// covers excessMiB. Turbo is borrowed capacity and is reclaimed first. Recent
+// activity is an eligibility boundary, not merely an ordering hint: reclaiming
+// a freshly-started working set makes the balloon and the workload fight over
+// the same pages, and interactive activity can then deflate/reinflate it on
+// successive controller ticks.
 func (m *Manager) reclaimMemory(ctx context.Context, owner string, excessMiB int64) {
 	type candidate struct {
 		box         *Sandbox
@@ -2910,8 +2931,13 @@ func (m *Manager) reclaimMemory(ctx context.Context, owner string, excessMiB int
 	}
 	var candidates []candidate
 	m.mu.Lock()
+	now := time.Now()
 	for _, b := range m.boxes {
 		if b.State != vmm.StateRunning || b.Pinned || b.Ballooned || (owner != "" && b.Owner != owner) {
+			continue
+		}
+		lastActive := m.latestActivity(b.Name, b.LastActive)
+		if now.Sub(lastActive) < memoryPressureIdle {
 			continue
 		}
 		floor := m.workingSetFloor(b)
@@ -2932,11 +2958,12 @@ func (m *Manager) reclaimMemory(ctx context.Context, owner string, excessMiB int
 		if remaining <= 0 {
 			break
 		}
-		if err := m.balloonDown(ctx, c.box.Name); err != nil {
+		reclaim := min(remaining, c.reclaimable)
+		if err := m.balloonForPressure(ctx, c.box.Name, reclaim); err != nil {
 			m.log.Warn("memory pressure balloon failed", "name", c.box.Name, "err", err)
 			continue
 		}
-		remaining -= c.reclaimable
+		remaining -= reclaim
 	}
 	if remaining > 0 {
 		m.log.Warn("memory pressure could not be fully reclaimed", "owner", owner,
@@ -3123,6 +3150,23 @@ var errNoTemplateReport = errors.New("driver cannot measure template usage")
 // no-op if overcommit is off, the driver has no balloon, or there's nothing to
 // reclaim above the reserve.
 func (m *Manager) balloonDown(ctx context.Context, name string) error {
+	return m.setBalloonTarget(ctx, name, 0)
+}
+
+// balloonForPressure reclaims no more than the measured pool excess. The idle
+// path intentionally takes a cold VM all the way to its reserve, but doing that
+// for a small transient overage turns a 100 MiB correction into several GiB of
+// needless guest reclaim.
+func (m *Manager) balloonForPressure(ctx context.Context, name string, reclaimMiB int64) error {
+	if reclaimMiB <= 0 {
+		return nil
+	}
+	return m.setBalloonTarget(ctx, name, reclaimMiB)
+}
+
+// setBalloonTarget inflates a running sandbox's balloon. reclaimMiB <= 0 means
+// the idle policy's full target; a positive value bounds pressure reclaim.
+func (m *Manager) setBalloonTarget(ctx context.Context, name string, reclaimMiB int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.boxes[name]
@@ -3130,6 +3174,9 @@ func (m *Manager) balloonDown(ctx context.Context, name string) error {
 		return nil
 	}
 	target := b.MemMB - m.workingSetFloor(b)
+	if reclaimMiB > 0 && reclaimMiB < target {
+		target = reclaimMiB
+	}
 	if target <= 0 {
 		return nil
 	}
@@ -3138,7 +3185,11 @@ func (m *Manager) balloonDown(ctx context.Context, name string) error {
 	}
 	b.Ballooned = true
 	m.balloonedAt[name] = time.Now()
-	m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
+	if reclaimMiB > 0 {
+		m.log.Info("memory pressure ballooned cold sandbox", "name", name, "reclaim_mb", target)
+	} else {
+		m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
+	}
 	m.observe(b, "ballooned")
 	return m.save()
 }

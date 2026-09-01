@@ -14,7 +14,18 @@ package host
 
 import (
 	"context"
+	"io"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/publicports"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"golang.org/x/net/html"
 )
 
 // Vitals is what one machine can currently say about one sandbox.
@@ -36,6 +47,22 @@ type Vitals struct {
 	// below the previous one as that reset rather than a negative rate.
 	NetRxBytes *uint64
 	NetTxBytes *uint64
+	// ListeningPorts are the supported public ports that spoke HTTP. Any valid
+	// HTTP response counts: a 404 at / still proves that an API is browser-facing.
+	// PortServices carries optional names discovered from the same bounded GET.
+	// PortsChecked distinguishes an authoritative empty result from a node that
+	// could not perform the probe.
+	ListeningPorts []int
+	PortServices   []PortService
+	PortsChecked   bool
+}
+
+// PortService is one supported browser-facing listener and the best small,
+// untrusted display name its HTTP response supplied. Name is empty when the
+// response had no useful title, product header, or media type.
+type PortService struct {
+	Port int    `json:"port"`
+	Name string `json:"name,omitempty"`
 }
 
 // Empty reports whether this reading carries nothing at all. It is what tells
@@ -43,7 +70,27 @@ type Vitals struct {
 // machine answered with numbers", which are rendered identically but logged
 // differently.
 func (v Vitals) Empty() bool {
-	return v.CPUSeconds == nil && v.MemUsedMB == nil && v.NetRxBytes == nil && v.NetTxBytes == nil
+	return v.CPUSeconds == nil && v.MemUsedMB == nil && v.NetRxBytes == nil && v.NetTxBytes == nil && !v.PortsChecked
+}
+
+const portScanTTL = 3 * time.Second
+const portProbeTimeout = 250 * time.Millisecond
+const portHTTPBackoff = 60 * time.Second
+const portProbeBodyLimit = 64 << 10
+
+type portProbeState struct {
+	tcpOpen bool
+	http    bool
+	name    string
+	httpAt  time.Time
+}
+
+type portScanSample struct {
+	hostIP   string
+	at       time.Time
+	ports    []int
+	services []PortService
+	states   map[int]portProbeState
 }
 
 // Vitals reads all three counters for one sandbox on THIS machine.
@@ -64,7 +111,7 @@ func (m *Manager) Vitals(ctx context.Context, name string) (Vitals, error) {
 		out Vitals
 		wg  sync.WaitGroup
 	)
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		if secs, ok := m.CPUSeconds(ctx, name); ok {
@@ -83,6 +130,198 @@ func (m *Manager) Vitals(ctx context.Context, name string) (Vitals, error) {
 			out.NetRxBytes, out.NetTxBytes = &rx, &tx
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		box, ok := m.Get(name)
+		if !ok || box.State != vmm.StateRunning || box.HostIP == "" {
+			return
+		}
+		ports, err := m.listeningPorts(ctx, name, box.HostIP)
+		if err == nil {
+			out.ListeningPorts = append([]int(nil), ports.ports...)
+			out.PortServices = append([]PortService(nil), ports.services...)
+			out.PortsChecked = true
+		}
+	}()
 	wg.Wait()
 	return out, nil
+}
+
+type portScanResult struct {
+	ports    []int
+	services []PortService
+}
+
+func (m *Manager) listeningPorts(ctx context.Context, name, hostIP string) (portScanResult, error) {
+	m.portScanMu.Lock()
+	if sample, ok := m.portScan[name]; ok && sample.hostIP == hostIP && time.Since(sample.at) < portScanTTL {
+		result := portScanResult{
+			ports:    append([]int(nil), sample.ports...),
+			services: append([]PortService(nil), sample.services...),
+		}
+		m.portScanMu.Unlock()
+		return result, nil
+	}
+	m.portScanMu.Unlock()
+
+	value, err, _ := m.portScans.Do(name, func() (any, error) {
+		m.portScanMu.Lock()
+		previous := make(map[int]portProbeState)
+		if sample, ok := m.portScan[name]; ok && sample.hostIP == hostIP {
+			for port, state := range sample.states {
+				previous[port] = state
+			}
+		}
+		m.portScanMu.Unlock()
+
+		services, states, err := probeSupportedPorts(ctx, hostIP, publicports.CommonHTTPS(), previous, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		ports := make([]int, len(services))
+		for i, service := range services {
+			ports[i] = service.Port
+		}
+		m.portScanMu.Lock()
+		if m.portScan == nil {
+			m.portScan = make(map[string]portScanSample)
+		}
+		m.portScan[name] = portScanSample{
+			hostIP: hostIP, at: time.Now(),
+			ports: append([]int(nil), ports...), services: append([]PortService(nil), services...), states: states,
+		}
+		m.portScanMu.Unlock()
+		return portScanResult{ports: ports, services: services}, nil
+	})
+	if err != nil {
+		return portScanResult{}, err
+	}
+	result := value.(portScanResult)
+	result.ports = append([]int(nil), result.ports...)
+	result.services = append([]PortService(nil), result.services...)
+	return result, nil
+}
+
+func probeSupportedPorts(ctx context.Context, hostIP string, ports []int, previous map[int]portProbeState, now time.Time) ([]PortService, map[int]portProbeState, error) {
+	states := make([]portProbeState, len(ports))
+	var wg sync.WaitGroup
+	wg.Add(len(ports))
+	for i, port := range ports {
+		i, port := i, port
+		go func() {
+			defer wg.Done()
+			states[i] = probeSupportedPort(ctx, hostIP, port, previous[port], now)
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	services := make([]PortService, 0, len(ports))
+	next := make(map[int]portProbeState, len(ports))
+	for i, port := range ports {
+		next[port] = states[i]
+		if states[i].http {
+			services = append(services, PortService{Port: port, Name: states[i].name})
+		}
+	}
+	sort.Slice(services, func(i, j int) bool { return services[i].Port < services[j].Port })
+	return services, next, nil
+}
+
+func probeSupportedPort(ctx context.Context, hostIP string, port int, previous portProbeState, now time.Time) portProbeState {
+	ctx, cancel := context.WithTimeout(ctx, portProbeTimeout)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: portProbeTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(hostIP, strconv.Itoa(port)))
+	if err != nil {
+		return portProbeState{}
+	}
+	conn.Close() //nolint:errcheck
+
+	// Cheap TCP checks notice a stop immediately without writing application
+	// traffic. Refresh HTTP metadata at most once a minute while the same port
+	// remains open; observing it closed resets the state, so the next listener
+	// receives a fresh HTTP probe immediately.
+	if previous.tcpOpen && !previous.httpAt.IsZero() && now.Sub(previous.httpAt) < portHTTPBackoff {
+		previous.tcpOpen = true
+		return previous
+	}
+
+	transport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
+		DisableKeepAlives:     true,
+		ResponseHeaderTimeout: portProbeTimeout,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	url := "http://" + net.JoinHostPort(hostIP, strconv.Itoa(port)) + "/"
+	service, ok := probeHTTP(ctx, client, url)
+	return portProbeState{tcpOpen: true, http: ok, name: service.Name, httpAt: now}
+}
+
+func probeHTTP(ctx context.Context, client *http.Client, url string) (PortService, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return PortService{}, false
+	}
+	req.Header.Set("Accept", "text/html, application/json;q=0.9, */*;q=0.1")
+	req.Header.Set("Range", "bytes=0-65535")
+	req.Header.Set("User-Agent", "Sparkbox-Port-Probe/1.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return PortService{}, false
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, portProbeBodyLimit))
+	return PortService{Name: serviceName(resp.Header, body)}, true
+}
+
+func serviceName(header http.Header, body []byte) string {
+	if title := htmlTitle(body); title != "" {
+		return title
+	}
+	for _, key := range []string{"X-Powered-By", "Server"} {
+		if value := cleanServiceName(header.Get(key)); value != "" {
+			return value
+		}
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(header.Get("Content-Type"), ";")[0]))
+	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+		return "JSON API"
+	}
+	return ""
+}
+
+func htmlTitle(body []byte) string {
+	tokens := html.NewTokenizer(strings.NewReader(string(body)))
+	for {
+		switch tokens.Next() {
+		case html.ErrorToken:
+			return ""
+		case html.StartTagToken:
+			tag, _ := tokens.TagName()
+			if string(tag) != "title" {
+				continue
+			}
+			if tokens.Next() == html.TextToken {
+				return cleanServiceName(string(tokens.Text()))
+			}
+		}
+	}
+}
+
+func cleanServiceName(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > 80 {
+		value = string(runes[:80])
+	}
+	return value
 }

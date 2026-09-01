@@ -284,8 +284,12 @@ func TestGRPCControlLifecycleUsesDurableIdentitiesAndResults(t *testing.T) {
 	if err := control.RecordKey(context.Background(), "renamed", "SHA256:test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := control.Vitals(context.Background(), "renamed"); err != nil {
+	vitals, err := control.Vitals(context.Background(), "renamed")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(vitals.PortServices) != 1 || vitals.PortServices[0] != (host.PortService{Port: 8080, Name: "JSON API"}) {
+		t.Fatalf("port services = %+v, want JSON API on 8080", vitals.PortServices)
 	}
 	if err := control.Destroy(context.Background(), "renamed"); err != nil {
 		t.Fatal(err)
@@ -799,7 +803,11 @@ func (f *fakeDurable) NetworkUsage(context.Context) (*nodev1.GetNetworkUsageResp
 func (f *fakeDurable) MarkActive(context.Context, *nodev1.MarkActiveRequest) error { return nil }
 func (f *fakeDurable) RecordKey(context.Context, *nodev1.RecordKeyRequest) error   { return nil }
 func (f *fakeDurable) Vitals(context.Context, string) (*nodev1.Vitals, error) {
-	return &nodev1.Vitals{CpuSeconds: 1.5, MemoryUsedMb: 256}, nil
+	return &nodev1.Vitals{
+		CpuSeconds: 1.5, MemoryUsedMb: 256,
+		ListeningPorts: []int32{8080}, PortsChecked: true,
+		PortServices: []*nodev1.PortService{{Port: 8080, Name: "JSON API"}},
+	}, nil
 }
 
 type selectorStub struct {

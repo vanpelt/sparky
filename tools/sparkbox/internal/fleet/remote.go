@@ -356,10 +356,13 @@ func (r *remoteNode) Vitals(ctx context.Context, name string) (host.Vitals, erro
 	// produces a wrong sparkline for its own sandbox, which is the whole of the
 	// damage, and a plausible-looking invented ceiling would be worse.
 	return host.Vitals{
-		CPUSeconds: resp.CPUSeconds,
-		MemUsedMB:  resp.MemUsedMB,
-		NetRxBytes: resp.NetRxBytes,
-		NetTxBytes: resp.NetTxBytes,
+		CPUSeconds:     resp.CPUSeconds,
+		MemUsedMB:      resp.MemUsedMB,
+		NetRxBytes:     resp.NetRxBytes,
+		NetTxBytes:     resp.NetTxBytes,
+		ListeningPorts: append([]int(nil), resp.ListeningPorts...),
+		PortServices:   append([]host.PortService(nil), resp.PortServices...),
+		PortsChecked:   resp.PortsChecked,
 	}, nil
 }
 

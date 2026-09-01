@@ -177,6 +177,19 @@ The browser terminal is `https://<name>-xterm.<domain>` — an xterm.js page ove
 an authenticated WebSocket into a real PTY in that sandbox, with the same
 resume-on-connect as `ssh <name>@<domain>`. Open it and you get a shell; nothing
 to install, and the sign-in is the same passkey/token flow as any private route.
+Its hamburger menu links straight to the sandbox's default proxy endpoint at
+`https://<name>.<domain>`, following whichever guest port the default route
+currently selects. The owning VM host lightly probes Sparkbox's supported
+browser ports and returns those speaking HTTP in the terminal's vitals. Any
+syntactically valid HTTP response counts, including an API's entirely normal
+`404 /`; HTML titles, product headers, and JSON media
+types supply a best-effort service name for the menu. Live non-default ports
+appear as additional Proxy rows;
+if the default port is not HTTP-ready, its row explains which port needs a
+service instead of opening a known-dead endpoint. A three-second TCP check
+notices listeners coming and going, while HTTP classification and metadata are
+refreshed no more than once a minute unless the port first closes. Probes never
+resume or touch an idle sandbox.
 One host per sandbox, so the browser's own origin isolation keeps one sandbox's
 page from scripting another's socket. The identical bridge is mounted at
 `wss://api.<domain>/v1/sandboxes/<name>/terminal` for clients that are not
