@@ -334,17 +334,10 @@ if [ -n "$github_app_client_id" ]; then
 	  "${k[@]}" -n "$namespace" get secret sparkbox-github-app \
 	    -o 'go-template={{if index .data "private-key.pem"}}yes{{end}}' 2>/dev/null || true
 	)
-	legacy_github_app_key_present=$(
-	  "${k[@]}" -n "$namespace" get secret "$identity_secret" \
-	    -o 'go-template={{if index .data "github_app_key.pem"}}yes{{end}}' 2>/dev/null || true
-	)
-	if [ "$github_app_key_present" != yes ] && [ "$legacy_github_app_key_present" != yes ]; then
+	if [ "$github_app_key_present" != yes ]; then
 	  echo "GitHub App client id is configured, but no private key is available." >&2
 	  echo "Add private-key.pem to Secret $namespace/sparkbox-github-app." >&2
 	  exit 1
-	fi
-	if [ "$github_app_key_present" != yes ]; then
-	  echo "  Using legacy sparkbox-identity/github_app_key.pem for this rollout; migrate it to sparkbox-github-app/private-key.pem."
 	fi
 else
   echo "No GitHub App configured; repo attachments will be unavailable."

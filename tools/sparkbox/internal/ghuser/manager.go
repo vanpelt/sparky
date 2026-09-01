@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,8 @@ type Subject struct {
 	InstallationID int64
 	RepoID         int64
 	Slug           string
+	Target         string
+	Permissions    map[string]string
 }
 
 type AuthorizationStart struct {
@@ -95,6 +98,7 @@ func (m *Manager) StartWeb(subject Subject, redirectURI string) (string, error) 
 		return "", err
 	}
 	now := m.now()
+	subject.Permissions = maps.Clone(subject.Permissions)
 	m.mu.Lock()
 	for key, existing := range m.webFlows {
 		// Keep only the newest browser attempt for one owner/repository. This
@@ -132,7 +136,7 @@ func (m *Manager) FinishWeb(ctx context.Context, owner, state, code string) (Aut
 	if !ok || f.subject.Owner != owner || !m.now().Before(f.expiresAt) {
 		return AuthorizationStatus{}, ErrExpired
 	}
-	tok, err := m.client.ExchangeCode(ctx, code, f.redirectURI, f.verifier, f.subject.RepoID)
+	tok, err := m.client.ExchangeCode(ctx, code, f.redirectURI, f.verifier)
 	if err != nil {
 		return AuthorizationStatus{}, err
 	}
@@ -157,7 +161,8 @@ func (m *Manager) Authorized(owner, slug string, githubID int64) bool {
 }
 
 func validSubject(subject Subject) bool {
-	return subject.Owner != "" && subject.GitHubID > 0 && subject.InstallationID > 0 && subject.RepoID > 0 && subject.Slug != ""
+	return subject.Owner != "" && subject.GitHubID > 0 && subject.InstallationID > 0 && subject.RepoID > 0 &&
+		subject.Slug != "" && subject.Target != "" && len(subject.Permissions) > 0
 }
 
 func (m *Manager) Start(ctx context.Context, subject Subject) (AuthorizationStart, error) {
@@ -179,6 +184,7 @@ func (m *Manager) Start(ctx context.Context, subject Subject) (AuthorizationStar
 			delete(m.flows, key)
 		}
 	}
+	subject.Permissions = maps.Clone(subject.Permissions)
 	m.flows[id] = flow{subject: subject, code: dc, next: m.now()}
 	m.mu.Unlock()
 	return AuthorizationStart{ID: id, UserCode: dc.UserCode, VerificationURI: dc.VerificationURI,
@@ -205,7 +211,7 @@ func (m *Manager) Poll(ctx context.Context, owner, id string) (AuthorizationStat
 	f.next = now.Add(f.code.Interval)
 	m.flows[id] = f
 	m.mu.Unlock()
-	tok, err := m.client.Poll(ctx, f.code, f.subject.RepoID)
+	tok, err := m.client.Poll(ctx, f.code)
 	if errors.Is(err, ErrPending) {
 		return AuthorizationStatus{State: "pending", Slug: f.subject.Slug}, nil
 	}
@@ -237,17 +243,37 @@ func (m *Manager) Poll(ctx context.Context, owner, id string) (AuthorizationStat
 }
 
 func (m *Manager) saveVerified(ctx context.Context, subject Subject, tok Token) error {
-	if err := m.client.Verify(ctx, tok.AccessToken, subject.GitHubID, subject.InstallationID, subject.RepoID); err != nil {
+	scoped, err := m.deriveVerified(ctx, subject, tok)
+	if err != nil {
 		return err
 	}
 	grant := Grant{Owner: subject.Owner, GitHubID: subject.GitHubID,
-		InstallationID: subject.InstallationID, RepoID: subject.RepoID, Slug: subject.Slug, Token: tok}
+		InstallationID: subject.InstallationID, RepoID: subject.RepoID, Slug: subject.Slug, Token: scoped}
 	if err := m.store.Put(grant); err != nil {
 		return err
 	}
 	m.log.Info("github repository authorized by user", "owner", subject.Owner,
-		"github_id", subject.GitHubID, "repo", subject.Slug, "expires_at", tok.AccessExpiresAt)
+		"github_id", subject.GitHubID, "repo", subject.Slug, "expires_at", scoped.AccessExpiresAt)
 	return nil
+}
+
+// deriveVerified turns the broad OAuth result into the only access token that
+// may be persisted or handed to a guest. The broad access token exists only in
+// this stack frame; its rotating refresh token is retained so the same process
+// can be repeated when the derived token expires.
+func (m *Manager) deriveVerified(ctx context.Context, subject Subject, broad Token) (Token, error) {
+	if err := m.client.VerifyUser(ctx, broad.AccessToken, subject.GitHubID); err != nil {
+		return Token{}, err
+	}
+	scoped, err := m.client.Scope(ctx, broad.AccessToken, subject.Target, subject.RepoID, subject.Permissions)
+	if err != nil {
+		return Token{}, err
+	}
+	if err := m.client.Verify(ctx, scoped.AccessToken, subject.GitHubID, subject.InstallationID, subject.RepoID); err != nil {
+		return Token{}, err
+	}
+	return Token{AccessToken: scoped.AccessToken, RefreshToken: broad.RefreshToken,
+		AccessExpiresAt: scoped.AccessExpiresAt, RefreshExpiresAt: broad.RefreshExpiresAt}, nil
 }
 
 // Token returns false for an absent grant so callers can deliberately fall
@@ -282,7 +308,7 @@ func (m *Manager) Token(ctx context.Context, subject Subject) (Token, bool, erro
 		_ = m.store.Delete(subject.Owner, g.RepoID)
 		return Token{}, false, nil
 	}
-	tok, err := m.client.Refresh(ctx, g.Token.RefreshToken)
+	broad, err := m.client.Refresh(ctx, g.Token.RefreshToken)
 	if err != nil {
 		if errors.Is(err, ErrBadRefresh) {
 			_ = m.store.Delete(subject.Owner, g.RepoID)
@@ -292,15 +318,17 @@ func (m *Manager) Token(ctx context.Context, subject Subject) (Token, bool, erro
 			"owner", subject.Owner, "repo", subject.Slug, "err", err)
 		return Token{}, false, fmt.Errorf("refresh github user token: %w", err)
 	}
-	if err := m.client.Verify(ctx, tok.AccessToken, subject.GitHubID, subject.InstallationID, g.RepoID); err != nil {
+	subject.RepoID = g.RepoID
+	scoped, err := m.deriveVerified(ctx, subject, broad)
+	if err != nil {
 		_ = m.store.Delete(subject.Owner, g.RepoID)
 		m.log.Warn("refreshed github user grant failed verification; using installation token",
 			"owner", subject.Owner, "repo", subject.Slug, "err", err)
 		return Token{}, false, err
 	}
-	g.Token = tok
+	g.Token = scoped
 	if err := m.store.Put(g); err != nil {
 		return Token{}, false, err
 	}
-	return tok, true, nil
+	return scoped, true, nil
 }

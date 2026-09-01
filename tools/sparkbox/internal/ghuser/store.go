@@ -57,7 +57,7 @@ func Open(path string, kek []byte) (*Store, error) {
 		return nil, err
 	}
 	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS github_user_grants (
+		CREATE TABLE IF NOT EXISTS github_scoped_user_grants (
 			owner TEXT NOT NULL,
 			github_id INTEGER NOT NULL,
 			installation_id INTEGER NOT NULL,
@@ -71,7 +71,7 @@ func Open(path string, kek []byte) (*Store, error) {
 			PRIMARY KEY (owner, slug),
 			UNIQUE (owner, repo_id)
 		);
-		CREATE INDEX IF NOT EXISTS github_user_grants_github_id ON github_user_grants(github_id);
+		CREATE INDEX IF NOT EXISTS github_scoped_user_grants_github_id ON github_scoped_user_grants(github_id);
 	`); err != nil {
 		db.Close()
 		return nil, err
@@ -96,7 +96,7 @@ func (s *Store) Put(g Grant) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.db.Exec(`INSERT OR REPLACE INTO github_user_grants
+	_, err = s.db.Exec(`INSERT OR REPLACE INTO github_scoped_user_grants
 		(owner, github_id, installation_id, repo_id, slug, access_token, refresh_token, access_expires_at, refresh_expires_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		g.Owner, g.GitHubID, g.InstallationID, g.RepoID, g.Slug, access, refresh,
@@ -120,7 +120,7 @@ func (s *Store) get(where string, args ...any) (Grant, error) {
 	var g Grant
 	var access, refresh []byte
 	err := s.db.QueryRow(`SELECT owner, github_id, installation_id, repo_id, slug, access_token, refresh_token,
-		access_expires_at, refresh_expires_at FROM github_user_grants WHERE `+where, args...).
+		access_expires_at, refresh_expires_at FROM github_scoped_user_grants WHERE `+where, args...).
 		Scan(&g.Owner, &g.GitHubID, &g.InstallationID, &g.RepoID, &g.Slug, &access, &refresh,
 			&g.Token.AccessExpiresAt, &g.Token.RefreshExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -143,7 +143,7 @@ func (s *Store) get(where string, args ...any) (Grant, error) {
 func (s *Store) Delete(owner string, repoID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM github_user_grants WHERE owner=? AND repo_id=?`, owner, repoID)
+	_, err := s.db.Exec(`DELETE FROM github_scoped_user_grants WHERE owner=? AND repo_id=?`, owner, repoID)
 	return err
 }
 
@@ -167,6 +167,6 @@ func (s *Store) open(g Grant, kind string, blob []byte) (string, error) {
 }
 
 func aad(g Grant, kind string) []byte {
-	return []byte(fmt.Sprintf("sparkbox-github-user-grant/v1|%s|%s|%s|%s", g.Owner,
+	return []byte(fmt.Sprintf("sparkbox-github-user-grant/v2|%s|%s|%s|%s", g.Owner,
 		strconv.FormatInt(g.GitHubID, 10), strconv.FormatInt(g.RepoID, 10), kind))
 }

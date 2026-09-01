@@ -4,6 +4,7 @@
 package ghuser
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -106,18 +106,17 @@ func (c *Client) AuthorizationURL(redirectURI, state, challenge string) (string,
 	return u.String(), nil
 }
 
-func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI, verifier string, repoID int64) (Token, error) {
+func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI, verifier string) (Token, error) {
 	if !c.WebEnabled() {
 		return Token{}, errors.New("github web authorization needs an app client secret")
 	}
-	if code == "" || redirectURI == "" || verifier == "" || repoID <= 0 {
+	if code == "" || redirectURI == "" || verifier == "" {
 		return Token{}, errors.New("incomplete github web authorization response")
 	}
 	var out tokenResponse
 	err := c.form(ctx, c.tokenURL, url.Values{
 		"client_id": {c.clientID}, "client_secret": {c.clientSecret}, "code": {code},
 		"redirect_uri": {redirectURI}, "code_verifier": {verifier},
-		"repository_id": {strconv.FormatInt(repoID, 10)},
 	}, &out)
 	if err != nil {
 		return Token{}, err
@@ -180,15 +179,11 @@ func (c *Client) Start(ctx context.Context) (DeviceCode, error) {
 
 // Poll asks once. The Manager enforces the cadence and retains the device code,
 // so neither the secret code nor a refresh token ever crosses into a guest.
-func (c *Client) Poll(ctx context.Context, dc DeviceCode, repoID int64) (Token, error) {
-	if repoID <= 0 {
-		return Token{}, errors.New("repository id is required")
-	}
+func (c *Client) Poll(ctx context.Context, dc DeviceCode) (Token, error) {
 	var out tokenResponse
 	err := c.form(ctx, c.tokenURL, url.Values{
 		"client_id": {c.clientID}, "device_code": {dc.Code},
-		"grant_type":    {"urn:ietf:params:oauth:grant-type:device_code"},
-		"repository_id": {strconv.FormatInt(repoID, 10)},
+		"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
 	}, &out)
 	if err != nil {
 		return Token{}, err
@@ -197,6 +192,61 @@ func (c *Client) Poll(ctx context.Context, dc DeviceCode, repoID int64) (Token, 
 		return Token{}, oauthError(out.Error, out.Description)
 	}
 	return c.token(out)
+}
+
+type ScopedToken struct {
+	AccessToken     string
+	AccessExpiresAt time.Time
+}
+
+// Scope derives the only token a guest is allowed to receive from the broad
+// user grant returned by OAuth. GitHub authenticates this endpoint with the
+// App's client credentials and attributes the derived ghu_ token to the same
+// user while restricting it to one target, repository, and permission set.
+func (c *Client) Scope(ctx context.Context, accessToken, target string, repoID int64, permissions map[string]string) (ScopedToken, error) {
+	if !c.WebEnabled() {
+		return ScopedToken{}, errors.New("github scoped user tokens need an app client secret")
+	}
+	if accessToken == "" || strings.TrimSpace(target) == "" || repoID <= 0 || len(permissions) == 0 {
+		return ScopedToken{}, errors.New("incomplete github scoped token request")
+	}
+	body, err := json.Marshal(struct {
+		AccessToken   string            `json:"access_token"`
+		Target        string            `json:"target"`
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}{AccessToken: accessToken, Target: target, RepositoryIDs: []int64{repoID}, Permissions: permissions})
+	if err != nil {
+		return ScopedToken{}, err
+	}
+	endpoint := c.apiURL + "/applications/" + url.PathEscape(c.clientID) + "/token/scoped"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return ScopedToken{}, err
+	}
+	req.SetBasicAuth(c.clientID, c.clientSecret)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return ScopedToken{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return ScopedToken{}, fmt.Errorf("github returned %s creating a scoped user token", resp.Status)
+	}
+	var out struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return ScopedToken{}, err
+	}
+	if out.Token == "" || out.ExpiresAt.IsZero() {
+		return ScopedToken{}, errors.New("github returned an incomplete scoped user token")
+	}
+	return ScopedToken{AccessToken: out.Token, AccessExpiresAt: out.ExpiresAt}, nil
 }
 
 func (c *Client) Refresh(ctx context.Context, refresh string) (Token, error) {
@@ -243,9 +293,9 @@ func (c *Client) token(out tokenResponse) (Token, error) {
 		RefreshExpiresAt: now.Add(time.Duration(out.RefreshExpiresIn) * time.Second)}, nil
 }
 
-// Verify binds the grant to the immutable user and proves GitHub honored the
-// repository_id restriction. A restriction GitHub silently ignored is refused.
-func (c *Client) Verify(ctx context.Context, token string, githubID, installationID, repoID int64) error {
+// VerifyUser binds a token to the immutable GitHub account recorded for the
+// Sparkbox owner. It is used on the broad OAuth result before it is scoped.
+func (c *Client) VerifyUser(ctx context.Context, token string, githubID int64) error {
 	var user struct {
 		ID int64 `json:"id"`
 	}
@@ -254,6 +304,15 @@ func (c *Client) Verify(ctx context.Context, token string, githubID, installatio
 	}
 	if user.ID != githubID {
 		return fmt.Errorf("%w: got account %d, want %d", ErrWrongUser, user.ID, githubID)
+	}
+	return nil
+}
+
+// Verify binds the derived grant to the immutable user and proves the scoped
+// token exposes exactly the requested repository. A broad token is refused.
+func (c *Client) Verify(ctx context.Context, token string, githubID, installationID, repoID int64) error {
+	if err := c.VerifyUser(ctx, token, githubID); err != nil {
+		return err
 	}
 	var listing struct {
 		TotalCount   int `json:"total_count"`

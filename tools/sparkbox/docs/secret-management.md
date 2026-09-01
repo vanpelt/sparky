@@ -61,11 +61,13 @@ is the intended state for anyone who has not set a webhook URL in their App:
 mounting a receiver that cannot verify would mean an unauthenticated POST at
 `hooks.<domain>/github` was indistinguishable from a delivery.
 
-A fleet with no `github-app-client-secret` likewise keeps its existing repo
-behavior: installation credentials and `sparkbox repo authorize` Device Flow
-remain available. Only the browser OAuth button is disabled. To enable it,
-copy a client secret from the GitHub App settings into
-`$SECRETS_DIR/github_app_client_secret`, then push or deliver secrets again.
+A fleet with no `github-app-client-secret` keeps installation credentials and
+bot-token fallback, but disables both `sparkbox repo authorize` Device Flow and
+the browser OAuth button. The secret is required to exchange OAuth's broad user
+grant for the repository- and permission-scoped token Sparkbox is willing to
+store. To enable per-user attribution, copy a client secret from the GitHub App
+settings into `$SECRETS_DIR/github_app_client_secret`, then push or deliver
+secrets again.
 
 ## Delivery model 1: pull at provisioning time (hardware you own)
 

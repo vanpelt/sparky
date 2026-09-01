@@ -272,7 +272,10 @@ func (l LocalRepos) authorizationSubject(ctx context.Context, box *host.Sandbox,
 	if err != nil {
 		return ghuser.Subject{}, githubError(err)
 	}
-	return ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID, Slug: entry.Slug}, nil
+	perms := inst.Narrow(map[string]string{"contents": ghapp.PermWrite, "pull_requests": ghapp.PermWrite, "issues": ghapp.PermWrite})
+	perms["contents"] = ghapp.PermWrite
+	return ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID,
+		Slug: entry.Slug, Target: inst.AccountLogin, Permissions: perms}, nil
 }
 
 // Manifest lists what this sandbox's tags say should be checked out in it.
@@ -456,7 +459,7 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	perms["contents"] = perm
 	if entry.Access == repos.AccessWrite && l.UserAuth != nil {
 		subject := ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID,
-			InstallationID: inst.ID, Slug: entry.Slug}
+			InstallationID: inst.ID, Slug: entry.Slug, Target: inst.AccountLogin, Permissions: perms}
 		if userToken, ok, userErr := l.UserAuth.Token(ctx, subject); userErr == nil && ok {
 			return Credential{Username: credentialUsername, Password: userToken.AccessToken,
 				ExpiresAt: userToken.AccessExpiresAt}, nil

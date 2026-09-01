@@ -13,7 +13,10 @@ all**. Repos always supports narrowly scoped installation tokens, and an owner
 can additionally authorize one write attachment with `sparkbox repo authorize
 owner/name` so GitHub operations, including pull-request creation, are
 attributed to that user. The Repos tab offers the same authorization through
-GitHub's browser OAuth flow when the gateway has the App client secret.
+GitHub's browser OAuth flow. Both front doors require the App client secret on
+the gateway: after OAuth, Sparkbox uses it to exchange the broad user grant for
+a repository- and permission-scoped user token before anything is stored or
+given to a VM.
 
 ---
 
@@ -144,8 +147,10 @@ generate a client secret in the App settings, and deliver it only to the
 gateway as `SPARKBOX_GITHUB_APP_CLIENT_SECRET` (boot-secret item
 `github-app-client-secret`).
 
-The client secret is optional. Without it the browser button is omitted, while
-the VM Device Flow below and installation-token fallback continue normally.
+The client secret is required for per-repository user attribution from either
+the browser or VM Device Flow. Without it both authorization entry points are
+disabled, while the narrowly scoped installation-token fallback continues
+normally.
 
 Inside a VM, authorize each write attachment whose GitHub activity should be
 performed as you:
@@ -155,12 +160,14 @@ sparkbox repo authorize wandb/hivemind
 ```
 
 The VM prints GitHub's public device code and polls its own metadata endpoint.
-The device code, access token, and rotating refresh token remain on the gateway;
-only the public user code crosses into the VM. Sparkbox verifies both the
-immutable linked GitHub account id and that GitHub exposed exactly the requested
-repository before saving the grant encrypted in `sparkbox.db`.
+The device code and all token material remain on the gateway; only the public
+user code crosses into the VM. OAuth first returns a broad user grant. Sparkbox
+verifies its immutable user id, immediately calls GitHub's scoped-token endpoint
+for the installation account, exact repository id, and required permissions,
+then discards the broad access token. Only the derived access token and the
+rotating refresh token are saved encrypted in `sparkbox.db`.
 
-The browser flow lands in that same store and applies the same immutable-user
+The browser flow lands in that same store and applies the identical derivation
 and exact-one-repository verification before accepting GitHub's token.
 
 Authorization is per repository. In a VM containing two repositories, one can
@@ -180,8 +187,8 @@ On the app's settings page:
 2. **App ID** — a number, shown just above it. Public.
 3. **Private key** — scroll to *Private keys* → **Generate a private key**. A
    `.pem` downloads once and is never shown again. This is the secret.
-4. **Client secret** — under *Client secrets*, generate one. This enables the
-   Repos tab's browser flow and is not needed by the VM Device Flow.
+4. **Client secret** — under *Client secrets*, generate one. This lets the
+   gateway derive scoped user tokens after either browser or Device Flow OAuth.
 
 The downloaded key is PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`). Store it
 verbatim; do not re-encode it.

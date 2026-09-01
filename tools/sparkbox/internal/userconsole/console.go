@@ -1288,7 +1288,10 @@ func (h *Handler) repoAuthorizationSubject(ctx context.Context, handle, slug str
 	if err != nil {
 		return ghuser.Subject{}, err
 	}
-	return ghuser.Subject{Owner: handle, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID, Slug: entry.Slug}, nil
+	perms := inst.Narrow(map[string]string{"contents": ghapp.PermWrite, "pull_requests": ghapp.PermWrite, "issues": ghapp.PermWrite})
+	perms["contents"] = ghapp.PermWrite
+	return ghuser.Subject{Owner: handle, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID,
+		Slug: entry.Slug, Target: inst.AccountLogin, Permissions: perms}, nil
 }
 
 func repoAuthorizationStatus(err error) int {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +21,13 @@ import (
 func TestManagerAuthorizesOneRepositoryAndRetainsTokensOnGateway(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	var mu sync.Mutex
-	var repositoryID string
+	var tokenForm url.Values
+	var scopeRequest struct {
+		AccessToken   string            `json:"access_token"`
+		Target        string            `json:"target"`
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login/device/code", func(w http.ResponseWriter, r *http.Request) {
 		assertForm(t, r, "client_id", "Iv23liTEST")
@@ -31,24 +38,40 @@ func TestManagerAuthorizesOneRepositoryAndRetainsTokensOnGateway(t *testing.T) {
 			t.Fatal(err)
 		}
 		mu.Lock()
-		repositoryID = r.Form.Get("repository_id")
+		tokenForm, _ = url.ParseQuery(r.Form.Encode())
 		mu.Unlock()
-		fmt.Fprint(w, `{"access_token":"ghu_user_secret","expires_in":28800,"refresh_token":"ghr_refresh_secret","refresh_token_expires_in":15897600}`)
+		fmt.Fprint(w, `{"access_token":"ghu_broad_secret","expires_in":28800,"refresh_token":"ghr_refresh_secret","refresh_token_expires_in":15897600}`)
+	})
+	mux.HandleFunc("POST /applications/Iv23liTEST/token/scoped", func(w http.ResponseWriter, r *http.Request) {
+		clientID, clientSecret, ok := r.BasicAuth()
+		if !ok || clientID != "Iv23liTEST" || clientSecret != "client-secret" {
+			t.Errorf("scoped token basic auth = (%q, %q, %v)", clientID, clientSecret, ok)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if err := json.NewDecoder(r.Body).Decode(&scopeRequest); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprint(w, `{"token":"ghu_scoped_secret","expires_at":"2026-09-01T20:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer ghu_user_secret" {
+		got := r.Header.Get("Authorization")
+		if got != "Bearer ghu_broad_secret" && got != "Bearer ghu_scoped_secret" {
 			t.Errorf("Authorization = %q", got)
 		}
 		fmt.Fprint(w, `{"id":7}`)
 	})
-	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer ghu_scoped_secret" {
+			t.Errorf("repository listing Authorization = %q", got)
+		}
 		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
 	client, err := NewClient(Config{
-		ClientID: "Iv23liTEST", HTTPClient: srv.Client(), CodeURL: srv.URL + "/login/device/code",
+		ClientID: "Iv23liTEST", ClientSecret: "client-secret", HTTPClient: srv.Client(), CodeURL: srv.URL + "/login/device/code",
 		TokenURL: srv.URL + "/login/oauth/access_token", APIURL: srv.URL, Now: func() time.Time { return now },
 	})
 	if err != nil {
@@ -60,7 +83,8 @@ func TestManagerAuthorizesOneRepositoryAndRetainsTokensOnGateway(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	mgr := NewManager(client, store, nil)
-	subject := Subject{Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind"}
+	subject := Subject{Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		Target: "wandb", Permissions: map[string]string{"contents": "write", "pull_requests": "write"}}
 
 	started, err := mgr.Start(context.Background(), subject)
 	if err != nil {
@@ -77,10 +101,16 @@ func TestManagerAuthorizesOneRepositoryAndRetainsTokensOnGateway(t *testing.T) {
 		t.Fatalf("state = %q", status.State)
 	}
 	mu.Lock()
-	gotRepositoryID := repositoryID
+	gotTokenForm := tokenForm
+	gotScope := scopeRequest
 	mu.Unlock()
-	if gotRepositoryID != "99" {
-		t.Fatalf("repository_id = %q, want 99", gotRepositoryID)
+	if gotTokenForm.Get("repository_id") != "" {
+		t.Fatalf("broad token exchange unexpectedly requested repository_id: %v", gotTokenForm)
+	}
+	if gotScope.AccessToken != "ghu_broad_secret" || gotScope.Target != "wandb" ||
+		len(gotScope.RepositoryIDs) != 1 || gotScope.RepositoryIDs[0] != 99 ||
+		gotScope.Permissions["contents"] != "write" || gotScope.Permissions["pull_requests"] != "write" {
+		t.Fatalf("scoped token request = %+v", gotScope)
 	}
 
 	// The credential path knows only the attached slug; the immutable id stays
@@ -88,15 +118,16 @@ func TestManagerAuthorizesOneRepositoryAndRetainsTokensOnGateway(t *testing.T) {
 	tok, ok, err := mgr.Token(context.Background(), Subject{
 		Owner: "alice", GitHubID: 7, InstallationID: 42, Slug: "WandB/HiveMind",
 	})
-	if err != nil || !ok || tok.AccessToken != "ghu_user_secret" {
+	if err != nil || !ok || tok.AccessToken != "ghu_scoped_secret" {
 		t.Fatalf("Token = (%+v, %v, %v)", tok, ok, err)
 	}
 
 	var access, refresh []byte
-	if err := store.db.QueryRow(`SELECT access_token, refresh_token FROM github_user_grants`).Scan(&access, &refresh); err != nil {
+	if err := store.db.QueryRow(`SELECT access_token, refresh_token FROM github_scoped_user_grants`).Scan(&access, &refresh); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(access, []byte("ghu_user_secret")) || bytes.Contains(refresh, []byte("ghr_refresh_secret")) {
+	if bytes.Contains(access, []byte("ghu_scoped_secret")) || bytes.Contains(access, []byte("ghu_broad_secret")) ||
+		bytes.Contains(refresh, []byte("ghr_refresh_secret")) {
 		t.Fatal("tokens were stored in plaintext")
 	}
 }
@@ -129,7 +160,10 @@ func TestManagerWebFlowUsesPKCEAndBindsStateToOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 		tokenForm, _ = url.ParseQuery(r.Form.Encode())
-		fmt.Fprint(w, `{"access_token":"ghu_web_secret","expires_in":28800,"refresh_token":"ghr_web_secret","refresh_token_expires_in":15897600}`)
+		fmt.Fprint(w, `{"access_token":"ghu_web_broad","expires_in":28800,"refresh_token":"ghr_web_secret","refresh_token_expires_in":15897600}`)
+	})
+	mux.HandleFunc("POST /applications/Iv23liTEST/token/scoped", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"token":"ghu_web_scoped","expires_at":"2026-09-01T20:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
 	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
@@ -151,7 +185,8 @@ func TestManagerWebFlowUsesPKCEAndBindsStateToOwner(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	mgr := NewManager(client, store, nil)
-	subject := Subject{Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind"}
+	subject := Subject{Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		Target: "wandb", Permissions: map[string]string{"contents": "write"}}
 	redirectURI := "https://my.example.test/github/repo/callback"
 	location, err := mgr.StartWeb(subject, redirectURI)
 	if err != nil {
@@ -182,7 +217,7 @@ func TestManagerWebFlowUsesPKCEAndBindsStateToOwner(t *testing.T) {
 		t.Fatalf("FinishWeb = (%+v, %v)", status, err)
 	}
 	if tokenForm.Get("client_secret") != "client-secret" || tokenForm.Get("code") != "oauth-code" ||
-		tokenForm.Get("redirect_uri") != redirectURI || tokenForm.Get("repository_id") != "99" ||
+		tokenForm.Get("redirect_uri") != redirectURI || tokenForm.Get("repository_id") != "" ||
 		tokenForm.Get("code_verifier") == "" {
 		t.Fatalf("token exchange form = %v", tokenForm)
 	}
@@ -234,6 +269,65 @@ func TestManagerDropsGrantWhenInstallationBindingChanges(t *testing.T) {
 	}
 	if _, err := store.GetBySlug("alice", "wandb/hivemind"); !errors.Is(err, ErrNoGrant) {
 		t.Fatalf("stale grant still present: %v", err)
+	}
+}
+
+func TestManagerRefreshesBroadGrantAndRescopesBeforeReturning(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "ghr_old" {
+			t.Fatalf("refresh form = %v", r.Form)
+		}
+		fmt.Fprint(w, `{"access_token":"ghu_refreshed_broad","expires_in":28800,"refresh_token":"ghr_rotated","refresh_token_expires_in":15897600}`)
+	})
+	mux.HandleFunc("POST /applications/Iv23liTEST/token/scoped", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			AccessToken   string  `json:"access_token"`
+			Target        string  `json:"target"`
+			RepositoryIDs []int64 `json:"repository_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Fatal(err)
+		}
+		if in.AccessToken != "ghu_refreshed_broad" || in.Target != "wandb" || len(in.RepositoryIDs) != 1 || in.RepositoryIDs[0] != 99 {
+			t.Fatalf("scope request = %+v", in)
+		}
+		fmt.Fprint(w, `{"token":"ghu_refreshed_scoped","expires_at":"2026-09-01T20:00:00Z"}`)
+	})
+	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
+	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client, err := NewClient(Config{ClientID: "Iv23liTEST", ClientSecret: "client-secret", HTTPClient: srv.Client(),
+		TokenURL: srv.URL + "/login/oauth/access_token", APIURL: srv.URL, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "grants.db"), DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Put(Grant{Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		Token: Token{AccessToken: "ghu_expired_scoped", RefreshToken: "ghr_old",
+			AccessExpiresAt: now.Add(-time.Minute), RefreshExpiresAt: now.Add(24 * time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	subject := Subject{Owner: "alice", GitHubID: 7, InstallationID: 42, Slug: "wandb/hivemind",
+		Target: "wandb", Permissions: map[string]string{"contents": "write"}}
+	tok, ok, err := NewManager(client, store, nil).Token(context.Background(), subject)
+	if err != nil || !ok || tok.AccessToken != "ghu_refreshed_scoped" || tok.RefreshToken != "ghr_rotated" {
+		t.Fatalf("Token = (%+v, %v, %v)", tok, ok, err)
+	}
+	stored, err := store.GetBySlug("alice", "wandb/hivemind")
+	if err != nil || stored.Token.AccessToken != "ghu_refreshed_scoped" || stored.Token.RefreshToken != "ghr_rotated" {
+		t.Fatalf("stored grant = (%+v, %v)", stored, err)
 	}
 }
 

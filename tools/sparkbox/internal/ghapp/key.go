@@ -64,6 +64,9 @@ func LoadKeyIfPresent(dir, name string) (*rsa.PrivateKey, error) {
 // used when the GitHub App credentials have a lifecycle and mount separate
 // from the fleet identity key directory.
 func LoadKeyFileIfPresent(path string) (*rsa.PrivateKey, error) {
+	if path == "" {
+		return nil, nil
+	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil

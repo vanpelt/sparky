@@ -159,15 +159,19 @@ A GitHub credential should arrive the same way, for the same reason.
 | | what it is | scope | lifetime | at rest where |
 |---|---|---|---|---|
 | **A. PAT as a secret** (today) | the user's `gh` token | every repo the human can reach | until revoked | the sandbox's `/etc/environment`, the sqlite store |
-| **B. App user-to-server token** | device flow restricted with `repository_id` | the linked user, one installation and one repository, verified after exchange | 8h + rotating refresh token | encrypted on the gateway; device-flow refresh needs no client secret |
+| **B. App user-to-server token** | OAuth user grant followed by GitHub's scoped-token exchange | the linked user, one installation, one repository, and explicit permissions | derived token lifetime + rotating refresh token | derived access token and broad grant's refresh token encrypted on the gateway; client secret required |
 | **C. App installation token** | minted from the App private key | **exactly the repository ids asked for**, with permissions down-scoped per request | 1 hour, not refreshable | **nowhere** |
 
 B and C are deliberately layered. C is the safe zero-setup default and fallback:
 one repository, one hour, nothing durable in the guest. B is opt-in for a write
 attachment because GitHub attributes API actions such as PR creation to the
-user holding that token. Sparkbox asks GitHub for one `repository_id`, then
-verifies the token's immutable `/user` id and installation repository listing
-before encrypting it. If no valid B grant exists, C continues to work.
+user holding that token. Sparkbox verifies the broad OAuth result's immutable
+`/user` id, calls `POST /applications/{client_id}/token/scoped` with one target,
+repository id, and explicit permission set, then verifies the derived token's
+installation repository listing before encrypting it. The broad access token
+exists only in gateway memory during that exchange; its rotating refresh token
+is retained so the gateway can repeat the derivation. If no valid B grant
+exists, C continues to work.
 
 A stays supported. Some orgs will not install a third-party App, GitHub
 Enterprise Server is its own project, and a user with one weird repo should not

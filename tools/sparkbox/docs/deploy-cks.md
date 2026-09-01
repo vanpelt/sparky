@@ -122,9 +122,10 @@ Two limits that are not bugs but will bite:
   `docs/github-webhooks.md`.
 - Optionally `sparkbox-github-app`, a Secret whose `private-key.pem` and
   `client-secret` keys hold the GitHub App credentials. The private key enables
-  installation credentials; the client secret enables per-repository user
-  authorization from the Repos tab; without it, VM Device Flow and bot-token
-  fallback continue normally. Create it with:
+  installation credentials; the client secret enables scoped per-repository
+  user authorization from both the Repos tab and VM Device Flow. Without it,
+  bot-token fallback continues normally but both user-authorization entry
+  points are disabled. Create it with:
 
   ```sh
   secret_dir=$(mktemp -d)
@@ -505,10 +506,9 @@ missing.
 
 GitHub App credentials are not fleet identity. Store `private-key.pem` and
 `client-secret` together in `sparkbox-github-app`; the gateway mounts them
-separately from `/run/sparkbox/keys`. During the migration rollout only, the
-gateway falls back to a legacy `sparkbox-identity/github_app_key.pem` when the
-dedicated Secret has no private key. Future identity captures omit that legacy
-entry.
+separately from `/run/sparkbox/keys`. The gateway does not read
+`sparkbox-identity/github_app_key.pem`; remove that legacy entry after the
+dedicated Secret is populated.
 
 Kubernetes Secret persistence is independent of the selected compute Node, but
 it is not an off-cluster backup. Keep an approved escrow copy, especially of

@@ -989,6 +989,8 @@ func TestRepoBrowserOAuthAuthorizesExactAttachment(t *testing.T) {
 		t.Fatalf("attach: %d %s", rec.Code, rec.Body.String())
 	}
 	var exchangedRepo string
+	var scopedRepo int64
+	var scopedTarget string
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/wandb/hivemind/installation", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"id":42,"app_slug":"sparkbox","account":{"id":7,"login":"alice-gh","type":"User"},"permissions":{"metadata":"read","contents":"write"}}`)
@@ -1004,7 +1006,21 @@ func TestRepoBrowserOAuthAuthorizesExactAttachment(t *testing.T) {
 			t.Fatal(err)
 		}
 		exchangedRepo = r.Form.Get("repository_id")
-		fmt.Fprint(w, `{"access_token":"ghu_web","expires_in":28800,"refresh_token":"ghr_web","refresh_token_expires_in":15897600}`)
+		fmt.Fprint(w, `{"access_token":"ghu_web_broad","expires_in":28800,"refresh_token":"ghr_web","refresh_token_expires_in":15897600}`)
+	})
+	mux.HandleFunc("POST /applications/Iv23liTEST/token/scoped", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Target        string  `json:"target"`
+			RepositoryIDs []int64 `json:"repository_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Fatal(err)
+		}
+		scopedTarget = in.Target
+		if len(in.RepositoryIDs) == 1 {
+			scopedRepo = in.RepositoryIDs[0]
+		}
+		fmt.Fprint(w, `{"token":"ghu_web_scoped","expires_at":"2030-01-01T00:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
 	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
@@ -1056,8 +1072,9 @@ func TestRepoBrowserOAuthAuthorizesExactAttachment(t *testing.T) {
 	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "github=authorized") {
 		t.Fatalf("callback: %d location %q body %s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
 	}
-	if exchangedRepo != "99" || !mgr.Authorized("alice", "wandb/hivemind", 7) {
-		t.Fatalf("repo exchange = %q authorized = %v", exchangedRepo, mgr.Authorized("alice", "wandb/hivemind", 7))
+	if exchangedRepo != "" || scopedRepo != 99 || scopedTarget != "alice-gh" || !mgr.Authorized("alice", "wandb/hivemind", 7) {
+		t.Fatalf("repo exchange = %q scoped = (%q, %d) authorized = %v", exchangedRepo, scopedTarget, scopedRepo,
+			mgr.Authorized("alice", "wandb/hivemind", 7))
 	}
 }
 
