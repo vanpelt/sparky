@@ -36,6 +36,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghuser"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghwebhook"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
@@ -416,6 +417,26 @@ func serve(args []string) error {
 		return fmt.Errorf("secrets store: %w", err)
 	}
 	defer secretsStore.Close()
+
+	// User-to-server grants use the GitHub App's public client id, but never its
+	// private key. The gateway retains and encrypts both rotating token halves;
+	// a guest sees only the public device code and obtains a credential through
+	// the same per-request metadata path as an installation token.
+	var ghUserManager *ghuser.Manager
+	if ghApp != nil {
+		grantStore, openErr := ghuser.Open(filepath.Join(*stateDir, "sparkbox.db"),
+			ghuser.DeriveKEK(oidcKey.D.Bytes()))
+		if openErr != nil {
+			return fmt.Errorf("github user grant store: %w", openErr)
+		}
+		defer grantStore.Close()
+		client, clientErr := ghuser.NewClient(ghuser.Config{ClientID: *githubAppClientID})
+		if clientErr != nil {
+			return fmt.Errorf("github user authorization: %w", clientErr)
+		}
+		ghUserManager = ghuser.NewManager(client, grantStore, log)
+		log.Info("github per-repository user authorization enabled")
+	}
 
 	// Network rule-sets (per-tag egress allowlists) live in the same DB, on their
 	// own connection. Independent of sluice: rules can be authored even when the
@@ -1001,7 +1022,7 @@ func serve(args []string) error {
 	// different manifest — or a different refusal — depending on which machine
 	// the placer happened to pick, which is exactly the fact a sandbox must not
 	// be able to observe. LocalRepos is a value; copying it is the intent.
-	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp}
+	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp, UserAuth: ghUserManager}
 	// Installed here rather than beside SetRules for the same reason SetIdentity
 	// is: it is unconditional and independent of whether this gateway serves a
 	// metadata endpoint of its own. A --gateway-only control plane holds no VMs
@@ -1036,6 +1057,7 @@ func serve(args []string) error {
 			Identity:          metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
 			RouteControl:      gatewayRouteControl{fleet: flt, node: nodeName},
 			Repos:             localRepos,
+			RepoAuthorizer:    localRepos,
 			Tools:             localTools(*toolsDir),
 			SelfLifecycle:     gatewaySelfLifecycle{fleet: flt, node: nodeName},
 			AllowSelfSnapshot: *guestSelfSnapshot,

@@ -772,6 +772,11 @@ short-lived token scoped to the one repository being fetched, so `git clone`,
 `git fetch` and `git push` on an attached repository just work, and nothing
 durable holds a credential.
 
+Before opening a pull request, run `sparkbox repo authorize owner/name` for that
+checkout if the PR should appear as this VM's owner. Authorization is per repo;
+without it, GitHub access still works but PRs and other API actions are
+attributed to the Sparkbox bot.
+
 git's author is usually already set, to the GitHub account that owns this VM, so
 commits you make are attributed to that person. Leave it alone: an author you
 invent cannot be corrected on a branch that has been pushed. If git does ask who

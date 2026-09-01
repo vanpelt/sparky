@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghuser"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
@@ -34,6 +35,24 @@ import (
 type RepoAccess interface {
 	Manifest(ctx context.Context, box *host.Sandbox) (Manifest, error)
 	Credential(ctx context.Context, box *host.Sandbox, slug string) (Credential, error)
+}
+
+type RepoAuthorizer interface {
+	StartAuthorization(ctx context.Context, box *host.Sandbox, slug string) (AuthorizationStart, error)
+	PollAuthorization(ctx context.Context, box *host.Sandbox, id string) (AuthorizationStatus, error)
+}
+
+type AuthorizationStart struct {
+	ID              string    `json:"id"`
+	UserCode        string    `json:"user_code"`
+	VerificationURI string    `json:"verification_uri"`
+	IntervalSeconds int       `json:"interval_seconds"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type AuthorizationStatus struct {
+	State string `json:"state"`
+	Slug  string `json:"slug,omitempty"`
 }
 
 // Manifest is what the guest's clone-at-boot unit reads. It is configuration,
@@ -72,10 +91,11 @@ type RepoEntry struct {
 	Instance bool `json:"instance,omitempty"`
 }
 
-// Credential is one installation token in the shape git's credential protocol
-// wants. It is never stored anywhere: not in the store, not in the guest's
-// ~/.git-credentials, not in a remote URL — the whole argument for installation
-// tokens over a PAT is that after the hour there is nothing left to steal.
+// Credential is one short-lived token in the shape git's credential protocol
+// wants. The token is never stored in the guest: not in ~/.git-credentials and
+// not in a remote URL. It is either an installation token minted on demand or
+// a repository-restricted user token whose rotating grant stays encrypted on
+// the gateway.
 type Credential struct {
 	Username  string    `json:"username"`
 	Password  string    `json:"password"`
@@ -111,6 +131,12 @@ const (
 // write timeout, which reads to the guest as a broken host. Cut short here it
 // produces a 503 with a sentence, which is the answer the guest's retry is for.
 const githubBudget = 6 * time.Second
+
+// githubAuthorizationBudget covers a cold interactive flow, which may resolve
+// an installation and repository on start, then exchange and verify a token on
+// poll. It remains below the metadata server's ten-second write deadline so a
+// slow GitHub answer becomes a complete 503 rather than a truncated response.
+const githubAuthorizationBudget = 8 * time.Second
 
 // ErrNotEnabled is what a host without the backing configuration returns: no
 // repos store, or no GitHub App key. It is answered 501, the same shape the
@@ -161,7 +187,92 @@ type LocalRepos struct {
 	// App mints installation tokens. Nil is a fleet that has attachments but no
 	// GitHub App — a supported state, in which public repositories still clone
 	// and Credential answers ErrNotEnabled.
-	App *ghapp.App
+	App      *ghapp.App
+	UserAuth *ghuser.Manager
+}
+
+func (l LocalRepos) StartAuthorization(ctx context.Context, box *host.Sandbox, slug string) (AuthorizationStart, error) {
+	if l.UserAuth == nil {
+		return AuthorizationStart{}, fmt.Errorf("%w: github user authorization is not enabled", ErrNotEnabled)
+	}
+	subject, err := l.authorizationSubject(ctx, box, slug)
+	if err != nil {
+		return AuthorizationStart{}, err
+	}
+	started, err := l.UserAuth.Start(ctx, subject)
+	if err != nil {
+		return AuthorizationStart{}, fmt.Errorf("%w: start github authorization: %v", ErrUpstream, err)
+	}
+	return AuthorizationStart{ID: started.ID, UserCode: started.UserCode, VerificationURI: started.VerificationURI,
+		IntervalSeconds: started.IntervalSeconds, ExpiresAt: started.ExpiresAt}, nil
+}
+
+func (l LocalRepos) PollAuthorization(ctx context.Context, box *host.Sandbox, id string) (AuthorizationStatus, error) {
+	if l.UserAuth == nil {
+		return AuthorizationStatus{}, fmt.Errorf("%w: github user authorization is not enabled", ErrNotEnabled)
+	}
+	ctx, cancel := context.WithTimeout(ctx, githubAuthorizationBudget)
+	defer cancel()
+	status, err := l.UserAuth.Poll(ctx, box.Owner, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, ghuser.ErrDenied), errors.Is(err, ghuser.ErrExpired),
+			errors.Is(err, ghuser.ErrWrongUser), errors.Is(err, ghuser.ErrWrongScope),
+			errors.Is(err, ghuser.ErrNoRefresh):
+			return AuthorizationStatus{}, fmt.Errorf("%w: %v", ErrRepoDenied, err)
+		default:
+			return AuthorizationStatus{}, fmt.Errorf("%w: finish github authorization: %v", ErrUpstream, err)
+		}
+	}
+	return AuthorizationStatus{State: status.State, Slug: status.Slug}, nil
+}
+
+func (l LocalRepos) authorizationSubject(ctx context.Context, box *host.Sandbox, slug string) (ghuser.Subject, error) {
+	if l.Repos == nil || l.App == nil || l.Users == nil {
+		return ghuser.Subject{}, ErrNotEnabled
+	}
+	if box == nil || box.Owner == "" {
+		return ghuser.Subject{}, fmt.Errorf("%w: sandbox has no owner", ErrRepoDenied)
+	}
+	u, err := l.Users.Get(box.Owner)
+	if err != nil || !u.Active() || u.GitHubVerifiedAt == nil || !users.StrongGitHubLink(u.GitHubVia) || u.GitHubID <= 0 {
+		return ghuser.Subject{}, fmt.Errorf("%w: this sandbox's owner has no verified github link", ErrRepoDenied)
+	}
+	attached, err := l.Repos.ReposForSandbox(box.Name, box.Owner)
+	if err != nil {
+		return ghuser.Subject{}, err
+	}
+	var entry repos.Repo
+	for _, candidate := range attached {
+		if strings.EqualFold(candidate.Slug, slug) {
+			entry = candidate
+			break
+		}
+	}
+	if entry.Slug == "" {
+		return ghuser.Subject{}, fmt.Errorf("%w: %s", ErrNoSuchRepo, slug)
+	}
+	if entry.Access != repos.AccessWrite {
+		return ghuser.Subject{}, fmt.Errorf("%w: %s is attached read-only; user authorization is only used for write attachments", ErrRepoDenied, entry.Slug)
+	}
+	owner, name, ok := repos.SplitSlug(entry.Slug)
+	if !ok {
+		return ghuser.Subject{}, fmt.Errorf("invalid stored slug %q", entry.Slug)
+	}
+	ctx, cancel := context.WithTimeout(ctx, githubAuthorizationBudget)
+	defer cancel()
+	inst, err := l.App.InstallationFor(ctx, owner, name)
+	if err != nil {
+		return ghuser.Subject{}, githubError(err)
+	}
+	if err := l.App.Authorize(ctx, inst, u.GitHubID, u.GitHubLogin); err != nil {
+		return ghuser.Subject{}, githubError(err)
+	}
+	repoID, err := l.App.RepositoryID(ctx, inst, owner, name)
+	if err != nil {
+		return ghuser.Subject{}, githubError(err)
+	}
+	return ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID, Slug: entry.Slug}, nil
 }
 
 // Manifest lists what this sandbox's tags say should be checked out in it.
@@ -216,8 +327,9 @@ func instanceKey(host, slug string) string {
 	return strings.ToLower(host) + "\x00" + strings.ToLower(slug)
 }
 
-// Credential mints a GitHub installation token scoped to one repository this
-// sandbox is actually attached to.
+// Credential returns a GitHub token scoped to one repository this sandbox is
+// actually attached to. A valid user grant wins for write attachments;
+// otherwise it mints an installation token.
 //
 // The order of the checks is the design: resolve the owner, decide whether that
 // owner may reach an access verb at all, confirm the attachment from this
@@ -323,9 +435,10 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	// branch but not open a pull request for it is a strange half-grant, so the
 	// set follows the attachment: read attachments read, write attachments write.
 	//
-	// It is still one repository, still an hour, still never written down. What
-	// widened is what the sandbox may do on GitHub, not who may do it, where the
-	// token lives, or how long it lasts.
+	// The installation-token fallback is still one repository, one hour and
+	// never written down. A write attachment may instead have an encrypted,
+	// repository-restricted user grant so GitHub attributes API actions to its
+	// owner; the branch below selects it without changing the permission ceiling.
 	perm := ghapp.PermRead
 	if entry.Access == repos.AccessWrite {
 		perm = ghapp.PermWrite
@@ -341,6 +454,14 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	// saying so rather than silently produce a token good for nothing.
 	perms := inst.Narrow(want)
 	perms["contents"] = perm
+	if entry.Access == repos.AccessWrite && l.UserAuth != nil {
+		subject := ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID,
+			InstallationID: inst.ID, Slug: entry.Slug}
+		if userToken, ok, userErr := l.UserAuth.Token(ctx, subject); userErr == nil && ok {
+			return Credential{Username: credentialUsername, Password: userToken.AccessToken,
+				ExpiresAt: userToken.AccessExpiresAt}, nil
+		}
+	}
 	tok, err := l.App.MintToken(ctx, inst, []string{name}, perms)
 	if err != nil {
 		return Credential{}, githubError(err)
@@ -451,6 +572,60 @@ func (s *Server) githubCredential(w http.ResponseWriter, r *http.Request) {
 	// with a log collector attached.
 	s.log.Info("minted github credential", "sandbox", box.Name, "owner", box.Owner, "repo", slug, "exp", cred.ExpiresAt)
 	s.writeJSON(w, cred)
+}
+
+func (s *Server) startGithubAuthorization(w http.ResponseWriter, r *http.Request) {
+	box, err := s.caller(r)
+	if err != nil {
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	slug := strings.TrimSpace(r.URL.Query().Get("slug"))
+	if !repos.ValidSlug(slug) {
+		http.Error(w, "sparkbox: ?slug= must be owner/name", http.StatusBadRequest)
+		return
+	}
+	if s.repoAuthorizer == nil {
+		http.Error(w, "sparkbox: github user authorization is not enabled", http.StatusNotImplemented)
+		return
+	}
+	if !s.allowRepoCall(box.Name + " authorization-start") {
+		http.Error(w, "sparkbox: too many authorization requests", http.StatusTooManyRequests)
+		return
+	}
+	started, err := s.repoAuthorizer.StartAuthorization(r.Context(), box, slug)
+	if err != nil {
+		s.failRepos(w, "authorize", box, err)
+		return
+	}
+	s.writeJSON(w, started)
+}
+
+func (s *Server) pollGithubAuthorization(w http.ResponseWriter, r *http.Request) {
+	box, err := s.caller(r)
+	if err != nil {
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if len(id) < 20 || len(id) > 128 {
+		http.Error(w, "sparkbox: invalid authorization id", http.StatusBadRequest)
+		return
+	}
+	if s.repoAuthorizer == nil {
+		http.Error(w, "sparkbox: github user authorization is not enabled", http.StatusNotImplemented)
+		return
+	}
+	if !s.allowRepoCall(box.Name + " authorization-poll") {
+		http.Error(w, "sparkbox: too many authorization polls", http.StatusTooManyRequests)
+		return
+	}
+	status, err := s.repoAuthorizer.PollAuthorization(r.Context(), box, id)
+	if err != nil {
+		s.failRepos(w, "authorize", box, err)
+		return
+	}
+	s.writeJSON(w, status)
 }
 
 // failRepos maps a RepoAccess error onto a status. It is a sibling of fail

@@ -6,11 +6,13 @@ whether you need one app or two.
 | | what it needs from the app | who holds what |
 |---|---|---|
 | **Linking** (shipped) | a **client id**, and *Enable Device Flow* checked | the client id is public; sparkbox stores no secret |
-| **Repos** (this feature) | the app's **private key**, and repository permissions | the gateway holds the private key |
+| **Repos** (shipped) | a **private key**, repository permissions, Device Flow, and expiring user tokens | the gateway holds the private key and encrypted rotating user grants |
 
 Linking asks GitHub one question — who is this — and requests **no scope at
-all**. Repos mints installation access tokens, which requires signing a JWT with
-the app's private key.
+all**. Repos always supports narrowly scoped installation tokens, and an owner
+can additionally authorize one write attachment with `sparkbox repo authorize
+owner/name` so GitHub operations, including pull-request creation, are
+attributed to that user.
 
 ---
 
@@ -56,6 +58,7 @@ Fill in:
 | **Homepage URL** | `https://catnip.sh` | required, cosmetic |
 | **Callback URL** | `https://my.catnip.sh/github/callback` | required by the form; the device flow never uses it |
 | **Enable Device Flow** | ☑ **checked** | **the one setting that silently breaks everything if missed** |
+| **Optional Features → User-to-server token expiration** | ☑ **opted in** | issues the rotating `ghu_` / `ghr_` pair Sparkbox stores on the gateway; non-expiring user tokens are refused |
 | **Webhook → Active** | ☐ **unchecked** | leave it off — unless you are also setting up webhooks, which is its own decision: see `docs/github-webhooks.md` and the note below |
 | **Where can this app be installed?** | *Any account* | so org installs are possible |
 
@@ -114,8 +117,8 @@ a read-only token regardless. An app capped at read cannot ever be raised
 without every user re-consenting.
 
 **Pull requests** is what makes `gh` useful inside a sandbox. The CLI speaks no
-credential-helper protocol, so it runs on the same per-repository, one-hour
-token `git` does (a wrapper in the guest hands it over as `GH_TOKEN` for the
+credential-helper protocol, so it runs on the same per-repository token `git`
+does (a wrapper in the guest hands it over as `GH_TOKEN` for the
 length of one command and writes nothing to disk). A token that can push a
 branch but cannot open a pull request for it is a strange half-grant, so the
 minted set follows the attachment's access level across all of these
@@ -129,6 +132,26 @@ GitHub refuses a token request naming a permission the installation lacks
 requests to this list would have broken every clone on an app that predates it.
 
 Leave **Account permissions** entirely empty.
+
+## Per-repository user attribution
+
+Inside a VM, authorize each write attachment whose GitHub activity should be
+performed as you:
+
+```sh
+sparkbox repo authorize wandb/hivemind
+```
+
+The VM prints GitHub's public device code and polls its own metadata endpoint.
+The device code, access token, and rotating refresh token remain on the gateway;
+only the public user code crosses into the VM. Sparkbox verifies both the
+immutable linked GitHub account id and that GitHub exposed exactly the requested
+repository before saving the grant encrypted in `sparkbox.db`.
+
+Authorization is per repository. In a VM containing two repositories, one can
+use the user's token while the other continues to use the App installation
+token. Missing, expired, revoked, or temporarily unrefreshable user grants never
+break git: Sparkbox falls back to the one-hour bot token for that repository.
 
 Click **Create GitHub App**.
 

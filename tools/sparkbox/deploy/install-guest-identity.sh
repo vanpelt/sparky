@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=18
+IDENTITY_REV=19
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -450,6 +450,69 @@ case "${1:-}" in
       *) echo "usage: sparkbox repos [survey|sync]" >&2; exit 2 ;;
     esac
     ;;
+  repo)
+    shift
+    case "${1:-}" in
+      authorize)
+        _slug=${2:-}
+        [ "$#" -eq 2 ] || { echo "usage: sparkbox repo authorize OWNER/NAME" >&2; exit 2; }
+        case "$_slug" in
+          */*) ;;
+          *) echo "sparkbox: repository must be owner/name" >&2; exit 2 ;;
+        esac
+        case "$_slug" in
+          *[!A-Za-z0-9._/-]*|/*|*/|*/*/*) echo "sparkbox: repository must be owner/name" >&2; exit 2 ;;
+        esac
+        _d=$(mktemp -d) || { echo "sparkbox: no writable temporary directory" >&2; exit 75; }
+        trap 'rm -rf "$_d"' EXIT HUP INT TERM
+        _code=$(curl -sS --max-time 20 -H 'Accept: application/json' -o "$_d/body" \
+          -w '%{http_code}' -X POST "$META/github/authorization?slug=$_slug" 2>/dev/null) || _code=000
+        case "$_code" in
+          2*) ;;
+          400) cat "$_d/body" >&2; exit 2 ;;
+          403|404) cat "$_d/body" >&2; exit 3 ;;
+          409|429) cat "$_d/body" >&2; exit 4 ;;
+          501) cat "$_d/body" >&2; exit 5 ;;
+          *) cat "$_d/body" >&2; exit 75 ;;
+        esac
+        _json=$(tr '\n' ' ' < "$_d/body")
+        _id=$(printf '%s' "$_json" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p')
+        _user_code=$(printf '%s' "$_json" | sed -n 's/.*"user_code":[[:space:]]*"\([^"]*\)".*/\1/p')
+        _uri=$(printf '%s' "$_json" | sed -n 's/.*"verification_uri":[[:space:]]*"\([^"]*\)".*/\1/p')
+        _interval=$(printf '%s' "$_json" | sed -n 's/.*"interval_seconds":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+        [ -n "$_id" ] && [ -n "$_user_code" ] && [ -n "$_uri" ] \
+          || { echo "sparkbox: the gateway returned an incomplete authorization" >&2; exit 75; }
+        case "$_interval" in ''|0) _interval=5 ;; esac
+        echo "Open $_uri and enter code $_user_code"
+        echo "Waiting for authorization of ${_slug}…"
+        _tries=0
+        while [ "$_tries" -lt 180 ]; do
+          sleep "$_interval"
+          _tries=$((_tries + 1))
+          _code=$(curl -sS --max-time 20 -H 'Accept: application/json' -o "$_d/body" \
+            -w '%{http_code}' "$META/github/authorization/$_id" 2>/dev/null) || _code=000
+          case "$_code" in
+            2*)
+              _json=$(tr '\n' ' ' < "$_d/body")
+              _state=$(printf '%s' "$_json" | sed -n 's/.*"state":[[:space:]]*"\([^"]*\)".*/\1/p')
+              case "$_state" in
+                authorized) echo "Authorized $_slug. GitHub operations for this repository will be attributed to you."; exit 0 ;;
+                pending) ;;
+                *) echo "sparkbox: the gateway returned an unknown authorization state" >&2; exit 75 ;;
+              esac
+              ;;
+            403|404) cat "$_d/body" >&2; exit 3 ;;
+            429) ;;
+            501) cat "$_d/body" >&2; exit 5 ;;
+            *) cat "$_d/body" >&2; exit 75 ;;
+          esac
+        done
+        echo "sparkbox: GitHub authorization expired; run the command again" >&2
+        exit 3
+        ;;
+      *) echo "usage: sparkbox repo authorize OWNER/NAME" >&2; exit 2 ;;
+    esac
+    ;;
   update-tools)
     # Same escalation as `repos`, for the same reason and with the same -n
     # degradation: the installer writes /usr/local/bin, /usr/local/lib and
@@ -466,7 +529,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repos [survey|sync]|update-tools [--check]>" >&2
+    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repo authorize OWNER/NAME|repos [survey|sync]|update-tools [--check]>" >&2
     exit 2
     ;;
 esac
@@ -860,9 +923,10 @@ chmod 0755 "$MNT/usr/local/sbin/sparkbox-update-tools"
 
 # git's credential helper, riding the same tap the OIDC token arrives on.
 #
-# The gateway mints a GitHub App installation token scoped to the ONE repository
-# git is talking to, good for an hour, from its own ledger of who this sandbox
-# belongs to and what that owner attached. Nothing is stored guest-side: no
+# The gateway returns a GitHub token scoped to the ONE repository git is talking
+# to, from its own ledger of who this sandbox belongs to and what that owner
+# attached. An authorized write attachment uses its owner's user token; every
+# other attachment uses a one-hour App installation token. Nothing is stored guest-side: no
 # token in ~/.git-credentials, none in a remote URL, none in /etc/environment —
 # so none of it rides into a snapshot, a fork or an archived rootfs. The warm
 # checkout does, which is the half worth keeping.
@@ -931,8 +995,8 @@ chmod 0755 "$MNT/usr/local/bin/sparkbox-git-credential"
 # The GitHub CLI does not speak git's credential-helper protocol — it reads a
 # token out of the environment — so the helper above does nothing for it, and a
 # sandbox with a warm checkout of a private repository had a `gh` that answered
-# "You are not logged into any GitHub hosts". Wrapping it is the whole fix: mint
-# the same per-repository, one-hour token the clone uses, hand it to `gh` for the
+# "You are not logged into any GitHub hosts". Wrapping it is the whole fix: get
+# the same per-repository token the clone uses, hand it to `gh` for the
 # length of one command, and let it die with the process. Nothing is written to
 # ~/.config/gh, so nothing rides into a snapshot, a fork or an archived rootfs —
 # the same property the credential helper has, for the same reason.

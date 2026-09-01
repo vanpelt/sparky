@@ -253,12 +253,13 @@ func (l Local) githubOwner(owner string) (login string, id int64) {
 }
 
 type Server struct {
-	mgr        Sandboxes
-	id         Identity
-	routes     RouteControl
-	repoAccess RepoAccess
-	tools      ToolCache
-	lifecycle  SelfLifecycle
+	mgr            Sandboxes
+	id             Identity
+	routes         RouteControl
+	repoAccess     RepoAccess
+	repoAuthorizer RepoAuthorizer
+	tools          ToolCache
+	lifecycle      SelfLifecycle
 	// allowSelfSnapshot is the operator's kill switch for capture-from-inside.
 	// Default on, because the carried-tag restriction already bounds it and a
 	// self-service feature nobody is told about does not exist; the flag is for
@@ -296,6 +297,9 @@ type Options struct {
 	// Repos serves the two repository endpoints. Nil answers both 501, which
 	// is what a host with no repos store or no GitHub App is.
 	Repos RepoAccess
+	// RepoAuthorizer serves the interactive per-repository GitHub user flow.
+	// It is separate from Repos so older/minimal hosts retain bot credentials.
+	RepoAuthorizer RepoAuthorizer
 	// Tools serves this machine's own agent-CLI cache. Nil answers both /tools
 	// routes 501, which is what a host started without --tools-dir is. It is
 	// never a relay to another machine — see ToolCache.
@@ -336,7 +340,7 @@ func NewChecked(opts Options) (*Server, error) {
 	}
 	return &Server{
 		mgr: opts.Manager, id: opts.Identity, routes: opts.RouteControl,
-		repoAccess: opts.Repos, tools: opts.Tools, log: log,
+		repoAccess: opts.Repos, repoAuthorizer: opts.RepoAuthorizer, tools: opts.Tools, log: log,
 		lifecycle:         opts.SelfLifecycle,
 		allowSelfSnapshot: opts.AllowSelfSnapshot,
 		defAud:            opts.DefaultAudience,
@@ -351,6 +355,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /identity", s.identity)
 	mux.HandleFunc("GET /repos", s.repoManifest)
 	mux.HandleFunc("GET /github/credential", s.githubCredential)
+	mux.HandleFunc("POST /github/authorization", s.startGithubAuthorization)
+	mux.HandleFunc("GET /github/authorization/{id}", s.pollGithubAuthorization)
 	// The literal pattern is more specific than the wildcard one, so
 	// /tools/manifest can never be routed as a tool named "manifest" — which is
 	// also why parseToolManifest refuses that name outright rather than

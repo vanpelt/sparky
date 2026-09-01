@@ -4,7 +4,8 @@ How a GitHub repository becomes something a sandbox *has* rather than something
 its occupant remembers to clone, and how the credential that clones it stops
 being a personal access token sitting in `/etc/environment`.
 
-This is a proposal. Nothing in Part 3 onward is built.
+Status: **implemented**, including optional per-repository user attribution and
+installation-token fallback.
 
 ---
 
@@ -158,20 +159,26 @@ A GitHub credential should arrive the same way, for the same reason.
 | | what it is | scope | lifetime | at rest where |
 |---|---|---|---|---|
 | **A. PAT as a secret** (today) | the user's `gh` token | every repo the human can reach | until revoked | the sandbox's `/etc/environment`, the sqlite store |
-| **B. App user-to-server token** | device flow with scopes | intersection of the user's access and the app's installations | 8h + refresh token | the store, and refreshing needs a client **secret** on the gateway |
+| **B. App user-to-server token** | device flow restricted with `repository_id` | the linked user, one installation and one repository, verified after exchange | 8h + rotating refresh token | encrypted on the gateway; device-flow refresh needs no client secret |
 | **C. App installation token** | minted from the App private key | **exactly the repository ids asked for**, with permissions down-scoped per request | 1 hour, not refreshable | **nowhere** |
 
-C is the answer. It is the only one of the three whose scope can be narrowed to
-"this sandbox's repos", the only one that expires fast enough that a leak is an
-incident rather than a breach, and the only one with nothing to steal from the
-guest afterwards. B is worth naming only to say why it loses: a refreshable
-user token still has to be stored, and storing it buys a *coarser* scope than C
-gives for free.
+B and C are deliberately layered. C is the safe zero-setup default and fallback:
+one repository, one hour, nothing durable in the guest. B is opt-in for a write
+attachment because GitHub attributes API actions such as PR creation to the
+user holding that token. Sparkbox asks GitHub for one `repository_id`, then
+verifies the token's immutable `/user` id and installation repository listing
+before encrypting it. If no valid B grant exists, C continues to work.
 
 A stays supported. Some orgs will not install a third-party App, GitHub
 Enterprise Server is its own project, and a user with one weird repo should not
 be blocked on an org admin. It becomes the documented fallback rather than the
 documented path.
+
+The in-guest entry point is `sparkbox repo authorize owner/name`. The gateway
+retains the secret device code and all token material; the guest receives only
+the public code and an opaque polling id. Grants are keyed per owner and
+repository, so authorizing one checkout in a multi-repository VM does not widen
+the others.
 
 ## 3.2 How C works, concretely
 

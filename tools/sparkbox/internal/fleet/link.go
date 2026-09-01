@@ -55,6 +55,8 @@ func (f *Fleet) ServeLink(ctx context.Context, opts nodelink.ServerOptions) erro
 		OnSelfPort:          f.SelfPort,
 		OnSelfRepos:         f.SelfRepos,
 		OnSelfRepoCred:      f.SelfRepoCredential,
+		OnSelfRepoAuthStart: f.SelfRepoAuthorizationStart,
+		OnSelfRepoAuthPoll:  f.SelfRepoAuthorizationPoll,
 		OnSelfPause:         f.SelfPause,
 		OnSelfSnapshotPlan:  f.SelfSnapshotPlan,
 		OnSelfSnapshot:      f.SelfSnapshot,

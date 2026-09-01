@@ -488,6 +488,29 @@ func TestMintTokenRefusesAnUnscopedRequest(t *testing.T) {
 	}
 }
 
+func TestRepositoryIDUsesAOneRepoMetadataToken(t *testing.T) {
+	s := newStub(t)
+	s.json("POST /app/installations/42/access_tokens", 200, tokenBody)
+	s.json("GET /repos/wandb/hivemind", 200, `{"id":99}`)
+	app := newApp(t, s, nil)
+
+	id, err := app.RepositoryID(context.Background(), Installation{ID: 42}, "wandb", "hivemind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 99 {
+		t.Fatalf("repository id = %d, want 99", id)
+	}
+	mint := s.last("/access_tokens")
+	if !strings.Contains(mint.body, `"repositories":["hivemind"]`) ||
+		!strings.Contains(mint.body, `"metadata":"read"`) {
+		t.Fatalf("repository-id mint was not narrowly scoped: %s", mint.body)
+	}
+	if got := s.last("/repos/wandb/hivemind").auth; got != "Bearer ghs_supersecret" {
+		t.Fatalf("repository lookup auth = %q", got)
+	}
+}
+
 // The cache is what keeps a `git fetch` loop from minting per fetch, so it has
 // to survive the two things a caller varies for free: repeating itself, and
 // listing the same repositories in a different order.
