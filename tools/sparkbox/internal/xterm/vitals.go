@@ -94,6 +94,15 @@ type vitals struct {
 	// presence monitor has successfully refreshed its ephemeral catalog.
 	HiveMindSessionTitle string `json:"hivemind_session_title,omitempty"`
 	HiveMindSessionURL   string `json:"hivemind_session_url,omitempty"`
+	// HiveMindPresence is HiveMind's own word for what the agent is doing, and
+	// HiveMindActive is whether it currently holds a protection lease.
+	//
+	// The page shows activity from these and never from a session's own state:
+	// a catalog row reads "ended" the moment a turn completes, while the session
+	// is still open and the VM is still protected, so rendering that field would
+	// tell somebody their running agent had stopped.
+	HiveMindPresence string `json:"hivemind_presence,omitempty"`
+	HiveMindActive   bool   `json:"hivemind_active,omitempty"`
 
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
@@ -181,7 +190,6 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	out.HiveMindSessionTitle, out.HiveMindSessionURL = recentHiveMindSession(box.HiveMind)
 	h.readVitals(r.Context(), box, &out)
 
 	// edgeauth.Require already sets no-store on everything behind the gate;
@@ -202,34 +210,19 @@ func repositoryMap(repos []host.RepoStatus) map[string]host.RepoStatus {
 	return out
 }
 
-// recentHiveMindSession selects by activity rather than trusting response
-// order, then admits only an absolute HTTP(S) dashboard link. The title is
-// painted with textContent in the page; the URL still needs this scheme check
-// because it becomes a clickable href.
-func recentHiveMindSession(snapshot *host.HiveMindSessionSnapshot) (string, string) {
-	if snapshot == nil {
-		return "", ""
+// dashboardLink admits only an absolute HTTP(S) link.
+//
+// The selection of which session to name happens on the machine holding the VM
+// (host.HiveMindSessionSnapshot.Recent), but this check stays here, on the
+// gateway, because a node is a separate trust domain and this is the one value
+// in a vitals reply that becomes a clickable href rather than a number. The
+// title needs no equivalent: the page paints it with textContent.
+func dashboardLink(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return ""
 	}
-	var best *host.HiveMindSession
-	for i := range snapshot.Sessions {
-		session := &snapshot.Sessions[i]
-		parsed, err := url.Parse(session.URL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-			continue
-		}
-		if best == nil || session.LastActivityAt.After(best.LastActivityAt) ||
-			(session.LastActivityAt.Equal(best.LastActivityAt) && session.StartedAt.After(best.StartedAt)) {
-			best = session
-		}
-	}
-	if best == nil {
-		return "", ""
-	}
-	title := strings.TrimSpace(best.Title)
-	if title == "" {
-		title = "HiveMind session"
-	}
-	return title, best.URL
+	return raw
 }
 
 // readVitals fills in whatever the machine holding box can answer about it.
@@ -254,4 +247,17 @@ func (h *Handler) readVitals(ctx context.Context, box *host.Sandbox, out *vitals
 	out.ListeningPorts = append([]int(nil), v.ListeningPorts...)
 	out.PortServices = append([]host.PortService(nil), v.PortServices...)
 	out.PortsChecked = v.PortsChecked
+	if hm := v.HiveMind; hm != nil {
+		title := strings.TrimSpace(hm.SessionTitle)
+		if link := dashboardLink(hm.SessionURL); link != "" {
+			out.HiveMindSessionURL = link
+			if title == "" {
+				title = "HiveMind session"
+			}
+		}
+		out.HiveMindSessionTitle = title
+		if p := hm.Presence; p != nil {
+			out.HiveMindPresence, out.HiveMindActive = p.State, p.Live()
+		}
+	}
 }

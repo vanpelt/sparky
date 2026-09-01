@@ -56,6 +56,26 @@ type Vitals struct {
 	ListeningPorts []int
 	PortServices   []PortService
 	PortsChecked   bool
+	// HiveMind is the agent-activity reading, nil when this machine has never
+	// heard from HiveMind about this sandbox.
+	//
+	// It rides the vitals reply rather than SandboxRow deliberately. The row is
+	// broadcast on every lifecycle event to every gateway that cares; this is
+	// pulled by one open terminal tab that is actually looking at it. Those are
+	// different costs, and only one of them scales with the number of people
+	// watching — which is the number that should pay.
+	HiveMind *HiveMindLive
+}
+
+// HiveMindLive is one machine's current answer to "is an agent working in this
+// VM, and on what". It pairs the cheap live reading with the most recent
+// session from the catalog, because a person reading a terminal header wants
+// both halves and neither is much use alone: a title with no liveness is
+// history, and liveness with no title is a light with no label.
+type HiveMindLive struct {
+	Presence     *HiveMindPresence
+	SessionTitle string
+	SessionURL   string
 }
 
 // PortService is one supported browser-facing listener and the best small,
@@ -145,7 +165,26 @@ func (m *Manager) Vitals(ctx context.Context, name string) (Vitals, error) {
 		}
 	}()
 	wg.Wait()
+	// Not in the group above: this reads memory rather than a VMM or a socket,
+	// so it needs no goroutine of its own. Callers still only see it for a
+	// running sandbox — webui.Probe returns the empty reading for any other
+	// state before it ever gets here — which is the same rule the counters obey.
+	out.HiveMind = m.hivemindLive(name)
 	return out, nil
+}
+
+// hivemindLive composes the two independently-refreshed halves of the HiveMind
+// view into the one reading that crosses a machine boundary.
+func (m *Manager) hivemindLive(name string) *HiveMindLive {
+	box, ok := m.Get(name)
+	if !ok || (box.HiveMindPresence == nil && box.HiveMind == nil) {
+		return nil
+	}
+	live := &HiveMindLive{Presence: box.HiveMindPresence}
+	if recent := box.HiveMind.Recent(); recent != nil {
+		live.SessionTitle, live.SessionURL = recent.Title, recent.URL
+	}
+	return live
 }
 
 type portScanResult struct {

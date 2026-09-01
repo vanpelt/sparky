@@ -211,6 +211,19 @@ message Vitals {
   repeated int32 listening_ports = 5;
   bool ports_checked = 6;
   repeated PortService port_services = 7;
+  HiveMindLive hivemind = 8;
+}
+
+// HiveMindLive is what the machine holding a VM currently knows about the agent
+// working in it. presence is HiveMind's own word ("idle", "waiting", ...) and
+// is passed through rather than mapped to an enum, so a value HiveMind adds
+// reaches a person without a redeploy of this schema.
+message HiveMindLive {
+  string presence = 1;
+  google.protobuf.Timestamp protect_until = 2;
+  google.protobuf.Timestamp observed_at = 3;
+  string session_title = 4;
+  string session_url = 5;
 }
 
 // OperationIdentity is required on every mutation. request_hash is a SHA-256

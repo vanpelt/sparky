@@ -35,6 +35,7 @@ type fakeVitals struct {
 	ports        map[string][]int
 	services     map[string][]host.PortService
 	portsChecked map[string]bool
+	hivemind     map[string]*host.HiveMindLive
 	err          error
 	calls        int
 }
@@ -70,6 +71,7 @@ func (f *fakeVitals) Vitals(_ context.Context, name string) (host.Vitals, error)
 		v.PortServices = append([]host.PortService(nil), services...)
 	}
 	v.PortsChecked = f.portsChecked[name]
+	v.HiveMind = f.hivemind[name]
 	return v, nil
 }
 
@@ -426,36 +428,75 @@ func TestVitalsOmitsWhatThisHostDoesNotHave(t *testing.T) {
 	}
 }
 
-func TestVitalsCarriesTheMostRecentHiveMindSession(t *testing.T) {
-	base := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
-	box := runningBox("demo", "alice")
-	box.HiveMind = &host.HiveMindSessionSnapshot{Sessions: []host.HiveMindSession{
-		{Title: "Older work", URL: "https://hivemind.example/sessions/old", StartedAt: base, LastActivityAt: base.Add(time.Minute)},
-		{Title: "  Fix terminal chrome  ", URL: "https://hivemind.example/sessions/new", StartedAt: base.Add(time.Minute), LastActivityAt: base.Add(2 * time.Minute)},
-	}}
-	hz := newHarness(t, box)
+// The session reaches the page through the VITALS reading and not through the
+// sandbox record, and that is the whole point of this test.
+//
+// host.Sandbox.HiveMind is only ever populated by the presence monitor's
+// observer, which writes into the manager on the machine that RUNS the VM. A
+// gateway resolves a sandbox through the fleet, which rebuilds the record from
+// a node's SandboxRow and cannot carry that field — so a handler reading
+// box.HiveMind renders a session on a single-box host and nothing at all on
+// every fleet, forever. Wiring this through the probe is what makes the two
+// cases identical, so the fake below is deliberately the ONLY source.
+func TestVitalsCarriesTheHiveMindSessionFromTheMachineHoldingTheVM(t *testing.T) {
+	protect := time.Now().Add(10 * time.Minute)
+	fv := &fakeVitals{hivemind: map[string]*host.HiveMindLive{"demo": {
+		SessionTitle: "  Fix terminal chrome  ",
+		SessionURL:   "https://hivemind.example/sessions/new",
+		Presence:     &host.HiveMindPresence{State: "waiting", ProtectUntil: &protect},
+	}}}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
 
 	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
 	if got := m["hivemind_session_title"]; got != "Fix terminal chrome" {
-		t.Errorf("hivemind_session_title = %v, want newest session title", got)
+		t.Errorf("hivemind_session_title = %v, want the trimmed title", got)
 	}
 	if got := m["hivemind_session_url"]; got != "https://hivemind.example/sessions/new" {
-		t.Errorf("hivemind_session_url = %v, want newest session URL", got)
+		t.Errorf("hivemind_session_url = %v", got)
+	}
+	// Activity comes from presence, never from a session's own state — see the
+	// note on the vitals struct. A live agent must read as live.
+	if m["hivemind_presence"] != "waiting" || m["hivemind_active"] != true {
+		t.Errorf("presence = %v, active = %v, want waiting/true",
+			m["hivemind_presence"], m["hivemind_active"])
 	}
 }
 
-func TestVitalsOmitsUnsafeHiveMindSessionLinks(t *testing.T) {
-	box := runningBox("demo", "alice")
-	box.HiveMind = &host.HiveMindSessionSnapshot{Sessions: []host.HiveMindSession{{
-		Title: "Not a dashboard", URL: "javascript:alert(1)", LastActivityAt: time.Now(),
+// An expired lease is not activity. Nobody re-observes a sandbox to retract
+// protection, so the deadline has to be read against the clock at render time
+// rather than trusted as a flag.
+func TestVitalsReportsAnExpiredProtectionLeaseAsInactive(t *testing.T) {
+	expired := time.Now().Add(-time.Minute)
+	fv := &fakeVitals{hivemind: map[string]*host.HiveMindLive{"demo": {
+		Presence: &host.HiveMindPresence{State: "idle", ProtectUntil: &expired},
 	}}}
-	hz := newHarness(t, box)
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
 
 	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
-	for _, field := range []string{"hivemind_session_title", "hivemind_session_url"} {
-		if value, present := m[field]; present {
-			t.Errorf("unsafe session produced %s=%v", field, value)
-		}
+	if _, present := m["hivemind_active"]; present {
+		t.Errorf("hivemind_active = %v on an expired lease", m["hivemind_active"])
+	}
+	if m["hivemind_presence"] != "idle" {
+		t.Errorf("hivemind_presence = %v, want idle", m["hivemind_presence"])
+	}
+}
+
+// The node supplying this value is a separate trust domain and the URL becomes
+// an href, so the scheme is checked on the gateway after it crosses the link.
+// The title survives: it is painted with textContent, and dropping the only
+// label because the link was bad would hide the session entirely.
+func TestVitalsOmitsUnsafeHiveMindSessionLinks(t *testing.T) {
+	fv := &fakeVitals{hivemind: map[string]*host.HiveMindLive{"demo": {
+		SessionTitle: "Not a dashboard", SessionURL: "javascript:alert(1)",
+	}}}
+	hz := withVitals(t, fv, runningBox("demo", "alice"))
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	if value, present := m["hivemind_session_url"]; present {
+		t.Errorf("unsafe session produced hivemind_session_url=%v", value)
+	}
+	if m["hivemind_session_title"] != "Not a dashboard" {
+		t.Errorf("hivemind_session_title = %v", m["hivemind_session_title"])
 	}
 }
 

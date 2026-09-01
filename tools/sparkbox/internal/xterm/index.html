@@ -57,6 +57,18 @@
   }
   .session-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-link svg { width: 12px; height: 12px; flex: none; }
+  /* The same lamp idiom as .status, for the same reason: the word ("waiting",
+     "idle") is worth more in a tooltip than in a bar this narrow. Dark when
+     HiveMind holds no protection lease for this VM, lit and pulsing while it
+     does — which is the ONLY honest source for this. A session row's own state
+     reads "ended" between turns of a conversation that is still going. */
+  .session-dot {
+    width: 6px; height: 6px; border-radius: 50%; flex: none;
+    background: hsl(var(--muted-foreground) / .5);
+  }
+  .session-link.live .session-dot {
+    background: hsl(var(--green)); animation: pulse 1.4s ease-in-out infinite;
+  }
   .spacer { flex: 1 1 auto; }
 
   /* Status is a lamp, not a sentence. The word it used to carry cost ~65px of a
@@ -311,6 +323,7 @@
       <img class="logo" src="/assets/sparkbox-logo.png" alt="" width="24" height="24" />
       <span class="name mono" id="sandbox-name">&nbsp;</span>
       <a class="session-link hidden" id="hivemind-session" href="#" target="_blank" rel="noopener noreferrer">
+        <span class="session-dot" id="hivemind-session-dot"></span>
         <span class="session-label" id="hivemind-session-title"></span>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M14 5h5v5"></path><path d="M10 14 19 5"></path><path d="M19 13v6H5V5h6"></path>
@@ -997,16 +1010,32 @@
     // reload, and a refreshed title should follow it.
     function paintHiveMindSession(v) {
       const link = $("hivemind-session");
-      if (!v.hivemind_session_url) {
+      const title = v.hivemind_session_title;
+      // Presence alone is worth showing. A VM can hold a live lease before its
+      // first session has reached the catalog, and going dark until a title
+      // arrives would hide activity at exactly the moment it starts.
+      if (!title && !v.hivemind_presence) {
         link.classList.add("hidden");
+        link.classList.remove("live");
         link.removeAttribute("href");
         return;
       }
-      const title = v.hivemind_session_title || "HiveMind session";
-      link.href = v.hivemind_session_url;
-      link.title = title;
-      link.setAttribute("aria-label", "Open HiveMind session: " + title);
-      $("hivemind-session-title").textContent = title;
+      const label = title || "HiveMind session";
+      // Only an absolute http(s) link reaches us — the gateway drops anything
+      // else — so an absent URL means there is nothing to open, not that the
+      // session is uninteresting. Render it as a lamp with a label instead.
+      if (v.hivemind_session_url) {
+        link.href = v.hivemind_session_url;
+      } else {
+        link.removeAttribute("href");
+      }
+      const state = v.hivemind_active ? (v.hivemind_presence || "active") : null;
+      const hint = state ? label + " — " + state : label;
+      link.title = hint;
+      link.setAttribute("aria-label",
+        (v.hivemind_session_url ? "Open HiveMind session: " : "HiveMind session: ") + hint);
+      link.classList.toggle("live", Boolean(v.hivemind_active));
+      $("hivemind-session-title").textContent = label;
       link.classList.remove("hidden");
     }
 

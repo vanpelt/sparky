@@ -55,6 +55,7 @@ func (f *fakeProtector) ProtectUntil(id string, until time.Time) {
 type fakeObserver struct {
 	mu        sync.Mutex
 	snapshots map[string]host.HiveMindSessionSnapshot
+	presence  map[string]host.HiveMindPresence
 }
 
 func (f *fakeObserver) ObserveHiveMindSessions(
@@ -64,6 +65,15 @@ func (f *fakeObserver) ObserveHiveMindSessions(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots[id] = snapshot
+}
+
+func (f *fakeObserver) ObserveHiveMindPresence(id string, presence host.HiveMindPresence) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.presence == nil {
+		f.presence = map[string]host.HiveMindPresence{}
+	}
+	f.presence[id] = presence
 }
 
 func TestNewRejectsInsecureRemoteAPIBase(t *testing.T) {
@@ -217,7 +227,7 @@ func TestPollExchangesOnceAndRefreshesLease(t *testing.T) {
 	}
 
 	monitor.mu.Lock()
-	monitor.sessionsAt["box-running"] = time.Now().Add(-sessionRefreshInterval)
+	monitor.sessionsAt["box-running"] = time.Now().Add(-idleSessionRefresh)
 	monitor.mu.Unlock()
 	monitor.Poll(context.Background())
 	mu.Lock()

@@ -289,6 +289,17 @@ type Sandbox struct {
 	// refreshed from a token-bound API response and deliberately never written
 	// to the sandbox state file.
 	HiveMind *HiveMindSessionSnapshot `json:"-"`
+	// HiveMindPresence is the live half of the same view, and it is separate
+	// from HiveMind because the two are refreshed on very different clocks: the
+	// presence endpoint is cheap and polled every minute, the session catalog is
+	// paginated and polled far less often. Folding them into one field would
+	// force the expensive query onto the cheap one's schedule.
+	//
+	// It is also the only trustworthy answer to "is an agent working here".
+	// A catalog row's State reaches "ended" at a turn boundary while the session
+	// is still open and the device is still live, so a surface that reports
+	// activity must read this and not HiveMind.Sessions[i].State.
+	HiveMindPresence *HiveMindPresence `json:"-"`
 }
 
 // RepoStatus is one checkout as observed by the guest. Ahead and Behind are
@@ -323,6 +334,55 @@ type HiveMindSessionSnapshot struct {
 	Sessions   []HiveMindSession `json:"sessions"`
 	TotalCount int               `json:"total_count"`
 	HasMore    bool              `json:"has_more"`
+}
+
+// HiveMindPresence is what the cheap presence endpoint last said about a VM.
+//
+// State is HiveMind's own word for what the device is doing — "idle",
+// "waiting", and whatever else it grows — carried through as an opaque string
+// rather than mapped onto an enum here. A new value HiveMind starts sending
+// should reach a person unchanged, not become "unknown" because this end of the
+// federation has not been redeployed.
+//
+// ProtectUntil is nil when nothing is live. When it is set, something is:
+// it is the same field the reaper honours, so it is the one signal that is
+// authoritative in both directions rather than only descriptive.
+type HiveMindPresence struct {
+	ObservedAt   time.Time  `json:"observed_at"`
+	State        string     `json:"state,omitempty"`
+	ProtectUntil *time.Time `json:"protect_until,omitempty"`
+}
+
+// Recent is the most recently active session in the snapshot, or nil for one
+// holding none. It selects by LastActivityAt rather than trusting the order the
+// API returned, falling back to StartedAt to break a tie.
+//
+// It deliberately does not filter on State. A session reaches "ended" at a turn
+// boundary and is still the one a person is working in — see the note on
+// Sandbox.HiveMindPresence — so filtering here would routinely hide the only
+// session worth naming.
+func (s *HiveMindSessionSnapshot) Recent() *HiveMindSession {
+	if s == nil {
+		return nil
+	}
+	var best *HiveMindSession
+	for i := range s.Sessions {
+		session := &s.Sessions[i]
+		if best == nil || session.LastActivityAt.After(best.LastActivityAt) ||
+			(session.LastActivityAt.Equal(best.LastActivityAt) &&
+				session.StartedAt.After(best.StartedAt)) {
+			best = session
+		}
+	}
+	return best
+}
+
+// Live reports whether HiveMind currently considers this VM's agent to be
+// working. It reads ProtectUntil rather than State because that is the field
+// with a defined meaning on both sides of the federation, and because an
+// expired lease must stop counting as live without anyone re-observing it.
+func (p *HiveMindPresence) Live() bool {
+	return p != nil && p.ProtectUntil != nil && p.ProtectUntil.After(time.Now())
 }
 
 // TurboFactor is how much a turbo boot multiplies a sandbox's CPU and RAM by.
@@ -1189,6 +1249,24 @@ func (m *Manager) ObserveHiveMindSessions(sandboxID string, snapshot HiveMindSes
 		}
 		snapshot.Sessions = cloneHiveMindSessions(snapshot.Sessions)
 		box.HiveMind = &snapshot
+		return
+	}
+}
+
+// ObserveHiveMindPresence records the live reading taken on every poll. It is
+// separate from ObserveHiveMindSessions so the minute-by-minute signal is not
+// held hostage to the catalog's much slower refresh — see Sandbox.HiveMind.
+func (m *Manager) ObserveHiveMindPresence(sandboxID string, presence HiveMindPresence) {
+	if sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, box := range m.boxes {
+		if box.ID != sandboxID {
+			continue
+		}
+		box.HiveMindPresence = &presence
 		return
 	}
 }

@@ -1096,10 +1096,28 @@ func (g *GRPCControl) Vitals(ctx context.Context, name string) (host.Vitals, err
 	for _, service := range wire.GetPortServices() {
 		services = append(services, host.PortService{Port: int(service.GetPort()), Name: service.GetName()})
 	}
-	return host.Vitals{
+	out := host.Vitals{
 		CPUSeconds: &cpu, MemUsedMB: &memory, NetRxBytes: &rx, NetTxBytes: &tx,
 		ListeningPorts: ports, PortServices: services, PortsChecked: wire.GetPortsChecked(),
-	}, nil
+	}
+	if hm := wire.GetHivemind(); hm != nil {
+		// Bounded like every other node-supplied display string; the URL's
+		// scheme is checked where it becomes an href, not here.
+		presence := &host.HiveMindPresence{
+			State:      ctlops.SafeText(hm.GetPresence(), maxDisplayText),
+			ObservedAt: hm.GetObservedAt().AsTime(),
+		}
+		if until := hm.GetProtectUntil(); until != nil {
+			at := until.AsTime()
+			presence.ProtectUntil = &at
+		}
+		out.HiveMind = &host.HiveMindLive{
+			Presence:     presence,
+			SessionTitle: ctlops.SafeText(hm.GetSessionTitle(), maxDisplayText),
+			SessionURL:   ctlops.SafeText(hm.GetSessionUrl(), maxDisplayText),
+		}
+	}
+	return out, nil
 }
 
 func (g *GRPCControl) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {

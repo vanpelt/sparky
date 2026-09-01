@@ -901,6 +901,24 @@ type VitalsResp struct {
 	ListeningPorts []int              `json:"listening_ports,omitempty"`
 	PortServices   []host.PortService `json:"port_services,omitempty"`
 	PortsChecked   bool               `json:"ports_checked,omitempty"`
+	// HiveMind rides this reply for the same reason the counters do: it is a
+	// current reading that only the machine holding the VM can take, and only a
+	// gateway with somebody actually watching should pay for it.
+	HiveMind *HiveMindLive `json:"hivemind,omitempty"`
+}
+
+// HiveMindLive mirrors host.HiveMindLive across the link.
+//
+// SessionURL is carried as the node sent it and is NOT trusted here. The
+// gateway validates its scheme before it becomes a clickable href, because a
+// node is a separate trust domain and this is the one field in the reply that
+// turns into markup rather than a number.
+type HiveMindLive struct {
+	Presence     string     `json:"presence,omitempty"`
+	ProtectUntil *time.Time `json:"protect_until,omitempty"`
+	ObservedAt   time.Time  `json:"observed_at,omitempty"`
+	SessionTitle string     `json:"session_title,omitempty"`
+	SessionURL   string     `json:"session_url,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
