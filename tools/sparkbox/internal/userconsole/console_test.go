@@ -1023,8 +1023,8 @@ func TestRepoBrowserOAuthAuthorizesExactAttachment(t *testing.T) {
 		fmt.Fprint(w, `{"token":"ghu_web_scoped","expires_at":"2030-01-01T00:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
-	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
+	mux.HandleFunc("GET /repositories/99", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":99}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

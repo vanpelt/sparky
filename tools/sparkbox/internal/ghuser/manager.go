@@ -269,7 +269,7 @@ func (m *Manager) deriveVerified(ctx context.Context, subject Subject, broad Tok
 	if err != nil {
 		return Token{}, err
 	}
-	if err := m.client.Verify(ctx, scoped.AccessToken, subject.GitHubID, subject.InstallationID, subject.RepoID); err != nil {
+	if err := m.client.Verify(ctx, scoped.AccessToken, subject.GitHubID, subject.RepoID); err != nil {
 		return Token{}, err
 	}
 	return Token{AccessToken: scoped.AccessToken, RefreshToken: broad.RefreshToken,

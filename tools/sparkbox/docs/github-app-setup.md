@@ -167,8 +167,9 @@ for the installation account, exact repository id, and required permissions,
 then discards the broad access token. Only the derived access token and the
 rotating refresh token are saved encrypted in `sparkbox.db`.
 
-The browser flow lands in that same store and applies the identical derivation
-and exact-one-repository verification before accepting GitHub's token.
+The browser flow lands in that same store and applies the identical derivation,
+immutable-user check, and requested-repository access check before accepting
+GitHub's token.
 
 Authorization is per repository. In a VM containing two repositories, one can
 use the user's token while the other continues to use the App installation

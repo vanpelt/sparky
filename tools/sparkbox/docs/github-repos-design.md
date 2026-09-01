@@ -168,10 +168,10 @@ attachment because GitHub attributes API actions such as PR creation to the
 user holding that token. Sparkbox verifies the broad OAuth result's immutable
 `/user` id, calls `POST /applications/{client_id}/token/scoped` with one target,
 repository id, and explicit permission set, then verifies the derived token's
-installation repository listing before encrypting it. The broad access token
-exists only in gateway memory during that exchange; its rotating refresh token
-is retained so the gateway can repeat the derivation. If no valid B grant
-exists, C continues to work.
+immutable user and access to the requested immutable repository id before
+encrypting it. The broad access token exists only in gateway memory during that
+exchange; its rotating refresh token is retained so the gateway can repeat the
+derivation. If no valid B grant exists, C continues to work.
 
 A stays supported. Some orgs will not install a third-party App, GitHub
 Enterprise Server is its own project, and a user with one weird repo should not

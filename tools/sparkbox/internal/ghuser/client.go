@@ -308,24 +308,23 @@ func (c *Client) VerifyUser(ctx context.Context, token string, githubID int64) e
 	return nil
 }
 
-// Verify binds the derived grant to the immutable user and proves the scoped
-// token exposes exactly the requested repository. A broad token is refused.
-func (c *Client) Verify(ctx context.Context, token string, githubID, installationID, repoID int64) error {
+// Verify binds the derived grant to the immutable user and proves it can resolve
+// the repository GitHub was asked to scope it to. The scoped-token endpoint's
+// successful response is the authority for the exclusion of other repositories;
+// GitHub's installation repository listing describes the installation's full
+// selection and does not introspect the narrower token scope.
+func (c *Client) Verify(ctx context.Context, token string, githubID, repoID int64) error {
 	if err := c.VerifyUser(ctx, token, githubID); err != nil {
 		return err
 	}
-	var listing struct {
-		TotalCount   int `json:"total_count"`
-		Repositories []struct {
-			ID int64 `json:"id"`
-		} `json:"repositories"`
+	var repository struct {
+		ID int64 `json:"id"`
 	}
-	path := fmt.Sprintf("/user/installations/%d/repositories?per_page=100", installationID)
-	if err := c.api(ctx, path, token, &listing); err != nil {
+	if err := c.api(ctx, fmt.Sprintf("/repositories/%d", repoID), token, &repository); err != nil {
 		return err
 	}
-	if listing.TotalCount != 1 || len(listing.Repositories) != 1 || listing.Repositories[0].ID != repoID {
-		return fmt.Errorf("%w: token exposes %d repositories", ErrWrongScope, listing.TotalCount)
+	if repository.ID != repoID {
+		return fmt.Errorf("%w: github returned repository %d, want %d", ErrWrongScope, repository.ID, repoID)
 	}
 	return nil
 }

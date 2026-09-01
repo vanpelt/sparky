@@ -61,11 +61,11 @@ func TestManagerAuthorizesOneRepositoryAndRetainsTokensOnGateway(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"id":7}`)
 	})
-	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /repositories/99", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer ghu_scoped_secret" {
-			t.Errorf("repository listing Authorization = %q", got)
+			t.Errorf("repository verification Authorization = %q", got)
 		}
-		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
+		fmt.Fprint(w, `{"id":99}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -166,8 +166,8 @@ func TestManagerWebFlowUsesPKCEAndBindsStateToOwner(t *testing.T) {
 		fmt.Fprint(w, `{"token":"ghu_web_scoped","expires_at":"2026-09-01T20:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
-	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
+	mux.HandleFunc("GET /repositories/99", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":99}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -299,8 +299,8 @@ func TestManagerRefreshesBroadGrantAndRescopesBeforeReturning(t *testing.T) {
 		fmt.Fprint(w, `{"token":"ghu_refreshed_scoped","expires_at":"2026-09-01T20:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
-	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
+	mux.HandleFunc("GET /repositories/99", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":99}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -331,11 +331,11 @@ func TestManagerRefreshesBroadGrantAndRescopesBeforeReturning(t *testing.T) {
 	}
 }
 
-func TestVerifyRefusesAUserTokenThatExposesMoreThanRequestedRepo(t *testing.T) {
+func TestVerifyRefusesAUserTokenThatResolvesTheWrongRepository(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
-	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"total_count":2,"repositories":[{"id":99},{"id":100}]}`)
+	mux.HandleFunc("GET /repositories/99", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":100}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -343,7 +343,7 @@ func TestVerifyRefusesAUserTokenThatExposesMoreThanRequestedRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Verify(context.Background(), "ghu_secret", 7, 42, 99); err == nil || !errors.Is(err, ErrWrongScope) {
+	if err := client.Verify(context.Background(), "ghu_secret", 7, 99); err == nil || !errors.Is(err, ErrWrongScope) {
 		t.Fatalf("Verify error = %v, want ErrWrongScope", err)
 	}
 }
