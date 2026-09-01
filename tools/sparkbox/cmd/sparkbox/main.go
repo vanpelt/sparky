@@ -948,7 +948,7 @@ func serve(args []string) error {
 			"api", *hivemindAPI, "interval", *hivemindInterval)
 	}
 	go mgr.RunReaper(ctx, *idleBalloon, *idleTimeout, time.Minute)
-	go mgr.RunMemoryPressureController(ctx, 10*time.Second)
+	go mgr.RunMemoryPressureController(ctx, time.Minute)
 	// Reconcile egress policy periodically so VM churn (create, resume, destroy)
 	// that bypasses the console's change-time push still converges. The console
 	// also pushes on every rule/tag mutation for immediacy.

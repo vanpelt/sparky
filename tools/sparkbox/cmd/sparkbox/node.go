@@ -369,7 +369,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			"api", opts.hivemindAPI, "interval", opts.hivemindInterval)
 	}
 	go mgr.RunReaper(ctx, opts.idleBalloon, opts.idleTimeout, time.Minute)
-	go mgr.RunMemoryPressureController(ctx, 10*time.Second)
+	go mgr.RunMemoryPressureController(ctx, time.Minute)
 	// No push loop here. On a gateway that ticker is what reconciles rule
 	// changes the console did not push; on a node there is nothing local to
 	// reconcile FROM — the policy is whatever the gateway last sent — and a
