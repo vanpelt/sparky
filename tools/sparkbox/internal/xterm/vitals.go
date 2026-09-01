@@ -80,8 +80,8 @@ type vitals struct {
 	Proxy string `json:"proxy,omitempty"`
 	// ProxyPort is the guest port selected by the portless Proxy URL.
 	ProxyPort int `json:"proxy_port,omitempty"`
-	// ListeningPorts contains the supported public ports accepting TCP
-	// connections. PortsChecked makes an empty list authoritative.
+	// ListeningPorts contains supported public ports answering HTTP with a
+	// success or redirect. PortsChecked makes an empty list authoritative.
 	ListeningPorts []int `json:"listening_ports,omitempty"`
 	PortsChecked   bool  `json:"ports_checked,omitempty"`
 

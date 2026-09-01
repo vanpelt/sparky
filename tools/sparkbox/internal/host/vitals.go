@@ -15,6 +15,7 @@ package host
 import (
 	"context"
 	"net"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -42,9 +43,9 @@ type Vitals struct {
 	// below the previous one as that reset rather than a negative rate.
 	NetRxBytes *uint64
 	NetTxBytes *uint64
-	// ListeningPorts are the supported public HTTP ports that accepted a TCP
-	// connection at this reading. PortsChecked distinguishes an authoritative
-	// empty result from a node or driver that could not perform the scan.
+	// ListeningPorts are the supported public HTTP ports that answered HEAD (or
+	// a GET fallback) with success or redirect status. PortsChecked distinguishes
+	// an authoritative empty result from a node that could not perform the probe.
 	ListeningPorts []int
 	PortsChecked   bool
 }
@@ -58,7 +59,7 @@ func (v Vitals) Empty() bool {
 }
 
 const portScanTTL = 3 * time.Second
-const portDialTimeout = 150 * time.Millisecond
+const portProbeTimeout = 250 * time.Millisecond
 
 type portScanSample struct {
 	hostIP string
@@ -129,7 +130,7 @@ func (m *Manager) listeningPorts(ctx context.Context, name, hostIP string) ([]in
 	m.portScanMu.Unlock()
 
 	value, err, _ := m.portScans.Do(name, func() (any, error) {
-		ports, err := scanListeningPorts(ctx, hostIP, publicports.CommonHTTPS())
+		ports, err := probeHTTPPorts(ctx, hostIP, publicports.CommonHTTPS())
 		if err != nil {
 			return nil, err
 		}
@@ -147,20 +148,15 @@ func (m *Manager) listeningPorts(ctx context.Context, name, hostIP string) ([]in
 	return append([]int(nil), value.([]int)...), nil
 }
 
-func scanListeningPorts(ctx context.Context, hostIP string, ports []int) ([]int, error) {
-	open := make([]bool, len(ports))
+func probeHTTPPorts(ctx context.Context, hostIP string, ports []int) ([]int, error) {
+	ready := make([]bool, len(ports))
 	var wg sync.WaitGroup
 	wg.Add(len(ports))
 	for i, port := range ports {
 		i, port := i, port
 		go func() {
 			defer wg.Done()
-			conn, err := (&net.Dialer{Timeout: portDialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(hostIP, strconv.Itoa(port)))
-			if err != nil {
-				return
-			}
-			open[i] = true
-			conn.Close() //nolint:errcheck
+			ready[i] = probeHTTPPort(ctx, hostIP, port)
 		}()
 	}
 	wg.Wait()
@@ -169,9 +165,47 @@ func scanListeningPorts(ctx context.Context, hostIP string, ports []int) ([]int,
 	}
 	listening := make([]int, 0, len(ports))
 	for i, port := range ports {
-		if open[i] {
+		if ready[i] {
 			listening = append(listening, port)
 		}
 	}
 	return listening, nil
+}
+
+func probeHTTPPort(ctx context.Context, hostIP string, port int) bool {
+	ctx, cancel := context.WithTimeout(ctx, portProbeTimeout)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: portProbeTimeout}
+	transport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
+		DisableKeepAlives:     true,
+		ResponseHeaderTimeout: portProbeTimeout,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	url := "http://" + net.JoinHostPort(hostIP, strconv.Itoa(port)) + "/"
+	status, ok := probeHTTPMethod(ctx, client, http.MethodHead, url)
+	if ok && (status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented) {
+		status, ok = probeHTTPMethod(ctx, client, http.MethodGet, url)
+	}
+	return ok && status >= http.StatusOK && status < http.StatusBadRequest
+}
+
+func probeHTTPMethod(ctx context.Context, client *http.Client, method, url string) (int, bool) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return 0, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	resp.Body.Close() //nolint:errcheck
+	return resp.StatusCode, true
 }

@@ -100,9 +100,9 @@ Two limits that are not bugs but will bite:
   controller receives no devices. There are no raw device `hostPath` volumes.
 - A public `LoadBalancer` Service selecting only the gateway on SSH port 22,
   HTTP redirect port 80, HTTPS port 443, and common HTTPS development ports
-  3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8443, 8501,
-  8888, and 9000, plus an internal ClusterIP Service for the authenticated
-  fleet link.
+  3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8081, 8082,
+  8083, 8123, 8443, 8501, 8888, 9000, and 16686, plus an internal ClusterIP
+  Service for the authenticated fleet link.
 - Default-deny ingress, with only the gateway's SSH/fleet and HTTPS ports
   admitted. The node has no admitted ingress. A Cilium egress policy permits
   the VM node to reach only public IP space, cluster DNS, and the internal
@@ -196,12 +196,13 @@ tools/sparkbox/deploy/kubernetes/public-port.sh add 6454
 tools/sparkbox/deploy/kubernetes/public-port.sh list
 ```
 
-Ports 3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8443,
-8501, 8888, and 9000 are declared in `service.yaml` and therefore survive an
-ordinary manifest re-apply. Port 80 feeds the gateway's cleartext-to-HTTPS
-redirect. Use the helper for an additional experimental port such as 6454.
-Port 8081 is intentionally absent: it is the gateway's internal listener and
-is interpreted as the route's default rather than as guest port 8081.
+Ports 3000, 3001, 4000, 4200, 5000, 5173, 6006, 7860, 8000, 8080, 8081, 8082,
+8083, 8123, 8443, 8501, 8888, 9000, and 16686 are declared in `service.yaml`
+and therefore survive an ordinary manifest re-apply. Port 80 feeds the
+gateway's cleartext-to-HTTPS redirect. Use the helper for an additional
+experimental port such as 6454. Public 8081 shares the gateway's internal 8081
+listener; its explicit HTTP authority selects guest port 8081, while an
+unqualified internal request still selects the sandbox's default route.
 
 After the load balancer finishes programming the change, both
 `https://foo.<domain>:6454` and `https://bar.<domain>:6454` reach the gateway.

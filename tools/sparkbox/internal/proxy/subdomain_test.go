@@ -32,6 +32,17 @@ func TestTargetPortUsesNonDefaultHTTPSAuthority(t *testing.T) {
 	}
 }
 
+func TestTargetPortAllowsPublicAuthorityMatchingInternalListener(t *testing.T) {
+	s := testServer()
+	s.listenPort = 8081
+	req := httptest.NewRequest(http.MethodGet, "https://foo.hivemind.tools/", nil)
+	req.Host = "foo.hivemind.tools:8081"
+
+	if got := s.targetPort(req, routes.Route{Port: routes.DefaultPort}); got != 8081 {
+		t.Fatalf("targetPort = %d, want public authority port 8081", got)
+	}
+}
+
 func TestSubdomainOf(t *testing.T) {
 	s := testServer()
 	cases := []struct {

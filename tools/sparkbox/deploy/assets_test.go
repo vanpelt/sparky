@@ -1491,9 +1491,6 @@ func TestCKSServicePreloadsCommonHTTPSPorts(t *testing.T) {
 	if !strings.Contains(got, "name: http\n") || !strings.Contains(got, "port: 80\n") {
 		t.Fatal("CKS Service missing public HTTP redirect port 80")
 	}
-	if strings.Contains(got, "name: https-8081") {
-		t.Fatal("CKS Service must not advertise internal gateway listener port 8081")
-	}
 	wantMappings := len(publicports.CommonHTTPS()) + 2 // HTTP redirect and default HTTPS.
 	if strings.Count(got, "targetPort: https") != wantMappings {
 		t.Fatalf("HTTP(S) mappings = %d, want %d (ports 80/443 plus common HTTPS ports)",

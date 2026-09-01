@@ -75,6 +75,22 @@ spec:
       protocol: TCP
       port: 8080
       targetPort: https
+    - name: https-8081
+      protocol: TCP
+      port: 8081
+      targetPort: https
+    - name: https-8082
+      protocol: TCP
+      port: 8082
+      targetPort: https
+    - name: https-8083
+      protocol: TCP
+      port: 8083
+      targetPort: https
+    - name: https-8123
+      protocol: TCP
+      port: 8123
+      targetPort: https
     - name: https-8443
       protocol: TCP
       port: 8443
@@ -90,4 +106,8 @@ spec:
     - name: https-9000
       protocol: TCP
       port: 9000
+      targetPort: https
+    - name: https-16686
+      protocol: TCP
+      port: 16686
       targetPort: https

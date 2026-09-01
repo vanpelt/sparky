@@ -693,14 +693,17 @@ func stripSessionCookie(lines []string) (kept []string, changed bool) {
 // the pre-DNAT port recovered below TLS (authoritative when iptables REDIRECT
 // funnelled an any-port URL in), then an explicit port in the Host header
 // (covers direct binds and non-Linux dev), then the route's configured port.
-// The edge's own listen port is ignored — dialing the edge directly means "the
-// default web route", not "forward to guest:443".
+// An original destination equal to the edge's listen port is ignored: a local
+// direct dial names the default route. An explicit Host/:authority port remains
+// authoritative even when it happens to equal the internal listen port. That
+// distinction lets a load balancer expose guest :8081 while targeting the
+// gateway's own :8081 listener.
 func (s *Server) targetPort(r *http.Request, route routes.Route) int {
 	if p, ok := r.Context().Value(portKey).(int); ok && p > 0 && p != s.listenPort {
 		return p
 	}
 	if _, portStr, err := net.SplitHostPort(r.Host); err == nil {
-		if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p != s.listenPort {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
 			return p
 		}
 	}

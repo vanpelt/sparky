@@ -878,7 +878,7 @@
         e.preventDefault();
         closeMenu(false);
         $("proxy-msg").textContent = "Port " + proxyPort +
-          " is not currently accepting connections. Start a service on this port to gain access via the proxy.";
+          " did not return a successful HTTP response. Start an HTTP service on this port to gain access via the proxy.";
         $("proxy-dlg").showModal();
         $("proxy-ok").focus();
         return;
@@ -975,7 +975,7 @@
       proxyListening = ports.includes(proxyPort);
       const defaultSub = $("proxy-host");
       if (proxyChecked && !proxyListening) {
-        defaultSub.textContent = "Port " + proxyPort + " · not listening";
+        defaultSub.textContent = "Port " + proxyPort + " · not HTTP-ready";
       } else {
         try { defaultSub.textContent = new URL(v.proxy).host + " · port " + proxyPort; }
         catch (e) { defaultSub.textContent = "Default HTTPS endpoint"; }

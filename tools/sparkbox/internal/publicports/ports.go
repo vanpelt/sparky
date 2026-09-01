@@ -15,7 +15,8 @@ import (
 // and forwards HTTP; it is not a generic TCP proxy.
 var commonHTTPS = [...]int{
 	3000, 3001, 4000, 4200, 5000, 5173, 6006,
-	7860, 8000, 8080, 8443, 8501, 8888, 9000,
+	7860, 8000, 8080, 8081, 8082, 8083, 8123, 8443,
+	8501, 8888, 9000, 16686,
 }
 
 // CommonHTTPS returns a copy so callers cannot mutate the process-wide source
