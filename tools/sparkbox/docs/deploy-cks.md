@@ -120,6 +120,18 @@ Two limits that are not bugs but will bite:
 
   then paste the same value into the App's Settings → Webhook → Secret. See
   `docs/github-webhooks.md`.
+- Optionally `sparkbox-github-app`, a Secret whose `client-secret` key holds
+  the GitHub App OAuth client secret. This enables per-repository user
+  authorization from the Repos tab; without it, VM Device Flow and bot-token
+  fallback continue normally. Create it with:
+
+  ```sh
+  kubectl -n sparkbox-poc create secret generic sparkbox-github-app \
+    --from-literal=client-secret='<secret copied from the GitHub App settings>'
+  ```
+
+  Register `https://my.<allocated-domain>/github/repo/callback` as an App
+  callback URL as described in `docs/github-app-setup.md`.
 - A separately provisioned `sparkbox-identity` Secret containing the stable
   gateway, OIDC, and node-control identity, mounted only by the gateway. The
   node receives a separate Secret containing only the gateway's public host-key

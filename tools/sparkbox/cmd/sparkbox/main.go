@@ -418,8 +418,9 @@ func serve(args []string) error {
 	}
 	defer secretsStore.Close()
 
-	// User-to-server grants use the GitHub App's public client id, but never its
-	// private key. The gateway retains and encrypts both rotating token halves;
+	// User-to-server grants use the GitHub App's public client id. The optional
+	// OAuth client secret enables the browser web flow; the VM device flow does
+	// not need it. The gateway retains and encrypts both rotating token halves;
 	// a guest sees only the public device code and obtains a credential through
 	// the same per-request metadata path as an installation token.
 	var ghUserManager *ghuser.Manager
@@ -430,12 +431,14 @@ func serve(args []string) error {
 			return fmt.Errorf("github user grant store: %w", openErr)
 		}
 		defer grantStore.Close()
-		client, clientErr := ghuser.NewClient(ghuser.Config{ClientID: *githubAppClientID})
+		client, clientErr := ghuser.NewClient(ghuser.Config{
+			ClientID: *githubAppClientID, ClientSecret: os.Getenv("SPARKBOX_GITHUB_APP_CLIENT_SECRET"),
+		})
 		if clientErr != nil {
 			return fmt.Errorf("github user authorization: %w", clientErr)
 		}
 		ghUserManager = ghuser.NewManager(client, grantStore, log)
-		log.Info("github per-repository user authorization enabled")
+		log.Info("github per-repository user authorization enabled", "browser_flow", ghUserManager.WebEnabled())
 	}
 
 	// Network rule-sets (per-tag egress allowlists) live in the same DB, on their
@@ -1202,6 +1205,7 @@ func serve(args []string) error {
 			// repo panel still attaches and detaches, and every row's install
 			// state reads as unknown instead of claiming one.
 			uc.SetGitHubApp(ghApp)
+			uc.SetGitHubUserAuth(ghUserManager)
 			// The Snapshots panel's bound-tags column, read-only: the console
 			// shows which tags boot from which snapshot and cannot change it.
 			uc.SetTemplateTags(templateStore)

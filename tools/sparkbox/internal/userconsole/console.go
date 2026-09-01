@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +34,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghuser"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
@@ -40,6 +42,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
@@ -168,6 +171,10 @@ type Handler struct {
 	// Set by SetGitHubApp, not by New, because it arrives from a fleet secret
 	// that may be absent.
 	app *ghapp.App
+	// userAuth is the encrypted per-repository grant manager shared with the
+	// VM device flow. A client secret enables its browser OAuth front door;
+	// without one, the VM command still works and this panel shows bot fallback.
+	userAuth *ghuser.Manager
 	// appMu guards the probe cache below.
 	appMu sync.Mutex
 	// appSeen remembers what the App last said about one account's attachment,
@@ -266,6 +273,11 @@ func (h *Handler) SetVitals(v webui.VitalsReader) { h.vitals = v }
 // serve this console — it simply stops claiming to know what github.com thinks.
 func (h *Handler) SetGitHubApp(a *ghapp.App) { h.app = a }
 
+// SetGitHubUserAuth enables the Repos panel's browser authorization controls.
+// The manager remains optional because device-only and bot-only deployments
+// are both supported configurations.
+func (h *Handler) SetGitHubUserAuth(a *ghuser.Manager) { h.userAuth = a }
+
 // SetTemplateTags gives the Snapshots panel its Tags column. It is a seam for
 // the same reason SetGitHubApp is: a host with no binding store still serves
 // this console, still lists snapshots and still forks them — it simply has no
@@ -309,8 +321,10 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("PUT /api/network-rules/{name}", mutate(h.putNetRule))
 	mux.Handle("DELETE /api/network-rules/{name}", mutate(h.deleteNetRule))
 	mux.Handle("GET /api/repos", require(h.listRepos))
+	mux.Handle("POST /api/repos/{slug}/authorize", mutate(h.authorizeRepo))
 	mux.Handle("PUT /api/repos/{slug}", mutate(h.putRepo))
 	mux.Handle("DELETE /api/repos/{slug}", mutate(h.deleteRepo))
+	mux.Handle("GET /github/repo/callback", require(h.githubRepoCallback))
 	mux.Handle("GET /api/machines/{name}/bandwidth", require(h.bandwidth))
 	mux.Handle("GET /api/favicon", require(h.favicon))
 	mux.HandleFunc("GET /", h.index)
@@ -1127,6 +1141,12 @@ type repoView struct {
 	// when it would help, so the page never renders a call to action next to a
 	// repository that is already reachable.
 	InstallURL string `json:"install_url,omitempty"`
+	// UserAuth says whether GitHub operations use the owner or the App bot.
+	// UserAuthEnabled controls whether the browser can change that choice; the
+	// VM device-flow command may still be available when it is false.
+	UserAuth        string `json:"user_auth"`
+	UserAuthEnabled bool   `json:"user_auth_enabled,omitempty"`
+	GitHubLogin     string `json:"github_login,omitempty"`
 }
 
 // listRepos returns the session's repo attachments in full, each carrying the
@@ -1147,15 +1167,141 @@ func (h *Handler) listRepos(w http.ResponseWriter, r *http.Request) {
 	// than null: the SPA's Array.isArray guard renders null as an empty table,
 	// with no error anywhere to explain it.
 	views := make([]repoView, 0, len(list))
+	var u users.User
+	var userErr error
+	if h.accounts != nil {
+		u, userErr = h.accounts.Get(handle)
+	} else {
+		userErr = errors.New("accounts are not enabled")
+	}
+	strongUser := userErr == nil && u.Active() && u.GitHubVerifiedAt != nil && users.StrongGitHubLink(u.GitHubVia) && u.GitHubID > 0
 	for _, rp := range list {
 		state, note := h.appState(handle, rp)
-		v := repoView{Repo: rp, App: state, AppNote: note}
+		v := repoView{Repo: rp, App: state, AppNote: note, UserAuth: "bot"}
+		if strongUser {
+			v.GitHubLogin = u.GitHubLogin
+			v.UserAuthEnabled = rp.Access == repos.AccessWrite && state == appReady && h.userAuth != nil && h.userAuth.WebEnabled()
+			if rp.Access == repos.AccessWrite && state == appReady && h.userAuth != nil && h.userAuth.Authorized(handle, rp.Slug, u.GitHubID) {
+				v.UserAuth = "user"
+			}
+		}
 		if state == appMissing {
 			v.InstallURL = h.app.InstallURL()
 		}
 		views = append(views, v)
 	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+const githubWebAuthorizationBudget = 12 * time.Second
+
+// authorizeRepo starts a browser OAuth flow for one write attachment. The
+// repository is resolved and authorized before GitHub sees the browser, so a
+// typed slug cannot turn the endpoint into an installation oracle.
+func (h *Handler) authorizeRepo(w http.ResponseWriter, r *http.Request) {
+	if h.userAuth == nil || !h.userAuth.WebEnabled() {
+		writeErr(w, http.StatusNotImplemented, "browser GitHub authorization is not enabled on this host")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), githubWebAuthorizationBudget)
+	defer cancel()
+	subject, err := h.repoAuthorizationSubject(ctx, handleFrom(r), r.PathValue("slug"))
+	if err != nil {
+		writeErr(w, repoAuthorizationStatus(err), err.Error())
+		return
+	}
+	location, err := h.userAuth.StartWeb(subject, h.origin+"/github/repo/callback")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "could not start GitHub authorization: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": location})
+}
+
+func (h *Handler) githubRepoCallback(w http.ResponseWriter, r *http.Request) {
+	if h.userAuth == nil || !h.userAuth.WebEnabled() {
+		writeErr(w, http.StatusNotImplemented, "browser GitHub authorization is not enabled on this host")
+		return
+	}
+	q := r.URL.Query()
+	if q.Get("error") != "" {
+		h.userAuth.CancelWeb(handleFrom(r), q.Get("state"))
+		h.redirectRepoAuthorization(w, r, "declined", "")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), githubWebAuthorizationBudget)
+	defer cancel()
+	status, err := h.userAuth.FinishWeb(ctx, handleFrom(r), q.Get("state"), q.Get("code"))
+	if err != nil {
+		h.log.Warn("github browser repository authorization failed", "handle", handleFrom(r), "err", err)
+		h.redirectRepoAuthorization(w, r, "failed", "")
+		return
+	}
+	h.redirectRepoAuthorization(w, r, "authorized", status.Slug)
+}
+
+func (h *Handler) redirectRepoAuthorization(w http.ResponseWriter, r *http.Request, state, slug string) {
+	q := url.Values{"github": {state}}
+	if slug != "" {
+		q.Set("repo", slug)
+	}
+	http.Redirect(w, r, "/?"+q.Encode()+"#repos", http.StatusSeeOther)
+}
+
+func (h *Handler) repoAuthorizationSubject(ctx context.Context, handle, slug string) (ghuser.Subject, error) {
+	if h.repos == nil || h.app == nil || h.accounts == nil {
+		return ghuser.Subject{}, errors.New("repositories are not enabled on this host")
+	}
+	u, err := h.accounts.Get(handle)
+	if err != nil || !u.Active() || u.GitHubVerifiedAt == nil || !users.StrongGitHubLink(u.GitHubVia) || u.GitHubID <= 0 {
+		return ghuser.Subject{}, errors.New("this account has no verified GitHub link")
+	}
+	list, err := h.repos.ListRepos(handle)
+	if err != nil {
+		return ghuser.Subject{}, err
+	}
+	var entry repos.Repo
+	for _, candidate := range list {
+		if strings.EqualFold(candidate.Slug, slug) {
+			entry = candidate
+			break
+		}
+	}
+	if entry.Slug == "" {
+		return ghuser.Subject{}, repos.ErrNoSuchRepo
+	}
+	if entry.Access != repos.AccessWrite {
+		return ghuser.Subject{}, errors.New("user authorization is only available for read + push attachments")
+	}
+	owner, name, ok := repos.SplitSlug(entry.Slug)
+	if !ok {
+		return ghuser.Subject{}, fmt.Errorf("invalid stored slug %q", entry.Slug)
+	}
+	inst, err := h.app.InstallationFor(ctx, owner, name)
+	if err != nil {
+		return ghuser.Subject{}, err
+	}
+	if err := h.app.Authorize(ctx, inst, u.GitHubID, u.GitHubLogin); err != nil {
+		return ghuser.Subject{}, err
+	}
+	repoID, err := h.app.RepositoryID(ctx, inst, owner, name)
+	if err != nil {
+		return ghuser.Subject{}, err
+	}
+	return ghuser.Subject{Owner: handle, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID, Slug: entry.Slug}, nil
+}
+
+func repoAuthorizationStatus(err error) int {
+	switch {
+	case errors.Is(err, repos.ErrNoSuchRepo), errors.Is(err, ghapp.ErrNotInstalled):
+		return http.StatusNotFound
+	case errors.Is(err, ghapp.ErrUpstream):
+		return http.StatusBadGateway
+	case errors.Is(err, ghapp.ErrNotConfigured):
+		return http.StatusNotImplemented
+	default:
+		return http.StatusForbidden
+	}
 }
 
 // appState reports what the App last said about one of handle's attachments,

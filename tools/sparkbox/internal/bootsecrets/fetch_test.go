@@ -65,15 +65,16 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 	const controlKeyPEM = "-----BEGIN PRIVATE KEY-----\nCONTROL\n-----END PRIVATE KEY-----\n"
 	const appKeyPEM = "-----BEGIN RSA PRIVATE KEY-----\nAPP\nKEY\n-----END RSA PRIVATE KEY-----\n"
 	srv := fakeSM(t, map[string]struct{ payload, typ string }{
-		"/sparkbox/fleet/gateway-host-key":     sshSecret(hostPEM),
-		"/sparkbox/fleet/gateway-upstream-key": sshSecret(upstreamPEM),
-		"/sparkbox/fleet/oidc-signing-key":     {oidcPEM, "opaque"},
-		"/sparkbox/fleet/node-control-ca-cert": {caCertPEM, "opaque"},
-		"/sparkbox/fleet/node-control-ca-key":  {caKeyPEM, "opaque"},
-		"/sparkbox/fleet/gateway-control-key":  {controlKeyPEM, "opaque"},
-		"/sparkbox/fleet/github-app-key":       {appKeyPEM, "opaque"},
-		"/sparkbox/fleet/cloudflare-api-token": {"cf-token", "opaque"},
-		"/sparkbox/fleet/console-password":     {`p@ss "with" quotes`, "opaque"},
+		"/sparkbox/fleet/gateway-host-key":         sshSecret(hostPEM),
+		"/sparkbox/fleet/gateway-upstream-key":     sshSecret(upstreamPEM),
+		"/sparkbox/fleet/oidc-signing-key":         {oidcPEM, "opaque"},
+		"/sparkbox/fleet/node-control-ca-cert":     {caCertPEM, "opaque"},
+		"/sparkbox/fleet/node-control-ca-key":      {caKeyPEM, "opaque"},
+		"/sparkbox/fleet/gateway-control-key":      {controlKeyPEM, "opaque"},
+		"/sparkbox/fleet/github-app-key":           {appKeyPEM, "opaque"},
+		"/sparkbox/fleet/github-app-client-secret": {"github-client-secret", "opaque"},
+		"/sparkbox/fleet/cloudflare-api-token":     {"cf-token", "opaque"},
+		"/sparkbox/fleet/console-password":         {`p@ss "with" quotes`, "opaque"},
 	})
 
 	dir := t.TempDir()
@@ -119,6 +120,9 @@ func TestFetchWritesKeysAndEnv(t *testing.T) {
 	}
 	if !strings.Contains(env, `SPARKBOX_CONSOLE_PASSWORD="p@ss \"with\" quotes"`) {
 		t.Errorf("env did not escape quotes in the password:\n%s", env)
+	}
+	if !strings.Contains(env, `SPARKBOX_GITHUB_APP_CLIENT_SECRET="github-client-secret"`) {
+		t.Errorf("env missing github app client secret:\n%s", env)
 	}
 	if fi, _ := os.Stat(c.EnvOut); fi.Mode().Perm() != 0o600 {
 		t.Errorf("env perms = %o, want 600", fi.Mode().Perm())

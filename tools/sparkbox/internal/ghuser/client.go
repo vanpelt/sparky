@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	defaultCodeURL  = "https://github.com/login/device/code"
-	defaultTokenURL = "https://github.com/login/oauth/access_token"
-	defaultAPIURL   = "https://api.github.com"
+	defaultCodeURL      = "https://github.com/login/device/code"
+	defaultAuthorizeURL = "https://github.com/login/oauth/authorize"
+	defaultTokenURL     = "https://github.com/login/oauth/access_token"
+	defaultAPIURL       = "https://api.github.com"
 )
 
 var (
@@ -34,34 +35,41 @@ var (
 )
 
 type Config struct {
-	ClientID   string
-	HTTPClient *http.Client
-	CodeURL    string
-	TokenURL   string
-	APIURL     string
-	Now        func() time.Time
+	ClientID     string
+	ClientSecret string
+	HTTPClient   *http.Client
+	CodeURL      string
+	AuthorizeURL string
+	TokenURL     string
+	APIURL       string
+	Now          func() time.Time
 }
 
 type Client struct {
-	clientID string
-	hc       *http.Client
-	codeURL  string
-	tokenURL string
-	apiURL   string
-	now      func() time.Time
+	clientID     string
+	clientSecret string
+	hc           *http.Client
+	codeURL      string
+	authorizeURL string
+	tokenURL     string
+	apiURL       string
+	now          func() time.Time
 }
 
 func NewClient(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		return nil, errors.New("github user authorization needs an app client id")
 	}
-	c := &Client{clientID: strings.TrimSpace(cfg.ClientID), hc: cfg.HTTPClient,
-		codeURL: cfg.CodeURL, tokenURL: cfg.TokenURL, apiURL: strings.TrimSuffix(cfg.APIURL, "/"), now: cfg.Now}
+	c := &Client{clientID: strings.TrimSpace(cfg.ClientID), clientSecret: strings.TrimSpace(cfg.ClientSecret), hc: cfg.HTTPClient,
+		codeURL: cfg.CodeURL, authorizeURL: cfg.AuthorizeURL, tokenURL: cfg.TokenURL, apiURL: strings.TrimSuffix(cfg.APIURL, "/"), now: cfg.Now}
 	if c.hc == nil {
 		c.hc = &http.Client{Timeout: 30 * time.Second}
 	}
 	if c.codeURL == "" {
 		c.codeURL = defaultCodeURL
+	}
+	if c.authorizeURL == "" {
+		c.authorizeURL = defaultAuthorizeURL
 	}
 	if c.tokenURL == "" {
 		c.tokenURL = defaultTokenURL
@@ -73,6 +81,51 @@ func NewClient(cfg Config) (*Client, error) {
 		c.now = time.Now
 	}
 	return c, nil
+}
+
+func (c *Client) WebEnabled() bool { return c.clientSecret != "" }
+
+func (c *Client) AuthorizationURL(redirectURI, state, challenge string) (string, error) {
+	if !c.WebEnabled() {
+		return "", errors.New("github web authorization needs an app client secret")
+	}
+	if redirectURI == "" || state == "" || challenge == "" {
+		return "", errors.New("incomplete github web authorization request")
+	}
+	u, err := url.Parse(c.authorizeURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("client_id", c.clientID)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("state", state)
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI, verifier string, repoID int64) (Token, error) {
+	if !c.WebEnabled() {
+		return Token{}, errors.New("github web authorization needs an app client secret")
+	}
+	if code == "" || redirectURI == "" || verifier == "" || repoID <= 0 {
+		return Token{}, errors.New("incomplete github web authorization response")
+	}
+	var out tokenResponse
+	err := c.form(ctx, c.tokenURL, url.Values{
+		"client_id": {c.clientID}, "client_secret": {c.clientSecret}, "code": {code},
+		"redirect_uri": {redirectURI}, "code_verifier": {verifier},
+		"repository_id": {strconv.FormatInt(repoID, 10)},
+	}, &out)
+	if err != nil {
+		return Token{}, err
+	}
+	if out.Error != "" {
+		return Token{}, oauthError(out.Error, out.Description)
+	}
+	return c.token(out)
 }
 
 type DeviceCode struct {
@@ -151,9 +204,17 @@ func (c *Client) Refresh(ctx context.Context, refresh string) (Token, error) {
 		return Token{}, ErrBadRefresh
 	}
 	var out tokenResponse
-	err := c.form(ctx, c.tokenURL, url.Values{
+	values := url.Values{
 		"client_id": {c.clientID}, "grant_type": {"refresh_token"}, "refresh_token": {refresh},
-	}, &out)
+	}
+	// GitHub requires the secret when refreshing a token issued by the web
+	// application flow. It is accepted for device-flow refreshes too, so a
+	// gateway can refresh grants from either front door without persisting
+	// which OAuth ceremony created them.
+	if c.clientSecret != "" {
+		values.Set("client_secret", c.clientSecret)
+	}
+	err := c.form(ctx, c.tokenURL, values, &out)
 	if err != nil {
 		return Token{}, err
 	}

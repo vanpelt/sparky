@@ -18,6 +18,7 @@
 #   node-control-ca-key   $SECRETS_DIR/node_ca_key.pem           (generated if absent)
 #   gateway-control-key   $SECRETS_DIR/gateway_control_key.pem   (generated if absent)
 #   github-app-key        $SECRETS_DIR/github_app_key.pem        (NEVER generated — GitHub issues it)
+#   github-app-client-secret $SECRETS_DIR/github_app_client_secret (NEVER generated — GitHub issues it)
 #   github-webhook-secret $SECRETS_DIR/github_webhook_secret     (generated if absent — we pick it)
 #   cloudflare-api-token  $SECRETS_DIR/.env CLOUDFLARE_API_TOKEN (optional)
 #   console-password      $CONSOLE_PASSWORD or generated         (optional)
@@ -41,6 +42,7 @@ NODE_CA_CERT=${NODE_CA_CERT:-$SECRETS_DIR/node_ca_cert.pem}
 NODE_CA_KEY=${NODE_CA_KEY:-$SECRETS_DIR/node_ca_key.pem}
 GATEWAY_CONTROL_KEY=${GATEWAY_CONTROL_KEY:-$SECRETS_DIR/gateway_control_key.pem}
 GITHUB_APP_KEY=${GITHUB_APP_KEY:-$SECRETS_DIR/github_app_key.pem}
+GITHUB_APP_CLIENT_SECRET_FILE=${GITHUB_APP_CLIENT_SECRET_FILE:-$SECRETS_DIR/github_app_client_secret}
 GITHUB_WEBHOOK_SECRET_FILE=${GITHUB_WEBHOOK_SECRET_FILE:-$SECRETS_DIR/github_webhook_secret}
 
 # name:file:required — the manifest, mirroring internal/bootsecrets.
@@ -52,6 +54,7 @@ SECRETS=(
   "node-control-ca-key:$NODE_CA_KEY:0"
   "gateway-control-key:$GATEWAY_CONTROL_KEY:0"
   "github-app-key:$GITHUB_APP_KEY:0"
+  "github-app-client-secret:$GITHUB_APP_CLIENT_SECRET_FILE:0"
   "github-webhook-secret:$GITHUB_WEBHOOK_SECRET_FILE:0"
   "cloudflare-api-token:$SECRETS_DIR/cloudflare_api_token:0"
   "console-password:$SECRETS_DIR/console_password:0"

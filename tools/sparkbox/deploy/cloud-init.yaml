@@ -6,8 +6,8 @@
 # still expects the old bucket layout; the current release path is GitHub
 # Releases via `sparkbox setup` (see .github/workflows/build-artifacts.yml).
 #
-# Fleet secrets NO LONGER ride in this user-data. The three private keys (gateway
-# host + upstream, OIDC signing) and the two passwords (console, Cloudflare) live
+# Fleet secrets NO LONGER ride in this user-data. The fleet PEMs and string
+# credentials (including GitHub App credentials when configured) live
 # in Scaleway Secret Manager under /sparkbox/fleet; sparkbox-secrets.service fetches
 # them into tmpfs (/run/sparkbox) on every boot, before sparkbox starts. The ONLY
 # secret still in user-data is the host's Secret Manager API key (/etc/sparkbox/

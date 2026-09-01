@@ -3,6 +3,8 @@ package ghuser
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -114,6 +116,96 @@ func TestManagerMissingGrantIsBotFallback(t *testing.T) {
 	})
 	if err != nil || ok {
 		t.Fatalf("missing grant = (ok %v, err %v), want bot fallback", ok, err)
+	}
+}
+
+func TestManagerWebFlowUsesPKCEAndBindsStateToOwner(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	var authorizeQuery url.Values
+	var tokenForm url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		tokenForm, _ = url.ParseQuery(r.Form.Encode())
+		fmt.Fprint(w, `{"access_token":"ghu_web_secret","expires_in":28800,"refresh_token":"ghr_web_secret","refresh_token_expires_in":15897600}`)
+	})
+	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
+	mux.HandleFunc("GET /user/installations/42/repositories", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"total_count":1,"repositories":[{"id":99}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client, err := NewClient(Config{
+		ClientID: "Iv23liTEST", ClientSecret: "client-secret", HTTPClient: srv.Client(),
+		AuthorizeURL: srv.URL + "/login/oauth/authorize", TokenURL: srv.URL + "/login/oauth/access_token",
+		APIURL: srv.URL, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "grants.db"), DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	mgr := NewManager(client, store, nil)
+	subject := Subject{Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind"}
+	redirectURI := "https://my.example.test/github/repo/callback"
+	location, err := mgr.StartWeb(subject, redirectURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorize, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizeQuery = authorize.Query()
+	if authorizeQuery.Get("client_id") != "Iv23liTEST" || authorizeQuery.Get("redirect_uri") != redirectURI ||
+		authorizeQuery.Get("state") == "" || authorizeQuery.Get("code_challenge") == "" ||
+		authorizeQuery.Get("code_challenge_method") != "S256" {
+		t.Fatalf("authorize query = %v", authorizeQuery)
+	}
+	state := authorizeQuery.Get("state")
+	if _, err := mgr.FinishWeb(context.Background(), "mallory", state, "oauth-code"); !errors.Is(err, ErrExpired) {
+		t.Fatalf("cross-owner callback error = %v, want ErrExpired", err)
+	}
+	// The mismatched callback consumed the one-time state, so begin again.
+	location, err = mgr.StartWeb(subject, redirectURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorize, _ = url.Parse(location)
+	status, err := mgr.FinishWeb(context.Background(), "alice", authorize.Query().Get("state"), "oauth-code")
+	if err != nil || status.State != "authorized" {
+		t.Fatalf("FinishWeb = (%+v, %v)", status, err)
+	}
+	if tokenForm.Get("client_secret") != "client-secret" || tokenForm.Get("code") != "oauth-code" ||
+		tokenForm.Get("redirect_uri") != redirectURI || tokenForm.Get("repository_id") != "99" ||
+		tokenForm.Get("code_verifier") == "" {
+		t.Fatalf("token exchange form = %v", tokenForm)
+	}
+	digest := sha256.Sum256([]byte(tokenForm.Get("code_verifier")))
+	wantChallenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	if got := authorize.Query().Get("code_challenge"); got != wantChallenge {
+		t.Fatalf("PKCE challenge = %q, want %q", got, wantChallenge)
+	}
+	if !mgr.Authorized("alice", "WandB/HiveMind", 7) {
+		t.Fatal("stored web grant was not reported as authorized")
+	}
+	if _, err := mgr.FinishWeb(context.Background(), "alice", authorize.Query().Get("state"), "oauth-code"); !errors.Is(err, ErrExpired) {
+		t.Fatalf("replayed callback error = %v, want ErrExpired", err)
+	}
+	location, err = mgr.StartWeb(subject, redirectURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorize, _ = url.Parse(location)
+	state = authorize.Query().Get("state")
+	mgr.CancelWeb("alice", state)
+	if _, err := mgr.FinishWeb(context.Background(), "alice", state, "oauth-code"); !errors.Is(err, ErrExpired) {
+		t.Fatalf("declined callback state error = %v, want ErrExpired", err)
 	}
 }
 

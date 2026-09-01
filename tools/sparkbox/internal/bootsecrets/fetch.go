@@ -67,6 +67,9 @@ var manifest = []struct {
 	// but newlines. It also belongs on disk beside the other keys, because
 	// ghapp.LoadKeyIfPresent reads it from KeyDir by name.
 	{"github-app-key", opaquePEM, "github_app_key.pem", false},
+	// The client secret is needed only by the browser OAuth flow. Device flow
+	// inside a VM and bot installation credentials continue without it.
+	{"github-app-client-secret", envVar, "SPARKBOX_GITHUB_APP_CLIENT_SECRET", false},
 	// envVar, not opaquePEM: the App's webhook secret is a random string an
 	// operator pastes into two places, with no structure and no newlines, so it
 	// travels the same way the console password does. Optional for the same

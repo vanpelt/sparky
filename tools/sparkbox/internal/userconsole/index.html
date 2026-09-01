@@ -573,7 +573,7 @@
         <div class="table-scroll">
           <table>
             <thead>
-              <tr><th>Repository</th><th>Tags</th><th>Access</th><th>GitHub App</th><th>Attached</th><th></th></tr>
+              <tr><th>Repository</th><th>Tags</th><th>Access</th><th>GitHub</th><th>Attached</th><th></th></tr>
             </thead>
             <tbody id="repo-rows"></tbody>
           </table>
@@ -1724,6 +1724,16 @@
     return APP_STATE[r.app] || APP_STATE.off;
   }
 
+  function userAuthCell(r) {
+    if (r.user_auth === "user") {
+      return '<span class="app-ok">you' + (r.github_login ? ' (@' + esc(r.github_login) + ')' : '') + '</span>';
+    }
+    const fallback = '<span class="muted">bot</span>';
+    if (!r.user_auth_enabled) return fallback;
+    return fallback + '<div><button class="btn-outline btn-sm" data-authrepo="' +
+      esc(r.slug) + '">Authorize as me</button></div>';
+  }
+
   function renderRepos(list) {
     const rows = $("repo-rows");
     rows.innerHTML = "";
@@ -1738,7 +1748,7 @@
         '<td class="name mono">' + esc(r.slug) + ref + where + "</td>" +
         '<td><div class="chips">' + tags + "</div></td>" +
         "<td>" + (r.access === "write" ? "read + push" : "read-only") + "</td>" +
-        "<td>" + appCell(r) + "</td>" +
+        "<td>" + appCell(r) + '<div>' + userAuthCell(r) + "</div></td>" +
         '<td class="age">' + rel(r.created_at) + "</td>" +
         '<td class="actions">' +
           '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Update</button> ' +
@@ -1767,6 +1777,18 @@
           await api("/api/repos/" + encodeURIComponent(slug), { method: "DELETE" });
           toast("detached " + slug);
         });
+      }));
+    rows.querySelectorAll("button[data-authrepo]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const slug = btn.dataset.authrepo;
+        btn.disabled = true;
+        try {
+          const started = await api("/api/repos/" + encodeURIComponent(slug) + "/authorize", { method: "POST" });
+          window.location.assign(started.url);
+        } catch (e) {
+          btn.disabled = false;
+          toast(e.message, true);
+        }
       }));
     reapplyInflight(rows);
   }
@@ -1830,6 +1852,8 @@
 
   // ---- tabs / shell ----
 
+  const initialTab = window.location.hash === "#repos" ? "repos" : "machines";
+
   document.querySelectorAll(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
@@ -1838,6 +1862,18 @@
       $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
       $("tab-repos").classList.toggle("hidden", btn.dataset.tab !== "repos");
     }));
+  const initialTabButton = document.querySelector('.tab[data-tab="' + initialTab + '"]');
+  if (initialTabButton) initialTabButton.click();
+
+  const oauthResult = new URLSearchParams(window.location.search);
+  if (oauthResult.get("github")) {
+    const state = oauthResult.get("github");
+    const slug = oauthResult.get("repo") || "repository";
+    if (state === "authorized") toast("GitHub will now attribute " + slug + " operations to you");
+    else if (state === "declined") toast("GitHub authorization was declined", true);
+    else toast("GitHub authorization failed; please try again", true);
+    history.replaceState({}, "", window.location.pathname + "#repos");
+  }
 
   $("logout-btn").addEventListener("click", async () => {
     await fetch("/api/logout", { method: "POST", headers: { "X-Sparkbox-Console": "1" } }).catch(() => {});

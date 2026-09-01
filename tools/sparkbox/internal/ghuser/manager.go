@@ -3,6 +3,7 @@ package ghuser
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -39,6 +40,13 @@ type flow struct {
 	next    time.Time
 }
 
+type webFlow struct {
+	subject     Subject
+	verifier    string
+	redirectURI string
+	expiresAt   time.Time
+}
+
 type Manager struct {
 	client    *Client
 	store     *Store
@@ -46,6 +54,7 @@ type Manager struct {
 	now       func() time.Time
 	mu        sync.Mutex
 	flows     map[string]flow
+	webFlows  map[string]webFlow
 	refreshMu sync.Mutex
 }
 
@@ -53,11 +62,106 @@ func NewManager(client *Client, store *Store, log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{client: client, store: store, log: log, now: client.now, flows: map[string]flow{}}
+	return &Manager{client: client, store: store, log: log, now: client.now,
+		flows: map[string]flow{}, webFlows: map[string]webFlow{}}
+}
+
+func (m *Manager) WebEnabled() bool { return m != nil && m.client.WebEnabled() }
+
+// StartWeb begins the browser OAuth flow. The verifier remains gateway-only;
+// the opaque state is one-time, expires quickly, and is bound to the Sparkbox
+// owner who initiated it.
+func (m *Manager) StartWeb(subject Subject, redirectURI string) (string, error) {
+	if !validSubject(subject) {
+		return "", errors.New("incomplete github authorization subject")
+	}
+	if !m.WebEnabled() {
+		return "", errors.New("github web authorization is not enabled")
+	}
+	stateRaw := make([]byte, 32)
+	verifierRaw := make([]byte, 32)
+	if _, err := rand.Read(stateRaw); err != nil {
+		return "", err
+	}
+	if _, err := rand.Read(verifierRaw); err != nil {
+		return "", err
+	}
+	state := base64.RawURLEncoding.EncodeToString(stateRaw)
+	verifier := base64.RawURLEncoding.EncodeToString(verifierRaw)
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	location, err := m.client.AuthorizationURL(redirectURI, state, challenge)
+	if err != nil {
+		return "", err
+	}
+	now := m.now()
+	m.mu.Lock()
+	for key, existing := range m.webFlows {
+		// Keep only the newest browser attempt for one owner/repository. This
+		// also bounds repeated clicks without making the callback state global
+		// or guessable.
+		if !now.Before(existing.expiresAt) ||
+			(existing.subject.Owner == subject.Owner && strings.EqualFold(existing.subject.Slug, subject.Slug)) {
+			delete(m.webFlows, key)
+		}
+	}
+	m.webFlows[state] = webFlow{subject: subject, verifier: verifier, redirectURI: redirectURI, expiresAt: now.Add(10 * time.Minute)}
+	m.mu.Unlock()
+	return location, nil
+}
+
+// CancelWeb consumes a declined browser flow without letting another account
+// invalidate it. GitHub returns state alongside access_denied but no code.
+func (m *Manager) CancelWeb(owner, state string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if f, ok := m.webFlows[state]; ok && f.subject.Owner == owner {
+		delete(m.webFlows, state)
+	}
+}
+
+// FinishWeb consumes a browser OAuth state before exchanging the code. A
+// failed exchange cannot be replayed; the user starts a fresh authorization.
+func (m *Manager) FinishWeb(ctx context.Context, owner, state, code string) (AuthorizationStatus, error) {
+	m.mu.Lock()
+	f, ok := m.webFlows[state]
+	if ok {
+		delete(m.webFlows, state)
+	}
+	m.mu.Unlock()
+	if !ok || f.subject.Owner != owner || !m.now().Before(f.expiresAt) {
+		return AuthorizationStatus{}, ErrExpired
+	}
+	tok, err := m.client.ExchangeCode(ctx, code, f.redirectURI, f.verifier, f.subject.RepoID)
+	if err != nil {
+		return AuthorizationStatus{}, err
+	}
+	if err := m.saveVerified(ctx, f.subject, tok); err != nil {
+		return AuthorizationStatus{}, err
+	}
+	return AuthorizationStatus{State: "authorized", Slug: f.subject.Slug}, nil
+}
+
+// Authorized reports a usable stored grant without refreshing it or calling
+// GitHub. It exists for the console's four-second list poll, not the credential
+// path; an expired access token still counts while its refresh grant is alive.
+func (m *Manager) Authorized(owner, slug string, githubID int64) bool {
+	if m == nil {
+		return false
+	}
+	g, err := m.store.GetBySlug(owner, slug)
+	if err != nil || g.GitHubID != githubID || !strings.EqualFold(g.Slug, slug) {
+		return false
+	}
+	return m.now().Before(g.Token.RefreshExpiresAt)
+}
+
+func validSubject(subject Subject) bool {
+	return subject.Owner != "" && subject.GitHubID > 0 && subject.InstallationID > 0 && subject.RepoID > 0 && subject.Slug != ""
 }
 
 func (m *Manager) Start(ctx context.Context, subject Subject) (AuthorizationStart, error) {
-	if subject.Owner == "" || subject.GitHubID <= 0 || subject.InstallationID <= 0 || subject.RepoID <= 0 || subject.Slug == "" {
+	if !validSubject(subject) {
 		return AuthorizationStart{}, errors.New("incomplete github authorization subject")
 	}
 	dc, err := m.client.Start(ctx)
@@ -120,15 +224,7 @@ func (m *Manager) Poll(ctx context.Context, owner, id string) (AuthorizationStat
 		m.mu.Unlock()
 		return AuthorizationStatus{}, err
 	}
-	if err := m.client.Verify(ctx, tok.AccessToken, f.subject.GitHubID, f.subject.InstallationID, f.subject.RepoID); err != nil {
-		m.mu.Lock()
-		delete(m.flows, id)
-		m.mu.Unlock()
-		return AuthorizationStatus{}, err
-	}
-	grant := Grant{Owner: f.subject.Owner, GitHubID: f.subject.GitHubID,
-		InstallationID: f.subject.InstallationID, RepoID: f.subject.RepoID, Slug: f.subject.Slug, Token: tok}
-	if err := m.store.Put(grant); err != nil {
+	if err := m.saveVerified(ctx, f.subject, tok); err != nil {
 		m.mu.Lock()
 		delete(m.flows, id)
 		m.mu.Unlock()
@@ -137,9 +233,21 @@ func (m *Manager) Poll(ctx context.Context, owner, id string) (AuthorizationStat
 	m.mu.Lock()
 	delete(m.flows, id)
 	m.mu.Unlock()
-	m.log.Info("github repository authorized by user", "owner", f.subject.Owner,
-		"github_id", f.subject.GitHubID, "repo", f.subject.Slug, "expires_at", tok.AccessExpiresAt)
 	return AuthorizationStatus{State: "authorized", Slug: f.subject.Slug}, nil
+}
+
+func (m *Manager) saveVerified(ctx context.Context, subject Subject, tok Token) error {
+	if err := m.client.Verify(ctx, tok.AccessToken, subject.GitHubID, subject.InstallationID, subject.RepoID); err != nil {
+		return err
+	}
+	grant := Grant{Owner: subject.Owner, GitHubID: subject.GitHubID,
+		InstallationID: subject.InstallationID, RepoID: subject.RepoID, Slug: subject.Slug, Token: tok}
+	if err := m.store.Put(grant); err != nil {
+		return err
+	}
+	m.log.Info("github repository authorized by user", "owner", subject.Owner,
+		"github_id", subject.GitHubID, "repo", subject.Slug, "expires_at", tok.AccessExpiresAt)
+	return nil
 }
 
 // Token returns false for an absent grant so callers can deliberately fall

@@ -6,13 +6,14 @@ whether you need one app or two.
 | | what it needs from the app | who holds what |
 |---|---|---|
 | **Linking** (shipped) | a **client id**, and *Enable Device Flow* checked | the client id is public; sparkbox stores no secret |
-| **Repos** (shipped) | a **private key**, repository permissions, Device Flow, and expiring user tokens | the gateway holds the private key and encrypted rotating user grants |
+| **Repos** (shipped) | a **private key**, repository permissions, Device Flow, web OAuth, and expiring user tokens | the gateway holds the private key, OAuth client secret, and encrypted rotating user grants |
 
 Linking asks GitHub one question — who is this — and requests **no scope at
 all**. Repos always supports narrowly scoped installation tokens, and an owner
 can additionally authorize one write attachment with `sparkbox repo authorize
 owner/name` so GitHub operations, including pull-request creation, are
-attributed to that user.
+attributed to that user. The Repos tab offers the same authorization through
+GitHub's browser OAuth flow when the gateway has the App client secret.
 
 ---
 
@@ -56,7 +57,7 @@ Fill in:
 |---|---|---|
 | **GitHub App name** | `sparkbox` (or `catnip-sparkbox` if taken — names are global) | shown on the consent and install screens |
 | **Homepage URL** | `https://catnip.sh` | required, cosmetic |
-| **Callback URL** | `https://my.catnip.sh/github/callback` | required by the form; the device flow never uses it |
+| **Callback URL** | `https://my.catnip.sh/github/repo/callback` | returns browser authorization to the signed-in Repos tab; substitute your console host |
 | **Enable Device Flow** | ☑ **checked** | **the one setting that silently breaks everything if missed** |
 | **Optional Features → User-to-server token expiration** | ☑ **opted in** | issues the rotating `ghu_` / `ghr_` pair Sparkbox stores on the gateway; non-expiring user tokens are refused |
 | **Webhook → Active** | ☐ **unchecked** | leave it off — unless you are also setting up webhooks, which is its own decision: see `docs/github-webhooks.md` and the note below |
@@ -135,6 +136,17 @@ Leave **Account permissions** entirely empty.
 
 ## Per-repository user attribution
 
+The Repos tab is the normal browser path: click **Authorize as me** next
+to a read + push attachment. Sparkbox sends the browser through GitHub's web
+application flow with PKCE and a one-time state bound to the signed-in account.
+Add `https://my.<your-domain>/github/repo/callback` to the App's callback URLs,
+generate a client secret in the App settings, and deliver it only to the
+gateway as `SPARKBOX_GITHUB_APP_CLIENT_SECRET` (boot-secret item
+`github-app-client-secret`).
+
+The client secret is optional. Without it the browser button is omitted, while
+the VM Device Flow below and installation-token fallback continue normally.
+
 Inside a VM, authorize each write attachment whose GitHub activity should be
 performed as you:
 
@@ -148,6 +160,9 @@ only the public user code crosses into the VM. Sparkbox verifies both the
 immutable linked GitHub account id and that GitHub exposed exactly the requested
 repository before saving the grant encrypted in `sparkbox.db`.
 
+The browser flow lands in that same store and applies the same immutable-user
+and exact-one-repository verification before accepting GitHub's token.
+
 Authorization is per repository. In a VM containing two repositories, one can
 use the user's token while the other continues to use the App installation
 token. Missing, expired, revoked, or temporarily unrefreshable user grants never
@@ -157,7 +172,7 @@ Click **Create GitHub App**.
 
 ---
 
-# Part 3 — collect the three values
+# Part 3 — collect the four values
 
 On the app's settings page:
 
@@ -165,15 +180,17 @@ On the app's settings page:
 2. **App ID** — a number, shown just above it. Public.
 3. **Private key** — scroll to *Private keys* → **Generate a private key**. A
    `.pem` downloads once and is never shown again. This is the secret.
+4. **Client secret** — under *Client secrets*, generate one. This enables the
+   Repos tab's browser flow and is not needed by the VM Device Flow.
 
 The downloaded key is PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`). Store it
 verbatim; do not re-encode it.
 
 ---
 
-# Part 4 — put the key in the fleet vault
+# Part 4 — put the credentials in the fleet vault
 
-It is one of the ten secrets in `docs/secret-management.md`. Its blast
+They are two of the eleven secrets in `docs/secret-management.md`. The key's blast
 radius: mints installation tokens for every installation of the app. Unlike the
 OIDC signing key it is **revocable in one click** — regenerate it in the app's
 settings and every copy dies.
@@ -182,6 +199,13 @@ settings and every copy dies.
 # 1Password (the DGX / catnip.sh path)
 op item create --category=password --vault Sparkbox \
   --title github-app-key "password=$(cat ~/Downloads/sparkbox.*.private-key.pem)"
+
+# Save the copied client secret without putting it in shell history or argv,
+# then let the fleet sync script write the 1Password item.
+install -d -m 700 ~/.sparkbox/secrets
+${EDITOR:-vi} ~/.sparkbox/secrets/github_app_client_secret
+chmod 600 ~/.sparkbox/secrets/github_app_client_secret
+deploy/sync-fleet-secrets.sh push
 ```
 
 Then deliver it to the host the same way as the rest:
@@ -189,6 +213,8 @@ Then deliver it to the host the same way as the rest:
 ```sh
 SECRETS_DIR=./staged deploy/sync-fleet-secrets.sh pull
 scp ./staged/github_app_key.pem root@catnip.sh:/srv/sparkbox/state/
+# If the host does not use fetch-secrets, also expose the staged client secret
+# to the gateway as SPARKBOX_GITHUB_APP_CLIENT_SECRET.
 ```
 
 A fleet with no `github-app-key` keeps working — repo attachment answers
