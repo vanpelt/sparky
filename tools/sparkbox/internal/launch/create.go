@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
@@ -181,6 +182,24 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 		if err != nil {
 			return nil, err
 		}
+		// The secrets go in BEFORE the 303, for the reason the two attach paths
+		// already document at their own doors: pam_env reads /etc/environment
+		// once, at session setup, and Create's push is asynchronous.
+		//
+		// This door needs its own barrier because neither attach path can be
+		// this one's. internal/xterm gates its wait on `box.State !=
+		// StateRunning` (ws.go:189) — but a sandbox this handler just built is
+		// ALREADY running when the browser follows the redirect, so that gate
+		// reads false and the terminal opens with the push still in flight. The
+		// SSH gateway does not have the bug only because it carries a second
+		// term for exactly this case, `viaNewDoor` (gateway.go:547), and a
+		// redirect into a browser terminal has no equivalent to carry.
+		//
+		// It is here, inside the flight and after the read-back, so that the
+		// followers of a collapsed double-click are held by it too: they take
+		// the leader's answer, so a barrier outside the group would be one the
+		// leader alone waited at.
+		h.awaitEnv(shared, back.Name)
 		return back, nil
 	})
 	if err != nil {
@@ -200,3 +219,40 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 // errBadShare names the unreachable case above so the assertion has something
 // to report other than a panic.
 var errBadShare = errors.New("launch: the shared create returned an unexpected value")
+
+// envAwaiter is the synchronous secret-env delivery, taken by assertion rather
+// than added to Sandboxes. Sandboxes is narrow on purpose and this is not a
+// capability a deployment chooses — the one real implementation, *ctlops.Ops,
+// always has it, and a test fake that does not is a fake with no guest to
+// deliver into. The same shape, and the same reasoning, as internal/xterm's
+// assertion off Attacher (ws.go:373).
+type envAwaiter interface {
+	AwaitEnv(ctx context.Context, name string) error
+}
+
+// envAwaitBudget bounds the wait. The push dials the guest's sshd, which the
+// browser is about to reach through the terminal anyway, so this mostly
+// overlaps a wait the click was already going to make; the bound is there so a
+// guest that never answers costs a slow redirect rather than a hung one.
+const envAwaitBudget = 30 * time.Second
+
+// awaitEnv delivers the owner's secrets into a freshly created sandbox before
+// the redirect that opens a session on it.
+//
+// Never fatal. A sandbox worth building is worth handing over without its
+// environment, the next transition to running pushes again, and failing the
+// create here would turn a missing variable into a button that does nothing.
+// Always logged, though — an environment that quietly failed to arrive is the
+// failure this barrier exists to end, and the launch door's user is in a
+// browser with no stderr to be told on.
+func (h *Handler) awaitEnv(ctx context.Context, name string) {
+	a, ok := h.ops.(envAwaiter)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, envAwaitBudget)
+	defer cancel()
+	if err := a.AwaitEnv(ctx, name); err != nil {
+		h.log.Warn("secrets not delivered before the launch redirect", "name", name, "err", err)
+	}
+}

@@ -65,6 +65,13 @@ type fakeOps struct {
 	// not happen. Both are nil for every other test.
 	entered chan struct{}
 	held    chan struct{}
+
+	// awaited records the names AwaitEnv was called for, and awaitErr is what
+	// it fails with. The fake implements envAwaiter unconditionally: the
+	// barrier is asserted by what it recorded, not by whether the assertion in
+	// awaitEnv found a method.
+	awaited  []string
+	awaitErr error
 }
 
 func (f *fakeOps) List(_ context.Context, _ ctlops.Caller) ([]ctlops.SandboxInfo, error) {
@@ -301,4 +308,21 @@ func box(name, state string, unreachable bool, lastActive time.Time) ctlops.Sand
 		Name: name, Owner: "vanpelt", State: state, Unreachable: unreachable,
 		LastActive: lastActive, TerminalURL: "https://" + name + "-xterm.example.test/",
 	}
+}
+
+// AwaitEnv records the barrier the launch door puts in front of its redirect.
+// It appends under the same mutex the create path uses so the ordering a test
+// reads back is the ordering the handler produced.
+func (f *fakeOps) AwaitEnv(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.awaited = append(f.awaited, name)
+	return f.awaitErr
+}
+
+// awaitedNames is the recorded barrier, copied under the lock.
+func (f *fakeOps) awaitedNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.awaited...)
 }
