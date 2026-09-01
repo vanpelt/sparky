@@ -339,9 +339,23 @@ func serve(args []string) error {
 	// that every fleet which predates this feature keeps booting. A file that
 	// exists and does not parse is still fatal; that is a broken deploy, not an
 	// absent one.
-	ghAppKey, err := ghapp.LoadKeyIfPresent(keysIn, "github_app_key")
+	legacyGHAppKeyPath := filepath.Join(keysIn, "github_app_key.pem")
+	ghAppKeyPath := strings.TrimSpace(os.Getenv("SPARKBOX_GITHUB_APP_KEY_FILE"))
+	if ghAppKeyPath == "" {
+		ghAppKeyPath = legacyGHAppKeyPath
+	}
+	ghAppKey, err := ghapp.LoadKeyFileIfPresent(ghAppKeyPath)
 	if err != nil {
 		return fmt.Errorf("github app key: %w", err)
+	}
+	// One-rollout compatibility: Kubernetes moved the App key out of the
+	// long-lived fleet identity Secret. Prefer the new dedicated mount, but let
+	// a gateway whose Secret has not been migrated yet use the legacy file.
+	if ghAppKey == nil && ghAppKeyPath != legacyGHAppKeyPath {
+		ghAppKey, err = ghapp.LoadKeyFileIfPresent(legacyGHAppKeyPath)
+		if err != nil {
+			return fmt.Errorf("legacy github app key: %w", err)
+		}
 	}
 	// Both halves or neither. The key cannot say which App it belongs to and
 	// the client id cannot sign, so a host holding one of them can do nothing
@@ -365,7 +379,7 @@ func serve(args []string) error {
 	} else {
 		reason := "no --github-app-client-id"
 		if ghAppKey == nil {
-			reason = "no " + filepath.Join(keysIn, "github_app_key.pem")
+			reason = "no " + ghAppKeyPath + " or " + legacyGHAppKeyPath
 		}
 		log.Info("github app credentials disabled", "reason", reason)
 	}

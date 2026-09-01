@@ -220,6 +220,10 @@ scp ./staged/github_app_key.pem root@catnip.sh:/srv/sparkbox/state/
 A fleet with no `github-app-key` keeps working — repo attachment answers
 "not enabled on this host", the same shape tagging already uses.
 
+On Kubernetes, keep both GitHub-issued values in `sparkbox-github-app` as
+`private-key.pem` and `client-secret`. Do not add the App key to
+`sparkbox-identity`; that Secret is reserved for long-lived fleet identity.
+
 ---
 
 # Part 5 — install it, and tell sparkbox about it

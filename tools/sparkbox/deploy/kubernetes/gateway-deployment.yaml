@@ -66,6 +66,8 @@ spec:
                   optional: true
             - name: SPARKBOX_GITHUB_APP_CLIENT_ID
               value: __SPARKBOX_GITHUB_APP_CLIENT_ID__
+            - name: SPARKBOX_GITHUB_APP_KEY_FILE
+              value: /run/sparkbox/github-app/private-key.pem
             - name: SPARKBOX_GITHUB_APP_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -139,6 +141,9 @@ spec:
             - name: identity
               mountPath: /run/sparkbox/keys
               readOnly: true
+            - name: github-app
+              mountPath: /run/sparkbox/github-app
+              readOnly: true
             - name: users
               mountPath: /etc/sparkbox/users
               readOnly: true
@@ -154,6 +159,11 @@ spec:
           secret:
             secretName: sparkbox-identity
             defaultMode: 0440
+        - name: github-app
+          secret:
+            secretName: sparkbox-github-app
+            defaultMode: 0440
+            optional: true
         - name: users
           secret:
             secretName: sparkbox-users

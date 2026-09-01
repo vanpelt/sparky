@@ -16,8 +16,8 @@ Options:
   --github-app-client-id ID
                           client id of the GitHub App that mints repository
                           credentials (default: whatever the live gateway
-                          already uses). Its private key must be in the
-                          sparkbox-identity Secret as github_app_key.pem.
+                          already uses). Its private key belongs in the
+                          sparkbox-github-app Secret as private-key.pem.
   --hivemind-api ORIGIN   HiveMind API origin to federate with, e.g.
                           https://hivemind.wandb.tools (default: whatever the
                           live gateway already uses; empty turns the presence
@@ -330,9 +330,25 @@ deployed_github_app_client_id=$(
 github_app_client_id=${requested_github_app_client_id:-$deployed_github_app_client_id}
 if [ -n "$github_app_client_id" ]; then
   echo "GitHub App for repo credentials: $github_app_client_id"
+	github_app_key_present=$(
+	  "${k[@]}" -n "$namespace" get secret sparkbox-github-app \
+	    -o 'go-template={{if index .data "private-key.pem"}}yes{{end}}' 2>/dev/null || true
+	)
+	legacy_github_app_key_present=$(
+	  "${k[@]}" -n "$namespace" get secret "$identity_secret" \
+	    -o 'go-template={{if index .data "github_app_key.pem"}}yes{{end}}' 2>/dev/null || true
+	)
+	if [ "$github_app_key_present" != yes ] && [ "$legacy_github_app_key_present" != yes ]; then
+	  echo "GitHub App client id is configured, but no private key is available." >&2
+	  echo "Add private-key.pem to Secret $namespace/sparkbox-github-app." >&2
+	  exit 1
+	fi
+	if [ "$github_app_key_present" != yes ]; then
+	  echo "  Using legacy sparkbox-identity/github_app_key.pem for this rollout; migrate it to sparkbox-github-app/private-key.pem."
+	fi
 else
   echo "No GitHub App configured; repo attachments will be unavailable."
-  echo "  Pass --github-app-client-id and add github_app_key.pem to the sparkbox-identity Secret."
+  echo "  Pass --github-app-client-id and add private-key.pem to the sparkbox-github-app Secret."
 fi
 
 # Carried forward on a re-run for the same reason as the two above. Dropping it

@@ -57,7 +57,14 @@ func LoadKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 // cannot be parsed is still an error — that one is a broken deploy, and the
 // difference between "no app" and "a broken app" is worth a loud sentence.
 func LoadKeyIfPresent(dir, name string) (*rsa.PrivateKey, error) {
-	data, err := os.ReadFile(filepath.Join(dir, name+".pem"))
+	return LoadKeyFileIfPresent(filepath.Join(dir, name+".pem"))
+}
+
+// LoadKeyFileIfPresent is LoadKeyIfPresent for a fully qualified path. It is
+// used when the GitHub App credentials have a lifecycle and mount separate
+// from the fleet identity key directory.
+func LoadKeyFileIfPresent(path string) (*rsa.PrivateKey, error) {
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

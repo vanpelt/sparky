@@ -28,8 +28,8 @@ because both resolve to the same LoadBalancer, but only the configured
 The GitHub App above is **not** the one `--github-client-id` names for account
 linking. They are deliberately separate: linking asks GitHub who somebody is and
 requests no scope, while this one holds a private key and can mint repository
-credentials. Its key reaches the gateway as `github_app_key.pem` in the
-`sparkbox-identity` Secret, mounted read-only at `/run/sparkbox/keys` — there is
+credentials. Its key and OAuth client secret reach the gateway from the
+`sparkbox-github-app` Secret, mounted read-only at `/run/sparkbox/github-app` — there is
 no path that copies a file onto this host, because the gateway Pod runs non-root
 with a read-only root filesystem and port 22 is Sparkbox's own SSH gateway, which
 has no sftp subsystem. See `docs/github-app-setup.md`.
@@ -120,14 +120,25 @@ Two limits that are not bugs but will bite:
 
   then paste the same value into the App's Settings → Webhook → Secret. See
   `docs/github-webhooks.md`.
-- Optionally `sparkbox-github-app`, a Secret whose `client-secret` key holds
-  the GitHub App OAuth client secret. This enables per-repository user
+- Optionally `sparkbox-github-app`, a Secret whose `private-key.pem` and
+  `client-secret` keys hold the GitHub App credentials. The private key enables
+  installation credentials; the client secret enables per-repository user
   authorization from the Repos tab; without it, VM Device Flow and bot-token
   fallback continue normally. Create it with:
 
   ```sh
+  secret_dir=$(mktemp -d)
+  chmod 700 "$secret_dir"
+  # Place the GitHub-issued PEM at $secret_dir/private-key.pem and enter the
+  # rotated client secret into $secret_dir/client-secret without using argv.
+  ${EDITOR:-vi} "$secret_dir/client-secret"
+  chmod 600 "$secret_dir/private-key.pem" "$secret_dir/client-secret"
   kubectl -n sparkbox-poc create secret generic sparkbox-github-app \
-    --from-literal=client-secret='<secret copied from the GitHub App settings>'
+    --from-file=private-key.pem="$secret_dir/private-key.pem" \
+    --from-file=client-secret="$secret_dir/client-secret" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  rm -f "$secret_dir/private-key.pem" "$secret_dir/client-secret"
+  rmdir "$secret_dir"
   ```
 
   Register `https://my.<allocated-domain>/github/repo/callback` as an App
@@ -491,6 +502,13 @@ kubectl -n sparkbox-poc create secret generic sparkbox-identity \
 Add `--from-file=oidc_signing_key_prev.pem=...` when that rollover key exists.
 The deploy script refuses to proceed when the Secret or any required entry is
 missing.
+
+GitHub App credentials are not fleet identity. Store `private-key.pem` and
+`client-secret` together in `sparkbox-github-app`; the gateway mounts them
+separately from `/run/sparkbox/keys`. During the migration rollout only, the
+gateway falls back to a legacy `sparkbox-identity/github_app_key.pem` when the
+dedicated Secret has no private key. Future identity captures omit that legacy
+entry.
 
 Kubernetes Secret persistence is independent of the selected compute Node, but
 it is not an off-cluster backup. Keep an approved escrow copy, especially of

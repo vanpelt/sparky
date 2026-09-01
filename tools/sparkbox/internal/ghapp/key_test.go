@@ -133,4 +133,8 @@ func TestLoadKeyIfPresent(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("good key: got (%v, %v)", got, err)
 	}
+	got, err = LoadKeyFileIfPresent(filepath.Join(dir, "good.pem"))
+	if err != nil || got == nil {
+		t.Fatalf("good key by path: got (%v, %v)", got, err)
+	}
 }
