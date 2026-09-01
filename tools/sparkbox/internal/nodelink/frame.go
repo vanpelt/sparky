@@ -885,12 +885,13 @@ type EmptyResp struct{}
 // can answer nothing sends `{}` — which is the same thing a gateway with no
 // link at all renders, and deliberately so.
 type VitalsResp struct {
-	CPUSeconds     *float64 `json:"cpu_seconds,omitempty"`
-	MemUsedMB      *int64   `json:"mem_used_mb,omitempty"`
-	NetRxBytes     *uint64  `json:"net_rx_bytes,omitempty"`
-	NetTxBytes     *uint64  `json:"net_tx_bytes,omitempty"`
-	ListeningPorts []int    `json:"listening_ports,omitempty"`
-	PortsChecked   bool     `json:"ports_checked,omitempty"`
+	CPUSeconds     *float64           `json:"cpu_seconds,omitempty"`
+	MemUsedMB      *int64             `json:"mem_used_mb,omitempty"`
+	NetRxBytes     *uint64            `json:"net_rx_bytes,omitempty"`
+	NetTxBytes     *uint64            `json:"net_tx_bytes,omitempty"`
+	ListeningPorts []int              `json:"listening_ports,omitempty"`
+	PortServices   []host.PortService `json:"port_services,omitempty"`
+	PortsChecked   bool               `json:"ports_checked,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -180,11 +180,16 @@ to install, and the sign-in is the same passkey/token flow as any private route.
 Its hamburger menu links straight to the sandbox's default proxy endpoint at
 `https://<name>.<domain>`, following whichever guest port the default route
 currently selects. The owning VM host lightly probes Sparkbox's supported
-browser ports and returns those answering HTTP with success or a redirect in
-the terminal's vitals. Live non-default ports appear as additional Proxy rows;
+browser ports and returns those speaking HTTP in the terminal's vitals. Any
+syntactically valid HTTP response counts, including an API's entirely normal
+`404 /`; HTML titles, product headers, and JSON media
+types supply a best-effort service name for the menu. Live non-default ports
+appear as additional Proxy rows;
 if the default port is not HTTP-ready, its row explains which port needs a
-service instead of opening a known-dead endpoint. Probe results are briefly
-cached and never resume or touch an idle sandbox.
+service instead of opening a known-dead endpoint. A three-second TCP check
+notices listeners coming and going, while HTTP classification and metadata are
+refreshed no more than once a minute unless the port first closes. Probes never
+resume or touch an idle sandbox.
 One host per sandbox, so the browser's own origin isolation keeps one sandbox's
 page from scripting another's socket. The identical bridge is mounted at
 `wss://api.<domain>/v1/sandboxes/<name>/terminal` for clients that are not

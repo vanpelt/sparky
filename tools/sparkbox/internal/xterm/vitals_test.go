@@ -32,6 +32,7 @@ type fakeVitals struct {
 	mem          map[string]int64
 	net          map[string][2]uint64
 	ports        map[string][]int
+	services     map[string][]host.PortService
 	portsChecked map[string]bool
 	err          error
 	calls        int
@@ -63,6 +64,9 @@ func (f *fakeVitals) Vitals(_ context.Context, name string) (host.Vitals, error)
 	}
 	if ports, ok := f.ports[name]; ok {
 		v.ListeningPorts = append([]int(nil), ports...)
+	}
+	if services, ok := f.services[name]; ok {
+		v.PortServices = append([]host.PortService(nil), services...)
 	}
 	v.PortsChecked = f.portsChecked[name]
 	return v, nil
@@ -158,6 +162,7 @@ func TestVitalsServesLiveCounters(t *testing.T) {
 func TestVitalsCarriesListeningPortsAndCurrentDefault(t *testing.T) {
 	fv := &fakeVitals{
 		ports:        map[string][]int{"demo": {3000, 8000}},
+		services:     map[string][]host.PortService{"demo": {{Port: 3000, Name: "Vite"}, {Port: 8000, Name: "JSON API"}}},
 		portsChecked: map[string]bool{"demo": true},
 	}
 	hz := withVitals(t, fv, runningBox("demo", "alice"))
@@ -170,6 +175,10 @@ func TestVitalsCarriesListeningPortsAndCurrentDefault(t *testing.T) {
 	ports, ok := m["listening_ports"].([]any)
 	if !ok || len(ports) != 2 || ports[0] != float64(3000) || ports[1] != float64(8000) {
 		t.Fatalf("listening_ports = %v, want [3000 8000]", m["listening_ports"])
+	}
+	services, ok := m["port_services"].([]any)
+	if !ok || len(services) != 2 || services[1].(map[string]any)["name"] != "JSON API" {
+		t.Fatalf("port_services = %v, want named metadata", m["port_services"])
 	}
 }
 

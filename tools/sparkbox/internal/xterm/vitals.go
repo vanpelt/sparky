@@ -80,10 +80,12 @@ type vitals struct {
 	Proxy string `json:"proxy,omitempty"`
 	// ProxyPort is the guest port selected by the portless Proxy URL.
 	ProxyPort int `json:"proxy_port,omitempty"`
-	// ListeningPorts contains supported public ports answering HTTP with a
-	// success or redirect. PortsChecked makes an empty list authoritative.
-	ListeningPorts []int `json:"listening_ports,omitempty"`
-	PortsChecked   bool  `json:"ports_checked,omitempty"`
+	// ListeningPorts contains supported public ports that spoke HTTP, regardless
+	// of application status. PortServices adds optional display names discovered
+	// from the same bounded response. PortsChecked makes an empty list authoritative.
+	ListeningPorts []int              `json:"listening_ports,omitempty"`
+	PortServices   []host.PortService `json:"port_services,omitempty"`
+	PortsChecked   bool               `json:"ports_checked,omitempty"`
 
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
@@ -192,5 +194,6 @@ func (h *Handler) readVitals(ctx context.Context, box *host.Sandbox, out *vitals
 	out.CPUSeconds, out.MemUsedMB = v.CPUSeconds, v.MemUsedMB
 	out.NetRxBytes, out.NetTxBytes = v.NetRxBytes, v.NetTxBytes
 	out.ListeningPorts = append([]int(nil), v.ListeningPorts...)
+	out.PortServices = append([]host.PortService(nil), v.PortServices...)
 	out.PortsChecked = v.PortsChecked
 }

@@ -361,6 +361,7 @@ func (r *remoteNode) Vitals(ctx context.Context, name string) (host.Vitals, erro
 		NetRxBytes:     resp.NetRxBytes,
 		NetTxBytes:     resp.NetTxBytes,
 		ListeningPorts: append([]int(nil), resp.ListeningPorts...),
+		PortServices:   append([]host.PortService(nil), resp.PortServices...),
 		PortsChecked:   resp.PortsChecked,
 	}, nil
 }

@@ -970,12 +970,18 @@
     function paintProxyPorts(v) {
       if (!v.proxy) return;
       const ports = Array.isArray(v.listening_ports) ? v.listening_ports : [];
+      const names = new Map((Array.isArray(v.port_services) ? v.port_services : [])
+        .filter((service) => service && Number.isInteger(service.port))
+        .map((service) => [service.port, service.name || ""]));
       proxyPort = v.proxy_port || 8000;
       proxyChecked = !!v.ports_checked;
       proxyListening = ports.includes(proxyPort);
       const defaultSub = $("proxy-host");
+      const defaultName = names.get(proxyPort);
       if (proxyChecked && !proxyListening) {
         defaultSub.textContent = "Port " + proxyPort + " · not HTTP-ready";
+      } else if (defaultName) {
+        defaultSub.textContent = defaultName + " · port " + proxyPort;
       } else {
         try { defaultSub.textContent = new URL(v.proxy).host + " · port " + proxyPort; }
         catch (e) { defaultSub.textContent = "Default HTTPS endpoint"; }
@@ -988,7 +994,8 @@
         link.removeAttribute("id");
         link.classList.remove("hidden");
         link.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
-        link.querySelector(".menu-label").textContent = "Proxy · port " + port;
+        const name = names.get(port);
+        link.querySelector(".menu-label").textContent = name ? name + " · port " + port : "Proxy · port " + port;
         try {
           const url = new URL(v.proxy);
           url.port = String(port);

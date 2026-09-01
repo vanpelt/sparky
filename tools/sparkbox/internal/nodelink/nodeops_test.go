@@ -139,7 +139,9 @@ func (m *opsManager) Vitals(ctx context.Context, name string) (host.Vitals, erro
 	secs, used, rx, tx := 12.5, int64(700), uint64(4096), uint64(2048)
 	return host.Vitals{
 		CPUSeconds: &secs, MemUsedMB: &used, NetRxBytes: &rx, NetTxBytes: &tx,
-		ListeningPorts: []int{3000, 8000}, PortsChecked: true,
+		ListeningPorts: []int{3000, 8000},
+		PortServices:   []host.PortService{{Port: 3000, Name: "Vite"}, {Port: 8000, Name: "JSON API"}},
+		PortsChecked:   true,
 	}, nil
 }
 
@@ -345,6 +347,9 @@ func TestNodeRunsEveryLifecycleVerb(t *testing.T) {
 				}
 				if !got.PortsChecked || !reflect.DeepEqual(got.ListeningPorts, []int{3000, 8000}) {
 					t.Errorf("ports = %v checked=%v, want [3000 8000] checked", got.ListeningPorts, got.PortsChecked)
+				}
+				if len(got.PortServices) != 2 || got.PortServices[1].Name != "JSON API" {
+					t.Errorf("port services = %v, want named metadata", got.PortServices)
 				}
 			},
 		},

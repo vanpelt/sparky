@@ -147,6 +147,7 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 			NetRxBytes:     v.NetRxBytes,
 			NetTxBytes:     v.NetTxBytes,
 			ListeningPorts: v.ListeningPorts,
+			PortServices:   v.PortServices,
 			PortsChecked:   v.PortsChecked,
 		}, nil
 	})

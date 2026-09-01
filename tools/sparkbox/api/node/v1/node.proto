@@ -208,6 +208,7 @@ message Vitals {
   uint64 network_tx_bytes = 4;
   repeated int32 listening_ports = 5;
   bool ports_checked = 6;
+  repeated PortService port_services = 7;
 }
 
 // OperationIdentity is required on every mutation. request_hash is a SHA-256
@@ -466,4 +467,11 @@ message IssueRepoCredentialResponse {
 message DurationRange {
   google.protobuf.Duration minimum = 1;
   google.protobuf.Duration maximum = 2;
+}
+
+// PortService enriches a browser-facing port with the small display name
+// discovered from its HTTP title, product header, or media type.
+message PortService {
+  int32 port = 1;
+  string name = 2;
 }
