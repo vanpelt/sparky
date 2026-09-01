@@ -204,6 +204,13 @@ type Sandbox struct {
 	// because they ride in the state file. Metering for future egress limits.
 	NetRxBytes uint64 `json:"net_rx_bytes,omitempty"`
 	NetTxBytes uint64 `json:"net_tx_bytes,omitempty"`
+	// Repos is the latest git state reported from inside this guest. The host
+	// cannot safely mount or inspect a running guest filesystem, so the
+	// read-only in-guest survey publishes this bounded snapshot through the
+	// tap-authenticated metadata service. It is advisory UI/safety data, never
+	// an authorization input. RepoStatusAt says how fresh the snapshot is.
+	Repos        []RepoStatus `json:"repos,omitempty"`
+	RepoStatusAt time.Time    `json:"repo_status_at,omitempty"`
 	// ArchiveKey is the object-storage key holding this sandbox's rootfs when
 	// State is archived (empty otherwise). ArchivedAt is when it was parked.
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
@@ -282,6 +289,21 @@ type Sandbox struct {
 	// refreshed from a token-bound API response and deliberately never written
 	// to the sandbox state file.
 	HiveMind *HiveMindSessionSnapshot `json:"-"`
+}
+
+// RepoStatus is one checkout as observed by the guest. Ahead and Behind are
+// relative to Upstream after the reporting pass fetched its remote; Dirty
+// includes untracked files. Missing checkouts retain their configured path and
+// report State "missing" with the git-specific fields empty.
+type RepoStatus struct {
+	Slug     string `json:"slug"`
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"`
+	Upstream string `json:"upstream,omitempty"`
+	Ahead    int64  `json:"ahead,omitempty"`
+	Behind   int64  `json:"behind,omitempty"`
+	Dirty    bool   `json:"dirty,omitempty"`
+	State    string `json:"state"`
 }
 
 type HiveMindSession struct {
@@ -2417,9 +2439,18 @@ func (m *Manager) MemStats(ctx context.Context, name string) (usedMiB int64, ok 
 	if err != nil {
 		return 0, false
 	}
-	// The guest sees (ceiling − ballooned) RAM; what it's actually using is that
-	// minus what it reports free. This is roughly the host RAM the VM costs.
-	used := memMB - st.ActualMiB - st.FreeMiB
+	// Linux deliberately uses otherwise-idle RAM for reclaimable page cache.
+	// Treating only MemFree as unused makes a healthy cached guest look nearly
+	// full (and paints the consoles red) even though that memory is immediately
+	// available to new work. Firecracker exposes the guest's MemAvailable
+	// estimate, which is the same honest denominator `free` prints. Older
+	// balloon implementations may leave it zero, so retain FreeMiB as a
+	// compatibility fallback.
+	unused := st.AvailableMiB
+	if unused <= 0 {
+		unused = st.FreeMiB
+	}
+	used := memMB - st.ActualMiB - unused
 	if used < 0 {
 		used = 0
 	}
@@ -2501,6 +2532,24 @@ func (m *Manager) SetPinned(name string, pinned bool) error {
 	} else {
 		m.observe(b, "unpinned")
 	}
+	return m.save()
+}
+
+// SetRepoStatus records the latest bounded, read-only survey published by a
+// running guest. The metadata service has already authenticated the caller by
+// tap address and validated every field. Keeping the write on Manager makes it
+// durable on a standalone host and lets the ordinary inventory observer carry
+// the same advisory state from a fleet node to its gateway.
+func (m *Manager) SetRepoStatus(name string, repos []RepoStatus, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	b.Repos = append([]RepoStatus(nil), repos...)
+	b.RepoStatusAt = at.UTC()
+	m.observe(b, "repo-status")
 	return m.save()
 }
 
@@ -3284,6 +3333,7 @@ func (m *Manager) mergeActivityLocked() map[string]time.Time {
 
 func copyOf(b *Sandbox) *Sandbox {
 	c := *b
+	c.Repos = append([]RepoStatus(nil), b.Repos...)
 	if b.HiveMind != nil {
 		snapshot := *b.HiveMind
 		snapshot.Sessions = cloneHiveMindSessions(b.HiveMind.Sessions)
@@ -3326,6 +3376,7 @@ func (b *Sandbox) Public() *Sandbox {
 		return nil
 	}
 	c := *b
+	c.Repos = append([]RepoStatus(nil), b.Repos...)
 	c.SSHAddr, c.HostIP, c.GuestV6 = "", "", ""
 	return &c
 }

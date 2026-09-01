@@ -464,10 +464,9 @@
           </span>
         </button>
 
-        <!-- Label and sentence both move with the connection: while a shell is
-             attached this is "start a new shell", which is what pressing it
-             actually does, and only a disconnected page calls it Reconnect. A
-             button reading "Reconnect" on a working terminal is a puzzle. -->
+        <!-- A live shell opens its sibling in another tab, preserving this
+             session and its scrollback. A disconnected page still reconnects
+             in place because there is no live session to preserve. -->
         <button class="menu-item" id="reconnect-btn">
           <span class="menu-lines">
             <span class="menu-label" id="reconnect-label">Reconnect</span>
@@ -656,7 +655,7 @@
     function paintConnAction(live) {
       $("reconnect-label").textContent = live ? "Start a new shell" : "Reconnect";
       $("reconnect-sub").textContent = live
-        ? "Ends this shell and opens a fresh one."
+        ? "Open another terminal in a new tab."
         : "Open a shell in this sandbox.";
     }
 
@@ -874,7 +873,19 @@
       if (e.key === "Escape" && menuIsOpen()) closeMenu(true);
     }, true);
 
-    $("reconnect-btn").addEventListener("click", () => { closeMenu(false); attempt = 0; connect(); });
+    $("reconnect-btn").addEventListener("click", () => {
+      closeMenu(false);
+      if (ready) {
+        // Preserve the current PTY and its scrollback. noopener severs the new
+        // terminal's window.opener reference just like the menu's external
+        // links; opening the same URL creates an entirely separate WebSocket.
+        window.open(location.href, "_blank", "noopener");
+        term.focus();
+        return;
+      }
+      attempt = 0;
+      connect();
+    });
     $("overlay-btn").addEventListener("click", () => { attempt = 0; connect(); });
     $("clear-btn").addEventListener("click", () => { closeMenu(false); term.clear(); term.focus(); });
     // A link out is a navigation, so the menu is closed but focus is NOT pulled

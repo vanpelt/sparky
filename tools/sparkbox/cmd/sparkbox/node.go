@@ -382,6 +382,8 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			RouteControl:   relayRouteControl{up: uplink},
 			Repos:          reposRelay,
 			RepoAuthorizer: reposRelay,
+			RepoStatus:     mgr,
+			Vitals:         mgr,
 			Tools:          localTools(opts.toolsDir),
 			// Wired on the node in the same release as on the gateway, and that
 			// is not a scheduling nicety. metadata's own rule (repos.go's

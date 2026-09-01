@@ -579,6 +579,16 @@ func (o *Ops) info(b *host.Sandbox) SandboxInfo {
 		CreatedAt:   b.CreatedAt,
 		LastActive:  b.LastActive,
 	}
+	if !b.RepoStatusAt.IsZero() {
+		at := b.RepoStatusAt
+		si.RepoStatusAt = &at
+	}
+	for _, repo := range b.Repos {
+		si.Repos = append(si.Repos, RepoStatus{
+			Slug: repo.Slug, Path: repo.Path, Branch: repo.Branch, Upstream: repo.Upstream,
+			Ahead: repo.Ahead, Behind: repo.Behind, Dirty: repo.Dirty, State: repo.State,
+		})
+	}
 	if o.tags != nil {
 		// A tag-store hiccup must not turn `list` into an error: the tags are
 		// decoration on this record, not its subject.

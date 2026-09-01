@@ -393,10 +393,12 @@ func (d *Driver) BalloonStats(_ context.Context, name string) (vmm.BalloonStats,
 	if !ok || vm.paused {
 		return vmm.BalloonStats{}, fmt.Errorf("vm %q not running", name)
 	}
+	available := max64(0, vm.memMB-vm.balloonTarget-256)
 	return vmm.BalloonStats{
-		TargetMiB: vm.balloonTarget,
-		ActualMiB: vm.balloonTarget,
-		FreeMiB:   max64(0, vm.memMB-vm.balloonTarget-256), // pretend ~256MiB in use
+		TargetMiB:    vm.balloonTarget,
+		ActualMiB:    vm.balloonTarget,
+		FreeMiB:      available / 2, // some of the available RAM is reclaimable cache
+		AvailableMiB: available,     // pretend ~256MiB is genuinely in use
 	}, nil
 }
 

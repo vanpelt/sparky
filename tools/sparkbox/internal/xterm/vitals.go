@@ -122,7 +122,7 @@ type vitals struct {
 	// different things, and the page draws them differently — one hides the
 	// meter, the other shows an idle one.
 	CPUSeconds *float64 `json:"cpu_seconds,omitempty"`
-	MemUsedMB  *int64   `json:"mem_used_mb,omitempty"`
+	MemUsedMB  *int64   `json:"mem_used_mb,omitempty"` // excludes guest-reclaimable cache
 	NetRxBytes *uint64  `json:"net_rx_bytes,omitempty"`
 	NetTxBytes *uint64  `json:"net_tx_bytes,omitempty"`
 
@@ -131,6 +131,12 @@ type vitals struct {
 	// what the network readout names on hover; the plot never uses them.
 	LifeRxBytes uint64 `json:"life_rx_bytes,omitempty"`
 	LifeTxBytes uint64 `json:"life_tx_bytes,omitempty"`
+
+	// Repositories is the guest's latest advisory git survey, keyed by the
+	// configured owner/name slug. Keeping it on the same snapshot as the
+	// resource counters gives every status surface one payload to consume.
+	Repositories map[string]host.RepoStatus `json:"repositories"`
+	RepoStatusAt *time.Time                 `json:"repo_status_at,omitempty"`
 }
 
 // vitalsHandler answers GET /vitals for the sandbox this host names.
@@ -157,6 +163,11 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 		Ballooned:      box.Ballooned,
 		LifeRxBytes:    box.NetRxBytes,
 		LifeTxBytes:    box.NetTxBytes,
+		Repositories:   repositoryMap(box.Repos),
+	}
+	if !box.RepoStatusAt.IsZero() {
+		at := box.RepoStatusAt
+		out.RepoStatusAt = &at
 	}
 	if h.sshCommand != nil {
 		out.SSH = h.sshCommand(box.Name)
@@ -181,6 +192,14 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	json.NewEncoder(w).Encode(out) //nolint:errcheck
+}
+
+func repositoryMap(repos []host.RepoStatus) map[string]host.RepoStatus {
+	out := make(map[string]host.RepoStatus, len(repos))
+	for _, repo := range repos {
+		out[repo.Slug] = repo
+	}
+	return out
 }
 
 // recentHiveMindSession selects by activity rather than trusting response

@@ -48,6 +48,13 @@ func sandboxToProto(box *host.Sandbox) *nodev1.Sandbox {
 		DiskTotalMb:    box.DiskTotalMB,
 		HostIp:         box.HostIP,
 		Turbo:          box.Turbo,
+		RepoStatusAt:   timestamp(box.RepoStatusAt),
+	}
+	for _, repo := range box.Repos {
+		out.Repos = append(out.Repos, &nodev1.RepoStatus{
+			Slug: repo.Slug, Path: repo.Path, Branch: repo.Branch, Upstream: repo.Upstream,
+			Ahead: repo.Ahead, Behind: repo.Behind, Dirty: repo.Dirty, State: repo.State,
+		})
 	}
 	return out
 }

@@ -4,8 +4,9 @@
   \___ \| '_ \ / _` | '__| |/ / '_ \ / _ \ \/ /
    ___) | |_) | (_| | |  |   <| |_) | (_) >  <
   |____/| .__/ \__,_|_|  |_|\_\_.__/ \___/_/\_\
-        |_|          agentic sandbox
+   ⚡   |_|          agentic sandbox
 
   An ephemeral microVM. Work persists while the box is warm; it
   suspends when idle and resumes the instant you reconnect.
 
+  Run `sparkbox` for commands you can use from inside this VM.

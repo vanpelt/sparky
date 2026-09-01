@@ -194,21 +194,25 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	// The usage line is the only discovery surface an agent in a VM has for
-	// these verbs, so a verb that is not in it is a verb nobody finds.
-	if !strings.Contains(cli, "update-tools [--check]>") {
-		t.Errorf("guest CLI usage line does not mention update-tools:\n%s", cli)
-	}
-	if !strings.Contains(cli, "pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|") {
-		t.Errorf("guest CLI usage line does not mention pause or snapshot:\n%s", cli)
-	}
-	if !strings.Contains(cli, "usage: sparkbox <whoami [--json]|") {
-		t.Errorf("guest CLI usage line does not mention whoami:\n%s", cli)
+	// The human-readable help is also the discovery surface for agents. Keep
+	// commands one per line and document stable exit codes so it remains easy to
+	// parse without resurrecting the old unreadable one-line usage blob.
+	for _, want := range []string{
+		"sparkbox — manage this sandbox from inside the VM",
+		"status [--json]",
+		"snapshot [OPTIONS] [TAG [NAME]]",
+		"whoami [--json]",
+		"update-tools [--check]",
+		"Exit codes (stable for scripts and agents):",
+	} {
+		if !strings.Contains(cli, want) {
+			t.Errorf("guest CLI help does not mention %q:\n%s", want, cli)
+		}
 	}
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=21\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=22\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -509,6 +513,21 @@ func TestRepoCloneNeverBlocksTheFirstAttach(t *testing.T) {
 	// enable` against; the symlink IS the enablement.
 	if !strings.Contains(script, "multi-user.target.wants/sparkbox-repos.service") {
 		t.Error("sparkbox-repos.service is never symlinked into multi-user.target.wants, so it never runs at boot")
+	}
+	report := heredocBody(t, script, "sparkbox-repos-report.service\" <<'EOF'\n")
+	timer := heredocBody(t, script, "sparkbox-repos-report.timer\" <<'EOF'\n")
+	for _, want := range []string{"Type=oneshot", "ExecStart=/usr/local/sbin/sparkbox-repos report"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("sparkbox-repos-report.service missing %q:\n%s", want, report)
+		}
+	}
+	for _, want := range []string{"OnUnitInactiveSec=5min", "RandomizedDelaySec=30s"} {
+		if !strings.Contains(timer, want) {
+			t.Errorf("sparkbox-repos-report.timer missing %q:\n%s", want, timer)
+		}
+	}
+	if !strings.Contains(script, "timers.target.wants/sparkbox-repos-report.timer") {
+		t.Error("sparkbox-repos-report.timer is not enabled")
 	}
 }
 

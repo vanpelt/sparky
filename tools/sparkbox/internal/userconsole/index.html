@@ -615,6 +615,10 @@
   <dialog id="confirm-dlg">
     <h3>Remove machine</h3>
     <p id="confirm-msg"></p>
+    <div id="confirm-repo-check" class="hidden">
+      <label for="confirm-name">Type the machine name to confirm</label>
+      <input id="confirm-name" class="mono" type="text" autocomplete="off" spellcheck="false" />
+    </div>
     <div class="row">
       <button class="btn-outline" id="confirm-cancel" type="button">Cancel</button>
       <button class="btn-danger-solid" id="confirm-go" type="button">Remove</button>
@@ -1025,6 +1029,10 @@
   function machineCard(b, now) {
     const isRunning = b.state === "running";
     const isArchived = b.state === "archived";
+    const repoRows = Array.isArray(b.repos) ? b.repos : [];
+    const repoAhead = repoRows.reduce((n, r) => n + (Number(r.ahead) || 0), 0);
+    const repoBehind = repoRows.reduce((n, r) => n + (Number(r.behind) || 0), 0);
+    const repoDirty = repoRows.filter((r) => r.dirty).length;
 
     const pct = cpuPct(b, now);
     const cpu = isRunning && pct !== null
@@ -1100,6 +1108,8 @@
       '" title="set the guest port this machine\'s default route forwards to">Set default port…</button>';
     const removeItem =
       '<button class="btn-danger" data-delbox="' + esc(b.name) + '" data-archived="' + (isArchived ? 1 : 0) +
+      '" data-repo-ahead="' + repoAhead + '" data-repo-behind="' + repoBehind +
+      '" data-repo-dirty="' + repoDirty +
       '" title="permanently remove this machine and its disk">Remove…</button>';
 
     const powerBtn = (b.pinned && isRunning) ? pinIcon : stateBtn;
@@ -1136,6 +1146,14 @@
       ? '<div class="env-warn">Secrets for this machine cannot be decrypted — the encryption key' +
         " has changed. Nothing was pushed. Re-enter the affected secrets in the Secrets tab.</div>"
       : "";
+    const repoNotes = [];
+    if (repoAhead) repoNotes.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
+    if (repoBehind) repoNotes.push(repoBehind + " commit" + (repoBehind === 1 ? "" : "s") + " behind upstream");
+    if (repoDirty) repoNotes.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
+    const repoWarn = repoNotes.length
+      ? '<div class="env-warn"><strong>Repository attention:</strong> ' + esc(repoNotes.join(" · ")) +
+        '. Run <code class="mono">sparkbox status</code> in the machine for details.</div>'
+      : "";
 
     return '<div class="card machine">' +
       '<div class="m-head">' +
@@ -1148,7 +1166,7 @@
             " · active " + rel(b.last_active) + "</span>" +
         "</div>" +
         '<div class="m-actions">' + actions + "</div>" +
-      "</div>" + envWarn +
+      "</div>" + envWarn + repoWarn +
       '<div class="m-body">' +
         '<div class="m-stat"><div class="label">Host CPU</div><div class="value">' + cpu + "</div></div>" +
         '<div class="m-stat"><div class="label">Memory</div><div class="value">' + mem + "</div></div>" +
@@ -1226,7 +1244,10 @@
     wrap.querySelectorAll("button[data-portdlg]").forEach((btn) =>
       btn.addEventListener("click", () => openPort(btn.dataset.portdlg, btn.dataset.port)));
     wrap.querySelectorAll("button[data-delbox]").forEach((btn) =>
-      btn.addEventListener("click", () => openRemove(btn.dataset.delbox, btn.dataset.archived === "1")));
+      btn.addEventListener("click", () => openRemove(
+        btn.dataset.delbox, btn.dataset.archived === "1",
+        Number(btn.dataset.repoAhead) || 0, Number(btn.dataset.repoBehind) || 0,
+        Number(btn.dataset.repoDirty) || 0)));
     wrap.querySelectorAll("button[data-netexp]").forEach((btn) =>
       btn.addEventListener("click", () => toggleNet(btn.dataset.netexp)));
     wrap.querySelectorAll("button[data-turbo]").forEach((btn) =>
@@ -1387,16 +1408,31 @@
 
   // Removing an archived machine also drops its rootfs copy from object storage
   // (the backend folds that cleanup in), so the message calls that out.
-  function openRemove(name, archived) {
+  function openRemove(name, archived, ahead, behind, dirty) {
     const dlg = $("confirm-dlg");
     dlg._name = name;
+    dlg._requiresName = ahead > 0;
+    const warnings = [];
+    if (ahead > 0) warnings.push(ahead + " unpushed commit" + (ahead === 1 ? "" : "s"));
+    if (behind > 0) warnings.push(behind + " commit" + (behind === 1 ? "" : "s") + " behind upstream");
+    if (dirty > 0) warnings.push(dirty + " dirty checkout" + (dirty === 1 ? "" : "s"));
     $("confirm-msg").innerHTML =
       'Permanently remove <span class="mono">' + esc(name) + "</span>? " +
       "This destroys the machine and its disk" +
       (archived ? ", including its archived copy in object storage," : "") +
-      " and cannot be undone.";
+      " and cannot be undone." +
+      (warnings.length ? '<br><br><strong>Repository warning:</strong> ' + esc(warnings.join("; ")) + "." : "");
+    $("confirm-repo-check").classList.toggle("hidden", !dlg._requiresName);
+    $("confirm-name").value = "";
+    $("confirm-go").disabled = dlg._requiresName;
     dlg.showModal();
+    if (dlg._requiresName) $("confirm-name").focus();
   }
+
+  $("confirm-name").addEventListener("input", () => {
+    const dlg = $("confirm-dlg");
+    $("confirm-go").disabled = dlg._requiresName && $("confirm-name").value !== dlg._name;
+  });
 
   $("confirm-cancel").addEventListener("click", () => $("confirm-dlg").close());
   $("confirm-go").addEventListener("click", async () => {

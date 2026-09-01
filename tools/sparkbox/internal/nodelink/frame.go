@@ -692,21 +692,23 @@ type Cancel struct {
 // column is the authorization input, and the gateway overwrites this one from
 // it before the record is indexed.
 type SandboxRow struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Owner       string `json:"owner"`
-	Image       string `json:"image"`
-	State       string `json:"state"`
-	VCPUs       int64  `json:"vcpus"`
-	MemMB       int64  `json:"mem_mb"`
-	DiskMB      int64  `json:"disk_mb,omitempty"`
-	DiskTotalMB int64  `json:"disk_total_mb,omitempty"`
-	Pinned      bool   `json:"pinned,omitempty"`
-	Ballooned   bool   `json:"ballooned,omitempty"`
-	SSHUser     string `json:"ssh_user,omitempty"`
-	KeyFP       string `json:"key_fp,omitempty"`
-	NetRxBytes  uint64 `json:"net_rx_bytes,omitempty"`
-	NetTxBytes  uint64 `json:"net_tx_bytes,omitempty"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Owner        string            `json:"owner"`
+	Image        string            `json:"image"`
+	State        string            `json:"state"`
+	VCPUs        int64             `json:"vcpus"`
+	MemMB        int64             `json:"mem_mb"`
+	DiskMB       int64             `json:"disk_mb,omitempty"`
+	DiskTotalMB  int64             `json:"disk_total_mb,omitempty"`
+	Pinned       bool              `json:"pinned,omitempty"`
+	Ballooned    bool              `json:"ballooned,omitempty"`
+	SSHUser      string            `json:"ssh_user,omitempty"`
+	KeyFP        string            `json:"key_fp,omitempty"`
+	NetRxBytes   uint64            `json:"net_rx_bytes,omitempty"`
+	NetTxBytes   uint64            `json:"net_tx_bytes,omitempty"`
+	Repos        []host.RepoStatus `json:"repos,omitempty"`
+	RepoStatusAt time.Time         `json:"repo_status_at,omitempty"`
 	// Turbo says VCPUs and MemMB above are a doubled allocation borrowed for
 	// this run, which the node hands back the moment the sandbox pauses.
 	Turbo      bool      `json:"turbo,omitempty"`

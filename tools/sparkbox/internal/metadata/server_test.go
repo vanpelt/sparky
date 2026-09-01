@@ -21,6 +21,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // fakeBoxes maps guest IP -> sandbox, the same resolution host.Manager does
@@ -56,6 +57,23 @@ func (f fakeAccounts) Get(handle string) (users.User, error) {
 type fakeRouteControl struct {
 	visibility string
 	port       int
+}
+
+type fakeRepoStatusSink struct {
+	name string
+	rows []host.RepoStatus
+	at   time.Time
+}
+
+type fakeVitalsReader struct{ reading host.Vitals }
+
+func (f fakeVitalsReader) Vitals(context.Context, string) (host.Vitals, error) {
+	return f.reading, nil
+}
+
+func (f *fakeRepoStatusSink) SetRepoStatus(name string, rows []host.RepoStatus, at time.Time) error {
+	f.name, f.rows, f.at = name, append([]host.RepoStatus(nil), rows...), at
+	return nil
 }
 
 func (f *fakeRouteControl) SetVisibility(_ context.Context, box *host.Sandbox, visibility string) (RouteVisibility, error) {
@@ -110,7 +128,11 @@ func request(s *Server, path, src, dst string) *httptest.ResponseRecorder {
 }
 
 func requestMethod(s *Server, method, path, src, dst string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(method, path, nil)
+	return requestBody(s, method, path, "", src, dst)
+}
+
+func requestBody(s *Server, method, path, body, src, dst string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.RemoteAddr = net.JoinHostPort(src, "40000")
 	r = r.WithContext(context.WithValue(r.Context(), localAddrKey{},
 		&net.TCPAddr{IP: net.ParseIP(dst), Port: DefaultPort}))
@@ -135,6 +157,67 @@ func TestDocsAreServedOverMetadataToo(t *testing.T) {
 		rec := request(s, tc.path, "0.0.0.0", "0.0.0.0")
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
 			t.Errorf("GET %s = %d %q, want 200 containing %q", tc.path, rec.Code, rec.Body.String(), tc.want)
+		}
+	}
+}
+
+func TestGuestPublishesStructuredRepoStatus(t *testing.T) {
+	s := fixture(t)
+	sink := &fakeRepoStatusSink{}
+	s.repoStatus = sink
+	sep := "\x1f"
+	body := strings.Join([]string{
+		"wandb/agentstream", "/home/sparky/src/wandb/agentstream", "feat/timeline",
+		"origin/feat/timeline", "2", "1", "1", "stale",
+	}, sep) + "\n"
+	rec := requestBody(s, http.MethodPost, "/repos/status", body, "172.30.5.2", "172.30.5.1")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /repos/status = %d: %s", rec.Code, rec.Body)
+	}
+	if sink.name != "alice-box" || len(sink.rows) != 1 {
+		t.Fatalf("published name=%q rows=%+v", sink.name, sink.rows)
+	}
+	got := sink.rows[0]
+	if got.Branch != "feat/timeline" || got.Ahead != 2 || got.Behind != 1 || !got.Dirty ||
+		got.Path != "/home/sparky/src/wandb/agentstream" {
+		t.Errorf("published row = %+v", got)
+	}
+	if sink.at.IsZero() {
+		t.Error("publish did not record its observation time")
+	}
+
+	bad := requestBody(s, http.MethodPost, "/repos/status", "not-a-row", "172.30.5.2", "172.30.5.1")
+	if bad.Code != http.StatusBadRequest {
+		t.Errorf("malformed report = %d, want 400", bad.Code)
+	}
+}
+
+func TestSelfStatusIncludesReportedReposForHumansAndAgents(t *testing.T) {
+	s := fixture(t)
+	box, _ := s.mgr.(fakeBoxes).GetByHostIP("172.30.5.2")
+	box.State = vmm.StateRunning
+	box.VCPUs, box.MemMB = 4, 4096
+	box.RepoStatusAt = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	box.Repos = []host.RepoStatus{{
+		Slug: "wandb/agentstream", Path: "/home/sparky/agentstream", Branch: "feat/x",
+		Upstream: "origin/feat/x", Ahead: 2, Dirty: true, State: "stale",
+	}}
+	cpu, mem, rx, tx := 12.5, int64(1024), uint64(7000), uint64(4000)
+	s.vitals = fakeVitalsReader{reading: host.Vitals{
+		CPUSeconds: &cpu, MemUsedMB: &mem, NetRxBytes: &rx, NetTxBytes: &tx,
+		ListeningPorts: []int{8080}, PortsChecked: true,
+	}}
+
+	human := request(s, "/self?format=text", "172.30.5.2", "172.30.5.1")
+	for _, want := range []string{"state: running", "allocation: 4 vCPU, 4096 MiB memory", "cpu time: 12.5 seconds", "memory: 1024 MiB used (25%)", "listening ports: 8080", "wandb/agentstream", "/home/sparky/agentstream", "feat/x", "2 unpushed", "dirty"} {
+		if !strings.Contains(human.Body.String(), want) {
+			t.Errorf("human status missing %q:\n%s", want, human.Body)
+		}
+	}
+	agent := request(s, "/self", "172.30.5.2", "172.30.5.1")
+	for _, want := range []string{`"state":"running"`, `"vcpus":4`, `"mem_used_mb":1024`, `"repositories":{"wandb/agentstream"`, `"ahead":2`, `"dirty":true`} {
+		if !strings.Contains(agent.Body.String(), want) {
+			t.Errorf("JSON status missing %q: %s", want, agent.Body)
 		}
 	}
 }

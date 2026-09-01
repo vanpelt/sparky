@@ -1404,6 +1404,13 @@ backgrounded for ten minutes. `at_ms` is the divisor rather than the browser's
 clock, so request latency never shows up as a CPU spike. This is the same split
 the user console already makes with `cpu_seconds`.
 
+The payload also carries `repositories`, an object keyed by configured repo
+slug, and `repo_status_at`. This is the gateway's latest guest-published git
+survey rather than a filesystem read performed by the poll. The in-guest
+`sparkbox status --json` response uses the same field names and resource
+counters, so the xterm strip, people at a shell, and agents all consume the
+same status vocabulary.
+
 **It is strictly passive.** The handler resolves through `Get`, never
 `EnsureRunning`, and never calls `Touch` — `TestVitalsNeverResumesOrTouches`
 holds the line. A tab polls this once a second; if any of it counted as activity
@@ -1490,13 +1497,12 @@ this host. The switch itself keeps the physical push-button it has everywhere
 else in the product; the point of that shape is that it is the same switch
 wherever you meet it.
 
-**The connection item is worded for the state it is in.** Pressing it does one
-thing either way — drop whatever socket is there and open a new one — but those
-are two different acts to the person pressing it. On a live shell it reads
-*Start a new shell*, "ends this shell and opens a fresh one"; only a
-disconnected page calls it *Reconnect*. `setStatus` paints it, so it cannot
-drift from the lamp beside it. The overlay keeps its own button, which is the
-path anybody disconnected actually takes.
+**The connection item is worded for the state it is in.** On a live shell it
+reads *Start a new shell* and opens the same xterm URL in a new tab, preserving
+the current PTY and scrollback. Only a disconnected page calls it *Reconnect*
+and reconnects in place. `setStatus` paints it, so it cannot drift from the lamp
+beside it. The overlay keeps its own button, which is the path anybody
+disconnected actually takes.
 
 **`ssh <name>@<host>`, copied.** The first row is the command that reaches the
 same shell from a terminal, rendered in full so it can be read without being

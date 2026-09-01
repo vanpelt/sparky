@@ -257,7 +257,7 @@ type sandboxView struct {
 	Routes    []routeStatus `json:"routes"`
 	NextWake  *time.Time    `json:"next_wake,omitempty"`
 	Schedules int           `json:"schedules,omitempty"`
-	// MemUsedMB is the guest's real memory use in MiB (from balloon stats), the
+	// MemUsedMB is the guest's non-available memory in MiB (from balloon stats), the
 	// live-overcommit signal against MemMB's ceiling. nil when unavailable.
 	MemUsedMB *int64 `json:"mem_used_mb,omitempty"`
 }

@@ -39,7 +39,8 @@ import (
 type Vitals struct {
 	// CPUSeconds is cumulative host CPU time of the VM process, in seconds.
 	CPUSeconds *float64
-	// MemUsedMB is the guest's real memory use in MiB, from balloon statistics.
+	// MemUsedMB is the guest's non-available memory in MiB, from balloon stats;
+	// reclaimable cache is available rather than alarming "used" memory.
 	MemUsedMB *int64
 	// NetRxBytes and NetTxBytes are the raw tap counters in bytes, from the
 	// guest's point of view. They reset to zero on every pause, resume and cold

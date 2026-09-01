@@ -44,11 +44,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,7 +59,9 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // DefaultPort is the metadata service's port on each tap host address. It is
@@ -76,6 +81,19 @@ const (
 type Sandboxes interface {
 	GetByHostIP(ip string) (*host.Sandbox, bool)
 	SetPinned(name string, pinned bool) error
+}
+
+// RepoStatusSink accepts an advisory checkout snapshot from the guest. It is
+// separate from Sandboxes so small identity-only test doubles and deployments
+// do not acquire a mutation they do not need.
+type RepoStatusSink interface {
+	SetRepoStatus(name string, repos []host.RepoStatus, at time.Time) error
+}
+
+// VitalsReader supplies the same live counters used by the xterm instrument
+// strip. It is optional so identity-only metadata deployments remain small.
+type VitalsReader interface {
+	Vitals(context.Context, string) (host.Vitals, error)
 }
 
 // Accounts is the slice of the user store this service needs: the owner's
@@ -259,6 +277,8 @@ type Server struct {
 	routes         RouteControl
 	repoAccess     RepoAccess
 	repoAuthorizer RepoAuthorizer
+	repoStatus     RepoStatusSink
+	vitals         VitalsReader
 	tools          ToolCache
 	lifecycle      SelfLifecycle
 	// allowSelfSnapshot is the operator's kill switch for capture-from-inside.
@@ -301,6 +321,12 @@ type Options struct {
 	// RepoAuthorizer serves the interactive per-repository GitHub user flow.
 	// It is separate from Repos so older/minimal hosts retain bot credentials.
 	RepoAuthorizer RepoAuthorizer
+	// RepoStatus receives the guest's bounded read-only git survey. Nil answers
+	// the publish route 501 while leaving manifest and credential reads intact.
+	RepoStatus RepoStatusSink
+	// Vitals lets sparkbox status render the resource snapshot also exposed by
+	// the xterm UI. Nil leaves the stable fields present and live counters absent.
+	Vitals VitalsReader
 	// Tools serves this machine's own agent-CLI cache. Nil answers both /tools
 	// routes 501, which is what a host started without --tools-dir is. It is
 	// never a relay to another machine — see ToolCache.
@@ -341,7 +367,9 @@ func NewChecked(opts Options) (*Server, error) {
 	}
 	return &Server{
 		mgr: opts.Manager, id: opts.Identity, routes: opts.RouteControl,
-		repoAccess: opts.Repos, repoAuthorizer: opts.RepoAuthorizer, tools: opts.Tools, log: log,
+		repoAccess: opts.Repos, repoAuthorizer: opts.RepoAuthorizer, repoStatus: opts.RepoStatus,
+		vitals: opts.Vitals,
+		tools:  opts.Tools, log: log,
 		lifecycle:         opts.SelfLifecycle,
 		allowSelfSnapshot: opts.AllowSelfSnapshot,
 		defAud:            opts.DefaultAudience,
@@ -355,6 +383,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /token", s.token)
 	mux.HandleFunc("GET /identity", s.identity)
 	mux.HandleFunc("GET /repos", s.repoManifest)
+	mux.HandleFunc("POST /repos/status", s.publishRepoStatus)
 	mux.HandleFunc("GET /github/credential", s.githubCredential)
 	mux.HandleFunc("POST /github/authorization", s.startGithubAuthorization)
 	mux.HandleFunc("GET /github/authorization/{id}", s.pollGithubAuthorization)
@@ -395,9 +424,114 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+const (
+	maxRepoStatusBody = 64 << 10
+	maxRepoStatusRows = 64
+	maxRepoStatusText = 512
+)
+
+// publishRepoStatus accepts the checkout survey produced inside the calling
+// guest. The source tap authenticates the sandbox exactly as it does for every
+// other metadata route; the body is only advisory state and is bounded before
+// any of it reaches durable inventory or a fleet link.
+//
+// Each line is eight ASCII-US-separated fields:
+// slug, path, branch, upstream, ahead, behind, dirty (0/1), state.
+func (s *Server) publishRepoStatus(w http.ResponseWriter, r *http.Request) {
+	box, err := s.caller(r)
+	if err != nil {
+		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	if s.repoStatus == nil {
+		http.Error(w, "sparkbox: repo status reporting is not enabled", http.StatusNotImplemented)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRepoStatusBody))
+	if err != nil {
+		http.Error(w, "sparkbox: repo status report is too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+	if len(lines) > maxRepoStatusRows {
+		http.Error(w, "sparkbox: repo status report has too many rows", http.StatusBadRequest)
+		return
+	}
+	rows := make([]host.RepoStatus, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Split(line, "\x1f")
+		if len(fields) != 8 {
+			http.Error(w, "sparkbox: malformed repo status row", http.StatusBadRequest)
+			return
+		}
+		for _, field := range fields {
+			if len(field) > maxRepoStatusText || hasControl(field) {
+				http.Error(w, "sparkbox: invalid repo status field", http.StatusBadRequest)
+				return
+			}
+		}
+		if !repos.ValidSlug(fields[0]) || !strings.HasPrefix(fields[1], "/") {
+			http.Error(w, "sparkbox: invalid repository or path in status report", http.StatusBadRequest)
+			return
+		}
+		ahead, e1 := strconv.ParseInt(fields[4], 10, 64)
+		behind, e2 := strconv.ParseInt(fields[5], 10, 64)
+		if e1 != nil || e2 != nil || ahead < 0 || behind < 0 ||
+			(fields[6] != "0" && fields[6] != "1") {
+			http.Error(w, "sparkbox: invalid repository counters in status report", http.StatusBadRequest)
+			return
+		}
+		switch fields[7] {
+		case "ready", "stale", "missing", "failed":
+		default:
+			http.Error(w, "sparkbox: invalid repository state in status report", http.StatusBadRequest)
+			return
+		}
+		rows = append(rows, host.RepoStatus{
+			Slug: fields[0], Path: fields[1], Branch: fields[2], Upstream: fields[3],
+			Ahead: ahead, Behind: behind, Dirty: fields[6] == "1", State: fields[7],
+		})
+	}
+	if err := s.repoStatus.SetRepoStatus(box.Name, rows, time.Now()); err != nil {
+		s.log.Error("repo status publish failed", "sandbox", box.Name, "err", err)
+		http.Error(w, "sparkbox: could not record repo status", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func hasControl(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 type selfDoc struct {
-	Sandbox string `json:"sandbox"`
-	Pinned  bool   `json:"pinned"`
+	Sandbox        string                     `json:"sandbox"`
+	State          vmm.State                  `json:"state"`
+	Pinned         bool                       `json:"pinned"`
+	AtMS           int64                      `json:"at_ms"`
+	VCPUs          int64                      `json:"vcpus"`
+	MemMB          int64                      `json:"mem_mb"`
+	Turbo          bool                       `json:"turbo,omitempty"`
+	Ballooned      bool                       `json:"ballooned,omitempty"`
+	CPUSeconds     *float64                   `json:"cpu_seconds,omitempty"`
+	MemUsedMB      *int64                     `json:"mem_used_mb,omitempty"`
+	NetRxBytes     *uint64                    `json:"net_rx_bytes,omitempty"`
+	NetTxBytes     *uint64                    `json:"net_tx_bytes,omitempty"`
+	LifeRxBytes    uint64                     `json:"life_rx_bytes,omitempty"`
+	LifeTxBytes    uint64                     `json:"life_tx_bytes,omitempty"`
+	ListeningPorts []int                      `json:"listening_ports,omitempty"`
+	PortServices   []host.PortService         `json:"port_services,omitempty"`
+	PortsChecked   bool                       `json:"ports_checked,omitempty"`
+	Repositories   map[string]host.RepoStatus `json:"repositories"`
+	RepoStatusAt   *time.Time                 `json:"repo_status_at,omitempty"`
 }
 
 func (s *Server) self(w http.ResponseWriter, r *http.Request) {
@@ -406,7 +540,11 @@ func (s *Server) self(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	s.writeSelf(w, box)
+	if r.URL.Query().Get("format") == "text" {
+		s.writeSelfText(w, s.selfStatus(r.Context(), box))
+		return
+	}
+	s.writeSelf(w, s.selfStatus(r.Context(), box))
 }
 
 func (s *Server) pin(w http.ResponseWriter, r *http.Request)   { s.setPinned(w, r, true) }
@@ -426,13 +564,115 @@ func (s *Server) setPinned(w http.ResponseWriter, r *http.Request, pinned bool) 
 	}
 	box.Pinned = pinned
 	s.log.Info("sandbox changed its own pin", "sandbox", box.Name, "owner", box.Owner, "pinned", pinned)
-	s.writeSelf(w, box)
+	s.writeSelf(w, s.selfStatus(r.Context(), box))
 }
 
-func (s *Server) writeSelf(w http.ResponseWriter, box *host.Sandbox) {
+func (s *Server) selfStatus(ctx context.Context, box *host.Sandbox) selfDoc {
+	repositories := make(map[string]host.RepoStatus, len(box.Repos))
+	for _, repo := range box.Repos {
+		repositories[repo.Slug] = repo
+	}
+	doc := selfDoc{
+		Sandbox: box.Name, State: box.State, Pinned: box.Pinned,
+		AtMS: time.Now().UnixMilli(), VCPUs: box.VCPUs, MemMB: box.MemMB,
+		Turbo: box.Turbo, Ballooned: box.Ballooned,
+		LifeRxBytes: box.NetRxBytes, LifeTxBytes: box.NetTxBytes,
+		Repositories: repositories,
+	}
+	if !box.RepoStatusAt.IsZero() {
+		at := box.RepoStatusAt
+		doc.RepoStatusAt = &at
+	}
+	if s.vitals != nil && box.State == vmm.StateRunning {
+		readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if live, err := s.vitals.Vitals(readCtx, box.Name); err == nil {
+			doc.CPUSeconds, doc.MemUsedMB = live.CPUSeconds, live.MemUsedMB
+			doc.NetRxBytes, doc.NetTxBytes = live.NetRxBytes, live.NetTxBytes
+			doc.ListeningPorts = append([]int(nil), live.ListeningPorts...)
+			doc.PortServices = append([]host.PortService(nil), live.PortServices...)
+			doc.PortsChecked = live.PortsChecked
+		} else if err != nil {
+			s.log.Debug("guest status vitals unavailable", "sandbox", box.Name, "err", err)
+		}
+	}
+	return doc
+}
+
+func (s *Server) writeSelf(w http.ResponseWriter, doc selfDoc) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(selfDoc{Sandbox: box.Name, Pinned: box.Pinned}) //nolint:errcheck
+	json.NewEncoder(w).Encode(doc) //nolint:errcheck
+}
+
+func (s *Server) writeSelfText(w http.ResponseWriter, doc selfDoc) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, "sandbox: %s\nstate: %s\npinned: %t\n", doc.Sandbox, doc.State, doc.Pinned)
+	fmt.Fprintf(w, "allocation: %d vCPU, %d MiB memory\n", doc.VCPUs, doc.MemMB)
+	if doc.CPUSeconds != nil {
+		fmt.Fprintf(w, "cpu time: %.1f seconds\n", *doc.CPUSeconds)
+	}
+	if doc.MemUsedMB != nil {
+		if doc.MemMB > 0 {
+			fmt.Fprintf(w, "memory: %d MiB used (%.0f%%)\n", *doc.MemUsedMB, 100*float64(*doc.MemUsedMB)/float64(doc.MemMB))
+		} else {
+			fmt.Fprintf(w, "memory: %d MiB used\n", *doc.MemUsedMB)
+		}
+	}
+	if doc.NetRxBytes != nil && doc.NetTxBytes != nil {
+		fmt.Fprintf(w, "network: %d bytes received, %d bytes sent\n", *doc.NetRxBytes, *doc.NetTxBytes)
+	}
+	if doc.PortsChecked {
+		if len(doc.ListeningPorts) == 0 {
+			fmt.Fprintln(w, "listening ports: none")
+		} else {
+			ports := make([]string, 0, len(doc.ListeningPorts))
+			for _, port := range doc.ListeningPorts {
+				ports = append(ports, strconv.Itoa(port))
+			}
+			fmt.Fprintf(w, "listening ports: %s\n", strings.Join(ports, ", "))
+		}
+	}
+	if len(doc.Repositories) == 0 {
+		if doc.RepoStatusAt == nil {
+			fmt.Fprintln(w, "repos: none reported")
+		} else {
+			fmt.Fprintln(w, "repos: none attached")
+		}
+	} else {
+		fmt.Fprintln(w, "repos:")
+		slugs := make([]string, 0, len(doc.Repositories))
+		for slug := range doc.Repositories {
+			slugs = append(slugs, slug)
+		}
+		sort.Strings(slugs)
+		for _, slug := range slugs {
+			repo := doc.Repositories[slug]
+			branch := repo.Branch
+			if branch == "" {
+				branch = "not cloned"
+			}
+			flags := make([]string, 0, 3)
+			if repo.Ahead > 0 {
+				flags = append(flags, fmt.Sprintf("%d unpushed", repo.Ahead))
+			}
+			if repo.Behind > 0 {
+				flags = append(flags, fmt.Sprintf("%d behind", repo.Behind))
+			}
+			if repo.Dirty {
+				flags = append(flags, "dirty")
+			}
+			note := ""
+			if len(flags) > 0 {
+				note = " [" + strings.Join(flags, ", ") + "]"
+			}
+			fmt.Fprintf(w, "  %-28s %-34s %s%s\n", repo.Slug, repo.Path, branch, note)
+		}
+	}
+	if doc.RepoStatusAt != nil {
+		fmt.Fprintf(w, "repo status checked: %s\n", doc.RepoStatusAt.UTC().Format(time.RFC3339))
+	}
 }
 
 func (s *Server) visibility(w http.ResponseWriter, r *http.Request) {

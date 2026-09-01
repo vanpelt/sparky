@@ -384,6 +384,29 @@ func TestVitalsCarriesTheNameSSHAndConsole(t *testing.T) {
 	}
 }
 
+func TestVitalsCarriesRepositoryStateMap(t *testing.T) {
+	box := runningBox("demo", "alice")
+	box.RepoStatusAt = time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	box.Repos = []host.RepoStatus{{
+		Slug: "wandb/agentstream", Path: "/home/sparky/src/wandb/agentstream",
+		Branch: "feat/x", Upstream: "origin/feat/x", Ahead: 2, Dirty: true, State: "stale",
+	}}
+	hz := newHarness(t, box)
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	repositories, ok := m["repositories"].(map[string]any)
+	if !ok {
+		t.Fatalf("repositories = %#v, want an object keyed by slug", m["repositories"])
+	}
+	repo, ok := repositories["wandb/agentstream"].(map[string]any)
+	if !ok || repo["ahead"] != float64(2) || repo["dirty"] != true {
+		t.Errorf("repository state = %#v", repositories["wandb/agentstream"])
+	}
+	if m["repo_status_at"] != "2026-09-01T12:00:00Z" {
+		t.Errorf("repo_status_at = %v", m["repo_status_at"])
+	}
+}
+
 // A host that advertises no SSH endpoint and runs no console omits both fields
 // rather than sending empty strings. The page keys its menu rows off their
 // presence, so an empty string would render "Copy the ssh command" over a blank

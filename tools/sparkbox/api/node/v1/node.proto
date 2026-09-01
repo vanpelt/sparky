@@ -132,6 +132,8 @@ message Sandbox {
   bool turbo = 19;
   // Stable workload identity. Unlike name, this survives sandbox rename.
   string id = 20;
+  repeated RepoStatus repos = 21;
+  google.protobuf.Timestamp repo_status_at = 22;
 }
 
 enum SandboxState {
@@ -474,4 +476,18 @@ message DurationRange {
 message PortService {
   int32 port = 1;
   string name = 2;
+}
+
+// RepoStatus is appended to preserve every existing message index in the
+// generated compatibility descriptors. It is advisory guest-observed state;
+// the gateway never uses it for ownership or authorization.
+message RepoStatus {
+  string slug = 1;
+  string path = 2;
+  string branch = 3;
+  string upstream = 4;
+  int64 ahead = 5;
+  int64 behind = 6;
+  bool dirty = 7;
+  string state = 8;
 }

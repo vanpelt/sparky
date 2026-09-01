@@ -1068,6 +1068,8 @@ func serve(args []string) error {
 			RouteControl:      gatewayRouteControl{fleet: flt, node: nodeName},
 			Repos:             localRepos,
 			RepoAuthorizer:    localRepos,
+			RepoStatus:        mgr,
+			Vitals:            mgr,
 			Tools:             localTools(*toolsDir),
 			SelfLifecycle:     gatewaySelfLifecycle{fleet: flt, node: nodeName},
 			AllowSelfSnapshot: *guestSelfSnapshot,

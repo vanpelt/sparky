@@ -31,12 +31,28 @@ type SandboxInfo struct {
 	// Turbo says vcpus and mem_mb above are a doubled allocation borrowed for
 	// this run. Without it a listing would report a turbo sandbox's size as its
 	// own, and then appear to shrink it the next time the reaper pauses it.
-	Turbo       bool      `json:"turbo,omitempty"`
-	DiskMB      int64     `json:"disk_mb,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	LastActive  time.Time `json:"last_active"`
-	URL         string    `json:"url,omitempty"`          // https://<name>.<domain>
-	TerminalURL string    `json:"terminal_url,omitempty"` // https://<name>-xterm.<domain>
+	Turbo        bool         `json:"turbo,omitempty"`
+	DiskMB       int64        `json:"disk_mb,omitempty"`
+	Repos        []RepoStatus `json:"repos,omitempty"`
+	RepoStatusAt *time.Time   `json:"repo_status_at,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+	LastActive   time.Time    `json:"last_active"`
+	URL          string       `json:"url,omitempty"`          // https://<name>.<domain>
+	TerminalURL  string       `json:"terminal_url,omitempty"` // https://<name>-xterm.<domain>
+}
+
+// RepoStatus is the latest advisory git state a sandbox reported from inside
+// its own filesystem. It is restated rather than exposing host.RepoStatus so
+// the public API remains independent of internal topology records.
+type RepoStatus struct {
+	Slug     string `json:"slug"`
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"`
+	Upstream string `json:"upstream,omitempty"`
+	Ahead    int64  `json:"ahead,omitempty"`
+	Behind   int64  `json:"behind,omitempty"`
+	Dirty    bool   `json:"dirty,omitempty"`
+	State    string `json:"state"`
 }
 
 type SnapshotInfo struct {

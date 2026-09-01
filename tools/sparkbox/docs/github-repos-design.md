@@ -323,7 +323,8 @@ is far slower than anything in that story. So the unit is `Type=oneshot` with no
 ordering before `ssh.service`, and the arrival experience is handled in the
 shell instead:
 
-- the motd reports `repos: cloning wandb/hivemind…` or `2 repos ready`;
+- the motd reports `repos: cloning wandb/hivemind…`, then lists each repo,
+  checkout path, current branch, and ahead/behind/dirty markers;
 - `sparkbox repos` in-guest reports per-repo status and reasons;
 - a failed clone is a warning in the motd, never a failed boot.
 

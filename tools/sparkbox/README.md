@@ -204,6 +204,18 @@ reconnecting on its own and resurrecting the VM the reaper just parked. Typing
 counts as activity (throttled to once a minute); merely having the tab open does
 not, so a forgotten tab cannot pin a sandbox warm forever.
 
+The guest login banner lists every attached repository with its checkout path,
+current branch, and compact ahead/behind/dirty markers. `sparkbox status` shows
+the same resource and lifecycle snapshot used by the xterm `/vitals` strip,
+plus the gateway's latest repository map (`--json` is the stable agent-facing
+form); `sparkbox repos` inspects the filesystem immediately, and
+`sparkbox repos sync` is the only post-boot command that may safely fast-forward
+a clean checkout. A fetch-only guest timer refreshes the gateway's advisory repo
+state every five minutes, including unpushed commits and divergence, so consoles
+can warn before destructive actions. The browser terminal's **Start a new
+shell** action opens a separate xterm tab and leaves the current PTY and
+scrollback intact.
+
 `--api-subdomain` and `--xterm-subdomain` move or disable either surface. See
 [`docs/rest-api-and-xterm-design.md`](docs/rest-api-and-xterm-design.md).
 
