@@ -94,7 +94,7 @@ AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-br
 # like IDENTITY_REV so bumping it re-patches every template on the next run even
 # when no tool version moved — editing any of it without bumping this ships the
 # change to nobody.
-AGENT_ENV_REV=10
+AGENT_ENV_REV=11
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -585,7 +585,7 @@ except Exception as e:
 
 cfg["hasCompletedOnboarding"] = True
 cfg["lastOnboardingVersion"] = os.environ["CLAUDE_VER"]
-cfg.setdefault("theme", "dark")
+cfg.setdefault("theme", "auto")
 
 tmp = path + ".seed-new"
 with open(tmp, "w") as f:

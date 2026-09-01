@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -418,6 +419,15 @@ type sandboxView struct {
 func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
 	boxes := h.boxes.ListByOwner(sess.Handle)
+	// The console is an activity view, so put the machine the user touched most
+	// recently first. The stores deliberately keep their general-purpose list
+	// methods name-sorted; this presentation-specific order belongs here.
+	sort.SliceStable(boxes, func(i, j int) bool {
+		if boxes[i].LastActive.Equal(boxes[j].LastActive) {
+			return boxes[i].Name < boxes[j].Name
+		}
+		return boxes[i].LastActive.After(boxes[j].LastActive)
+	})
 	views := make([]sandboxView, len(boxes))
 	var wg sync.WaitGroup
 	for i, b := range boxes {

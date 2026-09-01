@@ -1042,6 +1042,23 @@ func (g *GRPCControl) putSnapshot(snapshot *host.Snapshot) {
 	g.mu.Unlock()
 }
 
+func (g *GRPCControl) noteSnapshotSourcePaused(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	box := g.boxes[name]
+	if box == nil {
+		return
+	}
+	paused := cloneSandbox(box)
+	paused.State = vmm.StatePaused
+	paused.HostIP = ""
+	paused.SSHAddr = ""
+	paused.GuestV6 = ""
+	g.boxes[name] = paused
+	delete(g.routedBoxes, name)
+	g.lastSeen = g.now()
+}
+
 func (g *GRPCControl) deleteSnapshot(name string) {
 	g.mu.Lock()
 	delete(g.snaps, name)
@@ -1316,6 +1333,10 @@ func (g *GRPCControl) Snapshotter(ctx context.Context, boxName, snapshotName, ow
 		return nil, g.fail("snapshot.create", boxName, errors.New("invalid snapshot result"))
 	}
 	g.putSnapshot(snapshot)
+	// The snapshot operation's durable success guarantees its source was
+	// paused. Do not leave the pre-operation running row in the cache while
+	// waiting for the independent inventory event stream to catch up.
+	g.noteSnapshotSourcePaused(boxName)
 	copy := *snapshot
 	return &copy, nil
 }

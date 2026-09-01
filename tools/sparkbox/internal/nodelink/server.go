@@ -1025,6 +1025,22 @@ func (c *Client) NoteSnapshot(row SnapshotRow) {
 	c.snaps[row.Name] = row
 }
 
+// NoteSandbox folds an authoritative sandbox row returned by a mutation into
+// the node cache. Lifecycle events normally do this, but a mutation reply is
+// the stronger ordering point: callers should not briefly (or, after a dropped
+// event, indefinitely) keep serving the state from before the operation.
+func (c *Client) NoteSandbox(row SandboxRow) {
+	if row.Name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.boxes[row.Name]; !known && len(c.boxes) >= MaxSandboxesPerNode {
+		return
+	}
+	c.boxes[row.Name] = row
+}
+
 func (c *Client) ForgetSnapshot(name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

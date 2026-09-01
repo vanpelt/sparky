@@ -199,6 +199,13 @@ func (m *opsManager) Snapshot(ctx context.Context, box, snapName, owner string) 
 	if err := m.waited(ctx); err != nil {
 		return nil, err
 	}
+	m.fakeManager.mu.Lock()
+	for _, b := range m.fakeManager.boxes {
+		if b.Name == box {
+			b.State = vmm.StatePaused
+		}
+	}
+	m.fakeManager.mu.Unlock()
 	return &host.Snapshot{
 		Name: snapName, Owner: owner, Image: "snap-" + owner + "-" + snapName,
 		FromBox: box, CreatedAt: time.Now(),
@@ -359,9 +366,13 @@ func TestNodeRunsEveryLifecycleVerb(t *testing.T) {
 			reply: &SnapshotResp{},
 			want:  managerCall{"snapshot", []any{"demo", "base", "alice"}},
 			check: func(t *testing.T, reply any) {
-				got := reply.(*SnapshotResp).Snapshot
+				response := reply.(*SnapshotResp)
+				got := response.Snapshot
 				if got.Name != "base" || got.Owner != "alice" || got.FromBox != "demo" {
 					t.Errorf("template = %+v, want base/alice from demo", got)
+				}
+				if response.Source.Name != "demo" || response.Source.State != string(vmm.StatePaused) {
+					t.Errorf("source = %+v, want demo paused in the same reply", response.Source)
 				}
 			},
 		},

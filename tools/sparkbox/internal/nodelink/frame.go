@@ -862,6 +862,11 @@ type SandboxResp struct {
 
 type SnapshotResp struct {
 	Snapshot SnapshotRow `json:"snapshot"`
+	// Source is the authoritative state of the sandbox after capture. A
+	// successful snapshot pauses it; carrying the row in the same reply keeps a
+	// gateway from rendering the pre-capture running state if the asynchronous
+	// sandbox.changed event is delayed or dropped.
+	Source SandboxRow `json:"source,omitempty"`
 }
 
 // EmptyResp is the reply body of every operation whose success carries no

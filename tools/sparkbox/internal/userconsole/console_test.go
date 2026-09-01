@@ -291,6 +291,25 @@ func TestEveryEndpointRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestMachinesAreNewestActivityFirst(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "alpha", "alice")
+	time.Sleep(time.Millisecond)
+	tc.create(t, "zulu", "alice")
+
+	var views []sandboxView
+	rec := tc.do(t, "GET", "/api/machines", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("machines status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &views); err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 || views[0].Name != "zulu" || views[1].Name != "alpha" {
+		t.Fatalf("machine order = %+v, want newest activity first", views)
+	}
+}
+
 // TestCrossOwnerIs404 drives every owner-scoped endpoint against alice's
 // resources as mallory: each must answer 404 with the not-found body — never
 // 403, which would confirm the name exists.

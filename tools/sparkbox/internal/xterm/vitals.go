@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -86,6 +88,12 @@ type vitals struct {
 	ListeningPorts []int              `json:"listening_ports,omitempty"`
 	PortServices   []host.PortService `json:"port_services,omitempty"`
 	PortsChecked   bool               `json:"ports_checked,omitempty"`
+
+	// HiveMindSessionTitle and HiveMindSessionURL identify the most recently
+	// active session observed for this VM. They are absent until the optional
+	// presence monitor has successfully refreshed its ephemeral catalog.
+	HiveMindSessionTitle string `json:"hivemind_session_title,omitempty"`
+	HiveMindSessionURL   string `json:"hivemind_session_url,omitempty"`
 
 	// State is the sandbox's lifecycle state ("running", "paused", ...). The
 	// counters below are only ever present while it is running.
@@ -162,6 +170,7 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	out.HiveMindSessionTitle, out.HiveMindSessionURL = recentHiveMindSession(box.HiveMind)
 	h.readVitals(r.Context(), box, &out)
 
 	// edgeauth.Require already sets no-store on everything behind the gate;
@@ -172,6 +181,36 @@ func (h *Handler) vitals(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	json.NewEncoder(w).Encode(out) //nolint:errcheck
+}
+
+// recentHiveMindSession selects by activity rather than trusting response
+// order, then admits only an absolute HTTP(S) dashboard link. The title is
+// painted with textContent in the page; the URL still needs this scheme check
+// because it becomes a clickable href.
+func recentHiveMindSession(snapshot *host.HiveMindSessionSnapshot) (string, string) {
+	if snapshot == nil {
+		return "", ""
+	}
+	var best *host.HiveMindSession
+	for i := range snapshot.Sessions {
+		session := &snapshot.Sessions[i]
+		parsed, err := url.Parse(session.URL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+			continue
+		}
+		if best == nil || session.LastActivityAt.After(best.LastActivityAt) ||
+			(session.LastActivityAt.Equal(best.LastActivityAt) && session.StartedAt.After(best.StartedAt)) {
+			best = session
+		}
+	}
+	if best == nil {
+		return "", ""
+	}
+	title := strings.TrimSpace(best.Title)
+	if title == "" {
+		title = "HiveMind session"
+	}
+	return title, best.URL
 }
 
 // readVitals fills in whatever the machine holding box can answer about it.

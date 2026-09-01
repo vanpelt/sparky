@@ -28,6 +28,11 @@ var badgeTemplate []byte
 //go:embed sparkbox-logo.png
 var badgeLogoPNG []byte
 
+// LogoPNG returns the compact Sparkbox product mark used by small chrome such
+// as the launch badge and browser-terminal header. Callers get their own slice
+// so an asset handler cannot mutate the embedded source for another surface.
+func LogoPNG() []byte { return append([]byte(nil), badgeLogoPNG...) }
+
 const badgeLogoMarker = "SPARKBOX_LOGO_PNG_BASE64"
 
 // withBadgeLogo keeps badge.svg reviewable while producing one self-contained

@@ -785,7 +785,7 @@ func guestUpdater(t *testing.T, cache string) (root string, run func(args ...str
 	installGuestPayload(t, root)
 	// What this VM booted with. The updater may read it and must never write it.
 	if err := os.WriteFile(filepath.Join(root, "etc/sparkbox/tools-rev"),
-		[]byte("claude=1.0.0 codex=rust-v1.0.0 pi=v1.0.0 hivemind=1.0.0 agentbrowser=1.0.0 identity=10 agentenv=10\n"),
+		[]byte("claude=1.0.0 codex=rust-v1.0.0 pi=v1.0.0 hivemind=1.0.0 agentbrowser=1.0.0 identity=10 agentenv=11\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1132,7 +1132,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// was patched, and every agent's own updater is off. An agent that does
 		// not know the pull exists has no way to move them.
 		"sparkbox update-tools --check",
-		"AGENT_ENV_REV=10",
+		"AGENT_ENV_REV=11",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
@@ -1246,6 +1246,18 @@ func TestGuestSeedsAPermissionDefault(t *testing.T) {
 	// above it in the script legitimately uses to explain the choice.
 	if strings.Contains(got, `"defaultMode", "bypassPermissions"`) {
 		t.Error("the template seeds a full permission bypass; `auto` is the line this is allowed to draw")
+	}
+}
+
+func TestGuestSeedsAutomaticClaudeColorScheme(t *testing.T) {
+	got := string(RefreshToolsScript)
+	if !strings.Contains(got, `cfg.setdefault("theme", "auto")`) {
+		t.Error("guest Claude seed does not follow the terminal's light/dark color scheme")
+	}
+	for _, overwrite := range []string{`cfg["theme"] =`, `cfg.setdefault("theme", "dark")`} {
+		if strings.Contains(got, overwrite) {
+			t.Errorf("guest Claude seed overrides or hardcodes the user's theme: %q", overwrite)
+		}
 	}
 }
 

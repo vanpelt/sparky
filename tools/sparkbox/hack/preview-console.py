@@ -233,6 +233,8 @@ def _vitals():
         "name": "brave-meadow", "ssh": "ssh brave-meadow@catnip.sh",
         "proxy": "https://brave-meadow.catnip.sh/",
         "console": "https://my.catnip.sh/",
+        "hivemind_session_title": "Polish the Sparkbox terminal experience",
+        "hivemind_session_url": "https://hivemind.example/sessions/demo",
         "state": "running", "at_ms": int(now * 1000),
         "vcpus": _V_VCPUS * (2 if _VITALS["turbo"] else 1),
         "mem_mb": _V_MEM_MB * (2 if _VITALS["turbo"] else 1),
@@ -301,6 +303,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # /assets/ paths the real handler uses.
         if PAGE["assets"] and self.path.startswith("/assets/"):
             name = os.path.basename(self.path.split("?")[0])
+            if name == "sparkbox-logo.png":
+                self._sendfile(_pkg("launch", "sparkbox-logo.png"), "image/png")
+                return
             ctype = "text/css" if name.endswith(".css") else "text/javascript"
             self._sendfile(os.path.join(PAGE["assets"], name), ctype)
             return
