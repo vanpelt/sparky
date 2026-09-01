@@ -78,11 +78,11 @@ handles servers and background work as **two different problems** (Parts 2 and 3
   and time-sensitive — a sandbox resumed after an hour would mint/hold tokens with
   a wrong `iat/exp`. TLS validation and logs skew too. Resume must step the guest
   clock (Part 6).
-- **Fixed 2 vCPU / 8192 MB per sandbox** (`host/manager.go:28`). ~~So RAM is
+- **Fixed 4 vCPU / 12288 MB per sandbox** (`host/manager.go`). ~~So RAM is
   reserved, not "up to."~~ **Corrected:** Firecracker configures guest RAM as
   lazily-allocated anonymous mmap (no prealloc/hugepages in `fc.go`), so a warm
-  sandbox that touched 300 MB costs ~300 MB of host RAM, *not* 8 GB. The "8 GB"
-  is a **ceiling**, and the old full-8 GB charge was purely an *admission
+  sandbox that touched 300 MB costs ~300 MB of host RAM, *not* 12 GB. The "12 GB"
+  is a **ceiling**, and the old full-ceiling charge was purely an *admission
   accounting* choice, not a kernel fact — which is exactly why we thought only ~7
   fit. **Landed:** every VM now gets a `deflate_on_oom` memory balloon
   (`vmm.Ballooner`, `fc.go`), so we can reclaim an idle guest's RAM to the host
@@ -409,8 +409,8 @@ on pause, while the host kernel time-slices its doubled vCPU threads.
 ## What we already have (so this is mostly policy, not new mechanics)
 
 - Snapshot pause/resume, resume-on-connect over SSH **and** HTTP, thin CoW rootfs,
-  a per-minute reaper, RAM admission, `ctl@ pause`, and a 4 vCPU / 8 GB default
-  allocation (8 vCPU / 16 GB for a Turbo run). The Firecracker driver, tap/NDP
+  a per-minute reaper, RAM admission, `ctl@ pause`, and a 4 vCPU / 12 GB default
+  allocation (8 vCPU / 24 GB for a Turbo run). The Firecracker driver, tap/NDP
   lifecycle, and state persistence (`sandboxes.json`) are all in place.
 - The genuinely new engineering is: the Stopped state + snapshot GC, XFS project
   quotas + pooled accounting, the platform scheduler, wake-on-arbitrary-port,

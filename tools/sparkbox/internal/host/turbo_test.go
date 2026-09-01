@@ -70,16 +70,16 @@ func TestDefaultSandboxAndTurboSizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.VCPUs != 4 || b.MemMB != 8192 {
-		t.Fatalf("default size = %d vCPU / %d MB, want 4 / 8192", b.VCPUs, b.MemMB)
+	if b.VCPUs != 4 || b.MemMB != 12288 {
+		t.Fatalf("default size = %d vCPU / %d MB, want 4 / 12288", b.VCPUs, b.MemMB)
 	}
 
 	if err := m.SetTurbo(ctx, "default-size", true); err != nil {
 		t.Fatalf("turbo on: %v", err)
 	}
 	b, _ = m.Get("default-size")
-	if !b.Turbo || b.VCPUs != 8 || b.MemMB != 16384 || b.BaseVCPUs != 4 || b.BaseMemMB != 8192 {
-		t.Fatalf("turbo default = %+v, want 8 vCPU / 16384 MB over a 4 / 8192 base", b)
+	if !b.Turbo || b.VCPUs != 8 || b.MemMB != 24576 || b.BaseVCPUs != 4 || b.BaseMemMB != 12288 {
+		t.Fatalf("turbo default = %+v, want 8 vCPU / 24576 MB over a 4 / 12288 base", b)
 	}
 }
 

@@ -33,7 +33,7 @@ SUBNET6_FLAG=""
 [ -n "$SUBNET6" ] && SUBNET6_FLAG="--subnet6 $SUBNET6"
 
 # Live-overcommit + density defaults for fleet hosts. A sandbox's RAM is lazily
-# allocated, so an 8GB VM costs its working set (~0.5GB idle, measured), not 8GB
+# allocated, so a 12GB VM costs its working set (~0.5GB idle, measured), not 12GB
 # — admission charges the --mem-reserve-mb floor instead of the ceiling, and the
 # per-owner cap rises to match. Verified in prod: 12 running 8GB VMs cost ~7GB.
 # Override for a conservative box with OVERCOMMIT_FLAGS="" ; retune the reserve

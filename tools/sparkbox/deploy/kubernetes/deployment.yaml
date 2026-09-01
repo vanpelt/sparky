@@ -311,7 +311,7 @@ spec:
               value: "50"
             - name: SPARKBOX_MAX_SANDBOXES_PER_OWNER
               value: "50"
-            # Each VM keeps its 8 GiB ceiling, but all of an owner's running
+            # Each VM keeps its 12 GiB ceiling, but all of an owner's running
             # VMs share one 8 GiB effective-memory entitlement. A 256 MiB
             # working-set charge admits up to 32 simultaneously warm children;
             # the remainder stay durable and resume after another is paused.

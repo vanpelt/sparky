@@ -40,10 +40,10 @@ func reservedName(name string) bool { return reserved.Name(name) }
 
 // Default per-sandbox resources, applied when the caller passes <= 0 (the SSH
 // `new@` path always does; the HTTP API may override). Bounded only by host
-// capacity — an 8c/16t/64GB box fits ~8 of these before overcommit.
+// capacity — an 8c/16t/64GB box fits ~5 of these before overcommit.
 const (
 	defaultVCPUs int64 = 4
-	defaultMemMB int64 = 8192
+	defaultMemMB int64 = 12288
 
 	// activityInterval is the shortest gap between activity marks we retain for
 	// one sandbox. A mark is deliberately approximate: the idle thresholds are

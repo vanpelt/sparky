@@ -318,7 +318,7 @@ type CreateArgs struct {
 	// not-found is not also an ownership answer.
 	Node  string
 	VCPUs int64 // 0 takes the manager default (4)
-	MemMB int64 // 0 takes the manager default (8192)
+	MemMB int64 // 0 takes the manager default (12288)
 	// Refs are the per-instance branch overrides: which branch THIS sandbox's
 	// checkouts start on, whatever the attachment says. Resolved and refused
 	// before any row is written, and written beside the tags for the same
