@@ -177,6 +177,8 @@ The browser terminal is `https://<name>-xterm.<domain>` — an xterm.js page ove
 an authenticated WebSocket into a real PTY in that sandbox, with the same
 resume-on-connect as `ssh <name>@<domain>`. Open it and you get a shell; nothing
 to install, and the sign-in is the same passkey/token flow as any private route.
+When the presence monitor has observed a HiveMind session for the VM, the
+terminal header links its most recently active session by title.
 Its hamburger menu links straight to the sandbox's default proxy endpoint at
 `https://<name>.<domain>`, following whichever guest port the default route
 currently selects. The owning VM host lightly probes Sparkbox's supported

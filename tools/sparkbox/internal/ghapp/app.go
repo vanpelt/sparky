@@ -313,6 +313,32 @@ func (a *App) MintToken(ctx context.Context, inst Installation, repoNames []stri
 	return a.token(ctx, inst.ID, repoNames, perms)
 }
 
+// RepositoryID resolves the immutable id needed to restrict a GitHub App user
+// access token to one repository. The app JWT cannot read ordinary repository
+// metadata, so this uses an installation token whose only requested permission
+// is the mandatory metadata read grant.
+func (a *App) RepositoryID(ctx context.Context, inst Installation, owner, name string) (int64, error) {
+	slug, err := checkSlug(owner, name)
+	if err != nil {
+		return 0, err
+	}
+	tok, err := a.MintToken(ctx, inst, []string{name}, map[string]string{"metadata": PermRead})
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	path := fmt.Sprintf(repositoryPath, url.PathEscape(owner), url.PathEscape(name))
+	if err := a.do(ctx, http.MethodGet, path, "Bearer "+tok.Token, "resolving repository id for "+slug, nil, &out); err != nil {
+		return 0, err
+	}
+	if out.ID <= 0 {
+		return 0, fmt.Errorf("%w: github returned no repository id for %s", ErrUpstream, slug)
+	}
+	return out.ID, nil
+}
+
 // Authorize decides whether the sparkbox account identified by (githubID,
 // githubLogin) may use inst. This is the security boundary of the repos
 // feature: getting it wrong hands one user's private repositories to another

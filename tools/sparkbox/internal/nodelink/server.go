@@ -207,6 +207,26 @@ func registerUplinkOps(conn *Conn, node string, hooks Hooks) {
 		}
 		return hooks.OnSelfRepoCred(ctx, node, req)
 	})
+	conn.Handle(TypeSelfRepoAuthStart, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfRepoAuthStartReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" || req.Slug == "" || len(req.Slug) > MaxRepoSlugBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_repo_authorization_start", "a repo authorization needs a sandbox and repository")
+		}
+		if hooks.OnSelfRepoAuthStart == nil {
+			return nil, noRepos()
+		}
+		return hooks.OnSelfRepoAuthStart(ctx, node, req)
+	})
+	conn.Handle(TypeSelfRepoAuthPoll, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfRepoAuthPollReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" || len(req.ID) < 20 || len(req.ID) > 128 {
+			return nil, ctlops.Invalid(OpLink, "bad_self_repo_authorization_poll", "a repo authorization poll needs a sandbox and flow id")
+		}
+		if hooks.OnSelfRepoAuthPoll == nil {
+			return nil, noRepos()
+		}
+		return hooks.OnSelfRepoAuthPoll(ctx, node, req)
+	})
 }
 
 // identityRequest parses and bounds one identity request. The name is checked
@@ -470,8 +490,10 @@ type Hooks struct {
 	// The repo pair. Nil means this deployment attaches no repositories — no
 	// store, or no GitHub App key — and, as above, the node is told that in a
 	// sentence it can turn into a 501 rather than being left to infer it.
-	OnSelfRepos    func(ctx context.Context, node string, req SelfReposReq) (SelfReposResp, error)
-	OnSelfRepoCred func(ctx context.Context, node string, req SelfRepoCredReq) (SelfRepoCredResp, error)
+	OnSelfRepos         func(ctx context.Context, node string, req SelfReposReq) (SelfReposResp, error)
+	OnSelfRepoCred      func(ctx context.Context, node string, req SelfRepoCredReq) (SelfRepoCredResp, error)
+	OnSelfRepoAuthStart func(ctx context.Context, node string, req SelfRepoAuthStartReq) (SelfRepoAuthStartResp, error)
+	OnSelfRepoAuthPoll  func(ctx context.Context, node string, req SelfRepoAuthPollReq) (SelfRepoAuthPollResp, error)
 	// The lifecycle trio. OnSelfSnapshotPlan is a pure read and answers every
 	// refusal a guest can act on; OnSelfPause and OnSelfSnapshot are the two
 	// that stop the VM, and both return the instant the work is accepted — the
@@ -1001,6 +1023,22 @@ func (c *Client) NoteSnapshot(row SnapshotRow) {
 		return
 	}
 	c.snaps[row.Name] = row
+}
+
+// NoteSandbox folds an authoritative sandbox row returned by a mutation into
+// the node cache. Lifecycle events normally do this, but a mutation reply is
+// the stronger ordering point: callers should not briefly (or, after a dropped
+// event, indefinitely) keep serving the state from before the operation.
+func (c *Client) NoteSandbox(row SandboxRow) {
+	if row.Name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.boxes[row.Name]; !known && len(c.boxes) >= MaxSandboxesPerNode {
+		return
+	}
+	c.boxes[row.Name] = row
 }
 
 func (c *Client) ForgetSnapshot(name string) {

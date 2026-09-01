@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/launch"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/webui"
 )
 
@@ -26,6 +27,8 @@ var indexPage = webui.Build(indexTemplate)
 
 //go:embed assets
 var assetsFS embed.FS
+
+var sparkboxLogoPNG = launch.LogoPNG()
 
 // assetServer serves the vendored xterm.js bundle. The files are immutable —
 // upgrading xterm.js changes the binary, not the contents of a URL — so they
@@ -44,6 +47,11 @@ func assetServer() http.Handler {
 		// the terminal, so a sniffed content type is only ever a way to be
 		// wrong about it.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.URL.Path == "/sparkbox-logo.png" {
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(sparkboxLogoPNG)
+			return
+		}
 		files.ServeHTTP(w, r)
 	})
 }

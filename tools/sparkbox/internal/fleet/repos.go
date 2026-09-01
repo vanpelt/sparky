@@ -63,6 +63,26 @@ type Repos interface {
 	Credential(ctx context.Context, box *host.Sandbox, slug string) (RepoCredential, error)
 }
 
+// RepoAuthorizer is implemented by a repository resolver that can bind a
+// short-lived GitHub user grant to one exact write attachment.
+type RepoAuthorizer interface {
+	StartAuthorization(ctx context.Context, box *host.Sandbox, slug string) (RepoAuthorizationStart, error)
+	PollAuthorization(ctx context.Context, box *host.Sandbox, id string) (RepoAuthorizationStatus, error)
+}
+
+type RepoAuthorizationStart struct {
+	ID              string
+	UserCode        string
+	VerificationURI string
+	IntervalSeconds int
+	ExpiresAt       time.Time
+}
+
+type RepoAuthorizationStatus struct {
+	State string
+	Slug  string
+}
+
 // RepoAttachment is one repository a sandbox should hold. Its fields restate
 // internal/repos' columns rather than importing them, so this package stays
 // free of the store the way it is free of the OIDC issuer.
@@ -120,7 +140,43 @@ const maxRepoRefusalText = 240
 // SetRepos installs the resolver. Nil — the default — means this deployment
 // attaches no repositories, and a node that asks is told so rather than left
 // waiting on a hook that will never answer.
-func (f *Fleet) SetRepos(r Repos) { f.repos = r }
+func (f *Fleet) SetRepos(r Repos) {
+	f.repos = r
+	f.repoAuthorizer, _ = r.(RepoAuthorizer)
+}
+
+func (f *Fleet) SelfRepoAuthorizationStart(ctx context.Context, node string, req nodelink.SelfRepoAuthStartReq) (nodelink.SelfRepoAuthStartResp, error) {
+	box, err := f.selfServiceBox(node, req.Sandbox)
+	if err != nil {
+		return nodelink.SelfRepoAuthStartResp{}, err
+	}
+	if f.repoAuthorizer == nil {
+		return nodelink.SelfRepoAuthStartResp{}, noRepos()
+	}
+	started, err := f.repoAuthorizer.StartAuthorization(ctx, box, req.Slug)
+	if err != nil {
+		return nodelink.SelfRepoAuthStartResp{}, repoFailure(err)
+	}
+	return nodelink.SelfRepoAuthStartResp{
+		ID: started.ID, UserCode: started.UserCode, VerificationURI: started.VerificationURI,
+		IntervalSeconds: started.IntervalSeconds, ExpiresAt: started.ExpiresAt,
+	}, nil
+}
+
+func (f *Fleet) SelfRepoAuthorizationPoll(ctx context.Context, node string, req nodelink.SelfRepoAuthPollReq) (nodelink.SelfRepoAuthPollResp, error) {
+	box, err := f.selfServiceBox(node, req.Sandbox)
+	if err != nil {
+		return nodelink.SelfRepoAuthPollResp{}, err
+	}
+	if f.repoAuthorizer == nil {
+		return nodelink.SelfRepoAuthPollResp{}, noRepos()
+	}
+	status, err := f.repoAuthorizer.PollAuthorization(ctx, box, req.ID)
+	if err != nil {
+		return nodelink.SelfRepoAuthPollResp{}, repoFailure(err)
+	}
+	return nodelink.SelfRepoAuthPollResp{State: status.State, Slug: status.Slug}, nil
+}
 
 // SelfRepos answers a node asking what one of its sandboxes should have checked
 // out.

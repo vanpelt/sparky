@@ -12,13 +12,6 @@
   </defs>
   <rect x=".5" y=".5" width="171" height="27" rx="7" fill="url(#sparkboxBadgeGround)" stroke="#3F3F46"/>
   <path d="M2 7A5 5 0 0 1 7 2H165A5 5 0 0 1 170 7" fill="none" stroke="url(#sparkboxBadgeSheen)"/>
-  <g transform="translate(21 5.2) scale(1.1)">
-    <path d="M8 .9C10.3 3.4 11.5 6.3 11.5 9.1H4.5C4.5 6.3 5.7 3.4 8 .9Z" fill="#FACC15"/>
-    <path d="M4.5 6.9 2.2 9.8V12.3L4.5 10.6Z" fill="#FACC15"/>
-    <path d="M11.5 6.9 13.8 9.8V12.3L11.5 10.6Z" fill="#FACC15"/>
-    <path d="M5.3 9.1H10.7L10.1 11.4H5.9Z" fill="#FACC15"/>
-    <path d="M8 15.3C6.9 14.1 6.3 12.9 6.5 11.6H9.5C9.7 12.9 9.1 14.1 8 15.3Z" fill="#F59E0B"/>
-    <circle cx="8" cy="5.6" r="1.5" fill="#1C1C1F"/>
-  </g>
+  <image x="17" y="2" width="24" height="24" href="data:image/png;base64,SPARKBOX_LOGO_PNG_BASE64"/>
   <text x="45" y="18.5" textLength="104" lengthAdjust="spacingAndGlyphs" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#FAFAFA">Open in Sparkbox</text>
 </svg>

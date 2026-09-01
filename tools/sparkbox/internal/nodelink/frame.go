@@ -152,8 +152,10 @@ const (
 	// sandbox's attachments are resolved from its owner's tags, which no node
 	// holds, and the GitHub App key that turns one of them into a credential is
 	// in exactly the position the OIDC key is — on the gateway, staying there.
-	TypeSelfRepos    = "sandbox.self_repos"
-	TypeSelfRepoCred = "sandbox.self_repo_credential"
+	TypeSelfRepos         = "sandbox.self_repos"
+	TypeSelfRepoCred      = "sandbox.self_repo_credential"
+	TypeSelfRepoAuthStart = "sandbox.self_repo_authorization_start"
+	TypeSelfRepoAuthPoll  = "sandbox.self_repo_authorization_poll"
 
 	// Certificate enrollment, NODE -> gateway. The SSH control link is the
 	// bootstrap authentication: the request carries no node name because the
@@ -860,6 +862,11 @@ type SandboxResp struct {
 
 type SnapshotResp struct {
 	Snapshot SnapshotRow `json:"snapshot"`
+	// Source is the authoritative state of the sandbox after capture. A
+	// successful snapshot pauses it; carrying the row in the same reply keeps a
+	// gateway from rendering the pre-capture running state if the asynchronous
+	// sandbox.changed event is delayed or dropped.
+	Source SandboxRow `json:"source,omitempty"`
 }
 
 // EmptyResp is the reply body of every operation whose success carries no
@@ -1166,6 +1173,26 @@ type SelfRepoCredResp struct {
 	Username  string    `json:"username"`
 	Password  string    `json:"password"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type SelfRepoAuthStartReq struct {
+	Sandbox string `json:"sandbox"`
+	Slug    string `json:"slug"`
+}
+type SelfRepoAuthStartResp struct {
+	ID              string    `json:"id"`
+	UserCode        string    `json:"user_code"`
+	VerificationURI string    `json:"verification_uri"`
+	IntervalSeconds int       `json:"interval_seconds"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+type SelfRepoAuthPollReq struct {
+	Sandbox string `json:"sandbox"`
+	ID      string `json:"id"`
+}
+type SelfRepoAuthPollResp struct {
+	State string `json:"state"`
+	Slug  string `json:"slug,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>sparkbox — terminal</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
+<link rel="icon" type="image/png" href="/assets/sparkbox-logo.png" />
 <link rel="stylesheet" href="/assets/xterm.css" />
 <style>
   /* Design tokens and reset are shared with the two consoles (internal/webui)
@@ -36,14 +36,8 @@
     position: relative; z-index: 2;
   }
   .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
-  /* The mark does not follow the theme: --primary inverts to near-white in
-     dark mode and the bolt's gold would fall to about 2:1 against it. Pinning
-     the tile dark keeps it constant, the way a real logo is. */
   .logo {
-    width: 24px; height: 24px; border-radius: 6px; flex: none;
-    background: hsl(240 5.9% 10%); color: hsl(0 0% 98%);
-    display: grid; place-items: center; font-size: 13px; line-height: 1;
-    text-indent: 0.02em;
+    width: 24px; height: 24px; flex: none; object-fit: contain;
   }
   .name {
     font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
@@ -52,6 +46,17 @@
        the bar is squeezed — but it is not allowed to hog a wide bar either. */
     min-width: 4ch; max-width: 24ch;
   }
+  .session-link {
+    display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+    max-width: 30ch; flex: 0 1 auto; padding: 3px 5px; margin-left: 1px;
+    border-radius: calc(var(--radius) - 3px); color: hsl(var(--muted-foreground));
+    font-size: 12px; line-height: 1.2; text-decoration: none;
+  }
+  .session-link:hover, .session-link:focus-visible {
+    color: hsl(var(--foreground)); background: hsl(var(--muted));
+  }
+  .session-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-link svg { width: 12px; height: 12px; flex: none; }
   .spacer { flex: 1 1 auto; }
 
   /* Status is a lamp, not a sentence. The word it used to carry cost ~65px of a
@@ -171,6 +176,11 @@
   @media (max-width: 460px) {
     header { gap: 8px; padding: 0 8px; }
     .brand { gap: 7px; }
+    /* Keep the session reachable on a phone without letting an arbitrary title
+       squeeze out the sandbox name or the CPU/status controls. */
+    .session-link { flex: none; width: 28px; height: 28px; padding: 0; justify-content: center; }
+    .session-label { display: none; }
+    .session-link svg { width: 14px; height: 14px; }
   }
 
   /* background: transparent is not cosmetic — the shared reset leaves it
@@ -298,8 +308,14 @@
 <body>
   <header>
     <div class="brand">
-      <div class="logo">&#9889;&#65039;</div>
+      <img class="logo" src="/assets/sparkbox-logo.png" alt="" width="24" height="24" />
       <span class="name mono" id="sandbox-name">&nbsp;</span>
+      <a class="session-link hidden" id="hivemind-session" href="#" target="_blank" rel="noopener noreferrer">
+        <span class="session-label" id="hivemind-session-title"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 5h5v5"></path><path d="M10 14 19 5"></path><path d="M19 13v6H5V5h6"></path>
+        </svg>
+      </a>
     </div>
     <div class="spacer"></div>
 
@@ -964,6 +980,25 @@
       }
     }
 
+    // Presence refreshes its session catalog independently of the page, so
+    // unlike the stable identity fields this is repainted on every reading. A
+    // session that starts after the terminal opened should appear without a
+    // reload, and a refreshed title should follow it.
+    function paintHiveMindSession(v) {
+      const link = $("hivemind-session");
+      if (!v.hivemind_session_url) {
+        link.classList.add("hidden");
+        link.removeAttribute("href");
+        return;
+      }
+      const title = v.hivemind_session_title || "HiveMind session";
+      link.href = v.hivemind_session_url;
+      link.title = title;
+      link.setAttribute("aria-label", "Open HiveMind session: " + title);
+      $("hivemind-session-title").textContent = title;
+      link.classList.remove("hidden");
+    }
+
     // Port availability is deliberately repainted on every reading: services
     // come and go while the terminal remains open. The default URL stays in its
     // stable first row; additional supported listeners appear beneath it.
@@ -1100,6 +1135,7 @@
     function paintVitals(v) {
       vLast = v;
       paintIdentity(v);
+      paintHiveMindSession(v);
       paintProxyPorts(v);
       paintTurbo(v);
       const live = v.state === "running";

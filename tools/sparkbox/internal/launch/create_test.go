@@ -448,3 +448,75 @@ func TestMutationHeaderIsAcceptedProof(t *testing.T) {
 		t.Fatalf("status = %d (%s), want 303", rec.Code, rec.Body)
 	}
 }
+
+// TestCreateAwaitsSecretsBeforeRedirecting is the regression for a sandbox that
+// came up through this door holding none of its owner's secrets.
+//
+// pam_env reads /etc/environment once, at session setup, and ctlops.Create
+// pushes the secret block asynchronously. Both attach paths know this and put a
+// synchronous barrier in front of the session — but internal/xterm gates its
+// barrier on `box.State != StateRunning` (ws.go:189), and a sandbox this door
+// just built is already running by the time the browser follows the 303. The
+// gate reads false, the terminal opens, and the push lands in a file that
+// session will never read again: observed live as a shell whose `claude` asked
+// the user to log in on a box they had already tokenised, with the block on
+// disk 180ms after the terminal attached.
+//
+// The SSH door does not have the bug only because it carries a second term for
+// exactly this case (`viaNewDoor`, gateway.go:547). This is that term, for the
+// door that redirects instead of dialling.
+func TestCreateAwaitsSecretsBeforeRedirecting(t *testing.T) {
+	ops := &fakeOps{t: t, allowCreate: true}
+	h := creatable(t, ops)
+
+	rec := serveLaunch(t, h, http.MethodPost, postLink, signedIn(t, testHandle), fromThePage)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d (%s), want 303", rec.Code, rec.Body)
+	}
+	got := ops.awaitedNames()
+	if len(got) != 1 || got[0] != "created-box" {
+		t.Fatalf("AwaitEnv calls = %v, want the new sandbox's secrets delivered before the 303", got)
+	}
+}
+
+// TestReuseDoesNotAwaitSecrets: the barrier belongs to the create and to
+// nothing else. A reused sandbox is either warm — its environment already
+// pushed, so an exec into the guest buys nothing — or it is paused, and then
+// internal/xterm's own gate opens because the state check that misses a fresh
+// create is exactly right for a resume. Waiting here too would put a redundant
+// SSH round trip in front of every click on a badge for a box that exists.
+func TestReuseDoesNotAwaitSecrets(t *testing.T) {
+	// allowCreate stays false: a create on this link is a different bug.
+	ops := &fakeOps{t: t, boxes: []ctlops.SandboxInfo{
+		box("crafty-axolotl", string(vmm.StateRunning), false, time.Unix(1000, 0)),
+	}}
+	h := newHandler(t, ops, attached(testHandle, attachment("main", "hm"),
+		map[string][]repos.Repo{"crafty-axolotl": {{Host: gitHubHost, Slug: testSlug, Ref: "main"}}}))
+
+	rec := serveLaunch(t, h, http.MethodPost, "https://go.example.test/wandb/hivemind",
+		signedIn(t, testHandle), fromThePage)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d (%s), want 303", rec.Code, rec.Body)
+	}
+	if got := ops.awaitedNames(); len(got) != 0 {
+		t.Fatalf("AwaitEnv calls = %v, want none on a reuse", got)
+	}
+}
+
+// TestUndeliveredSecretsStillLaunch: the barrier is never fatal. A guest that
+// cannot be reached for the push is still a sandbox worth handing over — the
+// next transition to running pushes again — and a button that answers an error
+// screen because one SSH exec timed out is a worse failure than the one this
+// path exists to prevent.
+func TestUndeliveredSecretsStillLaunch(t *testing.T) {
+	ops := &fakeOps{t: t, allowCreate: true, awaitErr: errStore}
+	h := creatable(t, ops)
+
+	rec := serveLaunch(t, h, http.MethodPost, postLink, signedIn(t, testHandle), fromThePage)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d (%s), want 303 despite the failed delivery", rec.Code, rec.Body)
+	}
+	if want := "https://created-box-xterm.example.test/"; rec.Header().Get("Location") != want {
+		t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), want)
+	}
+}

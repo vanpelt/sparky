@@ -94,7 +94,7 @@ AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-br
 # like IDENTITY_REV so bumping it re-patches every template on the next run even
 # when no tool version moved — editing any of it without bumping this ships the
 # change to nobody.
-AGENT_ENV_REV=10
+AGENT_ENV_REV=11
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -585,7 +585,7 @@ except Exception as e:
 
 cfg["hasCompletedOnboarding"] = True
 cfg["lastOnboardingVersion"] = os.environ["CLAUDE_VER"]
-cfg.setdefault("theme", "dark")
+cfg.setdefault("theme", "auto")
 
 tmp = path + ".seed-new"
 with open(tmp, "w") as f:
@@ -771,6 +771,11 @@ github.com through a system credential helper that asks this host for a
 short-lived token scoped to the one repository being fetched, so `git clone`,
 `git fetch` and `git push` on an attached repository just work, and nothing
 durable holds a credential.
+
+Before opening a pull request, run `sparkbox repo authorize owner/name` for that
+checkout if the PR should appear as this VM's owner. Authorization is per repo;
+without it, GitHub access still works but PRs and other API actions are
+attributed to the Sparkbox bot.
 
 git's author is usually already set, to the GitHub account that owns this VM, so
 commits you make are attributed to that person. Leave it alone: an author you

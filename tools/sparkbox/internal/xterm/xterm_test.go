@@ -409,7 +409,7 @@ func TestPageCarriesCSPAndTerminal(t *testing.T) {
 		t.Errorf("X-Frame-Options = %q, want DENY", got)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"/assets/xterm.js", "/assets/xterm.css", "sparkbox.terminal.v1", "id=\"term\"", "id=\"proxy-link\"", "id=\"proxy-dlg\"", "listening_ports", "port_services"} {
+	for _, want := range []string{"/assets/xterm.js", "/assets/xterm.css", "/assets/sparkbox-logo.png", "sparkbox.terminal.v1", "id=\"term\"", "id=\"hivemind-session\"", "id=\"proxy-link\"", "id=\"proxy-dlg\"", "listening_ports", "port_services"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
 		}
@@ -428,6 +428,7 @@ func TestAssetsAreServedImmutably(t *testing.T) {
 		{"/assets/xterm.css", "text/css"},
 		{"/assets/addon-fit.js", "text/javascript"},
 		{"/assets/addon-web-links.js", "text/javascript"},
+		{"/assets/sparkbox-logo.png", "image/png"},
 	} {
 		rec := hz.get(t, "demo-xterm."+testDomain, c.path, "")
 		if rec.Code != http.StatusOK {

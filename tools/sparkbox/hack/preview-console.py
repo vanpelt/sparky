@@ -103,13 +103,18 @@ _NETRULES = [
 # installed (the row that carries the one-click URL), and still being asked.
 _REPOS = [
     {"host": "github.com", "slug": "wandb/hivemind", "ref": "", "path": "",
-     "access": "write", "tags": ["hm"], "created_at": _iso(86400), "app": "ready"},
+     "access": "write", "tags": ["hm"], "created_at": _iso(86400), "app": "ready",
+     "user_auth": "bot", "user_auth_enabled": True, "github_login": "vanpelt"},
+    {"host": "github.com", "slug": "wandb/sparky", "ref": "main", "path": "src/sparky",
+     "access": "write", "tags": ["hm"], "created_at": _iso(172800), "app": "ready",
+     "user_auth": "user", "user_auth_enabled": True, "github_login": "vanpelt"},
     {"host": "github.com", "slug": "wandb/dotfiles", "ref": "", "path": "",
      "access": "read", "tags": ["default"], "created_at": _iso(604800), "app": "missing",
-     "install_url": "https://github.com/apps/sparkbox/installations/new"},
+     "install_url": "https://github.com/apps/sparkbox/installations/new", "user_auth": "bot"},
     {"host": "github.com", "slug": "torvalds/linux", "ref": "v6.1", "path": "src/linux",
      "access": "read", "tags": [], "created_at": _iso(300), "app": "blocked",
-     "app_note": "the GitHub App may not do that: you are not an active member of torvalds"},
+     "app_note": "the GitHub App may not do that: you are not an active member of torvalds",
+     "user_auth": "bot"},
 ]
 
 
@@ -228,6 +233,8 @@ def _vitals():
         "name": "brave-meadow", "ssh": "ssh brave-meadow@catnip.sh",
         "proxy": "https://brave-meadow.catnip.sh/",
         "console": "https://my.catnip.sh/",
+        "hivemind_session_title": "Polish the Sparkbox terminal experience",
+        "hivemind_session_url": "https://hivemind.example/sessions/demo",
         "state": "running", "at_ms": int(now * 1000),
         "vcpus": _V_VCPUS * (2 if _VITALS["turbo"] else 1),
         "mem_mb": _V_MEM_MB * (2 if _VITALS["turbo"] else 1),
@@ -296,6 +303,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # /assets/ paths the real handler uses.
         if PAGE["assets"] and self.path.startswith("/assets/"):
             name = os.path.basename(self.path.split("?")[0])
+            if name == "sparkbox-logo.png":
+                self._sendfile(_pkg("launch", "sparkbox-logo.png"), "image/png")
+                return
             ctype = "text/css" if name.endswith(".css") else "text/javascript"
             self._sendfile(os.path.join(PAGE["assets"], name), ctype)
             return

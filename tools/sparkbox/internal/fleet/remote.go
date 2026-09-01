@@ -527,6 +527,14 @@ func (r *remoteNode) Snapshotter(ctx context.Context, box, snapName, owner strin
 	row := resp.Snapshot
 	row.Name, row.Owner, row.FromBox = snapName, owner, box
 	r.client.NoteSnapshot(row)
+	// Snapshot success means the source is paused. Record the row returned from
+	// that exact operation instead of depending solely on the asynchronous
+	// changed event, which may be delayed or dropped on a busy link.
+	if resp.Source.Name != "" {
+		source := resp.Source
+		source.Name, source.Owner = box, owner
+		r.client.NoteSandbox(source)
+	}
 	return s, nil
 }
 

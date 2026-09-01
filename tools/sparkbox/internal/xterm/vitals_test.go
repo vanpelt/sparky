@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -399,6 +400,39 @@ func TestVitalsOmitsWhatThisHostDoesNotHave(t *testing.T) {
 	// The name is not optional: every host knows it.
 	if m["name"] != "demo" {
 		t.Errorf("name = %v, want demo", m["name"])
+	}
+}
+
+func TestVitalsCarriesTheMostRecentHiveMindSession(t *testing.T) {
+	base := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	box := runningBox("demo", "alice")
+	box.HiveMind = &host.HiveMindSessionSnapshot{Sessions: []host.HiveMindSession{
+		{Title: "Older work", URL: "https://hivemind.example/sessions/old", StartedAt: base, LastActivityAt: base.Add(time.Minute)},
+		{Title: "  Fix terminal chrome  ", URL: "https://hivemind.example/sessions/new", StartedAt: base.Add(time.Minute), LastActivityAt: base.Add(2 * time.Minute)},
+	}}
+	hz := newHarness(t, box)
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	if got := m["hivemind_session_title"]; got != "Fix terminal chrome" {
+		t.Errorf("hivemind_session_title = %v, want newest session title", got)
+	}
+	if got := m["hivemind_session_url"]; got != "https://hivemind.example/sessions/new" {
+		t.Errorf("hivemind_session_url = %v, want newest session URL", got)
+	}
+}
+
+func TestVitalsOmitsUnsafeHiveMindSessionLinks(t *testing.T) {
+	box := runningBox("demo", "alice")
+	box.HiveMind = &host.HiveMindSessionSnapshot{Sessions: []host.HiveMindSession{{
+		Title: "Not a dashboard", URL: "javascript:alert(1)", LastActivityAt: time.Now(),
+	}}}
+	hz := newHarness(t, box)
+
+	m := decode(t, hz.getJSON(t, "demo-xterm."+testDomain, "/vitals", "alice"))
+	for _, field := range []string{"hivemind_session_title", "hivemind_session_url"} {
+		if value, present := m[field]; present {
+			t.Errorf("unsafe session produced %s=%v", field, value)
+		}
 	}
 }
 

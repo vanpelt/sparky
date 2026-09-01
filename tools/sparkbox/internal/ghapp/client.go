@@ -31,6 +31,7 @@ const defaultBaseURL = "https://api.github.com"
 // happen here.
 const (
 	installationPath = "/repos/%s/%s/installation"
+	repositoryPath   = "/repos/%s/%s"
 	accessTokensPath = "/app/installations/%d/access_tokens"
 	membershipPath   = "/orgs/%s/memberships/%s"
 	appPath          = "/app"

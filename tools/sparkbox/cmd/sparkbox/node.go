@@ -378,10 +378,11 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	if opts.metaAddr != "" {
 		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
-			Identity:     identityRelay,
-			RouteControl: relayRouteControl{up: uplink},
-			Repos:        reposRelay,
-			Tools:        localTools(opts.toolsDir),
+			Identity:       identityRelay,
+			RouteControl:   relayRouteControl{up: uplink},
+			Repos:          reposRelay,
+			RepoAuthorizer: reposRelay,
+			Tools:          localTools(opts.toolsDir),
 			// Wired on the node in the same release as on the gateway, and that
 			// is not a scheduling nicety. metadata's own rule (repos.go's
 			// githubError) is that a guest must not be able to tell which

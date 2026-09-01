@@ -259,6 +259,9 @@ func TestGRPCControlLifecycleUsesDurableIdentitiesAndResults(t *testing.T) {
 	if snapshot.Name != "base" || snapshot.FromBox != "renamed" || snapshot.Node != "node-b" {
 		t.Fatalf("snapshot result = %+v", snapshot)
 	}
+	if source, ok := control.Box("renamed"); !ok || source.State != vmm.StatePaused {
+		t.Fatalf("snapshot source cache = %+v, found=%v; successful capture must not leave it running", source, ok)
+	}
 	forked, err := control.Fork(context.Background(), "base", "forked", "alice", 1, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -282,6 +285,9 @@ func TestGRPCControlLifecycleUsesDurableIdentitiesAndResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := control.RecordKey(context.Background(), "renamed", "SHA256:test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.EnsureReady(context.Background(), "renamed"); err != nil {
 		t.Fatal(err)
 	}
 	vitals, err := control.Vitals(context.Background(), "renamed")

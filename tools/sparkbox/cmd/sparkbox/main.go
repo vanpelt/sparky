@@ -36,6 +36,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghuser"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghwebhook"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
@@ -182,7 +183,7 @@ func serve(args []string) error {
 		openSignup           = fs.Bool("open-signup", false, "let anyone with an SSH key register at signup@ without an invite code")
 		invitesPer           = fs.Int("invites-per-user", 0, "how many invite codes a non-operator user may mint (0 = operators only)")
 		githubClientID       = fs.String("github-client-id", defaultGitHubClientID, "public client id of the GitHub app used to link accounts via the OAuth device flow (`ssh ctl@<domain> github link`). It is an identifier, not a secret. Empty disables the flow, leaving `keys verify-github` — which needs the user's key published on GitHub — as the only way to link")
-		githubAppClientID    = fs.String("github-app-client-id", "", "client id of the GitHub App that mints repo credentials (`ssh ctl@<domain> repo add`). Distinct from --github-client-id: linking an account and reading a private repository are two different apps with two different consent screens, and only this one has a private key. Empty — or a host with no github_app_key.pem — leaves repo attachments unavailable")
+		githubAppClientID    = fs.String("github-app-client-id", "", "client id of the GitHub App that mints repo credentials (`ssh ctl@<domain> repo add`). Distinct from --github-client-id: linking an account and reading a private repository are two different apps with two different consent screens, and only this one has a private key. Empty — or a host with no key at SPARKBOX_GITHUB_APP_KEY_FILE — leaves repo attachments unavailable")
 		nodeNameFlag         = fs.String("node-name", "", "name this machine reports to the fleet and stamps on the sandboxes it holds (default: hostname). Also the `box` claim in every id token it issues, so changing it on a live host is externally visible")
 		archFlag             = fs.String("arch", runtime.GOARCH, "CPU architecture this machine reports to the fleet")
 		noNodeEnrol          = fs.Bool("no-node-enrol", false, "refuse unknown keys at the node@ door, so a machine cannot record itself as awaiting approval. Enrolment grants nothing on its own — an operator must approve its verified fingerprint and network configuration — so this is only worth setting on a gateway that will never gain another node")
@@ -334,11 +335,10 @@ func serve(args []string) error {
 	// The GitHub App key is the one piece of fleet key material with no
 	// create-if-missing form: nobody can mint the private half of an App that
 	// GitHub has to know about. So it is loaded, never created, and it is NOT
-	// gated on --require-keys — bootsecrets declares it optional precisely so
-	// that every fleet which predates this feature keeps booting. A file that
-	// exists and does not parse is still fatal; that is a broken deploy, not an
-	// absent one.
-	ghAppKey, err := ghapp.LoadKeyIfPresent(keysIn, "github_app_key")
+	// part of the fleet identity key directory. A configured file that does not
+	// parse is fatal; that is a broken deploy, not an absent one.
+	ghAppKeyPath := strings.TrimSpace(os.Getenv("SPARKBOX_GITHUB_APP_KEY_FILE"))
+	ghAppKey, err := ghapp.LoadKeyFileIfPresent(ghAppKeyPath)
 	if err != nil {
 		return fmt.Errorf("github app key: %w", err)
 	}
@@ -364,7 +364,10 @@ func serve(args []string) error {
 	} else {
 		reason := "no --github-app-client-id"
 		if ghAppKey == nil {
-			reason = "no " + filepath.Join(keysIn, "github_app_key.pem")
+			reason = "no SPARKBOX_GITHUB_APP_KEY_FILE"
+			if ghAppKeyPath != "" {
+				reason = "no " + ghAppKeyPath
+			}
 		}
 		log.Info("github app credentials disabled", "reason", reason)
 	}
@@ -416,6 +419,34 @@ func serve(args []string) error {
 		return fmt.Errorf("secrets store: %w", err)
 	}
 	defer secretsStore.Close()
+
+	// User-to-server grants begin with the GitHub App's OAuth or device flow,
+	// then the gateway uses the App client secret to derive a repository-scoped
+	// user token. The broad OAuth access token is never persisted or handed to a
+	// guest; only its rotating refresh token and the derived access token are
+	// encrypted here. Without the client secret, installation-token fallback
+	// remains available but per-user repository authorization is disabled.
+	var ghUserManager *ghuser.Manager
+	githubAppClientSecret := strings.TrimSpace(os.Getenv("SPARKBOX_GITHUB_APP_CLIENT_SECRET"))
+	if ghApp != nil && githubAppClientSecret != "" {
+		grantStore, openErr := ghuser.Open(filepath.Join(*stateDir, "sparkbox.db"),
+			ghuser.DeriveKEK(oidcKey.D.Bytes()))
+		if openErr != nil {
+			return fmt.Errorf("github user grant store: %w", openErr)
+		}
+		defer grantStore.Close()
+		client, clientErr := ghuser.NewClient(ghuser.Config{
+			ClientID: *githubAppClientID, ClientSecret: githubAppClientSecret,
+		})
+		if clientErr != nil {
+			return fmt.Errorf("github user authorization: %w", clientErr)
+		}
+		ghUserManager = ghuser.NewManager(client, grantStore, log)
+		log.Info("github per-repository user authorization enabled", "browser_flow", true, "scoped_tokens", true)
+	} else if ghApp != nil {
+		log.Info("github per-repository user authorization disabled; installation-token fallback remains enabled",
+			"reason", "SPARKBOX_GITHUB_APP_CLIENT_SECRET is not configured")
+	}
 
 	// Network rule-sets (per-tag egress allowlists) live in the same DB, on their
 	// own connection. Independent of sluice: rules can be authored even when the
@@ -1001,7 +1032,7 @@ func serve(args []string) error {
 	// different manifest — or a different refusal — depending on which machine
 	// the placer happened to pick, which is exactly the fact a sandbox must not
 	// be able to observe. LocalRepos is a value; copying it is the intent.
-	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp}
+	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp, UserAuth: ghUserManager}
 	// Installed here rather than beside SetRules for the same reason SetIdentity
 	// is: it is unconditional and independent of whether this gateway serves a
 	// metadata endpoint of its own. A --gateway-only control plane holds no VMs
@@ -1036,6 +1067,7 @@ func serve(args []string) error {
 			Identity:          metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
 			RouteControl:      gatewayRouteControl{fleet: flt, node: nodeName},
 			Repos:             localRepos,
+			RepoAuthorizer:    localRepos,
 			Tools:             localTools(*toolsDir),
 			SelfLifecycle:     gatewaySelfLifecycle{fleet: flt, node: nodeName},
 			AllowSelfSnapshot: *guestSelfSnapshot,
@@ -1180,6 +1212,7 @@ func serve(args []string) error {
 			// repo panel still attaches and detaches, and every row's install
 			// state reads as unknown instead of claiming one.
 			uc.SetGitHubApp(ghApp)
+			uc.SetGitHubUserAuth(ghUserManager)
 			// The Snapshots panel's bound-tags column, read-only: the console
 			// shows which tags boot from which snapshot and cannot change it.
 			uc.SetTemplateTags(templateStore)

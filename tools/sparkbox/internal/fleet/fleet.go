@@ -210,6 +210,10 @@ type Fleet struct {
 	// no attachment store or no GitHub App key — with the same answer as
 	// identity: the node is told, not left waiting. See repos.go.
 	repos Repos
+	// repoAuthorizer is the optional interactive user-authorization half of
+	// repos. It is kept separate so older/custom Repos implementations continue
+	// to serve bot credentials without having to implement the new flow.
+	repoAuthorizer RepoAuthorizer
 
 	// foreign latches once this fleet can hold a record that is not on this
 	// machine. See hasRemote.

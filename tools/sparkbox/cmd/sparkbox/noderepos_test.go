@@ -196,10 +196,43 @@ func TestFleetReposCarriesEveryColumn(t *testing.T) {
 	}
 }
 
+func TestFleetReposCarriesRepositoryAuthorization(t *testing.T) {
+	source := stubRepoAuthorizerAccess{stubRepoAccess: stubRepoAccess{}}
+	adapter := newFleetRepos(source)
+	authorizer, ok := adapter.(fleet.RepoAuthorizer)
+	if !ok {
+		t.Fatal("gateway repo adapter dropped the authorization capability")
+	}
+	started, err := authorizer.StartAuthorization(context.Background(), &host.Sandbox{Name: "alpha"}, "wandb/hivemind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.ID != "flow-id" || started.UserCode != "ABCD-EFGH" {
+		t.Fatalf("start = %+v", started)
+	}
+	status, err := authorizer.PollAuthorization(context.Background(), &host.Sandbox{Name: "alpha"}, "flow-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "authorized" || status.Slug != "wandb/hivemind" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
 type stubRepoAccess struct {
 	manifest   metadata.Manifest
 	credential metadata.Credential
 	err        error
+}
+
+type stubRepoAuthorizerAccess struct{ stubRepoAccess }
+
+func (stubRepoAuthorizerAccess) StartAuthorization(context.Context, *host.Sandbox, string) (metadata.AuthorizationStart, error) {
+	return metadata.AuthorizationStart{ID: "flow-id", UserCode: "ABCD-EFGH"}, nil
+}
+
+func (stubRepoAuthorizerAccess) PollAuthorization(context.Context, *host.Sandbox, string) (metadata.AuthorizationStatus, error) {
+	return metadata.AuthorizationStatus{State: "authorized", Slug: "wandb/hivemind"}, nil
 }
 
 func (s stubRepoAccess) Manifest(context.Context, *host.Sandbox) (metadata.Manifest, error) {

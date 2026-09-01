@@ -169,6 +169,11 @@ type Server struct {
 	// home is the subdomain a bare <domain> request is redirected to (see
 	// SetHome). Empty leaves the apex answering a 404.
 	home string
+
+	// runtimeEnv is the next-runtime-env script body the edge serves for a
+	// guest that does not answer /__ENV.js itself. See runtimeenv.go; nil
+	// disables the behaviour entirely.
+	runtimeEnv []byte
 }
 
 // SetListenPort records the edge's own listen port so targetPort can tell a
@@ -391,6 +396,12 @@ func New(mgr Resumer, store *routes.Store, domain string, log *slog.Logger) *Ser
 				}
 			}
 		},
+		// ModifyResponse sees the upstream's status before any of it reaches
+		// the client, which is what lets /__ENV.js be filled in only when the
+		// guest failed to serve it. It touches no other response.
+		ModifyResponse: func(resp *http.Response) error {
+			return s.fillRuntimeEnv(resp)
+		},
 		// ErrorHandler only ever runs before anything has been written to the
 		// client: the stdlib handles a failure part-way through a body by
 		// panicking with http.ErrAbortHandler (aborting the connection) rather
@@ -413,6 +424,10 @@ func New(mgr Resumer, store *routes.Store, domain string, log *slog.Logger) *Ser
 				s.notListeningHint(r, route.Port))
 		},
 	}
+	// On by default: it costs nothing on a sandbox that never asks for the
+	// path, and a sandbox running ClickHouse is otherwise handed a console
+	// whose every query 401s. SetRuntimeEnv(nil) turns it off.
+	s.SetRuntimeEnv(DefaultRuntimeEnv())
 	return s
 }
 

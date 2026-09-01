@@ -124,6 +124,11 @@ From inside the VM:
 - `sparkbox repos sync` clones what is not there yet and brings what is there
   forward. Attaching a repository to a tag never reaches into a VM that already
   exists, so this is how an existing VM picks one up.
+- `sparkbox repo authorize OWNER/NAME` authorizes one write attachment as the
+  VM's owner. Afterward GitHub operations for that repository, including PR
+  creation, are attributed to the user. Repositories you have not authorized
+  continue using the Sparkbox bot token, so a VM with multiple repos can opt in
+  one at a time.
 
 Attaching and detaching happen outside the VM, with `ssh ctl@<domain> repo add`
 or from the web console.
@@ -146,14 +151,10 @@ reports the GitHub login and account number of this VM's owner, plus the owner's
 Sparkbox handle and the VM's name, as `key: value` lines. `--json` prints the
 host's identity document instead, for anything that would rather parse it.
 
-`gh api user` cannot answer this, and no change to the GitHub App will make it.
-The credential a VM carries for github.com is a GitHub App *installation* token
-— a server-to-server credential scoped to the attached repositories, with no
-authenticated user behind it — so `GET /user` refuses it with "Resource not
-accessible by integration" regardless of which permissions the App holds. There
-is no permission that invents a user. Everything repository-scoped (`gh pr
-create`, `gh api repos/...`) works normally on that token; only the endpoints
-that ask "who is holding this credential" do not.
+Before per-repository authorization, `gh api user` cannot answer this because
+the fallback credential is a GitHub App installation token with no user behind
+it. After `sparkbox repo authorize OWNER/NAME`, commands scoped to that
+repository use the linked user's token and GitHub attributes them to that user.
 
 An owner with no linked GitHub account has no login to report, and the Sparkbox
 handle is not a substitute — handles and GitHub logins are separate namespaces,

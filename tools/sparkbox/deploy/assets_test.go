@@ -154,6 +154,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		"SB=$SPARKBOX_REPOS_BIN",
 		"exec $SB status",
 		"exec $SB sync",
+		"$META/github/authorization?slug=$_slug",
+		"$META/github/authorization/$_id",
 		// And it delegates as ROOT when it can. The boot unit runs as root and
 		// writes the status file and the login banner; a user-run sync that
 		// could not write them would clone successfully and leave the banner
@@ -199,7 +201,10 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "usage: sparkbox <whoami [--json]|") {
 		t.Errorf("guest CLI usage line does not mention whoami:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=18\n" {
+	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
+		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
+	}
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=19\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -780,7 +785,7 @@ func guestUpdater(t *testing.T, cache string) (root string, run func(args ...str
 	installGuestPayload(t, root)
 	// What this VM booted with. The updater may read it and must never write it.
 	if err := os.WriteFile(filepath.Join(root, "etc/sparkbox/tools-rev"),
-		[]byte("claude=1.0.0 codex=rust-v1.0.0 pi=v1.0.0 hivemind=1.0.0 agentbrowser=1.0.0 identity=10 agentenv=10\n"),
+		[]byte("claude=1.0.0 codex=rust-v1.0.0 pi=v1.0.0 hivemind=1.0.0 agentbrowser=1.0.0 identity=10 agentenv=11\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1091,6 +1096,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"sparkbox set-port PORT",
 		"sparkbox repos",
 		"sparkbox repos sync",
+		"sparkbox repo authorize owner/name",
 		// The sentence that stops an agent solving a private clone the way the
 		// old documentation told it to: by asking for a personal access token.
 		"Do not create, paste, or store a GitHub token",
@@ -1126,7 +1132,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// was patched, and every agent's own updater is off. An agent that does
 		// not know the pull exists has no way to move them.
 		"sparkbox update-tools --check",
-		"AGENT_ENV_REV=10",
+		"AGENT_ENV_REV=11",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
@@ -1240,6 +1246,18 @@ func TestGuestSeedsAPermissionDefault(t *testing.T) {
 	// above it in the script legitimately uses to explain the choice.
 	if strings.Contains(got, `"defaultMode", "bypassPermissions"`) {
 		t.Error("the template seeds a full permission bypass; `auto` is the line this is allowed to draw")
+	}
+}
+
+func TestGuestSeedsAutomaticClaudeColorScheme(t *testing.T) {
+	got := string(RefreshToolsScript)
+	if !strings.Contains(got, `cfg.setdefault("theme", "auto")`) {
+		t.Error("guest Claude seed does not follow the terminal's light/dark color scheme")
+	}
+	for _, overwrite := range []string{`cfg["theme"] =`, `cfg.setdefault("theme", "dark")`} {
+		if strings.Contains(got, overwrite) {
+			t.Errorf("guest Claude seed overrides or hardcodes the user's theme: %q", overwrite)
+		}
 	}
 }
 
@@ -1723,6 +1741,29 @@ const guestPlanHeaders = "HTTP/1.1 200 OK\r\n" +
 	"Sparkbox-Ctl: ssh ctl@catnip.sh\r\n\r\n"
 
 const guestPlanBody = "\n  this sandbox   quiet-lake   tags: default, web\n  capture as     web-260829-1412   (new)\n"
+
+func TestGuestCanAuthorizeOneRepository(t *testing.T) {
+	reply, requests, run := guestSelfService(t)
+	reply("POST", "200", "HTTP/1.1 200 OK\r\n\r\n",
+		`{"id":"abcdefghijklmnopqrstuvwxyz123456","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","interval_seconds":1}`)
+	reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n",
+		`{"state":"authorized","slug":"wandb/hivemind"}`)
+
+	stdout, stderr, code := run("repo", "authorize", "wandb/hivemind")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{"ABCD-EFGH", "https://github.com/login/device", "Authorized wandb/hivemind"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	got := requests()
+	if len(got) != 4 || got[0] != "POST" || !strings.Contains(got[1], "/github/authorization?slug=wandb/hivemind") ||
+		got[2] != "GET" || !strings.Contains(got[3], "/github/authorization/abcdefghijklmnopqrstuvwxyz123456") {
+		t.Fatalf("requests = %v", got)
+	}
+}
 
 // TestGuestCaptureSendsThePlansOwnValuesBack: the commit must carry the tag,
 // the name and the token the PLAN reported, never anything re-derived in the

@@ -157,7 +157,11 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 		if err != nil {
 			return SnapshotResp{}, err
 		}
-		return SnapshotResp{Snapshot: snapshotRow(s)}, nil
+		resp := SnapshotResp{Snapshot: snapshotRow(s)}
+		if b, ok := mgr.Get(req.Sandbox); ok {
+			resp.Source = sandboxRow(b)
+		}
+		return resp, nil
 	})
 
 	handle(conn, TypeSnapshotDelete, func(ctx context.Context, req DeleteSnapshotReq) (EmptyResp, error) {

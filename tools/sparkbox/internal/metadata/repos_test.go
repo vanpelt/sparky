@@ -22,6 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghuser"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
@@ -37,6 +38,22 @@ type fakeRepoAccess struct {
 	cred     Credential
 	err      error
 	calls    []string
+}
+
+type fakeRepoAuthorizer struct {
+	started AuthorizationStart
+	status  AuthorizationStatus
+	calls   []string
+}
+
+func (f *fakeRepoAuthorizer) StartAuthorization(_ context.Context, box *host.Sandbox, slug string) (AuthorizationStart, error) {
+	f.calls = append(f.calls, "start "+box.Name+" "+slug)
+	return f.started, nil
+}
+
+func (f *fakeRepoAuthorizer) PollAuthorization(_ context.Context, box *host.Sandbox, id string) (AuthorizationStatus, error) {
+	f.calls = append(f.calls, "poll "+box.Name+" "+id)
+	return f.status, nil
 }
 
 func (f *fakeRepoAccess) Manifest(_ context.Context, box *host.Sandbox) (Manifest, error) {
@@ -128,6 +145,30 @@ func TestCredentialIsServedForTheCallingSandbox(t *testing.T) {
 	}
 	if seen := access.seen(); len(seen) != 1 || seen[0] != "credential alice-box wandb/hivemind" {
 		t.Errorf("resolver saw %v", seen)
+	}
+}
+
+func TestRepositoryAuthorizationIsScopedToTheCallingSandbox(t *testing.T) {
+	auth := &fakeRepoAuthorizer{
+		started: AuthorizationStart{ID: "abcdefghijklmnopqrstuvwxyz123456", UserCode: "ABCD-EFGH",
+			VerificationURI: "https://github.com/login/device", IntervalSeconds: 5},
+		status: AuthorizationStatus{State: "authorized", Slug: "wandb/hivemind"},
+	}
+	s := fixture(t)
+	s.repoAuthorizer = auth
+	start := requestMethod(s, http.MethodPost, "/github/authorization?slug=wandb/hivemind", "172.30.5.2", "172.30.5.1")
+	if start.Code != http.StatusOK || !strings.Contains(start.Body.String(), "ABCD-EFGH") {
+		t.Fatalf("start = %d: %s", start.Code, start.Body)
+	}
+	poll := request(s, "/github/authorization/abcdefghijklmnopqrstuvwxyz123456", "172.30.5.2", "172.30.5.1")
+	if poll.Code != http.StatusOK || !strings.Contains(poll.Body.String(), `"state":"authorized"`) {
+		t.Fatalf("poll = %d: %s", poll.Code, poll.Body)
+	}
+	if got := auth.calls; len(got) != 2 || got[0] != "start alice-box wandb/hivemind" || !strings.HasPrefix(got[1], "poll alice-box ") {
+		t.Fatalf("authorizer calls = %v", got)
+	}
+	if rec := requestMethod(s, http.MethodPost, "/github/authorization?slug=wandb/hivemind", "172.30.5.2", "172.30.9.1"); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-slot start = %d, want 403", rec.Code)
 	}
 }
 
@@ -499,6 +540,54 @@ func TestLocalCredentialAsksForWriteOnlyWhenTheAttachmentSaysSo(t *testing.T) {
 	// clones working on an older deployment. See ghapp.Installation.Narrow.
 	if strings.Contains(mints[0], "pull_requests") {
 		t.Errorf("asked an installation for a permission it never declared: %s", mints[0])
+	}
+}
+
+func TestLocalCredentialUsesUserGrantForAuthorizedRepoAndBotForSibling(t *testing.T) {
+	now := time.Now().UTC()
+	stub := newGitHubStub(t, installedFor(4242, "alice-gh"), mintsToken(now.Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	seedTag(t, local.db, "alice-box", "alice", "hm")
+	for _, slug := range []string{"wandb/hivemind", "wandb/agentstream"} {
+		if err := local.Repos.PutRepo("alice", repos.Repo{Slug: slug, Access: repos.AccessWrite}, []string{"hm"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	grantStore, err := ghuser.Open(local.db, ghuser.DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = grantStore.Close() })
+	client, err := ghuser.NewClient(ghuser.Config{ClientID: "Iv23liTEST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.UserAuth = ghuser.NewManager(client, grantStore, slog.New(slog.DiscardHandler))
+	if err := grantStore.Put(ghuser.Grant{
+		Owner: "alice", GitHubID: 4242, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		Token: ghuser.Token{AccessToken: "ghu_alice", RefreshToken: "ghr_alice",
+			AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(30 * 24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	userCred, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userCred.Password != "ghu_alice" {
+		t.Fatalf("authorized credential = %q, want user token", userCred.Password)
+	}
+	botCred, err := local.Credential(context.Background(), aliceBox(), "wandb/agentstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if botCred.Password != "ghs_minted" {
+		t.Fatalf("unauthorized sibling credential = %q, want bot fallback", botCred.Password)
+	}
+	_, mints := stub.seen()
+	if len(mints) != 1 || !strings.Contains(mints[0], `"agentstream"`) {
+		t.Fatalf("installation mints = %v, want only the unauthorized sibling", mints)
 	}
 }
 

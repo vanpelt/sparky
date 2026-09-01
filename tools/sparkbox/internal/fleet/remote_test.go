@@ -166,6 +166,9 @@ func okReply(typ string) (any, error) {
 		return nodelink.SnapshotResp{Snapshot: nodelink.SnapshotRow{
 			Name: "base", Owner: "alice", Image: "snap-alice-base", FromBox: "demo",
 			CreatedAt: time.Now(),
+		}, Source: nodelink.SandboxRow{
+			Name: "demo", Owner: "alice", Image: "ubuntu", State: string(vmm.StatePaused),
+			VCPUs: 2, MemMB: 2048, LastActive: time.Now(),
 		}}, nil
 	default:
 		return nodelink.EmptyResp{}, nil
@@ -764,6 +767,9 @@ func TestRemoteCaptureIsVisibleWithoutWaitingForAnInventory(t *testing.T) {
 	}
 	if snap.Name != "gold" {
 		t.Fatalf("capture returned %q, want the name this gateway asked for", snap.Name)
+	}
+	if source, ok := rig.node.Box("demo"); !ok || source.State != vmm.StatePaused {
+		t.Fatalf("source after capture = %+v, found=%v; snapshot success must synchronously replace the stale running row", source, ok)
 	}
 
 	got := rig.node.Templates()

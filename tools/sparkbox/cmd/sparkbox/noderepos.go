@@ -133,6 +133,35 @@ func (r *relayRepos) Credential(ctx context.Context, box *host.Sandbox, slug str
 	}, nil
 }
 
+func (r *relayRepos) StartAuthorization(ctx context.Context, box *host.Sandbox, slug string) (metadata.AuthorizationStart, error) {
+	if box == nil || box.Name == "" || slug == "" {
+		return metadata.AuthorizationStart{}, errors.New("sparkbox: a repo authorization needs a sandbox and repository")
+	}
+	var resp nodelink.SelfRepoAuthStartResp
+	err := r.up.Request(ctx, nodelink.TypeSelfRepoAuthStart,
+		nodelink.SelfRepoAuthStartReq{Sandbox: box.Name, Slug: slug}, &resp)
+	if err != nil {
+		return metadata.AuthorizationStart{}, relayReposError(err)
+	}
+	return metadata.AuthorizationStart{
+		ID: resp.ID, UserCode: resp.UserCode, VerificationURI: resp.VerificationURI,
+		IntervalSeconds: resp.IntervalSeconds, ExpiresAt: resp.ExpiresAt,
+	}, nil
+}
+
+func (r *relayRepos) PollAuthorization(ctx context.Context, box *host.Sandbox, id string) (metadata.AuthorizationStatus, error) {
+	if box == nil || box.Name == "" || id == "" {
+		return metadata.AuthorizationStatus{}, errors.New("sparkbox: a repo authorization poll needs a sandbox and flow id")
+	}
+	var resp nodelink.SelfRepoAuthPollResp
+	err := r.up.Request(ctx, nodelink.TypeSelfRepoAuthPoll,
+		nodelink.SelfRepoAuthPollReq{Sandbox: box.Name, ID: id}, &resp)
+	if err != nil {
+		return metadata.AuthorizationStatus{}, relayReposError(err)
+	}
+	return metadata.AuthorizationStatus{State: resp.State, Slug: resp.Slug}, nil
+}
+
 // relayReposError is relayError plus the one case only this path can see.
 //
 // A gateway that predates these message types answers with the framing layer's
@@ -182,6 +211,33 @@ func (a fleetRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	return fleet.RepoCredential{
 		Username: cred.Username, Password: cred.Password, ExpiresAt: cred.ExpiresAt,
 	}, nil
+}
+
+func (a fleetRepos) StartAuthorization(ctx context.Context, box *host.Sandbox, slug string) (fleet.RepoAuthorizationStart, error) {
+	authorizer, ok := a.local.(metadata.RepoAuthorizer)
+	if !ok {
+		return fleet.RepoAuthorizationStart{}, fleet.ErrReposDisabled
+	}
+	started, err := authorizer.StartAuthorization(ctx, box, slug)
+	if err != nil {
+		return fleet.RepoAuthorizationStart{}, reposFleetError(err)
+	}
+	return fleet.RepoAuthorizationStart{
+		ID: started.ID, UserCode: started.UserCode, VerificationURI: started.VerificationURI,
+		IntervalSeconds: started.IntervalSeconds, ExpiresAt: started.ExpiresAt,
+	}, nil
+}
+
+func (a fleetRepos) PollAuthorization(ctx context.Context, box *host.Sandbox, id string) (fleet.RepoAuthorizationStatus, error) {
+	authorizer, ok := a.local.(metadata.RepoAuthorizer)
+	if !ok {
+		return fleet.RepoAuthorizationStatus{}, fleet.ErrReposDisabled
+	}
+	status, err := authorizer.PollAuthorization(ctx, box, id)
+	if err != nil {
+		return fleet.RepoAuthorizationStatus{}, reposFleetError(err)
+	}
+	return fleet.RepoAuthorizationStatus{State: status.State, Slug: status.Slug}, nil
 }
 
 // reposFleetError restates the resolver's four sentinels as the four

@@ -24,6 +24,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghuser"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
@@ -263,8 +264,10 @@ var apiEndpoints = []struct{ method, path string }{
 	{"PUT", "/api/network-rules/somerule"},
 	{"DELETE", "/api/network-rules/somerule"},
 	{"GET", "/api/repos"},
+	{"POST", "/api/repos/wandb%2Fhivemind/authorize"},
 	{"PUT", "/api/repos/wandb%2Fhivemind"},
 	{"DELETE", "/api/repos/wandb%2Fhivemind"},
+	{"GET", "/github/repo/callback"},
 	{"GET", "/api/machines/somebox/bandwidth"},
 	{"GET", "/api/favicon"},
 }
@@ -285,6 +288,25 @@ func TestEveryEndpointRequiresAuth(t *testing.T) {
 	rec := tc.do(t, "GET", "/", "", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "sparkbox") {
 		t.Fatalf("index page: status %d", rec.Code)
+	}
+}
+
+func TestMachinesAreNewestActivityFirst(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "alpha", "alice")
+	time.Sleep(time.Millisecond)
+	tc.create(t, "zulu", "alice")
+
+	var views []sandboxView
+	rec := tc.do(t, "GET", "/api/machines", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("machines status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &views); err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 || views[0].Name != "zulu" || views[1].Name != "alpha" {
+		t.Fatalf("machine order = %+v, want newest activity first", views)
 	}
 }
 
@@ -772,10 +794,20 @@ func TestValidationErrorsAreBadRequest(t *testing.T) {
 func TestIndexShipsRecoveryAffordances(t *testing.T) {
 	tc := newTestConsole(t)
 	body := tc.do(t, "GET", "/", "", nil).Body.String()
-	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()"} {
+	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()", `/sparkbox-logo.png`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index.html missing %s", want)
 		}
+	}
+}
+
+func TestLogoIsPublicAndPNG(t *testing.T) {
+	rec := newTestConsole(t).do(t, "GET", "/sparkbox-logo.png", "", nil)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("logo: status %d content-type %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if !bytes.HasPrefix(rec.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatal("logo response is not PNG data")
 	}
 }
 
@@ -863,14 +895,17 @@ func TestNetworkRulesAreOwnerScoped(t *testing.T) {
 // repoView so a rename of an unexported field cannot quietly change the JSON
 // the page is written against.
 type repoRow struct {
-	Slug       string   `json:"slug"`
-	Ref        string   `json:"ref"`
-	Path       string   `json:"path"`
-	Access     string   `json:"access"`
-	Tags       []string `json:"tags"`
-	App        string   `json:"app"`
-	AppNote    string   `json:"app_note"`
-	InstallURL string   `json:"install_url"`
+	Slug            string   `json:"slug"`
+	Ref             string   `json:"ref"`
+	Path            string   `json:"path"`
+	Access          string   `json:"access"`
+	Tags            []string `json:"tags"`
+	App             string   `json:"app"`
+	AppNote         string   `json:"app_note"`
+	InstallURL      string   `json:"install_url"`
+	UserAuth        string   `json:"user_auth"`
+	UserAuthEnabled bool     `json:"user_auth_enabled"`
+	GitHubLogin     string   `json:"github_login"`
 }
 
 func TestRepoCRUD(t *testing.T) {
@@ -909,6 +944,9 @@ func TestRepoCRUD(t *testing.T) {
 	if got.App != appOff || got.InstallURL != "" {
 		t.Errorf("app state without an App: %q url %q, want %q and no url", got.App, got.InstallURL, appOff)
 	}
+	if got.UserAuth != "bot" || got.UserAuthEnabled || got.GitHubLogin != "alice-gh" {
+		t.Errorf("user auth without browser flow: %+v", got)
+	}
 	// An attachment is egress-relevant, so the mutation re-pushes policy — and
 	// it is not a secret, so it must NOT fire the env sync.
 	if n := tc.sync.count("alice"); n != 0 {
@@ -925,6 +963,147 @@ func TestRepoCRUD(t *testing.T) {
 	}
 	if rec = tc.do(t, "DELETE", "/api/repos/wandb%2Fhivemind", "alice", nil); rec.Code != http.StatusNotFound {
 		t.Errorf("second detach: %d, want 404", rec.Code)
+	}
+}
+
+func TestRepoListShowsUserCredentialAndBrowserAvailability(t *testing.T) {
+	tc := newTestConsole(t)
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "alice",
+		map[string]any{"access": "write", "tags": []string{"hm"}}); rec.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", rec.Code, rec.Body.String())
+	}
+	client, err := ghuser.NewClient(ghuser.Config{ClientID: "Iv23liTEST", ClientSecret: "client-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := ghuser.Open(filepath.Join(t.TempDir(), "grants.db"), ghuser.DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Put(ghuser.Grant{
+		Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		Token: ghuser.Token{AccessToken: "ghu_secret", RefreshToken: "ghr_secret",
+			AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := ghapp.New(ghapp.Config{ClientID: "Iv23liTEST", Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc.handler.SetGitHubApp(app)
+	tc.handler.appSeen = map[string]appProbe{
+		probeKey("alice", defaultRepoHost, "wandb/hivemind"): {state: appReady, at: time.Now()},
+	}
+	tc.handler.SetGitHubUserAuth(ghuser.NewManager(client, store, nil))
+	rec := tc.do(t, "GET", "/api/repos", "alice", nil)
+	var rows []repoRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].UserAuth != "user" || !rows[0].UserAuthEnabled || rows[0].GitHubLogin != "alice-gh" {
+		t.Fatalf("repo auth row = %+v", rows)
+	}
+}
+
+func TestRepoBrowserOAuthAuthorizesExactAttachment(t *testing.T) {
+	tc := newTestConsole(t)
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "alice",
+		map[string]any{"access": "write", "tags": []string{"hm"}}); rec.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", rec.Code, rec.Body.String())
+	}
+	var exchangedRepo string
+	var scopedRepo int64
+	var scopedTarget string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/wandb/hivemind/installation", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":42,"app_slug":"sparkbox","account":{"id":7,"login":"alice-gh","type":"User"},"permissions":{"metadata":"read","contents":"write"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/42/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"token":"ghs_installation","expires_at":"2030-01-01T00:00:00Z"}`)
+	})
+	mux.HandleFunc("GET /repos/wandb/hivemind", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":99}`)
+	})
+	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		exchangedRepo = r.Form.Get("repository_id")
+		fmt.Fprint(w, `{"access_token":"ghu_web_broad","expires_in":28800,"refresh_token":"ghr_web","refresh_token_expires_in":15897600}`)
+	})
+	mux.HandleFunc("POST /applications/Iv23liTEST/token/scoped", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Target        string  `json:"target"`
+			RepositoryIDs []int64 `json:"repository_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Fatal(err)
+		}
+		scopedTarget = in.Target
+		if len(in.RepositoryIDs) == 1 {
+			scopedRepo = in.RepositoryIDs[0]
+		}
+		fmt.Fprint(w, `{"token":"ghu_web_scoped","expires_at":"2030-01-01T00:00:00Z"}`)
+	})
+	mux.HandleFunc("GET /user", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"id":7}`) })
+	mux.HandleFunc("GET /repositories/99", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":99}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := ghapp.New(ghapp.Config{ClientID: "Iv23liTEST", Key: key, BaseURL: srv.URL, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := ghuser.NewClient(ghuser.Config{
+		ClientID: "Iv23liTEST", ClientSecret: "client-secret", HTTPClient: srv.Client(),
+		AuthorizeURL: srv.URL + "/login/oauth/authorize", TokenURL: srv.URL + "/login/oauth/access_token", APIURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := ghuser.Open(filepath.Join(t.TempDir(), "grants.db"), ghuser.DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	mgr := ghuser.NewManager(client, store, nil)
+	tc.handler.SetGitHubApp(app)
+	tc.handler.SetGitHubUserAuth(mgr)
+
+	rec := tc.do(t, "POST", "/api/repos/wandb%2Fhivemind/authorize", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
+	}
+	var started map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	authorizeURL, err := url.Parse(started["url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := authorizeURL.Query().Get("state")
+	if state == "" || authorizeURL.Query().Get("redirect_uri") != "https://my.hivemind.tools/github/repo/callback" {
+		t.Fatalf("authorize URL = %s", authorizeURL)
+	}
+	rec = tc.do(t, "GET", "/github/repo/callback?state="+url.QueryEscape(state)+"&code=oauth-code", "alice", nil)
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "github=authorized") {
+		t.Fatalf("callback: %d location %q body %s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	if exchangedRepo != "" || scopedRepo != 99 || scopedTarget != "alice-gh" || !mgr.Authorized("alice", "wandb/hivemind", 7) {
+		t.Fatalf("repo exchange = %q scoped = (%q, %d) authorized = %v", exchangedRepo, scopedTarget, scopedRepo,
+			mgr.Authorized("alice", "wandb/hivemind", 7))
 	}
 }
 
