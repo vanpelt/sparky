@@ -16,6 +16,7 @@
 package userconsole
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -49,6 +50,9 @@ import (
 
 //go:embed index.html
 var indexTemplate []byte
+
+//go:embed sparkbox-logo.png
+var sparkboxLogoPNG []byte
 
 // indexPage is the console SPA composed against the shared design system,
 // minified, and pre-gzipped once at package init — see internal/webui.
@@ -327,8 +331,16 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("GET /github/repo/callback", require(h.githubRepoCallback))
 	mux.Handle("GET /api/machines/{name}/bandwidth", require(h.bandwidth))
 	mux.Handle("GET /api/favicon", require(h.favicon))
+	mux.HandleFunc("GET /sparkbox-logo.png", h.logo)
 	mux.HandleFunc("GET /", h.index)
 	return mux
+}
+
+func (h *Handler) logo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, "sparkbox-logo.png", time.Time{}, bytes.NewReader(sparkboxLogoPNG))
 }
 
 // index always serves the single-page app; the page itself calls the API and

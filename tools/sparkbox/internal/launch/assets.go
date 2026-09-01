@@ -23,7 +23,26 @@ import (
 )
 
 //go:embed badge.svg
-var badgeSVG []byte
+var badgeTemplate []byte
+
+//go:embed sparkbox-logo.png
+var badgeLogoPNG []byte
+
+const badgeLogoMarker = "SPARKBOX_LOGO_PNG_BASE64"
+
+// withBadgeLogo keeps badge.svg reviewable while producing one self-contained
+// image for GitHub's camo proxy. The embedded PNG is a second source asset at
+// build time, but never a second browser request.
+func withBadgeLogo(svg, logo []byte) []byte {
+	if !bytes.Contains(svg, []byte(badgeLogoMarker)) {
+		panic("launch: badge.svg has no " + badgeLogoMarker + " marker")
+	}
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(logo)))
+	base64.StdEncoding.Encode(encoded, logo)
+	return bytes.Replace(svg, []byte(badgeLogoMarker), encoded, 1)
+}
+
+var badgeSVG = withBadgeLogo(badgeTemplate, badgeLogoPNG)
 
 //go:embed page.html
 var pageTemplate []byte

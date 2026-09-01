@@ -231,18 +231,17 @@ It survives the sanitizer, so this is a choice and not a limitation. A themed
 badge needs a second badge URL (`badge.svg?theme=dark`), which reintroduces the
 parameterized image the previous section rules out. Instead the badge brings its
 own opaque dark ground — a `#27272A`→`#18181B` pill with a `#3F3F46` border,
-`#FAFAFA` text and a `#FACC15` rocket, the same pinned pair every console uses
-for its `.logo` tile in *both* themes — so one image reads correctly on a light
-and a dark GitHub. Inside a `<picture>`, GitHub's styling is not injected at all
-and the SVG must carry its own rounded corners anyway; ours does.
+`#FAFAFA` text and the Sparkbox cube mark — so one image reads correctly on a
+light and a dark GitHub. Inside a `<picture>`, GitHub's styling is not injected
+at all and the SVG must carry its own rounded corners anyway; ours does.
 
-The rocket is an inline `<path>`, not a `🚀` glyph. An SVG loaded through `<img>`
-is an isolated document: no webfont, no `@import`, no `<image href>`, no
-`xlink:href`, nothing external of any kind resolves. Text is drawn in a
-hardcoded system stack with `textLength` + `lengthAdjust="spacingAndGlyphs"`
-(shields.io's trick) set slightly *under* the natural Helvetica width, so a
-machine with a wider fallback font compresses the label instead of spilling it
-out of the pill.
+The logo is a compact PNG data URI embedded in the SVG, not an external image
+request. An SVG loaded through `<img>` is an isolated document: no webfont, no
+`@import`, no `xlink:href`, and nothing external of any kind resolves. Text is
+drawn in a hardcoded system stack with `textLength` +
+`lengthAdjust="spacingAndGlyphs"` (shields.io's trick) set slightly *under* the
+natural Helvetica width, so a machine with a wider fallback font compresses the
+label instead of spilling it out of the pill.
 
 `alt="Open in Sparkbox"` reads as an action, so a blocked or broken image
 degrades to a sentence somebody can still act on rather than to a filename.

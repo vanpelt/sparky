@@ -775,10 +775,20 @@ func TestValidationErrorsAreBadRequest(t *testing.T) {
 func TestIndexShipsRecoveryAffordances(t *testing.T) {
 	tc := newTestConsole(t)
 	body := tc.do(t, "GET", "/", "", nil).Body.String()
-	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()"} {
+	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()", `/sparkbox-logo.png`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index.html missing %s", want)
 		}
+	}
+}
+
+func TestLogoIsPublicAndPNG(t *testing.T) {
+	rec := newTestConsole(t).do(t, "GET", "/sparkbox-logo.png", "", nil)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("logo: status %d content-type %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if !bytes.HasPrefix(rec.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatal("logo response is not PNG data")
 	}
 }
 

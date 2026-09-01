@@ -112,8 +112,8 @@ func TestBadgeHonoursIfNoneMatch(t *testing.T) {
 // own hostname, so a relative URL has no meaning and an absolute one is a
 // third-party fetch from inside a GitHub page. A webfont reference would make
 // the label render in whatever the fallback is — or not at all — on the
-// machines that matter most, and an <image> element would be a second network
-// hop nobody asked for.
+// machines that matter most. The logo is an embedded PNG data URI, not a
+// second network hop.
 func TestBadgeIsSelfContained(t *testing.T) {
 	svg := string(badgeSVG)
 
@@ -125,19 +125,20 @@ func TestBadgeIsSelfContained(t *testing.T) {
 	if n := strings.Count(svg, "http://"); n != 1 || !strings.Contains(svg, `xmlns="http://www.w3.org/2000/svg"`) {
 		t.Errorf("found %d http:// references; the only legal one is the xmlns", n)
 	}
-	for _, banned := range []string{"@font-face", "@import", "<image", "xlink:href", "<script", "<foreignObject"} {
+	for _, banned := range []string{"@font-face", "@import", "xlink:href", "<script", "<foreignObject"} {
 		if strings.Contains(svg, banned) {
 			t.Errorf("the badge contains %q, which either fetches something or executes something", banned)
 		}
 	}
-	// No emoji glyph: a rocket rendered from the viewer's own emoji font is
-	// tofu on some platforms and a flat monochrome outline on others. The
-	// rocket here is geometry.
-	if strings.ContainsAny(svg, "\U0001F680⚡") {
-		t.Error("the badge draws an emoji glyph; the rocket must be an inline <path>")
+	if !strings.Contains(svg, `<image`) || !strings.Contains(svg, `href="data:image/png;base64,`) {
+		t.Error("the badge logo is not an embedded PNG data URI")
 	}
-	if !strings.Contains(svg, "<path") {
-		t.Error("the badge has no <path>, so it is not drawing the rocket as geometry")
+	if strings.Contains(svg, badgeLogoMarker) {
+		t.Error("the badge still contains the unexpanded logo marker")
+	}
+	// No emoji glyph: the supplied logo must render identically everywhere.
+	if strings.ContainsAny(svg, "\U0001F680⚡") {
+		t.Error("the badge draws an emoji glyph instead of the Sparkbox logo")
 	}
 	// textLength plus lengthAdjust is what stops the label spilling out of the
 	// pill on a machine whose first font in the stack is missing — shields.io's
@@ -153,8 +154,8 @@ func TestBadgeIsSelfContained(t *testing.T) {
 	// Its own opaque dark ground: GitHub serves one image to light and dark
 	// readers and a bare <img> cannot switch themes, so the badge brings the
 	// contrast with it rather than borrowing the page's.
-	if !strings.Contains(svg, "#18181B") || !strings.Contains(svg, "#FAFAFA") || !strings.Contains(svg, "#FACC15") {
-		t.Error("the badge does not carry the pinned dark ground / light text / gold mark")
+	if !strings.Contains(svg, "#18181B") || !strings.Contains(svg, "#FAFAFA") {
+		t.Error("the badge does not carry the pinned dark ground / light text")
 	}
 }
 
