@@ -317,6 +317,97 @@ func TestEnvironmentListingNeverSerializesNull(t *testing.T) {
 // Refusals
 // ---------------------------------------------------------------------------
 
+// TestANewEnvironmentIsGovernedByDefault.
+//
+// sluice runs `--enforce --open-untagged`, under which a sandbox absent from
+// the policy snapshot is UNFILTERED — and a sandbox is present only if one of
+// its tags carries a rule-set. So "the builder is tagged, so it is governed"
+// was false: an environment nobody wrote egress rules for got unrestricted
+// egress, which is the wrong default for a box that runs a setup script from a
+// repository and much the wrong default for one running an unattended agent
+// with the owner's decrypted credentials in it.
+//
+// The empty rule-set this creates is NOT deny-all, which is the thing to keep
+// straight: sluice checks its base allowlist first and grants unconditionally,
+// so a governed sandbox with no patterns of its own reaches the operator's
+// trusted list — the package registries, github, the model API — and not the
+// rest of the internet.
+func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
+	t.Run("a plain create gets one", func(t *testing.T) {
+		r := newRig(t)
+		e, _, n := withEnvs(r)
+		_ = e
+		if _, err := r.ops.PutEnvironment(context.Background(), alice(),
+			EnvArgs{Name: "web"}); err != nil {
+			t.Fatalf("env create: %v", err)
+		}
+		got, ok := n.rows["alice\x00web"]
+		if !ok {
+			t.Fatalf("no default egress rule-set was created: %v", n.rows)
+		}
+		if !slices.Contains(got.Tags, "web") {
+			t.Errorf("the default rule-set does not carry the environment's tag: %+v", got)
+		}
+		if len(got.Spec.Allow) != 0 {
+			t.Errorf("the default rule-set wrote patterns nobody asked for: %v — it is meant to be "+
+				"empty, which means the operator's base allowlist and nothing more", got.Spec.Allow)
+		}
+	})
+
+	t.Run("--open-egress skips it", func(t *testing.T) {
+		r := newRig(t)
+		withEnvs(r)
+		if _, err := r.ops.PutEnvironment(context.Background(), alice(),
+			EnvArgs{Name: "web", OpenEgress: true}); err != nil {
+			t.Fatalf("env create: %v", err)
+		}
+		if len(r.netrules.rows) != 0 {
+			t.Errorf("--open-egress still created a rule-set: %v", r.netrules.rows)
+		}
+	})
+
+	t.Run("a create that names its own rules gets no default", func(t *testing.T) {
+		r := newRig(t)
+		withEnvs(r)
+		if err := r.netrules.PutRule("alice", "npm-only",
+			netrules.RuleSpec{Allow: []string{"registry.npmjs.org"}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.PutEnvironment(context.Background(), alice(),
+			EnvArgs{Name: "web", Rules: []string{"npm-only"}}); err != nil {
+			t.Fatalf("env create: %v", err)
+		}
+		if _, made := r.netrules.rows["alice\x00web"]; made {
+			t.Error("a second, empty rule-set was created beside the one the caller named — " +
+				"which would be a policy nobody wrote sitting next to the policy they did")
+		}
+	})
+
+	t.Run("a second env set does not add another", func(t *testing.T) {
+		r := newRig(t)
+		withEnvs(r)
+		ctx := context.Background()
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		// The owner widens the default, the way somebody would in the console.
+		if err := r.netrules.PutRule("alice", "web",
+			netrules.RuleSpec{Allow: []string{"internal.example.com"}}, []string{"web"}); err != nil {
+			t.Fatal(err)
+		}
+		// `create` and `set` are one verb, so this path runs again — and must
+		// not put the narrow default back over the top of their edit.
+		if _, err := r.ops.PutEnvironment(ctx, alice(),
+			EnvArgs{Name: "web", Description: "second call"}); err != nil {
+			t.Fatal(err)
+		}
+		got := r.netrules.rows["alice\x00web"]
+		if !slices.Contains(got.Spec.Allow, "internal.example.com") {
+			t.Errorf("a second `env set` reverted the owner's egress edit: %+v", got)
+		}
+	})
+}
+
 // The store's sentences about the reserved word and the grammar reach the
 // caller unrewritten, under this package's own stable codes.
 func TestPutEnvironmentRefusals(t *testing.T) {

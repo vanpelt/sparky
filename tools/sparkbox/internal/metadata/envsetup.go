@@ -23,9 +23,13 @@ package metadata
 // another owner's template, which is the whole thing this port is arranged not
 // to permit.
 //
-// Phase B is SCRIPT MODE ONLY. The mode is on the wire from the start (line 2
-// of the fetch) so the agent path can be added without a second format and
-// without a guest that must be upgraded in lockstep.
+// TWO MODES RIDE ONE FORMAT. Line 2 of the fetch is the mode and line 3 is its
+// payload, base64 either way: in `script` mode the payload is the setup script,
+// in `agent` mode it is the prompt an agent is run with. The guest switches on
+// the mode BEFORE it decodes, and refuses a mode it does not know by name — so
+// a gateway ahead of its guests produces one clear sentence rather than a run
+// of the wrong thing. Adding a third mode is a new value here, still not a new
+// format.
 
 import (
 	"context"
@@ -51,16 +55,38 @@ import (
 // Nil answers both routes 501, which is what a host with no environment store
 // is.
 type EnvSetup interface {
-	// SetupFor returns the script this sandbox should run, or ok=false when it
-	// has no job. The sandbox identity comes from the tap, never from the
-	// request. env is the environment's name, which the guest prints; it is
-	// host-authored and carries no secret.
-	SetupFor(ctx context.Context, box *host.Sandbox) (script, env string, ok bool, err error)
+	// SetupFor returns the job this sandbox should run, or ok=false when it has
+	// no job. The sandbox identity comes from the tap, never from the request.
+	SetupFor(ctx context.Context, box *host.Sandbox) (job SetupJob, ok bool, err error)
 	// SetupDone hands back what the guest reported. It returns immediately; the
 	// snapshot it triggers happens on its own goroutine, because the caller is
 	// the guest that is about to be paused.
 	SetupDone(ctx context.Context, box *host.Sandbox, r SetupResult) error
 }
+
+// SetupJob is what a builder is told to do: which environment it is building,
+// which of the two ways, and the bytes that way needs.
+//
+// A STRUCT AND NOT THREE STRINGS, deliberately. The previous shape returned
+// (script, env string, ok bool, err error), and a mode makes that three
+// same-typed positional returns in a row — where transposing two of them
+// compiles cleanly and serves the mode as the environment name. Every field
+// here is host-authored and none carries a secret; Payload is the one that
+// varies by mode, which is why it is not called Script any more.
+type SetupJob struct {
+	Env     string // the environment's name, which the guest prints
+	Mode    string // SetupModeScript or SetupModeAgent
+	Payload string // the setup script, or the agent's prompt
+}
+
+// The modes, named here because this package owns the wire format that carries
+// them. ctlops mirrors these constants rather than importing them, for the same
+// reason SetupResult is mirrored as ctlops.SetupReport: this package imports
+// ctlops, so ctlops cannot import back.
+const (
+	SetupModeScript = "script"
+	SetupModeAgent  = "agent"
+)
 
 // SetupResult is what the guest says happened. Every field is guest-authored
 // and every field is bounded before it gets here.
@@ -171,7 +197,7 @@ func (s *Server) selfSetup(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), setupBudget)
 	defer cancel()
-	script, env, ok, err := s.envSetup.SetupFor(ctx, box)
+	job, ok, err := s.envSetup.SetupFor(ctx, box)
 	if err != nil {
 		s.log.Error("could not resolve a sandbox's setup job", "sandbox", box.Name, "err", err)
 		http.Error(w, "sparkbox: could not read this sandbox's setup job",
@@ -182,24 +208,46 @@ func (s *Server) selfSetup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	// The name is host-authored, but it is about to become line 1 of a
-	// line-oriented format the guest parses, so it is checked here rather than
-	// trusted to have been checked wherever it was stored. A row that cannot be
-	// rendered safely is a host bug, not a guest's problem.
-	if env == "" || len(env) > maxEnvNameLen || hasControl(env) {
+	// Both are host-authored, but both are about to become lines 1 and 2 of a
+	// line-oriented format the guest parses, so they are checked HERE rather
+	// than trusted to have been checked wherever they were stored. A row that
+	// cannot be rendered safely is a host bug, not a guest's problem.
+	//
+	// The mode is checked against the known set and not merely for control
+	// characters: an empty or unknown mode reaching a guest costs a whole
+	// builder boot to produce a refusal this host could have produced in a
+	// nanosecond, and a mode that is silently wrong is worse than either.
+	//
+	// This check lives in the RENDERER, which is the one piece of this path
+	// that a gateway guest and a node guest both run — internal/metadata.Server
+	// serves both. Hoisting it into ctlops or fleet would validate for one kind
+	// of guest and skip it for the other, which is the Phase B asymmetry in
+	// mirror image.
+	if job.Env == "" || len(job.Env) > maxEnvNameLen || hasControl(job.Env) {
 		s.log.Error("refusing to serve a setup job with an unrenderable environment name",
 			"sandbox", box.Name)
 		http.Error(w, "sparkbox: could not read this sandbox's setup job",
 			http.StatusInternalServerError)
 		return
 	}
+	if job.Mode != SetupModeScript && job.Mode != SetupModeAgent {
+		s.log.Error("refusing to serve a setup job with an unknown mode",
+			"sandbox", box.Name, "env", job.Env, "mode", job.Mode)
+		http.Error(w, "sparkbox: could not read this sandbox's setup job",
+			http.StatusInternalServerError)
+		return
+	}
 
 	var b strings.Builder
-	b.WriteString(env)
-	// Phase B builds only from a script. The field is on the wire so the agent
-	// path is a new value here and not a new format.
-	b.WriteString("\nscript\n")
-	b.WriteString(base64.StdEncoding.EncodeToString([]byte(script)))
+	b.WriteString(job.Env)
+	b.WriteString("\n")
+	b.WriteString(job.Mode)
+	b.WriteString("\n")
+	// Base64 in BOTH modes, and in agent mode that is load-bearing rather than
+	// uniform-for-its-own-sake: the payload is a prompt written by this host,
+	// the guest feeds it to a shell, and a backtick or a $( in it would be code
+	// if it travelled as plain text.
+	b.WriteString(base64.StdEncoding.EncodeToString([]byte(job.Payload)))
 	b.WriteString("\n")
 	body := b.String()
 

@@ -437,9 +437,10 @@ func TestControlEnvBuildStartsAndSaysSo(t *testing.T) {
 		t.Fatalf("create: exit %d (%s)", s.code, s.stderr.String())
 	}
 
-	// Nothing to run, and the refusal has to TEACH: the condition is in the
-	// message and the two ways out are in the hint, which the ctl channel would
-	// drop entirely without failEnvBuild.
+	// Nothing to run and no agent credential either, so the refusal is the
+	// agent path's precondition — and it still has to TEACH: the condition is
+	// in the message and the ways out are in the hint, which the ctl channel
+	// would drop entirely without failEnvBuild.
 	s := st.run(t, "alice", "env", "build", "web")
 	if s.code != 1 {
 		t.Fatalf("build with no script: exit %d, want 1 (%s)", s.code, s.stderr.String())
@@ -447,8 +448,7 @@ func TestControlEnvBuildStartsAndSaysSo(t *testing.T) {
 	for _, want := range []string{
 		"has no setup script",
 		".sparkbox/setup.sh",
-		"env script web --set",
-		"sparkbox docs dev-environment",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 	} {
 		if !strings.Contains(s.stderr.String(), want) {
 			t.Errorf("the refusal never says %q:\n%s", want, s.stderr.String())

@@ -593,15 +593,21 @@ func (c relaySelfLifecycle) Snapshot(ctx context.Context, box *host.Sandbox, a c
 // already been answered and is about to be paused by that very capture.
 type relayEnvSetup struct{ up *nodelink.Uplink }
 
-func (c relayEnvSetup) SetupFor(ctx context.Context, box *host.Sandbox) (script, env string, ok bool, err error) {
+func (c relayEnvSetup) SetupFor(ctx context.Context, box *host.Sandbox) (metadata.SetupJob, bool, error) {
 	var resp nodelink.SelfSetupResp
 	if err := c.up.Request(ctx, nodelink.TypeSelfSetup,
 		nodelink.SelfSetupReq{Sandbox: box.Name}, &resp); err != nil {
 		// Never a job on an error path: a guest that cannot reach its gateway
 		// must run nothing at all, and its own retry is the repair.
-		return "", "", false, err
+		return metadata.SetupJob{}, false, err
 	}
-	return resp.Script, resp.Env, resp.Job, nil
+	// resp.Script is the MODE'S PAYLOAD — a setup script or an agent prompt.
+	// The field kept its shipped JSON name on purpose; see SelfSetupResp. The
+	// mode is relayed verbatim and is NOT defaulted to "script" here: a gateway
+	// too old to send one would otherwise have this node silently run an empty
+	// script as if it were a build, where an empty mode makes the guest refuse
+	// by name. A node must not invent the one field that decides what runs.
+	return metadata.SetupJob{Env: resp.Env, Mode: resp.Mode, Payload: resp.Script}, resp.Job, nil
 }
 
 func (c relayEnvSetup) SetupDone(ctx context.Context, box *host.Sandbox, r metadata.SetupResult) error {

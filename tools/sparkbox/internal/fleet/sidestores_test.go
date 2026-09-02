@@ -722,14 +722,19 @@ type recordingEnvSetup struct {
 	reports []ctlops.SetupReport
 	script  string
 	env     string
+	mode    string
 }
 
-func (e *recordingEnvSetup) SetupFor(_ context.Context, box *host.Sandbox) (string, string, bool, error) {
+func (e *recordingEnvSetup) SetupFor(_ context.Context, box *host.Sandbox) (ctlops.SetupJob, bool, error) {
 	e.boxes = append(e.boxes, "fetch:"+box.Name+"@"+box.Owner)
 	if e.script == "" {
-		return "", "", false, nil
+		return ctlops.SetupJob{}, false, nil
 	}
-	return e.script, e.env, true, nil
+	mode := e.mode
+	if mode == "" {
+		mode = ctlops.SetupModeScript
+	}
+	return ctlops.SetupJob{Env: e.env, Mode: mode, Payload: e.script}, true, nil
 }
 
 func (e *recordingEnvSetup) SetupDone(_ context.Context, box *host.Sandbox, r ctlops.SetupReport) error {
@@ -747,6 +752,35 @@ func (e *recordingEnvSetup) SetupDone(_ context.Context, box *host.Sandbox, r ct
 // often the names of their internal repositories — and could then report a
 // success against somebody else's build, which ends in a capture that re-points
 // that owner's template to a disk this node authored.
+// TestAnAgentSetupJobRelaysItsModeAndPrompt is the same relay in the mode that
+// did not exist when it was written. It is separate rather than a subtest
+// because what it asserts is different: not that the payload arrives, but that
+// the payload and the MODE arrive together — a prompt that reached a guest
+// labelled `script` would be run by bash.
+func TestAnAgentSetupJobRelaysItsModeAndPrompt(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	const prompt = "You are configuring a fresh Sparkbox microVM.\nDo not ask questions.\n"
+	r.f.SetEnvSetup(&recordingEnvSetup{script: prompt, env: "web", mode: ctlops.SetupModeAgent})
+
+	job, err := r.f.SelfSetup(context.Background(), "boxb", nodelink.SelfSetupReq{Sandbox: "far-away"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !job.Job {
+		t.Fatal("the agent builder was told it had no job")
+	}
+	if job.Mode != ctlops.SetupModeAgent {
+		t.Errorf("mode = %q, want %q", job.Mode, ctlops.SetupModeAgent)
+	}
+	if job.Script != prompt {
+		t.Errorf("payload = %q, want the prompt verbatim", job.Script)
+	}
+}
+
 func TestEnvironmentSetupRefusesASandboxPlacedOnAnotherNode(t *testing.T) {
 	r := newSideRig(t)
 	r.linkBuilder(t)
@@ -765,6 +799,15 @@ func TestEnvironmentSetupRefusesASandboxPlacedOnAnotherNode(t *testing.T) {
 	}
 	if !job.Job || job.Env != "web" || job.Script != "#!/bin/sh\nmake deps\n" {
 		t.Errorf("job = %+v", job)
+	}
+	// THE MODE MUST SURVIVE THE RELAY. On a control-plane-only gateway — which
+	// is what the live CKS cluster is — every builder is on a node, so this is
+	// not an edge case, it is the only path. A mode dropped here arrives at the
+	// guest empty and the build fails with "no mode"; a mode silently defaulted
+	// here would run an agent prompt as a shell script.
+	if job.Mode != ctlops.SetupModeScript {
+		t.Errorf("mode = %q, want %q — a dropped mode is the Phase B asymmetry again",
+			job.Mode, ctlops.SetupModeScript)
 	}
 	if _, err := r.f.SelfSetupResult(ctx, "boxb", nodelink.SelfSetupResultReq{
 		Sandbox: "far-away", OK: true, Script: "#!/bin/sh\nmake deps\n", Log: "+ make deps\n",

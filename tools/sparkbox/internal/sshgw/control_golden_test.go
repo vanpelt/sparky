@@ -707,6 +707,13 @@ func TestControlGolden(t *testing.T) {
 		name: "env build with nothing to build", handle: "alice", args: []string{"env", "build"},
 		wantErr: envUsage, wantExit: 2,
 	}, {
+		// `rebuild` is `build` under a second name, so it has to reach the same
+		// handler and print the same usage. If it fell through to `default:` it
+		// would answer `unknown env command "rebuild"` — for a word this
+		// platform's own template_missing refusal now tells people to type.
+		name: "env rebuild with nothing to rebuild", handle: "alice", args: []string{"env", "rebuild"},
+		wantErr: envUsage, wantExit: 2,
+	}, {
 		name: "env capture with nothing to capture", handle: "alice", args: []string{"env", "capture"},
 		wantErr: envUsage, wantExit: 2,
 	}, {

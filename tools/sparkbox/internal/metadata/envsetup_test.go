@@ -32,24 +32,29 @@ type fakeEnvSetup struct {
 	doneErr   error
 	entered   chan struct{}
 	enteredAt time.Time
+	mode      string // "" means SetupModeScript
 }
 
 func newFakeEnvSetup() *fakeEnvSetup {
 	return &fakeEnvSetup{entered: make(chan struct{}, 4)}
 }
 
-func (f *fakeEnvSetup) SetupFor(_ context.Context, box *host.Sandbox) (string, string, bool, error) {
+func (f *fakeEnvSetup) SetupFor(_ context.Context, box *host.Sandbox) (SetupJob, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
-		return "", "", false, f.err
+		return SetupJob{}, false, f.err
 	}
 	// Only the box the fixture nominated as the builder has a job; every other
 	// sandbox in the fleet asks the same question and is told no.
 	if !f.has || box.Name != "alice-box" {
-		return "", "", false, nil
+		return SetupJob{}, false, nil
 	}
-	return f.script, f.env, true, nil
+	mode := f.mode
+	if mode == "" {
+		mode = SetupModeScript
+	}
+	return SetupJob{Env: f.env, Mode: mode, Payload: f.script}, true, nil
 }
 
 func (f *fakeEnvSetup) SetupDone(_ context.Context, box *host.Sandbox, r SetupResult) error {
@@ -138,18 +143,58 @@ func TestASandboxWithNoBuildIsToldSoCheaply(t *testing.T) {
 	}
 }
 
+// TestAnUnrenderableModeIsRefusedHereRatherThanShippedToAGuest.
+//
+// The check lives in the RENDERER because internal/metadata.Server is the one
+// piece of this path that a gateway's own guest and a node's guest both run.
+// Hoisting it into ctlops or fleet would validate it for one kind of guest and
+// skip it for the other — which is the shape of the Phase B bug where /self/setup
+// answered 501 on every node and 200 on the gateway.
+//
+// Failing here costs nothing. Shipping an unknown mode costs a builder boot to
+// produce a refusal this host could have produced immediately, and shipping an
+// EMPTY one is worse than either: it is the state a relay produces when it
+// drops a field, and the guest cannot tell it from a gateway that meant it.
+func TestAnUnrenderableModeIsRefusedHereRatherThanShippedToAGuest(t *testing.T) {
+	for _, mode := range []string{"", "telepathy", "script\nagent", "SCRIPT"} {
+		t.Run("mode "+strconv.Quote(mode), func(t *testing.T) {
+			s, env := envSetupFixture(t)
+			env.mode = mode
+			// A mode of "" would take the fake's default, so it is forced.
+			if mode == "" {
+				env.mode = " "
+			}
+			rec := request(s, "/self/setup", "172.30.5.2", "172.30.5.1")
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500 — an unrenderable job is a host bug, not a job (body %q)",
+					rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), mode) && mode != "" {
+				t.Errorf("the refusal echoed the bad mode back to the guest: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestTheBuilderIsHandedItsScriptInThreeLines pins the wire format the guest
 // parses with sed and head, and the reason line 3 is base64: a setup script is
 // arbitrary bytes containing the separator.
 func TestTheBuilderIsHandedItsScriptInThreeLines(t *testing.T) {
-	for _, tc := range []struct{ name, script string }{
-		{"multi-line", "#!/usr/bin/env bash\nset -e\n\necho 'hi there'\n"},
-		{"empty", ""},
-		{"non-ascii and control bytes", "echo \"café\"\nprintf '\\x1b[31m'\n"},
+	for _, tc := range []struct{ name, mode, script string }{
+		{"multi-line", SetupModeScript, "#!/usr/bin/env bash\nset -e\n\necho 'hi there'\n"},
+		{"empty", SetupModeScript, ""},
+		{"non-ascii and control bytes", SetupModeScript, "echo \"café\"\nprintf '\\x1b[31m'\n"},
+		// Agent mode rides the SAME three lines with the same base64 on line 3
+		// — the payload is a prompt rather than a script, and the format does
+		// not know the difference. Tabled here rather than asserted separately
+		// so the two modes cannot drift into two formats.
+		{"an agent prompt", SetupModeAgent, "You are configuring a fresh microVM.\nDo not ask questions.\n"},
+		{"a prompt with shell metacharacters", SetupModeAgent, "write $(whoami) and `id` down\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, env := envSetupFixture(t)
 			env.script = tc.script
+			env.mode = tc.mode
 
 			rec := request(s, "/self/setup", "172.30.5.2", "172.30.5.1")
 			if rec.Code != http.StatusOK {
@@ -162,8 +207,8 @@ func TestTheBuilderIsHandedItsScriptInThreeLines(t *testing.T) {
 			if lines[0] != "webapp" {
 				t.Errorf("line 1 = %q, want the environment name", lines[0])
 			}
-			if lines[1] != "script" {
-				t.Errorf("line 2 = %q, want the mode (phase B builds only from a script)", lines[1])
+			if lines[1] != tc.mode {
+				t.Errorf("line 2 = %q, want the mode %q", lines[1], tc.mode)
 			}
 			got, err := base64.StdEncoding.DecodeString(lines[2])
 			if err != nil {

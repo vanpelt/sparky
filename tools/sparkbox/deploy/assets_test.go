@@ -229,7 +229,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=25\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=26\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -264,8 +264,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 // update wantPayloadSum here to the sum the failure prints. Both, in that order.
 func TestIdentityRevMovesWithThePayload(t *testing.T) {
 	const (
-		wantRev        = 25
-		wantPayloadSum = "039643f9d70e52e4d60747d2c0fa3bd3d993f14b12ba34a7136536939e0d88fb"
+		wantRev        = 26
+		wantPayloadSum = "a92b5ca557b0d7e7d06360dd458413f08dc3c2e52b0edd4cd7711c6480c34059"
 	)
 	src, err := os.ReadFile("install-guest-identity.sh")
 	if err != nil {
@@ -2618,6 +2618,27 @@ func newEnvWorld(t *testing.T) *envWorld {
 	writeExecutable(t, filepath.Join(w.stub, "ip"), `#!/bin/sh
 [ "$1" = -4 ] && echo "default via 10.0.0.1 dev eth0"
 `)
+	// A stub `claude`, ALWAYS installed, and its presence is not only about
+	// convenience: the worker resolves the agent binary with `command -v
+	// claude`, so without a stub on PATH an agent-mode test would find and run
+	// the REAL claude on whatever machine is running `go test` — network, quota
+	// and all — which is how this test first discovered agent mode worked.
+	//
+	// It records its argv so a test can assert the invocation, and it is driven
+	// by two files rather than by flags so a subtest can describe the agent's
+	// behaviour without re-writing the stub: claude-exit is the status it exits
+	// with, and claude-writes is the .sparkbox/setup.sh it leaves behind (none,
+	// if the file is absent — which is the measured real-world case of an agent
+	// that is denied every tool call and still exits 0).
+	writeExecutable(t, filepath.Join(w.stub, "claude"), `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$SPARKBOX_TEST_DIR/claude-args"
+printf 'agent ran in %s\n' "$(pwd)"
+if [ -f "$SPARKBOX_TEST_DIR/claude-writes" ]; then
+  mkdir -p .sparkbox
+  cp "$SPARKBOX_TEST_DIR/claude-writes" .sparkbox/setup.sh
+fi
+exit "$(cat "$SPARKBOX_TEST_DIR/claude-exit" 2>/dev/null || echo 0)"
+`)
 	// Honours both call shapes the worker makes: the -o/-w job fetch and the
 	// --data-binary report. A staged job.code of 204 is the answer every VM in
 	// the fleet that is not a builder gets.
@@ -2835,10 +2856,16 @@ func TestEnvSetupAlwaysReportsSomething(t *testing.T) {
 			expectExit: 0,
 		},
 		{
+			// `agent` used to be the unknown mode this case was written around.
+			// It is a mode the payload now RUNS, so the property — an unknown
+			// mode is refused by name rather than guessed at — needs a value
+			// that is still unknown, or the assertion quietly stops testing
+			// anything. It matters because a guest older than its gateway is
+			// the normal state during a rollout.
 			name: "a mode this payload does not know is refused, not guessed at",
-			env:  "webapp", mode: "agent",
+			env:  "webapp", mode: "telepathy",
 			script:    "echo should-not-run\n",
-			wantState: "failed", wantInLog: "agent", wantNoRun: true,
+			wantState: "failed", wantInLog: "telepathy", wantNoRun: true,
 			expectExit: 1,
 		},
 		{
@@ -2870,6 +2897,130 @@ func TestEnvSetupAlwaysReportsSomething(t *testing.T) {
 				t.Errorf("the script ran anyway:\n%s", log)
 			}
 		})
+	}
+}
+
+// TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus is the test that stops
+// agent mode shipping broken and looking fine.
+//
+// `claude -p` exits 0 for a run in which every tool call was DENIED — measured,
+// not supposed. So a worker that reports success on rc == 0 would report a
+// successful build for an agent that touched nothing, and the gateway would go
+// on to capture an untouched base image as the environment's disk. Nobody
+// downstream can tell the difference: the row says ready, the snapshot exists,
+// and the environment is empty.
+//
+// The deliverable of an agent build is the setup script, so the artifact is the
+// only honest signal, and these cases pin it from both sides.
+func TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		exit        string
+		writes      string // the .sparkbox/setup.sh the agent leaves, "" for none
+		wantState   string
+		wantScript  string
+		wantInLog   string
+		wantReports string
+	}{
+		{
+			name:      "an agent that writes the script succeeds",
+			exit:      "0",
+			writes:    "#!/usr/bin/env bash\nnpm ci\n",
+			wantState: "ok", wantScript: "#!/usr/bin/env bash\nnpm ci\n",
+			wantInLog: "agent ran in",
+		},
+		{
+			name: "an agent that exits 0 having written nothing FAILS",
+			exit: "0", writes: "",
+			wantState: "failed",
+			wantInLog: "without writing",
+		},
+		{
+			name: "an agent that fails is reported with its own status",
+			exit: "3", writes: "",
+			wantState: "failed",
+			wantInLog: "agent ran in",
+		},
+		{
+			// The script an agent wrote is reported even when the run failed,
+			// for the same reason script mode reports one: it is the record of
+			// what happened, and a person finishing the build by hand starts
+			// from what the agent got as far as.
+			name: "a failed agent's partial script is still reported",
+			exit: "5", writes: "# half of it\n",
+			wantState: "failed", wantScript: "# half of it\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newEnvWorld(t)
+			w.write(filepath.Join(w.fix, "claude-exit"), tc.exit)
+			if tc.writes != "" {
+				w.write(filepath.Join(w.fix, "claude-writes"), tc.writes)
+			}
+			// In agent mode line 3 is the PROMPT, not a script.
+			w.job("webapp", "agent", "write a setup script for this project")
+			if _, _, code := w.run(); code != 0 {
+				t.Errorf("exit = %d, want 0 — the worker reports and exits 0 either way", code)
+			}
+			state, _, script, log := w.report()
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q (log %q)", state, tc.wantState, log)
+			}
+			// Line 3 of the report is base64, in both modes.
+			var decoded string
+			if script != "" {
+				raw, err := base64.StdEncoding.DecodeString(script)
+				if err != nil {
+					t.Fatalf("reported script is not base64: %v (%q)", err, script)
+				}
+				decoded = string(raw)
+			}
+			if decoded != tc.wantScript {
+				t.Errorf("reported script = %q, want %q", decoded, tc.wantScript)
+			}
+			if tc.wantInLog != "" && !strings.Contains(log, tc.wantInLog) {
+				t.Errorf("log does not mention %q:\n%s", tc.wantInLog, log)
+			}
+		})
+	}
+}
+
+// TestEnvSetupAgentModeInvokesClaudeSafely pins the three things about the
+// invocation that are load-bearing rather than stylistic.
+func TestEnvSetupAgentModeInvokesClaudeSafely(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\ntrue\n")
+	// A prompt carrying shell metacharacters. If any of this is ever
+	// interpolated into a command line instead of read from a file, the
+	// substitution runs and the assertion below catches it.
+	const prompt = "write $(touch /tmp/pwned) a `whoami` setup script"
+	w.job("webapp", "agent", prompt)
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	args, err := os.ReadFile(filepath.Join(w.fix, "claude-args"))
+	if err != nil {
+		t.Fatalf("the agent was never invoked: %v", err)
+	}
+	got := string(args)
+	// One argv element, verbatim, un-expanded: the prompt reached the agent as
+	// text and not as commands.
+	if !strings.Contains(got, prompt) {
+		t.Errorf("the prompt did not reach the agent as one verbatim argument:\n%s", got)
+	}
+	// bypassPermissions is REQUIRED, not preference. Under -p the `auto` mode
+	// this platform seeds is downgraded to `default` and every Write and Bash
+	// is denied, while the run still exits 0 — an agent build without this flag
+	// does nothing and reports success.
+	if !strings.Contains(got, "--permission-mode\nbypassPermissions\n") {
+		t.Errorf("the agent was not run with --permission-mode bypassPermissions:\n%s", got)
+	}
+	// The builder's disk becomes the environment's template and is copied into
+	// every fork of it. Nothing in the capture path strips ~/.claude/projects,
+	// so not writing the transcript is the only place this can be prevented.
+	if !strings.Contains(got, "--no-session-persistence") {
+		t.Errorf("the agent was run with session persistence, which bakes the transcript into the template:\n%s", got)
 	}
 }
 

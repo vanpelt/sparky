@@ -51,10 +51,12 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"       ssh ctl@<gateway> env script <name>\r\n" +
 	"       cat setup.sh | ssh ctl@<gateway> env script <name> --set\r\n" +
 	"       ssh ctl@<gateway> env build <name>\r\n" +
+	"       ssh ctl@<gateway> env rebuild <name>\r\n" +
 	"       ssh ctl@<gateway> env capture <name>\r\n" +
 	"\r\n" +
 	"  flags: --repo <owner>/<name>  --secret <NAME>  --rule <name>  --var K=V\r\n" +
 	"         --description <text>          every one of them may be repeated\r\n" +
+	"         --open-egress                 on create: skip the default egress rules\r\n" +
 	"\r\n" +
 	"an environment names a way of working: a checkout, the secrets it needs, the\r\n" +
 	"egress it is allowed, some plain variables, and the disk they were built on.\r\n" +
@@ -96,12 +98,35 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"then stored, so the next build is the same build. `sparkbox docs\r\n" +
 	"dev-environment` describes what belongs in that file.\r\n" +
 	"\r\n" +
-	"a build that fails leaves its builder sandbox PAUSED, with the half-built disk\r\n" +
-	"and the log in it. ssh in, fix what was missing by hand, and keep the result:\r\n" +
+	"with NO script anywhere, `env build` runs an AGENT in the builder instead: it\r\n" +
+	"reads `sparkbox docs dev-environment`, gets the project running, and writes\r\n" +
+	".sparkbox/setup.sh — which is the deliverable, because the next build of the\r\n" +
+	"same environment then runs that script instead of running an agent. commit the\r\n" +
+	"file it leaves in your checkout and every later build is deterministic. this\r\n" +
+	"needs a CLAUDE_CODE_OAUTH_TOKEN the builder will carry, and says so up front\r\n" +
+	"rather than after booting a VM to find out.\r\n" +
+	"\r\n" +
+	"`env rebuild` is `env build` on an environment that already has a disk: always\r\n" +
+	"from the stock image and the current script, never from its own last snapshot,\r\n" +
+	"so an environment never accumulates. the old image stays bound until the new\r\n" +
+	"one is captured, so a rebuild that fails costs you nothing but the time.\r\n" +
+	"\r\n" +
+	"a new environment gets a default egress rule-set named after it, so its\r\n" +
+	"sandboxes reach the package registries, github and the model API and not the\r\n" +
+	"rest of the internet. widen it in the console's Network panel, or pass\r\n" +
+	"--open-egress on create to have no rules at all.\r\n" +
+	"\r\n" +
+	"a SCRIPT build that fails leaves its builder sandbox PAUSED, with the\r\n" +
+	"half-built disk and the log in it. ssh in, fix what was missing by hand, and\r\n" +
+	"keep the result:\r\n" +
 	"\r\n" +
 	"  ssh ctl@<gateway> env build web\r\n" +
 	"  ssh web-build@<gateway>              # only if it failed\r\n" +
-	"  ssh ctl@<gateway> env capture web    # snapshot that box, bind it, done\r\n"
+	"  ssh ctl@<gateway> env capture web    # snapshot that box, bind it, done\r\n" +
+	"\r\n" +
+	"an AGENT build that overruns its budget has its builder DESTROYED instead of\r\n" +
+	"paused: it holds an unattended agent with your credentials, and by definition\r\n" +
+	"has not written the script that was the point.\r\n"
 
 // controlEnv serves `ctl env …`.
 func (g *Gateway) controlEnv(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
@@ -150,7 +175,14 @@ func (g *Gateway) controlEnv(s gssh.Session, c ctlops.Caller, args []string, log
 	case "script":
 		g.envScript(s, c, args[1:], log)
 
-	case "build":
+	// One verb under two names, and the second one is honest about it. `build`
+	// on an environment that already has a disk IS a rebuild — it boots the
+	// stock image and runs the current script, never the environment's own last
+	// snapshot — so there is one code path and `rebuild` is the word for the
+	// case where you know that is what you are asking for. Refusing to accept
+	// it would leave `env rebuild`, which this platform's own refusals now
+	// recommend, reading as a typo.
+	case "build", "rebuild":
 		if len(args) < 2 {
 			fmt.Fprint(s.Stderr(), envUsage)
 			s.Exit(2) //nolint:errcheck
@@ -495,6 +527,20 @@ func parseEnvSet(args []string) (ctlops.EnvArgs, []string, error) {
 					strings.SplitN(v, "=", 2)[0])
 			}
 			unset = append(unset, strings.TrimSpace(v))
+		case "--open-egress", "--no-egress-rules":
+			// A gesture, not a value: it says "do not create the default
+			// rule-set now". It is deliberately not stored, so it cannot become
+			// a property of the environment that somebody later has to discover.
+			//
+			// The only flag here that takes no argument, so it is the only one
+			// that must NOT touch i — the loop's own i++ is the whole advance.
+			// `take` moves i for the others precisely because they consume the
+			// next word; doing that here would silently eat the argument after
+			// this one, which for `--open-egress --var K=V` is the var.
+			if attached {
+				return ctlops.EnvArgs{}, nil, fmt.Errorf("%s takes no value", flag)
+			}
+			a.OpenEgress = true
 		case "--description", "--desc":
 			// The one flag whose value may legitimately be several words: the
 			// shell is supposed to quote it, and somebody who forgets gets the

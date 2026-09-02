@@ -113,6 +113,10 @@ type EnvArgs struct {
 	// invented an empty rule-set would be a subtractive policy nobody wrote.
 	Secrets []string
 	Rules   []string
+	// OpenEgress opts OUT of the default egress rule-set a new environment
+	// gets. It is a per-call gesture and is never stored: what it means is
+	// "do not create one now", not "this environment is permanently open".
+	OpenEgress bool
 	// Vars are set outright — a var IS keyed by (owner, tag, name), so there is
 	// no other object to union with.
 	Vars []EnvVar
@@ -293,6 +297,7 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 			return EnvironmentInfo{}, verbatim(Invalid(op, "bad_var", "%v", err))
 		}
 	}
+	defaultedEgress := o.defaultEnvEgress(op, c.Handle, name, a, len(wantRules) > 0)
 
 	// Everything above changed what a sandbox carrying this tag should see, so
 	// the running ones are re-pushed rather than left to discover it at their
@@ -305,7 +310,7 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 	}
 	o.log.Info("environment set", "user", c.Handle, "env", name,
 		"repos", len(a.Repos), "secrets", len(wantSecrets), "rules", len(wantRules),
-		"vars", len(a.Vars), "resynced", len(affected))
+		"vars", len(a.Vars), "default_egress", defaultedEgress, "resynced", len(affected))
 
 	e, err := o.envs.Get(c.Handle, name)
 	if err != nil {
@@ -571,6 +576,34 @@ func (o *Ops) resolveEnvTag(op, owner, want string) (string, error) {
 			Verbatim: true,
 		}
 	case envs.StateFailed:
+		// A FAILED BUILD AND A FAILED REBUILD ARE NOT THE SAME STATE, and until
+		// `env rebuild` existed only the first could happen, which is why one
+		// sentence used to cover both.
+		//
+		// The binding is written at the very END of a successful capture, so a
+		// rebuild that fails anywhere leaves template_tags still pointing at the
+		// previous good snapshot. The environment therefore still HAS an image
+		// and still boots from it — while the row says `failed`. Telling that
+		// person "has no base image" is false, and sending them to `--tag <name>
+		// to use the default image` is false twice over: the tag resolves the
+		// bound snapshot, so it would not give them the default image either.
+		//
+		// BuiltAt is the discriminator: it is stamped only on the transition
+		// into `ready`, so a non-zero one means a capture succeeded once and
+		// nothing since has unbound it.
+		if e.BuiltAt != nil {
+			return "", &Error{
+				Kind: KindConflict, Op: op, Code: "env_build_failed",
+				Msg: "environment " + name + "'s last build failed" + buildErrPhrase(e) +
+					", so it is still on the image it built on " + e.BuiltAt.UTC().Format("2006-01-02") + ".",
+				Hint: "Boot that image anyway with --tag " + name + ", or try again with `env rebuild " +
+					name + "`.",
+				Details: map[string]any{
+					"environment": name, "state": string(e.State), "built_at": e.BuiltAt.UTC(),
+				},
+				Verbatim: true,
+			}
+		}
 		return "", &Error{
 			Kind: KindConflict, Op: op, Code: "env_build_failed",
 			Msg: "environment " + name + " has no base image: its last build failed" +
@@ -837,6 +870,69 @@ func (o *Ops) resolveEnvSecrets(op, owner string, names []string) ([]secrets.Sec
 		out = append(out, list[i])
 	}
 	return out, nil
+}
+
+// defaultEnvEgress gives a brand-new environment a governed-by-default egress
+// posture, and it is the one place this package creates a rule-set nobody
+// typed. It reports whether it made one.
+//
+// THE PROBLEM IT SOLVES. sluice runs `--enforce --open-untagged`, under which a
+// sandbox ABSENT from the policy snapshot is unfiltered. A sandbox is present
+// only if one of its tags carries a rule-set — so "the builder is tagged, so it
+// is governed" is FALSE, and an environment nobody wrote egress rules for got
+// UNRESTRICTED egress. That is the wrong default for a box that runs a setup
+// script somebody found in a repository, and it is much the wrong default for
+// one running an unattended agent with the owner's decrypted credentials.
+//
+// WHAT AN EMPTY RULE-SET ACTUALLY MEANS, because the name suggests deny-all and
+// it is not: sluice checks its BASE allowlist first and grants unconditionally
+// (Policy.AllowedFor), so a governed sandbox with no patterns of its own
+// reaches exactly the operator's trusted list — pypi, npm, crates, the Go
+// proxy, github, api.anthropic.com — plus the domains its own repo attachments
+// imply. The base list is a floor, not a ceiling. So this is "the trusted
+// defaults" and not "nothing".
+//
+// WHY ONLY ON CREATE, AND ONLY WHEN NOTHING ELSE GOVERNS. resolveEnvRules'
+// comment warns that quietly creating an empty rule-set would cut every sandbox
+// on a tag down to the base allowlist — a policy nobody wrote, discovered as a
+// build that cannot reach the internet. That warning is right, and it is about
+// doing this to an environment that already exists. Doing it at the moment the
+// environment is BORN is a default rather than a change: there is nothing yet
+// to narrow, the rule-set is named after the environment and listed by
+// `env show`, and widening it is `net` — an ordinary edit of an ordinary object.
+//
+// BEST EFFORT, NEVER FATAL. The environment and everything the caller actually
+// asked for are already written by the time this runs. Failing the whole verb
+// because a default could not be added would report failure for a command that
+// mostly succeeded, so a failure here is logged and the environment is open —
+// which is exactly the state every environment was in before this existed.
+func (o *Ops) defaultEnvEgress(op, owner, name string, a EnvArgs, attachedRules bool) bool {
+	if o.netrules == nil || a.OpenEgress || attachedRules {
+		return false
+	}
+	list, err := o.netrules.ListRules(owner)
+	if err != nil {
+		o.log.Warn("could not read egress rule-sets while defaulting an environment's",
+			"user", owner, "env", name, "err", err)
+		return false
+	}
+	// Anything already governing this tag — including a rule-set from an
+	// earlier `env create` of the same name — means the owner has a policy and
+	// this must not add a second one. `create` and `set` are one verb, so this
+	// runs again on every `env set`, and it has to be a no-op every time after
+	// the first.
+	for _, m := range list {
+		if slices.Contains(m.Tags, name) {
+			return false
+		}
+	}
+	if err := o.netrules.PutRule(owner, name, netrules.RuleSpec{}, []string{name}); err != nil {
+		o.log.Warn("could not give a new environment its default egress rule-set",
+			"user", owner, "env", name, "err", err)
+		return false
+	}
+	o.log.Info("environment given the default egress rule-set", "user", owner, "env", name)
+	return true
 }
 
 // resolveEnvRules is resolveEnvSecrets for egress rule-sets, and it refuses an

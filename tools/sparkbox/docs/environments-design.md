@@ -27,12 +27,21 @@ oneshot and its deliberately-unenabled `sparkbox-env-setup.service`,
 reconciler sweep. Part 4 below has been rewritten to describe what was built;
 where it and the code disagreed, the code won and the paragraph says so.
 
-**Agent mode — `claude -p` writing the setup script — is Phase C and is NOT
-built.** A build with no script anywhere is refused with a sentence that says
-plainly that the third way does not exist yet, so its absence does not read as a
-bug in the two that do. The seam is one field: line 2 of the guest fetch is the
-mode, `envs.SetupFromAgent` already exists, and the guest worker refuses an
-unknown mode by name rather than guessing.
+**Phase C — agent mode — is built.** A build with no script anywhere no longer
+refuses; it runs `claude -p` in the builder against this platform's own
+dev-environment guidance and keeps the `.sparkbox/setup.sh` the agent writes.
+`ctl env rebuild` exists as a second name for `env build`, and Part 5(b)'s three
+mitigations are real rather than asserted. Two claims that Part 5 made about
+this phase turned out to be FALSE when the code was read, and both are corrected
+where they appear: the "governed by construction" claim (an environment with no
+rule-set was unrestricted, not governed) and the timeout ladder (the gateway
+gave up *before* the guest's own budget). Phase C also found that
+`--permission-mode auto` is silently downgraded to `default` under `-p`, which
+is why the invocation carries `bypassPermissions` and why success is judged by
+the artifact rather than the exit status.
+
+**Phase D — REST routes and the console tab — is still NOT built.** The only
+thing environments add to `openapi.json` is the `environments` capability flag.
 
 Part 5's two posture changes are therefore half-taken: (a) we now run a script
 from a repository, unattended, in a VM holding the owner's secrets. (b) we do
@@ -411,9 +420,9 @@ That refusal is, as in netrules and templates, exactly what keeps
 
 # Part 4 — the build
 
-**Built, script mode only** (Phase B). Agent mode is Phase C and is not built.
-This part describes the code that exists; where the original plan and the
-implementation disagreed, the paragraph says which won.
+**Built, both modes** (Phases B and C). This part describes the code that
+exists; where the original plan and the implementation disagreed, the paragraph
+says which won.
 
 An environment whose composition is complete still leaves steps 6, 7 and 8 of
 the eight. `env build <name>` is the verb that removes them:
@@ -477,10 +486,10 @@ state they are already in. The leftover box is logged with the `rm` line.
 ## The oneshot, and why it is installed but not enabled
 
 `/usr/local/sbin/sparkbox-env-setup` and `sparkbox-env-setup.service`, installed
-by `deploy/install-guest-identity.sh` (IDENTITY_REV 23). Shaped like
+by `deploy/install-guest-identity.sh` (IDENTITY_REV 26). Shaped like
 `sparkbox-repos.service`: `Type=oneshot`, `RemainAfterExit=yes` so `systemctl
 status` shows that the pass ran, a bounded `TimeoutStartSec` (5400s, set
-deliberately *above* the worker's own 3600s budget so the worker is always what
+deliberately *above* the worker's own 2400s budget so the worker is always what
 gives up first and therefore always reports), `After=` the network, token and
 repo units, and — the load-bearing one — **no ordering before `ssh.service`**.
 That unit's own comment says why, and it cites the incident: "copying it into a
@@ -517,16 +526,45 @@ every template's `~/.agents/AGENTS.md`, and since
 convention. `setup_from = "repo"` when the script was seeded from a repository,
 `"manual"` when somebody piped it in.
 
-Phase C adds the second branch: **`claude -p`** with the dev-environment
+Phase C added the second branch: **`claude -p`** with the dev-environment
 guidance, when there is no script anywhere. The guidance is not new either —
 `sparkbox docs dev-environment` (`internal/guestdocs`) is the per-framework
 Host-header and hot-reload material, and the platform-owned `~/.agents/AGENTS.md`
 already tells an agent to bind `0.0.0.0`, use a `systemd --user` unit, call
 `sparkbox set-port`, and **write what it did down as `.sparkbox/setup.sh`**.
-`setup_from = "agent"`. The seam is already cut: line 2 of the guest fetch is
-the mode, the guest refuses an unknown mode by name rather than guessing, and
-the only ctlops change is what happens where `env build` currently refuses with
-`env_no_setup`.
+`setup_from = "agent"`.
+
+**The seam was less cut than this paragraph claimed.** It said "the only ctlops
+change is what happens where `env build` refuses with `env_no_setup`". The wire
+FORMAT was ready — line 2 has always been the mode and the guest has always
+refused an unknown one by name — but nothing in Go carried a mode. `line 2` was
+the literal `b.WriteString("\nscript\n")` in `metadata`'s renderer, and
+`SetupFor` returned `(script, env string, ok bool, err error)`. Adding a mode
+touched five signatures and one relay struct, and `SetupFor`'s own guard
+("no script on the row means no job") refused agent mode by construction.
+
+What that turned into: `SetupJob{Env, Mode, Payload}` in `metadata`, mirrored in
+`ctlops` for the same import-direction reason `SetupResult`/`SetupReport` are
+mirrored, and a `Mode` field on `nodelink.SelfSetupResp`. The payload field kept
+its shipped JSON tag `script` even though it now carries a prompt: gateway and
+node are separate processes that can run separate builds, and a renamed tag
+makes a new gateway's payload arrive at an old node as an empty string — a
+builder that runs nothing and reports success — where an unknown *mode* fails
+loudly at the guest by name. A struct rather than four positional returns,
+because three same-typed strings in a row is a shape where transposing two of
+them compiles and serves the mode as the environment name.
+
+**Which mode a build is, is read off the ROW and never off the request** — the
+same rule as the environment name, and for a sharper reason. `startBuild` stamps
+`SetScript(owner, name, "", envs.SetupFromAgent)` before the state moves, and
+that stamp is the only durable record: two readers need it long afterwards with
+nothing else to go on — `SetupFor`, answering a guest that boots minutes later,
+and `ReconcileEnvironmentBuilds`, deciding after a gateway restart whether an
+expired builder is a paused disk to finish by hand or an unattended agent to
+destroy. Nothing in the guest's report carries the mode. `setup_from` is honest
+here rather than overloaded: an empty script with `from = agent` means "an agent
+is writing one", and the store already documents that an empty script with a
+`from` is distinguishable from never having looked.
 
 The second path's real output is therefore the first path's input. An agent that
 does its job leaves a script in the repo, a person reviews it in a pull request
@@ -802,26 +840,120 @@ sees.
 
 Three mitigations, and none of them is "trust the model".
 
-**The environment's own netrules.** This is the one place in the tree where
-`netrules`' subtractive semantics is straightforwardly a feature rather than a
-footgun. An **untagged** sandbox has unrestricted egress; a **tagged** one is
-governed and filtered to its allow list plus the repo-implied domains
-(`internal/netrules/store.go:431-449`, and the overlay at `:446`). A builder box
-is tagged with the environment by construction, so it is governed by
-construction. An environment with no rule-set gets the base allowlist and
-nothing else, which is the correct default for a box about to run a script
-somebody found on the internet. This costs nothing to build — it is already
-true — but it has to be *stated*, because the moment somebody "helpfully" makes
-the builder untagged to fix a package-manager failure, it silently becomes the
-one box on the fleet with open egress and an agent in it.
+**The environment's own netrules — and the paragraph that used to be here was
+WRONG, which is the most useful thing in this section.**
 
-**A hard build timeout.** Bounded the way `ctlops.ArchiveTimeout` is — 15
-minutes, at `internal/ctlops/ops.go:505` — and enforced by the gateway, not by
-the guest, because the guest is the thing that might be stuck. On expiry the
-builder is **destroyed**, not paused and not left running: a builder VM that
-outlives its build is an unattended agent sitting on an owner's credentials with
-nobody watching, which is the exact state this bullet exists to prevent. The row
-goes to `failed` with the timeout in `build_error`.
+It said a builder is "governed by construction" because it is tagged. It is not.
+`AllowForSandbox` returns `governed = len(rules) > 0`, where `rules` is the join
+of `network_rules` → `network_rule_tags` → `sandbox_tags` — so governance keys
+off the sandbox's tags carrying a **rule-set**, not off the sandbox being
+tagged. Under the deployment sparkbox actually runs (`sluice --enforce
+--open-untagged`) a sandbox absent from the policy snapshot is UNFILTERED. A
+builder tagged `{web, default}` where nobody has written a rule-set for `web`
+was therefore exactly as open as an untagged box. The mitigation this section
+claimed cost nothing and was already true cost something and was false, and had
+it been written down as-is the platform would have recorded a safety property it
+did not have: the DEFAULT agent builder, with open egress, an unattended agent,
+and the owner's decrypted credentials in it.
+
+**What is built instead.** `ctlops.defaultEnvEgress` gives every NEW environment
+an egress rule-set named after it, with an empty allow list, carried by its tag.
+That makes every sandbox on the environment governed, which under sluice means
+filtered to the operator's base allowlist plus the domains its repo attachments
+imply.
+
+An empty rule-set being *usable as a default* rests on one fact that the name
+actively obscures, and `AllowForSandbox`'s own comment used to get it wrong too:
+**an empty allow list is not deny-all.** `policy.AllowedFor` checks the BASE
+allowlist first and grants unconditionally, so a governed sandbox with no
+patterns of its own still reaches `pypi.org`, `registry.npmjs.org`, `crates.io`,
+`proxy.golang.org`, `github.com`, `api.anthropic.com` and the rest of
+`deploy/sluice-allowlist.txt`. The base list is a floor under every governed
+sandbox, not a ceiling over it — which is also why `api.anthropic.com` being on
+it is what lets an agent build work at all under its own default policy.
+
+Three properties of the default worth stating, because each is a decision:
+
+- **On create only, never on `set`.** `resolveEnvRules`' comment warns that
+  quietly creating an empty rule-set would cut every sandbox on a tag down to
+  the base allowlist — a policy nobody wrote, discovered as a build that cannot
+  reach the internet. That warning is right *about an environment that already
+  exists*. At the moment one is born there is nothing to narrow, so this is a
+  default rather than a change. `create` and `set` are one verb, so the code
+  checks for any rule-set already governing the tag and does nothing if it finds
+  one — otherwise the second `env set` would revert the owner's own widening.
+- **Overridable, in both directions.** Widen it in the console's Network panel
+  like any other rule-set; or pass `--open-egress` on create to have no rules at
+  all and be unfiltered, which is what every environment was before this.
+- **Best effort, never fatal.** The environment and everything the caller asked
+  for are already written when this runs. Failing the whole verb over a default
+  would report failure for a command that mostly succeeded.
+
+**A hard build timeout, and the builder DESTROYED on expiry.** Enforced by the
+gateway, not by the guest, because the guest is the thing that might be stuck.
+`ReconcileEnvironmentBuilds` reads the mode off the row and `expireBuild` is the
+one place the two modes diverge after they start: a script build's builder is
+paused and kept, because it holds a half-built disk and a log that somebody can
+finish by hand with `env capture`; an agent build's builder is destroyed,
+because an overrun agent build is by definition one whose guest never reported,
+so the likeliest thing in that VM is an agent still running with a shell, egress
+and the owner's decrypted credentials. There is also nothing to keep: an agent
+build that overran has not written the script that was its deliverable. The row
+goes to `failed`, and its `build_box` is cleared **only if the destroy
+succeeded** — a row naming no builder means "nothing left to look at", and
+saying that about a VM still sitting there is the one lie this path must not
+tell.
+
+This section originally specified a *shorter* 15-minute budget for agent mode,
+citing `ctlops.ArchiveTimeout`. That was not built, and the reason is the
+timeout ladder below: the number that actually bounds an unattended agent's life
+is the budget plus the reconciler's ten-minute sweep interval, so a second
+budget would have been a second thing to keep in sync for a bound it does not
+really deliver. One budget, `--env-build-timeout`, applies to both modes; what
+differs is what happens when it expires.
+
+**The timeout ladder, which was wrong and is now ordered.** Three budgets bound
+one build and they only work in one order — the guest's must be smallest, so it
+always reports before anything else gives up:
+
+| bound | value | where |
+|---|---|---|
+| guest worker | 40 min | `TIMEOUT` in `sparkbox-env-setup` |
+| gateway reconciler | 45 min (`--env-build-timeout`) | `ReconcileEnvironmentBuilds` |
+| systemd unit | 90 min | `TimeoutStartSec` |
+
+The worker's budget used to be **60 minutes** — longer than the gateway's 45 —
+so a build between the two was marked `failed` by the reconciler while the guest
+was still working, and the guest's eventual report landed on a row that was no
+longer `building` and was discarded with a warning. The build had actually
+finished and nobody could tell. Setting `--env-build-timeout` below 40 minutes
+re-creates that inversion, which is why the flag's help now says so.
+
+**`--permission-mode bypassPermissions`, and why that is not the decision
+`refresh-agent-tools.sh` declined to make.** This one is not in the original
+list because it was not known to be necessary. Measured against a real `claude`:
+under `-p`, the `auto` permission mode this platform seeds into every template's
+`~/.claude/settings.json` is silently downgraded to `default`, every `Write` and
+every `Bash` is DENIED, and **the run still exits 0**. An agent build without
+the flag does nothing, reports success, and gets an untouched base image
+captured as the environment's disk — a failure invisible to everything
+downstream, since the row says `ready` and the snapshot exists.
+
+`refresh-agent-tools.sh` deliberately seeds `auto` and not `bypassPermissions`,
+with the comment "`--dangerously-skip-permissions` stays theirs to type." That
+decision stands and this does not overturn it: it declined to make the call
+*once, globally, on behalf of every user of every sandbox*. This is one
+invocation, in one ephemeral builder the owner asked for by name, whose egress
+is governed by the default rule-set above and which is destroyed if it overruns.
+
+Two consequences follow and both are built. Success is judged by the **artifact**
+— `rc == 0` *and* a non-empty `.sparkbox/setup.sh` — because the exit status is
+not an answer in this mode. And the invocation carries
+`--no-session-persistence`, because the builder's disk becomes the environment's
+template and is copied byte-for-byte into every fork of it: nothing in the
+capture path strips `~/.claude/projects`, so *not writing* the transcript — the
+prompt, every command, and every command's output — is the only place that can
+be prevented.
 
 **Refuse the build up front when the owner has no agent credential.** The
 gateway can answer this without decrypting anything: `ListSecrets(owner)`
@@ -833,8 +965,21 @@ door matters because the alternative is genuinely bad: a builder boots, runs
 whole timeout producing a `failed` row whose real cause is three layers down.
 The refusal's sentence should be the `secret set` tip, which is the repair.
 
-The `.sparkbox/setup.sh` path takes none of these three except the timeout,
-which is the other half of the argument for Phase B shipping before Phase C.
+The `.sparkbox/setup.sh` path takes none of these except the timeout and the
+default egress rule-set, which is the other half of the argument for Phase B
+shipping before Phase C.
+
+One thing this section still OWES, and it is worth naming rather than leaving to
+be discovered: the prompt-and-confirm for a script adopted out of a repository.
+`env build` reads `.sparkbox/setup.sh` from an attachment and runs it with no
+human having read it, which inverts the instruction the platform's own example
+script carries ("Read a `.sparkbox/setup.sh` you did not write before running
+it"). Agent mode does not make that worse — an agent-written script is reviewed
+in a pull request like any other file, which is the whole point of the script
+being the deliverable — but it does make the gap load-bearing, because agent
+mode is how most environments will acquire their first script. The `--yes`, the
+printed diff, and the re-confirm when the repository's copy has changed are
+still owed.
 
 ---
 
@@ -989,12 +1134,24 @@ the script and ask. `env script <name>` prints it and the seed is recorded on
 the row before the builder boots, so the script is inspectable before and after,
 but the confirmation gesture itself is still owed.
 
-**C. The agent path.** `claude -p`, `setup_from = "agent"`, and the three
-mitigations in Part 5(b): the no-credential refusal at the door, the timeout
-already built in B, and the statement (plus a test) that a builder box is always
-tagged and therefore always governed. Landing this after B means the day an
-unattended agent first runs, everything underneath it has already been exercised
-by builds that did not have one.
+**C. The agent path — BUILT.** `claude -p`, `setup_from = "agent"` stamped
+before the state moves, `SetupJob` carrying the mode from the gateway through
+the node relay to the guest, and Part 5(b)'s mitigations made real rather than
+asserted: the no-credential refusal at the door, `bypassPermissions` with
+success judged by the artifact, `--no-session-persistence` so the transcript
+does not ride into every fork, the builder destroyed rather than paused when an
+agent build overruns, and a default egress rule-set that makes "the builder is
+governed" true instead of merely claimed. `ctl env rebuild` is a second name for
+`env build` — `build` already boots the stock image and runs the current script,
+so there is one code path — plus the two refusals that now name it: the
+`template_missing` sentence when an environment's snapshot is gone, and the
+`env_build_failed` sentence, which used to tell somebody whose REBUILD failed
+that their image was gone when the tag was still bound to the previous good one.
+
+Landing this after B means the day an unattended agent first runs, everything
+underneath it has already been exercised by builds that did not have one — and
+in fact B's deploy to real hardware is what found the two bugs C had to build
+on top of.
 
 **D. The consoles.** An Environments panel on `my.<domain>` beside Secrets,
 Network and Repos — those panels are one object viewed four ways and this is the

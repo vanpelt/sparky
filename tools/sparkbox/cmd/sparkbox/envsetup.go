@@ -32,8 +32,14 @@ import (
 // `web-build` is a name anybody may take.
 type envSetupOps struct{ ops *ctlops.Ops }
 
-func (e envSetupOps) SetupFor(ctx context.Context, box *host.Sandbox) (script, env string, ok bool, err error) {
-	return e.ops.SetupFor(ctx, box)
+func (e envSetupOps) SetupFor(ctx context.Context, box *host.Sandbox) (metadata.SetupJob, bool, error) {
+	// One conversion, no copying, for the same reason SetupReport is converted
+	// below: the two structs are field-for-field identical across a package
+	// boundary that cannot be crossed by an import in this direction. If this
+	// line stops compiling, the two definitions have drifted — which is exactly
+	// what it is here to catch.
+	job, ok, err := e.ops.SetupFor(ctx, box)
+	return metadata.SetupJob(job), ok, err
 }
 
 func (e envSetupOps) SetupDone(ctx context.Context, box *host.Sandbox, r metadata.SetupResult) error {

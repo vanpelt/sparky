@@ -13,10 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"slices"
+
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -240,28 +243,47 @@ func TestBuildRefusesBeforeTheFirstWrite(t *testing.T) {
 			want: []string{"web-build", "env capture web", "rm web-build"},
 		},
 		{
-			// The refusal that has to teach, because it is what a person hits
-			// when everything is working and they simply have not written the
-			// file yet.
-			name:  "no script anywhere",
+			// No script anywhere is the AGENT path, so what a person hits here
+			// is the agent's own precondition — and hitting it must cost
+			// nothing. Without this gate the builder boots, `claude -p` fails
+			// to authenticate, and the real cause arrives as a 401 in a log
+			// tail forty-five minutes' worth of budget later.
+			name:  "no script anywhere and no agent credential",
 			setup: func(b *buildRig) { b.env("alice", "web") },
-			kind:  KindConflict, code: "env_no_setup",
+			kind:  KindConflict, code: "env_no_agent_credential",
 			want: []string{
-				".sparkbox/setup.sh", "env script web --set",
-				"sparkbox docs dev-environment", "not available yet",
+				AgentCredential, "secret set " + AgentCredential,
+				".sparkbox/setup.sh",
 			},
 		},
 		{
+			// The credential EXISTS but is tagged where no builder for this
+			// environment will carry it. That is a different problem from not
+			// having one and the repair is a retag, so it gets its own
+			// sentence — and the sentence has to name the tags it actually has,
+			// or the reader cannot tell why a token they can see in `secret ls`
+			// is not reaching anything.
+			name: "an agent credential tagged out of the builder's reach",
+			setup: func(b *buildRig) {
+				b.env("alice", "web")
+				b.secret("alice", AgentCredential, "ci")
+			},
+			kind: KindConflict, code: "env_no_agent_credential",
+			want: []string{AgentCredential, "ci", "--tag web"},
+		},
+		{
 			// An attachment whose repository has no such file is not a script,
-			// and neither is one that only has whitespace in it.
+			// and neither is one that only has whitespace in it — so this falls
+			// through to the agent path and its gate, exactly as an environment
+			// with no repository at all does.
 			name: "an attached repo with an empty setup script",
 			setup: func(b *buildRig) {
 				b.env("alice", "web")
 				b.attach("alice", "wandb/hivemind", "main", "web")
 				b.file("wandb/hivemind", "main", SetupScriptPath, "   \n\n")
 			},
-			kind: KindConflict, code: "env_no_setup",
-			want: []string{".sparkbox/setup.sh"},
+			kind: KindConflict, code: "env_no_agent_credential",
+			want: []string{AgentCredential},
 		},
 	}
 
@@ -288,6 +310,150 @@ func TestBuildRefusesBeforeTheFirstWrite(t *testing.T) {
 			// The point of the whole table.
 			if got := b.calls.mutating(); len(got) > 0 {
 				t.Errorf("a refused build mutated something: %v", got)
+			}
+		})
+	}
+}
+
+// secret seeds a credential the owner holds, on the tags given. It writes the
+// fake's tag map directly rather than going through PutSecret so a test can
+// describe a token that is tagged out of reach without also asserting on the
+// call that put it there.
+func (b *buildRig) secret(owner, name string, tags ...string) {
+	if len(tags) == 0 {
+		tags = []string{secrets.DefaultTag}
+	}
+	b.rig.secrets.tags[secretKey(owner, name)] = tags
+}
+
+// TestAnEnvironmentWithNoScriptBuildsWithAnAgent is the Phase C path end to end
+// on the gateway side, and it pins the two things that are easy to get subtly
+// wrong.
+//
+// The first is that the row must SAY it is an agent build before the state
+// moves. Two readers need that later with nothing else to go on: SetupFor,
+// answering a guest that boots minutes from now, and the reconciler, deciding
+// whether an expired builder is a paused disk to finish by hand or an
+// unattended agent to destroy. Nothing in the guest's report carries the mode.
+//
+// The second is that the guest is handed a PROMPT and not a script, under the
+// agent mode — a job that arrived as mode=script with a prompt in the payload
+// would be run as a shell script, which is a sentence of English executed by
+// bash.
+func TestAnEnvironmentWithNoScriptBuildsWithAnAgent(t *testing.T) {
+	b := newBuildRig(t)
+	b.env("alice", "web")
+	b.secret("alice", AgentCredential) // on `default`, which every builder carries
+
+	if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
+		t.Fatalf("an agent build was refused: %v", err)
+	}
+
+	row := b.envs.rows[envKey("alice", "web")]
+	if row.State != envs.StateBuilding {
+		t.Errorf("state = %q, want building", row.State)
+	}
+	if row.SetupFrom != envs.SetupFromAgent {
+		t.Errorf("setup_from = %q, want %q — nothing downstream can tell this is an agent build without it",
+			row.SetupFrom, envs.SetupFromAgent)
+	}
+	if row.SetupScript != "" {
+		t.Errorf("an agent build started with a script already on the row: %q", row.SetupScript)
+	}
+	if !slices.Contains(b.starter.started, "web-build") {
+		t.Errorf("the builder was never nudged: %v", b.starter.started)
+	}
+
+	// What the guest will actually be handed.
+	box, ok := b.boxes.Get("web-build")
+	if !ok {
+		t.Fatal("no builder sandbox was created")
+	}
+	job, ok, err := b.ops.SetupFor(context.Background(), box)
+	if err != nil || !ok {
+		t.Fatalf("SetupFor on the agent builder = %+v/%v/%v", job, ok, err)
+	}
+	if job.Mode != SetupModeAgent {
+		t.Fatalf("mode = %q, want %q", job.Mode, SetupModeAgent)
+	}
+	if job.Env != "web" {
+		t.Errorf("env = %q, want web", job.Env)
+	}
+	// The prompt has to send the agent at the platform's own guidance rather
+	// than restate it, and has to end with the file that is the deliverable.
+	for _, want := range []string{"sparkbox docs dev-environment", SetupScriptPath, "web"} {
+		if !strings.Contains(job.Payload, want) {
+			t.Errorf("the agent prompt never mentions %q:\n%s", want, job.Payload)
+		}
+	}
+	// Nobody is there to answer a question, and a prompt that invites one buys
+	// a builder that sits until the budget expires.
+	if !strings.Contains(job.Payload, "do not ask") && !strings.Contains(job.Payload, "Do not ask") {
+		t.Errorf("the agent prompt does not tell the agent nobody can answer it:\n%s", job.Payload)
+	}
+}
+
+// TestAnOverrunAgentBuildDestroysItsBuilder is the one place the two modes are
+// treated differently after they start, and the asymmetry is deliberate.
+//
+// A script build's failed builder is a debugging surface worth keeping. An
+// overrun AGENT build's builder is, by definition, one whose guest never
+// reported — so the likeliest thing in it is an agent still running, with a
+// shell, egress and the owner's decrypted credentials, and nobody watching.
+// There is also nothing to keep: an agent build that overran has not written
+// the script that was its whole deliverable.
+func TestAnOverrunAgentBuildDestroysItsBuilder(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		from         string
+		script       string
+		wantDestroy  bool
+		wantPause    bool
+		wantBoxOnRow string
+	}{
+		{
+			name: "a script build is paused and kept",
+			from: envs.SetupFromManual, script: setupScript,
+			wantPause: true, wantBoxOnRow: "web-build",
+		},
+		{
+			name: "an agent build is destroyed",
+			from: envs.SetupFromAgent, script: "",
+			wantDestroy: true, wantBoxOnRow: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuildRig(t)
+			b.building("alice", "web", "web-build", func(e *envs.Environment) {
+				e.SetupFrom, e.SetupScript = tc.from, tc.script
+			})
+			// Push the row's clock well past the budget.
+			row := b.envs.rows[envKey("alice", "web")]
+			row.UpdatedAt = b.ops.now().Add(-2 * DefaultEnvBuildTimeout)
+			b.envs.rows[envKey("alice", "web")] = row
+			b.calls.reset()
+
+			b.ops.ReconcileEnvironmentBuilds(context.Background())
+
+			_, stillThere := b.boxes.Get("web-build")
+			if tc.wantDestroy && stillThere {
+				t.Error("an overrun agent builder was left in place")
+			}
+			if !tc.wantDestroy && !stillThere {
+				t.Error("a script builder was destroyed instead of kept")
+			}
+			if tc.wantPause && !b.calls.has("Pause web-build") {
+				t.Errorf("a script builder was not paused: %v", b.calls.all())
+			}
+			after := b.envs.rows[envKey("alice", "web")]
+			if after.State != envs.StateFailed {
+				t.Errorf("state = %q, want failed", after.State)
+			}
+			// A row naming a builder says "there is something to go and look
+			// at". Saying that about a VM that was just destroyed is the one
+			// lie this path must not tell.
+			if after.BuildBox != tc.wantBoxOnRow {
+				t.Errorf("build_box = %q, want %q", after.BuildBox, tc.wantBoxOnRow)
 			}
 		})
 	}
@@ -523,10 +689,11 @@ func TestBuildFailsWhenTheGuestPredatesTheFeature(t *testing.T) {
 
 // building puts an environment into the state the guest door answers from, with
 // a real builder sandbox behind it.
-func (b *buildRig) building(owner, env, box string) {
-	b.env(owner, env, withScript(setupScript), func(e *envs.Environment) {
+func (b *buildRig) building(owner, env, box string, mutate ...func(*envs.Environment)) {
+	m := append([]func(*envs.Environment){withScript(setupScript), func(e *envs.Environment) {
 		e.State, e.BuildBox = envs.StateBuilding, box
-	})
+	}}, mutate...)
+	b.env(owner, env, m...)
 	b.boxes.boxes[box] = &host.Sandbox{
 		Name: box, Owner: owner, State: vmm.StateRunning,
 		SSHAddr: "127.0.0.1:2200", SSHUser: "sparky", CreatedAt: time.Unix(0, 0).UTC(),
@@ -544,12 +711,16 @@ func TestSetupForAnswersOnlyItsOwnBuilder(t *testing.T) {
 
 	t.Run("the builder itself", func(t *testing.T) {
 		box, _ := b.boxes.Get("web-build")
-		script, env, ok, err := b.ops.SetupFor(context.Background(), box)
+		job, ok, err := b.ops.SetupFor(context.Background(), box)
 		if err != nil || !ok {
-			t.Fatalf("SetupFor = %q/%v/%v", script, ok, err)
+			t.Fatalf("SetupFor = %+v/%v/%v", job, ok, err)
 		}
-		if script != setupScript || env != "web" {
-			t.Errorf("script/env = %q/%q", script, env)
+		if job.Payload != setupScript || job.Env != "web" {
+			t.Errorf("payload/env = %q/%q", job.Payload, job.Env)
+		}
+		if job.Mode != SetupModeScript {
+			t.Errorf("mode = %q, want %q — a row with a script is a script build",
+				job.Mode, SetupModeScript)
 		}
 	})
 
@@ -557,12 +728,12 @@ func TestSetupForAnswersOnlyItsOwnBuilder(t *testing.T) {
 		// Mallory takes the name in her own namespace. The row still says
 		// web-build; only the owner comparison keeps them apart.
 		imposter := &host.Sandbox{Name: "web-build", Owner: "mallory", State: vmm.StateRunning}
-		script, env, ok, err := b.ops.SetupFor(context.Background(), imposter)
+		job, ok, err := b.ops.SetupFor(context.Background(), imposter)
 		if err != nil {
 			t.Fatalf("SetupFor: %v", err)
 		}
-		if ok || script != "" || env != "" {
-			t.Fatalf("a cross-owner sandbox was handed a setup script: %q/%q", script, env)
+		if ok || job.Payload != "" || job.Env != "" {
+			t.Fatalf("a cross-owner sandbox was handed a setup job: %+v", job)
 		}
 	})
 
@@ -574,7 +745,7 @@ func TestSetupForAnswersOnlyItsOwnBuilder(t *testing.T) {
 			t.Fatal(err)
 		}
 		box, _ := b.boxes.Get("alicebox")
-		_, _, ok, err := b.ops.SetupFor(context.Background(), box)
+		_, ok, err := b.ops.SetupFor(context.Background(), box)
 		if err != nil || ok {
 			t.Fatalf("SetupFor(alicebox) = %v/%v, want no job", ok, err)
 		}

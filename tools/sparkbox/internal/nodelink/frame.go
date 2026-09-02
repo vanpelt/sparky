@@ -1271,13 +1271,24 @@ type SelfSetupReq struct {
 //
 // Job is explicit rather than inferred from an empty Script: "no job" is the
 // answer nearly every VM in the fleet gets, and a guest must not be able to
-// start a build because a field happened to arrive empty. Env is host-authored
-// and carries no secret; the node's metadata service checks it is renderable
-// before it becomes line 1 of the guest's response, exactly as the gateway's
-// does, because that check belongs where the format is written.
+// start a build because a field happened to arrive empty. Env and Mode are
+// host-authored and carry no secret; the node's metadata service checks both
+// are renderable before they become lines 1 and 2 of the guest's response,
+// exactly as the gateway's does, because that check belongs where the format is
+// written.
+//
+// THE JSON TAG STAYS `script` THOUGH THE FIELD NOW CARRIES A PROMPT IN AGENT
+// MODE. Renaming it would be tidier and is the wrong trade: gateway and node
+// are separate processes that can run separate builds of this package, and a
+// renamed tag makes a new gateway's payload arrive at an old node as an empty
+// string — a builder that runs nothing and reports success. An unknown MODE, by
+// contrast, fails loudly at the guest by name. So the field keeps the name it
+// shipped with and the comment carries the meaning.
 type SelfSetupResp struct {
-	Job    bool   `json:"job"`
-	Env    string `json:"env,omitempty"`
+	Job  bool   `json:"job"`
+	Env  string `json:"env,omitempty"`
+	Mode string `json:"mode,omitempty"`
+	// Script is the mode's payload: the setup script, or the agent's prompt.
 	Script string `json:"script,omitempty"`
 }
 

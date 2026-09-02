@@ -48,7 +48,7 @@ import (
 // whichever machine it landed on, which is the whole point of relaying rather
 // than reimplementing.
 type EnvSetup interface {
-	SetupFor(ctx context.Context, box *host.Sandbox) (script, env string, ok bool, err error)
+	SetupFor(ctx context.Context, box *host.Sandbox) (job ctlops.SetupJob, ok bool, err error)
 	SetupDone(ctx context.Context, box *host.Sandbox, r ctlops.SetupReport) error
 }
 
@@ -83,19 +83,23 @@ func (f *Fleet) SelfSetup(ctx context.Context, node string, req nodelink.SelfSet
 		return nodelink.SelfSetupResp{}, ctlops.Disabled(nodelink.OpLink,
 			"environment builds are not enabled on this gateway")
 	}
-	script, env, ok, err := door.SetupFor(ctx, box)
+	job, ok, err := door.SetupFor(ctx, box)
 	if err != nil {
 		return nodelink.SelfSetupResp{}, err
 	}
 	if !ok {
 		return nodelink.SelfSetupResp{}, nil
 	}
-	// The environment's name and the script's size, never the script: it is an
-	// owner's private build recipe and a gateway log is not where it belongs.
+	// The environment's name, the mode and the payload's SIZE — never the
+	// payload. In script mode it is an owner's private build recipe; in agent
+	// mode it is host-authored, but logging one and not the other would make
+	// the log a place to learn which mode leaks, so neither travels.
 	f.log.Info("handed a setup job to a builder on another machine",
 		"sandbox", box.Name, "owner", box.Owner, "node", node,
-		"env", env, "script_bytes", len(script))
-	return nodelink.SelfSetupResp{Job: true, Env: env, Script: script}, nil
+		"env", job.Env, "mode", job.Mode, "payload_bytes", len(job.Payload))
+	// Script is the payload field; see the comment on SelfSetupResp for why it
+	// kept that name after the field grew a second meaning.
+	return nodelink.SelfSetupResp{Job: true, Env: job.Env, Mode: job.Mode, Script: job.Payload}, nil
 }
 
 // SelfSetupResult records what a builder on another machine reported.

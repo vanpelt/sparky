@@ -727,12 +727,18 @@ func TestGatewayOpsBuildsEnvironmentsWithoutAGitHubApp(t *testing.T) {
 	if _, err := ops.PutEnvironment(ctx, alice, ctlops.EnvArgs{Name: "web"}); err != nil {
 		t.Fatalf("env create: %v", err)
 	}
+	// No script anywhere is the AGENT path now, so what this fixture actually
+	// proves has moved: it is not that a scriptless build is refused, it is
+	// that the refusal it does get comes from the agent gate and not from a
+	// typed-nil RepoFiles panicking on the seed read — which is this test's
+	// real subject. This owner has no CLAUDE_CODE_OAUTH_TOKEN, so the gate
+	// refuses, and the seed read has already run by then.
 	_, err := ops.BuildEnvironment(ctx, alice, "web")
 	if err == nil {
-		t.Fatal("a build with no script anywhere was accepted")
+		t.Fatal("a build with no script and no agent credential was accepted")
 	}
-	if got := ctlops.AsError("env.build", err).Code; got != "env_no_setup" {
-		t.Fatalf("build refused with code %q, want env_no_setup: %v", got, err)
+	if got := ctlops.AsError("env.build", err).Code; got != "env_no_agent_credential" {
+		t.Fatalf("build refused with code %q, want env_no_agent_credential: %v", got, err)
 	}
 	if len(nudge.boxes) != 0 {
 		t.Fatalf("a refused build nudged %v", nudge.boxes)
@@ -825,12 +831,12 @@ func TestEnvSetupDoorAnswersAnOrdinaryBox(t *testing.T) {
 			ops := newGatewayOps(tc.build())
 			t.Cleanup(ops.Close)
 			door := envSetupOps{ops: ops}
-			script, env, ok, err := door.SetupFor(context.Background(), box)
+			job, ok, err := door.SetupFor(context.Background(), box)
 			if err != nil {
 				t.Fatalf("SetupFor on an ordinary sandbox: %v", err)
 			}
-			if ok || script != "" || env != "" {
-				t.Fatalf("SetupFor handed %q for %q to a box with no build", script, env)
+			if ok || job.Payload != "" || job.Env != "" || job.Mode != "" {
+				t.Fatalf("SetupFor handed %+v to a box with no build", job)
 			}
 		})
 	}
