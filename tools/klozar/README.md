@@ -84,13 +84,48 @@ every `č ć š ž đ` turns to mojibake. Commit it and the repo's `pages.yml` w
 puts it at **<https://vanpelt.github.io/sparky/tools/klozar/>**, publicly, no
 sign-in.
 
-`window.claude` doesn't exist off claude.ai, so the page falls back to
-`localStorage` on its own and the badge reads "Saving on this device". Hiding
-translations, ticking sentences off and taking notes all work; nothing syncs
-between people. That's the trade for a link anyone can open.
-
 The page is public, so it publishes the week's sentences and your error counts.
-Lesson notes are never in the file — they only ever live in the reader's browser.
+Lesson notes are never baked into the file.
+
+### Shared notes
+
+Notes and ticks sync through a **Turso** database that the page talks to directly
+over its HTTP protocol — plain JSON `POST`s to `/v2/pipeline`, so there's no
+client library and nothing loaded from a CDN. Turso answers with
+`access-control-allow-origin: *`, which is what makes a static page able to reach
+it at all.
+
+The point of this over anything GitHub-native is that **your tutor needs no
+account**. They open the link and type.
+
+The trade, chosen deliberately: **the read-write token is in the published HTML,
+so anyone who opens the sheet can read, edit, or wipe the notes.** It is a
+dedicated database holding nothing else, and the token is public the moment it
+enters git history — rotating it means issuing a new one, not scrubbing this one.
+See `notes-backend.json`. Run `site --no-notes` to publish without it and keep
+notes per-device.
+
+The database has Turso's Delete Protection on, which prevents the *database* being
+deleted through the platform API. It is not a guard on the data: an `rw` token
+still permits `drop table notes` or `delete from notes`. Worth keeping a copy of
+anything that matters — `klozar.py snapshot` already archives the sentences, and
+notes also persist in each reader's `localStorage`.
+
+Inside a claude.ai artifact that `fetch` is blocked by the CSP, so that copy of
+the page uses the artifact's own store instead; on any other host with neither,
+`localStorage` carries it alone and the badge reads "Saving on this device".
+
+Two details worth keeping if you touch the sync code:
+
+- **One write in flight per sentence.** Ticking a box and then typing a note fires
+  two saves for the same row; without serialization the slower first request can
+  land last and overwrite the newer state. This ate a note the first time it was
+  tested. A change made while a save is out sets a flag, and the re-run reads
+  current state, so only the latest wins.
+- **A poll must not take a row that has a write pending**, or it reverts what was
+  just typed and the queued save writes the reverted value back out.
+
+Polling is every 15s and only while the tab is visible.
 
 ### On a schedule
 

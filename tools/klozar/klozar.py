@@ -299,7 +299,23 @@ STANDALONE_HEAD = """<!DOCTYPE html>
 """
 
 
-def render_html(week: dict, limit: int, standalone: bool = False) -> str:
+def notes_backend() -> dict | None:
+    """The shared-notes store baked into the published page, if configured.
+
+    The token in notes-backend.json is deliberately public — see the note in that
+    file. Only url and token reach the page; the schema and comment stay here.
+    """
+    cfg = HERE / "notes-backend.json"
+    if not cfg.exists():
+        return None
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    if not data.get("url") or not data.get("token"):
+        return None
+    return {"url": data["url"].rstrip("/"), "token": data["token"]}
+
+
+def render_html(week: dict, limit: int, standalone: bool = False,
+                notes: dict | None = None) -> str:
     """The same sheet as an interactive page, data baked in.
 
     The artifact host supplies <!doctype>, charset and a small reset, so the
@@ -331,6 +347,7 @@ def render_html(week: dict, limit: int, standalone: bool = False) -> str:
         ],
         "words": [w for w, n in week["words"].most_common(30) if n > 1],
         "stamp": f"Pulled {today:%-d %B %Y} for {week['user'].get('username')}",
+        "notes": notes,
     }
     tpl = (HERE / "template.html").read_text(encoding="utf-8")
     # json.dumps can emit "</script>" inside a string and close the tag early.
@@ -407,6 +424,8 @@ def main():
     site.add_argument("--days", type=int, default=7)
     site.add_argument("--limit", type=int, default=25, help="entries per section")
     site.add_argument("--out", type=Path, help="default: index.html beside this script")
+    site.add_argument("--no-notes", action="store_true",
+                      help="omit the shared-notes store; notes stay per-device")
 
     sub.add_parser("collections", help="list collections and their counts")
     sub.add_parser("auth", help="store the session cookie in the macOS Keychain")
@@ -463,11 +482,15 @@ def main():
         if args.cmd == "site":
             out = args.out or HERE / "index.html"
             standalone = True
+            # Only the published page gets the shared store; inside an artifact the
+            # CSP blocks the fetch anyway, and that copy uses claude.use("db").
+            notes = None if args.no_notes else notes_backend()
         else:
             out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
             standalone = False
+            notes = None
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render_html(week, args.limit, standalone), encoding="utf-8")
+        out.write_text(render_html(week, args.limit, standalone, notes), encoding="utf-8")
         cm.persist()
         print(f"{len(week['played'])} sentences this week -> {out}")
         if standalone:

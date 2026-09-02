@@ -1,0 +1,6 @@
+{
+  "_comment": "DELIBERATELY PUBLIC. This read-write token is baked into the published page, so anyone who opens the lesson sheet can read, edit, or wipe these notes. That is the accepted trade for letting a tutor with no account take notes. Keep this database holding nothing but lesson notes, and treat the token as burned the moment it lands in git history — rotating it means issuing a new one, not removing this one. Turso's Delete Protection is on, but that only stops the database being deleted via the platform API; it does not stop 'drop table notes' over SQL.",
+  "url": "https://klozar-vanpelt.aws-us-east-1.turso.io",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgzNzE0MjYsImlkIjoiMDFhMDYzM2UtMWIxMC03MzhiLTkyYzItMjBkZGZmZmQ1YTk4Iiwia2lkIjoiSTQ0Q0RzUmdnbTZaeG43Z0w5azBWY0VIcG9KY1ZyRmZkd2JXT3Z2anlvdyIsInJpZCI6ImE0ZDZiOGM3LTlmMjktNGQ3OS1hYjAzLTczNGM3ZDQ5MzA3MSJ9.NQNw1hJwPjVjqzQctXGeiKD6ssBQxCAYDIngievzcpxVwtklZ3KG7Wovo3vd-50HbdNkiQ6Qg2DJIoFQjfGlCQ",
+  "schema": "create table if not exists notes (week text not null, sentence_id text not null, note text not null default '', covered integer not null default 0, updated_at text not null, primary key (week, sentence_id))"
+}
