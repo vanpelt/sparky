@@ -5,6 +5,7 @@ and writes a lesson sheet to bring to a tutor.
 
 ```
 klozar.py        the CLI
+template.html    the interactive sheet, with a /*__DATA__*/ slot for the week
 .env             your session cookie   — gitignored
 out/             generated sheets      — gitignored
 ```
@@ -28,11 +29,29 @@ uv run klozar.py lesson --days 14
 uv run klozar.py lesson --stdout         # straight to the terminal
 uv run klozar.py snapshot                # raw JSON, one file per week, good for diffing
 uv run klozar.py snapshot --scope favorited
+uv run klozar.py artifact                # interactive HTML, ready to publish
 ```
 
 The sheet has four sections: **Gave me trouble** (ranked by miss rate — the part
 worth a tutor's time), **Starred this week**, **New this week**, and the cloze
 words that recurred most.
+
+## The interactive sheet
+
+`artifact` bakes the week into `template.html` and writes a self-contained page:
+translations hide for drilling, each sentence takes a note, and ticking one off
+tracks what the hour actually got through. Ask Claude to publish the file with the
+Artifact tool (`capabilities: {db: {}}`) and you get a link.
+
+Persistence is two-tiered on purpose. Every change writes to `localStorage`
+immediately, which works for any viewer in any browser and never fails. When the
+page can reach the artifact's shared store it also writes there, so notes sync
+live between whoever has it open — the badge in the corner says which is in
+effect. Declaring `db` makes the artifact organization-internal, so a tutor
+outside your org can read a shared link but their notes stay on their own device.
+
+Each week is a fresh publish and a fresh link. State is keyed by week, so an old
+sheet keeps its own notes.
 
 Starring alone turns out to be a weak signal: it's sticky, so the same handful of
 old sentences come back every week. `lastPlayedDate` combined with
