@@ -1,0 +1,15 @@
+git_sha=74bb8c9c62d7dba194ce6b3b79442682a9c5e008-dirty
+release=v0.5.0 transport (one later unrelated secrets commit)
+go_version=go1.25.4
+compiler_host=CW-LD4GQL399M-L (darwin/arm64; CGO_ENABLED=0 GOOS=linux GOARCH=arm64)
+kernel=Linux sparky 6.14.0-1013-nvidia #13-Ubuntu SMP PREEMPT_DYNAMIC Wed Oct 29 06:01:19 UTC 2025 aarch64 aarch64 aarch64 GNU/Linux
+benchmark_host=sparky
+command=/tmp/sparkbox-split-wan-codex-20260727/fleet-split-wan-bench.sh
+binary_source=/tmp/sparkbox-split-wan-codex-20260727/grpccontrol-split-wan-linux-arm64.test
+binary_sha256=4c4754e97620dffbfc7333ae7fd5868194c57f999776049daee445a4de17b45e
+results_sha256=c8e6cd0fdd532a3d6475307e3ea81edc59bc2738e794a51b2b70ec45079caaa4
+run_log_sha256=69a40826c75db1a909356e19cfed4c64846bf0a436a702dcdea1a3ea5f47fbad
+run_started_utc=2026-07-28T01:43:27Z
+run_finished_utc=2026-07-28T02:16:58Z
+control_path=grpc_mtls
+data_path=routed_tcp

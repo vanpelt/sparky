@@ -1,0 +1,581 @@
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.757,"p95":0.798,"p99":0.806},"concurrent_streams":0,"control_ms":{"p50":0.571,"p95":0.774,"p99":0.976},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.42,"p95":0.479,"p99":0.527},"warm_http_ttfb_ms":{"p50":0.33,"p95":0.408,"p99":0.427}}
+--- PASS: TestSplitWANBenchmarkCell (0.19s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.774,"p95":0.833,"p99":0.857},"concurrent_streams":10,"control_ms":{"p50":0.582,"p95":0.823,"p99":1.418},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.411,"p95":0.475,"p99":20.836},"warm_http_ttfb_ms":{"p50":0.366,"p95":0.419,"p99":0.583}}
+--- PASS: TestSplitWANBenchmarkCell (0.21s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.76,"p95":0.791,"p99":0.818},"concurrent_streams":100,"control_ms":{"p50":0.609,"p95":0.844,"p99":3.312},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.403,"p95":0.468,"p99":0.505},"warm_http_ttfb_ms":{"p50":0.306,"p95":0.331,"p99":0.34}}
+--- PASS: TestSplitWANBenchmarkCell (0.23s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.741,"p95":0.795,"p99":0.991},"concurrent_streams":511,"control_ms":{"p50":0.531,"p95":0.699,"p99":7.317},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.476,"p95":0.526,"p99":0.549},"warm_http_ttfb_ms":{"p50":0.342,"p95":0.378,"p99":0.47}}
+--- PASS: TestSplitWANBenchmarkCell (0.40s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.166,"p95":0.293,"p99":0.336},"concurrent_streams":0,"control_ms":{"p50":0.186,"p95":0.425,"p99":1.232},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.078,"p95":0.128,"p99":0.215},"warm_http_ttfb_ms":{"p50":0.126,"p95":0.291,"p99":0.394}}
+--- PASS: TestSplitWANBenchmarkCell (0.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.274,"p95":0.322,"p99":0.648},"concurrent_streams":10,"control_ms":{"p50":0.247,"p95":0.36,"p99":1.79},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.082,"p95":0.116,"p99":9.337},"warm_http_ttfb_ms":{"p50":0.118,"p95":0.145,"p99":0.147}}
+--- PASS: TestSplitWANBenchmarkCell (0.11s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.212,"p95":0.337,"p99":0.904},"concurrent_streams":100,"control_ms":{"p50":0.254,"p95":0.372,"p99":0.829},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.087,"p95":0.126,"p99":0.207},"warm_http_ttfb_ms":{"p50":0.09,"p95":0.159,"p99":0.486}}
+--- PASS: TestSplitWANBenchmarkCell (0.13s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.201,"p95":0.346,"p99":0.568},"concurrent_streams":511,"control_ms":{"p50":0.187,"p95":0.409,"p99":1.275},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.065,"p95":0.143,"p99":0.257},"warm_http_ttfb_ms":{"p50":0.053,"p95":0.09,"p99":0.095}}
+--- PASS: TestSplitWANBenchmarkCell (0.19s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.221,"p95":0.3,"p99":0.367},"concurrent_streams":0,"control_ms":{"p50":0.195,"p95":0.415,"p99":0.708},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.061,"p95":0.129,"p99":0.138},"warm_http_ttfb_ms":{"p50":0.076,"p95":0.134,"p99":0.386}}
+--- PASS: TestSplitWANBenchmarkCell (0.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.23,"p95":0.368,"p99":12.56},"concurrent_streams":10,"control_ms":{"p50":0.193,"p95":0.392,"p99":1.377},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.096,"p95":0.145,"p99":0.219},"warm_http_ttfb_ms":{"p50":0.068,"p95":0.114,"p99":0.13}}
+--- PASS: TestSplitWANBenchmarkCell (0.10s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.221,"p95":0.323,"p99":0.466},"concurrent_streams":100,"control_ms":{"p50":0.172,"p95":0.412,"p99":0.748},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.084,"p95":0.11,"p99":0.113},"warm_http_ttfb_ms":{"p50":0.074,"p95":0.109,"p99":0.344}}
+--- PASS: TestSplitWANBenchmarkCell (0.14s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.194,"p95":0.348,"p99":0.503},"concurrent_streams":511,"control_ms":{"p50":0.168,"p95":0.329,"p99":0.685},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.056,"p95":0.12,"p99":0.128},"warm_http_ttfb_ms":{"p50":0.079,"p95":0.105,"p99":0.115}}
+--- PASS: TestSplitWANBenchmarkCell (0.19s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.769,"p95":0.851,"p99":1057.854},"concurrent_streams":0,"control_ms":{"p50":0.579,"p95":0.918,"p99":206.069},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.416,"p95":0.478,"p99":1007.381},"warm_http_ttfb_ms":{"p50":0.316,"p95":0.503,"p99":203.456}}
+--- PASS: TestSplitWANBenchmarkCell (2.65s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.774,"p95":0.855,"p99":1048.522},"concurrent_streams":10,"control_ms":{"p50":0.588,"p95":1.308,"p99":205.399},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.403,"p95":0.513,"p99":9.346},"warm_http_ttfb_ms":{"p50":0.357,"p95":0.409,"p99":0.664}}
+--- PASS: TestSplitWANBenchmarkCell (1.65s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.773,"p95":1.038,"p99":1065.231},"concurrent_streams":100,"control_ms":{"p50":0.568,"p95":0.856,"p99":3.792},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.424,"p95":0.513,"p99":0.518},"warm_http_ttfb_ms":{"p50":0.301,"p95":0.319,"p99":0.327}}
+--- PASS: TestSplitWANBenchmarkCell (2.30s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.768,"p95":0.785,"p99":1.174},"concurrent_streams":511,"control_ms":{"p50":0.565,"p95":0.992,"p99":206.853},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.413,"p95":0.496,"p99":0.518},"warm_http_ttfb_ms":{"p50":0.349,"p95":0.378,"p99":0.392}}
+--- PASS: TestSplitWANBenchmarkCell (1.66s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.172,"p95":0.282,"p99":0.295},"concurrent_streams":0,"control_ms":{"p50":0.178,"p95":0.389,"p99":1.076},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.064,"p95":0.127,"p99":0.136},"warm_http_ttfb_ms":{"p50":0.089,"p95":0.152,"p99":0.538}}
+--- PASS: TestSplitWANBenchmarkCell (0.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.256,"p95":0.353,"p99":0.381},"concurrent_streams":10,"control_ms":{"p50":0.296,"p95":0.386,"p99":1.634},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.095,"p95":0.13,"p99":0.206},"warm_http_ttfb_ms":{"p50":0.099,"p95":0.209,"p99":0.273}}
+--- PASS: TestSplitWANBenchmarkCell (0.10s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.158,"p95":0.33,"p99":0.676},"concurrent_streams":100,"control_ms":{"p50":0.167,"p95":0.507,"p99":3.798},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.056,"p95":0.107,"p99":0.264},"warm_http_ttfb_ms":{"p50":0.053,"p95":0.462,"p99":201.576}}
+--- PASS: TestSplitWANBenchmarkCell (1.36s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.247,"p95":0.406,"p99":1216.228},"concurrent_streams":511,"control_ms":{"p50":0.178,"p95":0.415,"p99":0.912},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.071,"p95":0.149,"p99":0.323},"warm_http_ttfb_ms":{"p50":0.07,"p95":0.239,"p99":0.282}}
+--- PASS: TestSplitWANBenchmarkCell (2.63s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.082,"p95":0.376,"p99":1055.055},"concurrent_streams":0,"control_ms":{"p50":0.146,"p95":0.677,"p99":207.49},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.084,"p95":0.175,"p99":1024.206},"warm_http_ttfb_ms":{"p50":0.021,"p95":0.036,"p99":202.591}}
+--- PASS: TestSplitWANBenchmarkCell (2.58s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.158,"p95":0.588,"p99":206.595},"concurrent_streams":10,"control_ms":{"p50":0.183,"p95":1.884,"p99":207.003},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.089,"p95":0.171,"p99":16.951},"warm_http_ttfb_ms":{"p50":0.058,"p95":0.238,"p99":209.314}}
+--- PASS: TestSplitWANBenchmarkCell (1.14s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.17,"p95":0.439,"p99":0.817},"concurrent_streams":100,"control_ms":{"p50":0.199,"p95":203.457,"p99":207.928},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.068,"p95":0.169,"p99":0.244},"warm_http_ttfb_ms":{"p50":0.061,"p95":0.283,"p99":202.294}}
+--- PASS: TestSplitWANBenchmarkCell (2.01s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.148,"p95":0.353,"p99":0.546},"concurrent_streams":511,"control_ms":{"p50":0.16,"p95":0.401,"p99":1.26},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.08,"p95":0.117,"p99":0.18},"warm_http_ttfb_ms":{"p50":0.041,"p95":0.064,"p99":0.069}}
+--- PASS: TestSplitWANBenchmarkCell (1.23s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.77,"p95":5.447,"p99":1064.31},"concurrent_streams":0,"control_ms":{"p50":0.584,"p95":204.217,"p99":208.029},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.41,"p95":0.504,"p99":1063.461},"warm_http_ttfb_ms":{"p50":0.336,"p95":0.394,"p99":206.771}}
+--- PASS: TestSplitWANBenchmarkCell (4.57s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.771,"p95":203.524,"p99":1031.661},"concurrent_streams":10,"control_ms":{"p50":0.597,"p95":202.742,"p99":208.43},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.404,"p95":18.701,"p99":1044.612},"warm_http_ttfb_ms":{"p50":0.327,"p95":0.998,"p99":420.302}}
+--- PASS: TestSplitWANBenchmarkCell (5.35s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.761,"p95":1010.525,"p99":1060.328},"concurrent_streams":100,"control_ms":{"p50":0.577,"p95":2.06,"p99":205.409},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.408,"p95":0.492,"p99":1042.058},"warm_http_ttfb_ms":{"p50":0.351,"p95":0.503,"p99":204.747}}
+--- PASS: TestSplitWANBenchmarkCell (6.19s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.762,"p95":1.127,"p99":203.333},"concurrent_streams":511,"control_ms":{"p50":0.604,"p95":10.824,"p99":207.751},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.414,"p95":1018.962,"p99":1059.699},"warm_http_ttfb_ms":{"p50":0.326,"p95":0.536,"p99":209.358}}
+--- PASS: TestSplitWANBenchmarkCell (6.70s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.175,"p95":0.308,"p99":1019.253},"concurrent_streams":0,"control_ms":{"p50":0.197,"p95":1.37,"p99":208.203},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.079,"p95":1017.575,"p99":1061.05},"warm_http_ttfb_ms":{"p50":0.063,"p95":0.162,"p99":0.273}}
+--- PASS: TestSplitWANBenchmarkCell (4.63s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.179,"p95":205.341,"p99":1064.429},"concurrent_streams":10,"control_ms":{"p50":0.168,"p95":0.4,"p99":1.566},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.069,"p95":0.119,"p99":1011.047},"warm_http_ttfb_ms":{"p50":0.079,"p95":203.758,"p99":208.083}}
+--- PASS: TestSplitWANBenchmarkCell (5.03s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.22,"p95":207.067,"p99":1053.904},"concurrent_streams":100,"control_ms":{"p50":0.178,"p95":0.829,"p99":209.012},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.074,"p95":0.143,"p99":1004.058},"warm_http_ttfb_ms":{"p50":0.087,"p95":0.321,"p99":209.7}}
+--- PASS: TestSplitWANBenchmarkCell (5.29s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.179,"p95":1021.809,"p99":1264.659},"concurrent_streams":511,"control_ms":{"p50":0.251,"p95":0.52,"p99":206.823},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.079,"p95":0.209,"p99":1020.808},"warm_http_ttfb_ms":{"p50":0.063,"p95":0.461,"p99":204.869}}
+--- PASS: TestSplitWANBenchmarkCell (8.19s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.149,"p95":0.619,"p99":1212.099},"concurrent_streams":0,"control_ms":{"p50":0.212,"p95":0.744,"p99":209.845},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.084,"p95":0.594,"p99":1064.434},"warm_http_ttfb_ms":{"p50":0.082,"p95":0.213,"p99":204.367}}
+--- PASS: TestSplitWANBenchmarkCell (4.03s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.13,"p95":204.982,"p99":1230.948},"concurrent_streams":10,"control_ms":{"p50":0.174,"p95":0.372,"p99":4.811},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.083,"p95":0.356,"p99":1023.932},"warm_http_ttfb_ms":{"p50":0.08,"p95":0.265,"p99":203.214}}
+--- PASS: TestSplitWANBenchmarkCell (4.02s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.262,"p95":0.506,"p99":1019.347},"concurrent_streams":100,"control_ms":{"p50":0.102,"p95":0.262,"p99":1.861},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.032,"p95":0.122,"p99":1018.11},"warm_http_ttfb_ms":{"p50":0.065,"p95":0.302,"p99":206.638}}
+--- PASS: TestSplitWANBenchmarkCell (3.60s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":0.16,"p95":0.465,"p99":201.593},"concurrent_streams":511,"control_ms":{"p50":0.165,"p95":2.098,"p99":206.712},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"0","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":0.089,"p95":1007.49,"p99":1020.35},"warm_http_ttfb_ms":{"p50":0.046,"p95":0.084,"p99":203.452}}
+--- PASS: TestSplitWANBenchmarkCell (5.34s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.949,"p95":42.868,"p99":43.313},"concurrent_streams":0,"control_ms":{"p50":20.595,"p95":21.461,"p99":22.017},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.765,"p95":21.781,"p99":22.001},"warm_http_ttfb_ms":{"p50":21.752,"p95":22.178,"p99":22.63}}
+--- PASS: TestSplitWANBenchmarkCell (5.43s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.599,"p95":42.586,"p99":42.748},"concurrent_streams":10,"control_ms":{"p50":20.689,"p95":21.182,"p99":21.514},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.814,"p95":21.827,"p99":22.296},"warm_http_ttfb_ms":{"p50":21.422,"p95":22.127,"p99":22.151}}
+--- PASS: TestSplitWANBenchmarkCell (5.45s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.697,"p95":42.751,"p99":43.021},"concurrent_streams":100,"control_ms":{"p50":20.573,"p95":21.631,"p99":22.109},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.726,"p95":21.49,"p99":21.873},"warm_http_ttfb_ms":{"p50":21.603,"p95":22.325,"p99":22.462}}
+--- PASS: TestSplitWANBenchmarkCell (5.48s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.405,"p95":42.014,"p99":42.37},"concurrent_streams":511,"control_ms":{"p50":20.592,"p95":21.58,"p99":21.972},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.706,"p95":21.582,"p99":21.921},"warm_http_ttfb_ms":{"p50":21.374,"p95":22.063,"p99":22.42}}
+--- PASS: TestSplitWANBenchmarkCell (5.62s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.086,"p95":42.325,"p99":42.51},"concurrent_streams":0,"control_ms":{"p50":20.352,"p95":21.216,"p99":21.883},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.843,"p95":21.76,"p99":22.26},"warm_http_ttfb_ms":{"p50":20.968,"p95":21.599,"p99":21.899}}
+--- PASS: TestSplitWANBenchmarkCell (5.35s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.325,"p95":42.237,"p99":42.545},"concurrent_streams":10,"control_ms":{"p50":20.253,"p95":20.809,"p99":21.156},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.495,"p95":21.25,"p99":21.592},"warm_http_ttfb_ms":{"p50":21.049,"p95":21.593,"p99":21.654}}
+--- PASS: TestSplitWANBenchmarkCell (5.38s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.48,"p95":42.732,"p99":43.217},"concurrent_streams":100,"control_ms":{"p50":20.291,"p95":21.254,"p99":22.093},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.89,"p95":21.758,"p99":21.924},"warm_http_ttfb_ms":{"p50":21.254,"p95":22.019,"p99":22.291}}
+--- PASS: TestSplitWANBenchmarkCell (5.47s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.873,"p95":42.931,"p99":43.302},"concurrent_streams":511,"control_ms":{"p50":20.411,"p95":21.146,"p99":21.74},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.837,"p95":21.573,"p99":22.172},"warm_http_ttfb_ms":{"p50":20.914,"p95":21.762,"p99":21.93}}
+--- PASS: TestSplitWANBenchmarkCell (5.50s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.701,"p95":42.568,"p99":42.744},"concurrent_streams":0,"control_ms":{"p50":20.303,"p95":20.861,"p99":21.369},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.701,"p95":21.678,"p99":21.907},"warm_http_ttfb_ms":{"p50":21.034,"p95":21.61,"p99":21.768}}
+--- PASS: TestSplitWANBenchmarkCell (5.36s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.839,"p95":42.694,"p99":43.349},"concurrent_streams":10,"control_ms":{"p50":20.354,"p95":20.809,"p99":21.556},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.915,"p95":21.788,"p99":21.986},"warm_http_ttfb_ms":{"p50":21.688,"p95":22.618,"p99":22.713}}
+--- PASS: TestSplitWANBenchmarkCell (5.46s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.354,"p95":42.352,"p99":42.552},"concurrent_streams":100,"control_ms":{"p50":20.232,"p95":21.246,"p99":22.905},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.719,"p95":21.276,"p99":21.445},"warm_http_ttfb_ms":{"p50":21.013,"p95":21.546,"p99":21.818}}
+--- PASS: TestSplitWANBenchmarkCell (5.43s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":40.839,"p95":41.264,"p99":41.477},"concurrent_streams":511,"control_ms":{"p50":20.318,"p95":20.952,"p99":21.667},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.54,"p95":21.557,"p99":21.953},"warm_http_ttfb_ms":{"p50":20.95,"p95":21.425,"p99":21.894}}
+--- PASS: TestSplitWANBenchmarkCell (5.42s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.835,"p95":42.767,"p99":1048.284},"concurrent_streams":0,"control_ms":{"p50":20.644,"p95":21.474,"p99":21.553},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.792,"p95":21.482,"p99":21.823},"warm_http_ttfb_ms":{"p50":21.227,"p95":22.283,"p99":249.416}}
+--- PASS: TestSplitWANBenchmarkCell (6.65s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.776,"p95":42.633,"p99":42.986},"concurrent_streams":10,"control_ms":{"p50":20.542,"p95":21.265,"p99":41.344},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.704,"p95":21.316,"p99":21.88},"warm_http_ttfb_ms":{"p50":21.171,"p95":22.008,"p99":22.178}}
+--- PASS: TestSplitWANBenchmarkCell (5.48s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.961,"p95":43.106,"p99":270.305},"concurrent_streams":100,"control_ms":{"p50":20.568,"p95":21.57,"p99":251.23},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.805,"p95":21.551,"p99":21.983},"warm_http_ttfb_ms":{"p50":21.012,"p95":21.783,"p99":22.583}}
+--- PASS: TestSplitWANBenchmarkCell (6.96s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":42.107,"p95":42.776,"p99":42.995},"concurrent_streams":511,"control_ms":{"p50":20.549,"p95":21.345,"p99":263.157},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.796,"p95":21.709,"p99":21.716},"warm_http_ttfb_ms":{"p50":21.149,"p95":21.98,"p99":250.929}}
+--- PASS: TestSplitWANBenchmarkCell (7.06s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.496,"p95":42.676,"p99":69.281},"concurrent_streams":0,"control_ms":{"p50":20.355,"p95":21.198,"p99":264.33},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.673,"p95":21.715,"p99":1031.114},"warm_http_ttfb_ms":{"p50":21.112,"p95":21.921,"p99":21.959}}
+--- PASS: TestSplitWANBenchmarkCell (6.65s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":40.993,"p95":42.438,"p99":42.675},"concurrent_streams":10,"control_ms":{"p50":20.252,"p95":21.845,"p99":28.163},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.751,"p95":21.622,"p99":1032.88},"warm_http_ttfb_ms":{"p50":20.718,"p95":21.59,"p99":21.851}}
+--- PASS: TestSplitWANBenchmarkCell (6.41s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.988,"p95":42.904,"p99":271.987},"concurrent_streams":100,"control_ms":{"p50":20.282,"p95":21.683,"p99":244.327},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.68,"p95":21.064,"p99":21.707},"warm_http_ttfb_ms":{"p50":21.145,"p95":21.557,"p99":21.935}}
+--- PASS: TestSplitWANBenchmarkCell (6.13s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.726,"p95":42.447,"p99":2074.048},"concurrent_streams":511,"control_ms":{"p50":20.298,"p95":21.114,"p99":244.105},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.619,"p95":21.899,"p99":22.197},"warm_http_ttfb_ms":{"p50":21.017,"p95":21.921,"p99":21.995}}
+--- PASS: TestSplitWANBenchmarkCell (9.79s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.125,"p95":42.556,"p99":42.829},"concurrent_streams":0,"control_ms":{"p50":20.298,"p95":20.928,"p99":21.618},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.753,"p95":21.628,"p99":1029.707},"warm_http_ttfb_ms":{"p50":21.068,"p95":22.104,"p99":245.492}}
+--- PASS: TestSplitWANBenchmarkCell (6.61s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":40.94,"p95":41.933,"p99":69.806},"concurrent_streams":10,"control_ms":{"p50":20.288,"p95":21.28,"p99":21.948},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.731,"p95":21.331,"p99":22.179},"warm_http_ttfb_ms":{"p50":21.239,"p95":21.788,"p99":21.912}}
+--- PASS: TestSplitWANBenchmarkCell (5.42s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.587,"p95":42.909,"p99":267.567},"concurrent_streams":100,"control_ms":{"p50":20.364,"p95":21.741,"p99":28.03},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.786,"p95":21.95,"p99":1069.503},"warm_http_ttfb_ms":{"p50":21.051,"p95":22.201,"p99":293.241}}
+--- PASS: TestSplitWANBenchmarkCell (8.27s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.946,"p95":42.821,"p99":1068.056},"concurrent_streams":511,"control_ms":{"p50":20.35,"p95":244.856,"p99":250.148},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.859,"p95":21.741,"p99":22.365},"warm_http_ttfb_ms":{"p50":20.827,"p95":21.457,"p99":21.807}}
+--- PASS: TestSplitWANBenchmarkCell (8.27s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.618,"p95":1091.838,"p99":1098.934},"concurrent_streams":0,"control_ms":{"p50":20.649,"p95":41.28,"p99":62.759},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.895,"p95":21.522,"p99":21.99},"warm_http_ttfb_ms":{"p50":20.806,"p95":21.902,"p99":247.709}}
+--- PASS: TestSplitWANBenchmarkCell (10.18s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.629,"p95":70.284,"p99":1045.104},"concurrent_streams":10,"control_ms":{"p50":20.672,"p95":40.97,"p99":252.969},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.844,"p95":21.828,"p99":1061.885},"warm_http_ttfb_ms":{"p50":21.289,"p95":22.301,"p99":247.301}}
+--- PASS: TestSplitWANBenchmarkCell (9.32s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.464,"p95":43.117,"p99":1068.57},"concurrent_streams":100,"control_ms":{"p50":20.641,"p95":242.869,"p99":256.989},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.985,"p95":1031.352,"p99":1081.729},"warm_http_ttfb_ms":{"p50":21.053,"p95":21.78,"p99":248.429}}
+--- PASS: TestSplitWANBenchmarkCell (12.58s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":42.147,"p95":42.743,"p99":1057.498},"concurrent_streams":511,"control_ms":{"p50":20.693,"p95":21.214,"p99":49.952},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.894,"p95":21.656,"p99":21.908},"warm_http_ttfb_ms":{"p50":21.776,"p95":22.89,"p99":249.575}}
+--- PASS: TestSplitWANBenchmarkCell (10.66s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.625,"p95":267.04,"p99":1081.134},"concurrent_streams":0,"control_ms":{"p50":20.377,"p95":40.786,"p99":243.56},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.885,"p95":21.462,"p99":22.643},"warm_http_ttfb_ms":{"p50":21.154,"p95":21.878,"p99":248.074}}
+--- PASS: TestSplitWANBenchmarkCell (9.47s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.966,"p95":286.777,"p99":1109.607},"concurrent_streams":10,"control_ms":{"p50":20.29,"p95":20.946,"p99":86.841},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.65,"p95":21.703,"p99":24.279},"warm_http_ttfb_ms":{"p50":21.082,"p95":21.917,"p99":245.465}}
+--- PASS: TestSplitWANBenchmarkCell (9.04s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.329,"p95":42.472,"p99":1071.802},"concurrent_streams":100,"control_ms":{"p50":20.305,"p95":40.527,"p99":249.484},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.751,"p95":21.719,"p99":22.089},"warm_http_ttfb_ms":{"p50":21.189,"p95":21.939,"p99":249.695}}
+--- PASS: TestSplitWANBenchmarkCell (8.21s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.869,"p95":279.592,"p99":1084.192},"concurrent_streams":511,"control_ms":{"p50":20.29,"p95":249.326,"p99":272.184},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.618,"p95":22.603,"p99":1056.485},"warm_http_ttfb_ms":{"p50":21.413,"p95":249.867,"p99":298.622}}
+--- PASS: TestSplitWANBenchmarkCell (13.68s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.649,"p95":68.765,"p99":1104.198},"concurrent_streams":0,"control_ms":{"p50":20.311,"p95":248.893,"p99":296.739},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.648,"p95":21.572,"p99":21.976},"warm_http_ttfb_ms":{"p50":20.951,"p95":21.712,"p99":245.725}}
+--- PASS: TestSplitWANBenchmarkCell (8.76s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.232,"p95":264.884,"p99":1050.57},"concurrent_streams":10,"control_ms":{"p50":20.331,"p95":21.117,"p99":263.506},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.723,"p95":21.404,"p99":22.077},"warm_http_ttfb_ms":{"p50":20.927,"p95":21.654,"p99":245.374}}
+--- PASS: TestSplitWANBenchmarkCell (8.41s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.307,"p95":69.587,"p99":1042.019},"concurrent_streams":100,"control_ms":{"p50":20.385,"p95":48.15,"p99":247.696},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.886,"p95":21.787,"p99":1040.726},"warm_http_ttfb_ms":{"p50":21.112,"p95":244.53,"p99":248.406}}
+--- PASS: TestSplitWANBenchmarkCell (10.54s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":41.121,"p95":69.721,"p99":1079.923},"concurrent_streams":511,"control_ms":{"p50":20.238,"p95":40.367,"p99":254.076},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"20","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":20.542,"p95":21.315,"p99":1059.172},"warm_http_ttfb_ms":{"p50":20.754,"p95":21.61,"p99":250.6}}
+--- PASS: TestSplitWANBenchmarkCell (11.56s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.09,"p95":102.701,"p99":103.085},"concurrent_streams":0,"control_ms":{"p50":51.365,"p95":52.036,"p99":52.621},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.044,"p95":51.824,"p99":52.532},"warm_http_ttfb_ms":{"p50":51.759,"p95":52.188,"p99":52.496}}
+--- PASS: TestSplitWANBenchmarkCell (13.14s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.06,"p95":102.944,"p99":103.319},"concurrent_streams":10,"control_ms":{"p50":51.306,"p95":51.973,"p99":52.117},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.062,"p95":51.744,"p99":51.84},"warm_http_ttfb_ms":{"p50":51.258,"p95":52.229,"p99":52.26}}
+--- PASS: TestSplitWANBenchmarkCell (13.23s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.115,"p95":103.204,"p99":103.293},"concurrent_streams":100,"control_ms":{"p50":51.183,"p95":51.97,"p99":52.09},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.939,"p95":51.613,"p99":52.008},"warm_http_ttfb_ms":{"p50":51.439,"p95":52.397,"p99":52.527}}
+--- PASS: TestSplitWANBenchmarkCell (13.25s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.307,"p95":103.168,"p99":104.379},"concurrent_streams":511,"control_ms":{"p50":51.114,"p95":51.86,"p99":52.272},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.888,"p95":51.686,"p99":51.868},"warm_http_ttfb_ms":{"p50":51.388,"p95":51.938,"p99":52.063}}
+--- PASS: TestSplitWANBenchmarkCell (13.37s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.914,"p95":102.928,"p99":103.125},"concurrent_streams":0,"control_ms":{"p50":51.146,"p95":51.693,"p99":51.928},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.929,"p95":51.425,"p99":51.632},"warm_http_ttfb_ms":{"p50":51.218,"p95":51.819,"p99":52.342}}
+--- PASS: TestSplitWANBenchmarkCell (13.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.546,"p95":103.457,"p99":103.804},"concurrent_streams":10,"control_ms":{"p50":51.193,"p95":51.957,"p99":53.185},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.072,"p95":51.702,"p99":51.827},"warm_http_ttfb_ms":{"p50":51.435,"p95":52.056,"p99":52.429}}
+--- PASS: TestSplitWANBenchmarkCell (13.25s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.887,"p95":102.802,"p99":102.993},"concurrent_streams":100,"control_ms":{"p50":51.114,"p95":51.974,"p99":52.206},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.904,"p95":51.635,"p99":51.992},"warm_http_ttfb_ms":{"p50":50.988,"p95":51.758,"p99":51.808}}
+--- PASS: TestSplitWANBenchmarkCell (13.21s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.557,"p95":103.066,"p99":103.099},"concurrent_streams":511,"control_ms":{"p50":51.348,"p95":52.239,"p99":52.49},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.985,"p95":51.91,"p99":51.972},"warm_http_ttfb_ms":{"p50":51.262,"p95":52.334,"p99":52.661}}
+--- PASS: TestSplitWANBenchmarkCell (13.56s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.923,"p95":102.734,"p99":103.396},"concurrent_streams":0,"control_ms":{"p50":51.094,"p95":51.754,"p99":52.246},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.945,"p95":51.563,"p99":51.681},"warm_http_ttfb_ms":{"p50":51.163,"p95":51.706,"p99":52.141}}
+--- PASS: TestSplitWANBenchmarkCell (13.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.858,"p95":102.945,"p99":103.013},"concurrent_streams":10,"control_ms":{"p50":51.125,"p95":51.854,"p99":52.039},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.89,"p95":51.508,"p99":51.854},"warm_http_ttfb_ms":{"p50":51.085,"p95":51.638,"p99":53.945}}
+--- PASS: TestSplitWANBenchmarkCell (13.19s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.119,"p95":102.948,"p99":103.286},"concurrent_streams":100,"control_ms":{"p50":51.28,"p95":52.222,"p99":52.439},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.014,"p95":51.877,"p99":52.284},"warm_http_ttfb_ms":{"p50":51.101,"p95":51.689,"p99":51.993}}
+--- PASS: TestSplitWANBenchmarkCell (13.24s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.461,"p95":102.206,"p99":102.865},"concurrent_streams":511,"control_ms":{"p50":51.109,"p95":51.851,"p99":52.172},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.083,"p95":51.885,"p99":52.1},"warm_http_ttfb_ms":{"p50":50.907,"p95":51.838,"p99":52.071}}
+--- PASS: TestSplitWANBenchmarkCell (13.47s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.961,"p95":103.602,"p99":1126.666},"concurrent_streams":0,"control_ms":{"p50":51.342,"p95":52.256,"p99":52.444},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.826,"p95":51.747,"p99":52.225},"warm_http_ttfb_ms":{"p50":51.397,"p95":52.309,"p99":311.102}}
+--- PASS: TestSplitWANBenchmarkCell (14.48s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.922,"p95":102.833,"p99":1108.14},"concurrent_streams":10,"control_ms":{"p50":51.362,"p95":52.016,"p99":101.553},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.925,"p95":51.695,"p99":52.338},"warm_http_ttfb_ms":{"p50":51.275,"p95":51.862,"p99":52.44}}
+--- PASS: TestSplitWANBenchmarkCell (14.53s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.236,"p95":103.305,"p99":359.423},"concurrent_streams":100,"control_ms":{"p50":51.307,"p95":52.074,"p99":52.535},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.019,"p95":51.832,"p99":1068.295},"warm_http_ttfb_ms":{"p50":51.107,"p95":52.021,"p99":52.125}}
+--- PASS: TestSplitWANBenchmarkCell (15.52s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.334,"p95":103.35,"p99":103.793},"concurrent_streams":511,"control_ms":{"p50":51.028,"p95":51.798,"p99":52.486},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.835,"p95":51.648,"p99":1075.863},"warm_http_ttfb_ms":{"p50":51.287,"p95":52.005,"p99":52.24}}
+--- PASS: TestSplitWANBenchmarkCell (15.36s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.73,"p95":102.535,"p99":103.723},"concurrent_streams":0,"control_ms":{"p50":51.175,"p95":51.729,"p99":52.007},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.943,"p95":51.684,"p99":1096.81},"warm_http_ttfb_ms":{"p50":51.106,"p95":51.988,"p99":52.357}}
+--- PASS: TestSplitWANBenchmarkCell (15.16s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.123,"p95":103.334,"p99":170.516},"concurrent_streams":10,"control_ms":{"p50":51.353,"p95":52.316,"p99":102.296},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.975,"p95":51.897,"p99":1066.41},"warm_http_ttfb_ms":{"p50":51.654,"p95":52.775,"p99":309.433}}
+--- PASS: TestSplitWANBenchmarkCell (14.95s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.752,"p95":103.063,"p99":1120.611},"concurrent_streams":100,"control_ms":{"p50":51.166,"p95":52.224,"p99":305.842},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.885,"p95":51.429,"p99":1060.511},"warm_http_ttfb_ms":{"p50":50.977,"p95":51.615,"p99":304.593}}
+--- PASS: TestSplitWANBenchmarkCell (17.01s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.563,"p95":102.349,"p99":102.442},"concurrent_streams":511,"control_ms":{"p50":51.108,"p95":52.069,"p99":52.482},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.916,"p95":51.605,"p99":51.67},"warm_http_ttfb_ms":{"p50":51.062,"p95":51.584,"p99":310.089}}
+--- PASS: TestSplitWANBenchmarkCell (14.72s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.13,"p95":103.105,"p99":103.55},"concurrent_streams":0,"control_ms":{"p50":51.242,"p95":52.073,"p99":102.27},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.034,"p95":51.61,"p99":51.664},"warm_http_ttfb_ms":{"p50":51.067,"p95":51.855,"p99":309.028}}
+--- PASS: TestSplitWANBenchmarkCell (13.41s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.87,"p95":102.915,"p99":166.479},"concurrent_streams":10,"control_ms":{"p50":51.182,"p95":51.774,"p99":52.519},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.944,"p95":51.701,"p99":1110.385},"warm_http_ttfb_ms":{"p50":50.847,"p95":51.589,"p99":51.911}}
+--- PASS: TestSplitWANBenchmarkCell (14.31s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.849,"p95":103.116,"p99":1159.565},"concurrent_streams":100,"control_ms":{"p50":51.133,"p95":52.022,"p99":52.407},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.028,"p95":51.659,"p99":52.152},"warm_http_ttfb_ms":{"p50":51.064,"p95":51.847,"p99":307.89}}
+--- PASS: TestSplitWANBenchmarkCell (14.54s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.929,"p95":102.851,"p99":102.909},"concurrent_streams":511,"control_ms":{"p50":50.985,"p95":51.701,"p99":51.842},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.891,"p95":51.398,"p99":52.071},"warm_http_ttfb_ms":{"p50":51.262,"p95":51.904,"p99":52.492}}
+--- PASS: TestSplitWANBenchmarkCell (14.28s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.598,"p95":362.159,"p99":1167.369},"concurrent_streams":0,"control_ms":{"p50":51.262,"p95":102.006,"p99":357.343},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.954,"p95":52.383,"p99":1066.167},"warm_http_ttfb_ms":{"p50":51.41,"p95":303.585,"p99":317.492}}
+--- PASS: TestSplitWANBenchmarkCell (18.46s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.238,"p95":361.987,"p99":1121.09},"concurrent_streams":10,"control_ms":{"p50":51.451,"p95":101.591,"p99":313.117},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.134,"p95":51.832,"p99":1102.529},"warm_http_ttfb_ms":{"p50":51.452,"p95":52.841,"p99":313.091}}
+--- PASS: TestSplitWANBenchmarkCell (17.86s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.416,"p95":1138.482,"p99":1165.619},"concurrent_streams":100,"control_ms":{"p50":51.28,"p95":310.548,"p99":359.302},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.939,"p95":1053.589,"p99":1112.344},"warm_http_ttfb_ms":{"p50":51.356,"p95":52.27,"p99":304.693}}
+--- PASS: TestSplitWANBenchmarkCell (23.49s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.331,"p95":168.552,"p99":1137.794},"concurrent_streams":511,"control_ms":{"p50":51.374,"p95":102.536,"p99":357.571},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.077,"p95":1052.403,"p99":1088.105},"warm_http_ttfb_ms":{"p50":51.456,"p95":52.274,"p99":309.473}}
+--- PASS: TestSplitWANBenchmarkCell (19.79s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.632,"p95":103.165,"p99":1162.833},"concurrent_streams":0,"control_ms":{"p50":51.143,"p95":304.955,"p99":311.466},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.807,"p95":51.828,"p99":1081.532},"warm_http_ttfb_ms":{"p50":51.04,"p95":307.258,"p99":393.246}}
+--- PASS: TestSplitWANBenchmarkCell (19.73s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.766,"p95":358.9,"p99":1160.272},"concurrent_streams":10,"control_ms":{"p50":51.273,"p95":304.088,"p99":359.241},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.031,"p95":51.824,"p99":1082.654},"warm_http_ttfb_ms":{"p50":51.165,"p95":52.131,"p99":304.549}}
+--- PASS: TestSplitWANBenchmarkCell (17.28s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.35,"p95":360.25,"p99":1147.32},"concurrent_streams":100,"control_ms":{"p50":51.153,"p95":116.849,"p99":310.969},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.842,"p95":51.687,"p99":1057.992},"warm_http_ttfb_ms":{"p50":51.076,"p95":52.233,"p99":308.908}}
+--- PASS: TestSplitWANBenchmarkCell (19.82s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.334,"p95":103.224,"p99":1106.245},"concurrent_streams":511,"control_ms":{"p50":51.322,"p95":52.496,"p99":308.552},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.938,"p95":51.509,"p99":52.213},"warm_http_ttfb_ms":{"p50":51.273,"p95":51.734,"p99":52.038}}
+--- PASS: TestSplitWANBenchmarkCell (15.95s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.28,"p95":402.949,"p99":1126.035},"concurrent_streams":0,"control_ms":{"p50":51.321,"p95":308.13,"p99":357.694},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.963,"p95":51.732,"p99":1067.93},"warm_http_ttfb_ms":{"p50":51.307,"p95":52.1,"p99":311.332}}
+--- PASS: TestSplitWANBenchmarkCell (18.93s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.929,"p95":1108.433,"p99":1164.121},"concurrent_streams":10,"control_ms":{"p50":51.243,"p95":102.026,"p99":308.966},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":51.069,"p95":1072.618,"p99":1100.268},"warm_http_ttfb_ms":{"p50":51.244,"p95":52.119,"p99":312.217}}
+--- PASS: TestSplitWANBenchmarkCell (22.03s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.716,"p95":102.748,"p99":1126.666},"concurrent_streams":100,"control_ms":{"p50":51.3,"p95":213.079,"p99":361.276},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.979,"p95":51.603,"p99":1104.924},"warm_http_ttfb_ms":{"p50":51.141,"p95":51.622,"p99":310.779}}
+--- PASS: TestSplitWANBenchmarkCell (19.56s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":101.777,"p95":364.724,"p99":1140.231},"concurrent_streams":511,"control_ms":{"p50":51.347,"p95":103.236,"p99":308.624},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":50.931,"p95":1063.139,"p99":1113.756},"warm_http_ttfb_ms":{"p50":51.099,"p95":51.601,"p99":306.273}}
+--- PASS: TestSplitWANBenchmarkCell (20.52s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.739,"p95":203.354,"p99":204.039},"concurrent_streams":0,"control_ms":{"p50":101.627,"p95":102.223,"p99":102.39},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.22,"p95":101.744,"p99":102.087},"warm_http_ttfb_ms":{"p50":101.238,"p95":101.951,"p99":102.559}}
+--- PASS: TestSplitWANBenchmarkCell (25.93s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.847,"p95":203.829,"p99":203.916},"concurrent_streams":10,"control_ms":{"p50":101.669,"p95":102.537,"p99":102.703},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.208,"p95":101.835,"p99":101.952},"warm_http_ttfb_ms":{"p50":101.663,"p95":102.246,"p99":102.416}}
+--- PASS: TestSplitWANBenchmarkCell (26.16s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.664,"p95":203.422,"p99":203.819},"concurrent_streams":100,"control_ms":{"p50":101.289,"p95":102.261,"p99":102.335},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.006,"p95":101.757,"p99":102.01},"warm_http_ttfb_ms":{"p50":101.412,"p95":102.233,"p99":102.4}}
+--- PASS: TestSplitWANBenchmarkCell (26.13s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.08,"p95":202.65,"p99":202.931},"concurrent_streams":511,"control_ms":{"p50":101.311,"p95":102.067,"p99":102.37},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.939,"p95":101.552,"p99":101.763},"warm_http_ttfb_ms":{"p50":101.292,"p95":102.306,"p99":102.439}}
+--- PASS: TestSplitWANBenchmarkCell (26.49s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.306,"p95":202.856,"p99":203.246},"concurrent_streams":0,"control_ms":{"p50":101.292,"p95":101.966,"p99":102.071},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.974,"p95":101.551,"p99":101.928},"warm_http_ttfb_ms":{"p50":101.14,"p95":102.032,"p99":102.521}}
+--- PASS: TestSplitWANBenchmarkCell (25.84s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.076,"p95":202.917,"p99":203.46},"concurrent_streams":10,"control_ms":{"p50":101.15,"p95":101.973,"p99":102.126},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.931,"p95":101.571,"p99":101.854},"warm_http_ttfb_ms":{"p50":101.524,"p95":102.099,"p99":102.336}}
+--- PASS: TestSplitWANBenchmarkCell (26.08s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.162,"p95":202.945,"p99":203.349},"concurrent_streams":100,"control_ms":{"p50":101.311,"p95":102.096,"p99":102.212},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.025,"p95":101.71,"p99":101.834},"warm_http_ttfb_ms":{"p50":101.206,"p95":101.643,"p99":101.821}}
+--- PASS: TestSplitWANBenchmarkCell (26.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.815,"p95":202.808,"p99":203.173},"concurrent_streams":511,"control_ms":{"p50":101.24,"p95":101.944,"p99":102.172},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.867,"p95":101.711,"p99":102.414},"warm_http_ttfb_ms":{"p50":101.143,"p95":102.166,"p99":102.293}}
+--- PASS: TestSplitWANBenchmarkCell (26.41s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.855,"p95":202.707,"p99":202.995},"concurrent_streams":0,"control_ms":{"p50":101.391,"p95":102.358,"p99":102.523},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.188,"p95":102.062,"p99":102.445},"warm_http_ttfb_ms":{"p50":101.185,"p95":101.981,"p99":102.732}}
+--- PASS: TestSplitWANBenchmarkCell (25.87s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.59,"p95":203.36,"p99":203.535},"concurrent_streams":10,"control_ms":{"p50":101.266,"p95":101.977,"p99":102.166},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.983,"p95":101.585,"p99":101.947},"warm_http_ttfb_ms":{"p50":101.535,"p95":102.293,"p99":102.582}}
+--- PASS: TestSplitWANBenchmarkCell (26.10s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.976,"p95":202.798,"p99":202.892},"concurrent_streams":100,"control_ms":{"p50":101.196,"p95":101.92,"p99":102.089},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.872,"p95":101.661,"p99":102.045},"warm_http_ttfb_ms":{"p50":101.158,"p95":101.568,"p99":101.848}}
+--- PASS: TestSplitWANBenchmarkCell (26.08s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.058,"p95":202.905,"p99":203.143},"concurrent_streams":511,"control_ms":{"p50":101.308,"p95":102.48,"p99":102.636},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.04,"p95":101.741,"p99":101.779},"warm_http_ttfb_ms":{"p50":101.213,"p95":102.227,"p99":102.378}}
+--- PASS: TestSplitWANBenchmarkCell (26.45s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.067,"p95":203.053,"p99":1207.789},"concurrent_streams":0,"control_ms":{"p50":101.634,"p95":102.645,"p99":204.337},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.402,"p95":101.873,"p99":102.122},"warm_http_ttfb_ms":{"p50":101.417,"p95":102.308,"p99":407.16}}
+--- PASS: TestSplitWANBenchmarkCell (27.43s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.526,"p95":203.862,"p99":511.331},"concurrent_streams":10,"control_ms":{"p50":101.364,"p95":102.338,"p99":202.795},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.065,"p95":101.544,"p99":101.794},"warm_http_ttfb_ms":{"p50":101.535,"p95":103.069,"p99":413.37}}
+--- PASS: TestSplitWANBenchmarkCell (27.77s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.19,"p95":203.27,"p99":1210.181},"concurrent_streams":100,"control_ms":{"p50":101.38,"p95":102.315,"p99":231.583},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.079,"p95":102.027,"p99":102.235},"warm_http_ttfb_ms":{"p50":101.419,"p95":102.57,"p99":411.923}}
+--- PASS: TestSplitWANBenchmarkCell (27.57s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.517,"p95":203.52,"p99":1224.01},"concurrent_streams":511,"control_ms":{"p50":101.333,"p95":101.988,"p99":102.958},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.056,"p95":101.849,"p99":1121.603},"warm_http_ttfb_ms":{"p50":101.516,"p95":102.37,"p99":404.247}}
+--- PASS: TestSplitWANBenchmarkCell (30.54s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.586,"p95":203.309,"p99":203.562},"concurrent_streams":0,"control_ms":{"p50":101.438,"p95":102.294,"p99":102.469},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.139,"p95":101.551,"p99":1130.611},"warm_http_ttfb_ms":{"p50":101.744,"p95":102.303,"p99":405.656}}
+--- PASS: TestSplitWANBenchmarkCell (27.26s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.666,"p95":203.438,"p99":1245.858},"concurrent_streams":10,"control_ms":{"p50":101.322,"p95":102.429,"p99":408.693},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.04,"p95":101.948,"p99":102.373},"warm_http_ttfb_ms":{"p50":101.632,"p95":102.233,"p99":102.555}}
+--- PASS: TestSplitWANBenchmarkCell (27.47s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.172,"p95":203.231,"p99":203.403},"concurrent_streams":100,"control_ms":{"p50":101.211,"p95":102.094,"p99":103.39},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.043,"p95":101.64,"p99":101.8},"warm_http_ttfb_ms":{"p50":101.181,"p95":101.828,"p99":102.55}}
+--- PASS: TestSplitWANBenchmarkCell (26.09s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.073,"p95":203.441,"p99":1240.881},"concurrent_streams":511,"control_ms":{"p50":101.326,"p95":102.178,"p99":102.611},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.092,"p95":101.751,"p99":101.887},"warm_http_ttfb_ms":{"p50":101.43,"p95":102.149,"p99":102.503}}
+--- PASS: TestSplitWANBenchmarkCell (28.20s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.626,"p95":203.374,"p99":1263.91},"concurrent_streams":0,"control_ms":{"p50":101.204,"p95":103.101,"p99":411.055},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.004,"p95":101.667,"p99":102.044},"warm_http_ttfb_ms":{"p50":101.195,"p95":101.851,"p99":403.872}}
+--- PASS: TestSplitWANBenchmarkCell (27.66s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.213,"p95":203.105,"p99":332.03},"concurrent_streams":10,"control_ms":{"p50":101.372,"p95":102.157,"p99":507.938},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.032,"p95":101.949,"p99":102.363},"warm_http_ttfb_ms":{"p50":101.241,"p95":101.694,"p99":102.721}}
+--- PASS: TestSplitWANBenchmarkCell (26.61s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.883,"p95":203.015,"p99":331.474},"concurrent_streams":100,"control_ms":{"p50":101.473,"p95":102.311,"p99":508.864},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.197,"p95":101.681,"p99":101.737},"warm_http_ttfb_ms":{"p50":101.58,"p95":102.192,"p99":103.006}}
+--- PASS: TestSplitWANBenchmarkCell (27.68s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.041,"p95":203.441,"p99":1246.846},"concurrent_streams":511,"control_ms":{"p50":101.347,"p95":102.356,"p99":511.691},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.111,"p95":101.92,"p99":102.198},"warm_http_ttfb_ms":{"p50":101.171,"p95":102.173,"p99":403.975}}
+--- PASS: TestSplitWANBenchmarkCell (29.03s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.667,"p95":1209.001,"p99":1252.315},"concurrent_streams":0,"control_ms":{"p50":101.412,"p95":202.722,"p99":527.744},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.273,"p95":1135.377,"p99":1153.859},"warm_http_ttfb_ms":{"p50":101.551,"p95":407.065,"p99":445.65}}
+--- PASS: TestSplitWANBenchmarkCell (37.91s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.386,"p95":1215.463,"p99":2237.679},"concurrent_streams":10,"control_ms":{"p50":101.229,"p95":102.744,"p99":511.297},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.119,"p95":101.553,"p99":102.056},"warm_http_ttfb_ms":{"p50":101.517,"p95":406.138,"p99":414.779}}
+--- PASS: TestSplitWANBenchmarkCell (34.26s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.574,"p95":1237.293,"p99":1266.466},"concurrent_streams":100,"control_ms":{"p50":101.495,"p95":414.734,"p99":515.614},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.101,"p95":102.56,"p99":1139.446},"warm_http_ttfb_ms":{"p50":101.328,"p95":102.129,"p99":408.467}}
+--- PASS: TestSplitWANBenchmarkCell (36.32s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"10","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.271,"p95":331.939,"p99":1212.057},"concurrent_streams":511,"control_ms":{"p50":101.51,"p95":230.818,"p99":408.978},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.254,"p95":1102.331,"p99":1115.686},"warm_http_ttfb_ms":{"p50":101.347,"p95":407.187,"p99":463.259}}
+--- PASS: TestSplitWANBenchmarkCell (34.75s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.828,"p95":202.515,"p99":202.943},"concurrent_streams":0,"control_ms":{"p50":101.221,"p95":102.698,"p99":505.062},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.024,"p95":102.354,"p99":2188.604},"warm_http_ttfb_ms":{"p50":101.124,"p95":101.701,"p99":408.574}}
+--- PASS: TestSplitWANBenchmarkCell (30.00s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.033,"p95":549.772,"p99":1259.703},"concurrent_streams":10,"control_ms":{"p50":101.499,"p95":406.808,"p99":510.319},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.047,"p95":101.808,"p99":1138.851},"warm_http_ttfb_ms":{"p50":101.219,"p95":102.337,"p99":414.494}}
+--- PASS: TestSplitWANBenchmarkCell (32.75s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.127,"p95":611.323,"p99":1232.657},"concurrent_streams":100,"control_ms":{"p50":101.291,"p95":201.688,"p99":202.654},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.07,"p95":1128.694,"p99":1159.494},"warm_http_ttfb_ms":{"p50":101.176,"p95":102.094,"p99":712.945}}
+--- PASS: TestSplitWANBenchmarkCell (35.33s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":201.855,"p95":203.077,"p99":331.768},"concurrent_streams":511,"control_ms":{"p50":101.345,"p95":457.862,"p99":509.709},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.001,"p95":101.775,"p99":1154.33},"warm_http_ttfb_ms":{"p50":101.236,"p95":406.094,"p99":411.085}}
+--- PASS: TestSplitWANBenchmarkCell (31.36s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.531,"p95":1238.295,"p99":1258.833},"concurrent_streams":0,"control_ms":{"p50":101.455,"p95":102.256,"p99":201.37},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":101,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.23,"p95":102.074,"p99":1150.52},"warm_http_ttfb_ms":{"p50":101.249,"p95":102.201,"p99":409.48}}
+--- PASS: TestSplitWANBenchmarkCell (34.38s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.249,"p95":1228.642,"p99":1239.142},"concurrent_streams":10,"control_ms":{"p50":101.358,"p95":102.521,"p99":202.636},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":111,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.876,"p95":1120.195,"p99":1142.384},"warm_http_ttfb_ms":{"p50":101.26,"p95":102.055,"p99":407.527}}
+--- PASS: TestSplitWANBenchmarkCell (36.00s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.094,"p95":204.114,"p99":1249.161},"concurrent_streams":100,"control_ms":{"p50":101.38,"p95":200.979,"p99":409.039},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":201,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":101.02,"p95":101.591,"p99":1163.107},"warm_http_ttfb_ms":{"p50":101.106,"p95":101.961,"p99":451.238}}
+--- PASS: TestSplitWANBenchmarkCell (32.55s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"1000","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":202.045,"p95":202.804,"p99":1224.013},"concurrent_streams":511,"control_ms":{"p50":101.317,"p95":102.294,"p99":102.75},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"2","route_observations":{"canceled":0,"connected":612,"rejected":0,"route_failure":0},"rtt_ms":"100","samples":50,"stalled_reader":false,"stream_open_ms":{"p50":100.976,"p95":1126.797,"p99":1154.484},"warm_http_ttfb_ms":{"p50":101.067,"p95":102.396,"p99":803.835}}
+--- PASS: TestSplitWANBenchmarkCell (35.05s)
+PASS
+=== RUN   TestSplitWANBenchmarkCell
+    wan_benchmark_linux_test.go:185: SPLIT_WANBENCH_RESULT {"bandwidth_mbps":"100","benchmark_host":"sparky","cold_http_ttfb_ms":{"p50":102.627,"p95":103.627,"p99":1141.283},"concurrent_streams":10,"control_ms":{"p50":51.243,"p95":52.283,"p99":308.164},"control_operation":"health","control_totals":{"connection":"reused","failures_total":0},"control_transport":"grpc_mtls","data_transport":"routed_tcp","loss_percent":"0.5","route_observations":{"canceled":0,"connected":112,"rejected":0,"route_failure":0},"rtt_ms":"50","samples":50,"stalled_reader":true,"stream_open_ms":{"p50":51.081,"p95":52.195,"p99":1088.641},"warm_http_ttfb_ms":{"p50":51.341,"p95":51.992,"p99":52.207}}
+--- PASS: TestSplitWANBenchmarkCell (16.65s)
+PASS
+fleet-split-wan-bench: wrote /tmp/sparkbox-split-wan-codex-20260727/full-results
