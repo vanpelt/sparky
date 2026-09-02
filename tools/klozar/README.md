@@ -6,20 +6,43 @@ and writes a lesson sheet to bring to a tutor.
 ```
 klozar.py        the CLI
 template.html    the interactive sheet, with a /*__DATA__*/ slot for the week
-.env             your session cookie   — gitignored
-out/             generated sheets      — gitignored
+refresh.sh       rebuild the published sheet and push it
+index.html       the published sheet — committed, served by GitHub Pages
+.env             an alternative to the Keychain — gitignored
+out/             ad-hoc sheets                  — gitignored
 ```
 
 ## Setup
 
-Copy `.env.example` to `.env` and paste in your session cookie. It's HttpOnly, so
-it has to come out of DevTools by hand — Chrome → **Application → Cookies →
-`https://www.clozemaster.com` → `_clozemaster_session`**.
-
 ```sh
 uv sync
+uv run klozar.py auth            # paste the cookie once, stored in the Keychain
 uv run klozar.py collections     # confirms auth works
 ```
+
+The cookie is HttpOnly, so it has to come out of DevTools by hand — Chrome →
+**Application → Cookies → `https://www.clozemaster.com` → `_clozemaster_session`**.
+`auth` reads it from stdin and stores it in the login Keychain under
+`klozar-clozemaster`. (`security` takes the value as an argument, so it is briefly
+visible in the process list on write; nothing persists in shell history.)
+
+If you'd rather not use the Keychain, `CLOZEMASTER_SESSION` in the environment or
+in a `.env` beside this script both still work — the lookup order is environment,
+then Keychain, then `.env`.
+
+## Why the cookie doesn't go stale
+
+The server **re-issues `_clozemaster_session` on every response**, with a fresh
+`last_request_at` inside the encrypted payload. It's a Devise session on Rails'
+encrypted CookieStore — self-contained, with an idle timeout that *using* it
+resets. So klozar saves the rotated cookie back to wherever it came from after
+every run, and a weekly job keeps it alive indefinitely. You only re-paste if you
+go quiet long enough to cross the idle window.
+
+This is also the reason the cookie does **not** belong in a GitHub Actions secret:
+a static secret can't absorb the rotation, so it would expire on exactly the
+schedule the rotation exists to prevent — and it's a full-account bearer
+credential. Run it locally instead; see below.
 
 ## Use
 
@@ -52,6 +75,50 @@ outside your org can read a shared link but their notes stay on their own device
 
 Each week is a fresh publish and a fresh link. State is keyed by week, so an old
 sheet keeps its own notes.
+
+## The published sheet
+
+`site` writes the same page as `tools/klozar/index.html` — a complete standalone
+document, since GitHub Pages serves the file as-is and without a `<meta charset>`
+every `č ć š ž đ` turns to mojibake. Commit it and the repo's `pages.yml` workflow
+puts it at **<https://vanpelt.github.io/sparky/tools/klozar/>**, publicly, no
+sign-in.
+
+`window.claude` doesn't exist off claude.ai, so the page falls back to
+`localStorage` on its own and the badge reads "Saving on this device". Hiding
+translations, ticking sentences off and taking notes all work; nothing syncs
+between people. That's the trade for a link anyone can open.
+
+The page is public, so it publishes the week's sentences and your error counts.
+Lesson notes are never in the file — they only ever live in the reader's browser.
+
+### On a schedule
+
+```sh
+./refresh.sh          # rebuild, commit, push — no-ops if nothing changed
+```
+
+It only ever stages `tools/klozar/index.html`, and it refuses to push from any
+branch but `main`, so it's safe to leave on a timer. Weekly, an hour before the
+lesson:
+
+```sh
+cat > ~/Library/LaunchAgents/sh.catnip.klozar.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>sh.catnip.klozar</string>
+  <key>ProgramArguments</key>
+  <array><string>SPARKY/tools/klozar/refresh.sh</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer></dict>
+  <key>StandardErrorPath</key><string>/tmp/klozar.log</string>
+</dict></plist>
+PLIST
+# replace SPARKY with the repo path, then:
+launchctl load ~/Library/LaunchAgents/sh.catnip.klozar.plist
+```
+
+Each run rolls the cookie forward, so the schedule is what keeps auth alive.
 
 Starring alone turns out to be a weak signal: it's sticky, so the same handful of
 old sentences come back every week. `lastPlayedDate` combined with
