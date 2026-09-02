@@ -177,6 +177,10 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		// text those tests read.
 		"$META/self/pause",
 		"$META/self/snapshot?tag=",
+		// docs.<domain> can resolve to this fleet's own edge, which the guest's
+		// tap firewall has no route to reach directly, so `docs` reads the same
+		// content over the metadata port instead.
+		`$META/docs/$_page.md`,
 		"-w '%{http_code}'",
 		// The commit sends the PLAN's tag, name and token, never values the
 		// shell re-derived: the derived name carries a minute in it.
@@ -204,7 +208,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=19\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=21\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -1088,7 +1092,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		".agents/AGENTS.md",
 		".codex/AGENTS.md",
 		".claude/CLAUDE.md",
-		"https://docs.catnip.sh/docs.md",
+		"sparkbox docs",
 		"sparkbox pin",
 		"sparkbox unpin",
 		"sparkbox make-public",
@@ -1110,18 +1114,31 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"../../../.agents/skills/agent-browser",
 		"AGENT_BROWSER_EXECUTABLE_PATH /headless-shell/headless-shell",
 		"AGENT_BROWSER_SOCKET_DIR",
-		// The VM's own name and public URL, which the guidance can only express
-		// as $(hostname): this file is baked into a shared template and read by
-		// every clone of it, so no sandbox's name can be literal here. The
-		// sparkbox-netcfg boot hook makes the hostname the sandbox name.
-		"https://$(hostname).catnip.sh",
+		// The VM's own name and domain, which the guidance can only express by
+		// deriving them: this file is baked into a shared template and read by
+		// every clone of it on every deployment, so no sandbox's name and no
+		// deployment's domain can be literal here. The sparkbox-netcfg boot hook
+		// makes the hostname the sandbox name; `sparkbox whoami`'s `domain:` line
+		// is where the domain itself has to come from instead.
+		"DOMAIN=$(sparkbox whoami | sed -n 's/^domain: //p')",
+		`echo "https://$(hostname).$DOMAIN"`,
 		// A dev service is only reachable if the default route points at the
 		// port a person opens, and only findable later if the other ports are
 		// recorded somewhere the session carries with it.
 		"sparkbox set-port 5173",
-		"hivemind tag api_url=https://$(hostname).catnip.sh:8080",
+		`hivemind tag api_url="https://$(hostname).$DOMAIN:8080"`,
 		"hivemind tag --list",
 		"hivemind tag --remove KEY",
+		// The framework fixes live in the served doc, not retyped here — this is
+		// the pointer an agent needs to go find them. `sparkbox docs`, not the
+		// https:// URL: that hostname can resolve to this fleet's own edge, which
+		// a guest has no network route to reach directly.
+		"sparkbox docs dev-environment",
+		"systemd --user",
+		// The replay convention: what to write, where, and to check for one
+		// before re-deriving the setup by hand.
+		".sparkbox/setup.sh",
+		"Check for one before redoing this",
 		// An agent that hits "Please tell me who you are" and answers it
 		// invents an author that cannot be corrected once pushed.
 		"git's author is usually already set",
@@ -1132,7 +1149,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// was patched, and every agent's own updater is off. An agent that does
 		// not know the pull exists has no way to move them.
 		"sparkbox update-tools --check",
-		"AGENT_ENV_REV=11",
+		"AGENT_ENV_REV=12",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)
@@ -1141,6 +1158,17 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 	flat := strings.Join(strings.Fields(got), " ")
 	if !strings.Contains(flat, publicports.HumanList()) {
 		t.Errorf("template guidance common HTTPS ports drifted from publicports: want %q", publicports.HumanList())
+	}
+}
+
+// TestTemplateGuidanceNeverHardcodesADomain: this file is baked into every
+// deployment's templates, not just the flagship catnip.sh one, and the guest
+// CLI already has a way to ask its own host — `sparkbox whoami`'s `domain:`
+// line — so a literal domain here would be silently wrong on every other
+// deployment.
+func TestTemplateGuidanceNeverHardcodesADomain(t *testing.T) {
+	if got := string(RefreshToolsScript); strings.Contains(got, "catnip.sh") {
+		t.Errorf("template guidance hardcodes a domain instead of deriving one from `sparkbox whoami`:\n%s", got)
 	}
 }
 
@@ -1934,6 +1962,66 @@ func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// `sparkbox docs`
+// ---------------------------------------------------------------------------
+
+// TestGuestDocsReadsFromMetadataNotTheEdge is the whole point of the verb:
+// docs.<domain> is a public DNS name that can resolve to this fleet's own
+// edge, which this VM's own tap firewall has no route to reach directly (only
+// DNS and the metadata port are open guest-to-host). So `sparkbox docs` reads
+// the same content over the metadata port instead of ever touching
+// https://docs.<domain>.
+func TestGuestDocsReadsFromMetadataNotTheEdge(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		wantPath string
+	}{
+		{[]string{"docs"}, "/docs/docs.md"},
+		{[]string{"docs", "proxy"}, "/docs/proxy.md"},
+		{[]string{"docs", "dev-environment"}, "/docs/dev-environment.md"},
+	} {
+		reply, requests, run := guestSelfService(t)
+		reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", "# doc body\n")
+
+		stdout, stderr, code := run(tc.args...)
+		if code != 0 || stderr != "" {
+			t.Fatalf("%v: exit = %d, stderr = %q", tc.args, code, stderr)
+		}
+		if !strings.Contains(stdout, "# doc body") {
+			t.Errorf("%v: stdout = %q", tc.args, stdout)
+		}
+		// The fake `ip` stub above reports the guest's gateway as 10.0.0.1, so a
+		// request to the real edge hostname would show up as something other
+		// than that address — this asserts the request went to $META, not
+		// https://docs.<domain>.
+		got := requests()
+		if len(got) != 2 || got[0] != "GET" || got[1] != "http://10.0.0.1:8967"+tc.wantPath {
+			t.Errorf("%v: requests = %v, want a GET of %q", tc.args, got, "http://10.0.0.1:8967"+tc.wantPath)
+		}
+	}
+}
+
+// TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking mirrors the snapshot
+// usage test: a malformed page name is refused locally, and never reaches the
+// host as a path-traversal attempt or similar.
+func TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking(t *testing.T) {
+	for _, page := range []string{"../../etc/passwd", "docs.md", "a/b", "a b"} {
+		reply, requests, run := guestSelfService(t)
+		reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", "# doc body\n")
+		_, stderr, code := run("docs", page)
+		if code != 2 {
+			t.Errorf("docs %q: exit = %d, want 2", page, code)
+		}
+		if !strings.Contains(stderr, "usage: sparkbox docs [docs|proxy|dev-environment]") {
+			t.Errorf("docs %q: stderr = %q", page, stderr)
+		}
+		if got := requests(); len(got) != 0 {
+			t.Errorf("docs %q: a malformed page name reached the host: %v", page, got)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // `sparkbox whoami`
 // ---------------------------------------------------------------------------
 
@@ -1943,7 +2031,7 @@ func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
 // (see sparkbox-git-identity), which is why the fixture carries it rather than
 // the compact form a hand-written test would reach for.
 const guestIdentityDoc = `{
-  "iss": "https://catnip.sh",
+  "iss": "https://oidc.catnip.sh",
   "sub": "sandbox:quiet-lake",
   "owner": "alice",
   "github": "alice-gh",
@@ -1974,6 +2062,7 @@ func TestGuestWhoamiAnswersWhatGhCannot(t *testing.T) {
 		"github_id: 271676\n",
 		"owner: alice\n",
 		"sandbox: quiet-lake\n",
+		"domain: catnip.sh\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("whoami did not report %q:\n%s", want, stdout)
@@ -1988,6 +2077,26 @@ func TestGuestWhoamiAnswersWhatGhCannot(t *testing.T) {
 	}
 	if got := requests(); len(got) != 2 || got[0] != "GET" || !strings.HasSuffix(got[1], "/identity") {
 		t.Errorf("requests = %v — whoami must read /identity, which mints nothing", got)
+	}
+}
+
+// TestGuestWhoamiDerivesDomainFromIssuerNotAHardcodedSubdomain: main.go's
+// IssuerURL is "https://" + oidc-subdomain + "." + proxy-domain, and the
+// subdomain is a deployment flag (--oidc-subdomain, default "oidc"), not a
+// constant. The domain line has to survive a deployment that renamed it,
+// because nothing else in this script may hardcode a domain (see AGENTS.md).
+func TestGuestWhoamiDerivesDomainFromIssuerNotAHardcodedSubdomain(t *testing.T) {
+	doc := strings.Replace(guestIdentityDoc, `"iss": "https://oidc.catnip.sh"`,
+		`"iss": "https://auth.example.internal"`, 1)
+	reply, _, run := guestSelfService(t)
+	reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", doc)
+
+	stdout, stderr, code := run("whoami")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "domain: example.internal\n") {
+		t.Errorf("whoami did not derive the domain from a renamed oidc subdomain:\n%s", stdout)
 	}
 }
 

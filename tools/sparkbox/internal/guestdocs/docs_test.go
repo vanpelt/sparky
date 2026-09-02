@@ -17,8 +17,10 @@ func TestHandler(t *testing.T) {
 	}{
 		{"/", http.StatusOK, "Shared resources"},
 		{"/proxy", http.StatusOK, "Bind to"},
+		{"/dev-environment", http.StatusOK, "Allow the proxy's Host header"},
 		{"/docs.md", http.StatusOK, "## Pinning this VM"},
 		{"/proxy.md", http.StatusOK, "## Wake on request"},
+		{"/dev-environment.md", http.StatusOK, "## Allow the proxy's Host header"},
 		{"/missing", http.StatusNotFound, "404 page not found"},
 	} {
 		rec := httptest.NewRecorder()
@@ -34,6 +36,41 @@ func TestHandler(t *testing.T) {
 			if !strings.Contains(rec.Header().Get("Content-Type"), wantType) {
 				t.Errorf("GET %s content type = %q, want %s", tc.path, rec.Header().Get("Content-Type"), wantType)
 			}
+		}
+	}
+}
+
+// TestSetupShExampleIsEmbeddedNotRetyped guards the one fact that makes the
+// example in the docs trustworthy: it is the literal file at
+// examples/.sparkbox/setup.sh, not a second copy somebody can let drift.
+func TestSetupShExampleIsEmbeddedNotRetyped(t *testing.T) {
+	for _, path := range []string{"/dev-environment", "/dev-environment.md"} {
+		rec := httptest.NewRecorder()
+		Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		body := rec.Body.String()
+		if !strings.Contains(body, "sparkbox set-port 5173") {
+			t.Errorf("GET %s does not contain the setup.sh example", path)
+		}
+		if strings.Contains(body, setupExampleMarker) {
+			t.Errorf("GET %s still contains the unexpanded setup.sh marker", path)
+		}
+	}
+}
+
+// TestNoPageHardcodesADomain: every page here is baked into every
+// deployment's binary, not just the flagship catnip.sh one, and is read by
+// agents (via `sparkbox docs`) as well as browsers, so a literal domain in an
+// example URL or framework config would be silently wrong everywhere except
+// the one deployment it was written against.
+func TestNoPageHardcodesADomain(t *testing.T) {
+	for _, path := range []string{
+		"/", "/proxy", "/dev-environment",
+		"/docs.md", "/proxy.md", "/dev-environment.md",
+	} {
+		rec := httptest.NewRecorder()
+		Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if strings.Contains(rec.Body.String(), "catnip.sh") {
+			t.Errorf("GET %s hardcodes a domain instead of deriving one from `sparkbox whoami`", path)
 		}
 	}
 }

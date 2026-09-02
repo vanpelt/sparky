@@ -16,8 +16,9 @@ network interface.
 ## Other ports
 
 Use the desired port in the public URL, for example
-`https://your-box.catnip.sh:5173`. The development HTTPS ports exposed by the
-CKS edge are {{COMMON_HTTPS_PORTS}}.
+`https://your-box.<domain>:5173`, where `<domain>` is this deployment's own —
+read it from `sparkbox whoami`'s `domain:` line rather than assuming one. The
+development HTTPS ports exposed by the CKS edge are {{COMMON_HTTPS_PORTS}}.
 
 To change where the default hostname forwards without putting a port in its
 URL, run `sparkbox set-port PORT` inside the VM.

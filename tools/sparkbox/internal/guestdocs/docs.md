@@ -111,6 +111,12 @@ From inside the VM:
 - `sparkbox make-public` makes all routes for this VM unauthenticated.
 - `sparkbox make-private` restores authenticated access to all routes.
 
+A dev server's own Host-header check and hot-reload client both need explicit
+wiring for a domain that is never `localhost`. See
+[running a dev server behind the proxy](./dev-environment.md) for the
+per-framework fixes and the `.sparkbox/setup.sh` convention for replaying the
+setup on a fresh VM.
+
 ## Attached repositories
 
 Repositories attached to one of your tags are cloned into this VM at boot, over
@@ -178,6 +184,12 @@ asks for one on the first commit.
 New VMs include Claude Code, Codex, Pi, and Hivemind. Sparkbox environment
 guidance is installed at `~/.agents/AGENTS.md` and linked into each harness's
 global instruction location. Repository-level instructions still apply.
+
+This page's own URL is one an agent inside the VM cannot always reach:
+`docs.<domain>` is a public DNS name that can resolve to this fleet's own
+edge, which a VM's own network routing has no path back to. `sparkbox docs
+[docs|proxy|dev-environment]` reads the identical content from inside the VM
+over the always-open metadata channel instead.
 
 ## Updating the agent tools
 

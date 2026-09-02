@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sparkbox dev environments</title><style>
+:root{color-scheme:dark;background:#0b0d10;color:#e8edf2;font:17px/1.65 ui-sans-serif,system-ui,sans-serif}body{max-width:760px;margin:0 auto;padding:64px 24px}h1,h2{line-height:1.15}h1{font-size:2.5rem}h2{margin-top:2.4rem}a{color:#74c7ec}code,pre{background:#171b21;border-radius:6px}code{padding:.15rem .35rem}pre{padding:1rem;overflow:auto;white-space:pre-wrap}aside{border-left:3px solid #74c7ec;padding:.1rem 1rem;color:#c9d2dc}
+</style></head><body>
+<p><a href="/">← Sparkbox docs</a></p><h1>Running a dev server behind the proxy</h1>
+<p>The edge terminates TLS and forwards plain HTTP &mdash; WebSocket upgrades included &mdash; to a port inside the VM; see <a href="/proxy">the proxy guide</a> for how a URL picks that port. Two things a dev server takes for granted on a laptop are false here: the browser's Host header is <code>&lt;name&gt;.&lt;domain&gt;</code>, not <code>localhost</code>, and both the box's hostname and the domain are different on every deployment &mdash; <code>&lt;name&gt;</code> is <code>$(hostname)</code>, and <code>&lt;domain&gt;</code> below is whatever <code>sparkbox whoami</code> reports on its <code>domain:</code> line, never a literal to hardcode.</p>
+<h2>Bind to 0.0.0.0</h2>
+<p>Same rule as the proxy guide: listen on <code>0.0.0.0</code> (or a framework's equivalent, often <code>--host</code> or <code>HOST=0.0.0.0</code>), not the default <code>127.0.0.1</code> &mdash; or nothing outside the VM can reach it.</p>
+<h2>Allow the proxy's Host header</h2>
+<p>Most dev servers reject requests whose Host header they do not recognize &mdash; correctly, since that check is what stops a malicious page from driving your dev server through DNS rebinding. Sparkbox's Host header is real but is never <code>localhost</code>, so it needs adding explicitly. Match the whole domain, not one VM's name, since the same fix has to keep working after <code>sparkbox snapshot</code> or a plain <code>git clone</code> lands it on a different box:</p>
+<ul>
+<li><b>Vite</b>: <code>server.allowedHosts: ['.&lt;domain&gt;']</code> in <code>vite.config.*</code> &mdash; a leading dot matches the domain and every subdomain.</li>
+<li><b>Next.js</b>: <code>allowedDevOrigins: ['*.&lt;domain&gt;']</code> in <code>next.config.*</code>.</li>
+<li><b>Django</b>: <code>ALLOWED_HOSTS = [".&lt;domain&gt;"]</code>, and &mdash; separately, since Django checks <code>Origin</code> against a different list &mdash; <code>CSRF_TRUSTED_ORIGINS = ["https://*.&lt;domain&gt;"]</code> for anything that POSTs, including the admin.</li>
+<li><b>Rails</b>: <code>config.hosts &lt;&lt; ".&lt;domain&gt;"</code> in <code>config/environments/development.rb</code>.</li>
+<li><b>webpack-dev-server / Create React App</b>: <code>allowedHosts: ['.&lt;domain&gt;']</code> in the dev-server config. <code>DANGEROUSLY_DISABLE_HOST_CHECK=true</code> is a last resort for a config you cannot easily reach &mdash; it is exactly as dangerous as the name says, so revert it once the real fix is in.</li>
+</ul>
+<h2>Hot reload and other websockets</h2>
+<p>The edge passes WebSocket upgrades straight through, and for one route the port the browser connects to and the port a dev server's own client script assumes are already the same number &mdash; so a client that derives its host and protocol from the page it was served on (Vite's and webpack's HMR clients do, by default) needs no override. If reload silently never fires, check the browser's Network tab for the WS connection first: a client hardcoded to <code>ws://localhost:&lt;port&gt;</code> instead of the page's own origin is the one case that still needs one, e.g. Vite's <code>server.hmr: { protocol: 'wss' }</code>.</p>
+<h2>Point the default route at it</h2>
+<p>Once it is listening, run <code>sparkbox set-port PORT</code> so the endpoint a person opens is the one they should actually look at &mdash; the frontend of a stack, not whichever service happened to bind first. Record any other port with <code>hivemind tag</code>, for example:</p>
+<pre><code>DOMAIN=$(sparkbox whoami | sed -n 's/^domain: //p')
+hivemind tag api_url="https://$(hostname).$DOMAIN:8080"</code></pre>
+<h2>Turn the start command into a service</h2>
+<p>A command run in a foreground shell dies with the SSH session. Wrap it in a <code>systemd --user</code> unit instead &mdash; the login user carries linger, so <code>--user</code> units keep running unattended, restart themselves, and their output is one <code>journalctl --user -u NAME -f</code> away instead of living in a terminal nobody can get back to:</p>
+<pre><code>mkdir -p ~/.config/systemd/user
+cat &gt; ~/.config/systemd/user/web.service &lt;&lt;'EOF'
+[Unit]
+Description=web dev server
+
+[Service]
+WorkingDirectory=%h/myproject
+ExecStart=/usr/bin/env pnpm dev --host 0.0.0.0
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload
+systemctl --user enable --now web.service</code></pre>
+<h2>Make it replayable: <code>.sparkbox/setup.sh</code></h2>
+<p>Everything above &mdash; installing dependencies, writing the unit, calling <code>sparkbox set-port</code> &mdash; is worth doing once and writing down, not re-deriving from scratch on the next VM or the next teammate's checkout. Commit it to the project's own repo as <code>.sparkbox/setup.sh</code>: a plain, idempotent shell script that a fresh checkout can run with <code>bash .sparkbox/setup.sh</code> to arrive at the same running state.</p>
+<aside>This is deliberately a script, not a Sparkbox feature &mdash; <code>sparkbox snapshot</code> already freezes a whole VM disk, and that is the right tool when the setup is genuinely expensive to repeat. A script is the better default: it is readable in a diff, works on a VM that never forked from a snapshot, and survives changes to the setup being ordinary commits instead of a new disk image each time.</aside>
+<pre><code>{{SETUP_SH_EXAMPLE}}</code></pre>
+<p>Read a <code>.sparkbox/setup.sh</code> you did not write before running it &mdash; like any script, it runs as you.</p>
+</body></html>

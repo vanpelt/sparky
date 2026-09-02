@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=19
+IDENTITY_REV=21
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -405,11 +405,21 @@ case "${1:-}" in
     _ghid=$(printf '%s' "$_doc" | sed -n 's/.*"github_id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     _owner=$(printf '%s' "$_doc" | sed -n 's/.*"owner":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     _box=$(printf '%s' "$_doc" | sed -n 's/.*"sandbox":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # The domain is this deployment's, not one this script can know: it is
+    # whatever --proxy-domain the fleet was started with, which is why nothing
+    # else in this file spells out a literal domain. `iss` is
+    # "https://<oidc-subdomain>.<domain>" (main.go's IssuerURL, subdomain
+    # configurable, default "oidc") — one label after the scheme is always the
+    # subdomain, so everything after the FIRST dot is the domain regardless of
+    # what that subdomain is actually named.
+    _iss=$(printf '%s' "$_doc" | sed -n 's/.*"iss":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    _domain=$(printf '%s' "$_iss" | sed -n 's#^https\{0,1\}://[^./]*\.##p')
     if [ "$_json" -ne 1 ]; then
       [ -n "$_login" ] && echo "github: $_login"
       [ -n "$_ghid" ] && [ "$_ghid" != 0 ] && echo "github_id: $_ghid"
       [ -n "$_owner" ] && echo "owner: $_owner"
       [ -n "$_box" ] && echo "sandbox: $_box"
+      [ -n "$_domain" ] && echo "domain: $_domain"
     fi
     # No link, no answer — and saying so with exit 0 would let a script read an
     # empty login as this person's login. The owner handle is NOT a substitute:
@@ -513,6 +523,20 @@ case "${1:-}" in
       *) echo "usage: sparkbox repo authorize OWNER/NAME" >&2; exit 2 ;;
     esac
     ;;
+  docs)
+    # docs.<domain> is a public DNS name and can resolve to this fleet's own
+    # edge — which this VM's own tap firewall has no route to reach directly
+    # (only DNS and this metadata port are open guest-to-host; see
+    # sparkbox-net.sh). The metadata service mirrors the same static,
+    # unauthenticated content, so this is the way to actually read it from
+    # inside a VM; the https://docs.<domain> URL remains the one to open in a
+    # browser, outside the VM.
+    _page=${2:-docs}
+    case "$_page" in
+      *[!A-Za-z0-9-]*) echo "sparkbox: usage: sparkbox docs [docs|proxy|dev-environment]" >&2; exit 2 ;;
+    esac
+    exec curl -fsS --max-time 10 "$META/docs/$_page.md"
+    ;;
   update-tools)
     # Same escalation as `repos`, for the same reason and with the same -n
     # degradation: the installer writes /usr/local/bin, /usr/local/lib and
@@ -529,7 +553,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repo authorize OWNER/NAME|repos [survey|sync]|update-tools [--check]>" >&2
+    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repo authorize OWNER/NAME|repos [survey|sync]|docs [docs|proxy|dev-environment]|update-tools [--check]>" >&2
     exit 2
     ;;
 esac

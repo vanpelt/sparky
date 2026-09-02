@@ -18,26 +18,42 @@ var indexHTML []byte
 //go:embed proxy.html
 var proxyHTML []byte
 
+//go:embed dev-environment.html
+var devEnvironmentHTML []byte
+
 //go:embed docs.md
 var docsMarkdown []byte
 
 //go:embed proxy.md
 var proxyMarkdown []byte
 
-const portsMarker = "{{COMMON_HTTPS_PORTS}}"
+//go:embed dev-environment.md
+var devEnvironmentMarkdown []byte
 
-// The public port list is process data rather than hand-maintained prose. The
-// embedded files retain an obvious marker for editors, and every rendering is
-// expanded once at startup from publicports' source of truth.
+//go:embed examples/.sparkbox/setup.sh
+var setupShExample []byte
+
+const portsMarker = "{{COMMON_HTTPS_PORTS}}"
+const setupExampleMarker = "{{SETUP_SH_EXAMPLE}}"
+
+// The public port list and the setup.sh example are process data rather than
+// hand-maintained prose. The embedded files retain an obvious marker for
+// editors, and every rendering is expanded once at startup: the ports from
+// publicports' source of truth, the example from the one file that is also a
+// real, lintable shell script.
 var (
-	indexPage         = expandPorts(indexHTML)
-	proxyPage         = expandPorts(proxyHTML)
-	docsMarkdownPage  = expandPorts(docsMarkdown)
-	proxyMarkdownPage = expandPorts(proxyMarkdown)
+	indexPage            = expandAll(indexHTML)
+	proxyPage            = expandAll(proxyHTML)
+	devEnvironmentPage   = expandAll(devEnvironmentHTML)
+	docsMarkdownPage     = expandAll(docsMarkdown)
+	proxyMarkdownPage    = expandAll(proxyMarkdown)
+	devEnvironmentMdPage = expandAll(devEnvironmentMarkdown)
 )
 
-func expandPorts(body []byte) []byte {
-	return bytes.ReplaceAll(body, []byte(portsMarker), []byte(publicports.HumanList()))
+func expandAll(body []byte) []byte {
+	body = bytes.ReplaceAll(body, []byte(portsMarker), []byte(publicports.HumanList()))
+	body = bytes.ReplaceAll(body, []byte(setupExampleMarker), bytes.TrimRight(setupShExample, "\n"))
+	return body
 }
 
 // Handler returns the public documentation handler.
@@ -53,11 +69,17 @@ func Handler() http.Handler {
 	mux.HandleFunc("GET /proxy", func(w http.ResponseWriter, _ *http.Request) {
 		serveHTML(w, proxyPage)
 	})
+	mux.HandleFunc("GET /dev-environment", func(w http.ResponseWriter, _ *http.Request) {
+		serveHTML(w, devEnvironmentPage)
+	})
 	mux.HandleFunc("GET /docs.md", func(w http.ResponseWriter, _ *http.Request) {
 		serveMarkdown(w, docsMarkdownPage)
 	})
 	mux.HandleFunc("GET /proxy.md", func(w http.ResponseWriter, _ *http.Request) {
 		serveMarkdown(w, proxyMarkdownPage)
+	})
+	mux.HandleFunc("GET /dev-environment.md", func(w http.ResponseWriter, _ *http.Request) {
+		serveMarkdown(w, devEnvironmentMdPage)
 	})
 	return mux
 }
