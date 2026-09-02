@@ -192,6 +192,34 @@ sed -e "s/@@META_PORT@@/$META_PORT/g" > "$MNT/usr/local/bin/sparkbox" <<'EOF'
 #!/bin/sh
 set -eu
 
+# sparkbox_docs_toc lists the pages `sparkbox docs` can print.
+#
+# The page names are spelled out here rather than fetched, and that is
+# deliberate: the moment this is worth printing is the moment somebody is lost,
+# and a contents page that needed the network to explain the network would be
+# no use in the one situation it exists for. deploy/assets_test.go pins the list
+# against the pages internal/guestdocs actually serves, so a fourth page cannot
+# be added without this catching up.
+#
+# No literal domain, for the reason given at SPARKBOX_CTL above: a guest is
+# never told its own domain, so anything that names one has to be host-authored
+# or derived. `sparkbox whoami` prints it.
+sparkbox_docs_toc() {
+  cat <<'TOC'
+sparkbox docs — the guidance bundled with this machine
+
+  sparkbox docs                  This sandbox: what persists across a pause,
+                                 where to put work, how an agent keeps running
+  sparkbox docs proxy            Serving a port on the web: the default
+                                 hostname, picking a port, who can reach it
+  sparkbox docs dev-environment  Running a dev server behind that proxy, and
+                                 the .sparkbox/setup.sh your project builds in
+
+The same pages read in a browser at https://docs.<domain>, where <domain> is
+the one `sparkbox whoami` prints.
+TOC
+}
+
 sparkbox_help() {
   cat <<'HELP'
 sparkbox — manage this sandbox from inside the VM
@@ -219,8 +247,8 @@ Identity and networking:
 
 Tools:
   update-tools [--check]         Update bundled agent CLIs, or check versions
-  docs [docs|proxy|dev-environment]
-                                 Read bundled sandbox and proxy guidance
+  docs [PAGE]                    Read bundled guidance; `docs help` lists the
+                                 pages (docs, proxy, dev-environment)
 
 Options:
   -h, --help                     Show this help
@@ -587,11 +615,27 @@ case "${1:-}" in
     # unauthenticated content, so this is the way to actually read it from
     # inside a VM; the https://docs.<domain> URL remains the one to open in a
     # browser, outside the VM.
-    _page=${2:-docs}
-    case "$_page" in
-      *[!A-Za-z0-9-]*) echo "sparkbox: usage: sparkbox docs [docs|proxy|dev-environment]" >&2; exit 2 ;;
+    #
+    # Anything that is not one of the three pages prints the contents rather
+    # than reaching curl. It used to reach curl: the only guard was a character
+    # class, so `sparkbox docs help` fetched /docs/help.md and `sparkbox docs
+    # --help` fetched /docs/--help.md — both of them 404s reported in curl's
+    # words, and both of them exactly what somebody types when they have
+    # forgotten the page names. An allowlist also means the character-class
+    # guard is no longer load-bearing: nothing but a known name is interpolated
+    # into the URL at all.
+    case "${2:-docs}" in
+      docs|proxy|dev-environment)
+        exec curl -fsS --max-time 10 "$META/docs/${2:-docs}.md" ;;
+      -h|--help|help)
+        # Asked for on purpose, so it is stdout and success — the same contract
+        # `sparkbox --help` has at the top of this file.
+        sparkbox_docs_toc; exit 0 ;;
+      *)
+        echo "sparkbox: no such doc page: $2" >&2
+        sparkbox_docs_toc >&2
+        exit 2 ;;
     esac
-    exec curl -fsS --max-time 10 "$META/docs/$_page.md"
     ;;
   update-tools)
     # Same escalation as `repos`, for the same reason and with the same -n
