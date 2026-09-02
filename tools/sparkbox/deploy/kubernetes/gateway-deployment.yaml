@@ -81,6 +81,19 @@ spec:
               value: __SPARKBOX_HIVEMIND_API__
             - name: SPARKBOX_HIVEMIND_SIGNIN_ORGS
               value: __SPARKBOX_HIVEMIND_SIGNIN_ORGS__
+            # OpenAI workload identity federation. Identifiers, not secrets:
+            # they name a provider and a rule that grant nothing without an
+            # assertion this fleet's OIDC key signed. The gateway needs them to
+            # add the audience to its issuer allowlist; the node needs them to
+            # answer its own guests. Empty everywhere is federation off.
+            - name: SPARKBOX_OPENAI_PROVIDER_ID
+              value: __SPARKBOX_OPENAI_PROVIDER_ID__
+            - name: SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID
+              value: __SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID__
+            - name: SPARKBOX_OPENAI_RULE_ID
+              value: __SPARKBOX_OPENAI_RULE_ID__
+            - name: SPARKBOX_OPENAI_AUDIENCE
+              value: __SPARKBOX_OPENAI_AUDIENCE__
             # optional, like the console password above: a gateway without it
             # mounts no webhook receiver at all rather than one that accepts
             # unverified deliveries, so an absent Secret is a configuration

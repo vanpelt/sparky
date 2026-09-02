@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=24
+IDENTITY_REV=25
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -93,6 +93,74 @@ if curl -fsS --max-time 10 "$META/identity" -o "$TMP"; then
 else
   rm -f "$TMP"
 fi
+
+# ---- OpenAI workload identity federation ------------------------------------
+#
+# Same bargain as the hivemind token above, one audience over: OpenAI verifies
+# an assertion signed by our issuer and exchanges it (RFC 8693) for an access
+# token that lives at most an hour, so a sandbox calls the OpenAI API and runs
+# `codex` with no API key and no browser login anywhere in the picture.
+#
+# LAST in this script, and deliberately so. Everything above is what a sandbox
+# cannot work without; this is an integration a fleet may not even have
+# configured. A host that answers 501 at /openai — the default — must leave the
+# guest exactly as it was, and a host that is having a bad minute must not cost
+# the box its hivemind token, which is why nothing here can reach the `exit 1`
+# above.
+OPENAI_CONF=/run/sparkbox/openai.json
+TMP="$OPENAI_CONF.tmp"
+if curl -fsS --max-time 10 "$META/openai" -o "$TMP"; then
+  chmod 0644 "$TMP"
+  mv -f "$TMP" "$OPENAI_CONF"
+else
+  # 501 is the ordinary answer on a fleet that does not federate with OpenAI,
+  # and it has to erase the config rather than leave the last one lying around:
+  # a fork template carries /etc/environment across fleets, and stale
+  # identifiers would point a guest at a provider that will never mint for it.
+  rm -f "$TMP" "$OPENAI_CONF"
+fi
+
+if [ -s "$OPENAI_CONF" ]; then
+  # Same reader as sparkbox-git-identity uses on identity.json, for the same
+  # reason: no JSON parser is a dependency this early boot path may take on,
+  # and [[:space:]]* after the colon is load-bearing because the metadata
+  # service encodes with SetIndent.
+  oai_field() {
+    sed -n 's/.*"'"$1"'":[[:space:]]*"\([^"]*\)".*/\1/p' "$OPENAI_CONF" | head -1
+  }
+  OPENAI_AUD=$(oai_field audience)
+  OPENAI_TOKEN_FILE=$(oai_field token_file)
+  if [ -n "$OPENAI_AUD" ] && [ -n "$OPENAI_TOKEN_FILE" ]; then
+    OPENAI_DIR=$(dirname "$OPENAI_TOKEN_FILE")
+    mkdir -p "$OPENAI_DIR"
+    # 0700 and owned by the account that runs the agent, which is what OpenAI
+    # asks for. It differs from the hivemind directory above (0755) because
+    # nothing else has to traverse this one: root writes the file, the login
+    # user reads it, and no third party has business here.
+    chmod 0700 "$OPENAI_DIR"
+    [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
+      && chown "$SANDBOX_USER" "$OPENAI_DIR"
+    TMP="$OPENAI_TOKEN_FILE.tmp"
+    # --data-urlencode rather than pasting the audience into the query: it is
+    # a URL, so it carries a ':' and two '/' of its own, and one day it will
+    # carry something that needs escaping.
+    if curl -fsS --max-time 10 -G --data-urlencode "aud=$OPENAI_AUD" "$META/token" -o "$TMP"; then
+      chmod 0600 "$TMP"
+      [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
+        && chown "$SANDBOX_USER" "$TMP"
+      mv -f "$TMP" "$OPENAI_TOKEN_FILE"
+    else
+      rm -f "$TMP"
+      echo "sparkbox-token: could not fetch an OpenAI assertion from $META" >&2
+    fi
+  fi
+fi
+
+# Unconditional, including when the fetch above found nothing: this is also
+# what REMOVES the managed block from a guest whose fleet has turned federation
+# off, so `codex` goes back to its ordinary login instead of failing against a
+# rule that no longer exists.
+/usr/local/sbin/sparkbox-openai-env "$OPENAI_CONF" "$IDENTITY_FILE" || true
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-token"
 
@@ -184,6 +252,135 @@ chmod 0644 "$tmp"
 mv -f "$tmp" "$GITCONFIG"
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-git-identity"
+
+# Advertise the OpenAI federation configuration to every process in the guest.
+#
+# /etc/environment and nothing else. It is the only file that reaches BOTH an
+# interactive shell (pam_env, at session setup) and the non-interactive
+# `ssh box '<cmd>'` execs agents actually run — those read no profile at all,
+# which is the same reasoning refresh-agent-tools.sh writes down for
+# AGENT_BROWSER_EXECUTABLE_PATH. A /etc/profile.d drop-in would quietly cover
+# only half the sandbox.
+#
+# The block is rewritten between its own markers, so envsync's secrets block
+# (different markers, pushed over SSH) and the toolchain PATH the image bakes
+# in are both untouched. It is written by the token unit rather than baked into
+# the template because these identifiers are fleet configuration: correcting a
+# provider id must not mean rebuilding an image, and a fork template that
+# crosses fleets must be able to be corrected on its next boot.
+cat > "$MNT/usr/local/sbin/sparkbox-openai-env" <<'EOF'
+#!/bin/sh
+# Render the OpenAI workload-identity block in /etc/environment.
+#
+# Usage: sparkbox-openai-env [<openai.json> [<identity.json>]]
+# A missing or unconfigured openai.json removes the block, which is how a fleet
+# turning federation off reaches boxes that are already running.
+set -eu
+CONF=${1:-/run/sparkbox/openai.json}
+IDENTITY_FILE=${2:-/run/sparkbox/identity.json}
+# Overridable so the deploy tests can run this against a tree instead of the
+# machine running them, exactly as SPARKBOX_GITCONFIG does above.
+ENVFILE=${SPARKBOX_ENVIRONMENT:-/etc/environment}
+BEGIN='# >>> sparkbox openai federation (managed) >>>'
+END='# <<< sparkbox openai federation (managed) <<<'
+
+field() {
+  [ -s "$2" ] || return 0
+  sed -n 's/.*"'"$1"'":[[:space:]]*"\([^"]*\)".*/\1/p' "$2" | head -1
+}
+
+body=""
+token_file=$(field token_file "$CONF")
+rule=$(field federation_rule_id "$CONF")
+provider=$(field identity_provider_id "$CONF")
+service_account=$(field service_account_id "$CONF")
+
+# The token file is what every consumer needs, and a rule or provider id is
+# what makes presenting it mean anything. Missing either, write no block: the
+# half-configured state is strictly worse than none, because a Codex that finds
+# OPENAI_IDENTITY_TOKEN_FILE set federates instead of offering to log in.
+if [ -n "$token_file" ] && { [ -n "$rule" ] || [ -n "$provider" ]; }; then
+  body="OPENAI_IDENTITY_TOKEN_FILE=$token_file"
+  [ -n "$rule" ] && body="$body
+OPENAI_FEDERATION_RULE_ID=$rule"
+  [ -n "$provider" ] && body="$body
+OPENAI_IDENTITY_PROVIDER_ID=$provider"
+  [ -n "$service_account" ] && body="$body
+OPENAI_SERVICE_ACCOUNT_ID=$service_account"
+fi
+
+# Rebuild in one pass and rename over the target, so being killed mid-write
+# cannot leave a half-deleted marker behind — the shape sparkbox-git-identity
+# uses on /etc/gitconfig, for the same reason.
+umask 022
+tmp=$(mktemp "$ENVFILE.sparkbox.XXXXXX") || exit 0
+if [ -f "$ENVFILE" ]; then
+  awk -v b="$BEGIN" -v e="$END" '
+    $0 == b { skip = 1; next }
+    $0 == e { skip = 0; next }
+    !skip   { print }
+  ' "$ENVFILE" > "$tmp" || { rm -f "$tmp"; exit 0; }
+fi
+if [ -n "$body" ]; then
+  {
+    printf '%s\n' "$BEGIN"
+    printf '%s\n' "$body"
+    printf '%s\n' "$END"
+  } >> "$tmp"
+fi
+chmod 0644 "$tmp"
+mv -f "$tmp" "$ENVFILE"
+
+# Audit attribution, so an OpenAI admin reading their logs sees which sandbox
+# made a request and not only which principal.
+#
+# A SECOND file, and that split is forced rather than chosen. This value is a
+# JSON object, so it contains double quotes, and /etc/environment cannot carry
+# one safely: written bare it survives pam_env but a shell that sources the file
+# performs quote removal on it — measured, not feared, `{"instance_id":"box"}`
+# comes back as `{instance_id:box}`, which is no longer JSON — and written
+# quoted it depends on pam_env stripping the pair back off, which is not a
+# promise that file format makes. A profile.d snippet is unambiguously shell, so
+# `export VAR='{"a":"b"}' means exactly one thing to the only reader it has.
+#
+# The cost is honest and small: profile.d reaches login shells, so an
+# interactive sandbox attributes and a non-interactive `ssh box '<cmd>'` exec
+# does not. That is the right way round for a field OpenAI documents as
+# optional — the credentials that MUST reach both readers are the plain
+# identifiers above, which have no quoting problem at all.
+PROFILE=${SPARKBOX_PROFILE_D:-/etc/profile.d}/sparkbox-openai.sh
+# Sandbox names, owners and node names already sit inside OpenAI's identifier
+# grammar (letters, digits, and . _ : / @ -); the tr is for a name shape nobody
+# has invented yet, and it is also what keeps a single quote out of a
+# single-quoted shell literal.
+clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._:/@-' | cut -c1-128; }
+instance=$(clean "$(field sandbox "$IDENTITY_FILE")")
+owner=$(clean "$(field owner "$IDENTITY_FILE")")
+node=$(clean "$(field box "$IDENTITY_FILE")")
+if [ -n "$body" ] && [ -n "$instance" ]; then
+  # Assembled by concatenation rather than in one ${var:+...} expansion: a
+  # literal } inside a parameter expansion is a shell portability argument
+  # nobody should have to win to read this.
+  labels=""
+  [ -n "$owner" ] && labels="\"owner\":\"$owner\""
+  [ -n "$node" ] && [ -n "$labels" ] && labels="$labels,"
+  [ -n "$node" ] && labels="$labels\"box\":\"$node\""
+  context="{\"instance_id\":\"$instance\""
+  [ -n "$labels" ] && context="$context,\"labels\":{$labels}"
+  context="$context}"
+  mkdir -p "$(dirname "$PROFILE")"
+  tmp=$(mktemp "$PROFILE.XXXXXX") || exit 0
+  {
+    printf '%s\n' "# Written by sparkbox-openai-env. Edits are overwritten every 45 minutes."
+    printf "export OPENAI_WORKLOAD_IDENTITY_CONTEXT='%s'\n" "$context"
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$PROFILE"
+else
+  rm -f "$PROFILE"
+fi
+EOF
+chmod 0755 "$MNT/usr/local/sbin/sparkbox-openai-env"
 
 # A tiny in-guest control client. The metadata service authenticates the
 # caller from its tap source address, so this carries no operator credential

@@ -118,6 +118,11 @@ type nodeOptions struct {
 	diskPool         int64
 	hivemindAPI      string
 	hivemindAudience string
+	// openAI is this fleet's OpenAI federation configuration, served to this
+	// machine's own guests. A node holds no signing key, so this is config
+	// only: the mint itself still relays to the gateway, whose audience
+	// allowlist is the thing that can refuse it.
+	openAI           metadata.OpenAI
 	hivemindInterval time.Duration
 
 	controlTransport   string
@@ -392,6 +397,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			// here beside a 202 on the gateway is exactly that leak.
 			SelfLifecycle:     relaySelfLifecycle{up: uplink},
 			AllowSelfSnapshot: opts.guestSelfSnapshot,
+			OpenAI:            opts.openAI,
 			GuestSubnet:       opts.guestSubnet,
 			// No default audience here: the gateway substitutes its own, which
 			// is the only one that could be right — the allowlist that decides
@@ -407,6 +413,11 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		}()
 		log.Info("guest metadata service enabled", "addr", opts.metaAddr,
 			"signing", "relayed to the gateway", "tools_dir", opts.toolsDir)
+		if opts.openAI.Configured() {
+			log.Info("OpenAI workload identity federation enabled",
+				"audience", opts.openAI.AudienceOrDefault(),
+				"provider", opts.openAI.IdentityProvider, "rule", opts.openAI.FederationRule)
+		}
 	}
 
 	log.Info("sparkbox node up", "node", opts.nodeName, "gateway", opts.gateway,

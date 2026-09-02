@@ -289,6 +289,7 @@ type Server struct {
 	allowSelfSnapshot bool
 	log               *slog.Logger
 	defAud            string
+	openAI            OpenAI
 	guestNet          guestnet.Network
 
 	mu     sync.Mutex
@@ -341,6 +342,9 @@ type Options struct {
 	Logger            *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
+	// OpenAI is this fleet's OpenAI workload-identity federation config, served
+	// at /openai. A zero value answers 501 there and leaves guests alone.
+	OpenAI OpenAI
 	// GuestSubnet must match the VM driver's IPv4 prefix. Empty uses the
 	// standalone compatibility default.
 	GuestSubnet string
@@ -373,6 +377,7 @@ func NewChecked(opts Options) (*Server, error) {
 		lifecycle:         opts.SelfLifecycle,
 		allowSelfSnapshot: opts.AllowSelfSnapshot,
 		defAud:            opts.DefaultAudience,
+		openAI:            opts.OpenAI.withDefaults(),
 		guestNet:          guestNetwork,
 		recent:            map[string][]time.Time{},
 	}, nil
@@ -382,6 +387,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /token", s.token)
 	mux.HandleFunc("GET /identity", s.identity)
+	mux.HandleFunc("GET /openai", s.openai)
 	mux.HandleFunc("GET /repos", s.repoManifest)
 	mux.HandleFunc("POST /repos/status", s.publishRepoStatus)
 	mux.HandleFunc("GET /github/credential", s.githubCredential)

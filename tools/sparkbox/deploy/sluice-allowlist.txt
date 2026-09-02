@@ -42,3 +42,11 @@ api.anthropic.com
 
 # Sparkbox workload-identity federation
 hivemind.wandb.tools
+
+# OpenAI API and Codex (for agents running in the sandbox). auth.openai.com is
+# where the sandbox's OIDC assertion is exchanged for an access token, so
+# without it workload identity fails closed and `codex` falls back to asking a
+# person to log in — inside a VM that has no browser.
+api.openai.com
+auth.openai.com
+chatgpt.com

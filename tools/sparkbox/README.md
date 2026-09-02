@@ -75,6 +75,22 @@ pasted. The guest is authenticated by its network position (it can only reach
 the metadata endpoint over its own tap), exactly like a cloud IMDS. See
 [`docs/identity-federation-design.md`](docs/identity-federation-design.md).
 
+The same issuer federates with OpenAI. Given a provider and a federation rule
+from an OpenAI organization admin, every sandbox keeps a second assertion at
+`/var/run/secrets/openai.com/identity-token` and exports what `codex` and the
+OpenAI SDKs read, so they authenticate with **no API key anywhere in the VM**
+and no browser login in a VM that has no browser:
+
+```text
+--openai-provider-id=idp_...
+--openai-rule-id=idpm_...
+--openai-service-account-id=svc_...
+```
+
+Absent those, nothing changes for any guest. See
+[`docs/openai-workload-identity.md`](docs/openai-workload-identity.md), which
+also carries the exact list to hand an admin.
+
 Sparkbox can also keep an otherwise-idle VM reachable while HiveMind reports a
 live agent session inside it:
 

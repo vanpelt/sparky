@@ -29,6 +29,23 @@ Options:
                           gateway already uses; empty closes the door). Needs
                           --hivemind-api, which is the back channel the
                           single-use handoff code is redeemed over
+  --openai-provider-id ID
+                          OpenAI Workload Identity Provider id (idp_...) whose
+                          rules this fleet's OIDC assertions are matched by.
+                          Setting it — or --openai-rule-id — is what turns
+                          OpenAI federation on for every sandbox: `codex` and
+                          the OpenAI SDKs then authenticate with no API key
+                          (default: whatever the live gateway already uses;
+                          empty turns it off)
+  --openai-service-account-id ID
+                          OpenAI service account id (svc_...) the federation
+                          rule maps to, wanted by the SDKs (same default)
+  --openai-rule-id ID     OpenAI federation rule id (idpm_...), the one
+                          identifier `codex` needs (same default)
+  --openai-audience AUD   `aud` sparkbox mints OpenAI assertions for; it must
+                          match the provider's configured audience exactly
+                          (default: whatever the live gateway already uses,
+                          else https://api.openai.com/v1)
   --hivemind-manifest URL release manifest deciding which hivemind new sandboxes
                           get, e.g. .../manifests/hivemind-1.0.8rc1.json
                           (default: the latest release). Use it to put a release
@@ -51,6 +68,10 @@ requested_github_app_client_id=
 requested_hivemind_api=
 requested_hivemind_signin_orgs=
 requested_hivemind_manifest=
+requested_openai_provider_id=
+requested_openai_service_account_id=
+requested_openai_rule_id=
+requested_openai_audience=
 public_key="${HOME}/.ssh/id_ed25519.pub"
 private_key=
 operator=$(id -un)
@@ -81,6 +102,22 @@ while [ "$#" -gt 0 ]; do
       ;;
     --hivemind-manifest)
       requested_hivemind_manifest=${2:?--hivemind-manifest requires a value}
+      shift 2
+      ;;
+    --openai-provider-id)
+      requested_openai_provider_id=${2:?--openai-provider-id requires a value}
+      shift 2
+      ;;
+    --openai-service-account-id)
+      requested_openai_service_account_id=${2:?--openai-service-account-id requires a value}
+      shift 2
+      ;;
+    --openai-rule-id)
+      requested_openai_rule_id=${2:?--openai-rule-id requires a value}
+      shift 2
+      ;;
+    --openai-audience)
+      requested_openai_audience=${2:?--openai-audience requires a value}
       shift 2
       ;;
     --hivemind-api)
@@ -382,7 +419,36 @@ if [ -n "$hivemind_signin_orgs" ]; then
   fi
 fi
 
-# Deliberately NOT carried forward, unlike the three above, and the asymmetry is
+# Carried forward, like the three above and unlike the manifest pin below.
+# These four are a permanent fact about this deployment — an OpenAI admin
+# configured a provider and a rule for this fleet's issuer — so losing one is
+# always a mistake, and the symptom is remote: nothing fails at deploy time,
+# and days later somebody's `codex` in a fresh sandbox asks them to log in
+# inside a VM that has no browser.
+gateway_env() {
+  "${k[@]}" -n "$namespace" get deployment sparkbox-gateway \
+    -o "jsonpath={.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}" \
+    2>/dev/null || true
+}
+openai_provider_id=${requested_openai_provider_id:-$(gateway_env SPARKBOX_OPENAI_PROVIDER_ID)}
+openai_service_account_id=${requested_openai_service_account_id:-$(gateway_env SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID)}
+openai_rule_id=${requested_openai_rule_id:-$(gateway_env SPARKBOX_OPENAI_RULE_ID)}
+openai_audience=${requested_openai_audience:-$(gateway_env SPARKBOX_OPENAI_AUDIENCE)}
+if [ -n "$openai_provider_id" ] || [ -n "$openai_rule_id" ]; then
+  echo "OpenAI workload identity: provider ${openai_provider_id:-(none)}, rule ${openai_rule_id:-(none)}"
+  # Half-configured is the one state worse than off: a sandbox that exports a
+  # token file with no rule to present it against makes `codex` federate and
+  # fail rather than offer the login it would otherwise have offered.
+  if [ -z "$openai_rule_id" ]; then
+    echo "  No --openai-rule-id, so \`codex\` will NOT use workload identity (the SDKs still will)."
+  fi
+else
+  echo "No OpenAI workload identity configured; sandboxes will need an API key for"
+  echo "  the OpenAI API and a login for \`codex\`. Pass --openai-provider-id and"
+  echo "  --openai-rule-id from the OpenAI Admin Portal."
+fi
+
+# Deliberately NOT carried forward, unlike the seven above, and the asymmetry is
 # the point. Those three are permanent facts about this deployment, so losing one
 # is always a mistake. A manifest override is the opposite: it is how a release
 # candidate gets onto real hardware, it is meant to end, and a test pin that
@@ -511,6 +577,10 @@ sed \
   -e "s|__SPARKBOX_GITHUB_APP_CLIENT_ID__|$github_app_client_id|g" \
   -e "s|__SPARKBOX_HIVEMIND_API__|$hivemind_api|g" \
   -e "s|__SPARKBOX_HIVEMIND_SIGNIN_ORGS__|$hivemind_signin_orgs|g" \
+  -e "s|__SPARKBOX_OPENAI_PROVIDER_ID__|$openai_provider_id|g" \
+  -e "s|__SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID__|$openai_service_account_id|g" \
+  -e "s|__SPARKBOX_OPENAI_RULE_ID__|$openai_rule_id|g" \
+  -e "s|__SPARKBOX_OPENAI_AUDIENCE__|$openai_audience|g" \
   "$script_dir/gateway-deployment.yaml" | "${k[@]}" apply -f -
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \
@@ -519,6 +589,10 @@ sed \
   -e "s|__SPARKBOX_NODE__|$node|g" \
   -e "s|__SPARKBOX_HIVEMIND_API__|$hivemind_api|g" \
   -e "s|__HIVEMIND_MANIFEST__|$hivemind_manifest|g" \
+  -e "s|__SPARKBOX_OPENAI_PROVIDER_ID__|$openai_provider_id|g" \
+  -e "s|__SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID__|$openai_service_account_id|g" \
+  -e "s|__SPARKBOX_OPENAI_RULE_ID__|$openai_rule_id|g" \
+  -e "s|__SPARKBOX_OPENAI_AUDIENCE__|$openai_audience|g" \
   "$script_dir/deployment.yaml" | "${k[@]}" apply -f -
 "${k[@]}" apply -f "$script_dir/service.yaml"
 
