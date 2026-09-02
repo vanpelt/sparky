@@ -36,7 +36,7 @@ func newFakeLifecycle() *fakeLifecycle {
 		plan: ctlops.SelfSnapshotPlan{
 			Sandbox: "alice-box", Tags: []string{"default", "web"}, Tag: "web",
 			Snapshot: "web-260829-1412", DiskMB: 4300,
-			CtlHint: "ssh ctl@catnip.sh", SSHHint: "ssh alice-box.catnip.sh",
+			CtlHint: "ssh ctl@catnip.sh", SSHHint: "ssh alice-box@catnip.sh",
 			Carriers: []ctlops.TaggedSandbox{{Name: "alice-box", State: "running", Self: true}},
 			Token:    "tok-abc",
 		},

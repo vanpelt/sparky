@@ -146,7 +146,7 @@ type SelfSnapshotPlan struct {
 	Busy   string `json:"busy,omitempty"`
 	Turbo  bool   `json:"turbo,omitempty"`
 	DiskMB int64  `json:"disk_mb,omitempty"`
-	// CtlHint is `ssh ctl@<domain>` and SSHHint is `ssh <sandbox>.<domain>`,
+	// CtlHint is `ssh ctl@<domain>` and SSHHint is `ssh <sandbox>@<domain>`,
 	// both host-authored for the reason above.
 	CtlHint string `json:"ctl_hint"`
 	SSHHint string `json:"ssh_hint"`

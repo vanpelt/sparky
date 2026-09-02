@@ -440,7 +440,7 @@ func TestGuestLifecycleRequestsReachGatewayWithAuthenticatedNode(t *testing.T) {
 		Turbo:    true,
 		DiskMB:   4300,
 		CtlHint:  "ssh ctl@catnip.sh",
-		SSHHint:  "ssh alices-box.catnip.sh",
+		SSHHint:  "ssh alices-box@catnip.sh",
 		Token:    "tok-abc",
 		Carriers: []ctlops.TaggedSandbox{{Name: "alices-box", State: "running", Self: true}},
 	}

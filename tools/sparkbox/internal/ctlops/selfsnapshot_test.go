@@ -84,7 +84,7 @@ func TestThePlanIsAPureRead(t *testing.T) {
 	if len(p.Carriers) != 1 || p.Carriers[0].Name != "alicebox" || !p.Carriers[0].Self {
 		t.Errorf("carriers = %+v, want just this sandbox marked as itself", p.Carriers)
 	}
-	if p.CtlHint != "ssh ctl@example.test" || p.SSHHint != "ssh alicebox.example.test" {
+	if p.CtlHint != "ssh ctl@example.test" || p.SSHHint != "ssh alicebox@example.test" {
 		t.Errorf("hints = %q / %q — a guest is never told its own domain, so these are host-authored",
 			p.CtlHint, p.SSHHint)
 	}
@@ -429,5 +429,27 @@ func TestSnapshotToTagRefusesABindingItCannotRecordBeforeCapturing(t *testing.T)
 	}
 	if mutations := r.calls.mutating(); len(mutations) > 0 {
 		t.Errorf("it captured anyway: %v", mutations)
+	}
+}
+
+// TestSSHHintPutsTheSandboxInTheUserPart pins the shape of a hint that is
+// printed at the worst possible moment — after a snapshot or an environment
+// build has stopped — and so has to work when it is pasted.
+//
+// `ssh alicebox.example.test` is not a broken name: the wildcard resolves to the
+// gateway and the connection succeeds. It then fails with `no sandbox named
+// <local username>`, because routing reads the SSH USER and ssh sent whoever you
+// are on your laptop. That is a much more confusing failure than a name that
+// does not resolve, which is why this is worth a test of its own rather than the
+// incidental assertion inside the plan test above.
+func TestSSHHintPutsTheSandboxInTheUserPart(t *testing.T) {
+	o := &Ops{domain: "example.test"}
+	if got, want := o.sshHint("alicebox"), "ssh alicebox@example.test"; got != want {
+		t.Errorf("sshHint = %q, want %q", got, want)
+	}
+	// With no --proxy-domain there is no name to route on at all, so the
+	// placeholder keeps the same shape rather than switching to a host label.
+	if got, want := (&Ops{}).sshHint("alicebox"), "ssh alicebox@<gateway>"; got != want {
+		t.Errorf("sshHint without a domain = %q, want %q", got, want)
 	}
 }
