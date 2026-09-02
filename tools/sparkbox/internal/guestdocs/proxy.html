@@ -9,7 +9,7 @@
 <pre><code>python3 -m http.server 8000 --bind 0.0.0.0</code></pre>
 <aside>Bind to <code>0.0.0.0</code>, not <code>127.0.0.1</code>. The proxy reaches the service over the VM's network interface.</aside>
 <h2>Other ports</h2>
-<p>Use the desired port in the public URL, for example <code>https://your-box.catnip.sh:5173</code>. The development HTTPS ports exposed by the CKS edge are {{COMMON_HTTPS_PORTS}}. Run <code>sparkbox set-port PORT</code> inside the VM to change the default hostname's target.</p>
+<p>Use the desired port in the public URL, for example <code>https://your-box.&lt;domain&gt;:5173</code>, where <code>&lt;domain&gt;</code> is this deployment's own &mdash; read it from <code>sparkbox whoami</code>'s <code>domain:</code> line rather than assuming one. The development HTTPS ports exposed by the CKS edge are {{COMMON_HTTPS_PORTS}}. Run <code>sparkbox set-port PORT</code> inside the VM to change the default hostname's target.</p>
 <h2>Wake on request</h2>
 <p>A request to a paused sandbox asks Sparkbox to resume it before connecting. Cold starts can therefore make the first request slower than subsequent requests.</p>
 <h2>Access</h2>
