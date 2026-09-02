@@ -226,7 +226,7 @@ footer {
   var DATA = JSON.parse(document.getElementById("lesson-data").textContent);
   var KEY = "klozar:" + DATA.week;
   var state = {};   // id -> {note, covered}
-  var db = null;
+  var sync = null;  // shared store, if this copy of the page has one
   var savingEl = document.getElementById("saving");
 
   // Local storage is the floor: it works for every viewer, signed in or not,
@@ -254,16 +254,53 @@ footer {
     savingEl.textContent = text;
   }
 
+  // One write in flight per sentence. Ticking a box and then typing a note fires
+  // two saves for the same row, and without this the slower first request can
+  // land last and overwrite the newer state with the older one — which silently
+  // ate a note the first time this was tested. A second change while a save is
+  // out just sets a flag; the re-run reads current state, so only the latest
+  // wins and intermediate values never need their own request.
+  var inflight = {};
+  var queued = {};
+
   function push(id) {
     saveLocal();
-    if (!db) return;
-    var e = entry(id);
-    db.collection("lessons/" + DATA.week + "/items").doc(String(id))
-      .set({ note: e.note, covered: !!e.covered, at: new Date().toISOString() })
-      .then(function () { status("Shared"); })
-      .catch(function (err) {
-        status(err && err.code === "quota_exceeded" ? "Store full" : "Saved on this device");
-      });
+    if (!sync) return;
+    if (inflight[id]) { queued[id] = true; return; }
+    var run = function () {
+      inflight[id] = sync.save(id)
+        .then(function () { status("Shared"); })
+        .catch(function () { status("Saved on this device"); })
+        .then(function () {
+          delete inflight[id];
+          if (queued[id]) { delete queued[id]; run(); }
+        });
+    };
+    run();
+  }
+
+  // Merge whatever the shared store has into local state. Returns true if
+  // anything actually moved, so a poll that changes nothing costs no re-render.
+  function merge(rows) {
+    var touched = false;
+    rows.forEach(function (r) {
+      // A poll can return a row we are mid-way through replacing. Taking it
+      // would revert what was just typed, and the queued save would then write
+      // the reverted value back out.
+      if (inflight[r.id] || queued[r.id]) return;
+      var mine = entry(r.id);
+      if (mine.note !== r.note || mine.covered !== r.covered) {
+        mine.note = r.note;
+        mine.covered = r.covered;
+        touched = true;
+      }
+    });
+    if (!touched) return false;
+    saveLocal();
+    // Never redraw out from under someone mid-sentence.
+    if (!document.querySelector("textarea:focus")) render();
+    countCovered();
+    return true;
   }
 
   // --- rendering ---
@@ -368,9 +405,18 @@ footer {
     }
   }
 
+  // Notes outlive the sheet they were taken on: a sentence you annotated last
+  // week may not make this week's cut, but its row is still in the store. Count
+  // only what's actually on this page, or the tally claims credit for sentences
+  // the reader can't see.
+  var pageIds = {};
+  DATA.sections.forEach(function (sec) {
+    sec.items.forEach(function (s) { pageIds[s.id] = true; });
+  });
+
   function countCovered() {
     var n = 0;
-    for (var k in state) if (state[k] && state[k].covered) n++;
+    for (var k in state) if (pageIds[k] && state[k] && state[k].covered) n++;
     document.getElementById("n-covered").textContent = n;
   }
 
@@ -392,49 +438,127 @@ footer {
   });
 
   document.getElementById("clear-covered").addEventListener("click", function () {
-    for (var k in state) if (state[k]) state[k].covered = false;
+    var cleared = [];
+    for (var k in state) {
+      if (state[k] && state[k].covered) { state[k].covered = false; cleared.push(k); }
+    }
     saveLocal();
     render();
     countCovered();
-    if (db) {
-      DATA.sections.forEach(function (sec) {
-        sec.items.forEach(function (s) {
-          if (state[s.id] && state[s.id].note) push(s.id);
-          else db.collection("lessons/" + DATA.week + "/items").doc(String(s.id)).delete().catch(function () {});
-        });
-      });
-    }
+    cleared.forEach(push);
   });
 
-  // --- shared store, if this viewer can run it ---
+  // --- shared store -----------------------------------------------------
+  //
+  // Two homes, two backends. On GitHub Pages the page talks straight to Turso
+  // over its HTTP protocol — plain JSON POSTs, so no client library and nothing
+  // to load from a CDN. Inside a claude.ai artifact that fetch is blocked by the
+  // CSP, so it uses the artifact's own store instead. Either way localStorage
+  // has already taken the write, so a store that never arrives costs nothing.
+
+  function tursoBackend(cfg) {
+    var T = function (v) { return { type: "text", value: String(v) }; };
+    var I = function (v) { return { type: "integer", value: String(v) }; };
+
+    function pipeline(stmts) {
+      return fetch(cfg.url + "/v2/pipeline", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + cfg.token,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          requests: stmts.map(function (s) { return { type: "execute", stmt: s }; })
+            .concat([{ type: "close" }])
+        })
+      }).then(function (r) {
+        if (!r.ok) throw new Error("turso " + r.status);
+        return r.json();
+      }).then(function (j) {
+        var results = j.results || [];
+        for (var i = 0; i < results.length; i++) {
+          if (results[i].type === "error") throw new Error("turso statement failed");
+        }
+        return results;
+      });
+    }
+
+    return {
+      save: function (id) {
+        var e = entry(id);
+        return pipeline([{
+          sql: "insert into notes(week, sentence_id, note, covered, updated_at) " +
+               "values(?,?,?,?,?) on conflict(week, sentence_id) do update set " +
+               "note=excluded.note, covered=excluded.covered, updated_at=excluded.updated_at",
+          args: [T(DATA.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0),
+                 T(new Date().toISOString())]
+        }]);
+      },
+      load: function () {
+        return pipeline([{
+          sql: "select sentence_id, note, covered from notes where week = ?",
+          args: [T(DATA.week)]
+        }]).then(function (results) {
+          var rows = results[0].response.result.rows;
+          return rows.map(function (row) {
+            return {
+              id: row[0].value,
+              note: row[1].type === "null" ? "" : row[1].value,
+              covered: row[2].value === "1"
+            };
+          });
+        });
+      }
+    };
+  }
+
+  function artifactBackend(db) {
+    var items = function () { return db.collection("lessons/" + DATA.week + "/items"); };
+    return {
+      save: function (id) {
+        var e = entry(id);
+        return items().doc(String(id)).set({
+          note: e.note, covered: !!e.covered, at: new Date().toISOString()
+        });
+      },
+      watch: function () {
+        items().onSnapshot(function (snap) {
+          merge(snap.docs.map(function (d) {
+            var b = d.data() || {};
+            return { id: d.id, note: b.note || "", covered: !!b.covered };
+          }));
+        }, function () {
+          sync = null;
+          status("Saving on this device");
+        });
+      }
+    };
+  }
 
   status("Saving on this device");
-  if (window.claude && typeof window.claude.use === "function") {
+
+  if (DATA.notes) {
+    sync = tursoBackend(DATA.notes);
+    var poll = function () {
+      if (document.hidden || !sync) return;
+      sync.load().then(function (rows) {
+        merge(rows);
+        status("Shared");
+      }).catch(function () { status("Saving on this device"); });
+    };
+    poll();
+    // Only while someone is looking — a backgrounded tab polling all week is
+    // just burning someone's free tier.
+    setInterval(poll, 15000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) poll();
+    });
+  } else if (window.claude && typeof window.claude.use === "function") {
     window.claude.use("db").then(function (ns) {
       if (!ns) return;
-      db = ns;
+      sync = artifactBackend(ns);
       status("Shared");
-      db.collection("lessons/" + DATA.week + "/items").onSnapshot(function (snap) {
-        var touched = false;
-        snap.docs.forEach(function (d) {
-          var body = d.data() || {};
-          var mine = entry(d.id);
-          // Last write wins, matching the store — whoever typed most recently.
-          if (mine.note !== (body.note || "") || mine.covered !== !!body.covered) {
-            mine.note = body.note || "";
-            mine.covered = !!body.covered;
-            touched = true;
-          }
-        });
-        if (touched) {
-          saveLocal();
-          if (!document.querySelector("textarea:focus")) render();
-          countCovered();
-        }
-      }, function (err) {
-        db = null;
-        status(err && err.code === "revoked" ? "Saving on this device" : "Saving on this device");
-      });
+      sync.watch();
     });
   }
 })();
