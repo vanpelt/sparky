@@ -188,6 +188,55 @@ def entry(s: dict) -> str:
     return line
 
 
+def as_item(s: dict) -> dict:
+    """The subset of a sentence the page actually renders."""
+    return {
+        "id": s["id"],
+        "text": s.get("text") or "",
+        "plain": plain(s),
+        "translation": s.get("translation") or "",
+        "level": s.get("level", 0),
+        "played": s.get("numPlayed", 0),
+        "missed": s.get("numIncorrect", 0),
+        "favorited": bool(s.get("favorited")),
+        "last": s.get("lastPlayedDate") or "",
+    }
+
+
+def render_html(week: dict, limit: int) -> str:
+    """The same sheet as an interactive page, data baked in."""
+    today = date.today()
+    start = date.fromisoformat(week["cutoff"])
+    data = {
+        "week": today.isoformat(),
+        "eyebrow": f"Week of {start:%-d %B} – {today:%-d %B %Y}",
+        "title": "Serbian lesson sheet",
+        "counts": {
+            "played": len(week["played"]),
+            "missed": len(week["struggles"]),
+            "starred": len(week["starred"]),
+        },
+        "sections": [
+            {"title": "Gave me trouble",
+             "blurb": "Ranked by how often I got them wrong. The heavier the red edge, "
+                      "the worse the ratio. This is the list worth the hour.",
+             "items": [as_item(s) for s in week["struggles"][:limit]]},
+            {"title": "Starred this week",
+             "blurb": "Flagged in the app while playing.",
+             "items": [as_item(s) for s in week["starred"]]},
+            {"title": "New this week",
+             "blurb": "Inferred first encounters — seen twice or fewer. Still fragile.",
+             "items": [as_item(s) for s in week["fresh"][:limit]]},
+        ],
+        "words": [w for w, n in week["words"].most_common(30) if n > 1],
+        "stamp": f"Pulled {today:%-d %B %Y} for {week['user'].get('username')}",
+    }
+    tpl = (HERE / "template.html").read_text(encoding="utf-8")
+    # json.dumps can emit "</script>" inside a string and close the tag early.
+    blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    return tpl.replace("/*__DATA__*/", blob)
+
+
 def render(week: dict, limit: int) -> str:
     today = date.today()
     start = date.fromisoformat(week["cutoff"])
@@ -236,6 +285,11 @@ def main():
     lesson.add_argument("--out", type=Path, help="default: out/<date>-serbian-lesson.md")
     lesson.add_argument("--stdout", action="store_true", help="print instead of writing")
 
+    art = sub.add_parser("artifact", help="interactive HTML sheet, ready to publish")
+    art.add_argument("--days", type=int, default=7)
+    art.add_argument("--limit", type=int, default=25, help="entries per section")
+    art.add_argument("--out", type=Path, help="default: out/<date>-serbian-lesson.html")
+
     snap = sub.add_parser("snapshot", help="raw per-sentence JSON")
     snap.add_argument("--scope", default="playing",
                       help="all | playing | favorited | mastered | ready_for_review | ignored")
@@ -269,8 +323,17 @@ def main():
         }
         out = args.out or out_dir / f"{date.today()}-snapshot.json"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"{sum(len(v) for v in data.values())} sentences -> {out}")
+        return
+
+    if args.cmd == "artifact":
+        week = collect_week(cm, args.days)
+        out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(render_html(week, args.limit), encoding="utf-8")
+        print(f"{len(week['played'])} sentences this week -> {out}")
+        print("Publish it with the Artifact tool (capabilities: db) to get a link.")
         return
 
     week = collect_week(cm, args.days)
@@ -280,7 +343,7 @@ def main():
         return
     out = args.out or out_dir / f"{date.today()}-serbian-lesson.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(md)
+    out.write_text(md, encoding="utf-8")
     print(f"{len(week['played'])} sentences this week -> {out}")
 
 

@@ -1,0 +1,441 @@
+<title>Serbian Lesson Sheet</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Zilla+Slab:wght@500;700&display=swap">
+<style>
+:root {
+  --paper: #f4f5f2;
+  --raised: #fbfbf9;
+  --ink: #17181c;
+  --muted: #6f7469;
+  --faint: #9aa093;
+  --rule: #dcded7;
+  --pen: #c8342b;
+  --pen-soft: #f0d9d6;
+  --done: #2f6f5e;
+  --done-soft: #dbe8e3;
+  --star: #b07d1a;
+  --focus: #2f6f5e;
+  --shadow: 0 1px 2px rgba(23, 24, 28, .06);
+  --serif: Literata, Georgia, "Times New Roman", serif;
+  --slab: "Zilla Slab", Rockwell, Georgia, serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #171a18;
+    --raised: #1e2220;
+    --ink: #e8e9e4;
+    --muted: #969c93;
+    --faint: #6d746c;
+    --rule: #2a2e2b;
+    --pen: #e8635a;
+    --pen-soft: #3a2523;
+    --done: #5ba88f;
+    --done-soft: #1f2f2a;
+    --star: #d9a94b;
+    --focus: #5ba88f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #171a18;
+  --raised: #1e2220;
+  --ink: #e8e9e4;
+  --muted: #969c93;
+  --faint: #6d746c;
+  --rule: #2a2e2b;
+  --pen: #e8635a;
+  --pen-soft: #3a2523;
+  --done: #5ba88f;
+  --done-soft: #1f2f2a;
+  --star: #d9a94b;
+  --focus: #5ba88f;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.wrap { max-width: 47rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+
+/* --- masthead --- */
+.masthead { border-bottom: 2px solid var(--ink); padding-bottom: 1.25rem; }
+.eyebrow {
+  font-family: var(--slab); font-weight: 500; font-size: .7rem;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+}
+h1 {
+  font-family: var(--slab); font-weight: 700; font-size: clamp(1.75rem, 5vw, 2.5rem);
+  line-height: 1.1; margin: .35rem 0 0; text-wrap: balance; letter-spacing: -.01em;
+}
+.tally { display: flex; flex-wrap: wrap; gap: 1.75rem; margin-top: 1.25rem; }
+.tally div { display: flex; flex-direction: column; gap: .1rem; }
+.tally b {
+  font-family: var(--slab); font-weight: 700; font-size: 1.5rem;
+  font-variant-numeric: tabular-nums; line-height: 1;
+}
+.tally span {
+  font-family: var(--slab); font-size: .7rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.tally .miss b { color: var(--pen); }
+.tally .cov b { color: var(--done); }
+
+/* --- controls --- */
+.controls {
+  display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+  margin: 1.25rem 0 0; padding-bottom: .25rem;
+}
+button {
+  font-family: var(--slab); font-weight: 500; font-size: .78rem;
+  letter-spacing: .04em; color: var(--ink); background: var(--raised);
+  border: 1px solid var(--rule); border-radius: 3px; padding: .4rem .7rem;
+  cursor: pointer; transition: border-color .12s, color .12s;
+}
+button:hover { border-color: var(--ink); }
+button[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.saving {
+  margin-left: auto; font-family: var(--slab); font-size: .7rem;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
+}
+
+/* --- sections --- */
+section { margin-top: 3rem; }
+h2 {
+  font-family: var(--slab); font-weight: 700; font-size: 1.15rem;
+  margin: 0; letter-spacing: -.005em;
+}
+.blurb { color: var(--muted); font-size: .9rem; margin: .3rem 0 0; max-width: 34rem; }
+.rows { border-top: 1px solid var(--rule); margin-top: 1.1rem; }
+
+/* --- one sentence --- */
+.row {
+  display: grid; grid-template-columns: 1.6rem 1fr; gap: 0 .85rem;
+  border-bottom: 1px solid var(--rule); padding: .95rem .6rem .95rem .5rem;
+  position: relative; transition: background .12s;
+}
+.row::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--pen); opacity: var(--sev, 0);
+}
+.row:hover { background: var(--raised); }
+.row.is-covered { background: var(--done-soft); }
+.row.is-covered .sr { text-decoration: line-through; text-decoration-color: var(--done); }
+
+.tick {
+  appearance: none; -webkit-appearance: none; margin: .35rem 0 0; width: 1.15rem; height: 1.15rem;
+  border: 1.5px solid var(--faint); border-radius: 3px; background: var(--raised);
+  cursor: pointer; display: grid; place-content: center; flex: none;
+}
+.tick:checked { background: var(--done); border-color: var(--done); }
+.tick:checked::after {
+  content: ""; width: .34rem; height: .62rem; margin-top: -.12rem;
+  border: solid var(--raised); border-width: 0 2px 2px 0; transform: rotate(42deg);
+}
+
+.body { min-width: 0; }
+.sr { font-size: 1.16rem; line-height: 1.4; margin: 0; }
+.cloze {
+  background: none; color: inherit; font-weight: 600;
+  border-bottom: 2px solid var(--pen); padding-bottom: 1px;
+}
+.en {
+  font-size: .97rem; color: var(--muted); font-style: italic;
+  margin: .2rem 0 0; transition: opacity .12s;
+}
+.hidden-en .en { opacity: 0; }
+.hidden-en .en:hover, .hidden-en .en:focus-within { opacity: 1; }
+
+.meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+  margin-top: .5rem; font-family: var(--mono); font-size: .72rem;
+  color: var(--faint); font-variant-numeric: tabular-nums;
+}
+.meta .miss { color: var(--pen); }
+.meta .star { color: var(--star); }
+.notebtn {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: 0;
+  padding: .1rem .4rem; background: none; border: 1px dashed var(--rule);
+}
+.notebtn.has-note { border-style: solid; border-color: var(--done); color: var(--done); }
+
+.note { margin-top: .55rem; }
+.note[hidden] { display: none; }
+textarea {
+  width: 100%; min-height: 4.5rem; resize: vertical; padding: .55rem .65rem;
+  font-family: var(--serif); font-size: .93rem; line-height: 1.45;
+  color: var(--ink); background: var(--raised);
+  border: 1px solid var(--rule); border-left: 3px solid var(--done); border-radius: 3px;
+}
+textarea::placeholder { color: var(--faint); font-style: italic; }
+
+/* --- word list --- */
+.words { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: 1.1rem; }
+.words span {
+  font-family: var(--mono); font-size: .8rem; padding: .2rem .5rem;
+  background: var(--raised); border: 1px solid var(--rule); border-radius: 3px;
+}
+
+footer {
+  margin-top: 3.5rem; padding-top: 1.1rem; border-top: 1px solid var(--rule);
+  font-family: var(--slab); font-size: .76rem; color: var(--faint);
+  display: flex; flex-wrap: wrap; gap: .4rem 1rem; justify-content: space-between;
+}
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="eyebrow" id="eyebrow"></p>
+    <h1 id="title"></h1>
+    <div class="tally">
+      <div><b id="n-played"></b><span>practiced</span></div>
+      <div class="miss"><b id="n-missed"></b><span>missed</span></div>
+      <div><b id="n-starred"></b><span>starred</span></div>
+      <div class="cov"><b id="n-covered"></b><span>covered today</span></div>
+    </div>
+  </header>
+
+  <div class="controls">
+    <button id="toggle-en" type="button" aria-pressed="false">Hide translations</button>
+    <button id="clear-covered" type="button">Reset ticks</button>
+    <span class="saving" id="saving"></span>
+  </div>
+
+  <main id="sections"></main>
+
+  <footer>
+    <span id="stamp"></span>
+    <span>klozar &middot; Clozemaster</span>
+  </footer>
+</div>
+
+<script id="lesson-data" type="application/json">/*__DATA__*/</script>
+<script>
+(function () {
+  "use strict";
+
+  var DATA = JSON.parse(document.getElementById("lesson-data").textContent);
+  var KEY = "klozar:" + DATA.week;
+  var state = {};   // id -> {note, covered}
+  var db = null;
+  var savingEl = document.getElementById("saving");
+
+  // Local storage is the floor: it works for every viewer, signed in or not,
+  // and never fails the way a capability can. The shared store layers on top.
+  try {
+    state = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+  } catch (e) {
+    state = {};
+  }
+
+  function entry(id) {
+    if (!state[id]) state[id] = { note: "", covered: false };
+    return state[id];
+  }
+
+  function saveLocal() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(state));
+    } catch (e) {
+      /* private window, full quota — the page still works, just forgets */
+    }
+  }
+
+  function status(text) {
+    savingEl.textContent = text;
+  }
+
+  function push(id) {
+    saveLocal();
+    if (!db) return;
+    var e = entry(id);
+    db.collection("lessons/" + DATA.week + "/items").doc(String(id))
+      .set({ note: e.note, covered: !!e.covered, at: new Date().toISOString() })
+      .then(function () { status("Shared"); })
+      .catch(function (err) {
+        status(err && err.code === "quota_exceeded" ? "Store full" : "Saved on this device");
+      });
+  }
+
+  // --- rendering ---
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function clozed(text) {
+    return esc(text).replace(/\{\{(.+?)\}\}/g, '<mark class="cloze">$1</mark>');
+  }
+
+  function rowEl(s) {
+    var e = entry(s.id);
+    var row = document.createElement("div");
+    row.className = "row" + (e.covered ? " is-covered" : "");
+    // The stripe reads miss rate directly: darker edge, harder sentence.
+    row.style.setProperty("--sev", s.played ? (s.missed / s.played).toFixed(2) : 0);
+
+    var bits = ["level " + s.level];
+    if (s.missed) bits.push('<span class="miss">missed ' + s.missed + " of " + s.played + "</span>");
+    else bits.push("seen " + s.played + "×");
+    if (s.favorited) bits.push('<span class="star">★ starred</span>');
+    bits.push(s.last);
+
+    row.innerHTML =
+      '<input class="tick" type="checkbox" ' + (e.covered ? "checked" : "") +
+        ' aria-label="Mark &quot;' + esc(s.plain) + '&quot; as covered">' +
+      '<div class="body">' +
+        '<p class="sr">' + clozed(s.text) + "</p>" +
+        '<p class="en">' + esc(s.translation) + "</p>" +
+        '<div class="meta">' + bits.join('<span aria-hidden="true">&middot;</span>') +
+          '<button class="notebtn' + (e.note ? " has-note" : "") + '" type="button">' +
+            (e.note ? "note" : "+ note") + "</button>" +
+        "</div>" +
+        '<div class="note"' + (e.note ? "" : " hidden") + '>' +
+          '<textarea placeholder="What came up in the lesson…">' + esc(e.note) + "</textarea>" +
+        "</div>" +
+      "</div>";
+
+    var tick = row.querySelector(".tick");
+    var btn = row.querySelector(".notebtn");
+    var note = row.querySelector(".note");
+    var ta = row.querySelector("textarea");
+
+    tick.addEventListener("change", function () {
+      entry(s.id).covered = tick.checked;
+      row.classList.toggle("is-covered", tick.checked);
+      countCovered();
+      push(s.id);
+    });
+
+    btn.addEventListener("click", function () {
+      note.hidden = !note.hidden;
+      if (!note.hidden) ta.focus();
+    });
+
+    // Save on blur, not per keystroke — one write per thought, not per letter.
+    ta.addEventListener("blur", function () {
+      var v = ta.value.trim();
+      if (v === entry(s.id).note) return;
+      entry(s.id).note = v;
+      btn.classList.toggle("has-note", !!v);
+      btn.textContent = v ? "note" : "+ note";
+      push(s.id);
+    });
+
+    row.dataset.id = s.id;
+    return row;
+  }
+
+  function render() {
+    var host = document.getElementById("sections");
+    host.textContent = "";
+    DATA.sections.forEach(function (sec) {
+      if (!sec.items.length) return;
+      var el = document.createElement("section");
+      var head = document.createElement("h2");
+      head.textContent = sec.title;
+      var blurb = document.createElement("p");
+      blurb.className = "blurb";
+      blurb.textContent = sec.blurb;
+      var rows = document.createElement("div");
+      rows.className = "rows";
+      sec.items.forEach(function (s) { rows.appendChild(rowEl(s)); });
+      el.appendChild(head);
+      el.appendChild(blurb);
+      el.appendChild(rows);
+      host.appendChild(el);
+    });
+
+    if (DATA.words.length) {
+      var el = document.createElement("section");
+      el.innerHTML = '<h2>Words that kept coming up</h2>' +
+        '<p class="blurb">Cloze answers that appeared more than once this week.</p>' +
+        '<div class="words">' + DATA.words.map(function (w) {
+          return "<span>" + esc(w) + "</span>";
+        }).join("") + "</div>";
+      host.appendChild(el);
+    }
+  }
+
+  function countCovered() {
+    var n = 0;
+    for (var k in state) if (state[k] && state[k].covered) n++;
+    document.getElementById("n-covered").textContent = n;
+  }
+
+  document.getElementById("eyebrow").textContent = DATA.eyebrow;
+  document.getElementById("title").textContent = DATA.title;
+  document.getElementById("n-played").textContent = DATA.counts.played;
+  document.getElementById("n-missed").textContent = DATA.counts.missed;
+  document.getElementById("n-starred").textContent = DATA.counts.starred;
+  document.getElementById("stamp").textContent = DATA.stamp;
+  render();
+  countCovered();
+
+  var toggle = document.getElementById("toggle-en");
+  toggle.addEventListener("click", function () {
+    var on = toggle.getAttribute("aria-pressed") === "true";
+    toggle.setAttribute("aria-pressed", String(!on));
+    document.body.classList.toggle("hidden-en", !on);
+    toggle.textContent = on ? "Hide translations" : "Show translations";
+  });
+
+  document.getElementById("clear-covered").addEventListener("click", function () {
+    for (var k in state) if (state[k]) state[k].covered = false;
+    saveLocal();
+    render();
+    countCovered();
+    if (db) {
+      DATA.sections.forEach(function (sec) {
+        sec.items.forEach(function (s) {
+          if (state[s.id] && state[s.id].note) push(s.id);
+          else db.collection("lessons/" + DATA.week + "/items").doc(String(s.id)).delete().catch(function () {});
+        });
+      });
+    }
+  });
+
+  // --- shared store, if this viewer can run it ---
+
+  status("Saving on this device");
+  if (window.claude && typeof window.claude.use === "function") {
+    window.claude.use("db").then(function (ns) {
+      if (!ns) return;
+      db = ns;
+      status("Shared");
+      db.collection("lessons/" + DATA.week + "/items").onSnapshot(function (snap) {
+        var touched = false;
+        snap.docs.forEach(function (d) {
+          var body = d.data() || {};
+          var mine = entry(d.id);
+          // Last write wins, matching the store — whoever typed most recently.
+          if (mine.note !== (body.note || "") || mine.covered !== !!body.covered) {
+            mine.note = body.note || "";
+            mine.covered = !!body.covered;
+            touched = true;
+          }
+        });
+        if (touched) {
+          saveLocal();
+          if (!document.querySelector("textarea:focus")) render();
+          countCovered();
+        }
+      }, function (err) {
+        db = null;
+        status(err && err.code === "revoked" ? "Saving on this device" : "Saving on this device");
+      });
+    });
+  }
+})();
+</script>
