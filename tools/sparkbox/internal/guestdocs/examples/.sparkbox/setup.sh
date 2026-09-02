@@ -41,5 +41,7 @@ systemctl --user enable --now web.service
 sparkbox set-port 5173
 
 # 4. Anything else worth finding this session by later, since only the
-#    default port is discoverable from the URL bar.
-hivemind tag api_url="https://$(hostname).catnip.sh:8080"
+#    default port is discoverable from the URL bar. The domain is this
+#    deployment's own, not a constant, so it is read rather than assumed.
+DOMAIN=$(sparkbox whoami | sed -n 's/^domain: //p')
+hivemind tag api_url="https://$(hostname).$DOMAIN:8080"

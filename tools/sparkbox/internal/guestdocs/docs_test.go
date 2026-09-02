@@ -57,6 +57,21 @@ func TestSetupShExampleIsEmbeddedNotRetyped(t *testing.T) {
 	}
 }
 
+// TestDevEnvironmentPageNeverHardcodesADomain: this page is baked into every
+// deployment's binary, not just the flagship catnip.sh one, and is read by
+// agents (via `sparkbox docs dev-environment`) as well as browsers, so a
+// literal domain in a framework config example would be silently wrong
+// everywhere except the one deployment it was written against.
+func TestDevEnvironmentPageNeverHardcodesADomain(t *testing.T) {
+	for _, path := range []string{"/dev-environment", "/dev-environment.md"} {
+		rec := httptest.NewRecorder()
+		Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if strings.Contains(rec.Body.String(), "catnip.sh") {
+			t.Errorf("GET %s hardcodes a domain instead of deriving one from `sparkbox whoami`", path)
+		}
+	}
+}
+
 func TestPublicPortListComesFromSourceOfTruth(t *testing.T) {
 	for _, path := range []string{"/", "/proxy", "/docs.md", "/proxy.md"} {
 		rec := httptest.NewRecorder()

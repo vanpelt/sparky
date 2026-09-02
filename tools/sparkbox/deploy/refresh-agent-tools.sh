@@ -709,14 +709,8 @@ install_agent_guidance() {
   cat > "$canonical" <<'EOF'
 You are running in a Sparkbox microVM.
 
-Sparkbox documentation: https://docs.catnip.sh/docs.md — that URL is for a
-browser outside the VM. From inside this VM, run `sparkbox docs` instead: the
-public hostname can resolve to this fleet's own edge, which this VM has no
-network route to reach directly, so the same content is mirrored on the
-metadata channel `sparkbox docs` already knows how to reach.
-
-The HTTPS proxy is documented at `sparkbox docs proxy`
-(https://docs.catnip.sh/proxy.md for a browser).
+Sparkbox documentation: run `sparkbox docs`. The HTTPS proxy specifically is
+documented at `sparkbox docs proxy`.
 
 Your disk is persistent. CPU and memory are shared across your Sparkbox owner
 pool; idle guest memory may be reclaimed and returned when it becomes active.
@@ -732,20 +726,25 @@ changes the forwarded port, `sparkbox make-public` allows unauthenticated
 access to all of this VM's routes, and `sparkbox make-private` restores the
 authenticated default.
 
-This VM's name is its hostname, so `$(hostname)` is the name and
-`https://$(hostname).catnip.sh` is the default endpoint above. Any other port is
-reached by naming it in the URL, as `https://$(hostname).catnip.sh:5173`. The
-edge exposes the common development ports — 3000, 3001, 4000, 4200, 5000, 5173,
-6006, 7860, 8000, 8080, 8081, 8082, 8083, 8123, 8443, 8501, 8888, 9000 and
-16686 — so listen on one of those, and on 0.0.0.0 rather than 127.0.0.1, or
-nothing outside the VM can reach it.
+This VM's name is its hostname, so `$(hostname)` is the name. The domain is
+this deployment's own, not a constant across every Sparkbox install — read it
+rather than assume one, from the `domain:` line `sparkbox whoami` reports:
+
+    DOMAIN=$(sparkbox whoami | sed -n 's/^domain: //p')
+    echo "https://$(hostname).$DOMAIN"      # the default endpoint above
+    echo "https://$(hostname).$DOMAIN:5173" # any other port, named in the URL
+
+The edge exposes the common development ports — 3000, 3001, 4000, 4200, 5000,
+5173, 6006, 7860, 8000, 8080, 8081, 8082, 8083, 8123, 8443, 8501, 8888, 9000
+and 16686 — so listen on one of those, and on 0.0.0.0 rather than 127.0.0.1,
+or nothing outside the VM can reach it.
 
 When you start a dev service, point the default endpoint at the port a person
 should open. A stack serving an API on 8080 and a Vite frontend on 5173 gets
 `sparkbox set-port 5173`, because the frontend is the human entrypoint. Record
 the other ports as session labels rather than leaving them undiscoverable:
 
-    hivemind tag api_url=https://$(hostname).catnip.sh:8080
+    hivemind tag api_url="https://$(hostname).$DOMAIN:8080"
 
 `hivemind tag` labels the session you are working in, so it can be found later
 by what it was about. A bare word is a tag (`hivemind tag nightly`) and

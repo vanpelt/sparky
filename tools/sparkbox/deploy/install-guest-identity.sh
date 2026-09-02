@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=20
+IDENTITY_REV=21
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -405,11 +405,21 @@ case "${1:-}" in
     _ghid=$(printf '%s' "$_doc" | sed -n 's/.*"github_id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     _owner=$(printf '%s' "$_doc" | sed -n 's/.*"owner":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     _box=$(printf '%s' "$_doc" | sed -n 's/.*"sandbox":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # The domain is this deployment's, not one this script can know: it is
+    # whatever --proxy-domain the fleet was started with, which is why nothing
+    # else in this file spells out a literal domain. `iss` is
+    # "https://<oidc-subdomain>.<domain>" (main.go's IssuerURL, subdomain
+    # configurable, default "oidc") — one label after the scheme is always the
+    # subdomain, so everything after the FIRST dot is the domain regardless of
+    # what that subdomain is actually named.
+    _iss=$(printf '%s' "$_doc" | sed -n 's/.*"iss":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    _domain=$(printf '%s' "$_iss" | sed -n 's#^https\{0,1\}://[^./]*\.##p')
     if [ "$_json" -ne 1 ]; then
       [ -n "$_login" ] && echo "github: $_login"
       [ -n "$_ghid" ] && [ "$_ghid" != 0 ] && echo "github_id: $_ghid"
       [ -n "$_owner" ] && echo "owner: $_owner"
       [ -n "$_box" ] && echo "sandbox: $_box"
+      [ -n "$_domain" ] && echo "domain: $_domain"
     fi
     # No link, no answer — and saying so with exit 0 would let a script read an
     # empty login as this person's login. The owner handle is NOT a substitute:

@@ -3,9 +3,10 @@
 The edge terminates TLS and forwards plain HTTP — WebSocket upgrades included —
 to a port inside the VM; see [the proxy guide](./proxy.md) for how a URL picks
 that port. Two things a dev server takes for granted on a laptop are false
-here: the browser's Host header is `<name>.catnip.sh`, not `localhost`, and a
-box's hostname is different every time, so a fix that names one box breaks on
-the next.
+here: the browser's Host header is `<name>.<domain>`, not `localhost`, and both
+the box's hostname and the domain are different on every deployment — `<name>`
+is `$(hostname)`, and `<domain>` below is whatever `sparkbox whoami` reports on
+its `domain:` line, never a literal to hardcode.
 
 ## Bind to 0.0.0.0
 
@@ -22,15 +23,15 @@ dev server through DNS rebinding. Sparkbox's Host header is real but is never
 VM's name, since the same fix has to keep working after `sparkbox snapshot` or
 a plain `git clone` lands it on a different box:
 
-- **Vite**: `server.allowedHosts: ['.catnip.sh']` in `vite.config.*` — a
+- **Vite**: `server.allowedHosts: ['.<domain>']` in `vite.config.*` — a
   leading dot matches the domain and every subdomain.
-- **Next.js**: `allowedDevOrigins: ['*.catnip.sh']` in `next.config.*`.
-- **Django**: `ALLOWED_HOSTS = [".catnip.sh"]`, and — separately, since
+- **Next.js**: `allowedDevOrigins: ['*.<domain>']` in `next.config.*`.
+- **Django**: `ALLOWED_HOSTS = [".<domain>"]`, and — separately, since
   Django checks `Origin` against a different list — `CSRF_TRUSTED_ORIGINS =
-  ["https://*.catnip.sh"]` for anything that POSTs, including the admin.
-- **Rails**: `config.hosts << ".catnip.sh"` in
+  ["https://*.<domain>"]` for anything that POSTs, including the admin.
+- **Rails**: `config.hosts << ".<domain>"` in
   `config/environments/development.rb`.
-- **webpack-dev-server / Create React App**: `allowedHosts: ['.catnip.sh']`
+- **webpack-dev-server / Create React App**: `allowedHosts: ['.<domain>']`
   in the dev-server config. `DANGEROUSLY_DISABLE_HOST_CHECK=true` is a last
   resort for a config you cannot easily reach — it is exactly as dangerous as
   the name says, so revert it once the real fix is in.
@@ -51,7 +52,12 @@ still needs one, e.g. Vite's `server.hmr: { protocol: 'wss' }`.
 Once it is listening, run `sparkbox set-port PORT` so the endpoint a person
 opens is the one they should actually look at — the frontend of a stack, not
 whichever service happened to bind first. Record any other port with
-`hivemind tag`, for example `hivemind tag api_url=https://$(hostname).catnip.sh:8080`.
+`hivemind tag`, for example:
+
+```sh
+DOMAIN=$(sparkbox whoami | sed -n 's/^domain: //p')
+hivemind tag api_url="https://$(hostname).$DOMAIN:8080"
+```
 
 ## Turn the start command into a service
 

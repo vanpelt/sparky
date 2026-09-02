@@ -208,7 +208,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=20\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=21\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -1092,7 +1092,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		".agents/AGENTS.md",
 		".codex/AGENTS.md",
 		".claude/CLAUDE.md",
-		"https://docs.catnip.sh/docs.md",
+		"sparkbox docs",
 		"sparkbox pin",
 		"sparkbox unpin",
 		"sparkbox make-public",
@@ -1114,16 +1114,19 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"../../../.agents/skills/agent-browser",
 		"AGENT_BROWSER_EXECUTABLE_PATH /headless-shell/headless-shell",
 		"AGENT_BROWSER_SOCKET_DIR",
-		// The VM's own name and public URL, which the guidance can only express
-		// as $(hostname): this file is baked into a shared template and read by
-		// every clone of it, so no sandbox's name can be literal here. The
-		// sparkbox-netcfg boot hook makes the hostname the sandbox name.
-		"https://$(hostname).catnip.sh",
+		// The VM's own name and domain, which the guidance can only express by
+		// deriving them: this file is baked into a shared template and read by
+		// every clone of it on every deployment, so no sandbox's name and no
+		// deployment's domain can be literal here. The sparkbox-netcfg boot hook
+		// makes the hostname the sandbox name; `sparkbox whoami`'s `domain:` line
+		// is where the domain itself has to come from instead.
+		"DOMAIN=$(sparkbox whoami | sed -n 's/^domain: //p')",
+		`echo "https://$(hostname).$DOMAIN"`,
 		// A dev service is only reachable if the default route points at the
 		// port a person opens, and only findable later if the other ports are
 		// recorded somewhere the session carries with it.
 		"sparkbox set-port 5173",
-		"hivemind tag api_url=https://$(hostname).catnip.sh:8080",
+		`hivemind tag api_url="https://$(hostname).$DOMAIN:8080"`,
 		"hivemind tag --list",
 		"hivemind tag --remove KEY",
 		// The framework fixes live in the served doc, not retyped here — this is
@@ -1155,6 +1158,17 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 	flat := strings.Join(strings.Fields(got), " ")
 	if !strings.Contains(flat, publicports.HumanList()) {
 		t.Errorf("template guidance common HTTPS ports drifted from publicports: want %q", publicports.HumanList())
+	}
+}
+
+// TestTemplateGuidanceNeverHardcodesADomain: this file is baked into every
+// deployment's templates, not just the flagship catnip.sh one, and the guest
+// CLI already has a way to ask its own host — `sparkbox whoami`'s `domain:`
+// line — so a literal domain here would be silently wrong on every other
+// deployment.
+func TestTemplateGuidanceNeverHardcodesADomain(t *testing.T) {
+	if got := string(RefreshToolsScript); strings.Contains(got, "catnip.sh") {
+		t.Errorf("template guidance hardcodes a domain instead of deriving one from `sparkbox whoami`:\n%s", got)
 	}
 }
 
@@ -2017,7 +2031,7 @@ func TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking(t *testing.T) {
 // (see sparkbox-git-identity), which is why the fixture carries it rather than
 // the compact form a hand-written test would reach for.
 const guestIdentityDoc = `{
-  "iss": "https://catnip.sh",
+  "iss": "https://oidc.catnip.sh",
   "sub": "sandbox:quiet-lake",
   "owner": "alice",
   "github": "alice-gh",
@@ -2048,6 +2062,7 @@ func TestGuestWhoamiAnswersWhatGhCannot(t *testing.T) {
 		"github_id: 271676\n",
 		"owner: alice\n",
 		"sandbox: quiet-lake\n",
+		"domain: catnip.sh\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("whoami did not report %q:\n%s", want, stdout)
@@ -2062,6 +2077,26 @@ func TestGuestWhoamiAnswersWhatGhCannot(t *testing.T) {
 	}
 	if got := requests(); len(got) != 2 || got[0] != "GET" || !strings.HasSuffix(got[1], "/identity") {
 		t.Errorf("requests = %v — whoami must read /identity, which mints nothing", got)
+	}
+}
+
+// TestGuestWhoamiDerivesDomainFromIssuerNotAHardcodedSubdomain: main.go's
+// IssuerURL is "https://" + oidc-subdomain + "." + proxy-domain, and the
+// subdomain is a deployment flag (--oidc-subdomain, default "oidc"), not a
+// constant. The domain line has to survive a deployment that renamed it,
+// because nothing else in this script may hardcode a domain (see AGENTS.md).
+func TestGuestWhoamiDerivesDomainFromIssuerNotAHardcodedSubdomain(t *testing.T) {
+	doc := strings.Replace(guestIdentityDoc, `"iss": "https://oidc.catnip.sh"`,
+		`"iss": "https://auth.example.internal"`, 1)
+	reply, _, run := guestSelfService(t)
+	reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", doc)
+
+	stdout, stderr, code := run("whoami")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "domain: example.internal\n") {
+		t.Errorf("whoami did not derive the domain from a renamed oidc subdomain:\n%s", stdout)
 	}
 }
 
