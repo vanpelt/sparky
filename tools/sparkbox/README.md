@@ -24,6 +24,14 @@ subdomain defaults to the sandbox name). Idle sandboxes are automatically
 paused by a reaper and transparently resumed on the next connection — over SSH
 *or* HTTP.
 
+Proxy requests and real SSH stream traffic refresh the idle clock. The reaper
+also treats sustained tap traffic above `--activity-net-kb` as work, which
+protects unattended agents talking to remote services. Host CPU use is not an
+activity signal by default: idle Docker and Compose stacks commonly consume a
+few percent of a core and would otherwise keep unrelated VMs warm in lockstep.
+Operators running unattended CPU-only jobs can opt back in with
+`--activity-cpu-pct`; pinning remains the explicit always-on policy.
+
 One wrinkle on the `new@` / `new+<name>@` door: the words after it are read as
 **tags**, never as a command, because a freshly created sandbox always gets a
 shell. But `ssh host word` makes your ssh client skip terminal allocation, and
@@ -757,12 +765,12 @@ derives the darwin pair from the arm64 manifest that produced.
       reaper (balloon-down → pause) + working-set admission (`--mem-reserve-mb`),
       so idle VMs return RAM to the host while staying live. Measure the real
       per-VM cost + KSM savings with `hack/measure-density.py`
-- [x] Vitals-based idleness: the reaper samples each VM's host CPU time and tap
-      byte counters, so an unattended agent, build, or training run counts as
-      active with no inbound traffic (`--activity-cpu-pct`, `--activity-net-kb`).
-      An idle box measures ~0.4% CPU / ~3 KB/min against 3.6–14% / 400 KB+ for a
-      working agent. Lifetime bytes in/out are metered per sandbox and shown in
-      both consoles — the basis for future egress limits
+- [x] Vitals-based idleness: the reaper samples each VM's tap byte counters, so
+      an unattended networked agent counts as active with no inbound traffic
+      (`--activity-net-kb`). Host CPU activity is opt-in
+      (`--activity-cpu-pct`) because background VM and container overhead is
+      not reliable evidence of user work. Lifetime bytes in/out are metered per
+      sandbox and shown in both consoles — the basis for future egress limits
 - [x] Clean hang-up on pause: attached terminals get their modes restored
       (mouse reporting, alternate screen, bracketed paste) and a reason, instead
       of being left wedged against a VM that stopped answering

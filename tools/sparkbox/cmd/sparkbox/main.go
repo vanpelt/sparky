@@ -123,7 +123,7 @@ func serve(args []string) error {
 		defaultLogin         = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
 		idleTimeout          = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
 		idleBalloon          = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
-		activityCPU          = fs.Float64("activity-cpu-pct", 2, "treat a sandbox as active while it burns at least this % of one host core (0 disables); keeps an unattended build or agent from being reaped. Idle boxes measure ~0.4%")
+		activityCPU          = fs.Float64("activity-cpu-pct", 0, "treat a sandbox as active while it burns at least this % of one host core (0 disables, the default); opt in for unattended CPU-only work")
 		activityNetKB        = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
 		maxPerOwner          = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
 		maxBoxesPerOwner     = fs.Int("max-sandboxes-per-owner", 0, "max total running, paused, and archived sandboxes per owner (0 = unlimited)")
