@@ -7,8 +7,8 @@ and writes a lesson sheet to bring to a tutor.
 klozar.py        the CLI
 template.html    the interactive sheet, with a /*__DATA__*/ slot for the week
 refresh.sh       rebuild the published sheet and push it
-index.html       the latest sheet    — committed, served by GitHub Pages
-weeks/           every past sheet    — committed, one file per week
+index.html       the shell + newest week baked in — committed, served by Pages
+weeks/           one JSON of content per week    — committed, ~15 KB each
 weeks.json       the week manifest the picker reads
 .env             an alternative to the Keychain — gitignored
 out/             ad-hoc sheets                  — gitignored
@@ -120,19 +120,26 @@ the page uses the artifact's own store instead; on any other host with neither,
 
 ### Earlier weeks
 
-`site` writes two copies of each sheet: `index.html` as the canonical latest, and
-`weeks/<date>.html` as its permanent home. A dropdown in the controls row switches
-between them, and because notes are keyed by week, opening an old sheet brings
+There is **one** HTML shell. `index.html` carries the CSS, the JS, and the newest
+week's data baked in, so the default URL paints immediately and works offline.
+Every week also gets a `weeks/<date>.json` of pure content — about 15 KB, against
+36 KB if the whole document were copied per week. Older weeks load as
+`index.html?week=<date>`; a dropdown in the controls row switches between them.
+
+Two things fall out of that split. Because the shell is the only copy of the CSS
+and JS, **fixing it fixes every past sheet** instead of leaving old weeks frozen
+with old bugs. And because notes are keyed by week, opening an old sheet brings
 back the notes taken on it.
 
-The picker reads `weeks.json` **at page load rather than baking it in**. A sheet
-published in March is otherwise frozen and could never list a week from May; the
-fetch is what lets an old page still see everything that came after it.
+The picker reads `weeks.json` **at load rather than baking it in**. A sheet
+published in March would otherwise be frozen and could never list a week from May.
+A `?week=` that doesn't exist falls back to the latest sheet rather than a blank
+page.
 
 The sheets stay in git rather than the database on purpose. They're the record —
 append-only, versioned, restorable — and the page's Turso token is public and
 read-write, so putting them there would mean anyone with the link could erase the
-archive rather than just this week's notes. Cost is about 30 KB a week.
+archive rather than just this week's notes.
 
 Two details worth keeping if you touch the sync code:
 

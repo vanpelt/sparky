@@ -9,6 +9,7 @@ REPO=$(git rev-parse --show-toplevel)
 
 uv run klozar.py site
 
+# index.html changes every week (it bakes the newest sheet); weeks/ only grows.
 PATHS="tools/klozar/index.html tools/klozar/weeks tools/klozar/weeks.json"
 if git -C "$REPO" diff --quiet -- $PATHS && \
    [ -z "$(git -C "$REPO" ls-files --others --exclude-standard -- $PATHS)" ]; then

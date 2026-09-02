@@ -271,11 +271,14 @@ def entry(s: dict) -> str:
 
 
 def as_item(s: dict) -> dict:
-    """The subset of a sentence the page actually renders."""
+    """The subset of a sentence the page actually renders.
+
+    No `plain` field — it is `text` with the cloze braces stripped, and the page
+    can do that itself rather than carry a second copy of every sentence.
+    """
     return {
         "id": s["id"],
         "text": s.get("text") or "",
-        "plain": plain(s),
         "translation": s.get("translation") or "",
         "level": s.get("level", 0),
         "played": s.get("numPlayed", 0),
@@ -341,17 +344,16 @@ def update_manifest(root: Path, week: dict, entry_label: str) -> list[dict]:
     return weeks
 
 
-def render_html(week: dict, limit: int, standalone: bool = False,
-                notes: dict | None = None, archive: dict | None = None) -> str:
-    """The same sheet as an interactive page, data baked in.
+def sheet_data(week: dict, limit: int) -> dict:
+    """One week's content — everything the page renders, and nothing else.
 
-    The artifact host supplies <!doctype>, charset and a small reset, so the
-    template is body content only. `standalone` wraps it for GitHub Pages, which
-    serves the file as-is — without the charset every č ć š ž đ turns to mojibake.
+    Kept separate from the shell so a week costs a small JSON file instead of a
+    whole duplicated HTML document, and so a fix to the shell reaches every past
+    week rather than leaving old sheets frozen with old bugs.
     """
     today = date.today()
     start = date.fromisoformat(week["cutoff"])
-    data = {
+    return {
         "week": today.isoformat(),
         "eyebrow": f"Week of {start:%-d %B} – {today:%-d %B %Y}",
         "title": "Serbian lesson sheet",
@@ -374,13 +376,26 @@ def render_html(week: dict, limit: int, standalone: bool = False,
         ],
         "words": [w for w, n in week["words"].most_common(30) if n > 1],
         "stamp": f"Pulled {today:%-d %B %Y} for {week['user'].get('username')}",
-        "notes": notes,
-        "archive": archive,
     }
+
+
+def embed(value) -> str:
+    """JSON for a <script> block — "</script>" inside a string would close it."""
+    return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
+
+
+def render_html(sheet: dict, standalone: bool = False,
+                notes: dict | None = None, archive: dict | None = None) -> str:
+    """The shell, with one week baked in so the default URL paints at once.
+
+    The artifact host supplies <!doctype>, charset and a small reset, so the
+    template is body content only. `standalone` wraps it for GitHub Pages, which
+    serves the file as-is — without the charset every č ć š ž đ turns to mojibake.
+    """
     tpl = (HERE / "template.html").read_text(encoding="utf-8")
-    # json.dumps can emit "</script>" inside a string and close the tag early.
-    blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    page = tpl.replace("/*__DATA__*/", blob)
+    page = (tpl
+            .replace("/*__CONFIG__*/", embed({"notes": notes, "archive": archive}))
+            .replace("/*__DATA__*/", embed(sheet)))
     if not standalone:
         return page
     # The <title> and <style> the template opens with belong in <head>; the rest
@@ -510,7 +525,7 @@ def main():
         week = collect_week(cm, args.days)
         out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render_html(week, args.limit), encoding="utf-8")
+        out.write_text(render_html(sheet_data(week, args.limit)), encoding="utf-8")
         cm.persist()
         print(f"{len(week['played'])} sentences this week -> {out}")
         print("Publish it with the Artifact tool (capabilities: db) to get a link.")
@@ -522,28 +537,28 @@ def main():
         # CSP blocks the fetch anyway, and that copy uses claude.use("db").
         notes = None if args.no_notes else notes_backend()
         root = args.out.parent if args.out else HERE
+        sheet = sheet_data(week, args.limit)
         label = f"{date.fromisoformat(week['cutoff']):%-d %b} – {date.today():%-d %b %Y}"
         update_manifest(root, week, label)
 
-        # index.html is the canonical latest sheet; weeks/<date>.html is its
-        # permanent home. Same content, different relative paths to the manifest
-        # and to sibling weeks, so each knows how to reach the others.
+        # One HTML shell with the newest week baked in, plus a small JSON per
+        # week beside it. Older weeks load as ?week=<date>; the shell is the only
+        # copy of the CSS and JS, so fixing it fixes every past sheet too.
         index = args.out or root / "index.html"
-        archived = root / "weeks" / f"{date.today()}.html"
-        archived.parent.mkdir(parents=True, exist_ok=True)
+        data_file = root / "weeks" / f"{date.today()}.json"
+        data_file.parent.mkdir(parents=True, exist_ok=True)
         index.parent.mkdir(parents=True, exist_ok=True)
 
+        data_file.write_text(json.dumps(sheet, ensure_ascii=False, indent=1) + "\n",
+                             encoding="utf-8")
         index.write_text(
-            render_html(week, args.limit, True, notes,
+            render_html(sheet, True, notes,
                         {"manifest": "weeks.json", "base": "weeks/"}),
             encoding="utf-8")
-        archived.write_text(
-            render_html(week, args.limit, True, notes,
-                        {"manifest": "../weeks.json", "base": ""}),
-            encoding="utf-8")
         cm.persist()
-        print(f"{len(week['played'])} sentences this week -> {index}")
-        print(f"archived at {archived}")
+        kb = lambda p: p.stat().st_size / 1024
+        print(f"{len(week['played'])} sentences this week -> {index} ({kb(index):.0f} KB)")
+        print(f"week data -> {data_file} ({kb(data_file):.0f} KB, the only per-week cost)")
         print("Commit and push; the pages.yml workflow publishes it at "
               "https://vanpelt.github.io/sparky/tools/klozar/")
         return
