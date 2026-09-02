@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -928,6 +929,55 @@ func TestFirstLoginWaitsOutAnInFlightClone(t *testing.T) {
 	}
 	if elapsed < 500*time.Millisecond {
 		t.Errorf("returned in %v, so it cannot have waited for the clone", elapsed)
+	}
+}
+
+// TestLoginWaitsOnAWorkerItCannotSignal is the bug hardware found, and the one
+// the same-user tests above structurally could not.
+//
+// The clone worker is a systemd unit running as ROOT; the login shell is the
+// sandbox user. `kill -0` against a process you do not own fails with EPERM,
+// which in a shell is indistinguishable from the ESRCH that means "no such
+// process" — so a liveness check built on kill alone declared every live
+// root-owned worker dead, skipped the wait, and left the banner and the cd
+// exactly as broken as before the fix. Every test above holds its lock with a
+// process the test itself spawned, which it can always signal, so all of them
+// passed against the broken check.
+//
+// pid 1 is the standing example of the shape that broke it: always alive, never
+// signalable by an ordinary user, and — the part the fix relies on — always
+// present in /proc. The lock is never released, so this asserts the hook waited
+// out its whole (deliberately short) budget rather than returning at once.
+func TestLoginWaitsOnAWorkerItCannotSignal(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// /proc is the mechanism under test and pid 1 is only unsignalable
+		// where this test is not run as root. Both hold on the CI runner and
+		// in a guest; neither is worth faking elsewhere.
+		t.Skip("needs /proc and a pid 1 this user cannot signal")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which can signal pid 1")
+	}
+	tree, home, run := loginTree(t)
+	lock := filepath.Join(run, "repos.lock")
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, elapsed := runLoginHook(t, tree, home, run, "1")
+	if !strings.Contains(out, "finishing clone") {
+		t.Errorf("did not wait for a live worker it cannot signal: %q", out)
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("returned in %v; the worker is alive, so the budget should have been spent", elapsed)
+	}
+	// The lock never clears here, so the hook must hand over the prompt with an
+	// honest sentence rather than pretending the clone finished.
+	if !strings.Contains(out, "still working") {
+		t.Errorf("a timed-out wait must say so: %q", out)
 	}
 }
 

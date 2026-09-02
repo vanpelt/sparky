@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=23
+IDENTITY_REV=24
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -1301,14 +1301,24 @@ sparkbox_repo_wait=${SPARKBOX_REPOS_WAIT_SECS:-25}
 case $- in
   *i*)
     # A lock whose pid is gone is a worker that died; waiting on it would burn
-    # the whole budget for nothing. Same staleness rule the worker itself uses
-    # when it decides whether to break a lock (see sparkbox-repos).
+    # the whole budget for nothing.
+    #
+    # /proc FIRST, and kill -0 only as the fallback. The worker is a systemd
+    # unit running as root while this shell is the login user, and `kill -0`
+    # against a process you do not own fails with EPERM — which is
+    # indistinguishable, in a shell, from the ESRCH that means "no such
+    # process". Asking kill alone therefore declared every live root-owned
+    # worker dead, skipped the wait entirely, and left the banner and the cd
+    # exactly as broken as they were before. /proc needs no permission to
+    # stat. The kill fallback is kept for anywhere without /proc, where the
+    # only workers are same-user ones it can answer for correctly.
     if [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ] &&
        [ -d "$sparkbox_repo_lock" ]; then
       sparkbox_repo_pid=$(cat "$sparkbox_repo_lock/pid" 2>/dev/null || true)
       case "$sparkbox_repo_pid" in
         ''|*[!0-9]*) sparkbox_repo_live= ;;
-        *) if kill -0 "$sparkbox_repo_pid" 2>/dev/null; then
+        *) if [ -d "/proc/$sparkbox_repo_pid" ] ||
+              kill -0 "$sparkbox_repo_pid" 2>/dev/null; then
              sparkbox_repo_live=1
            else
              sparkbox_repo_live=
