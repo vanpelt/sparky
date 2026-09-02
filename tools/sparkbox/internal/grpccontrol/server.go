@@ -296,6 +296,19 @@ func (s *Server) GetVitals(ctx context.Context, request *nodev1.GetVitalsRequest
 		out.PortServices = append(out.PortServices, &nodev1.PortService{Port: int32(service.Port), Name: service.Name})
 	}
 	out.PortsChecked = vitals.PortsChecked
+	if hm := vitals.HiveMind; hm != nil {
+		out.Hivemind = &nodev1.HiveMindLive{
+			SessionTitle: hm.SessionTitle,
+			SessionUrl:   hm.SessionURL,
+		}
+		if p := hm.Presence; p != nil {
+			out.Hivemind.Presence = p.State
+			out.Hivemind.ObservedAt = timestamp(p.ObservedAt)
+			if p.ProtectUntil != nil {
+				out.Hivemind.ProtectUntil = timestamp(*p.ProtectUntil)
+			}
+		}
+	}
 	return out, nil
 }
 

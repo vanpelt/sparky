@@ -132,6 +132,8 @@ message Sandbox {
   bool turbo = 19;
   // Stable workload identity. Unlike name, this survives sandbox rename.
   string id = 20;
+  repeated RepoStatus repos = 21;
+  google.protobuf.Timestamp repo_status_at = 22;
 }
 
 enum SandboxState {
@@ -209,6 +211,19 @@ message Vitals {
   repeated int32 listening_ports = 5;
   bool ports_checked = 6;
   repeated PortService port_services = 7;
+  HiveMindLive hivemind = 8;
+}
+
+// HiveMindLive is what the machine holding a VM currently knows about the agent
+// working in it. presence is HiveMind's own word ("idle", "waiting", ...) and
+// is passed through rather than mapped to an enum, so a value HiveMind adds
+// reaches a person without a redeploy of this schema.
+message HiveMindLive {
+  string presence = 1;
+  google.protobuf.Timestamp protect_until = 2;
+  google.protobuf.Timestamp observed_at = 3;
+  string session_title = 4;
+  string session_url = 5;
 }
 
 // OperationIdentity is required on every mutation. request_hash is a SHA-256
@@ -474,4 +489,18 @@ message DurationRange {
 message PortService {
   int32 port = 1;
   string name = 2;
+}
+
+// RepoStatus is appended to preserve every existing message index in the
+// generated compatibility descriptors. It is advisory guest-observed state;
+// the gateway never uses it for ownership or authorization.
+message RepoStatus {
+  string slug = 1;
+  string path = 2;
+  string branch = 3;
+  string upstream = 4;
+  int64 ahead = 5;
+  int64 behind = 6;
+  bool dirty = 7;
+  string state = 8;
 }

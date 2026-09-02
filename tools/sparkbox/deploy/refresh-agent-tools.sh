@@ -78,6 +78,11 @@ TOOLS_DIR=${TOOLS_DIR:-/srv/sparkbox/tools}
 # lands it next to this script. Templates published before workload identity
 # existed get it here, with no ~65-minute image rebuild.
 GUEST_IDENTITY=${GUEST_IDENTITY:-/usr/local/sbin/sparkbox-install-guest-identity.sh}
+# Optional canonical static banner for trusted base templates. CKS supplies the
+# repository's images/motd here because its fast image build reuses a released
+# rootfs rather than rebuilding images/Dockerfile. Snapshot templates remain
+# excluded by the selection loop below.
+GUEST_MOTD_FILE=${GUEST_MOTD_FILE:-}
 # Optional public-only fleet key to bake into trusted operator templates. CKS
 # uses this from a read-only Secret so the long-lived VM controller never has
 # to loop-mount a guest disk merely to install authorized_keys.
@@ -183,6 +188,12 @@ esac
 # installing nothing of the sort.
 TOOLS_REV="claude=$CLAUDE_VER codex=$CODEX_TAG pi=$PI_TAG hivemind=$HM_VER agentbrowser=$AB_VER"
 WANT="$TOOLS_REV identity=$IDENTITY_REV agentenv=$AGENT_ENV_REV"
+if [ -n "$GUEST_MOTD_FILE" ]; then
+  [ -f "$GUEST_MOTD_FILE" ] \
+    || { echo "guest motd file does not exist: $GUEST_MOTD_FILE" >&2; exit 1; }
+  MOTD_SHA=$(sha256sum "$GUEST_MOTD_FILE" | awk '{print $1}')
+  WANT="$WANT motd=$MOTD_SHA"
+fi
 if [ -n "$GATEWAY_PUBLIC_KEY_FILE" ]; then
   [ -f "$GATEWAY_PUBLIC_KEY_FILE" ] \
     || { echo "gateway public key file does not exist: $GATEWAY_PUBLIC_KEY_FILE" >&2; exit 1; }
@@ -1083,7 +1094,7 @@ for tpl in "${STALE[@]}"; do
   # Workload identity: the token unit + timer that keep
   # /var/run/secrets/hivemind/token fresh, so `hivemind start` federates with
   # no secret in the guest and nothing to paste.
-  "$GUEST_IDENTITY" "$MNT"
+  GUEST_MOTD_FILE="$GUEST_MOTD_FILE" "$GUEST_IDENTITY" "$MNT"
   # Stamp LAST, inside the copy, and only once everything above succeeded — so a
   # run that dies mid-patch leaves a template that still reads as stale and gets
   # redone, rather than one that claims tools it never received. `set -e` makes

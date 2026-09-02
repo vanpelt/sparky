@@ -310,6 +310,7 @@ func cloneSandbox(box *host.Sandbox) *host.Sandbox {
 		return nil
 	}
 	out := *box
+	out.Repos = append([]host.RepoStatus(nil), box.Repos...)
 	return &out
 }
 
@@ -732,7 +733,7 @@ func sandboxRowFromProto(wire *nodev1.Sandbox) nodelink.SandboxRow {
 	if wire == nil {
 		return nodelink.SandboxRow{}
 	}
-	return nodelink.SandboxRow{
+	row := nodelink.SandboxRow{
 		ID: wire.GetId(), Name: wire.GetName(), Owner: wire.GetOwner(), Image: wire.GetImage(),
 		State: sandboxStateFromProto(wire.GetState()), VCPUs: wire.GetVcpus(),
 		MemMB: wire.GetMemoryMb(), DiskMB: wire.GetDiskMb(),
@@ -741,8 +742,16 @@ func sandboxRowFromProto(wire *nodev1.Sandbox) nodelink.SandboxRow {
 		KeyFP: wire.GetKeyFingerprint(), NetRxBytes: wire.GetNetworkRxBytes(),
 		NetTxBytes: wire.GetNetworkTxBytes(), ArchivedAt: protoTime(wire.GetArchivedAt()),
 		CreatedAt: protoTime(wire.GetCreatedAt()), LastActive: protoTime(wire.GetLastActive()),
-		Turbo: wire.GetTurbo(),
+		Turbo:        wire.GetTurbo(),
+		RepoStatusAt: protoTime(wire.GetRepoStatusAt()),
 	}
+	for _, repo := range wire.GetRepos() {
+		row.Repos = append(row.Repos, host.RepoStatus{
+			Slug: repo.GetSlug(), Path: repo.GetPath(), Branch: repo.GetBranch(), Upstream: repo.GetUpstream(),
+			Ahead: repo.GetAhead(), Behind: repo.GetBehind(), Dirty: repo.GetDirty(), State: repo.GetState(),
+		})
+	}
+	return row
 }
 
 func snapshotRowFromProto(wire *nodev1.Snapshot) nodelink.SnapshotRow {
@@ -790,6 +799,7 @@ func grpcBox(node string, row nodelink.SandboxRow) *host.Sandbox {
 		NetRxBytes: row.NetRxBytes, NetTxBytes: row.NetTxBytes,
 		ArchivedAt: row.ArchivedAt, DiskMB: row.DiskMB,
 		DiskTotalMB: row.DiskTotalMB, Node: node,
+		Repos: append([]host.RepoStatus(nil), row.Repos...), RepoStatusAt: row.RepoStatusAt,
 	}
 	box.HostIP = Host(box.Name, node)
 	box.SSHAddr = net.JoinHostPort(box.HostIP, SSHPort)
@@ -1086,10 +1096,28 @@ func (g *GRPCControl) Vitals(ctx context.Context, name string) (host.Vitals, err
 	for _, service := range wire.GetPortServices() {
 		services = append(services, host.PortService{Port: int(service.GetPort()), Name: service.GetName()})
 	}
-	return host.Vitals{
+	out := host.Vitals{
 		CPUSeconds: &cpu, MemUsedMB: &memory, NetRxBytes: &rx, NetTxBytes: &tx,
 		ListeningPorts: ports, PortServices: services, PortsChecked: wire.GetPortsChecked(),
-	}, nil
+	}
+	if hm := wire.GetHivemind(); hm != nil {
+		// Bounded like every other node-supplied display string; the URL's
+		// scheme is checked where it becomes an href, not here.
+		presence := &host.HiveMindPresence{
+			State:      ctlops.SafeText(hm.GetPresence(), maxDisplayText),
+			ObservedAt: hm.GetObservedAt().AsTime(),
+		}
+		if until := hm.GetProtectUntil(); until != nil {
+			at := until.AsTime()
+			presence.ProtectUntil = &at
+		}
+		out.HiveMind = &host.HiveMindLive{
+			Presence:     presence,
+			SessionTitle: ctlops.SafeText(hm.GetSessionTitle(), maxDisplayText),
+			SessionURL:   ctlops.SafeText(hm.GetSessionUrl(), maxDisplayText),
+		}
+	}
+	return out, nil
 }
 
 func (g *GRPCControl) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {

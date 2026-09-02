@@ -459,15 +459,13 @@ and the login stays in `$HOME`, because a shell that opens in the wrong
 repository is worse than one in `$HOME`: every agent started from it inherits
 that directory, and it looks deliberate.
 
-The banner ends with the same directory the shell started in, or names the
-parent the checkouts share, or points at the problem — a path is no use for a
-clone that failed:
+The banner lists every checkout with its path, current branch, and compact git
+markers. The shell still starts in the marked checkout when there is one:
 
 ```
-repos: 1 ready in ~/hivemind
-repos: 2 ready in ~/src/wandb/hivemind      the launch link's repository
-repos: 3 ready in ~/src
-repos: 2 ready, 1 failed — run `sparkbox repos`
+repos:
+  wandb/hivemind              ~/src/wandb/hivemind              feat/x
+  wandb/agentstream           ~/src/wandb/agentstream           main  [↑2 dirty]
 ```
 
 The gap this leaves: a launch link with no `?ref=` on a repository whose

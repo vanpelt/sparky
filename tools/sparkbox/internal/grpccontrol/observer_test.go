@@ -27,7 +27,9 @@ func TestEventObserverPersistsManagerEventsInOrder(t *testing.T) {
 	defer cancel()
 	observer := NewEventObserver(ctx, journal, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	observer.SandboxChanged(&host.Sandbox{Name: "demo"}, "resumed")
+	observer.SandboxChanged(&host.Sandbox{Name: "demo", Repos: []host.RepoStatus{{
+		Slug: "wandb/agentstream", Path: "/home/sparky/agentstream", Ahead: 2, State: "stale",
+	}}}, "resumed")
 	observer.SandboxGone("demo")
 
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -53,8 +55,11 @@ func TestEventObserverPersistsManagerEventsInOrder(t *testing.T) {
 			if err := proto.Unmarshal(event.Payload, &decoded); err != nil {
 				t.Fatal(err)
 			}
-			if wantRevision == 1 && decoded.GetSandboxChanged().GetSandbox().GetName() != "demo" {
-				t.Fatalf("changed event = %v", &decoded)
+			if wantRevision == 1 {
+				box := decoded.GetSandboxChanged().GetSandbox()
+				if box.GetName() != "demo" || len(box.GetRepos()) != 1 || box.GetRepos()[0].GetAhead() != 2 {
+					t.Fatalf("changed event = %v", &decoded)
+				}
 			}
 			if wantRevision == 2 && decoded.GetSandboxGone().GetName() != "demo" {
 				t.Fatalf("gone event = %v", &decoded)

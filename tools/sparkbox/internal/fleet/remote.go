@@ -151,26 +151,28 @@ func (r *remoteNode) Capacity() host.NodeCapacity { return r.client.Capacity() }
 func (r *remoteNode) record(row nodelink.SandboxRow, name, owner string) *host.Sandbox {
 	node := r.client.Name()
 	b := &host.Sandbox{
-		ID:          safeSandboxID(row.ID),
-		Name:        name,
-		Owner:       owner,
-		Image:       ctlops.SafeText(row.Image, maxDisplayText),
-		VCPUs:       row.VCPUs,
-		MemMB:       row.MemMB,
-		State:       safeState(row.State),
-		SSHUser:     ctlops.SafeText(row.SSHUser, maxDisplayText),
-		CreatedAt:   row.CreatedAt,
-		LastActive:  row.LastActive,
-		Pinned:      row.Pinned,
-		Ballooned:   row.Ballooned,
-		KeyFP:       ctlops.SafeText(row.KeyFP, maxDisplayText),
-		NetRxBytes:  row.NetRxBytes,
-		NetTxBytes:  row.NetTxBytes,
-		ArchivedAt:  row.ArchivedAt,
-		DiskMB:      row.DiskMB,
-		DiskTotalMB: row.DiskTotalMB,
-		Turbo:       row.Turbo,
-		Node:        node,
+		ID:           safeSandboxID(row.ID),
+		Name:         name,
+		Owner:        owner,
+		Image:        ctlops.SafeText(row.Image, maxDisplayText),
+		VCPUs:        row.VCPUs,
+		MemMB:        row.MemMB,
+		State:        safeState(row.State),
+		SSHUser:      ctlops.SafeText(row.SSHUser, maxDisplayText),
+		CreatedAt:    row.CreatedAt,
+		LastActive:   row.LastActive,
+		Pinned:       row.Pinned,
+		Ballooned:    row.Ballooned,
+		KeyFP:        ctlops.SafeText(row.KeyFP, maxDisplayText),
+		NetRxBytes:   row.NetRxBytes,
+		NetTxBytes:   row.NetTxBytes,
+		Repos:        append([]host.RepoStatus(nil), row.Repos...),
+		RepoStatusAt: row.RepoStatusAt,
+		ArchivedAt:   row.ArchivedAt,
+		DiskMB:       row.DiskMB,
+		DiskTotalMB:  row.DiskTotalMB,
+		Turbo:        row.Turbo,
+		Node:         node,
 	}
 	b.HostIP = Host(b.Name, node)
 	b.SSHAddr = net.JoinHostPort(b.HostIP, SSHPort)
@@ -355,7 +357,7 @@ func (r *remoteNode) Vitals(ctx context.Context, name string) (host.Vitals, erro
 	// clamp that would be honest — a machine that lies about its own CPU seconds
 	// produces a wrong sparkline for its own sandbox, which is the whole of the
 	// damage, and a plausible-looking invented ceiling would be worse.
-	return host.Vitals{
+	out := host.Vitals{
 		CPUSeconds:     resp.CPUSeconds,
 		MemUsedMB:      resp.MemUsedMB,
 		NetRxBytes:     resp.NetRxBytes,
@@ -363,7 +365,23 @@ func (r *remoteNode) Vitals(ctx context.Context, name string) (host.Vitals, erro
 		ListeningPorts: append([]int(nil), resp.ListeningPorts...),
 		PortServices:   append([]host.PortService(nil), resp.PortServices...),
 		PortsChecked:   resp.PortsChecked,
-	}, nil
+	}
+	if hm := resp.HiveMind; hm != nil {
+		// Text a node supplied, bounded here the way every other display string
+		// crossing this boundary is. The URL keeps its scheme check at the point
+		// it becomes an href rather than being dropped here, so a node sending a
+		// nonsense link costs a missing link and not a missing session.
+		out.HiveMind = &host.HiveMindLive{
+			SessionTitle: ctlops.SafeText(hm.SessionTitle, maxDisplayText),
+			SessionURL:   ctlops.SafeText(hm.SessionURL, maxDisplayText),
+			Presence: &host.HiveMindPresence{
+				ObservedAt:   hm.ObservedAt,
+				State:        ctlops.SafeText(hm.Presence, maxDisplayText),
+				ProtectUntil: hm.ProtectUntil,
+			},
+		}
+	}
+	return out, nil
 }
 
 func (r *remoteNode) Templates() []*host.Snapshot {

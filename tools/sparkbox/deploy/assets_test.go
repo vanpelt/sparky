@@ -120,6 +120,15 @@ func installGuestPayload(t *testing.T, tree string) {
 	}
 }
 
+func installGuestPayloadWithMOTD(t *testing.T, tree, motd string) {
+	t.Helper()
+	cmd := exec.Command("bash", "install-guest-identity.sh", tree)
+	cmd.Env = append(os.Environ(), "GUEST_MOTD_FILE="+motd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install guest payload with motd: %v\n%s", err, out)
+	}
+}
+
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -194,21 +203,25 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 			t.Errorf("guest CLI missing %q", want)
 		}
 	}
-	// The usage line is the only discovery surface an agent in a VM has for
-	// these verbs, so a verb that is not in it is a verb nobody finds.
-	if !strings.Contains(cli, "update-tools [--check]>") {
-		t.Errorf("guest CLI usage line does not mention update-tools:\n%s", cli)
-	}
-	if !strings.Contains(cli, "pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|") {
-		t.Errorf("guest CLI usage line does not mention pause or snapshot:\n%s", cli)
-	}
-	if !strings.Contains(cli, "usage: sparkbox <whoami [--json]|") {
-		t.Errorf("guest CLI usage line does not mention whoami:\n%s", cli)
+	// The human-readable help is also the discovery surface for agents. Keep
+	// commands one per line and document stable exit codes so it remains easy to
+	// parse without resurrecting the old unreadable one-line usage blob.
+	for _, want := range []string{
+		"sparkbox — manage this sandbox from inside the VM",
+		"status [--json]",
+		"snapshot [OPTIONS] [TAG [NAME]]",
+		"whoami [--json]",
+		"update-tools [--check]",
+		"Exit codes (stable for scripts and agents):",
+	} {
+		if !strings.Contains(cli, want) {
+			t.Errorf("guest CLI help does not mention %q:\n%s", want, cli)
+		}
 	}
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=21\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=22\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -475,6 +488,29 @@ func TestGuestPayloadRePatchesWithoutAccumulating(t *testing.T) {
 	}
 }
 
+func TestGuestPayloadInstallsHostSuppliedMOTD(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	motd := filepath.Join(t.TempDir(), "motd")
+	want := "the CKS feature banner\nRun `sparkbox` for commands.\n"
+	if err := os.WriteFile(motd, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First install replaces the released rootfs banner. A later install must
+	// also replace a dynamic status line left in /etc/motd, while keeping the
+	// canonical base clean for the repo worker's next rewrite.
+	installGuestPayloadWithMOTD(t, root, motd)
+	if err := os.WriteFile(filepath.Join(root, "etc/motd"), []byte(want+"repos: old status\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installGuestPayloadWithMOTD(t, root, motd)
+	for _, name := range []string{"etc/motd", "etc/sparkbox/motd.base"} {
+		if got := guestFile(t, root, name); got != want {
+			t.Errorf("%s = %q, want canonical banner %q", name, got, want)
+		}
+	}
+}
+
 // TestRepoCloneNeverBlocksTheFirstAttach is the one assertion in this file that
 // exists because the mistake has already been made. sparkbox-net.service
 // carries Before=ssh.service because it generates the host keys sshd needs, and
@@ -509,6 +545,21 @@ func TestRepoCloneNeverBlocksTheFirstAttach(t *testing.T) {
 	// enable` against; the symlink IS the enablement.
 	if !strings.Contains(script, "multi-user.target.wants/sparkbox-repos.service") {
 		t.Error("sparkbox-repos.service is never symlinked into multi-user.target.wants, so it never runs at boot")
+	}
+	report := heredocBody(t, script, "sparkbox-repos-report.service\" <<'EOF'\n")
+	timer := heredocBody(t, script, "sparkbox-repos-report.timer\" <<'EOF'\n")
+	for _, want := range []string{"Type=oneshot", "ExecStart=/usr/local/sbin/sparkbox-repos report"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("sparkbox-repos-report.service missing %q:\n%s", want, report)
+		}
+	}
+	for _, want := range []string{"OnUnitInactiveSec=5min", "RandomizedDelaySec=30s"} {
+		if !strings.Contains(timer, want) {
+			t.Errorf("sparkbox-repos-report.timer missing %q:\n%s", want, timer)
+		}
+	}
+	if !strings.Contains(script, "timers.target.wants/sparkbox-repos-report.timer") {
+		t.Error("sparkbox-repos-report.timer is not enabled")
 	}
 }
 
@@ -1454,6 +1505,23 @@ func TestCKSGuestHivemindIsAFlagNotAHandEdit(t *testing.T) {
 	}
 	if !strings.Contains(string(RefreshToolsScript), "HIVEMIND_MANIFEST:-https://") {
 		t.Error("refresh-agent-tools.sh no longer defaults HIVEMIND_MANIFEST, so an unpinned deploy resolves nothing")
+	}
+}
+
+func TestCKSImageRefreshesTheCanonicalGuestMOTD(t *testing.T) {
+	containerfile := string(readFile(t, "kubernetes/Containerfile"))
+	entrypoint := string(readFile(t, "kubernetes/entrypoint.sh"))
+	refresher := string(RefreshToolsScript)
+
+	for name, pair := range map[string][2]string{
+		"container image": {containerfile, "COPY sparkbox/images/motd /usr/local/share/sparkbox/motd"},
+		"prepare step":    {entrypoint, "GUEST_MOTD_FILE=/usr/local/share/sparkbox/motd"},
+		"template stamp":  {refresher, `WANT="$WANT motd=$MOTD_SHA"`},
+		"guest installer": {refresher, `GUEST_MOTD_FILE="$GUEST_MOTD_FILE" "$GUEST_IDENTITY" "$MNT"`},
+	} {
+		if !strings.Contains(pair[0], pair[1]) {
+			t.Errorf("%s does not carry the canonical MOTD through the CKS template refresh: missing %q", name, pair[1])
+		}
 	}
 }
 

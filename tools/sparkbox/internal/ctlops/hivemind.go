@@ -4,12 +4,13 @@ package ctlops
 //
 // The query is live rather than served from the presence monitor's cache, and
 // the difference is worth stating because the monitor already holds a snapshot.
-// The monitor refreshes the catalog every ten minutes, which is the right
-// cadence for something whose only consumer is a reaper lease and quite the
-// wrong one for a person who just ran an agent and is asking whether it synced.
-// Worse, the cache lives on the machine holding the VM, so serving from it
-// would make this answerable only for local sandboxes — while the question
-// costs one HTTP round trip from wherever the control plane happens to run.
+// That cache is refreshed on a budget — every minute while HiveMind reports a
+// live agent, every ten while it does not — which is the right cadence for a
+// status light and the wrong one for a person who just ran an agent and is
+// asking whether it synced. Worse, the cache lives on the machine holding the
+// VM, so serving from it would make this answerable only for local sandboxes —
+// while the question costs one HTTP round trip from wherever the control plane
+// happens to run.
 //
 // Authorization is the same as everywhere else in this package on the way in
 // (owned() decides whose sandbox this is), and then narrower than anywhere else
@@ -18,6 +19,7 @@ package ctlops
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -57,6 +59,24 @@ func (o *Ops) Sessions(
 		return host.HiveMindSessionSnapshot{}, err
 	}
 	if box.ID == "" {
+		// Two very different things reach here, and they used to give the same
+		// permanent-sounding answer.
+		//
+		// A sandbox the fleet is rendering from the placement ledger alone has
+		// no ID because the ledger has no such column — so a VM whose machine
+		// has not (yet) reported it reads exactly like a pre-identity record,
+		// and "predates workload identity" is then simply false: it is a live
+		// sandbox, it has an ID, and the answer changes by itself within a poll.
+		// Telling somebody to give up on a transient condition is worse than
+		// telling them nothing.
+		if box.Unreachable {
+			return host.HiveMindSessionSnapshot{}, &Error{
+				Kind: KindUpstream, Op: op, Code: "sandbox_unreported",
+				Msg: fmt.Sprintf(
+					"the machine holding %s has not reported it yet, so there is no "+
+						"identity to ask HiveMind with — try again shortly", name),
+			}
+		}
 		// Pre-identity records. There is no claim to bind a token to, so there
 		// is no question to ask — and saying so beats a 403 from HiveMind.
 		return host.HiveMindSessionSnapshot{}, Invalid(op, "no_sandbox_id",

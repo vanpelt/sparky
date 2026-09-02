@@ -81,8 +81,22 @@ type cachedToken struct {
 // live HiveMind activity, and until when that buys it protection from the
 // reaper. ProtectUntil is nil when nothing is live.
 type Presence struct {
-	ObservedAt   time.Time  `json:"observed_at"`
+	ObservedAt time.Time `json:"observed_at"`
+	// State is HiveMind's own word for what the device is doing — "idle" and
+	// "waiting" are the two seen so far. It is carried as an opaque string on
+	// purpose: this end of the federation should not have to ship a release to
+	// pass through a value HiveMind has started sending.
+	//
+	// It is display only. ProtectUntil is what the reaper honours, and what
+	// Live() answers from, because that field has an agreed meaning on both
+	// sides and expires on its own.
+	State        string     `json:"presence"`
 	ProtectUntil *time.Time `json:"protect_until"`
+}
+
+// Live reports whether this reading says an agent is working.
+func (p Presence) Live() bool {
+	return p.ProtectUntil != nil && p.ProtectUntil.After(time.Now())
 }
 
 type exchangeResponse struct {

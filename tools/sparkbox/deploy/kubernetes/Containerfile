@@ -54,6 +54,7 @@ COPY --from=build /out/sluice /usr/local/bin/sluice
 COPY sparkbox/deploy/sparkbox-net.sh /usr/local/sbin/sparkbox-net.sh
 COPY sparkbox/deploy/refresh-agent-tools.sh /usr/local/sbin/sparkbox-refresh-tools.sh
 COPY sparkbox/deploy/install-guest-identity.sh /usr/local/sbin/sparkbox-install-guest-identity.sh
+COPY sparkbox/images/motd /usr/local/share/sparkbox/motd
 COPY sparkbox/deploy/sluice-allowlist.txt /etc/sparkbox/sluice-allowlist.txt
 COPY sparkbox/deploy/kubernetes/entrypoint.sh /usr/local/sbin/sparkbox-kubernetes-entrypoint
 COPY sparkbox/deploy/kubernetes/gateway-entrypoint.sh /usr/local/sbin/sparkbox-gateway-entrypoint

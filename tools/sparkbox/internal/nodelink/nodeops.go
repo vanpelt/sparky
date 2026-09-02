@@ -141,7 +141,7 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 		if err != nil {
 			return VitalsResp{}, err
 		}
-		return VitalsResp{
+		resp := VitalsResp{
 			CPUSeconds:     v.CPUSeconds,
 			MemUsedMB:      v.MemUsedMB,
 			NetRxBytes:     v.NetRxBytes,
@@ -149,7 +149,19 @@ func registerOps(ctx context.Context, conn *Conn, mgr Manager, log *slog.Logger)
 			ListeningPorts: v.ListeningPorts,
 			PortServices:   v.PortServices,
 			PortsChecked:   v.PortsChecked,
-		}, nil
+		}
+		if v.HiveMind != nil {
+			resp.HiveMind = &HiveMindLive{
+				SessionTitle: v.HiveMind.SessionTitle,
+				SessionURL:   v.HiveMind.SessionURL,
+			}
+			if p := v.HiveMind.Presence; p != nil {
+				resp.HiveMind.Presence = p.State
+				resp.HiveMind.ProtectUntil = p.ProtectUntil
+				resp.HiveMind.ObservedAt = p.ObservedAt
+			}
+		}
+		return resp, nil
 	})
 
 	handle(conn, TypeSnapshotCreate, func(ctx context.Context, req SnapshotReq) (SnapshotResp, error) {

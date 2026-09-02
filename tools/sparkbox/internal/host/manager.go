@@ -204,6 +204,13 @@ type Sandbox struct {
 	// because they ride in the state file. Metering for future egress limits.
 	NetRxBytes uint64 `json:"net_rx_bytes,omitempty"`
 	NetTxBytes uint64 `json:"net_tx_bytes,omitempty"`
+	// Repos is the latest git state reported from inside this guest. The host
+	// cannot safely mount or inspect a running guest filesystem, so the
+	// read-only in-guest survey publishes this bounded snapshot through the
+	// tap-authenticated metadata service. It is advisory UI/safety data, never
+	// an authorization input. RepoStatusAt says how fresh the snapshot is.
+	Repos        []RepoStatus `json:"repos,omitempty"`
+	RepoStatusAt time.Time    `json:"repo_status_at,omitempty"`
 	// ArchiveKey is the object-storage key holding this sandbox's rootfs when
 	// State is archived (empty otherwise). ArchivedAt is when it was parked.
 	// Resume-on-connect downloads the archive and cold-boots it (Manager.restore).
@@ -282,6 +289,32 @@ type Sandbox struct {
 	// refreshed from a token-bound API response and deliberately never written
 	// to the sandbox state file.
 	HiveMind *HiveMindSessionSnapshot `json:"-"`
+	// HiveMindPresence is the live half of the same view, and it is separate
+	// from HiveMind because the two are refreshed on very different clocks: the
+	// presence endpoint is cheap and polled every minute, the session catalog is
+	// paginated and polled far less often. Folding them into one field would
+	// force the expensive query onto the cheap one's schedule.
+	//
+	// It is also the only trustworthy answer to "is an agent working here".
+	// A catalog row's State reaches "ended" at a turn boundary while the session
+	// is still open and the device is still live, so a surface that reports
+	// activity must read this and not HiveMind.Sessions[i].State.
+	HiveMindPresence *HiveMindPresence `json:"-"`
+}
+
+// RepoStatus is one checkout as observed by the guest. Ahead and Behind are
+// relative to Upstream after the reporting pass fetched its remote; Dirty
+// includes untracked files. Missing checkouts retain their configured path and
+// report State "missing" with the git-specific fields empty.
+type RepoStatus struct {
+	Slug     string `json:"slug"`
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"`
+	Upstream string `json:"upstream,omitempty"`
+	Ahead    int64  `json:"ahead,omitempty"`
+	Behind   int64  `json:"behind,omitempty"`
+	Dirty    bool   `json:"dirty,omitempty"`
+	State    string `json:"state"`
 }
 
 type HiveMindSession struct {
@@ -301,6 +334,55 @@ type HiveMindSessionSnapshot struct {
 	Sessions   []HiveMindSession `json:"sessions"`
 	TotalCount int               `json:"total_count"`
 	HasMore    bool              `json:"has_more"`
+}
+
+// HiveMindPresence is what the cheap presence endpoint last said about a VM.
+//
+// State is HiveMind's own word for what the device is doing — "idle",
+// "waiting", and whatever else it grows — carried through as an opaque string
+// rather than mapped onto an enum here. A new value HiveMind starts sending
+// should reach a person unchanged, not become "unknown" because this end of the
+// federation has not been redeployed.
+//
+// ProtectUntil is nil when nothing is live. When it is set, something is:
+// it is the same field the reaper honours, so it is the one signal that is
+// authoritative in both directions rather than only descriptive.
+type HiveMindPresence struct {
+	ObservedAt   time.Time  `json:"observed_at"`
+	State        string     `json:"state,omitempty"`
+	ProtectUntil *time.Time `json:"protect_until,omitempty"`
+}
+
+// Recent is the most recently active session in the snapshot, or nil for one
+// holding none. It selects by LastActivityAt rather than trusting the order the
+// API returned, falling back to StartedAt to break a tie.
+//
+// It deliberately does not filter on State. A session reaches "ended" at a turn
+// boundary and is still the one a person is working in — see the note on
+// Sandbox.HiveMindPresence — so filtering here would routinely hide the only
+// session worth naming.
+func (s *HiveMindSessionSnapshot) Recent() *HiveMindSession {
+	if s == nil {
+		return nil
+	}
+	var best *HiveMindSession
+	for i := range s.Sessions {
+		session := &s.Sessions[i]
+		if best == nil || session.LastActivityAt.After(best.LastActivityAt) ||
+			(session.LastActivityAt.Equal(best.LastActivityAt) &&
+				session.StartedAt.After(best.StartedAt)) {
+			best = session
+		}
+	}
+	return best
+}
+
+// Live reports whether HiveMind currently considers this VM's agent to be
+// working. It reads ProtectUntil rather than State because that is the field
+// with a defined meaning on both sides of the federation, and because an
+// expired lease must stop counting as live without anyone re-observing it.
+func (p *HiveMindPresence) Live() bool {
+	return p != nil && p.ProtectUntil != nil && p.ProtectUntil.After(time.Now())
 }
 
 // TurboFactor is how much a turbo boot multiplies a sandbox's CPU and RAM by.
@@ -1167,6 +1249,24 @@ func (m *Manager) ObserveHiveMindSessions(sandboxID string, snapshot HiveMindSes
 		}
 		snapshot.Sessions = cloneHiveMindSessions(snapshot.Sessions)
 		box.HiveMind = &snapshot
+		return
+	}
+}
+
+// ObserveHiveMindPresence records the live reading taken on every poll. It is
+// separate from ObserveHiveMindSessions so the minute-by-minute signal is not
+// held hostage to the catalog's much slower refresh — see Sandbox.HiveMind.
+func (m *Manager) ObserveHiveMindPresence(sandboxID string, presence HiveMindPresence) {
+	if sandboxID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, box := range m.boxes {
+		if box.ID != sandboxID {
+			continue
+		}
+		box.HiveMindPresence = &presence
 		return
 	}
 }
@@ -2417,9 +2517,18 @@ func (m *Manager) MemStats(ctx context.Context, name string) (usedMiB int64, ok 
 	if err != nil {
 		return 0, false
 	}
-	// The guest sees (ceiling − ballooned) RAM; what it's actually using is that
-	// minus what it reports free. This is roughly the host RAM the VM costs.
-	used := memMB - st.ActualMiB - st.FreeMiB
+	// Linux deliberately uses otherwise-idle RAM for reclaimable page cache.
+	// Treating only MemFree as unused makes a healthy cached guest look nearly
+	// full (and paints the consoles red) even though that memory is immediately
+	// available to new work. Firecracker exposes the guest's MemAvailable
+	// estimate, which is the same honest denominator `free` prints. Older
+	// balloon implementations may leave it zero, so retain FreeMiB as a
+	// compatibility fallback.
+	unused := st.AvailableMiB
+	if unused <= 0 {
+		unused = st.FreeMiB
+	}
+	used := memMB - st.ActualMiB - unused
 	if used < 0 {
 		used = 0
 	}
@@ -2501,6 +2610,24 @@ func (m *Manager) SetPinned(name string, pinned bool) error {
 	} else {
 		m.observe(b, "unpinned")
 	}
+	return m.save()
+}
+
+// SetRepoStatus records the latest bounded, read-only survey published by a
+// running guest. The metadata service has already authenticated the caller by
+// tap address and validated every field. Keeping the write on Manager makes it
+// durable on a standalone host and lets the ordinary inventory observer carry
+// the same advisory state from a fleet node to its gateway.
+func (m *Manager) SetRepoStatus(name string, repos []RepoStatus, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.boxes[name]
+	if !ok {
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+	b.Repos = append([]RepoStatus(nil), repos...)
+	b.RepoStatusAt = at.UTC()
+	m.observe(b, "repo-status")
 	return m.save()
 }
 
@@ -3284,6 +3411,7 @@ func (m *Manager) mergeActivityLocked() map[string]time.Time {
 
 func copyOf(b *Sandbox) *Sandbox {
 	c := *b
+	c.Repos = append([]RepoStatus(nil), b.Repos...)
 	if b.HiveMind != nil {
 		snapshot := *b.HiveMind
 		snapshot.Sessions = cloneHiveMindSessions(b.HiveMind.Sessions)
@@ -3326,6 +3454,7 @@ func (b *Sandbox) Public() *Sandbox {
 		return nil
 	}
 	c := *b
+	c.Repos = append([]RepoStatus(nil), b.Repos...)
 	c.SSHAddr, c.HostIP, c.GuestV6 = "", "", ""
 	return &c
 }

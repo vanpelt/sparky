@@ -74,6 +74,45 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+func TestSSHStreamActivityMarksRealTrafficAndThrottles(t *testing.T) {
+	marks := 0
+	activity := &streamActivity{
+		interval: time.Hour,
+		mark:     func() { marks++ },
+	}
+
+	if _, err := io.ReadAll(activity.reader(strings.NewReader("typed"))); err != nil {
+		t.Fatal(err)
+	}
+	if marks != 1 {
+		t.Fatalf("input traffic produced %d marks, want 1", marks)
+	}
+	if _, err := activity.writer(io.Discard).Write([]byte("output")); err != nil {
+		t.Fatal(err)
+	}
+	if marks != 1 {
+		t.Fatalf("traffic inside the throttle window produced %d marks, want 1", marks)
+	}
+
+	activity.mu.Lock()
+	activity.last = time.Now().Add(-2 * activity.interval)
+	activity.mu.Unlock()
+	if _, err := activity.writer(io.Discard).Write([]byte("later output")); err != nil {
+		t.Fatal(err)
+	}
+	if marks != 2 {
+		t.Fatalf("output after the throttle window produced %d marks, want 2", marks)
+	}
+
+	empty := &streamActivity{interval: time.Hour, mark: func() { marks++ }}
+	if _, err := io.ReadAll(empty.reader(strings.NewReader(""))); err != nil {
+		t.Fatal(err)
+	}
+	if marks != 2 {
+		t.Fatalf("an empty stream changed marks to %d, want 2", marks)
+	}
+}
+
 // TestHangUpRestoresTerminal is the fix for the wedged-terminal bug: a PTY
 // client must receive the escape sequences that undo mouse reporting and the
 // alternate screen, because the program that turned them on is being killed

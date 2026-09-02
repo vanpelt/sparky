@@ -409,7 +409,7 @@ func TestPageCarriesCSPAndTerminal(t *testing.T) {
 		t.Errorf("X-Frame-Options = %q, want DENY", got)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"/assets/xterm.js", "/assets/xterm.css", "/assets/sparkbox-logo.png", "sparkbox.terminal.v1", "id=\"term\"", "id=\"hivemind-session\"", "id=\"proxy-link\"", "id=\"proxy-dlg\"", "listening_ports", "port_services"} {
+	for _, want := range []string{"/assets/xterm.js", "/assets/xterm.css", "/assets/sparkbox-logo.png", "sparkbox.terminal.v1", "id=\"term\"", "id=\"hivemind-session\"", "id=\"proxy-link\"", "id=\"proxy-dlg\"", "listening_ports", "port_services", "window.open(location.href"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
 		}

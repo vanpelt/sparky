@@ -359,6 +359,21 @@ func TestRepoStatusAnswersWithoutTheNetwork(t *testing.T) {
 	}
 }
 
+// The periodic report fetches enough to know the checkout has drifted but
+// never moves its branch. Only an explicit sync owns the fast-forward.
+func TestRepoReportFetchesWithoutMovingTheWorkingTree(t *testing.T) {
+	w := newRepoWorld(t)
+	before := w.head()
+	w.pushToRemote("new-upstream.txt")
+	w.want(t, w.run("report"), "stale", "1 behind")
+	if got := w.head(); got != before {
+		t.Errorf("fetch-only report moved HEAD: %s -> %s", before, got)
+	}
+	if got := w.git(w.checkout, "rev-list", "--count", "HEAD..origin/main"); got != "1" {
+		t.Errorf("report did not refresh the remote-tracking branch: behind=%s", got)
+	}
+}
+
 // A remote that cannot be reached is a state, not a failure: the checkout is
 // fine, it is the answer about it that is missing, and the next sync repairs it.
 func TestRepoRefreshSurvivesAnUnreachableRemote(t *testing.T) {
@@ -590,8 +605,9 @@ func TestRepoSyncPublishesWhereTheCheckoutIs(t *testing.T) {
 	w.run("sync")
 
 	banner := guestFile(t, w.root, "etc/motd")
-	if !strings.Contains(banner, "repos: 1 ready in ~/hivemind") {
-		t.Errorf("the login banner does not name the checkout:\n%s", banner)
+	if !strings.Contains(banner, "repos:") || !strings.Contains(banner, "wandb/hivemind") ||
+		!strings.Contains(banner, "~/hivemind") || !strings.Contains(banner, "main") {
+		t.Errorf("the login banner does not name the checkout, path, and branch:\n%s", banner)
 	}
 	// The baked banner is still above it — the rewrite is (image banner +
 	// status) and never one replacing the other.
@@ -663,8 +679,8 @@ func TestRepoSyncLandsInTheRepositoryTheBoxWasMadeFor(t *testing.T) {
 		t.Errorf("repos.dir = %q, want the named repository at %q", got, w.checkout)
 	}
 	banner := guestFile(t, w.root, "etc/motd")
-	if !strings.Contains(banner, "repos: 2 ready in ~/hivemind") {
-		t.Errorf("the banner does not name where the shell will start:\n%s", banner)
+	if strings.Count(banner, "wandb/") < 2 || !strings.Contains(banner, "~/hivemind") {
+		t.Errorf("the banner does not list both repositories and their paths:\n%s", banner)
 	}
 	// The flag must not have eaten the fields after it.
 	if line, _ := w.runCode("status"); !strings.Contains(line, "read") {
@@ -693,8 +709,8 @@ func TestRepoSyncWillNotGuessBetweenTwoNamedRepositories(t *testing.T) {
 	}
 }
 
-// The banner's location half is silent when something is wrong, because a
-// pointer at the failure is worth more than a path.
+// A checkout that needs attention keeps its path visible and calls out the
+// state inline; hiding the path makes the warning harder to act on.
 func TestRepoBannerPointsAtTheProblemRatherThanThePath(t *testing.T) {
 	w := newRepoWorld(t)
 	w.write(filepath.Join(w.checkout, "scratch.txt"), "notes\n")
@@ -702,11 +718,9 @@ func TestRepoBannerPointsAtTheProblemRatherThanThePath(t *testing.T) {
 	w.want(t, w.run("sync"), "stale")
 
 	banner := guestFile(t, w.root, "etc/motd")
-	if !strings.Contains(banner, "run `sparkbox repos`") {
-		t.Errorf("the banner does not point at the report:\n%s", banner)
-	}
-	if strings.Contains(banner, "~/hivemind") {
-		t.Errorf("the banner named a path for a checkout that needs a look:\n%s", banner)
+	if !strings.Contains(banner, "~/hivemind") || !strings.Contains(banner, "dirty") ||
+		!strings.Contains(banner, "↓1") {
+		t.Errorf("the banner does not identify the checkout and why it needs attention:\n%s", banner)
 	}
 }
 

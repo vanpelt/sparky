@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=21
+IDENTITY_REV=22
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -191,6 +191,56 @@ chmod 0755 "$MNT/usr/local/sbin/sparkbox-git-identity"
 sed -e "s/@@META_PORT@@/$META_PORT/g" > "$MNT/usr/local/bin/sparkbox" <<'EOF'
 #!/bin/sh
 set -eu
+
+sparkbox_help() {
+  cat <<'HELP'
+sparkbox — manage this sandbox from inside the VM
+
+Usage:
+  sparkbox COMMAND [ARGS]
+
+Sandbox lifecycle:
+  status [--json]                Show resource, lifecycle, and repository state
+  pin | unpin                    Keep it warm, or restore idle suspension
+  pause                          Suspend now (the current shell will end)
+  snapshot [OPTIONS] [TAG [NAME]]
+                                 Capture this VM as a reusable template
+
+Repositories:
+  repos                          List each checkout, path, branch, and git state
+  repos sync                     Fetch and safely fast-forward clean checkouts
+  repos survey                   Preview repo state included in a snapshot
+  repo authorize OWNER/NAME      Attribute pushes and PRs to your GitHub user
+
+Identity and networking:
+  whoami [--json]                Show the sandbox owner and linked GitHub user
+  make-public | make-private     Change the default web route visibility
+  set-port PORT                  Point the default web route at PORT (1–65535)
+
+Tools:
+  update-tools [--check]         Update bundled agent CLIs, or check versions
+  docs [docs|proxy|dev-environment]
+                                 Read bundled sandbox and proxy guidance
+
+Options:
+  -h, --help                     Show this help
+
+Exit codes (stable for scripts and agents):
+  0 success · 1 declined · 2 invalid usage · 3 denied/not found
+  4 conflict/busy/rate limited · 5 unsupported · 75 temporary/ambiguous
+
+Examples:
+  sparkbox repos
+  sparkbox repos sync
+  sparkbox snapshot cuda-base --yes
+  sparkbox set-port 3000
+HELP
+}
+
+case "${1:-}" in
+  ''|-h|--help|help) sparkbox_help; exit 0 ;;
+esac
+
 GW=$(ip -4 route show default | awk '{print $3; exit}')
 [ -n "$GW" ] || { echo "sparkbox: no default gateway" >&2; exit 1; }
 META="http://$GW:@@META_PORT@@"
@@ -257,7 +307,13 @@ _call() {
 case "${1:-}" in
   pin)    exec curl -fsS --max-time 10 -X POST "$META/self/pin" ;;
   unpin)  exec curl -fsS --max-time 10 -X POST "$META/self/unpin" ;;
-  status) exec curl -fsS --max-time 10 "$META/self" ;;
+  status)
+    case "${2:-}" in
+      '')     exec curl -fsS --max-time 10 "$META/self?format=text" ;;
+      --json) exec curl -fsS --max-time 10 "$META/self" ;;
+      *) echo "usage: sparkbox status [--json]" >&2; exit 2 ;;
+    esac
+    ;;
   pause)
     # The host answers BEFORE it pauses and waits for this process to have read
     # the answer, so the line below really does arrive. Without that the happy
@@ -553,7 +609,8 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repo authorize OWNER/NAME|repos [survey|sync]|docs [docs|proxy|dev-environment]|update-tools [--check]>" >&2
+    echo "sparkbox: unknown command: ${1:-}" >&2
+    echo "Run 'sparkbox --help' to see available commands." >&2
     exit 2
     ;;
 esac
@@ -1109,11 +1166,18 @@ grep -qs 'sparkbox-git-credential' "$MNT/etc/gitconfig" \
 EOF
 
 # Preserve the baked login banner so the clone worker can rewrite /etc/motd as
-# (banner + status) without the two ever accumulating. Captured once and only
-# once: re-patching an already-patched template must not snapshot a banner that
+# (banner + status) without the two ever accumulating. A host may supply the
+# canonical banner explicitly when it patches a previously released trusted
+# template (CKS does this because its fast image build does not rebuild the
+# rootfs). Otherwise capture once: re-patching must not snapshot a banner that
 # already carries a status line.
 mkdir -p "$MNT/etc/sparkbox"
-if [ ! -f "$MNT/etc/sparkbox/motd.base" ]; then
+if [ -n "${GUEST_MOTD_FILE:-}" ]; then
+  [ -f "$GUEST_MOTD_FILE" ] \
+    || { echo "guest motd file does not exist: $GUEST_MOTD_FILE" >&2; exit 1; }
+  install -m 0644 "$GUEST_MOTD_FILE" "$MNT/etc/sparkbox/motd.base"
+  install -m 0644 "$GUEST_MOTD_FILE" "$MNT/etc/motd"
+elif [ ! -f "$MNT/etc/sparkbox/motd.base" ]; then
   if [ -f "$MNT/etc/motd" ]; then
     cp "$MNT/etc/motd" "$MNT/etc/sparkbox/motd.base"
   else
@@ -1208,8 +1272,8 @@ set -eu
 
 MODE=${1:-sync}
 case "$MODE" in
-  sync|status|survey) ;;
-  *) echo "usage: sparkbox-repos [status|survey|sync]" >&2; exit 2 ;;
+  sync|status|survey|report) ;;
+  *) echo "usage: sparkbox-repos [status|survey|report|sync]" >&2; exit 2 ;;
 esac
 
 # The account the checkouts belong to (the login user; root on legacy templates).
@@ -1343,6 +1407,31 @@ stamp_adoption() {
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+LOCK_DIR="$R/run/sparkbox/repos.lock"
+mkdir -p "$(dirname "$LOCK_DIR")" 2>/dev/null || true
+lock_acquired=
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  lock_acquired=1
+else
+  old_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+  case "$old_pid" in
+    ''|*[!0-9]*) stale=1 ;;
+    *) if kill -0 "$old_pid" 2>/dev/null; then stale=; else stale=1; fi ;;
+  esac
+  if [ -n "$stale" ]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    if mkdir "$LOCK_DIR" 2>/dev/null; then lock_acquired=1; fi
+  fi
+fi
+if [ -z "$lock_acquired" ]; then
+  # The background reporter is expendable; a person running status or sync
+  # gets an explicit answer instead of two concurrent fetches fighting over
+  # the same remote-tracking refs and report files.
+  [ "$MODE" = report ] && exit 0
+  give_up "another repository operation is already running"
+fi
+printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+trap 'rm -rf "$WORK" "$LOCK_DIR"' EXIT INT TERM HUP
 : > "$WORK/report"
 : > "$WORK/log"
 
@@ -1436,8 +1525,9 @@ tilde() {
   esac
 }
 
-# The one line the login banner gets: counts, and then either a pointer or a
-# place.
+# The repository block the login banner gets. It names every checkout, where it
+# lives, and the branch currently checked out; the compact suffix calls out the
+# states most likely to lose work or surprise a push.
 #
 # The place is the half people asked for. Somebody arriving from a launch link
 # lands in a shell they did not open, in a box they did not name, holding a
@@ -1455,42 +1545,35 @@ status_line() {
     printf 'repos: %s %s…' "${2:-cloning}" "$inflight"
     return 0
   fi
-  # The per-repository words collapse to four counts. A banner is read in the
-  # second before somebody starts typing and cannot carry the whole vocabulary;
-  # the word that says what is actually wrong lives one command away, in the
-  # table below.
-  ready=0; stale=0; pending=0; failed=0; rows=0; scattered=
+  printf 'repos:'
   while IFS="$SEP" read -r state slug access dest detail; do
-    rows=$((rows + 1))
-    # Whether the several share a parent worth naming. The multi-attachment
-    # default layout is ~/src/<owner>/<name>, so they usually do — but an
-    # explicit --path can put one anywhere, and "in ~/src" would then be a
-    # sentence that is wrong about where somebody's work is.
-    case "$dest" in
-      "$HOME_DIR"/src/*) ;;
-      *) scattered=1 ;;
-    esac
+    branch=
+    marks=
+    if gitq "$dest" rev-parse --git-dir >/dev/null 2>&1; then
+      branch=$(gitq "$dest" symbolic-ref --short -q HEAD 2>/dev/null || true)
+      [ -n "$branch" ] || branch='detached HEAD'
+      up=$(gitq "$dest" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+      if [ -z "$up" ] && [ "$branch" != 'detached HEAD' ] &&
+         gitq "$dest" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+        up="origin/$branch"
+      fi
+      if [ -n "$up" ]; then
+        set -- $(gitq "$dest" rev-list --left-right --count "$up...HEAD" 2>/dev/null || echo '0 0')
+        [ "${2:-0}" = 0 ] || marks="↑${2}"
+        [ "${1:-0}" = 0 ] || marks="${marks:+$marks }↓${1}"
+      else
+        marks='no upstream'
+      fi
+      [ -z "$(gitq "$dest" status --porcelain 2>/dev/null || true)" ] || marks="${marks:+$marks }dirty"
+    else
+      branch='not cloned'
+    fi
     case "$state" in
-      ready)  ready=$((ready + 1)) ;;
-      stale)  stale=$((stale + 1)) ;;
-      failed) failed=$((failed + 1)) ;;
-      *)      pending=$((pending + 1)) ;;
+      failed)  marks="${marks:+$marks }failed" ;;
+      pending) marks="${marks:+$marks }missing" ;;
     esac
+    printf '\n  %-28s %-34s %s%s' "$slug" "$(tilde "$dest")" "$branch" "${marks:+  [$marks]}"
   done < "$WORK/report"
-  out=""
-  if [ "$ready" -gt 0 ];   then out="$ready ready"; fi
-  if [ "$stale" -gt 0 ];   then out="${out:+$out, }$stale need a look"; fi
-  if [ "$pending" -gt 0 ]; then out="${out:+$out, }$pending not cloned"; fi
-  if [ "$failed" -gt 0 ];  then out="${out:+$out, }$failed failed"; fi
-  if [ -z "$out" ]; then out="none attached"; fi
-  if [ "$failed" -gt 0 ] || [ "$pending" -gt 0 ] || [ "$stale" -gt 0 ]; then
-    out="$out — run \`sparkbox repos\`"
-  elif place=$(cd_target); then
-    out="$out in $(tilde "$place")"
-  elif [ "$rows" -gt 1 ] && [ -z "$scattered" ]; then
-    out="$out in $(tilde "$HOME_DIR/src")"
-  fi
-  printf 'repos: %s' "$out"
 }
 
 # /etc/motd and not /etc/update-motd.d: the guest image empties that directory,
@@ -1516,7 +1599,7 @@ publish_motd() {
 publish() {
   mkdir -p "$R/run/sparkbox" 2>/dev/null || true
   # Same redirection-order rule as publish_motd above.
-  if printf '  %s\n' "$1" 2>/dev/null > "$STATUS_FILE.new"; then
+  if printf '%s\n' "$1" | sed 's/^/  /' 2>/dev/null > "$STATUS_FILE.new"; then
     chmod 0644 "$STATUS_FILE.new" 2>/dev/null || true
     mv -f "$STATUS_FILE.new" "$STATUS_FILE" 2>/dev/null || rm -f "$STATUS_FILE.new"
   fi
@@ -1579,6 +1662,39 @@ publish_cd() {
     chmod 0644 "$CD_FILE.new" 2>/dev/null || true
     mv -f "$CD_FILE.new" "$CD_FILE" 2>/dev/null || rm -f "$CD_FILE.new"
   fi
+}
+
+# Publish a machine-readable snapshot to the host over the same tap-authenticated
+# metadata channel as the manifest. Failure is deliberately non-fatal: repo
+# status is advisory safety/UI data and must never turn a successful checkout
+# or an interactive `sparkbox repos` into an outage.
+publish_gateway_status() {
+  : > "$WORK/gateway-report"
+  while IFS="$SEP" read -r state slug access dest detail; do
+    branch=; up=; ahead=0; behind=0; dirty=0
+    wire_dest=$dest
+    [ -z "$R" ] || wire_dest=${dest#"$R"}
+    if gitq "$dest" rev-parse --git-dir >/dev/null 2>&1; then
+      branch=$(gitq "$dest" symbolic-ref --short -q HEAD 2>/dev/null || true)
+      [ -n "$branch" ] || branch='detached HEAD'
+      up=$(gitq "$dest" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+      if [ -z "$up" ] && [ "$branch" != 'detached HEAD' ] &&
+         gitq "$dest" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+        up="origin/$branch"
+      fi
+      if [ -n "$up" ]; then
+        set -- $(gitq "$dest" rev-list --left-right --count "$up...HEAD" 2>/dev/null || echo '0 0')
+        behind=${1:-0}; ahead=${2:-0}
+      fi
+      [ -z "$(gitq "$dest" status --porcelain 2>/dev/null || true)" ] || dirty=1
+    fi
+    case "$state" in pending) state=missing ;; esac
+    printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+      "$slug" "$SEP" "$wire_dest" "$SEP" "$branch" "$SEP" "$up" "$SEP" \
+      "$ahead" "$SEP" "$behind" "$SEP" "$dirty" "$SEP" "$state" >> "$WORK/gateway-report"
+  done < "$WORK/report"
+  curl -fsS --max-time 10 -H 'Content-Type: text/plain' \
+    --data-binary "@$WORK/gateway-report" "$META/repos/status" >/dev/null 2>&1 || true
 }
 
 # Put the banner back exactly as the image baked it. Also the repair path for
@@ -1662,7 +1778,7 @@ refresh_checkout() {
   # the remote-tracking refs this checkout already has — what the last fetch
   # knew — which is exactly the right basis for the question `survey` is asked:
   # what would a capture of this disk freeze into a template.
-  if [ "$MODE" != sync ]; then
+  if [ "$MODE" = status ] || [ "$MODE" = survey ]; then
     if [ -z "$_branch" ]; then
       _note="detached HEAD"
     else
@@ -1732,6 +1848,22 @@ refresh_checkout() {
   # does not. `set --` is safe in here: the four arguments were saved above.
   set -- $(gitq "$_dest" rev-list --left-right --count "$_up...HEAD" || echo "0 0")
   _behind=${1:-0}; _ahead=${2:-0}
+
+  # The periodic report fetches remote refs so the gateway can warn about a
+  # checkout that drifted, but it never moves HEAD or the working tree. Only an
+  # explicit sync may fast-forward.
+  if [ "$MODE" = report ]; then
+    if [ "$_ahead" != 0 ] && [ "$_behind" != 0 ]; then
+      report_add stale "$_slug" "$_access" "$_dest" "diverged from $_up ($_ahead ahead, $_behind behind)"
+    elif [ "$_ahead" != 0 ]; then
+      report_add stale "$_slug" "$_access" "$_dest" "$_ahead not pushed to $_up"
+    elif [ "$_behind" != 0 ]; then
+      report_add stale "$_slug" "$_access" "$_dest" "$_behind behind $_up${_dirty:+, uncommitted changes}"
+    else
+      report_add ready "$_slug" "$_access" "$_dest" "$_branch, up to date${_dirty:+, uncommitted changes}"
+    fi
+    return 0
+  fi
 
   if [ "$_ahead" != 0 ] && [ "$_behind" != 0 ]; then
     report_add stale "$_slug" "$_access" "$_dest" "diverged from $_up ($_ahead ahead, $_behind behind)"
@@ -1834,11 +1966,13 @@ if [ "$count" -eq 0 ]; then
   # A banner line reading "none attached" on every login of every sandbox that
   # never had a repo is noise, so the no-attachment case gets no line at all.
   clear_status
+  publish_gateway_status
   echo "no repos are attached to this sandbox"
   exit 0
 fi
 publish "$(status_line)"
 publish_cd
+publish_gateway_status
 while IFS="$SEP" read -r state slug access dest detail; do
   case "$dest" in
     "$HOME_DIR"/*) dest="~/${dest#"$HOME_DIR"/}" ;;
@@ -2036,10 +2170,39 @@ ExecStart=/usr/local/sbin/sparkbox-repos sync
 WantedBy=multi-user.target
 EOF
 
+  # A fetch-only survey keeps the gateway's advisory checkout state current.
+  # It updates remote-tracking refs but never moves HEAD or a working tree; the
+  # explicit `sparkbox repos sync` command remains the only post-boot path that
+  # may fast-forward a clean checkout.
+  cat > "$MNT/etc/systemd/system/sparkbox-repos-report.service" <<'EOF'
+[Unit]
+Description=report sparkbox repository state
+Wants=network-online.target
+After=network-online.target sparkbox-repos.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=5min
+ExecStart=/usr/local/sbin/sparkbox-repos report
+EOF
+
+  cat > "$MNT/etc/systemd/system/sparkbox-repos-report.timer" <<'EOF'
+[Unit]
+Description=periodically report sparkbox repository state
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
+EOF
+
   # Enable without a chroot: symlink into the target's .wants directory. That
-  # symlink IS what `systemctl enable` writes. Three units are enabled now: the
-  # token service owns the boot fetch, the timer owns the refresh, and the repos
-  # service owns the boot clone.
+  # symlink IS what `systemctl enable` writes. The token service owns the boot
+  # identity fetch, its timer owns refresh, the repos service owns the boot
+  # clone, and the report timer keeps the gateway's advisory git state fresh.
   # DefaultDependencies=no and Before=sparkbox-net.service: the reset removes the
   # host keys that unit's `ssh-keygen -A` then regenerates, so it has to be
   # ahead of it, and both are ahead of sshd. sysinit.target rather than
@@ -2067,6 +2230,8 @@ EOF
     "$MNT/etc/systemd/system/multi-user.target.wants/sparkbox-identity-reset.service"
   ln -sf ../sparkbox-token.timer \
     "$MNT/etc/systemd/system/timers.target.wants/sparkbox-token.timer"
+  ln -sf ../sparkbox-repos-report.timer \
+    "$MNT/etc/systemd/system/timers.target.wants/sparkbox-repos-report.timer"
   ln -sf ../sparkbox-token.service \
     "$MNT/etc/systemd/system/multi-user.target.wants/sparkbox-token.service"
   ln -sf ../sparkbox-repos.service \

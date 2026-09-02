@@ -445,7 +445,7 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 				views[i].EnvUndecryptable = true
 			}
 		}
-		// Read the guest's real memory use and cumulative CPU time concurrently,
+		// Read the guest's non-available memory and cumulative CPU time concurrently,
 		// under the budget its placement deserves, so one slow VM can't stall
 		// the dashboard. A sandbox on another machine is asked of the machine
 		// running it — a balloon and a VMM process can only be asked there —

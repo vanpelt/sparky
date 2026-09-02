@@ -14,9 +14,19 @@ import (
 )
 
 const (
-	defaultInterval        = time.Minute
-	sessionRefreshInterval = 10 * time.Minute
-	maxParallel            = 4
+	defaultInterval = time.Minute
+	// idleSessionRefresh is how stale the catalog may get on a VM HiveMind says
+	// nothing is running in. Nothing is changing, so nothing is worth paying a
+	// paginated query for.
+	idleSessionRefresh = 10 * time.Minute
+	// activeSessionRefresh applies while presence reports a live agent, which is
+	// exactly when the catalog changes and when somebody is watching it. The old
+	// single ten-minute figure meant a session could be an hour old on screen
+	// while its VM was mid-conversation; a minute is the poll interval, so this
+	// costs one extra query per poll per ACTIVE sandbox and nothing at all on an
+	// idle fleet.
+	activeSessionRefresh = time.Minute
+	maxParallel          = 4
 )
 
 type Sandboxes interface {
@@ -29,6 +39,7 @@ type Protector interface {
 
 type Observer interface {
 	ObserveHiveMindSessions(sandboxID string, snapshot host.HiveMindSessionSnapshot)
+	ObserveHiveMindPresence(sandboxID string, presence host.HiveMindPresence)
 }
 
 type Options struct {
@@ -162,10 +173,23 @@ func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
 	if err != nil {
 		return err
 	}
-	if presence.ProtectUntil != nil && presence.ProtectUntil.After(time.Now()) {
+	live := presence.Live()
+	if live {
 		m.protector.ProtectUntil(box.ID, presence.ProtectUntil.UTC())
 	}
-	if m.observer == nil || !m.sessionsDue(box.ID, time.Now()) {
+	if m.observer == nil {
+		return nil
+	}
+	// Recorded on every poll, before the early return below. This is the half a
+	// status surface reads to answer "is an agent working here", so letting the
+	// catalog's refresh budget decide how fresh it is would defeat the point of
+	// having a cheap endpoint at all.
+	m.observer.ObserveHiveMindPresence(box.ID, host.HiveMindPresence{
+		ObservedAt:   presence.ObservedAt,
+		State:        presence.State,
+		ProtectUntil: presence.ProtectUntil,
+	})
+	if !m.sessionsDue(box.ID, time.Now(), live) {
 		return nil
 	}
 
@@ -180,8 +204,15 @@ func (m *Monitor) pollSandbox(ctx context.Context, box *host.Sandbox) error {
 	return nil
 }
 
-func (m *Monitor) sessionsDue(sandboxID string, now time.Time) bool {
+// sessionsDue decides whether to spend a paginated catalog query, on the
+// evidence the cheap endpoint just supplied: a VM with a live agent is both the
+// one whose catalog is changing and the one somebody is looking at.
+func (m *Monitor) sessionsDue(sandboxID string, now time.Time, live bool) bool {
+	interval := idleSessionRefresh
+	if live {
+		interval = activeSessionRefresh
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return !m.sessionsAt[sandboxID].Add(sessionRefreshInterval).After(now)
+	return !m.sessionsAt[sandboxID].Add(interval).After(now)
 }

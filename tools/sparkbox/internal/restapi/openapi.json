@@ -2134,6 +2134,20 @@
           "template_tags": { "type": "boolean", "description": "A tag can name the base image its sandboxes boot from, so `/v1/templates/{tag}` answers. False is a host with no binding store, where every create takes the operator's default image — a different statement from `snapshots`, since a host can hold snapshots to fork by name with nowhere to record a binding." }
         }
       },
+      "RepoStatus": {
+        "type": "object",
+        "required": ["slug", "path", "state"],
+        "properties": {
+          "slug": { "type": "string", "example": "wandb/agentstream" },
+          "path": { "type": "string", "example": "/home/sparky/src/wandb/agentstream" },
+          "branch": { "type": "string", "example": "feat/tag-timeline" },
+          "upstream": { "type": "string", "example": "origin/feat/tag-timeline" },
+          "ahead": { "type": "integer", "format": "int64", "minimum": 0 },
+          "behind": { "type": "integer", "format": "int64", "minimum": 0 },
+          "dirty": { "type": "boolean" },
+          "state": { "type": "string", "enum": ["ready", "stale", "missing", "failed"] }
+        }
+      },
       "Sandbox": {
         "type": "object",
         "description": "One microVM. Internal topology — its guest address, its host IP — is deliberately not part of this shape.",
@@ -2185,6 +2199,16 @@
             "description": "`vcpus` and `mem_mb` above are a doubled allocation this run borrowed. The host hands it back the moment the sandbox pauses — an idle pause included — so the next resume comes up at the sandbox's own size."
           },
           "disk_mb": { "type": "integer", "format": "int64", "example": 25600 },
+          "repos": {
+            "type": "array",
+            "description": "Latest advisory git state reported from inside the guest. Ahead/behind are relative to the fetched upstream; the array is omitted until the first report.",
+            "items": { "$ref": "#/components/schemas/RepoStatus" }
+          },
+          "repo_status_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the guest last reported repository state."
+          },
           "created_at": { "type": "string", "format": "date-time" },
           "last_active": {
             "type": "string",

@@ -671,6 +671,8 @@ func TestEmitterEventsReachTheGateway(t *testing.T) {
 	e.SandboxChanged(&host.Sandbox{
 		Name: "demo", Owner: "alice", Image: "ubuntu", State: vmm.StatePaused,
 		HostIP: "172.30.7.2", SSHAddr: "172.30.7.2:22", MemMB: 2048,
+		Repos:        []host.RepoStatus{{Slug: "wandb/agentstream", Path: "/home/sparky/agentstream", Branch: "feat/x", Ahead: 1, State: "stale"}},
+		RepoStatusAt: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC),
 	}, "paused")
 	e.CloseSandboxSessions("demo", "went idle for 30m")
 	e.SandboxGone("demo")
@@ -692,6 +694,10 @@ func TestEmitterEventsReachTheGateway(t *testing.T) {
 	}
 	if changed.Sandbox.State != string(vmm.StatePaused) || changed.Sandbox.MemMB != 2048 {
 		t.Errorf("changed event lost the record: %+v", changed.Sandbox)
+	}
+	if len(changed.Sandbox.Repos) != 1 || changed.Sandbox.Repos[0].Ahead != 1 ||
+		changed.Sandbox.RepoStatusAt.IsZero() {
+		t.Errorf("changed event lost repository state: %+v", changed.Sandbox)
 	}
 	// No address crosses the link, ever: every node mints the same guest
 	// addresses, so one the gateway holds is one something up there can dial.
