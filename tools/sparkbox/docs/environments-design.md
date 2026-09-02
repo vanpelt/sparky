@@ -1,0 +1,785 @@
+# Environments: the noun the tag was standing in for
+
+How the four things a project needs to run — its credentials, its checkouts, its
+egress policy and its disk — stop being four unrelated gestures against a tag
+somebody invented, and become one object with a name, a description, and a
+`ctl env show` that prints all of it.
+
+## Status
+
+**Phase A is built** on `feat/sparkbox-environments`: `internal/envs`, the `Var`
+half of `internal/secrets`, the `ctlops` operations and interfaces over both,
+the `ctl env` command family, `--env` on the `new@` door, and the `main.go`
+wiring. `gofmt`, `go build ./...`, `go vet ./...` and `go test ./...` are all
+clean. Phase D's REST routes and console tab are NOT built — the only thing this
+change adds to `openapi.json` is the `environments` capability flag, because
+`Capabilities` grew a field and `openapi_test.go` requires the spec to match.
+
+Parts 4 and 5 — the builder VM, the guest oneshot, the metadata report, the
+gateway-side capture, and both posture changes — are **written down and
+unbuilt**, and are Phase B/C. The schema in Part 1 carries their columns from
+the first `CREATE TABLE` anyway, because this tree has no migration framework:
+schema is `CREATE TABLE IF NOT EXISTS` at `Open` plus a per-package copy of
+`addColumnIfMissing` kept alive with `var _ = addColumnIfMissing`
+(`internal/secrets/store.go:273-278`). Adding a column later is possible and
+tedious; adding it now is free.
+
+Nothing in this document has been run on a real host. Phase A is a sqlite store
+and its tests are `t.TempDir()` and the mock driver, which is the whole of what
+`go test ./...` can prove about it — and that is genuinely enough for Phase A.
+It is not remotely enough for Phase B, where the interesting failure is a
+builder VM that boots, runs somebody's shell script, and does not come back.
+
+One correction to a sibling document while we are here.
+`docs/tag-templates-design.md`'s Status section says "**None of it does anything
+on CKS**" because `Driver.Snapshot` refuses outright under
+`DisableHostRootfsMounts`. That has not been true since
+`docs/cks-snapshot-design.md` shipped: `internal/vmm/firecracker/fc.go:1291-1296`
+now skips only `sanitizeTemplate` under that flag and runs the rest of the
+capture, and the identity regeneration moved into the guest's first boot. Tag
+templates work on the cluster. Part 7 has the caveat that replaced it, which is
+a different and smaller one.
+
+---
+
+# Why
+
+The low-level primitives are right. Four independent readers already join
+through one `sandbox_tags` table, each owning its own side table, each with
+owner scoping structural in the SQL rather than checked by a handler
+(`internal/repos/store.go:400-418`). A tag has been the correct answer to "which
+of my things reach which of my boxes" four times running, and this document does
+not propose replacing it.
+
+What is missing is the noun. Here is what a person does today to stand up one
+project. Count the steps and then read what each of them is named after.
+
+1. `claude setup-token | ssh ctl@<gateway> secret set CLAUDE_CODE_OAUTH_TOKEN --tag proj`
+   — the tip the gateway itself prints (`internal/sshgw/secret.go:61`).
+2. The same verb again for every other credential the project needs, one at a
+   time, each one sealed under the fleet KEK because `secret set` is the only
+   door and it encrypts unconditionally. `DATABASE_HOST`,
+   `NEXT_PUBLIC_API_URL` and `PORT` are not secrets and there is nowhere else to
+   put them.
+3. `ssh ctl@<gateway> repo add wandb/hivemind --tag proj` — and if there are
+   three repositories, three times.
+4. Egress rules, which have **no `ctl` and no REST surface at all** and are
+   reachable only from the user console at `my.<domain>`
+   (`docs/github-repos-design.md` Part 5 says so out loud; `internal/sshgw` and
+   `internal/restapi` import `internal/netrules` nowhere). So step 4 happens in
+   a different browser tab, under a different mental model, at a different time.
+5. `ssh new+box@<gateway> --tag proj` — a sandbox, finally.
+6. Inside it: install the dependencies, write the `systemd --user` unit so the
+   dev server outlives the SSH session, and `sparkbox set-port 5173` so the URL
+   a person opens is the thing they should look at
+   (`internal/guestdocs/dev-environment.md:62-102`).
+7. Write all of step 6 down as `.sparkbox/setup.sh` and commit it to the
+   project's repo, because otherwise the next VM re-derives it
+   (`dev-environment.md:88-102`). Sparkbox does not read this file, write it, or
+   run it — the example's own header says so
+   (`internal/guestdocs/examples/.sparkbox/setup.sh:4-6`).
+8. `sparkbox snapshot proj` from inside the box, which captures the disk and
+   binds it to the tag in one act (`internal/ctlops/template.go:195-238`), so
+   that the *next* box skips steps 5 through 7.
+
+Eight steps, four stores, two transports and one shell script the platform
+pretends not to know about. And the name of the thing being built appears in
+exactly one place: as the argument `proj` to five different verbs that have
+nothing else in common.
+
+That word is doing all the work and it is not an object. It has no description,
+so nobody can find out what `proj` is except by reading five listings and
+intersecting them. It has no lifecycle, so deleting it means remembering all
+five. It has no state, so "is this ready?" is a question with no one to ask. And
+it has no answer at all for step 2's non-secrets or step 7's script.
+
+**The primitive is right. The noun is missing.** This document adds the noun and
+changes nothing underneath it.
+
+---
+
+# Part 1 — the object
+
+An **environment** is a row. It owns exactly one tag, and **its name IS the
+tag**.
+
+```sql
+CREATE TABLE IF NOT EXISTS environments (
+  owner        TEXT NOT NULL,
+  name         TEXT NOT NULL,      -- IS the tag, in the shared sandbox_tags namespace
+  description  TEXT NOT NULL DEFAULT '',
+  setup_script TEXT NOT NULL DEFAULT '',   -- the captured .sparkbox/setup.sh
+  setup_from   TEXT NOT NULL DEFAULT '',   -- repo | agent | manual | ''
+  state        TEXT NOT NULL DEFAULT 'draft',
+  build_box    TEXT NOT NULL DEFAULT '',
+  build_error  TEXT NOT NULL DEFAULT '',
+  built_at     TIMESTAMP,
+  created_at   TIMESTAMP NOT NULL,
+  updated_at   TIMESTAMP NOT NULL,
+  PRIMARY KEY (owner, name)
+);
+```
+
+`PRIMARY KEY (owner, name)` where `name` is the tag is the whole design in one
+line, exactly as `PRIMARY KEY (owner, tag)` was for `template_tags`
+(`docs/tag-templates-design.md` Part 2). Everything else in this document is a
+consequence of it.
+
+`internal/envs` is the **fifth reader** of `sandbox_tags` and it reads only. It
+copies the DDL byte-identically, opens the same database file with the same DSN
+(`file:`+path+`?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)`,
+plus the three explicit `PRAGMA` execs whose rationale is at
+`internal/secrets/store.go:186-196`), and never writes a tag row.
+`internal/secrets` owns the mutations, and the reason is stated identically in
+three package comments already (`internal/repos/store.go:11-16`,
+`internal/templates/store.go:10-15`): a second writer bypasses secrets'
+in-transaction cross-owner refusal and the invariant that a tag belongs to
+exactly one handle is gone.
+
+`EnvironmentsForSandbox(sandbox, owner)` is the join, with owner on both sides
+like every other one in the tree:
+
+```sql
+SELECT e.* FROM environments e
+JOIN sandbox_tags bt ON bt.tag = e.name AND bt.owner = e.owner
+WHERE bt.sandbox = ? AND e.owner = ?
+```
+
+The first term of that `AND` looks redundant next to the `WHERE` and is not.
+`internal/repos/store.go:400-405` explains why at length and the explanation
+transfers: without it, any tag name two people happen to share — `ci`, `prod`,
+`dev` — joins their rows together. What leaks here is smaller than a private
+repository slug, but it is not nothing: an environment's description and its
+setup script, which is somebody's infrastructure written in prose and shell.
+
+## The alternative, and why it is refused
+
+The obvious richer design is an environment that **composes several tags**: an
+environment `web` made of tags `base`, `node20` and `web-secrets`, so tags stay
+the composable primitive and environments are the convenient bundle over them.
+It is more expressive. It is wrong, and the argument is already written down in
+this tree.
+
+`docs/tag-templates-design.md` Part 3, and the package comment at
+`internal/templates/store.go:17-25`, make it. Every other reader of
+`sandbox_tags` **adds** — two tags mean the union of two secret sets, the union
+of two repo lists. `internal/netrules` subtracts. But a template does neither:
+it **replaces**, because a sandbox has exactly one rootfs, and `--tag cuda --tag
+node20` with both bound has no answer that is not a coin flip. So a create whose
+tags resolve to more than one distinct snapshot is refused outright —
+`template_ambiguous`, at `internal/ctlops/binding.go:170-177`, before any write —
+rather than papered over with a precedence rule, because "a precedence rule
+means somebody gets a sandbox with the wrong CUDA in it and finds out twenty
+minutes later."
+
+**An environment binds a template.** That is not an optional feature of it; it
+is Part 4's entire reason to exist and it is what makes step 8 of the eight
+disappear. So a multi-tag environment inherits the coin flip immediately, and
+there are only two ways to hold it:
+
+- **Each member tag may carry its own binding, and the environment refuses when
+  more than one does.** Then the composition the design was sold on is exactly
+  the thing that breaks it. `env add-tag node20` becomes an operation that can
+  brick an environment for a reason involving a fourth store the user was not
+  looking at.
+- **The environment owns the binding, and its member tags do not.** Then two
+  environments that share a member tag can both apply to one sandbox, and the
+  ambiguity is back — one level deeper, where the user cannot see it, because
+  the thing in conflict is no longer named by anything they typed.
+
+Either way you have re-derived `template_ambiguous` and made it harder to
+explain. One tag, and the refusal stays where it already is, in the store that
+already owns it.
+
+Two smaller arguments point the same way.
+
+`ctl tags <box> a b c` **replaces the whole set**, and `--clear` empties it
+(`internal/sshgw/control.go:861-862`). If an environment were a set of tags,
+then "which environments is this box in" is subset matching over a set the user
+edits one word at a time, and `env show` has to invent a vocabulary for partial
+membership. With name == tag it is one join and the answer is a list.
+
+And the launch door. A repo attachment carries `Tags`, and
+`internal/launch/create.go:159-169` hands them to `ctlops.Create` **verbatim**,
+from the store, under the session's own handle. If an environment were several
+tags, an attachment would have to carry all of them or a clicker lands in half
+an environment — half its secrets, none of its rootfs. Part 6 is about how much
+falls out for free from name == tag, and this is why it does.
+
+## What the decision costs, stated
+
+You cannot say "environments `web` and `api` share these three secrets" by
+naming a shared environment. You say it on the attachment, which is where the
+tag set already lives: `secret set STRIPE_KEY --tag web --tag api` puts one
+sealed value in both, and `repo add wandb/hivemind --tag web --tag api` puts one
+checkout in both. `secret_tags`, `repo_tags` and `network_rule_tags` are all
+many-to-many, so three of the four joins compose exactly as they did before.
+
+Only the template does not, and that is the one that could never have been
+shared anyway — for the reason above. Composition did not go away; it moved onto
+the attachment, which is the object that was already carrying a tag *set*.
+
+---
+
+# Part 2 — what composes and what replaces
+
+An environment is a name over five readers. Four exist; the fifth is new.
+
+| reader | side table | semantics | what two tags on one sandbox mean |
+| --- | --- | --- | --- |
+| `internal/secrets` | `secret_tags` | **union** | both secret sets, decrypted into `/etc/environment` |
+| `internal/repos` | `repo_tags` | **union** | both checkout manifests |
+| `internal/netrules` | `network_rule_tags` | **subtractive** | a *governed* box filtered to the union of the allow lists, where an ungoverned one has open egress (`internal/netrules/store.go:431-449`) |
+| `internal/templates` | `template_tags` | **replaces** | refused if they name different snapshots (`ctlops/binding.go:170-177`) |
+| `internal/secrets` (new) | `env_vars` | **union**, losing to secrets on a name collision | both var sets, then secrets written over the top |
+
+The middle row is the one that reads as an oddity and is not. `netrules`
+subtracts because an untagged sandbox has unrestricted egress and a tagged one
+is filtered to its allow list; adding a rule-set *removes* reachability. That
+asymmetry is why `PutRule` refuses `default` outright
+(`internal/netrules/store.go:204-210`), and Part 3 is about why an environment
+inherits that refusal for a different reason.
+
+## Where plain environment variables sit
+
+They go in `internal/secrets`, in a new `env_vars` table, and not in a sixth
+package. The reason is one line long: **`EnvForSandbox` is where the merge
+happens**, and it is the only place in the tree that decrypts
+(`internal/secrets/store.go:569-608`). A vars store in its own package means the
+merge happens in a caller — and then in a second caller, and then the two
+disagree about precedence for a release before anybody notices.
+
+```sql
+CREATE TABLE IF NOT EXISTS env_vars (
+  owner      TEXT NOT NULL,
+  tag        TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL,
+  PRIMARY KEY (owner, tag, name)
+);
+```
+
+Note the shape, because it deliberately differs from `secrets` +`secret_tags`. A
+secret is **a value with a tag set**: one row in `secrets`, N rows in
+`secret_tags`, and `secret rm` versus untagging are genuinely different
+operations the CLI has to explain. A var is **a row per tag**. `PORT=8080` on
+two environments is two rows, and changing it is two edits.
+
+That is a real cost and it buys two things. `DeleteVarsForTag` is one statement,
+so `env rm` cleans up completely without a second concept; and "delete this
+environment" has no ambiguity about whether a shared value dies with it, because
+there is no shared value. A var's whole premise is that it is cheap — it is
+declared non-sensitive, a console can render it, an edit does not have to retype
+it (`internal/secrets/store.go:157-161`). Duplicating something cheap is the
+correct trade; duplicating a credential would not be.
+
+The value cap should be `maxValueLen` — 4 KiB, the same as a secret
+(`internal/secrets/store.go:135-136`). These are environment variables either
+way, and the guest-side limit is the same file.
+
+## Secrets win on a collision, and why that direction
+
+`EnvForSandbox` writes the vars first and the secrets over the top. The two
+possible orderings fail in very different directions and only one of them is
+survivable.
+
+If a var shadowed a secret, an owner who sets `DATABASE_URL` as a var for a
+staging box and *also* holds a sealed `DATABASE_URL` gets the plaintext one — a
+credential silently replaced by the value that was, by declaration, safe to
+print. The failure is invisible and it is in the direction of using the value
+somebody took less care with.
+
+The other way round, the sealed value wins. The failure is that a var is
+ignored, which is annoying, visible the moment anybody echoes it, and fixable by
+deleting one of the two.
+
+So: secrets overwrite. And the complement to that rule is a **warning at write
+time, not a refusal** — `PutVar` on a name that already has a secret on the same
+tag should say so in the response, and so should `PutSecret` the other way. A
+cross-table uniqueness constraint would be a second write path through two
+tables that today have no transaction in common, to prevent a state that is
+already deterministic and already explainable. `ctl env show` renders the
+shadowed var struck through, which is the honest display.
+
+## Both halves ride the channel that already exists
+
+`internal/envsync` pushes an owner's environment into `/etc/environment` over
+SSH, rewriting only the block between `BlockBegin` and `BlockEnd`
+(`internal/envsync/sync.go:43-52`), so the toolchain `PATH` the image bakes in
+survives. Vars go in the same block, which gets three properties free:
+
+- the push-on-create and push-on-retag hooks already cover them;
+- the pre-capture strip removes them from a template along with the secrets
+  (`internal/host/snapshot.go:72`), so a snapshot never freezes an environment's
+  variables into a rootfs every fork then copies byte-for-byte;
+- and because they are stripped, they come back from the **store** on the next
+  create, which is what makes editing a var take effect on a forked box at all.
+
+That last one matters more than it looks. If vars were written outside the
+managed block to "survive", an environment rebuilt in March would keep handing
+out February's `API_URL` forever, from a disk nobody thinks of as configuration.
+
+---
+
+# Part 3 — why `default` is refused
+
+`ctlops.defaultTags` (`internal/ctlops/sandbox.go:242`) stamps
+`secrets.DefaultTag` on **every** sandbox this package creates, unconditionally,
+and `internal/secrets/store.go:103-133` explains at length why narrowing it to
+untagged creates was tried and moved the same silent failure one step along.
+
+Two stores already refuse that word at write time, for the same shape of reason
+in two different registers.
+
+`internal/netrules/store.go:204-210`:
+
+> an egress rule-set cannot be tagged `default` — every sandbox carries that
+> tag, so this rule would filter your whole fleet. Tag it with a name you also
+> put on the sandboxes you mean to govern.
+
+`internal/templates/store.go:228-235`:
+
+> a template cannot be bound to the `default` tag — every sandbox you create
+> carries that tag, so this snapshot would silently become the base image for
+> all of them, including ones you make months from now.
+
+An environment binds a template, so it replaces, so it takes the same refusal in
+the same sentence shape at `env create` time:
+
+> an environment cannot be named `default` — every sandbox you create carries
+> that tag, so this environment's base image, egress rules and setup script
+> would silently apply to all of them, including ones you make months from now.
+> Name it something you also put on the sandboxes you mean to use it.
+
+Note what got added to the template's sentence. An environment named `default`
+would not merely re-base every one of the owner's future sandboxes; once Part 4
+lands, it would run **its setup script** in all of them. Part 5 is the argument
+for why running a script unattended needs a confirmation at all; a `default`
+environment is that posture change applied to the whole of one person's fleet by
+a single word, permanently, with no per-create way to opt out short of
+retagging every box.
+
+Two implementation notes for whoever writes it.
+
+**Fold case and check before the grammar check.** `templates.Bind` does
+(`internal/templates/store.go:211-218`): `DEFAULT` would be refused either way,
+because `tagRe` has no uppercase, but by a message about the character set,
+which says nothing about why this particular word is the one that cannot be
+used.
+
+**`internal/reserved` is the wrong list here, and it will be tempting.** That
+package is the single claim over three things that all become hostnames — a
+sandbox's default subdomain, a route subdomain, a user handle
+(`internal/reserved/reserved.go:1-21`). An environment's name is a tag. A tag is
+never a hostname, never dispatched on at the edge, and never resolvable. Calling
+`reserved.Name` here would refuse `api`, `docs`, `www` and `git` as environment
+names for reasons no user could act on and no failure would ever justify. The
+contract's `ErrReservedName` covers `default` and, today, nothing else; the
+grammar (`secrets.ValidTag`, `^[a-z0-9][a-z0-9-]{0,39}$`,
+`internal/secrets/store.go:73`) is `ErrInvalidName`'s job and they should stay
+two errors because they have two repairs.
+
+That refusal is, as in netrules and templates, exactly what keeps
+`ctlops.Create` free to keep stamping `default` on everything.
+
+---
+
+# Part 4 — the build
+
+**Not built. Phase B and C.** Everything in this part is a plan, and the honest
+reading of it is that the schema in Part 1 reserves room for it and the CLI
+surface in Phase A should not mention it yet.
+
+An environment whose composition is complete still leaves steps 6, 7 and 8 of
+the eight. `env build <name>` is the verb that removes them:
+
+```
+ssh ctl@<gateway> env build web
+```
+
+## The shape
+
+1. The gateway creates a **builder sandbox** tagged with the environment — an
+   ordinary create through `ctlops.Create`, which means it gets the
+   environment's secrets, its vars, its checkouts and its egress policy by the
+   four joins that already exist, with no special case anywhere. Its name is
+   recorded in `environments.build_box` and the row moves to `building`.
+2. A guest-side **systemd oneshot** runs the setup, ordered after
+   `sparkbox-repos.service` because it needs the checkout to exist.
+3. The guest **reports back over the metadata service**: started, finished,
+   failed, and the script text it actually ran.
+4. The **gateway** — not the guest — takes the snapshot, through
+   `ctlops.SnapshotToTag`, which captures and binds in one act.
+5. The row moves to `ready` with `built_at` set, or to `failed` with
+   `build_error` carrying the sentence, and the builder box is destroyed either
+   way.
+
+## The oneshot, and the two scripts it might run
+
+Shaped like `sparkbox-repos.service`
+(`deploy/install-guest-identity.sh:2150-2171`): `Type=oneshot`,
+`RemainAfterExit=yes` so `systemctl status` shows that the pass ran, a bounded
+`TimeoutStartSec`, and — the load-bearing one — **no ordering before
+`ssh.service`**. That unit's own comment says why, and it cites the incident:
+"copying it into a unit that clones a repository would put a multi-minute
+network operation in front of the first attach, which is exactly the class of
+bug main@e196d5f already cost this platform once." A setup script is slower than
+a clone.
+
+It runs one of two things.
+
+- **`bash .sparkbox/setup.sh`**, if the checkout has one. This is the path the
+  platform has been telling agents to prepare for since
+  `deploy/refresh-agent-tools.sh:777-783` started installing that instruction
+  into every template's `~/.agents/AGENTS.md`, and since
+  `internal/guestdocs/dev-environment.md:88-102` started documenting the
+  convention. `setup_from = "repo"`.
+- **`claude -p`**, with the dev-environment guidance, when there is no script.
+  The guidance is not new either: `sparkbox docs dev-environment`
+  (`internal/guestdocs`) is the per-framework Host-header and hot-reload
+  material, and the platform-owned `~/.agents/AGENTS.md` already tells an agent
+  to bind `0.0.0.0`, use a `systemd --user` unit, call `sparkbox set-port`, and
+  **write what it did down as `.sparkbox/setup.sh`**. `setup_from = "agent"`.
+
+The second path's real output is therefore the first path's input. An agent that
+does its job leaves a script in the repo, a person reviews it in a pull request
+like any other file, and the next `env build` takes the deterministic branch.
+That loop is the argument for the agent path existing at all — not "an agent can
+configure a box", which is unremarkable, but "an agent can produce the artifact
+that means no agent has to next time."
+
+Either way the script text that actually ran lands on the environment row via
+`SetScript(owner, name, script, from)`, which is why the contract has that
+method and why `SetupScript` is `""` until a build runs. It is the record of
+what happened, not a plan for what will.
+
+## The report
+
+`POST /self/setup` on the metadata mux, in the shape of `POST /repos/status`
+(`internal/metadata/server.go:386`), which is the existing precedent for a guest
+publishing a fact about itself that the gateway stores on the record. The
+authentication is the one the whole metadata service already rests on: the
+handler matches the request's source address to the guest's `/30` slot **and**
+the connection's local address to `slot.Host`
+(`internal/metadata/server.go:802`), and the firecracker driver sets `rp_filter`
+so a spoofed source is dropped rather than merely unanswered. The guest names
+itself; the host decides everything else — including, here, the owner, which
+comes from the manager record and never from the request.
+
+## Why the gateway takes the snapshot
+
+The guest could ask for its own capture. `sparkbox snapshot <tag>` already
+exists and already does exactly this — plan, confirm, commit, capture, bind
+(`docs/tag-templates-design.md` Part 10). Reusing it would be the smaller diff
+and it is the wrong call, for three reasons.
+
+**The gateway-side path is already proven and already synchronous.**
+`host.Manager.Snapshot` (`internal/host/snapshot.go:46`) takes the disk lock,
+strips the managed secret block (`:72`) — every fork copies the rootfs
+byte-for-byte, so that block cannot ride along — refreshes the agent CLIs
+(`:81`), pauses the guest so the filesystem is flushed, and hands off to the
+driver. `ctlops.SnapshotToTag` (`internal/ctlops/template.go:195-238`) wraps
+that with the bind, in the right order (capture first: binding first would leave
+the tag pointing at an image that does not exist, so every create on that tag in
+that window resolves to a missing rootfs), and with the half-failure already
+thought through — if the bind fails the snapshot is **kept**, and a typed
+`snapshot_not_bound` carries the one-command repair. Every one of those
+decisions is one an environment build would otherwise have to make again, worse.
+
+**The guest then needs no second credential, and no relaxation of the rules that
+protect the first one.** The guest door is deliberately hard to use unattended,
+and every one of its restrictions is in the way here. It refuses without a TTY,
+on purpose — "there is nobody here to read the warning, so I will not proceed" —
+and a builder VM has no TTY by construction. It is rate-limited to three commits
+per hour per sandbox. It may only re-point **a tag it already carries**, checked
+server-side, which is the restriction that caps a compromised guest's
+persistence at the trust its box already had. Driving a build through that door
+means either handing an unattended process a `--yes` and a plan token, or
+loosening a rule whose entire purpose is that unattended processes cannot use
+it. The gateway already holds the authority to capture and bind. Let it. The
+guest reports a fact; the gateway acts on it.
+
+**And the fleet case is already handled.** `Fleet.Snapshot` runs the pre-capture
+tool refresh gateway-side before it hangs up the node sessions, because a node
+caches only the gateway's upstream *public* key and has no signer with which to
+open a session into its own guests (`docs/tag-templates-design.md` Part 5). A
+gateway-driven build inherits that. A guest-driven one would run into it.
+
+## The reconciler, and why `Building()` is on the contract
+
+A gateway restart in the middle of a build leaves a row saying `building`, a
+`build_box` naming a sandbox that may or may not still exist, and an owner's
+decrypted secrets inside it. `Store.Building()` returns every such row across
+**all** owners — the only method on the contract that is not owner-scoped, and
+deliberately so, because the caller is the process itself and not a person.
+
+What the reconciler does with them is Phase B's problem and it has exactly one
+defensible default: a build that was in flight when the gateway died did not
+finish, so mark it `failed` with a sentence that says the gateway restarted, and
+destroy the builder box. Resuming is tempting and wrong — the guest's oneshot
+may have completed, half-completed, or be running still, and nothing on the
+gateway can tell the three apart after a restart.
+
+---
+
+# Part 5 — the two posture changes
+
+These are not consequences of the design. They are the design, and burying them
+under Part 4's mechanism would be the dishonest way to write this document.
+
+## (a) We will run a script from a repository, unattended
+
+`internal/guestdocs/dev-environment.md:108-109` currently ends with:
+
+> Read a `.sparkbox/setup.sh` you did not write before running it — like any
+> script, it runs as you.
+
+and the example file's own header
+(`internal/guestdocs/examples/.sparkbox/setup.sh:4-6`) says:
+
+> Written by the agent that first configured this project to run inside a
+> Sparkbox VM … **Sparkbox itself never writes or runs this file.**
+
+Part 4 breaks both sentences. `env build` runs `bash .sparkbox/setup.sh` as the
+guest's login user, in a box holding the owner's decrypted secrets, from a file
+whose contents are whatever is on the branch the attachment points at — which
+anyone with write access to that repository can change, including a merged pull
+request nobody read closely.
+
+The exposure is bounded by what a sandbox is: the script runs *inside* the
+guest, under the environment's own egress policy, with no host mount and no
+control-plane authority. It cannot reach the gateway except through the metadata
+service, which answers only for the sandbox that asked. This is not a new
+boundary and this document does not move it.
+
+But the **trigger** is new. Today a person types `bash .sparkbox/setup.sh` after
+reading it, or does not. Tomorrow a CLI verb does it on their behalf.
+
+So the mitigation is the one the docs already prescribe, moved into the product:
+**`env build` prints the script and asks**, before the builder VM is created,
+unless `--yes`. The full text, not a hash and not a summary — a summary of a
+shell script is a category error.
+
+And the confirmation is remembered against the text, not against the
+environment. `environments.setup_script` holds what was confirmed and run; a
+build whose repo script differs from it prompts again, showing the diff. That is
+the property worth having: the second `env build` of an unchanged environment is
+frictionless, and the one after somebody edited the setup is not. `--yes` skips
+the prompt, exactly as it does for `sparkbox snapshot`, and skipping is the
+scriptable path for a person who has already decided.
+
+The one rule to carry over from that verb verbatim: without a terminal, and
+without `--yes`, it refuses. A warning nobody can read is not a warning.
+
+## (b) We will run an agent, unattended, in a box holding the owner's secrets
+
+`claude -p` in a builder VM is an agent with a shell, network access under the
+environment's rules, and `/etc/environment` full of the owner's decrypted
+credentials.
+
+Say plainly what is and is not new. **The exposure is not new** — that is what a
+sandbox *is*, and the platform's own tip is `claude setup-token | ssh ctl@…
+secret set CLAUDE_CODE_OAUTH_TOKEN` precisely so that agents in sandboxes are
+signed in and useful (`internal/sshgw/secret.go:61`). Every box anybody has ever
+created this way has had exactly this shape. **The trigger is new**: today a
+person opens a terminal and starts the agent; tomorrow a CLI verb starts one
+with no person in the room, at a moment nobody chose, in a box the person never
+sees.
+
+Three mitigations, and none of them is "trust the model".
+
+**The environment's own netrules.** This is the one place in the tree where
+`netrules`' subtractive semantics is straightforwardly a feature rather than a
+footgun. An **untagged** sandbox has unrestricted egress; a **tagged** one is
+governed and filtered to its allow list plus the repo-implied domains
+(`internal/netrules/store.go:431-449`, and the overlay at `:446`). A builder box
+is tagged with the environment by construction, so it is governed by
+construction. An environment with no rule-set gets the base allowlist and
+nothing else, which is the correct default for a box about to run a script
+somebody found on the internet. This costs nothing to build — it is already
+true — but it has to be *stated*, because the moment somebody "helpfully" makes
+the builder untagged to fix a package-manager failure, it silently becomes the
+one box on the fleet with open egress and an agent in it.
+
+**A hard build timeout.** Bounded the way `ctlops.ArchiveTimeout` is — 15
+minutes, at `internal/ctlops/ops.go:505` — and enforced by the gateway, not by
+the guest, because the guest is the thing that might be stuck. On expiry the
+builder is **destroyed**, not paused and not left running: a builder VM that
+outlives its build is an unattended agent sitting on an owner's credentials with
+nobody watching, which is the exact state this bullet exists to prevent. The row
+goes to `failed` with the timeout in `build_error`.
+
+**Refuse the build up front when the owner has no agent credential.** The
+gateway can answer this without decrypting anything: `ListSecrets(owner)`
+returns `SecretMeta` carrying `Name` and `Tags` and no value at all
+(`internal/secrets/store.go:149-155`), so "does this owner have
+`CLAUDE_CODE_OAUTH_TOKEN` on this tag" is a listing question. Refusing at the
+door matters because the alternative is genuinely bad: a builder boots, runs
+`claude -p`, hits an interactive login prompt it cannot answer, and burns the
+whole timeout producing a `failed` row whose real cause is three layers down.
+The refusal's sentence should be the `secret set` tip, which is the repair.
+
+The `.sparkbox/setup.sh` path takes none of these three except the timeout,
+which is the other half of the argument for Phase B shipping before Phase C.
+
+---
+
+# Part 6 — the launch door needs no change at all
+
+`go.<domain>` serves a button somebody pastes into a pull request comment, and
+the promise is narrow on purpose: whoever clicks it signs in as themselves and
+lands in their own sandbox with that repository checked out
+(`internal/launch/launch.go:1-24`).
+
+An environment **is** a tag. A launch link's tags come from
+`repos.Repo.Tags` on the matched attachment, read from the store under the
+verified session's own handle, and handed to `ctlops.Create` verbatim
+(`internal/launch/create.go:159-169`). The confirm page already renders them as
+pills, plus the `default` that `defaultTags` will stamp
+(`internal/launch/page.go:642-654`).
+
+So: attach a repository to an environment's tag, and every launch link for that
+repository lands the clicker in that environment — its secrets, its vars, its
+checkouts, its egress rules and, once Part 4 lands, its snapshot. Zero lines
+changed in `internal/launch`. The environment's name simply appears in the pills
+that are already there.
+
+That is not luck. It is the second dividend of name == tag, and it is worth
+saying out loud because the alternative shape would have needed real work here:
+a multi-tag environment would have forced launch to decide whether an attachment
+carrying two of an environment's three tags means the environment or half of it.
+
+## And `?env=` must never exist
+
+The temptation, once environments have names, is `go.<domain>/wandb/hivemind?env=web`.
+
+`internal/launch/launch.go:55-76` forbids it already, in the general case, and
+the argument is the hard rule of that package:
+
+> Put that selector in a URL and you have handed the author of a public,
+> immutable comment the ability to choose which of the CLICKER's secrets are
+> decrypted into a VM whose working tree sits at a branch the same author chose.
+
+An `env=` parameter is that primitive and **more**. A tag selects the owner's
+secrets. An environment selects the secrets, the plain vars, the repositories,
+the egress policy, the rootfs — and a setup script that *runs*. The comment
+author would be choosing which of a stranger's credentials get decrypted into a
+VM **and** which of that stranger's shell scripts executes with them present.
+
+The package's own note that narrowing does not help applies here verbatim: "a
+repository carried on both `dev` and `prod` still lets the author pick", and the
+narrowed rule would live in a second place where it goes stale the moment the
+attachment's tags change. Tags come from exactly one place, which is the matched
+attachment's stored `Tags`. Environments change nothing about that and must not.
+
+---
+
+# Part 7 — what this does not do, on purpose
+
+**No sharing across owners.** `environments` is keyed `(owner, name)` and
+`EnvironmentsForSandbox` carries the owner on both sides of the join, exactly
+like the four readers before it. Alice's `web` and Bob's `web` are different
+environments that never meet. The real answer to a team wanting one environment
+is a shared or org-scoped object, and it is out of scope here for the same
+reason it is out of scope in `docs/tag-templates-design.md` Part 9 and
+`docs/repos-in-templates-design.md` Part 8: cross-owner sharing is a permissions
+model, not a column. Worth noting that owner scoping is also what bounds Part
+3's blast radius from the fleet to one handle.
+
+**No environment composing several tags.** Part 1.
+
+**No garbage collection of the snapshots an environment creates.** Each `env
+build` captures a new snapshot named `<tag>-<YYMMDD-HHMM>`, and the previous
+generation survives, unbound — which is deliberate, because it is the only thing
+that makes a bad build recoverable with one `snapshot bind`
+(`docs/tag-templates-design.md` Part 10). It is also a slow leak, and worse than
+it looks: snapshots are **unmetered**. Nothing anywhere counts them, by number
+or by bytes, and they land in the image directory every VM on the machine
+reflinks from. An environment rebuilt weekly is 52 templates a year that nobody
+is told about.
+
+The fix is not hard — keep the last N per environment, or expire on age — and it
+is deliberately not in Phase A, because a retention policy on a thing that also
+serves as somebody's rollback needs a decision about N that nobody has an
+opinion on yet. What Phase A **must** do is make `env rm` list the snapshots it
+is leaving behind rather than silently orphaning them.
+
+**On CKS, an environment's template is node-local and can evaporate.** The
+cluster Deployment is pinned to one exact Node and uses a named hostPath
+(`docs/cks-reflink-persistence-plan.md`), so the image directory — templates
+included — lives on that node's local XFS. Templates are not replicated across
+nodes (`docs/tag-templates-design.md` Part 4 says the replication half is
+written down and unbuilt), and object storage on that cluster holds checkpoint
+objects, not templates.
+
+So an environment whose node is reclaimed has a binding pointing at a file that
+is gone, and every create on it hits `resolveTemplate`'s refusal
+(`internal/ctlops/binding.go:200-211`):
+
+> tag `web` boots from snapshot `web-260902-1130`, which no longer exists. Bind
+> the tag to a snapshot you still have, or unbind it to go back to the default
+> image.
+
+That refusal is exactly right and must never degrade into a silent fallback to
+the stock image — the comment above it says why, and it is the same argument as
+everywhere else in this tree: a box that quietly boots the wrong rootfs is
+invisible for twenty minutes and then reads as a broken toolchain.
+
+But its **message** is wrong for an environment. `snapshot unbind --tag web` is
+the repair for a hand-made binding; for an environment it throws away the object
+and reads as an instruction to dismantle the thing you were using. When the tag
+names an environment, the sentence must say `ctl env rebuild web` — which is the
+same act, done by the thing that knows how to do it, and which is why `Get` is
+on the `ctlops.Environments` interface at all: `resolveTemplate` needs to know
+whether the tag it is refusing over is an environment before it picks a hint.
+
+---
+
+# Part 8 — build order
+
+Four steps. Each is independently shippable and independently useful, and the
+ordering is chosen so that the two posture changes in Part 5 land as late as
+possible and separately from each other.
+
+**A. The object and its composition. (Phase A — in flight.)**
+`internal/envs` with the schema in Part 1; `secrets.Var`, `PutVar`,
+`DeleteVar`, `ListVars`, `VarsForTag`, `VarsForSandbox`, `DeleteVarsForTag` and
+the merge in `EnvForSandbox`; the `Environments` and `EnvVars` interfaces in
+`ctlops`; `ctl env create|ls|show|rm|var set|var rm`, and the REST mirror. No
+build, no builder VM, no script. An environment is a named bundle you compose by
+hand, and `env show` prints all five joins in one place.
+
+This is useful on its own, which is the test every step here has to pass. It
+turns the eight steps of the Why section into three (`env create`, attach
+things to it, `ssh new@<gateway> --tag web`), it gives non-secret configuration
+its first home, and it makes "what is `proj`?" a question with an answer. The
+build columns exist from this step's first `CREATE TABLE` and are never written,
+so B is purely additive.
+
+**B. The build, `.sparkbox/setup.sh` only.** The builder VM, the guest oneshot,
+`POST /self/setup`, the gateway-side `SnapshotToTag`, the `Building()`
+reconciler, the timeout, and Part 5(a)'s print-and-confirm. **No agent.** This
+ships the entire orchestration — which is where the interesting failures are:
+the builder that never reports, the gateway that restarts mid-build, the guest
+whose oneshot outlives its timeout — with the smallest blast radius available,
+because the script came from a repository and a person read it on screen before
+it ran.
+
+**C. The agent path.** `claude -p`, `setup_from = "agent"`, and the three
+mitigations in Part 5(b): the no-credential refusal at the door, the timeout
+already built in B, and the statement (plus a test) that a builder box is always
+tagged and therefore always governed. Landing this after B means the day an
+unattended agent first runs, everything underneath it has already been exercised
+by builds that did not have one.
+
+**D. The consoles.** An Environments panel on `my.<domain>` beside Secrets,
+Network and Repos — those panels are one object viewed four ways and this is the
+step that says so — plus whatever the operator console needs. It trails because
+everything before it is reachable from `ctl` and REST, and because a panel for a
+feature whose shape is still moving is a rewrite waiting to happen.
+
+Cross-owner sharing (Part 7) and snapshot retention (Part 7) stay written down
+and unbuilt. Neither has a measured workload behind it, and retention in
+particular needs somebody to have an opinion about N.

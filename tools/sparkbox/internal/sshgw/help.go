@@ -64,6 +64,16 @@ func helpTopics() []helpTopic {
 		blurb:   "cloned in before you arrive",
 		page:    repoUsage,
 	}, {
+		// After repos and secrets, because an environment is the word for a
+		// composition of both and reads as nonsense before them. The row is 27
+		// runes of verbs and a 22-rune blurb, which lands inside the 80 columns
+		// TestControlHelpHidesOperatorTopics holds this listing to.
+		name:    "environments",
+		aliases: []string{"env", "envs", "environment"},
+		verbs:   "env ls · show · create · rm",
+		blurb:   "a named way of working",
+		page:    envUsage,
+	}, {
 		// A topic of its own, which it was not: `help badge` used to land on the
 		// repos page and every mistyped `badge` printed it — a page about
 		// attaching repositories, forks and ref overrides, for somebody who

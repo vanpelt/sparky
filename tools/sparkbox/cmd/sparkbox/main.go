@@ -31,6 +31,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/dnsedge"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/domainmeta"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
@@ -485,6 +486,21 @@ func serve(args []string) error {
 	}
 	defer templateStore.Close()
 
+	// Environments — the fifth reader of the shared sandbox_tags namespace, and
+	// the only one that is a user-facing object rather than a join: an
+	// environment owns exactly one tag and its name IS that tag, so the four
+	// stores above are untouched by it. Opened unconditionally, on its own
+	// connection, for the same reasons they are, and with the same
+	// return-the-error-and-refuse-to-boot posture: a host that could not open
+	// one of these has a database problem, and starting anyway would answer
+	// `ctl env ls` with "not enabled on this host" while plainly holding the
+	// file it needs.
+	envStore, err := envs.Open(filepath.Join(*stateDir, "sparkbox.db"), log)
+	if err != nil {
+		return fmt.Errorf("environments store: %w", err)
+	}
+	defer envStore.Close()
+
 	var driver vmm.Driver
 	switch *driverName {
 	case "mock":
@@ -891,8 +907,15 @@ func serve(args []string) error {
 		GitHubClientID: *githubClientID,
 		Repos:          repoStore, GitHubApp: ghAppOps,
 		TemplateTags: templateStore,
-		HiveMind:     hivemindOps,
-		Log:          log,
+		Environments: envStore,
+		// The SAME secrets store, through its other two halves — the plain-var
+		// half and the retag half. A second secrets.Open on this file would be
+		// a second connection with a second derived KEK for no reason, and a
+		// second keycheck sentinel that could disagree with this one.
+		EnvVars: secretsStore, SecretTags: secretsStore,
+		NetRules: netrulesStore,
+		HiveMind: hivemindOps,
+		Log:      log,
 	})
 	defer ops.Close()
 
@@ -1643,6 +1666,23 @@ type gatewayStores struct {
 	// store — and the first `snapshot bind` would panic instead of answering
 	// "not enabled on this host".
 	TemplateTags ctlops.TemplateBindings
+	// Environments is the same discipline a third time, and it has the same
+	// consequence: ctlops.Capabilities reports `environments` by comparing this
+	// against nil, and `create --env` refuses when it is nil. A concrete
+	// *envs.Store field holding a typed nil would advertise the feature on a
+	// host with no store and panic on the first `ctl env ls` instead of
+	// answering "environments are not enabled on this host".
+	Environments ctlops.Environments
+	// EnvVars, SecretTags and NetRules are the three stores an environment
+	// composes THROUGH, and they are interfaces here for the reason above.
+	// EnvVars and SecretTags are both the secrets store seen through a
+	// different half — the plain-var half and the retag half — so a host wires
+	// the one *secrets.Store into all three of Secrets, EnvVars and SecretTags.
+	// NetRules is the egress rule-set store, which the control plane had never
+	// held before environments needed to name a rule-set.
+	EnvVars    ctlops.EnvVars
+	SecretTags ctlops.SecretTags
+	NetRules   ctlops.NetRules
 	// HiveMind is the same nil-interface discipline: an unconfigured host must
 	// answer `sessions` with "not enabled here", not with a nil dereference.
 	HiveMind ctlops.HiveMind
@@ -1689,6 +1729,16 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// takes DefaultImage and bind/unbind answer 501 — which is exactly what
 		// shipped before this store existed.
 		TemplateTags: s.TemplateTags,
+		// Environments and the three stores one composes through. Nil in any of
+		// them is a narrower host, not a broken one: no Environments is a host
+		// where `ctl env` and `--env` answer "not enabled here", no EnvVars
+		// disables only the var verbs, no SecretTags means a secret cannot be
+		// added to an environment without re-pasting it, and no NetRules means
+		// an environment's composition simply has no rule-sets in it.
+		Environments: s.Environments,
+		EnvVars:      s.EnvVars,
+		SecretTags:   s.SecretTags,
+		NetRules:     s.NetRules,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
 		// cannot say whether a machine is answering, and the fleet alone cannot

@@ -319,6 +319,20 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// contract instead — see TestAdmitIsNotOperatorReachable for the half
 		// that is testable.
 		"AdmitGitHubLogin": true,
+		// Environments are keyed (owner, name) for the same reason secrets and
+		// repos are, and the store's every query carries the owner on both
+		// sides of the tag join — so the handle is not an argument and the name
+		// the caller passes selects only among their own. The masking is
+		// asserted directly instead, in env_test.go, because the answer for
+		// another owner's environment must be byte-identical to the answer for
+		// one nobody has.
+		"ListEnvironments": true, "GetEnvironment": true, "PutEnvironment": true,
+		"DeleteEnvironment": true, "SetEnvVar": true, "UnsetEnvVar": true,
+		// The setup-script pair names an environment and nothing else, so it is
+		// scoped exactly as the six above are: envs.Store.Get and SetScript
+		// both carry the owner in their WHERE clause, and a name belonging to
+		// somebody else comes back as ErrNoSuchEnvironment.
+		"EnvScript": true, "SetEnvScript": true,
 	}
 	covered := map[string]bool{}
 	for _, tc := range ownCases() {

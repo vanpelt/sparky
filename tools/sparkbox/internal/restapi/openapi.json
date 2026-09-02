@@ -2118,7 +2118,8 @@
           "fleet",
           "repos",
           "github_app",
-          "template_tags"
+          "template_tags",
+          "environments"
         ],
         "properties": {
           "archiving": { "type": "boolean", "description": "Object storage is configured." },
@@ -2131,7 +2132,8 @@
           "fleet": { "type": "boolean", "description": "This host is a gateway other machines can join, so the node endpoints answer. It says nothing about whether any machine has joined." },
           "repos": { "type": "boolean", "description": "The repo store is open, so repositories can be attached to tags at all." },
           "github_app": { "type": "boolean", "description": "This host holds a GitHub App key, which is what turns an attachment into a clone of a PRIVATE repository. False leaves attachment working and public repos cloning." },
-          "template_tags": { "type": "boolean", "description": "A tag can name the base image its sandboxes boot from, so `/v1/templates/{tag}` answers. False is a host with no binding store, where every create takes the operator's default image — a different statement from `snapshots`, since a host can hold snapshots to fork by name with nowhere to record a binding." }
+          "template_tags": { "type": "boolean", "description": "A tag can name the base image its sandboxes boot from, so `/v1/templates/{tag}` answers. False is a host with no binding store, where every create takes the operator's default image — a different statement from `snapshots`, since a host can hold snapshots to fork by name with nowhere to record a binding." },
+          "environments": { "type": "boolean", "description": "A composition — repositories, secrets, plain variables, egress rules and a base image — can be named and booted from as one object. False is a host with no environment store, where the environment endpoints answer 501 and a create naming one is refused; it says nothing about `tags`, which keep working on their own, because an environment is a name for a tag rather than a replacement for one." }
         }
       },
       "RepoStatus": {

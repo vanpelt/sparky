@@ -217,6 +217,8 @@ func (g *Gateway) handleControl(s gssh.Session, user string, log *slog.Logger) {
 		g.controlSecret(s, c, args[1:], log)
 	case "repo", "repos":
 		g.controlRepo(s, c, args[1:], log)
+	case "env", "envs", "environment", "environments":
+		g.controlEnv(s, c, args[1:], log)
 	// `badge` sits beside the repo verbs rather than under them because what it
 	// prints is about a repository the way `repo add` is, and because it is the
 	// one command on this channel whose output is meant to be copied out of the
@@ -776,6 +778,16 @@ func (g *Gateway) controlFork(s gssh.Session, c ctlops.Caller, args []string, lo
 		// accept — the alternative is the bare word `--node` becoming a tag.
 		err = fmt.Errorf("fork has no --node: a snapshot can only be forked on the machine that holds it")
 	}
+	if err == nil && parsed.Env != "" {
+		// A fork already names the disk it comes from — the snapshot is the
+		// first argument — and an environment's whole contribution to a create
+		// is deciding that. Accepting it here would mean either ignoring the
+		// snapshot the user typed or ignoring the environment, and both are
+		// silent. The tags an environment composes are still available, because
+		// its name IS a tag.
+		err = fmt.Errorf("fork has no --env: a fork already names the disk it comes from — " +
+			"the snapshot. use `--tag <env>` for that environment's secrets, repos and egress")
+	}
 	if err != nil {
 		fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)
 		s.Exit(2) //nolint:errcheck
@@ -890,6 +902,14 @@ func (g *Gateway) controlTags(s gssh.Session, c ctlops.Caller, args []string, lo
 			// created. Retagging a box that already exists cannot re-run that,
 			// and a --ref quietly accepted here would look like it had.
 			err = fmt.Errorf("tags has no --ref: it decides where a checkout starts, so it is a create-time choice — use `git switch` in the box")
+		}
+		if err == nil && parsed.Env != "" {
+			// The same shape of refusal, and the sharpest reason of the three:
+			// an environment decides which DISK a box boots from, and a box
+			// that exists has already booted. Quietly accepting it would look
+			// like the sandbox had been rebuilt on the environment's image.
+			err = fmt.Errorf("tags has no --env: an environment decides which disk a box boots from, " +
+				"so it is a create-time choice — recreate the box, or add the tag alone with `tags <name> <env>`")
 		}
 		if err != nil {
 			fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n", err)

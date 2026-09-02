@@ -22,6 +22,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -164,6 +165,16 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 	}
 	t.Cleanup(func() { templateStore.Close() }) //nolint:errcheck
 
+	// Nor is the environment store, for the third time and for the same
+	// reason: serve() opens one on every gateway unconditionally, so a fixture
+	// without it would model a host that does not exist and would let
+	// TestGatewayOpsNamesEnvironments pass vacuously.
+	envStore, err := envs.Open(db, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { envStore.Close() }) //nolint:errcheck
+
 	// The optional stores a gateway also passes are left out: nothing here asks
 	// the control plane about tags, schedules, routes or session tokens. The
 	// GitHub App is left out too, and that one is optional in production as
@@ -173,6 +184,7 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 			Fleet: flt, Placement: index, Roster: roster, Users: userStore,
 			Repos:        repoStore,
 			TemplateTags: templateStore,
+			Environments: envStore,
 			DefaultImage: "ubuntu", Domain: "hivemind.tools", Log: log,
 			GatewayGuestSubnet: testGatewayGuestSubnet,
 		},
@@ -265,6 +277,41 @@ func TestGatewayOpsWithoutATemplateStoreSaysSo(t *testing.T) {
 
 	if ops.Capabilities().TemplateTags {
 		t.Fatal("a gateway with no template store advertises bindings; the field is not the honest nil")
+	}
+}
+
+// TestGatewayOpsNamesEnvironments is the fourth of these wiring assertions, and
+// it exists for the reason the three above do: ctlops decides whether an
+// environment can be named at all by comparing Config.Environments against nil,
+// so a dropped line in newGatewayOps turns `ssh ctl@<gw> env ls` into
+// "environments are not enabled on this host" on a machine with the store
+// plainly open — and `create --env` into a refusal nobody can act on.
+func TestGatewayOpsNamesEnvironments(t *testing.T) {
+	fx := newGatewayFixture(t)
+	ops := newGatewayOps(fx.stores)
+	t.Cleanup(ops.Close)
+
+	if !ops.Capabilities().Environments {
+		t.Fatal("a gateway with an environment store reports environments disabled; ctlops.Config.Environments is unwired")
+	}
+}
+
+// TestGatewayOpsWithoutAnEnvironmentStoreSaysSo is the other half, and it is
+// what makes the assertion above mean something — it is also the typed-nil trap
+// itself, asserted. gatewayStores.Environments is declared as the ctlops
+// INTERFACE, so an unset field is a nil interface and the capability is false.
+// Declared as a concrete *envs.Store it would be a NON-nil interface holding a
+// nil pointer the moment newGatewayOps copied it into ctlops.Config: this test
+// would fail, and on a real host with no store every env verb would panic
+// instead of refusing.
+func TestGatewayOpsWithoutAnEnvironmentStoreSaysSo(t *testing.T) {
+	fx := newGatewayFixture(t)
+	fx.stores.Environments = nil
+	ops := newGatewayOps(fx.stores)
+	t.Cleanup(ops.Close)
+
+	if ops.Capabilities().Environments {
+		t.Fatal("a gateway with no environment store advertises environments; the field is not the honest nil")
 	}
 }
 

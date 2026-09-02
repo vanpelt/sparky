@@ -23,8 +23,10 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -151,6 +153,74 @@ type Repos interface {
 	// an owner and a tag, because `--ref` is the only thing on this surface
 	// that is about one instance. See reporef.go.
 	SetSandboxRefs(owner, sandbox string, refs []repos.SandboxRef) error
+}
+
+// Environments is the environment store — the FIFTH reader of the shared
+// sandbox_tags namespace, after secrets, netrules, repos and templates. A nil
+// one makes every environment verb answer KindDisabled, which is what a host
+// with no environment store is, and leaves `--env` on create refusing rather
+// than silently ignoring the flag.
+//
+// An environment OWNS EXACTLY ONE TAG and its name IS that tag, so this
+// interface never mentions a tag at all: `name` is the tag everywhere below.
+// That is what keeps the four existing joins untouched — an environment invents
+// no new join key, it only asserts that one tag name means something.
+//
+// envs.EnvironmentsForSandbox and envs.Building are deliberately absent, for
+// the reason Repos.ReposForSandbox is: nothing on this control surface resolves
+// what a running guest sees (that is internal/metadata's authority), and
+// Building belongs to the restart reconciler, which acts on behalf of no
+// caller. Every method here is owner-agnostic because ctlops authorizes first
+// and passes the handle down as a query term.
+type Environments interface {
+	Put(owner, name, description string) (envs.Environment, error)
+	Get(owner, name string) (envs.Environment, error)
+	List(owner string) ([]envs.Environment, error)
+	Delete(owner, name string) error
+	SetScript(owner, name, script, from string) error
+	SetState(owner, name string, st envs.State, box, buildErr string) error
+}
+
+// EnvVars is the plain (non-secret) environment-variable half of
+// secrets.Store. It is a second field rather than more methods on Secrets
+// because the two carry different material and fail differently: a secret is
+// sealed under the OIDC key and every one of them is unreadable after a key
+// rotation, while a var is plaintext configuration that keeps working. A host
+// could sensibly have one without the other.
+//
+// There is no ListVars here on purpose. Everything this package renders is
+// scoped to one environment, so VarsForTag is the whole read surface; a
+// list-them-all method would be a second way to ask a question with one
+// answer.
+type EnvVars interface {
+	PutVar(owner, tag, name, value string) error
+	DeleteVar(owner, tag, name string) error
+	VarsForTag(owner, tag string) ([]secrets.Var, error)
+	DeleteVarsForTag(owner, tag string) error
+}
+
+// SecretTags is the retag half of secrets.Store: change WHICH sandboxes a
+// secret reaches without touching what it says.
+//
+// It is separate from Secrets because it is the one secret operation that does
+// not need the value, and that is exactly why it has to exist. PutSecret
+// demands the value and the store deliberately has no way to read one back, so
+// without this the only way to add `web` to an existing token would be to ask
+// the user to paste the token again — which people skip, and the environment
+// then composes a secret it does not actually carry.
+type SecretTags interface {
+	RetagSecret(owner, envName string, tags []string) error
+}
+
+// NetRules is the egress rule-set store — the second reader of sandbox_tags,
+// and the only SUBTRACTIVE one. ctlops reaches it for exactly two things: to
+// say which rule-sets an environment composes, and to add an environment's tag
+// to one. Authoring a rule-set (the allow list itself) stays where it is; this
+// package deliberately cannot widen an allowlist except by carrying the spec it
+// just read straight back.
+type NetRules interface {
+	ListRules(owner string) ([]netrules.RuleMeta, error)
+	PutRule(owner, name string, spec netrules.RuleSpec, tags []string) error
 }
 
 // TemplateBindings is the tag-to-base-image store — the fourth reader of the
@@ -287,12 +357,31 @@ type Config struct {
 	Secrets      Secrets          // nil: secret operations are KindDisabled
 	Repos        Repos            // nil: repo operations are KindDisabled
 	TemplateTags TemplateBindings // nil: bind is KindDisabled and creates use DefaultImage
-	Checkpoints  Checkpoints      // nil: manual durable checkpoints are KindDisabled
-	Schedules    Schedules        // nil: schedule operations are KindDisabled
-	Routes       Routes           // nil: share operations are KindDisabled
-	Sessions     Minter           // nil: MintSessionToken is KindDisabled
-	Nodes        NodeRoster       // nil: node operations are KindDisabled
-	GitHub       GitHubKeys       // nil: the real github.com client
+	// Environments is the environment store. nil makes every `env` verb
+	// KindDisabled and makes `create --env` refuse — never silently ignore
+	// the flag, which would hand somebody a sandbox composed of nothing they
+	// asked for.
+	Environments Environments
+	// EnvVars is the plain-env-var half of the secrets store. nil leaves
+	// environments perfectly usable — they still compose secrets, repos and
+	// rules — and makes only the `env var` verbs KindDisabled.
+	EnvVars EnvVars
+	// SecretTags is the retag half of the secrets store, used to add an
+	// environment's tag to an existing secret. nil makes attaching a secret to
+	// an environment KindDisabled while leaving everything else about
+	// environments working; see the SecretTags interface for why it is not
+	// simply a method on Secrets.
+	SecretTags SecretTags
+	// NetRules is the egress rule-set store. nil leaves an environment unable
+	// to name or attach one, and its composition simply omits rule-sets — a
+	// host with no netrules store has none to omit.
+	NetRules    NetRules
+	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
+	Schedules   Schedules   // nil: schedule operations are KindDisabled
+	Routes      Routes      // nil: share operations are KindDisabled
+	Sessions    Minter      // nil: MintSessionToken is KindDisabled
+	Nodes       NodeRoster  // nil: node operations are KindDisabled
+	GitHub      GitHubKeys  // nil: the real github.com client
 	// GitHubDevice runs the OAuth device flow. nil — the default, and the state
 	// of any host with no --github-client-id — leaves the key check as the only
 	// way to link, which is what shipped before this existed.
@@ -331,6 +420,10 @@ type Ops struct {
 	secrets      Secrets
 	repos        Repos
 	templateTags TemplateBindings
+	envs         Environments
+	envVars      EnvVars
+	secretTags   SecretTags
+	netrules     NetRules
 	checkpoints  Checkpoints
 	schedules    Schedules
 	routes       Routes
@@ -374,6 +467,10 @@ func New(cfg Config) *Ops {
 		secrets:            cfg.Secrets,
 		repos:              cfg.Repos,
 		templateTags:       cfg.TemplateTags,
+		envs:               cfg.Environments,
+		envVars:            cfg.EnvVars,
+		secretTags:         cfg.SecretTags,
+		netrules:           cfg.NetRules,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
@@ -471,6 +568,13 @@ type Capabilities struct {
 	// different statement from Snapshots, since a host can hold snapshots to
 	// fork by name while having nowhere to record a binding.
 	TemplateTags bool `json:"template_tags"`
+	// Environments reports that this host can name a composition — repos,
+	// secrets, vars, rules and a base image — under one word and boot a
+	// sandbox from it. False is a host with no environment store, where every
+	// `env` verb answers 501 and `create --env` refuses; it says nothing about
+	// tags, which keep working on their own, because an environment is a name
+	// for a tag rather than a replacement for one.
+	Environments bool `json:"environments"`
 }
 
 func (o *Ops) Capabilities() Capabilities {
@@ -487,6 +591,7 @@ func (o *Ops) Capabilities() Capabilities {
 		GitHubApp:     o.ghApp != nil,
 		Fleet:         o.nodes != nil,
 		TemplateTags:  o.templateTags != nil,
+		Environments:  o.envs != nil,
 	}
 }
 

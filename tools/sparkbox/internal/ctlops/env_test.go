@@ -1,0 +1,861 @@
+package ctlops
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+)
+
+// ---------------------------------------------------------------------------
+// Fixture helpers
+// ---------------------------------------------------------------------------
+
+// seedEnv puts an environment in the given state directly, bypassing the verbs,
+// so a test about `--env` does not first have to run a build that does not exist
+// until Phase B.
+func seedEnv(t *testing.T, e *fakeEnvs, owner, name string, st envs.State) {
+	t.Helper()
+	if _, err := e.Put(owner, name, ""); err != nil {
+		t.Fatalf("seed %s/%s: %v", owner, name, err)
+	}
+	if st != envs.StateDraft {
+		if err := e.SetState(owner, name, st, "", ""); err != nil {
+			t.Fatalf("seed state %s/%s: %v", owner, name, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Disabled
+// ---------------------------------------------------------------------------
+
+// A host with no environment store answers KindDisabled from every verb rather
+// than panicking on a nil store, which is the contract every optional store in
+// this package holds. `create --env` is in the table because silently ignoring
+// the flag would be worse than refusing: the user gets a sandbox composed of
+// nothing they asked for.
+func TestEnvironmentVerbsDisabledWithoutAStore(t *testing.T) {
+	r := newRig(t) // deliberately NOT withEnvs
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"list", func() error { _, err := r.ops.ListEnvironments(alice()); return err }},
+		{"get", func() error { _, err := r.ops.GetEnvironment(alice(), "web"); return err }},
+		{"put", func() error {
+			_, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{Name: "web"})
+			return err
+		}},
+		{"rm", func() error {
+			_, err := r.ops.DeleteEnvironment(context.Background(), alice(), "web")
+			return err
+		}},
+		{"var set", func() error { return r.ops.SetEnvVar(context.Background(), alice(), "web", "FOO", "1") }},
+		{"var unset", func() error { return r.ops.UnsetEnvVar(context.Background(), alice(), "web", "FOO") }},
+		{"create --env", func() error {
+			_, err := r.ops.Create(context.Background(), alice(), CreateArgs{Name: "box", Env: "web"})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("want an error on a host with no environment store")
+			}
+			if !IsKind(err, KindDisabled) {
+				t.Fatalf("kind = %v, want KindDisabled: %v", err.(*Error).Kind, err)
+			}
+		})
+	}
+	if r.ops.Capabilities().Environments {
+		t.Error("Capabilities reported environments on a host with no store")
+	}
+}
+
+// The var verbs are disabled on their own when the environment store is present
+// but the var half is not: an environment still composes secrets, repos and
+// rules there, so the whole feature must not go dark for a missing half.
+func TestEnvVarVerbsDisabledWithoutTheVarStore(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	r.ops.envVars = nil
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+
+	if err := r.ops.SetEnvVar(context.Background(), alice(), "web", "FOO", "1"); !IsKind(err, KindDisabled) {
+		t.Fatalf("var set = %v, want KindDisabled", err)
+	}
+	// And the environment itself still lists.
+	if _, err := r.ops.ListEnvironments(alice()); err != nil {
+		t.Fatalf("env ls broke because the var store is missing: %v", err)
+	}
+}
+
+func TestCapabilitiesReportsEnvironments(t *testing.T) {
+	r := newRig(t)
+	if r.ops.Capabilities().Environments {
+		t.Fatal("environments reported without a store")
+	}
+	withEnvs(r)
+	if !r.ops.Capabilities().Environments {
+		t.Fatal("environments not reported with a store")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The masked answer
+// ---------------------------------------------------------------------------
+
+// An environment names somebody's private repository list and secret set, so
+// "you have no environment called that" and "somebody else does" must be the
+// SAME answer, byte for byte. This is the security boundary AGENTS.md names,
+// and the assertion is on the rendered messages rather than on the kind,
+// because a distinguishable sentence leaks existence just as effectively as a
+// 403 would.
+func TestGetEnvironmentMasksAnotherOwnersEnvironment(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+	r.calls.reset()
+
+	_, missing := r.ops.GetEnvironment(mallory(), "nothing-here")
+	_, notYours := r.ops.GetEnvironment(mallory(), "web")
+	if missing == nil || notYours == nil {
+		t.Fatalf("want two errors, got %v and %v", missing, notYours)
+	}
+	if missing.Error() == notYours.Error() {
+		t.Fatal("the fixture is broken: both names should differ in the message but not in shape")
+	}
+	// The shape is what must be identical: same kind, same code, same sentence
+	// modulo the name the caller themselves typed.
+	me, ny := missing.(*Error), notYours.(*Error)
+	if me.Kind != ny.Kind || me.Code != ny.Code {
+		t.Fatalf("distinguishable classification: %+v vs %+v", me, ny)
+	}
+	if want := `no environment named "web"`; ny.Msg != want {
+		t.Fatalf("msg = %q, want %q", ny.Msg, want)
+	}
+	if want := `no environment named "nothing-here"`; me.Msg != want {
+		t.Fatalf("msg = %q, want %q", me.Msg, want)
+	}
+	if !IsKind(notYours, KindNotFound) {
+		t.Fatalf("kind = %v, want KindNotFound", ny.Kind)
+	}
+	// And a cross-owner probe wrote nothing at all.
+	if got := r.calls.mutating(); len(got) != 0 {
+		t.Fatalf("a masked lookup mutated: %v", got)
+	}
+}
+
+// The same masking on the verbs that could otherwise confirm existence by
+// failing differently.
+func TestEnvironmentMutationsMaskAnotherOwnersEnvironment(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+
+	if _, err := r.ops.DeleteEnvironment(context.Background(), mallory(), "web"); !IsKind(err, KindNotFound) {
+		t.Fatalf("rm = %v, want KindNotFound", err)
+	}
+	if _, ok := e.rows[envKey("alice", "web")]; !ok {
+		t.Fatal("a stranger's delete removed the environment")
+	}
+	if err := r.ops.SetEnvVar(context.Background(), mallory(), "web", "FOO", "1"); !IsKind(err, KindNotFound) {
+		t.Fatalf("var set = %v, want KindNotFound", err)
+	}
+	if len(r.envVars.rows) != 0 {
+		t.Fatalf("a stranger's var landed: %+v", r.envVars.rows)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round trip
+// ---------------------------------------------------------------------------
+
+// The whole shape in one pass: create, add to it, read it back, list it,
+// delete it.
+func TestEnvironmentRoundTrip(t *testing.T) {
+	r := newRig(t)
+	e, vars, rules := withEnvs(r)
+	rp, _ := withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaDevice, 7)
+	// The two objects an environment can only ATTACH, never create.
+	if err := r.secrets.PutSecret("alice", "GH_TOKEN", "ghp_x", []string{"other"}); err != nil {
+		t.Fatal(err)
+	}
+	rules.rows["alice\x00npm"] = netrules.RuleMeta{Name: "npm", Tags: []string{"other"},
+		Spec: netrules.RuleSpec{Allow: []string{"registry.npmjs.org"}}}
+
+	got, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name:        "Web", // upper-case on purpose: the name IS a tag, so it folds
+		Description: "the web stack",
+		Repos:       []RepoArgs{{Slug: "wandb/hivemind", Ref: "main"}},
+		Secrets:     []string{"GH_TOKEN"},
+		Rules:       []string{"npm"},
+		Vars:        []EnvVar{{Name: "NODE_ENV", Value: "test"}},
+	})
+	if err != nil {
+		t.Fatalf("PutEnvironment: %v", err)
+	}
+	if got.Name != "web" {
+		t.Errorf("name = %q, want the folded tag %q", got.Name, "web")
+	}
+	if got.State != string(envs.StateDraft) {
+		t.Errorf("state = %q, want draft — nothing has built it", got.State)
+	}
+	if !slices.Equal(got.Repos, []string{"wandb/hivemind"}) {
+		t.Errorf("repos = %v", got.Repos)
+	}
+	if !slices.Equal(got.Secrets, []string{"GH_TOKEN"}) {
+		t.Errorf("secrets = %v", got.Secrets)
+	}
+	if !slices.Equal(got.Rules, []string{"npm"}) {
+		t.Errorf("rules = %v", got.Rules)
+	}
+	if len(got.Vars) != 1 || got.Vars[0].Name != "NODE_ENV" || got.Vars[0].Value != "test" {
+		t.Errorf("vars = %+v", got.Vars)
+	}
+	if got.HasSetup || got.SetupBytes != 0 {
+		t.Errorf("a draft environment reports a setup script: %+v", got)
+	}
+
+	// ATTACHING IS A UNION. The secret and the rule-set were reaching `other`
+	// before this ran and must still be.
+	if tags := r.secrets.tags[secretKey("alice", "GH_TOKEN")]; !slices.Equal(tags, []string{"other", "web"}) {
+		t.Errorf("secret tags = %v, want the union [other web] — an environment must not steal a credential", tags)
+	}
+	if tags := rules.rows["alice\x00npm"].Tags; !slices.Equal(tags, []string{"other", "web"}) {
+		t.Errorf("rule tags = %v, want the union [other web]", tags)
+	}
+	if allow := rules.rows["alice\x00npm"].Spec.Allow; !slices.Equal(allow, []string{"registry.npmjs.org"}) {
+		t.Errorf("the allowlist changed: %v — env.set must carry the spec straight back", allow)
+	}
+
+	// Update: description changes, attachments are added to, nothing is lost.
+	got, err = r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name: "web", Description: "the web stack, v2",
+		Vars: []EnvVar{{Name: "PORT", Value: "3000"}},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got.Description != "the web stack, v2" {
+		t.Errorf("description = %q", got.Description)
+	}
+	if len(got.Vars) != 2 {
+		t.Errorf("vars after update = %+v, want both", got.Vars)
+	}
+	if !slices.Equal(got.Repos, []string{"wandb/hivemind"}) {
+		t.Errorf("an update dropped the repos: %v", got.Repos)
+	}
+
+	// The stored attachment kept the ref the first call set, because the second
+	// did not restate it.
+	if r0 := rp.rows[repoKey("alice", "github.com", "wandb/hivemind")]; r0.Ref != "main" {
+		t.Errorf("repo ref = %q, want main preserved", r0.Ref)
+	}
+
+	list, err := r.ops.ListEnvironments(alice())
+	if err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "web" {
+		t.Fatalf("list = %+v", list)
+	}
+	if !slices.Equal(list[0].Secrets, []string{"GH_TOKEN"}) {
+		t.Errorf("the listing lost the composition: %+v", list[0])
+	}
+
+	one, err := r.ops.GetEnvironment(alice(), "web")
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if one.Name != list[0].Name || len(one.Vars) != len(list[0].Vars) {
+		t.Errorf("get and list disagree: %+v vs %+v", one, list[0])
+	}
+
+	if _, err := r.ops.DeleteEnvironment(context.Background(), alice(), "web"); err != nil {
+		t.Fatalf("DeleteEnvironment: %v", err)
+	}
+	if _, err := r.ops.GetEnvironment(alice(), "web"); !IsKind(err, KindNotFound) {
+		t.Fatalf("after rm: %v, want KindNotFound", err)
+	}
+	if len(vars.rows) != 0 {
+		t.Errorf("the vars outlived their environment: %+v", vars.rows)
+	}
+	_ = e
+}
+
+// A listing on a host whose composition stores are empty is [] and not null,
+// and every composed field is an empty slice for the same reason.
+func TestEnvironmentListingNeverSerializesNull(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+
+	list, err := r.ops.ListEnvironments(alice())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("list = %+v", list)
+	}
+	got := list[0]
+	if got.Repos == nil || got.Secrets == nil || got.Rules == nil || got.Vars == nil {
+		t.Fatalf("a nil composition slice serializes as null: %+v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------
+
+// The store's sentences about the reserved word and the grammar reach the
+// caller unrewritten, under this package's own stable codes.
+func TestPutEnvironmentRefusals(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+
+	cases := []struct {
+		name string
+		args EnvArgs
+		kind Kind
+		code string
+	}{
+		{"empty", EnvArgs{Name: "  "}, KindInvalid, "missing_env_name"},
+		{"reserved", EnvArgs{Name: "default"}, KindInvalid, "reserved_env_name"},
+		{"bad grammar", EnvArgs{Name: "-nope"}, KindInvalid, "bad_env_name"},
+		{"unknown secret", EnvArgs{Name: "web", Secrets: []string{"NOPE"}}, KindInvalid, "no_such_secret"},
+		{"unknown rule", EnvArgs{Name: "web", Rules: []string{"nope"}}, KindInvalid, "no_such_rule"},
+		{"nameless var", EnvArgs{Name: "web", Vars: []EnvVar{{Value: "1"}}}, KindInvalid, "missing_var_name"},
+		// The grammar refusals below live in the stores, and every one of them
+		// used to fire from inside the WRITE loop — after the environment row
+		// and any retagged secret had already committed. They are here to pin
+		// the ordering, not the messages.
+		{"reserved var name", EnvArgs{Name: "web", Vars: []EnvVar{{Name: "PATH", Value: "/opt/bin"}}}, KindInvalid, "bad_var"},
+		{"lowercase var name", EnvArgs{Name: "web", Vars: []EnvVar{{Name: "node_env", Value: "dev"}}}, KindInvalid, "bad_var"},
+		{"hash in var value", EnvArgs{Name: "web", Vars: []EnvVar{{Name: "API", Value: "a#b"}}}, KindInvalid, "bad_var"},
+		{"oversized var value", EnvArgs{Name: "web", Vars: []EnvVar{{Name: "BIG", Value: strings.Repeat("x", 4097)}}}, KindInvalid, "bad_var"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.ops.PutEnvironment(context.Background(), alice(), tc.args)
+			if err == nil {
+				t.Fatal("want a refusal")
+			}
+			e := err.(*Error)
+			if e.Kind != tc.kind || e.Code != tc.code {
+				t.Fatalf("kind/code = %v/%q, want %v/%q (%v)", e.Kind, e.Code, tc.kind, tc.code, err)
+			}
+		})
+	}
+	// None of them left a row behind. An attachment that cannot be honoured
+	// must not leave a half-composed environment for the user to find.
+	if len(r.envs.rows) != 0 {
+		t.Fatalf("a refused env.set wrote a row: %+v", r.envs.rows)
+	}
+}
+
+// `default` is refused because an environment's name IS its tag and every
+// sandbox carries that tag — the same refusal netrules and templates already
+// make, and the sentence the store wrote must survive to the terminal.
+func TestPutEnvironmentPassesTheReservedSentenceThrough(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	_, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{Name: "default"})
+	if err == nil {
+		t.Fatal("`default` was accepted as an environment name")
+	}
+	if !strings.Contains(err.Error(), "default") {
+		t.Errorf("the refusal does not name the word: %v", err)
+	}
+	if !err.(*Error).Verbatim {
+		t.Error("the store's sentence was wrapped instead of printed")
+	}
+}
+
+// Attaching a repository through an environment goes through the SAME gate
+// The failure this ordering exists to prevent, end to end: a command naming a
+// real secret and a bad var must not retag the secret. The var rules live in
+// the secret store, so before they were hoisted into the refusal block the
+// sequence ran envs.Put, then RetagSecret, and only THEN discovered that PATH
+// is reserved — reporting failure to a user whose credential had just been
+// widened to a new tag.
+func TestPutEnvironmentDoesNotRetagASecretWhenAVarIsRefused(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	if err := r.secrets.PutSecret("alice", "GH_TOKEN", "ghp_x", []string{"other"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name:    "web",
+		Secrets: []string{"GH_TOKEN"},
+		Vars:    []EnvVar{{Name: "PATH", Value: "/opt/bin"}},
+	})
+	if err == nil {
+		t.Fatal("a reserved var name was accepted")
+	}
+	if code := err.(*Error).Code; code != "bad_var" {
+		t.Fatalf("code = %q, want bad_var", code)
+	}
+	if tags := r.secrets.tags[secretKey("alice", "GH_TOKEN")]; !slices.Equal(tags, []string{"other"}) {
+		t.Errorf("secret tags = %v, want [other] — a refused command widened a credential's scope", tags)
+	}
+	if len(r.envs.rows) != 0 {
+		t.Errorf("a refused env.set wrote an environment row: %+v", r.envs.rows)
+	}
+}
+
+// A malformed slug is refused before the environment row is written, and in the
+// same order `repo add` refuses it: grammar before the GitHub-link gate. alice
+// has no link in the base fixture, so a slug checked AFTER that gate would
+// answer github_not_linked here and only reveal the typo on the second attempt.
+func TestPutEnvironmentRefusesABadSlugBeforeWriting(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	withRepos(r)
+	_, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name: "web", Repos: []RepoArgs{{Slug: "not-a-slug"}},
+	})
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if code := err.(*Error).Code; code != "bad_slug" {
+		t.Fatalf("code = %q, want bad_slug", code)
+	}
+	if len(r.envs.rows) != 0 {
+		t.Fatalf("a refused env.set wrote an environment row: %+v", r.envs.rows)
+	}
+}
+
+// `repo add` applies. An environment must not be a side door onto the verb that
+// decides which GitHub installation reads somebody's private source.
+func TestPutEnvironmentAppliesTheRepoAttachGate(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	withRepos(r)
+	// alice has no GitHub link at all in the base fixture.
+	_, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name: "web", Repos: []RepoArgs{{Slug: "wandb/hivemind"}},
+	})
+	if err == nil {
+		t.Fatal("a repo was attached by an account with no GitHub link")
+	}
+	if code := err.(*Error).Code; code != "github_not_linked" {
+		t.Fatalf("code = %q, want github_not_linked", code)
+	}
+	if len(r.envs.rows) != 0 {
+		t.Fatalf("the environment row was written before the gate refused: %+v", r.envs.rows)
+	}
+
+	// An assertion-strength link is refused too — the rule AttachGate exists for.
+	linkGitHub(r, "alice", "alice-gh", "assertion", 7)
+	_, err = r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name: "web", Repos: []RepoArgs{{Slug: "wandb/hivemind"}},
+	})
+	if err == nil || err.(*Error).Code != "github_link_too_weak" {
+		t.Fatalf("an assertion link attached a repo: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Delete
+// ---------------------------------------------------------------------------
+
+// Removing a grouping must never destroy a user's credential, a checkout they
+// may be working in, or a policy that governs other tags. `env rm` reports what
+// still carries the tag and deletes NONE of it.
+func TestDeleteEnvironmentKeepsTheThingsItGrouped(t *testing.T) {
+	r := newRig(t)
+	e, vars, rules := withEnvs(r)
+	rp, _ := withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaDevice, 7)
+	if err := r.secrets.PutSecret("alice", "GH_TOKEN", "ghp_x", nil); err != nil {
+		t.Fatal(err)
+	}
+	rules.rows["alice\x00npm"] = netrules.RuleMeta{Name: "npm",
+		Spec: netrules.RuleSpec{Allow: []string{"registry.npmjs.org"}}}
+	if _, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name:    "web",
+		Repos:   []RepoArgs{{Slug: "wandb/hivemind"}},
+		Secrets: []string{"GH_TOKEN"},
+		Rules:   []string{"npm"},
+		Vars:    []EnvVar{{Name: "NODE_ENV", Value: "test"}},
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// A binding on the same tag, which DOES go: it would otherwise point a tag
+	// nobody can see at a base image.
+	r.bindings.bind("alice", "web", "alicesnap")
+
+	res, err := r.ops.DeleteEnvironment(context.Background(), alice(), "web")
+	if err != nil {
+		t.Fatalf("DeleteEnvironment: %v", err)
+	}
+	if !slices.Equal(res.Repos, []string{"wandb/hivemind"}) {
+		t.Errorf("result.Repos = %v, want the still-attached repo named", res.Repos)
+	}
+	if !slices.Equal(res.Secrets, []string{"GH_TOKEN"}) {
+		t.Errorf("result.Secrets = %v", res.Secrets)
+	}
+	if !slices.Equal(res.Rules, []string{"npm"}) {
+		t.Errorf("result.Rules = %v", res.Rules)
+	}
+	if res.Unbound != "alicesnap" {
+		t.Errorf("result.Unbound = %q, want the snapshot the tag was bound to", res.Unbound)
+	}
+
+	// And now the point of the whole test: none of them are gone.
+	if _, ok := r.secrets.vals[secretKey("alice", "GH_TOKEN")]; !ok {
+		t.Error("env rm DELETED A CREDENTIAL")
+	}
+	if _, ok := rp.rows[repoKey("alice", "github.com", "wandb/hivemind")]; !ok {
+		t.Error("env rm deleted a repo attachment")
+	}
+	if _, ok := rules.rows["alice\x00npm"]; !ok {
+		t.Error("env rm deleted an egress rule-set")
+	}
+	// The two things that cannot outlive the name did go.
+	if _, ok := e.rows[envKey("alice", "web")]; ok {
+		t.Error("the environment row survived")
+	}
+	if len(vars.rows) != 0 {
+		t.Errorf("vars survived their environment: %+v", vars.rows)
+	}
+}
+
+// The result's slices are never nil, so a transport that prints "still carries
+// the tag" gets [] rather than null for an environment that grouped nothing.
+func TestDeleteEnvironmentResultIsNeverNull(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+
+	res, err := r.ops.DeleteEnvironment(context.Background(), alice(), "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Repos == nil || res.Secrets == nil || res.Rules == nil || res.Resynced == nil {
+		t.Fatalf("nil slices in %+v", res)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Vars
+// ---------------------------------------------------------------------------
+
+// A var change reaches running sandboxes the same way a secret change does: a
+// var saved while a box is running must not wait for a resume that, for a
+// pinned box, never comes.
+func TestEnvVarChangeResyncsRunningSandboxes(t *testing.T) {
+	r := newRig(t)
+	e, vars, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+	// alicebox is alice's, and carries the tag.
+	if err := r.tagger.SetTags("alicebox", "alice", []string{"web"}); err != nil {
+		t.Fatal(err)
+	}
+	r.calls.reset()
+
+	if err := r.ops.SetEnvVar(context.Background(), alice(), "web", "NODE_ENV", "test"); err != nil {
+		t.Fatalf("SetEnvVar: %v", err)
+	}
+	if !r.calls.has("ResyncEnv alicebox") {
+		t.Fatalf("the running sandbox was not re-pushed:\n%v", r.calls.all())
+	}
+	if got := vars.rows[varKey("alice", "web", "NODE_ENV")].Value; got != "test" {
+		t.Fatalf("value = %q", got)
+	}
+
+	r.calls.reset()
+	if err := r.ops.UnsetEnvVar(context.Background(), alice(), "web", "NODE_ENV"); err != nil {
+		t.Fatalf("UnsetEnvVar: %v", err)
+	}
+	if !r.calls.has("ResyncEnv alicebox") {
+		t.Fatalf("the running sandbox was not re-pushed after an unset:\n%v", r.calls.all())
+	}
+	if len(vars.rows) != 0 {
+		t.Fatalf("the var survived the unset: %+v", vars.rows)
+	}
+}
+
+// Unsetting a var nobody set is its own answer, not a silent success: somebody
+// typed a name and expects it gone, and a no-op would let a typo read as done.
+func TestUnsetEnvVarRefusesAMissingVar(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+
+	err := r.ops.UnsetEnvVar(context.Background(), alice(), "web", "NOPE")
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if code := err.(*Error).Code; code != "no_such_var" {
+		t.Fatalf("code = %q, want no_such_var", code)
+	}
+}
+
+// A var can only be set on an environment that exists, so a typo cannot write a
+// row keyed by a tag nobody will ever look at again.
+func TestSetEnvVarRequiresTheEnvironment(t *testing.T) {
+	r := newRig(t)
+	_, vars, _ := withEnvs(r)
+
+	if err := r.ops.SetEnvVar(context.Background(), alice(), "typo", "FOO", "1"); !IsKind(err, KindNotFound) {
+		t.Fatalf("err = %v, want KindNotFound", err)
+	}
+	if len(vars.rows) != 0 {
+		t.Fatalf("a var landed under an environment that does not exist: %+v", vars.rows)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Best-effort composition
+// ---------------------------------------------------------------------------
+
+// A store hiccup degrades ONE field of the answer. It must never turn `env ls`
+// into an error — the composition is decoration on a row whose subject is the
+// environment itself, which is the discipline Ops.info already applies to a
+// sandbox's tags.
+func TestEnvironmentListingSurvivesAStoreHiccup(t *testing.T) {
+	r := newRig(t)
+	e, vars, rules := withEnvs(r)
+	rp, _ := withRepos(r)
+	seedEnv(t, e, "alice", "web", envs.StateDraft)
+
+	rp.err = errUnavailable
+	rules.err = errUnavailable
+	vars.err = errUnavailable
+	r.secrets.err = errUnavailable
+	r.bindings.err = errUnavailable
+
+	list, err := r.ops.ListEnvironments(alice())
+	if err != nil {
+		t.Fatalf("a store hiccup turned env ls into an error: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "web" {
+		t.Fatalf("list = %+v", list)
+	}
+	got := list[0]
+	if len(got.Repos) != 0 || len(got.Secrets) != 0 || len(got.Rules) != 0 || len(got.Vars) != 0 {
+		t.Fatalf("a failed store invented a composition: %+v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// create --env
+// ---------------------------------------------------------------------------
+
+// The tag an environment names is UNIONED with the tags the caller typed, not
+// substituted for them: `--env web --tag ci` asked for both, and dropping
+// either half silently withholds secrets, checkouts or egress.
+func TestCreateWithEnvUnionsWithExplicitTags(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateReady)
+
+	got, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+		Name: "box", Env: "web", Tags: []string{"ci"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// `default` still rides along, and the whole set is sorted.
+	if !slices.Equal(got.Tags, []string{"ci", "default", "web"}) {
+		t.Fatalf("tags = %v, want [ci default web]", got.Tags)
+	}
+}
+
+// Naming the same environment twice, or naming it in both --env and --tag, is
+// one tag and not two.
+func TestCreateWithEnvIsIdempotentAgainstAnEqualTag(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateReady)
+
+	got, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+		Name: "box", Env: "web", Tags: []string{"web"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !slices.Equal(got.Tags, []string{"default", "web"}) {
+		t.Fatalf("tags = %v, want [default web]", got.Tags)
+	}
+}
+
+// The ordering invariant create_test.go pins for the template and --ref
+// refusals, applied to --env: a create that cannot possibly succeed must leave
+// NO sandbox, NO tag rows and NO repo-ref rows behind.
+func TestCreateWithABadEnvWritesNothing(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	rp, _ := withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaDevice, 7)
+	attach(t, r, "alice", "wandb/hivemind", "main", "hm")
+	seedEnv(t, e, "alice", "building-one", envs.StateBuilding)
+	seedEnv(t, e, "alice", "draft-one", envs.StateDraft)
+	seedEnv(t, e, "alice", "failed-one", envs.StateFailed)
+
+	cases := []struct {
+		name string
+		env  string
+		kind Kind
+		code string
+	}{
+		{"unknown", "nope", KindNotFound, "environment_not_found"},
+		{"another owner's", "someone-elses", KindNotFound, "environment_not_found"},
+		{"still building", "building-one", KindConflict, "env_building"},
+		{"never built", "draft-one", KindConflict, "env_not_built"},
+		{"build failed", "failed-one", KindConflict, "env_build_failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r.calls.reset()
+			_, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+				Name: "box", Env: tc.env, Tags: []string{"hm"},
+				Refs: []RepoRef{{Slug: "wandb/hivemind", Ref: "feat/x"}},
+			})
+			if err == nil {
+				t.Fatal("a create naming an unusable environment was accepted")
+			}
+			ce := err.(*Error)
+			if ce.Kind != tc.kind || ce.Code != tc.code {
+				t.Fatalf("kind/code = %v/%q, want %v/%q (%v)", ce.Kind, ce.Code, tc.kind, tc.code, err)
+			}
+			if _, ok := r.boxes.boxes["box"]; ok {
+				t.Error("the sandbox was built despite the refusal")
+			}
+			if tags, _ := r.tagger.TagsFor("box"); len(tags) != 0 {
+				t.Errorf("tag rows were stranded by a refused create: %v", tags)
+			}
+			if len(rp.refs) != 0 {
+				t.Errorf("ref override rows were written for a refused create: %+v", rp.refs)
+			}
+			if got := r.calls.mutating(); len(got) != 0 {
+				t.Errorf("a refused create mutated: %v", got)
+			}
+		})
+	}
+	// Each not-ready state gets its OWN sentence: somebody whose build is
+	// running needs to be told to wait, not to go looking for a typo.
+	var msgs []string
+	for _, env := range []string{"building-one", "draft-one", "failed-one"} {
+		_, err := r.ops.Create(context.Background(), alice(), CreateArgs{Name: "box2", Env: env})
+		msgs = append(msgs, err.Error())
+	}
+	for i := range msgs {
+		for j := i + 1; j < len(msgs); j++ {
+			if msgs[i] == msgs[j] {
+				t.Fatalf("two build states share one sentence: %q", msgs[i])
+			}
+		}
+	}
+}
+
+// A create naming a ready environment is placed on that tag and boots whatever
+// the tag binds, exactly as a hand-typed --tag would.
+func TestCreateWithEnvBootsTheBoundTemplate(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateReady)
+	r.bindings.bind("alice", "web", "alicesnap")
+	r.calls.reset()
+
+	if _, err := r.ops.Create(context.Background(), alice(), CreateArgs{Name: "box", Env: "web"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !r.calls.has("Create box owner=alice image=snap-alice-alicesnap") {
+		t.Fatalf("the environment's template was not used:\n%v", r.calls.all())
+	}
+}
+
+// --from-base ignores the binding and boots the operator default. It is how a
+// rebuild gets a clean universal image: an environment that booted from its own
+// last snapshot would accumulate every side effect of every previous build.
+func TestCreateFromBaseIgnoresABoundTemplate(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateReady)
+	r.bindings.bind("alice", "web", "alicesnap")
+	r.calls.reset()
+
+	if _, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+		Name: "box", Env: "web", FromBase: true,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !r.calls.has("Create box owner=alice image=base") {
+		t.Fatalf("--from-base did not take the default image:\n%v", r.calls.all())
+	}
+	// The tag is still stamped: --from-base is about the disk, not about the
+	// secrets, checkouts and egress the environment composes.
+	if tags, _ := r.tagger.TagsFor("box"); !slices.Contains(tags, "web") {
+		t.Fatalf("tags = %v, want the environment's tag stamped", tags)
+	}
+}
+
+// --from-base also skips the binding lookup entirely, which is the case it
+// exists to recover from: a tag whose bound snapshot is gone refuses every
+// ordinary create, and a rebuild has to be able to start anyway.
+func TestCreateFromBaseSurvivesAMissingSnapshot(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	seedEnv(t, e, "alice", "web", envs.StateReady)
+	r.bindings.bind("alice", "web", "deleted-snap")
+
+	if _, err := r.ops.Create(context.Background(), alice(), CreateArgs{Name: "box", Env: "web"}); err == nil {
+		t.Fatal("a binding pointing at a missing snapshot must refuse an ordinary create")
+	}
+	if _, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+		Name: "box", Env: "web", FromBase: true,
+	}); err != nil {
+		t.Fatalf("--from-base could not escape a dangling binding: %v", err)
+	}
+}
+
+// A tagged repo attachment reaches a sandbox created through --env, which is
+// the whole point of the object: the environment IS the tag.
+func TestCreateWithEnvCarriesTheEnvironmentsAttachments(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaDevice, 7)
+	seedEnv(t, e, "alice", "web", envs.StateReady)
+	if _, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
+		Name: "web", Repos: []RepoArgs{{Slug: "wandb/hivemind"}},
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+		Name: "box", Env: "web", Refs: []RepoRef{{Ref: "feat/x"}},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	refs := r.ops.repos.(*fakeRepos).refs["alice\x00box"]
+	if len(refs) != 1 || refs[0].Slug != "wandb/hivemind" {
+		t.Fatalf("the environment's attachment was not visible to --ref: %+v", refs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+
+// errUnavailable is a store that stumbled.
+var errUnavailable = errors.New("store unavailable")
+
+// Compile-time proof the fakes still satisfy the narrow interfaces after any
+// edit to either side.
+var (
+	_ Environments = (*fakeEnvs)(nil)
+	_ EnvVars      = (*fakeEnvVars)(nil)
+	_ NetRules     = (*fakeNetRules)(nil)
+	_ SecretTags   = (*fakeSecrets)(nil)
+)
