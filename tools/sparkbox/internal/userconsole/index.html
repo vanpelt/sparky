@@ -188,6 +188,29 @@
     color: hsl(var(--red)); background: hsl(var(--red) / .06);
   }
 
+  /* Footprint card — the owner-wide rollup above the machine list. Three
+     tiles, each "what this actually costs" over "what it was provisioned",
+     with the sharing/overcommit multiplier called out underneath. */
+  .footprint { margin-bottom: 14px; }
+  .fp-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px 0; }
+  .fp-head h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }
+  .fp-head .hint { font-size: 11.5px; color: hsl(var(--muted-foreground)); }
+  .fp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 22px;
+    padding: 9px 14px 13px; }
+  @media (max-width: 640px) { .fp-grid { grid-template-columns: 1fr; gap: 11px; } }
+  .fp-stat .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); }
+  .fp-stat .value { font-size: 19px; font-weight: 650; letter-spacing: -0.02em;
+    margin-top: 1px; font-variant-numeric: tabular-nums; }
+  .fp-stat .value small { font-size: 12px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+  .fp-stat .sub { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin-top: 5px;
+    line-height: 1.5; }
+  /* The multiplier is the point of the card, so it reads as a result rather
+     than a warning: --blue is the same "this is the win" accent the operator
+     console gives its overcommit ratio. */
+  .fp-x { color: hsl(var(--blue)); font-weight: 650; font-variant-numeric: tabular-nums; }
+
   /* capacity meters — thin, quiet */
   .meter { height: 4px; border-radius: 999px; background: hsl(var(--muted)); margin-top: 7px; overflow: hidden; }
   .meter > div { height: 100%; border-radius: 999px; background: hsl(var(--green)); width: 0; transition: width .3s ease; }
@@ -382,6 +405,32 @@
 
     <!-- MACHINES TAB -->
     <div id="tab-machines">
+      <div class="card footprint hidden" id="footprint">
+        <div class="fp-head">
+          <h2>Your footprint</h2>
+          <span class="hint">what your machines actually cost the host, not what they were handed</span>
+        </div>
+        <div class="fp-grid">
+          <div class="fp-stat">
+            <div class="label">Disk</div>
+            <div class="value" id="fp-disk">–</div>
+            <div class="meter hidden" id="fp-disk-meter"><div></div></div>
+            <div class="sub" id="fp-disk-sub">–</div>
+          </div>
+          <div class="fp-stat">
+            <div class="label">Memory</div>
+            <div class="value" id="fp-mem">–</div>
+            <div class="meter hidden" id="fp-mem-meter"><div></div></div>
+            <div class="sub" id="fp-mem-sub">–</div>
+          </div>
+          <div class="fp-stat">
+            <div class="label">CPU</div>
+            <div class="value" id="fp-cpu">–</div>
+            <div class="meter hidden" id="fp-cpu-meter"><div></div></div>
+            <div class="sub" id="fp-cpu-sub">–</div>
+          </div>
+        </div>
+      </div>
       <div id="machine-list"></div>
       <div id="machines-empty" class="card empty hidden">
         No machines yet. Create one with <code class="mono">ssh new@…</code>.
@@ -791,6 +840,11 @@
   // The first poll after load — or after a machine starts — has no baseline
   // and shows "–".
   const cpuPrev = {}; // name -> { s: cpu_seconds, t: Date.now() }
+  // cpuNow is the current repaint's answer per machine, in percent of that
+  // machine's own vCPUs. It exists because cpuPct ADVANCES the delta window:
+  // calling it twice in one pass — once for the card, once for the footprint
+  // tile — would divide by a zero-length interval and read 0% forever.
+  const cpuNow = {};
 
   function cpuPct(b, now) {
     if (typeof b.cpu_seconds !== "number") return null;
@@ -800,6 +854,116 @@
     const pct = ((b.cpu_seconds - prev.s) / ((now - prev.t) / 1000)) / (b.vcpus || 1) * 100;
     return Math.max(0, Math.min(100, pct));
   }
+
+  // ---- footprint ----
+  //
+  // The card answers what no single machine row can: what all of this costs
+  // together. Two sources meet here because neither half can be derived from
+  // the other. /api/usage is the pooled arithmetic only the control plane can
+  // do — the reflink baseline that makes six 25 GB disks cost a few gigabytes,
+  // and the owner pool budgets, which are the host's configuration and appear
+  // in no machine's record. The machine list supplies what is only true right
+  // now: the live balloon reading and the CPU delta, both already fetched from
+  // the machine holding each VM.
+  let usage = null;
+
+  // setMeter is meterHTML for a bar that already exists in the document. A
+  // meter with no denominator is HIDDEN rather than drawn empty: an unset pool
+  // is "no limit configured", and a full-width empty track reads as "you have
+  // used none of something", which is a different and false statement.
+  function setMeter(id, used, total) {
+    const el = $(id);
+    if (!(total > 0)) { el.className = "meter hidden"; return; }
+    const pct = Math.max(0, Math.min(100, (used / total) * 100));
+    el.className = "meter" + (pct >= 90 ? " hot" : pct >= 70 ? " warn" : "");
+    el.firstElementChild.style.width = pct.toFixed(1) + "%";
+  }
+
+  function paintFootprint(list) {
+    const card = $("footprint");
+    if (!usage || !usage.total_sandboxes) { card.classList.add("hidden"); return; }
+    card.classList.remove("hidden");
+    const u = usage;
+
+    // Disk. Entirely server-side: a browser cannot tell which blocks are
+    // shared. used_disk_mb counts the template blocks that every fork reflinks
+    // once instead of once per machine; raw_disk_mb is the sum the machines
+    // themselves report, which is what a copy would have cost.
+    const pool = u.disk_pool_mb || 0;
+    $("fp-disk").innerHTML = pool > 0
+      ? gb(u.used_disk_mb) + " <small>/ " + gb(pool) + " GB</small>"
+      : gb(u.used_disk_mb) + " <small>GB</small>";
+    setMeter("fp-disk-meter", u.used_disk_mb, pool);
+    const n = u.total_sandboxes;
+    const diskSub = [gb(u.raw_disk_mb) + " GB across " + n + " disk" + (n === 1 ? "" : "s") +
+      (u.archived_sandboxes ? " · " + u.archived_sandboxes + " parked in object storage" : "")];
+    const shrink = u.used_disk_mb > 0 ? u.raw_disk_mb / u.used_disk_mb : 0;
+    if (u.shared_disk_mb > 0 && shrink >= 1.05) {
+      diskSub.push('<span class="fp-x">' + x(shrink) + "</span> smaller than copies · " +
+        gb(u.shared_disk_mb) + " GB of template shared");
+    }
+    $("fp-disk-sub").innerHTML = diskSub.join("<br />");
+
+    // Memory. The ceiling is the server's (the same sum admission charges);
+    // the numerator is the live balloon reading summed over the machines that
+    // reported one. A machine whose host is not answering has no reading, so
+    // say how many are covered rather than quietly under-reporting the total.
+    let held = 0, covered = 0, running = 0;
+    for (const b of list) {
+      if (b.state !== "running") continue;
+      running++;
+      if (typeof b.mem_used_mb === "number") { held += b.mem_used_mb; covered++; }
+    }
+    const alloc = u.allocated_memory_mb || 0;
+    // With no live reading anywhere, fall back to what admission charges —
+    // which is what the host is holding back on these guests' behalf, and the
+    // same substitution a node makes for a guest it has not sampled yet.
+    const real = covered > 0 ? held : u.effective_memory_mb;
+    $("fp-mem").innerHTML = running
+      ? gb(real) + " <small>/ " + gb(alloc) + " GB</small>"
+      : '<span class="muted">–</span>';
+    setMeter("fp-mem-meter", real, running ? alloc : 0);
+    const memSub = [];
+    if (!running) {
+      memSub.push("nothing running — every machine has handed its RAM back");
+    } else {
+      const over = real > 0 ? alloc / real : 0;
+      memSub.push(running + " machine" + (running === 1 ? "" : "s") + " running" +
+        (covered < running ? " · " + covered + " reporting" : "") +
+        (over >= 1.05 ? ' · <span class="fp-x">' + x(over) + "</span> overcommit" : ""));
+    }
+    if (u.memory_pool_mb > 0) {
+      memSub.push("pool charge " + gb(u.effective_memory_mb) + " of " + gb(u.memory_pool_mb) + " GB" +
+        (u.memory_burst_mb > u.memory_pool_mb ? " · " + gb(u.memory_burst_mb) + " GB burst" : ""));
+    }
+    $("fp-mem-sub").innerHTML = memSub.join("<br />");
+
+    // CPU. cpuNow holds this repaint's per-machine percentage, already
+    // normalised by that machine's own vCPUs, so weighting it back up by them
+    // gives cores — the only figure that can be summed across machines of
+    // different sizes.
+    let busy = 0, sampled = 0;
+    for (const b of list) {
+      const pct = cpuNow[b.name];
+      if (b.state !== "running" || typeof pct !== "number") continue;
+      busy += (pct / 100) * (b.vcpus || 1);
+      sampled++;
+    }
+    const vcpus = u.allocated_vcpus || 0;
+    $("fp-cpu").innerHTML = sampled
+      ? (busy < 10 ? busy.toFixed(1) : Math.round(busy)) + " <small>/ " + vcpus + " vCPU</small>"
+      : '<span class="muted">–</span>';
+    setMeter("fp-cpu-meter", busy, sampled ? vcpus : 0);
+    $("fp-cpu-sub").textContent = !running
+      ? "no machines running"
+      : sampled
+        ? (vcpus > 0 ? ((busy / vcpus) * 100).toFixed(1) + "% of the vCPUs you hold" : "busy cores")
+        : "sampling — a rate needs two polls";
+  }
+
+  // x renders a multiplier: one decimal while it still reads as a ratio, whole
+  // numbers once it is large enough that the decimal is noise.
+  function x(r) { return (r < 10 ? r.toFixed(1) : Math.round(r)) + "×"; }
 
   // Per-VM egress panel state. netOpen holds the machines whose "egress by
   // domain" panel is expanded; netData caches each one's last bandwidth fetch
@@ -1026,7 +1190,7 @@
     return html;
   }
 
-  function machineCard(b, now) {
+  function machineCard(b) {
     const isRunning = b.state === "running";
     const isArchived = b.state === "archived";
     const repoRows = Array.isArray(b.repos) ? b.repos : [];
@@ -1034,8 +1198,8 @@
     const repoBehind = repoRows.reduce((n, r) => n + (Number(r.behind) || 0), 0);
     const repoDirty = repoRows.filter((r) => r.dirty).length;
 
-    const pct = cpuPct(b, now);
-    const cpu = isRunning && pct !== null
+    const pct = cpuNow[b.name];
+    const cpu = isRunning && pct !== null && pct !== undefined
       ? pct.toFixed(pct < 10 ? 1 : 0) + "<small>%</small>" + meterHTML(pct, 100)
       : '<span class="muted">–</span>';
     const mem = typeof b.mem_used_mb === "number"
@@ -1202,7 +1366,13 @@
     const now = Date.now();
     // Always take a CPU sample so the delta window stays fresh even when the
     // repaint is skipped mid-edit.
-    const cards = list.map((b) => machineCard(b, now));
+    for (const b of list) cpuNow[b.name] = cpuPct(b, now);
+    // The footprint card carries no editable field, so it is painted before
+    // the editing() guard: there is nothing on it for a repaint to steal focus
+    // from, and holding it stale for as long as someone leaves a tag box
+    // focused would be the odd behaviour, not the other way round.
+    paintFootprint(list);
+    const cards = list.map(machineCard);
     if (editing()) return;
     const wrap = $("machine-list");
     wrap.innerHTML = cards.join("");
@@ -1913,9 +2083,9 @@
 
   async function refresh() {
     try {
-      const [rm, rs, rn, rnr, rrp] = await Promise.all([
-        fetch("/api/machines"), fetch("/api/secrets"), fetch("/api/snapshots"),
-        fetch("/api/network-rules"), fetch("/api/repos"),
+      const [rm, ru, rs, rn, rnr, rrp] = await Promise.all([
+        fetch("/api/machines"), fetch("/api/usage"), fetch("/api/secrets"),
+        fetch("/api/snapshots"), fetch("/api/network-rules"), fetch("/api/repos"),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
@@ -1928,6 +2098,11 @@
         if (!b || b.state !== "running") netOpen.delete(n);
       }
       await Promise.all([...netOpen].map(refreshNet));
+      // The footprint is a summary of the very list below it, so a failure to
+      // fetch it hides the card and nothing else. It deliberately does not
+      // clear the "updated" stamp: that stamp asserts the panes are current,
+      // and a missing summary of a current list is not a stale list.
+      usage = ru.ok ? await ru.json() : null;
       show("app");
       renderMachines(lastMachines);
       // The "updated" stamp asserts every pane is current; a failed secrets

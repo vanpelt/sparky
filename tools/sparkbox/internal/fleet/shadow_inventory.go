@@ -164,6 +164,7 @@ type sandboxShadow struct {
 	ArchivedAt  time.Time
 	DiskMB      int64
 	DiskTotalMB int64
+	BaseDiskMB  int64
 }
 
 func sandboxShadowOf(box *host.Sandbox) sandboxShadow {
@@ -173,6 +174,7 @@ func sandboxShadowOf(box *host.Sandbox) sandboxShadow {
 		LastActive: box.LastActive, Pinned: box.Pinned, Ballooned: box.Ballooned,
 		KeyFP: box.KeyFP, NetRxBytes: box.NetRxBytes, NetTxBytes: box.NetTxBytes,
 		ArchivedAt: box.ArchivedAt, DiskMB: box.DiskMB, DiskTotalMB: box.DiskTotalMB,
+		BaseDiskMB: box.BaseDiskMB,
 	}
 }
 

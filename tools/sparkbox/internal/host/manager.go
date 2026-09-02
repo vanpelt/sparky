@@ -241,12 +241,17 @@ type Sandbox struct {
 	// charges an owner only for what their sandboxes wrote. 0 when the driver
 	// can't measure templates, which simply restores the old raw charging.
 	//
-	// Node-local: it is an artifact of this machine's image dir, so it is
-	// deliberately absent from the field-by-field node-link and gRPC inventory
-	// conversions (nodelink/frame.go, grpccontrol/convert.go) — which is why
-	// refreshDiskUsage saves without firing m.observe when only this moves.
-	// It does ride along in the consoles' JSON, which embed the whole record;
-	// neither page reads it, and neither should: the meters stay raw.
+	// It is measured against this machine's image dir but it does cross the node
+	// link (nodelink/frame.go, grpccontrol/convert.go), because a gateway that
+	// cannot see it has to charge every remote sandbox raw — a 25 GB fork that
+	// physically cost 400 MB. A node too old to send it, or one whose driver
+	// cannot measure templates, sends 0, which restores exactly that raw
+	// charging rather than breaking anything.
+	//
+	// The PER-SANDBOX meters in both consoles stay raw on purpose: a person
+	// looking at one machine wants the disk that machine sees. Only the pooled
+	// per-owner rollup (CapacityForOwner) subtracts it, which is what makes the
+	// user console's footprint card able to say how much sharing saved.
 	BaseDiskMB int64 `json:"base_disk_mb,omitempty"`
 	// RenamedFrom journals an in-flight rename (see Rename): the record is
 	// saved under its new name with this set to the old name before the VM dir
@@ -1158,14 +1163,27 @@ func (m *Manager) effectiveMemMB(memMB int64) int64 {
 // ceiling: under overcommit both ceilings would otherwise collapse to the same
 // MemReserveMB and borrowed capacity would be invisible.
 func (m *Manager) sandboxEffectiveMemMB(b *Sandbox) int64 {
+	return effectiveMemFor(b, m.reserveMB)
+}
+
+// effectiveMemFor is sandboxEffectiveMemMB with the node's working-set floor
+// passed in rather than read off a Manager, so a gateway folding records for
+// sandboxes on other machines charges them the way their own node does.
+func effectiveMemFor(b *Sandbox, reserveMB int64) int64 {
+	reserved := func(memMB int64) int64 {
+		if reserveMB > 0 && reserveMB < memMB {
+			return reserveMB
+		}
+		return memMB
+	}
 	if b.Turbo && b.BaseMemMB > 0 {
-		cost := m.effectiveMemMB(b.BaseMemMB) * TurboFactor
+		cost := reserved(b.BaseMemMB) * TurboFactor
 		if cost > b.MemMB {
 			return b.MemMB
 		}
 		return cost
 	}
-	return m.effectiveMemMB(b.MemMB)
+	return reserved(b.MemMB)
 }
 
 // observedMemMB returns the last balloon-stat working set, falling back to the
@@ -1370,12 +1388,139 @@ type OwnerCapacity struct {
 	// blocks, net of the template blocks every clone shares. It is therefore a
 	// lower bound on the physical bytes they occupy, and it is smaller than the
 	// per-sandbox figures the consoles show, which stay raw.
-	UsedDiskMB       int64 `json:"used_disk_mb"`
-	RunningSandboxes int   `json:"running_sandboxes"`
-	TotalSandboxes   int   `json:"total_sandboxes"`
-	MaxRunning       int   `json:"max_running"`
-	MaxSandboxes     int   `json:"max_sandboxes"`
-	TurboSandboxes   int   `json:"turbo_sandboxes"`
+	UsedDiskMB int64 `json:"used_disk_mb"`
+	// RawDiskMB is the same sandboxes' disk WITHOUT the reflink subtraction —
+	// what they would occupy if every fork had been a copy. RawDiskMB minus
+	// UsedDiskMB is therefore the sharing dividend, which is the number worth
+	// showing an owner: it is the difference between "you have six 25 GB disks"
+	// and "you have written 3 GB".
+	RawDiskMB int64 `json:"raw_disk_mb"`
+	// CapacityDiskMB is the summed hard ceiling of those sandboxes' filesystems
+	// — the space they could grow into, not space anyone is holding. 0 for
+	// sandboxes whose driver cannot report a ceiling, so it is a floor.
+	CapacityDiskMB    int64 `json:"capacity_disk_mb"`
+	AllocatedVCPUs    int64 `json:"allocated_vcpus"`
+	RunningSandboxes  int   `json:"running_sandboxes"`
+	TotalSandboxes    int   `json:"total_sandboxes"`
+	ArchivedSandboxes int   `json:"archived_sandboxes"`
+	MaxRunning        int   `json:"max_running"`
+	MaxSandboxes      int   `json:"max_sandboxes"`
+	TurboSandboxes    int   `json:"turbo_sandboxes"`
+	// Nodes is how many machines these sandboxes are spread over — 1 for a
+	// node reporting on itself, and what a gateway fills in when it merges. It
+	// is the caveat on the pool figures below: those are one node's
+	// configuration, not a fleet-wide entitlement (see Merge).
+	Nodes int `json:"nodes,omitempty"`
+}
+
+// OwnerPolicy is the node configuration an owner's charge is computed against.
+// It is separated from the Manager so a gateway can fold the sandboxes it holds
+// records for — which live on other machines — with exactly the arithmetic the
+// node itself would use, rather than a second copy of it that drifts.
+type OwnerPolicy struct {
+	MemoryPoolMB  int64
+	MemoryBurstMB int64
+	DiskPoolMB    int64
+	// ReserveMemMB is the per-VM working-set floor under overcommit; 0 means
+	// overcommit is off and a VM is charged its full ceiling.
+	ReserveMemMB int64
+	MaxRunning   int
+	MaxSandboxes int
+}
+
+// RollUpOwner folds boxes into one owner's capacity picture under policy.
+//
+// resident supplies a running sandbox's live balloon working set and may be
+// nil, which is the honest answer away from the machine holding the VM: the
+// conservative admission charge stands in, exactly as it does on a node that
+// has not sampled a guest yet. Callers with a live reading of their own — the
+// user console has one per running sandbox already — should prefer it over
+// this field.
+//
+// boxes is filtered by owner here rather than by the caller so that every
+// caller filters it the same way.
+func RollUpOwner(owner string, boxes []*Sandbox, policy OwnerPolicy, resident func(*Sandbox) int64) OwnerCapacity {
+	c := OwnerCapacity{
+		Owner: owner, MemoryPoolMB: policy.MemoryPoolMB, MemoryBurstMB: policy.MemoryBurstMB,
+		DiskPoolMB: policy.DiskPoolMB,
+		MaxRunning: policy.MaxRunning, MaxSandboxes: policy.MaxSandboxes,
+	}
+	for _, b := range boxes {
+		if b == nil || b.Owner != owner {
+			continue
+		}
+		c.TotalSandboxes++
+		c.UsedDiskMB += b.pooledDiskMB()
+		c.RawDiskMB += b.DiskMB
+		c.CapacityDiskMB += b.DiskTotalMB
+		switch b.State {
+		case vmm.StateArchived:
+			c.ArchivedSandboxes++
+		case vmm.StateRunning:
+			c.RunningSandboxes++
+			c.AllocatedMemMB += b.MemMB
+			c.AllocatedVCPUs += b.VCPUs
+			effective := effectiveMemFor(b, policy.ReserveMemMB)
+			c.EffectiveMemMB += effective
+			if resident != nil {
+				c.ResidentMemMB += resident(b)
+			} else {
+				c.ResidentMemMB += effective
+			}
+			if b.Turbo {
+				c.TurboSandboxes++
+			}
+		}
+	}
+	if c.TotalSandboxes > 0 {
+		c.Nodes = 1
+	}
+	c.recomputeBorrowed()
+	return c
+}
+
+// Merge folds another machine's rollup for the same owner into this one.
+//
+// Usage adds; the pool figures do NOT. MemoryPoolMB, MemoryBurstMB, DiskPoolMB
+// and the two Max counts are one machine's configuration, and an owner who
+// straddles two machines has not thereby been granted two pools — every node in
+// a fleet is configured with the same numbers, so the larger of two identical
+// values is that value, and the larger of a configured one and an unset 0 is
+// the configured one. Summing them would quietly double an owner's apparent
+// entitlement the first time a sandbox was placed elsewhere.
+func (c OwnerCapacity) Merge(other OwnerCapacity) OwnerCapacity {
+	if c.Owner == "" {
+		c.Owner = other.Owner
+	}
+	c.EffectiveMemMB += other.EffectiveMemMB
+	c.ResidentMemMB += other.ResidentMemMB
+	c.AllocatedMemMB += other.AllocatedMemMB
+	c.AllocatedVCPUs += other.AllocatedVCPUs
+	c.UsedDiskMB += other.UsedDiskMB
+	c.RawDiskMB += other.RawDiskMB
+	c.CapacityDiskMB += other.CapacityDiskMB
+	c.RunningSandboxes += other.RunningSandboxes
+	c.TotalSandboxes += other.TotalSandboxes
+	c.ArchivedSandboxes += other.ArchivedSandboxes
+	c.TurboSandboxes += other.TurboSandboxes
+	c.Nodes += other.Nodes
+	c.MemoryPoolMB = max(c.MemoryPoolMB, other.MemoryPoolMB)
+	c.MemoryBurstMB = max(c.MemoryBurstMB, other.MemoryBurstMB)
+	c.DiskPoolMB = max(c.DiskPoolMB, other.DiskPoolMB)
+	c.MaxRunning = max(c.MaxRunning, other.MaxRunning)
+	c.MaxSandboxes = max(c.MaxSandboxes, other.MaxSandboxes)
+	c.recomputeBorrowed()
+	return c
+}
+
+// recomputeBorrowed restates how far past the baseline pool this owner is
+// charged. It is derived, so a Merge that added two halves has to redo it
+// rather than add two borrowings computed against the same pool twice.
+func (c *OwnerCapacity) recomputeBorrowed() {
+	c.BorrowedMemMB = 0
+	if c.MemoryPoolMB > 0 && c.EffectiveMemMB > c.MemoryPoolMB {
+		c.BorrowedMemMB = c.EffectiveMemMB - c.MemoryPoolMB
+	}
 }
 
 // CapacityForOwner reports the local portion of an owner's resource envelope.
@@ -1384,31 +1529,22 @@ type OwnerCapacity struct {
 func (m *Manager) CapacityForOwner(owner string) OwnerCapacity {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	c := OwnerCapacity{
-		Owner: owner, MemoryPoolMB: m.ownerMemPoolMB, MemoryBurstMB: m.ownerMemBurstMB,
-		DiskPoolMB: m.diskPoolMB,
+	boxes := make([]*Sandbox, 0, len(m.boxes))
+	for _, b := range m.boxes {
+		boxes = append(boxes, b)
+	}
+	// observedMemMB wants m.mu, which is held for the whole fold — the reason
+	// the balloon reading is passed in rather than read inside the rollup.
+	return RollUpOwner(owner, boxes, m.ownerPolicy(), m.observedMemMB)
+}
+
+// ownerPolicy is this node's configured owner envelope. Callers hold m.mu.
+func (m *Manager) ownerPolicy() OwnerPolicy {
+	return OwnerPolicy{
+		MemoryPoolMB: m.ownerMemPoolMB, MemoryBurstMB: m.ownerMemBurstMB,
+		DiskPoolMB: m.diskPoolMB, ReserveMemMB: m.reserveMB,
 		MaxRunning: m.maxPerOwner, MaxSandboxes: m.maxBoxesPerOwner,
 	}
-	for _, b := range m.boxes {
-		if b.Owner != owner {
-			continue
-		}
-		c.TotalSandboxes++
-		c.UsedDiskMB += b.pooledDiskMB()
-		if b.State == vmm.StateRunning {
-			c.RunningSandboxes++
-			c.AllocatedMemMB += b.MemMB
-			c.EffectiveMemMB += m.sandboxEffectiveMemMB(b)
-			c.ResidentMemMB += m.observedMemMB(b)
-			if b.Turbo {
-				c.TurboSandboxes++
-			}
-		}
-	}
-	if c.EffectiveMemMB > c.MemoryPoolMB && c.MemoryPoolMB > 0 {
-		c.BorrowedMemMB = c.EffectiveMemMB - c.MemoryPoolMB
-	}
-	return c
 }
 
 // Capacity reports this node's resources. Used* counts only running sandboxes,
@@ -3227,18 +3363,21 @@ func (m *Manager) refreshDiskUsage(ctx context.Context, name string) {
 	// its template unreadable, and treating that as "baseline 0" would spike the
 	// pooled charge of every sandbox forked from it by the whole template size —
 	// on a tick, with nobody having written a byte. Same for a transient read
-	// error. baseChanged is tracked apart from `changed` because BaseDiskMB is
-	// node-local and never crosses the node link, so a move in it alone is worth
-	// persisting but not worth waking the observer for.
-	baseChanged := false
+	// error.
+	//
+	// A move in the baseline alone still wakes the observer. It used not to,
+	// because BaseDiskMB was node-local; it now rides the inventory so a gateway
+	// can charge an owner for the blocks their sandboxes wrote rather than for
+	// the reflinked copy that was never made, and a figure that never broadcasts
+	// is one the gateway holds a stale copy of forever. The churn this adds is
+	// nil in practice: a baseline only moves when the refresher replaces the
+	// template a sandbox was forked from, not on the tick that re-measures it.
 	if baseErr == nil && b.BaseDiskMB != baseMB {
 		b.BaseDiskMB = baseMB
-		baseChanged = true
+		changed = true
 	}
 	if changed {
 		m.observe(b, "disk")
-	}
-	if changed || baseChanged {
 		m.save() //nolint:errcheck
 	}
 }

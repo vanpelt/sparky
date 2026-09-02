@@ -46,6 +46,7 @@ func sandboxToProto(box *host.Sandbox) *nodev1.Sandbox {
 		ArchivedAt:     timestamp(box.ArchivedAt),
 		DiskMb:         box.DiskMB,
 		DiskTotalMb:    box.DiskTotalMB,
+		BaseDiskMb:     box.BaseDiskMB,
 		HostIp:         box.HostIP,
 		Turbo:          box.Turbo,
 		RepoStatusAt:   timestamp(box.RepoStatusAt),

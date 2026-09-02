@@ -218,6 +218,7 @@ func sandboxRow(b *host.Sandbox) SandboxRow {
 		MemMB:        b.MemMB,
 		DiskMB:       b.DiskMB,
 		DiskTotalMB:  b.DiskTotalMB,
+		BaseDiskMB:   b.BaseDiskMB,
 		Pinned:       b.Pinned,
 		Ballooned:    b.Ballooned,
 		SSHUser:      b.SSHUser,

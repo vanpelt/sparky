@@ -515,6 +515,72 @@ func (f *Fleet) Capacities() []host.NodeCapacity {
 	return out
 }
 
+// CapacityForOwner is one owner's resource envelope across the whole fleet.
+//
+// It exists because the two halves of the answer live in different places. The
+// per-sandbox charge needs each record's disk baseline and memory ceiling,
+// which the gateway already holds for every machine — that is what the
+// inventory is. The POLICY those records are charged against (the owner memory
+// pool, the pooled-disk budget, the working-set reserve) is each machine's own
+// configuration, which a gateway typically does not set on itself at all: on a
+// Kubernetes deployment the pools are declared on the node Deployment and the
+// gateway has none. So each machine's sandboxes are folded against that
+// machine's capacity report, and the results merged.
+//
+// No remote call is made. Every input is already cached: the inventory the
+// nodes stream, and the capacity report the link refreshes in the background.
+// This is polled by a console every few seconds and must stay that cheap.
+//
+// The balloon working set is deliberately not part of it — see RollUpOwner.
+// Sandboxes on other machines are charged their admission cost here, and a
+// caller that wants live guest memory reads Vitals for the boxes it is showing,
+// which is routed to the machine holding each VM.
+func (f *Fleet) CapacityForOwner(owner string) host.OwnerCapacity {
+	out := f.localMgr.CapacityForOwner(owner)
+	remote := f.remoteByOwner(owner)
+	if len(remote) == 0 {
+		return out
+	}
+	// Policies are read once per node rather than once per sandbox: Capacity()
+	// on a linked node takes its lock, and an owner may hold many boxes there.
+	policies := make(map[string]host.OwnerPolicy)
+	byNode := make(map[string][]*host.Sandbox)
+	for _, b := range remote {
+		byNode[b.Node] = append(byNode[b.Node], b)
+	}
+	for node, boxes := range byNode {
+		policy, ok := policies[node]
+		if !ok {
+			policy = f.ownerPolicyOf(node)
+			policies[node] = policy
+		}
+		out = out.Merge(host.RollUpOwner(owner, boxes, policy, nil))
+	}
+	return out
+}
+
+// ownerPolicyOf reads a machine's configured owner envelope out of the capacity
+// report it already publishes. A machine that is not answering yields the zero
+// policy, which charges its sandboxes their full memory ceiling and shows no
+// pool — the same thing a machine with pooling switched off reports, and the
+// right way round: an unknown budget must never look like a generous one.
+//
+// MaxRunning and MaxSandboxes are absent from a capacity report, so they stay 0
+// here and Merge takes them from whichever machine did state them.
+func (f *Fleet) ownerPolicyOf(node string) host.OwnerPolicy {
+	n, ok := f.nodeByName(node)
+	if !ok {
+		return host.OwnerPolicy{}
+	}
+	c := n.Capacity()
+	return host.OwnerPolicy{
+		MemoryPoolMB:  c.OwnerMemoryPoolMB,
+		MemoryBurstMB: c.OwnerMemoryBurstMB,
+		DiskPoolMB:    c.DiskPoolMBPerOwner,
+		ReserveMemMB:  c.ReserveMemMB,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------

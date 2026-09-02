@@ -692,15 +692,22 @@ type Cancel struct {
 // column is the authorization input, and the gateway overwrites this one from
 // it before the record is indexed.
 type SandboxRow struct {
-	ID           string            `json:"id"`
-	Name         string            `json:"name"`
-	Owner        string            `json:"owner"`
-	Image        string            `json:"image"`
-	State        string            `json:"state"`
-	VCPUs        int64             `json:"vcpus"`
-	MemMB        int64             `json:"mem_mb"`
-	DiskMB       int64             `json:"disk_mb,omitempty"`
-	DiskTotalMB  int64             `json:"disk_total_mb,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Owner       string `json:"owner"`
+	Image       string `json:"image"`
+	State       string `json:"state"`
+	VCPUs       int64  `json:"vcpus"`
+	MemMB       int64  `json:"mem_mb"`
+	DiskMB      int64  `json:"disk_mb,omitempty"`
+	DiskTotalMB int64  `json:"disk_total_mb,omitempty"`
+	// BaseDiskMB is the template baseline DiskMB is measured against: the
+	// blocks this sandbox shares by reflink with every other fork of the same
+	// image. It crosses the link so a gateway can charge an owner for what
+	// their sandboxes wrote rather than for a copy that was never made. 0 from
+	// a node whose driver cannot measure templates, or one older than this
+	// field, and the raw figure is charged instead.
+	BaseDiskMB   int64             `json:"base_disk_mb,omitempty"`
 	Pinned       bool              `json:"pinned,omitempty"`
 	Ballooned    bool              `json:"ballooned,omitempty"`
 	SSHUser      string            `json:"ssh_user,omitempty"`
