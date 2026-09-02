@@ -178,6 +178,7 @@ func serve(args []string) error {
 		hivemindSigninOrgs   = fs.String("hivemind-signin-orgs", "", "comma-separated GitHub organizations whose HiveMind users may sign in to this sparkbox at https://<login-subdomain>.<domain>"+edgeauth.HandoffPath+", creating an account on first arrival (empty disables the door). Needs --hivemind-api, which is the back channel the single-use handoff code is redeemed over. There is no wildcard: an empty list is off, never everyone")
 		metaAddr             = fs.String("metadata-addr", fmt.Sprintf(":%d", metadata.DefaultPort), "guest metadata/token service listen address (reachable only from sandbox taps)")
 		toolsDir             = fs.String("tools-dir", "", "directory of agent CLIs this machine has verified (the refresher's TOOLS_DIR), served to its own guests at /tools so `sparkbox update-tools` can install them without rebuilding the VM. Empty serves no cache and answers 501, which is what a laptop or mock-driver run wants")
+		envBuildTimeout      = fs.Duration("env-build-timeout", ctlops.DefaultEnvBuildTimeout, "how long an environment build may sit in `building` before it is given up on (`ssh ctl@<domain> env build <name>`). The budget covers the whole run — boot the builder sandbox, clone, run its setup script — and a build that overruns it is marked failed with its builder LEFT PAUSED, so the half-built disk can still be finished by hand and kept with `env capture`. Raise it for a project whose setup compiles something large")
 		guestSelfSnapshot    = fs.Bool("guest-self-snapshot", true, "let a sandbox capture ITSELF as the template for a tag it already carries (`sparkbox snapshot <tag>` from inside the VM). On by default: a guest may only re-point a tag it was already given — so it gains persistence over sandboxes it already had the secrets of, and nothing wider — and a self-service verb nobody is told about does not exist. Turn it off when handing boxes to people you would not let re-base their own tags")
 		dnsAddr              = fs.String("dns-addr", "", "wildcard DNS responder listen address (e.g. <edge-ip>:53); serves *.<domain> -> the edge for a Tailscale split-DNS entry. Empty disables it")
 		dnsAnswer            = fs.String("dns-answer", "", "comma-separated IPs the wildcard DNS answers with (default: the IP host of --proxy-addr)")
@@ -353,6 +354,11 @@ func serve(args []string) error {
 	// nil *ghapp.App put into an interface field is a non-nil interface, which
 	// would tell ctlops the capability exists and panic on the first call.
 	var ghAppOps ctlops.GitHubApp
+	// The same App through its third half, and interface-typed for the same
+	// reason: reading one file out of an attached repository is what seeds an
+	// environment's setup script from `.sparkbox/setup.sh`, and a host with no
+	// App must answer "there is no setup script" rather than dereference a nil.
+	var ghAppFiles ctlops.RepoFileReader
 	if ghAppKey != nil && *githubAppClientID != "" {
 		ghApp, err = ghapp.New(ghapp.Config{
 			ClientID: *githubAppClientID, Key: ghAppKey, Logger: log,
@@ -361,6 +367,7 @@ func serve(args []string) error {
 			return fmt.Errorf("github app: %w", err)
 		}
 		ghAppOps = ghApp
+		ghAppFiles = ghApp
 		log.Info("github app credentials enabled", "client_id", *githubAppClientID)
 	} else {
 		reason := "no --github-app-client-id"
@@ -914,8 +921,14 @@ func serve(args []string) error {
 		// second keycheck sentinel that could disagree with this one.
 		EnvVars: secretsStore, SecretTags: secretsStore,
 		NetRules: netrulesStore,
-		HiveMind: hivemindOps,
-		Log:      log,
+		// The build's two halves. The syncer is the same one the manager and
+		// the fleet already hold for secrets, checkouts and tool refreshes —
+		// one syncer per host, so a nudge sent from here rides the transport
+		// every other guest exec already uses.
+		RepoFiles: ghAppFiles, SetupStarter: syncer,
+		EnvBuildTimeout: *envBuildTimeout,
+		HiveMind:        hivemindOps,
+		Log:             log,
 	})
 	defer ops.Close()
 
@@ -1014,6 +1027,25 @@ func serve(args []string) error {
 	// that meter nothing.
 	go pushLoop(ctx, flt, log)
 
+	// Settle the environment builds nobody is waiting on any more: one pass at
+	// startup and then a slow one, in pushLoop's shape and for pushLoop's
+	// reason — a fact that only converges when something re-reads it.
+	//
+	// The startup pass is the load-bearing one. A gateway restart in the middle
+	// of a build leaves a row saying `building`, a builder sandbox holding an
+	// owner's decrypted secrets, and a guest whose report has nowhere to land;
+	// nothing in the process can tell whether that guest finished, half
+	// finished, or is running still. Without this pass the row stays `building`
+	// forever and every `create --env` on that environment refuses with a
+	// sentence naming a build nobody can finish. The ticker then catches the
+	// same state arrived at without a restart — a VM killed mid-script, a POST
+	// that never landed.
+	//
+	// Ten minutes against a forty-five-minute budget: this only decides how
+	// late a verdict is, never what the verdict is, and a build still inside
+	// its budget is deliberately left alone.
+	go reconcileEnvBuilds(ctx, ops)
+
 	// The platform scheduler wakes sandboxes to run due cron jobs (the honest
 	// answer to background work in a scale-to-zero world). It ticks every 30s so
 	// minute-granularity crons fire promptly; the gateway is its exec runner.
@@ -1067,6 +1099,13 @@ func serve(args []string) error {
 	// unconditional, because a gateway holding no VMs of its own still answers
 	// for every one of them on its nodes.
 	flt.SetSelfLifecycle(selfLifecycleOps{ops: ops})
+	// The environment-build door for the guests this gateway does not hold. Ops
+	// itself, with no adapter: fleet takes ctlops.SetupReport, so the bridge
+	// envSetupOps provides for internal/metadata is not needed here. Also
+	// unconditional, and here it is not merely tidy — a --gateway-only control
+	// plane places EVERY builder on a node, so this line is the only path by
+	// which any environment build can finish at all.
+	flt.SetEnvSetup(ops)
 	if *gatewayGRPCAddr != "" {
 		identityServer, identityListener, err := newGatewayIdentityServer(
 			ctx, *gatewayGRPCAddr, flt, nodeStore,
@@ -1087,14 +1126,21 @@ func serve(args []string) error {
 	if *metaAddr != "" {
 		meta, err := metadata.NewChecked(metadata.Options{
 			Manager: mgr, Logger: log,
-			Identity:          metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
-			RouteControl:      gatewayRouteControl{fleet: flt, node: nodeName},
-			Repos:             localRepos,
-			RepoAuthorizer:    localRepos,
-			RepoStatus:        mgr,
-			Vitals:            mgr,
-			Tools:             localTools(*toolsDir),
-			SelfLifecycle:     gatewaySelfLifecycle{fleet: flt, node: nodeName},
+			Identity:       metadata.Local{Issuer: issuer, Users: userStore, NodeName: nodeName},
+			RouteControl:   gatewayRouteControl{fleet: flt, node: nodeName},
+			Repos:          localRepos,
+			RepoAuthorizer: localRepos,
+			RepoStatus:     mgr,
+			Vitals:         mgr,
+			Tools:          localTools(*toolsDir),
+			SelfLifecycle:  gatewaySelfLifecycle{fleet: flt, node: nodeName},
+			// The environment-build door. Unconditional, because the refusals
+			// live one layer down: a guest that is not the builder of an
+			// environment in `building` is answered "no job" by ctlops, and a
+			// host with no environment store answers the same from the same
+			// line. Left nil, both routes would 501 and every build would hang
+			// in `building` until the reconciler timed it out.
+			EnvSetup:          envSetupOps{ops: ops},
 			AllowSelfSnapshot: *guestSelfSnapshot,
 			DefaultAudience:   firstOr(splitList(*oidcAud), defaultAudience),
 			GuestSubnet:       *guestSubnet,
@@ -1683,6 +1729,22 @@ type gatewayStores struct {
 	EnvVars    ctlops.EnvVars
 	SecretTags ctlops.SecretTags
 	NetRules   ctlops.NetRules
+	// RepoFiles and SetupStarter are the two halves of `env build`, and both
+	// are interfaces here for the reason above — a typed nil in either would
+	// turn a narrower host into a panicking one.
+	//
+	// RepoFiles is the GitHub App seen through its file-reading half: it is
+	// what seeds a setup script from `.sparkbox/setup.sh` in an attached
+	// repository. Nil means a build needs a script somebody stored with
+	// `env script --set`, which is a smaller feature and not a broken one.
+	//
+	// SetupStarter is the envsync syncer, which is what asks a builder's guest
+	// to fetch and run its job. Nil makes `env build` refuse up front rather
+	// than create a builder sandbox that would sit there with nothing to do.
+	RepoFiles    ctlops.RepoFileReader
+	SetupStarter ctlops.SetupStarter
+	// EnvBuildTimeout bounds one build; 0 takes ctlops.DefaultEnvBuildTimeout.
+	EnvBuildTimeout time.Duration
 	// HiveMind is the same nil-interface discipline: an unconfigured host must
 	// answer `sessions` with "not enabled here", not with a nil dereference.
 	HiveMind ctlops.HiveMind
@@ -1739,6 +1801,13 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		EnvVars:      s.EnvVars,
 		SecretTags:   s.SecretTags,
 		NetRules:     s.NetRules,
+		// And the two halves of the build. Nil in either narrows `env build`
+		// rather than breaking it: no RepoFiles means the script has to have
+		// been stored already, and no SetupStarter means the verb refuses
+		// instead of leaving a builder sandbox with no job.
+		RepoFiles:       s.RepoFiles,
+		SetupStarter:    s.SetupStarter,
+		EnvBuildTimeout: s.EnvBuildTimeout,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
 		// cannot say whether a machine is answering, and the fleet alone cannot
@@ -1979,6 +2048,33 @@ func (f netpushFleet) List() []netpush.Sandbox {
 // restarted daemon — cost at most one interval.
 type netPusher interface {
 	PushNet(ctx context.Context) error
+}
+
+// envBuildSweepInterval is how often the reconciler re-reads the rows that say
+// `building`. It is not the build budget — --env-build-timeout is, and this
+// only decides how promptly a build that overran it is told so.
+const envBuildSweepInterval = 10 * time.Minute
+
+// reconcileEnvBuilds runs the environment-build reconciler once at startup and
+// then on a slow ticker, in pushLoop's shape: work first, then select on the
+// ticker and the context, so a cancelled context ends the goroutine at the next
+// boundary and never mid-pass.
+//
+// It logs nothing itself. ReconcileEnvironmentBuilds acts for no person and
+// renders to nobody — its outcome is a row and its own log line — so a wrapper
+// that announced each sweep would print a line every ten minutes on every host
+// forever to say that nothing happened.
+func reconcileEnvBuilds(ctx context.Context, ops *ctlops.Ops) {
+	t := time.NewTicker(envBuildSweepInterval)
+	defer t.Stop()
+	for {
+		ops.ReconcileEnvironmentBuilds(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func pushLoop(ctx context.Context, p netPusher, log *slog.Logger) {

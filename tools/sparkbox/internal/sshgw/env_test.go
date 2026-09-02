@@ -7,14 +7,19 @@ package sshgw
 // script, which is the one payload on this channel that arrives on stdin.
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 )
 
 // newCtlStackEnv is the stack with the secrets store wired as all three of its
@@ -349,5 +354,309 @@ func eq(t *testing.T, what string, got, want []string) {
 	t.Helper()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("%s = %#v, want %#v", what, got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The build
+// ---------------------------------------------------------------------------
+
+// fakeSetupStarter stands in for the envsync syncer: it records the builders it
+// was asked to start and never touches a guest. The real one runs a systemd
+// unit inside a VM, which is exactly the half of this feature no test in this
+// tree can reach.
+type fakeSetupStarter struct {
+	mu    sync.Mutex
+	boxes []string
+	err   error
+}
+
+func (f *fakeSetupStarter) StartSetup(_ context.Context, box *host.Sandbox) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.boxes = append(f.boxes, box.Name)
+	return nil
+}
+
+func (f *fakeSetupStarter) started() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.boxes...)
+}
+
+// newCtlStackBuild is the stack a build actually needs: the secrets store for
+// the composition, a template-binding store so a capture has somewhere to point
+// the tag, and a stand-in for the guest nudge. The environment store is opened
+// here rather than taken from the fixture so the test can put a row into states
+// only a guest's report reaches — chiefly `failed`, which is the state whose
+// rendering matters most and the one no mock driver can produce.
+func newCtlStackBuild(t *testing.T) (*ctlStack, *envs.Store, *fakeSetupStarter) {
+	t.Helper()
+	dir := t.TempDir()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	sec, err := secrets.Open(filepath.Join(dir, "secrets.db"),
+		secrets.DeriveKEK([]byte("env-build-test-key-material")), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sec.Close() }) //nolint:errcheck
+	envStore, err := envs.Open(filepath.Join(dir, "envs.db"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { envStore.Close() }) //nolint:errcheck
+	tmpl, err := templates.Open(filepath.Join(dir, "templates.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tmpl.Close() }) //nolint:errcheck
+	starter := &fakeSetupStarter{}
+	st := newCtlStackWith(t, testRoster(), func(cfg *ctlops.Config) {
+		cfg.Secrets, cfg.SecretTags, cfg.EnvVars, cfg.Tags = sec, sec, sec, sec
+		cfg.Environments = envStore
+		cfg.TemplateTags = tmpl
+		cfg.SetupStarter = starter
+		// RepoFiles is deliberately nil: this host has no GitHub App, which is
+		// the commonest shape there is, and it is what makes the "no setup
+		// script" refusal below reachable at all.
+	})
+	return st, envStore, starter
+}
+
+// TestControlEnvBuildStartsAndSaysSo walks the verb somebody actually types:
+// a build refused for the one reason it usually is, the script piped in, the
+// build started, and the two things the announcement has to say — the builder's
+// name and that this keeps running without them.
+func TestControlEnvBuildStartsAndSaysSo(t *testing.T) {
+	st, _, starter := newCtlStackBuild(t)
+
+	if s := st.run(t, "alice", "env", "create", "web"); s.code != 0 {
+		t.Fatalf("create: exit %d (%s)", s.code, s.stderr.String())
+	}
+
+	// Nothing to run, and the refusal has to TEACH: the condition is in the
+	// message and the two ways out are in the hint, which the ctl channel would
+	// drop entirely without failEnvBuild.
+	s := st.run(t, "alice", "env", "build", "web")
+	if s.code != 1 {
+		t.Fatalf("build with no script: exit %d, want 1 (%s)", s.code, s.stderr.String())
+	}
+	for _, want := range []string{
+		"has no setup script",
+		".sparkbox/setup.sh",
+		"env script web --set",
+		"sparkbox docs dev-environment",
+	} {
+		if !strings.Contains(s.stderr.String(), want) {
+			t.Errorf("the refusal never says %q:\n%s", want, s.stderr.String())
+		}
+	}
+	if len(starter.started()) != 0 {
+		t.Fatalf("a build with no script started a guest: %v", starter.started())
+	}
+	if _, ok := st.mgr.Get("web-build"); ok {
+		t.Fatal("a refused build left a builder sandbox behind")
+	}
+
+	// The script, on stdin, as a file and never as an argument.
+	sess := st.newSession("alice")
+	sess.cmd = []string{"env", "script", "web", "--set"}
+	sess.in = strings.NewReader("#!/usr/bin/env bash\nnpm ci\n")
+	st.gw.handleControl(sess, "alice", st.log)
+	if sess.code != 0 {
+		t.Fatalf("script --set: exit %d (%s)", sess.code, sess.stderr.String())
+	}
+
+	s = st.run(t, "alice", "env", "build", "web")
+	if s.code != 0 {
+		t.Fatalf("build: exit %d (%s)", s.code, s.stderr.String())
+	}
+	want := "building web in web-build. this takes minutes and keeps going if you disconnect.\r\n" +
+		"  watch it      ssh ctl@hivemind.tools env show web\r\n" +
+		"  look inside   ssh web-build@hivemind.tools\r\n" +
+		"when it succeeds, `ssh new@hivemind.tools -- --env web` boots from the disk it built.\r\n"
+	if s.out.String() != want {
+		t.Errorf("build printed\n%q\nwant\n%q", s.out.String(), want)
+	}
+	if got := starter.started(); len(got) != 1 || got[0] != "web-build" {
+		t.Fatalf("the guest nudge went to %v, want [web-build]", got)
+	}
+	if _, ok := st.mgr.Get("web-build"); !ok {
+		t.Fatal("the build reported success without creating its builder")
+	}
+
+	// `show` while it runs: the state, the box, and how to get inside it. This
+	// is the page the announcement above sends people to.
+	s = st.run(t, "alice", "env", "show", "web")
+	for _, want := range []string{
+		"web                  building\r\n",
+		"  building in  web-build — running the setup script; this takes minutes\r\n",
+		"               ssh web-build@hivemind.tools\r\n",
+	} {
+		if !strings.Contains(s.out.String(), want) {
+			t.Errorf("show is missing %q:\n%s", want, s.out.String())
+		}
+	}
+
+	// A second build while the first is in flight is a conflict, not a second
+	// builder — and the sentence answers the question that was actually being
+	// asked, which is where the first one got to.
+	s = st.run(t, "alice", "env", "build", "web")
+	if s.code != 1 || !strings.Contains(s.stderr.String(), "already building (in web-build)") {
+		t.Errorf("a re-run during a build printed %q (exit %d)", s.stderr.String(), s.code)
+	}
+	if got := starter.started(); len(got) != 1 {
+		t.Errorf("the re-run nudged the guest again: %v", got)
+	}
+}
+
+// TestControlEnvCaptureFinishesByHand is the recovery path end to end: a build
+// that failed, the rendering that tells somebody how to rescue it, and the
+// capture that adopts the disk they fixed.
+//
+// The `failed` state is written directly because nothing in this tree can
+// produce it honestly — it arrives from a guest reporting a non-zero exit over
+// the metadata service, and there is no guest here. What is under test is the
+// half that is ours: what a person reads, and what `env capture` then does.
+func TestControlEnvCaptureFinishesByHand(t *testing.T) {
+	st, envStore, _ := newCtlStackBuild(t)
+
+	if s := st.run(t, "alice", "env", "create", "web"); s.code != 0 {
+		t.Fatalf("create: exit %d (%s)", s.code, s.stderr.String())
+	}
+	if _, err := st.mgr.Create(context.Background(), "web-build", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	const reason = "the setup script exited 1: E: Unable to locate package libpq-dev"
+	if err := envStore.SetState("alice", "web", envs.StateFailed, "web-build", reason); err != nil {
+		t.Fatal(err)
+	}
+
+	s := st.run(t, "alice", "env", "show", "web")
+	for _, want := range []string{
+		"  build error  " + reason + "\r\n",
+		"  builder      web-build — kept and paused, with the half-built disk in it\r\n",
+		"               fix it by hand:     ssh web-build@hivemind.tools\r\n",
+		"               keep what you fix:  ssh ctl@hivemind.tools env capture web\r\n",
+	} {
+		if !strings.Contains(s.out.String(), want) {
+			t.Errorf("show is missing %q:\n%s", want, s.out.String())
+		}
+	}
+
+	// And the verb that page points at. It announces before it blocks, because
+	// a capture pauses a VM and packs a disk with the person watching.
+	s = st.run(t, "alice", "env", "capture", "web")
+	if s.code != 0 {
+		t.Fatalf("capture: exit %d (%s)", s.code, s.stderr.String())
+	}
+	if !strings.HasPrefix(s.out.String(), "capturing web-build (pause + pack; this takes minutes)…\r\n") {
+		t.Errorf("capture blocked without saying it would:\n%s", s.out.String())
+	}
+	for _, want := range []string{
+		"web is ready — captured to ",
+		"the builder is gone; sandboxes boot that disk now:\r\n",
+		"  ssh new@hivemind.tools -- --env web\r\n",
+	} {
+		if !strings.Contains(s.out.String(), want) {
+			t.Errorf("capture is missing %q:\n%s", want, s.out.String())
+		}
+	}
+	if _, ok := st.mgr.Get("web-build"); ok {
+		t.Error("the builder outlived a successful capture")
+	}
+
+	// The environment now boots from a disk, which is the whole point, and
+	// `show` says which one.
+	e, err := envStore.Get("alice", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != envs.StateReady || e.BuildBox != "" || e.BuildError != "" {
+		t.Fatalf("after a capture the row is %+v", e)
+	}
+	s = st.run(t, "alice", "env", "show", "web")
+	if strings.Contains(s.out.String(), "none — sandboxes on this tag boot the stock image") {
+		t.Errorf("a ready environment still boots the stock image:\n%s", s.out.String())
+	}
+}
+
+// TestControlEnvCaptureWithNoBuilder: the environment is real, the builder is
+// not. A refusal, and one that names both ways forward rather than only the
+// state it is in.
+func TestControlEnvCaptureWithNoBuilder(t *testing.T) {
+	st, _, _ := newCtlStackBuild(t)
+	if s := st.run(t, "alice", "env", "create", "web"); s.code != 0 {
+		t.Fatalf("create: exit %d (%s)", s.code, s.stderr.String())
+	}
+	s := st.run(t, "alice", "env", "capture", "web")
+	if s.code != 1 {
+		t.Fatalf("capture with no builder: exit %d, want 1", s.code)
+	}
+	if s.out.Len() != 0 {
+		t.Errorf("a refused capture announced work it never did: %q", s.out.String())
+	}
+	for _, want := range []string{"has no builder sandbox", "env build web"} {
+		if !strings.Contains(s.stderr.String(), want) {
+			t.Errorf("the refusal never says %q:\n%s", want, s.stderr.String())
+		}
+	}
+}
+
+// TestControlEnvBuildIsMasked: a stranger's `env build` and `env capture` on an
+// environment they do not own must read exactly like one that was never
+// created. Both refusals come from the owner-scoped store read, and this is the
+// assertion that keeps a future short-circuit from confirming the name.
+func TestControlEnvBuildIsMasked(t *testing.T) {
+	st, _, starter := newCtlStackBuild(t)
+	if s := st.run(t, "alice", "env", "create", "web"); s.code != 0 {
+		t.Fatalf("create: exit %d (%s)", s.code, s.stderr.String())
+	}
+	const want = "sparkbox: no environment named \"web\"\r\n"
+	for _, args := range [][]string{{"env", "build", "web"}, {"env", "capture", "web"}} {
+		s := st.run(t, "mallory", args...)
+		if s.stderr.String() != want || s.code != 1 {
+			t.Errorf("%v as a stranger: %q exit %d, want %q exit 1",
+				args, s.stderr.String(), s.code, want)
+		}
+	}
+	if got := starter.started(); len(got) != 0 {
+		t.Errorf("a stranger's build reached a guest: %v", got)
+	}
+}
+
+// TestControlEnvBuildWithoutAGuestNudge is the degraded host, asserted: a
+// control plane with no way to start a setup run refuses the build rather than
+// creating a builder sandbox that would sit there forever with nothing to do.
+func TestControlEnvBuildWithoutAGuestNudge(t *testing.T) {
+	dir := t.TempDir()
+	tmpl, err := templates.Open(filepath.Join(dir, "templates.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tmpl.Close() }) //nolint:errcheck
+	st := newCtlStackWith(t, testRoster(), func(cfg *ctlops.Config) {
+		cfg.TemplateTags = tmpl
+		cfg.SetupStarter = nil
+	})
+	if s := st.run(t, "alice", "env", "create", "web"); s.code != 0 {
+		t.Fatalf("create: exit %d (%s)", s.code, s.stderr.String())
+	}
+	sess := st.newSession("alice")
+	sess.cmd = []string{"env", "script", "web", "--set"}
+	sess.in = strings.NewReader("echo hi\n")
+	st.gw.handleControl(sess, "alice", st.log)
+	if sess.code != 0 {
+		t.Fatalf("script --set: exit %d (%s)", sess.code, sess.stderr.String())
+	}
+	s := st.run(t, "alice", "env", "build", "web")
+	if s.code == 0 {
+		t.Fatalf("a host that cannot nudge a guest started a build anyway:\n%s", s.out.String())
+	}
+	if !strings.Contains(s.stderr.String(), "not enabled on this host") {
+		t.Errorf("the refusal reads %q", s.stderr.String())
 	}
 }

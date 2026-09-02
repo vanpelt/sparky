@@ -15,20 +15,43 @@ clean. Phase D's REST routes and console tab are NOT built — the only thing th
 change adds to `openapi.json` is the `environments` capability flag, because
 `Capabilities` grew a field and `openapi_test.go` requires the spec to match.
 
-Parts 4 and 5 — the builder VM, the guest oneshot, the metadata report, the
-gateway-side capture, and both posture changes — are **written down and
-unbuilt**, and are Phase B/C. The schema in Part 1 carries their columns from
-the first `CREATE TABLE` anyway, because this tree has no migration framework:
-schema is `CREATE TABLE IF NOT EXISTS` at `Open` plus a per-package copy of
+**Phase B is built too, in script mode only.** `ctl env build <name>` and
+`ctl env capture <name>` exist and run end to end against the mock driver:
+`ghapp.App.ReadFile` (the seed read of `.sparkbox/setup.sh`, which returns bytes
+and never a token), `metadata`'s `GET /self/setup` and
+`POST /self/setup/result`, the guest's `/usr/local/sbin/sparkbox-env-setup`
+oneshot and its deliberately-unenabled `sparkbox-env-setup.service`,
+`envsync.StartSetup`, and `ctlops`'s `BuildEnvironment`, `SetupFor`,
+`SetupDone`, `CaptureEnvironment` and `ReconcileEnvironmentBuilds`, wired in
+`main.go` behind `--env-build-timeout` (default 45m) with a ten-minute
+reconciler sweep. Part 4 below has been rewritten to describe what was built;
+where it and the code disagreed, the code won and the paragraph says so.
+
+**Agent mode — `claude -p` writing the setup script — is Phase C and is NOT
+built.** A build with no script anywhere is refused with a sentence that says
+plainly that the third way does not exist yet, so its absence does not read as a
+bug in the two that do. The seam is one field: line 2 of the guest fetch is the
+mode, `envs.SetupFromAgent` already exists, and the guest worker refuses an
+unknown mode by name rather than guessing.
+
+Part 5's two posture changes are therefore half-taken: (a) we now run a script
+from a repository, unattended, in a VM holding the owner's secrets. (b) we do
+not yet run an agent.
+
+The schema in Part 1 carried Phase B's columns from the first `CREATE TABLE`,
+because this tree has no migration framework: schema is
+`CREATE TABLE IF NOT EXISTS` at `Open` plus a per-package copy of
 `addColumnIfMissing` kept alive with `var _ = addColumnIfMissing`
 (`internal/secrets/store.go:273-278`). Adding a column later is possible and
-tedious; adding it now is free.
+tedious; adding it now was free, and this is the phase that collected on it.
 
-Nothing in this document has been run on a real host. Phase A is a sqlite store
-and its tests are `t.TempDir()` and the mock driver, which is the whole of what
-`go test ./...` can prove about it — and that is genuinely enough for Phase A.
-It is not remotely enough for Phase B, where the interesting failure is a
-builder VM that boots, runs somebody's shell script, and does not come back.
+**Nothing in this document has been run on a real host, and for Phase B that
+matters far more than it did for Phase A.** Every test in the tree runs against
+the mock driver with no KVM: no builder VM has booted, no setup script has run,
+no `runuser` privilege drop has happened, and no rootfs has been captured from a
+box a script had just modified. The interesting failure of this feature — a VM
+that boots, runs somebody's shell script, and does not come back — is precisely
+the one `go test ./...` cannot reach. The reconciler exists because of it.
 
 One correction to a sibling document while we are here.
 `docs/tag-templates-design.md`'s Status section says "**None of it does anything
@@ -388,9 +411,9 @@ That refusal is, as in netrules and templates, exactly what keeps
 
 # Part 4 — the build
 
-**Not built. Phase B and C.** Everything in this part is a plan, and the honest
-reading of it is that the schema in Part 1 reserves room for it and the CLI
-surface in Phase A should not mention it yet.
+**Built, script mode only** (Phase B). Agent mode is Phase C and is not built.
+This part describes the code that exists; where the original plan and the
+implementation disagreed, the paragraph says which won.
 
 An environment whose composition is complete still leaves steps 6, 7 and 8 of
 the eight. `env build <name>` is the verb that removes them:
@@ -401,47 +424,109 @@ ssh ctl@<gateway> env build web
 
 ## The shape
 
-1. The gateway creates a **builder sandbox** tagged with the environment — an
-   ordinary create through `ctlops.Create`, which means it gets the
-   environment's secrets, its vars, its checkouts and its egress policy by the
-   four joins that already exist, with no special case anywhere. Its name is
-   recorded in `environments.build_box` and the row moves to `building`.
-2. A guest-side **systemd oneshot** runs the setup, ordered after
-   `sparkbox-repos.service` because it needs the checkout to exist.
-3. The guest **reports back over the metadata service**: started, finished,
-   failed, and the script text it actually ran.
-4. The **gateway** — not the guest — takes the snapshot, through
-   `ctlops.SnapshotToTag`, which captures and binds in one act.
-5. The row moves to `ready` with `built_at` set, or to `failed` with
-   `build_error` carrying the sentence, and the builder box is destroyed either
-   way.
+0. Every refusal comes **before the first write**, which for this verb means
+   before `SetState(building)`: environments off, a driver that cannot snapshot,
+   no template-binding store, no tag store, no such environment *or* not yours
+   (one masked answer from one line), already building, `web-build` already
+   taken, and — last — no setup script anywhere. There is no transaction
+   spanning the environment store, the tag store and the VM manager, so ordering
+   is the only thing that makes this safe.
+1. The **script is resolved**. The stored one wins. Otherwise the environment's
+   attached repositories are read, in slug order, first hit wins, for
+   `.sparkbox/setup.sh` — and finding one **writes it to the row** with
+   `setup_from = "repo"`, which is the first write this verb makes. Seeding is
+   what "seed" says: a later build re-uses the stored copy rather than re-reading
+   the repository, so a hand-fixed script is never silently overwritten.
+2. The gateway creates a **builder sandbox** named `<name>-build`, tagged with
+   the environment — an ordinary create through `ctlops.Create`, which means it
+   gets the environment's secrets, its vars, its checkouts and its egress policy
+   by the four joins that already exist, with no special case anywhere — and
+   `FromBase: true`, so a rebuild starts from the operator's stock image rather
+   than accumulating the side effects of every previous build. Its name is in
+   `environments.build_box` and the row is in `building`.
+3. The gateway **nudges** that guest (`envsync.StartSetup`), which restarts a
+   guest-side **systemd oneshot** that is installed but deliberately **not
+   enabled** — see below. The verb returns here. The create is waited on, and
+   only the create: a name that is taken or a host at capacity is a refusal the
+   person typing this can act on, and learning it from a `failed` row a minute
+   later would be strictly worse.
+4. The guest fetches its own job (`GET /self/setup`), runs it, and **reports
+   back over the metadata service** (`POST /self/setup/result`): whether it
+   worked, the exit status, the `.sparkbox/setup.sh` the run ended with, and a
+   bounded tail of the log.
+5. On success the **gateway** — not the guest — takes the snapshot, through
+   `ctlops.SnapshotToTag`, which captures and binds in one act; then it destroys
+   the builder and the row moves to `ready` with `built_at` set.
+6. On failure the row moves to `failed` with `build_error` carrying one
+   sentence, **and the builder is kept, paused**. That is the correction to the
+   original plan, which said the builder was destroyed either way. It is what
+   `env capture` exists to finish from: the box holds the half-built disk, the
+   log and the checkout, and throwing that away at the exact moment somebody
+   needs it is the wrong trade. `env show` prints the box name and both
+   commands.
 
-## The oneshot, and the two scripts it might run
+Two half-failures are worth stating because they are decided rather than
+incidental. If the **create** fails, the row goes straight to `failed` with an
+empty `build_box` — a row stuck in `building` with no builder is the one state
+only the forty-five-minute timeout recovers from. If the capture and the bind
+succeed but the **destroy** fails, the environment is `ready` anyway: the
+expensive half is done, the disk exists, the tag points at it, and reporting
+that as a failure would send somebody to pay the whole cost again to reach the
+state they are already in. The leftover box is logged with the `rm` line.
 
-Shaped like `sparkbox-repos.service`
-(`deploy/install-guest-identity.sh:2150-2171`): `Type=oneshot`,
-`RemainAfterExit=yes` so `systemctl status` shows that the pass ran, a bounded
-`TimeoutStartSec`, and — the load-bearing one — **no ordering before
-`ssh.service`**. That unit's own comment says why, and it cites the incident:
-"copying it into a unit that clones a repository would put a multi-minute
-network operation in front of the first attach, which is exactly the class of
-bug main@e196d5f already cost this platform once." A setup script is slower than
-a clone.
+## The oneshot, and why it is installed but not enabled
 
-It runs one of two things.
+`/usr/local/sbin/sparkbox-env-setup` and `sparkbox-env-setup.service`, installed
+by `deploy/install-guest-identity.sh` (IDENTITY_REV 23). Shaped like
+`sparkbox-repos.service`: `Type=oneshot`, `RemainAfterExit=yes` so `systemctl
+status` shows that the pass ran, a bounded `TimeoutStartSec` (5400s, set
+deliberately *above* the worker's own 3600s budget so the worker is always what
+gives up first and therefore always reports), `After=` the network, token and
+repo units, and — the load-bearing one — **no ordering before `ssh.service`**.
+That unit's own comment says why, and it cites the incident: "copying it into a
+unit that clones a repository would put a multi-minute network operation in
+front of the first attach, which is exactly the class of bug main@e196d5f
+already cost this platform once." A setup script is slower than a clone.
 
-- **`bash .sparkbox/setup.sh`**, if the checkout has one. This is the path the
-  platform has been telling agents to prepare for since
-  `deploy/refresh-agent-tools.sh:777-783` started installing that instruction
-  into every template's `~/.agents/AGENTS.md`, and since
-  `internal/guestdocs/dev-environment.md:88-102` started documenting the
-  convention. `setup_from = "repo"`.
-- **`claude -p`**, with the dev-environment guidance, when there is no script.
-  The guidance is not new either: `sparkbox docs dev-environment`
-  (`internal/guestdocs`) is the per-framework Host-header and hot-reload
-  material, and the platform-owned `~/.agents/AGENTS.md` already tells an agent
-  to bind `0.0.0.0`, use a `systemd --user` unit, call `sparkbox set-port`, and
-  **write what it did down as `.sparkbox/setup.sh`**. `setup_from = "agent"`.
+**It has no `[Install]` section and is never enabled**, which is a change from
+the plan and the more interesting half. Three reasons, and a test in
+`deploy/assets_test.go` that fails if anyone adds one. Only a builder ever has a
+job, so enabling it fleet-wide would have every VM in the fleet make a metadata
+request on every boot to be told 204. The owner's secrets arrive by an env
+*push*, not by a unit, so boot ordering cannot express "after the secrets land"
+and a boot-time run would race it — a setup script that runs before the managed
+block is written sees none of the owner's credentials. And the gateway has to
+know when the run finished, which means it has to be the thing that started it.
+So `envsync.StartSetup` restarts the unit explicitly, after `PushEnv` has
+returned. `restart` and not `start`, because `RemainAfterExit=yes` makes a
+second `start` a silent no-op on a re-used builder.
+
+The worker itself drops privilege (`runuser`, else `sudo -n`) to the login user,
+`cd`s to the primary checkout `sparkbox-repos` published, sources
+`/etc/environment` *inside* the unprivileged child — a systemd unit gets no
+`pam_env`, and sourcing it after the drop means a `$(...)` in a secret's value
+cannot run as root — and runs `bash` under `timeout -k`. Its log is 0600 and
+owned by the login user, not 0644 like the repo worker's, because a `set -x`
+over an API key is a realistic thing for a setup script to produce.
+
+**In Phase B it runs exactly one thing: `bash .sparkbox/setup.sh`.** That is the
+path the platform has been telling agents to prepare for since
+`deploy/refresh-agent-tools.sh:777-783` started installing the instruction into
+every template's `~/.agents/AGENTS.md`, and since
+`internal/guestdocs/dev-environment.md:88-102` started documenting the
+convention. `setup_from = "repo"` when the script was seeded from a repository,
+`"manual"` when somebody piped it in.
+
+Phase C adds the second branch: **`claude -p`** with the dev-environment
+guidance, when there is no script anywhere. The guidance is not new either —
+`sparkbox docs dev-environment` (`internal/guestdocs`) is the per-framework
+Host-header and hot-reload material, and the platform-owned `~/.agents/AGENTS.md`
+already tells an agent to bind `0.0.0.0`, use a `systemd --user` unit, call
+`sparkbox set-port`, and **write what it did down as `.sparkbox/setup.sh`**.
+`setup_from = "agent"`. The seam is already cut: line 2 of the guest fetch is
+the mode, the guest refuses an unknown mode by name rather than guessing, and
+the only ctlops change is what happens where `env build` currently refuses with
+`env_no_setup`.
 
 The second path's real output is therefore the first path's input. An agent that
 does its job leaves a script in the repo, a person reviews it in a pull request
@@ -453,20 +538,93 @@ that means no agent has to next time."
 Either way the script text that actually ran lands on the environment row via
 `SetScript(owner, name, script, from)`, which is why the contract has that
 method and why `SetupScript` is `""` until a build runs. It is the record of
-what happened, not a plan for what will.
+what happened, not a plan for what will. An empty script field in the report
+means "unchanged" and the stored one is kept — the guest sends empty rather than
+truncating an oversized file, because half a script is what every future fork of
+the environment would run.
 
-## The report
+## The fetch and the report
 
-`POST /self/setup` on the metadata mux, in the shape of `POST /repos/status`
-(`internal/metadata/server.go:386`), which is the existing precedent for a guest
+**Two routes, not one.** The plan said `POST /self/setup`; the implementation is
+`GET /self/setup` for the job and `POST /self/setup/result` for the outcome.
+Sharing one path would have made "no job" (204) and "here is what happened" the
+same URL, which is a distinction worth a path segment.
+
+Both are in the shape of `POST /repos/status`
+(`internal/metadata/server.go:386`), the existing precedent for a guest
 publishing a fact about itself that the gateway stores on the record. The
 authentication is the one the whole metadata service already rests on: the
 handler matches the request's source address to the guest's `/30` slot **and**
 the connection's local address to `slot.Host`
 (`internal/metadata/server.go:802`), and the firecracker driver sets `rp_filter`
-so a spoofed source is dropped rather than merely unanswered. The guest names
-itself; the host decides everything else — including, here, the owner, which
-comes from the manager record and never from the request.
+so a spoofed source is dropped rather than merely unanswered. Nothing in either
+request names a sandbox, an environment or an owner. The guest arrives on a tap;
+the host decides everything else.
+
+The guest has no JSON encoder — it is POSIX `sh` with `curl` and `base64` — so
+both bodies are line-oriented, which is `/repos/status`' rule applied again:
+
+```
+GET  /self/setup          -> 204, empty          (no job: every ordinary VM)
+                          -> 200 text/plain
+                             line 1  environment name
+                             line 2  mode ("script"; the Phase C seam)
+                             line 3  base64 of the script (folding tolerated)
+
+POST /self/setup/result   -> 202, then the work runs on its own goroutine
+                             line 1   ok | failed
+                             line 2   exit status 0-255
+                             line 3   base64 of .sparkbox/setup.sh, or empty
+                             line 4+  the log tail, VERBATIM, not base64
+```
+
+Guest-authored bytes are bounded on both sides. The body is capped at 128 KiB
+before parsing (the largest honest report is ~74 KiB); the decoded script is
+**refused** over 64 KiB rather than truncated; the log is **truncated** to its
+last 8 KiB rather than refused, because a rejected report leaves the row in
+`building` with nobody able to say why. `build_error` is then reduced further —
+last non-empty line, control bytes and partial runes replaced, cut at 200 runes
+— because an ANSI escape in a refusal is a terminal a stranger can drive, and
+that column is printed by `env ls`, `env show` and every `create --env` refusal.
+
+The 202 is written, flushed and the guest's FIN awaited **before** `SetupDone`
+runs, for the reason the self-service pause and capture verbs do it: the first
+thing that work does is pause the VM the request came from.
+
+**The owner term on the way back in is a security boundary, not belt and
+braces.** `envs.Building()` is the one store query with no owner scope — the
+reconciler acts for no person — and sandbox names are a single global namespace,
+so `web-build` is a name anybody may take. Both `SetupFor` and `SetupDone`
+compare the row's owner against the sandbox record's, and log a mismatch. Without
+that comparison a stranger who created that name would be handed another owner's
+setup script: the shape of their private toolchain, and often the names of their
+internal repositories and services.
+
+## Both routes are relayed from a node
+
+A node holds no environments table, no tag-to-template bindings and no placement
+ledger, so it can answer neither route from anything of its own. Both therefore
+travel up the node link as `sandbox.self_setup` and `sandbox.self_setup_result`
+(`internal/nodelink/frame.go`), exactly as the lifecycle trio and the repo pair
+do, and land on `Fleet.SelfSetup` / `Fleet.SelfSetupResult`, whose first act is
+`selfServiceBox` — the gateway's own ledger must place that sandbox on the node
+that asked. The node's side is `relayEnvSetup` in `cmd/sparkbox/node.go`, wired
+into its metadata service beside `relaySelfLifecycle`.
+
+This is not an optimisation for a fleet that happens to have nodes. **On CKS the
+gateway is control-plane-only, so every sandbox — every builder included — is
+placed on a node.** Left unrelayed both routes answer 501 there, a builder reads
+that as "no job", exits 0 without running anything, and the row sits in
+`building` until the 45-minute timeout reports a cause that is not the real one:
+no environment build can complete at all. It is also the leak the metadata
+service exists to prevent, which is the same argument in its general form — a
+guest must not be able to tell which machine it landed on from the status it
+got.
+
+The relayed report is bounded again on arrival (`MaxSelfSetupScriptBytes`,
+`MaxSelfSetupLogBytes`) rather than trusted to have passed the metadata door's
+caps, because the body originated in a guest and the door it passed was on
+another machine.
 
 ## Why the gateway takes the snapshot
 
@@ -515,12 +673,43 @@ decrypted secrets inside it. `Store.Building()` returns every such row across
 **all** owners — the only method on the contract that is not owner-scoped, and
 deliberately so, because the caller is the process itself and not a person.
 
-What the reconciler does with them is Phase B's problem and it has exactly one
-defensible default: a build that was in flight when the gateway died did not
-finish, so mark it `failed` with a sentence that says the gateway restarted, and
-destroy the builder box. Resuming is tempting and wrong — the guest's oneshot
-may have completed, half-completed, or be running still, and nothing on the
-gateway can tell the three apart after a restart.
+Resuming is tempting and wrong — the guest's oneshot may have completed,
+half-completed, or be running still, and nothing on the gateway can tell the
+three apart after a restart. So the reconciler settles rather than resumes,
+three cases:
+
+- **the builder is gone** -> `failed`. Nothing can finish a build whose box does
+  not exist, and leaving the row in `building` would refuse every `create --env`
+  on it forever.
+- **the build is older than `--env-build-timeout`** (default 45m) -> `failed`,
+  **builder left paused**. This is the second correction to the plan, which said
+  to destroy it. The whole reason a failed build keeps its builder is that the
+  box holds the half-built filesystem, the log and the checkout — which is what
+  `env capture` exists to finish from — and a reconciler that destroyed it would
+  throw that away for the one failure mode where nobody was watching.
+- **anything else** -> **left alone**. This is the case a naive sweep gets
+  wrong: a build two minutes into a twenty-minute `cargo build` looks exactly
+  like a stranded one from out here, and failing it would destroy work that was
+  going to succeed. The result POST may still land.
+
+It runs once at startup — the load-bearing pass, because a restart mid-build is
+the state nothing else recovers from — and then every ten minutes.
+`cmd/sparkbox` owns that goroutine, in `pushLoop`'s shape and with its shutdown
+discipline; nothing in `ctlops` starts a timer the wiring cannot see or stop.
+
+## `env capture`: finishing by hand
+
+A verb the original plan did not have, and the reason the failure path keeps its
+builder. Somebody `ssh`es into `web-build`, finds the missing apt package,
+installs it, and runs `env capture web` — and the environment is built, from the
+disk they just fixed, with no second run of a script that was never going to
+work. It shares the build's singleflight key, so a manual capture and a guest's
+late result cannot both try to snapshot the same box, and it is synchronous like
+`snapshot create` because the person who typed it is watching.
+
+Both verbs' refusals are owner-scoped through the same masked read, so a
+stranger's `env build web` and one on an environment nobody has are the same
+sentence from the same line.
 
 ---
 
@@ -531,18 +720,21 @@ under Part 4's mechanism would be the dishonest way to write this document.
 
 ## (a) We will run a script from a repository, unattended
 
-`internal/guestdocs/dev-environment.md:108-109` currently ends with:
+Before Phase B, `internal/guestdocs/dev-environment.md` ended with:
 
 > Read a `.sparkbox/setup.sh` you did not write before running it — like any
 > script, it runs as you.
 
 and the example file's own header
-(`internal/guestdocs/examples/.sparkbox/setup.sh:4-6`) says:
+(`internal/guestdocs/examples/.sparkbox/setup.sh`) said:
 
 > Written by the agent that first configured this project to run inside a
 > Sparkbox VM … **Sparkbox itself never writes or runs this file.**
 
-Part 4 breaks both sentences. `env build` runs `bash .sparkbox/setup.sh` as the
+Both sentences were true when they were written and both have now been corrected
+in place, because Phase B made the second one false.
+
+Part 4 is what broke them. `env build` runs `bash .sparkbox/setup.sh` as the
 guest's login user, in a box holding the owner's decrypted secrets, from a file
 whose contents are whatever is on the branch the attachment points at — which
 anyone with write access to that repository can change, including a merged pull
@@ -572,6 +764,26 @@ scriptable path for a person who has already decided.
 
 The one rule to carry over from that verb verbatim: without a terminal, and
 without `--yes`, it refuses. A warning nobody can read is not a warning.
+
+**As built (Phase B), this mitigation is NOT in place, and that is the one gap
+in this phase worth reading twice.** `env build` does not print the script and
+does not ask; there is no `--yes` and no diff-on-change. The posture change in
+this section has therefore been taken without the compensating gesture that was
+supposed to come with it. What does exist is weaker and worth naming honestly:
+the seed read records the script on the row **before** the builder boots, so
+`env script <name>` prints exactly what is about to run and `env show` says how
+many bytes it is and where it came from; and a later build resolves from the row
+rather than going back to github.com, so nothing changes under an environment
+between builds.
+
+One interaction here is surprising enough to state outright. The guest's report
+carries the `.sparkbox/setup.sh` the run **ended with**, and that is what lands
+on the row — deliberately, because in agent mode the whole point is that the
+agent wrote it. In script mode it means a build re-records whatever the fresh
+checkout had, so the row tracks the repository as of the last build. `setup_from`
+is *not* re-litigated: a script somebody piped in stays `manual`, and a later
+build still resolves from the row rather than seeding again. The prompt, the
+`--yes`, and the re-confirm-on-diff are owed.
 
 ## (b) We will run an agent, unattended, in a box holding the owner's secrets
 
@@ -743,7 +955,7 @@ Four steps. Each is independently shippable and independently useful, and the
 ordering is chosen so that the two posture changes in Part 5 land as late as
 possible and separately from each other.
 
-**A. The object and its composition. (Phase A — in flight.)**
+**A. The object and its composition. (Phase A — DONE.)**
 `internal/envs` with the schema in Part 1; `secrets.Var`, `PutVar`,
 `DeleteVar`, `ListVars`, `VarsForTag`, `VarsForSandbox`, `DeleteVarsForTag` and
 the merge in `EnvForSandbox`; the `Environments` and `EnvVars` interfaces in
@@ -758,14 +970,24 @@ its first home, and it makes "what is `proj`?" a question with an answer. The
 build columns exist from this step's first `CREATE TABLE` and are never written,
 so B is purely additive.
 
-**B. The build, `.sparkbox/setup.sh` only.** The builder VM, the guest oneshot,
-`POST /self/setup`, the gateway-side `SnapshotToTag`, the `Building()`
-reconciler, the timeout, and Part 5(a)'s print-and-confirm. **No agent.** This
-ships the entire orchestration — which is where the interesting failures are:
-the builder that never reports, the gateway that restarts mid-build, the guest
-whose oneshot outlives its timeout — with the smallest blast radius available,
-because the script came from a repository and a person read it on screen before
-it ran.
+**B. The build, `.sparkbox/setup.sh` only. (DONE, mock-driver only.)** The
+builder VM, the guest oneshot, `GET /self/setup` + `POST /self/setup/result`
+(two routes, not the one this document originally planned), the gateway-side
+`SnapshotToTag`, the `Building()` reconciler, and `--env-build-timeout`.
+**No agent.** This ships the entire orchestration — which is where the
+interesting failures are: the builder that never reports, the gateway that
+restarts mid-build, the guest whose oneshot outlives its timeout — with the
+smallest blast radius available, because the script came from a repository and a
+person can read it on screen before it runs.
+
+It also added a verb this plan did not have: **`env capture`**, which adopts a
+failed build's paused builder exactly as it stands. That is what made "keep the
+builder on failure" the right call rather than a leak.
+
+What B did NOT ship is Part 5(a)'s print-and-confirm — `env build` does not show
+the script and ask. `env script <name>` prints it and the seed is recorded on
+the row before the builder boots, so the script is inspectable before and after,
+but the confirmation gesture itself is still owed.
 
 **C. The agent path.** `claude -p`, `setup_from = "agent"`, and the three
 mitigations in Part 5(b): the no-credential refusal at the door, the timeout

@@ -94,16 +94,22 @@ project's own repo as `.sparkbox/setup.sh`: a plain, idempotent shell script
 that a fresh checkout can run with `bash .sparkbox/setup.sh` to arrive at the
 same running state.
 
-This is deliberately a script, not a Sparkbox feature — `sparkbox snapshot`
-already freezes a whole VM disk (see the docs), and that is the right tool
-when the setup is genuinely expensive to repeat. A script is the better
-default: it is readable in a diff, works on a VM that never forked from a
-snapshot, and survives changes to the setup being ordinary commits instead of
-a new disk image each time.
+It stays a script rather than becoming a Sparkbox format: it is readable in a
+diff, works on a VM that never forked from a snapshot, and survives changes to
+the setup being ordinary commits instead of a new disk image each time.
+
+Sparkbox does now read and run it, in one place and only when asked.
+`ssh ctl@<gateway> env build <name>` boots one builder VM, runs
+`bash .sparkbox/setup.sh` in the primary checkout as you, and — if it succeeds —
+captures that VM as the disk every later sandbox on that environment boots from.
+So this file is both the thing a teammate runs by hand and the thing that builds
+the image. Nothing runs it on an ordinary VM's boot.
 
 ```sh
 {{SETUP_SH_EXAMPLE}}
 ```
 
 Read a `.sparkbox/setup.sh` you did not write before running it — like any
-script, it runs as you.
+script, it runs as you, and `env build` runs it as you too, in a VM holding your
+secrets. `ssh ctl@<gateway> env script <name>` prints the exact copy a build
+will use.

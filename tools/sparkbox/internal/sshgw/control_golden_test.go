@@ -700,6 +700,34 @@ func TestControlGolden(t *testing.T) {
 		name: "env with an unknown subcommand", handle: "alice", args: []string{"env", "wat"},
 		wantErr: "unknown env command \"wat\"\r\n" + envUsage, wantExit: 2,
 	}, {
+		// The two build verbs, named without the thing they act on. Both print
+		// the usage rather than guessing, exactly as `show` and `rm` do — there
+		// is no default environment and inventing one would build somebody's
+		// project on a word they did not type.
+		name: "env build with nothing to build", handle: "alice", args: []string{"env", "build"},
+		wantErr: envUsage, wantExit: 2,
+	}, {
+		name: "env capture with nothing to capture", handle: "alice", args: []string{"env", "capture"},
+		wantErr: envUsage, wantExit: 2,
+	}, {
+		// This fixture has no template-binding store, which is the shape of a
+		// host that can run sandboxes and cannot point a tag at a disk — so a
+		// build is impossible here for a reason that has nothing to do with the
+		// name typed. It is refused UP FRONT, before the environment is even
+		// looked up: the alternative is finding out after a builder VM has run
+		// somebody's setup script for ten minutes.
+		//
+		// The name is one nobody has, and that is the point. A refusal that
+		// reached the store first would answer `ghost` and `web` differently
+		// and leak which environments exist to anyone who can read an exit.
+		name: "env build on a host that cannot bind a disk", handle: "alice",
+		args:    []string{"env", "build", "ghost"},
+		wantErr: "sparkbox: template bindings are not enabled on this host\r\n", wantExit: 1,
+	}, {
+		name: "env capture on a host that cannot bind a disk", handle: "alice",
+		args:    []string{"env", "capture", "ghost"},
+		wantErr: "sparkbox: template bindings are not enabled on this host\r\n", wantExit: 1,
+	}, {
 		// The two doors that parse --env only so they can refuse it. Without
 		// the flag in parseCreateArgs these would be read as the two tags
 		// `--env` and `web`, silently dropped by the tag grammar.

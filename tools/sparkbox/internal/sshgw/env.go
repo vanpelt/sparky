@@ -50,6 +50,8 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"       ssh ctl@<gateway> env rm <name>\r\n" +
 	"       ssh ctl@<gateway> env script <name>\r\n" +
 	"       cat setup.sh | ssh ctl@<gateway> env script <name> --set\r\n" +
+	"       ssh ctl@<gateway> env build <name>\r\n" +
+	"       ssh ctl@<gateway> env capture <name>\r\n" +
 	"\r\n" +
 	"  flags: --repo <owner>/<name>  --secret <NAME>  --rule <name>  --var K=V\r\n" +
 	"         --description <text>          every one of them may be repeated\r\n" +
@@ -80,7 +82,26 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"the setup script is read from stdin, never from the command line, because it\r\n" +
 	"is a file rather than an argument:\r\n" +
 	"\r\n" +
-	"  cat .sparkbox/setup.sh | ssh ctl@<gateway> env script web --set\r\n"
+	"  cat .sparkbox/setup.sh | ssh ctl@<gateway> env script web --set\r\n" +
+	"\r\n" +
+	"`env build` is what turns all of that into a disk. it boots one sandbox named\r\n" +
+	"<name>-build from the stock image, runs the setup script in the checkout, and\r\n" +
+	"— when the script succeeds — captures that sandbox as the image every later\r\n" +
+	"`ssh new@<gateway> -- --env <name>` boots from. it RETURNS AS SOON AS THE\r\n" +
+	"BUILD STARTS: the work takes minutes and keeps going after you disconnect, so\r\n" +
+	"read the outcome with `env show <name>` rather than by waiting here.\r\n" +
+	"\r\n" +
+	"the script comes from the environment (`env script <name> --set`), or, when\r\n" +
+	"there is none, from .sparkbox/setup.sh in one of its repositories — which is\r\n" +
+	"then stored, so the next build is the same build. `sparkbox docs\r\n" +
+	"dev-environment` describes what belongs in that file.\r\n" +
+	"\r\n" +
+	"a build that fails leaves its builder sandbox PAUSED, with the half-built disk\r\n" +
+	"and the log in it. ssh in, fix what was missing by hand, and keep the result:\r\n" +
+	"\r\n" +
+	"  ssh ctl@<gateway> env build web\r\n" +
+	"  ssh web-build@<gateway>              # only if it failed\r\n" +
+	"  ssh ctl@<gateway> env capture web    # snapshot that box, bind it, done\r\n"
 
 // controlEnv serves `ctl env …`.
 func (g *Gateway) controlEnv(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
@@ -128,6 +149,22 @@ func (g *Gateway) controlEnv(s gssh.Session, c ctlops.Caller, args []string, log
 
 	case "script":
 		g.envScript(s, c, args[1:], log)
+
+	case "build":
+		if len(args) < 2 {
+			fmt.Fprint(s.Stderr(), envUsage)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		g.envBuild(s, c, args[1], log)
+
+	case "capture":
+		if len(args) < 2 {
+			fmt.Fprint(s.Stderr(), envUsage)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		g.envCapture(s, c, args[1], log)
 
 	default:
 		fmt.Fprintf(s.Stderr(), "unknown env command %q\r\n%s", args[0], envUsage)
@@ -201,11 +238,30 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 		setup += "  (read it with `env script " + e.Name + "`)"
 	}
 	fmt.Fprintf(s, "  %-12s %s\r\n", "setup", setup)
-	if e.BuildBox != "" {
-		fmt.Fprintf(s, "  %-12s %s\r\n", "building in", e.BuildBox)
+	// The build. This is the half of `env show` somebody runs while something is
+	// happening, so both live states say what to do next rather than only what
+	// state they are in: a build in flight is watchable and a failed one is
+	// RECOVERABLE — its builder is still there, paused, holding the half-built
+	// disk and the log — and neither fact is discoverable from the word alone.
+	//
+	// The continuation lines are indented to the value column (two spaces, the
+	// twelve-wide label, one space) so the commands read as belonging to the
+	// row above them rather than as more rows.
+	const envCont = "               " // 2 + 12 + 1: the column the values above start in
+	if e.BuildBox != "" && e.State == string(envs.StateBuilding) {
+		fmt.Fprintf(s, "  %-12s %s — running the setup script; this takes minutes\r\n",
+			"building in", e.BuildBox)
+		fmt.Fprintf(s, "%sssh %s@%s\r\n", envCont, e.BuildBox, g.sshHint())
 	}
 	if e.BuildError != "" {
 		fmt.Fprintf(s, "  %-12s %s\r\n", "build error", e.BuildError)
+	}
+	if e.BuildBox != "" && e.State != string(envs.StateBuilding) {
+		fmt.Fprintf(s, "  %-12s %s — kept and paused, with the half-built disk in it\r\n",
+			"builder", e.BuildBox)
+		fmt.Fprintf(s, "%sfix it by hand:     ssh %s@%s\r\n", envCont, e.BuildBox, g.sshHint())
+		fmt.Fprintf(s, "%skeep what you fix:  ssh %s@%s env capture %s\r\n",
+			envCont, ControlUser, g.sshHint(), e.Name)
 	}
 
 	for _, sec := range []struct {
@@ -616,4 +672,107 @@ func readScript(s gssh.Session, name string) (string, error) {
 	// is plainly right there — the single most confusing failure this path can
 	// produce, from a client that did nothing wrong.
 	return strings.ReplaceAll(script, "\r\n", "\n"), nil
+}
+
+// ---------------------------------------------------------------------------
+// The build
+// ---------------------------------------------------------------------------
+
+// failEnvBuild is failCtl plus the hint.
+//
+// failCtl prints Msg and nothing else, which is right for every refusal whose
+// sentence IS the whole answer: `no sandbox named "x"` has nothing to add. The
+// build's refusals are not that shape. ctlops splits them on purpose — the
+// condition in Msg, what to do about it in Hint — and the commonest one by far
+// is `env build web` on an environment nobody has written a setup script for,
+// where the second half is the entire point: which file to write, which verb
+// pipes one in, and that having an agent write it does not exist yet. Printing
+// only the first half would leave a person reading "web has no setup script"
+// with nowhere to go.
+//
+// It is two lines rather than one joined sentence because these hints are two
+// or three sentences long; appended after the message they wrap somewhere
+// arbitrary in the middle of a command the reader is meant to copy.
+func failEnvBuild(s gssh.Session, log *slog.Logger, what string, err error) {
+	e := ctlops.AsError(what, err)
+	if !e.Verbatim || e.Hint == "" {
+		failCtl(s, log, what, err)
+		return
+	}
+	// failCtl's rule, restated rather than reached: a refusal the user is
+	// already reading stays out of the operator's log unless something broke.
+	switch e.Kind {
+	case ctlops.KindInternal, ctlops.KindUpstream:
+		log.Error(what+" failed", "err", err)
+	default:
+		log.Debug(what+" refused", "err", err, "kind", e.Kind.String())
+	}
+	fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n%s\r\n", e.Msg, e.Hint)
+	s.Exit(e.ExitCode()) //nolint:errcheck
+}
+
+// envBuild starts a build and then gets out of the way.
+//
+// The whole of this function's job past the call is telling the truth about
+// what it just did, because the command LOOKS synchronous and is not: ctlops
+// returns once the builder sandbox exists and its guest has taken the job, and
+// the setup script then runs for minutes inside that VM with nothing attached
+// to this session. Somebody who believes otherwise waits, sees nothing, and
+// presses ctrl-C — which does not stop the build but does teach them that the
+// feature is broken. So the first line says it is running, the second and third
+// say where to read the outcome and where to watch it happen, and none of them
+// is a progress indicator this channel could not honour.
+func (g *Gateway) envBuild(s gssh.Session, c ctlops.Caller, name string, log *slog.Logger) {
+	info, err := g.ops.BuildEnvironment(s.Context(), c, name)
+	if err != nil {
+		failEnvBuild(s, log, "env build", err)
+		return
+	}
+	if info.BuildBox == "" {
+		// Unreachable from a successful build — the column is written before
+		// the create — but the two hints below are worth nothing without a box
+		// name, and printing `ssh @gateway` would be worse than printing less.
+		fmt.Fprintf(s, "building %s — this takes minutes; read the outcome with `env show %s`.\r\n",
+			info.Name, info.Name)
+		s.Exit(0) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(s, "building %s in %s. this takes minutes and keeps going if you disconnect.\r\n",
+		info.Name, info.BuildBox)
+	fmt.Fprintf(s, "  watch it      ssh %s@%s env show %s\r\n", ControlUser, g.sshHint(), info.Name)
+	fmt.Fprintf(s, "  look inside   ssh %s@%s\r\n", info.BuildBox, g.sshHint())
+	fmt.Fprintf(s, "when it succeeds, `ssh %s@%s -- --env %s` boots from the disk it built.\r\n",
+		NewSandboxUser, g.sshHint(), info.Name)
+	s.Exit(0) //nolint:errcheck
+}
+
+// envCapture adopts the builder exactly as it stands.
+//
+// Unlike `build` this one IS synchronous, and has to be: it pauses a VM and
+// packs a disk, and the person who typed it is the person who just finished
+// fixing that disk by hand. So it announces before it blocks, in `rename`'s
+// shape, rather than going quiet for two minutes on a session with no output.
+//
+// The announcement needs the builder's name, which is read separately — and a
+// failure of that read is deliberately ignored. CaptureEnvironment is the one
+// place this command's refusals are decided; a second opinion from here is how
+// one condition comes to have two wordings. All the read can do is make the
+// sentence better, and when it cannot, nothing is printed before the refusal.
+func (g *Gateway) envCapture(s gssh.Session, c ctlops.Caller, name string, log *slog.Logger) {
+	if e, err := g.ops.GetEnvironment(c, name); err == nil && e.BuildBox != "" {
+		fmt.Fprintf(s, "capturing %s (pause + pack; this takes minutes)…\r\n", e.BuildBox)
+	}
+	info, err := g.ops.CaptureEnvironment(s.Context(), c, name)
+	if err != nil {
+		failEnvBuild(s, log, "env capture", err)
+		return
+	}
+	line := info.Name + " is " + info.State
+	if info.Snapshot != "" {
+		line += " — captured to " + info.Snapshot
+	}
+	fmt.Fprintf(s, "%s\r\n", line)
+	fmt.Fprintf(s, "the builder is gone; sandboxes boot that disk now:\r\n"+
+		"  ssh %s@%s -- --env %s\r\n", NewSandboxUser, g.sshHint(), info.Name)
+	s.Exit(0) //nolint:errcheck
 }

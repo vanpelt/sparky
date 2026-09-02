@@ -21,6 +21,7 @@ import (
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
@@ -166,12 +167,20 @@ type Repos interface {
 // That is what keeps the four existing joins untouched — an environment invents
 // no new join key, it only asserts that one tag name means something.
 //
-// envs.EnvironmentsForSandbox and envs.Building are deliberately absent, for
-// the reason Repos.ReposForSandbox is: nothing on this control surface resolves
-// what a running guest sees (that is internal/metadata's authority), and
-// Building belongs to the restart reconciler, which acts on behalf of no
-// caller. Every method here is owner-agnostic because ctlops authorizes first
+// envs.EnvironmentsForSandbox is deliberately absent, for the reason
+// Repos.ReposForSandbox is: nothing on this control surface resolves what a
+// running guest sees — that is internal/metadata's authority. Every
+// owner-scoped method here is owner-agnostic because ctlops authorizes first
 // and passes the handle down as a query term.
+//
+// Building IS on the interface, and it is the one method with no owner
+// argument. It is what the restart reconciler walks (see
+// ReconcileEnvironmentBuilds), and it is also how the guest door resolves a
+// builder sandbox to the environment it is building — neither of which acts on
+// behalf of a caller, so asking either for a handle would be a lie or a loop
+// over the user table. Every use of it in this package compares the row's owner
+// against the sandbox's before doing anything with it; that comparison is a
+// security boundary, not tidiness, because sandbox names are global.
 type Environments interface {
 	Put(owner, name, description string) (envs.Environment, error)
 	Get(owner, name string) (envs.Environment, error)
@@ -179,6 +188,24 @@ type Environments interface {
 	Delete(owner, name string) error
 	SetScript(owner, name, script, from string) error
 	SetState(owner, name string, st envs.State, box, buildErr string) error
+	Building() ([]envs.Environment, error)
+}
+
+// SetupStarter nudges a BUILDER's guest into fetching and running the setup
+// script its gateway is holding for it. *envsync.Syncer satisfies it.
+//
+// It is a Config field rather than a type assertion off Sandboxes (the shape
+// syncRepos uses for ResyncRepos) because the one implementation is not the
+// sandbox store at all: it is the syncer cmd/sparkbox already builds and hands
+// to the manager and the fleet, and there is exactly one guest exec channel for
+// all three uses of it.
+//
+// It carries nothing about the job on purpose. The guest fetches its own work
+// over its tap and reports on the same channel, so this is a doorbell and not a
+// delivery — see SetupFor for why that direction is the security property and
+// not an accident of layering.
+type SetupStarter interface {
+	StartSetup(ctx context.Context, box *host.Sandbox) error
 }
 
 // EnvVars is the plain (non-secret) environment-variable half of
@@ -375,7 +402,21 @@ type Config struct {
 	// NetRules is the egress rule-set store. nil leaves an environment unable
 	// to name or attach one, and its composition simply omits rule-sets — a
 	// host with no netrules store has none to omit.
-	NetRules    NetRules
+	NetRules NetRules
+	// RepoFiles reads one file out of an attached repository, which is how a
+	// build seeds its setup script from `.sparkbox/setup.sh`. *ghapp.App
+	// satisfies it, so this is normally the same value as GitHubApp. nil leaves
+	// the seed read off entirely: a build then needs a script stored on the
+	// environment, and says so.
+	RepoFiles RepoFileReader
+	// SetupStarter nudges a builder's guest into running its setup script. nil
+	// makes `env build` refuse — never silently create a builder that will sit
+	// there doing nothing until the reconciler times it out.
+	SetupStarter SetupStarter
+	// EnvBuildTimeout is how long an environment build may stay in `building`
+	// before the reconciler fails it. 0 takes DefaultEnvBuildTimeout.
+	EnvBuildTimeout time.Duration
+
 	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
 	Schedules   Schedules   // nil: schedule operations are KindDisabled
 	Routes      Routes      // nil: share operations are KindDisabled
@@ -424,6 +465,8 @@ type Ops struct {
 	envVars      EnvVars
 	secretTags   SecretTags
 	netrules     NetRules
+	repoFiles    RepoFileReader
+	setupStarter SetupStarter
 	checkpoints  Checkpoints
 	schedules    Schedules
 	routes       Routes
@@ -456,7 +499,26 @@ type Ops struct {
 	jobs      map[string]*Job
 	stop      chan struct{}
 	closeOnce sync.Once
+
+	// envBuildTimeout bounds one environment build; 0 means
+	// DefaultEnvBuildTimeout. envBuilds collapses concurrent work on one
+	// (owner, environment) — a double-submitted `env build`, a manual capture
+	// racing a late guest report — because the already-building refusal is a
+	// check and not a lock.
+	//
+	// envBuildsWG tracks the detached completion goroutines SetupDone starts.
+	// NOTHING IN PRODUCTION WAITS ON IT. It exists because SetupDone's whole
+	// contract is "return before the work" — the caller is the guest the
+	// capture is about to pause — and a test that cannot wait for that work
+	// would have to sleep, which this package does not do.
+	envBuildTimeout time.Duration
+	envBuilds       singleflight.Group
+	envBuildsWG     sync.WaitGroup
 }
+
+// awaitEnvBuilds blocks until every detached environment-build completion has
+// finished. Test-only, and unexported for that reason; see envBuildsWG.
+func (o *Ops) awaitEnvBuilds() { o.envBuildsWG.Wait() }
 
 func New(cfg Config) *Ops {
 	o := &Ops{
@@ -471,6 +533,9 @@ func New(cfg Config) *Ops {
 		envVars:            cfg.EnvVars,
 		secretTags:         cfg.SecretTags,
 		netrules:           cfg.NetRules,
+		repoFiles:          cfg.RepoFiles,
+		setupStarter:       cfg.SetupStarter,
+		envBuildTimeout:    cfg.EnvBuildTimeout,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,

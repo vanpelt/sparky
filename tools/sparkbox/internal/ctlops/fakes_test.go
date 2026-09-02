@@ -116,7 +116,11 @@ var mutatingVerbs = map[string]bool{
 	// mutating() only reports what this table lists, so a write left out of it
 	// silently drops out of every ownership assertion in the package.
 	"envs.Put": true, "envs.Delete": true, "envs.SetScript": true, "envs.SetState": true,
-	"vars.Put": true, "vars.Delete": true, "vars.DeleteForTag": true,
+	// The build nudge. It runs a script inside somebody's guest, which is the
+	// most consequential thing on this list, so it must be visible to every
+	// ownership assertion in the package.
+	"StartSetup": true,
+	"vars.Put":   true, "vars.Delete": true, "vars.DeleteForTag": true,
 	"netrules.Put": true, "secrets.Retag": true, "repos.Put": true,
 }
 
@@ -145,6 +149,10 @@ type fakeSandboxes struct {
 	archiving   bool
 	err         error // returned by every mutating method when set
 	repoSyncErr error // returned by ResyncRepos when set
+	// destroyErr fails only the destroy, which is the one half-failure an
+	// environment build treats as non-fatal: the disk exists and the tag points
+	// at it, so a leftover box must not turn a finished build into a failed one.
+	destroyErr error
 }
 
 func (f *fakeSandboxes) Get(name string) (*host.Sandbox, bool) {
@@ -248,6 +256,9 @@ func (f *fakeSandboxes) Rename(ctx context.Context, oldName, newName, owner stri
 
 func (f *fakeSandboxes) Destroy(ctx context.Context, name string) error {
 	f.c.add("Destroy %s", name)
+	if f.destroyErr != nil {
+		return f.destroyErr
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -1244,6 +1255,21 @@ type fakeEnvs struct {
 	err  error
 	// cap mirrors maxEnvironmentsPerOwner; 0 means the fixture's default.
 	cap int
+	// now stamps updated_at the way the real store's clock does. The build
+	// reconciler decides staleness from that column, so a fake that left it at
+	// the zero time would make every build look infinitely old — or, with the
+	// rig's epoch clock, infinitely young. nil means the rig's epoch.
+	now func() time.Time
+	// buildingErr fails Building() alone, so a reconciler test can prove that a
+	// store hiccup fails no environment.
+	buildingErr error
+}
+
+func (f *fakeEnvs) clock() time.Time {
+	if f.now != nil {
+		return f.now()
+	}
+	return time.Unix(0, 0).UTC()
 }
 
 func envKey(owner, name string) string { return owner + "\x00" + name }
@@ -1333,6 +1359,7 @@ func (f *fakeEnvs) SetScript(owner, name, script, from string) error {
 		return envs.ErrNoSuchEnvironment
 	}
 	e.SetupScript, e.SetupFrom = script, from
+	e.UpdatedAt = f.clock()
 	f.rows[k] = e
 	return nil
 }
@@ -1348,12 +1375,43 @@ func (f *fakeEnvs) SetState(owner, name string, st envs.State, box, buildErr str
 		buildErr = ""
 	}
 	e.State, e.BuildBox, e.BuildError = st, box, buildErr
+	// updated_at moves on every state change, exactly as the real UPDATE does.
+	// It is what buildStartedAt reads, so a fake that skipped it would make the
+	// reconciler untestable.
+	e.UpdatedAt = f.clock()
 	if st == envs.StateReady {
-		at := time.Unix(0, 0).UTC()
+		at := f.clock()
 		e.BuiltAt = &at
 	}
 	f.rows[k] = e
 	return nil
+}
+
+// Building is the one query with no owner term, and the fake keeps it that way:
+// it returns every owner's in-flight build, sorted, because what this package
+// does with the owner afterwards — compare it against the sandbox's — is the
+// security property the build tests exist to pin.
+func (f *fakeEnvs) Building() ([]envs.Environment, error) {
+	f.c.add("envs.Building")
+	if f.buildingErr != nil {
+		return nil, f.buildingErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := []envs.Environment{}
+	for _, e := range f.rows {
+		if e.State == envs.StateBuilding {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Owner != out[j].Owner {
+			return out[i].Owner < out[j].Owner
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

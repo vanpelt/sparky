@@ -711,3 +711,119 @@ func TestGuestLifecycleWithoutAControlPlaneIsRefusedNotDropped(t *testing.T) {
 		}
 	}
 }
+
+// recordingEnvSetup is an environment door that only remembers which sandbox
+// RECORD it was handed. The record is the security property here as it is for
+// the lifecycle: the environment a report lands on is resolved from that
+// record's owner, so a node able to reach a box it does not hold would be
+// reporting into somebody else's build.
+type recordingEnvSetup struct {
+	boxes   []string
+	reports []ctlops.SetupReport
+	script  string
+	env     string
+}
+
+func (e *recordingEnvSetup) SetupFor(_ context.Context, box *host.Sandbox) (string, string, bool, error) {
+	e.boxes = append(e.boxes, "fetch:"+box.Name+"@"+box.Owner)
+	if e.script == "" {
+		return "", "", false, nil
+	}
+	return e.script, e.env, true, nil
+}
+
+func (e *recordingEnvSetup) SetupDone(_ context.Context, box *host.Sandbox, r ctlops.SetupReport) error {
+	e.boxes = append(e.boxes, "report:"+box.Name+"@"+box.Owner)
+	e.reports = append(e.reports, r)
+	return nil
+}
+
+// TestEnvironmentSetupRefusesASandboxPlacedOnAnotherNode is the placement-ledger
+// rule applied to the environment pair, and it is the reason this file's
+// selfServiceBox call comes first in both methods.
+//
+// Without it any enrolled machine could fetch another owner's setup script by
+// guessing a sandbox name — which is the shape of their private toolchain and
+// often the names of their internal repositories — and could then report a
+// success against somebody else's build, which ends in a capture that re-points
+// that owner's template to a disk this node authored.
+func TestEnvironmentSetupRefusesASandboxPlacedOnAnotherNode(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	door := &recordingEnvSetup{script: "#!/bin/sh\nmake deps\n", env: "web"}
+	r.f.SetEnvSetup(door)
+	ctx := context.Background()
+
+	// The machine that holds it is answered, so this refuses forgery and not
+	// the feature.
+	job, err := r.f.SelfSetup(ctx, "boxb", nodelink.SelfSetupReq{Sandbox: "far-away"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !job.Job || job.Env != "web" || job.Script != "#!/bin/sh\nmake deps\n" {
+		t.Errorf("job = %+v", job)
+	}
+	if _, err := r.f.SelfSetupResult(ctx, "boxb", nodelink.SelfSetupResultReq{
+		Sandbox: "far-away", OK: true, Script: "#!/bin/sh\nmake deps\n", Log: "+ make deps\n",
+	}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	// The owner comes off the ledger's record, not off anything the node said.
+	want := []string{"fetch:far-away@alice", "report:far-away@alice"}
+	if !equalStrings(door.boxes, want) {
+		t.Errorf("the door saw %v, want %v", door.boxes, want)
+	}
+	if len(door.reports) != 1 || !door.reports[0].OK || door.reports[0].Log != "+ make deps\n" {
+		t.Errorf("report = %+v", door.reports)
+	}
+
+	for name, call := range map[string]func() error{
+		"fetch": func() error {
+			_, err := r.f.SelfSetup(ctx, "intruder", nodelink.SelfSetupReq{Sandbox: "far-away"})
+			return err
+		},
+		"report": func() error {
+			_, err := r.f.SelfSetupResult(ctx, "intruder", nodelink.SelfSetupResultReq{
+				Sandbox: "far-away", OK: true})
+			return err
+		},
+	} {
+		if err := call(); codeOf(err) != nodelink.CodeNotYours {
+			t.Errorf("cross-node %s = %v (code %q), want %s", name, err, codeOf(err), nodelink.CodeNotYours)
+		}
+	}
+	if len(door.boxes) != 2 {
+		t.Errorf("a cross-node request reached the environment door: %v", door.boxes)
+	}
+}
+
+// TestEnvironmentSetupWithoutAControlPlaneIsRefusedNotDropped: a gateway with no
+// environment door answers a node in a sentence, rather than leaving a builder
+// waiting on a hook that will never answer and a row in `building` with nothing
+// to explain it.
+func TestEnvironmentSetupWithoutAControlPlaneIsRefusedNotDropped(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for name, call := range map[string]func() error{
+		"fetch": func() error {
+			_, err := r.f.SelfSetup(ctx, "boxb", nodelink.SelfSetupReq{Sandbox: "far-away"})
+			return err
+		},
+		"report": func() error {
+			_, err := r.f.SelfSetupResult(ctx, "boxb", nodelink.SelfSetupResultReq{
+				Sandbox: "far-away", OK: true})
+			return err
+		},
+	} {
+		if err := call(); !ctlops.IsKind(err, ctlops.KindDisabled) {
+			t.Errorf("%s with no environment door = %v, want KindDisabled", name, err)
+		}
+	}
+}

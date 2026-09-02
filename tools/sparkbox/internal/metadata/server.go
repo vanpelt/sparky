@@ -281,6 +281,10 @@ type Server struct {
 	vitals         VitalsReader
 	tools          ToolCache
 	lifecycle      SelfLifecycle
+	// envSetup is the environment-build door. Nil answers both /self/setup
+	// routes 501, which is what a host with no environment store is. See
+	// envsetup.go and SetEnvSetup.
+	envSetup EnvSetup
 	// allowSelfSnapshot is the operator's kill switch for capture-from-inside.
 	// Default on, because the carried-tag restriction already bounds it and a
 	// self-service feature nobody is told about does not exist; the flag is for
@@ -335,6 +339,10 @@ type Options struct {
 	// calling sandbox. Nil answers all three lifecycle routes 501, which is
 	// what a host with no control plane on its fleet is.
 	SelfLifecycle SelfLifecycle
+	// EnvSetup serves the environment-build pair. Nil answers both 501, which
+	// is what a host with no environment store is. A deployment whose
+	// construction order cannot supply it here uses SetEnvSetup instead.
+	EnvSetup EnvSetup
 	// AllowSelfSnapshot is the operator's switch for the capture verb alone.
 	// The gateway and node wiring both default it to true; `pause` ignores it.
 	AllowSelfSnapshot bool
@@ -371,6 +379,7 @@ func NewChecked(opts Options) (*Server, error) {
 		vitals: opts.Vitals,
 		tools:  opts.Tools, log: log,
 		lifecycle:         opts.SelfLifecycle,
+		envSetup:          opts.EnvSetup,
 		allowSelfSnapshot: opts.AllowSelfSnapshot,
 		defAud:            opts.DefaultAudience,
 		guestNet:          guestNetwork,
@@ -410,6 +419,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /self/pause", s.selfPause)
 	mux.HandleFunc("GET /self/snapshot", s.selfSnapshotPlan)
 	mux.HandleFunc("POST /self/snapshot", s.selfSnapshotCommit)
+	// The environment-build pair. Neither request names a sandbox or an
+	// environment: the tap is the identity and the host decides the rest. See
+	// envsetup.go.
+	mux.HandleFunc("GET /self/setup", s.selfSetup)
+	mux.HandleFunc("POST /self/setup/result", s.selfSetupResult)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

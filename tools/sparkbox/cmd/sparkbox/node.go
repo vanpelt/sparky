@@ -376,27 +376,8 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	// second loop re-applying a stale snapshot would fight the one being pushed.
 	// The gateway's own loop covers this machine on the same cadence.
 	if opts.metaAddr != "" {
-		meta, err := metadata.NewChecked(metadata.Options{
-			Manager: mgr, Logger: log,
-			Identity:       identityRelay,
-			RouteControl:   relayRouteControl{up: uplink},
-			Repos:          reposRelay,
-			RepoAuthorizer: reposRelay,
-			RepoStatus:     mgr,
-			Vitals:         mgr,
-			Tools:          localTools(opts.toolsDir),
-			// Wired on the node in the same release as on the gateway, and that
-			// is not a scheduling nicety. metadata's own rule (repos.go's
-			// githubError) is that a guest must not be able to tell which
-			// machine its sandbox landed on from the status it got, and a 501
-			// here beside a 202 on the gateway is exactly that leak.
-			SelfLifecycle:     relaySelfLifecycle{up: uplink},
-			AllowSelfSnapshot: opts.guestSelfSnapshot,
-			GuestSubnet:       opts.guestSubnet,
-			// No default audience here: the gateway substitutes its own, which
-			// is the only one that could be right — the allowlist that decides
-			// whether an audience is permitted lives with the issuer.
-		})
+		meta, err := metadata.NewChecked(
+			nodeMetadataOptions(mgr, uplink, identityRelay, reposRelay, opts, log))
 		if err != nil {
 			return fmt.Errorf("guest metadata subnet: %w", err)
 		}
@@ -531,6 +512,51 @@ func (c gatewaySelfLifecycle) Snapshot(ctx context.Context, box *host.Sandbox, a
 	return err
 }
 
+// nodeMetadataOptions is the node's whole guest-facing metadata service, in one
+// function rather than a literal inside runNode so that a test can assert what
+// no reader reliably notices: that every collaborator the gateway hands its
+// metadata server is handed to this one too.
+//
+// That is not tidiness. metadata's own rule (repos.go's githubError) is that a
+// guest must not be able to tell which machine its sandbox landed on from the
+// status it got, and a collaborator left out here answers 501 beside the
+// gateway's 200 — which on a control-plane-only gateway, where every sandbox is
+// on a node, means the feature simply does not exist and says so in the one
+// status code that reads like a bug in the guest's own request.
+func nodeMetadataOptions(
+	mgr *host.Manager,
+	uplink *nodelink.Uplink,
+	identity metadata.Identity,
+	repos *relayRepos,
+	opts nodeOptions,
+	log *slog.Logger,
+) metadata.Options {
+	return metadata.Options{
+		Manager: mgr, Logger: log,
+		Identity:       identity,
+		RouteControl:   relayRouteControl{up: uplink},
+		Repos:          repos,
+		RepoAuthorizer: repos,
+		RepoStatus:     mgr,
+		Vitals:         mgr,
+		Tools:          localTools(opts.toolsDir),
+		// Wired on the node in the same release as on the gateway, and that is
+		// not a scheduling nicety. See the rule above: a 501 here beside a 202
+		// on the gateway is exactly the leak.
+		SelfLifecycle: relaySelfLifecycle{up: uplink},
+		// The environment-build pair, for the same rule and one blunter fact: a
+		// gateway that holds no VMs of its own places every builder on a node,
+		// so unwired here is unwired everywhere — no build could ever finish,
+		// and each would sit in `building` until its timeout invented a cause.
+		EnvSetup:          relayEnvSetup{up: uplink},
+		AllowSelfSnapshot: opts.guestSelfSnapshot,
+		GuestSubnet:       opts.guestSubnet,
+		// No default audience here: the gateway substitutes its own, which is
+		// the only one that could be right — the allowlist that decides whether
+		// an audience is permitted lives with the issuer.
+	}
+}
+
 // relaySelfLifecycle is the same three verbs on a NODE: the name of the sandbox
 // and the operation's own arguments, and nothing else. The owner, the tags, the
 // bindings and every refusal are the gateway's to decide from its ledger.
@@ -556,6 +582,39 @@ func (c relaySelfLifecycle) Snapshot(ctx context.Context, box *host.Sandbox, a c
 	return c.up.Request(ctx, nodelink.TypeSelfSnapshot,
 		nodelink.SelfSnapshotReq{Sandbox: box.Name, Tag: a.Tag, Name: a.Name}, &resp)
 }
+
+// relayEnvSetup is the environment-build pair on a NODE, and it is the same
+// three lines per verb for the same reason: a node holds no environments table,
+// so the name of the sandbox is the entire request and the gateway decides from
+// its own rows whether that box is any environment's builder.
+//
+// SetupDone returns when the gateway has ACCEPTED the report, not when the
+// capture it triggers is done — which is what the guest needs, since it has
+// already been answered and is about to be paused by that very capture.
+type relayEnvSetup struct{ up *nodelink.Uplink }
+
+func (c relayEnvSetup) SetupFor(ctx context.Context, box *host.Sandbox) (script, env string, ok bool, err error) {
+	var resp nodelink.SelfSetupResp
+	if err := c.up.Request(ctx, nodelink.TypeSelfSetup,
+		nodelink.SelfSetupReq{Sandbox: box.Name}, &resp); err != nil {
+		// Never a job on an error path: a guest that cannot reach its gateway
+		// must run nothing at all, and its own retry is the repair.
+		return "", "", false, err
+	}
+	return resp.Script, resp.Env, resp.Job, nil
+}
+
+func (c relayEnvSetup) SetupDone(ctx context.Context, box *host.Sandbox, r metadata.SetupResult) error {
+	var resp nodelink.SelfSetupResultResp
+	return c.up.Request(ctx, nodelink.TypeSelfSetupResult, nodelink.SelfSetupResultReq{
+		Sandbox: box.Name, OK: r.OK, ExitCode: r.ExitCode, Script: r.Script, Log: r.Log,
+	}, &resp)
+}
+
+// Asserted here rather than left to the wiring, exactly as envSetupOps is on
+// the gateway: a signature drift should fail this package's build, not surface
+// as a 501 on the one machine nobody tests by hand.
+var _ metadata.EnvSetup = relayEnvSetup{}
 
 type gatewayIdentityClient interface {
 	metadata.Identity

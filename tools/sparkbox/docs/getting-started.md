@@ -226,6 +226,25 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   off. Capturing needs a host that can loop-mount the image, so a deployment run
   with `--disable-host-rootfs-mounts` refuses it. See
   [tag-templates-design.md](tag-templates-design.md).
+- **Environments.** A tag names four things at once; an environment is the
+  object that name deserves — a description, plain (non-secret) variables, and
+  the setup script the project needs, with the tag as its name.
+  ```sh
+  ssh -p 2222 ctl@<host> env create web --repo wandb/hivemind --secret GITHUB_TOKEN
+  ssh -p 2222 ctl@<host> env build web     # returns as soon as the build starts
+  ssh -t new@<host> -- --env web           # boots from the disk that build made
+  ```
+  `env build` boots one sandbox called `web-build`, runs the setup script inside
+  the checkout, and — when it succeeds — the gateway captures that box and binds
+  the capture to the tag. The script is the one you piped in with `env script web
+  --set`, or `.sparkbox/setup.sh` read out of an attached repository and then
+  recorded, so the next build is the same build. It is asynchronous: read the
+  outcome with `env show web` rather than by waiting. A build that fails leaves
+  its builder **paused** with the half-built disk in it, so you can `ssh
+  web-build@<host>`, fix what was missing, and keep exactly that disk with `env
+  capture web`. `--env-build-timeout` (default 45m) bounds how long a build may
+  sit unfinished before a sweep gives up on it — the builder is still left
+  paused. See [environments-design.md](environments-design.md).
 - **Agent CLI drift.** A template is frozen at the tool versions of the day it
   was captured, so `snapshot create` refreshes them first and a long-lived
   sandbox catches up on demand with `sparkbox update-tools` (`--check` to look

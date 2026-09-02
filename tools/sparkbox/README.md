@@ -338,6 +338,47 @@ is the useful default. `--merge` reads every machine-id directory on the disk,
 including the boot immediately before the current one; plain `journalctl` only
 selects the current machine id.
 
+## Environments: one name for the whole way of working
+
+A tag composes four things — secrets, checkouts, egress, disk — and until
+recently the only place that name existed was as an argument to five unrelated
+verbs. An **environment** is that name as an object: it owns exactly one tag,
+*its name is the tag*, and it carries a description, some plain (non-secret)
+variables, and the setup script the project needs.
+
+```
+ssh ctl@<domain> env create web --repo wandb/hivemind --secret GITHUB_TOKEN
+ssh ctl@<domain> env set web --var NODE_ENV=test
+ssh ctl@<domain> env build web         # returns as soon as the build STARTS
+ssh ctl@<domain> env show web          # where it got to
+ssh -t new@<domain> -- --env web       # a sandbox booted from the disk it built
+```
+
+`env build` boots one ordinary sandbox called `<name>-build` from the stock
+image, runs the environment's setup script inside the primary checkout as the
+login user, and — when the script succeeds — the *gateway* captures that sandbox
+and binds the capture to the tag, so every later `--env web` starts from the
+finished disk. The builder is then destroyed. The script is the one stored with
+`env script web --set`, or, when there is none, `.sparkbox/setup.sh` read out of
+an attached repository through the GitHub App and recorded on the environment so
+the next build is the same build.
+
+It is asynchronous on purpose. The verb returns once the builder exists and its
+guest has taken the job; the run itself is minutes and survives your
+disconnecting. A build that fails leaves its builder **paused**, holding the
+half-built disk and the log, and `env show` prints the way out:
+
+```
+ssh web-build@<domain>                 # fix what was missing, by hand
+ssh ctl@<domain> env capture web       # keep exactly that disk
+```
+
+`--env-build-timeout` (default 45m) is how long a build may sit in `building`
+before a periodic sweep gives up on it — with the builder still paused, so the
+recovery path above is unchanged. Having an agent write the setup script for you
+is not built yet. Design:
+[`docs/environments-design.md`](docs/environments-design.md).
+
 ## Architecture
 
 ```
