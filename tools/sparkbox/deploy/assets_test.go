@@ -120,6 +120,15 @@ func installGuestPayload(t *testing.T, tree string) {
 	}
 }
 
+func installGuestPayloadWithMOTD(t *testing.T, tree, motd string) {
+	t.Helper()
+	cmd := exec.Command("bash", "install-guest-identity.sh", tree)
+	cmd.Env = append(os.Environ(), "GUEST_MOTD_FILE="+motd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install guest payload with motd: %v\n%s", err, out)
+	}
+}
+
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -476,6 +485,29 @@ func TestGuestPayloadRePatchesWithoutAccumulating(t *testing.T) {
 	}
 	if base != "the baked banner\n" {
 		t.Errorf("saved login banner = %q, want the image's own /etc/motd", base)
+	}
+}
+
+func TestGuestPayloadInstallsHostSuppliedMOTD(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	motd := filepath.Join(t.TempDir(), "motd")
+	want := "the CKS feature banner\nRun `sparkbox` for commands.\n"
+	if err := os.WriteFile(motd, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First install replaces the released rootfs banner. A later install must
+	// also replace a dynamic status line left in /etc/motd, while keeping the
+	// canonical base clean for the repo worker's next rewrite.
+	installGuestPayloadWithMOTD(t, root, motd)
+	if err := os.WriteFile(filepath.Join(root, "etc/motd"), []byte(want+"repos: old status\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installGuestPayloadWithMOTD(t, root, motd)
+	for _, name := range []string{"etc/motd", "etc/sparkbox/motd.base"} {
+		if got := guestFile(t, root, name); got != want {
+			t.Errorf("%s = %q, want canonical banner %q", name, got, want)
+		}
 	}
 }
 
@@ -1473,6 +1505,23 @@ func TestCKSGuestHivemindIsAFlagNotAHandEdit(t *testing.T) {
 	}
 	if !strings.Contains(string(RefreshToolsScript), "HIVEMIND_MANIFEST:-https://") {
 		t.Error("refresh-agent-tools.sh no longer defaults HIVEMIND_MANIFEST, so an unpinned deploy resolves nothing")
+	}
+}
+
+func TestCKSImageRefreshesTheCanonicalGuestMOTD(t *testing.T) {
+	containerfile := string(readFile(t, "kubernetes/Containerfile"))
+	entrypoint := string(readFile(t, "kubernetes/entrypoint.sh"))
+	refresher := string(RefreshToolsScript)
+
+	for name, pair := range map[string][2]string{
+		"container image": {containerfile, "COPY sparkbox/images/motd /usr/local/share/sparkbox/motd"},
+		"prepare step":    {entrypoint, "GUEST_MOTD_FILE=/usr/local/share/sparkbox/motd"},
+		"template stamp":  {refresher, `WANT="$WANT motd=$MOTD_SHA"`},
+		"guest installer": {refresher, `GUEST_MOTD_FILE="$GUEST_MOTD_FILE" "$GUEST_IDENTITY" "$MNT"`},
+	} {
+		if !strings.Contains(pair[0], pair[1]) {
+			t.Errorf("%s does not carry the canonical MOTD through the CKS template refresh: missing %q", name, pair[1])
+		}
 	}
 }
 

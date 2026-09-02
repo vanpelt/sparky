@@ -250,6 +250,7 @@ if [ "$mode" = prepare ] || [ "$skip_prepare" != true ]; then
   # other Sparkbox hosts.
   IMAGES_DIR="$image_dir" \
   TOOLS_DIR="$tools_dir" \
+  GUEST_MOTD_FILE=/usr/local/share/sparkbox/motd \
   GUEST_IDENTITY=/usr/local/sbin/sparkbox-install-guest-identity.sh \
     /usr/local/sbin/sparkbox-refresh-tools.sh
 

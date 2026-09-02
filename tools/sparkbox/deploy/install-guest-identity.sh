@@ -1166,11 +1166,18 @@ grep -qs 'sparkbox-git-credential' "$MNT/etc/gitconfig" \
 EOF
 
 # Preserve the baked login banner so the clone worker can rewrite /etc/motd as
-# (banner + status) without the two ever accumulating. Captured once and only
-# once: re-patching an already-patched template must not snapshot a banner that
+# (banner + status) without the two ever accumulating. A host may supply the
+# canonical banner explicitly when it patches a previously released trusted
+# template (CKS does this because its fast image build does not rebuild the
+# rootfs). Otherwise capture once: re-patching must not snapshot a banner that
 # already carries a status line.
 mkdir -p "$MNT/etc/sparkbox"
-if [ ! -f "$MNT/etc/sparkbox/motd.base" ]; then
+if [ -n "${GUEST_MOTD_FILE:-}" ]; then
+  [ -f "$GUEST_MOTD_FILE" ] \
+    || { echo "guest motd file does not exist: $GUEST_MOTD_FILE" >&2; exit 1; }
+  install -m 0644 "$GUEST_MOTD_FILE" "$MNT/etc/sparkbox/motd.base"
+  install -m 0644 "$GUEST_MOTD_FILE" "$MNT/etc/motd"
+elif [ ! -f "$MNT/etc/sparkbox/motd.base" ]; then
   if [ -f "$MNT/etc/motd" ]; then
     cp "$MNT/etc/motd" "$MNT/etc/sparkbox/motd.base"
   else

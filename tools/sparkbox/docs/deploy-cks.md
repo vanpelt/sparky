@@ -445,10 +445,14 @@ contains the current Sparkbox and Sluice binaries, the base Sluice allow-list,
 host networking tools, and the template refresher. At Pod startup it downloads
 and SHA-256-verifies the Firecracker,
 kernel, and universal rootfs artifacts pinned to Sparkbox `v0.7.0`, then
-downloads the current agent CLI bundles and patches the template. The first
-start downloads the roughly 750 MB release payload plus those CLI bundles and
-decompresses a sparse ext4 image. Later same-Node Pod starts reuse the cached
-artifacts and template.
+downloads the current agent CLI bundles and patches the template. The runtime
+image also carries the repository's canonical `images/motd`; its digest is part
+of the template freshness stamp, so a branch build can update the static login
+banner without waiting for a full rootfs release. Only trusted operator base
+templates such as `universal.ext4` are patched. User-derived `snap-*.ext4`
+templates remain untouched. The first start downloads the roughly 750 MB
+release payload plus those CLI bundles and decompresses a sparse ext4 image.
+Later same-Node Pod starts reuse the cached artifacts and template.
 
 ## Preserve the gateway identity
 
