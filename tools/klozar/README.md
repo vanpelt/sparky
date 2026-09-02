@@ -7,7 +7,9 @@ and writes a lesson sheet to bring to a tutor.
 klozar.py        the CLI
 template.html    the interactive sheet, with a /*__DATA__*/ slot for the week
 refresh.sh       rebuild the published sheet and push it
-index.html       the published sheet — committed, served by GitHub Pages
+index.html       the latest sheet    — committed, served by GitHub Pages
+weeks/           every past sheet    — committed, one file per week
+weeks.json       the week manifest the picker reads
 .env             an alternative to the Keychain — gitignored
 out/             ad-hoc sheets                  — gitignored
 ```
@@ -26,9 +28,10 @@ The cookie is HttpOnly, so it has to come out of DevTools by hand — Chrome →
 `klozar-clozemaster`. (`security` takes the value as an argument, so it is briefly
 visible in the process list on write; nothing persists in shell history.)
 
-If you'd rather not use the Keychain, `CLOZEMASTER_SESSION` in the environment or
-in a `.env` beside this script both still work — the lookup order is environment,
-then Keychain, then `.env`.
+Off macOS, `CLOZEMASTER_SESSION` in the environment or in a `.env` beside this
+script both still work — the lookup order is environment, then Keychain, then
+`.env`. Only the Keychain and `.env` get the rotated cookie written back though;
+a value from the environment goes stale on whatever the idle timeout is.
 
 ## Why the cookie doesn't go stale
 
@@ -114,6 +117,22 @@ notes also persist in each reader's `localStorage`.
 Inside a claude.ai artifact that `fetch` is blocked by the CSP, so that copy of
 the page uses the artifact's own store instead; on any other host with neither,
 `localStorage` carries it alone and the badge reads "Saving on this device".
+
+### Earlier weeks
+
+`site` writes two copies of each sheet: `index.html` as the canonical latest, and
+`weeks/<date>.html` as its permanent home. A dropdown in the controls row switches
+between them, and because notes are keyed by week, opening an old sheet brings
+back the notes taken on it.
+
+The picker reads `weeks.json` **at page load rather than baking it in**. A sheet
+published in March is otherwise frozen and could never list a week from May; the
+fetch is what lets an old page still see everything that came after it.
+
+The sheets stay in git rather than the database on purpose. They're the record —
+append-only, versioned, restorable — and the page's Turso token is public and
+read-write, so putting them there would mean anyone with the link could erase the
+archive rather than just this week's notes. Cost is about 30 KB a week.
 
 Two details worth keeping if you touch the sync code:
 

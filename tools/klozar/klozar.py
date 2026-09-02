@@ -314,8 +314,35 @@ def notes_backend() -> dict | None:
     return {"url": data["url"].rstrip("/"), "token": data["token"]}
 
 
+def update_manifest(root: Path, week: dict, entry_label: str) -> list[dict]:
+    """Upsert this week into weeks.json, newest first.
+
+    The manifest is read at page load rather than baked in, so a sheet published
+    in March still lists weeks that only exist in May.
+    """
+    path = root / "weeks.json"
+    weeks = []
+    if path.exists():
+        try:
+            weeks = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            weeks = []
+    stamp = date.today().isoformat()
+    weeks = [w for w in weeks if w.get("week") != stamp]
+    weeks.append({
+        "week": stamp,
+        "label": entry_label,
+        "played": len(week["played"]),
+        "missed": len(week["struggles"]),
+        "starred": len(week["starred"]),
+    })
+    weeks.sort(key=lambda w: w["week"], reverse=True)
+    path.write_text(json.dumps(weeks, indent=2) + "\n", encoding="utf-8")
+    return weeks
+
+
 def render_html(week: dict, limit: int, standalone: bool = False,
-                notes: dict | None = None) -> str:
+                notes: dict | None = None, archive: dict | None = None) -> str:
     """The same sheet as an interactive page, data baked in.
 
     The artifact host supplies <!doctype>, charset and a small reset, so the
@@ -348,6 +375,7 @@ def render_html(week: dict, limit: int, standalone: bool = False,
         "words": [w for w, n in week["words"].most_common(30) if n > 1],
         "stamp": f"Pulled {today:%-d %B %Y} for {week['user'].get('username')}",
         "notes": notes,
+        "archive": archive,
     }
     tpl = (HERE / "template.html").read_text(encoding="utf-8")
     # json.dumps can emit "</script>" inside a string and close the tag early.
@@ -448,8 +476,9 @@ def main():
 
     session, origin = read_session(env)
     if not session:
-        sys.exit("No session cookie. Run `uv run klozar.py auth` to store one, "
-                 "or set CLOZEMASTER_SESSION in .env — see .env.example.")
+        sys.exit("No session cookie. Run `uv run klozar.py auth` to store one in "
+                 "the Keychain. (CLOZEMASTER_SESSION in the environment also works, "
+                 "off macOS — but nothing writes the rotated cookie back to it.)")
     cm = Clozemaster(session, env.get("CLOZEMASTER_PAIRING", "srp-eng"), origin)
 
     out_dir = HERE / "out"
@@ -477,27 +506,46 @@ def main():
         print(f"{sum(len(v) for v in data.values())} sentences -> {out}")
         return
 
-    if args.cmd in ("artifact", "site"):
+    if args.cmd == "artifact":
         week = collect_week(cm, args.days)
-        if args.cmd == "site":
-            out = args.out or HERE / "index.html"
-            standalone = True
-            # Only the published page gets the shared store; inside an artifact the
-            # CSP blocks the fetch anyway, and that copy uses claude.use("db").
-            notes = None if args.no_notes else notes_backend()
-        else:
-            out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
-            standalone = False
-            notes = None
+        out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render_html(week, args.limit, standalone, notes), encoding="utf-8")
+        out.write_text(render_html(week, args.limit), encoding="utf-8")
         cm.persist()
         print(f"{len(week['played'])} sentences this week -> {out}")
-        if standalone:
-            print("Commit and push; the pages.yml workflow publishes it at "
-                  "https://vanpelt.github.io/sparky/tools/klozar/")
-        else:
-            print("Publish it with the Artifact tool (capabilities: db) to get a link.")
+        print("Publish it with the Artifact tool (capabilities: db) to get a link.")
+        return
+
+    if args.cmd == "site":
+        week = collect_week(cm, args.days)
+        # Only the published page gets the shared store; inside an artifact the
+        # CSP blocks the fetch anyway, and that copy uses claude.use("db").
+        notes = None if args.no_notes else notes_backend()
+        root = args.out.parent if args.out else HERE
+        label = f"{date.fromisoformat(week['cutoff']):%-d %b} – {date.today():%-d %b %Y}"
+        update_manifest(root, week, label)
+
+        # index.html is the canonical latest sheet; weeks/<date>.html is its
+        # permanent home. Same content, different relative paths to the manifest
+        # and to sibling weeks, so each knows how to reach the others.
+        index = args.out or root / "index.html"
+        archived = root / "weeks" / f"{date.today()}.html"
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        index.parent.mkdir(parents=True, exist_ok=True)
+
+        index.write_text(
+            render_html(week, args.limit, True, notes,
+                        {"manifest": "weeks.json", "base": "weeks/"}),
+            encoding="utf-8")
+        archived.write_text(
+            render_html(week, args.limit, True, notes,
+                        {"manifest": "../weeks.json", "base": ""}),
+            encoding="utf-8")
+        cm.persist()
+        print(f"{len(week['played'])} sentences this week -> {index}")
+        print(f"archived at {archived}")
+        print("Commit and push; the pages.yml workflow publishes it at "
+              "https://vanpelt.github.io/sparky/tools/klozar/")
         return
 
     week = collect_week(cm, args.days)
