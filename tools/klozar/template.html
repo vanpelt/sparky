@@ -206,7 +206,6 @@ footer {
   display: flex; flex-wrap: wrap; gap: .4rem 1rem; justify-content: space-between;
 }
 </style>
-
 <div class="wrap">
   <header class="masthead">
     <p class="eyebrow" id="eyebrow"></p>
@@ -234,24 +233,24 @@ footer {
   </footer>
 </div>
 
+<script id="klozar-config" type="application/json">/*__CONFIG__*/</script>
 <script id="lesson-data" type="application/json">/*__DATA__*/</script>
 <script>
 (function () {
   "use strict";
 
-  var DATA = JSON.parse(document.getElementById("lesson-data").textContent);
-  var KEY = "klozar:" + DATA.week;
-  var state = {};   // id -> {note, covered}
-  var sync = null;  // shared store, if this copy of the page has one
+  // CONFIG is the shell: what never changes week to week. SHEET is one week's
+  // content. The latest week is baked in so the default URL paints immediately;
+  // ?week=<date> fetches an older one from weeks/<date>.json instead. One HTML
+  // shell serves every week, so a fix here fixes every past sheet too.
+  var CONFIG = JSON.parse(document.getElementById("klozar-config").textContent);
+  var BAKED = JSON.parse(document.getElementById("lesson-data").textContent);
+
+  var sheet, KEY, state = {}, pageIds = {}, sync = null;
+  var inflight = {}, queued = {};
   var savingEl = document.getElementById("saving");
 
-  // Local storage is the floor: it works for every viewer, signed in or not,
-  // and never fails the way a capability can. The shared store layers on top.
-  try {
-    state = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-  } catch (e) {
-    state = {};
-  }
+  function status(text) { savingEl.textContent = text; }
 
   function entry(id) {
     if (!state[id]) state[id] = { note: "", covered: false };
@@ -266,19 +265,12 @@ footer {
     }
   }
 
-  function status(text) {
-    savingEl.textContent = text;
-  }
-
   // One write in flight per sentence. Ticking a box and then typing a note fires
   // two saves for the same row, and without this the slower first request can
   // land last and overwrite the newer state with the older one — which silently
   // ate a note the first time this was tested. A second change while a save is
   // out just sets a flag; the re-run reads current state, so only the latest
   // wins and intermediate values never need their own request.
-  var inflight = {};
-  var queued = {};
-
   function push(id) {
     saveLocal();
     if (!sync) return;
@@ -295,8 +287,6 @@ footer {
     run();
   }
 
-  // Merge whatever the shared store has into local state. Returns true if
-  // anything actually moved, so a poll that changes nothing costs no re-render.
   function merge(rows) {
     var touched = false;
     rows.forEach(function (r) {
@@ -331,6 +321,11 @@ footer {
     return esc(text).replace(/\{\{(.+?)\}\}/g, '<mark class="cloze">$1</mark>');
   }
 
+  // The sentence with the cloze braces taken out, for screen readers.
+  function plain(text) {
+    return String(text || "").replace(/\{\{(.+?)\}\}/g, "$1");
+  }
+
   function rowEl(s) {
     var e = entry(s.id);
     var row = document.createElement("div");
@@ -346,7 +341,7 @@ footer {
 
     row.innerHTML =
       '<input class="tick" type="checkbox" ' + (e.covered ? "checked" : "") +
-        ' aria-label="Mark &quot;' + esc(s.plain) + '&quot; as covered">' +
+        ' aria-label="Mark &quot;' + esc(plain(s.text)) + '&quot; as covered">' +
       '<div class="body">' +
         '<p class="sr">' + clozed(s.text) + "</p>" +
         '<p class="en">' + esc(s.translation) + "</p>" +
@@ -393,7 +388,7 @@ footer {
   function render() {
     var host = document.getElementById("sections");
     host.textContent = "";
-    DATA.sections.forEach(function (sec) {
+    sheet.sections.forEach(function (sec) {
       if (!sec.items.length) return;
       var el = document.createElement("section");
       var head = document.createElement("h2");
@@ -410,59 +405,25 @@ footer {
       host.appendChild(el);
     });
 
-    if (DATA.words.length) {
+    if (sheet.words.length) {
       var el = document.createElement("section");
       el.innerHTML = '<h2>Words that kept coming up</h2>' +
         '<p class="blurb">Cloze answers that appeared more than once this week.</p>' +
-        '<div class="words">' + DATA.words.map(function (w) {
+        '<div class="words">' + sheet.words.map(function (w) {
           return "<span>" + esc(w) + "</span>";
         }).join("") + "</div>";
       host.appendChild(el);
     }
   }
 
-  // Notes outlive the sheet they were taken on: a sentence you annotated last
-  // week may not make this week's cut, but its row is still in the store. Count
-  // only what's actually on this page, or the tally claims credit for sentences
-  // the reader can't see.
-  var pageIds = {};
-  DATA.sections.forEach(function (sec) {
-    sec.items.forEach(function (s) { pageIds[s.id] = true; });
-  });
-
+  // Notes outlive the sheet they were taken on: a sentence annotated last week
+  // may not make this week's cut, but its row is still in the store. Count only
+  // what's on this page, or the tally claims credit for unseen sentences.
   function countCovered() {
     var n = 0;
     for (var k in state) if (pageIds[k] && state[k] && state[k].covered) n++;
     document.getElementById("n-covered").textContent = n;
   }
-
-  document.getElementById("eyebrow").textContent = DATA.eyebrow;
-  document.getElementById("title").textContent = DATA.title;
-  document.getElementById("n-played").textContent = DATA.counts.played;
-  document.getElementById("n-missed").textContent = DATA.counts.missed;
-  document.getElementById("n-starred").textContent = DATA.counts.starred;
-  document.getElementById("stamp").textContent = DATA.stamp;
-  render();
-  countCovered();
-
-  var toggle = document.getElementById("toggle-en");
-  toggle.addEventListener("click", function () {
-    var on = toggle.getAttribute("aria-pressed") === "true";
-    toggle.setAttribute("aria-pressed", String(!on));
-    document.body.classList.toggle("hidden-en", !on);
-    toggle.textContent = on ? "Hide translations" : "Show translations";
-  });
-
-  document.getElementById("clear-covered").addEventListener("click", function () {
-    var cleared = [];
-    for (var k in state) {
-      if (state[k] && state[k].covered) { state[k].covered = false; cleared.push(k); }
-    }
-    saveLocal();
-    render();
-    countCovered();
-    cleared.forEach(push);
-  });
 
   // --- shared store -----------------------------------------------------
   //
@@ -506,14 +467,14 @@ footer {
           sql: "insert into notes(week, sentence_id, note, covered, updated_at) " +
                "values(?,?,?,?,?) on conflict(week, sentence_id) do update set " +
                "note=excluded.note, covered=excluded.covered, updated_at=excluded.updated_at",
-          args: [T(DATA.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0),
+          args: [T(sheet.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0),
                  T(new Date().toISOString())]
         }]);
       },
       load: function () {
         return pipeline([{
           sql: "select sentence_id, note, covered from notes where week = ?",
-          args: [T(DATA.week)]
+          args: [T(sheet.week)]
         }]).then(function (results) {
           var rows = results[0].response.result.rows;
           return rows.map(function (row) {
@@ -529,7 +490,7 @@ footer {
   }
 
   function artifactBackend(db) {
-    var items = function () { return db.collection("lessons/" + DATA.week + "/items"); };
+    var items = function () { return db.collection("lessons/" + sheet.week + "/items"); };
     return {
       save: function (id) {
         var e = entry(id);
@@ -551,14 +512,43 @@ footer {
     };
   }
 
-  // --- earlier weeks ----------------------------------------------------
-  //
-  // Every sheet is frozen at publish time, so a page from March can't know about
-  // May. The manifest is fetched at load instead of baked in, which is what lets
-  // an old sheet still list every week including ones published after it.
+  function startSync() {
+    status("Saving on this device");
+    if (CONFIG.notes) {
+      sync = tursoBackend(CONFIG.notes);
+      var fetchNotes = function () {
+        if (!sync) return;
+        sync.load().then(function (rows) {
+          merge(rows);
+          status("Shared");
+        }).catch(function () { status("Saving on this device"); });
+      };
+      // The first load always runs, even in a background tab — it is what puts
+      // existing notes on the page and what tells the badge whether the store is
+      // actually reachable. Skipping it leaves the page claiming to be local-only
+      // when it isn't, with none of the notes loaded.
+      fetchNotes();
+      // The repeat only runs while someone is looking; a backgrounded tab
+      // polling all week is just burning the free tier.
+      setInterval(function () { if (!document.hidden) fetchNotes(); }, 15000);
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) fetchNotes();
+      });
+    } else if (window.claude && typeof window.claude.use === "function") {
+      window.claude.use("db").then(function (ns) {
+        if (!ns) return;
+        sync = artifactBackend(ns);
+        status("Shared");
+        sync.watch();
+      });
+    }
+  }
 
-  if (DATA.archive) {
-    fetch(DATA.archive.manifest, { cache: "no-cache" })
+  // --- earlier weeks ----------------------------------------------------
+
+  function buildPicker() {
+    if (!CONFIG.archive) return;
+    fetch(CONFIG.archive.manifest, { cache: "no-cache" })
       .then(function (r) {
         if (!r.ok) throw new Error("no manifest");
         return r.json();
@@ -570,52 +560,83 @@ footer {
           var opt = document.createElement("option");
           opt.value = w.week;
           opt.textContent = w.label + (i === 0 ? " · latest" : "");
-          opt.selected = w.week === DATA.week;
+          opt.selected = w.week === sheet.week;
           pick.appendChild(opt);
         });
-        // A week published after this page existed won't be in its own list.
-        if (!pick.value) {
-          var self = document.createElement("option");
-          self.value = DATA.week;
-          self.textContent = DATA.eyebrow;
-          self.selected = true;
-          pick.insertBefore(self, pick.firstChild);
-        }
         pick.hidden = false;
         pick.addEventListener("change", function () {
-          if (pick.value !== DATA.week) {
-            location.href = DATA.archive.base + pick.value + ".html";
-          }
+          if (pick.value === sheet.week) return;
+          // The newest week is the one baked into this shell, so it lives at the
+          // bare URL; everything else is a query away.
+          location.search = pick.value === BAKED.week ? "" : "?week=" + pick.value;
         });
       })
       .catch(function () { /* no archive yet — the picker just stays hidden */ });
   }
 
-  status("Saving on this device");
+  // --- boot -------------------------------------------------------------
 
-  if (DATA.notes) {
-    sync = tursoBackend(DATA.notes);
-    var poll = function () {
-      if (document.hidden || !sync) return;
-      sync.load().then(function (rows) {
-        merge(rows);
-        status("Shared");
-      }).catch(function () { status("Saving on this device"); });
-    };
-    poll();
-    // Only while someone is looking — a backgrounded tab polling all week is
-    // just burning someone's free tier.
-    setInterval(poll, 15000);
-    document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) poll();
+  function start(s) {
+    sheet = s;
+    KEY = "klozar:" + sheet.week;
+    try {
+      state = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+    } catch (e) {
+      state = {};
+    }
+    pageIds = {};
+    sheet.sections.forEach(function (sec) {
+      sec.items.forEach(function (item) { pageIds[item.id] = true; });
     });
-  } else if (window.claude && typeof window.claude.use === "function") {
-    window.claude.use("db").then(function (ns) {
-      if (!ns) return;
-      sync = artifactBackend(ns);
-      status("Shared");
-      sync.watch();
+
+    document.getElementById("eyebrow").textContent = sheet.eyebrow;
+    document.getElementById("title").textContent = sheet.title;
+    document.getElementById("n-played").textContent = sheet.counts.played;
+    document.getElementById("n-missed").textContent = sheet.counts.missed;
+    document.getElementById("n-starred").textContent = sheet.counts.starred;
+    document.getElementById("stamp").textContent = sheet.stamp;
+    document.title = sheet.title;
+
+    render();
+    countCovered();
+
+    var toggle = document.getElementById("toggle-en");
+    toggle.addEventListener("click", function () {
+      var on = toggle.getAttribute("aria-pressed") === "true";
+      toggle.setAttribute("aria-pressed", String(!on));
+      document.body.classList.toggle("hidden-en", !on);
+      toggle.textContent = on ? "Hide translations" : "Show translations";
     });
+
+    document.getElementById("clear-covered").addEventListener("click", function () {
+      var cleared = [];
+      for (var k in state) {
+        if (state[k] && state[k].covered) { state[k].covered = false; cleared.push(k); }
+      }
+      saveLocal();
+      render();
+      countCovered();
+      cleared.forEach(push);
+    });
+
+    buildPicker();
+    startSync();
+  }
+
+  var want = new URLSearchParams(location.search).get("week");
+  if (want && want !== BAKED.week && CONFIG.archive) {
+    document.getElementById("eyebrow").textContent = "Loading…";
+    fetch(CONFIG.archive.base + want + ".json", { cache: "no-cache" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("no such week");
+        return r.json();
+      })
+      .then(start)
+      // A week that isn't there is better answered with the latest sheet than
+      // with a blank page.
+      .catch(function () { start(BAKED); });
+  } else {
+    start(BAKED);
   }
 })();
 </script>
