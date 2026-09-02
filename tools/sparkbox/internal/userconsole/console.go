@@ -94,6 +94,13 @@ type Sandboxes interface {
 	Snapshot(ctx context.Context, box, snapName, owner string) (*host.Snapshot, error)
 	DeleteSnapshot(ctx context.Context, snapName, owner string) error
 	Fork(ctx context.Context, snapName, newName, owner string, vcpus, memMB int64) (*host.Sandbox, error)
+	// CapacityForOwner is the footprint card's numbers. It belongs on this
+	// interface rather than beside it because it has to be the FLEET's answer
+	// for the same reason every other method here does: an owner's disk and
+	// memory are charged by the machine holding each VM, and a rollup taken
+	// from the local manager alone would report a person with three sandboxes
+	// on a node as using nothing at all.
+	CapacityForOwner(owner string) host.OwnerCapacity
 }
 
 var _ Sandboxes = (*host.Manager)(nil)
@@ -303,6 +310,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("GET /api/me", require(h.me))
 	mux.Handle("POST /api/logout", mutate(h.logout))
 	mux.Handle("GET /api/machines", require(h.machines))
+	mux.Handle("GET /api/usage", require(h.usage))
 	mux.Handle("POST /api/machines/{name}/pause", mutate(h.pause))
 	mux.Handle("POST /api/machines/{name}/resume", mutate(h.resume))
 	mux.Handle("DELETE /api/machines/{name}", mutate(h.destroy))
@@ -491,6 +499,44 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	writeJSON(w, http.StatusOK, views)
+}
+
+// usageView is the Machines tab's footprint card: what this owner's sandboxes
+// cost, as opposed to what they were provisioned.
+//
+// It is a separate request from the machine list rather than a field on it
+// because the two answer different questions and the page combines them. The
+// list is per-sandbox and carries the live balloon reading for each running VM,
+// which is the honest memory number and is already routed to the machine
+// holding each one. This is the pooled arithmetic no browser can do: the
+// reflink baseline that turns six 25 GB disks into the three gigabytes actually
+// written, and the owner pool budgets, which are the node configuration and
+// appear in no per-sandbox record.
+type usageView struct {
+	host.OwnerCapacity
+	// SharedDiskMB is the sharing dividend spelled out: template blocks this
+	// owner sandboxes read but never paid for, because a fork reflinks them
+	// instead of copying. Derived from the pair above it so the page does not
+	// have to know which way round the subtraction goes.
+	SharedDiskMB int64 `json:"shared_disk_mb"`
+}
+
+// usage answers the footprint card. Owner-scoped like everything else here:
+// the session handle is the only input, so there is nothing to authorize
+// beyond having a session, and an operator sees their own footprint rather
+// than a privileged view of somebody else.
+func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
+	sess, _ := edgeauth.From(r.Context())
+	c := h.boxes.CapacityForOwner(sess.Handle)
+	shared := c.RawDiskMB - c.UsedDiskMB
+	if shared < 0 {
+		// A baseline larger than the disk measured against it, which
+		// pooledDiskMB already floors at zero per sandbox. Belt and braces:
+		// this is a subtraction of two independently sampled figures and a
+		// negative "you saved" would be nonsense on a page.
+		shared = 0
+	}
+	writeJSON(w, http.StatusOK, usageView{OwnerCapacity: c, SharedDiskMB: shared})
 }
 
 // listening is the shared port probe (webui.Probe) bound to this console's

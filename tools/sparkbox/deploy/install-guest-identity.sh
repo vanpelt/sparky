@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=22
+IDENTITY_REV=24
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -192,6 +192,34 @@ sed -e "s/@@META_PORT@@/$META_PORT/g" > "$MNT/usr/local/bin/sparkbox" <<'EOF'
 #!/bin/sh
 set -eu
 
+# sparkbox_docs_toc lists the pages `sparkbox docs` can print.
+#
+# The page names are spelled out here rather than fetched, and that is
+# deliberate: the moment this is worth printing is the moment somebody is lost,
+# and a contents page that needed the network to explain the network would be
+# no use in the one situation it exists for. deploy/assets_test.go pins the list
+# against the pages internal/guestdocs actually serves, so a fourth page cannot
+# be added without this catching up.
+#
+# No literal domain, for the reason given at SPARKBOX_CTL above: a guest is
+# never told its own domain, so anything that names one has to be host-authored
+# or derived. `sparkbox whoami` prints it.
+sparkbox_docs_toc() {
+  cat <<'TOC'
+sparkbox docs — the guidance bundled with this machine
+
+  sparkbox docs                  This sandbox: what persists across a pause,
+                                 where to put work, how an agent keeps running
+  sparkbox docs proxy            Serving a port on the web: the default
+                                 hostname, picking a port, who can reach it
+  sparkbox docs dev-environment  Running a dev server behind that proxy, and
+                                 the .sparkbox/setup.sh your project builds in
+
+The same pages read in a browser at https://docs.<domain>, where <domain> is
+the one `sparkbox whoami` prints.
+TOC
+}
+
 sparkbox_help() {
   cat <<'HELP'
 sparkbox — manage this sandbox from inside the VM
@@ -219,8 +247,8 @@ Identity and networking:
 
 Tools:
   update-tools [--check]         Update bundled agent CLIs, or check versions
-  docs [docs|proxy|dev-environment]
-                                 Read bundled sandbox and proxy guidance
+  docs [PAGE]                    Read bundled guidance; `docs help` lists the
+                                 pages (docs, proxy, dev-environment)
 
 Options:
   -h, --help                     Show this help
@@ -587,11 +615,27 @@ case "${1:-}" in
     # unauthenticated content, so this is the way to actually read it from
     # inside a VM; the https://docs.<domain> URL remains the one to open in a
     # browser, outside the VM.
-    _page=${2:-docs}
-    case "$_page" in
-      *[!A-Za-z0-9-]*) echo "sparkbox: usage: sparkbox docs [docs|proxy|dev-environment]" >&2; exit 2 ;;
+    #
+    # Anything that is not one of the three pages prints the contents rather
+    # than reaching curl. It used to reach curl: the only guard was a character
+    # class, so `sparkbox docs help` fetched /docs/help.md and `sparkbox docs
+    # --help` fetched /docs/--help.md — both of them 404s reported in curl's
+    # words, and both of them exactly what somebody types when they have
+    # forgotten the page names. An allowlist also means the character-class
+    # guard is no longer load-bearing: nothing but a known name is interpolated
+    # into the URL at all.
+    case "${2:-docs}" in
+      docs|proxy|dev-environment)
+        exec curl -fsS --max-time 10 "$META/docs/${2:-docs}.md" ;;
+      -h|--help|help)
+        # Asked for on purpose, so it is stdout and success — the same contract
+        # `sparkbox --help` has at the top of this file.
+        sparkbox_docs_toc; exit 0 ;;
+      *)
+        echo "sparkbox: no such doc page: $2" >&2
+        sparkbox_docs_toc >&2
+        exit 2 ;;
     esac
-    exec curl -fsS --max-time 10 "$META/docs/$_page.md"
     ;;
   update-tools)
     # Same escalation as `repos`, for the same reason and with the same -n
@@ -1234,9 +1278,78 @@ cat > "$MNT/etc/profile.d/50-sparkbox-repo.sh" <<'EOF'
 # Overridable for the same reason the worker's $SPARKBOX_REPOS_ROOT is: the
 # deploy tests drive this file against a tree instead of the machine running
 # them. Nothing in a guest sets it.
+# The wait below is what makes a NEWLY CREATED sandbox behave like every later
+# login, and it fixes two symptoms with one mechanism.
+#
+# Repositories are cloned by a worker that deliberately does not block the first
+# attach, so the very first shell in a brand-new box arrives while that clone is
+# still running. At that instant /etc/motd was rendered when the only true thing
+# to say was "cloning <slug>…", and /run/sparkbox/repos.dir — the file the cd
+# below reads — does not exist yet. So BOTH things this file exists to do were
+# silently skipped in exactly the session where they matter most: the banner
+# never resolved to the checkout list, and the login landed in $HOME with the
+# person left to find the directory themselves.
+#
+# Waiting on the worker's own lock and then reprinting the resolved block fixes
+# both. It costs nothing on every later login, where the lock is long gone, and
+# nothing at all for non-interactive shells, which never reach here.
 sparkbox_repo_file=${SPARKBOX_REPOS_DIR_FILE:-/run/sparkbox/repos.dir}
+sparkbox_repo_lock=${SPARKBOX_REPOS_LOCK_DIR:-/run/sparkbox/repos.lock}
+sparkbox_repo_status=${SPARKBOX_REPOS_STATUS_FILE:-/run/sparkbox/repos.status}
+# Seconds. 0 disables the wait and restores the old straight-through behaviour.
+sparkbox_repo_wait=${SPARKBOX_REPOS_WAIT_SECS:-25}
 case $- in
   *i*)
+    # A lock whose pid is gone is a worker that died; waiting on it would burn
+    # the whole budget for nothing.
+    #
+    # /proc FIRST, and kill -0 only as the fallback. The worker is a systemd
+    # unit running as root while this shell is the login user, and `kill -0`
+    # against a process you do not own fails with EPERM — which is
+    # indistinguishable, in a shell, from the ESRCH that means "no such
+    # process". Asking kill alone therefore declared every live root-owned
+    # worker dead, skipped the wait entirely, and left the banner and the cd
+    # exactly as broken as they were before. /proc needs no permission to
+    # stat. The kill fallback is kept for anywhere without /proc, where the
+    # only workers are same-user ones it can answer for correctly.
+    if [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ] &&
+       [ -d "$sparkbox_repo_lock" ]; then
+      sparkbox_repo_pid=$(cat "$sparkbox_repo_lock/pid" 2>/dev/null || true)
+      case "$sparkbox_repo_pid" in
+        ''|*[!0-9]*) sparkbox_repo_live= ;;
+        *) if [ -d "/proc/$sparkbox_repo_pid" ] ||
+              kill -0 "$sparkbox_repo_pid" 2>/dev/null; then
+             sparkbox_repo_live=1
+           else
+             sparkbox_repo_live=
+           fi ;;
+      esac
+      case "$sparkbox_repo_wait" in
+        ''|*[!0-9]*) sparkbox_repo_live= ;;
+        0) sparkbox_repo_live= ;;
+      esac
+      if [ -n "$sparkbox_repo_live" ]; then
+        # Said out loud, because a login shell that pauses without explaining
+        # itself reads as a hang. The resolved block prints under it.
+        printf 'repos: finishing clone…\n'
+        # Tenths of a second, so a fast clone is not rounded up to a whole one.
+        sparkbox_repo_left=$((sparkbox_repo_wait * 10))
+        while [ -d "$sparkbox_repo_lock" ] && [ "$sparkbox_repo_left" -gt 0 ]; do
+          sleep 0.1 2>/dev/null || sleep 1
+          sparkbox_repo_left=$((sparkbox_repo_left - 1))
+        done
+        if [ -d "$sparkbox_repo_lock" ]; then
+          printf 'repos: still working — run `sparkbox repos` for the current state\n'
+        elif [ -r "$sparkbox_repo_status" ]; then
+          # The status file is the same block the banner carries, already
+          # indented by the worker, so this reads as the banner finishing
+          # rather than as a second unrelated message.
+          cat "$sparkbox_repo_status" 2>/dev/null || true
+        fi
+        unset sparkbox_repo_left
+      fi
+      unset sparkbox_repo_pid sparkbox_repo_live
+    fi
     if [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ] && [ -r "$sparkbox_repo_file" ]; then
       sparkbox_repo_dir=$(cat "$sparkbox_repo_file" 2>/dev/null) || sparkbox_repo_dir=
       case "$sparkbox_repo_dir" in
@@ -1248,7 +1361,7 @@ case $- in
     fi
     ;;
 esac
-unset sparkbox_repo_file
+unset sparkbox_repo_file sparkbox_repo_lock sparkbox_repo_status sparkbox_repo_wait
 EOF
 chmod 0644 "$MNT/etc/profile.d/50-sparkbox-repo.sh"
 

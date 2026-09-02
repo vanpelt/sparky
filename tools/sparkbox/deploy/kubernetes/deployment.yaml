@@ -311,18 +311,25 @@ spec:
               value: "50"
             - name: SPARKBOX_MAX_SANDBOXES_PER_OWNER
               value: "50"
-            # Each VM keeps its 12 GiB ceiling, but all of an owner's running
-            # VMs share one 8 GiB effective-memory entitlement. A 256 MiB
-            # working-set charge admits up to 32 simultaneously warm children;
-            # the remainder stay durable and resume after another is paused.
+            # The pool tracks ONE default VM: an owner's first machine fits
+            # inside its entitlement, and every machine after that is paid for
+            # out of the memory the others are not touching. That is the whole
+            # bargain, so the two numbers move together — the pool was left at
+            # 8 GiB when the per-VM default became 12 GiB, which quietly meant a
+            # single default machine could not fit its own pool.
+            #
+            # A 256 MiB working-set charge admits up to 48 simultaneously warm
+            # children; the remainder stay durable and resume after one is paused.
             - name: SPARKBOX_MEM_RESERVE_MB
               value: "256"
             - name: SPARKBOX_OWNER_MEMORY_POOL_MB
-              value: "8192"
+              value: "12288"
             # Turbo may borrow another owner pool while the node's overlapping
-            # working-set budget has room. This is a ceiling, not reserved RAM.
+            # working-set budget has room. This is a ceiling, not reserved RAM,
+            # and it is TurboFactor (2) x the pool so one turbo machine at the
+            # doubled ceiling still fits.
             - name: SPARKBOX_OWNER_MEMORY_BURST_MB
-              value: "16384"
+              value: "24576"
             - name: SPARKBOX_DISK_POOL_MB_PER_OWNER
               value: "102400"
             - name: SPARKBOX_GATEWAY_ADDR

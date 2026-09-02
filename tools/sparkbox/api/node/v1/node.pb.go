@@ -734,9 +734,16 @@ type Sandbox struct {
 	// borrowed, which the node hands back the moment the sandbox pauses.
 	Turbo bool `protobuf:"varint,19,opt,name=turbo,proto3" json:"turbo,omitempty"`
 	// Stable workload identity. Unlike name, this survives sandbox rename.
-	Id            string                 `protobuf:"bytes,20,opt,name=id,proto3" json:"id,omitempty"`
-	Repos         []*RepoStatus          `protobuf:"bytes,21,rep,name=repos,proto3" json:"repos,omitempty"`
-	RepoStatusAt  *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=repo_status_at,json=repoStatusAt,proto3" json:"repo_status_at,omitempty"`
+	Id           string                 `protobuf:"bytes,20,opt,name=id,proto3" json:"id,omitempty"`
+	Repos        []*RepoStatus          `protobuf:"bytes,21,rep,name=repos,proto3" json:"repos,omitempty"`
+	RepoStatusAt *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=repo_status_at,json=repoStatusAt,proto3" json:"repo_status_at,omitempty"`
+	// base_disk_mb is the used-blocks figure of the template this sandbox was
+	// forked from. Those blocks exist once on the node and are shared by reflink
+	// with every sibling fork, so disk_mb minus this is what the sandbox actually
+	// wrote — the only honest per-owner charge, and the only way a gateway can
+	// tell a 25 GB disk that cost 25 GB from one that cost 400 MB. A node that
+	// cannot measure templates sends 0, which reads as "charge it raw".
+	BaseDiskMb    int64 `protobuf:"varint,23,opt,name=base_disk_mb,json=baseDiskMb,proto3" json:"base_disk_mb,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -923,6 +930,13 @@ func (x *Sandbox) GetRepoStatusAt() *timestamppb.Timestamp {
 		return x.RepoStatusAt
 	}
 	return nil
+}
+
+func (x *Sandbox) GetBaseDiskMb() int64 {
+	if x != nil {
+		return x.BaseDiskMb
+	}
+	return 0
 }
 
 type Snapshot struct {
@@ -4083,7 +4097,7 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"q\n" +
 	"\bEventGap\x12:\n" +
 	"\x19oldest_available_revision\x18\x01 \x01(\x04R\x17oldestAvailableRevision\x12)\n" +
-	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xa7\x06\n" +
+	"\x10current_revision\x18\x02 \x01(\x04R\x0fcurrentRevision\"\xc9\x06\n" +
 	"\aSandbox\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
@@ -4110,7 +4124,9 @@ const file_node_v1_node_proto_rawDesc = "" +
 	"\x05turbo\x18\x13 \x01(\bR\x05turbo\x12\x0e\n" +
 	"\x02id\x18\x14 \x01(\tR\x02id\x122\n" +
 	"\x05repos\x18\x15 \x03(\v2\x1c.sparkbox.node.v1.RepoStatusR\x05repos\x12@\n" +
-	"\x0erepo_status_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\frepoStatusAt\"\xa8\x01\n" +
+	"\x0erepo_status_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\frepoStatusAt\x12 \n" +
+	"\fbase_disk_mb\x18\x17 \x01(\x03R\n" +
+	"baseDiskMb\"\xa8\x01\n" +
 	"\bSnapshot\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +

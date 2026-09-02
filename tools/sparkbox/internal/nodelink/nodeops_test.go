@@ -94,6 +94,10 @@ func built(name, owner, image string, vcpus, memMB int64) *host.Sandbox {
 	return &host.Sandbox{
 		Name: name, Owner: owner, Image: image, VCPUs: vcpus, MemMB: memMB,
 		State: vmm.StateRunning, SSHUser: "sparky", DiskMB: 1024, DiskTotalMB: 25600,
+		// The template baseline the gateway subtracts to charge an owner for
+		// what their forks WROTE rather than for a copy that was never made.
+		// It rides the wire; dropping it is silent and quadruples the figure.
+		BaseDiskMB: 768,
 		// Present on the record and absent from the wire on purpose: every node
 		// mints its guests the same addresses, so one relayed up would resolve
 		// to the gateway's own sandbox.
@@ -282,7 +286,8 @@ func TestNodeRunsEveryLifecycleVerb(t *testing.T) {
 				}
 				if got.VCPUs != want.VCPUs || got.MemMB != want.MemMB ||
 					got.State != want.State || got.SSHUser != want.SSHUser ||
-					got.DiskMB != want.DiskMB || got.DiskTotalMB != want.DiskTotalMB {
+					got.DiskMB != want.DiskMB || got.DiskTotalMB != want.DiskTotalMB ||
+					got.BaseDiskMB != want.BaseDiskMB {
 					t.Errorf("row = %+v, want %+v", got, want)
 				}
 			},

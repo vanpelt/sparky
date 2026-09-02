@@ -82,6 +82,23 @@ def _machines(tick):
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
     ]
 
+# The owner rollup behind the Machines tab's footprint card. It is mock data of
+# its own rather than a sum of _machines() above, because the interesting half —
+# the reflink baseline and the pool budgets — appears in no machine record; that
+# is the whole reason the card has an endpoint of its own. Kept internally
+# consistent so the ratios the page derives are the ones a real fleet shows:
+# shared = raw - used, over three disks (one paused, one running, one parked).
+_USAGE = {
+    "owner": "van",
+    "memory_pool_mb": 8192, "memory_burst_mb": 16384,
+    "effective_memory_mb": 8192, "resident_memory_mb": 6820,
+    "borrowed_memory_mb": 0, "allocated_memory_mb": 16384, "allocated_vcpus": 8,
+    "disk_pool_mb": 102400, "used_disk_mb": 6240, "raw_disk_mb": 24654,
+    "shared_disk_mb": 18414, "capacity_disk_mb": 76800,
+    "running_sandboxes": 1, "total_sandboxes": 3, "archived_sandboxes": 1,
+    "turbo_sandboxes": 1, "max_running": 4, "max_sandboxes": 8, "nodes": 1,
+}
+
 _ME = {"handle": "van", "operator": True, "terminal_subdomain": "xterm"}
 _SECRETS = [
     {"name": "OPENAI_API_KEY", "tags": ["ml", "prod"], "version": 3, "updated_at": _iso(3600)},
@@ -142,6 +159,7 @@ _STUB = """
   var tick = 0;
   var ME = %(me)s, SECRETS = %(secrets)s, SNAPSHOTS = %(snapshots)s;
   var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s, REPOS = %(repos)s;
+  var USAGE = %(usage)s;
   function machines() {
     tick += 1;
     var list = %(machines_fn)s(tick);
@@ -174,6 +192,7 @@ _STUB = """
       });
     }
     if (u.indexOf("/api/me") >= 0) return J(ME);
+    if (u.indexOf("/api/usage") >= 0 && m === "GET") return J(USAGE);
     if (u.indexOf("/api/secrets") >= 0 && m === "GET") return J(SECRETS);
     if (u.indexOf("/api/snapshots") >= 0 && m === "GET") return J(SNAPSHOTS);
     if (u.indexOf("/api/network-rules") >= 0 && m === "GET") return J(NETRULES);
@@ -326,7 +345,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
                 "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
                 "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
-                "repos": json.dumps(_REPOS),
+                "repos": json.dumps(_REPOS), "usage": json.dumps(_USAGE),
             }
         theme = ""
         if "theme=dark" in self.path:

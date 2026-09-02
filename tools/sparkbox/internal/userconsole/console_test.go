@@ -241,6 +241,7 @@ var apiEndpoints = []struct{ method, path string }{
 	{"GET", "/api/me"},
 	{"POST", "/api/logout"},
 	{"GET", "/api/machines"},
+	{"GET", "/api/usage"},
 	{"POST", "/api/machines/somebox/pause"},
 	{"POST", "/api/machines/somebox/resume"},
 	{"DELETE", "/api/machines/somebox"},

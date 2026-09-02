@@ -1,13 +1,16 @@
 package deploy
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The refresh half of sparkbox-repos, driven for real.
@@ -815,5 +818,232 @@ func TestLoginSnippetLandsInTheCheckout(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != home {
 		t.Errorf("a non-interactive shell was moved to %q", got)
+	}
+}
+
+// runLoginHook drives /etc/profile.d/50-sparkbox-repo.sh the way a login shell
+// does — interactive, starting in $HOME — and reports what it printed and where
+// it left the shell. Every path the hook reads is redirected into the test's own
+// tree, which is why those overrides exist in the hook at all.
+func runLoginHook(t *testing.T, tree, home, run, wait string) (string, time.Duration) {
+	t.Helper()
+	hook := filepath.Join(tree, "etc", "profile.d", "50-sparkbox-repo.sh")
+	if _, err := os.Stat(hook); err != nil {
+		t.Fatalf("no login hook installed: %v", err)
+	}
+	// `set -i` rather than `sh -i`, which both dash and bash accept and which
+	// is the flag the hook reads. An actual interactive shell is not usable
+	// here: `bash -ic` with no terminal blocks.
+	cmd := exec.Command("sh", "-c", "set -i; . "+hook+`; printf 'LANDED %s\n' "$PWD"`)
+	cmd.Dir = home
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"SPARKBOX_REPOS_DIR_FILE="+filepath.Join(run, "repos.dir"),
+		"SPARKBOX_REPOS_LOCK_DIR="+filepath.Join(run, "repos.lock"),
+		"SPARKBOX_REPOS_STATUS_FILE="+filepath.Join(run, "repos.status"),
+		"SPARKBOX_REPOS_WAIT_SECS="+wait,
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("login hook: %v\n%s", err, out.String())
+	}
+	return out.String(), time.Since(start)
+}
+
+// loginTree builds a guest tree with the payload installed, a checkout to land
+// in, and a resolved status block for the hook to print.
+func loginTree(t *testing.T) (tree, home, run string) {
+	t.Helper()
+	tree = fakeGuestTree(t, false)
+	installGuestPayload(t, tree)
+	// The physical path, for the reason TestLoginSnippetLandsInTheCheckout
+	// gives: on macOS a temp dir lives under /var, a symlink to /private/var,
+	// and the hook's own [ "$PWD" = "$HOME" ] guard would be comparing two
+	// spellings of one directory and correctly declining to do anything.
+	if resolved, err := filepath.EvalSymlinks(tree); err == nil {
+		tree = resolved
+	}
+	home = filepath.Join(tree, "home", "sparky")
+	run = filepath.Join(tree, "run", "sparkbox")
+	for _, d := range []string{filepath.Join(home, "sparky"), run} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(run, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("repos.status", "  repos:\n    vanpelt/sparky   ~/sparky   main\n")
+	write("repos.dir", filepath.Join(home, "sparky")+"\n")
+	return tree, home, run
+}
+
+// holdLock takes the worker's lock with a live process that releases it after
+// d, which is what an in-flight clone looks like to a login shell.
+func holdLock(t *testing.T, run string, d time.Duration) {
+	t.Helper()
+	lock := filepath.Join(run, "repos.lock")
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", `sleep "$1"; rm -rf "$2"`, "_",
+		strconv.FormatFloat(d.Seconds(), 'f', 2, 64), lock)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait(); os.RemoveAll(lock) }) //nolint:errcheck
+	if err := os.WriteFile(filepath.Join(lock, "pid"),
+		[]byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFirstLoginWaitsOutAnInFlightClone is the bug a new sandbox showed.
+//
+// The clone worker deliberately does not block the first attach, so the very
+// first shell in a brand-new box arrives while the clone is still running: the
+// banner it just printed says "cloning <slug>…" and never resolves, and
+// repos.dir does not exist yet so the login lands in $HOME instead of the
+// checkout. Both symptoms are the same race, and both are fixed by waiting on
+// the worker's own lock.
+func TestFirstLoginWaitsOutAnInFlightClone(t *testing.T) {
+	tree, home, run := loginTree(t)
+	holdLock(t, run, 700*time.Millisecond)
+
+	out, elapsed := runLoginHook(t, tree, home, run, "25")
+
+	if !strings.Contains(out, "finishing clone") {
+		t.Errorf("the wait said nothing, so a pausing login reads as a hang: %q", out)
+	}
+	// The banner finishes: the resolved block is printed, not the "cloning" line.
+	if !strings.Contains(out, "vanpelt/sparky") {
+		t.Errorf("the resolved repo block never printed: %q", out)
+	}
+	// And the login lands in the checkout, which is the other half of the race.
+	if !strings.Contains(out, "LANDED "+filepath.Join(home, "sparky")) {
+		t.Errorf("login did not land in the checkout: %q", out)
+	}
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("returned in %v, so it cannot have waited for the clone", elapsed)
+	}
+}
+
+// TestLoginWaitsOnAWorkerItCannotSignal is the bug hardware found, and the one
+// the same-user tests above structurally could not.
+//
+// The clone worker is a systemd unit running as ROOT; the login shell is the
+// sandbox user. `kill -0` against a process you do not own fails with EPERM,
+// which in a shell is indistinguishable from the ESRCH that means "no such
+// process" — so a liveness check built on kill alone declared every live
+// root-owned worker dead, skipped the wait, and left the banner and the cd
+// exactly as broken as before the fix. Every test above holds its lock with a
+// process the test itself spawned, which it can always signal, so all of them
+// passed against the broken check.
+//
+// pid 1 is the standing example of the shape that broke it: always alive, never
+// signalable by an ordinary user, and — the part the fix relies on — always
+// present in /proc. The lock is never released, so this asserts the hook waited
+// out its whole (deliberately short) budget rather than returning at once.
+func TestLoginWaitsOnAWorkerItCannotSignal(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// /proc is the mechanism under test and pid 1 is only unsignalable
+		// where this test is not run as root. Both hold on the CI runner and
+		// in a guest; neither is worth faking elsewhere.
+		t.Skip("needs /proc and a pid 1 this user cannot signal")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which can signal pid 1")
+	}
+	tree, home, run := loginTree(t)
+	lock := filepath.Join(run, "repos.lock")
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, elapsed := runLoginHook(t, tree, home, run, "1")
+	if !strings.Contains(out, "finishing clone") {
+		t.Errorf("did not wait for a live worker it cannot signal: %q", out)
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("returned in %v; the worker is alive, so the budget should have been spent", elapsed)
+	}
+	// The lock never clears here, so the hook must hand over the prompt with an
+	// honest sentence rather than pretending the clone finished.
+	if !strings.Contains(out, "still working") {
+		t.Errorf("a timed-out wait must say so: %q", out)
+	}
+}
+
+// TestLoginDoesNotWaitOnAStaleLock. A lock whose pid is gone is a worker that
+// died; waiting on it would burn the whole budget at every login for nothing.
+func TestLoginDoesNotWaitOnAStaleLock(t *testing.T) {
+	tree, home, run := loginTree(t)
+	lock := filepath.Join(run, "repos.lock")
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A pid that cannot be running. Same staleness rule the worker itself uses.
+	if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("999999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, elapsed := runLoginHook(t, tree, home, run, "25")
+	if elapsed > 3*time.Second {
+		t.Errorf("waited %v on a dead worker's lock", elapsed)
+	}
+	if strings.Contains(out, "finishing clone") {
+		t.Errorf("announced a wait it should not have made: %q", out)
+	}
+}
+
+// TestLoginWaitIsDisableable keeps an escape hatch for anyone whose clone is
+// genuinely long and who would rather have the prompt now.
+func TestLoginWaitIsDisableable(t *testing.T) {
+	tree, home, run := loginTree(t)
+	holdLock(t, run, 30*time.Second)
+
+	out, elapsed := runLoginHook(t, tree, home, run, "0")
+	if elapsed > 3*time.Second {
+		t.Errorf("waited %v with the wait switched off", elapsed)
+	}
+	if strings.Contains(out, "finishing clone") {
+		t.Errorf("waited despite SPARKBOX_REPOS_WAIT_SECS=0: %q", out)
+	}
+}
+
+// TestNonInteractiveLoginNeverWaits. `ssh box <command>`, scp and rsync all run
+// a login shell; none of them may pause on a clone or print a banner into what
+// the caller is parsing.
+func TestNonInteractiveLoginNeverWaits(t *testing.T) {
+	tree, home, run := loginTree(t)
+	holdLock(t, run, 30*time.Second)
+
+	hook := filepath.Join(tree, "etc", "profile.d", "50-sparkbox-repo.sh")
+	cmd := exec.Command("sh", "-c", ". "+hook+`; printf 'LANDED %s\n' "$PWD"`)
+	cmd.Dir = home
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"SPARKBOX_REPOS_DIR_FILE="+filepath.Join(run, "repos.dir"),
+		"SPARKBOX_REPOS_LOCK_DIR="+filepath.Join(run, "repos.lock"),
+		"SPARKBOX_REPOS_STATUS_FILE="+filepath.Join(run, "repos.status"),
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook: %v\n%s", err, out.String())
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("a non-interactive login waited %v", elapsed)
+	}
+	if strings.Contains(out.String(), "repos:") {
+		t.Errorf("a non-interactive login printed the banner: %q", out.String())
 	}
 }

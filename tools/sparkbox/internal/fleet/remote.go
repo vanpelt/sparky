@@ -171,6 +171,7 @@ func (r *remoteNode) record(row nodelink.SandboxRow, name, owner string) *host.S
 		ArchivedAt:   row.ArchivedAt,
 		DiskMB:       row.DiskMB,
 		DiskTotalMB:  row.DiskTotalMB,
+		BaseDiskMB:   row.BaseDiskMB,
 		Turbo:        row.Turbo,
 		Node:         node,
 	}

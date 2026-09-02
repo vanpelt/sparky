@@ -295,9 +295,11 @@ plan that shipped it).
   is what makes the two subtractable — stores it as `Sandbox.BaseDiskMB`, and
   charges the pool `max(0, DiskMB - BaseDiskMB)`. An owner pays for blocks their
   sandboxes wrote. Notes:
-  - The per-VM 25 GB ceiling, both consoles' meters, the REST/gRPC projections and
-    every per-sandbox figure a user sees stay **raw**: that is the number they can
-    reconcile against `df` inside the guest. Only the pooled sums move.
+  - The per-VM 25 GB ceiling, both consoles' meters, the REST projection and
+    every per-sandbox figure a user *sees* stay **raw**: that is the number they
+    can reconcile against `df` inside the guest. Only the pooled sums move.
+    `BaseDiskMB` itself does now ride the node link (see Part 10) so a gateway
+    can compute those sums for sandboxes it does not run; nothing renders it.
   - **This enlarges every existing `--disk-pool-mb-per-owner` setting** the moment
     the first reaper tick backfills baselines. It only ever loosens — it can never
     refuse a create that used to succeed — but it is a live policy change on a
@@ -405,6 +407,60 @@ load and the intentional owner-pool overcommit ratio.
 Still open: a time-based turbo lease, a per-owner simultaneous-turbo policy,
 and cgroup CPU enforcement. Today turbo lasts for one run and naturally returns
 on pause, while the host kernel time-slices its doubled vCPU threads.
+
+## Part 10 — The footprint card: showing an owner what they actually cost (✅ landed)
+
+Part 8 made the *host* charge honestly. This makes the honesty visible to the
+person being charged, on the Machines tab of the user console (`my.<domain>`), in
+one small three-tile card above the machine list.
+
+The premise is that every number a sandbox owner had until now was the
+provisioned one. Six machines at 25 GB read as 150 GB of disk and five at 16 GB
+read as 80 GB of RAM, when the reflinked disks hold a few gigabytes between them
+and the balloon has handed most of that RAM back. Those figures make the product
+look expensive in exactly the dimension it is cheap.
+
+- **Disk** — the pooled, baseline-subtracted charge over the owner's disk pool,
+  with the raw sum and the sharing dividend underneath: *"24 GB across 3 disks ·
+  4.0× smaller than copies · 18 GB of template shared"*.
+- **Memory** — the live balloon reading over the provisioned ceiling, with the
+  overcommit ratio and the pool charge underneath. The numerator is the same
+  `Vitals` read the per-machine rows already make, routed to the machine holding
+  each VM; the ceiling and the pool come from the rollup.
+- **CPU** — cores busy over vCPUs held, derived in the browser from the same
+  cumulative `cpu_seconds` delta the per-machine meter uses. It is weighted back
+  up by each machine's own vCPUs before summing, because a percentage of a
+  2-vCPU guest and a percentage of an 8-vCPU guest are not addable.
+
+Three pieces of mechanism, and only the first is new policy:
+
+1. **`BaseDiskMB` now crosses the node link** (`base_disk_mb`, `node.proto`
+   field 23, plus the `nodelink.SandboxRow` JSON form). It used to be
+   deliberately node-local, which was correct while only the owning node charged
+   the pool; the moment a *gateway* computes an owner's disk it has to know which
+   blocks are shared, or it charges every remote fork for a copy that was never
+   made. `refreshDiskUsage` therefore also wakes the observer when only the
+   baseline moves, which it did not before. A node too old to send it, or one
+   whose driver cannot measure templates, sends 0 — which reads as "charge this
+   one raw", exactly the pre-Part-8 behaviour, so the card degrades to showing no
+   dividend rather than a wrong one.
+2. **`host.RollUpOwner` + `OwnerCapacity.Merge`** are the arithmetic, extracted
+   from `Manager.CapacityForOwner` so that a gateway folding records for VMs it
+   does not run uses the same code rather than a second copy of the policy. Each
+   machine's sandboxes are charged against *that machine's* `OwnerPolicy`, read
+   from the capacity report it already publishes — which matters because on the
+   Kubernetes deployment the owner pools are declared on the node Deployment and
+   the gateway sets none at all. Merge **adds usage and does not add pools**: an
+   owner who straddles two machines has one entitlement, not two.
+3. **`GET /api/usage`** on the user console returns that rollup for the session's
+   own handle. It is a second request rather than a field on `/api/machines`
+   because the two answer different questions — the list is per-sandbox and
+   carries the live readings, this is the pooled arithmetic no browser can do —
+   and because a failure to fetch it hides the card without making the list stale.
+
+No remote call is added: every input is already cached (the inventory nodes
+stream, and the capacity report the link refreshes in the background), which is
+what lets a console poll it every few seconds.
 
 ## What we already have (so this is mostly policy, not new mechanics)
 

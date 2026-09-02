@@ -263,12 +263,22 @@
 
   /* ---------- terminal ---------- */
   #screen { position: relative; min-height: 0; background: hsl(var(--background)); }
-  #term { position: absolute; inset: 0; padding: 8px 4px 8px 10px; }
-  .xterm .xterm-viewport { scrollbar-width: thin; }
-  .xterm-viewport::-webkit-scrollbar { width: 10px; }
-  .xterm-viewport::-webkit-scrollbar-thumb {
-    background: hsl(var(--muted-foreground) / .35); border-radius: 5px;
-  }
+  /* The bottom gap is an INSET, not padding, and that distinction is the fix.
+     FitAddon sizes the grid from this element's own computed height, so bottom
+     padding is space xterm still believes it may draw into; an inset makes the
+     element genuinely shorter and leaves a strip nothing can render over.
+     It is needed because a fractional cell height (13px at lineHeight 1.2 =
+     15.6px) makes N rows render slightly taller than N x the floor()ed cell
+     FitAddon divided by, and that accumulated remainder is what was being
+     clipped off the last line. */
+  #term { position: absolute; inset: 0 0 10px 0; padding: 8px 4px 0 10px; }
+  /* No scrollbar. xterm's viewport is a scrollback buffer, not a document:
+     the wheel, trackpad, Shift-PageUp and the alternate screen's own paging
+     all still work, and the gutter was the only thing in the frame that did
+     not belong to either the chrome or the grid. Both properties are needed —
+     Firefox reads scrollbar-width, WebKit and Blink the pseudo-element. */
+  .xterm .xterm-viewport { scrollbar-width: none; }
+  .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
 
   /* Overlay for the states where there is nothing to type into yet. It sits
      over the grid rather than replacing it, so a reconnect does not throw away
@@ -1011,10 +1021,19 @@
     function paintHiveMindSession(v) {
       const link = $("hivemind-session");
       const title = v.hivemind_session_title;
-      // Presence alone is worth showing. A VM can hold a live lease before its
-      // first session has reached the catalog, and going dark until a title
-      // arrives would hide activity at exactly the moment it starts.
-      if (!title && !v.hivemind_presence) {
+      // Presence alone is NOT enough, though it used to be. A HiveMind daemon
+      // reports a presence state whenever it is installed and running, so
+      // "idle" with nothing in the session catalog is the resting state of
+      // every VM where nobody has started an agent — and it rendered a link
+      // labelled "HiveMind session" that named no session and, having no URL,
+      // did nothing at all when clicked.
+      //
+      // hivemind_active is the honest liveness signal (a protection lease that
+      // has not expired), and it still covers the case the old guard was
+      // written for: a live lease before the first session reaches the catalog.
+      // A title means the catalog has one either way — the host fills in the
+      // "HiveMind session" fallback itself whenever there is a URL to open.
+      if (!title && !v.hivemind_session_url && !v.hivemind_active) {
         link.classList.add("hidden");
         link.classList.remove("live");
         link.removeAttribute("href");

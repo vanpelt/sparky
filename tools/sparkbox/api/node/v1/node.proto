@@ -134,6 +134,13 @@ message Sandbox {
   string id = 20;
   repeated RepoStatus repos = 21;
   google.protobuf.Timestamp repo_status_at = 22;
+  // base_disk_mb is the used-blocks figure of the template this sandbox was
+  // forked from. Those blocks exist once on the node and are shared by reflink
+  // with every sibling fork, so disk_mb minus this is what the sandbox actually
+  // wrote — the only honest per-owner charge, and the only way a gateway can
+  // tell a 25 GB disk that cost 25 GB from one that cost 400 MB. A node that
+  // cannot measure templates sends 0, which reads as "charge it raw".
+  int64 base_disk_mb = 23;
 }
 
 enum SandboxState {

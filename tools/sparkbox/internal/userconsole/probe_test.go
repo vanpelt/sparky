@@ -124,8 +124,9 @@ func TestListeningBudgetWidensOnlyForRemoteSandboxes(t *testing.T) {
 // and records every lifecycle call, so a test can tell whether the console
 // asked the router or reached past it into the local manager.
 type fakeBoxes struct {
-	boxes []*host.Sandbox
-	calls []string
+	boxes  []*host.Sandbox
+	calls  []string
+	policy host.OwnerPolicy
 }
 
 func (f *fakeBoxes) Get(name string) (*host.Sandbox, bool) {
@@ -145,6 +146,13 @@ func (f *fakeBoxes) ListByOwner(owner string) []*host.Sandbox {
 		}
 	}
 	return out
+}
+
+// CapacityForOwner folds this fake's boxes with the real rollup, so a test
+// that asserts on /api/usage is asserting on the arithmetic that ships rather
+// than on a second copy of it written here.
+func (f *fakeBoxes) CapacityForOwner(owner string) host.OwnerCapacity {
+	return host.RollUpOwner(owner, f.boxes, f.policy, nil)
 }
 
 func (f *fakeBoxes) EnsureReady(_ context.Context, name string) (*host.Sandbox, error) {

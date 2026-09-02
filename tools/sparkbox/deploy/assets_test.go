@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -188,8 +190,9 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		"$META/self/snapshot?tag=",
 		// docs.<domain> can resolve to this fleet's own edge, which the guest's
 		// tap firewall has no route to reach directly, so `docs` reads the same
-		// content over the metadata port instead.
-		`$META/docs/$_page.md`,
+		// content over the metadata port instead. Only an allowlisted page name
+		// is interpolated — see TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking.
+		`$META/docs/${2:-docs}.md`,
 		"-w '%{http_code}'",
 		// The commit sends the PLAN's tag, name and token, never values the
 		// shell re-derived: the derived name carries a minute in it.
@@ -221,7 +224,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=22\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=24\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -236,6 +239,63 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 // — which is exactly what a user notices a week later, on a push they cannot
 // re-author. The legacy fallback is deliberate and second: naming the right
 // person unattributed still beats naming no one.
+// TestIdentityRevMovesWithThePayload is the guard that was missing, and the
+// reason it is worth the small friction it adds.
+//
+// refresh-agent-tools.sh decides whether to re-patch a published rootfs
+// template by comparing the template's stamped IDENTITY_REV against the one it
+// reads out of the installer. Edit the payload without bumping the stamp and
+// every host concludes "templates already current" and skips the work — so the
+// change ships, deploys green, and simply is not there in any VM. There is no
+// error anywhere; the only way to find out is for somebody to run the new
+// command in a sandbox and get the old behaviour. That is exactly how a docs
+// fix reached production and 404'd.
+//
+// The existing rev assertion below cannot catch it: it pins the VALUE, so it
+// fires when you bump without telling it, which is the harmless direction.
+// This pins the payload, so it fires when you edit without bumping.
+//
+// WHEN THIS FAILS: bump IDENTITY_REV in deploy/install-guest-identity.sh, then
+// update wantPayloadSum here to the sum the failure prints. Both, in that order.
+func TestIdentityRevMovesWithThePayload(t *testing.T) {
+	const (
+		wantRev        = 24
+		wantPayloadSum = "59f349d3c8efdb6ad739e0957f001ee52a2f6c0c660893e96c7486d6624a1ef2"
+	)
+	src, err := os.ReadFile("install-guest-identity.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Everything but the stamp line, so bumping the stamp alone does not move
+	// the sum and the two assertions stay independent.
+	var payload strings.Builder
+	rev := 0
+	for _, line := range strings.Split(string(src), "\n") {
+		if after, ok := strings.CutPrefix(line, "IDENTITY_REV="); ok && rev == 0 {
+			n, convErr := strconv.Atoi(strings.TrimSpace(after))
+			if convErr != nil {
+				t.Fatalf("IDENTITY_REV is not a number: %q", line)
+			}
+			rev = n
+			continue
+		}
+		payload.WriteString(line)
+		payload.WriteByte('\n')
+	}
+	if rev != wantRev {
+		t.Fatalf("IDENTITY_REV = %d, want %d — update wantRev here when you bump it", rev, wantRev)
+	}
+	sum := sha256.Sum256([]byte(payload.String()))
+	if got := hex.EncodeToString(sum[:]); got != wantPayloadSum {
+		t.Fatalf("the guest payload changed while IDENTITY_REV is %d.\n"+
+			"If you have NOT already bumped the stamp for this change, bump it in\n"+
+			"deploy/install-guest-identity.sh (and wantRev here) — otherwise hosts skip\n"+
+			"re-patching their templates and the change reaches no VM at all.\n"+
+			"Then record the new payload:\n"+
+			"  wantPayloadSum = %q", rev, got)
+	}
+}
+
 func TestGuestGitIdentityWritesAnAttributableAuthor(t *testing.T) {
 	root := fakeGuestTree(t, false)
 	installGuestPayload(t, root)
@@ -2071,20 +2131,102 @@ func TestGuestDocsReadsFromMetadataNotTheEdge(t *testing.T) {
 
 // TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking mirrors the snapshot
 // usage test: a malformed page name is refused locally, and never reaches the
-// host as a path-traversal attempt or similar.
+// host as a path-traversal attempt or similar. What it now gets back is the
+// table of contents rather than a one-line usage string — an unknown page is
+// almost always somebody who has forgotten the page names, so the answer is
+// the list.
 func TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking(t *testing.T) {
-	for _, page := range []string{"../../etc/passwd", "docs.md", "a/b", "a b"} {
+	for _, page := range []string{"../../etc/passwd", "docs.md", "a/b", "a b", "wat"} {
 		reply, requests, run := guestSelfService(t)
 		reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", "# doc body\n")
 		_, stderr, code := run("docs", page)
 		if code != 2 {
 			t.Errorf("docs %q: exit = %d, want 2", page, code)
 		}
-		if !strings.Contains(stderr, "usage: sparkbox docs [docs|proxy|dev-environment]") {
-			t.Errorf("docs %q: stderr = %q", page, stderr)
+		if !strings.Contains(stderr, "no such doc page: "+page) {
+			t.Errorf("docs %q: stderr does not name the page: %q", page, stderr)
+		}
+		for _, want := range []string{"sparkbox docs proxy", "sparkbox docs dev-environment"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("docs %q: stderr is missing %q: %q", page, want, stderr)
+			}
 		}
 		if got := requests(); len(got) != 0 {
 			t.Errorf("docs %q: a malformed page name reached the host: %v", page, got)
+		}
+	}
+}
+
+// TestGuestDocsHelpPrintsContentsWithoutAskingTheHost. `sparkbox docs help` and
+// `sparkbox docs --help` are what somebody types when they have forgotten the
+// page names. They used to be handed to curl as page names, which fetched
+// /docs/help.md and /docs/--help.md and answered with curl's 404 — so the two
+// most likely spellings of the question were the two that could not answer it.
+//
+// They are answered locally on purpose: the moment this is worth printing is
+// the moment somebody is lost, and a contents page that needed the metadata
+// service to explain the metadata service would be no use.
+func TestGuestDocsHelpPrintsContentsWithoutAskingTheHost(t *testing.T) {
+	for _, arg := range []string{"help", "--help", "-h"} {
+		reply, requests, run := guestSelfService(t)
+		reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", "# doc body\n")
+		stdout, stderr, code := run("docs", arg)
+		// Asked for on purpose, so it is success on stdout — the same contract
+		// `sparkbox --help` has.
+		if code != 0 || stderr != "" {
+			t.Errorf("docs %q: exit = %d, stderr = %q", arg, code, stderr)
+		}
+		for _, want := range []string{
+			"sparkbox docs", "sparkbox docs proxy", "sparkbox docs dev-environment",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("docs %q: stdout is missing %q: %q", arg, want, stdout)
+			}
+		}
+		// A guest is never told its own domain, so the contents must not invent
+		// one — it points at `sparkbox whoami` instead.
+		if strings.Contains(stdout, "catnip.sh") || strings.Contains(stdout, "coreweave.app") {
+			t.Errorf("docs %q: the contents hardcode a domain: %q", arg, stdout)
+		}
+		if got := requests(); len(got) != 0 {
+			t.Errorf("docs %q: the contents asked the host: %v", arg, got)
+		}
+	}
+}
+
+// TestGuestDocsContentsListsEveryPageThatIsServed is the drift guard. The
+// contents are spelled out in the shell — deliberately, because the moment they
+// are worth printing is the moment somebody is lost and a contents page that
+// needed the network would be no use — so the list has to be pinned against the
+// pages internal/guestdocs actually serves. A fourth page cannot be added
+// without this failing.
+func TestGuestDocsContentsListsEveryPageThatIsServed(t *testing.T) {
+	root := fakeGuestTree(t, false)
+	installGuestPayload(t, root)
+	cli := guestFile(t, root, "usr/local/bin/sparkbox")
+
+	contents := cli[strings.Index(cli, "sparkbox_docs_toc() {"):]
+	contents = contents[:strings.Index(contents, "\nTOC\n}")]
+	if contents == "" {
+		t.Fatal("the guest CLI has no sparkbox_docs_toc")
+	}
+
+	served, err := filepath.Glob(filepath.Join("..", "internal", "guestdocs", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(served) == 0 {
+		t.Fatal("no markdown pages found in internal/guestdocs")
+	}
+	for _, path := range served {
+		page := strings.TrimSuffix(filepath.Base(path), ".md")
+		if !strings.Contains(contents, "sparkbox docs "+page) && page != "docs" {
+			t.Errorf("internal/guestdocs serves %q but `sparkbox docs help` does not list it", page)
+		}
+		// Every served page must also be reachable, not merely advertised.
+		if !strings.Contains(cli, page+"|") && !strings.Contains(cli, "|"+page+")") &&
+			!strings.Contains(cli, "|"+page+"|") {
+			t.Errorf("internal/guestdocs serves %q but the guest CLI allowlist omits it", page)
 		}
 	}
 }
