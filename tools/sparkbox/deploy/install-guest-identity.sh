@@ -2349,10 +2349,8 @@ esac
 
 publish_status running ""
 
-# Line 3 is base64 in both modes, and in agent mode that is what keeps a
-# host-authored prompt from being shell code: it is decoded to a FILE and the
-# wrapper below reads that file, so no part of it is ever interpolated into a
-# command line.
+# Line 3 is base64 in both modes. It is decoded to a FILE and run as one, so no
+# part of a payload is ever interpolated into a command line.
 if ! base64 -d < "$WORK/b64" > "$WORK/payload" 2>/dev/null; then
   fail "the setup job for $ENV_NAME did not decode"
 fi
@@ -2360,73 +2358,22 @@ if [ ! -s "$WORK/payload" ]; then
   fail "the setup job for $ENV_NAME is empty"
 fi
 
-# In script mode the payload IS the script. In agent mode the payload is the
-# prompt, and the thing that runs is a wrapper this guest writes.
+# The payload is the script to run, in BOTH modes. In script mode it is the
+# owner's .sparkbox/setup.sh; in agent mode it is a shell script the GATEWAY
+# wrote, which invokes the agent with the prompt in a quoted heredoc.
 #
-# WHY A WRAPPER AND NOT A DIFFERENT COMMAND. Everything below — the drop to the
-# login user, the cd into the checkout, sourcing /etc/environment inside the
-# unprivileged child, the timeout, the readback of .sparkbox/setup.sh — is one
-# code path that has already been proven on real hardware. Reaching into it to
-# swap the command would fork all of it. Writing the agent invocation into the
-# same $SCRIPT_FILE the script mode uses forks none of it.
-if [ "$MODE" = agent ]; then
-  # Resolved to an absolute path HERE, before the drop, for the reason SHELL_BIN
-  # is: the child's first act is to source /etc/environment, which sets PATH, so
-  # a lookup made after that is a lookup the owner can influence.
-  CLAUDE_BIN=$(command -v claude 2>/dev/null || true)
-  [ -n "$CLAUDE_BIN" ] || CLAUDE_BIN=/usr/local/bin/claude
-  if [ ! -x "$CLAUDE_BIN" ]; then
-    fail "this sandbox has no agent to write a setup script with; run \`sparkbox update-tools\`"
-  fi
-  cp "$WORK/payload" "$WORK/prompt"
-  #
-  # --permission-mode bypassPermissions is REQUIRED, not a shortcut, and the
-  # reason is measured rather than assumed: under -p the `auto` mode this
-  # platform seeds into ~/.claude/settings.json is downgraded to `default`, so
-  # every Write and every Bash is DENIED — and the run still exits 0. An agent
-  # build without this flag does nothing, reports success, and gets an untouched
-  # base image captured as the environment's disk.
-  #
-  # refresh-agent-tools.sh deliberately declines to seed a bypass for every
-  # sandbox of every user, and that decision stands: this is one invocation, in
-  # one ephemeral builder the owner asked for by name with `env build`, whose
-  # egress is governed and which is destroyed if it overruns. The narrow call
-  # and the global one are not the same call.
-  #
-  # --no-session-persistence keeps the transcript — the prompt, every command
-  # and every command's output — OUT of ~/.claude/projects. This disk is about
-  # to become the environment's template and be copied byte-for-byte into every
-  # sandbox anybody forks from it; nothing in the capture path strips that
-  # directory, so not writing it is the only place this can be fixed.
-  # UNQUOTED heredoc, so $CLAUDE_BIN and $PROMPT_FILE are resolved NOW, by this
-  # root-owned worker, and never looked up by the child. The one dollar sign
-  # that must survive to runtime is escaped: \$(cat …) reads the prompt from a
-  # FILE, which is what keeps a backtick or a $( in host-authored text from
-  # being code in the shell that runs it.
-  #
-  # Both paths are interpolated rather than written literally because $R — the
-  # deploy tests' root override — moves $RUN_DIR, and a hardcoded
-  # /run/sparkbox/… would make the tests exercise a path the guest never uses.
-  PROMPT_FILE="$RUN_DIR/env-setup.prompt"
-  cp "$WORK/prompt" "$PROMPT_FILE.new" 2>/dev/null || \
-    fail "could not stage the agent prompt in $RUN_DIR"
-  # 0644 and not the log's 0600. The prompt is host-authored constant text with
-  # no secret in it, and it has to be readable by the account the run drops to —
-  # which is decided further down, after this. Making it world-readable here is
-  # simpler than threading an ownership decision backwards, and gives away
-  # nothing.
-  chmod 0644 "$PROMPT_FILE.new" 2>/dev/null || true
-  mv -f "$PROMPT_FILE.new" "$PROMPT_FILE" 2>/dev/null || \
-    fail "could not stage the agent prompt in $RUN_DIR"
-  cat > "$WORK/payload" <<AGENT_EOF
-#!/usr/bin/env bash
-set -uo pipefail
-exec "$CLAUDE_BIN" -p "\$(cat "$PROMPT_FILE")" \
-  --permission-mode bypassPermissions \
-  --output-format text \
-  --no-session-persistence
-AGENT_EOF
-fi
+# WHY THE GATEWAY WRITES IT AND NOT THIS WORKER. nodelink.SelfSetupResp gained
+# `mode` as an omitempty field, so a NODE running an older build drops it and
+# then renders the hardcoded `script` its own metadata service shipped with. If
+# the payload were a bare prompt, that guest would run paragraphs of English
+# through bash. A payload that is already a script makes the same version skew
+# merely degrade: the agent runs correctly, and only the artifact check at the
+# bottom of this file is missed.
+#
+# So everything below — the privilege drop, the workdir, sourcing
+# /etc/environment inside the unprivileged child, the timeout, the readback — is
+# ONE code path for both modes, and the mode only changes what counts as
+# success.
 cp "$WORK/payload" "$WORK/script"
 
 # Checkouts, and the setup script that runs in them, belong to whoever will edit

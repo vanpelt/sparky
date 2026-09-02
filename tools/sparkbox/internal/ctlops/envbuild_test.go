@@ -393,6 +393,122 @@ func TestAnEnvironmentWithNoScriptBuildsWithAnAgent(t *testing.T) {
 	}
 }
 
+// TestAnApiKeyIsAlsoAnAgentCredential.
+//
+// docs/onboarding-users.md documents ANTHROPIC_API_KEY in the same breath as
+// the OAuth token ("works too if you bill by API"), so a gate that knew only
+// one name would refuse an agent build for somebody who is perfectly well
+// authenticated — a FALSE refusal in a check whose entire justification is that
+// it saves people from a false failure.
+func TestAnApiKeyIsAlsoAnAgentCredential(t *testing.T) {
+	for _, name := range AgentCredentials {
+		t.Run(name, func(t *testing.T) {
+			b := newBuildRig(t)
+			b.env("alice", "web")
+			b.secret("alice", name)
+			if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
+				t.Fatalf("an agent build was refused with %s on `default`: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestAFailedBuildStillRecordsTheScriptTheRunWrote.
+//
+// The guest reports the .sparkbox/setup.sh the run ENDED with whether it
+// succeeded or not, and that file is the record of what happened rather than a
+// reward for succeeding. Losing it is silently expensive in agent mode: an
+// agent can write the script and still fail — its own timeout, a dev server
+// that would not start — and the failure message then tells the owner to finish
+// by hand with `env capture`. If the script were dropped, that capture would
+// bind the disk with NO script on the row, leaving the environment in agent
+// mode so every later build ran another agent to write a file already sitting
+// in the checkout.
+func TestAFailedBuildStillRecordsTheScriptTheRunWrote(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build", func(e *envs.Environment) {
+		e.SetupFrom, e.SetupScript = envs.SetupFromAgent, ""
+	})
+	box, _ := b.boxes.Get("web-build")
+
+	const written = "#!/usr/bin/env bash\nuv sync\n"
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{
+		OK: false, ExitCode: 5, Script: written, Log: "the dev server never came up\n",
+	}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+
+	row := b.envs.rows[envKey("alice", "web")]
+	if row.State != envs.StateFailed {
+		t.Errorf("state = %q, want failed", row.State)
+	}
+	if row.SetupScript != written {
+		t.Errorf("setup_sh = %q, want the script the failed run wrote — otherwise `env capture` binds a "+
+			"disk with no script and the environment stays in agent mode forever", row.SetupScript)
+	}
+	if row.SetupFrom != envs.SetupFromAgent {
+		t.Errorf("setup_from = %q, want agent", row.SetupFrom)
+	}
+}
+
+// TestAnAgentBuildRefusesWhenItsEgressPolicyCannotBeApplied.
+//
+// The security argument for running `claude -p --permission-mode
+// bypassPermissions` unattended is that it happens in a GOVERNED box. Egress
+// policy is otherwise pushed by a thirty-second sweep, so a sandbox created
+// between sweeps is absent from sluice's snapshot — and absent means
+// unrestricted. If the push fails, that argument does not hold, and starting
+// anyway would run the agent under a mitigation that is documented and absent.
+//
+// A script build only warns: the script is the owner's own and they have read
+// it, so failing a build they were going to get, over a window the sweep closes
+// thirty seconds later, is the worse trade.
+func TestAnAgentBuildRefusesWhenItsEgressPolicyCannotBeApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		script     string
+		from       string
+		wantRefuse bool
+	}{
+		{name: "agent mode refuses", from: envs.SetupFromAgent, wantRefuse: true},
+		{name: "script mode proceeds", script: setupScript, from: envs.SetupFromManual},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuildRig(t)
+			b.env("alice", "web", func(e *envs.Environment) {
+				e.SetupScript, e.SetupFrom = tc.script, tc.from
+			})
+			b.secret("alice", AgentCredential)
+			b.ops.netPusher = failingNetPusher{}
+
+			_, err := b.ops.BuildEnvironment(context.Background(), alice(), "web")
+			if tc.wantRefuse {
+				if err == nil {
+					t.Fatal("an agent build started in a box whose egress policy could not be applied")
+				}
+				if got := AsError("env.build", err).Code; got != "env_egress_unavailable" {
+					t.Errorf("code = %q, want env_egress_unavailable: %v", got, err)
+				}
+				if slices.Contains(b.starter.started, "web-build") {
+					t.Error("the agent was nudged anyway")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a script build was refused over an egress push: %v", err)
+			}
+			if !slices.Contains(b.starter.started, "web-build") {
+				t.Error("a script build was not started")
+			}
+		})
+	}
+}
+
+type failingNetPusher struct{}
+
+func (failingNetPusher) PushNet(context.Context) error { return errors.New("sluice is not answering") }
+
 // TestAnOverrunAgentBuildDestroysItsBuilder is the one place the two modes are
 // treated differently after they start, and the asymmetry is deliberate.
 //

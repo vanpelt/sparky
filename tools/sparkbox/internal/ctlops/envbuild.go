@@ -321,12 +321,76 @@ func (o *Ops) startBuild(ctx context.Context, c Caller, name, box, mode, script 
 		o.markFailed(c.Handle, name, "", "the builder sandbox could not be created: "+e.Msg)
 		return EnvironmentInfo{}, e
 	}
+	// THE POLICY GOES IN BEFORE THE GUEST IS TOLD TO START, and for agent mode
+	// that ordering is the mitigation rather than an optimisation.
+	//
+	// Egress policy is otherwise pushed by a thirty-second sweep, so a sandbox
+	// created between sweeps is absent from sluice's snapshot — and under
+	// `--enforce --open-untagged`, absent means UNRESTRICTED. Every other
+	// sandbox can wait: it was made by a person who is about to ssh into it.
+	// This one starts an unattended agent with the owner's decrypted
+	// credentials within seconds of booting, so waiting would mean the agent
+	// spends its first half-minute with exactly the open egress the default
+	// rule-set exists to deny it.
+	if err := o.pushBuilderEgress(ctx, c.Handle, name, box, mode); err != nil {
+		return EnvironmentInfo{}, err
+	}
 	if err := o.nudgeBuilder(ctx, c, name, box); err != nil {
 		return EnvironmentInfo{}, err
 	}
 	o.log.Info("environment build started", "user", c.Handle, "env", name, "sandbox", box,
 		"mode", mode, "script_bytes", len(script))
 	return o.environmentInfo(c.Handle, name)
+}
+
+// pushBuilderEgress puts this builder into the egress policy before its guest
+// is nudged. The two modes weigh a failure differently, and that is the whole
+// design of this function.
+//
+// SCRIPT mode: a warning. The script is the owner's own, they wrote it or they
+// read it in a pull request, and failing a build they were going to get over a
+// policy push that will be retried by the sweep thirty seconds later would
+// trade a real build for a brief window on code they already trust.
+//
+// AGENT mode: a REFUSAL, and the builder is failed. The security argument for
+// running `claude -p --permission-mode bypassPermissions` unattended is that it
+// happens in a governed box; if this host cannot confirm the box is governed,
+// that argument does not hold, and starting anyway would be running the agent
+// under a mitigation that is documented and absent. Refusing costs one build.
+//
+// A nil pusher is not a failure in either mode: it is a host with no egress
+// control at all, where nothing was ever governed and saying so on this one
+// verb would be arbitrary.
+func (o *Ops) pushBuilderEgress(ctx context.Context, owner, name, box, mode string) error {
+	const op = "env.build"
+	if o.netPusher == nil {
+		return nil
+	}
+	push, cancel := context.WithTimeout(context.WithoutCancel(ctx), PauseTimeout)
+	defer cancel()
+	err := o.netPusher.PushNet(push)
+	if err == nil {
+		return nil
+	}
+	if mode != SetupModeAgent {
+		o.log.Warn("could not push egress policy before starting a build; the periodic sweep will",
+			"user", owner, "env", name, "sandbox", box, "err", err)
+		return nil
+	}
+	o.log.Error("refusing to start an agent build whose builder could not be given an egress policy",
+		"user", owner, "env", name, "sandbox", box, "err", err)
+	o.failBuild(ctx, owner, name, box,
+		"the builder's egress policy could not be applied, and an agent is not run in a box whose egress is unknown")
+	return &Error{
+		Kind: KindUpstream, Op: op, Code: "env_egress_unavailable",
+		Msg: "the egress policy for " + box + " could not be applied, so the agent that would write " +
+			name + "'s setup script was not started.",
+		Hint: "This is usually the egress daemon being briefly unavailable — try again. To build without " +
+			"an agent, write " + SetupScriptPath + " in a repository attached to " + name + ".",
+		Details:  map[string]any{"environment": name, "sandbox": box},
+		Verbatim: true,
+		Err:      err,
+	}
 }
 
 // nudgeBuilder asks the builder's guest to fetch and run its job.
@@ -417,9 +481,19 @@ func (o *Ops) alreadyBuilding(op string, e envs.Environment) *Error {
 	}
 }
 
-// AgentCredential is the secret an agent build needs in its builder. It is the
-// same name the platform's own `secret set` tip uses, which is what makes the
-// refusal below repairable by copying one line.
+// AgentCredentials are the secrets that can sign an agent in, EITHER of which
+// is enough. The first is the name the platform's own `secret set` tip uses,
+// which is what makes the refusal below repairable by copying one line; the
+// second is the API-billing path docs/onboarding-users.md documents in the same
+// breath ("`ANTHROPIC_API_KEY` works too if you bill by API").
+//
+// Both, because checking only the first would refuse an agent build for
+// somebody who is perfectly well authenticated — a false refusal in a gate
+// whose entire justification is that it saves people from a false failure.
+var AgentCredentials = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
+
+// AgentCredential is the one the repair sentence names, because a token is what
+// most people have and `claude setup-token` is one command.
 const AgentCredential = "CLAUDE_CODE_OAUTH_TOKEN"
 
 // agentBuildable is every refusal the AGENT path can decide before anything
@@ -467,25 +541,34 @@ func (o *Ops) agentBuildable(op, owner, env string) error {
 	// with no --tag at all. Broader ("any tag") would pass a token tagged `ci`
 	// that is never going to arrive, and we would be back to discovering it
 	// from a 401 in a builder.
+	var outOfReach *secrets.SecretMeta
 	for _, m := range list {
-		if m.Name != AgentCredential {
+		if !slices.Contains(AgentCredentials, m.Name) {
 			continue
 		}
 		if slices.Contains(m.Tags, env) || slices.Contains(m.Tags, secrets.DefaultTag) {
 			return nil
 		}
+		// Remembered, not returned: another credential later in the list may
+		// still be in reach, and refusing on the first out-of-reach one would
+		// refuse a build that was going to work.
+		if outOfReach == nil {
+			outOfReach = &m
+		}
+	}
+	if outOfReach != nil {
 		// The credential exists but is tagged out of reach. That is a different
 		// problem from not having one, and the repair is a retag rather than a
 		// login, so it gets its own sentence.
 		return &Error{
 			Kind: KindConflict, Op: op, Code: "env_no_agent_credential",
 			Msg: "environment " + env + " has no setup script, so building it means having an agent write one — " +
-				"and your " + AgentCredential + " is tagged " + strings.Join(m.Tags, ", ") +
+				"and your " + outOfReach.Name + " is tagged " + strings.Join(outOfReach.Tags, ", ") +
 				", which no builder for " + env + " will carry.",
 			Hint: "Re-save it so it reaches this environment: `claude setup-token | ssh ctl@<gateway> secret set " +
-				AgentCredential + " --tag " + env + "`. Or write " + SetupScriptPath +
+				outOfReach.Name + " --tag " + env + "`. Or write " + SetupScriptPath +
 				" yourself and skip the agent entirely.",
-			Details:  map[string]any{"environment": env, "secret": AgentCredential, "tags": m.Tags},
+			Details:  map[string]any{"environment": env, "secret": outOfReach.Name, "tags": outOfReach.Tags},
 			Verbatim: true,
 		}
 	}
@@ -703,7 +786,7 @@ func (o *Ops) SetupFor(ctx context.Context, b *host.Sandbox) (SetupJob, bool, er
 	// build from an abandoned script build minutes later, with the builder gone
 	// and only the row to go on.
 	if e.SetupFrom == envs.SetupFromAgent && strings.TrimSpace(e.SetupScript) == "" {
-		return SetupJob{Env: e.Name, Mode: SetupModeAgent, Payload: agentPrompt(e.Name)}, true, nil
+		return SetupJob{Env: e.Name, Mode: SetupModeAgent, Payload: AgentRunner(e.Name)}, true, nil
 	}
 
 	if strings.TrimSpace(e.SetupScript) == "" {
@@ -738,6 +821,73 @@ func (o *Ops) SetupFor(ctx context.Context, b *host.Sandbox) (SetupJob, bool, er
 // this environment is an ordinary script build. An agent that configures a
 // perfect box and writes nothing down has produced a disk nobody can reproduce
 // — which is the state this whole feature exists to get out of.
+// AgentRunner wraps the prompt in the shell that runs the agent with it, and
+// the gateway does this rather than the guest for ONE reason that is worth the
+// paragraph: a mixed-version fleet.
+//
+// nodelink.SelfSetupResp gained `mode` as an omitempty field, so a node running
+// an older build unmarshals a job and DROPS it — and that node's own metadata
+// service then renders the hardcoded line 2 it shipped with, `script`. If the
+// payload were a bare prompt, that guest would run several paragraphs of
+// English through bash, backticks and all. Shipping a shell script as the
+// payload makes the same skew merely DEGRADE: the old guest runs the agent
+// correctly and only misses the artifact check below, which is a build that
+// might over-report success rather than a build that executes prose.
+//
+// It is also less code. The guest's agent branch is now the mode case and the
+// artifact check; there is no prompt file to stage, chmod, and reason about
+// against the privilege drop.
+//
+// The prompt travels inside a QUOTED heredoc, so the shell expands none of it —
+// no $(...), no backtick, no $VAR — and the only value interpolated into the
+// script proper is the environment name, which the store has already
+// constrained to [a-z0-9-]. The terminator is checked rather than assumed.
+// EXPORTED so deploy's tests can run the real thing inside the real guest
+// worker. That crossing is the point: this string is written by the gateway and
+// executed by a guest, the two live in different packages, and both bugs review
+// caught in the previous phase were at exactly this kind of seam. A test that
+// asserts on a copy of the script would not have caught either.
+func AgentRunner(env string) string {
+	prompt := agentPrompt(env)
+	if strings.Contains(prompt, agentPromptEOF) {
+		// Unreachable with a host-authored constant, and asserted anyway: the
+		// day somebody makes the prompt configurable, this is what stops a
+		// terminator in it from ending the heredoc early and running the rest.
+		prompt = strings.ReplaceAll(prompt, agentPromptEOF, "(redacted)")
+	}
+	return `#!/usr/bin/env bash
+# Written by the sparkbox gateway for an environment build. It runs an agent
+# against this platform's dev-environment guidance and expects it to leave
+# ` + SetupScriptPath + ` behind; that file, not this box, is the deliverable.
+set -uo pipefail
+
+# Resolved here rather than left to PATH: /etc/environment has been sourced by
+# now, so PATH is whatever the owner's variables made it.
+claude_bin=$(command -v claude 2>/dev/null || true)
+[ -n "$claude_bin" ] || claude_bin=/usr/local/bin/claude
+if [ ! -x "$claude_bin" ]; then
+  echo "sparkbox: this sandbox has no agent to write a setup script with; run \` + "`" + `sparkbox update-tools\` + "`" + `" >&2
+  exit 127
+fi
+
+# --permission-mode bypassPermissions is required, not preferred: under -p the
+# ` + "`auto`" + ` mode this platform seeds is downgraded to ` + "`default`" + `, every Write and
+# Bash is denied, and the run still exits 0.
+#
+# --no-session-persistence keeps the transcript out of ~/.claude/projects. This
+# disk becomes the environment's template and is copied into every fork of it,
+# and nothing in the capture path strips that directory.
+exec "$claude_bin" -p "$(cat <<'` + agentPromptEOF + `'
+` + prompt + `
+` + agentPromptEOF + `
+)"   --permission-mode bypassPermissions   --output-format text   --no-session-persistence
+`
+}
+
+// agentPromptEOF is the heredoc terminator carrying the prompt. Distinctive on
+// purpose: it has to be a string no prompt would contain by accident.
+const agentPromptEOF = "SPARKBOX_AGENT_PROMPT_EOF"
+
 func agentPrompt(env string) string {
 	return `You are configuring a fresh Sparkbox microVM so this project runs in it.
 Nobody is watching and nobody can answer a question, so do not ask any.
@@ -819,6 +969,20 @@ func (o *Ops) SetupDone(ctx context.Context, b *host.Sandbox, r SetupReport) err
 func (o *Ops) completeBuild(ctx context.Context, e envs.Environment, box string, r SetupReport, summary string) {
 	owner, name := e.Owner, e.Name
 
+	// RECORDED BEFORE THE OUTCOME IS DECIDED, and that ordering is the whole of
+	// this paragraph. The guest reports the .sparkbox/setup.sh the run ENDED
+	// with whether the run succeeded or not, and that file is the record of
+	// what happened rather than a reward for succeeding.
+	//
+	// It matters most in agent mode, where losing it is silently expensive: an
+	// agent can write the script and still fail — its own timeout, a failed
+	// `curl`, a dev server that would not start — and the row's message then
+	// tells the owner to finish by hand with `env capture`. Before this, that
+	// capture bound the disk while the row still had NO script, so the
+	// environment stayed in agent mode and every later build ran another agent
+	// to write a file that was already sitting in the checkout.
+	o.recordReportedScript(e, r)
+
 	if !r.OK {
 		// THE BUILDER IS KEPT, AND PAUSED. It holds the half-built filesystem,
 		// the log, and the checkout the script failed in — which is everything
@@ -832,11 +996,6 @@ func (o *Ops) completeBuild(ctx context.Context, e envs.Environment, box string,
 		o.failBuild(ctx, owner, name, box, reason)
 		return
 	}
-
-	// The script the run ENDED with, which is the record of what actually
-	// happened rather than what was planned: an agent, or a person editing in
-	// the builder, may have changed it. Empty means unchanged.
-	o.recordReportedScript(e, r)
 
 	if err := o.captureBuild(ctx, owner, name, box); err != nil {
 		o.failBuild(ctx, owner, name, box,
@@ -1084,16 +1243,21 @@ func (o *Ops) expireBuild(ctx context.Context, e envs.Environment, cutoff time.D
 	reason = "the agent writing its setup script ran longer than " + cutoff.String() +
 		" without reporting a result, so the builder was destroyed rather than left running unattended"
 	if o.boxes == nil {
-		o.markFailed(e.Owner, e.Name, e.BuildBox, reason)
+		o.markFailedBox(e.Owner, e.Name, e.BuildBox, reason, false)
 		return
 	}
-	kill, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.buildTimeout())
+	// PauseTimeout and NOT the build budget. ReconcileEnvironmentBuilds walks
+	// every owner's building rows on ONE goroutine on a ten-minute ticker, so a
+	// destroy that blocks blocks the whole sweep — and with the build budget
+	// (45 minutes by default) a single unreachable node would stall every other
+	// owner's reconciliation for longer than the interval between sweeps. Every
+	// other Destroy in this package is bounded the same way.
+	kill, cancel := context.WithTimeout(context.WithoutCancel(ctx), PauseTimeout)
 	defer cancel()
 	if err := o.boxes.Destroy(kill, e.BuildBox); err != nil {
 		o.log.Error("could not destroy an overrun agent builder",
 			"user", e.Owner, "env", e.Name, "sandbox", e.BuildBox, "err", err)
-		o.markFailed(e.Owner, e.Name, e.BuildBox,
-			reason+" — and it could not be destroyed, so remove it with `rm "+e.BuildBox+"`")
+		o.markFailedBox(e.Owner, e.Name, e.BuildBox, reason+" — and it could not be stopped", false)
 		return
 	}
 	o.log.Info("destroyed an overrun agent builder",
@@ -1186,10 +1350,27 @@ func (o *Ops) failBuild(ctx context.Context, owner, name, box, reason string) {
 // (see resolveEnvTag). A failure a person cannot locate is a failure they
 // cannot fix.
 func (o *Ops) markFailed(owner, name, box, reason string) {
+	o.markFailedBox(owner, name, box, reason, true)
+}
+
+// markFailedBox is markFailed with the one thing the sentence assumes made
+// explicit: whether that builder is actually PAUSED and finishable.
+//
+// It exists because expireBuild has a case where it is not. An agent builder
+// that overran and could not be destroyed is still there, was never paused, and
+// offering `env capture` on it would offer to snapshot a VM with an agent
+// possibly still writing to its filesystem. The name has to stay on the row —
+// dropping it would tell somebody nothing is left when something is — so the
+// name is kept and the sentence changes.
+func (o *Ops) markFailedBox(owner, name, box, reason string, paused bool) {
 	msg := reason
-	if box != "" {
+	switch {
+	case box != "" && paused:
 		msg += ". The builder " + box + " is paused — `" + o.sshHint(box) +
 			"` to look, then `env capture " + name + "` to finish it, or `rm " + box + "` to start over"
+	case box != "":
+		msg += ". The builder " + box + " could not be stopped and may still be running — remove it with `rm " +
+			box + "`"
 	}
 	if err := o.envs.SetState(owner, name, envs.StateFailed, box, msg); err != nil {
 		o.log.Error("could not record an environment build failure",

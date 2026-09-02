@@ -348,9 +348,88 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 		if !slices.Contains(got.Tags, "web") {
 			t.Errorf("the default rule-set does not carry the environment's tag: %+v", got)
 		}
-		if len(got.Spec.Allow) != 0 {
-			t.Errorf("the default rule-set wrote patterns nobody asked for: %v — it is meant to be "+
-				"empty, which means the operator's base allowlist and nothing more", got.Spec.Allow)
+		// The distribution archives, and only those. The base allowlist every
+		// governed sandbox already gets carries the LANGUAGE registries (pypi,
+		// npm, crates, the Go proxy) but no apt repository — so without these
+		// the very first thing the agent prompt tells an agent to do,
+		// `sudo apt-get -y`, could not resolve, and the default would defeat
+		// the feature it is meant to protect.
+		for _, want := range []string{"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"} {
+			if !slices.Contains(got.Spec.Allow, want) {
+				t.Errorf("the default rule-set does not allow %q: %v", want, got.Spec.Allow)
+			}
+		}
+	})
+
+	t.Run("it does not overwrite a rule-set that already has that name", func(t *testing.T) {
+		// Rule-set names and tag names are separate namespaces, so somebody can
+		// perfectly well have a `web` rule-set governing their `prod` boxes and
+		// then make an environment called `web`. PutRule is an upsert keyed on
+		// (owner, name), so writing the default would REPLACE it: the allow
+		// list gone and the tags re-pointed, which silently un-governs every
+		// sandbox it was protecting.
+		r := newRig(t)
+		withEnvs(r)
+		if err := r.netrules.PutRule("alice", "web",
+			netrules.RuleSpec{Allow: []string{"internal.corp"}}, []string{"prod"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.PutEnvironment(context.Background(), alice(),
+			EnvArgs{Name: "web"}); err != nil {
+			t.Fatalf("env create: %v", err)
+		}
+		got := r.netrules.rows["alice\x00web"]
+		if !slices.Contains(got.Spec.Allow, "internal.corp") {
+			t.Errorf("creating an environment destroyed a same-named rule-set's allow list: %+v", got)
+		}
+		if !slices.Contains(got.Tags, "prod") {
+			t.Errorf("creating an environment re-pointed a same-named rule-set's tags, un-governing "+
+				"the sandboxes it protected: %+v", got)
+		}
+	})
+
+	t.Run("sandboxes already carrying the tag keep their open egress", func(t *testing.T) {
+		// Tags are free-form and independent of environments: `ctl create
+		// scratch --tag web` writes sandbox_tags with no environment of that
+		// name anywhere. So somebody can have been running boxes tagged `web`
+		// with unrestricted egress for months, and `env create web` must not
+		// cut all of them down to an allowlist they never chose. That is a live
+		// narrowing dressed as a default, and it is the exact failure
+		// resolveEnvRules' comment warns about.
+		r := newRig(t)
+		withEnvs(r)
+		if _, err := r.ops.Create(context.Background(), alice(), CreateArgs{
+			Name: "scratch", Tags: []string{"web"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.PutEnvironment(context.Background(), alice(),
+			EnvArgs{Name: "web"}); err != nil {
+			t.Fatalf("env create: %v", err)
+		}
+		if _, made := r.netrules.rows["alice\x00web"]; made {
+			t.Error("creating an environment narrowed the egress of sandboxes that already carried its tag")
+		}
+	})
+
+	t.Run("a later env set does not re-create one the owner deleted", func(t *testing.T) {
+		// Deleting the default rule-set is how somebody deliberately opens an
+		// existing environment's egress. If `env set` put it back, that choice
+		// would be undone by an unrelated `--var` change — and the sandboxes
+		// would silently narrow under them.
+		r := newRig(t)
+		withEnvs(r)
+		ctx := context.Background()
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		delete(r.netrules.rows, "alice\x00web")
+		if _, err := r.ops.PutEnvironment(ctx, alice(),
+			EnvArgs{Name: "web", Vars: []EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, back := r.netrules.rows["alice\x00web"]; back {
+			t.Error("`env set` re-created the default egress rule-set the owner had deleted")
 		}
 	})
 

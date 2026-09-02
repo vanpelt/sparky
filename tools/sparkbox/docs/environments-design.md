@@ -880,11 +880,24 @@ Three properties of the default worth stating, because each is a decision:
   reach the internet. That warning is right *about an environment that already
   exists*. At the moment one is born there is nothing to narrow, so this is a
   default rather than a change. `create` and `set` are one verb, so the code
-  checks for any rule-set already governing the tag and does nothing if it finds
-  one — otherwise the second `env set` would revert the owner's own widening.
+  takes a create/update discriminator BEFORE its first write — the store's Put
+  is an upsert, so after it there is no way to tell — otherwise deleting the
+  rule-set to open an environment's egress would be silently undone by the next
+  unrelated `env set --var`.
 - **Overridable, in both directions.** Widen it in the console's Network panel
   like any other rule-set; or pass `--open-egress` on create to have no rules at
   all and be unfiltered, which is what every environment was before this.
+
+**And the policy is pushed before the guest is nudged.** Egress policy is
+otherwise pushed by a thirty-second sweep, so a sandbox created between sweeps
+is absent from sluice's snapshot — and absent means unrestricted. Every other
+sandbox can wait; a builder cannot, because it starts an unattended agent within
+seconds of booting, and waiting would mean the agent spends its first half
+minute with exactly the open egress this rule-set exists to deny it.
+`ctlops.NetPusher` exists for that one caller. A failed push WARNS in script
+mode and REFUSES in agent mode: the argument for `bypassPermissions` is that it
+happens in a governed box, so a host that cannot confirm the box is governed
+must not start the agent.
 - **Best effort, never fatal.** The environment and everything the caller asked
   for are already written when this runs. Failing the whole verb over a default
   would report failure for a command that mostly succeeded.

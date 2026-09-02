@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/publicports"
 )
@@ -265,7 +266,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 func TestIdentityRevMovesWithThePayload(t *testing.T) {
 	const (
 		wantRev        = 26
-		wantPayloadSum = "a92b5ca557b0d7e7d06360dd458413f08dc3c2e52b0edd4cd7711c6480c34059"
+		wantPayloadSum = "1db4e6667ff5b25dee0dea610e673ef9af4235e701efd7cb4e44226a61447a69"
 	)
 	src, err := os.ReadFile("install-guest-identity.sh")
 	if err != nil {
@@ -2611,8 +2612,14 @@ func newEnvWorld(t *testing.T) *envWorld {
 	// owner's environment as internal/envsync's PushEnv leaves it: KEY="value"
 	// lines, PATH included.
 	w.write(filepath.Join(root, "run/sparkbox/repos.dir"), w.work+"\n")
+	// The stub directory is on the PATH that /etc/environment sets, because in a
+	// real guest the agent binary lives at /usr/local/bin/claude and that IS on
+	// this PATH. The distinction matters: the worker sources /etc/environment
+	// INSIDE the unprivileged child, so this PATH — not the one the test process
+	// exports — is what a setup script or the gateway's agent runner resolves
+	// against.
 	w.write(filepath.Join(root, "etc/environment"),
-		"PATH=\"/usr/bin:/bin:/usr/local/bin\"\nSETUP_SECRET=\"s3cr3t\"\n")
+		"PATH=\""+w.stub+":/usr/bin:/bin:/usr/local/bin\"\nSETUP_SECRET=\"s3cr3t\"\n")
 	installGuestPayload(t, root)
 
 	writeExecutable(t, filepath.Join(w.stub, "ip"), `#!/bin/sh
@@ -2912,53 +2919,48 @@ func TestEnvSetupAlwaysReportsSomething(t *testing.T) {
 //
 // The deliverable of an agent build is the setup script, so the artifact is the
 // only honest signal, and these cases pin it from both sides.
+//
+// The payload here is a stand-in rather than the real runner; the case below
+// runs the real one.
 func TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus(t *testing.T) {
+	const writesIt = "mkdir -p .sparkbox\nprintf '%s' \"$AGENT_WROTE\" > .sparkbox/setup.sh\n"
 	for _, tc := range []struct {
-		name        string
-		exit        string
-		writes      string // the .sparkbox/setup.sh the agent leaves, "" for none
-		wantState   string
-		wantScript  string
-		wantInLog   string
-		wantReports string
+		name       string
+		payload    string
+		wantState  string
+		wantScript string
+		wantInLog  string
 	}{
 		{
 			name:      "an agent that writes the script succeeds",
-			exit:      "0",
-			writes:    "#!/usr/bin/env bash\nnpm ci\n",
+			payload:   "echo working\n" + writesIt + "exit 0\n",
 			wantState: "ok", wantScript: "#!/usr/bin/env bash\nnpm ci\n",
-			wantInLog: "agent ran in",
+			wantInLog: "working",
 		},
 		{
-			name: "an agent that exits 0 having written nothing FAILS",
-			exit: "0", writes: "",
-			wantState: "failed",
-			wantInLog: "without writing",
+			name:      "an agent that exits 0 having written nothing FAILS",
+			payload:   "echo I am terribly sorry, I was not permitted to do that\nexit 0\n",
+			wantState: "failed", wantInLog: "without writing",
 		},
 		{
-			name: "an agent that fails is reported with its own status",
-			exit: "3", writes: "",
-			wantState: "failed",
-			wantInLog: "agent ran in",
+			name:      "an agent that fails is reported with its own status",
+			payload:   "echo could not authenticate\nexit 3\n",
+			wantState: "failed", wantInLog: "could not authenticate",
 		},
 		{
 			// The script an agent wrote is reported even when the run failed,
 			// for the same reason script mode reports one: it is the record of
 			// what happened, and a person finishing the build by hand starts
 			// from what the agent got as far as.
-			name: "a failed agent's partial script is still reported",
-			exit: "5", writes: "# half of it\n",
-			wantState: "failed", wantScript: "# half of it\n",
+			name:      "a failed agent's partial script is still reported",
+			payload:   writesIt + "exit 5\n",
+			wantState: "failed", wantScript: "#!/usr/bin/env bash\nnpm ci\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newEnvWorld(t)
-			w.write(filepath.Join(w.fix, "claude-exit"), tc.exit)
-			if tc.writes != "" {
-				w.write(filepath.Join(w.fix, "claude-writes"), tc.writes)
-			}
-			// In agent mode line 3 is the PROMPT, not a script.
-			w.job("webapp", "agent", "write a setup script for this project")
+			w.extra = append(w.extra, "AGENT_WROTE=#!/usr/bin/env bash\nnpm ci\n")
+			w.job("webapp", "agent", tc.payload)
 			if _, _, code := w.run(); code != 0 {
 				t.Errorf("exit = %d, want 0 — the worker reports and exits 0 either way", code)
 			}
@@ -2966,7 +2968,6 @@ func TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus(t *testing.T) {
 			if state != tc.wantState {
 				t.Errorf("state = %q, want %q (log %q)", state, tc.wantState, log)
 			}
-			// Line 3 of the report is base64, in both modes.
 			var decoded string
 			if script != "" {
 				raw, err := base64.StdEncoding.DecodeString(script)
@@ -2985,33 +2986,46 @@ func TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus(t *testing.T) {
 	}
 }
 
-// TestEnvSetupAgentModeInvokesClaudeSafely pins the three things about the
-// invocation that are load-bearing rather than stylistic.
-func TestEnvSetupAgentModeInvokesClaudeSafely(t *testing.T) {
+// TestTheRealAgentRunnerWorksInTheRealGuestWorker runs the exact string the
+// gateway ships — ctlops.AgentRunner — inside the exact worker a guest runs,
+// against a stub `claude`.
+//
+// It crosses a package boundary on purpose. The gateway writes this script and
+// a guest executes it, they live in different packages with no compiler
+// relationship, and BOTH bugs review caught in the previous phase were at
+// exactly this kind of seam. A test that asserted on a hand-written copy of the
+// script would agree with itself forever.
+func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 	w := newEnvWorld(t)
 	w.write(filepath.Join(w.fix, "claude-exit"), "0")
-	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\ntrue\n")
-	// A prompt carrying shell metacharacters. If any of this is ever
-	// interpolated into a command line instead of read from a file, the
-	// substitution runs and the assertion below catches it.
-	const prompt = "write $(touch /tmp/pwned) a `whoami` setup script"
-	w.job("webapp", "agent", prompt)
+	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\nnpm ci\n")
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
 	if _, _, code := w.run(); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
+	state, _, _, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the gateway's own runner did not complete: %s", state, log)
+	}
+
 	args, err := os.ReadFile(filepath.Join(w.fix, "claude-args"))
 	if err != nil {
 		t.Fatalf("the agent was never invoked: %v", err)
 	}
 	got := string(args)
-	// One argv element, verbatim, un-expanded: the prompt reached the agent as
-	// text and not as commands.
-	if !strings.Contains(got, prompt) {
-		t.Errorf("the prompt did not reach the agent as one verbatim argument:\n%s", got)
+	// One argv element carrying the whole prompt, un-expanded. The prompt rides
+	// a QUOTED heredoc, so if that ever became unquoted the $(...) and backticks
+	// a future prompt might contain would run instead of travelling as text.
+	if !strings.Contains(got, "sparkbox docs dev-environment") {
+		t.Errorf("the prompt did not reach the agent as one argument:\n%s", got)
+	}
+	if !strings.Contains(got, ".sparkbox/setup.sh") {
+		t.Errorf("the prompt never names the deliverable:\n%s", got)
 	}
 	// bypassPermissions is REQUIRED, not preference. Under -p the `auto` mode
-	// this platform seeds is downgraded to `default` and every Write and Bash
-	// is denied, while the run still exits 0 — an agent build without this flag
+	// this platform seeds is downgraded to `default` and every Write and Bash is
+	// denied, while the run still exits 0 — an agent build without this flag
 	// does nothing and reports success.
 	if !strings.Contains(got, "--permission-mode\nbypassPermissions\n") {
 		t.Errorf("the agent was not run with --permission-mode bypassPermissions:\n%s", got)
@@ -3020,7 +3034,35 @@ func TestEnvSetupAgentModeInvokesClaudeSafely(t *testing.T) {
 	// every fork of it. Nothing in the capture path strips ~/.claude/projects,
 	// so not writing the transcript is the only place this can be prevented.
 	if !strings.Contains(got, "--no-session-persistence") {
-		t.Errorf("the agent was run with session persistence, which bakes the transcript into the template:\n%s", got)
+		t.Errorf("the agent ran with session persistence, which bakes the transcript into the template:\n%s", got)
+	}
+}
+
+// TestTheRealAgentRunnerDegradesOnAnOldNodeInsteadOfRunningProse.
+//
+// nodelink.SelfSetupResp gained `mode` as an omitempty field, so a node running
+// an older build DROPS it and then renders the hardcoded `script` its own
+// metadata service shipped with. That skew is the normal state during a fleet
+// rollout, and it is why the gateway ships a shell script rather than a bare
+// prompt: run as `script`, the payload still invokes the agent correctly and
+// only the artifact check is missed. A bare prompt would have been paragraphs
+// of English executed by bash, backticks and all.
+func TestTheRealAgentRunnerDegradesOnAnOldNodeInsteadOfRunningProse(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\nnpm ci\n")
+	// mode `script`, which is what an old node's metadata service renders.
+	w.job("webapp", "script", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, _, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the agent did not run under the old node's mode: %s", state, log)
+	}
+	if _, err := os.ReadFile(filepath.Join(w.fix, "claude-args")); err != nil {
+		t.Fatalf("the agent was never invoked under mode=script: %v", err)
 	}
 }
 

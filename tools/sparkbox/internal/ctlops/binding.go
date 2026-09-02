@@ -211,13 +211,26 @@ func (o *Ops) resolveTemplate(op, owner string, tags []string) (resolvedTemplate
 	// The store read only happens on this failure path, never on the hot create
 	// path, and a nil store or a miss falls back to the sentence below.
 	if o.envs != nil {
-		if _, err := o.envs.Get(owner, want.Tag); err == nil {
+		if e, err := o.envs.Get(owner, want.Tag); err == nil {
+			// The second clause is not decoration. An environment can be
+			// `ready` with NO script — somebody bound a snapshot to the tag by
+			// hand, or finished a build with `env capture` — and telling that
+			// person "the setup script is still on the environment, so nothing
+			// is lost but the time" would promise them a rebuild that
+			// reproduces their disk when nothing on the row can reproduce it.
+			// `env rebuild` is still the right verb; what it costs is not.
+			hint := fmt.Sprintf("Build its disk again with `env rebuild %s` — the setup script is still "+
+				"on the environment, so nothing is lost but the time.", want.Tag)
+			if strings.TrimSpace(e.SetupScript) == "" {
+				hint = fmt.Sprintf("This environment has no setup script stored, so a rebuild starts from "+
+					"whatever its repositories and `env script %s --set` provide — check `env show %s` "+
+					"before running `env rebuild %s`.", want.Tag, want.Tag, want.Tag)
+			}
 			return resolvedTemplate{}, &Error{
 				Kind: KindConflict, Op: op, Code: "template_missing",
 				Msg: fmt.Sprintf("environment %q boots from snapshot %q, which no longer exists.",
 					want.Tag, want.Snapshot),
-				Hint: fmt.Sprintf("Build its disk again with `env rebuild %s` — the setup script is still "+
-					"on the environment, so nothing is lost but the time.", want.Tag),
+				Hint: hint,
 				Details: map[string]any{
 					"template_tag": want.Tag, "template_snapshot": want.Snapshot, "environment": want.Tag,
 				},

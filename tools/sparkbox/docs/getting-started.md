@@ -242,9 +242,16 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   outcome with `env show web` rather than by waiting. A build that fails leaves
   its builder **paused** with the half-built disk in it, so you can `ssh
   web-build@<host>`, fix what was missing, and keep exactly that disk with `env
-  capture web`. `--env-build-timeout` (default 45m) bounds how long a build may
-  sit unfinished before a sweep gives up on it — the builder is still left
-  paused. See [environments-design.md](environments-design.md).
+  capture web`. With NO script anywhere it runs an agent in the builder instead —
+  `claude -p` against `sparkbox docs dev-environment` — and keeps the
+  `.sparkbox/setup.sh` it writes, so the next build of the same environment is
+  an ordinary script build; that needs a `CLAUDE_CODE_OAUTH_TOKEN` the builder
+  will carry. A new environment also gets an egress rule-set named after it, so
+  its sandboxes reach the package registries, github and the model API and not
+  the rest of the internet (`--open-egress` on create opts out).
+  `--env-build-timeout` (default 45m) bounds how long a build may sit unfinished
+  before a sweep gives up on it — a script build's builder is left paused, an
+  agent build's is destroyed. See [environments-design.md](environments-design.md).
 - **Agent CLI drift.** A template is frozen at the tool versions of the day it
   was captured, so `snapshot create` refreshes them first and a long-lived
   sandbox catches up on demand with `sparkbox update-tools` (`--check` to look

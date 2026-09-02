@@ -191,6 +191,22 @@ type Environments interface {
 	Building() ([]envs.Environment, error)
 }
 
+// NetPusher hands every machine in the fleet its own sandboxes' egress policy.
+// *fleet.Fleet satisfies it, and so does *netpush.Syncer on a single box.
+//
+// It exists on Ops for ONE caller: an environment build, which needs the
+// builder's policy in place before its guest is told to start. Everything else
+// is content to wait for the thirty-second sweep, because everything else is a
+// person who created a sandbox and is about to ssh into it. A builder is not —
+// it runs an unattended agent within seconds of being created, and "governed
+// egress" is the mitigation the whole agent path rests on.
+//
+// Nil is a host with no egress control, where a build proceeds as it always
+// has.
+type NetPusher interface {
+	PushNet(ctx context.Context) error
+}
+
 // SetupStarter nudges a BUILDER's guest into fetching and running the setup
 // script its gateway is holding for it. *envsync.Syncer satisfies it.
 //
@@ -413,6 +429,9 @@ type Config struct {
 	// makes `env build` refuse — never silently create a builder that will sit
 	// there doing nothing until the reconciler times it out.
 	SetupStarter SetupStarter
+	// NetPusher pushes egress policy. nil leaves an environment build relying
+	// on the periodic sweep, which is what happens on a host with no sluice.
+	NetPusher NetPusher
 	// EnvBuildTimeout is how long an environment build may stay in `building`
 	// before the reconciler fails it. 0 takes DefaultEnvBuildTimeout.
 	EnvBuildTimeout time.Duration
@@ -467,6 +486,7 @@ type Ops struct {
 	netrules     NetRules
 	repoFiles    RepoFileReader
 	setupStarter SetupStarter
+	netPusher    NetPusher
 	checkpoints  Checkpoints
 	schedules    Schedules
 	routes       Routes
@@ -535,6 +555,7 @@ func New(cfg Config) *Ops {
 		netrules:           cfg.NetRules,
 		repoFiles:          cfg.RepoFiles,
 		setupStarter:       cfg.SetupStarter,
+		netPusher:          cfg.NetPusher,
 		envBuildTimeout:    cfg.EnvBuildTimeout,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,

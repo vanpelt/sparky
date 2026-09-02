@@ -270,6 +270,17 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 		}
 	}
 
+	// Whether this call CREATES the environment, decided before anything is
+	// written, because after `Put` there is no way to tell: the store's Put is
+	// an upsert and `create`, `set` and `add` are one verb on one handler.
+	//
+	// Only the default egress rule-set reads it, and it is the difference
+	// between a default and a change. Without it, somebody who deliberately
+	// removed that rule-set to open their environment's egress would have it
+	// silently put back by their next `env set web --var LOG_LEVEL=debug`.
+	_, getErr := o.envs.Get(c.Handle, name)
+	creating := getErr != nil && errors.Is(getErr, envs.ErrNoSuchEnvironment)
+
 	// ---- writes ----
 
 	if _, err := o.envs.Put(c.Handle, name, a.Description); err != nil {
@@ -297,7 +308,7 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 			return EnvironmentInfo{}, verbatim(Invalid(op, "bad_var", "%v", err))
 		}
 	}
-	defaultedEgress := o.defaultEnvEgress(op, c.Handle, name, a, len(wantRules) > 0)
+	defaultedEgress := o.defaultEnvEgress(c.Handle, name, a, creating, len(wantRules) > 0)
 
 	// Everything above changed what a sandbox carrying this tag should see, so
 	// the running ones are re-pushed rather than left to discover it at their
@@ -906,8 +917,8 @@ func (o *Ops) resolveEnvSecrets(op, owner string, names []string) ([]secrets.Sec
 // because a default could not be added would report failure for a command that
 // mostly succeeded, so a failure here is logged and the environment is open —
 // which is exactly the state every environment was in before this existed.
-func (o *Ops) defaultEnvEgress(op, owner, name string, a EnvArgs, attachedRules bool) bool {
-	if o.netrules == nil || a.OpenEgress || attachedRules {
+func (o *Ops) defaultEnvEgress(owner, name string, a EnvArgs, creating, attachedRules bool) bool {
+	if o.netrules == nil || a.OpenEgress || attachedRules || !creating {
 		return false
 	}
 	list, err := o.netrules.ListRules(owner)
@@ -916,23 +927,78 @@ func (o *Ops) defaultEnvEgress(op, owner, name string, a EnvArgs, attachedRules 
 			"user", owner, "env", name, "err", err)
 		return false
 	}
-	// Anything already governing this tag — including a rule-set from an
-	// earlier `env create` of the same name — means the owner has a policy and
-	// this must not add a second one. `create` and `set` are one verb, so this
-	// runs again on every `env set`, and it has to be a no-op every time after
-	// the first.
+	// SANDBOXES CAN CARRY THE TAG BEFORE THE ENVIRONMENT EXISTS, which is the
+	// case that breaks the "there is nothing yet to narrow" argument this
+	// default rests on. Tags are free-form: `ctl create scratch --tag web` and
+	// `ctl tag` write sandbox_tags with no environment of that name anywhere.
+	// So somebody can have been running boxes tagged `web` with unrestricted
+	// egress for months, and then `env create web` would cut all of them down
+	// to an allowlist they never chose — a live narrowing dressed as a default,
+	// which is exactly what resolveEnvRules' comment warns against.
+	//
+	// When that is the situation, the environment is created OPEN and the
+	// owner can choose the policy deliberately. Better a default that
+	// occasionally does not apply than one that occasionally cuts somebody's
+	// running boxes off from the internet.
+	if boxes := o.sandboxesWithTag(owner, name); len(boxes) > 0 {
+		o.log.Info("not defaulting an environment's egress: sandboxes already carry that tag",
+			"user", owner, "env", name, "sandboxes", len(boxes))
+		return false
+	}
 	for _, m := range list {
+		// Something already governs this tag: the owner has a policy for these
+		// sandboxes and a second, narrower rule-set beside it is not a default.
 		if slices.Contains(m.Tags, name) {
 			return false
 		}
+		// A rule-set of this NAME already exists, carrying other tags. PutRule
+		// is an upsert keyed on (owner, name), so writing ours would REPLACE
+		// it: its allow list gone, and its tags re-pointed at this environment
+		// — which un-governs every sandbox it was protecting. Tag namespaces
+		// and rule-set namespaces are separate, so a collision here is somebody
+		// having a `web` rule-set for their `prod` boxes and then making an
+		// environment called `web`, which is an ordinary thing to do and must
+		// not cost them their policy.
+		if m.Name == name {
+			o.log.Info("not defaulting an environment's egress: a rule-set of that name already exists",
+				"user", owner, "env", name, "tags", m.Tags)
+			return false
+		}
 	}
-	if err := o.netrules.PutRule(owner, name, netrules.RuleSpec{}, []string{name}); err != nil {
+	if err := o.netrules.PutRule(owner, name,
+		netrules.RuleSpec{Allow: slices.Clone(defaultEnvAllow)}, []string{name}); err != nil {
 		o.log.Warn("could not give a new environment its default egress rule-set",
 			"user", owner, "env", name, "err", err)
 		return false
 	}
 	o.log.Info("environment given the default egress rule-set", "user", owner, "env", name)
 	return true
+}
+
+// defaultEnvAllow is what a new environment's rule-set allows ON TOP of the
+// operator's base allowlist, which every governed sandbox already gets.
+//
+// It is the DISTRIBUTION ARCHIVES and nothing else, and they are here because
+// leaving them out made the default self-defeating. The base allowlist carries
+// the language package registries — pypi, npm, crates, the Go proxy — plus
+// github and api.anthropic.com, but no apt repository. The very first
+// instruction the agent prompt gives is "install what it needs — system
+// packages with `sudo apt-get -y` first", so an environment governed by an
+// empty rule-set could not execute step one of its own build. That is a break
+// this pair of features created between them: neither the default egress nor
+// the agent prompt is wrong alone.
+//
+// Both architectures, because a template is amd64 on CKS and arm64 on the DGX
+// and the rule-set is written by the gateway without knowing which the builder
+// will land on. ports.ubuntu.com serves arm64; archive/security serve amd64.
+//
+// It is an ordinary rule-set once written, so an owner who wants none of this
+// can empty it, and one who needs their internal mirror adds it — which is the
+// whole reason this is a stored object and not a constant in the pusher.
+var defaultEnvAllow = []string{
+	"archive.ubuntu.com",
+	"security.ubuntu.com",
+	"ports.ubuntu.com",
 }
 
 // resolveEnvRules is resolveEnvSecrets for egress rule-sets, and it refuses an

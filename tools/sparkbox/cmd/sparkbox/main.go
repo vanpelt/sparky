@@ -926,6 +926,7 @@ func serve(args []string) error {
 		// one syncer per host, so a nudge sent from here rides the transport
 		// every other guest exec already uses.
 		RepoFiles: ghAppFiles, SetupStarter: syncer,
+		NetPusher:       netPusherOrNil(flt),
 		EnvBuildTimeout: *envBuildTimeout,
 		HiveMind:        hivemindOps,
 		Log:             log,
@@ -1743,6 +1744,13 @@ type gatewayStores struct {
 	// than create a builder sandbox that would sit there with nothing to do.
 	RepoFiles    ctlops.RepoFileReader
 	SetupStarter ctlops.SetupStarter
+	// NetPusher pushes egress policy, so an environment build can put its
+	// builder into the policy BEFORE the guest is told to run an agent in it —
+	// rather than leaving it open until the next thirty-second sweep. Declared
+	// as the interface, never as *fleet.Fleet: ctlops decides whether the
+	// feature exists by comparing against nil, and a typed nil compares
+	// not-equal (see the note above).
+	NetPusher ctlops.NetPusher
 	// EnvBuildTimeout bounds one build; 0 takes ctlops.DefaultEnvBuildTimeout.
 	EnvBuildTimeout time.Duration
 	// HiveMind is the same nil-interface discipline: an unconfigured host must
@@ -1807,6 +1815,7 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// instead of leaving a builder sandbox with no job.
 		RepoFiles:       s.RepoFiles,
 		SetupStarter:    s.SetupStarter,
+		NetPusher:       s.NetPusher,
 		EnvBuildTimeout: s.EnvBuildTimeout,
 		// The roster reaches the control plane joined to the live fleet, which
 		// is what ctlops.NodeRoster asks of whoever wires it: the roster alone
@@ -2075,6 +2084,20 @@ func reconcileEnvBuilds(ctx context.Context, ops *ctlops.Ops) {
 		case <-t.C:
 		}
 	}
+}
+
+// netPusherOrNil hands ctlops the fleet's egress pusher, or a true nil.
+//
+// The typed-nil trap this file already warns about, one more time: returning
+// `flt` directly when it is nil would give ctlops a non-nil interface holding a
+// nil pointer, and its `o.netPusher == nil` check — the one that means "this
+// host has no egress control, proceed" — would be false, so every agent build
+// would panic instead of proceeding.
+func netPusherOrNil(flt *fleet.Fleet) ctlops.NetPusher {
+	if flt == nil {
+		return nil
+	}
+	return flt
 }
 
 func pushLoop(ctx context.Context, p netPusher, log *slog.Logger) {

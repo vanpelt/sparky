@@ -373,10 +373,29 @@ ssh web-build@<domain>                 # fix what was missing, by hand
 ssh ctl@<domain> env capture web       # keep exactly that disk
 ```
 
+**With no script anywhere, `env build` has an agent write one.** It runs
+`claude -p` in the builder against `sparkbox docs dev-environment`, gets the
+project running, and keeps the `.sparkbox/setup.sh` the agent leaves behind —
+which is the deliverable, not the box: commit that file and every later build of
+the environment runs it instead of running an agent. It needs a
+`CLAUDE_CODE_OAUTH_TOKEN` the builder will carry, and says so up front rather
+than after booting a VM to find out.
+
+`env rebuild <name>` is a second name for `env build` — a build already boots
+the stock image and runs the current script, never the environment's own last
+snapshot, so an environment cannot accumulate. The old image stays bound until
+the new one is captured, so a rebuild that fails costs only the time.
+
+A new environment gets an **egress rule-set named after it**, so its sandboxes
+reach the package registries, github and the model API and not the rest of the
+internet. Widen it in the console's Network panel, or pass `--open-egress` on
+create to have no rules at all.
+
 `--env-build-timeout` (default 45m) is how long a build may sit in `building`
-before a periodic sweep gives up on it — with the builder still paused, so the
-recovery path above is unchanged. Having an agent write the setup script for you
-is not built yet. Design:
+before a periodic sweep gives up on it. A *script* build's builder is left
+paused, so the recovery path above is unchanged; an *agent* build's builder is
+**destroyed**, because it holds an unattended agent with your credentials and,
+by definition, has not written the script that was the point. Design:
 [`docs/environments-design.md`](docs/environments-design.md).
 
 ## Architecture
