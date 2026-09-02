@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -222,7 +224,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=22\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=23\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -237,6 +239,63 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 // — which is exactly what a user notices a week later, on a push they cannot
 // re-author. The legacy fallback is deliberate and second: naming the right
 // person unattributed still beats naming no one.
+// TestIdentityRevMovesWithThePayload is the guard that was missing, and the
+// reason it is worth the small friction it adds.
+//
+// refresh-agent-tools.sh decides whether to re-patch a published rootfs
+// template by comparing the template's stamped IDENTITY_REV against the one it
+// reads out of the installer. Edit the payload without bumping the stamp and
+// every host concludes "templates already current" and skips the work — so the
+// change ships, deploys green, and simply is not there in any VM. There is no
+// error anywhere; the only way to find out is for somebody to run the new
+// command in a sandbox and get the old behaviour. That is exactly how a docs
+// fix reached production and 404'd.
+//
+// The existing rev assertion below cannot catch it: it pins the VALUE, so it
+// fires when you bump without telling it, which is the harmless direction.
+// This pins the payload, so it fires when you edit without bumping.
+//
+// WHEN THIS FAILS: bump IDENTITY_REV in deploy/install-guest-identity.sh, then
+// update wantPayloadSum here to the sum the failure prints. Both, in that order.
+func TestIdentityRevMovesWithThePayload(t *testing.T) {
+	const (
+		wantRev        = 23
+		wantPayloadSum = "affca1d450383176b424e571c25458a9eaa146dfdcf8182a0aa9503381864530"
+	)
+	src, err := os.ReadFile("install-guest-identity.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Everything but the stamp line, so bumping the stamp alone does not move
+	// the sum and the two assertions stay independent.
+	var payload strings.Builder
+	rev := 0
+	for _, line := range strings.Split(string(src), "\n") {
+		if after, ok := strings.CutPrefix(line, "IDENTITY_REV="); ok && rev == 0 {
+			n, convErr := strconv.Atoi(strings.TrimSpace(after))
+			if convErr != nil {
+				t.Fatalf("IDENTITY_REV is not a number: %q", line)
+			}
+			rev = n
+			continue
+		}
+		payload.WriteString(line)
+		payload.WriteByte('\n')
+	}
+	if rev != wantRev {
+		t.Fatalf("IDENTITY_REV = %d, want %d — update wantRev here when you bump it", rev, wantRev)
+	}
+	sum := sha256.Sum256([]byte(payload.String()))
+	if got := hex.EncodeToString(sum[:]); got != wantPayloadSum {
+		t.Fatalf("the guest payload changed while IDENTITY_REV is %d.\n"+
+			"If you have NOT already bumped the stamp for this change, bump it in\n"+
+			"deploy/install-guest-identity.sh (and wantRev here) — otherwise hosts skip\n"+
+			"re-patching their templates and the change reaches no VM at all.\n"+
+			"Then record the new payload:\n"+
+			"  wantPayloadSum = %q", rev, got)
+	}
+}
+
 func TestGuestGitIdentityWritesAnAttributableAuthor(t *testing.T) {
 	root := fakeGuestTree(t, false)
 	installGuestPayload(t, root)

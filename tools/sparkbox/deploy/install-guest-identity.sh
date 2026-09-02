@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=22
+IDENTITY_REV=23
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -1278,9 +1278,68 @@ cat > "$MNT/etc/profile.d/50-sparkbox-repo.sh" <<'EOF'
 # Overridable for the same reason the worker's $SPARKBOX_REPOS_ROOT is: the
 # deploy tests drive this file against a tree instead of the machine running
 # them. Nothing in a guest sets it.
+# The wait below is what makes a NEWLY CREATED sandbox behave like every later
+# login, and it fixes two symptoms with one mechanism.
+#
+# Repositories are cloned by a worker that deliberately does not block the first
+# attach, so the very first shell in a brand-new box arrives while that clone is
+# still running. At that instant /etc/motd was rendered when the only true thing
+# to say was "cloning <slug>…", and /run/sparkbox/repos.dir — the file the cd
+# below reads — does not exist yet. So BOTH things this file exists to do were
+# silently skipped in exactly the session where they matter most: the banner
+# never resolved to the checkout list, and the login landed in $HOME with the
+# person left to find the directory themselves.
+#
+# Waiting on the worker's own lock and then reprinting the resolved block fixes
+# both. It costs nothing on every later login, where the lock is long gone, and
+# nothing at all for non-interactive shells, which never reach here.
 sparkbox_repo_file=${SPARKBOX_REPOS_DIR_FILE:-/run/sparkbox/repos.dir}
+sparkbox_repo_lock=${SPARKBOX_REPOS_LOCK_DIR:-/run/sparkbox/repos.lock}
+sparkbox_repo_status=${SPARKBOX_REPOS_STATUS_FILE:-/run/sparkbox/repos.status}
+# Seconds. 0 disables the wait and restores the old straight-through behaviour.
+sparkbox_repo_wait=${SPARKBOX_REPOS_WAIT_SECS:-25}
 case $- in
   *i*)
+    # A lock whose pid is gone is a worker that died; waiting on it would burn
+    # the whole budget for nothing. Same staleness rule the worker itself uses
+    # when it decides whether to break a lock (see sparkbox-repos).
+    if [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ] &&
+       [ -d "$sparkbox_repo_lock" ]; then
+      sparkbox_repo_pid=$(cat "$sparkbox_repo_lock/pid" 2>/dev/null || true)
+      case "$sparkbox_repo_pid" in
+        ''|*[!0-9]*) sparkbox_repo_live= ;;
+        *) if kill -0 "$sparkbox_repo_pid" 2>/dev/null; then
+             sparkbox_repo_live=1
+           else
+             sparkbox_repo_live=
+           fi ;;
+      esac
+      case "$sparkbox_repo_wait" in
+        ''|*[!0-9]*) sparkbox_repo_live= ;;
+        0) sparkbox_repo_live= ;;
+      esac
+      if [ -n "$sparkbox_repo_live" ]; then
+        # Said out loud, because a login shell that pauses without explaining
+        # itself reads as a hang. The resolved block prints under it.
+        printf 'repos: finishing clone…\n'
+        # Tenths of a second, so a fast clone is not rounded up to a whole one.
+        sparkbox_repo_left=$((sparkbox_repo_wait * 10))
+        while [ -d "$sparkbox_repo_lock" ] && [ "$sparkbox_repo_left" -gt 0 ]; do
+          sleep 0.1 2>/dev/null || sleep 1
+          sparkbox_repo_left=$((sparkbox_repo_left - 1))
+        done
+        if [ -d "$sparkbox_repo_lock" ]; then
+          printf 'repos: still working — run `sparkbox repos` for the current state\n'
+        elif [ -r "$sparkbox_repo_status" ]; then
+          # The status file is the same block the banner carries, already
+          # indented by the worker, so this reads as the banner finishing
+          # rather than as a second unrelated message.
+          cat "$sparkbox_repo_status" 2>/dev/null || true
+        fi
+        unset sparkbox_repo_left
+      fi
+      unset sparkbox_repo_pid sparkbox_repo_live
+    fi
     if [ -z "${SPARKBOX_NO_REPO_CD:-}" ] && [ "$PWD" = "$HOME" ] && [ -r "$sparkbox_repo_file" ]; then
       sparkbox_repo_dir=$(cat "$sparkbox_repo_file" 2>/dev/null) || sparkbox_repo_dir=
       case "$sparkbox_repo_dir" in
@@ -1292,7 +1351,7 @@ case $- in
     fi
     ;;
 esac
-unset sparkbox_repo_file
+unset sparkbox_repo_file sparkbox_repo_lock sparkbox_repo_status sparkbox_repo_wait
 EOF
 chmod 0644 "$MNT/etc/profile.d/50-sparkbox-repo.sh"
 
