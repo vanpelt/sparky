@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=19
+IDENTITY_REV=20
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -513,6 +513,20 @@ case "${1:-}" in
       *) echo "usage: sparkbox repo authorize OWNER/NAME" >&2; exit 2 ;;
     esac
     ;;
+  docs)
+    # docs.<domain> is a public DNS name and can resolve to this fleet's own
+    # edge — which this VM's own tap firewall has no route to reach directly
+    # (only DNS and this metadata port are open guest-to-host; see
+    # sparkbox-net.sh). The metadata service mirrors the same static,
+    # unauthenticated content, so this is the way to actually read it from
+    # inside a VM; the https://docs.<domain> URL remains the one to open in a
+    # browser, outside the VM.
+    _page=${2:-docs}
+    case "$_page" in
+      *[!A-Za-z0-9-]*) echo "sparkbox: usage: sparkbox docs [docs|proxy|dev-environment]" >&2; exit 2 ;;
+    esac
+    exec curl -fsS --max-time 10 "$META/docs/$_page.md"
+    ;;
   update-tools)
     # Same escalation as `repos`, for the same reason and with the same -n
     # degradation: the installer writes /usr/local/bin, /usr/local/lib and
@@ -529,7 +543,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repo authorize OWNER/NAME|repos [survey|sync]|update-tools [--check]>" >&2
+    echo "usage: sparkbox <whoami [--json]|pin|unpin|status|pause|snapshot [--yes] [--allow-busy] [TAG [NAME]]|make-public|make-private|set-port PORT|repo authorize OWNER/NAME|repos [survey|sync]|docs [docs|proxy|dev-environment]|update-tools [--check]>" >&2
     exit 2
     ;;
 esac

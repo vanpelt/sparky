@@ -185,6 +185,12 @@ New VMs include Claude Code, Codex, Pi, and Hivemind. Sparkbox environment
 guidance is installed at `~/.agents/AGENTS.md` and linked into each harness's
 global instruction location. Repository-level instructions still apply.
 
+This page's own URL is one an agent inside the VM cannot always reach:
+`docs.<domain>` is a public DNS name that can resolve to this fleet's own
+edge, which a VM's own network routing has no path back to. `sparkbox docs
+[docs|proxy|dev-environment]` reads the identical content from inside the VM
+over the always-open metadata channel instead.
+
 ## Updating the agent tools
 
 The agent CLIs in a VM — `claude`, `codex`, `pi`, `hivemind` and

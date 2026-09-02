@@ -119,6 +119,26 @@ func requestMethod(s *Server, method, path, src, dst string) *httptest.ResponseR
 	return rec
 }
 
+// TestDocsAreServedOverMetadataToo covers the reason this mount exists: the
+// public docs.<domain> DNS name can resolve to this fleet's own edge, which a
+// guest's tap firewall has no route to reach directly, so the metadata port —
+// already open guest-to-host — carries the same content instead.
+func TestDocsAreServedOverMetadataToo(t *testing.T) {
+	s := fixture(t)
+	for _, tc := range []struct{ path, want string }{
+		{"/docs/docs.md", "## Pinning this VM"},
+		{"/docs/proxy.md", "## Wake on request"},
+		{"/docs/dev-environment.md", "## Allow the proxy's Host header"},
+	} {
+		// No guest identity established: this content is unauthenticated, same
+		// trust boundary as /healthz.
+		rec := request(s, tc.path, "0.0.0.0", "0.0.0.0")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Errorf("GET %s = %d %q, want 200 containing %q", tc.path, rec.Code, rec.Body.String(), tc.want)
+		}
+	}
+}
+
 func TestSandboxCanPinAndUnpinItself(t *testing.T) {
 	s := fixture(t)
 	for _, tc := range []struct {

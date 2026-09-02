@@ -52,6 +52,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/oidc"
@@ -383,6 +384,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	// Same static, unauthenticated content docs.<domain> serves at the edge,
+	// mounted here too: docs.<domain> is a public DNS name that can resolve to
+	// this fleet's own edge, which a guest's own tap firewall then has no route
+	// to reach directly (see sparkbox-net.sh's SPARKBOX_GUEST_HOST — only 53 and
+	// this port are open guest-to-host). No caller() check, same as /healthz:
+	// the content carries no per-sandbox secret, so anything that can already
+	// reach this port may read it.
+	mux.Handle("GET /docs/", http.StripPrefix("/docs", guestdocs.Handler()))
 	return mux
 }
 

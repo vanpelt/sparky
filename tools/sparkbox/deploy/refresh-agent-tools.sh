@@ -709,9 +709,14 @@ install_agent_guidance() {
   cat > "$canonical" <<'EOF'
 You are running in a Sparkbox microVM.
 
-Sparkbox documentation: https://docs.catnip.sh/docs.md
+Sparkbox documentation: https://docs.catnip.sh/docs.md — that URL is for a
+browser outside the VM. From inside this VM, run `sparkbox docs` instead: the
+public hostname can resolve to this fleet's own edge, which this VM has no
+network route to reach directly, so the same content is mirrored on the
+metadata channel `sparkbox docs` already knows how to reach.
 
-The HTTPS proxy is documented at https://docs.catnip.sh/proxy.md.
+The HTTPS proxy is documented at `sparkbox docs proxy`
+(https://docs.catnip.sh/proxy.md for a browser).
 
 Your disk is persistent. CPU and memory are shared across your Sparkbox owner
 pool; idle guest memory may be reclaimed and returned when it becomes active.
@@ -755,9 +760,9 @@ A dev server's own Host-header check and hot-reload client normally assume
 `localhost`, which this domain never is, and most frameworks need one config
 line to accept it instead — Vite's `server.allowedHosts`, Next's
 `allowedDevOrigins`, Django's `ALLOWED_HOSTS`/`CSRF_TRUSTED_ORIGINS`, and so on.
-Full per-framework fixes: https://docs.catnip.sh/dev-environment.md. Run the
-service as a `systemd --user` unit rather than a foreground shell, so it
-survives your SSH session ending.
+Full per-framework fixes: `sparkbox docs dev-environment`. Run the service as
+a `systemd --user` unit rather than a foreground shell, so it survives your
+SSH session ending.
 
 Write down what you did as `.sparkbox/setup.sh` in the project's own repo —
 dependency install, the unit file, the `sparkbox set-port` call — so a fresh

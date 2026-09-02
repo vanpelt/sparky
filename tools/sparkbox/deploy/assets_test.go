@@ -177,6 +177,10 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		// text those tests read.
 		"$META/self/pause",
 		"$META/self/snapshot?tag=",
+		// docs.<domain> can resolve to this fleet's own edge, which the guest's
+		// tap firewall has no route to reach directly, so `docs` reads the same
+		// content over the metadata port instead.
+		`$META/docs/$_page.md`,
 		"-w '%{http_code}'",
 		// The commit sends the PLAN's tag, name and token, never values the
 		// shell re-derived: the derived name carries a minute in it.
@@ -204,7 +208,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=19\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=20\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -1123,8 +1127,10 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"hivemind tag --list",
 		"hivemind tag --remove KEY",
 		// The framework fixes live in the served doc, not retyped here — this is
-		// the pointer an agent needs to go find them.
-		"https://docs.catnip.sh/dev-environment.md",
+		// the pointer an agent needs to go find them. `sparkbox docs`, not the
+		// https:// URL: that hostname can resolve to this fleet's own edge, which
+		// a guest has no network route to reach directly.
+		"sparkbox docs dev-environment",
 		"systemd --user",
 		// The replay convention: what to write, where, and to check for one
 		// before re-deriving the setup by hand.
@@ -1937,6 +1943,66 @@ func TestGuestSnapshotUsageIsRefusedWithoutAsking(t *testing.T) {
 		}
 		if got := requests(); len(got) != 0 {
 			t.Errorf("%v: a malformed invocation reached the host: %v", args, got)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `sparkbox docs`
+// ---------------------------------------------------------------------------
+
+// TestGuestDocsReadsFromMetadataNotTheEdge is the whole point of the verb:
+// docs.<domain> is a public DNS name that can resolve to this fleet's own
+// edge, which this VM's own tap firewall has no route to reach directly (only
+// DNS and the metadata port are open guest-to-host). So `sparkbox docs` reads
+// the same content over the metadata port instead of ever touching
+// https://docs.<domain>.
+func TestGuestDocsReadsFromMetadataNotTheEdge(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		wantPath string
+	}{
+		{[]string{"docs"}, "/docs/docs.md"},
+		{[]string{"docs", "proxy"}, "/docs/proxy.md"},
+		{[]string{"docs", "dev-environment"}, "/docs/dev-environment.md"},
+	} {
+		reply, requests, run := guestSelfService(t)
+		reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", "# doc body\n")
+
+		stdout, stderr, code := run(tc.args...)
+		if code != 0 || stderr != "" {
+			t.Fatalf("%v: exit = %d, stderr = %q", tc.args, code, stderr)
+		}
+		if !strings.Contains(stdout, "# doc body") {
+			t.Errorf("%v: stdout = %q", tc.args, stdout)
+		}
+		// The fake `ip` stub above reports the guest's gateway as 10.0.0.1, so a
+		// request to the real edge hostname would show up as something other
+		// than that address — this asserts the request went to $META, not
+		// https://docs.<domain>.
+		got := requests()
+		if len(got) != 2 || got[0] != "GET" || got[1] != "http://10.0.0.1:8967"+tc.wantPath {
+			t.Errorf("%v: requests = %v, want a GET of %q", tc.args, got, "http://10.0.0.1:8967"+tc.wantPath)
+		}
+	}
+}
+
+// TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking mirrors the snapshot
+// usage test: a malformed page name is refused locally, and never reaches the
+// host as a path-traversal attempt or similar.
+func TestGuestDocsRejectsAnUnrecognizedPageWithoutAsking(t *testing.T) {
+	for _, page := range []string{"../../etc/passwd", "docs.md", "a/b", "a b"} {
+		reply, requests, run := guestSelfService(t)
+		reply("GET", "200", "HTTP/1.1 200 OK\r\n\r\n", "# doc body\n")
+		_, stderr, code := run("docs", page)
+		if code != 2 {
+			t.Errorf("docs %q: exit = %d, want 2", page, code)
+		}
+		if !strings.Contains(stderr, "usage: sparkbox docs [docs|proxy|dev-environment]") {
+			t.Errorf("docs %q: stderr = %q", page, stderr)
+		}
+		if got := requests(); len(got) != 0 {
+			t.Errorf("docs %q: a malformed page name reached the host: %v", page, got)
 		}
 	}
 }
