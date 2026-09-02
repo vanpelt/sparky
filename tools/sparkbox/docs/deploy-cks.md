@@ -702,20 +702,23 @@ reserve at most 432,000 MB while leaving room inside the helper cgroup for
 Firecracker and host-side overhead.
 
 The VM is no longer the subscription boundary. Each VM retains its 12 GiB
-ceiling, while every owner's running VMs share an 8,192 MB effective-memory
-pool. Admission charges a 256 MB configured working-set floor per warm VM, so at
-most 32 may be resident for one owner at once; paused and archived VMs retain
-their disks without consuming the memory pool. The per-owner disk pool is
+ceiling, while every owner's running VMs share a 12,288 MB effective-memory
+pool — one default machine's worth, so an owner's first VM fits inside its
+entitlement and every one after that is paid for out of the memory the others
+are not touching. Admission charges a 256 MB configured working-set floor per
+warm VM, so at most 48 may be resident for one owner at once; paused and
+archived VMs retain their disks without consuming the memory pool. The per-owner disk pool is
 102,400 MB of measured filesystem usage. These owner entitlements are checked
 before the node-wide safety budget, preventing one subscriber from consuming
 the whole helper cgroup merely by creating many VMs.
 
-Owner pools overlap: an 8 GiB pool is an admission entitlement, not 8 GiB
+Owner pools overlap: a 12 GiB pool is an admission entitlement, not 12 GiB
 reserved from Kubernetes for every subscriber. The node admits the sum of
 running working-set charges against its 432,000 MB safety budget, so many mostly
 idle owner pools can share the same physical memory. Turbo may temporarily take
-an owner to a 16,384 MB burst ceiling when that overlapping node budget has
-room. A turbo VM costs twice its normal working-set charge; pausing it returns
+an owner to a 24,576 MB burst ceiling — TurboFactor (2) x the pool, so one
+turbo machine at its doubled ceiling still fits — when that overlapping node
+budget has room. A turbo VM costs twice its normal working-set charge; pausing it returns
 the borrowed charge immediately. Every minute the node samples actual guest
 working sets. If an owner or the node crosses its active ceiling, Sparkbox
 balloons turbo first and then the least-recently-active unpinned VMs that have
@@ -724,7 +727,7 @@ overage; guests remain running.
 
 An owner may retain at most 50 sandbox identities in total, including paused
 and archived boxes. Up to 50 may run at once when a larger owner plan permits
-it; the 8 GiB default pool is normally the tighter bound. The controller and
+it; the 12 GiB default pool is normally the tighter bound. The controller and
 Sluice together request another 1.25 CPUs and 2.25
 GiB, leaving about 10 allocatable CPUs and 87 GiB of scheduler headroom after
 the cluster's existing system workloads. The host path is not quota-enforced
