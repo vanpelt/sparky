@@ -111,6 +111,12 @@ From inside the VM:
 - `sparkbox make-public` makes all routes for this VM unauthenticated.
 - `sparkbox make-private` restores authenticated access to all routes.
 
+A dev server's own Host-header check and hot-reload client both need explicit
+wiring for a domain that is never `localhost`. See
+[running a dev server behind the proxy](./dev-environment.md) for the
+per-framework fixes and the `.sparkbox/setup.sh` convention for replaying the
+setup on a fresh VM.
+
 ## Attached repositories
 
 Repositories attached to one of your tags are cloned into this VM at boot, over

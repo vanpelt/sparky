@@ -1122,6 +1122,14 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		"hivemind tag api_url=https://$(hostname).catnip.sh:8080",
 		"hivemind tag --list",
 		"hivemind tag --remove KEY",
+		// The framework fixes live in the served doc, not retyped here — this is
+		// the pointer an agent needs to go find them.
+		"https://docs.catnip.sh/dev-environment.md",
+		"systemd --user",
+		// The replay convention: what to write, where, and to check for one
+		// before re-deriving the setup by hand.
+		".sparkbox/setup.sh",
+		"Check for one before redoing this",
 		// An agent that hits "Please tell me who you are" and answers it
 		// invents an author that cannot be corrected once pushed.
 		"git's author is usually already set",
@@ -1132,7 +1140,7 @@ func TestTemplateGuidanceTargetsHarnessGlobalFiles(t *testing.T) {
 		// was patched, and every agent's own updater is off. An agent that does
 		// not know the pull exists has no way to move them.
 		"sparkbox update-tools --check",
-		"AGENT_ENV_REV=11",
+		"AGENT_ENV_REV=12",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("template guidance missing %q", want)

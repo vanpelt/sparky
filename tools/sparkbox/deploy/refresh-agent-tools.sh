@@ -94,7 +94,7 @@ AGENT_BROWSER_LATEST=${AGENT_BROWSER_LATEST:-https://registry.npmjs.org/agent-br
 # like IDENTITY_REV so bumping it re-patches every template on the next run even
 # when no tool version moved — editing any of it without bumping this ships the
 # change to nobody.
-AGENT_ENV_REV=11
+AGENT_ENV_REV=12
 FORCE=0
 [ "${1:-}" = --force ] && FORCE=1
 
@@ -750,6 +750,21 @@ own: `--pin` keeps one indefinitely, `--ttl 2h` sets your own window.
 `hivemind tag --remove KEY` clears one. Label whatever makes a session worth
 finding again — the issue or PR being worked, an experiment name, and the URL of
 any service you started.
+
+A dev server's own Host-header check and hot-reload client normally assume
+`localhost`, which this domain never is, and most frameworks need one config
+line to accept it instead — Vite's `server.allowedHosts`, Next's
+`allowedDevOrigins`, Django's `ALLOWED_HOSTS`/`CSRF_TRUSTED_ORIGINS`, and so on.
+Full per-framework fixes: https://docs.catnip.sh/dev-environment.md. Run the
+service as a `systemd --user` unit rather than a foreground shell, so it
+survives your SSH session ending.
+
+Write down what you did as `.sparkbox/setup.sh` in the project's own repo —
+dependency install, the unit file, the `sparkbox set-port` call — so a fresh
+checkout or a fresh VM can run `bash .sparkbox/setup.sh` and reach the same
+running state instead of re-deriving it. Check for one before redoing this
+work by hand, read it before running it, and keep it current as the setup
+changes.
 
 GitHub repositories attached to this VM are cloned into your home directory at
 boot: `~/<repo>` when one is attached, `~/src/<owner>/<repo>` when several are.
