@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -34,6 +35,9 @@ CLOZE = re.compile(r"\{\{(.+?)\}\}")
 
 
 # --- config -----------------------------------------------------------------
+
+
+KEYCHAIN_SERVICE = "klozar-clozemaster"
 
 
 def load_env() -> dict[str, str]:
@@ -51,13 +55,83 @@ def load_env() -> dict[str, str]:
     return env
 
 
+# --- cookie storage ---------------------------------------------------------
+#
+# The session cookie rotates on every response — the server re-issues it with a
+# fresh last_request_at, so the idle clock resets each time it's used. Storing
+# the rotated value back is what makes a scheduled run keep working forever
+# instead of dying on whatever Devise timeout is configured. It's also why a
+# static CI secret is the wrong home for it: a secret can't absorb the rotation.
+
+
+def keychain_read() -> str | None:
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return None  # not macOS
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def keychain_write(value: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
+             "-a", os.environ.get("USER", "klozar"), "-w", value],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return False
+    return r.returncode == 0
+
+
+def env_file_write(value: str) -> bool:
+    """Update CLOZEMASTER_SESSION in .env, leaving the rest of the file alone."""
+    dotenv = HERE / ".env"
+    if not dotenv.exists():
+        return False
+    lines = dotenv.read_text(encoding="utf-8").splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("CLOZEMASTER_SESSION="):
+            lines[i] = f"CLOZEMASTER_SESSION={value}\n"
+            dotenv.write_text("".join(lines), encoding="utf-8")
+            return True
+    return False
+
+
+def read_session(env: dict[str, str]) -> tuple[str | None, str]:
+    """The cookie and where it came from, so the rotated one goes back there."""
+    if os.environ.get("CLOZEMASTER_SESSION"):
+        return os.environ["CLOZEMASTER_SESSION"], "env"
+    kc = keychain_read()
+    if kc:
+        return kc, "keychain"
+    v = env.get("CLOZEMASTER_SESSION")
+    if v and v != "paste_the_value_here":
+        return v, "dotenv"
+    return None, "none"
+
+
+def write_session(value: str, origin: str) -> None:
+    if origin == "keychain":
+        keychain_write(value)
+    elif origin == "dotenv":
+        env_file_write(value)
+    # "env" came from the process environment — nothing durable to write back to.
+
+
 # --- api --------------------------------------------------------------------
 
 
 class Clozemaster:
-    def __init__(self, session: str, pairing: str):
+    def __init__(self, session: str, pairing: str, origin: str = "env"):
         offset = round(datetime.now().astimezone().utcoffset().total_seconds() / 3600)
         self.pairing = pairing
+        self.session = session
+        self.origin_value = session
+        self.origin = origin
         self.http = httpx.Client(
             base_url=BASE,
             timeout=30,
@@ -72,7 +146,15 @@ class Clozemaster:
     def get(self, path: str, **params):
         r = self.http.get(path, params=params)
         r.raise_for_status()
+        fresh = r.cookies.get("_clozemaster_session")
+        if fresh and fresh != self.session:
+            self.session = fresh
         return r.json()
+
+    def persist(self) -> None:
+        """Save the rolled-forward cookie so the next run starts from a fresh clock."""
+        if self.session != self.origin_value:
+            write_session(self.session, self.origin)
 
     def dashboard(self) -> dict:
         """Collections, per-collection stats, and the URLs for everything else."""
@@ -203,8 +285,27 @@ def as_item(s: dict) -> dict:
     }
 
 
-def render_html(week: dict, limit: int) -> str:
-    """The same sheet as an interactive page, data baked in."""
+STANDALONE_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="A week of Serbian practice from Clozemaster, ranked by where I slipped.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Serbian Lesson Sheet">
+<meta property="og:description" content="A week of Serbian practice from Clozemaster, ranked by where I slipped.">
+<style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+"""
+
+
+def render_html(week: dict, limit: int, standalone: bool = False) -> str:
+    """The same sheet as an interactive page, data baked in.
+
+    The artifact host supplies <!doctype>, charset and a small reset, so the
+    template is body content only. `standalone` wraps it for GitHub Pages, which
+    serves the file as-is — without the charset every č ć š ž đ turns to mojibake.
+    """
     today = date.today()
     start = date.fromisoformat(week["cutoff"])
     data = {
@@ -234,7 +335,14 @@ def render_html(week: dict, limit: int) -> str:
     tpl = (HERE / "template.html").read_text(encoding="utf-8")
     # json.dumps can emit "</script>" inside a string and close the tag early.
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    return tpl.replace("/*__DATA__*/", blob)
+    page = tpl.replace("/*__DATA__*/", blob)
+    if not standalone:
+        return page
+    # The <title> and <style> the template opens with belong in <head>; the rest
+    # is body. Splitting on the first tag after them keeps that honest.
+    head_end = page.index("<div class=\"wrap\">")
+    return STANDALONE_HEAD + page[:head_end] + "</head>\n<body>\n" + \
+        page[head_end:] + "</body>\n</html>\n"
 
 
 def render(week: dict, limit: int) -> str:
@@ -295,14 +403,35 @@ def main():
                       help="all | playing | favorited | mastered | ready_for_review | ignored")
     snap.add_argument("--out", type=Path, help="default: out/<date>-snapshot.json")
 
+    site = sub.add_parser("site", help="write the sheet into the GitHub Pages tree")
+    site.add_argument("--days", type=int, default=7)
+    site.add_argument("--limit", type=int, default=25, help="entries per section")
+    site.add_argument("--out", type=Path, help="default: index.html beside this script")
+
     sub.add_parser("collections", help="list collections and their counts")
+    sub.add_parser("auth", help="store the session cookie in the macOS Keychain")
 
     args = p.parse_args()
     env = load_env()
-    session = env.get("CLOZEMASTER_SESSION")
-    if not session or session == "paste_the_value_here":
-        sys.exit("Set CLOZEMASTER_SESSION in tools/klozar/.env — see .env.example.")
-    cm = Clozemaster(session, env.get("CLOZEMASTER_PAIRING", "srp-eng"))
+
+    if args.cmd == "auth":
+        print("Paste the _clozemaster_session cookie value, then press Enter.")
+        print("Chrome > DevTools > Application > Cookies > www.clozemaster.com")
+        value = sys.stdin.readline().strip()
+        if not value:
+            sys.exit("Nothing pasted.")
+        if not keychain_write(value):
+            sys.exit("Could not write to the Keychain — is this macOS?")
+        print(f"Stored in the login Keychain as “{KEYCHAIN_SERVICE}”.")
+        print("klozar re-saves the rotated cookie after every run, so regular use "
+              "keeps it alive.")
+        return
+
+    session, origin = read_session(env)
+    if not session:
+        sys.exit("No session cookie. Run `uv run klozar.py auth` to store one, "
+                 "or set CLOZEMASTER_SESSION in .env — see .env.example.")
+    cm = Clozemaster(session, env.get("CLOZEMASTER_PAIRING", "srp-eng"), origin)
 
     out_dir = HERE / "out"
 
@@ -313,6 +442,7 @@ def main():
             print(f"{c['name']:<28} playing {c['numPlaying']:>4} · "
                   f"starred {c['numFavorited']:>3} · mastered {c['numMastered']:>3} · "
                   f"due {c['numReadyForReview']:>3}")
+        cm.persist()
         return
 
     if args.cmd == "snapshot":
@@ -324,20 +454,32 @@ def main():
         out = args.out or out_dir / f"{date.today()}-snapshot.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        cm.persist()
         print(f"{sum(len(v) for v in data.values())} sentences -> {out}")
         return
 
-    if args.cmd == "artifact":
+    if args.cmd in ("artifact", "site"):
         week = collect_week(cm, args.days)
-        out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
+        if args.cmd == "site":
+            out = args.out or HERE / "index.html"
+            standalone = True
+        else:
+            out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
+            standalone = False
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render_html(week, args.limit), encoding="utf-8")
+        out.write_text(render_html(week, args.limit, standalone), encoding="utf-8")
+        cm.persist()
         print(f"{len(week['played'])} sentences this week -> {out}")
-        print("Publish it with the Artifact tool (capabilities: db) to get a link.")
+        if standalone:
+            print("Commit and push; the pages.yml workflow publishes it at "
+                  "https://vanpelt.github.io/sparky/tools/klozar/")
+        else:
+            print("Publish it with the Artifact tool (capabilities: db) to get a link.")
         return
 
     week = collect_week(cm, args.days)
     md = render(week, args.limit)
+    cm.persist()
     if args.stdout:
         print(md)
         return
