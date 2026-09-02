@@ -9,7 +9,9 @@ REPO=$(git rev-parse --show-toplevel)
 
 uv run klozar.py site
 
-if git -C "$REPO" diff --quiet -- tools/klozar/index.html; then
+PATHS="tools/klozar/index.html tools/klozar/weeks tools/klozar/weeks.json"
+if git -C "$REPO" diff --quiet -- $PATHS && \
+   [ -z "$(git -C "$REPO" ls-files --others --exclude-standard -- $PATHS)" ]; then
   echo "No change this week."
   exit 0
 fi
@@ -20,7 +22,7 @@ if [ "$BRANCH" != "main" ]; then
   exit 0
 fi
 
-git -C "$REPO" add tools/klozar/index.html
+git -C "$REPO" add $PATHS
 git -C "$REPO" commit -q -m "chore(klozar): Serbian sheet for week ending $(date +%Y-%m-%d)"
 git -C "$REPO" push -q
 echo "Pushed. Live in a minute at https://vanpelt.github.io/sparky/tools/klozar/"
