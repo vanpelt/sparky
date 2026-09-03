@@ -1060,7 +1060,15 @@
       throw err;
     }
     if (!r.ok) {
-      throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      // The body is {error, code?}. `code` is the server's stable machine token
+      // and is carried onto the Error so a caller can act on a specific refusal
+      // — matching on the sentence is exactly the coupling it exists to
+      // prevent. Everything else keeps reading .message as before.
+      const body = await r.json().catch(() => ({}));
+      const err = new Error(body.error || r.statusText);
+      err.code = body.code || "";
+      err.status = r.status;
+      throw err;
     }
     return r.json().catch(() => null);
   }
@@ -2735,9 +2743,16 @@
           // What SURVIVED is the point of the verb, so it is said rather than
           // left for somebody to go and check.
           const kept = (res.repos || []).length + (res.secrets || []).length + (res.rules || []).length;
+          // Variables and the base image are the two things a delete normally
+          // DOES take, so an environment that adopted them and gave them back
+          // has to say so — otherwise somebody who knows the rule assumes the
+          // worst about configuration that is still sitting there.
+          const inherited = (res.kept_vars || []).length;
           toast("deleted " + name +
             (kept ? " — " + kept + " attached object(s) still carry the tag" : "") +
-            (res.removed_rule ? "; its egress rule-set went with it" : ""));
+            (res.removed_rule ? "; its egress rule-set went with it" : "") +
+            (inherited ? "; " + inherited + " variable(s) it adopted were kept" : "") +
+            (res.kept_snapshot ? "; the tag still boots from " + res.kept_snapshot : ""));
           if (envEditing === name) resetEnvForm();
         });
       }));
@@ -2819,7 +2834,22 @@
     const btn = $("env-save");
     btn.disabled = true;
     try {
-      await api("/api/environments/" + encodeURIComponent(name), { method: "PUT", body: body });
+      const url = "/api/environments/" + encodeURIComponent(name);
+      try {
+        await api(url, { method: "PUT", body: body });
+      } catch (e1) {
+        // An environment's name IS its tag, and tags are older than
+        // environments — so this name may already be carrying somebody's repos,
+        // secrets, variables, base image or running machines, all of which the
+        // environment would adopt on the spot. The server refuses that create
+        // and says what is there; the decision is the person's, so it is put to
+        // them in their own words and the same request is sent again.
+        //
+        // Matched on `code`, never on the sentence: the wording is the server's
+        // to improve.
+        if (e1.code !== "env_tag_in_use" || !confirm(e1.message + "\n\nCreate it anyway?")) throw e1;
+        await api(url, { method: "PUT", body: Object.assign({}, body, { adopt: true }) });
+      }
       toast(name + " saved");
       resetEnvForm();
       closeEnvForm();

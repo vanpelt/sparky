@@ -282,6 +282,19 @@ _STUB = """
     return Promise.resolve(new Response(JSON.stringify(data), {
       status: 200, headers: { "Content-Type": "application/json" } }));
   }
+  // A refusal, in the console's own error shape: {error, code}. Needed because
+  // the blanket "mutations: pretend success" at the bottom of this switch
+  // swallows every non-200, and some of the states worth looking at ARE the
+  // non-200s.
+  function E(status, code, error) {
+    return Promise.resolve(new Response(JSON.stringify({ error: error, code: code }), {
+      status: status, headers: { "Content-Type": "application/json" } }));
+  }
+  // Saving an environment named `adopt-me` answers the adoption conflict, so
+  // the confirm-and-retry can be walked without a server: type that name into
+  // the New environment form and save. Saying yes sends the same body with
+  // adopt:true, which falls through to the success below.
+  var ADOPTED = {};
   var TURBO = {};   // name -> on, applied over the canned list below
   var real = window.fetch;
   window.fetch = function (url, opts) {
@@ -305,6 +318,21 @@ _STUB = """
     if (u.indexOf("/api/environments") >= 0 && m === "GET") return J(ENVIRONMENTS);
     var bw = u.match(/\\/api\\/machines\\/([^/]+)\\/bandwidth/);
     if (bw && m === "GET") return J(BANDWIDTH[decodeURIComponent(bw[1])] || { name: "", domains: [] });
+    var envPut = u.match(/\\/api\\/environments\\/([^/]+)$/);
+    if (envPut && m === "PUT") {
+      var envName = decodeURIComponent(envPut[1]);
+      var wantsAdopt = envName === "adopt-me" && !JSON.parse(opts.body || "{}").adopt;
+      if (wantsAdopt && !ADOPTED[envName]) {
+        return E(409, "env_tag_in_use",
+          "the tag \\"adopt-me\\" is already carrying 2 repositories, 1 secret and 3 sandboxes. " +
+          "An environment's name IS its tag, so creating adopt-me adopts all of it: everything on " +
+          "that tag becomes part of the environment, and every sandbox carrying it becomes one of " +
+          "its machines. Because sandboxes already carry it, the environment is also created with " +
+          "unrestricted egress rather than the default allowlist, so as not to cut them off.");
+      }
+      ADOPTED[envName] = true;
+      return J({ ok: true });
+    }
     if (u.indexOf("/api/machines") >= 0 && m === "GET" &&
         !/\\/(pause|resume|reboot|archive|pin|unpin|port|tags|rename|snapshot|bandwidth)/.test(u)) return J(machines());
     return J({ ok: true }); // mutations: pretend success

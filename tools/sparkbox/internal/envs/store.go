@@ -150,7 +150,48 @@ type Environment struct {
 	BuiltAt             *time.Time          `json:"built_at,omitempty"`
 	CreatedAt           time.Time           `json:"created_at"`
 	UpdatedAt           time.Time           `json:"updated_at"`
+	// Adopted is what the tag ALREADY carried on the day this environment was
+	// created, and nil for the ordinary case of a name nothing was using. It
+	// exists for exactly one reader — Delete's caller — and the reason is in
+	// the Adopted doc comment.
+	Adopted *Adopted `json:"adopted,omitempty"`
 }
+
+// Adopted records the configuration an environment INHERITED rather than
+// created: the plain vars that already sat under its tag, and the snapshot
+// already bound to it.
+//
+// It exists because tags are free-form and older than environments. `ctl create
+// scratch --tag web` and `repo add --tag web` write rows with no environment
+// anywhere, so `env create web` can name a tag that has been carrying somebody's
+// configuration for months. Adopting it is now a deliberate act — ctlops refuses
+// the create otherwise — but a deliberate adoption still must not become a
+// deliberate DELETION: `env rm` destroys the vars and the template binding on
+// the argument that they "cannot outlive the name", and that argument is only
+// true for the ones the environment brought with it.
+//
+// Only the two destroyed things are recorded. Repos, secrets and rule-sets need
+// no entry here because `env rm` already refuses to touch them in any case.
+//
+// It is written ONCE, in the same INSERT as the row, and never updated. A
+// second write would be a second answer to "what was here before", and the
+// window between the insert and it is exactly the window in which a delete
+// would eat the vars.
+type Adopted struct {
+	// Vars are the names only. A var's VALUE is not this store's to hold — it
+	// lives in internal/secrets, it is what the environment is about to start
+	// serving, and copying it here would put plaintext configuration in a second
+	// place that nothing keeps in sync.
+	Vars []string `json:"vars,omitempty"`
+	// Snapshot is the template binding that already pointed this tag at a base
+	// image, "" when none did.
+	Snapshot string `json:"snapshot,omitempty"`
+}
+
+// Empty reports whether nothing was adopted, so a caller can store nil rather
+// than a record that says "I checked and found nothing" — which is the same
+// state as never having been asked, and should not be two rows.
+func (a Adopted) Empty() bool { return len(a.Vars) == 0 && a.Snapshot == "" }
 
 // BuildDeniedDomain is one DNS name the egress policy refused during the most
 // recent build. It contains no URL, path, payload, or resolved address.
@@ -249,6 +290,7 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			build_error TEXT NOT NULL DEFAULT '',
 			build_session TEXT NOT NULL DEFAULT '',
 			build_denials TEXT NOT NULL DEFAULT '',
+			adopted     TEXT NOT NULL DEFAULT '',
 			built_at    TIMESTAMP,
 			created_at  TIMESTAMP NOT NULL,
 			updated_at  TIMESTAMP NOT NULL,
@@ -272,6 +314,17 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
+	// Every environment that exists on a host older than this column reads back
+	// with no adoption record, which is the right answer for all but one of
+	// them: it means "this environment brought its own vars", and `env rm` will
+	// go on deleting them exactly as it did before. The one it is wrong for is
+	// an environment somebody created over a tag that was already in use, back
+	// when nothing refused that — and there is no way to reconstruct what that
+	// tag carried on the day, so the migration does not pretend to.
+	if err := addColumnIfMissing(db, "environments", "adopted", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 	return &Store{db: db, log: log}, nil
 }
 
@@ -292,7 +345,15 @@ func (s *Store) Close() error { return s.db.Close() }
 // environment does not tag anything — the tag exists the moment a sandbox
 // carries it, which is ctlops' business — and this store never writes
 // sandbox_tags at all.
-func (s *Store) Put(owner, name, description string) (Environment, error) {
+//
+// adopted records what the tag already carried, and is honoured ON THE INSERT
+// BRANCH ONLY — nil, empty, or on an update, it is ignored and whatever the row
+// already holds stands. That follows the same rule as everything else here: an
+// update touches description and updated_at, full stop. Writing it in the same
+// INSERT rather than through a second call is what makes it trustworthy, because
+// the gap between "the environment exists" and "we know what it inherited" is
+// precisely the gap in which a delete would destroy the vars it inherited.
+func (s *Store) Put(owner, name, description string, adopted *Adopted) (Environment, error) {
 	if owner == "" {
 		return Environment{}, fmt.Errorf("%w: an environment needs an owner", ErrInvalidName)
 	}
@@ -349,10 +410,21 @@ func (s *Store) Put(owner, name, description string) (Environment, error) {
 			return Environment{}, fmt.Errorf("%w (%d, max %d)", ErrTooManyEnvironments, n, maxEnvironmentsPerOwner)
 		}
 		id = newID()
+		// "" rather than "null" or "{}" for an environment that inherited
+		// nothing, so the column has ONE spelling of "no record" and scanEnv
+		// has one branch rather than three.
+		var encoded string
+		if adopted != nil && !adopted.Empty() {
+			b, err := json.Marshal(adopted)
+			if err != nil {
+				return Environment{}, err
+			}
+			encoded = string(b)
+		}
 		if _, err := tx.Exec(`
-			INSERT INTO environments (id, owner, name, description, build_state, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			id, owner, name, description, string(StateDraft), now, now); err != nil {
+			INSERT INTO environments (id, owner, name, description, build_state, adopted, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, owner, name, description, string(StateDraft), encoded, now, now); err != nil {
 			return Environment{}, err
 		}
 	case err != nil:
@@ -574,7 +646,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 	rows, err := s.db.Query(`
 		SELECT DISTINCT e.owner, e.name, e.description, e.setup_sh, e.setup_from,
 		       e.build_state, e.build_box, e.build_error, e.build_session, e.build_denials,
-		       e.built_at, e.created_at, e.updated_at
+		       e.adopted, e.built_at, e.created_at, e.updated_at
 		FROM environments e
 		JOIN sandbox_tags bt ON bt.tag = e.name AND bt.owner = e.owner
 		WHERE bt.sandbox = ? AND e.owner = ?
@@ -594,7 +666,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 const selectCols = `
 	SELECT owner, name, description, setup_sh, setup_from,
 	       build_state, build_box, build_error, build_session, build_denials,
-	       built_at, created_at, updated_at
+	       adopted, built_at, created_at, updated_at
 	FROM environments`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows, so the column list has
@@ -610,9 +682,10 @@ func scanEnv(sc scanner) (Environment, error) {
 	var state string
 	var builtAt sql.NullTime
 	var buildDenials string
+	var adopted string
 	if err := sc.Scan(&e.Owner, &e.Name, &e.Description, &e.SetupScript, &e.SetupFrom,
 		&state, &e.BuildBox, &e.BuildError, &e.BuildSession, &buildDenials,
-		&builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		&adopted, &builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Environment{}, ErrNoSuchEnvironment
 		}
@@ -626,6 +699,13 @@ func scanEnv(sc scanner) (Environment, error) {
 		}
 		e.BuildDenials = record.Domains
 		e.BuildDenialOverflow = record.OverflowQueries
+	}
+	if adopted != "" {
+		var record Adopted
+		if err := json.Unmarshal([]byte(adopted), &record); err != nil {
+			return Environment{}, fmt.Errorf("decode adoption record: %w", err)
+		}
+		e.Adopted = &record
 	}
 	if builtAt.Valid {
 		t := builtAt.Time.UTC()

@@ -353,7 +353,8 @@ func (h *Handler) handoff(w http.ResponseWriter, r *http.Request, t target, info
 // create, so a visitor who has three repositories on `default` gets three
 // checkouts from a link that named one.
 func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, others []candidate) pageData {
-	tags := createTags(att)
+	choice := h.launchTags(c, att)
+	tags := createTags(choice.Tags)
 	facts := []fact{{
 		Label: "Repository",
 		Value: att.Slug,
@@ -371,9 +372,18 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, others []ca
 	} else {
 		facts = append(facts, fact{Label: "Branch", Value: "its default branch"})
 	}
+	tagSub := "tags decide which of your secrets are pushed into the sandbox"
+	// A dropped environment is the one thing on this page the visitor could not
+	// work out from the pills, because it is named by its ABSENCE. They are
+	// about to land in `web` when this repository is also in `ci`, and if that
+	// is not what they wanted, the Others list below is how they get there.
+	if len(choice.Dropped) > 0 {
+		tagSub = "this repository is in more than one environment, so it opens in " + choice.Chosen +
+			" — the one you changed most recently. Left off: " + strings.Join(choice.Dropped, ", ")
+	}
 	facts = append(facts, fact{
 		Label: "Tags", Pills: tags,
-		Sub: "tags decide which of your secrets are pushed into the sandbox",
+		Sub: tagSub,
 	})
 	if also := h.alsoClones(c, att, tags); len(also) > 0 {
 		facts = append(facts, fact{
@@ -650,8 +660,13 @@ func stateClass(state string) string {
 // This is also the ONLY place a tag enters this feature. Nothing here reads a
 // tag from the URL, and the package comment explains at length why a tag in a
 // public link would be a selector over the CLICKER's decrypted secrets.
-func createTags(att repos.Repo) []string {
-	out := slices.Clone(att.Tags)
+// It takes the CHOSEN tags rather than the attachment, because the attachment's
+// own set is no longer the answer: launchTags may drop an environment, and a
+// page that showed the undropped set would be listing a tag the create will not
+// carry — the one kind of inaccuracy this screen cannot have, since its whole
+// job is to state what the button does.
+func createTags(chosen []string) []string {
+	out := slices.Clone(chosen)
 	if !slices.Contains(out, secrets.DefaultTag) {
 		out = append(out, secrets.DefaultTag)
 	}

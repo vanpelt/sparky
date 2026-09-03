@@ -37,6 +37,7 @@ package ctlops
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -87,6 +88,12 @@ type EnvironmentInfo struct {
 	BuildDenialOverflow uint64                   `json:"build_denial_overflow,omitempty"`
 	BuiltAt             *time.Time               `json:"built_at,omitempty"`
 	CreatedAt           time.Time                `json:"created_at"`
+	// UpdatedAt is when this environment's composition was last changed. It is
+	// on the public shape for a reader that has to choose BETWEEN environments
+	// rather than display one — the launch door, which turns a repository
+	// attached to several into the one sandbox its owner most recently worked
+	// on (see EnvironmentsForTags).
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// The composition. Every one of these is what carries this environment's
 	// tag right now, read from the store that owns it — never a copy kept here,
@@ -131,6 +138,17 @@ type EnvArgs struct {
 	// gets. It is a per-call gesture and is never stored: what it means is
 	// "do not create one now", not "this environment is permanently open".
 	OpenEgress bool
+	// Adopt agrees to create an environment over a tag that is ALREADY carrying
+	// somebody's repos, secrets, rule-sets, vars, base image or sandboxes. It
+	// is a per-call gesture like OpenEgress and is never stored — what IS
+	// stored is what was adopted, which is a different fact and is the store's
+	// (see envs.Adopted).
+	//
+	// It only ever applies to a create. On an update the environment already
+	// owns its tag, so there is nothing left to consent to and the flag is
+	// silently irrelevant rather than an error — `env set web --adopt` typed out
+	// of habit is not a mistake worth refusing.
+	Adopt bool
 	// Vars are set outright — a var IS keyed by (owner, tag, name), so there is
 	// no other object to union with.
 	Vars []EnvVar
@@ -156,6 +174,13 @@ type EnvDeleteResult struct {
 	// somebody wrote, which are reported in Rules like everything else.
 	RemovedRule string   `json:"removed_rule,omitempty"`
 	Resynced    []string `json:"resynced"` // sandboxes whose environment was re-pushed
+	// KeptVars and KeptSnapshot are the vars and the base image this delete did
+	// NOT take, because the environment adopted them rather than created them
+	// (see envs.Adopted). They are reported for the same reason Repos and
+	// Secrets are — so nobody has to guess whether their configuration survived
+	// — and their emptiness is the normal case.
+	KeptVars     []string `json:"kept_vars,omitempty"`
+	KeptSnapshot string   `json:"kept_snapshot,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +224,67 @@ func (o *Ops) GetEnvironment(c Caller, name string) (EnvironmentInfo, error) {
 		return EnvironmentInfo{}, envStoreError(op, name, err)
 	}
 	return o.composition(c.Handle).info(e), nil
+}
+
+// EnvironmentsForTags returns the caller's environments whose name appears in
+// tags, newest first — the answer to "of the tags on this thing, which are
+// environments, and which did they last work on".
+//
+// It exists for a reader that has to CHOOSE between environments rather than
+// display one. A repository attachment can carry several tags, and a sandbox
+// has exactly one rootfs, so something must decide; the launch door is the
+// caller today (internal/launch), and its rule is the most recently updated
+// wins.
+//
+// No new store query. An owner has at most a few dozen environments and List is
+// one indexed read, so the intersection happens here — the same bargain
+// composition already makes, and a narrower one than a SQL IN would be, because
+// the sort is this package's policy and not the store's.
+//
+// The composition IS filled in, even though the caller that motivated this
+// method reads two fields of it. An EnvironmentInfo with empty Repos and
+// Secrets is not a cheaper answer, it is a wrong one — the type means "an
+// environment and everything carrying its tag" everywhere else it appears, and a
+// second, hollow spelling of it would be found by the next caller rather than by
+// a test. The cost is four indexed reads over small per-owner tables plus one
+// vars lookup per MATCHED environment, against a launch click that already takes
+// three repo queries and a sandbox listing.
+//
+// This is NOT the shape envs.EnvironmentsForSandbox was kept off the
+// Environments interface for. That refusal is about resolving what a RUNNING
+// GUEST sees, which is internal/metadata's authority; this is owner-and-tag
+// scoped, decides nothing about any existing sandbox, and is a read of the same
+// configuration `env ls` already returns in full.
+func (o *Ops) EnvironmentsForTags(c Caller, tags []string) ([]EnvironmentInfo, error) {
+	const op = "env.for-tags"
+	if o.envs == nil {
+		return nil, Disabled(op, envDisabledSentence)
+	}
+	if len(tags) == 0 {
+		return nil, nil
+	}
+	list, err := o.envs.List(c.Handle)
+	if err != nil {
+		return nil, Fail(op, err)
+	}
+	comp := o.composition(c.Handle)
+	out := make([]EnvironmentInfo, 0, len(tags))
+	for _, e := range list {
+		if slices.Contains(tags, e.Name) {
+			out = append(out, comp.info(e))
+		}
+	}
+	// Most recently updated first, name ascending to break a tie. The tiebreak
+	// is not cosmetic: a caller picking the head of this slice must get the same
+	// answer every time it asks, or a launch link would land in a different
+	// sandbox on alternate clicks.
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +385,37 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 	existing, getErr := o.envs.Get(c.Handle, name)
 	creating := getErr != nil && errors.Is(getErr, envs.ErrNoSuchEnvironment)
 
+	// THE ADOPTION GATE. A tag that is already carrying somebody's
+	// configuration is not a free name, and an environment named after one
+	// inherits the lot the moment the row exists — every composition read joins
+	// on the name, so there is no "half created" state in which to notice.
+	//
+	// It runs with the other refusals, before the first write, and only on a
+	// create: once the environment owns its tag there is nothing left to
+	// consent to.
+	//
+	// The carriers named in THIS command are deliberately not subtracted.
+	// `env create web --repo wandb/hivemind` where that repo is already tagged
+	// `web` is the commonest adoption there is — somebody tagged things by hand
+	// for months and now wants a word for the grouping — and it is exactly the
+	// case that should be confirmed rather than waved through.
+	var adopted *envs.Adopted
+	if creating {
+		carriers := o.carriersOfTag(c.Handle, name)
+		if !carriers.empty() {
+			if !a.Adopt {
+				return EnvironmentInfo{}, envTagInUse(op, name, carriers)
+			}
+			// Written in the same INSERT as the row below, so `env rm` can
+			// tell what this environment brought from what it found.
+			adopted = carriers.adopted()
+			o.log.Info("environment adopting an existing tag", "user", c.Handle, "env", name,
+				"repos", len(carriers.Repos), "secrets", len(carriers.Secrets),
+				"rules", len(carriers.Rules), "vars", len(carriers.Vars),
+				"snapshot", carriers.Snapshot, "sandboxes", len(carriers.Sandboxes))
+		}
+	}
+
 	// ---- writes ----
 
 	// The store's Put sets the description outright, so an absent one has to be
@@ -309,7 +426,7 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 	if a.Description != nil {
 		description = *a.Description
 	}
-	if _, err := o.envs.Put(c.Handle, name, description); err != nil {
+	if _, err := o.envs.Put(c.Handle, name, description, adopted); err != nil {
 		return EnvironmentInfo{}, envStoreError(op, name, err)
 	}
 	for _, r := range a.Repos {
@@ -381,9 +498,16 @@ func (o *Ops) DeleteEnvironment(ctx context.Context, c Caller, name string) (Env
 		return EnvDeleteResult{}, err
 	}
 	// Existence is checked through the store's own owner-scoped Get, so another
-	// owner's environment and one nobody has are the same masked answer.
-	if _, err := o.envs.Get(c.Handle, name); err != nil {
+	// owner's environment and one nobody has are the same masked answer. The row
+	// is KEPT rather than discarded, because its adoption record is what decides
+	// which of the two destructive steps below may run.
+	row, err := o.envs.Get(c.Handle, name)
+	if err != nil {
 		return EnvDeleteResult{}, envStoreError(op, name, err)
+	}
+	adopted := envs.Adopted{}
+	if row.Adopted != nil {
+		adopted = *row.Adopted
 	}
 	// Read the composition and the fan-out BEFORE the delete, for
 	// DeleteSecret's reason: afterwards nothing can say which boxes were
@@ -406,9 +530,15 @@ func (o *Ops) DeleteEnvironment(ctx context.Context, c Caller, name string) (Env
 		// failing the command here would report a completed removal as a
 		// refused one. The orphaned rows are owner-and-tag scoped and are
 		// cleared again by the next delete of the same name.
-		if err := o.envVars.DeleteVarsForTag(c.Handle, name); err != nil {
-			o.log.Warn("could not delete an environment's vars", "user", c.Handle, "env", name, "err", err)
-		}
+		//
+		// ADOPTED VARS ARE NOT DELETED. The blanket DeleteVarsForTag is right
+		// for an environment that brought its own — those rows are keyed by
+		// (owner, tag, name) and would otherwise be unreachable — and wrong for
+		// one that found them already sitting on somebody's tag, which is
+		// configuration this verb was never given permission to destroy. So the
+		// vars are read back and removed one at a time, skipping the inherited
+		// names.
+		res.KeptVars = o.deleteOwnVars(c.Handle, name, adopted.Vars)
 	}
 	// The one deletion this verb makes, and it is a deletion of something this
 	// package created rather than something a person did. It runs before the
@@ -418,7 +548,21 @@ func (o *Ops) DeleteEnvironment(ctx context.Context, c Caller, name string) (Env
 		res.RemovedRule = removed
 		res.Rules = slices.DeleteFunc(res.Rules, func(r string) bool { return r == removed })
 	}
-	if o.templateTags != nil && comp.snapshot[name] != "" {
+	// The binding goes for the same reason the vars do — a tag nobody can see
+	// must not keep pointing at a base image — and it stays for the same reason
+	// too. An adopted binding was somebody's `snapshot bind` long before this
+	// environment existed, and un-pointing it would change what their EXISTING
+	// sandboxes boot from, which is a far larger action than deleting a name.
+	// The comparison is against the CURRENT binding, not merely "was one
+	// adopted": a successful `env build` re-points the tag at a disk this
+	// environment captured, and that snapshot is its own however the tag
+	// started out. Only a binding that is still the one found on the day is
+	// kept.
+	switch {
+	case o.templateTags == nil || comp.snapshot[name] == "":
+	case adopted.Snapshot != "" && adopted.Snapshot == comp.snapshot[name]:
+		res.KeptSnapshot = comp.snapshot[name]
+	default:
 		if b, err := o.templateTags.Unbind(c.Handle, name); err == nil {
 			res.Unbound = b.Snapshot
 		} else {
@@ -431,6 +575,7 @@ func (o *Ops) DeleteEnvironment(ctx context.Context, c Caller, name string) (Env
 	o.log.Info("environment removed", "user", c.Handle, "env", name,
 		"still_tagged_repos", len(res.Repos), "still_tagged_secrets", len(res.Secrets),
 		"still_tagged_rules", len(res.Rules), "removed_rule", res.RemovedRule,
+		"kept_vars", len(res.KeptVars), "kept_snapshot", res.KeptSnapshot,
 		"resynced", len(affected))
 	return res, nil
 }
@@ -813,6 +958,7 @@ func (c envComposition) info(e envs.Environment) EnvironmentInfo {
 		BuildDenialOverflow: e.BuildDenialOverflow,
 		BuiltAt:             e.BuiltAt,
 		CreatedAt:           e.CreatedAt,
+		UpdatedAt:           e.UpdatedAt,
 		Repos:               c.repos[e.Name],
 		Secrets:             c.secrets[e.Name],
 		Rules:               c.rules[e.Name],
@@ -826,6 +972,185 @@ func (c envComposition) info(e envs.Environment) EnvironmentInfo {
 		ei.Vars = []EnvVar{}
 	}
 	return ei
+}
+
+// ---------------------------------------------------------------------------
+// Adoption
+// ---------------------------------------------------------------------------
+
+// tagCarriers is everything already carrying a tag that no environment has
+// claimed yet — the state `env create <that tag>` would silently inherit.
+//
+// It exists because the tag namespace is OLDER than environments and shared
+// with four other stores. `ctl create scratch --tag web`, `repo add --tag web`
+// and `net --tag web` all write rows with no environment anywhere, so a name
+// that means nothing to this package can mean a great deal to somebody's
+// sandboxes. An environment's name IS its tag, so naming one after such a tag
+// is not a fresh start: it is an adoption, and it happens the instant the row
+// is inserted, because every composition read joins on the name.
+type tagCarriers struct {
+	Repos     []string
+	Secrets   []string
+	Rules     []string
+	Vars      []string
+	Snapshot  string
+	Sandboxes []string
+}
+
+// empty reports whether the tag is genuinely unused, which is the ordinary case
+// and the one that needs no consent.
+func (t tagCarriers) empty() bool {
+	return len(t.Repos) == 0 && len(t.Secrets) == 0 && len(t.Rules) == 0 &&
+		len(t.Vars) == 0 && t.Snapshot == "" && len(t.Sandboxes) == 0
+}
+
+// adopted narrows the carriers down to the two that `env rm` would DESTROY, and
+// is what gets written alongside the row.
+//
+// Repos, secrets, rule-sets and sandboxes are deliberately not recorded: delete
+// never touches them, it reports them, so nothing later needs to know whether
+// they arrived before or after. Recording them anyway would be a second copy of
+// a list the other stores already answer, kept at one instant and wrong from the
+// next write onwards.
+func (t tagCarriers) adopted() *envs.Adopted {
+	a := envs.Adopted{Vars: slices.Clone(t.Vars), Snapshot: t.Snapshot}
+	if a.Empty() {
+		return nil
+	}
+	return &a
+}
+
+// deleteOwnVars removes every var on the tag EXCEPT the adopted ones, and
+// returns the names it left standing.
+//
+// One delete per var where DeleteVarsForTag is a single statement, which is the
+// price of the distinction and a cheap one: an environment holds a handful of
+// variables, and the alternative — deleting the lot and writing the adopted ones
+// back — has a window in which somebody's configuration exists nowhere.
+//
+// Every failure is logged and swallowed, matching the blanket delete it
+// replaces: the environment row is already gone by the time this runs, and a
+// var that outlives it is a stray row, not a broken command.
+func (o *Ops) deleteOwnVars(owner, tag string, keep []string) []string {
+	list, err := o.envVars.VarsForTag(owner, tag)
+	if err != nil {
+		o.log.Warn("could not read an environment's vars to delete them",
+			"user", owner, "env", tag, "err", err)
+		return nil
+	}
+	var kept []string
+	for _, v := range list {
+		if slices.Contains(keep, v.Name) {
+			kept = append(kept, v.Name)
+			continue
+		}
+		if err := o.envVars.DeleteVar(owner, tag, v.Name); err != nil {
+			o.log.Warn("could not delete an environment's var",
+				"user", owner, "env", tag, "var", v.Name, "err", err)
+		}
+	}
+	sort.Strings(kept)
+	return kept
+}
+
+// carriersOfTag reads what the tag holds right now. It is taken only on the
+// create path, where it decides a refusal, so the cost is one composition read
+// on the rarest of this verb's paths — `env set` typed against an environment
+// that already exists reads none of it.
+func (o *Ops) carriersOfTag(owner, tag string) tagCarriers {
+	comp := o.composition(owner)
+	t := tagCarriers{
+		Repos:     comp.repos[tag],
+		Secrets:   comp.secrets[tag],
+		Rules:     comp.rules[tag],
+		Snapshot:  comp.snapshot[tag],
+		Sandboxes: o.sandboxesWithTag(owner, tag),
+	}
+	if comp.vars != nil {
+		for _, v := range comp.vars(tag) {
+			t.Vars = append(t.Vars, v.Name)
+		}
+	}
+	sort.Strings(t.Vars)
+	return t
+}
+
+// envTagInUse is the refusal for `env create` over a tag somebody is already
+// using.
+//
+// It is a conflict rather than an invalid: the name is spelled perfectly well
+// and the request is one the caller may genuinely want, so the answer is "say
+// you meant it", not "say it differently". Everything the tag carries goes in
+// Details, because the console and the REST API render their own sentence and
+// the SSH channel prints this one — and the list is the whole content of the
+// warning.
+func envTagInUse(op, name string, t tagCarriers) *Error {
+	var parts []string
+	for _, s := range []struct {
+		n    int
+		one  string
+		many string
+	}{
+		{len(t.Repos), "repository", "repositories"},
+		{len(t.Secrets), "secret", "secrets"},
+		{len(t.Rules), "egress rule-set", "egress rule-sets"},
+		{len(t.Vars), "variable", "variables"},
+		{len(t.Sandboxes), "sandbox", "sandboxes"},
+	} {
+		if s.n == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", s.n, plural(s.n, s.one, s.many)))
+	}
+	if t.Snapshot != "" {
+		parts = append(parts, "a base image ("+t.Snapshot+")")
+	}
+	// The consequence is stated in general rather than itemised, because the
+	// itemised version has to be true of whichever carriers happen to exist —
+	// and a sentence about "those repositories" on a tag that has none reads
+	// like a bug in the message, which is the last thing a warning can afford.
+	msg := fmt.Sprintf("the tag %q is already carrying %s. An environment's name IS its tag, so "+
+		"creating %s adopts all of it: everything on that tag becomes part of the environment, and "+
+		"every sandbox carrying it becomes one of its machines.", name, joinAnd(parts), name)
+	// Said out loud because it is the one consequence that is not visible in the
+	// list, and it is a policy difference rather than a display one.
+	if len(t.Sandboxes) > 0 {
+		msg += " Because sandboxes already carry it, the environment is also created with " +
+			"unrestricted egress rather than the default allowlist, so as not to cut them off."
+	}
+	return &Error{
+		Kind: KindConflict, Op: op, Code: "env_tag_in_use",
+		Msg: msg,
+		Hint: "Re-run with --adopt to take it on as it stands, or choose a name nothing carries yet " +
+			"and attach what you want with --repo, --secret and --var.",
+		Details: map[string]any{
+			"environment": name,
+			"repos":       t.Repos, "secrets": t.Secrets, "rules": t.Rules,
+			"vars": t.Vars, "snapshot": t.Snapshot, "sandboxes": t.Sandboxes,
+		},
+		Verbatim: true,
+	}
+}
+
+// plural picks the noun form. Written out rather than reached for from a
+// dependency because this package renders exactly one sentence that needs it.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// joinAnd renders a list the way a person would say it: "a, b and c".
+func joinAnd(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return "nothing"
+	case 1:
+		return parts[0]
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -64,7 +64,7 @@ func names(list []Environment) []string {
 func TestPutGetListDeleteRoundTrip(t *testing.T) {
 	s := openTest(t)
 
-	env, err := s.Put("alice", "web", "  the frontend  ")
+	env, err := s.Put("alice", "web", "  the frontend  ", nil)
 	must(t, err)
 	if env.Owner != "alice" || env.Name != "web" {
 		t.Errorf("env = %+v", env)
@@ -118,7 +118,7 @@ func TestPutGetListDeleteRoundTrip(t *testing.T) {
 
 func mustPut(t *testing.T, s *Store, owner, name, desc string) error {
 	t.Helper()
-	_, err := s.Put(owner, name, desc)
+	_, err := s.Put(owner, name, desc, nil)
 	return err
 }
 
@@ -130,7 +130,7 @@ func TestPutRefusesDefault(t *testing.T) {
 	s := openTest(t)
 	for _, name := range []string{"default", "DEFAULT", "Default", " default "} {
 		t.Run(name, func(t *testing.T) {
-			_, err := s.Put("alice", name, "")
+			_, err := s.Put("alice", name, "", nil)
 			if !errors.Is(err, ErrReservedName) {
 				t.Fatalf("Put(%q) = %v, want ErrReservedName", name, err)
 			}
@@ -176,7 +176,7 @@ func TestPutNameGrammar(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%q", tc.name), func(t *testing.T) {
 			s := openTest(t)
-			env, err := s.Put("alice", tc.name, "")
+			env, err := s.Put("alice", tc.name, "", nil)
 			if tc.ok {
 				must(t, err)
 				if env.Name != strings.TrimSpace(tc.name) {
@@ -196,7 +196,7 @@ func TestPutNameGrammar(t *testing.T) {
 
 func TestPutNeedsAnOwner(t *testing.T) {
 	s := openTest(t)
-	if _, err := s.Put("", "web", ""); !errors.Is(err, ErrInvalidName) {
+	if _, err := s.Put("", "web", "", nil); !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("Put with no owner = %v, want ErrInvalidName", err)
 	}
 }
@@ -206,7 +206,7 @@ func TestPutNeedsAnOwner(t *testing.T) {
 // somebody is already running back to draft.
 func TestPutUpdatesDescriptionOnly(t *testing.T) {
 	s := openTest(t)
-	first, err := s.Put("alice", "web", "old")
+	first, err := s.Put("alice", "web", "old", nil)
 	must(t, err)
 	must(t, s.SetScript("alice", "web", "#!/bin/sh\nnpm ci\n", SetupFromRepo))
 	must(t, s.SetState("alice", "web", StateReady, "", ""))
@@ -214,7 +214,7 @@ func TestPutUpdatesDescriptionOnly(t *testing.T) {
 	must(t, err)
 
 	time.Sleep(2 * time.Millisecond)
-	again, err := s.Put("alice", "web", "new")
+	again, err := s.Put("alice", "web", "new", nil)
 	must(t, err)
 
 	if n := s.rowCount(t); n != 1 {
@@ -345,7 +345,7 @@ func TestMaxEnvironmentsPerOwner(t *testing.T) {
 			t.Fatalf("Put #%d: %v", i, err)
 		}
 	}
-	if _, err := s.Put("alice", "one-too-many", ""); !errors.Is(err, ErrTooManyEnvironments) {
+	if _, err := s.Put("alice", "one-too-many", "", nil); !errors.Is(err, ErrTooManyEnvironments) {
 		t.Fatalf("Put at the cap = %v, want ErrTooManyEnvironments", err)
 	}
 	if n := s.rowCount(t); n != maxEnvironmentsPerOwner {
@@ -353,7 +353,7 @@ func TestMaxEnvironmentsPerOwner(t *testing.T) {
 	}
 	// The cap is on the insert path only: an owner at the cap must still be
 	// able to edit what they have, or a full list becomes a frozen one.
-	env, err := s.Put("alice", "env-0", "still editable")
+	env, err := s.Put("alice", "env-0", "still editable", nil)
 	must(t, err)
 	if env.Description != "still editable" {
 		t.Errorf("update at the cap = %+v", env)
@@ -615,7 +615,7 @@ func TestBuildingSpansOwners(t *testing.T) {
 func TestEnvironmentsSurviveReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sparkbox.db")
 	first := openAt(t, path)
-	want, err := first.Put("alice", "web", "the frontend")
+	want, err := first.Put("alice", "web", "the frontend", nil)
 	must(t, err)
 	must(t, first.SetScript("alice", "web", "npm ci\n", SetupFromRepo))
 	must(t, first.SetState("alice", "web", StateReady, "", ""))
@@ -665,5 +665,74 @@ func TestOpensAlongsideTheOtherTagStores(t *testing.T) {
 	must(t, err)
 	if len(got) != 1 || got[0].Name != "web" {
 		t.Fatalf("join over secrets-written tags = %+v", got)
+	}
+}
+
+// TestAdoptionRecordRoundTrips pins the column an `env rm` reads to decide what
+// it may destroy.
+//
+// The record says what the tag was ALREADY carrying when the environment was
+// created over it. Getting it wrong in either direction is a real loss: too
+// little and a delete takes somebody's variables with it, too much and an
+// environment's own variables outlive it as rows nobody can reach.
+func TestAdoptionRecordRoundTrips(t *testing.T) {
+	s := openTest(t)
+
+	want := &Adopted{Vars: []string{"INHERITED", "OLD"}, Snapshot: "old-disk"}
+	if _, err := s.Put("alice", "web", "", want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("alice", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Adopted == nil {
+		t.Fatal("adoption record did not survive the write")
+	}
+	if got.Adopted.Snapshot != "old-disk" || len(got.Adopted.Vars) != 2 ||
+		got.Adopted.Vars[0] != "INHERITED" || got.Adopted.Vars[1] != "OLD" {
+		t.Errorf("adopted = %+v, want %+v", got.Adopted, want)
+	}
+
+	// An UPDATE must not restate it. Put is create-and-update in one verb, and
+	// `env set web --description "..."` typed months later has no idea what the
+	// tag held on the day — so honouring its argument would let an ordinary
+	// edit rewrite history, and the window in which the record is wrong is the
+	// window in which a delete destroys the wrong thing.
+	if _, err := s.Put("alice", "web", "a new description", &Adopted{Vars: []string{"WRONG"}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Get("alice", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Adopted == nil || len(after.Adopted.Vars) != 2 || after.Adopted.Vars[0] != "INHERITED" {
+		t.Errorf("an update rewrote the adoption record: %+v", after.Adopted)
+	}
+	if after.Description != "a new description" {
+		t.Errorf("the update did not take: description = %q", after.Description)
+	}
+}
+
+// TestAdoptingNothingStoresNoRecord keeps "adopted nothing" and "adopted an
+// empty set" from being two states. They are the same fact, the ordinary
+// environment is the one that adopted nothing, and a record that says so would
+// be a row every reader has to unwrap to learn it means no.
+func TestAdoptingNothingStoresNoRecord(t *testing.T) {
+	s := openTest(t)
+	for _, in := range []*Adopted{nil, {}, {Vars: []string{}}} {
+		if _, err := s.Put("alice", "web", "", in); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get("alice", "web")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Adopted != nil {
+			t.Errorf("Put(%+v) stored %+v, want no record at all", in, got.Adopted)
+		}
+		if err := s.Delete("alice", "web"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

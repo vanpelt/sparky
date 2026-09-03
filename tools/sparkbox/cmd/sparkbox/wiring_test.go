@@ -900,7 +900,11 @@ func TestGatewayOpsSeedsASetupScriptFromARepo(t *testing.T) {
 
 	ctx := context.Background()
 	opsy := ctlops.Caller{Handle: "opsy"}
-	if _, err := ops.PutEnvironment(ctx, opsy, ctlops.EnvArgs{Name: "web"}); err != nil {
+	// Adopt, because the fixture attaches the repository to the tag `web`
+	// BEFORE the environment exists — which is exactly the shape the adoption
+	// gate refuses without consent, and exactly the shape somebody who has been
+	// tagging by hand for months is in when they finally name the grouping.
+	if _, err := ops.PutEnvironment(ctx, opsy, ctlops.EnvArgs{Name: "web", Adopt: true}); err != nil {
 		t.Fatalf("env create: %v", err)
 	}
 	if _, err := ops.BuildEnvironment(ctx, opsy, "web"); err != nil {

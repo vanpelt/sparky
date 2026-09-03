@@ -55,6 +55,12 @@ type environmentRequest struct {
 	// given. It is a per-call gesture and is never stored: it means "do not
 	// create one now", not "this environment is permanently open".
 	OpenEgress bool `json:"open_egress,omitempty"`
+	// Adopt agrees to create an environment over a tag that is already carrying
+	// repositories, secrets, rule-sets, variables, a base image or sandboxes.
+	// Without it that create answers 409 `env_tag_in_use`, whose `details` list
+	// exactly what would be adopted — so the intended flow is to call once, show
+	// the caller what came back, and call again with this set.
+	Adopt bool `json:"adopt,omitempty"`
 }
 
 // environmentRepo is one attachment, with the same per-repo passthrough
@@ -113,6 +119,7 @@ func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request) {
 	args := ctlops.EnvArgs{
 		Name: req.Name, Description: req.Description,
 		Secrets: req.Secrets, Rules: req.Rules, Vars: req.Vars, OpenEgress: req.OpenEgress,
+		Adopt: req.Adopt,
 	}
 	for _, rp := range req.Repos {
 		args.Repos = append(args.Repos, ctlops.RepoArgs{

@@ -2,6 +2,7 @@ package launch
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 
@@ -173,6 +174,115 @@ func findRepo(list []repos.Repo, slug string) (repos.Repo, bool) {
 		}
 	}
 	return repos.Repo{}, false
+}
+
+// environmentLister is the optional half of Sandboxes: the control plane's
+// answer to "which of these tags are environments, and when did they last
+// change".
+//
+// It is taken by ASSERTION off h.ops rather than added to Sandboxes, the same
+// shape and the same reasoning as envAwaiter (create.go). Sandboxes is narrow
+// on purpose, *ctlops.Ops always has this method, and a test fake that does not
+// is a fake with no environments to choose between — so the fallback below is
+// the honest behaviour for it rather than a capability check anybody deploys.
+type environmentLister interface {
+	EnvironmentsForTags(c ctlops.Caller, tags []string) ([]ctlops.EnvironmentInfo, error)
+}
+
+// tagChoice is the tag set a launch link will create with, and the reasoning
+// the confirm page renders next to it.
+type tagChoice struct {
+	// Tags is what Create is handed. It is att.Tags with at most one
+	// environment left in it.
+	Tags []string
+	// Chosen is the environment that survived, "" when no choice was made —
+	// either because none of the tags is an environment, or because only one
+	// is. It is the ordinary case and the page says nothing about it.
+	Chosen string
+	// Dropped are the environments left off, so the page can name them. A
+	// visitor who lands in `web` when they were thinking of `ci` needs to be
+	// told, and this is the only screen that can tell them.
+	Dropped []string
+}
+
+// launchTags decides which of an attachment's tags a create should carry.
+//
+// THE PROBLEM IT SOLVES. A repository attachment can carry several tags and a
+// sandbox has exactly one rootfs, so when two of those tags are environments
+// with different base images, ctlops.resolveTemplate refuses the create as
+// `template_ambiguous` and says "create it with only one of those tags" — sound
+// advice for somebody at a terminal, and useless to somebody who clicked a link
+// in a comment. A repository attached to two built environments had a
+// permanently dead launch link.
+//
+// THE RULE. Every tag that is not an environment rides along untouched; among
+// the ones that are, the most recently updated wins. That is the environment
+// its owner was last working in, which is the best available guess at the one
+// they meant, and it is a guess that the confirm page shows and their other
+// sandboxes escape.
+//
+// NEVER FATAL. A host whose ops predates this method, or a store that stumbles,
+// falls back to the whole tag set — which is exactly today's behaviour, up to
+// and including the 409 — because a launch door that refused to open on a
+// degraded read would be worse than one that occasionally asks the visitor to
+// pick. Same discipline as alsoClones and awaitEnv.
+func (h *Handler) launchTags(c ctlops.Caller, att repos.Repo) tagChoice {
+	all := slices.Clone(att.Tags)
+	lister, ok := h.ops.(environmentLister)
+	if !ok {
+		return tagChoice{Tags: all}
+	}
+	list, err := lister.EnvironmentsForTags(c, att.Tags)
+	if err != nil {
+		h.log.Warn("launch could not read the environments on an attachment's tags",
+			"user", c.Handle, "slug", att.Slug, "err", err)
+		return tagChoice{Tags: all}
+	}
+	return pickTags(all, list)
+}
+
+// pickTags is launchTags' whole decision, separated from the read so it can be
+// tabled.
+//
+// It does NOT rely on the order it is handed. EnvironmentsForTags already sorts
+// newest-first, and depending on that here would make this function's answer a
+// property of two places instead of one — so the winner is computed again,
+// with the same rule: latest UpdatedAt, name ascending to break a tie.
+//
+// The tiebreak is load-bearing rather than tidy. Two environments saved in the
+// same write second is an ordinary thing, and without a total order the same
+// link would open a different sandbox on alternate clicks — the exact
+// duplicate-per-click failure normalizeRef exists to prevent, arriving by
+// another road.
+func pickTags(tags []string, list []ctlops.EnvironmentInfo) tagChoice {
+	if len(list) < 2 {
+		return tagChoice{Tags: tags}
+	}
+	best := list[0]
+	for _, e := range list[1:] {
+		switch {
+		case e.UpdatedAt.After(best.UpdatedAt):
+			best = e
+		case e.UpdatedAt.Equal(best.UpdatedAt) && e.Name < best.Name:
+			best = e
+		}
+	}
+	drop := make(map[string]bool, len(list))
+	var dropped []string
+	for _, e := range list {
+		if e.Name != best.Name {
+			drop[e.Name] = true
+			dropped = append(dropped, e.Name)
+		}
+	}
+	sort.Strings(dropped)
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if !drop[t] {
+			out = append(out, t)
+		}
+	}
+	return tagChoice{Tags: out, Chosen: best.Name, Dropped: dropped}
 }
 
 // resolve answers the only question a click asks: does this person already have

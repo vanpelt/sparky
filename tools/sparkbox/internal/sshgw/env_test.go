@@ -668,3 +668,52 @@ func TestControlEnvBuildWithoutAGuestNudge(t *testing.T) {
 		t.Errorf("the refusal reads %q", s.stderr.String())
 	}
 }
+
+// TestParseEnvAdopt pins the valueless flag that agrees to take on a tag
+// somebody is already using.
+//
+// The i discipline is the whole test. `--adopt` consumes no word, so a parser
+// that advanced anyway would silently eat the argument after it — and
+// `--adopt --var K=V` would set no variable while reporting success, which is
+// the shape of bug the --open-egress comment already warns about.
+func TestParseEnvAdopt(t *testing.T) {
+	t.Run("it sets the flag", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--adopt"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if !a.Adopt {
+			t.Error("--adopt did not set Adopt")
+		}
+	})
+
+	t.Run("it consumes no word", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--adopt", "--var", "K=1"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if !a.Adopt {
+			t.Error("--adopt did not set Adopt")
+		}
+		if len(a.Vars) != 1 || a.Vars[0].Name != "K" || a.Vars[0].Value != "1" {
+			t.Errorf("vars = %#v — --adopt ate the flag after it", a.Vars)
+		}
+	})
+
+	t.Run("it takes no value", func(t *testing.T) {
+		if _, _, err := parseEnvSet([]string{"web", "--adopt=yes"}); err == nil ||
+			!strings.Contains(err.Error(), "takes no value") {
+			t.Errorf("err = %v, want a refusal about taking no value", err)
+		}
+	})
+
+	t.Run("it is off unless asked for", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if a.Adopt {
+			t.Error("Adopt defaulted to true — adoption must never be the default")
+		}
+	})
+}

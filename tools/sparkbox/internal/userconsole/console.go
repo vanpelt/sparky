@@ -2030,3 +2030,25 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
+
+// writeOpErr is writeErr for an error that may be a *ctlops.Error, adding the
+// machine token as `code` alongside the sentence.
+//
+// The console's error body has always been `{"error": "<sentence>"}` and stays
+// that way — every existing caller reads that field and keeps working. What it
+// could not do is tell one refusal from another without matching on prose,
+// which is exactly the coupling `Code` exists to prevent, and the environment
+// adoption conflict is the first refusal this surface has to ACT on rather than
+// merely display: the page re-sends the request with `adopt` set.
+//
+// Only the code travels, never Details. The console renders its own sentence
+// from what the user typed and has the composition on screen already; a nested
+// object here would be a second, staler copy of the Environments tab.
+func writeOpErr(w http.ResponseWriter, code int, err error) {
+	body := map[string]string{"error": err.Error()}
+	var typed *ctlops.Error
+	if errors.As(err, &typed) && typed.Code != "" {
+		body["code"] = typed.Code
+	}
+	writeJSON(w, code, body)
+}

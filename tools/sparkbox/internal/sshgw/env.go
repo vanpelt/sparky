@@ -57,6 +57,7 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"  flags: --repo <owner>/<name>  --secret <NAME>  --rule <name>  --var K=V\r\n" +
 	"         --description <text>          every one of them may be repeated\r\n" +
 	"         --open-egress                 on create: skip the default egress rules\r\n" +
+	"         --adopt                       on create: take on a tag already in use\r\n" +
 	"\r\n" +
 	"an environment names a way of working: a checkout, the secrets it needs, the\r\n" +
 	"egress it is allowed, some plain variables, and the disk they were built on.\r\n" +
@@ -64,9 +65,10 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"sandbox of yours carrying `web` gets everything `web` is on.\r\n" +
 	"\r\n" +
 	"attaching ADDS. a secret can belong to three environments at once, so `env rm`\r\n" +
-	"deletes the environment, its variables, and the egress rule-set `env create`\r\n" +
-	"made for it — nothing else: the secrets, repos and rule-sets you wrote carry on\r\n" +
-	"and are listed on the way out.\r\n" +
+	"deletes the environment, the variables it created, and the egress rule-set\r\n" +
+	"`env create` made for it — nothing else: the secrets, repos and rule-sets you\r\n" +
+	"wrote carry on and are listed on the way out, and so does anything that was\r\n" +
+	"already on the tag when the environment adopted it.\r\n" +
 	"\r\n" +
 	"  ssh ctl@<gateway> env create web --repo wandb/hivemind --secret GITHUB_TOKEN\r\n" +
 	"  ssh ctl@<gateway> env set web --var NODE_ENV=test --description \"the web box\"\r\n" +
@@ -443,6 +445,18 @@ func (g *Gateway) envRemove(s gssh.Session, c ctlops.Caller, name string, log *s
 		fmt.Fprintf(s, "note: the tag no longer boots from snapshot %q — the snapshot itself is kept.\r\n",
 			res.Unbound)
 	}
+	// What an adopted environment gave back. These two would have been deleted
+	// had the environment created them, so saying nothing would leave somebody
+	// who remembers that rule assuming the worst about configuration that is
+	// still there.
+	if res.KeptSnapshot != "" {
+		fmt.Fprintf(s, "note: the tag still boots from snapshot %q — it was bound before this\r\n"+
+			"      environment adopted the tag, so it was left alone.\r\n", res.KeptSnapshot)
+	}
+	if len(res.KeptVars) > 0 {
+		fmt.Fprintf(s, "note: these variables were on the tag before this environment adopted it\r\n"+
+			"      and were kept: %s\r\n", strings.Join(res.KeptVars, ", "))
+	}
 	// Said out loud, because it is the one thing here that WAS deleted, and the
 	// note below promises the opposite about everything else.
 	if res.RemovedRule != "" {
@@ -570,6 +584,14 @@ func parseEnvSet(args []string) (ctlops.EnvArgs, []string, error) {
 				return ctlops.EnvArgs{}, nil, fmt.Errorf("%s takes no value", flag)
 			}
 			a.OpenEgress = true
+		case "--adopt":
+			// The other valueless gesture, and the same i discipline applies:
+			// consuming the next word here would eat the argument of whatever
+			// follows.
+			if attached {
+				return ctlops.EnvArgs{}, nil, fmt.Errorf("%s takes no value", flag)
+			}
+			a.Adopt = true
 		case "--description", "--desc":
 			// The one flag whose value may legitimately be several words: the
 			// shell is supposed to quote it, and somebody who forgets gets the

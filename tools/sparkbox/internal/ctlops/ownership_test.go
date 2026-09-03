@@ -336,6 +336,13 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// one nobody has.
 		"ListEnvironments": true, "GetEnvironment": true, "PutEnvironment": true,
 		"DeleteEnvironment": true, "SetEnvVar": true, "UnsetEnvVar": true,
+		// EnvironmentsForTags names TAGS rather than an environment, which
+		// sounds like a wider surface and is a narrower one: it cannot name a
+		// row at all. It reads the caller's own List and keeps whichever names
+		// happen to match, so a tag somebody else's environment uses returns
+		// nothing rather than theirs — the same structural scoping, reached
+		// without a name to mask.
+		"EnvironmentsForTags": true,
 		// The setup-script pair names an environment and nothing else, so it is
 		// scoped exactly as the six above are: envs.Store.Get and SetScript
 		// both carry the owner in their WHERE clause, and a name belonging to

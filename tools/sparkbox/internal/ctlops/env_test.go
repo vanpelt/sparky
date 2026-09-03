@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
@@ -25,7 +26,7 @@ func ptr[T any](v T) *T { return &v }
 
 func seedEnv(t *testing.T, e *fakeEnvs, owner, name string, st envs.State) {
 	t.Helper()
-	if _, err := e.Put(owner, name, ""); err != nil {
+	if _, err := e.Put(owner, name, "", nil); err != nil {
 		t.Fatalf("seed %s/%s: %v", owner, name, err)
 	}
 	if st != envs.StateDraft {
@@ -413,8 +414,11 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+		// Adopt, because a sandbox already carrying the tag is now precisely
+		// what the adoption gate refuses without it — this test is the reason
+		// that gate mentions egress in its own sentence.
 		if _, err := r.ops.PutEnvironment(context.Background(), alice(),
-			EnvArgs{Name: "web"}); err != nil {
+			EnvArgs{Name: "web", Adopt: true}); err != nil {
 			t.Fatalf("env create: %v", err)
 		}
 		if _, made := r.netrules.rows["alice\x00web"]; made {
@@ -1267,3 +1271,301 @@ var (
 	_ NetRules     = (*fakeNetRules)(nil)
 	_ SecretTags   = (*fakeSecrets)(nil)
 )
+
+// ---------------------------------------------------------------------------
+// Adoption
+// ---------------------------------------------------------------------------
+
+// TestEnvCreateRefusesATagAlreadyInUse is the adoption gate.
+//
+// An environment's name IS its tag, and tags are OLDER than environments and
+// shared with four other stores: `ctl create scratch --tag web`, `repo add
+// --tag web` and `net --tag web` all write rows with no environment anywhere.
+// So `env create web` can silently take ownership of configuration somebody has
+// been running for months — and it takes it the instant the row exists, because
+// every composition read joins on the name.
+//
+// One subtest per kind of carrier, because each comes from a different store and
+// a gate that consulted four of the five would be indistinguishable from one
+// that worked, right up until the day somebody's fifth thing got adopted.
+func TestEnvCreateRefusesATagAlreadyInUse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// seed puts one carrier on the tag `web` and nothing else.
+		seed func(t *testing.T, r *rig)
+	}{{
+		name: "a repo attachment",
+		seed: func(t *testing.T, r *rig) {
+			rp, _ := withRepos(r)
+			linkGitHub(r, "alice", "alice-gh", users.GitHubViaDevice, 7)
+			if _, err := r.ops.AttachRepo(context.Background(), alice(),
+				RepoArgs{Slug: "wandb/hivemind", Tags: []string{"web"}}); err != nil {
+				t.Fatal(err)
+			}
+			_ = rp
+		},
+	}, {
+		name: "a secret",
+		seed: func(t *testing.T, r *rig) {
+			if err := r.secrets.PutSecret("alice", "GITHUB_TOKEN", "x", []string{"web"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}, {
+		name: "an egress rule-set",
+		seed: func(t *testing.T, r *rig) {
+			if err := r.netrules.PutRule("alice", "npm-only",
+				netrules.RuleSpec{Allow: []string{"registry.npmjs.org"}}, []string{"web"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}, {
+		name: "a plain variable",
+		seed: func(t *testing.T, r *rig) {
+			if err := r.envVars.PutVar("alice", "web", "NODE_ENV", "test"); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}, {
+		name: "a bound base image",
+		seed: func(t *testing.T, r *rig) {
+			r.bindings.bind("alice", "web", "web-260902-1142")
+		},
+	}, {
+		name: "a sandbox already carrying the tag",
+		seed: func(t *testing.T, r *rig) {
+			if _, err := r.ops.Create(context.Background(), alice(),
+				CreateArgs{Name: "scratch", Tags: []string{"web"}}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			withEnvs(r)
+			tc.seed(t, r)
+
+			_, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{Name: "web"})
+			var e *Error
+			if !errors.As(err, &e) {
+				t.Fatalf("err = %v, want a *Error", err)
+			}
+			if e.Kind != KindConflict || e.Code != "env_tag_in_use" {
+				t.Errorf("got %s/%s, want conflict/env_tag_in_use", e.Kind, e.Code)
+			}
+			// The refusal runs with the others, BEFORE the first write. A
+			// half-created environment left behind by a gate that fired too late
+			// is worse than no gate: the tag would already be adopted, and the
+			// error would say it was not.
+			if len(r.envs.rows) != 0 {
+				t.Errorf("a refused create still wrote an environment: %v", r.envs.rows)
+			}
+
+			// And the same call with consent goes through.
+			if _, err := r.ops.PutEnvironment(context.Background(), alice(),
+				EnvArgs{Name: "web", Adopt: true}); err != nil {
+				t.Fatalf("--adopt was refused: %v", err)
+			}
+			if len(r.envs.rows) != 1 {
+				t.Errorf("an adopted create wrote %d environments, want 1", len(r.envs.rows))
+			}
+		})
+	}
+}
+
+// TestEnvCreateOnAFreeTagNeedsNoConsent is the other half, and the one that
+// keeps the gate from becoming a tax on the ordinary case: a name nothing is
+// using is created without anybody being asked anything.
+func TestEnvCreateOnAFreeTagNeedsNoConsent(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	if _, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{Name: "web"}); err != nil {
+		t.Fatalf("env create on an unused name: %v", err)
+	}
+	// Nothing was adopted, so nothing is recorded — an empty record and no
+	// record are the same state and must not be two.
+	if got := r.envs.rows[envKey("alice", "web")]; got.Adopted != nil {
+		t.Errorf("adoption record on a free tag: %+v", got.Adopted)
+	}
+}
+
+// TestEnvSetOnAnExistingEnvironmentIsNotAnAdoption pins that the gate is a
+// CREATE gate.
+//
+// `create` and `set` are one verb on one handler, so without the creating check
+// every later edit would re-ask a question the owner already answered — and
+// `env set web --var LOG_LEVEL=debug` would start failing the moment the
+// environment had a single repo on it.
+func TestEnvSetOnAnExistingEnvironmentIsNotAnAdoption(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	ctx := context.Background()
+	if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.envVars.PutVar("alice", "web", "NODE_ENV", "test"); err != nil {
+		t.Fatal(err)
+	}
+	// The tag now carries a var. A second call must not be refused for it.
+	if _, err := r.ops.PutEnvironment(ctx, alice(),
+		EnvArgs{Name: "web", Vars: []EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}}); err != nil {
+		t.Fatalf("env set on an existing environment was refused: %v", err)
+	}
+}
+
+// TestEnvRmKeepsWhatItAdopted is the reason the adoption record is stored at
+// all.
+//
+// `env rm` destroys the tag's variables and unbinds its base image, on the
+// argument that they "cannot outlive the name". That argument is true only for
+// the ones the environment brought with it. An environment created over
+// somebody's existing tag and then deleted used to take their configuration
+// with it — permanently, with no confirmation and no way back.
+func TestEnvRmKeepsWhatItAdopted(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	ctx := context.Background()
+
+	// The world before the environment: a var and a base image on the tag.
+	if err := r.envVars.PutVar("alice", "web", "INHERITED", "yes"); err != nil {
+		t.Fatal(err)
+	}
+	r.bindings.bind("alice", "web", "old-disk")
+
+	if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web", Adopt: true}); err != nil {
+		t.Fatal(err)
+	}
+	// A var the environment DID create. It is the control: without one, a
+	// delete that simply skipped every var would pass this test.
+	if _, err := r.ops.PutEnvironment(ctx, alice(),
+		EnvArgs{Name: "web", Vars: []EnvVar{{Name: "MINE", Value: "1"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := r.ops.DeleteEnvironment(ctx, alice(), "web")
+	if err != nil {
+		t.Fatalf("env rm: %v", err)
+	}
+	if _, gone := r.envVars.rows[varKey("alice", "web", "INHERITED")]; !gone {
+		t.Error("env rm destroyed a variable that was on the tag before the environment existed")
+	}
+	if _, still := r.envVars.rows[varKey("alice", "web", "MINE")]; still {
+		t.Error("env rm kept a variable the environment created — only adopted ones survive")
+	}
+	if b, bound := r.bindings.rows[bindKey("alice", "web")]; !bound || b.Snapshot != "old-disk" {
+		t.Error("env rm unbound a base image that was bound before the environment adopted the tag")
+	}
+	// Reported, not merely done: somebody who knows the rule assumes the worst
+	// about configuration they cannot see.
+	if len(res.KeptVars) != 1 || res.KeptVars[0] != "INHERITED" {
+		t.Errorf("kept_vars = %v, want [INHERITED]", res.KeptVars)
+	}
+	if res.KeptSnapshot != "old-disk" {
+		t.Errorf("kept_snapshot = %q, want old-disk", res.KeptSnapshot)
+	}
+	if res.Unbound != "" {
+		t.Errorf("unbound = %q, want empty — the binding was adopted and stays", res.Unbound)
+	}
+}
+
+// TestEnvRmStillTakesItsOwn is the mirror, and it matters as much: the keeping
+// is scoped to what was adopted, so an ordinary environment's variables and its
+// own captured disk still go with it. Otherwise every deleted environment would
+// leave unreachable (owner, tag, name) rows behind that reappear the day the
+// name is reused.
+func TestEnvRmStillTakesItsOwn(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	ctx := context.Background()
+	if _, err := r.ops.PutEnvironment(ctx, alice(),
+		EnvArgs{Name: "web", Vars: []EnvVar{{Name: "NODE_ENV", Value: "test"}}}); err != nil {
+		t.Fatal(err)
+	}
+	r.bindings.bind("alice", "web", "web-disk")
+
+	res, err := r.ops.DeleteEnvironment(ctx, alice(), "web")
+	if err != nil {
+		t.Fatalf("env rm: %v", err)
+	}
+	if _, still := r.envVars.rows[varKey("alice", "web", "NODE_ENV")]; still {
+		t.Error("env rm left its own variable behind")
+	}
+	if _, bound := r.bindings.rows[bindKey("alice", "web")]; bound {
+		t.Error("env rm left its own template binding pointing at a tag nobody can see")
+	}
+	if res.Unbound != "web-disk" {
+		t.Errorf("unbound = %q, want web-disk", res.Unbound)
+	}
+	if len(res.KeptVars) != 0 || res.KeptSnapshot != "" {
+		t.Errorf("an environment that adopted nothing reported keeping something: %+v", res)
+	}
+}
+
+// TestEnvRmDropsABindingTheBuildReplaced is the edge between the two rules
+// above.
+//
+// A successful `env build` re-points the tag at a disk this environment
+// captured, so that snapshot is the environment's own however the tag started
+// out. Keeping it because SOME binding was once adopted would leave a dead tag
+// pointing at an image nobody can reach — which is the exact thing the unbind
+// exists to prevent.
+func TestEnvRmDropsABindingTheBuildReplaced(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	ctx := context.Background()
+	r.bindings.bind("alice", "web", "old-disk")
+	if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web", Adopt: true}); err != nil {
+		t.Fatal(err)
+	}
+	// What a build does at the end of a successful capture.
+	r.bindings.bind("alice", "web", "web-260903-0900")
+
+	res, err := r.ops.DeleteEnvironment(ctx, alice(), "web")
+	if err != nil {
+		t.Fatalf("env rm: %v", err)
+	}
+	if res.Unbound != "web-260903-0900" {
+		t.Errorf("unbound = %q, want the snapshot the build bound", res.Unbound)
+	}
+	if res.KeptSnapshot != "" {
+		t.Errorf("kept_snapshot = %q, want empty — the adopted binding is long gone", res.KeptSnapshot)
+	}
+}
+
+// TestEnvironmentsForTags is the launch door's selector: owner-scoped, filtered
+// to the tags asked about, newest first.
+func TestEnvironmentsForTags(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	ctx := context.Background()
+	for _, name := range []string{"web", "ci", "prod"} {
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The fake stamps one fixed time, so the order has to come from somewhere;
+	// spreading them apart is what makes "newest first" an assertion rather
+	// than a coincidence.
+	for i, name := range []string{"ci", "web"} {
+		row := r.envs.rows[envKey("alice", name)]
+		row.UpdatedAt = time.Unix(int64(i+1)*1000, 0).UTC()
+		r.envs.rows[envKey("alice", name)] = row
+	}
+
+	got, err := r.ops.EnvironmentsForTags(alice(), []string{"web", "ci", "default", "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d environments, want 2 (web and ci; default and nope are not environments)", len(got))
+	}
+	if got[0].Name != "web" || got[1].Name != "ci" {
+		t.Errorf("order = %s, %s; want web then ci (most recently updated first)", got[0].Name, got[1].Name)
+	}
+
+	// Owner scoping, which for this method is the whole security story: it
+	// takes tag NAMES, and two people routinely share them.
+	if out, err := r.ops.EnvironmentsForTags(mallory(), []string{"web", "ci"}); err != nil || len(out) != 0 {
+		t.Errorf("another owner saw %v (err %v), want nothing", out, err)
+	}
+}

@@ -162,11 +162,19 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 		// name would sail past it and die inside stampTags as a 500 on a
 		// half-built sandbox.
 		//
+		// launchTags may leave one of them off, and only ever one that names an
+		// environment: two environments on an attachment bind two base images,
+		// and a sandbox has one rootfs. See its comment for why the alternative
+		// — Create's own `template_ambiguous` refusal — is the wrong answer to
+		// give somebody who arrived by clicking a link. It is the SAME call the
+		// confirm page made, so the pills the visitor agreed to are the tags
+		// this creates with.
+		//
 		// Everything else Create does we reimplement none of: name generation,
 		// the free-name and placement refusals, template resolution, the
 		// tags-before-create ordering the secret push depends on, and the
 		// rollback of both tag rows and ref rows on any failure after stamping.
-		si, err := h.ops.Create(shared, c, ctlops.CreateArgs{Tags: att.Tags, Refs: refs})
+		si, err := h.ops.Create(shared, c, ctlops.CreateArgs{Tags: h.launchTags(c, att).Tags, Refs: refs})
 		if err != nil {
 			return nil, err
 		}

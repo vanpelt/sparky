@@ -3,6 +3,7 @@ package launch
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -441,4 +442,186 @@ func longRef(n int) string {
 		b[i] = 'a'
 	}
 	return string(b)
+}
+
+// env is a terse EnvironmentInfo for the tag-selection tests. Only the two
+// fields pickTags ranks on are set, which is the point: anything else it started
+// reading would be a field this helper does not supply.
+func env(name string, updated time.Time) ctlops.EnvironmentInfo {
+	return ctlops.EnvironmentInfo{Name: name, UpdatedAt: updated}
+}
+
+// TestPickTags is the whole tag-selection rule as a table.
+//
+// A repository attachment can carry several tags and a sandbox has exactly one
+// rootfs, so two environments on one attachment used to reach
+// ctlops.resolveTemplate and come back as `template_ambiguous` — a 409 on a link
+// posted in a comment, which the visitor has no way to answer. The rule is that
+// non-environment tags all ride along and the most recently updated environment
+// wins.
+func TestPickTags(t *testing.T) {
+	early := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name        string
+		tags        []string
+		envs        []ctlops.EnvironmentInfo
+		wantTags    []string
+		wantChosen  string
+		wantDropped []string
+	}{{
+		name:     "no environments at all leaves every tag alone",
+		tags:     []string{"default", "web"},
+		envs:     nil,
+		wantTags: []string{"default", "web"},
+	}, {
+		name:     "one environment is not a choice",
+		tags:     []string{"default", "web"},
+		envs:     []ctlops.EnvironmentInfo{env("web", late)},
+		wantTags: []string{"default", "web"},
+	}, {
+		// The case the whole feature exists for.
+		name:        "the most recently updated environment wins",
+		tags:        []string{"ci", "default", "web"},
+		envs:        []ctlops.EnvironmentInfo{env("ci", early), env("web", late)},
+		wantTags:    []string{"default", "web"},
+		wantChosen:  "web",
+		wantDropped: []string{"ci"},
+	}, {
+		// Declared newest-first, to prove the answer is computed rather than
+		// taken from the order EnvironmentsForTags happened to return.
+		name:        "the order the list arrives in does not decide it",
+		tags:        []string{"ci", "default", "web"},
+		envs:        []ctlops.EnvironmentInfo{env("web", late), env("ci", early)},
+		wantTags:    []string{"default", "web"},
+		wantChosen:  "web",
+		wantDropped: []string{"ci"},
+	}, {
+		// Two environments saved in the same write second is ordinary, and
+		// without a total order the same link would open a different sandbox on
+		// alternate clicks.
+		name:        "an exact tie breaks on the name, ascending",
+		tags:        []string{"ci", "default", "web"},
+		envs:        []ctlops.EnvironmentInfo{env("web", late), env("ci", late)},
+		wantTags:    []string{"ci", "default"},
+		wantChosen:  "ci",
+		wantDropped: []string{"web"},
+	}, {
+		name:        "three environments still leave exactly one",
+		tags:        []string{"ci", "default", "prod", "web"},
+		envs:        []ctlops.EnvironmentInfo{env("ci", early), env("prod", late), env("web", early)},
+		wantTags:    []string{"default", "prod"},
+		wantChosen:  "prod",
+		wantDropped: []string{"ci", "web"},
+	}, {
+		// Nothing about the rule is specific to `default`; a hand-applied tag
+		// that names no environment is carried through the same way.
+		name:        "non-environment tags all survive the narrowing",
+		tags:        []string{"ci", "gpu", "scratch", "web"},
+		envs:        []ctlops.EnvironmentInfo{env("ci", early), env("web", late)},
+		wantTags:    []string{"gpu", "scratch", "web"},
+		wantChosen:  "web",
+		wantDropped: []string{"ci"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pickTags(tc.tags, tc.envs)
+			if !equalStrings(got.Tags, tc.wantTags) {
+				t.Errorf("tags = %v, want %v", got.Tags, tc.wantTags)
+			}
+			if got.Chosen != tc.wantChosen {
+				t.Errorf("chosen = %q, want %q", got.Chosen, tc.wantChosen)
+			}
+			if !equalStrings(got.Dropped, tc.wantDropped) {
+				t.Errorf("dropped = %v, want %v", got.Dropped, tc.wantDropped)
+			}
+		})
+	}
+}
+
+// TestLaunchTagsDegradesToEveryTag pins the two failure modes as the OLD
+// behaviour rather than as an error.
+//
+// A launch door that refused to open because an environment read stumbled would
+// be worse than one that occasionally hands the visitor the ambiguity it always
+// used to — so both a store failure and an ops that has no such method fall back
+// to the attachment's whole tag set. Same discipline as alsoClones and awaitEnv.
+func TestLaunchTagsDegradesToEveryTag(t *testing.T) {
+	att := repos.Repo{Slug: testSlug, Tags: []string{"ci", "default", "web"}}
+
+	t.Run("a store failure", func(t *testing.T) {
+		ops := &fakeOps{t: t, envsErr: errStore}
+		h := newHandler(t, ops, attached(testHandle, att, nil))
+		got := h.launchTags(testCaller, att)
+		if !equalStrings(got.Tags, att.Tags) {
+			t.Errorf("tags = %v, want every tag %v", got.Tags, att.Tags)
+		}
+		if got.Chosen != "" || got.Dropped != nil {
+			t.Errorf("a failed read reported a choice: %+v", got)
+		}
+	})
+
+	t.Run("an ops that cannot answer", func(t *testing.T) {
+		// noEnvOps is a Sandboxes with no EnvironmentsForTags, which is what the
+		// assertion in launchTags is there to survive.
+		h := newHandler(t, &fakeOps{t: t}, attached(testHandle, att, nil))
+		h.ops = noEnvOps{h.ops}
+		got := h.launchTags(testCaller, att)
+		if !equalStrings(got.Tags, att.Tags) {
+			t.Errorf("tags = %v, want every tag %v", got.Tags, att.Tags)
+		}
+	})
+}
+
+// noEnvOps wraps a Sandboxes and hides everything else, so the type assertion in
+// launchTags fails the way it would on a host whose control plane predates the
+// method.
+type noEnvOps struct{ Sandboxes }
+
+// TestCreateUsesTheNarrowedTagSet is the end-to-end half: the tags the confirm
+// page showed are the tags the create carries.
+//
+// Asserted on what reached Create rather than on launchTags, because the bug
+// this prevents is the two drifting — a page that renders one set and a POST
+// that sends another is worse than no narrowing at all.
+func TestCreateUsesTheNarrowedTagSet(t *testing.T) {
+	early := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	att := repos.Repo{Slug: testSlug, Tags: []string{"ci", "default", "web"}}
+
+	ops := &fakeOps{
+		t: t, allowCreate: true,
+		envs: []ctlops.EnvironmentInfo{env("ci", early), env("web", late)},
+	}
+	h := newHandler(t, ops, attached(testHandle, att, nil))
+
+	rec := serveLaunch(t, h, http.MethodPost, "https://go.example.test/"+testSlug,
+		signedIn(t, testHandle), fromThePage)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+	if ops.createCount() != 1 {
+		t.Fatalf("created %d sandboxes, want 1", ops.createCount())
+	}
+	got := ops.created[0].Tags
+	want := []string{"default", "web"}
+	if !equalStrings(got, want) {
+		t.Errorf("created with tags %v, want %v — `ci` is the older environment "+
+			"and must not ride along, or ctlops refuses the create as template_ambiguous", got, want)
+	}
+}
+
+// equalStrings compares two string slices, treating nil and empty as equal —
+// which they are for every caller here, since "no tags dropped" is reported as
+// nil and written as nothing.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

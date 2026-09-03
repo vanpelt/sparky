@@ -30,6 +30,11 @@ type fakeEnvOps struct {
 	rows    map[string]ctlops.EnvironmentInfo
 	scripts map[string]string
 	origins map[string]string
+	// lastArgs is what PutEnvironment was handed most recently, and putErr is
+	// what it fails with. Both exist for the adoption seam: the panel's whole
+	// confirm-and-retry rests on a flag arriving and a code coming back.
+	lastArgs ctlops.EnvArgs
+	putErr   error
 }
 
 func newFakeEnvOps() *fakeEnvOps {
@@ -68,6 +73,10 @@ func (f *fakeEnvOps) GetEnvironment(c ctlops.Caller, name string) (ctlops.Enviro
 
 func (f *fakeEnvOps) PutEnvironment(_ context.Context, c ctlops.Caller, a ctlops.EnvArgs) (ctlops.EnvironmentInfo, error) {
 	f.note(c, "put "+a.Name)
+	f.lastArgs = a
+	if f.putErr != nil {
+		return ctlops.EnvironmentInfo{}, f.putErr
+	}
 	e := f.rows[a.Name]
 	e.Name = a.Name
 	if a.Description != nil {
@@ -368,5 +377,60 @@ func TestBuildAndCaptureReachTheControlPlane(t *testing.T) {
 	}
 	if f.rows["web"].Snapshot == "" {
 		t.Error("capture bound no base image")
+	}
+}
+
+// TestTheAdoptFlagReachesTheControlPlane is the seam this package is
+// responsible for: the panel's confirm-and-retry is worthless if the retry's
+// `adopt` never arrives.
+func TestTheAdoptFlagReachesTheControlPlane(t *testing.T) {
+	tc := newTestConsole(t)
+	f := withEnvOps(t, tc)
+
+	tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{"secrets": []string{"X"}})
+	if f.lastArgs.Adopt {
+		t.Error("a save that did not ask to adopt arrived with Adopt set")
+	}
+	tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{
+		"secrets": []string{"X"}, "adopt": true,
+	})
+	if !f.lastArgs.Adopt {
+		t.Error("adopt:true did not reach the control plane, so the retry would be refused again")
+	}
+}
+
+// TestAConflictCarriesItsCode pins the one thing the console's error body could
+// not previously say.
+//
+// The body has always been {"error": "<sentence>"}, and the page cannot tell an
+// adoption conflict from any other 409 by reading prose — so it now carries the
+// stable machine token beside the sentence. Matching on the wording would be
+// exactly the coupling Code exists to prevent, and it would break the first time
+// somebody improved the sentence.
+func TestAConflictCarriesItsCode(t *testing.T) {
+	tc := newTestConsole(t)
+	f := withEnvOps(t, tc)
+	f.putErr = &ctlops.Error{
+		Kind: ctlops.KindConflict, Op: "env.set", Code: "env_tag_in_use",
+		Msg: "the tag \"web\" is already carrying 2 repositories.", Verbatim: true,
+	}
+
+	rec := tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{"secrets": []string{"X"}})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "env_tag_in_use" {
+		t.Errorf("code = %q, want env_tag_in_use", body.Code)
+	}
+	// The sentence still rides in `error`, where every other caller reads it.
+	if !strings.Contains(body.Error, "already carrying") {
+		t.Errorf("error = %q, want the control plane's own sentence", body.Error)
 	}
 }

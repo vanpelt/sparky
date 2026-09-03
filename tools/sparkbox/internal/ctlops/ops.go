@@ -183,7 +183,7 @@ type Repos interface {
 // against the sandbox's before doing anything with it; that comparison is a
 // security boundary, not tidiness, because sandbox names are global.
 type Environments interface {
-	Put(owner, name, description string) (envs.Environment, error)
+	Put(owner, name, description string, adopted *envs.Adopted) (envs.Environment, error)
 	Get(owner, name string) (envs.Environment, error)
 	List(owner string) ([]envs.Environment, error)
 	Delete(owner, name string) error

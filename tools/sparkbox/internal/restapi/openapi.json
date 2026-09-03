@@ -1328,6 +1328,12 @@
               "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
             }
           },
+          "409": {
+            "description": "`env_tag_in_use`: this would CREATE an environment over a tag that is already carrying repositories, secrets, rule-sets, variables, a base image or sandboxes, all of which it would adopt. `details` names each of them. Re-send with `adopt: true` to go ahead, or pick a name nothing carries.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
           "429": {
             "description": "You are at the per-owner environment limit.",
             "content": {
@@ -3057,6 +3063,11 @@
             "description": "When a capture last succeeded. Absent means no image was ever bound."
           },
           "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this environment's composition last changed. It is what decides between environments when something has to pick one — a launch link for a repository attached to several opens the most recently updated."
+          },
           "repos": {
             "type": "array",
             "items": { "type": "string" },
@@ -3151,6 +3162,10 @@
           "open_egress": {
             "type": "boolean",
             "description": "On create: skip the default egress rule-set. Never stored."
+          },
+          "adopt": {
+            "type": "boolean",
+            "description": "On create: agree to take on a tag that is already carrying repositories, secrets, rule-sets, variables, a base image or sandboxes. Without it such a create answers 409 `env_tag_in_use`, whose `details` name exactly what would be adopted. Never stored — what IS stored is the variables and base image that were found, so that deleting the environment later does not destroy them."
           }
         }
       },
@@ -3194,6 +3209,15 @@
           "removed_rule": {
             "type": "string",
             "description": "The auto-created egress rule-set that went with the environment \u2014 the one thing here that WAS deleted."
+          },
+          "kept_vars": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Variables that were on the tag BEFORE this environment adopted it, and so were kept. An environment's own variables are deleted with it."
+          },
+          "kept_snapshot": {
+            "type": "string",
+            "description": "The base image the tag still boots from, because it was bound before this environment adopted the tag."
           },
           "resynced": {
             "type": "array",

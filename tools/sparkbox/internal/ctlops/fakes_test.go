@@ -1364,7 +1364,7 @@ func (f *fakeEnvs) clock() time.Time {
 
 func envKey(owner, name string) string { return owner + "\x00" + name }
 
-func (f *fakeEnvs) Put(owner, name, description string) (envs.Environment, error) {
+func (f *fakeEnvs) Put(owner, name, description string, adopted *envs.Adopted) (envs.Environment, error) {
 	f.c.add("envs.Put %s/%s", owner, name)
 	if f.err != nil {
 		return envs.Environment{}, f.err
@@ -1392,7 +1392,10 @@ func (f *fakeEnvs) Put(owner, name, description string) (envs.Environment, error
 		if n >= limit {
 			return envs.Environment{}, fmt.Errorf("%w (%d, max %d)", envs.ErrTooManyEnvironments, n, limit)
 		}
-		e = envs.Environment{Owner: owner, Name: name, State: envs.StateDraft, CreatedAt: now}
+		// Honoured on the insert branch only, exactly as the real store does —
+		// the whole point of the record is that it says what was there on the
+		// day, so an update must never restate it.
+		e = envs.Environment{Owner: owner, Name: name, State: envs.StateDraft, CreatedAt: now, Adopted: adopted}
 	}
 	// The real store touches description and updated_at ONLY: a second
 	// `env create` must not reset a build somebody is using.

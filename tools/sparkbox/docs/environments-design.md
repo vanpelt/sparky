@@ -341,7 +341,10 @@ operations the CLI has to explain. A var is **a row per tag**. `PORT=8080` on
 two environments is two rows, and changing it is two edits.
 
 That is a real cost and it buys two things. `DeleteVarsForTag` is one statement,
-so `env rm` cleans up completely without a second concept; and "delete this
+so `env rm` cleans up completely without a second concept (**amended** — see
+"the tag namespace is older than environments" at the end: an environment that
+ADOPTED an existing tag's variables must not delete them, and that is a second
+concept); and "delete this
 environment" has no ambiguity about whether a shared value dies with it, because
 there is no shared value. A var's whole premise is that it is cheap — it is
 declared non-sensitive, a console can render it, an edit does not have to retype
@@ -1078,7 +1081,8 @@ pills, plus the `default` that `defaultTags` will stamp
 So: attach a repository to an environment's tag, and every launch link for that
 repository lands the clicker in that environment — its secrets, its vars, its
 checkouts, its egress rules and, once Part 4 lands, its snapshot. Zero lines
-changed in `internal/launch`. The environment's name simply appears in the pills
+changed in `internal/launch` (**amended** — see the end of this document: true
+for one environment on an attachment, and a dead link for two). The environment's name simply appears in the pills
 that are already there.
 
 That is not luck. It is the second dividend of name == tag, and it is worth
@@ -1279,3 +1283,83 @@ per-user identity, and environments are owner-scoped.
 Cross-owner sharing (Part 7) and snapshot retention (Part 7) stay written down
 and unbuilt. Neither has a measured workload behind it, and retention in
 particular needs somebody to have an opinion about N.
+
+## Amendments: the tag namespace is older than environments
+
+Two things this document argues turned out to be true only for the case where
+nobody had used the tag before. Both were found by reading, not by an incident,
+and both are now fixed in code.
+
+### `env create` over a tag already in use
+
+"An environment OWNS EXACTLY ONE TAG AND ITS NAME IS THAT TAG" is what makes the
+whole design small, and it has a consequence this document never states: tags
+are **free-form and predate environments**. `ctl create scratch --tag web`,
+`repo add --tag web` and `net --tag web` all write rows with no environment
+anywhere. So `env create web` could silently take ownership of configuration
+somebody had been running for months — and take it the instant the row existed,
+because every composition read joins on the name and there is no half-created
+state in which to notice.
+
+The one place the code already knew was `defaultEnvEgress`, which declines to
+install the default rule-set when sandboxes carry the tag and says so only to
+the log.
+
+`env create` now REFUSES a name that is already carrying repositories, secrets,
+rule-sets, variables, a base image or sandboxes, with a 409 `env_tag_in_use`
+naming each of them in `details`. `--adopt` (`"adopt": true`; a confirm dialog
+in the console) goes ahead. It is a conflict rather than an invalid because the
+name is spelled perfectly well and the request is one somebody may genuinely
+want: the answer is "say you meant it", not "say it differently". It gates
+creates only — once the environment owns its tag there is nothing left to
+consent to, and gating updates would refuse `env set web --var LOG_LEVEL=debug`
+on any environment with a single repo on it.
+
+### `env rm` must not destroy what it adopted
+
+The passage above on `DeleteVarsForTag` — "one statement, so `env rm` cleans up
+completely without a second concept" — is right about an environment that
+brought its own variables and wrong about one that found them. The same applies
+to the template binding. An environment created over somebody's existing tag and
+then deleted used to take their variables and their base image binding with it,
+permanently and with no confirmation.
+
+So there is now a second concept, and it is as small as it can be: an `adopted`
+column on `environments` holding `{"vars":[...],"snapshot":"..."}`, written in
+the SAME INSERT as the row. The atomicity is the point — the gap between "the
+environment exists" and "we know what it inherited" is exactly the gap in which a
+delete destroys the wrong thing. `env rm` then removes the variables one at a
+time, skipping the inherited names, and unbinds only a binding that is still the
+one found on the day; a build that re-pointed the tag makes that snapshot the
+environment's own, so it goes. What survived is reported as `kept_vars` and
+`kept_snapshot`, next to the repos, secrets and rule-sets the verb already named.
+
+Only those two are recorded. Repos, secrets and rule-sets need no entry because
+delete never touches them in any case — it reports them.
+
+### "Zero lines changed in `internal/launch`"
+
+The launch section above is correct that attaching a repository to an
+environment's tag makes every launch link for it land in that environment, and
+correct that this is a dividend of name == tag. What it misses is the case it
+almost names two paragraphs later: **an attachment carrying two environments.**
+
+`create.go` handed `att.Tags` to `ctlops.Create` verbatim, so two tags binding
+two different snapshots reached `resolveTemplate` and came back as
+`template_ambiguous` — "create it with only one of those tags", which is sound
+advice for somebody at a terminal and useless to somebody who clicked a link in
+a comment. A repository attached to two built environments had a permanently
+dead launch link, and there is no `?tag=` for the visitor to answer with (nor
+should there be — see the section below).
+
+`launchTags` now narrows: every non-environment tag rides along, and among the
+environments the most recently updated wins, ties broken by name so the same
+link always opens the same sandbox. The confirm page names the one it chose and
+what it left off, and the visitor's other boxes are already listed below it. It
+reads the control plane through an interface asserted off `h.ops`, the shape
+`envAwaiter` already uses, and degrades to the whole tag set — today's
+behaviour, 409 included — when the read fails or the method is absent.
+
+A residual `template_ambiguous` is still possible from two hand-bound,
+non-environment tags. That one keeps its refusal: nothing here knows which of
+two disks somebody meant, and the environment rule does not apply.

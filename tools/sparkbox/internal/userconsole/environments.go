@@ -87,6 +87,11 @@ type envRequest struct {
 	Rules       []string  `json:"rules,omitempty"`
 	Vars        *[]envVar `json:"vars,omitempty"`
 	OpenEgress  bool      `json:"open_egress,omitempty"`
+	// Adopt agrees to create an environment over a tag that is already in use.
+	// The panel never sends it on the first attempt: it sends the form, gets a
+	// 409 naming what the tag carries, asks, and sends the same body again with
+	// this set.
+	Adopt bool `json:"adopt,omitempty"`
 }
 
 // envRepo is one attachment, with the same per-repo passthrough `repo add`
@@ -159,6 +164,7 @@ func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request) {
 	args := ctlops.EnvArgs{
 		Name: name, Description: req.Description,
 		Secrets: req.Secrets, Rules: req.Rules, OpenEgress: req.OpenEgress,
+		Adopt: req.Adopt,
 	}
 	for _, rp := range req.Repos {
 		args.Repos = append(args.Repos, ctlops.RepoArgs{
@@ -189,7 +195,11 @@ func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request) {
 
 	info, err := h.envs.PutEnvironment(r.Context(), envCaller(r), args)
 	if err != nil {
-		writeErr(w, statusFor(err), err.Error())
+		// The one place this panel needs the machine token rather than the
+		// sentence: an `env_tag_in_use` 409 is answered by asking the person and
+		// sending the same request again with `adopt`, and the page cannot tell
+		// that refusal from any other 409 by reading prose.
+		writeOpErr(w, statusFor(err), err)
 		return
 	}
 	for _, n := range drop {
