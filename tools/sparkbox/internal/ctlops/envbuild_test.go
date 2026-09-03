@@ -8,6 +8,7 @@ package ctlops
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -934,7 +935,13 @@ func TestSetupForAnswersOnlyItsOwnBuilder(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("SetupFor = %+v/%v/%v", job, ok, err)
 		}
-		if job.Payload != setupScript || job.Env != "web" {
+		// CONTAINS, not equals: the payload is ScriptRunner's wrapper around
+		// the stored script, which is what runs it from .sparkbox/setup.sh in
+		// the checkout and hands a failure to one repair agent. The script
+		// travels base64 inside it, so the check is that the runner is carrying
+		// this environment's script and not another's.
+		if !strings.Contains(job.Payload, base64.StdEncoding.EncodeToString([]byte(setupScript))) ||
+			job.Env != "web" {
 			t.Errorf("payload/env = %q/%q", job.Payload, job.Env)
 		}
 		if job.Mode != SetupModeScript {

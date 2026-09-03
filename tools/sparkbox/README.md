@@ -398,6 +398,31 @@ capture` still adopts the box the agent did get working. Deferred monitors and
 scheduled wakeups are disabled for these one-turn agents because there is no
 live agent process to receive them after `claude -p` returns.
 
+**A script build runs the script from `.sparkbox/setup.sh` in the checkout**,
+not from a staging copy, because that is the path it was written to be run
+from. Most setup scripts open by finding their project from their own location
+— `cd "$(dirname "${BASH_SOURCE[0]}")/.."` — which is correct for a file in
+`.sparkbox/` and resolves to `/run` for a copy staged there. An agent build
+never saw this, because it verifies by running `.sparkbox/setup.sh` in the
+checkout: the script passed the moment it was written and failed the first time
+the same environment was rebuilt from it. When the environment's stored script
+and the checkout's file are the same bytes — the ordinary case, since the
+stored one was seeded out of that repository — nothing is written and the
+checkout's own file is what runs.
+
+**And a script that fails gets one repair agent.** A setup script that worked
+on the machine it was written on can still fail on a fresh microVM — a package
+the base image does not have, a tool that was only ever installed by hand — and
+the box that discovers it is a box with an agent in it. So one agent gets one
+pass: it is shown the failure, does the work by hand until the project is
+genuinely up, rewrites the file, and the script is run again. If it exits 0 the
+build is captured as usual and the repaired script is what the environment
+keeps, so **commit it back to the project** or the row and the repository will
+disagree. If it still fails, the build fails as before with the builder paused.
+This is best-effort and never a refusal: a builder with no `claude` or no agent
+credential reports the script's own error exactly as it used to, naming the
+`secret set CLAUDE_CODE_OAUTH_TOKEN --tag <env>` that would turn repair on.
+
 `env rebuild <name>` is a second name for `env build` — a build already boots
 the stock image and runs the current script, never the environment's own last
 snapshot, so an environment cannot accumulate. The old image stays bound until
