@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS environments (
   state        TEXT NOT NULL DEFAULT 'draft',
   build_box    TEXT NOT NULL DEFAULT '',
   build_error  TEXT NOT NULL DEFAULT '',
+  build_session TEXT NOT NULL DEFAULT '',  -- HiveMind session of the agent that built it
   built_at     TIMESTAMP,
   created_at   TIMESTAMP NOT NULL,
   updated_at   TIMESTAMP NOT NULL,
@@ -897,10 +898,22 @@ did not have: the DEFAULT agent builder, with open egress, an unattended agent,
 and the owner's decrypted credentials in it.
 
 **What is built instead.** `ctlops.defaultEnvEgress` gives every NEW environment
-an egress rule-set named after it, with an empty allow list, carried by its tag.
-That makes every sandbox on the environment governed, which under sluice means
-filtered to the operator's base allowlist plus the domains its repo attachments
-imply.
+an egress rule-set named after it, carried by its tag. That makes every sandbox
+on the environment governed, which under sluice means filtered to the operator's
+base allowlist plus whatever the rule-set itself allows.
+
+**What that rule-set allows has been wrong twice, in the same direction.** It
+shipped EMPTY, on the argument below that an empty list is not deny-all. Then a
+build could not run `apt-get`, so the three Ubuntu archives were added. Then a
+build could not pull a container image. Both fixes were the smallest possible
+one, and both were wrong for the same reason: the set of names a build reaches
+for is chosen by the project being built, not by us, and every name we have not
+anticipated costs somebody twenty minutes ending in a failure they cannot tell
+from a network fault. So the default is now `netrules.TrustedDomains` — the
+trusted-network list published by the vendor of the agent doing the building,
+which is also what the console's "add the trusted domains" prefill offers —
+plus the apt archives and a bare `docker.io`. It is wide, and that is the trade:
+a rule-set that stops a build for its own good is one people turn off entirely.
 
 An empty rule-set being *usable as a default* rests on one fact that the name
 actively obscures, and `AllowForSandbox`'s own comment used to get it wrong too:
@@ -1005,12 +1018,20 @@ not an answer in this mode. Hardware then added a third condition to that
 sentence: the artifact has to RUN. A non-empty file was the whole of the test
 for exactly one deploy, and the environment it produced could not rebuild
 itself, so the runner now replays the script in the builder and gives one repair
-round before failing the build. And the invocation carries
-`--no-session-persistence`, because the builder's disk becomes the environment's
-template and is copied byte-for-byte into every fork of it: nothing in the
-capture path strips `~/.claude/projects`, so *not writing* the transcript — the
-prompt, every command, and every command's output — is the only place that can
-be prevented.
+round before failing the build. And the invocation deliberately PERSISTS its
+session: every template seeds a hivemind daemon that syncs `~/.claude/projects`
+as the run happens, so the transcript — the prompt, every command, every
+command's output — is what a person watches a build with, and the console links
+to it from the building card. The build then records that session's URL on the
+row (`build_session`), because a successful build destroys its builder and the
+transcript is afterwards the only account of why the setup script says what it
+says. The invocation carried `--no-session-persistence` until 2026-09-02, on the
+argument that the builder's disk becomes the template and nothing in the capture
+path strips `~/.claude/projects`. That cost is real and it is now accepted: a
+template is bound `(owner, tag)` and masked from every other owner, and every
+ordinary sandbox in the fleet already persists sessions onto a disk somebody may
+snapshot — so the builder was the one place hiding its work, and it bought
+consistency with nothing.
 
 **Refuse the build up front when the owner has no agent credential.** The
 gateway can answer this without decrypting anything: `ListSecrets(owner)`
@@ -1195,8 +1216,8 @@ but the confirmation gesture itself is still owed.
 before the state moves, `SetupJob` carrying the mode from the gateway through
 the node relay to the guest, and Part 5(b)'s mitigations made real rather than
 asserted: the no-credential refusal at the door, `bypassPermissions` with
-success judged by the artifact, `--no-session-persistence` so the transcript
-does not ride into every fork, the builder destroyed rather than paused when an
+success judged by the artifact, a PERSISTED session so the run can be watched
+and read back afterwards, the builder destroyed rather than paused when an
 agent build overruns, and a default egress rule-set that makes "the builder is
 governed" true instead of merely claimed. `ctl env rebuild` is a second name for
 `env build` — `build` already boots the stock image and runs the current script,

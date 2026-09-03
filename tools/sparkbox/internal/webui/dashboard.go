@@ -10,6 +10,7 @@ package webui
 import (
 	"context"
 	"net"
+	"net/url"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -129,3 +130,20 @@ func (p *Probe) Vitals(ctx context.Context, r VitalsReader, b *host.Sandbox) (ho
 // same three fields for the same reason. nil in, nil out — the callers hand it
 // whatever Get returned.
 func Public(b *host.Sandbox) *host.Sandbox { return b.Public() }
+
+// SessionLink admits only an absolute HTTP(S) link, and answers "" for anything
+// else.
+//
+// The SELECTION of which session to name happens on the machine holding the VM
+// (host.HiveMindSessionSnapshot.Recent). This check stays on the gateway,
+// beside the other two policies this file exists to state once, because a node
+// is a separate trust domain and this is the one value in a vitals reply that
+// becomes a clickable href rather than a number. Both consoles paint the
+// session TITLE with textContent, which needs no equivalent.
+func SessionLink(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return ""
+	}
+	return raw
+}

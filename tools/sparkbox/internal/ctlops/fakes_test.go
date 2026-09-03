@@ -1454,6 +1454,21 @@ func (f *fakeEnvs) SetScript(owner, name, script, from string) error {
 	return nil
 }
 
+func (f *fakeEnvs) SetBuildSession(owner, name, url string) error {
+	f.c.add("envs.SetBuildSession %s/%s %s", owner, name, url)
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		// The store answers a missing row with nil here too: this is colour on
+		// a build, not the write that decides its outcome.
+		return nil
+	}
+	e.BuildSession = url
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
 func (f *fakeEnvs) SetState(owner, name string, st envs.State, box, buildErr string) error {
 	f.c.add("envs.SetState %s/%s state=%s", owner, name, st)
 	k := envKey(owner, name)

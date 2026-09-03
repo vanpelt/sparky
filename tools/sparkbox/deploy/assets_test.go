@@ -3067,11 +3067,13 @@ func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 	if !strings.Contains(got, "--permission-mode\nbypassPermissions\n") {
 		t.Errorf("the agent was not run with --permission-mode bypassPermissions:\n%s", got)
 	}
-	// The builder's disk becomes the environment's template and is copied into
-	// every fork of it. Nothing in the capture path strips ~/.claude/projects,
-	// so not writing the transcript is the only place this can be prevented.
-	if !strings.Contains(got, "--no-session-persistence") {
-		t.Errorf("the agent ran with session persistence, which bakes the transcript into the template:\n%s", got)
+	// The transcript is the only window anybody has into an unattended agent:
+	// the log tail is cut to a sentence by the time it reaches a row, and the
+	// box is destroyed on success. Every template seeds a hivemind daemon that
+	// syncs ~/.claude/projects as the run happens, so suppressing the session
+	// would put the build back to being unwatchable.
+	if strings.Contains(got, "--no-session-persistence") {
+		t.Errorf("the agent ran with session persistence off, so nothing can watch the build:\n%s", got)
 	}
 }
 
@@ -3185,9 +3187,8 @@ func TestTheRealAgentRunnerHasTheScriptFixedAndFinishes(t *testing.T) {
 	if got := decodeScript(t, script); !strings.Contains(got, "deps installed") {
 		t.Errorf("the environment recorded the broken script rather than the fixed one: %q", got)
 	}
-	// The repair round is a FRESH agent — the first runs with
-	// --no-session-persistence, so there is no session to continue — which
-	// makes handing it the failure the only way it can know what to fix.
+	// The repair round is a FRESH agent rather than a resume of the first, so
+	// handing it the failure is the only way it can know what to fix.
 	repair := w.read("claude-prompt-2")
 	if !strings.Contains(repair, "cd: selfhost") {
 		t.Errorf("the repair prompt does not carry the failure it is repairing:\n%s", repair)

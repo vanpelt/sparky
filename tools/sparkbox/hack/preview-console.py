@@ -59,6 +59,14 @@ def _machines(tick):
          "cpu_seconds": None, "image": "universal", "last_active": _iso(600),
          "net_rx_bytes": 48213, "net_tx_bytes": 9004,
          "pinned": False, "env_undecryptable": False, "tags": [],
+         # AT RISK: an unpushed commit and a dirty tree exist in this VM and
+         # nowhere else, so removing the machine loses them — the red banner,
+         # and the one that also has to carry "behind" when both are true.
+         "repos": [
+             {"slug": "wandb/weave", "path": "/home/sparky/weave", "branch": "spike",
+              "upstream": "origin/spike", "ahead": 2, "behind": 3, "dirty": True,
+              "state": "ok"},
+         ],
          # The port strip: the default port first, then this hostname's other
          # ports, then any extra hostname. "pinned" is a port the owner has an
          # opinion about (the only kind that can be forgotten); an unpinned one
@@ -76,6 +84,18 @@ def _machines(tick):
          "net_rx_bytes": 4923847112, "net_tx_bytes": 812394002,
          "pinned": True, "env_undecryptable": False, "tags": ["ml", "prod"],
          "turbo": True, "base_vcpus": 4, "base_mem_mb": 8192,
+         # BEHIND ONLY: somebody else pushed and this checkout has not pulled.
+         # Nothing here is at risk, so the card's banner is amber. The two repo
+         # banners are the reason both of these fixtures carry repo state: the
+         # colour is the whole point and neither variant is visible without one.
+         "repos": [
+             {"slug": "wandb/core", "path": "/home/sparky/core", "branch": "main",
+              "upstream": "origin/main", "ahead": 0, "behind": 7, "dirty": False,
+              "state": "ok"},
+             {"slug": "wandb/app", "path": "/home/sparky/app", "branch": "main",
+              "upstream": "origin/main", "ahead": 0, "behind": 0, "dirty": False,
+              "state": "ok"},
+         ],
          # Enough ports to make the strip scroll, which is what it is for.
          "routes": [
              {"subdomain": "brave-meadow", "port": 8080, "visibility": "private",
@@ -98,6 +118,22 @@ def _machines(tick):
          "net_rx_bytes": 73400320, "net_tx_bytes": 15728640,
          "pinned": False, "env_undecryptable": False, "tags": ["staging"],
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private",
+                     "listening": False, "default": True}]},
+        # The builder of an environment build IN FLIGHT, with the HiveMind
+        # reading its vitals carry. It is here so the building card's "Watch the
+        # agent" link is reachable in a preview: that link is drawn from the
+        # BUILDER's row in this list, not from the environment, so an
+        # environments fixture alone would silently render the card without it —
+        # which is how the table shipped the last time this tab was drawn blind.
+        {"name": "selfhost-build", "state": "running", "vcpus": 4,
+         "mem_mb": 8192, "mem_used_mb": 3140, "disk_mb": 4820, "disk_total_mb": 25600,
+         "cpu_seconds": 240 + tick * 1.7, "image": "universal", "last_active": _iso(2),
+         "net_rx_bytes": 284832100, "net_tx_bytes": 12105530,
+         "pinned": False, "env_undecryptable": False, "tags": ["selfhost", "default"],
+         "hivemind_session_url": "https://hivemind.example/sessions/selfhost-build",
+         "hivemind_session_title": "Write a setup script for the selfhost image",
+         "hivemind_active": True,
+         "routes": [{"subdomain": "selfhost-build", "port": 8080, "visibility": "private",
                      "listening": False, "default": True}]},
         # The builder a failed environment build leaves behind. It is here so
         # the failed card's "Open a terminal" is reachable in a preview: that
@@ -176,16 +212,22 @@ _ENVIRONMENTS = [
      "rules": ["web"], "vars": [{"name": "NODE_ENV", "value": "development"},
                                 {"name": "LOG_LEVEL", "value": "debug"}],
      "has_setup": True, "setup_bytes": 3746, "setup_from": "agent",
-     "state": "ready", "built_at": _iso(11400), "snapshot": "web-20260902-1412"},
+     "state": "ready", "built_at": _iso(11400), "snapshot": "web-20260902-1412",
+     # A finished agent build keeps its transcript, and this is the only thing
+     # that survives the builder: the box was destroyed when it succeeded.
+     "build_session": "https://hivemind.example/sessions/web-build"},
+    # An agent build in flight: no script yet, because writing one is what the
+    # agent is doing. This is the state a FIRST build of an environment is in.
     {"name": "selfhost", "description": "single-container selfhost image",
      "repos": ["wandb/server"], "secrets": [], "rules": ["selfhost"], "vars": [],
-     "has_setup": True, "setup_bytes": 1180, "setup_from": "repo",
+     "has_setup": False, "setup_bytes": 0, "setup_from": "agent",
      "state": "building", "build_box": "selfhost-build", "snapshot": ""},
     {"name": "weave-py", "description": "",
      "repos": ["wandb/weave"], "secrets": ["OPENAI_API_KEY"], "rules": ["weave-py"],
      "vars": [{"name": "PY", "value": "3.12"}],
      "has_setup": True, "setup_bytes": 902, "setup_from": "agent",
      "state": "failed", "build_box": "weave-py-build", "snapshot": "",
+     "build_session": "https://hivemind.example/sessions/weave-py-build",
      "build_error": "sparkbox: this box is configured, but .sparkbox/setup.sh does not "
                     "run in it, so no later build could reproduce it"},
     {"name": "scratch", "description": "empty starting point for one-off experiments",

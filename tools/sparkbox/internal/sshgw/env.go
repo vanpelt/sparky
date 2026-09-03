@@ -286,6 +286,14 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 			"building in", e.BuildBox)
 		fmt.Fprintf(s, "%sssh %s@%s\r\n", envCont, e.BuildBox, g.sshHint())
 	}
+	// The agent's transcript, once the build has reported one. It is printed
+	// for every state that has it rather than only for `ready`: on a FAILED
+	// agent build it is the fastest account of what went wrong, and on a ready
+	// one it is the only surviving record of why the setup script says what it
+	// says — the box that wrote it was destroyed.
+	if e.BuildSession != "" {
+		fmt.Fprintf(s, "  %-12s %s\r\n", "agent", e.BuildSession)
+	}
 	if e.BuildError != "" {
 		fmt.Fprintf(s, "  %-12s %s\r\n", "build error", e.BuildError)
 	}

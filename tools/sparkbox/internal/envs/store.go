@@ -130,17 +130,23 @@ const maxEnvironmentsPerOwner = 32
 // through this struct, so it is returned in full for display, for the ctl
 // surface and for the console.
 type Environment struct {
-	Owner       string     `json:"owner"`
-	Name        string     `json:"name"` // IS the tag
-	Description string     `json:"description,omitempty"`
-	SetupScript string     `json:"setup_script,omitempty"` // captured .sparkbox/setup.sh; "" until a build runs
-	SetupFrom   string     `json:"setup_from,omitempty"`   // "repo" | "agent" | "manual" | ""
-	State       State      `json:"state"`
-	BuildBox    string     `json:"build_box,omitempty"` // builder sandbox name while one exists
-	BuildError  string     `json:"build_error,omitempty"`
-	BuiltAt     *time.Time `json:"built_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	Owner       string `json:"owner"`
+	Name        string `json:"name"` // IS the tag
+	Description string `json:"description,omitempty"`
+	SetupScript string `json:"setup_script,omitempty"` // captured .sparkbox/setup.sh; "" until a build runs
+	SetupFrom   string `json:"setup_from,omitempty"`   // "repo" | "agent" | "manual" | ""
+	State       State  `json:"state"`
+	BuildBox    string `json:"build_box,omitempty"` // builder sandbox name while one exists
+	BuildError  string `json:"build_error,omitempty"`
+	// BuildSession is the HiveMind session URL of the agent that built this
+	// environment, "" for a script build and for anything built before the
+	// column existed. It OUTLIVES the builder deliberately: a successful build
+	// destroys its box, and the transcript is then the only surviving account
+	// of why the setup script looks the way it does.
+	BuildSession string     `json:"build_session,omitempty"`
+	BuiltAt      *time.Time `json:"built_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Store is the environments database handle.
@@ -223,6 +229,7 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			build_state TEXT NOT NULL DEFAULT 'draft',
 			build_box   TEXT NOT NULL DEFAULT '',
 			build_error TEXT NOT NULL DEFAULT '',
+			build_session TEXT NOT NULL DEFAULT '',
 			built_at    TIMESTAMP,
 			created_at  TIMESTAMP NOT NULL,
 			updated_at  TIMESTAMP NOT NULL,
@@ -230,6 +237,15 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 		);
 		CREATE INDEX IF NOT EXISTS environments_owner ON environments(owner);
 	`); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
+	// The first migration this store has needed. CREATE TABLE IF NOT EXISTS
+	// above is a no-op on every database that already has the table, so a
+	// column added to it reaches new installs only — and the environments that
+	// most want an agent's transcript are the ones on the host that has been
+	// building them since before this column existed.
+	if err := addColumnIfMissing(db, "environments", "build_session", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
@@ -457,6 +473,28 @@ func (s *Store) SetState(owner, name string, st State, box, buildErr string) err
 	return nil
 }
 
+// SetBuildSession records where the agent that built this environment can be
+// read, and is a separate write from SetState for one reason: the two have
+// different lifetimes. build_box names the machine that exists RIGHT NOW and is
+// cleared the moment a build finishes; this names a transcript on a service
+// that keeps it, and it has to survive the same transition.
+//
+// An empty url CLEARS it, so a rebuild that produced no session does not leave
+// the previous build's transcript standing as an account of the current disk.
+// Not finding the row is not an error here: this is best-effort colour on a
+// build whose real outcome is written by SetState, and an environment deleted
+// mid-build must not turn into a failure the caller has to reason about.
+func (s *Store) SetBuildSession(owner, name, url string) error {
+	name = strings.TrimSpace(name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		UPDATE environments SET build_session = ?, updated_at = ?
+		WHERE owner = ? AND name = ?`,
+		strings.TrimSpace(url), time.Now().UTC(), owner, name)
+	return err
+}
+
 // Building returns every environment in StateBuilding, across ALL owners, for
 // the reconciler that runs at startup.
 //
@@ -489,7 +527,8 @@ func (s *Store) Building() ([]Environment, error) {
 func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, error) {
 	rows, err := s.db.Query(`
 		SELECT DISTINCT e.owner, e.name, e.description, e.setup_sh, e.setup_from,
-		       e.build_state, e.build_box, e.build_error, e.built_at, e.created_at, e.updated_at
+		       e.build_state, e.build_box, e.build_error, e.build_session,
+		       e.built_at, e.created_at, e.updated_at
 		FROM environments e
 		JOIN sandbox_tags bt ON bt.tag = e.name AND bt.owner = e.owner
 		WHERE bt.sandbox = ? AND e.owner = ?
@@ -508,7 +547,8 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 // day a second table grows a `name`.
 const selectCols = `
 	SELECT owner, name, description, setup_sh, setup_from,
-	       build_state, build_box, build_error, built_at, created_at, updated_at
+	       build_state, build_box, build_error, build_session,
+	       built_at, created_at, updated_at
 	FROM environments`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows, so the column list has
@@ -524,7 +564,8 @@ func scanEnv(sc scanner) (Environment, error) {
 	var state string
 	var builtAt sql.NullTime
 	if err := sc.Scan(&e.Owner, &e.Name, &e.Description, &e.SetupScript, &e.SetupFrom,
-		&state, &e.BuildBox, &e.BuildError, &builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		&state, &e.BuildBox, &e.BuildError, &e.BuildSession,
+		&builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Environment{}, ErrNoSuchEnvironment
 		}
@@ -595,6 +636,3 @@ func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
 	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
 	return err
 }
-
-// Keeps the migration helper compiled until the first schema change needs it.
-var _ = addColumnIfMissing

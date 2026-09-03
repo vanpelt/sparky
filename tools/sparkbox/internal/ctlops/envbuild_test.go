@@ -963,6 +963,100 @@ func TestSetupDoneSuccessCapturesBindsAndDestroys(t *testing.T) {
 	}
 }
 
+// TestAnAgentBuildRecordsWhereItsTranscriptIs.
+//
+// The transcript is what makes an unattended agent watchable, and the row is
+// the only thing that keeps it: a successful build destroys the builder, and
+// with it the identity HiveMind would answer for. So the URL has to be asked
+// for and written down while the box is still there — which is why this asserts
+// on the ORDER as well as on the value.
+func TestAnAgentBuildRecordsWhereItsTranscriptIs(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build", func(e *envs.Environment) {
+		// An agent build: the row says an agent is writing the script, and
+		// there is not one yet.
+		e.SetupScript, e.SetupFrom = "", envs.SetupFromAgent
+	})
+	b.hivemind.snapshot = host.HiveMindSessionSnapshot{
+		Sessions: []host.HiveMindSession{
+			{ID: "old", URL: "https://hivemind.example/sessions/old",
+				LastActivityAt: time.Unix(100, 0).UTC()},
+			{ID: "this-build", URL: "https://hivemind.example/sessions/this-build",
+				LastActivityAt: time.Unix(900, 0).UTC()},
+		},
+		TotalCount: 2,
+	}
+	box, _ := b.boxes.Get("web-build")
+	b.calls.reset()
+
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{
+		OK: true, ExitCode: 0, Script: "#!/bin/sh\nnpm ci\n", Log: "done\n",
+	}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+
+	row := b.row(t, "alice", "web")
+	// The MOST RECENT session, not the first the API happened to return: a box
+	// that has run an agent before has more than one, and the one this build is
+	// about is the one that was active last.
+	if want := "https://hivemind.example/sessions/this-build"; row.BuildSession != want {
+		t.Errorf("build_session = %q, want %q", row.BuildSession, want)
+	}
+	// Asked about the BUILDER and nothing else — the credential is minted per
+	// sandbox, so this is the whole authorization story of the query.
+	if len(b.hivemind.asked) != 1 || b.hivemind.asked[0] != box.ID {
+		t.Errorf("asked about %v, want exactly [%s]", b.hivemind.asked, box.ID)
+	}
+	// And it survived the transition that clears the builder.
+	if row.BuildBox != "" || row.State != envs.StateReady {
+		t.Fatalf("the build did not finish: state=%q box=%q", row.State, row.BuildBox)
+	}
+	if !b.calls.has("Destroy web-build") {
+		t.Fatalf("the builder was not destroyed: %v", b.calls.all())
+	}
+	session, destroy := -1, -1
+	for i, c := range b.calls.all() {
+		if strings.HasPrefix(c, "envs.SetBuildSession alice/web") {
+			session = i
+		}
+		if c == "Destroy web-build" {
+			destroy = i
+		}
+	}
+	if session < 0 || destroy < 0 || session > destroy {
+		t.Errorf("the session was recorded at %d and the builder destroyed at %d; "+
+			"it has to be asked for while the box still exists: %v", session, destroy, b.calls.all())
+	}
+}
+
+// A URL that is not an absolute http(s) one is not recorded, because it becomes
+// an href in the console. Nothing in the fleet authors this field — it comes
+// from the API this gateway authenticated to — so what is being guarded against
+// is a shape change, not an author.
+func TestATranscriptThatIsNotALinkIsNotRecorded(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build", func(e *envs.Environment) {
+		e.SetupScript, e.SetupFrom = "", envs.SetupFromAgent
+	})
+	b.hivemind.snapshot = host.HiveMindSessionSnapshot{
+		Sessions:   []host.HiveMindSession{{ID: "s1", URL: "javascript:alert(1)"}},
+		TotalCount: 1,
+	}
+	box, _ := b.boxes.Get("web-build")
+
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{
+		OK: true, ExitCode: 0, Script: "#!/bin/sh\ntrue\n",
+	}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+
+	if got := b.row(t, "alice", "web").BuildSession; got != "" {
+		t.Errorf("build_session = %q, want it left empty", got)
+	}
+}
+
 // TestSetupDoneStampsRepoOnAScriptWithNoOrigin is the other half of the rule
 // above: a row whose origin column was never written gets `repo`, because a
 // script the guest hands back came out of the checkout.

@@ -188,6 +188,7 @@ type Environments interface {
 	Delete(owner, name string) error
 	SetScript(owner, name, script, from string) error
 	SetState(owner, name string, st envs.State, box, buildErr string) error
+	SetBuildSession(owner, name, url string) error
 	Building() ([]envs.Environment, error)
 }
 

@@ -69,16 +69,22 @@ type EnvVar struct {
 // environment configured yet" line is built from. A verb that shows the script
 // itself belongs beside the build that captures it (Phase B).
 type EnvironmentInfo struct {
-	Name        string     `json:"name"` // IS the tag
-	Description string     `json:"description,omitempty"`
-	State       string     `json:"state"`
-	SetupFrom   string     `json:"setup_from,omitempty"`
-	HasSetup    bool       `json:"has_setup"`
-	SetupBytes  int        `json:"setup_bytes"`
-	BuildBox    string     `json:"build_box,omitempty"`
-	BuildError  string     `json:"build_error,omitempty"`
-	BuiltAt     *time.Time `json:"built_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	Name        string `json:"name"` // IS the tag
+	Description string `json:"description,omitempty"`
+	State       string `json:"state"`
+	SetupFrom   string `json:"setup_from,omitempty"`
+	HasSetup    bool   `json:"has_setup"`
+	SetupBytes  int    `json:"setup_bytes"`
+	BuildBox    string `json:"build_box,omitempty"`
+	BuildError  string `json:"build_error,omitempty"`
+	// BuildSession links to the HiveMind transcript of the agent that built
+	// this environment. Empty for a script build, for a host with no
+	// --hivemind-api, and while an agent build is still in flight — the row
+	// learns it when the build reports, so a surface that wants to link a build
+	// IN PROGRESS reads the builder sandbox's own live session instead.
+	BuildSession string     `json:"build_session,omitempty"`
+	BuiltAt      *time.Time `json:"built_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 
 	// The composition. Every one of these is what carries this environment's
 	// tag right now, read from the store that owns it — never a copy kept here,
@@ -792,20 +798,21 @@ func (o *Ops) composition(owner string) envComposition {
 // never carried out of this package by a listing — see EnvironmentInfo.
 func (c envComposition) info(e envs.Environment) EnvironmentInfo {
 	ei := EnvironmentInfo{
-		Name:        e.Name,
-		Description: e.Description,
-		State:       string(e.State),
-		SetupFrom:   e.SetupFrom,
-		HasSetup:    e.SetupScript != "",
-		SetupBytes:  len(e.SetupScript),
-		BuildBox:    e.BuildBox,
-		BuildError:  e.BuildError,
-		BuiltAt:     e.BuiltAt,
-		CreatedAt:   e.CreatedAt,
-		Repos:       c.repos[e.Name],
-		Secrets:     c.secrets[e.Name],
-		Rules:       c.rules[e.Name],
-		Snapshot:    c.snapshot[e.Name],
+		Name:         e.Name,
+		Description:  e.Description,
+		State:        string(e.State),
+		SetupFrom:    e.SetupFrom,
+		HasSetup:     e.SetupScript != "",
+		SetupBytes:   len(e.SetupScript),
+		BuildBox:     e.BuildBox,
+		BuildError:   e.BuildError,
+		BuildSession: e.BuildSession,
+		BuiltAt:      e.BuiltAt,
+		CreatedAt:    e.CreatedAt,
+		Repos:        c.repos[e.Name],
+		Secrets:      c.secrets[e.Name],
+		Rules:        c.rules[e.Name],
+		Snapshot:     c.snapshot[e.Name],
 	}
 	if c.vars != nil {
 		ei.Vars = c.vars(e.Name)
@@ -1079,28 +1086,50 @@ func sameDomainSet(a, b []string) bool {
 // defaultEnvAllow is what a new environment's rule-set allows ON TOP of the
 // operator's base allowlist, which every governed sandbox already gets.
 //
-// It is the DISTRIBUTION ARCHIVES and nothing else, and they are here because
-// leaving them out made the default self-defeating. The base allowlist carries
-// the language package registries — pypi, npm, crates, the Go proxy — plus
-// github and api.anthropic.com, but no apt repository. The very first
-// instruction the agent prompt gives is "install what it needs — system
-// packages with `sudo apt-get -y` first", so an environment governed by an
-// empty rule-set could not execute step one of its own build. That is a break
-// this pair of features created between them: neither the default egress nor
-// the agent prompt is wrong alone.
+// IT IS THE COMMON TRUSTED SET, not a hand-picked minimum, and that is a
+// correction of what it used to be. It started as the three Ubuntu archives and
+// nothing else, on the argument that the base allowlist already carried the
+// language registries and only apt was missing — which was true of the base
+// allowlist on the machine it was written for, and true of nothing else. What
+// an environment build actually reaches for is a moving target chosen by
+// whatever the project needs: a registry for its container base image, a cloud
+// SDK's API, a JDK download, a Rust toolchain. Each one that is missing is
+// twenty minutes of build ending in a name that does not resolve, and the
+// person reading that failure cannot tell it from a network fault.
+//
+// So the default is netrules.TrustedDomains — the set the vendor of the agent
+// doing the building publishes as trusted, which is the same set the console's
+// prefill button offers, so the two paths into a rule-set agree. It is wide.
+// The trade is deliberate: a rule-set that stops a build for its own good is
+// one people turn off entirely, and an environment governed by nothing is worse
+// than one governed by this.
+//
+// FOUR NAMES ARE ADDED ON TOP of it. The three Ubuntu archives are redundant —
+// sluice takes a bare name as "this domain and its subdomains" and the trusted
+// set carries `ubuntu.com` — and they are kept because the very first
+// instruction the agent prompt gives is `sudo apt-get -y`, so a reader deleting
+// a name from this file should have to notice that. `docker.io` is NOT
+// redundant: the trusted set names registry-1, auth, index and hub
+// individually, which is every host a `docker pull` uses today and no host it
+// might use tomorrow. Docker is on by default in every template and a project
+// whose setup is `docker compose up` reaches a registry before it reaches
+// anything else, so the bare name is the one that does not need revisiting.
 //
 // Both architectures, because a template is amd64 on CKS and arm64 on the DGX
 // and the rule-set is written by the gateway without knowing which the builder
 // will land on. ports.ubuntu.com serves arm64; archive/security serve amd64.
 //
-// It is an ordinary rule-set once written, so an owner who wants none of this
-// can empty it, and one who needs their internal mirror adds it — which is the
-// whole reason this is a stored object and not a constant in the pusher.
-var defaultEnvAllow = []string{
+// It is an ordinary rule-set once written, so an owner who wants less can trim
+// it and one who needs their internal mirror adds it — which is the whole
+// reason this is a stored object and not a constant in the pusher. It is also
+// why this list only reaches environments created from now on: an existing
+// rule-set is somebody's policy, and `net add` is how it changes.
+var defaultEnvAllow = append(slices.Clone(netrules.TrustedDomains),
 	"archive.ubuntu.com",
 	"security.ubuntu.com",
 	"ports.ubuntu.com",
-}
+	"docker.io",
+)
 
 // resolveEnvRules is resolveEnvSecrets for egress rule-sets, and it refuses an
 // unknown name for a sharper reason: a rule-set is SUBTRACTIVE, so an

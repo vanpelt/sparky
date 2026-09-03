@@ -46,6 +46,13 @@
   .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
   .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
   a.btn-primary { text-decoration: none; padding: 7px 13px; }
+  /* A LINK dressed as an outlined button. The structural base in shared.css is
+     scoped to <button>, and the one control here that leaves this origin — the
+     transcript of the agent building an environment, which lives in HiveMind —
+     has to be an <a> so it opens in a tab and offers a copyable address. */
+  a.btn-outline { text-decoration: none; font: inherit; display: inline-flex;
+    align-items: center; gap: 6px; white-space: nowrap; transition: .12s ease;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border)); }
   /* icon button — the ··· overflow trigger, and the two header actions worth a
      single click. They lose their words on purpose: a row of four outlined text
      buttons was the loudest thing on a card whose job is to show numbers. */
@@ -454,6 +461,17 @@
     font: inherit; width: 100%; padding: 7px 10px; border-radius: calc(var(--radius) - 2px);
     border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground));
   }
+  /* Behind upstream, on a machine card. Amber and not the red .env-warn above,
+     for the same reason .tag-warn is: nothing is wrong and nothing is at risk —
+     somebody else pushed, and this checkout will have it on the next pull. Red
+     is kept for the state where deleting this machine LOSES something, which is
+     a dirty checkout or a commit that exists nowhere else. A card that shouts
+     the same colour at both teaches people to ignore the colour. */
+  .env-warn.soft {
+    border-color: hsl(var(--amber) / .4);
+    color: hsl(var(--amber)); background: hsl(var(--amber) / .07);
+  }
+  .env-warn.soft strong, .env-warn.soft code { color: hsl(var(--amber)); }
   /* the `default` tag warning: amber rather than the red .env-warn above,
      because it is a consequence to understand, not something broken. */
   .tag-warn {
@@ -546,8 +564,8 @@
     </header>
 
     <div class="tabs">
-      <button class="tab active" data-tab="machines">Machines</button>
-      <button class="tab" data-tab="environments">Environments</button>
+      <button class="tab active" data-tab="environments">Environments</button>
+      <button class="tab" data-tab="machines">Machines</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="repos">Repos</button>
@@ -1623,14 +1641,30 @@
       ? '<div class="env-warn">Secrets for this machine cannot be decrypted — the encryption key' +
         " has changed. Nothing was pushed. Re-enter the affected secrets in the Secrets tab.</div>"
       : "";
-    const repoNotes = [];
-    if (repoAhead) repoNotes.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
-    if (repoBehind) repoNotes.push(repoBehind + " commit" + (repoBehind === 1 ? "" : "s") + " behind upstream");
-    if (repoDirty) repoNotes.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
-    const repoWarn = repoNotes.length
-      ? '<div class="env-warn"><strong>Repository attention:</strong> ' + esc(repoNotes.join(" · ")) +
-        '. Run <code class="mono">sparkbox status</code> in the machine for details.</div>'
-      : "";
+    // Two different sentences, because they are two different situations and
+    // only one of them can cost somebody work.
+    //
+    // AT RISK: an unpushed commit or a dirty checkout exists in this VM and
+    // nowhere else, so deleting the machine loses it. That is the red one.
+    // BEHIND: somebody else pushed. Nothing here is in danger and a pull fixes
+    // it whenever the owner feels like it — amber, and phrased as news rather
+    // than as a fault. When both are true the red banner carries both facts,
+    // because a card with two banners buries the one that matters.
+    const atRisk = [];
+    if (repoAhead) atRisk.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
+    if (repoDirty) atRisk.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
+    // Counted once and phrased twice: the amber banner says "behind upstream"
+    // in its own label, and repeating it in the sentence reads as a stutter.
+    const behind = repoBehind ? repoBehind + " commit" + (repoBehind === 1 ? "" : "s") : "";
+    let repoWarn = "";
+    if (atRisk.length) {
+      repoWarn = '<div class="env-warn"><strong>Only in this machine:</strong> ' +
+        esc(atRisk.join(" · ")) + (behind ? " (and " + esc(behind) + " behind upstream)" : "") +
+        '. Push before you remove it — run <code class="mono">sparkbox status</code> inside for details.</div>';
+    } else if (behind) {
+      repoWarn = '<div class="env-warn soft"><strong>Behind upstream:</strong> ' + esc(behind) +
+        ' to pull. Nothing here is at risk.</div>';
+    }
 
     return '<div class="card machine">' +
       '<div class="m-head">' +
@@ -2184,7 +2218,13 @@
   }
 
   // Claude Code's default "Trusted" network domains (per code.claude.com/docs)
-  // plus hivemind.wandb.tools — a one-click starting point for a rule-set.
+  // plus hivemind.wandb.tools — a one-click starting point for a rule-set, and
+  // the same set a new environment's default rule-set is built from.
+  //
+  // THIS IS A COPY. The canonical list is netrules.TrustedDomains, which the
+  // server uses for that default; this one exists because a browser cannot
+  // import Go, and a test compares the two as sets so they cannot drift into
+  // "the prefill button offers something the default does not allow".
   var TRUSTED_DOMAINS = `
       *.amazonaws.com *.api.aws *.data.mcr.microsoft.com *.datadoghq.com *.datadoghq.eu *.gcr.io
       *.googleapis.com *.microsoftonline.com *.modelcontextprotocol.io *.nixos.org
@@ -2207,7 +2247,7 @@
       index.golang.org index.rubygems.org java.com java.net jcenter.bintray.com json-schema.org
       json.schemastore.org k8s.io kotlinlang.org launchpad.net maven.org mcr.microsoft.com
       metacpan.org microsoft.com nodejs.org npm.pkg.github.com npmjs.com npmjs.org nuget.org
-      objects.githubusercontent.com ode.js oracle.com packagecloud.io packages.microsoft.com
+      objects.githubusercontent.com oracle.com packagecloud.io packages.microsoft.com
       packagist.org pkg-npm.githubusercontent.com pkg.go.dev pkg.stainless.com pkgs.k8s.io
       platform.claude.com plugins.gradle.org portal.azure.com ppa.launchpad.net
       production.cloudflare.docker.com proxy.golang.org pub.dev public.ecr.aws pypa.io pypi.org
@@ -2452,6 +2492,34 @@
     return '<div class="env-col"><div class="label">' + label + "</div>" + body + "</div>";
   }
 
+  // machineFor is the machine list looked up by name. The Environments panel
+  // reads it for the one machine an environment ever names — its builder —
+  // rather than asking the server a second question about a box that is
+  // already in the response beside it.
+  function machineFor(name) {
+    return name ? lastMachines.find((m) => m.name === name) || null : null;
+  }
+
+  // sessionLink renders a HiveMind transcript as an outlined link.
+  //
+  // The href is host-checked on the way out (webui.SessionLink) and escaped
+  // again here, and the session TITLE — which is written by whatever the agent
+  // was doing — never becomes markup: it is a title attribute, so a long one
+  // is a hover rather than a card that stops fitting. rel is set because this
+  // is the one control on the page that leaves the origin.
+  function sessionLink(url, title, label) {
+    return '<a class="btn-outline btn-sm" href="' + esc(url) + '" target="_blank"' +
+      ' rel="noopener noreferrer"' + (title ? ' title="' + esc(title) + '"' : "") +
+      ">" + esc(label) + "</a>";
+  }
+
+  // sessionLinkInline is the same link as prose rather than as a control, for
+  // the foot line where it sits inside a sentence about the setup script.
+  function sessionLinkInline(url, label) {
+    return '<a class="linkish" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' +
+      esc(label) + "</a>";
+  }
+
   // The dot carries the colour and the word stays quiet — the same badge
   // anatomy as running/paused/archived one tab over, so the two lists read at
   // the same glance.
@@ -2478,24 +2546,48 @@
   // that resolves it.
   function envStrip(e) {
     if (e.state === "building") {
+      // The live transcript, when there is one. An agent build is minutes of
+      // an unattended agent working, and the log tail is cut to a sentence by
+      // the time it reaches this card — so a link to what it is actually doing
+      // is the difference between a spinner and a build somebody can follow.
+      //
+      // It comes off the BUILDER's own row in the machine list, which the same
+      // poll already fetched: the builder is an ordinary sandbox, and its
+      // vitals carry whatever HiveMind last said about it. A script build has
+      // no agent and therefore no link, which needs no special case.
+      const live = machineFor(e.build_box || (e.name + "-build"));
+      const watch = live && live.hivemind_session_url
+        ? '<div class="chips">' + sessionLink(live.hivemind_session_url,
+            live.hivemind_session_title, "Watch the agent") + "</div>"
+        : "";
       return '<div class="env-strip building"><div class="msg">Building in <span class="mono">' +
         esc(e.build_box || (e.name + "-build")) +
-        "</span>. This takes minutes; the card updates itself.</div></div>";
+        "</span>. This takes minutes; the card updates itself.</div>" + watch + "</div>";
     }
     if (e.state !== "failed" || !e.build_error) return "";
     // The builder is deliberately left paused on a failure, so the two things
     // worth offering are a shell in it and adopting its disk as-is. Both are
     // here rather than in the overflow menu: they only exist in this state.
     const box = e.build_box;
-    const live = box ? lastMachines.find((m) => m.name === box) : null;
-    const actions = box
+    const live = box ? machineFor(box) : null;
+    // The transcript is recorded on the row when the build reports, so it is
+    // here whether or not the builder still is — and on a failed AGENT build it
+    // is usually the fastest way to see what went wrong, because the box is
+    // paused and its log is behind an ssh.
+    const read = e.build_session
+      ? sessionLink(e.build_session, "", "Read what the agent did")
+      : "";
+    const actions = box || read
       ? '<div class="chips">' +
-          (live
+          (box && live
             ? '<button class="btn-outline btn-sm" data-envterm="' + esc(box) +
               '" data-running="' + (live.state === "running" ? 1 : 0) + '">Open a terminal</button>'
             : "") +
-          '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
-            '">Keep this disk</button></div>'
+          read +
+          (box
+            ? '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
+              '">Keep this disk</button>'
+            : "") + "</div>"
       : "";
     return '<div class="env-strip failed"><div class="msg">' + esc(e.build_error) +
       (box ? ' <span class="mono">' + esc(box) + "</span> is still there." : "") +
@@ -2511,7 +2603,14 @@
       ? "<strong>Setup script</strong> — " + from +
         (e.setup_bytes ? " · " + bytes(e.setup_bytes) : "")
       : "<strong>No setup script</strong> — Build asks an agent to write one, then runs what it wrote";
-    return '<div class="env-foot"><div>' + what + "</div>" +
+    // A script an agent wrote is the only one whose author can be read back,
+    // and the foot is where this card already says where the script came from.
+    // The failed strip carries its own copy of this link because a failure is
+    // read from the top of the card; a succeeded build is read from here.
+    const wrote = e.build_session && e.state !== "failed"
+      ? " · " + sessionLinkInline(e.build_session, "how it was written")
+      : "";
+    return '<div class="env-foot"><div>' + what + wrote + "</div>" +
       '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">' +
       (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
   }
@@ -2766,8 +2865,18 @@
 
   // ---- tabs / shell ----
 
-  const HASH_TABS = { "#repos": "repos", "#environments": "environments" };
-  const initialTab = HASH_TABS[window.location.hash] || "machines";
+  // The tab a link can land on directly. #machines is here now that
+  // Environments leads the bar and is what a bare visit opens: the machine list
+  // used to be reachable by simply arriving, and a deep link to it must not
+  // stop existing because the default moved.
+  const HASH_TABS = { "#repos": "repos", "#environments": "environments", "#machines": "machines" };
+  // ENVIRONMENTS IS THE LANDING TAB. An environment is the thing a person
+  // decides — the repos, secrets, egress and disk a machine will get — and a
+  // machine is what they get afterwards; opening on the composition rather than
+  // on the instances puts the console's first screen on the choice being made.
+  // The bar's first tab and the default are the same tab on purpose: an
+  // interface whose second tab is the one that opens reads as a bug.
+  const initialTab = HASH_TABS[window.location.hash] || "environments";
 
   document.querySelectorAll(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {

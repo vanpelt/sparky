@@ -1,6 +1,7 @@
 package envs
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -462,6 +463,94 @@ func TestSetStateRules(t *testing.T) {
 	}
 	if err := s.SetState("bob", "web", StateReady, "", ""); !errors.Is(err, ErrNoSuchEnvironment) {
 		t.Errorf("SetState across owners = %v, want ErrNoSuchEnvironment", err)
+	}
+}
+
+// TestBuildSessionOutlivesTheBuilder. The transcript is recorded while the
+// builder still exists and read long after it is gone, so the one property
+// worth pinning is that SetState's clearing of build_box does not take it too.
+func TestBuildSessionOutlivesTheBuilder(t *testing.T) {
+	s := openTest(t)
+	must(t, mustPut(t, s, "alice", "web", ""))
+	must(t, s.SetState("alice", "web", StateBuilding, "web-build", ""))
+	must(t, s.SetBuildSession("alice", "web", "https://hivemind.example/sessions/a"))
+
+	must(t, s.SetState("alice", "web", StateReady, "", ""))
+	got, err := s.Get("alice", "web")
+	must(t, err)
+	if got.BuildBox != "" {
+		t.Fatalf("build_box = %q, want cleared", got.BuildBox)
+	}
+	if got.BuildSession != "https://hivemind.example/sessions/a" {
+		t.Errorf("build_session = %q, want it to survive the finished build", got.BuildSession)
+	}
+
+	// A rebuild that produced no session clears it, rather than leaving the
+	// previous build's transcript standing as an account of the current disk.
+	must(t, s.SetBuildSession("alice", "web", ""))
+	got, err = s.Get("alice", "web")
+	must(t, err)
+	if got.BuildSession != "" {
+		t.Errorf("build_session = %q, want cleared", got.BuildSession)
+	}
+
+	// A row that is not there is not an error: this is colour on a build whose
+	// outcome SetState writes, and an environment deleted mid-build must not
+	// turn into a failure the caller has to reason about.
+	if err := s.SetBuildSession("bob", "web", "https://x.example/1"); err != nil {
+		t.Errorf("SetBuildSession across owners = %v, want nil", err)
+	}
+	if err := s.SetBuildSession("alice", "gone", "https://x.example/1"); err != nil {
+		t.Errorf("SetBuildSession on a missing environment = %v, want nil", err)
+	}
+}
+
+// TestABuildSessionColumnIsAddedToAnOlderDatabase. CREATE TABLE IF NOT EXISTS
+// is a no-op on a database that already has the table, so a column added to the
+// schema reaches new installs only — and the host that has been building
+// environments the longest is exactly the one that would never get it. This
+// builds the pre-migration table by hand and opens the store over it.
+func TestABuildSessionColumnIsAddedToAnOlderDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sparkbox.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE environments (
+			id          TEXT PRIMARY KEY,
+			owner       TEXT NOT NULL,
+			name        TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			setup_sh    TEXT NOT NULL DEFAULT '',
+			setup_from  TEXT NOT NULL DEFAULT '',
+			build_state TEXT NOT NULL DEFAULT 'draft',
+			build_box   TEXT NOT NULL DEFAULT '',
+			build_error TEXT NOT NULL DEFAULT '',
+			built_at    TIMESTAMP,
+			created_at  TIMESTAMP NOT NULL,
+			updated_at  TIMESTAMP NOT NULL,
+			UNIQUE (owner, name)
+		);
+		INSERT INTO environments (id, owner, name, created_at, updated_at)
+		VALUES ('deadbeef', 'alice', 'web', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`); err != nil {
+		t.Fatalf("seed the old schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	s := openAt(t, path)
+	got, err := s.Get("alice", "web")
+	must(t, err)
+	if got.BuildSession != "" {
+		t.Errorf("build_session = %q on a migrated row, want empty", got.BuildSession)
+	}
+	must(t, s.SetBuildSession("alice", "web", "https://hivemind.example/sessions/a"))
+	got, err = s.Get("alice", "web")
+	must(t, err)
+	if got.BuildSession != "https://hivemind.example/sessions/a" {
+		t.Errorf("build_session = %q after a write to a migrated row", got.BuildSession)
 	}
 }
 

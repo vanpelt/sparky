@@ -49,6 +49,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -901,13 +902,26 @@ sparkbox_agent() {
   # ` + "`auto`" + ` mode this platform seeds is downgraded to ` + "`default`" + `, every Write and
   # Bash is denied, and the run still exits 0.
   #
-  # --no-session-persistence keeps the transcript out of ~/.claude/projects. This
-  # disk becomes the environment's template and is copied into every fork of it,
-  # and nothing in the capture path strips that directory.
+  # THE TRANSCRIPT IS PERSISTED ON PURPOSE, and it is the only way anybody can
+  # see what an unattended agent is doing. The run takes minutes, its log tail
+  # is bounded to a sentence by the time it reaches a row, and the box it
+  # happens in is destroyed on success — so without the transcript the honest
+  # answer to "what did it do" is the diff and nothing else. Every template
+  # seeds a hivemind daemon (deploy/refresh-agent-tools.sh) which syncs
+  # ~/.claude/projects to HiveMind as the session runs, and that session is what
+  # the console links to while the build is in flight.
+  #
+  # It was previously run with --no-session-persistence, because this disk
+  # becomes the environment's template and nothing in the capture path strips
+  # ~/.claude/projects. That cost is real and it is accepted rather than
+  # overlooked: a template is bound (owner, tag) and masked from every other
+  # owner, the transcript is the owner's own agent working in the owner's own
+  # box, and every ORDINARY sandbox in the fleet already persists sessions onto
+  # a disk somebody may snapshot. Making the builder the one place that hides
+  # its work bought consistency with nothing.
   "$claude_bin" -p "$1" \
     --permission-mode bypassPermissions \
-    --output-format text \
-    --no-session-persistence
+    --output-format text
 }
 
 # sparkbox_verify: is this a script, and does it run?
@@ -1050,12 +1064,14 @@ Do not commit, push, or open a pull request; somebody will review this file.
 // repairPrompt is the second and last agent invocation of a build: the script
 // the first one wrote did not run, and this asks for it to be fixed.
 //
-// It is a SEPARATE, FRESH agent rather than a continuation, because there is no
-// session to continue — the first run is deliberately started with
-// --no-session-persistence so its transcript never lands on a disk that becomes
-// a template. Everything this one needs is therefore stated: the file is in the
-// checkout it starts in, and the failure is appended to this text by the shell
-// from the replay it just captured.
+// It is a SEPARATE, FRESH agent rather than a `--resume` of the first, and that
+// stays true now that the first run's session IS persisted. A round that starts
+// from the file and the failure is reproducible from what is on disk; one that
+// resumes carries the first agent's own account of what it did, which is
+// exactly the memory that wrote a script naming a directory it never made.
+// Everything this one needs is therefore stated: the file is in the checkout it
+// starts in, and the failure is appended to this text by the shell from the
+// replay it just captured.
 //
 // ONE ROUND, not a loop. A second agent that cannot make a script run is not
 // usually one round away from making it run, the build has a wall-clock budget
@@ -1153,6 +1169,13 @@ func (o *Ops) completeBuild(ctx context.Context, e envs.Environment, box string,
 	// to write a file that was already sitting in the checkout.
 	o.recordReportedScript(e, r)
 
+	// AND WHERE THE AGENT THAT WROTE IT CAN BE READ, recorded here for the same
+	// reason and with the same weight: it is the record of what happened, not a
+	// reward for succeeding. This is also the last moment it can be asked for —
+	// the credential HiveMind answers is minted for the BUILDER, and a
+	// successful build destroys that box a minute from now.
+	o.recordBuildSession(ctx, e, box)
+
 	if !r.OK {
 		// THE BUILDER IS KEPT, AND PAUSED. It holds the half-built filesystem,
 		// the log, and the checkout the script failed in — which is everything
@@ -1213,6 +1236,64 @@ func (o *Ops) recordReportedScript(e envs.Environment, r SetupReport) {
 		o.log.Warn("could not record the setup script a builder reported",
 			"user", e.Owner, "env", e.Name, "err", err)
 	}
+}
+
+// recordBuildSession stores the HiveMind session of the agent that ran this
+// build, so the transcript outlives the box it happened in.
+//
+// WHY THE ROW NEEDS THIS AT ALL, when a build in flight is already linkable:
+// the console finds a live session through the builder's own vitals, and that
+// answer disappears twice over — the builder is paused on a failure and
+// destroyed on a success. An agent build's transcript is the only account of
+// why the setup script looks the way it does, and it is worth exactly as much
+// the week after as it is while the spinner is going.
+//
+// ASKED LIVE RATHER THAN READ FROM THE PRESENCE CACHE, which is `ctl sessions`'
+// argument (hivemind.go:5-13) applied to a moment rather than to a person: the
+// cache is refreshed on a budget measured in minutes, and this is the one
+// instant where a stale answer would name the previous build's session on the
+// same box. The query is one round trip on a path that has just spent minutes.
+//
+// BEST EFFORT THROUGHOUT. A host with no --hivemind-api has no session to name,
+// a build that ran no agent has none either, and neither is a reason to fail a
+// build whose disk is the actual deliverable. Every failure is a debug line and
+// a row that says nothing rather than something wrong.
+func (o *Ops) recordBuildSession(ctx context.Context, e envs.Environment, box string) {
+	if o.hivemind == nil || e.SetupFrom != envs.SetupFromAgent {
+		return
+	}
+	b, ok := o.boxes.Get(box)
+	if !ok || b.Owner != e.Owner {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, SessionsTimeout)
+	defer cancel()
+	snapshot, err := o.hivemind.Sessions(ctx, b, 5)
+	if err != nil {
+		o.log.Debug("could not read the HiveMind session of an environment build",
+			"user", e.Owner, "env", e.Name, "sandbox", box, "err", err)
+		return
+	}
+	recent := snapshot.Recent()
+	if recent == nil {
+		return
+	}
+	// Scheme-checked because this string becomes an href in the console and a
+	// line in a terminal. HiveMind is not a node — this came from the API this
+	// gateway authenticated to, not across the fleet — so the check is against
+	// a field that grows a relative or a `javascript:` form, not against a
+	// hostile author.
+	link, err := url.Parse(recent.URL)
+	if err != nil || link.Host == "" || (link.Scheme != "https" && link.Scheme != "http") {
+		return
+	}
+	if err := o.envs.SetBuildSession(e.Owner, e.Name, recent.URL); err != nil {
+		o.log.Debug("could not record the HiveMind session of an environment build",
+			"user", e.Owner, "env", e.Name, "err", err)
+		return
+	}
+	o.log.Info("environment build session recorded",
+		"user", e.Owner, "env", e.Name, "sandbox", box, "session", recent.ID)
 }
 
 // ---------------------------------------------------------------------------
@@ -1423,6 +1504,12 @@ func (o *Ops) expireBuild(ctx context.Context, e envs.Environment, cutoff time.D
 	}
 	reason = "the agent writing its setup script ran longer than " + cutoff.String() +
 		" without reporting a result, so the builder was destroyed rather than left running unattended"
+	// BEFORE the destroy below, because after it there is no sandbox to mint a
+	// HiveMind credential for and the transcript becomes unreachable. An
+	// overrun agent build is the case that needs it most: nothing was reported,
+	// the box is about to go, and what the agent was doing for forty-five
+	// minutes is the only evidence there will ever be.
+	o.recordBuildSession(ctx, e, e.BuildBox)
 	if o.boxes == nil {
 		o.markFailedBox(e.Owner, e.Name, e.BuildBox, reason, false)
 		return

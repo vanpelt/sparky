@@ -352,13 +352,19 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 		if !slices.Contains(got.Tags, "web") {
 			t.Errorf("the default rule-set does not carry the environment's tag: %+v", got)
 		}
-		// The distribution archives, and only those. The base allowlist every
-		// governed sandbox already gets carries the LANGUAGE registries (pypi,
-		// npm, crates, the Go proxy) but no apt repository — so without these
-		// the very first thing the agent prompt tells an agent to do,
-		// `sudo apt-get -y`, could not resolve, and the default would defeat
-		// the feature it is meant to protect.
-		for _, want := range []string{"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"} {
+		// The COMMON TRUSTED SET, plus the four names defaultEnvAllow adds to
+		// it. A sample rather than the whole list, chosen to fail on the two
+		// ways this default has actually been wrong: too narrow to install a
+		// package (the apt archives, and npm/pypi standing in for the trusted
+		// set itself) and too narrow to pull an image (the registries). Either
+		// way a build ends in a name that does not resolve, twenty minutes in,
+		// and the person reading that cannot tell it from a network fault.
+		for _, want := range []string{
+			"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com",
+			"registry.npmjs.org", "pypi.org", "github.com",
+			"ghcr.io", "docker.io", "registry-1.docker.io",
+			"production.cloudflare.docker.com",
+		} {
 			if !slices.Contains(got.Spec.Allow, want) {
 				t.Errorf("the default rule-set does not allow %q: %v", want, got.Spec.Allow)
 			}

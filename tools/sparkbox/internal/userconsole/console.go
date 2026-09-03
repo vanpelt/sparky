@@ -449,6 +449,19 @@ type sandboxView struct {
 	MemUsedMB        *int64        `json:"mem_used_mb,omitempty"`
 	CPUSeconds       *float64      `json:"cpu_seconds,omitempty"`
 	EnvUndecryptable bool          `json:"env_undecryptable,omitempty"`
+	// The HiveMind reading, from the same vitals reply the meters come from and
+	// therefore free. It is what lets the Environments tab link a build in
+	// flight to the transcript of the agent running it: the builder is an
+	// ordinary sandbox in this very list, so the panel finds it by name rather
+	// than asking the control plane a second question about it.
+	//
+	// Absent — not empty — on a host with no --hivemind-api and on a machine
+	// that has never heard from HiveMind about this sandbox. "No session" and
+	// "nobody asks" render identically here (no link), which is right for a
+	// dashboard and is why nothing branches on the difference.
+	HiveMindSessionURL   string `json:"hivemind_session_url,omitempty"`
+	HiveMindSessionTitle string `json:"hivemind_session_title,omitempty"`
+	HiveMindActive       bool   `json:"hivemind_active,omitempty"`
 }
 
 func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
@@ -501,6 +514,14 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 				}
 				view.MemUsedMB, view.CPUSeconds = v.MemUsedMB, v.CPUSeconds
 				*scan = v
+				if hm := v.HiveMind; hm != nil {
+					// SessionLink, because a node is a separate trust domain
+					// and this is the one field in the reply that becomes an
+					// href. The title is painted with textContent by the page.
+					view.HiveMindSessionURL = webui.SessionLink(hm.SessionURL)
+					view.HiveMindSessionTitle = hm.SessionTitle
+					view.HiveMindActive = hm.Presence.Live()
+				}
 			}(b, &views[i], &scans[i])
 		}
 	}
