@@ -223,6 +223,64 @@ func TestSelfStatusIncludesReportedReposForHumansAndAgents(t *testing.T) {
 	}
 }
 
+func TestSelfStatusIncludesCachedHiveMindSessionsForHumansAndAgents(t *testing.T) {
+	s := fixture(t)
+	box, _ := s.mgr.(fakeBoxes).GetByHostIP("172.30.5.2")
+	box.HiveMind = &host.HiveMindSessionSnapshot{
+		ObservedAt: time.Date(2026, 9, 3, 14, 30, 0, 0, time.UTC),
+		Sessions: []host.HiveMindSession{
+			{
+				ID: "session-1", Title: "Polish environment status", State: "ended",
+				AgentType: "codex", Model: "gpt-5.6",
+				URL: "https://hivemind.example/sessions/session-1",
+			},
+			{ID: "session-2", State: "ended"},
+		},
+		TotalCount: 7,
+		HasMore:    true,
+	}
+
+	human := request(s, "/self?format=text", "172.30.5.2", "172.30.5.1")
+	for _, want := range []string{
+		"HiveMind sessions (2 of 7 shown, cached at 2026-09-03T14:30:00Z):",
+		"Polish environment status [ended]", "codex · gpt-5.6",
+		"https://hivemind.example/sessions/session-1", "session-2 [ended]",
+	} {
+		if !strings.Contains(human.Body.String(), want) {
+			t.Errorf("human status missing %q:\n%s", want, human.Body)
+		}
+	}
+
+	agent := request(s, "/self", "172.30.5.2", "172.30.5.1")
+	for _, want := range []string{
+		`"hivemind":{"observed_at":"2026-09-03T14:30:00Z"`,
+		`"sessions":[{"id":"session-1"`, `"total_count":7`, `"has_more":true`,
+	} {
+		if !strings.Contains(agent.Body.String(), want) {
+			t.Errorf("JSON status missing %q: %s", want, agent.Body)
+		}
+	}
+}
+
+func TestSelfStatusDistinguishesAnObservedEmptyHiveMindCatalog(t *testing.T) {
+	s := fixture(t)
+	box, _ := s.mgr.(fakeBoxes).GetByHostIP("172.30.5.2")
+	box.HiveMind = &host.HiveMindSessionSnapshot{
+		ObservedAt: time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC),
+		Sessions:   []host.HiveMindSession{},
+	}
+
+	human := request(s, "/self?format=text", "172.30.5.2", "172.30.5.1")
+	if want := "HiveMind sessions: none recorded, cached at 2026-09-03T15:00:00Z"; !strings.Contains(human.Body.String(), want) {
+		t.Errorf("human status missing %q:\n%s", want, human.Body)
+	}
+
+	agent := request(s, "/self", "172.30.5.2", "172.30.5.1")
+	if !strings.Contains(agent.Body.String(), `"sessions":[]`) {
+		t.Errorf("observed empty catalog is not an empty JSON list: %s", agent.Body)
+	}
+}
+
 func TestSandboxCanPinAndUnpinItself(t *testing.T) {
 	s := fixture(t)
 	for _, tc := range []struct {

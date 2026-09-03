@@ -218,8 +218,9 @@ not, so a forgotten tab cannot pin a sandbox warm forever.
 The guest login banner lists every attached repository with its checkout path,
 current branch, and compact ahead/behind/dirty markers. `sparkbox status` shows
 the same resource and lifecycle snapshot used by the xterm `/vitals` strip,
-plus the gateway's latest repository map (`--json` is the stable agent-facing
-form); `sparkbox repos` inspects the filesystem immediately, and
+plus the host's latest repository map and cached HiveMind session catalog
+(`--json` is the stable agent-facing form); `sparkbox repos` inspects the
+filesystem immediately, and
 `sparkbox repos sync` is the only post-boot command that may safely fast-forward
 a clean checkout. A fetch-only guest timer refreshes the gateway's advisory repo
 state every five minutes, including unpushed commits and divergence, so consoles

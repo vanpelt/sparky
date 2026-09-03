@@ -55,6 +55,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -549,6 +550,10 @@ type selfDoc struct {
 	PortsChecked   bool                       `json:"ports_checked,omitempty"`
 	Repositories   map[string]host.RepoStatus `json:"repositories"`
 	RepoStatusAt   *time.Time                 `json:"repo_status_at,omitempty"`
+	// HiveMind is the host's latest cached session catalog for this VM. It is
+	// absent until the optional presence monitor has completed a history query;
+	// a non-nil snapshot with no sessions is an authoritative empty result.
+	HiveMind *host.HiveMindSessionSnapshot `json:"hivemind,omitempty"`
 }
 
 func (s *Server) self(w http.ResponseWriter, r *http.Request) {
@@ -594,7 +599,7 @@ func (s *Server) selfStatus(ctx context.Context, box *host.Sandbox) selfDoc {
 		AtMS: time.Now().UnixMilli(), VCPUs: box.VCPUs, MemMB: box.MemMB,
 		Turbo: box.Turbo, Ballooned: box.Ballooned,
 		LifeRxBytes: box.NetRxBytes, LifeTxBytes: box.NetTxBytes,
-		Repositories: repositories,
+		Repositories: repositories, HiveMind: box.HiveMind,
 	}
 	if !box.RepoStatusAt.IsZero() {
 		at := box.RepoStatusAt
@@ -689,6 +694,59 @@ func (s *Server) writeSelfText(w http.ResponseWriter, doc selfDoc) {
 	}
 	if doc.RepoStatusAt != nil {
 		fmt.Fprintf(w, "repo status checked: %s\n", doc.RepoStatusAt.UTC().Format(time.RFC3339))
+	}
+	writeHiveMindSessions(w, doc.HiveMind)
+}
+
+func writeHiveMindSessions(w io.Writer, snapshot *host.HiveMindSessionSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	checked := ""
+	if !snapshot.ObservedAt.IsZero() {
+		checked = ", cached at " + snapshot.ObservedAt.UTC().Format(time.RFC3339)
+	}
+	if len(snapshot.Sessions) == 0 {
+		fmt.Fprintf(w, "HiveMind sessions: none recorded%s\n", checked)
+		return
+	}
+
+	shown, total := len(snapshot.Sessions), snapshot.TotalCount
+	if total < shown {
+		total = shown
+	}
+	count := fmt.Sprintf("%d", total)
+	if snapshot.HasMore || shown < total {
+		count = fmt.Sprintf("%d of %d shown", shown, total)
+	}
+	fmt.Fprintf(w, "HiveMind sessions (%s%s):\n", count, checked)
+	for _, session := range snapshot.Sessions {
+		title := ctlops.SafeText(session.Title, 80)
+		if title == "" {
+			title = ctlops.SafeText(session.ID, 80)
+		}
+		if title == "" {
+			title = "untitled"
+		}
+		state := ctlops.SafeText(session.State, 24)
+		if state != "" {
+			fmt.Fprintf(w, "  %s [%s]\n", title, state)
+		} else {
+			fmt.Fprintf(w, "  %s\n", title)
+		}
+		detail := make([]string, 0, 2)
+		if agent := ctlops.SafeText(session.AgentType, 32); agent != "" {
+			detail = append(detail, agent)
+		}
+		if model := ctlops.SafeText(session.Model, 48); model != "" {
+			detail = append(detail, model)
+		}
+		if len(detail) > 0 {
+			fmt.Fprintf(w, "    %s\n", strings.Join(detail, " · "))
+		}
+		if link := ctlops.SafeText(session.URL, 500); link != "" {
+			fmt.Fprintf(w, "    %s\n", link)
+		}
 	}
 }
 
