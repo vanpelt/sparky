@@ -364,7 +364,7 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 			"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com",
 			"registry.npmjs.org", "pypi.org", "github.com",
 			"ghcr.io", "docker.io", "registry-1.docker.io",
-			"production.cloudflare.docker.com",
+			"production.cloudflare.docker.com", "production.cloudfront.docker.com",
 		} {
 			if !slices.Contains(got.Spec.Allow, want) {
 				t.Errorf("the default rule-set does not allow %q: %v", want, got.Spec.Allow)
