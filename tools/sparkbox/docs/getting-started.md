@@ -254,6 +254,8 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   and the builder paused for `env capture`. A new environment also gets an egress rule-set named after it, so
   its sandboxes reach the package registries, github and the model API and not
   the rest of the internet (`--open-egress` on create opts out).
+  It is all on the other two doors as well: an Environments tab on
+  `my.<domain>`, and `/v1/environments` on the REST API.
   `--env-build-timeout` (default 45m) bounds how long a build may sit unfinished
   before a sweep gives up on it — a script build's builder is left paused, an
   agent build's is destroyed. See [environments-design.md](environments-design.md).

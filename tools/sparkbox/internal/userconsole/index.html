@@ -296,6 +296,44 @@
   .secret-form input { width: 100%; }
   .secret-form .save { align-self: end; }
 
+  /* environments form — the widest of the three, and the only one with a
+     field that needs two lines: the variables box spans the whole grid rather
+     than being squeezed into a column, because K=V pairs read as a list. */
+  .env-form { grid-template-columns: .9fr 1.3fr 1.2fr 1fr 1fr auto; }
+  @media (max-width: 860px) { .env-form { grid-template-columns: 1fr; } }
+  .env-form .wide { grid-column: 1 / -1; }
+  .env-form .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .env-form .check input { width: auto; }
+  /* The build state, which is the column somebody actually scans. Four words,
+     each in the colour the rest of the page already uses for that meaning. */
+  .env-state { font-size: 12px; font-weight: 500; }
+  .env-state.ready { color: hsl(var(--green)); }
+  .env-state.building { color: hsl(var(--amber)); }
+  .env-state.failed { color: hsl(var(--red)); }
+  .env-state.draft { color: hsl(var(--muted-foreground)); }
+  .env-why { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin-top: 3px; }
+  /* A WIDTH, not a max-width, and only on the build error. This sits in a table
+     cell, auto table layout sizes a column from its content's min-content
+     width, and a max-width on a child is advisory there — so a recorded build
+     error, which is one long line of guest log, pushed the actions column off
+     the right edge until this was a fixed number. */
+  /* white-space: normal is the load-bearing half. The table sets nowrap on its
+     cells — right for a name and a timestamp — and a recorded build error under
+     it did not wrap, it PAINTED ACROSS the actions column. */
+  .env-err { width: 150px; white-space: normal; overflow-wrap: anywhere; }
+  /* One labelled line per kind inside the Contents cell. Without the label the
+     chips are indistinguishable — `web` could be a rule-set, a tag or a
+     variable — and the whole point of this column is that four different
+     stores are being shown at once. */
+  .env-line { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .env-line:last-child { margin-bottom: 0; }
+  .env-kind { font-size: 11px; color: hsl(var(--muted-foreground)); width: 46px; flex: none; }
+  .script-box { width: 100%; min-height: 260px; resize: vertical; padding: 9px 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border));
+    background: hsl(var(--background)); color: hsl(var(--foreground)); }
+  .script-actions { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; }
+
   /* repos form — one field more than the secrets grid, and a <select> the
      input rules above cannot reach: they are typed to input[type=…], so an
      unstyled select would render as a light native control on a dark card. */
@@ -398,6 +436,7 @@
 
     <div class="tabs">
       <button class="tab active" data-tab="machines">Machines</button>
+      <button class="tab" data-tab="environments">Environments</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="repos">Repos</button>
@@ -549,6 +588,108 @@
           </table>
         </div>
         <div id="netrules-empty" class="empty hidden">No rule-sets yet. Add one above, then tag a machine to enforce it.</div>
+      </div>
+    </div>
+
+    <!-- ENVIRONMENTS TAB -->
+    <div id="tab-environments" class="hidden">
+      <div class="card panel">
+        <div class="panel-head">
+          <h2>Environments</h2>
+          <span class="hint">a named way of working — checkouts, secrets, egress, and the disk they were built on</span>
+        </div>
+        <div class="notice">
+          An environment's <strong>name is a tag</strong>: everything attached to it reaches every
+          machine carrying that tag, and the other three tabs are the same object viewed one piece
+          at a time. <strong>Build</strong> runs its setup script once in a throwaway machine called
+          <code class="mono">&lt;name&gt;-build</code> and keeps that disk, so the next machine you
+          make from it starts with the work already done. With no setup script anywhere, Build asks
+          an agent to write one — and then runs what it wrote.
+        </div>
+        <form id="env-form" class="secret-form env-form">
+          <div>
+            <label for="env-name">Name</label>
+            <input id="env-name" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="web" maxlength="40" />
+            <div class="field-hint">this is the tag — lowercase, digits, dashes</div>
+          </div>
+          <div>
+            <label for="env-desc">Description</label>
+            <input id="env-desc" type="text" autocomplete="off" placeholder="the web stack" maxlength="200" />
+            <div class="field-hint">optional; what this way of working is for</div>
+          </div>
+          <div>
+            <label for="env-repos">Repos</label>
+            <input id="env-repos" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="wandb/hivemind" />
+            <div class="field-hint">comma-separated <code class="mono">owner/name</code></div>
+          </div>
+          <div>
+            <label for="env-secrets">Secrets</label>
+            <input id="env-secrets" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="GITHUB_TOKEN" />
+            <div class="field-hint">must already exist — add them on the Secrets tab</div>
+          </div>
+          <div>
+            <label for="env-rules">Rule-sets</label>
+            <input id="env-rules" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="ci-egress" />
+            <div class="field-hint">optional; from the Network tab</div>
+          </div>
+          <button type="submit" class="btn-primary save" id="env-save">Save environment</button>
+          <div class="wide">
+            <label for="env-vars">Variables</label>
+            <textarea id="env-vars" class="mono" autocomplete="off" spellcheck="false"
+              placeholder="NODE_ENV=development&#10;LOG_LEVEL=debug"></textarea>
+            <div class="field-hint">
+              one <code class="mono">NAME=value</code> per line — plain values, delivered beside
+              the secrets. Editing an environment replaces this whole list, so a line you remove
+              is unset; repos, secrets and rule-sets only ever get added here (detach them on
+              their own tab).
+            </div>
+          </div>
+          <div class="check wide">
+            <input id="env-open" type="checkbox" />
+            <label for="env-open" style="margin:0">
+              Skip the default egress rule-set (new environments only)
+            </label>
+          </div>
+        </form>
+        <div id="envs-disabled" class="notice hidden">
+          Environments are not enabled on this host.
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Contents</th><th>Setup</th><th>Build</th><th></th></tr>
+            </thead>
+            <tbody id="env-rows"></tbody>
+          </table>
+        </div>
+        <div id="envs-empty" class="empty hidden">
+          No environments yet. Name one above, attach a repo, then <code>Build</code> it.
+        </div>
+      </div>
+
+      <div class="card panel hidden" id="env-script-panel">
+        <div class="panel-head">
+          <h2 id="env-script-title">setup.sh</h2>
+          <span class="hint" id="env-script-origin"></span>
+        </div>
+        <div class="notice">
+          The script a build runs, in the checkout, as you. It is read at
+          <strong>build</strong> time and never by a running machine, so saving one changes what
+          the next build does and nothing about the machines running now.
+        </div>
+        <div style="padding:14px">
+          <textarea id="env-script" class="script-box" spellcheck="false"
+            placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;&#10;pnpm install"></textarea>
+        </div>
+        <div class="script-actions">
+          <button class="btn-primary" id="env-script-save">Save script</button>
+          <button class="btn-outline" id="env-script-close">Close</button>
+          <span class="hint" id="env-script-note"></span>
+        </div>
       </div>
     </div>
 
@@ -2047,14 +2188,279 @@
     }
   });
 
+  // ---- environments ----
+
+  // The environment the form is currently EDITING, or null when it is a blank
+  // create form. It is the difference between "leave this alone" and "clear
+  // it": the same two fields — description and variables — are replaced outright
+  // when they belong to a row somebody opened, and left untouched when the form
+  // was never populated. Without it, typing an existing name into an empty form
+  // to add a secret would silently wipe that environment's description and
+  // every variable on it.
+  let envEditing = null;
+  let lastEnvs = [];
+
+  // Table cells are not the place for a paragraph. The whole string stays in
+  // the element's title, so nothing is lost — it just is not spent on width.
+  function clip(s, n) { return s.length > n ? s.slice(0, n) + "…" : s; }
+
+  // Four states, four sentences. `building` names the builder machine because
+  // that is the box somebody would ssh into, and `failed` shows why underneath
+  // rather than in a tooltip nobody hovers.
+  // The build column carries the base image too, on a second line rather than
+  // in a column of its own: they are one fact — what this environment boots
+  // from and how it got there — and splitting them cost the table more width
+  // than the console has.
+  function envStateCell(e) {
+    const st = e.state || "draft";
+    let head = st;
+    if (st === "building") head = "building" + (e.build_box ? " · " + esc(e.build_box) : "");
+    if (st === "ready" && e.built_at) head = "ready · " + rel(e.built_at);
+    const image = e.snapshot
+      ? '<div class="env-why mono">' + esc(e.snapshot) + "</div>"
+      : '<div class="env-why">boots the default image</div>';
+    let why = "";
+    // Trimmed, because the recorded error is a summarised guest log line and
+    // this is a table cell. The whole of it is the title, and `env show` and
+    // the builder's own log have all of it.
+    if (st === "failed" && e.build_error) {
+      const err = clip(e.build_error, 160);
+      why = '<div class="env-why env-err" title="' + esc(e.build_error) + '">' + esc(err) + "</div>";
+    }
+    return '<div class="env-state ' + esc(st) + '">' + head + "</div>" + image + why;
+  }
+
+  // One line per kind, labelled, and skipped entirely when there is nothing of
+  // that kind — except repos and secrets, which are said to be absent because
+  // "this environment has no secrets" is a fact somebody is looking for.
+  function envLine(kind, items, empty) {
+    if (!items || !items.length) {
+      if (!empty) return "";
+      return '<div class="env-line"><span class="env-kind">' + kind + '</span>' +
+        '<span class="muted">' + empty + "</span></div>";
+    }
+    return '<div class="env-line"><span class="env-kind">' + kind + '</span><div class="chips">' +
+      items.map((i) => '<span class="chip plain mono">' + esc(i) + "</span>").join(" ") + "</div></div>";
+  }
+
+  function renderEnvs(list) {
+    lastEnvs = list;
+    const rows = $("env-rows");
+    rows.innerHTML = "";
+    for (const e of list) {
+      const vars = (e.vars || []).map((v) => v.name);
+      const contents =
+        envLine("repos", e.repos, "none") +
+        envLine("secrets", e.secrets, "none") +
+        envLine("egress", e.rules, "") +
+        envLine("vars", vars, "");
+      // Bytes and origin, because "has a script" is not the useful fact: where
+      // it came from is what says whether the next build runs an agent.
+      const setup = e.has_setup
+        ? esc(String(e.setup_bytes)) + " B" +
+          (e.setup_from ? '<div class="env-why">from ' + esc(e.setup_from) + "</div>" : "")
+        : '<span class="muted">none</span><div class="env-why">an agent writes one</div>';
+      const buildLabel = e.state === "ready" || e.state === "failed" ? "Rebuild" : "Build";
+      const canCapture = e.state === "failed" && e.build_box;
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="name mono">' + esc(e.name) +
+          (e.description
+            ? '<div class="env-why" title="' + esc(e.description) + '">' + esc(clip(e.description, 22)) + "</div>"
+            : "") + "</td>" +
+        "<td>" + contents + "</td>" +
+        "<td>" + setup + "</td>" +
+        "<td>" + envStateCell(e) + "</td>" +
+        '<td class="actions">' +
+          '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + '"' +
+            (e.state === "building" ? " disabled" : "") + ">" + buildLabel + "</button> " +
+          (canCapture
+            ? '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
+                '" title="Keep ' + esc(e.build_box) + ' exactly as it is and make it this environment\'s base image">Capture</button> '
+            : "") +
+          '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">Script</button> ' +
+          '<button class="btn-outline btn-sm" data-envedit="' + esc(e.name) + '">Edit</button> ' +
+          '<button class="btn-outline btn-sm btn-danger" data-envdel="' + esc(e.name) + '">Delete</button></td>';
+      rows.appendChild(tr);
+    }
+    $("envs-empty").classList.toggle("hidden", list.length > 0);
+
+    rows.querySelectorAll("button[data-envbuild]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envbuild;
+        mutate("envbuild:" + name, btn, async () => {
+          await api("/api/environments/" + encodeURIComponent(name) + "/build", { method: "POST" });
+          toast("building " + name + " — this takes minutes; the row updates itself");
+        });
+      }));
+    rows.querySelectorAll("button[data-envcapture]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envcapture;
+        if (!confirm("Keep " + name + "-build exactly as it is and make it this environment's base image?")) return;
+        mutate("envcapture:" + name, btn, async () => {
+          // Synchronous and slow: it packs a rootfs. The button stays disabled
+          // for the whole wait, which is the honest progress indicator.
+          toast("capturing " + name + " — this takes a few minutes");
+          await api("/api/environments/" + encodeURIComponent(name) + "/capture", { method: "POST" });
+          toast(name + " captured");
+        });
+      }));
+    rows.querySelectorAll("button[data-envscript]").forEach((btn) =>
+      btn.addEventListener("click", () => openEnvScript(btn.dataset.envscript, btn)));
+    rows.querySelectorAll("button[data-envedit]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const e = list.find((x) => x.name === btn.dataset.envedit);
+        if (!e) return;
+        envEditing = e.name;
+        $("env-name").value = e.name;
+        $("env-desc").value = e.description || "";
+        $("env-repos").value = (e.repos || []).join(", ");
+        $("env-secrets").value = (e.secrets || []).join(", ");
+        $("env-rules").value = (e.rules || []).join(", ");
+        $("env-vars").value = (e.vars || []).map((v) => v.name + "=" + v.value).join("\n");
+        $("env-open").checked = false;
+        $("env-save").textContent = "Update " + e.name;
+        $("env-name").focus();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }));
+    rows.querySelectorAll("button[data-envdel]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envdel;
+        if (!confirm("Delete environment " + name + "? Its secrets, repos and rule-sets are kept — " +
+            "only the environment, its variables and its base image binding go.")) return;
+        mutate("envdel:" + name, btn, async () => {
+          const res = await api("/api/environments/" + encodeURIComponent(name), { method: "DELETE" });
+          // What SURVIVED is the point of the verb, so it is said rather than
+          // left for somebody to go and check.
+          const kept = (res.repos || []).length + (res.secrets || []).length + (res.rules || []).length;
+          toast("deleted " + name +
+            (kept ? " — " + kept + " attached object(s) still carry the tag" : "") +
+            (res.removed_rule ? "; its egress rule-set went with it" : ""));
+          if (envEditing === name) resetEnvForm();
+        });
+      }));
+    reapplyInflight(rows);
+  }
+
+  function envsDisabled(off) {
+    $("envs-disabled").classList.toggle("hidden", !off);
+    $("env-form").classList.toggle("hidden", off);
+  }
+
+  function resetEnvForm() {
+    envEditing = null;
+    for (const id of ["env-name", "env-desc", "env-repos", "env-secrets", "env-rules", "env-vars"]) {
+      $(id).value = "";
+    }
+    $("env-open").checked = false;
+    $("env-save").textContent = "Save environment";
+  }
+
+  function splitList(id) {
+    return $(id).value.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+  }
+
+  $("env-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("env-name").value.trim().toLowerCase();
+    if (!name) return toast("name is required", true);
+    if (!TAG_RE.test(name)) {
+      return toast("bad name " + name + ": lowercase letters, digits, dashes (max 40)", true);
+    }
+    const vars = [];
+    for (const line of $("env-vars").value.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      const eq = t.indexOf("=");
+      if (eq <= 0) return toast("bad variable " + t + ": write it as NAME=value", true);
+      vars.push({ name: t.slice(0, eq).trim(), value: t.slice(eq + 1) });
+    }
+    const body = {
+      repos: splitList("env-repos").map((slug) => ({ slug: slug })),
+      secrets: splitList("env-secrets"),
+      rules: splitList("env-rules"),
+      open_egress: $("env-open").checked,
+    };
+    // Only a form that was POPULATED from a row may clear these two. On a blank
+    // create form an empty box means "I did not fill this in", not "delete what
+    // is there" — and typing an existing name into one is how somebody adds a
+    // secret to an environment they already have.
+    const editing = envEditing === name;
+    const desc = $("env-desc").value.trim();
+    if (editing || desc) body.description = desc;
+    if (editing || vars.length) body.vars = vars;
+    const btn = $("env-save");
+    btn.disabled = true;
+    try {
+      await api("/api/environments/" + encodeURIComponent(name), { method: "PUT", body: body });
+      toast(name + " saved");
+      resetEnvForm();
+      await refresh();
+    } catch (e2) {
+      toast(e2.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- the setup script editor ----
+
+  let envScriptName = null;
+
+  async function openEnvScript(name, btn) {
+    btn.disabled = true;
+    try {
+      const got = await api("/api/environments/" + encodeURIComponent(name) + "/script");
+      envScriptName = name;
+      $("env-script-title").textContent = ".sparkbox/setup.sh — " + name;
+      $("env-script-origin").textContent = got.from
+        ? "recorded from " + got.from
+        : "nothing recorded yet";
+      $("env-script").value = got.script || "";
+      $("env-script-note").textContent = "";
+      $("env-script-panel").classList.remove("hidden");
+      $("env-script").focus();
+      $("env-script-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $("env-script-save").addEventListener("click", async () => {
+    if (!envScriptName) return;
+    const btn = $("env-script-save");
+    btn.disabled = true;
+    try {
+      await api("/api/environments/" + encodeURIComponent(envScriptName) + "/script",
+        { method: "PUT", body: { script: $("env-script").value } });
+      $("env-script-origin").textContent = "recorded from manual";
+      $("env-script-note").textContent = "saved — the next build runs this";
+      toast("setup script saved for " + envScriptName);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("env-script-close").addEventListener("click", () => {
+    envScriptName = null;
+    $("env-script-panel").classList.add("hidden");
+  });
+
   // ---- tabs / shell ----
 
-  const initialTab = window.location.hash === "#repos" ? "repos" : "machines";
+  const HASH_TABS = { "#repos": "repos", "#environments": "environments" };
+  const initialTab = HASH_TABS[window.location.hash] || "machines";
 
   document.querySelectorAll(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
       $("tab-machines").classList.toggle("hidden", btn.dataset.tab !== "machines");
+      $("tab-environments").classList.toggle("hidden", btn.dataset.tab !== "environments");
       $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
       $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
       $("tab-repos").classList.toggle("hidden", btn.dataset.tab !== "repos");
@@ -2083,9 +2489,10 @@
 
   async function refresh() {
     try {
-      const [rm, ru, rs, rn, rnr, rrp] = await Promise.all([
+      const [rm, ru, rs, rn, rnr, rrp, rev] = await Promise.all([
         fetch("/api/machines"), fetch("/api/usage"), fetch("/api/secrets"),
         fetch("/api/snapshots"), fetch("/api/network-rules"), fetch("/api/repos"),
+        fetch("/api/environments"),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
@@ -2151,6 +2558,18 @@
       } else {
         fresh = false;
         toast("repos refresh failed: " + (await errText(rrp)), true);
+      }
+      // 501 = no environment store on this host; same treatment as the two above.
+      if (rev.status === 501) {
+        envsDisabled(true);
+        renderEnvs([]);
+      } else if (rev.ok) {
+        envsDisabled(false);
+        const list = await rev.json();
+        renderEnvs(Array.isArray(list) ? list : []);
+      } else {
+        fresh = false;
+        toast("environments refresh failed: " + (await errText(rev)), true);
       }
       if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
       if (!timer) timer = setInterval(refresh, 4000);

@@ -1288,6 +1288,14 @@ func serve(args []string) error {
 			// The Snapshots panel's bound-tags column, read-only: the console
 			// shows which tags boot from which snapshot and cannot change it.
 			uc.SetTemplateTags(templateStore)
+			// The Environments panel, through the SAME control plane the SSH
+			// door and the REST API use. Not the envs store: composing an
+			// environment writes five stores under an ordering rule, and a
+			// second path through them would be a second authorization path.
+			// Nil-safe by construction — `ops` answers KindDisabled when it was
+			// built without an environment store, which the panel renders as
+			// "not enabled on this host".
+			uc.SetEnvironments(ops)
 			// Same as the operator console: the fleet answers everything an
 			// owner can act on, and routes the balloon and CPU reads to the
 			// machine holding each sandbox.

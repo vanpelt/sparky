@@ -557,7 +557,7 @@ func parseEnvSet(args []string) (ctlops.EnvArgs, []string, error) {
 			if err != nil {
 				return ctlops.EnvArgs{}, nil, err
 			}
-			a.Description = v
+			a.Description = &v
 		default:
 			if strings.HasPrefix(word, "-") {
 				return ctlops.EnvArgs{}, nil, fmt.Errorf("unknown flag %q", word)

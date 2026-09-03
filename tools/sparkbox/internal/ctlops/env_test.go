@@ -19,6 +19,10 @@ import (
 // seedEnv puts an environment in the given state directly, bypassing the verbs,
 // so a test about `--env` does not first have to run a build that does not exist
 // until Phase B.
+// ptr is EnvArgs.Description's optionality in a test's shape: nil is "leave the
+// description alone", and this is how a test says "set it to this".
+func ptr[T any](v T) *T { return &v }
+
 func seedEnv(t *testing.T, e *fakeEnvs, owner, name string, st envs.State) {
 	t.Helper()
 	if _, err := e.Put(owner, name, ""); err != nil {
@@ -195,7 +199,7 @@ func TestEnvironmentRoundTrip(t *testing.T) {
 
 	got, err := r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
 		Name:        "Web", // upper-case on purpose: the name IS a tag, so it folds
-		Description: "the web stack",
+		Description: ptr("the web stack"),
 		Repos:       []RepoArgs{{Slug: "wandb/hivemind", Ref: "main"}},
 		Secrets:     []string{"GH_TOKEN"},
 		Rules:       []string{"npm"},
@@ -240,7 +244,7 @@ func TestEnvironmentRoundTrip(t *testing.T) {
 
 	// Update: description changes, attachments are added to, nothing is lost.
 	got, err = r.ops.PutEnvironment(context.Background(), alice(), EnvArgs{
-		Name: "web", Description: "the web stack, v2",
+		Name: "web", Description: ptr("the web stack, v2"),
 		Vars: []EnvVar{{Name: "PORT", Value: "3000"}},
 	})
 	if err != nil {
@@ -477,7 +481,7 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 		// `create` and `set` are one verb, so this path runs again — and must
 		// not put the narrow default back over the top of their edit.
 		if _, err := r.ops.PutEnvironment(ctx, alice(),
-			EnvArgs{Name: "web", Description: "second call"}); err != nil {
+			EnvArgs{Name: "web", Description: ptr("second call")}); err != nil {
 			t.Fatal(err)
 		}
 		got := r.netrules.rows["alice\x00web"]
@@ -485,6 +489,38 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 			t.Errorf("a second `env set` reverted the owner's egress edit: %+v", got)
 		}
 	})
+}
+
+// A description is written once and never typed again, so every later `env set`
+// has to leave it alone. It is one field on a create-and-update struct where ""
+// is also a real value — "clear it" — which is why EnvArgs.Description is a
+// pointer: before it was, `env set web --var LOG_LEVEL=debug` sent no
+// description, and the store set the column to the empty string it was handed.
+func TestAnUnrelatedSetLeavesTheDescriptionAlone(t *testing.T) {
+	r := newRig(t)
+	withEnvs(r)
+	ctx := context.Background()
+	if _, err := r.ops.PutEnvironment(ctx, alice(),
+		EnvArgs{Name: "web", Description: ptr("the web box")}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.ops.PutEnvironment(ctx, alice(),
+		EnvArgs{Name: "web", Vars: []EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}})
+	if err != nil {
+		t.Fatalf("env set: %v", err)
+	}
+	if got.Description != "the web box" {
+		t.Errorf("description = %q, want it untouched by a var change", got.Description)
+	}
+	// And the empty string still clears it, because that is a request somebody
+	// made rather than one they omitted.
+	got, err = r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web", Description: ptr("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "" {
+		t.Errorf("description = %q, want it cleared", got.Description)
+	}
 }
 
 // TestEnvRemoveTakesBackTheEgressRuleSetItCreated.

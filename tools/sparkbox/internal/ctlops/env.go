@@ -101,8 +101,14 @@ type EnvironmentInfo struct {
 // another environment is exactly the mistake this file's union rule exists to
 // prevent.
 type EnvArgs struct {
-	Name        string
-	Description string
+	Name string
+	// Description is a POINTER because "" is a real value and this struct is
+	// create-and-update in one. `env set web --var LOG_LEVEL=debug` sends no
+	// description and means "leave it alone"; sending the empty string means
+	// "clear it". Before this was a pointer the two were the same request, so
+	// any edit to anything else silently wiped the description — which is
+	// exactly the field somebody wrote once and never types again.
+	Description *string
 	// Repos are attachments to give this environment's tag, with the per-repo
 	// write/ref/path passthrough `repo add` already takes. Any Tags an entry
 	// carries are honoured too and unioned with the environment's name, so a
@@ -282,12 +288,20 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 	// between a default and a change. Without it, somebody who deliberately
 	// removed that rule-set to open their environment's egress would have it
 	// silently put back by their next `env set web --var LOG_LEVEL=debug`.
-	_, getErr := o.envs.Get(c.Handle, name)
+	existing, getErr := o.envs.Get(c.Handle, name)
 	creating := getErr != nil && errors.Is(getErr, envs.ErrNoSuchEnvironment)
 
 	// ---- writes ----
 
-	if _, err := o.envs.Put(c.Handle, name, a.Description); err != nil {
+	// The store's Put sets the description outright, so an absent one has to be
+	// filled in with what is already there rather than passed through as "".
+	// existing is the zero Environment when creating, whose Description is ""
+	// — which is the right answer for a create that named none.
+	description := existing.Description
+	if a.Description != nil {
+		description = *a.Description
+	}
+	if _, err := o.envs.Put(c.Handle, name, description); err != nil {
 		return EnvironmentInfo{}, envStoreError(op, name, err)
 	}
 	for _, r := range a.Repos {

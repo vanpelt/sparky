@@ -40,8 +40,22 @@ gave up *before* the guest's own budget). Phase C also found that
 is why the invocation carries `bypassPermissions` and why success is judged by
 the artifact rather than the exit status.
 
-**Phase D — REST routes and the console tab — is still NOT built.** The only
-thing environments add to `openapi.json` is the `environments` capability flag.
+**Phase D — REST routes and the console tab — is built.** `/v1/environments`
+carries the whole verb set (list, set, show, rm, script read and write, build,
+capture), documented in `openapi.json` under an `environments` tag, and the user
+console has an Environments panel beside Secrets, Network and Repos.
+
+The console panel is the one place in `internal/userconsole` that goes through
+`ctlops` rather than reaching a store directly, and the reason is worth
+recording because the package's own `TemplateTags` comment argues the opposite
+for bindings. A secret or a rule-set is one row in one table, so the panel owns
+its own owner check and writes it. An environment is five stores under an
+ordering rule — "every refusal comes before the first write", which exists
+precisely because nothing spans them in a transaction — plus the GitHub-identity
+gate that decides whose installation token may read a private repository.
+Re-implementing that here would be a second authorization path and a second
+orchestration of the same stores. So `Handler.envs` is a narrow interface,
+`*ctlops.Ops` satisfies it, and the owner scoping is the `Caller`.
 
 **Phases A, B and C have now been deployed to the live CKS cluster and run on
 real hardware.** An environment with a repo and no script built itself with an
@@ -1206,11 +1220,25 @@ the builds that need it and nothing on the builds that do not, and it moves the
 discovery from "the first rebuild, months later" to "the build that wrote it,
 while there is still a builder and an agent standing there."
 
-**D. The consoles.** An Environments panel on `my.<domain>` beside Secrets,
-Network and Repos — those panels are one object viewed four ways and this is the
-step that says so — plus whatever the operator console needs. It trails because
-everything before it is reachable from `ctl` and REST, and because a panel for a
-feature whose shape is still moving is a rewrite waiting to happen.
+**D. The surfaces — BUILT.** `/v1/environments` and an Environments panel on
+`my.<domain>` beside Secrets, Network and Repos — those panels are one object
+viewed four ways and this is the step that says so. It trailed on purpose: a
+panel for a feature whose shape is still moving is a rewrite waiting to happen,
+and A through C moved the shape twice.
+
+The panel is a form and a table, and the form's semantics are not the CLI's on
+one field. Attachments ADD, as they do everywhere else, but the VARIABLES box is
+the whole set: a form that shows four variables and saves three means "delete
+the fourth", and the handler reconciles it by unsetting what is missing. It only
+does that when `vars` is sent at all, and the page only sends it from a form it
+populated from a row — otherwise typing an existing name into a blank form to
+add a secret would silently wipe that environment's variables. The same
+distinction made `EnvArgs.Description` a pointer, which fixed a real bug in the
+CLI: `env set web --var LOG_LEVEL=debug` used to clear the description, because
+"absent" and "empty" were the same request.
+
+The operator console is deliberately skipped: it has one shared password and no
+per-user identity, and environments are owner-scoped.
 
 Cross-owner sharing (Part 7) and snapshot retention (Part 7) stay written down
 and unbuilt. Neither has a measured workload behind it, and retention in

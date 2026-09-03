@@ -201,6 +201,13 @@ type Handler struct {
 	// no binding store, where the column is simply empty. Set by
 	// SetTemplateTags.
 	binds TemplateTags
+
+	// envs is the control plane, and it is the only store-shaped field here
+	// that is not a store: an environment composes five of them under an
+	// ordering rule, so this panel goes through ctlops rather than reaching
+	// past it. Optional: nil answers 501 from every environment route. Set by
+	// SetEnvironments. See environments.go.
+	envs Environments
 }
 
 // TemplateTags is the one question this console asks of the tag-to-base-image
@@ -333,6 +340,13 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("GET /api/network-rules", require(h.listNetRules))
 	mux.Handle("PUT /api/network-rules/{name}", mutate(h.putNetRule))
 	mux.Handle("DELETE /api/network-rules/{name}", mutate(h.deleteNetRule))
+	mux.Handle("GET /api/environments", require(h.listEnvironments))
+	mux.Handle("PUT /api/environments/{name}", mutate(h.putEnvironment))
+	mux.Handle("DELETE /api/environments/{name}", mutate(h.deleteEnvironment))
+	mux.Handle("GET /api/environments/{name}/script", require(h.getEnvScript))
+	mux.Handle("PUT /api/environments/{name}/script", mutate(h.putEnvScript))
+	mux.Handle("POST /api/environments/{name}/build", mutate(h.buildEnvironment))
+	mux.Handle("POST /api/environments/{name}/capture", mutate(h.captureEnvironment))
 	mux.Handle("GET /api/repos", require(h.listRepos))
 	mux.Handle("POST /api/repos/{slug}/authorize", mutate(h.authorizeRepo))
 	mux.Handle("PUT /api/repos/{slug}", mutate(h.putRepo))

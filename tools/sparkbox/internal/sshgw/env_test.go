@@ -314,8 +314,16 @@ func TestParseEnvSet(t *testing.T) {
 					t.Errorf("var %d = %#v, want %#v", i, a.Vars[i], tc.wantVars[i])
 				}
 			}
-			if a.Description != tc.wantDesc {
-				t.Errorf("description = %q, want %q", a.Description, tc.wantDesc)
+			// A nil description is "leave it alone", which is what every row
+			// that names no --description means; only a row that does gets a
+			// pointer, and only then is the value compared.
+			switch {
+			case tc.wantDesc == "" && a.Description != nil:
+				t.Errorf("description = %q, want it left alone (nil)", *a.Description)
+			case tc.wantDesc != "" && a.Description == nil:
+				t.Errorf("description = nil, want %q", tc.wantDesc)
+			case tc.wantDesc != "" && *a.Description != tc.wantDesc:
+				t.Errorf("description = %q, want %q", *a.Description, tc.wantDesc)
 			}
 		})
 	}

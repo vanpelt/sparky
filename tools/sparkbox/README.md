@@ -381,6 +381,15 @@ the environment runs it instead of running an agent. It needs a
 `CLAUDE_CODE_OAUTH_TOKEN` the builder will carry, and says so up front rather
 than after booting a VM to find out.
 
+**And then it runs what the agent wrote**, in the same builder, before calling
+the build done. An agent does the work interactively and writes the script at
+the end from memory, so the mistakes it makes are the ones that come from
+that — a directory it created by hand, a path that only ever existed in the
+session — and none of them show up until somebody rebuilds months later. A
+script that fails is handed back to one fresh agent to fix; if it fails again
+the build fails, with the script recorded and the builder paused, so `env
+capture` still adopts the box the agent did get working.
+
 `env rebuild <name>` is a second name for `env build` — a build already boots
 the stock image and runs the current script, never the environment's own last
 snapshot, so an environment cannot accumulate. The old image stays bound until
@@ -390,6 +399,11 @@ A new environment gets an **egress rule-set named after it**, so its sandboxes
 reach the package registries, github and the model API and not the rest of the
 internet. Widen it in the console's Network panel, or pass `--open-egress` on
 create to have no rules at all.
+
+All of it is on the other two doors too: an **Environments** tab on
+`my.<domain>` beside Secrets, Network and Repos — the four panels are one object
+viewed four ways, and this is the one that says so — and `/v1/environments` on
+the REST API, including the build and the script.
 
 `--env-build-timeout` (default 45m) is how long a build may sit in `building`
 before a periodic sweep gives up on it. A *script* build's builder is left
