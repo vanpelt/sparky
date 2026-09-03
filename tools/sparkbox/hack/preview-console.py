@@ -80,6 +80,15 @@ def _machines(tick):
          "net_rx_bytes": 73400320, "net_tx_bytes": 15728640,
          "pinned": False, "env_undecryptable": False, "tags": ["staging"],
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
+        # The builder a failed environment build leaves behind. It is here so
+        # the failed card's "Open a terminal" is reachable in a preview: that
+        # button is drawn only for a builder the machine list actually has.
+        {"name": "weave-py-build", "state": "paused", "vcpus": 4,
+         "mem_mb": 8192, "mem_used_mb": None, "disk_mb": 512, "disk_total_mb": 25600,
+         "cpu_seconds": None, "image": "universal", "last_active": _iso(2700),
+         "net_rx_bytes": 1204832, "net_tx_bytes": 210553,
+         "pinned": False, "env_undecryptable": False, "tags": ["weave-py", "default"],
+         "routes": [{"subdomain": "weave-py-build", "port": 8080, "visibility": "private", "listening": False}]},
     ]
 
 # The owner rollup behind the Machines tab's footprint card. It is mock data of
@@ -87,15 +96,15 @@ def _machines(tick):
 # the reflink baseline and the pool budgets — appears in no machine record; that
 # is the whole reason the card has an endpoint of its own. Kept internally
 # consistent so the ratios the page derives are the ones a real fleet shows:
-# shared = raw - used, over three disks (one paused, one running, one parked).
+# shared = raw - used, over four disks (two paused, one running, one parked).
 _USAGE = {
     "owner": "van",
     "memory_pool_mb": 8192, "memory_burst_mb": 16384,
     "effective_memory_mb": 8192, "resident_memory_mb": 6820,
     "borrowed_memory_mb": 0, "allocated_memory_mb": 16384, "allocated_vcpus": 8,
-    "disk_pool_mb": 102400, "used_disk_mb": 6240, "raw_disk_mb": 24654,
+    "disk_pool_mb": 102400, "used_disk_mb": 6752, "raw_disk_mb": 25166,
     "shared_disk_mb": 18414, "capacity_disk_mb": 76800,
-    "running_sandboxes": 1, "total_sandboxes": 3, "archived_sandboxes": 1,
+    "running_sandboxes": 1, "total_sandboxes": 4, "archived_sandboxes": 1,
     "turbo_sandboxes": 1, "max_running": 4, "max_sandboxes": 8, "nodes": 1,
 }
 
@@ -135,6 +144,39 @@ _REPOS = [
 ]
 
 
+# Environments, one per build state, because the four states are four different
+# card anatomies: ready names the disk it boots, building names the machine it
+# is happening in, failed carries a guest log line and the two recovery
+# actions, and draft has nothing yet. The tab had no fixture here at all until
+# after it shipped, which is exactly how a table row whose contents wrapped one
+# chip per line got as far as a deploy.
+_ENVIRONMENTS = [
+    {"name": "web", "description": "the wandb app dev stack — node 20 and postgres",
+     "repos": ["wandb/core", "wandb/app"], "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
+     "rules": ["web"], "vars": [{"name": "NODE_ENV", "value": "development"},
+                                {"name": "LOG_LEVEL", "value": "debug"}],
+     "has_setup": True, "setup_bytes": 3746, "setup_from": "agent",
+     "state": "ready", "built_at": _iso(11400), "snapshot": "web-20260902-1412"},
+    {"name": "selfhost", "description": "single-container selfhost image",
+     "repos": ["wandb/server"], "secrets": [], "rules": ["selfhost"], "vars": [],
+     "has_setup": True, "setup_bytes": 1180, "setup_from": "repo",
+     "state": "building", "build_box": "selfhost-build", "snapshot": ""},
+    {"name": "weave-py", "description": "",
+     "repos": ["wandb/weave"], "secrets": ["OPENAI_API_KEY"], "rules": ["weave-py"],
+     "vars": [{"name": "PY", "value": "3.12"}],
+     "has_setup": True, "setup_bytes": 902, "setup_from": "agent",
+     "state": "failed", "build_box": "weave-py-build", "snapshot": "",
+     "build_error": "sparkbox: this box is configured, but .sparkbox/setup.sh does not "
+                    "run in it, so no later build could reproduce it"},
+    {"name": "scratch", "description": "empty starting point for one-off experiments",
+     "repos": [], "secrets": [], "rules": [], "vars": [],
+     "has_setup": False, "setup_bytes": 0, "setup_from": "", "state": "draft", "snapshot": ""},
+]
+_ENV_SCRIPT = {"from": "agent", "script": "#!/usr/bin/env bash\n"
+               "set -euo pipefail\n\n"
+               "sudo apt-get -y install postgresql-client\n"
+               "pnpm install\n"}
+
 def _dom(domain, display, resolved, tx, rx):
     return {"domain": domain, "display": display, "resolved": resolved,
             "tx_bytes": tx, "rx_bytes": rx, "total": tx + rx}
@@ -159,7 +201,7 @@ _STUB = """
   var tick = 0;
   var ME = %(me)s, SECRETS = %(secrets)s, SNAPSHOTS = %(snapshots)s;
   var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s, REPOS = %(repos)s;
-  var USAGE = %(usage)s;
+  var USAGE = %(usage)s, ENVIRONMENTS = %(environments)s, ENVSCRIPT = %(envscript)s;
   function machines() {
     tick += 1;
     var list = %(machines_fn)s(tick);
@@ -197,6 +239,8 @@ _STUB = """
     if (u.indexOf("/api/snapshots") >= 0 && m === "GET") return J(SNAPSHOTS);
     if (u.indexOf("/api/network-rules") >= 0 && m === "GET") return J(NETRULES);
     if (u.indexOf("/api/repos") >= 0 && m === "GET") return J(REPOS);
+    if (/\\/api\\/environments\\/[^/]+\\/script/.test(u) && m === "GET") return J(ENVSCRIPT);
+    if (u.indexOf("/api/environments") >= 0 && m === "GET") return J(ENVIRONMENTS);
     var bw = u.match(/\\/api\\/machines\\/([^/]+)\\/bandwidth/);
     if (bw && m === "GET") return J(BANDWIDTH[decodeURIComponent(bw[1])] || { name: "", domains: [] });
     if (u.indexOf("/api/machines") >= 0 && m === "GET" &&
@@ -346,6 +390,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
                 "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
                 "repos": json.dumps(_REPOS), "usage": json.dumps(_USAGE),
+                "environments": json.dumps(_ENVIRONMENTS),
+                "envscript": json.dumps(_ENV_SCRIPT),
             }
         theme = ""
         if "theme=dark" in self.path:

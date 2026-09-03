@@ -1226,8 +1226,8 @@ viewed four ways and this is the step that says so. It trailed on purpose: a
 panel for a feature whose shape is still moving is a rewrite waiting to happen,
 and A through C moved the shape twice.
 
-The panel is a form and a table, and the form's semantics are not the CLI's on
-one field. Attachments ADD, as they do everywhere else, but the VARIABLES box is
+The panel is a list of cards and a form, and the form's semantics are not the
+CLI's on one field. Attachments ADD, as they do everywhere else, but the VARIABLES box is
 the whole set: a form that shows four variables and saves three means "delete
 the fourth", and the handler reconciles it by unsetting what is missing. It only
 does that when `vars` is sent at all, and the page only sends it from a form it
@@ -1236,6 +1236,21 @@ add a secret would silently wipe that environment's variables. The same
 distinction made `EnvArgs.Description` a pointer, which fixed a real bug in the
 CLI: `env set web --var LOG_LEVEL=debug` used to clear the description, because
 "absent" and "empty" were the same request.
+
+It shipped as a table first, and the table was wrong. An environment carries
+four separate lists — repos, secrets, egress, variables — and a table gives all
+four one cell: the chips wrapped one per line, the row grew to 190px, and the
+name, setup, state and actions beside it floated in the middle of the white
+space. The four-lists-and-a-state shape is a machine's shape, so it is now a
+machine's card: head with the state badge and one action plus a `···` menu,
+four labelled columns for the four lists, and a foot naming what the next build
+will actually run. Building and failed each get a strip under the head carrying
+the builder machine and the action that resolves it — a failed build's recorded
+error used to be 150px of clipped grey guest log inside a table cell.
+
+The form went behind a button in the same pass. Five inputs with their hints was
+430px of "how to add one" above the first of the things you already have, on a
+tab whose job is to tell you which environments are ready to boot from.
 
 The operator console is deliberately skipped: it has one shared password and no
 per-user identity, and environments are owner-scoped.

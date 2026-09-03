@@ -296,38 +296,103 @@
   .secret-form input { width: 100%; }
   .secret-form .save { align-self: end; }
 
-  /* environments form — the widest of the three, and the only one with a
-     field that needs two lines: the variables box spans the whole grid rather
-     than being squeezed into a column, because K=V pairs read as a list. */
-  .env-form { grid-template-columns: .9fr 1.3fr 1.2fr 1fr 1fr auto; }
+  /* ---------- environments ----------
+     An environment is far more like a machine than like a secret: one name,
+     one state, and four different lists hanging off it. So it is drawn with
+     the machine card's own anatomy — head, body grid, foot — rather than as a
+     table row, where those four lists shared one cell, wrapped a chip per
+     line, and left the other four cells floating in the middle of a 190px
+     row. Nothing here is a new idiom; it is the card that is already on the
+     Machines tab, with different contents. */
+
+  /* The tab's own header. Not a .panel-head, because the cards below are not
+     inside one card — the same relationship the machine list has with the
+     page. Shaped like .fp-head so the two read as the same level. */
+  .env-top { display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 12px 16px; flex-wrap: wrap; margin-bottom: 14px; }
+  .env-top h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }
+  .env-top .hint { display: block; margin-top: 2px; max-width: 66ch; }
+
+  /* The create/edit form is a mode, not furniture: it is hidden until asked
+     for. Visible, it was 430px of inputs and hints above the first
+     environment — the page's own content pushed below the fold by the box
+     used to add to it. */
+  .env-form { grid-template-columns: 1fr 1fr 1fr; border-bottom: 0; }
   @media (max-width: 860px) { .env-form { grid-template-columns: 1fr; } }
   .env-form .wide { grid-column: 1 / -1; }
+  .env-form .two { grid-column: span 2; }
+  @media (max-width: 860px) { .env-form .two { grid-column: 1 / -1; } }
   .env-form .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
   .env-form .check input { width: auto; }
-  /* The build state, which is the column somebody actually scans. Four words,
-     each in the colour the rest of the page already uses for that meaning. */
-  .env-state { font-size: 12px; font-weight: 500; }
-  .env-state.ready { color: hsl(var(--green)); }
-  .env-state.building { color: hsl(var(--amber)); }
-  .env-state.failed { color: hsl(var(--red)); }
-  .env-state.draft { color: hsl(var(--muted-foreground)); }
-  .env-why { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin-top: 3px; }
-  /* A WIDTH, not a max-width, and only on the build error. This sits in a table
-     cell, auto table layout sizes a column from its content's min-content
-     width, and a max-width on a child is advisory there — so a recorded build
-     error, which is one long line of guest log, pushed the actions column off
-     the right edge until this was a fixed number. */
-  /* white-space: normal is the load-bearing half. The table sets nowrap on its
-     cells — right for a name and a timestamp — and a recorded build error under
-     it did not wrap, it PAINTED ACROSS the actions column. */
-  .env-err { width: 150px; white-space: normal; overflow-wrap: anywhere; }
-  /* One labelled line per kind inside the Contents cell. Without the label the
-     chips are indistinguishable — `web` could be a rule-set, a tag or a
-     variable — and the whole point of this column is that four different
-     stores are being shown at once. */
-  .env-line { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
-  .env-line:last-child { margin-bottom: 0; }
-  .env-kind { font-size: 11px; color: hsl(var(--muted-foreground)); width: 46px; flex: none; }
+  .env-form .row { display: flex; gap: 8px; align-items: center; }
+
+  .env-card { margin-bottom: 10px; }
+  .env-card .m-head { align-items: baseline; }
+  /* The description, in the page's own face. It used to inherit .mono from the
+     name cell above it and be clipped at 22 characters, which read as a
+     truncation bug rather than a subtitle. */
+  .env-sub { padding: 0 14px 11px; font-size: 12.5px; color: hsl(var(--muted-foreground));
+    max-width: 72ch; margin-top: -4px; }
+
+  /* Four lists, four labelled columns — which is the whole reason this stopped
+     being a table cell. Plain monospace lines rather than chips: under a
+     column heading a pill adds a grey background and no information, and the
+     heading already answers the question the chips could not ("is `web` a
+     rule-set, a tag or a variable?"). */
+  .env-grid { border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 22px; align-items: start; }
+  @media (max-width: 900px) { .env-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .env-grid { grid-template-columns: 1fr; } }
+  .env-col .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); margin-bottom: 4px; }
+  .env-col .val { font-size: 12.5px; line-height: 1.6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere; }
+  .env-col .val.none { font-family: inherit; color: hsl(var(--muted-foreground)); }
+
+  /* The foot says what the next build will actually run, which is this
+     platform's one genuinely unusual promise and was previously rendered as
+     "3746 B / from agent". */
+  .env-foot { border-top: 1px solid hsl(var(--border)); padding: 9px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px 14px; flex-wrap: wrap; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+  .env-foot strong { color: hsl(var(--foreground)); font-weight: 550; }
+
+  /* The two states that are a situation rather than a fact get a strip of
+     their own under the head, carrying the machine you would go and look at
+     and the action that resolves it. A failed build used to be 150px of grey
+     clipped guest log inside a table cell. */
+  .env-strip { margin: 0 14px 11px; padding: 9px 11px; font-size: 12.5px;
+    border: 1px solid; border-radius: calc(var(--radius) - 2px);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+  .env-strip .msg { overflow-wrap: anywhere; max-width: 82ch; }
+  .env-strip.failed { border-color: hsl(var(--red) / .4); background: hsl(var(--red) / .06);
+    color: hsl(var(--red)); }
+  /* Amber frames it; the words stay in the page's own ink. --amber at 50%
+     lightness is this palette's weakest colour on a light background, and a
+     strip that tells somebody where the build is has to be readable. Red is
+     strong enough at both lightnesses to carry its own text, and an error
+     written in red is worth the difference. */
+  .env-strip.building { border-color: hsl(var(--amber) / .45); background: hsl(var(--amber) / .08);
+    color: hsl(var(--foreground)); }
+  .env-strip .mono { color: inherit; }
+
+  /* State badges. Same anatomy as the machine states — a dot carries the
+     colour, the word stays quiet — so ready/building/failed/draft read at the
+     same glance as running/paused/archived one tab over. */
+  .badge.ready { color: hsl(var(--green)); border-color: transparent; padding-left: 2px; }
+  .badge.ready .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .16); }
+  .badge.building { color: hsl(var(--amber)); border-color: hsl(var(--amber) / .35); }
+  /* A build is minutes long, so the lamp blinks for the whole of it: the same
+     steps() lamp as the turbo switch, which is this console's existing way of
+     saying "this is happening right now". */
+  .badge.building .dot { background: hsl(var(--amber)); animation: led 1s steps(1) infinite; }
+  @media (prefers-reduced-motion: reduce) { .badge.building .dot { animation: none; } }
+  .badge.failed { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); }
+  .badge.failed .dot { background: hsl(var(--red)); }
+  .badge.draft { color: hsl(var(--muted-foreground)); }
+  .badge.draft .dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+
   .script-box { width: 100%; min-height: 260px; resize: vertical; padding: 9px 11px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
     border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border));
@@ -593,29 +658,38 @@
 
     <!-- ENVIRONMENTS TAB -->
     <div id="tab-environments" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="env-top">
+        <div>
           <h2>Environments</h2>
-          <span class="hint">a named way of working — checkouts, secrets, egress, and the disk they were built on</span>
+          <span class="hint">The repos, secrets, egress and variables a machine gets, and a disk
+            with its setup already run. A machine joins one by carrying its name as a tag.</span>
+        </div>
+        <button class="btn-primary" id="env-new">New environment</button>
+      </div>
+
+      <div class="card panel hidden" id="env-form-card">
+        <div class="panel-head">
+          <h2 id="env-form-title">New environment</h2>
+          <span class="hint" id="env-form-hint">the name is the tag machines carry to get all of this</span>
         </div>
         <div class="notice">
-          An environment's <strong>name is a tag</strong>: everything attached to it reaches every
-          machine carrying that tag, and the other three tabs are the same object viewed one piece
-          at a time. <strong>Build</strong> runs its setup script once in a throwaway machine called
-          <code class="mono">&lt;name&gt;-build</code> and keeps that disk, so the next machine you
-          make from it starts with the work already done. With no setup script anywhere, Build asks
-          an agent to write one — and then runs what it wrote.
+          Everything you attach here reaches every machine tagged with this name — the Secrets,
+          Network and Repos tabs are the same attachments seen one kind at a time.
+          <strong>Build</strong> then runs the setup script once in a throwaway machine called
+          <code class="mono">&lt;name&gt;-build</code> and keeps its disk, so the next machine you
+          make starts with the work already done.
         </div>
         <form id="env-form" class="secret-form env-form">
           <div>
             <label for="env-name">Name</label>
             <input id="env-name" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="web" maxlength="40" />
-            <div class="field-hint">this is the tag — lowercase, digits, dashes</div>
+            <div class="field-hint">lowercase, digits, dashes — this is the tag</div>
           </div>
-          <div>
+          <div class="two">
             <label for="env-desc">Description</label>
-            <input id="env-desc" type="text" autocomplete="off" placeholder="the web stack" maxlength="200" />
+            <input id="env-desc" type="text" autocomplete="off"
+              placeholder="the web stack — node 20 and postgres" maxlength="200" />
             <div class="field-hint">optional; what this way of working is for</div>
           </div>
           <div>
@@ -628,7 +702,7 @@
             <label for="env-secrets">Secrets</label>
             <input id="env-secrets" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="GITHUB_TOKEN" />
-            <div class="field-hint">must already exist — add them on the Secrets tab</div>
+            <div class="field-hint">must already exist on the Secrets tab</div>
           </div>
           <div>
             <label for="env-rules">Rule-sets</label>
@@ -636,16 +710,14 @@
               spellcheck="false" placeholder="ci-egress" />
             <div class="field-hint">optional; from the Network tab</div>
           </div>
-          <button type="submit" class="btn-primary save" id="env-save">Save environment</button>
           <div class="wide">
             <label for="env-vars">Variables</label>
             <textarea id="env-vars" class="mono" autocomplete="off" spellcheck="false"
               placeholder="NODE_ENV=development&#10;LOG_LEVEL=debug"></textarea>
             <div class="field-hint">
               one <code class="mono">NAME=value</code> per line — plain values, delivered beside
-              the secrets. Editing an environment replaces this whole list, so a line you remove
-              is unset; repos, secrets and rule-sets only ever get added here (detach them on
-              their own tab).
+              the secrets. Saving replaces this whole list, so a line you remove is unset. Repos,
+              secrets and rule-sets are only ever added here; detach them on their own tab.
             </div>
           </div>
           <div class="check wide">
@@ -654,21 +726,21 @@
               Skip the default egress rule-set (new environments only)
             </label>
           </div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="env-save">Save environment</button>
+            <button type="button" class="btn-outline" id="env-cancel">Cancel</button>
+          </div>
         </form>
-        <div id="envs-disabled" class="notice hidden">
-          Environments are not enabled on this host.
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr><th>Name</th><th>Contents</th><th>Setup</th><th>Build</th><th></th></tr>
-            </thead>
-            <tbody id="env-rows"></tbody>
-          </table>
-        </div>
-        <div id="envs-empty" class="empty hidden">
-          No environments yet. Name one above, attach a repo, then <code>Build</code> it.
-        </div>
+      </div>
+
+      <div id="envs-disabled" class="card empty hidden">
+        Environments are not enabled on this host.
+      </div>
+      <div id="env-list"></div>
+      <div id="envs-empty" class="card empty hidden">
+        No environments yet. One holds the repos, secrets and variables a project needs, and a
+        disk with its setup already run.
+        <div style="margin-top:12px"><button class="btn-primary" id="env-empty-new">New environment</button></div>
       </div>
 
       <div class="card panel hidden" id="env-script-panel">
@@ -922,6 +994,11 @@
   // so they inherit the button's state — except the two transport glyphs, which
   // are solid, because a play triangle and a pause bar are shapes everyone has
   // seen filled and nobody has seen outlined.
+  // The overflow trigger, shared by the machine and environment cards.
+  const DOTS = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+    '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/>' +
+    '<circle cx="19" cy="12" r="1.7"/></svg>';
+
   const ICON = {
     // A prompt: the one glyph that means "shell" to the people who live in one.
     term: '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/>' +
@@ -1164,8 +1241,9 @@
     if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open ||
         $("turbo-dlg").open) return true;
     // an open ··· overflow menu counts as mid-interaction: the 4s repaint would
-    // otherwise rebuild the card and snap the menu shut under the cursor.
-    if (document.querySelector("#machine-list .menu-pop:not(.hidden)")) return true;
+    // otherwise rebuild the card and snap the menu shut under the cursor. Both
+    // card lists have one, so this is not scoped to the machines.
+    if (document.querySelector(".menu-pop:not(.hidden)")) return true;
     return !!(ae && ae.tagName === "INPUT" && ae.closest("#machine-list"));
   }
 
@@ -1174,7 +1252,7 @@
   // closes them — the item's own action handler still fires on the same click,
   // and closing synchronously lets the follow-up repaint land (editing() above).
   function closeMenus(except) {
-    document.querySelectorAll("#machine-list .menu-pop:not(.hidden)").forEach((m) => {
+    document.querySelectorAll(".menu-pop:not(.hidden)").forEach((m) => {
       if (m === except) return;
       m.classList.add("hidden");
       const t = m.previousElementSibling;
@@ -1213,6 +1291,9 @@
     if (d.del) return "delsnap:" + d.del;
     if (d.delSecret) return "delsecret:" + d.delSecret;
     if (d.delRepo) return "delrepo:" + d.delRepo;
+    if (d.envbuild) return "envbuild:" + d.envbuild;
+    if (d.envcapture) return "envcapture:" + d.envcapture;
+    if (d.envdel) return "envdel:" + d.envdel;
     return null;
   }
 
@@ -1429,11 +1510,9 @@
     // object-storage cleanup matters most — set off below a separator.
     const menuItems = coreItems.concat(
       coreItems.length ? ['<div class="sep"></div>'] : [], [removeItem]);
-    const dots = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
-      '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
     const menuHTML = menuItems.length
       ? '<div class="menu"><button type="button" class="btn-icon" data-menu aria-haspopup="true"' +
-        ' aria-expanded="false" title="More actions" aria-label="More actions">' + dots + "</button>" +
+        ' aria-expanded="false" title="More actions" aria-label="More actions">' + DOTS + "</button>" +
         '<div class="menu-pop hidden">' + menuItems.join("") + "</div></div>"
       : "";
     const actions = termBtn + powerBtn +
@@ -2200,114 +2279,167 @@
   let envEditing = null;
   let lastEnvs = [];
 
-  // Table cells are not the place for a paragraph. The whole string stays in
-  // the element's title, so nothing is lost — it just is not spent on width.
-  function clip(s, n) { return s.length > n ? s.slice(0, n) + "…" : s; }
+  // One vocabulary for where a setup script came from, shared by the card foot
+  // and the editor's header — "recorded from agent" and "written by an agent"
+  // were the same fact in two dialects.
+  const SETUP_FROM = {
+    agent: "written by an agent, then run in the builder",
+    repo: "committed in the repo",
+    manual: "written by hand",
+  };
 
-  // Four states, four sentences. `building` names the builder machine because
-  // that is the box somebody would ssh into, and `failed` shows why underneath
-  // rather than in a tooltip nobody hovers.
-  // The build column carries the base image too, on a second line rather than
-  // in a column of its own: they are one fact — what this environment boots
-  // from and how it got there — and splitting them cost the table more width
-  // than the console has.
-  function envStateCell(e) {
-    const st = e.state || "draft";
-    let head = st;
-    if (st === "building") head = "building" + (e.build_box ? " · " + esc(e.build_box) : "");
-    if (st === "ready" && e.built_at) head = "ready · " + rel(e.built_at);
-    const image = e.snapshot
-      ? '<div class="env-why mono">' + esc(e.snapshot) + "</div>"
-      : '<div class="env-why">boots the default image</div>';
-    let why = "";
-    // Trimmed, because the recorded error is a summarised guest log line and
-    // this is a table cell. The whole of it is the title, and `env show` and
-    // the builder's own log have all of it.
-    if (st === "failed" && e.build_error) {
-      const err = clip(e.build_error, 160);
-      why = '<div class="env-why env-err" title="' + esc(e.build_error) + '">' + esc(err) + "</div>";
-    }
-    return '<div class="env-state ' + esc(st) + '">' + head + "</div>" + image + why;
+  // One labelled column per kind of attachment. Absence is stated rather than
+  // left blank: "this environment has no secrets" is a fact somebody came here
+  // to check, and an empty column reads as a rendering failure.
+  function envCol(label, items, empty) {
+    const body = (items && items.length)
+      ? '<div class="val">' + items.map(esc).join("<br />") + "</div>"
+      : '<div class="val none">' + empty + "</div>";
+    return '<div class="env-col"><div class="label">' + label + "</div>" + body + "</div>";
   }
 
-  // One line per kind, labelled, and skipped entirely when there is nothing of
-  // that kind — except repos and secrets, which are said to be absent because
-  // "this environment has no secrets" is a fact somebody is looking for.
-  function envLine(kind, items, empty) {
-    if (!items || !items.length) {
-      if (!empty) return "";
-      return '<div class="env-line"><span class="env-kind">' + kind + '</span>' +
-        '<span class="muted">' + empty + "</span></div>";
+  // The dot carries the colour and the word stays quiet — the same badge
+  // anatomy as running/paused/archived one tab over, so the two lists read at
+  // the same glance.
+  function envBadge(st) {
+    const word = st === "ready" || st === "building" || st === "failed" ? st : "draft";
+    return '<span class="badge ' + word + '"><span class="dot"></span>' + word + "</span>";
+  }
+
+  // What a machine made from this environment would boot from. It is the whole
+  // product of a build, so it sits on the head line beside the state rather
+  // than in a column of its own.
+  function envBoots(e) {
+    if (e.state === "ready" && e.snapshot) {
+      return "built " + rel(e.built_at) + " · " + esc(e.snapshot);
     }
-    return '<div class="env-line"><span class="env-kind">' + kind + '</span><div class="chips">' +
-      items.map((i) => '<span class="chip plain mono">' + esc(i) + "</span>").join(" ") + "</div></div>";
+    // Nothing, mid-build: the strip below already names the machine it is
+    // happening in, and "boots the default image" under a blinking "building"
+    // is a fact that is about to stop being true.
+    return e.state === "building" ? "" : "boots the default image";
+  }
+
+  // The two states that are a situation rather than a fact get a strip under
+  // the head, carrying the machine you would go and look at and the action
+  // that resolves it.
+  function envStrip(e) {
+    if (e.state === "building") {
+      return '<div class="env-strip building"><div class="msg">Building in <span class="mono">' +
+        esc(e.build_box || (e.name + "-build")) +
+        "</span>. This takes minutes; the card updates itself.</div></div>";
+    }
+    if (e.state !== "failed" || !e.build_error) return "";
+    // The builder is deliberately left paused on a failure, so the two things
+    // worth offering are a shell in it and adopting its disk as-is. Both are
+    // here rather than in the overflow menu: they only exist in this state.
+    const box = e.build_box;
+    const live = box ? lastMachines.find((m) => m.name === box) : null;
+    const actions = box
+      ? '<div class="chips">' +
+          (live
+            ? '<button class="btn-outline btn-sm" data-envterm="' + esc(box) +
+              '" data-running="' + (live.state === "running" ? 1 : 0) + '">Open a terminal</button>'
+            : "") +
+          '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
+            '">Keep this disk</button></div>'
+      : "";
+    return '<div class="env-strip failed"><div class="msg">' + esc(e.build_error) +
+      (box ? ' <span class="mono">' + esc(box) + "</span> is still there." : "") +
+      "</div>" + actions + "</div>";
+  }
+
+  // The foot says what the next build will actually run. "3746 B" was not that
+  // fact; where the script came from, and that an absent one means an agent
+  // writes and then runs one, is.
+  function envFoot(e) {
+    const from = SETUP_FROM[e.setup_from] || "recorded";
+    const what = e.has_setup
+      ? "<strong>Setup script</strong> — " + from +
+        (e.setup_bytes ? " · " + bytes(e.setup_bytes) : "")
+      : "<strong>No setup script</strong> — Build asks an agent to write one, then runs what it wrote";
+    return '<div class="env-foot"><div>' + what + "</div>" +
+      '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">' +
+      (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
+  }
+
+  function envCard(e) {
+    const st = e.state || "draft";
+    const buildLabel = st === "ready" || st === "failed" ? "Rebuild" : "Build";
+    // One action plus a menu, which is this console's own vocabulary: the
+    // machine card lost its row of outlined buttons for being the loudest
+    // thing on it, and a five-button environment row was the same mistake.
+    const menu = '<div class="menu"><button type="button" class="btn-icon" data-menu' +
+      ' aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">' +
+      DOTS + '</button><div class="menu-pop hidden">' +
+      '<button data-envedit="' + esc(e.name) + '">Edit environment…</button>' +
+      '<div class="sep"></div>' +
+      '<button class="btn-danger" data-envdel="' + esc(e.name) + '">Delete…</button>' +
+      "</div></div>";
+    return '<div class="card env-card">' +
+      '<div class="m-head">' +
+        '<div class="m-title"><span class="name mono">' + esc(e.name) + "</span>" +
+          envBadge(st) + '<span class="spec">' + envBoots(e) + "</span></div>" +
+        '<div class="m-actions">' +
+          // A disabled "Build" next to a badge that says building is a control
+          // that only restates the state. It comes back when the build ends.
+          (st === "building" ? "" :
+            '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + '">' +
+            buildLabel + "</button>") +
+          menu +
+        "</div>" +
+      "</div>" +
+      (e.description ? '<div class="env-sub">' + esc(e.description) + "</div>" : "") +
+      envStrip(e) +
+      '<div class="env-grid">' +
+        envCol("Repos", e.repos, "none") +
+        envCol("Secrets", e.secrets, "none") +
+        envCol("Egress", e.rules, "unrestricted") +
+        envCol("Variables", (e.vars || []).map((v) => v.name), "none") +
+      "</div>" +
+      envFoot(e) +
+    "</div>";
   }
 
   function renderEnvs(list) {
     lastEnvs = list;
-    const rows = $("env-rows");
-    rows.innerHTML = "";
-    for (const e of list) {
-      const vars = (e.vars || []).map((v) => v.name);
-      const contents =
-        envLine("repos", e.repos, "none") +
-        envLine("secrets", e.secrets, "none") +
-        envLine("egress", e.rules, "") +
-        envLine("vars", vars, "");
-      // Bytes and origin, because "has a script" is not the useful fact: where
-      // it came from is what says whether the next build runs an agent.
-      const setup = e.has_setup
-        ? esc(String(e.setup_bytes)) + " B" +
-          (e.setup_from ? '<div class="env-why">from ' + esc(e.setup_from) + "</div>" : "")
-        : '<span class="muted">none</span><div class="env-why">an agent writes one</div>';
-      const buildLabel = e.state === "ready" || e.state === "failed" ? "Rebuild" : "Build";
-      const canCapture = e.state === "failed" && e.build_box;
-      const tr = document.createElement("tr");
-      tr.innerHTML =
-        '<td class="name mono">' + esc(e.name) +
-          (e.description
-            ? '<div class="env-why" title="' + esc(e.description) + '">' + esc(clip(e.description, 22)) + "</div>"
-            : "") + "</td>" +
-        "<td>" + contents + "</td>" +
-        "<td>" + setup + "</td>" +
-        "<td>" + envStateCell(e) + "</td>" +
-        '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + '"' +
-            (e.state === "building" ? " disabled" : "") + ">" + buildLabel + "</button> " +
-          (canCapture
-            ? '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
-                '" title="Keep ' + esc(e.build_box) + ' exactly as it is and make it this environment\'s base image">Capture</button> '
-            : "") +
-          '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">Script</button> ' +
-          '<button class="btn-outline btn-sm" data-envedit="' + esc(e.name) + '">Edit</button> ' +
-          '<button class="btn-outline btn-sm btn-danger" data-envdel="' + esc(e.name) + '">Delete</button></td>';
-      rows.appendChild(tr);
-    }
-    $("envs-empty").classList.toggle("hidden", list.length > 0);
+    const host = $("env-list");
+    // Same bargain the machine list makes with the 4s poll: a repaint rebuilds
+    // every card, which would snap an open ··· menu shut under the cursor.
+    if (host.querySelector(".menu-pop:not(.hidden)")) return;
+    host.innerHTML = list.map(envCard).join("");
+    // One invitation at a time. The empty card's own button is the call to
+    // action; the header's would be a second one three lines above it.
+    const off = !$("envs-disabled").classList.contains("hidden");
+    const empty = !off && list.length === 0;
+    $("envs-empty").classList.toggle("hidden", !empty);
+    $("env-new").classList.toggle("hidden", off || empty);
 
-    rows.querySelectorAll("button[data-envbuild]").forEach((btn) =>
+    host.querySelectorAll("button[data-envbuild]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const name = btn.dataset.envbuild;
         mutate("envbuild:" + name, btn, async () => {
           await api("/api/environments/" + encodeURIComponent(name) + "/build", { method: "POST" });
-          toast("building " + name + " — this takes minutes; the row updates itself");
+          toast("building " + name + " — this takes minutes; the card updates itself");
         });
       }));
-    rows.querySelectorAll("button[data-envcapture]").forEach((btn) =>
+    host.querySelectorAll("button[data-envterm]").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        openTerminal(btn.dataset.envterm, btn.dataset.running === "1", btn)));
+    host.querySelectorAll("button[data-envcapture]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const name = btn.dataset.envcapture;
         if (!confirm("Keep " + name + "-build exactly as it is and make it this environment's base image?")) return;
         mutate("envcapture:" + name, btn, async () => {
           // Synchronous and slow: it packs a rootfs. The button stays disabled
           // for the whole wait, which is the honest progress indicator.
-          toast("capturing " + name + " — this takes a few minutes");
+          toast("keeping " + name + "'s disk — this takes a few minutes");
           await api("/api/environments/" + encodeURIComponent(name) + "/capture", { method: "POST" });
           toast(name + " captured");
         });
       }));
-    rows.querySelectorAll("button[data-envscript]").forEach((btn) =>
+    host.querySelectorAll("button[data-envscript]").forEach((btn) =>
       btn.addEventListener("click", () => openEnvScript(btn.dataset.envscript, btn)));
-    rows.querySelectorAll("button[data-envedit]").forEach((btn) =>
+    host.querySelectorAll("button[data-envedit]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const e = list.find((x) => x.name === btn.dataset.envedit);
         if (!e) return;
@@ -2319,11 +2451,12 @@
         $("env-rules").value = (e.rules || []).join(", ");
         $("env-vars").value = (e.vars || []).map((v) => v.name + "=" + v.value).join("\n");
         $("env-open").checked = false;
-        $("env-save").textContent = "Update " + e.name;
-        $("env-name").focus();
-        window.scrollTo({ top: 0, behavior: "smooth" });
+        $("env-form-title").textContent = "Editing " + e.name;
+        $("env-form-hint").textContent = "the description and variables below replace what is stored";
+        $("env-save").textContent = "Save changes";
+        openEnvForm();
       }));
-    rows.querySelectorAll("button[data-envdel]").forEach((btn) =>
+    host.querySelectorAll("button[data-envdel]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const name = btn.dataset.envdel;
         if (!confirm("Delete environment " + name + "? Its secrets, repos and rule-sets are kept — " +
@@ -2339,12 +2472,26 @@
           if (envEditing === name) resetEnvForm();
         });
       }));
-    reapplyInflight(rows);
+    reapplyInflight(host);
   }
 
+  // Called before renderEnvs, which is what decides whether the header's
+  // "New environment" is shown — it depends on this having been set first.
   function envsDisabled(off) {
     $("envs-disabled").classList.toggle("hidden", !off);
-    $("env-form").classList.toggle("hidden", off);
+    if (off) closeEnvForm();
+  }
+
+  // The form is a mode. Opening it scrolls it into view rather than jumping
+  // the page to the top, which is what an edit used to do from four cards down.
+  function openEnvForm() {
+    $("env-form-card").classList.remove("hidden");
+    $("env-form-card").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    $("env-name").focus();
+  }
+
+  function closeEnvForm() {
+    $("env-form-card").classList.add("hidden");
   }
 
   function resetEnvForm() {
@@ -2353,8 +2500,19 @@
       $(id).value = "";
     }
     $("env-open").checked = false;
+    $("env-form-title").textContent = "New environment";
+    $("env-form-hint").textContent = "the name is the tag machines carry to get all of this";
     $("env-save").textContent = "Save environment";
   }
+
+  function newEnvironment() {
+    resetEnvForm();
+    openEnvForm();
+  }
+
+  $("env-new").addEventListener("click", newEnvironment);
+  $("env-empty-new").addEventListener("click", newEnvironment);
+  $("env-cancel").addEventListener("click", () => { resetEnvForm(); closeEnvForm(); });
 
   function splitList(id) {
     return $(id).value.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
@@ -2381,7 +2539,7 @@
       rules: splitList("env-rules"),
       open_egress: $("env-open").checked,
     };
-    // Only a form that was POPULATED from a row may clear these two. On a blank
+    // Only a form that was POPULATED from a card may clear these two. On a blank
     // create form an empty box means "I did not fill this in", not "delete what
     // is there" — and typing an existing name into one is how somebody adds a
     // secret to an environment they already have.
@@ -2395,6 +2553,7 @@
       await api("/api/environments/" + encodeURIComponent(name), { method: "PUT", body: body });
       toast(name + " saved");
       resetEnvForm();
+      closeEnvForm();
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -2414,7 +2573,7 @@
       envScriptName = name;
       $("env-script-title").textContent = ".sparkbox/setup.sh — " + name;
       $("env-script-origin").textContent = got.from
-        ? "recorded from " + got.from
+        ? (SETUP_FROM[got.from] || "recorded from " + got.from)
         : "nothing recorded yet";
       $("env-script").value = got.script || "";
       $("env-script-note").textContent = "";
@@ -2435,7 +2594,7 @@
     try {
       await api("/api/environments/" + encodeURIComponent(envScriptName) + "/script",
         { method: "PUT", body: { script: $("env-script").value } });
-      $("env-script-origin").textContent = "recorded from manual";
+      $("env-script-origin").textContent = SETUP_FROM.manual;
       $("env-script-note").textContent = "saved — the next build runs this";
       toast("setup script saved for " + envScriptName);
       await refresh();
