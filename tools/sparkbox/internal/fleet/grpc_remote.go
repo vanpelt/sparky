@@ -78,6 +78,7 @@ type DurableControlClient interface {
 	MarkActive(context.Context, *nodev1.MarkActiveRequest) error
 	RecordKey(context.Context, *nodev1.RecordKeyRequest) error
 	NetworkUsage(context.Context) (*nodev1.GetNetworkUsageResponse, error)
+	NetworkDenials(context.Context, string, bool) (*nodev1.NetworkDenialsResponse, error)
 }
 
 var _ DurableControlClient = (*grpccontrol.Client)(nil)
@@ -1460,6 +1461,26 @@ func (g *GRPCControl) NetUsage(ctx context.Context) (map[string]netpush.VMUsage,
 		}
 	}
 	return out, nil
+}
+
+func (g *GRPCControl) NetDenials(ctx context.Context, sandbox string, reset bool) (netpush.DenialCapture, error) {
+	response, err := observeGRPC(g, ctx, "network_denials", func(ctx context.Context) (*nodev1.NetworkDenialsResponse, error) {
+		return g.client.NetworkDenials(ctx, sandbox, reset)
+	})
+	if err != nil {
+		return netpush.DenialCapture{}, g.fail("net.denials", sandbox, err)
+	}
+	capture := netpush.DenialCapture{
+		CaptureID: response.GetCaptureId(), OverflowQueries: response.GetOverflowQueries(),
+		Domains: make([]netpush.DeniedDomain, 0, len(response.GetDomains())),
+	}
+	for _, domain := range response.GetDomains() {
+		capture.Domains = append(capture.Domains, netpush.DeniedDomain{
+			Domain: domain.GetDomain(), Queries: domain.GetQueries(), QTypes: domain.GetQtypes(),
+			FirstSeenUnix: domain.GetFirstSeenUnix(), LastSeenUnix: domain.GetLastSeenUnix(),
+		})
+	}
+	return capture, nil
 }
 
 func (g *GRPCControl) Hangup(code, message string) {

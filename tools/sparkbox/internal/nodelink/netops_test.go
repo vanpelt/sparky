@@ -23,6 +23,8 @@ type fakeSluice struct {
 	// gateway holds the ledger that decides who may see what.
 	owner   string
 	applyEr error
+	started string
+	denials netpush.DenialCapture
 }
 
 func (f *fakeSluice) Enabled() bool { return f.on }
@@ -35,6 +37,16 @@ func (f *fakeSluice) Apply(_ context.Context, allow map[string][]string) error {
 func (f *fakeSluice) Usage(_ context.Context, owner string) (map[string]netpush.VMUsage, error) {
 	f.owner = owner
 	return f.usage, nil
+}
+
+func (f *fakeSluice) StartDenialCapture(_ context.Context, sandbox string) error {
+	f.started = sandbox
+	return nil
+}
+
+func (f *fakeSluice) FinishDenialCapture(_ context.Context, sandbox string) (netpush.DenialCapture, error) {
+	f.started = sandbox
+	return f.denials, nil
 }
 
 func netPair(t *testing.T, s NetControl) (*Conn, *fakeSluice) {
@@ -82,6 +94,30 @@ func TestNetUsageIsReportedUnfilteredAndSorted(t *testing.T) {
 	}
 	if len(resp.VMs) != 2 || resp.VMs[0].Name != "alpha" || resp.VMs[1].Name != "zeta" {
 		t.Errorf("vms = %+v, want alpha then zeta", resp.VMs)
+	}
+}
+
+func TestNetDenialCaptureCrossesTheLink(t *testing.T) {
+	want := netpush.DenialCapture{CaptureID: "box-id", Domains: []netpush.DeniedDomain{
+		{Domain: "registry.npmjs.org", Queries: 3},
+	}}
+	gw, fs := netPair(t, &fakeSluice{on: true, denials: want})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var started NetDenialsResp
+	if err := gw.Request(ctx, TypeNetDenials, NetDenialsReq{Sandbox: "web-build", Reset: true}, &started); err != nil {
+		t.Fatal(err)
+	}
+	if fs.started != "web-build" {
+		t.Fatalf("started sandbox = %q", fs.started)
+	}
+	var finished NetDenialsResp
+	if err := gw.Request(ctx, TypeNetDenials, NetDenialsReq{Sandbox: "web-build"}, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(finished.Capture, want) {
+		t.Fatalf("capture = %+v, want %+v", finished.Capture, want)
 	}
 }
 

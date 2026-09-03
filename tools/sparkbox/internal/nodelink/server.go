@@ -83,6 +83,12 @@ const (
 	// old to speak it" must not read as the same diagnosis to whoever is
 	// looking at the node's log.
 	CodeNoSelfLifecycle = "self_lifecycle_not_enabled"
+	// CodeNoEnvSetup is a gateway that builds no environments — no environment
+	// store, or no control plane on its fleet. It is its own code for the reason
+	// CodeNoSelfLifecycle is: a node that cannot tell "this deployment has no
+	// environments" from "this gateway is too old to speak the pair" sends
+	// whoever reads its log looking for the wrong thing.
+	CodeNoEnvSetup = "env_setup_not_enabled"
 	// CodeNoCertificateIssuer means this gateway has no internal CA/roster
 	// signer wired. It is distinct from a pending or disabled authenticated row.
 	CodeNoCertificateIssuer = "certificate_not_issued"
@@ -227,6 +233,37 @@ func registerUplinkOps(conn *Conn, node string, hooks Hooks) {
 		}
 		return hooks.OnSelfRepoAuthPoll(ctx, node, req)
 	})
+	conn.Handle(TypeSelfSetup, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfSetupReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" {
+			return nil, ctlops.Invalid(OpLink, "bad_self_setup_request",
+				"a setup fetch has to name a sandbox")
+		}
+		if hooks.OnSelfSetup == nil {
+			return nil, noEnvSetup()
+		}
+		return hooks.OnSelfSetup(ctx, node, req)
+	})
+	conn.Handle(TypeSelfSetupResult, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var req SelfSetupResultReq
+		// The two strings are checked here as well as at the metadata door
+		// because this is where they arrive from another machine. Refused
+		// rather than truncated, both of them: half a script is what every
+		// future fork of the environment would run, and a log this gateway
+		// silently shortened is a report it never actually received.
+		if err := json.Unmarshal(raw, &req); err != nil || req.Sandbox == "" ||
+			req.ExitCode < 0 || req.ExitCode > 255 ||
+			len(req.Script) > MaxSelfSetupScriptBytes || len(req.Log) > MaxSelfSetupLogBytes {
+			return nil, ctlops.Invalid(OpLink, "bad_self_setup_result_request",
+				"a setup report needs a sandbox, an exit status from 0 to 255, "+
+					"a script of at most %d bytes and a log of at most %d bytes",
+				MaxSelfSetupScriptBytes, MaxSelfSetupLogBytes)
+		}
+		if hooks.OnSelfSetupResult == nil {
+			return nil, noEnvSetup()
+		}
+		return hooks.OnSelfSetupResult(ctx, node, req)
+	})
 }
 
 // identityRequest parses and bounds one identity request. The name is checked
@@ -277,6 +314,18 @@ func noSelfLifecycle() error {
 	return &ctlops.Error{
 		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoSelfLifecycle, Verbatim: true,
 		Msg: "this gateway does not run guest self-service lifecycle: no control plane is installed on its fleet.",
+	}
+}
+
+// noEnvSetup is the environment pair's equivalent, hand-built for the same
+// reason again: a node that gets this can answer its guest the way a
+// gateway-local guest is answered by a metadata service with no EnvSetup
+// wired, instead of turning a deployment's honest "no environments here" into
+// the fault of the machine that relayed it.
+func noEnvSetup() error {
+	return &ctlops.Error{
+		Kind: ctlops.KindDisabled, Op: OpLink, Code: CodeNoEnvSetup, Verbatim: true,
+		Msg: "this gateway builds no environments: no environment store or no control plane is installed on its fleet.",
 	}
 }
 
@@ -502,6 +551,12 @@ type Hooks struct {
 	OnSelfPause        func(ctx context.Context, node string, req SelfPauseReq) (SelfPauseResp, error)
 	OnSelfSnapshotPlan func(ctx context.Context, node string, req SelfSnapshotPlanReq) (SelfSnapshotPlanResp, error)
 	OnSelfSnapshot     func(ctx context.Context, node string, req SelfSnapshotReq) (SelfSnapshotResp, error)
+	// The environment-build pair. OnSelfSetup is a pure read — "does this box
+	// have a job" — and answers nearly every VM in the fleet with no. Nil means
+	// this deployment builds no environments, and the node is told so in a
+	// sentence rather than left with an unregistered-type error.
+	OnSelfSetup       func(ctx context.Context, node string, req SelfSetupReq) (SelfSetupResp, error)
+	OnSelfSetupResult func(ctx context.Context, node string, req SelfSetupResultReq) (SelfSetupResultResp, error)
 	// OnCertificateEnroll receives the same authenticated roster name. The CSR
 	// payload deliberately has no identity field.
 	OnCertificateEnroll func(ctx context.Context, node string, req CertificateEnrollRequest) (CertificateEnrollResponse, error)

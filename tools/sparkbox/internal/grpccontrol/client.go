@@ -330,3 +330,7 @@ func (c *Client) RecordKey(ctx context.Context, request *nodev1.RecordKeyRequest
 func (c *Client) NetworkUsage(ctx context.Context) (*nodev1.GetNetworkUsageResponse, error) {
 	return c.control.GetNetworkUsage(ctx, &nodev1.GetNetworkUsageRequest{})
 }
+
+func (c *Client) NetworkDenials(ctx context.Context, sandbox string, reset bool) (*nodev1.NetworkDenialsResponse, error) {
+	return c.control.NetworkDenials(ctx, &nodev1.NetworkDenialsRequest{Sandbox: sandbox, BeginCapture: reset})
+}

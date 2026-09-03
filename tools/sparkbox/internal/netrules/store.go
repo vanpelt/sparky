@@ -413,8 +413,17 @@ func (s *Store) SandboxesForRule(owner, name string) ([]string, error) {
 // the policy pusher sends to sluice for the VM's tap. The governed return
 // reports whether any rule-set applies at all: a sandbox with no tag bound to a
 // rule is ungoverned, and the pusher omits it so sluice leaves its egress
-// unrestricted (an empty allow-list, by contrast, is a deliberate deny-all on a
-// governed sandbox). governed is therefore distinct from len(allow) == 0.
+// unrestricted. governed is therefore distinct from len(allow) == 0.
+//
+// AN EMPTY ALLOW-LIST ON A GOVERNED SANDBOX IS NOT DENY-ALL, though the name
+// invites that reading and this comment used to say it. sluice checks its BASE
+// allowlist FIRST and grants unconditionally (policy.AllowedFor), so a governed
+// sandbox with no patterns of its own still reaches the operator's trusted list
+// — the package registries, github, api.anthropic.com — plus whatever its repo
+// attachments imply below. The base list is a floor under every governed
+// sandbox, not a ceiling over it. That is what makes an empty rule-set usable
+// as a DEFAULT posture (ctlops gives every new environment one) rather than as
+// a way to strand a VM with no network at all.
 //
 // It is also where a repo attachment's implied domains are unioned in, when a
 // RepoDomains source has been installed. That overlay lives here and not in the

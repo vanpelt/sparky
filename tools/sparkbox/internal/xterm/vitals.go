@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -210,21 +209,6 @@ func repositoryMap(repos []host.RepoStatus) map[string]host.RepoStatus {
 	return out
 }
 
-// dashboardLink admits only an absolute HTTP(S) link.
-//
-// The selection of which session to name happens on the machine holding the VM
-// (host.HiveMindSessionSnapshot.Recent), but this check stays here, on the
-// gateway, because a node is a separate trust domain and this is the one value
-// in a vitals reply that becomes a clickable href rather than a number. The
-// title needs no equivalent: the page paints it with textContent.
-func dashboardLink(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-		return ""
-	}
-	return raw
-}
-
 // readVitals fills in whatever the machine holding box can answer about it.
 //
 // The reading, its budget and what counts as "no reading" are all webui's, so
@@ -249,7 +233,7 @@ func (h *Handler) readVitals(ctx context.Context, box *host.Sandbox, out *vitals
 	out.PortsChecked = v.PortsChecked
 	if hm := v.HiveMind; hm != nil {
 		title := strings.TrimSpace(hm.SessionTitle)
-		if link := dashboardLink(hm.SessionURL); link != "" {
+		if link := webui.SessionLink(hm.SessionURL); link != "" {
 			out.HiveMindSessionURL = link
 			if title == "" {
 				title = "HiveMind session"

@@ -39,7 +39,7 @@ const (
 // the argument-less operations (pause, resume, archive, rm, reboot), where a
 // retry genuinely is the same work.
 type Ref struct {
-	Type string `json:"type"` // "sandbox" | "snapshot"
+	Type string `json:"type"` // "sandbox" | "snapshot" | "environment"
 	Name string `json:"name"`
 	Args string `json:"-"`
 }

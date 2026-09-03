@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -29,8 +30,16 @@ import (
 // assertion buys nothing at runtime, and because internal/ctlops/fakes_test.go
 // is `package ctlops` and so cannot be imported from here at all.
 var (
-	_ Sandboxes   = (*ctlops.Ops)(nil)
-	_ Attachments = (*repos.Store)(nil)
+	_ Sandboxes    = (*ctlops.Ops)(nil)
+	_ Environments = (*ctlops.Ops)(nil)
+	_ Attachments  = (*repos.Store)(nil)
+	// The optional interfaces are pinned here too, and they are the ones that
+	// most need it: nothing fails at compile time when an ASSERTION stops
+	// matching, so a renamed method on *ctlops.Ops would silently turn
+	// environment-aware tag selection back into the whole tag set, and every
+	// test would still pass because the fallback is the old behaviour.
+	_ envAwaiter        = (*ctlops.Ops)(nil)
+	_ environmentLister = (*ctlops.Ops)(nil)
 )
 
 // errStore is what a fake returns when a test wants the store to fail.
@@ -46,9 +55,11 @@ var errStore = errors.New("store is on fire")
 type fakeOps struct {
 	t *testing.T
 
-	mu      sync.Mutex
-	boxes   []ctlops.SandboxInfo
-	listErr error
+	mu           sync.Mutex
+	boxes        []ctlops.SandboxInfo
+	listErr      error
+	environments map[string]ctlops.EnvironmentInfo
+	envErr       error
 
 	// allowCreate opts one test into exercising the create path. Every GET test
 	// leaves it false, which is what pins the read paths side-effect free.
@@ -72,6 +83,28 @@ type fakeOps struct {
 	// awaitEnv found a method.
 	awaited  []string
 	awaitErr error
+
+	// envs is what EnvironmentsForTags answers with, filtered to the tags asked
+	// about, and envsErr is what it fails with. Nil envs with no error is the
+	// ordinary host where the attachment's tags name no environment — which is
+	// also, deliberately, the same answer as a host too old to have the method,
+	// so the fallback path and the empty path are exercised by the same tests.
+	envs    []ctlops.EnvironmentInfo
+	envsErr error
+}
+
+func (f *fakeOps) GetEnvironment(_ ctlops.Caller, name string) (ctlops.EnvironmentInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.envErr != nil {
+		return ctlops.EnvironmentInfo{}, f.envErr
+	}
+	for key, env := range f.environments {
+		if strings.EqualFold(key, name) {
+			return env, nil
+		}
+	}
+	return ctlops.EnvironmentInfo{}, ctlops.NotFound("env.get", "environment", name)
 }
 
 func (f *fakeOps) List(_ context.Context, _ ctlops.Caller) ([]ctlops.SandboxInfo, error) {
@@ -230,6 +263,7 @@ func newHandler(t *testing.T, ops *fakeOps, store *fakeRepos) *Handler {
 	t.Helper()
 	return &Handler{
 		ops:      ops,
+		envs:     ops,
 		repos:    store,
 		accounts: testAccounts{testHandle: {Handle: testHandle, Status: users.StatusActive, InvitedBy: "someoneelse"}, otherHandle: {Handle: otherHandle, Status: users.StatusActive, InvitedBy: "someoneelse"}},
 		signer:   testSigner,
@@ -318,6 +352,28 @@ func (f *fakeOps) AwaitEnv(_ context.Context, name string) error {
 	defer f.mu.Unlock()
 	f.awaited = append(f.awaited, name)
 	return f.awaitErr
+}
+
+// EnvironmentsForTags is the control plane's answer to "which of these tags are
+// environments". It filters by the tags asked about, the way the real one does,
+// so a test can hand the fake a whole world and still see the narrowing.
+//
+// It does NOT sort. The real method returns newest-first, and pickTags is
+// written not to depend on that; answering in the order a test declared them is
+// what keeps that promise honest.
+func (f *fakeOps) EnvironmentsForTags(_ ctlops.Caller, tags []string) ([]ctlops.EnvironmentInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.envsErr != nil {
+		return nil, f.envsErr
+	}
+	var out []ctlops.EnvironmentInfo
+	for _, e := range f.envs {
+		if slices.Contains(tags, e.Name) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 
 // awaitedNames is the recorded barrier, copied under the lock.

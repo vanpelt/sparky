@@ -21,10 +21,14 @@ import (
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -151,6 +155,130 @@ type Repos interface {
 	// an owner and a tag, because `--ref` is the only thing on this surface
 	// that is about one instance. See reporef.go.
 	SetSandboxRefs(owner, sandbox string, refs []repos.SandboxRef) error
+}
+
+// Environments is the environment store — the FIFTH reader of the shared
+// sandbox_tags namespace, after secrets, netrules, repos and templates. A nil
+// one makes every environment verb answer KindDisabled, which is what a host
+// with no environment store is, and leaves `--env` on create refusing rather
+// than silently ignoring the flag.
+//
+// An environment OWNS EXACTLY ONE TAG and its name IS that tag, so this
+// interface never mentions a tag at all: `name` is the tag everywhere below.
+// That is what keeps the four existing joins untouched — an environment invents
+// no new join key, it only asserts that one tag name means something.
+//
+// envs.EnvironmentsForSandbox is deliberately absent, for the reason
+// Repos.ReposForSandbox is: nothing on this control surface resolves what a
+// running guest sees — that is internal/metadata's authority. Every
+// owner-scoped method here is owner-agnostic because ctlops authorizes first
+// and passes the handle down as a query term.
+//
+// Building IS on the interface, and it is the one method with no owner
+// argument. It is what the restart reconciler walks (see
+// ReconcileEnvironmentBuilds), and it is also how the guest door resolves a
+// builder sandbox to the environment it is building — neither of which acts on
+// behalf of a caller, so asking either for a handle would be a lie or a loop
+// over the user table. Every use of it in this package compares the row's owner
+// against the sandbox's before doing anything with it; that comparison is a
+// security boundary, not tidiness, because sandbox names are global.
+type Environments interface {
+	Put(owner, name, description string, adopted *envs.Adopted) (envs.Environment, error)
+	Get(owner, name string) (envs.Environment, error)
+	List(owner string) ([]envs.Environment, error)
+	Delete(owner, name string) error
+	SetScript(owner, name, script, from string) error
+	SetState(owner, name string, st envs.State, box, buildErr string) error
+	SetBuildSession(owner, name, url string) error
+	SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error
+	Building() ([]envs.Environment, error)
+}
+
+// NetPusher hands every machine in the fleet its own sandboxes' egress policy.
+// *fleet.Fleet satisfies it, and so does *netpush.Syncer on a single box.
+//
+// It exists on Ops for ONE caller: an environment build, which needs the
+// builder's policy in place before its guest is told to start. Everything else
+// is content to wait for the thirty-second sweep, because everything else is a
+// person who created a sandbox and is about to ssh into it. A builder is not —
+// it runs an unattended agent within seconds of being created, and "governed
+// egress" is the mitigation the whole agent path rests on.
+//
+// Nil is a host with no egress control, where a build proceeds as it always
+// has.
+type NetPusher interface {
+	PushNet(ctx context.Context) error
+}
+
+// BuildDenialCapturer is the optional diagnostic half of the network plane.
+// A deployment without it still enforces policy and builds normally; it simply
+// cannot retain the exact DNS names policy refused during that build.
+type BuildDenialCapturer interface {
+	BeginBuildDenials(ctx context.Context, sandbox string) error
+	FinishBuildDenials(ctx context.Context, sandbox string) (netpush.DenialCapture, error)
+}
+
+// SetupStarter nudges a BUILDER's guest into fetching and running the setup
+// script its gateway is holding for it. *envsync.Syncer satisfies it.
+//
+// It is a Config field rather than a type assertion off Sandboxes (the shape
+// syncRepos uses for ResyncRepos) because the one implementation is not the
+// sandbox store at all: it is the syncer cmd/sparkbox already builds and hands
+// to the manager and the fleet, and there is exactly one guest exec channel for
+// all three uses of it.
+//
+// It carries nothing about the job on purpose. The guest fetches its own work
+// over its tap and reports on the same channel, so this is a doorbell and not a
+// delivery — see SetupFor for why that direction is the security property and
+// not an accident of layering.
+type SetupStarter interface {
+	StartSetup(ctx context.Context, box *host.Sandbox) error
+}
+
+// EnvVars is the plain (non-secret) environment-variable half of
+// secrets.Store. It is a second field rather than more methods on Secrets
+// because the two carry different material and fail differently: a secret is
+// sealed under the OIDC key and every one of them is unreadable after a key
+// rotation, while a var is plaintext configuration that keeps working. A host
+// could sensibly have one without the other.
+//
+// There is no ListVars here on purpose. Everything this package renders is
+// scoped to one environment, so VarsForTag is the whole read surface; a
+// list-them-all method would be a second way to ask a question with one
+// answer.
+type EnvVars interface {
+	PutVar(owner, tag, name, value string) error
+	DeleteVar(owner, tag, name string) error
+	VarsForTag(owner, tag string) ([]secrets.Var, error)
+	DeleteVarsForTag(owner, tag string) error
+}
+
+// SecretTags is the retag half of secrets.Store: change WHICH sandboxes a
+// secret reaches without touching what it says.
+//
+// It is separate from Secrets because it is the one secret operation that does
+// not need the value, and that is exactly why it has to exist. PutSecret
+// demands the value and the store deliberately has no way to read one back, so
+// without this the only way to add `web` to an existing token would be to ask
+// the user to paste the token again — which people skip, and the environment
+// then composes a secret it does not actually carry.
+type SecretTags interface {
+	RetagSecret(owner, envName string, tags []string) error
+}
+
+// NetRules is the egress rule-set store — the second reader of sandbox_tags,
+// and the only SUBTRACTIVE one. ctlops reaches it for exactly two things: to
+// say which rule-sets an environment composes, and to add an environment's tag
+// to one. Authoring a rule-set (the allow list itself) stays where it is; this
+// package deliberately cannot widen an allowlist except by carrying the spec it
+// just read straight back.
+type NetRules interface {
+	ListRules(owner string) ([]netrules.RuleMeta, error)
+	PutRule(owner, name string, spec netrules.RuleSpec, tags []string) error
+	// DeleteRule is here for exactly one caller: `env rm` taking back the
+	// rule-set `env create` made for it. This package deletes no rule-set a
+	// person wrote, and reclaimDefaultEgress is where that line is drawn.
+	DeleteRule(owner, name string) error
 }
 
 // TemplateBindings is the tag-to-base-image store — the fourth reader of the
@@ -293,12 +421,48 @@ type Config struct {
 	Secrets      Secrets          // nil: secret operations are KindDisabled
 	Repos        Repos            // nil: repo operations are KindDisabled
 	TemplateTags TemplateBindings // nil: bind is KindDisabled and creates use DefaultImage
-	Checkpoints  Checkpoints      // nil: manual durable checkpoints are KindDisabled
-	Schedules    Schedules        // nil: schedule operations are KindDisabled
-	Routes       Routes           // nil: share operations are KindDisabled
-	Sessions     Minter           // nil: MintSessionToken is KindDisabled
-	Nodes        NodeRoster       // nil: node operations are KindDisabled
-	GitHub       GitHubKeys       // nil: the real github.com client
+	// Environments is the environment store. nil makes every `env` verb
+	// KindDisabled and makes `create --env` refuse — never silently ignore
+	// the flag, which would hand somebody a sandbox composed of nothing they
+	// asked for.
+	Environments Environments
+	// EnvVars is the plain-env-var half of the secrets store. nil leaves
+	// environments perfectly usable — they still compose secrets, repos and
+	// rules — and makes only the `env var` verbs KindDisabled.
+	EnvVars EnvVars
+	// SecretTags is the retag half of the secrets store, used to add an
+	// environment's tag to an existing secret. nil makes attaching a secret to
+	// an environment KindDisabled while leaving everything else about
+	// environments working; see the SecretTags interface for why it is not
+	// simply a method on Secrets.
+	SecretTags SecretTags
+	// NetRules is the egress rule-set store. nil leaves an environment unable
+	// to name or attach one, and its composition simply omits rule-sets — a
+	// host with no netrules store has none to omit.
+	NetRules NetRules
+	// RepoFiles reads one file out of an attached repository, which is how a
+	// build seeds its setup script from `.sparkbox/setup.sh`. *ghapp.App
+	// satisfies it, so this is normally the same value as GitHubApp. nil leaves
+	// the seed read off entirely: a build then needs a script stored on the
+	// environment, and says so.
+	RepoFiles RepoFileReader
+	// SetupStarter nudges a builder's guest into running its setup script. nil
+	// makes `env build` refuse — never silently create a builder that will sit
+	// there doing nothing until the reconciler times it out.
+	SetupStarter SetupStarter
+	// NetPusher pushes egress policy. nil leaves an environment build relying
+	// on the periodic sweep, which is what happens on a host with no sluice.
+	NetPusher NetPusher
+	// EnvBuildTimeout is how long an environment build may stay in `building`
+	// before the reconciler fails it. 0 takes DefaultEnvBuildTimeout.
+	EnvBuildTimeout time.Duration
+
+	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
+	Schedules   Schedules   // nil: schedule operations are KindDisabled
+	Routes      Routes      // nil: share operations are KindDisabled
+	Sessions    Minter      // nil: MintSessionToken is KindDisabled
+	Nodes       NodeRoster  // nil: node operations are KindDisabled
+	GitHub      GitHubKeys  // nil: the real github.com client
 	// GitHubDevice runs the OAuth device flow. nil — the default, and the state
 	// of any host with no --github-client-id — leaves the key check as the only
 	// way to link, which is what shipped before this existed.
@@ -337,6 +501,13 @@ type Ops struct {
 	secrets      Secrets
 	repos        Repos
 	templateTags TemplateBindings
+	envs         Environments
+	envVars      EnvVars
+	secretTags   SecretTags
+	netrules     NetRules
+	repoFiles    RepoFileReader
+	setupStarter SetupStarter
+	netPusher    NetPusher
 	checkpoints  Checkpoints
 	schedules    Schedules
 	routes       Routes
@@ -369,7 +540,26 @@ type Ops struct {
 	jobs      map[string]*Job
 	stop      chan struct{}
 	closeOnce sync.Once
+
+	// envBuildTimeout bounds one environment build; 0 means
+	// DefaultEnvBuildTimeout. envBuilds collapses concurrent work on one
+	// (owner, environment) — a double-submitted `env build`, a manual capture
+	// racing a late guest report — because the already-building refusal is a
+	// check and not a lock.
+	//
+	// envBuildsWG tracks the detached completion goroutines SetupDone starts.
+	// NOTHING IN PRODUCTION WAITS ON IT. It exists because SetupDone's whole
+	// contract is "return before the work" — the caller is the guest the
+	// capture is about to pause — and a test that cannot wait for that work
+	// would have to sleep, which this package does not do.
+	envBuildTimeout time.Duration
+	envBuilds       singleflight.Group
+	envBuildsWG     sync.WaitGroup
 }
+
+// awaitEnvBuilds blocks until every detached environment-build completion has
+// finished. Test-only, and unexported for that reason; see envBuildsWG.
+func (o *Ops) awaitEnvBuilds() { o.envBuildsWG.Wait() }
 
 func New(cfg Config) *Ops {
 	o := &Ops{
@@ -380,6 +570,14 @@ func New(cfg Config) *Ops {
 		secrets:            cfg.Secrets,
 		repos:              cfg.Repos,
 		templateTags:       cfg.TemplateTags,
+		envs:               cfg.Environments,
+		envVars:            cfg.EnvVars,
+		secretTags:         cfg.SecretTags,
+		netrules:           cfg.NetRules,
+		repoFiles:          cfg.RepoFiles,
+		setupStarter:       cfg.SetupStarter,
+		netPusher:          cfg.NetPusher,
+		envBuildTimeout:    cfg.EnvBuildTimeout,
 		checkpoints:        cfg.Checkpoints,
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
@@ -477,6 +675,13 @@ type Capabilities struct {
 	// different statement from Snapshots, since a host can hold snapshots to
 	// fork by name while having nowhere to record a binding.
 	TemplateTags bool `json:"template_tags"`
+	// Environments reports that this host can name a composition — repos,
+	// secrets, vars, rules and a base image — under one word and boot a
+	// sandbox from it. False is a host with no environment store, where every
+	// `env` verb answers 501 and `create --env` refuses; it says nothing about
+	// tags, which keep working on their own, because an environment is a name
+	// for a tag rather than a replacement for one.
+	Environments bool `json:"environments"`
 }
 
 func (o *Ops) Capabilities() Capabilities {
@@ -493,6 +698,7 @@ func (o *Ops) Capabilities() Capabilities {
 		GitHubApp:     o.ghApp != nil,
 		Fleet:         o.nodes != nil,
 		TemplateTags:  o.templateTags != nil,
+		Environments:  o.envs != nil,
 	}
 }
 

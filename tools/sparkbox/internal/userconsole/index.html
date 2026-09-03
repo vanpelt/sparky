@@ -46,6 +46,13 @@
   .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
   .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
   a.btn-primary { text-decoration: none; padding: 7px 13px; }
+  /* A LINK dressed as an outlined button. The structural base in shared.css is
+     scoped to <button>, and the one control here that leaves this origin — the
+     transcript of the agent building an environment, which lives in HiveMind —
+     has to be an <a> so it opens in a tab and offers a copyable address. */
+  a.btn-outline { text-decoration: none; font: inherit; display: inline-flex;
+    align-items: center; gap: 6px; white-space: nowrap; transition: .12s ease;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border)); }
   /* icon button — the ··· overflow trigger, and the two header actions worth a
      single click. They lose their words on purpose: a row of four outlined text
      buttons was the loudest thing on a card whose job is to show numbers. */
@@ -342,6 +349,112 @@
   .secret-form input { width: 100%; }
   .secret-form .save { align-self: end; }
 
+  /* ---------- environments ----------
+     An environment is far more like a machine than like a secret: one name,
+     one state, and four different lists hanging off it. So it is drawn with
+     the machine card's own anatomy — head, body grid, foot — rather than as a
+     table row, where those four lists shared one cell, wrapped a chip per
+     line, and left the other four cells floating in the middle of a 190px
+     row. Nothing here is a new idiom; it is the card that is already on the
+     Machines tab, with different contents. */
+
+  /* The tab's own header. Not a .panel-head, because the cards below are not
+     inside one card — the same relationship the machine list has with the
+     page. Shaped like .fp-head so the two read as the same level. */
+  .env-top { display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 12px 16px; flex-wrap: wrap; margin-bottom: 14px; }
+  .env-top h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }
+  .env-top .hint { display: block; margin-top: 2px; max-width: 66ch; }
+
+  /* The create/edit form is a mode, not furniture: it is hidden until asked
+     for. Visible, it was 430px of inputs and hints above the first
+     environment — the page's own content pushed below the fold by the box
+     used to add to it. */
+  .env-form { grid-template-columns: 1fr 1fr 1fr; border-bottom: 0; }
+  @media (max-width: 860px) { .env-form { grid-template-columns: 1fr; } }
+  .env-form .wide { grid-column: 1 / -1; }
+  .env-form .two { grid-column: span 2; }
+  @media (max-width: 860px) { .env-form .two { grid-column: 1 / -1; } }
+  .env-form .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .env-form .check input { width: auto; }
+  .env-form .row { display: flex; gap: 8px; align-items: center; }
+
+  .env-card { margin-bottom: 10px; }
+  .env-card .m-head { align-items: baseline; }
+  /* The description, in the page's own face. It used to inherit .mono from the
+     name cell above it and be clipped at 22 characters, which read as a
+     truncation bug rather than a subtitle. */
+  .env-sub { padding: 0 14px 11px; font-size: 12.5px; color: hsl(var(--muted-foreground));
+    max-width: 72ch; margin-top: -4px; }
+
+  /* Four lists, four labelled columns — which is the whole reason this stopped
+     being a table cell. Plain monospace lines rather than chips: under a
+     column heading a pill adds a grey background and no information, and the
+     heading already answers the question the chips could not ("is `web` a
+     rule-set, a tag or a variable?"). */
+  .env-grid { border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 22px; align-items: start; }
+  @media (max-width: 900px) { .env-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .env-grid { grid-template-columns: 1fr; } }
+  .env-col .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); margin-bottom: 4px; }
+  .env-col .val { font-size: 12.5px; line-height: 1.6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere; }
+  .env-col .val.none { font-family: inherit; color: hsl(var(--muted-foreground)); }
+
+  /* The foot says what the next build will actually run, which is this
+     platform's one genuinely unusual promise and was previously rendered as
+     "3746 B / from agent". */
+  .env-foot { border-top: 1px solid hsl(var(--border)); padding: 9px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px 14px; flex-wrap: wrap; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+  .env-foot strong { color: hsl(var(--foreground)); font-weight: 550; }
+
+  /* The two states that are a situation rather than a fact get a strip of
+     their own under the head, carrying the machine you would go and look at
+     and the action that resolves it. A failed build used to be 150px of grey
+     clipped guest log inside a table cell. */
+  .env-strip { margin: 0 14px 11px; padding: 9px 11px; font-size: 12.5px;
+    border: 1px solid; border-radius: calc(var(--radius) - 2px);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+  .env-strip .msg { overflow-wrap: anywhere; max-width: 82ch; }
+  .env-strip.failed { border-color: hsl(var(--red) / .4); background: hsl(var(--red) / .06);
+    color: hsl(var(--red)); }
+  /* Amber frames it; the words stay in the page's own ink. --amber at 50%
+     lightness is this palette's weakest colour on a light background, and a
+     strip that tells somebody where the build is has to be readable. Red is
+     strong enough at both lightnesses to carry its own text, and an error
+     written in red is worth the difference. */
+  .env-strip.building { border-color: hsl(var(--amber) / .45); background: hsl(var(--amber) / .08);
+    color: hsl(var(--foreground)); }
+  .env-strip .mono { color: inherit; }
+  .env-strip.denials { display: block; border-color: hsl(var(--amber) / .35); background: hsl(var(--amber) / .055);
+    color: hsl(var(--foreground)); }
+  .env-strip.denials .domains { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+
+  /* State badges. Same anatomy as the machine states — a dot carries the
+     colour, the word stays quiet — so ready/building/failed/draft read at the
+     same glance as running/paused/archived one tab over. */
+  .badge.ready { color: hsl(var(--green)); border-color: transparent; padding-left: 2px; }
+  .badge.ready .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .16); }
+  .badge.building { color: hsl(var(--amber)); border-color: hsl(var(--amber) / .35); }
+  /* A build is minutes long, so the lamp blinks for the whole of it: the same
+     steps() lamp as the turbo switch, which is this console's existing way of
+     saying "this is happening right now". */
+  .badge.building .dot { background: hsl(var(--amber)); animation: led 1s steps(1) infinite; }
+  @media (prefers-reduced-motion: reduce) { .badge.building .dot { animation: none; } }
+  .badge.failed { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); }
+  .badge.failed .dot { background: hsl(var(--red)); }
+  .badge.draft { color: hsl(var(--muted-foreground)); }
+  .badge.draft .dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+
+  .script-box { width: 100%; min-height: 260px; resize: vertical; padding: 9px 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border));
+    background: hsl(var(--background)); color: hsl(var(--foreground)); }
+  .script-actions { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; }
+
   /* repos form — one field more than the secrets grid, and a <select> the
      input rules above cannot reach: they are typed to input[type=…], so an
      unstyled select would render as a light native control on a dark card. */
@@ -351,6 +464,17 @@
     font: inherit; width: 100%; padding: 7px 10px; border-radius: calc(var(--radius) - 2px);
     border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground));
   }
+  /* Behind upstream, on a machine card. Amber and not the red .env-warn above,
+     for the same reason .tag-warn is: nothing is wrong and nothing is at risk —
+     somebody else pushed, and this checkout will have it on the next pull. Red
+     is kept for the state where deleting this machine LOSES something, which is
+     a dirty checkout or a commit that exists nowhere else. A card that shouts
+     the same colour at both teaches people to ignore the colour. */
+  .env-warn.soft {
+    border-color: hsl(var(--amber) / .4);
+    color: hsl(var(--amber)); background: hsl(var(--amber) / .07);
+  }
+  .env-warn.soft strong, .env-warn.soft code { color: hsl(var(--amber)); }
   /* the `default` tag warning: amber rather than the red .env-warn above,
      because it is a consequence to understand, not something broken. */
   .tag-warn {
@@ -443,7 +567,8 @@
     </header>
 
     <div class="tabs">
-      <button class="tab active" data-tab="machines">Machines</button>
+      <button class="tab active" data-tab="environments">Environments</button>
+      <button class="tab" data-tab="machines">Machines</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="repos">Repos</button>
@@ -595,6 +720,115 @@
           </table>
         </div>
         <div id="netrules-empty" class="empty hidden">No rule-sets yet. Add one above, then tag a machine to enforce it.</div>
+      </div>
+    </div>
+
+    <!-- ENVIRONMENTS TAB -->
+    <div id="tab-environments" class="hidden">
+      <div class="env-top">
+        <div>
+          <h2>Environments</h2>
+          <span class="hint">The repos, secrets, egress and variables a machine gets, and a disk
+            with its setup already run. A machine joins one by carrying its name as a tag.</span>
+        </div>
+        <button class="btn-primary" id="env-new">New environment</button>
+      </div>
+
+      <div class="card panel hidden" id="env-form-card">
+        <div class="panel-head">
+          <h2 id="env-form-title">New environment</h2>
+          <span class="hint" id="env-form-hint">the name is the tag machines carry to get all of this</span>
+        </div>
+        <div class="notice">
+          Everything you attach here reaches every machine tagged with this name — the Secrets,
+          Network and Repos tabs are the same attachments seen one kind at a time.
+          <strong>Build</strong> then runs the setup script once in a throwaway machine called
+          <code class="mono">&lt;name&gt;-build</code> and keeps its disk, so the next machine you
+          make starts with the work already done.
+        </div>
+        <form id="env-form" class="secret-form env-form">
+          <div>
+            <label for="env-name">Name</label>
+            <input id="env-name" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="web" maxlength="40" />
+            <div class="field-hint">lowercase, digits, dashes — this is the tag</div>
+          </div>
+          <div class="two">
+            <label for="env-desc">Description</label>
+            <input id="env-desc" type="text" autocomplete="off"
+              placeholder="the web stack — node 20 and postgres" maxlength="200" />
+            <div class="field-hint">optional; what this way of working is for</div>
+          </div>
+          <div>
+            <label for="env-repos">Repos</label>
+            <input id="env-repos" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="wandb/hivemind" />
+            <div class="field-hint">comma-separated <code class="mono">owner/name</code></div>
+          </div>
+          <div>
+            <label for="env-secrets">Secrets</label>
+            <input id="env-secrets" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="GITHUB_TOKEN" />
+            <div class="field-hint">must already exist on the Secrets tab</div>
+          </div>
+          <div>
+            <label for="env-rules">Rule-sets</label>
+            <input id="env-rules" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="ci-egress" />
+            <div class="field-hint">optional; from the Network tab</div>
+          </div>
+          <div class="wide">
+            <label for="env-vars">Variables</label>
+            <textarea id="env-vars" class="mono" autocomplete="off" spellcheck="false"
+              placeholder="NODE_ENV=development&#10;LOG_LEVEL=debug"></textarea>
+            <div class="field-hint">
+              one <code class="mono">NAME=value</code> per line — plain values, delivered beside
+              the secrets. Saving replaces this whole list, so a line you remove is unset. Repos,
+              secrets and rule-sets are only ever added here; detach them on their own tab.
+            </div>
+          </div>
+          <div class="check wide">
+            <input id="env-open" type="checkbox" />
+            <label for="env-open" style="margin:0">
+              Skip the default egress rule-set (new environments only)
+            </label>
+          </div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="env-save">Save environment</button>
+            <button type="button" class="btn-outline" id="env-cancel">Cancel</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="envs-disabled" class="card empty hidden">
+        Environments are not enabled on this host.
+      </div>
+      <div id="env-list"></div>
+      <div id="envs-empty" class="card empty hidden">
+        No environments yet. One holds the repos, secrets and variables a project needs, and a
+        disk with its setup already run.
+        <div style="margin-top:12px"><button class="btn-primary" id="env-empty-new">New environment</button></div>
+      </div>
+
+      <div class="card panel hidden" id="env-script-panel">
+        <div class="panel-head">
+          <h2 id="env-script-title">setup.sh</h2>
+          <span class="hint" id="env-script-origin"></span>
+        </div>
+        <div class="notice">
+          The script a build runs, in the checkout, as you. It is read at
+          <strong>build</strong> time and never by a running machine, so saving one changes what
+          the next build does and nothing about the machines running now.
+        </div>
+        <div style="padding:14px">
+          <textarea id="env-script" class="script-box" spellcheck="false"
+            placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;&#10;pnpm install"></textarea>
+        </div>
+        <div class="script-actions">
+          <button class="btn-primary" id="env-script-save">Save script</button>
+          <button class="btn-outline" id="env-script-close">Close</button>
+          <span class="hint" id="env-script-note"></span>
+        </div>
       </div>
     </div>
 
@@ -774,6 +1008,7 @@
   // /api/me. Empty means this host serves none, and every Terminal button
   // disappears — the console never links to a host that answers nothing.
   let termSub = "";
+  let launchSub = "";
 
   // terminalURL is the per-machine terminal page: one origin per machine, which
   // is what keeps one machine's page from scripting another's socket. The
@@ -783,6 +1018,15 @@
   // will not issue, and fails as an unreadable browser cert error.
   function terminalURL(name) {
     return location.protocol + "//" + name + "-" + termSub + "." + domain() + portSuffix();
+  }
+
+  // The go service shows the environment choice back to the user, then
+  // owner-checks it and its repository again when the confirmation is posted.
+  function launchURL(slug, env) {
+    const parts = String(slug || "").split("/");
+    if (!launchSub || parts.length !== 2 || !parts[0] || !parts[1]) return "";
+    return location.protocol + "//" + launchSub + "." + domain() + portSuffix() + "/" +
+      parts.map(encodeURIComponent).join("/") + "?env=" + encodeURIComponent(env);
   }
 
   function show(view) {
@@ -826,7 +1070,15 @@
       throw err;
     }
     if (!r.ok) {
-      throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      // The body is {error, code?}. `code` is the server's stable machine token
+      // and is carried onto the Error so a caller can act on a specific refusal
+      // — matching on the sentence is exactly the coupling it exists to
+      // prevent. Everything else keeps reading .message as before.
+      const body = await r.json().catch(() => ({}));
+      const err = new Error(body.error || r.statusText);
+      err.code = body.code || "";
+      err.status = r.status;
+      throw err;
     }
     return r.json().catch(() => null);
   }
@@ -839,6 +1091,11 @@
   // so they inherit the button's state — except the two transport glyphs, which
   // are solid, because a play triangle and a pause bar are shapes everyone has
   // seen filled and nobody has seen outlined.
+  // The overflow trigger, shared by the machine and environment cards.
+  const DOTS = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+    '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/>' +
+    '<circle cx="19" cy="12" r="1.7"/></svg>';
+
   const ICON = {
     // A prompt: the one glyph that means "shell" to the people who live in one.
     term: '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/>' +
@@ -1081,8 +1338,9 @@
     if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open ||
         $("addport-dlg").open || $("turbo-dlg").open) return true;
     // an open ··· overflow menu counts as mid-interaction: the 4s repaint would
-    // otherwise rebuild the card and snap the menu shut under the cursor.
-    if (document.querySelector("#machine-list .menu-pop:not(.hidden)")) return true;
+    // otherwise rebuild the card and snap the menu shut under the cursor. Both
+    // card lists have one, so this is not scoped to the machines.
+    if (document.querySelector(".menu-pop:not(.hidden)")) return true;
     return !!(ae && ae.tagName === "INPUT" && ae.closest("#machine-list"));
   }
 
@@ -1091,7 +1349,7 @@
   // closes them — the item's own action handler still fires on the same click,
   // and closing synchronously lets the follow-up repaint land (editing() above).
   function closeMenus(except) {
-    document.querySelectorAll("#machine-list .menu-pop:not(.hidden)").forEach((m) => {
+    document.querySelectorAll(".menu-pop:not(.hidden)").forEach((m) => {
       if (m === except) return;
       m.classList.add("hidden");
       const t = m.previousElementSibling;
@@ -1130,6 +1388,9 @@
     if (d.del) return "delsnap:" + d.del;
     if (d.delSecret) return "delsecret:" + d.delSecret;
     if (d.delRepo) return "delrepo:" + d.delRepo;
+    if (d.envbuild) return "envbuild:" + d.envbuild;
+    if (d.envcapture) return "envcapture:" + d.envcapture;
+    if (d.envdel) return "envdel:" + d.envdel;
     return null;
   }
 
@@ -1381,11 +1642,9 @@
     // object-storage cleanup matters most — set off below a separator.
     const menuItems = coreItems.concat(
       coreItems.length ? ['<div class="sep"></div>'] : [], [removeItem]);
-    const dots = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
-      '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
     const menuHTML = menuItems.length
       ? '<div class="menu"><button type="button" class="btn-icon" data-menu aria-haspopup="true"' +
-        ' aria-expanded="false" title="More actions" aria-label="More actions">' + dots + "</button>" +
+        ' aria-expanded="false" title="More actions" aria-label="More actions">' + DOTS + "</button>" +
         '<div class="menu-pop hidden">' + menuItems.join("") + "</div></div>"
       : "";
     const actions = termBtn + powerBtn +
@@ -1403,14 +1662,30 @@
       ? '<div class="env-warn">Secrets for this machine cannot be decrypted — the encryption key' +
         " has changed. Nothing was pushed. Re-enter the affected secrets in the Secrets tab.</div>"
       : "";
-    const repoNotes = [];
-    if (repoAhead) repoNotes.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
-    if (repoBehind) repoNotes.push(repoBehind + " commit" + (repoBehind === 1 ? "" : "s") + " behind upstream");
-    if (repoDirty) repoNotes.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
-    const repoWarn = repoNotes.length
-      ? '<div class="env-warn"><strong>Repository attention:</strong> ' + esc(repoNotes.join(" · ")) +
-        '. Run <code class="mono">sparkbox status</code> in the machine for details.</div>'
-      : "";
+    // Two different sentences, because they are two different situations and
+    // only one of them can cost somebody work.
+    //
+    // AT RISK: an unpushed commit or a dirty checkout exists in this VM and
+    // nowhere else, so deleting the machine loses it. That is the red one.
+    // BEHIND: somebody else pushed. Nothing here is in danger and a pull fixes
+    // it whenever the owner feels like it — amber, and phrased as news rather
+    // than as a fault. When both are true the red banner carries both facts,
+    // because a card with two banners buries the one that matters.
+    const atRisk = [];
+    if (repoAhead) atRisk.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
+    if (repoDirty) atRisk.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
+    // Counted once and phrased twice: the amber banner says "behind upstream"
+    // in its own label, and repeating it in the sentence reads as a stutter.
+    const behind = repoBehind ? repoBehind + " commit" + (repoBehind === 1 ? "" : "s") : "";
+    let repoWarn = "";
+    if (atRisk.length) {
+      repoWarn = '<div class="env-warn"><strong>Only in this machine:</strong> ' +
+        esc(atRisk.join(" · ")) + (behind ? " (and " + esc(behind) + " behind upstream)" : "") +
+        '. Push before you remove it — run <code class="mono">sparkbox status</code> inside for details.</div>';
+    } else if (behind) {
+      repoWarn = '<div class="env-warn soft"><strong>Behind upstream:</strong> ' + esc(behind) +
+        ' to pull. Nothing here is at risk.</div>';
+    }
 
     return '<div class="card machine">' +
       '<div class="m-head">' +
@@ -1964,7 +2239,13 @@
   }
 
   // Claude Code's default "Trusted" network domains (per code.claude.com/docs)
-  // plus hivemind.wandb.tools — a one-click starting point for a rule-set.
+  // plus hivemind.wandb.tools — a one-click starting point for a rule-set, and
+  // the same set a new environment's default rule-set is built from.
+  //
+  // THIS IS A COPY. The canonical list is netrules.TrustedDomains, which the
+  // server uses for that default; this one exists because a browser cannot
+  // import Go, and a test compares the two as sets so they cannot drift into
+  // "the prefill button offers something the default does not allow".
   var TRUSTED_DOMAINS = `
       *.amazonaws.com *.api.aws *.data.mcr.microsoft.com *.datadoghq.com *.datadoghq.eu *.gcr.io
       *.googleapis.com *.microsoftonline.com *.modelcontextprotocol.io *.nixos.org
@@ -1987,7 +2268,7 @@
       index.golang.org index.rubygems.org java.com java.net jcenter.bintray.com json-schema.org
       json.schemastore.org k8s.io kotlinlang.org launchpad.net maven.org mcr.microsoft.com
       metacpan.org microsoft.com nodejs.org npm.pkg.github.com npmjs.com npmjs.org nuget.org
-      objects.githubusercontent.com ode.js oracle.com packagecloud.io packages.microsoft.com
+      objects.githubusercontent.com oracle.com packagecloud.io packages.microsoft.com
       packagist.org pkg-npm.githubusercontent.com pkg.go.dev pkg.stainless.com pkgs.k8s.io
       platform.claude.com plugins.gradle.org portal.azure.com ppa.launchpad.net
       production.cloudflare.docker.com proxy.golang.org pub.dev public.ecr.aws pypa.io pypi.org
@@ -2201,14 +2482,482 @@
     }
   });
 
+  // ---- environments ----
+
+  // The environment the form is currently EDITING, or null when it is a blank
+  // create form. It is the difference between "leave this alone" and "clear
+  // it": the same two fields — description and variables — are replaced outright
+  // when they belong to a row somebody opened, and left untouched when the form
+  // was never populated. Without it, typing an existing name into an empty form
+  // to add a secret would silently wipe that environment's description and
+  // every variable on it.
+  let envEditing = null;
+  let lastEnvs = [];
+
+  // One vocabulary for where a setup script came from, shared by the card foot
+  // and the editor's header — "recorded from agent" and "written by an agent"
+  // were the same fact in two dialects.
+  const SETUP_FROM = {
+    agent: "written by an agent, then run in the builder",
+    repo: "committed in the repo",
+    manual: "written by hand",
+  };
+
+  // One labelled column per kind of attachment. Absence is stated rather than
+  // left blank: "this environment has no secrets" is a fact somebody came here
+  // to check, and an empty column reads as a rendering failure.
+  function envCol(label, items, empty) {
+    const body = (items && items.length)
+      ? '<div class="val">' + items.map(esc).join("<br />") + "</div>"
+      : '<div class="val none">' + empty + "</div>";
+    return '<div class="env-col"><div class="label">' + label + "</div>" + body + "</div>";
+  }
+
+  // machineFor is the machine list looked up by name. The Environments panel
+  // reads it for the one machine an environment ever names — its builder —
+  // rather than asking the server a second question about a box that is
+  // already in the response beside it.
+  function machineFor(name) {
+    return name ? lastMachines.find((m) => m.name === name) || null : null;
+  }
+
+  // sessionLink renders a HiveMind transcript as an outlined link.
+  //
+  // The href is host-checked on the way out (webui.SessionLink) and escaped
+  // again here, and the session TITLE — which is written by whatever the agent
+  // was doing — never becomes markup: it is a title attribute, so a long one
+  // is a hover rather than a card that stops fitting. rel is set because this
+  // is the one control on the page that leaves the origin.
+  function sessionLink(url, title, label) {
+    return '<a class="btn-outline btn-sm" href="' + esc(url) + '" target="_blank"' +
+      ' rel="noopener noreferrer"' + (title ? ' title="' + esc(title) + '"' : "") +
+      ">" + esc(label) + "</a>";
+  }
+
+  // sessionLinkInline is the same link as prose rather than as a control, for
+  // the foot line where it sits inside a sentence about the setup script.
+  function sessionLinkInline(url, label) {
+    return '<a class="linkish" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' +
+      esc(label) + "</a>";
+  }
+
+  // The dot carries the colour and the word stays quiet — the same badge
+  // anatomy as running/paused/archived one tab over, so the two lists read at
+  // the same glance.
+  function envBadge(st) {
+    const word = st === "ready" || st === "building" || st === "failed" ? st : "draft";
+    return '<span class="badge ' + word + '"><span class="dot"></span>' + word + "</span>";
+  }
+
+  // What a machine made from this environment would boot from. It is the whole
+  // product of a build, so it sits on the head line beside the state rather
+  // than in a column of its own.
+  function envBoots(e) {
+    if (e.state === "ready" && e.snapshot) {
+      return "built " + rel(e.built_at) + " · " + esc(e.snapshot);
+    }
+    // Nothing, mid-build: the strip below already names the machine it is
+    // happening in, and "boots the default image" under a blinking "building"
+    // is a fact that is about to stop being true.
+    return e.state === "building" ? "" : "boots the default image";
+  }
+
+  // The two states that are a situation rather than a fact get a strip under
+  // the head, carrying the machine you would go and look at and the action
+  // that resolves it.
+  function envStrip(e) {
+    if (e.state === "building") {
+      // The live transcript, when there is one. An agent build is minutes of
+      // an unattended agent working, and the log tail is cut to a sentence by
+      // the time it reaches this card — so a link to what it is actually doing
+      // is the difference between a spinner and a build somebody can follow.
+      //
+      // It comes off the BUILDER's own row in the machine list, which the same
+      // poll already fetched: the builder is an ordinary sandbox, and its
+      // vitals carry whatever HiveMind last said about it. A script build has
+      // no agent and therefore no link, which needs no special case.
+      const live = machineFor(e.build_box || (e.name + "-build"));
+      const watch = live && live.hivemind_session_url
+        ? '<div class="chips">' + sessionLink(live.hivemind_session_url,
+            live.hivemind_session_title, "Watch the agent") + "</div>"
+        : "";
+      return '<div class="env-strip building"><div class="msg">Building in <span class="mono">' +
+        esc(e.build_box || (e.name + "-build")) +
+        "</span>. This takes minutes; the card updates itself.</div>" + watch + "</div>";
+    }
+    if (e.state !== "failed" || !e.build_error) return "";
+    // The builder is deliberately left paused on a failure, so the two things
+    // worth offering are a shell in it and adopting its disk as-is. Both are
+    // here rather than in the overflow menu: they only exist in this state.
+    const box = e.build_box;
+    const live = box ? machineFor(box) : null;
+    // The transcript is recorded on the row when the build reports, so it is
+    // here whether or not the builder still is — and on a failed AGENT build it
+    // is usually the fastest way to see what went wrong, because the box is
+    // paused and its log is behind an ssh.
+    const read = e.build_session
+      ? sessionLink(e.build_session, "", "Read what the agent did")
+      : "";
+    const actions = box || read
+      ? '<div class="chips">' +
+          (box && live
+            ? '<button class="btn-outline btn-sm" data-envterm="' + esc(box) +
+              '" data-running="' + (live.state === "running" ? 1 : 0) + '">Open a terminal</button>'
+            : "") +
+          read +
+          (box
+            ? '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
+              '">Keep this disk</button>'
+            : "") + "</div>"
+      : "";
+    return '<div class="env-strip failed"><div class="msg">' + esc(e.build_error) +
+      (box ? ' <span class="mono">' + esc(box) + "</span> is still there." : "") +
+      "</div>" + actions + "</div>";
+  }
+
+  // The foot says what the next build will actually run. "3746 B" was not that
+  // fact; where the script came from, and that an absent one means an agent
+  // writes and then runs one, is.
+  function envFoot(e) {
+    const from = SETUP_FROM[e.setup_from] || "recorded";
+    const what = e.has_setup
+      ? "<strong>Setup script</strong> — " + from +
+        (e.setup_bytes ? " · " + bytes(e.setup_bytes) : "")
+      : "<strong>No setup script</strong> — Build asks an agent to write one, then runs what it wrote";
+    // A script an agent wrote is the only one whose author can be read back,
+    // and the foot is where this card already says where the script came from.
+    // The failed strip carries its own copy of this link because a failure is
+    // read from the top of the card; a succeeded build is read from here.
+    const wrote = e.build_session && e.state !== "failed"
+      ? " · " + sessionLinkInline(e.build_session, "how it was written")
+      : "";
+    return '<div class="env-foot"><div>' + what + wrote + "</div>" +
+      '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">' +
+      (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
+  }
+
+  function envDenials(e) {
+    const domains = e.build_denials || [];
+    if (!domains.length && !e.build_denial_overflow) return "";
+    const rows = domains.map((d) => '<span><span class="mono">' + esc(d.domain) +
+      "</span> · " + d.queries + (d.queries === 1 ? " query" : " queries") + "</span>").join("");
+    const overflow = e.build_denial_overflow
+      ? '<span class="muted">' + e.build_denial_overflow + " more queries omitted</span>"
+      : "";
+    return '<div class="env-strip denials"><strong>Blocked by egress policy during the last build</strong>' +
+      '<div class="domains">' + rows + overflow + "</div></div>";
+  }
+
+  function envCard(e) {
+    const st = e.state || "draft";
+    const buildLabel = st === "ready" || st === "failed" ? "Rebuild" : "Build";
+    const envRepos = e.repos || [];
+    const canLaunch = st === "ready" && launchSub && envRepos.length > 0;
+    let launchAction = "";
+    if (canLaunch && envRepos.length === 1) {
+      launchAction = '<button class="btn-primary btn-sm" data-envlaunch="' + esc(e.name) +
+        '" data-repo="' + esc(envRepos[0]) + '">🚀 Launch</button>';
+    } else if (canLaunch) {
+      launchAction = '<div class="menu"><button type="button" class="btn-primary btn-sm" data-menu' +
+        ' aria-haspopup="true" aria-expanded="false">🚀 Launch</button><div class="menu-pop hidden">' +
+        envRepos.map((slug) => '<button data-envlaunch="' + esc(e.name) + '" data-repo="' +
+          esc(slug) + '">' + esc(slug) + '</button>').join("") + "</div></div>";
+    }
+    // One action plus a menu, which is this console's own vocabulary: the
+    // machine card lost its row of outlined buttons for being the loudest
+    // thing on it, and a five-button environment row was the same mistake.
+    const menu = '<div class="menu"><button type="button" class="btn-icon" data-menu' +
+      ' aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">' +
+      DOTS + '</button><div class="menu-pop hidden">' +
+      '<button data-envedit="' + esc(e.name) + '">Edit environment…</button>' +
+      (canLaunch ? '<button data-envbuild="' + esc(e.name) + '">Rebuild</button>' : '') +
+      '<div class="sep"></div>' +
+      '<button class="btn-danger" data-envdel="' + esc(e.name) + '">Delete…</button>' +
+      "</div></div>";
+    return '<div class="card env-card">' +
+      '<div class="m-head">' +
+        '<div class="m-title"><span class="name mono">' + esc(e.name) + "</span>" +
+          envBadge(st) + '<span class="spec">' + envBoots(e) + "</span></div>" +
+        '<div class="m-actions">' +
+          launchAction +
+          // A disabled "Build" next to a badge that says building is a control
+          // that only restates the state. It comes back when the build ends.
+          (st === "building" || canLaunch ? "" :
+            '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + '">' +
+            buildLabel + "</button>") +
+          menu +
+        "</div>" +
+      "</div>" +
+      (e.description ? '<div class="env-sub">' + esc(e.description) + "</div>" : "") +
+      envStrip(e) +
+      envDenials(e) +
+      '<div class="env-grid">' +
+        envCol("Repos", e.repos, "none") +
+        envCol("Secrets", e.secrets, "none") +
+        envCol("Egress", e.rules, "unrestricted") +
+        envCol("Variables", (e.vars || []).map((v) => v.name), "none") +
+      "</div>" +
+      envFoot(e) +
+    "</div>";
+  }
+
+  function renderEnvs(list) {
+    lastEnvs = list;
+    const host = $("env-list");
+    // Same bargain the machine list makes with the 4s poll: a repaint rebuilds
+    // every card, which would snap an open ··· menu shut under the cursor.
+    if (host.querySelector(".menu-pop:not(.hidden)")) return;
+    host.innerHTML = list.map(envCard).join("");
+    // One invitation at a time. The empty card's own button is the call to
+    // action; the header's would be a second one three lines above it.
+    const off = !$("envs-disabled").classList.contains("hidden");
+    const empty = !off && list.length === 0;
+    $("envs-empty").classList.toggle("hidden", !empty);
+    $("env-new").classList.toggle("hidden", off || empty);
+
+    host.querySelectorAll("button[data-envbuild]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envbuild;
+        mutate("envbuild:" + name, btn, async () => {
+          await api("/api/environments/" + encodeURIComponent(name) + "/build", { method: "POST" });
+          toast("building " + name + " — this takes minutes; the card updates itself");
+        });
+      }));
+    host.querySelectorAll("button[data-envlaunch]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const href = launchURL(btn.dataset.repo, btn.dataset.envlaunch);
+        if (href) window.location.assign(href);
+      }));
+    host.querySelectorAll("button[data-envterm]").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        openTerminal(btn.dataset.envterm, btn.dataset.running === "1", btn)));
+    host.querySelectorAll("button[data-envcapture]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envcapture;
+        if (!confirm("Keep " + name + "-build exactly as it is and make it this environment's base image?")) return;
+        mutate("envcapture:" + name, btn, async () => {
+          // Synchronous and slow: it packs a rootfs. The button stays disabled
+          // for the whole wait, which is the honest progress indicator.
+          toast("keeping " + name + "'s disk — this takes a few minutes");
+          await api("/api/environments/" + encodeURIComponent(name) + "/capture", { method: "POST" });
+          toast(name + " captured");
+        });
+      }));
+    host.querySelectorAll("button[data-envscript]").forEach((btn) =>
+      btn.addEventListener("click", () => openEnvScript(btn.dataset.envscript, btn)));
+    host.querySelectorAll("button[data-envedit]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const e = list.find((x) => x.name === btn.dataset.envedit);
+        if (!e) return;
+        envEditing = e.name;
+        $("env-name").value = e.name;
+        $("env-desc").value = e.description || "";
+        $("env-repos").value = (e.repos || []).join(", ");
+        $("env-secrets").value = (e.secrets || []).join(", ");
+        $("env-rules").value = (e.rules || []).join(", ");
+        $("env-vars").value = (e.vars || []).map((v) => v.name + "=" + v.value).join("\n");
+        $("env-open").checked = false;
+        $("env-form-title").textContent = "Editing " + e.name;
+        $("env-form-hint").textContent = "the description and variables below replace what is stored";
+        $("env-save").textContent = "Save changes";
+        openEnvForm();
+      }));
+    host.querySelectorAll("button[data-envdel]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envdel;
+        if (!confirm("Delete environment " + name + "? Its secrets, repos and rule-sets are kept — " +
+            "only the environment, its variables and its base image binding go.")) return;
+        mutate("envdel:" + name, btn, async () => {
+          const res = await api("/api/environments/" + encodeURIComponent(name), { method: "DELETE" });
+          // What SURVIVED is the point of the verb, so it is said rather than
+          // left for somebody to go and check.
+          const kept = (res.repos || []).length + (res.secrets || []).length + (res.rules || []).length;
+          // Variables and the base image are the two things a delete normally
+          // DOES take, so an environment that adopted them and gave them back
+          // has to say so — otherwise somebody who knows the rule assumes the
+          // worst about configuration that is still sitting there.
+          const inherited = (res.kept_vars || []).length;
+          toast("deleted " + name +
+            (kept ? " — " + kept + " attached object(s) still carry the tag" : "") +
+            (res.removed_rule ? "; its egress rule-set went with it" : "") +
+            (inherited ? "; " + inherited + " variable(s) it adopted were kept" : "") +
+            (res.kept_snapshot ? "; the tag still boots from " + res.kept_snapshot : ""));
+          if (envEditing === name) resetEnvForm();
+        });
+      }));
+    reapplyInflight(host);
+  }
+
+  // Called before renderEnvs, which is what decides whether the header's
+  // "New environment" is shown — it depends on this having been set first.
+  function envsDisabled(off) {
+    $("envs-disabled").classList.toggle("hidden", !off);
+    if (off) closeEnvForm();
+  }
+
+  // The form is a mode. Opening it scrolls it into view rather than jumping
+  // the page to the top, which is what an edit used to do from four cards down.
+  function openEnvForm() {
+    $("env-form-card").classList.remove("hidden");
+    $("env-form-card").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    $("env-name").focus();
+  }
+
+  function closeEnvForm() {
+    $("env-form-card").classList.add("hidden");
+  }
+
+  function resetEnvForm() {
+    envEditing = null;
+    for (const id of ["env-name", "env-desc", "env-repos", "env-secrets", "env-rules", "env-vars"]) {
+      $(id).value = "";
+    }
+    $("env-open").checked = false;
+    $("env-form-title").textContent = "New environment";
+    $("env-form-hint").textContent = "the name is the tag machines carry to get all of this";
+    $("env-save").textContent = "Save environment";
+  }
+
+  function newEnvironment() {
+    resetEnvForm();
+    openEnvForm();
+  }
+
+  $("env-new").addEventListener("click", newEnvironment);
+  $("env-empty-new").addEventListener("click", newEnvironment);
+  $("env-cancel").addEventListener("click", () => { resetEnvForm(); closeEnvForm(); });
+
+  function splitList(id) {
+    return $(id).value.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+  }
+
+  $("env-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("env-name").value.trim().toLowerCase();
+    if (!name) return toast("name is required", true);
+    if (!TAG_RE.test(name)) {
+      return toast("bad name " + name + ": lowercase letters, digits, dashes (max 40)", true);
+    }
+    const vars = [];
+    for (const line of $("env-vars").value.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      const eq = t.indexOf("=");
+      if (eq <= 0) return toast("bad variable " + t + ": write it as NAME=value", true);
+      vars.push({ name: t.slice(0, eq).trim(), value: t.slice(eq + 1) });
+    }
+    const body = {
+      repos: splitList("env-repos").map((slug) => ({ slug: slug })),
+      secrets: splitList("env-secrets"),
+      rules: splitList("env-rules"),
+      open_egress: $("env-open").checked,
+    };
+    // Only a form that was POPULATED from a card may clear these two. On a blank
+    // create form an empty box means "I did not fill this in", not "delete what
+    // is there" — and typing an existing name into one is how somebody adds a
+    // secret to an environment they already have.
+    const editing = envEditing === name;
+    const desc = $("env-desc").value.trim();
+    if (editing || desc) body.description = desc;
+    if (editing || vars.length) body.vars = vars;
+    const btn = $("env-save");
+    btn.disabled = true;
+    try {
+      const url = "/api/environments/" + encodeURIComponent(name);
+      try {
+        await api(url, { method: "PUT", body: body });
+      } catch (e1) {
+        // An environment's name IS its tag, and tags are older than
+        // environments — so this name may already be carrying somebody's repos,
+        // secrets, variables, base image or running machines, all of which the
+        // environment would adopt on the spot. The server refuses that create
+        // and says what is there; the decision is the person's, so it is put to
+        // them in their own words and the same request is sent again.
+        //
+        // Matched on `code`, never on the sentence: the wording is the server's
+        // to improve.
+        if (e1.code !== "env_tag_in_use" || !confirm(e1.message + "\n\nCreate it anyway?")) throw e1;
+        await api(url, { method: "PUT", body: Object.assign({}, body, { adopt: true }) });
+      }
+      toast(name + " saved");
+      resetEnvForm();
+      closeEnvForm();
+      await refresh();
+    } catch (e2) {
+      toast(e2.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- the setup script editor ----
+
+  let envScriptName = null;
+
+  async function openEnvScript(name, btn) {
+    btn.disabled = true;
+    try {
+      const got = await api("/api/environments/" + encodeURIComponent(name) + "/script");
+      envScriptName = name;
+      $("env-script-title").textContent = ".sparkbox/setup.sh — " + name;
+      $("env-script-origin").textContent = got.from
+        ? (SETUP_FROM[got.from] || "recorded from " + got.from)
+        : "nothing recorded yet";
+      $("env-script").value = got.script || "";
+      $("env-script-note").textContent = "";
+      $("env-script-panel").classList.remove("hidden");
+      $("env-script").focus();
+      $("env-script-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $("env-script-save").addEventListener("click", async () => {
+    if (!envScriptName) return;
+    const btn = $("env-script-save");
+    btn.disabled = true;
+    try {
+      await api("/api/environments/" + encodeURIComponent(envScriptName) + "/script",
+        { method: "PUT", body: { script: $("env-script").value } });
+      $("env-script-origin").textContent = SETUP_FROM.manual;
+      $("env-script-note").textContent = "saved — the next build runs this";
+      toast("setup script saved for " + envScriptName);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("env-script-close").addEventListener("click", () => {
+    envScriptName = null;
+    $("env-script-panel").classList.add("hidden");
+  });
+
   // ---- tabs / shell ----
 
-  const initialTab = window.location.hash === "#repos" ? "repos" : "machines";
+  // The tab a link can land on directly. #machines is here now that
+  // Environments leads the bar and is what a bare visit opens: the machine list
+  // used to be reachable by simply arriving, and a deep link to it must not
+  // stop existing because the default moved.
+  const HASH_TABS = { "#repos": "repos", "#environments": "environments", "#machines": "machines" };
+  // ENVIRONMENTS IS THE LANDING TAB. An environment is the thing a person
+  // decides — the repos, secrets, egress and disk a machine will get — and a
+  // machine is what they get afterwards; opening on the composition rather than
+  // on the instances puts the console's first screen on the choice being made.
+  // The bar's first tab and the default are the same tab on purpose: an
+  // interface whose second tab is the one that opens reads as a bug.
+  const initialTab = HASH_TABS[window.location.hash] || "environments";
 
   document.querySelectorAll(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
       $("tab-machines").classList.toggle("hidden", btn.dataset.tab !== "machines");
+      $("tab-environments").classList.toggle("hidden", btn.dataset.tab !== "environments");
       $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
       $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
       $("tab-repos").classList.toggle("hidden", btn.dataset.tab !== "repos");
@@ -2237,9 +2986,10 @@
 
   async function refresh() {
     try {
-      const [rm, ru, rs, rn, rnr, rrp] = await Promise.all([
+      const [rm, ru, rs, rn, rnr, rrp, rev] = await Promise.all([
         fetch("/api/machines"), fetch("/api/usage"), fetch("/api/secrets"),
         fetch("/api/snapshots"), fetch("/api/network-rules"), fetch("/api/repos"),
+        fetch("/api/environments"),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
@@ -2306,6 +3056,18 @@
         fresh = false;
         toast("repos refresh failed: " + (await errText(rrp)), true);
       }
+      // 501 = no environment store on this host; same treatment as the two above.
+      if (rev.status === 501) {
+        envsDisabled(true);
+        renderEnvs([]);
+      } else if (rev.ok) {
+        envsDisabled(false);
+        const list = await rev.json();
+        renderEnvs(Array.isArray(list) ? list : []);
+      } else {
+        fresh = false;
+        toast("environments refresh failed: " + (await errText(rev)), true);
+      }
       if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
       if (!timer) timer = setInterval(refresh, 4000);
     } catch (e) {
@@ -2324,6 +3086,7 @@
     try {
       const me = await api("/api/me");
       termSub = me.terminal_subdomain || "";
+      launchSub = me.launch_subdomain || "";
       const who = $("who");
       who.textContent = me.handle + (me.operator ? " · operator" : "");
       who.className = "badge" + (me.operator ? " op" : "");

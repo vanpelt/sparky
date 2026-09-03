@@ -28,6 +28,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -65,15 +66,25 @@ func (c *ctlContext) Value(k any) any   { return c.vals[k] }
 // asked for. Only the first Exit is kept: a real session is closed by it, so
 // anything a buggy handler wrote afterwards would never reach a client either.
 type ctlSession struct {
-	cmd    []string
-	ctx    *ctlContext
+	cmd []string
+	ctx *ctlContext
+	// in is the client's stdin, for the two commands that read one
+	// (`secret set`, `env script --set`). A nil one is a closed stdin rather
+	// than a reader that returns nothing forever, which is what an
+	// io.ReadAll on this session used to spin on.
+	in     io.Reader
 	out    bytes.Buffer
 	stderr bytes.Buffer
 	code   int
 	exited bool
 }
 
-func (s *ctlSession) Read([]byte) (int, error)    { return 0, nil }
+func (s *ctlSession) Read(p []byte) (int, error) {
+	if s.in == nil {
+		return 0, io.EOF
+	}
+	return s.in.Read(p)
+}
 func (s *ctlSession) Write(p []byte) (int, error) { return s.out.Write(p) }
 func (s *ctlSession) Close() error                { return nil }
 func (s *ctlSession) CloseWrite() error           { return nil }
@@ -220,6 +231,17 @@ func newCtlStackWith(t *testing.T, roster *fakeRoster, tweaks ...func(*ctlops.Co
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { schedStore.Close() }) //nolint:errcheck
+	// The environment store IS wired by default, unlike the secrets and
+	// template-binding stores: those two have a shipped "not enabled on this
+	// host" rendering that a fixture which always wired them could not
+	// exercise, and `env` has none to protect — it is new. The disabled
+	// rendering is pinned by TestControlEnvNotEnabled, which takes it away
+	// again.
+	envStore, err := envs.Open(filepath.Join(dir, "sparkbox.db"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { envStore.Close() }) //nolint:errcheck
 
 	// alice's key is the one the fake session presents, so `keys list` marks it
 	// and `whoami` echoes it.
@@ -265,6 +287,7 @@ func newCtlStackWith(t *testing.T, roster *fakeRoster, tweaks ...func(*ctlops.Co
 		cfg.Nodes = roster
 	}
 	cfg.GatewayGuestSubnet = "10.200.0.0/20"
+	cfg.Environments = envStore
 	for _, tweak := range tweaks {
 		tweak(&cfg)
 	}
@@ -637,6 +660,99 @@ func TestControlGolden(t *testing.T) {
 	}, {
 		name: "node with an unknown subcommand", handle: "opsy", args: []string{"node", "wat"},
 		wantErr: "unknown node command \"wat\"\r\n" + nodeHelp, wantExit: 2,
+
+		// ---- environments. These five rows run in order and share the stack:
+		// an empty listing, the create, what it looks like, and the removal.
+	}, {
+		name: "env ls with nothing yet", handle: "alice", args: []string{"env", "ls"},
+		wantOut: "no environments yet — create one with:\r\n" +
+			"  ssh ctl@hivemind.tools env create web --repo wandb/hivemind\r\n",
+		wantExit: 0,
+	}, {
+		name: "env create names it and says how to use it", handle: "alice",
+		args: []string{"env", "create", "web", "--description", "the web box"},
+		wantOut: "created web — nothing composed yet  (draft)\r\n" +
+			"use it now with:  ssh new@hivemind.tools -- web\r\n",
+		wantExit: 0,
+	}, {
+		// The image line is printed even though there is no image: "this boots
+		// the stock disk" is the fact people are surprised by, and a line that
+		// only appeared in the other case could not tell them.
+		name: "env show renders the composition", handle: "alice", args: []string{"env", "show", "web"},
+		wantOut: "web                  draft\r\n" +
+			"  about        the web box\r\n" +
+			"  image        none — sandboxes on this tag boot the stock image\r\n" +
+			"  setup        none\r\n" +
+			"\r\n" +
+			"nothing composed yet — add to it with:\r\n" +
+			"  ssh ctl@hivemind.tools env set web --repo <owner>/<name> --secret <NAME> --var K=V\r\n",
+		wantExit: 0,
+	}, {
+		name: "env ls lists it", handle: "alice", args: []string{"env", "ls"},
+		wantOut:  "web                  draft    nothing composed yet       the web box\r\n",
+		wantExit: 0,
+	}, {
+		// Masked exactly like every other owner-scoped not-found: alice's `web`
+		// is real, and mallory must not be able to tell.
+		name: "env show of someone else's environment", handle: "mallory", args: []string{"env", "show", "web"},
+		wantErr: "sparkbox: no environment named \"web\"\r\n", wantExit: 1,
+	}, {
+		name: "env rm removes it", handle: "alice", args: []string{"env", "rm", "web"},
+		wantOut: "removed web\r\n", wantExit: 0,
+	}, {
+		name: "env rm of an environment nobody has", handle: "alice", args: []string{"env", "rm", "ghost"},
+		wantErr: "sparkbox: no environment named \"ghost\"\r\n", wantExit: 1,
+	}, {
+		name: "env with an unknown subcommand", handle: "alice", args: []string{"env", "wat"},
+		wantErr: "unknown env command \"wat\"\r\n" + envUsage, wantExit: 2,
+	}, {
+		// The two build verbs, named without the thing they act on. Both print
+		// the usage rather than guessing, exactly as `show` and `rm` do — there
+		// is no default environment and inventing one would build somebody's
+		// project on a word they did not type.
+		name: "env build with nothing to build", handle: "alice", args: []string{"env", "build"},
+		wantErr: envUsage, wantExit: 2,
+	}, {
+		// `rebuild` is `build` under a second name, so it has to reach the same
+		// handler and print the same usage. If it fell through to `default:` it
+		// would answer `unknown env command "rebuild"` — for a word this
+		// platform's own template_missing refusal now tells people to type.
+		name: "env rebuild with nothing to rebuild", handle: "alice", args: []string{"env", "rebuild"},
+		wantErr: envUsage, wantExit: 2,
+	}, {
+		name: "env capture with nothing to capture", handle: "alice", args: []string{"env", "capture"},
+		wantErr: envUsage, wantExit: 2,
+	}, {
+		// This fixture has no template-binding store, which is the shape of a
+		// host that can run sandboxes and cannot point a tag at a disk — so a
+		// build is impossible here for a reason that has nothing to do with the
+		// name typed. It is refused UP FRONT, before the environment is even
+		// looked up: the alternative is finding out after a builder VM has run
+		// somebody's setup script for ten minutes.
+		//
+		// The name is one nobody has, and that is the point. A refusal that
+		// reached the store first would answer `ghost` and `web` differently
+		// and leak which environments exist to anyone who can read an exit.
+		name: "env build on a host that cannot bind a disk", handle: "alice",
+		args:    []string{"env", "build", "ghost"},
+		wantErr: "sparkbox: template bindings are not enabled on this host\r\n", wantExit: 1,
+	}, {
+		name: "env capture on a host that cannot bind a disk", handle: "alice",
+		args:    []string{"env", "capture", "ghost"},
+		wantErr: "sparkbox: template bindings are not enabled on this host\r\n", wantExit: 1,
+	}, {
+		// The two doors that parse --env only so they can refuse it. Without
+		// the flag in parseCreateArgs these would be read as the two tags
+		// `--env` and `web`, silently dropped by the tag grammar.
+		name: "fork refuses --env", handle: "alice", args: []string{"fork", "snap", "box", "--env", "web"},
+		wantErr: "sparkbox: fork has no --env: a fork already names the disk it comes from — " +
+			"the snapshot. use `--tag <env>` for that environment's secrets, repos and egress\r\n",
+		wantExit: 2,
+	}, {
+		name: "tags refuses --env", handle: "alice", args: []string{"tags", "alice-box", "--env", "web"},
+		wantErr: "sparkbox: tags has no --env: an environment decides which disk a box boots from, " +
+			"so it is a create-time choice — recreate the box, or add the tag alone with `tags <name> <env>`\r\n",
+		wantExit: 2,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := st.run(t, tc.handle, tc.args...)

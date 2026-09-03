@@ -166,10 +166,13 @@ type Handler struct {
 	// the <name>.<xtermSub>.<domain> link itself, and hide the Terminal button
 	// entirely on a host that serves no terminals.
 	xtermSub string
-	secure   bool // set the Secure flag when clearing the session cookie
-	log      *slog.Logger
-	loginURL string // where unauthenticated browsers are sent
-	origin   string // first-party Origin accepted by the CSRF gate
+	// launchSub is the reserved launch-link label. Empty hides environment
+	// launch controls, just as an empty xtermSub hides terminal controls.
+	launchSub string
+	secure    bool // set the Secure flag when clearing the session cookie
+	log       *slog.Logger
+	loginURL  string // where unauthenticated browsers are sent
+	origin    string // first-party Origin accepted by the CSRF gate
 
 	// probe carries this machine's name and the fleet dialer: together they
 	// decide which rows are remote and how long their port probes may take.
@@ -201,6 +204,13 @@ type Handler struct {
 	// no binding store, where the column is simply empty. Set by
 	// SetTemplateTags.
 	binds TemplateTags
+
+	// envs is the control plane, and it is the only store-shaped field here
+	// that is not a store: an environment composes five of them under an
+	// ordering rule, so this panel goes through ctlops rather than reaching
+	// past it. Optional: nil answers 501 from every environment route. Set by
+	// SetEnvironments. See environments.go.
+	envs Environments
 }
 
 // TemplateTags is the one question this console asks of the tag-to-base-image
@@ -290,6 +300,11 @@ func (h *Handler) SetGitHubApp(a *ghapp.App) { h.app = a }
 // are both supported configurations.
 func (h *Handler) SetGitHubUserAuth(a *ghuser.Manager) { h.userAuth = a }
 
+// SetLaunchSubdomain gives ready environment cards their go.<domain> link.
+// The launch service remains the authority for ownership and repo membership;
+// this value only controls whether the SPA can render a route to that service.
+func (h *Handler) SetLaunchSubdomain(sub string) { h.launchSub = strings.Trim(sub, ".") }
+
 // SetTemplateTags gives the Snapshots panel its Tags column. It is a seam for
 // the same reason SetGitHubApp is: a host with no binding store still serves
 // this console, still lists snapshots and still forks them — it simply has no
@@ -334,6 +349,13 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("GET /api/network-rules", require(h.listNetRules))
 	mux.Handle("PUT /api/network-rules/{name}", mutate(h.putNetRule))
 	mux.Handle("DELETE /api/network-rules/{name}", mutate(h.deleteNetRule))
+	mux.Handle("GET /api/environments", require(h.listEnvironments))
+	mux.Handle("PUT /api/environments/{name}", mutate(h.putEnvironment))
+	mux.Handle("DELETE /api/environments/{name}", mutate(h.deleteEnvironment))
+	mux.Handle("GET /api/environments/{name}/script", require(h.getEnvScript))
+	mux.Handle("PUT /api/environments/{name}/script", mutate(h.putEnvScript))
+	mux.Handle("POST /api/environments/{name}/build", mutate(h.buildEnvironment))
+	mux.Handle("POST /api/environments/{name}/capture", mutate(h.captureEnvironment))
 	mux.Handle("GET /api/repos", require(h.listRepos))
 	mux.Handle("POST /api/repos/{slug}/authorize", mutate(h.authorizeRepo))
 	mux.Handle("PUT /api/repos/{slug}", mutate(h.putRepo))
@@ -377,6 +399,9 @@ type meResponse struct {
 	// a host with no --proxy or no --xterm-subdomain must not offer a link to
 	// a name that resolves nowhere.
 	TerminalSubdomain string `json:"terminal_subdomain,omitempty"`
+	// LaunchSubdomain is the reserved go-service label used by ready
+	// environment cards. Omitted when launch links are disabled.
+	LaunchSubdomain string `json:"launch_subdomain,omitempty"`
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
@@ -384,6 +409,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meResponse{
 		Handle: sess.Handle, Email: sess.Email, Operator: sess.Operator,
 		TerminalSubdomain: h.xtermSub,
+		LaunchSubdomain:   h.launchSub,
 	})
 }
 
@@ -435,6 +461,19 @@ type sandboxView struct {
 	MemUsedMB        *int64        `json:"mem_used_mb,omitempty"`
 	CPUSeconds       *float64      `json:"cpu_seconds,omitempty"`
 	EnvUndecryptable bool          `json:"env_undecryptable,omitempty"`
+	// The HiveMind reading, from the same vitals reply the meters come from and
+	// therefore free. It is what lets the Environments tab link a build in
+	// flight to the transcript of the agent running it: the builder is an
+	// ordinary sandbox in this very list, so the panel finds it by name rather
+	// than asking the control plane a second question about it.
+	//
+	// Absent — not empty — on a host with no --hivemind-api and on a machine
+	// that has never heard from HiveMind about this sandbox. "No session" and
+	// "nobody asks" render identically here (no link), which is right for a
+	// dashboard and is why nothing branches on the difference.
+	HiveMindSessionURL   string `json:"hivemind_session_url,omitempty"`
+	HiveMindSessionTitle string `json:"hivemind_session_title,omitempty"`
+	HiveMindActive       bool   `json:"hivemind_active,omitempty"`
 }
 
 func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
@@ -487,6 +526,14 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 				}
 				view.MemUsedMB, view.CPUSeconds = v.MemUsedMB, v.CPUSeconds
 				*scan = v
+				if hm := v.HiveMind; hm != nil {
+					// SessionLink, because a node is a separate trust domain
+					// and this is the one field in the reply that becomes an
+					// href. The title is painted with textContent by the page.
+					view.HiveMindSessionURL = webui.SessionLink(hm.SessionURL)
+					view.HiveMindSessionTitle = hm.SessionTitle
+					view.HiveMindActive = hm.Presence.Live()
+				}
 			}(b, &views[i], &scans[i])
 		}
 	}
@@ -1994,4 +2041,26 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// writeOpErr is writeErr for an error that may be a *ctlops.Error, adding the
+// machine token as `code` alongside the sentence.
+//
+// The console's error body has always been `{"error": "<sentence>"}` and stays
+// that way — every existing caller reads that field and keeps working. What it
+// could not do is tell one refusal from another without matching on prose,
+// which is exactly the coupling `Code` exists to prevent, and the environment
+// adoption conflict is the first refusal this surface has to ACT on rather than
+// merely display: the page re-sends the request with `adopt` set.
+//
+// Only the code travels, never Details. The console renders its own sentence
+// from what the user typed and has the composition on screen already; a nested
+// object here would be a second, staler copy of the Environments tab.
+func writeOpErr(w http.ResponseWriter, code int, err error) {
+	body := map[string]string{"error": err.Error()}
+	var typed *ctlops.Error
+	if errors.As(err, &typed) && typed.Code != "" {
+		body["code"] = typed.Code
+	}
+	writeJSON(w, code, body)
 }

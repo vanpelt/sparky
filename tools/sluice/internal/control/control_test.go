@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sluice/internal/denials"
 	"github.com/vanpelt/sparky/tools/sluice/internal/ipmap"
 	"github.com/vanpelt/sparky/tools/sluice/internal/policy"
 	"github.com/vanpelt/sparky/tools/sluice/internal/report"
@@ -40,7 +41,7 @@ func TestReportJoinsPerTapDomainsAndLabelsByVM(t *testing.T) {
 			9: {addr("142.250.72.14"): {TxBytes: 10, RxBytes: 5000}}, // sbtap4 -> youtube
 		},
 	}
-	s := New(fm, im, policy.New(nil), nil, nil)
+	s := New(fm, im, policy.New(nil), nil, nil, nil)
 
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/report.json", nil))
@@ -77,7 +78,7 @@ func TestReportJoinsPerTapDomainsAndLabelsByVM(t *testing.T) {
 func TestPutPolicyReplacesTapsAndPokes(t *testing.T) {
 	pol := policy.New(nil)
 	poked := make(chan struct{}, 1)
-	s := New(nil, ipmap.New(), pol, func() { poked <- struct{}{} }, nil)
+	s := New(nil, ipmap.New(), pol, func() { poked <- struct{}{} }, nil, nil)
 
 	body := `{"taps":{"sbtap3":["github.com","*.githubusercontent.com"]}}`
 	rr := httptest.NewRecorder()
@@ -102,7 +103,7 @@ func TestReadyTapWaitsForReconciledAttachment(t *testing.T) {
 	s := New(fm, ipmap.New(), policy.New(nil), func() {
 		fm.ready["sbtap3"] = true
 		poked <- struct{}{}
-	}, nil)
+	}, nil, nil)
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/ready/sbtap3", nil))
 	if rr.Code != http.StatusNoContent {
@@ -116,11 +117,38 @@ func TestReadyTapWaitsForReconciledAttachment(t *testing.T) {
 }
 
 func TestPutPolicyRejectsBadPattern(t *testing.T) {
-	s := New(nil, ipmap.New(), policy.New(nil), nil, nil)
+	s := New(nil, ipmap.New(), policy.New(nil), nil, nil, nil)
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest("PUT", "/policy",
 		strings.NewReader(`{"taps":{"sbtap3":["*"]}}`)))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("bad pattern should 400, got %d", rr.Code)
+	}
+}
+
+func TestDenialCaptureLifecycle(t *testing.T) {
+	denied := denials.New()
+	s := New(nil, ipmap.New(), policy.New(nil), nil, nil, denied)
+
+	start := httptest.NewRecorder()
+	s.Handler().ServeHTTP(start, httptest.NewRequest("POST", "/denials/sbtap3/start",
+		strings.NewReader(`{"capture_id":"box-123"}`)))
+	if start.Code != http.StatusNoContent {
+		t.Fatalf("start status = %d, body=%s", start.Code, start.Body.String())
+	}
+	denied.Record("sbtap3", "registry.npmjs.org.", "A")
+
+	finish := httptest.NewRecorder()
+	s.Handler().ServeHTTP(finish, httptest.NewRequest("POST", "/denials/sbtap3/finish",
+		strings.NewReader(`{"capture_id":"box-123"}`)))
+	if finish.Code != http.StatusOK {
+		t.Fatalf("finish status = %d, body=%s", finish.Code, finish.Body.String())
+	}
+	var got denials.Capture
+	if err := json.Unmarshal(finish.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Domains) != 1 || got.Domains[0].Name != "registry.npmjs.org" {
+		t.Fatalf("capture = %+v", got)
 	}
 }

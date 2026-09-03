@@ -229,6 +229,8 @@ spec:
           command:
             - /usr/local/sbin/sparkbox-sluice-entrypoint
           env:
+            - name: SPARKBOX_GUEST_SUBNET
+              value: 172.30.0.0/20
             - name: SPARKBOX_SLUICE_DNS_IP
               value: 172.30.0.53
             - name: SPARKBOX_SLUICE_SOCKET

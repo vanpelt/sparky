@@ -257,6 +257,17 @@ func (h *Handler) routes() []route {
 		{"POST", "/v1/repos/check", "repo.check", authRead, h.checkRepos},
 		{"DELETE", "/v1/repos/{host}/{owner}/{name}", "repo.rm", authMutate, h.removeRepo},
 
+		// Environments — the named object over the tag primitive, and the one
+		// family here with a verb that boots a VM. See environments.go.
+		{"GET", "/v1/environments", "env.list", authRead, h.listEnvironments},
+		{"POST", "/v1/environments", "env.set", authMutate, h.putEnvironment},
+		{"GET", "/v1/environments/{name}", "env.get", authRead, h.getEnvironment},
+		{"DELETE", "/v1/environments/{name}", "env.rm", authMutate, h.deleteEnvironment},
+		{"GET", "/v1/environments/{name}/script", "env.script", authRead, h.getEnvScript},
+		{"PUT", "/v1/environments/{name}/script", "env.script.set", authMutate, h.putEnvScript},
+		{"POST", "/v1/environments/{name}/build", "env.build", authMutate, h.buildEnvironment},
+		{"POST", "/v1/environments/{name}/capture", "env.capture", authMutate, h.captureEnvironment},
+
 		// Account.
 		{"GET", "/v1/account/keys", "keys.list", authRead, h.listKeys},
 		{"POST", "/v1/account/keys", "keys.add", authMutate, h.addKey},

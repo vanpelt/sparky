@@ -140,6 +140,39 @@ func (f *Fleet) NetUsage(ctx context.Context, name string) (netpush.VMUsage, err
 	return u, nil
 }
 
+type netDenialNode interface {
+	NetDenials(context.Context, string, bool) (netpush.DenialCapture, error)
+}
+
+// BeginBuildDenials arms a build-scoped denial capture on the machine holding
+// name. An older node may not implement the optional extension; callers treat
+// that as unavailable observability rather than a reason to fail a build.
+func (f *Fleet) BeginBuildDenials(ctx context.Context, name string) error {
+	n, err := f.route("net.denials", name)
+	if err != nil {
+		return err
+	}
+	d, ok := n.(netDenialNode)
+	if !ok {
+		return nodelink.NoSluice(n.Name())
+	}
+	_, err = d.NetDenials(ctx, name, true)
+	return err
+}
+
+// FinishBuildDenials reads the current sandbox incarnation's capture.
+func (f *Fleet) FinishBuildDenials(ctx context.Context, name string) (netpush.DenialCapture, error) {
+	n, err := f.route("net.denials", name)
+	if err != nil {
+		return netpush.DenialCapture{}, err
+	}
+	d, ok := n.(netDenialNode)
+	if !ok {
+		return netpush.DenialCapture{}, nodelink.NoSluice(n.Name())
+	}
+	return d.NetDenials(ctx, name, false)
+}
+
 // NetMetered reports whether the machine holding a sandbox meters it at all, so
 // a caller can render "not measured here" rather than a panel of zeroes. It
 // costs a round trip and is meant for the surface that is about to render one.

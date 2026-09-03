@@ -59,6 +59,14 @@ def _machines(tick):
          "cpu_seconds": None, "image": "universal", "last_active": _iso(600),
          "net_rx_bytes": 48213, "net_tx_bytes": 9004,
          "pinned": False, "env_undecryptable": False, "tags": [],
+         # AT RISK: an unpushed commit and a dirty tree exist in this VM and
+         # nowhere else, so removing the machine loses them — the red banner,
+         # and the one that also has to carry "behind" when both are true.
+         "repos": [
+             {"slug": "wandb/weave", "path": "/home/sparky/weave", "branch": "spike",
+              "upstream": "origin/spike", "ahead": 2, "behind": 3, "dirty": True,
+              "state": "ok"},
+         ],
          # The port strip: the default port first, then this hostname's other
          # ports, then any extra hostname. "pinned" is a port the owner has an
          # opinion about (the only kind that can be forgotten); an unpinned one
@@ -76,6 +84,18 @@ def _machines(tick):
          "net_rx_bytes": 4923847112, "net_tx_bytes": 812394002,
          "pinned": True, "env_undecryptable": False, "tags": ["ml", "prod"],
          "turbo": True, "base_vcpus": 4, "base_mem_mb": 8192,
+         # BEHIND ONLY: somebody else pushed and this checkout has not pulled.
+         # Nothing here is at risk, so the card's banner is amber. The two repo
+         # banners are the reason both of these fixtures carry repo state: the
+         # colour is the whole point and neither variant is visible without one.
+         "repos": [
+             {"slug": "wandb/core", "path": "/home/sparky/core", "branch": "main",
+              "upstream": "origin/main", "ahead": 0, "behind": 7, "dirty": False,
+              "state": "ok"},
+             {"slug": "wandb/app", "path": "/home/sparky/app", "branch": "main",
+              "upstream": "origin/main", "ahead": 0, "behind": 0, "dirty": False,
+              "state": "ok"},
+         ],
          # Enough ports to make the strip scroll, which is what it is for.
          "routes": [
              {"subdomain": "brave-meadow", "port": 8080, "visibility": "private",
@@ -99,6 +119,32 @@ def _machines(tick):
          "pinned": False, "env_undecryptable": False, "tags": ["staging"],
          "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private",
                      "listening": False, "default": True}]},
+        # The builder of an environment build IN FLIGHT, with the HiveMind
+        # reading its vitals carry. It is here so the building card's "Watch the
+        # agent" link is reachable in a preview: that link is drawn from the
+        # BUILDER's row in this list, not from the environment, so an
+        # environments fixture alone would silently render the card without it —
+        # which is how the table shipped the last time this tab was drawn blind.
+        {"name": "selfhost-build", "state": "running", "vcpus": 4,
+         "mem_mb": 8192, "mem_used_mb": 3140, "disk_mb": 4820, "disk_total_mb": 25600,
+         "cpu_seconds": 240 + tick * 1.7, "image": "universal", "last_active": _iso(2),
+         "net_rx_bytes": 284832100, "net_tx_bytes": 12105530,
+         "pinned": False, "env_undecryptable": False, "tags": ["selfhost", "default"],
+         "hivemind_session_url": "https://hivemind.example/sessions/selfhost-build",
+         "hivemind_session_title": "Write a setup script for the selfhost image",
+         "hivemind_active": True,
+         "routes": [{"subdomain": "selfhost-build", "port": 8080, "visibility": "private",
+                     "listening": False, "default": True}]},
+        # The builder a failed environment build leaves behind. It is here so
+        # the failed card's "Open a terminal" is reachable in a preview: that
+        # button is drawn only for a builder the machine list actually has.
+        {"name": "weave-py-build", "state": "paused", "vcpus": 4,
+         "mem_mb": 8192, "mem_used_mb": None, "disk_mb": 512, "disk_total_mb": 25600,
+         "cpu_seconds": None, "image": "universal", "last_active": _iso(2700),
+         "net_rx_bytes": 1204832, "net_tx_bytes": 210553,
+         "pinned": False, "env_undecryptable": False, "tags": ["weave-py", "default"],
+         "routes": [{"subdomain": "weave-py-build", "port": 8080, "visibility": "private",
+                     "listening": False, "default": True}]},
     ]
 
 # The owner rollup behind the Machines tab's footprint card. It is mock data of
@@ -106,15 +152,15 @@ def _machines(tick):
 # the reflink baseline and the pool budgets — appears in no machine record; that
 # is the whole reason the card has an endpoint of its own. Kept internally
 # consistent so the ratios the page derives are the ones a real fleet shows:
-# shared = raw - used, over three disks (one paused, one running, one parked).
+# shared = raw - used, over four disks (two paused, one running, one parked).
 _USAGE = {
     "owner": "van",
     "memory_pool_mb": 8192, "memory_burst_mb": 16384,
     "effective_memory_mb": 8192, "resident_memory_mb": 6820,
     "borrowed_memory_mb": 0, "allocated_memory_mb": 16384, "allocated_vcpus": 8,
-    "disk_pool_mb": 102400, "used_disk_mb": 6240, "raw_disk_mb": 24654,
+    "disk_pool_mb": 102400, "used_disk_mb": 6752, "raw_disk_mb": 25166,
     "shared_disk_mb": 18414, "capacity_disk_mb": 76800,
-    "running_sandboxes": 1, "total_sandboxes": 3, "archived_sandboxes": 1,
+    "running_sandboxes": 1, "total_sandboxes": 4, "archived_sandboxes": 1,
     "turbo_sandboxes": 1, "max_running": 4, "max_sandboxes": 8, "nodes": 1,
 }
 
@@ -154,6 +200,45 @@ _REPOS = [
 ]
 
 
+# Environments, one per build state, because the four states are four different
+# card anatomies: ready names the disk it boots, building names the machine it
+# is happening in, failed carries a guest log line and the two recovery
+# actions, and draft has nothing yet. The tab had no fixture here at all until
+# after it shipped, which is exactly how a table row whose contents wrapped one
+# chip per line got as far as a deploy.
+_ENVIRONMENTS = [
+    {"name": "web", "description": "the wandb app dev stack — node 20 and postgres",
+     "repos": ["wandb/core", "wandb/app"], "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
+     "rules": ["web"], "vars": [{"name": "NODE_ENV", "value": "development"},
+                                {"name": "LOG_LEVEL", "value": "debug"}],
+     "has_setup": True, "setup_bytes": 3746, "setup_from": "agent",
+     "state": "ready", "built_at": _iso(11400), "snapshot": "web-20260902-1412",
+     # A finished agent build keeps its transcript, and this is the only thing
+     # that survives the builder: the box was destroyed when it succeeded.
+     "build_session": "https://hivemind.example/sessions/web-build"},
+    # An agent build in flight: no script yet, because writing one is what the
+    # agent is doing. This is the state a FIRST build of an environment is in.
+    {"name": "selfhost", "description": "single-container selfhost image",
+     "repos": ["wandb/server"], "secrets": [], "rules": ["selfhost"], "vars": [],
+     "has_setup": False, "setup_bytes": 0, "setup_from": "agent",
+     "state": "building", "build_box": "selfhost-build", "snapshot": ""},
+    {"name": "weave-py", "description": "",
+     "repos": ["wandb/weave"], "secrets": ["OPENAI_API_KEY"], "rules": ["weave-py"],
+     "vars": [{"name": "PY", "value": "3.12"}],
+     "has_setup": True, "setup_bytes": 902, "setup_from": "agent",
+     "state": "failed", "build_box": "weave-py-build", "snapshot": "",
+     "build_session": "https://hivemind.example/sessions/weave-py-build",
+     "build_error": "sparkbox: this box is configured, but .sparkbox/setup.sh does not "
+                    "run in it, so no later build could reproduce it"},
+    {"name": "scratch", "description": "empty starting point for one-off experiments",
+     "repos": [], "secrets": [], "rules": [], "vars": [],
+     "has_setup": False, "setup_bytes": 0, "setup_from": "", "state": "draft", "snapshot": ""},
+]
+_ENV_SCRIPT = {"from": "agent", "script": "#!/usr/bin/env bash\n"
+               "set -euo pipefail\n\n"
+               "sudo apt-get -y install postgresql-client\n"
+               "pnpm install\n"}
+
 def _dom(domain, display, resolved, tx, rx):
     return {"domain": domain, "display": display, "resolved": resolved,
             "tx_bytes": tx, "rx_bytes": rx, "total": tx + rx}
@@ -178,7 +263,7 @@ _STUB = """
   var tick = 0;
   var ME = %(me)s, SECRETS = %(secrets)s, SNAPSHOTS = %(snapshots)s;
   var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s, REPOS = %(repos)s;
-  var USAGE = %(usage)s;
+  var USAGE = %(usage)s, ENVIRONMENTS = %(environments)s, ENVSCRIPT = %(envscript)s;
   function machines() {
     tick += 1;
     var list = %(machines_fn)s(tick);
@@ -197,6 +282,19 @@ _STUB = """
     return Promise.resolve(new Response(JSON.stringify(data), {
       status: 200, headers: { "Content-Type": "application/json" } }));
   }
+  // A refusal, in the console's own error shape: {error, code}. Needed because
+  // the blanket "mutations: pretend success" at the bottom of this switch
+  // swallows every non-200, and some of the states worth looking at ARE the
+  // non-200s.
+  function E(status, code, error) {
+    return Promise.resolve(new Response(JSON.stringify({ error: error, code: code }), {
+      status: status, headers: { "Content-Type": "application/json" } }));
+  }
+  // Saving an environment named `adopt-me` answers the adoption conflict, so
+  // the confirm-and-retry can be walked without a server: type that name into
+  // the New environment form and save. Saying yes sends the same body with
+  // adopt:true, which falls through to the success below.
+  var ADOPTED = {};
   var TURBO = {};   // name -> on, applied over the canned list below
   var real = window.fetch;
   window.fetch = function (url, opts) {
@@ -216,8 +314,25 @@ _STUB = """
     if (u.indexOf("/api/snapshots") >= 0 && m === "GET") return J(SNAPSHOTS);
     if (u.indexOf("/api/network-rules") >= 0 && m === "GET") return J(NETRULES);
     if (u.indexOf("/api/repos") >= 0 && m === "GET") return J(REPOS);
+    if (/\\/api\\/environments\\/[^/]+\\/script/.test(u) && m === "GET") return J(ENVSCRIPT);
+    if (u.indexOf("/api/environments") >= 0 && m === "GET") return J(ENVIRONMENTS);
     var bw = u.match(/\\/api\\/machines\\/([^/]+)\\/bandwidth/);
     if (bw && m === "GET") return J(BANDWIDTH[decodeURIComponent(bw[1])] || { name: "", domains: [] });
+    var envPut = u.match(/\\/api\\/environments\\/([^/]+)$/);
+    if (envPut && m === "PUT") {
+      var envName = decodeURIComponent(envPut[1]);
+      var wantsAdopt = envName === "adopt-me" && !JSON.parse(opts.body || "{}").adopt;
+      if (wantsAdopt && !ADOPTED[envName]) {
+        return E(409, "env_tag_in_use",
+          "the tag \\"adopt-me\\" is already carrying 2 repositories, 1 secret and 3 sandboxes. " +
+          "An environment's name IS its tag, so creating adopt-me adopts all of it: everything on " +
+          "that tag becomes part of the environment, and every sandbox carrying it becomes one of " +
+          "its machines. Because sandboxes already carry it, the environment is also created with " +
+          "unrestricted egress rather than the default allowlist, so as not to cut them off.");
+      }
+      ADOPTED[envName] = true;
+      return J({ ok: true });
+    }
     if (u.indexOf("/api/machines") >= 0 && m === "GET" &&
         !/\\/(pause|resume|reboot|archive|pin|unpin|port|tags|rename|snapshot|bandwidth)/.test(u)) return J(machines());
     return J({ ok: true }); // mutations: pretend success
@@ -365,6 +480,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
                 "netrules": json.dumps(_NETRULES), "bandwidth": json.dumps(_BANDWIDTH),
                 "repos": json.dumps(_REPOS), "usage": json.dumps(_USAGE),
+                "environments": json.dumps(_ENVIRONMENTS),
+                "envscript": json.dumps(_ENV_SCRIPT),
             }
         theme = ""
         if "theme=dark" in self.path:

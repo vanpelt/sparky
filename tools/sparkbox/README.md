@@ -341,6 +341,87 @@ is the useful default. `--merge` reads every machine-id directory on the disk,
 including the boot immediately before the current one; plain `journalctl` only
 selects the current machine id.
 
+## Environments: one name for the whole way of working
+
+A tag composes four things — secrets, checkouts, egress, disk — and until
+recently the only place that name existed was as an argument to five unrelated
+verbs. An **environment** is that name as an object: it owns exactly one tag,
+*its name is the tag*, and it carries a description, some plain (non-secret)
+variables, and the setup script the project needs.
+
+```
+ssh ctl@<domain> env create web --repo wandb/hivemind --secret GITHUB_TOKEN
+ssh ctl@<domain> env set web --var NODE_ENV=test
+ssh ctl@<domain> env build web         # returns as soon as the build STARTS
+ssh ctl@<domain> env show web          # where it got to
+ssh -t new@<domain> -- --env web       # a sandbox booted from the disk it built
+```
+
+`env build` boots one ordinary sandbox called `<name>-build` from the stock
+image, runs the environment's setup script inside the primary checkout as the
+login user, and — when the script succeeds — the *gateway* captures that sandbox
+and binds the capture to the tag, so every later `--env web` starts from the
+finished disk. The builder is then destroyed. The script is the one stored with
+`env script web --set`, or, when there is none, `.sparkbox/setup.sh` read out of
+an attached repository through the GitHub App and recorded on the environment so
+the next build is the same build.
+
+It is asynchronous on purpose. The verb returns once the builder exists and its
+guest has taken the job; the run itself is minutes and survives your
+disconnecting. A build that fails leaves its builder **paused**, holding the
+half-built disk and the log, and `env show` prints the way out:
+
+```
+ssh web-build@<domain>                 # fix what was missing, by hand
+ssh ctl@<domain> env capture web       # keep exactly that disk
+```
+
+**With no script anywhere, `env build` has an agent write one.** It runs
+`claude -p` in the builder against `sparkbox docs dev-environment`, gets the
+project running, and keeps the `.sparkbox/setup.sh` the agent leaves behind —
+which is the deliverable, not the box: commit that file and every later build of
+the environment runs it instead of running an agent. It needs a
+`CLAUDE_CODE_OAUTH_TOKEN` the builder will carry, and says so up front rather
+than after booting a VM to find out.
+
+**And then it runs what the agent wrote**, in the same builder, before calling
+the build done. An agent does the work interactively and writes the script at
+the end from memory, so the mistakes it makes are the ones that come from
+that — a directory it created by hand, a path that only ever existed in the
+session — and none of them show up until somebody rebuilds months later. The
+first run gets at most one fresh recovery agent: if it wrote no script, the
+recovery pass inspects the running processes and logs it left behind and
+finishes the deliverable; if it wrote a script that fails, the recovery pass
+gets that failure to fix. If the second pass still leaves no working script,
+the build fails, with any script recorded and the builder paused, so `env
+capture` still adopts the box the agent did get working. Deferred monitors and
+scheduled wakeups are disabled for these one-turn agents because there is no
+live agent process to receive them after `claude -p` returns.
+
+`env rebuild <name>` is a second name for `env build` — a build already boots
+the stock image and runs the current script, never the environment's own last
+snapshot, so an environment cannot accumulate. The old image stays bound until
+the new one is captured, so a rebuild that fails costs only the time.
+
+A new environment gets an **egress rule-set named after it**, so its sandboxes
+reach the package registries, github and the model API and not the rest of the
+internet. Widen it in the console's Network panel, or pass `--open-egress` on
+create to have no rules at all. While a build runs, Sparkbox captures the exact
+DNS names that rule-set blocks and keeps the bounded summary on the environment
+row, so the console and API can show which dependency hosts need review.
+
+All of it is on the other two doors too: an **Environments** tab on
+`my.<domain>` beside Secrets, Network and Repos — the four panels are one object
+viewed four ways, and this is the one that says so — and `/v1/environments` on
+the REST API, including the build and the script.
+
+`--env-build-timeout` (default 45m) is how long a build may sit in `building`
+before a periodic sweep gives up on it. A *script* build's builder is left
+paused, so the recovery path above is unchanged; an *agent* build's builder is
+**destroyed**, because it holds an unattended agent with your credentials and,
+by definition, has not written the script that was the point. Design:
+[`docs/environments-design.md`](docs/environments-design.md).
+
 ## Architecture
 
 ```

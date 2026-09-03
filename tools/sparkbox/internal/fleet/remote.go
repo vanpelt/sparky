@@ -663,3 +663,12 @@ func (r *remoteNode) NetUsage(ctx context.Context) (map[string]netpush.VMUsage, 
 	}
 	return out, nil
 }
+
+func (r *remoteNode) NetDenials(ctx context.Context, sandbox string, reset bool) (netpush.DenialCapture, error) {
+	var resp nodelink.NetDenialsResp
+	req := nodelink.NetDenialsReq{Sandbox: sandbox, Reset: reset}
+	if err := r.client.Do(ctx, nodelink.TypeNetDenials, req, &resp); err != nil {
+		return netpush.DenialCapture{}, r.fail("net.denials", sandbox, err)
+	}
+	return resp.Capture, nil
+}

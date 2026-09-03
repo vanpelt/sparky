@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=25
+IDENTITY_REV=27
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -240,6 +240,9 @@ Repositories:
   repos survey                   Preview repo state included in a snapshot
   repo authorize OWNER/NAME      Attribute pushes and PRs to your GitHub user
 
+Environments:
+  env                            Show the environment behind this box, if any
+
 Identity and networking:
   whoami [--json]                Show the sandbox owner and linked GitHub user
   make-public [PORT]             Open a port to anyone with the URL. With no
@@ -287,6 +290,10 @@ SPARKBOX_REPOS_BIN=${SPARKBOX_REPOS_BIN:-/usr/local/sbin/sparkbox-repos}
 # script on a machine that has its own /run/sparkbox, and a test that read it
 # would pass or fail depending on whose laptop ran it.
 SPARKBOX_IDENTITY_FILE=${SPARKBOX_IDENTITY_FILE:-/run/sparkbox/identity.json}
+
+# What /usr/local/sbin/sparkbox-env-setup left behind, read by `env`. Overridable
+# on exactly the same terms as the two above.
+SPARKBOX_ENV_STATUS_FILE=${SPARKBOX_ENV_STATUS_FILE:-/run/sparkbox/env-setup.status}
 
 # _call METHOD URL — print the host's own sentence, on success AND on refusal.
 #
@@ -620,6 +627,33 @@ case "${1:-}" in
         ;;
       *) echo "usage: sparkbox repo authorize OWNER/NAME" >&2; exit 2 ;;
     esac
+    ;;
+  env)
+    # Which environment made this filesystem, and did its setup run in here?
+    #
+    # Both halves are local facts, on purpose. The status file is written by
+    # /usr/local/sbin/sparkbox-env-setup, which runs only in a builder box, so an
+    # ordinary sandbox forked from a finished environment has none — and saying
+    # that plainly beats inventing an answer, because the guest cannot see its
+    # own tags and the tag is what an environment IS. Building one is a
+    # control-plane act taken from outside the VM; this verb exists so an agent
+    # working in here can orient, not to start one.
+    case "${2:-}" in
+      '') ;;
+      *) echo "usage: sparkbox env" >&2; exit 2 ;;
+    esac
+    _box=$(curl -fsS --max-time 10 "$META/self?format=text" 2>/dev/null \
+             | sed -n 's/^sandbox: //p' | head -1) || _box=
+    if [ -n "$_box" ]; then echo "sandbox: $_box"; fi
+    if [ -s "$SPARKBOX_ENV_STATUS_FILE" ]; then
+      cat "$SPARKBOX_ENV_STATUS_FILE"
+      exit 0
+    fi
+    echo "environment: no setup has run in this sandbox"
+    echo "An environment is composed and built from outside the VM:"
+    echo "  ssh ctl@<gateway> env build <name>"
+    echo "Run 'sparkbox docs dev-environment' for what its setup script should do."
+    exit 0
     ;;
   docs)
     # docs.<domain> is a public DNS name and can resolve to this fleet's own
@@ -2124,6 +2158,386 @@ fi
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-repos"
 
+# The environment setup runner: `ctl env build <name>` reaching into the builder
+# sandbox it just created.
+#
+# The gateway creates an ordinary box tagged with the environment, then nudges
+# this worker (internal/envsync, StartSetup). The worker asks the metadata
+# service whether there is a job for it, runs the setup script the answer
+# carries, and posts back what happened; the GATEWAY takes the snapshot, because
+# a capture pauses the machine that would otherwise be reporting its own result.
+#
+# EVERY OTHER VM IN THE FLEET RUNS THIS TOO, whenever the unit is started by
+# hand, and gets a 204. That path must stay cheap and silent: one request, no
+# files written, no journal line. Only a 200 makes any of the rest happen.
+#
+# There is no manifest and no credential in the job beyond the script itself,
+# for the same reason sparkbox-repos takes none: the host end of our own tap IS
+# the authentication, and nothing else can reach it as us.
+sed -e "s/@@META_PORT@@/$META_PORT/g" -e "s/@@SANDBOX_USER@@/$SANDBOX_USER/g" \
+    > "$MNT/usr/local/sbin/sparkbox-env-setup" <<'EOF'
+#!/bin/sh
+# Run this sandbox's environment setup, if its gateway has one for it.
+set -eu
+
+# The account a setup script runs as (the login user; root on legacy templates).
+SANDBOX_USER=@@SANDBOX_USER@@
+
+# R and the timeout are overridable so the deploy tests can drive this against a
+# tree instead of the machine running them, the same way sparkbox-repos and
+# sparkbox-identity-reset take theirs. Nothing else reads them, and nothing in a
+# guest sets them.
+R=${SPARKBOX_ENV_ROOT:-}
+# 40 minutes, and the number is chosen against the GATEWAY's, not on its own.
+#
+# There is a ladder here and it only works in one order: this worker's budget
+# must be the SMALLEST, so the guest always reports before anything else gives
+# up. The systemd unit allows 90 minutes (deliberately above this, so the worker
+# is what stops the run and therefore what reports it), and the gateway's
+# reconciler gives up at --env-build-timeout, default 45 minutes.
+#
+# This used to be 3600 — LONGER than the gateway's 2700 — so a build between 45
+# and 60 minutes was marked failed by the reconciler while the guest was still
+# working, and the guest's eventual report landed on a row that was no longer
+# `building` and was discarded with a warning. The build had actually finished;
+# nobody could tell.
+TIMEOUT=${SPARKBOX_ENV_SETUP_TIMEOUT:-2400}
+
+RUN_DIR="$R/run/sparkbox"
+SCRIPT_FILE="$RUN_DIR/env-setup.sh"
+LOG_FILE="$RUN_DIR/env-setup.log"
+STATUS_FILE="$RUN_DIR/env-setup.status"
+LOCK_DIR="$RUN_DIR/env-setup.lock"
+# Published by sparkbox-repos when this sandbox has one unambiguous checkout.
+# The setup script is the repository's, so the repository is where it runs.
+CD_FILE="$RUN_DIR/repos.dir"
+ENV_FILE="$R/etc/environment"
+
+# What this guest will send back. Both halves are bounded HERE as well as on the
+# host — internal/metadata caps the body it reads, as it does for /repos/status
+# — because an oversized POST is refused whole, and a refused report is an
+# environment left in `building` with nobody to say why. 48 KiB of script is
+# exactly 64 KiB once base64 has it.
+MAX_SCRIPT=49152
+MAX_LOG=8192
+
+ENV_NAME=""
+MODE=""
+
+GW=$(ip -4 route show default | awk '{print $3; exit}')
+[ -n "$GW" ] || { echo "sparkbox-env-setup: no default gateway" >&2; exit 0; }
+META="http://$GW:@@META_PORT@@"
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+
+# One run at a time, in the shape sparkbox-repos uses: a directory is the atomic
+# create, the pid inside it is how a run killed mid-flight is told from a live
+# one. Two nudges arriving together must not run somebody's setup script twice
+# against the same tree.
+mkdir -p "$RUN_DIR" 2>/dev/null || true
+lock_acquired=
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  lock_acquired=1
+else
+  old_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+  case "$old_pid" in
+    ''|*[!0-9]*) stale=1 ;;
+    *) if kill -0 "$old_pid" 2>/dev/null; then stale=; else stale=1; fi ;;
+  esac
+  if [ -n "$stale" ]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    if mkdir "$LOCK_DIR" 2>/dev/null; then lock_acquired=1; fi
+  fi
+fi
+if [ -z "$lock_acquired" ]; then
+  echo "sparkbox-env-setup: a setup run is already in progress" >&2
+  exit 0
+fi
+printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+trap 'rm -rf "$WORK" "$LOCK_DIR"' EXIT INT TERM HUP
+
+# The job, or nothing at all. 204 is the ordinary answer everywhere in the fleet
+# — this sandbox is not the builder of an environment being built — and so is
+# every other non-200: a metadata service that is starting, a host that predates
+# this endpoint. None of them is this guest's problem to report.
+code=$(curl -sS --max-time 15 -o "$WORK/job" -w '%{http_code}' \
+  "$META/self/setup" 2>/dev/null) || code=000
+[ "$code" = 200 ] || exit 0
+
+# Line-oriented, because the guest has no JSON encoder and the reply has to be
+# as simple to READ here as the report below is to write. Line 1 the environment
+# name, line 2 the mode, line 3 onwards base64 of the script — folded or not,
+# since every whitespace character comes out before the decode.
+ENV_NAME=$(sed -n '1p' "$WORK/job" | tr -d '\r')
+MODE=$(sed -n '2p' "$WORK/job" | tr -d '\r')
+# The mode is reported back in a refusal and written to a status file a person
+# reads, so it is reduced to characters that can only be a word before either.
+MODE=$(printf '%s' "$MODE" | tr -cd 'A-Za-z0-9._-')
+sed -n '3,$p' "$WORK/job" | tr -d ' \011\r\n' > "$WORK/b64"
+
+# The status file, so a person or an agent inside the box can see a build in
+# flight rather than only its outcome. `sparkbox env` reads it.
+publish_status() {
+  mkdir -p "$RUN_DIR" 2>/dev/null || true
+  # 2>/dev/null FIRST, then the redirection that can fail: redirections are
+  # applied left to right, so `> file 2>/dev/null` still prints "Permission
+  # denied" on the stderr it has not replaced yet. Same rule as sparkbox-repos.
+  #
+  # The `exit:` line is deliberately not last. A `[ ... ] && printf` that fails
+  # its test would take the exit status of the whole group with it, and the `if`
+  # would then skip the rename — a status file that stops updating exactly when
+  # there is nothing to report.
+  if {
+       printf 'environment: %s\n' "$ENV_NAME"
+       printf 'mode: %s\n' "$MODE"
+       printf 'state: %s\n' "$1"
+       if [ -n "${2:-}" ]; then printf 'exit: %s\n' "$2"; fi
+       printf 'at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+       printf 'log: %s\n' "${LOG_FILE#"$R"}"
+     } 2>/dev/null > "$STATUS_FILE.new"; then
+    chmod 0644 "$STATUS_FILE.new" 2>/dev/null || true
+    mv -f "$STATUS_FILE.new" "$STATUS_FILE" 2>/dev/null || rm -f "$STATUS_FILE.new"
+  fi
+}
+
+# What the gateway is waiting for. Line-oriented for the same reason the job is,
+# and in the same shape as the /repos/status report this guest already sends:
+#
+#   line 1  ok | failed
+#   line 2  the script's exit status
+#   line 3  base64 of .sparkbox/setup.sh as the run left it, or empty
+#   line 4+ the tail of the log
+#
+# EVERY path past the 200 above ends here. The environment row sits in
+# `building` until a report arrives, so a run that gives up quietly is a row
+# that never moves and a person watching a build that already failed.
+report() {
+  publish_status "$1" "$2"
+  {
+    printf '%s\n%s\n%s\n' "$1" "$2" "${3:-}"
+    if [ -f "$LOG_FILE" ]; then tail -c "$MAX_LOG" "$LOG_FILE"; fi
+  } 2>/dev/null > "$WORK/result" || return 0
+  if ! curl -fsS --max-time 20 -H 'Content-Type: text/plain' \
+       --data-binary "@$WORK/result" "$META/self/setup/result" >/dev/null 2>&1; then
+    echo "sparkbox-env-setup: could not report the result to $META" >&2
+  fi
+}
+
+# A refusal this side can name, reported rather than merely logged.
+fail() {
+  echo "sparkbox-env-setup: $1" >&2
+  printf 'sparkbox-env-setup: %s\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+  report failed 1 ""
+  exit 1
+}
+
+# 0600 and not the 0644 the repos log gets. A setup script is somebody's
+# infrastructure and its output is whatever that script chose to print — a
+# `set -x` over a line holding an API key, at the extreme — so the log is
+# readable by the person whose secrets they are (the chown below, once the
+# account is known) and by root, and by nobody else in the box.
+: > "$LOG_FILE" 2>/dev/null || true
+chmod 0600 "$LOG_FILE" 2>/dev/null || true
+
+# The name is host-authored and this script prints it, so it is checked before
+# it reaches a terminal: a tag is [A-Za-z0-9._-] everywhere else in this
+# platform, and a control character in a status file is nobody's idea of one.
+case "$ENV_NAME" in
+  ''|*[!A-Za-z0-9._-]*)
+    ENV_NAME=""
+    fail "the gateway sent a setup job with no usable environment name" ;;
+esac
+
+# The two modes, and everything that is NOT in this case statement is the point:
+# the privilege drop, the workdir, the env sourcing, the timeout and the
+# readback below are identical for both, because an agent build is a script
+# build with a different command in the middle. A mode this payload does not
+# know is refused BY NAME rather than guessed at — a guest older than its
+# gateway must produce one clear sentence, never run the wrong thing.
+case "$MODE" in
+  script|agent) ;;
+  '') fail "the gateway sent a setup job with no mode" ;;
+  *)  fail "this sandbox's tools do not know how to run a '$MODE' setup; run \`sparkbox update-tools\`" ;;
+esac
+
+publish_status running ""
+
+# Line 3 is base64 in both modes. It is decoded to a FILE and run as one, so no
+# part of a payload is ever interpolated into a command line.
+if ! base64 -d < "$WORK/b64" > "$WORK/payload" 2>/dev/null; then
+  fail "the setup job for $ENV_NAME did not decode"
+fi
+if [ ! -s "$WORK/payload" ]; then
+  fail "the setup job for $ENV_NAME is empty"
+fi
+
+# The payload is the script to run, in BOTH modes. In script mode it is the
+# owner's .sparkbox/setup.sh; in agent mode it is a shell script the GATEWAY
+# wrote, which invokes the agent with the prompt in a quoted heredoc.
+#
+# WHY THE GATEWAY WRITES IT AND NOT THIS WORKER. nodelink.SelfSetupResp gained
+# `mode` as an omitempty field, so a NODE running an older build drops it and
+# then renders the hardcoded `script` its own metadata service shipped with. If
+# the payload were a bare prompt, that guest would run paragraphs of English
+# through bash. A payload that is already a script makes the same version skew
+# merely degrade: the agent runs correctly, and only the artifact check at the
+# bottom of this file is missed.
+#
+# So everything below — the privilege drop, the workdir, sourcing
+# /etc/environment inside the unprivileged child, the timeout, the readback — is
+# ONE code path for both modes, and the mode only changes what counts as
+# success.
+cp "$WORK/payload" "$WORK/script"
+
+# Checkouts, and the setup script that runs in them, belong to whoever will edit
+# them. Dropping privilege is not tidiness: a setup script is somebody's
+# infrastructure written in prose and shell, and the whole convention is that it
+# runs as the person would — `npm install` into their home, a `systemd --user`
+# unit under their session, files their next `git status` does not report as
+# root-owned. If privilege cannot be dropped we run nothing rather than run it
+# wrong.
+#
+# Skipped entirely when R is set, on the same terms as sparkbox-repos: with a
+# root override this is not the machine that /etc/passwd describes and there is
+# nobody on this kernel to drop TO.
+RUNAS=
+if [ -z "$R" ] && [ "$(id -u)" = 0 ] && [ "$SANDBOX_USER" != root ]; then
+  if ! id "$SANDBOX_USER" >/dev/null 2>&1; then
+    fail "no such user: $SANDBOX_USER"
+  elif command -v runuser >/dev/null 2>&1; then
+    RUNAS="runuser -u $SANDBOX_USER --"
+  elif command -v sudo >/dev/null 2>&1; then
+    RUNAS="sudo -n -u $SANDBOX_USER --"
+  else
+    fail "cannot drop privilege to $SANDBOX_USER (no runuser, no sudo)"
+  fi
+fi
+
+cp "$WORK/script" "$SCRIPT_FILE.new" 2>/dev/null || fail "could not stage the setup script in $RUN_DIR"
+chmod 0700 "$SCRIPT_FILE.new" 2>/dev/null || true
+if [ -n "$RUNAS" ]; then
+  chown "$SANDBOX_USER" "$SCRIPT_FILE.new" 2>/dev/null || true
+  chown "$SANDBOX_USER" "$LOG_FILE" 2>/dev/null || true
+fi
+mv -f "$SCRIPT_FILE.new" "$SCRIPT_FILE" 2>/dev/null || fail "could not stage the setup script in $RUN_DIR"
+
+HOME_DIR=$(awk -F: -v u="$SANDBOX_USER" '$1 == u {print $6; exit}' "$R/etc/passwd" 2>/dev/null || true)
+if [ -n "$HOME_DIR" ]; then HOME_DIR="$R$HOME_DIR"; fi
+
+# Where the setup runs: the primary checkout, because `.sparkbox/setup.sh` is a
+# file in a repository and every relative path in it is relative to that
+# repository. The home directory is the fallback for an environment with no
+# attachment at all, which is a legitimate shape — a base image plus packages.
+WORKDIR=
+if [ -r "$CD_FILE" ]; then WORKDIR=$(head -n 1 "$CD_FILE" 2>/dev/null || true); fi
+if [ -z "$WORKDIR" ] || [ ! -d "$WORKDIR" ]; then WORKDIR=$HOME_DIR; fi
+if [ -z "$WORKDIR" ] || [ ! -d "$WORKDIR" ]; then
+  fail "no checkout and no home directory to run the setup in"
+fi
+# A guest whose passwd the awk above could not read still gets a HOME, because
+# an empty one is worse than an approximate one: npm, pip and cargo all write
+# into it, and `HOME=` sends those writes to the filesystem root.
+if [ -z "$HOME_DIR" ]; then HOME_DIR=$WORKDIR; fi
+
+# bash, because `bash .sparkbox/setup.sh` is the convention this platform has
+# been telling agents to write for since refresh-agent-tools.sh started
+# installing it into every template's ~/.agents/AGENTS.md. sh only for the slim
+# systemd-less fallback template, which has no bash to offer.
+#
+# Resolved to an absolute path HERE rather than left as a name for the child to
+# look up: the child's first act is to source /etc/environment, which sets PATH
+# — so a guest whose owner put a broken PATH in a variable would get "bash: not
+# found" instead of their setup script, from a lookup made after we chose it.
+SHELL_BIN=$(command -v bash 2>/dev/null || true)
+[ -n "$SHELL_BIN" ] || SHELL_BIN=$(command -v sh 2>/dev/null || echo /bin/sh)
+
+# The environment the owner's secrets and vars live in.
+#
+# A systemd unit gets no pam_env, so without this line the run has none of them:
+# no CLAUDE_CODE_OAUTH_TOKEN, no DATABASE_URL, none of the setup script's whole
+# reason for wanting a tag. `set -a` is what makes the sourced assignments
+# exported rather than shell-local.
+#
+# Sourced INSIDE the unprivileged child rather than out here, and that placement
+# is the security half: /etc/environment is pam_env's format, not sh's, so a
+# value carrying $(...) or a backtick is code to a shell that reads it — and the
+# only shell that reads it is the one already running as the person whose
+# secrets those are.
+RUNNER='set -a; [ -f "$1" ] && . "$1"; set +a
+cd "$2" || { echo "sparkbox-env-setup: could not enter $2" >&2; exit 1; }
+HOME=$3; export HOME
+exec "$4" "$5"'
+
+# Bounded, because an environment held in `building` by a script waiting on a
+# prompt nobody can answer is the failure mode with no floor. -k so a process
+# that ignores the TERM still goes; 124 is what `timeout` reports for the kill.
+rc=0
+if command -v timeout >/dev/null 2>&1; then
+  $RUNAS timeout -k 30 "$TIMEOUT" /bin/sh -c "$RUNNER" sparkbox-env-setup \
+    "$ENV_FILE" "$WORKDIR" "$HOME_DIR" "$SHELL_BIN" "$SCRIPT_FILE" \
+    </dev/null >>"$LOG_FILE" 2>&1 || rc=$?
+else
+  $RUNAS /bin/sh -c "$RUNNER" sparkbox-env-setup \
+    "$ENV_FILE" "$WORKDIR" "$HOME_DIR" "$SHELL_BIN" "$SCRIPT_FILE" \
+    </dev/null >>"$LOG_FILE" 2>&1 || rc=$?
+fi
+if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+  printf 'sparkbox-env-setup: the setup script was still running after %s seconds and was stopped\n' \
+    "$TIMEOUT" >> "$LOG_FILE" 2>/dev/null || true
+fi
+
+# What the run ended with, which in script mode is usually the file that was
+# just run and occasionally is not: a setup script that discovers what this
+# project actually needs is allowed to write itself down again, and the
+# environment should record what it would run NEXT time.
+B64=""
+SETUP_SRC="$WORKDIR/.sparkbox/setup.sh"
+if [ -f "$SETUP_SRC" ]; then
+  size=$(wc -c < "$SETUP_SRC" 2>/dev/null | tr -d ' ') || size=0
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -gt 0 ] && [ "$size" -le "$MAX_SCRIPT" ]; then
+    B64=$(base64 < "$SETUP_SRC" 2>/dev/null | tr -d ' \011\r\n') || B64=""
+  elif [ "$size" -gt "$MAX_SCRIPT" ]; then
+    # Sending a TRUNCATED script would be worse than sending none: empty means
+    # "unchanged" and the gateway keeps the script it already has, where half a
+    # script means every future fork of this environment runs half a script.
+    printf 'sparkbox-env-setup: .sparkbox/setup.sh is %s bytes, over the %s byte report cap; not sending it\n' \
+      "$size" "$MAX_SCRIPT" >> "$LOG_FILE" 2>/dev/null || true
+  fi
+fi
+
+# WHAT COUNTS AS SUCCESS, and the two modes do NOT answer it the same way.
+#
+# In script mode the exit status is the answer, because `bash setup.sh` has an
+# honest one: the script's own `set -e` or its last command decided it.
+#
+# In AGENT mode the exit status is not an answer at all. It was MEASURED that an
+# agent whose every tool call is denied prints an apology and exits 0 — so
+# trusting rc here would report a successful build for a run that touched
+# nothing, and the gateway would capture an untouched base image as the
+# environment's disk. The one honest signal available is the artifact: the
+# deliverable of an agent build is `.sparkbox/setup.sh`, $B64 is that file as
+# the run left it, and an empty $B64 means the agent did not write one.
+#
+# That also makes the failure legible. "The agent did not write .sparkbox/setup.sh"
+# is a sentence somebody can act on; "exit 0" while the environment is silently
+# empty is not.
+if [ "$MODE" = agent ] && [ "$rc" = 0 ] && [ -z "$B64" ]; then
+  printf 'sparkbox-env-setup: the agent finished without writing %s, so there is nothing to build from\n' \
+    "$SETUP_SRC" >> "$LOG_FILE" 2>/dev/null || true
+  rc=2
+fi
+
+if [ "$rc" = 0 ]; then
+  report ok 0 "$B64"
+else
+  report failed "$rc" "$B64"
+fi
+exit 0
+EOF
+chmod 0755 "$MNT/usr/local/sbin/sparkbox-env-setup"
+
 # Fork identity reset: give a sandbox booted from somebody's template its own
 # machine identity, before anything can publish the one it inherited.
 #
@@ -2324,6 +2738,42 @@ RandomizedDelaySec=30s
 
 [Install]
 WantedBy=timers.target
+EOF
+
+  # The environment build runner. INSTALLED BUT NOT ENABLED, and there is no
+  # [Install] section for anything to enable it with.
+  #
+  # DO NOT ADD `WantedBy=multi-user.target`. This unit is started by a nudge
+  # from the gateway (internal/envsync, StartSetup) and by nothing else, and
+  # that is the whole design rather than an oversight:
+  #
+  #   - the job only exists for a builder box. Every other VM in the fleet would
+  #     be running a unit to be told 204, at every boot, forever;
+  #   - the secrets a setup script needs arrive over SSH after the box is up
+  #     (internal/envsync PushEnv), on the host's clock and not the guest's. A
+  #     boot-ordered unit races that push and there is no ordering to express
+  #     against it, because it is not a unit — that race has already cost this
+  #     platform once, in the launch door. A nudge sent AFTER the push cannot
+  #     lose it;
+  #   - and the gateway must know when the run finished, which means it has to
+  #     be the one that started it.
+  #
+  # Shaped like sparkbox-repos.service otherwise, including the absence of any
+  # Before=: a setup script is slower than a clone, and nothing may put it in
+  # front of somebody's first attach. TimeoutStartSec sits above the worker's
+  # own timeout so the worker is always the thing that gives up first — it
+  # reports what happened, where systemd's kill would leave the gateway waiting.
+  cat > "$MNT/etc/systemd/system/sparkbox-env-setup.service" <<'EOF'
+[Unit]
+Description=sparkbox environment setup
+Wants=network-online.target
+After=network-online.target sparkbox-net.service sparkbox-token.service sparkbox-repos.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=5400
+ExecStart=/usr/local/sbin/sparkbox-env-setup
 EOF
 
   # Enable without a chroot: symlink into the target's .wants directory. That

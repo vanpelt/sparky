@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -14,7 +15,9 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
@@ -38,6 +41,16 @@ var (
 	_ Minter    = (*edgeauth.Signer)(nil)
 
 	_ TemplateBindings = (*templates.Store)(nil)
+
+	// The environment surface, asserted the same way and for the same reason.
+	// EnvVars and SecretTags are both satisfied by the ONE secrets store: the
+	// plain vars and the encrypted secrets share a database file, a tag
+	// namespace and an /etc/environment block, and splitting them into two
+	// stores would mean two answers to "what does this sandbox see".
+	_ Environments = (*envs.Store)(nil)
+	_ EnvVars      = (*secrets.Store)(nil)
+	_ SecretTags   = (*secrets.Store)(nil)
+	_ NetRules     = (*netrules.Store)(nil)
 )
 
 // calls is the shared recorder every fake writes to. Ownership tests assert on
@@ -99,6 +112,16 @@ var mutatingVerbs = map[string]bool{
 	// The template-port verbs, for the same reason. Upsert is the route write
 	// that points a new sandbox at the port its template was captured on.
 	"SetSnapshotPort": true, "ForgetSnapshotPort": true, "Upsert": true,
+	// The environment verbs. Named here for the reason the binding verbs are:
+	// mutating() only reports what this table lists, so a write left out of it
+	// silently drops out of every ownership assertion in the package.
+	"envs.Put": true, "envs.Delete": true, "envs.SetScript": true, "envs.SetState": true,
+	// The build nudge. It runs a script inside somebody's guest, which is the
+	// most consequential thing on this list, so it must be visible to every
+	// ownership assertion in the package.
+	"StartSetup": true,
+	"vars.Put":   true, "vars.Delete": true, "vars.DeleteForTag": true,
+	"netrules.Put": true, "secrets.Retag": true, "repos.Put": true,
 }
 
 // mutating reports the recorded calls that could have changed state or woken a
@@ -126,6 +149,10 @@ type fakeSandboxes struct {
 	archiving   bool
 	err         error // returned by every mutating method when set
 	repoSyncErr error // returned by ResyncRepos when set
+	// destroyErr fails only the destroy, which is the one half-failure an
+	// environment build treats as non-fatal: the disk exists and the tag points
+	// at it, so a leftover box must not turn a finished build into a failed one.
+	destroyErr error
 }
 
 func (f *fakeSandboxes) Get(name string) (*host.Sandbox, bool) {
@@ -229,6 +256,9 @@ func (f *fakeSandboxes) Rename(ctx context.Context, oldName, newName, owner stri
 
 func (f *fakeSandboxes) Destroy(ctx context.Context, name string) error {
 	f.c.add("Destroy %s", name)
+	if f.destroyErr != nil {
+		return f.destroyErr
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -916,6 +946,25 @@ func (f *fakeSecrets) PutSecret(owner, envName, value string, tags []string) err
 	return nil
 }
 
+// RetagSecret changes WHICH sandboxes a secret reaches without touching what it
+// says — the one secret write that needs no value, which is exactly why it
+// exists (see secrets.Store.RetagSecret).
+func (f *fakeSecrets) RetagSecret(owner, envName string, tags []string) error {
+	f.c.add("secrets.Retag %s/%s tags=%v", owner, envName, tags)
+	if f.err != nil {
+		return f.err
+	}
+	k := secretKey(owner, envName)
+	if _, ok := f.vals[k]; !ok {
+		return secrets.ErrNoSuchSecret
+	}
+	if len(tags) == 0 {
+		tags = []string{secrets.DefaultTag}
+	}
+	f.tags[k] = tags
+	return nil
+}
+
 func (f *fakeSecrets) DeleteSecret(owner, envName string) error {
 	f.c.add("secrets.Delete %s/%s", owner, envName)
 	if f.err != nil {
@@ -1137,6 +1186,12 @@ type rig struct {
 	bindings    *fakeTemplateTags
 	nodes       *fakeNodes
 	hivemind    *fakeHiveMind
+	// The environment stores are nil on a plain rig — a host with no
+	// environment support is the shipped default and the state every
+	// KindDisabled assertion needs. withEnvs installs them.
+	envs     *fakeEnvs
+	envVars  *fakeEnvVars
+	netrules *fakeNetRules
 }
 
 // withNodes turns the rig's host into a fleet gateway holding one approved,
@@ -1231,7 +1286,10 @@ func newRig(t *testing.T) *rig {
 		Sandboxes: boxes, Templates: tmpl, Accounts: accts,
 		Checkpoints: checkpoints,
 		Tags:        tagger, Schedules: sched, Routes: rt, Sessions: minter, GitHub: gh,
-		Secrets:      secretStore,
+		Secrets: secretStore,
+		// The same store a third time, through its retag half: adding a tag to
+		// a secret needs no value, and PutSecret has no way to get one.
+		SecretTags:   secretStore,
 		TemplateTags: bindings,
 		HiveMind:     hm,
 		DefaultImage: "base", Domain: "example.test", XtermSubdomain: "xterm",
@@ -1271,4 +1329,344 @@ func (f *fakeHiveMind) Sessions(
 	f.asked = append(f.asked, box.ID)
 	f.pageSize = pageSize
 	return f.snapshot, f.err
+}
+
+// ---------------------------------------------------------------------------
+
+// fakeEnvs is envs.Store in a map. It reproduces the three refusals ctlops
+// actually maps onto its taxonomy — the reserved `default`, the tag grammar and
+// the per-owner cap — so the mapping can be asserted without a sqlite file, and
+// it keys every row by (owner, name) so no caller mistake can reach another
+// owner's environment. The exact sentences live in internal/envs and are tested
+// there; what this pins is that ctlops does not rewrite them.
+type fakeEnvs struct {
+	c    *calls
+	rows map[string]envs.Environment // "owner\x00name"
+	err  error
+	// cap mirrors maxEnvironmentsPerOwner; 0 means the fixture's default.
+	cap int
+	// now stamps updated_at the way the real store's clock does. The build
+	// reconciler decides staleness from that column, so a fake that left it at
+	// the zero time would make every build look infinitely old — or, with the
+	// rig's epoch clock, infinitely young. nil means the rig's epoch.
+	now func() time.Time
+	// buildingErr fails Building() alone, so a reconciler test can prove that a
+	// store hiccup fails no environment.
+	buildingErr error
+}
+
+func (f *fakeEnvs) clock() time.Time {
+	if f.now != nil {
+		return f.now()
+	}
+	return time.Unix(0, 0).UTC()
+}
+
+func envKey(owner, name string) string { return owner + "\x00" + name }
+
+func (f *fakeEnvs) Put(owner, name, description string, adopted *envs.Adopted) (envs.Environment, error) {
+	f.c.add("envs.Put %s/%s", owner, name)
+	if f.err != nil {
+		return envs.Environment{}, f.err
+	}
+	if strings.EqualFold(name, secrets.DefaultTag) {
+		return envs.Environment{}, fmt.Errorf("%w: an environment cannot be named %q", envs.ErrReservedName, secrets.DefaultTag)
+	}
+	if !secrets.ValidTag(name) {
+		return envs.Environment{}, fmt.Errorf("%w: name %q", envs.ErrInvalidName, name)
+	}
+	now := time.Unix(0, 0).UTC()
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		limit := f.cap
+		if limit == 0 {
+			limit = 32
+		}
+		n := 0
+		for _, row := range f.rows {
+			if row.Owner == owner {
+				n++
+			}
+		}
+		if n >= limit {
+			return envs.Environment{}, fmt.Errorf("%w (%d, max %d)", envs.ErrTooManyEnvironments, n, limit)
+		}
+		// Honoured on the insert branch only, exactly as the real store does —
+		// the whole point of the record is that it says what was there on the
+		// day, so an update must never restate it.
+		e = envs.Environment{Owner: owner, Name: name, State: envs.StateDraft, CreatedAt: now, Adopted: adopted}
+	}
+	// The real store touches description and updated_at ONLY: a second
+	// `env create` must not reset a build somebody is using.
+	e.Description, e.UpdatedAt = description, now
+	f.rows[k] = e
+	return e, nil
+}
+
+func (f *fakeEnvs) Get(owner, name string) (envs.Environment, error) {
+	f.c.add("envs.Get %s/%s", owner, name)
+	if f.err != nil {
+		return envs.Environment{}, f.err
+	}
+	e, ok := f.rows[envKey(owner, name)]
+	if !ok {
+		return envs.Environment{}, envs.ErrNoSuchEnvironment
+	}
+	return e, nil
+}
+
+func (f *fakeEnvs) List(owner string) ([]envs.Environment, error) {
+	f.c.add("envs.List %s", owner)
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := []envs.Environment{}
+	for _, e := range f.rows {
+		if e.Owner == owner {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (f *fakeEnvs) Delete(owner, name string) error {
+	f.c.add("envs.Delete %s/%s", owner, name)
+	if f.err != nil {
+		return f.err
+	}
+	k := envKey(owner, name)
+	if _, ok := f.rows[k]; !ok {
+		return envs.ErrNoSuchEnvironment
+	}
+	delete(f.rows, k)
+	return nil
+}
+
+func (f *fakeEnvs) SetScript(owner, name, script, from string) error {
+	f.c.add("envs.SetScript %s/%s from=%s", owner, name, from)
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		return envs.ErrNoSuchEnvironment
+	}
+	e.SetupScript, e.SetupFrom = script, from
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
+func (f *fakeEnvs) SetBuildSession(owner, name, url string) error {
+	f.c.add("envs.SetBuildSession %s/%s %s", owner, name, url)
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		// The store answers a missing row with nil here too: this is colour on
+		// a build, not the write that decides its outcome.
+		return nil
+	}
+	e.BuildSession = url
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
+func (f *fakeEnvs) SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error {
+	f.c.add("envs.SetBuildDenials %s/%s domains=%d", owner, name, len(domains))
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		return nil
+	}
+	e.BuildDenials = append([]envs.BuildDeniedDomain(nil), domains...)
+	e.BuildDenialOverflow = overflow
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
+func (f *fakeEnvs) SetState(owner, name string, st envs.State, box, buildErr string) error {
+	f.c.add("envs.SetState %s/%s state=%s", owner, name, st)
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		return envs.ErrNoSuchEnvironment
+	}
+	if st != envs.StateFailed {
+		buildErr = ""
+	}
+	e.State, e.BuildBox, e.BuildError = st, box, buildErr
+	if st == envs.StateBuilding {
+		e.BuildDenials = nil
+		e.BuildDenialOverflow = 0
+	}
+	// updated_at moves on every state change, exactly as the real UPDATE does.
+	// It is what buildStartedAt reads, so a fake that skipped it would make the
+	// reconciler untestable.
+	e.UpdatedAt = f.clock()
+	if st == envs.StateReady {
+		at := f.clock()
+		e.BuiltAt = &at
+	}
+	f.rows[k] = e
+	return nil
+}
+
+// Building is the one query with no owner term, and the fake keeps it that way:
+// it returns every owner's in-flight build, sorted, because what this package
+// does with the owner afterwards — compare it against the sandbox's — is the
+// security property the build tests exist to pin.
+func (f *fakeEnvs) Building() ([]envs.Environment, error) {
+	f.c.add("envs.Building")
+	if f.buildingErr != nil {
+		return nil, f.buildingErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := []envs.Environment{}
+	for _, e := range f.rows {
+		if e.State == envs.StateBuilding {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Owner != out[j].Owner {
+			return out[i].Owner < out[j].Owner
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+
+// fakeEnvVars is the plain-var half of secrets.Store, keyed by (owner, tag,
+// name) exactly as the real table is — so the same name under two tags is two
+// rows, which is the whole difference between a var and a secret.
+type fakeEnvVars struct {
+	c    *calls
+	rows map[string]secrets.Var // "owner\x00tag\x00name"
+	err  error
+}
+
+func varKey(owner, tag, name string) string { return owner + "\x00" + tag + "\x00" + name }
+
+func (f *fakeEnvVars) PutVar(owner, tag, name, value string) error {
+	f.c.add("vars.Put %s/%s/%s", owner, tag, name)
+	if f.err != nil {
+		return f.err
+	}
+	// The real store refuses a reserved name, an oversized value and a '#'
+	// here. A fake that accepted them would let an ordering regression — a
+	// grammar refusal that lands after the first write — pass every test in
+	// this package, which is exactly how the original one got in.
+	if err := secrets.ValidateVar(name, value); err != nil {
+		return err
+	}
+	f.rows[varKey(owner, tag, name)] = secrets.Var{Tag: tag, Name: name, Value: value}
+	return nil
+}
+
+func (f *fakeEnvVars) DeleteVar(owner, tag, name string) error {
+	f.c.add("vars.Delete %s/%s/%s", owner, tag, name)
+	if f.err != nil {
+		return f.err
+	}
+	k := varKey(owner, tag, name)
+	if _, ok := f.rows[k]; !ok {
+		return secrets.ErrNoSuchVar
+	}
+	delete(f.rows, k)
+	return nil
+}
+
+func (f *fakeEnvVars) VarsForTag(owner, tag string) ([]secrets.Var, error) {
+	f.c.add("vars.ForTag %s/%s", owner, tag)
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []secrets.Var
+	for k, v := range f.rows {
+		if strings.HasPrefix(k, owner+"\x00"+tag+"\x00") {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (f *fakeEnvVars) DeleteVarsForTag(owner, tag string) error {
+	f.c.add("vars.DeleteForTag %s/%s", owner, tag)
+	if f.err != nil {
+		return f.err
+	}
+	for k := range f.rows {
+		if strings.HasPrefix(k, owner+"\x00"+tag+"\x00") {
+			delete(f.rows, k)
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+
+// fakeNetRules is the egress rule-set store in a map. It keeps the one refusal
+// ctlops depends on — `default` is not a rule-set tag, because a subtractive
+// policy on the tag every sandbox carries would cut the whole fleet down to the
+// base allowlist.
+type fakeNetRules struct {
+	c    *calls
+	rows map[string]netrules.RuleMeta // "owner\x00name"
+	err  error
+}
+
+func (f *fakeNetRules) ListRules(owner string) ([]netrules.RuleMeta, error) {
+	f.c.add("netrules.List %s", owner)
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []netrules.RuleMeta
+	for k, r := range f.rows {
+		if o, _, _ := strings.Cut(k, "\x00"); o == owner {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (f *fakeNetRules) PutRule(owner, name string, spec netrules.RuleSpec, tags []string) error {
+	f.c.add("netrules.Put %s/%s tags=%v", owner, name, tags)
+	if f.err != nil {
+		return f.err
+	}
+	if slices.Contains(tags, secrets.DefaultTag) {
+		return fmt.Errorf("an egress rule-set cannot be tagged %q", secrets.DefaultTag)
+	}
+	f.rows[owner+"\x00"+name] = netrules.RuleMeta{Name: name, Tags: tags, Spec: spec, Version: 1}
+	return nil
+}
+
+func (f *fakeNetRules) DeleteRule(owner, name string) error {
+	f.c.add("netrules.Delete %s/%s", owner, name)
+	if f.err != nil {
+		return f.err
+	}
+	delete(f.rows, owner+"\x00"+name)
+	return nil
+}
+
+// withEnvs gives a rig the three optional stores the environment verbs need,
+// the same way withRepos does for the repo verbs: by setting the unexported
+// fields directly, which is this package's idiom for reshaping a host after New
+// and keeps the shared rig a plain one with no environment support at all.
+func withEnvs(r *rig) (*fakeEnvs, *fakeEnvVars, *fakeNetRules) {
+	e := &fakeEnvs{c: r.calls, rows: map[string]envs.Environment{}}
+	v := &fakeEnvVars{c: r.calls, rows: map[string]secrets.Var{}}
+	n := &fakeNetRules{c: r.calls, rows: map[string]netrules.RuleMeta{}}
+	r.envs, r.envVars, r.netrules = e, v, n
+	r.ops.envs, r.ops.envVars, r.ops.netrules = e, v, n
+	return e, v, n
 }

@@ -43,6 +43,7 @@ const (
 	NodeControl_RecordKey_FullMethodName              = "/sparkbox.node.v1.NodeControl/RecordKey"
 	NodeControl_ApplyNetworkPolicy_FullMethodName     = "/sparkbox.node.v1.NodeControl/ApplyNetworkPolicy"
 	NodeControl_GetNetworkUsage_FullMethodName        = "/sparkbox.node.v1.NodeControl/GetNetworkUsage"
+	NodeControl_NetworkDenials_FullMethodName         = "/sparkbox.node.v1.NodeControl/NetworkDenials"
 	NodeControl_GetOperation_FullMethodName           = "/sparkbox.node.v1.NodeControl/GetOperation"
 	NodeControl_WatchOperation_FullMethodName         = "/sparkbox.node.v1.NodeControl/WatchOperation"
 )
@@ -79,6 +80,7 @@ type NodeControlClient interface {
 	RecordKey(ctx context.Context, in *RecordKeyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ApplyNetworkPolicy(ctx context.Context, in *ApplyNetworkPolicyRequest, opts ...grpc.CallOption) (*Operation, error)
 	GetNetworkUsage(ctx context.Context, in *GetNetworkUsageRequest, opts ...grpc.CallOption) (*GetNetworkUsageResponse, error)
+	NetworkDenials(ctx context.Context, in *NetworkDenialsRequest, opts ...grpc.CallOption) (*NetworkDenialsResponse, error)
 	GetOperation(ctx context.Context, in *GetOperationRequest, opts ...grpc.CallOption) (*Operation, error)
 	WatchOperation(ctx context.Context, in *WatchOperationRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Operation], error)
 }
@@ -330,6 +332,16 @@ func (c *nodeControlClient) GetNetworkUsage(ctx context.Context, in *GetNetworkU
 	return out, nil
 }
 
+func (c *nodeControlClient) NetworkDenials(ctx context.Context, in *NetworkDenialsRequest, opts ...grpc.CallOption) (*NetworkDenialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NetworkDenialsResponse)
+	err := c.cc.Invoke(ctx, NodeControl_NetworkDenials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *nodeControlClient) GetOperation(ctx context.Context, in *GetOperationRequest, opts ...grpc.CallOption) (*Operation, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Operation)
@@ -391,6 +403,7 @@ type NodeControlServer interface {
 	RecordKey(context.Context, *RecordKeyRequest) (*emptypb.Empty, error)
 	ApplyNetworkPolicy(context.Context, *ApplyNetworkPolicyRequest) (*Operation, error)
 	GetNetworkUsage(context.Context, *GetNetworkUsageRequest) (*GetNetworkUsageResponse, error)
+	NetworkDenials(context.Context, *NetworkDenialsRequest) (*NetworkDenialsResponse, error)
 	GetOperation(context.Context, *GetOperationRequest) (*Operation, error)
 	WatchOperation(*WatchOperationRequest, grpc.ServerStreamingServer[Operation]) error
 	mustEmbedUnimplementedNodeControlServer()
@@ -471,6 +484,9 @@ func (UnimplementedNodeControlServer) ApplyNetworkPolicy(context.Context, *Apply
 }
 func (UnimplementedNodeControlServer) GetNetworkUsage(context.Context, *GetNetworkUsageRequest) (*GetNetworkUsageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetNetworkUsage not implemented")
+}
+func (UnimplementedNodeControlServer) NetworkDenials(context.Context, *NetworkDenialsRequest) (*NetworkDenialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method NetworkDenials not implemented")
 }
 func (UnimplementedNodeControlServer) GetOperation(context.Context, *GetOperationRequest) (*Operation, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetOperation not implemented")
@@ -906,6 +922,24 @@ func _NodeControl_GetNetworkUsage_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeControl_NetworkDenials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NetworkDenialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeControlServer).NetworkDenials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeControl_NetworkDenials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeControlServer).NetworkDenials(ctx, req.(*NetworkDenialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _NodeControl_GetOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetOperationRequest)
 	if err := dec(in); err != nil {
@@ -1029,6 +1063,10 @@ var NodeControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetNetworkUsage",
 			Handler:    _NodeControl_GetNetworkUsage_Handler,
+		},
+		{
+			MethodName: "NetworkDenials",
+			Handler:    _NodeControl_NetworkDenials_Handler,
 		},
 		{
 			MethodName: "GetOperation",

@@ -16,6 +16,7 @@ import (
 	nodev1 "github.com/vanpelt/sparky/tools/sparkbox/api/node/v1"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/eventjournal"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/operationjournal"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -72,6 +73,7 @@ const (
 type NetworkHooks interface {
 	ApplyNetworkPolicy(context.Context, []*nodev1.NetworkPolicy) error
 	GetNetworkUsage(context.Context) ([]*nodev1.NetworkUsage, error)
+	NetworkDenials(context.Context, string, bool) (netpush.DenialCapture, error)
 }
 
 // ServerConfig contains adapter metadata and dependencies. Context controls

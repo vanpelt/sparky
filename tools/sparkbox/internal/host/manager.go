@@ -485,6 +485,17 @@ type ToolRefresher interface {
 // through sshgw, so that dependency only runs one way).
 var ErrNoToolRefresh = errors.New("this sandbox was created before agent-tool updates and cannot refresh them")
 
+// ErrNoEnvSetup is a guest with no environment-setup payload in it — a builder
+// booted from a template that predates environment builds. Named rather than
+// silent for the reason the two sentinels above are: the nudge otherwise
+// succeeds, nothing ever runs, and the build sits in `building` until its
+// timeout reports "the builder never reported", which names the wrong cause.
+//
+// It lives here beside them, and for their reason: internal/ctlops has to print
+// it and cannot import envsync (envsync reaches ctlops through sshgw, so that
+// dependency only runs one way).
+var ErrNoEnvSetup = errors.New("this sandbox was created before environment builds and cannot run a setup script")
+
 // FrontDoor is an optional hook for per-sandbox public-address plumbing (see
 // internal/frontdoor): Ensure is called when a sandbox is created, Remove when
 // it is destroyed. Implementations are expected to be best-effort — a sandbox

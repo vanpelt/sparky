@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,11 +33,28 @@ import (
 // guest IP that identifies its tap. Satisfied by *host.Sandbox via an adapter
 // in the caller.
 type Sandbox struct {
+	ID    string
 	Name  string
 	Owner string
 	// HostIP is the guest address in its configured /30. Empty for a paused VM,
 	// which has no live tap and is skipped.
 	HostIP string
+}
+
+// DeniedDomain is one exact DNS name sluice refused during a scoped capture.
+type DeniedDomain struct {
+	Domain        string   `json:"domain"`
+	Queries       uint64   `json:"queries"`
+	QTypes        []string `json:"qtypes"`
+	FirstSeenUnix int64    `json:"first_seen_unix"`
+	LastSeenUnix  int64    `json:"last_seen_unix"`
+}
+
+// DenialCapture is the bounded result of one sandbox network capture.
+type DenialCapture struct {
+	CaptureID       string         `json:"capture_id"`
+	Domains         []DeniedDomain `json:"domains"`
+	OverflowQueries uint64         `json:"overflow_queries,omitempty"`
 }
 
 // Fleet enumerates the running sandboxes across all owners.
@@ -111,6 +129,52 @@ func (c *Client) Report(ctx context.Context) (*Report, error) {
 		return nil, fmt.Errorf("decode report: %w", err)
 	}
 	return &rep, nil
+}
+
+func (c *Client) StartDenials(ctx context.Context, tap, captureID string) error {
+	resp, err := c.denialRequest(ctx, tap, "start", captureID)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("start denials: sluice returned %s", resp.Status)
+	}
+	return nil
+}
+
+func (c *Client) FinishDenials(ctx context.Context, tap, captureID string) (DenialCapture, error) {
+	resp, err := c.denialRequest(ctx, tap, "finish", captureID)
+	if err != nil {
+		return DenialCapture{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return DenialCapture{}, fmt.Errorf("finish denials: sluice returned %s", resp.Status)
+	}
+	var capture DenialCapture
+	if err := json.NewDecoder(resp.Body).Decode(&capture); err != nil {
+		return DenialCapture{}, fmt.Errorf("decode denials: %w", err)
+	}
+	return capture, nil
+}
+
+func (c *Client) denialRequest(ctx context.Context, tap, action, captureID string) (*http.Response, error) {
+	body, err := json.Marshal(map[string]string{"capture_id": captureID})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://sluice/denials/"+tap+"/"+action, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s denials: %w", action, err)
+	}
+	return resp, nil
 }
 
 type policyBody struct {
@@ -313,6 +377,45 @@ func (s *Syncer) Usage(ctx context.Context, owner string) (map[string]VMUsage, e
 		out[b.Name] = VMUsage{Name: b.Name, TxBytes: tu.TxBytes, RxBytes: tu.RxBytes, Domains: domains}
 	}
 	return out, nil
+}
+
+// StartDenialCapture resets and arms a capture for the current incarnation of
+// sandbox. Its immutable sandbox ID makes a retried start idempotent.
+func (s *Syncer) StartDenialCapture(ctx context.Context, sandbox string) error {
+	b, tap, err := s.captureTarget(sandbox)
+	if err != nil {
+		return err
+	}
+	return s.client.StartDenials(ctx, tap, b.ID)
+}
+
+// FinishDenialCapture returns the current sandbox incarnation's capture.
+func (s *Syncer) FinishDenialCapture(ctx context.Context, sandbox string) (DenialCapture, error) {
+	b, tap, err := s.captureTarget(sandbox)
+	if err != nil {
+		return DenialCapture{}, err
+	}
+	return s.client.FinishDenials(ctx, tap, b.ID)
+}
+
+func (s *Syncer) captureTarget(name string) (Sandbox, string, error) {
+	if s.client == nil {
+		return Sandbox{}, "", errors.New("sluice is not configured")
+	}
+	for _, b := range s.fleet.List() {
+		if b.Name != name {
+			continue
+		}
+		if b.ID == "" {
+			return Sandbox{}, "", fmt.Errorf("sandbox %s has no capture identity", name)
+		}
+		tap, ok := tapName(s.guestNet, b.HostIP)
+		if !ok {
+			return Sandbox{}, "", fmt.Errorf("sandbox %s has no live network tap", name)
+		}
+		return b, tap, nil
+	}
+	return Sandbox{}, "", fmt.Errorf("sandbox %s is not running here", name)
 }
 
 // TapName derives the tap device name from a guest HostIP in the standalone

@@ -789,3 +789,162 @@ func TestGuestLifecycleWithoutAControlPlaneIsRefusedNotDropped(t *testing.T) {
 		}
 	}
 }
+
+// recordingEnvSetup is an environment door that only remembers which sandbox
+// RECORD it was handed. The record is the security property here as it is for
+// the lifecycle: the environment a report lands on is resolved from that
+// record's owner, so a node able to reach a box it does not hold would be
+// reporting into somebody else's build.
+type recordingEnvSetup struct {
+	boxes   []string
+	reports []ctlops.SetupReport
+	script  string
+	env     string
+	mode    string
+}
+
+func (e *recordingEnvSetup) SetupFor(_ context.Context, box *host.Sandbox) (ctlops.SetupJob, bool, error) {
+	e.boxes = append(e.boxes, "fetch:"+box.Name+"@"+box.Owner)
+	if e.script == "" {
+		return ctlops.SetupJob{}, false, nil
+	}
+	mode := e.mode
+	if mode == "" {
+		mode = ctlops.SetupModeScript
+	}
+	return ctlops.SetupJob{Env: e.env, Mode: mode, Payload: e.script}, true, nil
+}
+
+func (e *recordingEnvSetup) SetupDone(_ context.Context, box *host.Sandbox, r ctlops.SetupReport) error {
+	e.boxes = append(e.boxes, "report:"+box.Name+"@"+box.Owner)
+	e.reports = append(e.reports, r)
+	return nil
+}
+
+// TestEnvironmentSetupRefusesASandboxPlacedOnAnotherNode is the placement-ledger
+// rule applied to the environment pair, and it is the reason this file's
+// selfServiceBox call comes first in both methods.
+//
+// Without it any enrolled machine could fetch another owner's setup script by
+// guessing a sandbox name — which is the shape of their private toolchain and
+// often the names of their internal repositories — and could then report a
+// success against somebody else's build, which ends in a capture that re-points
+// that owner's template to a disk this node authored.
+// TestAnAgentSetupJobRelaysItsModeAndPrompt is the same relay in the mode that
+// did not exist when it was written. It is separate rather than a subtest
+// because what it asserts is different: not that the payload arrives, but that
+// the payload and the MODE arrive together — a prompt that reached a guest
+// labelled `script` would be run by bash.
+func TestAnAgentSetupJobRelaysItsModeAndPrompt(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	const prompt = "You are configuring a fresh Sparkbox microVM.\nDo not ask questions.\n"
+	r.f.SetEnvSetup(&recordingEnvSetup{script: prompt, env: "web", mode: ctlops.SetupModeAgent})
+
+	job, err := r.f.SelfSetup(context.Background(), "boxb", nodelink.SelfSetupReq{Sandbox: "far-away"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !job.Job {
+		t.Fatal("the agent builder was told it had no job")
+	}
+	if job.Mode != ctlops.SetupModeAgent {
+		t.Errorf("mode = %q, want %q", job.Mode, ctlops.SetupModeAgent)
+	}
+	if job.Script != prompt {
+		t.Errorf("payload = %q, want the prompt verbatim", job.Script)
+	}
+}
+
+func TestEnvironmentSetupRefusesASandboxPlacedOnAnotherNode(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	door := &recordingEnvSetup{script: "#!/bin/sh\nmake deps\n", env: "web"}
+	r.f.SetEnvSetup(door)
+	ctx := context.Background()
+
+	// The machine that holds it is answered, so this refuses forgery and not
+	// the feature.
+	job, err := r.f.SelfSetup(ctx, "boxb", nodelink.SelfSetupReq{Sandbox: "far-away"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !job.Job || job.Env != "web" || job.Script != "#!/bin/sh\nmake deps\n" {
+		t.Errorf("job = %+v", job)
+	}
+	// THE MODE MUST SURVIVE THE RELAY. On a control-plane-only gateway — which
+	// is what the live CKS cluster is — every builder is on a node, so this is
+	// not an edge case, it is the only path. A mode dropped here arrives at the
+	// guest empty and the build fails with "no mode"; a mode silently defaulted
+	// here would run an agent prompt as a shell script.
+	if job.Mode != ctlops.SetupModeScript {
+		t.Errorf("mode = %q, want %q — a dropped mode is the Phase B asymmetry again",
+			job.Mode, ctlops.SetupModeScript)
+	}
+	if _, err := r.f.SelfSetupResult(ctx, "boxb", nodelink.SelfSetupResultReq{
+		Sandbox: "far-away", OK: true, Script: "#!/bin/sh\nmake deps\n", Log: "+ make deps\n",
+	}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	// The owner comes off the ledger's record, not off anything the node said.
+	want := []string{"fetch:far-away@alice", "report:far-away@alice"}
+	if !equalStrings(door.boxes, want) {
+		t.Errorf("the door saw %v, want %v", door.boxes, want)
+	}
+	if len(door.reports) != 1 || !door.reports[0].OK || door.reports[0].Log != "+ make deps\n" {
+		t.Errorf("report = %+v", door.reports)
+	}
+
+	for name, call := range map[string]func() error{
+		"fetch": func() error {
+			_, err := r.f.SelfSetup(ctx, "intruder", nodelink.SelfSetupReq{Sandbox: "far-away"})
+			return err
+		},
+		"report": func() error {
+			_, err := r.f.SelfSetupResult(ctx, "intruder", nodelink.SelfSetupResultReq{
+				Sandbox: "far-away", OK: true})
+			return err
+		},
+	} {
+		if err := call(); codeOf(err) != nodelink.CodeNotYours {
+			t.Errorf("cross-node %s = %v (code %q), want %s", name, err, codeOf(err), nodelink.CodeNotYours)
+		}
+	}
+	if len(door.boxes) != 2 {
+		t.Errorf("a cross-node request reached the environment door: %v", door.boxes)
+	}
+}
+
+// TestEnvironmentSetupWithoutAControlPlaneIsRefusedNotDropped: a gateway with no
+// environment door answers a node in a sentence, rather than leaving a builder
+// waiting on a hook that will never answer and a row in `building` with nothing
+// to explain it.
+func TestEnvironmentSetupWithoutAControlPlaneIsRefusedNotDropped(t *testing.T) {
+	r := newSideRig(t)
+	r.linkBuilder(t)
+	if _, err := r.f.CreateOn(context.Background(), "boxb", "far-away", "alice", "ubuntu", 1, 512); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for name, call := range map[string]func() error{
+		"fetch": func() error {
+			_, err := r.f.SelfSetup(ctx, "boxb", nodelink.SelfSetupReq{Sandbox: "far-away"})
+			return err
+		},
+		"report": func() error {
+			_, err := r.f.SelfSetupResult(ctx, "boxb", nodelink.SelfSetupResultReq{
+				Sandbox: "far-away", OK: true})
+			return err
+		},
+	} {
+		if err := call(); !ctlops.IsKind(err, ctlops.KindDisabled) {
+			t.Errorf("%s with no environment door = %v, want KindDisabled", name, err)
+		}
+	}
+}

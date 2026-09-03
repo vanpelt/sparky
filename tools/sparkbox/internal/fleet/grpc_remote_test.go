@@ -281,6 +281,11 @@ func TestGRPCControlLifecycleUsesDurableIdentitiesAndResults(t *testing.T) {
 	if err != nil || usage["renamed"].RxBytes != 11 {
 		t.Fatalf("network usage = %+v, err=%v", usage, err)
 	}
+	denials, err := control.NetDenials(context.Background(), "renamed", false)
+	if err != nil || denials.CaptureID != "box-id" || len(denials.Domains) != 1 ||
+		denials.Domains[0].Domain != "registry.npmjs.org" || denials.OverflowQueries != 2 {
+		t.Fatalf("network denials = %+v, err=%v", denials, err)
+	}
 	if err := control.MarkActive(context.Background(), "renamed"); err != nil {
 		t.Fatal(err)
 	}
@@ -805,6 +810,14 @@ func (f *fakeDurable) NetworkUsage(context.Context) (*nodev1.GetNetworkUsageResp
 	return &nodev1.GetNetworkUsageResponse{Usage: []*nodev1.NetworkUsage{{
 		Sandbox: "renamed", RxBytes: 11, TxBytes: 22,
 	}}}, nil
+}
+func (f *fakeDurable) NetworkDenials(context.Context, string, bool) (*nodev1.NetworkDenialsResponse, error) {
+	return &nodev1.NetworkDenialsResponse{
+		CaptureId: "box-id", OverflowQueries: 2,
+		Domains: []*nodev1.NetworkDeniedDomain{{
+			Domain: "registry.npmjs.org", Queries: 3, Qtypes: []string{"A", "AAAA"},
+		}},
+	}, nil
 }
 func (f *fakeDurable) MarkActive(context.Context, *nodev1.MarkActiveRequest) error { return nil }
 func (f *fakeDurable) RecordKey(context.Context, *nodev1.RecordKeyRequest) error   { return nil }

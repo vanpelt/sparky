@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -219,6 +220,42 @@ func TestUsageAttributesTapsToVMsAndFiltersByOwner(t *testing.T) {
 	// Domains sorted by total bytes desc: youtube (900) before github (100).
 	if len(u.Domains) != 2 || u.Domains[0].Domain != "youtube.com" {
 		t.Errorf("domains not sorted desc: %+v", u.Domains)
+	}
+}
+
+func TestDenialCaptureUsesTapAndImmutableSandboxID(t *testing.T) {
+	var paths []string
+	client := unixSluice(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if body["capture_id"] != "box-immutable-id" {
+			t.Errorf("capture_id = %q", body["capture_id"])
+		}
+		if strings.HasSuffix(r.URL.Path, "/start") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		json.NewEncoder(w).Encode(DenialCapture{CaptureID: body["capture_id"], Domains: []DeniedDomain{
+			{Domain: "registry.npmjs.org", Queries: 2, QTypes: []string{"A", "AAAA"}},
+		}}) //nolint:errcheck
+	}))
+	s := NewSyncer(client, fakeFleet{boxes: []Sandbox{
+		{ID: "box-immutable-id", Name: "web-build", Owner: "alice", HostIP: "172.30.5.2"},
+	}}, fakeRules{}, nil)
+	if err := s.StartDenialCapture(context.Background(), "web-build"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.FinishDenialCapture(context.Background(), "web-build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Domains) != 1 || got.Domains[0].Domain != "registry.npmjs.org" {
+		t.Fatalf("capture = %+v", got)
+	}
+	want := []string{"/denials/sbtap320/start", "/denials/sbtap320/finish"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
 	}
 }
 

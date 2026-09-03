@@ -182,6 +182,14 @@ func ComposeNode(control ControlPlane, guest GuestDialer) Node {
 	return &composedNode{ControlPlane: control, GuestDialer: guest}
 }
 
+func (n *composedNode) NetDenials(ctx context.Context, sandbox string, reset bool) (netpush.DenialCapture, error) {
+	ext, ok := n.ControlPlane.(netDenialNode)
+	if !ok {
+		return netpush.DenialCapture{}, nodelink.NoSluice(n.Name())
+	}
+	return ext.NetDenials(ctx, sandbox, reset)
+}
+
 // Facts is what a node says about itself: everything a placement decision or an
 // operator listing needs that is not a live resource number. A node reports
 // them once, at hello, which is why this IS the hello — a separate struct was
