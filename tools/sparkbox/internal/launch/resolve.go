@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
@@ -39,10 +40,13 @@ const codeNoAttachment = "no_attachment"
 // would build a box with an empty working tree every single time.
 const codeUntaggedAttachment = "untagged_attachment"
 
-// target is a launch link's whole meaning: which repository, and which branch.
-// There is no third field and there is never going to be one — see the package
-// comment on why a tag, a node, a name or a command in a URL is a different and
-// much worse product.
+const (
+	codeEnvRepoMismatch = "environment_repo_mismatch"
+	codeEnvNotReady     = "environment_not_ready"
+)
+
+// target is a launch link's whole meaning: repository, branch, and an optional
+// owner-scoped environment selection that must be confirmed by the clicker.
 type target struct {
 	// Slug is "owner/name" as the URL spelled it, already validated. It is used
 	// for matching, which is case-insensitive; anything DISPLAYED comes from the
@@ -53,6 +57,9 @@ type target struct {
 	// "whatever the attachment says", which is not the same as any particular
 	// branch name — see normalizeRef.
 	Ref string
+	// Env is the raw ?env= value after whitespace/case normalization. Its row,
+	// ownership, readiness, and repository membership are resolved by ctlops.
+	Env string
 }
 
 // candidate is one of the caller's existing sandboxes that holds this
@@ -66,15 +73,16 @@ type candidate struct {
 	Ref string
 }
 
-// parseTarget validates the two parameters a launch link may carry and refuses
-// everything else by never looking at it.
+// parseTarget validates the path/ref grammar and normalizes the optional
+// environment name. The environment itself is resolved under the caller by
+// resolve; unknown parameters are ignored by never looking at them.
 //
 // Unknown query parameters are not read and not refused. That is a
 // forward-compatibility promise rather than laxness: this URL goes into
 // comments that outlive the deployment, so a host built years from now must
 // still honour a link written today, and a link written today must not 400 on a
 // host that learned a parameter after it was written.
-func parseTarget(owner, repo, ref string) (target, *ctlops.Error) {
+func parseTarget(owner, repo, ref, env string) (target, *ctlops.Error) {
 	slug := owner + "/" + repo
 	// repos.ValidSlug, never a hand-rolled regexp. The two halves are not the
 	// same grammar — the owner is a GitHub login and the name additionally
@@ -114,7 +122,7 @@ func parseTarget(owner, repo, ref string) (target, *ctlops.Error) {
 		return target{}, ctlops.Invalid(op, "bad_ref",
 			"%q is not a branch or tag name — it has to start with a letter or a digit, and it cannot contain \"..\".", ref)
 	}
-	return target{Slug: slug, Ref: ref}, nil
+	return target{Slug: slug, Ref: ref, Env: strings.ToLower(strings.TrimSpace(env))}, nil
 }
 
 // normalizeRef folds a ref that is merely the attachment's own default down to
@@ -289,7 +297,7 @@ func pickTags(tags []string, list []ctlops.EnvironmentInfo) tagChoice {
 // a sandbox holding this repository on this branch, and if not, what do we need
 // to tell them before offering to build one.
 //
-// It is three reads and no writes, and that is a contract rather than an
+// It is reads and no writes, and that is a contract rather than an
 // implementation detail. A link in a public comment is fetched by scanners,
 // previewers and prefetchers nobody consented to, so the GET behind it must not
 // create a sandbox, wake a paused one, write a tag or a ref row, or consume a
@@ -303,7 +311,7 @@ func pickTags(tags []string, list []ctlops.EnvironmentInfo) tagChoice {
 // it.
 //
 // The returns are: the matched attachment (the display authority for the slug
-// and the only source of tags a create may carry), the best existing sandbox to
+// and the ordinary path's source of tags), the best existing sandbox to
 // hand the visitor back if there is one, and every OTHER sandbox of theirs on
 // this repository — which the confirm page renders as the human escape hatch
 // for the one branch case no fold can decide.
@@ -348,6 +356,29 @@ func (h *Handler) resolve(ctx context.Context, c ctlops.Caller, t target) (repos
 		return att, nil, nil, ctlops.Invalid(op, codeUntaggedAttachment,
 			"%s is attached but carries no tag, so no sandbox will ever clone it.", att.Slug)
 	}
+	if t.Env != "" {
+		if h.envs == nil {
+			return att, nil, nil, ctlops.Disabled(op,
+				"this host does not support environment launch links.")
+		}
+		env, err := h.envs.GetEnvironment(c, t.Env)
+		if err != nil {
+			return att, nil, nil, err
+		}
+		if env.State != string(envs.StateReady) {
+			return att, nil, nil, &ctlops.Error{
+				Kind: ctlops.KindConflict, Op: op, Code: codeEnvNotReady,
+				Msg: "environment " + env.Name + " is not ready yet; finish its build before launching it.",
+			}
+		}
+		if !containsFold(att.Tags, env.Name) {
+			return att, nil, nil, ctlops.Invalid(op, codeEnvRepoMismatch,
+				"%s is not attached to environment %s.", att.Slug, env.Name)
+		}
+		// Keep the canonical environment name returned by ctlops. envName folds
+		// case and whitespace there too, and Create must receive the same name.
+		t.Env = env.Name
+	}
 
 	names, err := h.repos.SandboxesForRepo(c.Handle, gitHubHost, att.Slug)
 	if err != nil {
@@ -382,6 +413,9 @@ func (h *Handler) resolve(ctx context.Context, c ctlops.Caller, t target) (repos
 			// A tag row survives its sandbox in a window the manager closes
 			// asynchronously, and List is the ledger. A name with no record is
 			// a box we cannot redirect anybody to.
+			continue
+		}
+		if t.Env != "" && !containsFold(info.Tags, t.Env) {
 			continue
 		}
 		manifest, err := h.repos.ReposForSandbox(name, c.Handle)
@@ -427,6 +461,15 @@ func (h *Handler) resolve(ctx context.Context, c ctlops.Caller, t target) (repos
 		others = nil
 	}
 	return att, best, others, nil
+}
+
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // reachableOnly drops sandboxes whose node is not answering the control plane,

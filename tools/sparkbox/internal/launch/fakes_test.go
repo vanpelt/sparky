@@ -30,8 +30,9 @@ import (
 // assertion buys nothing at runtime, and because internal/ctlops/fakes_test.go
 // is `package ctlops` and so cannot be imported from here at all.
 var (
-	_ Sandboxes   = (*ctlops.Ops)(nil)
-	_ Attachments = (*repos.Store)(nil)
+	_ Sandboxes    = (*ctlops.Ops)(nil)
+	_ Environments = (*ctlops.Ops)(nil)
+	_ Attachments  = (*repos.Store)(nil)
 	// The optional interfaces are pinned here too, and they are the ones that
 	// most need it: nothing fails at compile time when an ASSERTION stops
 	// matching, so a renamed method on *ctlops.Ops would silently turn
@@ -54,9 +55,11 @@ var errStore = errors.New("store is on fire")
 type fakeOps struct {
 	t *testing.T
 
-	mu      sync.Mutex
-	boxes   []ctlops.SandboxInfo
-	listErr error
+	mu           sync.Mutex
+	boxes        []ctlops.SandboxInfo
+	listErr      error
+	environments map[string]ctlops.EnvironmentInfo
+	envErr       error
 
 	// allowCreate opts one test into exercising the create path. Every GET test
 	// leaves it false, which is what pins the read paths side-effect free.
@@ -88,6 +91,20 @@ type fakeOps struct {
 	// so the fallback path and the empty path are exercised by the same tests.
 	envs    []ctlops.EnvironmentInfo
 	envsErr error
+}
+
+func (f *fakeOps) GetEnvironment(_ ctlops.Caller, name string) (ctlops.EnvironmentInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.envErr != nil {
+		return ctlops.EnvironmentInfo{}, f.envErr
+	}
+	for key, env := range f.environments {
+		if strings.EqualFold(key, name) {
+			return env, nil
+		}
+	}
+	return ctlops.EnvironmentInfo{}, ctlops.NotFound("env.get", "environment", name)
 }
 
 func (f *fakeOps) List(_ context.Context, _ ctlops.Caller) ([]ctlops.SandboxInfo, error) {
@@ -246,6 +263,7 @@ func newHandler(t *testing.T, ops *fakeOps, store *fakeRepos) *Handler {
 	t.Helper()
 	return &Handler{
 		ops:      ops,
+		envs:     ops,
 		repos:    store,
 		accounts: testAccounts{testHandle: {Handle: testHandle, Status: users.StatusActive, InvitedBy: "someoneelse"}, otherHandle: {Handle: otherHandle, Status: users.StatusActive, InvitedBy: "someoneelse"}},
 		signer:   testSigner,

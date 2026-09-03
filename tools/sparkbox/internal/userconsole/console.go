@@ -166,10 +166,13 @@ type Handler struct {
 	// the <name>.<xtermSub>.<domain> link itself, and hide the Terminal button
 	// entirely on a host that serves no terminals.
 	xtermSub string
-	secure   bool // set the Secure flag when clearing the session cookie
-	log      *slog.Logger
-	loginURL string // where unauthenticated browsers are sent
-	origin   string // first-party Origin accepted by the CSRF gate
+	// launchSub is the reserved launch-link label. Empty hides environment
+	// launch controls, just as an empty xtermSub hides terminal controls.
+	launchSub string
+	secure    bool // set the Secure flag when clearing the session cookie
+	log       *slog.Logger
+	loginURL  string // where unauthenticated browsers are sent
+	origin    string // first-party Origin accepted by the CSRF gate
 
 	// probe carries this machine's name and the fleet dialer: together they
 	// decide which rows are remote and how long their port probes may take.
@@ -297,6 +300,11 @@ func (h *Handler) SetGitHubApp(a *ghapp.App) { h.app = a }
 // are both supported configurations.
 func (h *Handler) SetGitHubUserAuth(a *ghuser.Manager) { h.userAuth = a }
 
+// SetLaunchSubdomain gives ready environment cards their go.<domain> link.
+// The launch service remains the authority for ownership and repo membership;
+// this value only controls whether the SPA can render a route to that service.
+func (h *Handler) SetLaunchSubdomain(sub string) { h.launchSub = strings.Trim(sub, ".") }
+
 // SetTemplateTags gives the Snapshots panel its Tags column. It is a seam for
 // the same reason SetGitHubApp is: a host with no binding store still serves
 // this console, still lists snapshots and still forks them — it simply has no
@@ -391,6 +399,9 @@ type meResponse struct {
 	// a host with no --proxy or no --xterm-subdomain must not offer a link to
 	// a name that resolves nowhere.
 	TerminalSubdomain string `json:"terminal_subdomain,omitempty"`
+	// LaunchSubdomain is the reserved go-service label used by ready
+	// environment cards. Omitted when launch links are disabled.
+	LaunchSubdomain string `json:"launch_subdomain,omitempty"`
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +409,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meResponse{
 		Handle: sess.Handle, Email: sess.Email, Operator: sess.Operator,
 		TerminalSubdomain: h.xtermSub,
+		LaunchSubdomain:   h.launchSub,
 	})
 }
 

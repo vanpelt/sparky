@@ -355,7 +355,7 @@ func TestParseTargetAcceptsWhatGitHubIssues(t *testing.T) {
 		{"my-org", "my_repo", "2fa"},
 		{"a", "9", "main"},
 	} {
-		got, err := parseTarget(tc.owner, tc.repo, tc.ref)
+		got, err := parseTarget(tc.owner, tc.repo, tc.ref, "")
 		if err != nil {
 			t.Errorf("parseTarget(%q, %q, %q): %v", tc.owner, tc.repo, tc.ref, err)
 			continue
@@ -388,7 +388,7 @@ func TestParseTargetCanonicalisesTheSlug(t *testing.T) {
 		{"both ends", "\twandb", "hivemind\r"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseTarget(tc.owner, tc.repo, "")
+			got, err := parseTarget(tc.owner, tc.repo, "", "")
 			if err != nil {
 				t.Fatalf("parseTarget refused %q/%q: %v", tc.owner, tc.repo, err)
 			}
@@ -419,7 +419,7 @@ func TestParseTargetRefuses(t *testing.T) {
 		{"a ref past the length bound", "wandb", "hivemind", longRef(300), "bad_ref"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseTarget(tc.owner, tc.repo, tc.ref)
+			_, err := parseTarget(tc.owner, tc.repo, tc.ref, "")
 			if err == nil {
 				t.Fatalf("parseTarget(%q, %q, %q) was accepted", tc.owner, tc.repo, tc.ref)
 			}

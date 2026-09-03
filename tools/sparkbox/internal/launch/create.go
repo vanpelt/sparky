@@ -20,17 +20,14 @@ import (
 // visitor (or a page in another tab, or an old bookmark) to have edited. A form
 // is not a promise.
 //
-// What it deliberately does NOT read: a tag, a node, a name, a command, or any
-// URL-valued parameter. The package comment sets out at length why a tag in a
-// link authored in a public comment would be a selector over the CLICKER's
-// decrypted secrets; the rest are absent for the same family of reason, and the
-// only two redirect targets this whole package can produce are the configured
-// login URL and a SandboxInfo.TerminalURL.
+// What it deliberately does NOT read: a raw tag, a node, a sandbox name, a
+// command, or any URL-valued parameter. An environment is resolved and
+// owner-checked again inside createOrReuse before ctlops receives its name.
 func (h *Handler) post(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
 	c := ctlops.Caller{Handle: sess.Handle}
 
-	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("ref"))
+	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("ref"), r.URL.Query().Get("env"))
 	if bad != nil {
 		h.refuse(w, r, t, bad)
 		return
@@ -111,7 +108,7 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 			want = normalizeRef(att.Ref, t.Ref)
 		}
 	}
-	key := c.Handle + "\x00" + strings.ToLower(t.Slug) + "\x00" + want
+	key := c.Handle + "\x00" + strings.ToLower(t.Slug) + "\x00" + want + "\x00" + strings.ToLower(t.Env)
 
 	// The shared work is detached from THIS request's cancellation, deliberately
 	// — the same reason internal/host/manager.go holds a process-lifetime ctx
@@ -156,8 +153,9 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 			refs = []ctlops.RepoRef{{Slug: att.Slug, Ref: want}}
 		}
 
-		// Tags come from the attachment and from nowhere else — never from the
-		// URL, and never derived from the slug or the branch. NormalizeTags
+		// On the ordinary path tags come from the attachment and from nowhere
+		// else — never from the URL, and never derived from the slug or branch.
+		// On the environment path ctlops expands the owner-checked Env. NormalizeTags
 		// does not validate the charset, so a tag synthesised from a repository
 		// name would sail past it and die inside stampTags as a 500 on a
 		// half-built sandbox.
@@ -174,7 +172,19 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 		// the free-name and placement refusals, template resolution, the
 		// tags-before-create ordering the secret push depends on, and the
 		// rollback of both tag rows and ref rows on any failure after stamping.
-		si, err := h.ops.Create(shared, c, ctlops.CreateArgs{Tags: h.launchTags(c, att).Tags, Refs: refs})
+		args := ctlops.CreateArgs{Refs: refs}
+		if t.Env != "" {
+			// Env is the constrained override. Passing the attachment's complete
+			// tag set as well would accidentally combine every environment that
+			// happens to carry this repository and therefore their secrets.
+			args.Env = t.Env
+		} else {
+			// An ordinary link keeps the base branch's ambiguity fallback: retain
+			// every non-environment tag and select the most recently updated one
+			// when this attachment belongs to several environments.
+			args.Tags = h.launchTags(c, att).Tags
+		}
+		si, err := h.ops.Create(shared, c, args)
 		if err != nil {
 			return nil, err
 		}

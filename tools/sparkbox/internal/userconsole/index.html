@@ -1008,6 +1008,7 @@
   // /api/me. Empty means this host serves none, and every Terminal button
   // disappears — the console never links to a host that answers nothing.
   let termSub = "";
+  let launchSub = "";
 
   // terminalURL is the per-machine terminal page: one origin per machine, which
   // is what keeps one machine's page from scripting another's socket. The
@@ -1017,6 +1018,15 @@
   // will not issue, and fails as an unreadable browser cert error.
   function terminalURL(name) {
     return location.protocol + "//" + name + "-" + termSub + "." + domain() + portSuffix();
+  }
+
+  // The go service shows the environment choice back to the user, then
+  // owner-checks it and its repository again when the confirmation is posted.
+  function launchURL(slug, env) {
+    const parts = String(slug || "").split("/");
+    if (!launchSub || parts.length !== 2 || !parts[0] || !parts[1]) return "";
+    return location.protocol + "//" + launchSub + "." + domain() + portSuffix() + "/" +
+      parts.map(encodeURIComponent).join("/") + "?env=" + encodeURIComponent(env);
   }
 
   function show(view) {
@@ -2641,6 +2651,18 @@
   function envCard(e) {
     const st = e.state || "draft";
     const buildLabel = st === "ready" || st === "failed" ? "Rebuild" : "Build";
+    const envRepos = e.repos || [];
+    const canLaunch = st === "ready" && launchSub && envRepos.length > 0;
+    let launchAction = "";
+    if (canLaunch && envRepos.length === 1) {
+      launchAction = '<button class="btn-primary btn-sm" data-envlaunch="' + esc(e.name) +
+        '" data-repo="' + esc(envRepos[0]) + '">🚀 Launch</button>';
+    } else if (canLaunch) {
+      launchAction = '<div class="menu"><button type="button" class="btn-primary btn-sm" data-menu' +
+        ' aria-haspopup="true" aria-expanded="false">🚀 Launch</button><div class="menu-pop hidden">' +
+        envRepos.map((slug) => '<button data-envlaunch="' + esc(e.name) + '" data-repo="' +
+          esc(slug) + '">' + esc(slug) + '</button>').join("") + "</div></div>";
+    }
     // One action plus a menu, which is this console's own vocabulary: the
     // machine card lost its row of outlined buttons for being the loudest
     // thing on it, and a five-button environment row was the same mistake.
@@ -2648,6 +2670,7 @@
       ' aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">' +
       DOTS + '</button><div class="menu-pop hidden">' +
       '<button data-envedit="' + esc(e.name) + '">Edit environment…</button>' +
+      (canLaunch ? '<button data-envbuild="' + esc(e.name) + '">Rebuild</button>' : '') +
       '<div class="sep"></div>' +
       '<button class="btn-danger" data-envdel="' + esc(e.name) + '">Delete…</button>' +
       "</div></div>";
@@ -2656,9 +2679,10 @@
         '<div class="m-title"><span class="name mono">' + esc(e.name) + "</span>" +
           envBadge(st) + '<span class="spec">' + envBoots(e) + "</span></div>" +
         '<div class="m-actions">' +
+          launchAction +
           // A disabled "Build" next to a badge that says building is a control
           // that only restates the state. It comes back when the build ends.
-          (st === "building" ? "" :
+          (st === "building" || canLaunch ? "" :
             '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + '">' +
             buildLabel + "</button>") +
           menu +
@@ -2698,6 +2722,11 @@
           await api("/api/environments/" + encodeURIComponent(name) + "/build", { method: "POST" });
           toast("building " + name + " — this takes minutes; the card updates itself");
         });
+      }));
+    host.querySelectorAll("button[data-envlaunch]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const href = launchURL(btn.dataset.repo, btn.dataset.envlaunch);
+        if (href) window.location.assign(href);
       }));
     host.querySelectorAll("button[data-envterm]").forEach((btn) =>
       btn.addEventListener("click", () =>
@@ -3057,6 +3086,7 @@
     try {
       const me = await api("/api/me");
       termSub = me.terminal_subdomain || "";
+      launchSub = me.launch_subdomain || "";
       const who = $("who");
       who.textContent = me.handle + (me.operator ? " · operator" : "");
       who.className = "badge" + (me.operator ? " op" : "");

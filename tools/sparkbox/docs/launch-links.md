@@ -13,13 +13,14 @@ ssh ctl@<domain> badge wandb/hivemind --ref feat/x
 
 Almost everything in this document follows from one fact: **a GitHub comment is
 immutable and outlives this deployment.** We cannot edit a URL somebody pasted
-in March, we cannot take back a link that turned out to select the wrong tag,
+in March, we cannot take back a link that turned out to select the wrong environment,
 and we cannot ask a reader to retype a URL with an escaping mistake in it. So
 the URL grammar is a contract, the badge is one invariant image, and the flag
 that names the door carries a warning about renaming it.
 
 Part 1 is the URL. Part 2 is the markdown and what GitHub's sanitizer does to
-it. Part 3 is the parameter that does not exist and why. Part 4 is what a click
+it. Part 3 is why a raw tag parameter does not exist and how the constrained
+environment selection differs. Part 4 is what a click
 actually does. Part 5 is the reuse rule. Part 6 is the failure users will
 actually hit. **Part 7 is the pre-deploy check, and it is not optional.**
 
@@ -28,15 +29,16 @@ actually hit. **Part 7 is the pre-deploy check, and it is not optional.**
 # Part 1 — the URL is the contract
 
 ```
-https://go.<domain>/<owner>/<repo>[?ref=<git ref>]
+https://go.<domain>/<owner>/<repo>[?ref=<git ref>&env=<environment>]
 ```
 
-Two parameters, both of them names of things on github.com:
+One path and two optional query parameters:
 
 | where | what | validated by |
 |---|---|---|
 | path, required | `owner/repo` | `repos.ValidSlug` (`internal/repos/store.go`) — the owner half is a GitHub login grammar, the name half allows dots, underscores and a leading digit, so `node.js` works and `..` does not |
 | query, optional | `ref` | `repos.ValidRef` — the regexp **plus** the separate `..` check the regexp does not cover. The leading-alphanumeric rule is load-bearing: the ref ends up as the argument of `git clone --branch <ref>`, where a leading `-` is an option and not a branch |
+| query, optional | `env` | `ctlops.GetEnvironment` under the authenticated caller. The environment must be ready and the repository attachment must already carry its tag. Its presence always forces a confirmation page and POST revalidation |
 
 ## Why the repository is in the path
 
@@ -301,11 +303,20 @@ on both `dev` and `prod` still lets the author pick — and it adds a second pla
 for the tag rule to live, encoding a decision that goes stale the moment the
 attachment's tags change.
 
-**Tags come from the matched attachment's stored `Tags` and from nowhere else.**
-The confirm page prints the exact set the create will carry — `{default} ∪
-att.Tags`, because `default` is stamped on every create — along with an
-inventory of the other repositories those tags will drag in, since `default` is
-usually where the surprise lives.
+Without `env=`, tags come from the matched attachment's stored `Tags` and from
+nowhere else. The confirm page prints the exact set the create will carry —
+`{default} ∪ att.Tags`, because `default` is stamped on every create — along
+with an inventory of the other repositories those tags will drag in.
+
+`env=` is deliberately not `tag=` under another spelling. It resolves an
+owner-scoped environment through `ctlops`, requires that row to be ready, and
+requires the matched repository attachment to carry the environment's tag. A
+GET with `env=` never takes the fast redirect, even if a matching sandbox
+already exists: it shows the environment name, its effective tag set, and what
+will be opened. The form POST repeats the full resolve. Creation passes
+`CreateArgs.Env` with no attachment tag union, so a repository shared by `dev`
+and `prod` cannot accidentally combine both environments' secrets. The URL
+author may propose an environment; only the signed-in owner can confirm it.
 
 The related residual, stated rather than left implicit: the person who posts a
 button chooses the branch, and an agent started in that checkout reads
@@ -357,15 +368,18 @@ any kind — under the handle from the verified session, never from the URL:
 1. `ListRepos(handle)` — the only call that distinguishes "you never attached
    this" from "attached, but no sandbox of yours carries a selecting tag".
 2. `SandboxesForRepo(handle, "github.com", att.Slug)`.
-3. `Ops.List` indexed by name, then `ReposForSandbox` per name for the effective
+3. For `env=`, `Ops.GetEnvironment` verifies owner, readiness, and attachment
+   membership.
+4. `Ops.List` indexed by name, then `ReposForSandbox` per name for the effective
    branch.
 
-**Step 4a, a match — the common case.** 303 straight to
+**Step 4a, a match without `env=` — the common case.** 303 straight to
 `SandboxInfo.TerminalURL`, taken verbatim from the record. No page paints at
 all. This is the repeat click, the one that happens fifty times a day: a cookie
 check, three reads, one header.
 
-**Step 4b, no match — the confirm page.** 200, server-rendered, and **exactly
+**Step 4b, no match or any `env=` selection — the confirm page.** 200,
+server-rendered, and **exactly
 one `<script>`** — `internal/launch/progress.js`, inline — admitted by the
 sha256 of its bytes and by nothing else:
 `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:;
@@ -423,12 +437,14 @@ middleware's hardcoded `https` origin can never match on a `--proxy-tls=false`
 dev loop, which would leave the page permanently 403 with a remedy it has no
 script to obey.
 
-Then, collapsed by `singleflight` on `handle \0 lower(slug) \0 ref`:
+Then, collapsed by `singleflight` on
+`handle \0 lower(slug) \0 ref \0 lower(env)`:
 
 1. the whole resolve runs **again** — that is the idempotency. A double-click, a
    second tab, or a retry a minute later finds the first request's sandbox and
    redirects to it instead of building a second one;
-2. `Ops.Create` with `Tags` taken verbatim from the attachment and the *scoped*
+2. `Ops.Create` with `Tags` taken verbatim from the attachment in the ordinary
+   path, or `Env` alone in the environment path, and the *scoped*
    ref form `[]RepoRef{{Slug: att.Slug, Ref: want}}` (nil when the branch folds
    to the attachment's own default), so an `ambiguous_ref` failure is
    structurally impossible even after somebody adds a second repository to

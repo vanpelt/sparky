@@ -1280,6 +1280,7 @@ func serve(args []string) error {
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
 			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, repoStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			uc.SetLaunchSubdomain(launchLabel)
 			// The same App the control plane got. Nil-safe: without it the
 			// repo panel still attaches and detaches, and every row's install
 			// state reads as unknown instead of claiming one.

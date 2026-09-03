@@ -878,7 +878,7 @@ func TestValidationErrorsAreBadRequest(t *testing.T) {
 func TestIndexShipsRecoveryAffordances(t *testing.T) {
 	tc := newTestConsole(t)
 	body := tc.do(t, "GET", "/", "", nil).Body.String()
-	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()", `/sparkbox-logo.png`} {
+	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()", `/sparkbox-logo.png`, `?env=`, `🚀 Launch`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index.html missing %s", want)
 		}
@@ -1441,16 +1441,19 @@ func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
 	var me struct {
 		Handle            string `json:"handle"`
 		TerminalSubdomain string `json:"terminal_subdomain"`
+		LaunchSubdomain   string `json:"launch_subdomain"`
 	}
-	rec := newTestConsole(t).do(t, "GET", "/api/me", "alice", nil)
+	tc := newTestConsole(t)
+	tc.handler.SetLaunchSubdomain("go")
+	rec := tc.do(t, "GET", "/api/me", "alice", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("me: status %d (%s)", rec.Code, rec.Body)
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
 		t.Fatal(err)
 	}
-	if me.Handle != "alice" || me.TerminalSubdomain != "xterm" {
-		t.Fatalf("me = %+v, want handle alice and terminal_subdomain xterm", me)
+	if me.Handle != "alice" || me.TerminalSubdomain != "xterm" || me.LaunchSubdomain != "go" {
+		t.Fatalf("me = %+v, want handle alice, terminal_subdomain xterm, and launch_subdomain go", me)
 	}
 
 	// Terminals off: the field is omitted entirely, not sent empty-but-present.
@@ -1461,6 +1464,9 @@ func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "terminal_subdomain") {
 		t.Errorf("terminals disabled but /api/me advertised one: %s", rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "launch_subdomain") {
+		t.Errorf("launch links disabled but /api/me advertised one: %s", rec.Body)
 	}
 }
 

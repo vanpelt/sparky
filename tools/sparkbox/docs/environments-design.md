@@ -1064,54 +1064,48 @@ still owed.
 
 ---
 
-# Part 6 — the launch door needs no change at all
+# Part 6 — the launch door can select one environment explicitly
 
 `go.<domain>` serves a button somebody pastes into a pull request comment, and
 the promise is narrow on purpose: whoever clicks it signs in as themselves and
 lands in their own sandbox with that repository checked out
 (`internal/launch/launch.go:1-24`).
 
-An environment **is** a tag. A launch link's tags come from
+An environment **is** a tag. On an ordinary launch, tags come from
 `repos.Repo.Tags` on the matched attachment, read from the store under the
-verified session's own handle, and handed to `ctlops.Create` verbatim
-(`internal/launch/create.go:159-169`). The confirm page already renders them as
-pills, plus the `default` that `defaultTags` will stamp
-(`internal/launch/page.go:642-654`).
+verified session's own handle, and handed to `ctlops.Create`. The confirm page
+renders them as pills, plus the `default` that `defaultTags` stamps.
 
-So: attach a repository to an environment's tag, and every launch link for that
-repository lands the clicker in that environment — its secrets, its vars, its
-checkouts, its egress rules and, once Part 4 lands, its snapshot. Zero lines
-changed in `internal/launch` (**amended** — see the end of this document: true
-for one environment on an attachment, and a dead link for two). The environment's name simply appears in the pills
-that are already there.
+Without an override, attaching a repository to an environment's tag keeps the
+ordinary launch behavior. If the attachment belongs to several environments,
+`launchTags` keeps the most recently updated one and the confirmation page says
+which alternatives it left off.
 
 That is not luck. It is the second dividend of name == tag, and it is worth
 saying out loud because the alternative shape would have needed real work here:
 a multi-tag environment would have forced launch to decide whether an attachment
 carrying two of an environment's three tags means the environment or half of it.
 
-## And `?env=` must never exist
+## The constrained `?env=` override
 
-The temptation, once environments have names, is `go.<domain>/wandb/hivemind?env=web`.
+`go.<domain>/wandb/hivemind?env=web` is supported, but only as a proposal the
+signed-in owner must confirm. The launch resolver calls owner-scoped
+`ctlops.GetEnvironment`, requires the environment to be ready, and verifies the
+matched repository attachment already carries its tag. A non-owned environment
+is the same masked not-found as everywhere else.
 
-`internal/launch/launch.go:55-76` forbids it already, in the general case, and
-the argument is the hard rule of that package:
+An environment selects secrets, vars, repositories, egress, a rootfs, and a
+setup script, so the override never uses the ordinary fast redirect. GET always
+shows a confirmation page with a prominent Environment row, including when a
+matching sandbox already exists. POST repeats every check. If it creates,
+`CreateArgs.Env` is set and `Tags` is empty; ctlops remains the only authority
+that expands the environment and stamps its tag. This prevents a repository on
+both `dev` and `prod` from merging both environments merely because its
+attachment carries both tags.
 
-> Put that selector in a URL and you have handed the author of a public,
-> immutable comment the ability to choose which of the CLICKER's secrets are
-> decrypted into a VM whose working tree sits at a branch the same author chose.
-
-An `env=` parameter is that primitive and **more**. A tag selects the owner's
-secrets. An environment selects the secrets, the plain vars, the repositories,
-the egress policy, the rootfs — and a setup script that *runs*. The comment
-author would be choosing which of a stranger's credentials get decrypted into a
-VM **and** which of that stranger's shell scripts executes with them present.
-
-The package's own note that narrowing does not help applies here verbatim: "a
-repository carried on both `dev` and `prod` still lets the author pick", and the
-narrowed rule would live in a second place where it goes stale the moment the
-attachment's tags change. Tags come from exactly one place, which is the matched
-attachment's stored `Tags`. Environments change nothing about that and must not.
+The raw `tag=` parameter remains forbidden. It has no owner-scoped environment
+row, readiness state, repository-membership check, or explicit confirmation
+contract, and would still be a public-comment-controlled secret selector.
 
 ---
 
