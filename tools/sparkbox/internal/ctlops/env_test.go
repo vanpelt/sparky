@@ -487,6 +487,138 @@ func TestANewEnvironmentIsGovernedByDefault(t *testing.T) {
 	})
 }
 
+// TestEnvRemoveTakesBackTheEgressRuleSetItCreated.
+//
+// `env rm` deletes no secret, no repo attachment and no rule-set somebody
+// wrote — but the default egress rule-set is one this package writes itself,
+// and rule-sets have no `ctl` verb at all, so one left behind by a removed
+// environment was unlistable and undeletable from a terminal. Three
+// environments made and removed left three of them.
+//
+// Every subtest below is the same question from the other side: is this still
+// the object we created? Anything an owner has touched is theirs.
+func TestEnvRemoveTakesBackTheEgressRuleSetItCreated(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("the one it created goes with it", func(t *testing.T) {
+		r := newRig(t)
+		withEnvs(r)
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, made := r.netrules.rows["alice\x00web"]; !made {
+			t.Fatal("the default egress rule-set was never created, so this test proves nothing")
+		}
+		res, err := r.ops.DeleteEnvironment(ctx, alice(), "web")
+		if err != nil {
+			t.Fatalf("env rm: %v", err)
+		}
+		if _, left := r.netrules.rows["alice\x00web"]; left {
+			t.Error("the rule-set `env create` made was stranded by `env rm`")
+		}
+		if res.RemovedRule != "web" {
+			t.Errorf("RemovedRule = %q, want web — a deletion has to be reported", res.RemovedRule)
+		}
+		// And not ALSO listed as surviving, which is the note that promises
+		// nothing was deleted.
+		if slices.Contains(res.Rules, "web") {
+			t.Errorf("the deleted rule-set was reported as still carrying the tag: %v", res.Rules)
+		}
+	})
+
+	t.Run("one the owner widened survives", func(t *testing.T) {
+		// Adding their internal mirror to it makes it their policy. It is then
+		// reported as surviving, like every rule-set somebody wrote.
+		r := newRig(t)
+		withEnvs(r)
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.netrules.PutRule("alice", "web",
+			netrules.RuleSpec{Allow: append(slices.Clone(defaultEnvAllow), "internal.corp")},
+			[]string{"web"}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := r.ops.DeleteEnvironment(ctx, alice(), "web")
+		if err != nil {
+			t.Fatalf("env rm: %v", err)
+		}
+		if _, left := r.netrules.rows["alice\x00web"]; !left {
+			t.Error("`env rm` deleted a rule-set the owner had edited")
+		}
+		if res.RemovedRule != "" {
+			t.Errorf("RemovedRule = %q, want empty", res.RemovedRule)
+		}
+		if !slices.Contains(res.Rules, "web") {
+			t.Errorf("the surviving rule-set was not reported: %v", res.Rules)
+		}
+	})
+
+	t.Run("one governing another tag survives", func(t *testing.T) {
+		// Same allow list, but it is now also the policy for `prod`. Deleting
+		// it would un-govern boxes this environment never knew about.
+		r := newRig(t)
+		withEnvs(r)
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.netrules.PutRule("alice", "web",
+			netrules.RuleSpec{Allow: slices.Clone(defaultEnvAllow)}, []string{"web", "prod"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.DeleteEnvironment(ctx, alice(), "web"); err != nil {
+			t.Fatalf("env rm: %v", err)
+		}
+		if _, left := r.netrules.rows["alice\x00web"]; !left {
+			t.Error("`env rm` deleted a rule-set that was also governing another tag")
+		}
+	})
+
+	t.Run("it stays while sandboxes still carry the tag", func(t *testing.T) {
+		// The egress condition rather than the ownership one. A rule-set is
+		// what makes a sandbox governed at all — sluice runs --open-untagged,
+		// so a box no rule-set covers is unfiltered — and deleting this one
+		// under a running box would WIDEN its egress as a side effect of
+		// tidying up a name.
+		r := newRig(t)
+		withEnvs(r)
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.Create(ctx, alice(), CreateArgs{Name: "scratch", Tags: []string{"web"}}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := r.ops.DeleteEnvironment(ctx, alice(), "web")
+		if err != nil {
+			t.Fatalf("env rm: %v", err)
+		}
+		if _, left := r.netrules.rows["alice\x00web"]; !left {
+			t.Error("removing the environment un-governed a sandbox that is still running under its tag")
+		}
+		if res.RemovedRule != "" {
+			t.Errorf("RemovedRule = %q, want empty", res.RemovedRule)
+		}
+	})
+
+	t.Run("another owner's identically named rule-set is untouched", func(t *testing.T) {
+		r := newRig(t)
+		withEnvs(r)
+		if err := r.netrules.PutRule("bob", "web",
+			netrules.RuleSpec{Allow: slices.Clone(defaultEnvAllow)}, []string{"web"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.PutEnvironment(ctx, alice(), EnvArgs{Name: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ops.DeleteEnvironment(ctx, alice(), "web"); err != nil {
+			t.Fatalf("env rm: %v", err)
+		}
+		if _, left := r.netrules.rows["bob\x00web"]; !left {
+			t.Error("alice's `env rm` deleted bob's rule-set")
+		}
+	})
+}
+
 // The store's sentences about the reserved word and the grammar reach the
 // caller unrewritten, under this package's own stable codes.
 func TestPutEnvironmentRefusals(t *testing.T) {
@@ -928,6 +1060,70 @@ func TestCreateWithABadEnvWritesNothing(t *testing.T) {
 				t.Fatalf("two build states share one sentence: %q", msgs[i])
 			}
 		}
+	}
+}
+
+// TestAFailedBuildSaysWhatToDoBeforeItSaysWhatWentWrong.
+//
+// The recorded build error is a summarised line of guest log and can run to the
+// width of a terminal. Spliced into the middle of the refusal — which is where
+// it used to go — it pushed the two facts the reader has to have (whether there
+// is still an image, and what to type) past the fold, in a sentence with two
+// colons before its verb. The order is the fix: what happened, what to do,
+// then the evidence.
+func TestAFailedBuildSaysWhatToDoBeforeItSaysWhatWentWrong(t *testing.T) {
+	r := newRig(t)
+	e, _, _ := withEnvs(r)
+	const boom = "the agent run exited 3: sparkbox: this box is configured, but " +
+		".sparkbox/setup.sh does not run in it, so no later build could reproduce it"
+
+	// A REBUILD that failed: it was ready once, so template_tags still points
+	// at the snapshot that build produced and the environment still boots.
+	seedEnv(t, e, "alice", "rebuilt", envs.StateReady)
+	if err := e.SetState("alice", "rebuilt", envs.StateFailed, "rebuilt-build", boom); err != nil {
+		t.Fatal(err)
+	}
+	// A FIRST build that failed: nothing was ever bound.
+	seedEnv(t, e, "alice", "never", envs.StateFailed)
+	if err := e.SetState("alice", "never", envs.StateFailed, "never-build", boom); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		env   string
+		lead  string
+		after string
+	}{
+		{"rebuilt", "still on the image it built on", "Boot that image anyway"},
+		{"never", "has no base image", "Build it again"},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			_, err := r.ops.Create(context.Background(), alice(), CreateArgs{Name: "box", Env: tc.env})
+			if err == nil {
+				t.Fatal("a create naming a failed environment was accepted")
+			}
+			ce := err.(*Error)
+			lead, said := strings.Index(ce.Msg, tc.lead), strings.Index(ce.Msg, boom)
+			if lead < 0 {
+				t.Fatalf("the message does not say what state the environment is in: %q", ce.Msg)
+			}
+			if said < 0 {
+				t.Fatalf("the message drops the build error entirely: %q", ce.Msg)
+			}
+			if said < lead {
+				t.Errorf("the guest log comes before the clause the reader acts on: %q", ce.Msg)
+			}
+			// Its own sentence, so a long error cannot swallow the one before it.
+			if !strings.Contains(ce.Msg, ". The build said: ") {
+				t.Errorf("the build error is not a sentence of its own: %q", ce.Msg)
+			}
+			if strings.Contains(ce.Msg, "reproduce it..") {
+				t.Errorf("the message doubled the punctuation the guest already ended with: %q", ce.Msg)
+			}
+			if !strings.Contains(ce.Hint, tc.after) {
+				t.Errorf("hint = %q, want it to point at %q", ce.Hint, tc.after)
+			}
+		})
 	}
 }
 

@@ -1523,6 +1523,15 @@ func (f *fakeNetRules) PutRule(owner, name string, spec netrules.RuleSpec, tags 
 	return nil
 }
 
+func (f *fakeNetRules) DeleteRule(owner, name string) error {
+	f.c.add("netrules.Delete %s/%s", owner, name)
+	if f.err != nil {
+		return f.err
+	}
+	delete(f.rows, owner+"\x00"+name)
+	return nil
+}
+
 // withEnvs gives a rig the three optional stores the environment verbs need,
 // the same way withRepos does for the repo verbs: by setting the unexported
 // fields directly, which is this package's idiom for reshaping a host after New

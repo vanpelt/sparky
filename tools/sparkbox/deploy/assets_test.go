@@ -2632,17 +2632,30 @@ func newEnvWorld(t *testing.T) *envWorld {
 	// and all — which is how this test first discovered agent mode worked.
 	//
 	// It records its argv so a test can assert the invocation, and it is driven
-	// by two files rather than by flags so a subtest can describe the agent's
+	// by files rather than by flags so a subtest can describe the agent's
 	// behaviour without re-writing the stub: claude-exit is the status it exits
 	// with, and claude-writes is the .sparkbox/setup.sh it leaves behind (none,
 	// if the file is absent — which is the measured real-world case of an agent
 	// that is denied every tool call and still exits 0).
+	//
+	// It also counts its calls, because the runner invokes an agent TWICE when
+	// the script it gets does not run: claude-writes-1 and claude-writes-2
+	// override claude-writes for one call each, which is how a test describes
+	// an agent that writes something broken and then fixes it. The prompt of
+	// each call is kept separately, so the repair round can be asserted to
+	// carry the failure it is supposed to be repairing.
 	writeExecutable(t, filepath.Join(w.stub, "claude"), `#!/bin/sh
+n=$(cat "$SPARKBOX_TEST_DIR/claude-calls" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$SPARKBOX_TEST_DIR/claude-calls"
 for a in "$@"; do printf '%s\n' "$a"; done >> "$SPARKBOX_TEST_DIR/claude-args"
+printf '%s' "$2" > "$SPARKBOX_TEST_DIR/claude-prompt-$n"
 printf 'agent ran in %s\n' "$(pwd)"
-if [ -f "$SPARKBOX_TEST_DIR/claude-writes" ]; then
+writes="$SPARKBOX_TEST_DIR/claude-writes-$n"
+[ -f "$writes" ] || writes="$SPARKBOX_TEST_DIR/claude-writes"
+if [ -f "$writes" ]; then
   mkdir -p .sparkbox
-  cp "$SPARKBOX_TEST_DIR/claude-writes" .sparkbox/setup.sh
+  cp "$writes" .sparkbox/setup.sh
 fi
 exit "$(cat "$SPARKBOX_TEST_DIR/claude-exit" 2>/dev/null || echo 0)"
 `)
@@ -2739,6 +2752,28 @@ func (w *envWorld) report() (state, exit, script, log string) {
 		parts = append(parts, "")
 	}
 	return parts[0], parts[1], parts[2], parts[3]
+}
+
+// read returns one of the stub-driven fixture files, which is how a test asks
+// what the agent was actually told and how many times it was asked.
+func (w *envWorld) read(name string) string {
+	w.t.Helper()
+	body, err := os.ReadFile(filepath.Join(w.fix, name))
+	if err != nil {
+		w.t.Fatalf("the fixture file %s was never written: %v", name, err)
+	}
+	return string(body)
+}
+
+// decodeScript unwraps the third line of a report, which is the setup script as
+// base64 — the only encoding a guest with no JSON encoder can produce.
+func decodeScript(t *testing.T, script string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(script))
+	if err != nil {
+		t.Fatalf("reported script is not base64: %v (%q)", err, script)
+	}
+	return string(raw)
 }
 
 func (w *envWorld) requests() []string {
@@ -2998,7 +3033,7 @@ func TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus(t *testing.T) {
 func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 	w := newEnvWorld(t)
 	w.write(filepath.Join(w.fix, "claude-exit"), "0")
-	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\nnpm ci\n")
+	w.write(filepath.Join(w.fix, "claude-writes"), goodSetupScript)
 	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
 
 	if _, _, code := w.run(); code != 0 {
@@ -3050,7 +3085,7 @@ func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 func TestTheRealAgentRunnerDegradesOnAnOldNodeInsteadOfRunningProse(t *testing.T) {
 	w := newEnvWorld(t)
 	w.write(filepath.Join(w.fix, "claude-exit"), "0")
-	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\nnpm ci\n")
+	w.write(filepath.Join(w.fix, "claude-writes"), goodSetupScript)
 	// mode `script`, which is what an old node's metadata service renders.
 	w.job("webapp", "script", ctlops.AgentRunner("webapp"))
 
@@ -3063,6 +3098,122 @@ func TestTheRealAgentRunnerDegradesOnAnOldNodeInsteadOfRunningProse(t *testing.T
 	}
 	if _, err := os.ReadFile(filepath.Join(w.fix, "claude-args")); err != nil {
 		t.Fatalf("the agent was never invoked under mode=script: %v", err)
+	}
+}
+
+// The two setup scripts an agent-mode test describes its agent by. They are
+// real scripts and not markers, because the runner RUNS what the agent leaves
+// behind: goodSetupScript is written to be safe to run twice over its own work
+// (which is what the prompt asks the agent for), and brokenSetupScript fails
+// the way the first agent build on real hardware failed — a `cd` into a
+// directory that only ever existed in the agent's memory of the session.
+const (
+	goodSetupScript = "#!/usr/bin/env bash\nset -e\nmkdir -p .sparkbox/state\necho \"deps installed\"\n"
+
+	brokenSetupScript = "#!/usr/bin/env bash\nset -e\ncd selfhost\necho \"never reached\"\n"
+)
+
+// TestTheRealAgentRunnerRefusesAScriptThatDoesNotRun is the hardware bug, in a
+// test.
+//
+// The first agent build on the live cluster wrote a good-looking script, the
+// build reported `ready`, and the NEXT rebuild of that environment died on
+// `cd: selfhost: No such file or directory`. Nothing had checked that the
+// script ran, because the agent does the work interactively and writes the file
+// at the end from memory — so the only failure available was the one that
+// arrives months later, to whoever first depends on the environment
+// reproducing itself.
+//
+// What it asserts is the whole point of the change: a build like that FAILS,
+// and it fails with the script still reported, because the owner wants the
+// eighty percent the agent got right on a box they can still ssh into.
+func TestTheRealAgentRunnerRefusesAScriptThatDoesNotRun(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), brokenSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0 — the worker reports, it does not fail", code)
+	}
+	state, exit, script, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed: a script that does not run is not a build\n%s", state, log)
+	}
+	if exit != "3" {
+		t.Errorf("exit = %q, want 3 — the runner's own status for an unrunnable script", exit)
+	}
+	// The last non-empty line is what the gateway records as the build error, so
+	// it has to say the thing that is true and surprising rather than repeating
+	// the shell's error.
+	if !strings.Contains(log, "does not run in it") {
+		t.Errorf("the log never says the script is what failed:\n%s", log)
+	}
+	// KEPT. recordReportedScript stores a reported script whether the build
+	// succeeded or not, and this is the case that makes that matter: the owner
+	// finishes it by hand in the paused builder and runs `env capture`.
+	if got := decodeScript(t, script); !strings.Contains(got, "cd selfhost") {
+		t.Errorf("the failed build did not report the script the agent wrote: %q", got)
+	}
+	// Twice: written, run, handed back to be fixed, run again.
+	if got := w.read("claude-calls"); strings.TrimSpace(got) != "2" {
+		t.Errorf("the agent was invoked %s times, want 2 (the write and the one repair round)", got)
+	}
+}
+
+// TestTheRealAgentRunnerHasTheScriptFixedAndFinishes: the repair round is not
+// decoration. An agent writing from memory gets a path or an ordering wrong far
+// more often than it gets the project wrong, and it is holding a box where the
+// answer can be checked — so the cheap fix is to hand it the failure and let it
+// try once, before failing a build whose work is otherwise done.
+func TestTheRealAgentRunnerHasTheScriptFixedAndFinishes(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes-1"), brokenSetupScript)
+	w.write(filepath.Join(w.fix, "claude-writes-2"), goodSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, script, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the repaired script runs: %s", state, log)
+	}
+	if got := decodeScript(t, script); !strings.Contains(got, "deps installed") {
+		t.Errorf("the environment recorded the broken script rather than the fixed one: %q", got)
+	}
+	// The repair round is a FRESH agent — the first runs with
+	// --no-session-persistence, so there is no session to continue — which
+	// makes handing it the failure the only way it can know what to fix.
+	repair := w.read("claude-prompt-2")
+	if !strings.Contains(repair, "cd: selfhost") {
+		t.Errorf("the repair prompt does not carry the failure it is repairing:\n%s", repair)
+	}
+	if !strings.Contains(repair, "does not run") {
+		t.Errorf("the repair prompt does not say what it is asking for:\n%s", repair)
+	}
+}
+
+// TestTheRealAgentRunnerRefusesShellItCannotEvenParse. A syntax error is not a
+// failed run and is worth its own sentence: `bash -n` costs nothing, and the
+// alternative is a parse error buried in whatever the shell printed before it
+// gave up.
+func TestTheRealAgentRunnerRefusesShellItCannotEvenParse(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\nif [ -f x ; then\n")
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, _, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed\n%s", state, log)
+	}
+	if !strings.Contains(log, "not valid shell") {
+		t.Errorf("the log does not name the parse error as one:\n%s", log)
 	}
 }
 

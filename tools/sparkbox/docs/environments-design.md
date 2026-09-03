@@ -43,9 +43,34 @@ the artifact rather than the exit status.
 **Phase D — REST routes and the console tab — is still NOT built.** The only
 thing environments add to `openapi.json` is the `environments` capability flag.
 
-Part 5's two posture changes are therefore half-taken: (a) we now run a script
-from a repository, unattended, in a VM holding the owner's secrets. (b) we do
-not yet run an agent.
+**Phases A, B and C have now been deployed to the live CKS cluster and run on
+real hardware.** An environment with a repo and no script built itself with an
+agent, end to end, on the first attempt: the agent read the repository's own
+self-hosting doc, brought the project up, and wrote a 3.7 KB
+`.sparkbox/setup.sh` that the gateway captured, bound and forked from. Part 5's
+two posture changes are therefore both taken.
+
+That run also produced the one finding no test in this tree could have: **the
+build reported `ready`, and the script it produced did not work.** The next
+`env rebuild` of that environment died on `cd: selfhost: No such file or
+directory` — a directory that had only ever existed in the agent's memory of
+its own session. Nothing was wrong with the code. The agent does the work
+interactively and writes the script at the end FROM MEMORY, and the only thing
+checked was that the file was non-empty, so the failure was guaranteed to
+surface at the worst possible moment: the first time somebody depended on the
+environment reproducing itself.
+
+**So the runner now runs what the agent wrote.** `ctlops.AgentRunner` syntax-
+checks `.sparkbox/setup.sh`, executes it in the builder, and on a failure hands
+the output back to one fresh agent to fix before running it again; a script that
+still does not run fails the build, with the script recorded and the builder
+kept paused for `env capture`. The prompt says all of this up front, which is
+also what makes "every step must be safe to repeat" enforceable rather than
+hopeful. This is deliberately NOT a fresh-disk run — a step the agent performed
+by hand and forgot to write down still succeeds over its own work — but it
+catches the whole class that writing-from-memory produces: invalid shell, paths
+that never existed, and steps that cannot be repeated. Closing the remaining gap
+needs a second VM.
 
 The schema in Part 1 carried Phase B's columns from the first `CREATE TABLE`,
 because this tree has no migration framework: schema is
@@ -54,13 +79,14 @@ because this tree has no migration framework: schema is
 (`internal/secrets/store.go:273-278`). Adding a column later is possible and
 tedious; adding it now was free, and this is the phase that collected on it.
 
-**Nothing in this document has been run on a real host, and for Phase B that
-matters far more than it did for Phase A.** Every test in the tree runs against
-the mock driver with no KVM: no builder VM has booted, no setup script has run,
-no `runuser` privilege drop has happened, and no rootfs has been captured from a
-box a script had just modified. The interesting failure of this feature — a VM
-that boots, runs somebody's shell script, and does not come back — is precisely
-the one `go test ./...` cannot reach. The reconciler exists because of it.
+**What `go test ./...` still cannot reach.** Every test in the tree runs against
+the mock driver with no KVM, so the guest half is exercised only by `deploy`'s
+fixtures: the real `sparkbox-env-setup` worker and the real `AgentRunner` run
+there against a stub `claude`, which is enough to pin the seam between the two
+packages and nothing about a kernel. The interesting failure of this feature — a
+VM that boots, runs somebody's shell script, and does not come back — is the one
+only hardware finds, and hardware is what found the failure above. The
+reconciler exists because of that class.
 
 One correction to a sibling document while we are here.
 `docs/tag-templates-design.md`'s Status section says "**None of it does anything
@@ -961,7 +987,11 @@ is governed by the default rule-set above and which is destroyed if it overruns.
 
 Two consequences follow and both are built. Success is judged by the **artifact**
 — `rc == 0` *and* a non-empty `.sparkbox/setup.sh` — because the exit status is
-not an answer in this mode. And the invocation carries
+not an answer in this mode. Hardware then added a third condition to that
+sentence: the artifact has to RUN. A non-empty file was the whole of the test
+for exactly one deploy, and the environment it produced could not rebuild
+itself, so the runner now replays the script in the builder and gives one repair
+round before failing the build. And the invocation carries
 `--no-session-persistence`, because the builder's disk becomes the environment's
 template and is copied byte-for-byte into every fork of it: nothing in the
 capture path strips `~/.claude/projects`, so *not writing* the transcript — the
@@ -1165,6 +1195,16 @@ Landing this after B means the day an unattended agent first runs, everything
 underneath it has already been exercised by builds that did not have one — and
 in fact B's deploy to real hardware is what found the two bugs C had to build
 on top of.
+
+C's own deploy then found the third, which is the one worth carrying forward:
+**an agent build can succeed and still leave a script that does not run.** The
+runner now runs it. Syntax check, replay in the builder, one repair round with
+the failure handed to a fresh agent, and a build that fails if the second replay
+fails — with the script recorded and the builder paused, so `env capture` still
+adopts the box the agent did get working. It costs one extra agent invocation on
+the builds that need it and nothing on the builds that do not, and it moves the
+discovery from "the first rebuild, months later" to "the build that wrote it,
+while there is still a builder and an agent standing there."
 
 **D. The consoles.** An Environments panel on `my.<domain>` beside Secrets,
 Network and Repos — those panels are one object viewed four ways and this is the

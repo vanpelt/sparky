@@ -132,12 +132,16 @@ type EnvArgs struct {
 // — both to reassure the person that nothing was thrown away and to tell them
 // where to look if what they actually wanted was to throw it away.
 type EnvDeleteResult struct {
-	Name     string   `json:"name"`
-	Repos    []string `json:"repos"`   // never nil
-	Secrets  []string `json:"secrets"` // never nil
-	Rules    []string `json:"rules"`   // never nil
-	Unbound  string   `json:"unbound,omitempty"`
-	Resynced []string `json:"resynced"` // sandboxes whose environment was re-pushed
+	Name    string   `json:"name"`
+	Repos   []string `json:"repos"`   // never nil
+	Secrets []string `json:"secrets"` // never nil
+	Rules   []string `json:"rules"`   // never nil
+	Unbound string   `json:"unbound,omitempty"`
+	// RemovedRule is the auto-created egress rule-set this delete took back,
+	// and it is the one thing here that WAS deleted. Empty for every rule-set
+	// somebody wrote, which are reported in Rules like everything else.
+	RemovedRule string   `json:"removed_rule,omitempty"`
+	Resynced    []string `json:"resynced"` // sandboxes whose environment was re-pushed
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +388,14 @@ func (o *Ops) DeleteEnvironment(ctx context.Context, c Caller, name string) (Env
 			o.log.Warn("could not delete an environment's vars", "user", c.Handle, "env", name, "err", err)
 		}
 	}
+	// The one deletion this verb makes, and it is a deletion of something this
+	// package created rather than something a person did. It runs before the
+	// unbind for no reason except that both are best-effort cleanups and this
+	// one reads on the same list the note above is about.
+	if removed := o.reclaimDefaultEgress(c.Handle, name, affected); removed != "" {
+		res.RemovedRule = removed
+		res.Rules = slices.DeleteFunc(res.Rules, func(r string) bool { return r == removed })
+	}
 	if o.templateTags != nil && comp.snapshot[name] != "" {
 		if b, err := o.templateTags.Unbind(c.Handle, name); err == nil {
 			res.Unbound = b.Snapshot
@@ -396,7 +408,8 @@ func (o *Ops) DeleteEnvironment(ctx context.Context, c Caller, name string) (Env
 	nonNil(&res.Repos, &res.Secrets, &res.Rules, &res.Resynced)
 	o.log.Info("environment removed", "user", c.Handle, "env", name,
 		"still_tagged_repos", len(res.Repos), "still_tagged_secrets", len(res.Secrets),
-		"still_tagged_rules", len(res.Rules), "resynced", len(affected))
+		"still_tagged_rules", len(res.Rules), "removed_rule", res.RemovedRule,
+		"resynced", len(affected))
 	return res, nil
 }
 
@@ -605,8 +618,8 @@ func (o *Ops) resolveEnvTag(op, owner, want string) (string, error) {
 		if e.BuiltAt != nil {
 			return "", &Error{
 				Kind: KindConflict, Op: op, Code: "env_build_failed",
-				Msg: "environment " + name + "'s last build failed" + buildErrPhrase(e) +
-					", so it is still on the image it built on " + e.BuiltAt.UTC().Format("2006-01-02") + ".",
+				Msg: "environment " + name + "'s last build failed, so it is still on the image it built on " +
+					e.BuiltAt.UTC().Format("2006-01-02") + "." + buildErrSentence(e),
 				Hint: "Boot that image anyway with --tag " + name + ", or try again with `env rebuild " +
 					name + "`.",
 				Details: map[string]any{
@@ -617,8 +630,8 @@ func (o *Ops) resolveEnvTag(op, owner, want string) (string, error) {
 		}
 		return "", &Error{
 			Kind: KindConflict, Op: op, Code: "env_build_failed",
-			Msg: "environment " + name + " has no base image: its last build failed" +
-				buildErrPhrase(e) + ".",
+			Msg: "environment " + name + " has no base image: its last build failed." +
+				buildErrSentence(e),
 			Hint:     "Build it again, or create the sandbox with --tag " + name + " to use the default image.",
 			Details:  map[string]any{"environment": name, "state": string(e.State)},
 			Verbatim: true,
@@ -642,11 +655,23 @@ func buildBoxPhrase(e envs.Environment) string {
 	return " (in " + e.BuildBox + ")"
 }
 
-func buildErrPhrase(e envs.Environment) string {
+// buildErrSentence puts a recorded build error in a sentence of its OWN, after
+// the one that says what to do about it.
+//
+// It used to be spliced into the middle, and a real one read: "environment web's
+// last build failed: the agent run exited 3: sparkbox: this box is configured,
+// but .sparkbox/setup.sh does not run in it…, so it is still on the image it
+// built on 2026-09-02." The two facts the reader has to have — there IS still an
+// image, and `env rebuild` retries — arrive after a guest log line that can run
+// to the width of the terminal, and the sentence has two colons before its verb.
+// The clause somebody acts on now comes first and the evidence follows it.
+func buildErrSentence(e envs.Environment) string {
 	if e.BuildError == "" {
 		return ""
 	}
-	return ": " + e.BuildError
+	// The recorded error is a summarised guest log line, so it ends however the
+	// guest's last line ended; this owns the punctuation rather than doubling it.
+	return " The build said: " + strings.TrimRight(e.BuildError, " \t.") + "."
 }
 
 // ---------------------------------------------------------------------------
@@ -973,6 +998,68 @@ func (o *Ops) defaultEnvEgress(owner, name string, a EnvArgs, creating, attached
 	}
 	o.log.Info("environment given the default egress rule-set", "user", owner, "env", name)
 	return true
+}
+
+// reclaimDefaultEgress deletes the rule-set defaultEnvEgress created for this
+// environment, and nothing else.
+//
+// It exists because `env create` leaves an object behind that `env rm` used to
+// strand. The auto-created rule-set is the one thing in an environment's
+// composition that nobody typed, and rule-sets have no `ctl` verb at all — they
+// are edited in the user console — so an owner who made and removed three
+// environments from a terminal was left with three rule-sets they had never
+// seen, could not list, and could not delete. That is not "we do not destroy
+// what we did not create"; that is litter.
+//
+// THREE CONDITIONS, ALL OF THEM ABOUT NOT DELETING SOMEBODY'S POLICY. It has to
+// still be the object this package wrote: named for the environment, carrying
+// that tag and no other, and allowing exactly what defaultEnvAllow allows. An
+// owner who added their internal mirror to it has made it theirs, and it is
+// then reported as surviving the delete like every other rule-set.
+//
+// The fourth condition is the sandboxes, and it is the one that is about
+// egress rather than about ownership. A rule-set is what makes a sandbox
+// GOVERNED at all — sluice runs --open-untagged, so a box no rule-set covers is
+// unfiltered — and deleting this one while boxes still carry the tag would
+// widen their egress as a side effect of tidying up a name. defaultEnvEgress
+// refuses to create one when sandboxes already carry the tag, for the mirror
+// image of this reason; between the two, the rule-set is only ever created and
+// only ever removed when nothing is running under it, and no policy push is
+// needed here because no live sandbox changed.
+func (o *Ops) reclaimDefaultEgress(owner, name string, tagged []string) string {
+	if o.netrules == nil || len(tagged) > 0 {
+		return ""
+	}
+	list, err := o.netrules.ListRules(owner)
+	if err != nil {
+		o.log.Warn("could not read egress rule-sets while removing an environment",
+			"user", owner, "env", name, "err", err)
+		return ""
+	}
+	i := slices.IndexFunc(list, func(m netrules.RuleMeta) bool { return m.Name == name })
+	if i < 0 {
+		return ""
+	}
+	m := list[i]
+	if len(m.Tags) != 1 || m.Tags[0] != name || !sameDomainSet(m.Spec.Allow, defaultEnvAllow) {
+		return ""
+	}
+	if err := o.netrules.DeleteRule(owner, name); err != nil {
+		o.log.Warn("could not remove the egress rule-set an environment was given",
+			"user", owner, "env", name, "err", err)
+		return ""
+	}
+	o.log.Info("removed the default egress rule-set with its environment", "user", owner, "env", name)
+	return name
+}
+
+// sameDomainSet compares two allow lists as sets, because order and repetition
+// are not what makes a rule-set somebody else's.
+func sameDomainSet(a, b []string) bool {
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(slices.Compact(x), slices.Compact(y))
 }
 
 // defaultEnvAllow is what a new environment's rule-set allows ON TOP of the

@@ -64,8 +64,9 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"sandbox of yours carrying `web` gets everything `web` is on.\r\n" +
 	"\r\n" +
 	"attaching ADDS. a secret can belong to three environments at once, so `env rm`\r\n" +
-	"deletes the environment and its variables and NOTHING else: the secrets, repos\r\n" +
-	"and rule-sets carrying the tag are listed on the way out and left alone.\r\n" +
+	"deletes the environment, its variables, and the egress rule-set `env create`\r\n" +
+	"made for it — nothing else: the secrets, repos and rule-sets you wrote carry on\r\n" +
+	"and are listed on the way out.\r\n" +
 	"\r\n" +
 	"  ssh ctl@<gateway> env create web --repo wandb/hivemind --secret GITHUB_TOKEN\r\n" +
 	"  ssh ctl@<gateway> env set web --var NODE_ENV=test --description \"the web box\"\r\n" +
@@ -419,6 +420,12 @@ func (g *Gateway) envRemove(s gssh.Session, c ctlops.Caller, name string, log *s
 	if res.Unbound != "" {
 		fmt.Fprintf(s, "note: the tag no longer boots from snapshot %q — the snapshot itself is kept.\r\n",
 			res.Unbound)
+	}
+	// Said out loud, because it is the one thing here that WAS deleted, and the
+	// note below promises the opposite about everything else.
+	if res.RemovedRule != "" {
+		fmt.Fprintf(s, "note: the egress rule-set %q was created with this environment and went with it.\r\n",
+			res.RemovedRule)
 	}
 	// The reassurance, and the map. `rm` on a grouping must never destroy the
 	// things grouped, so the objects still carrying the tag are named — both so

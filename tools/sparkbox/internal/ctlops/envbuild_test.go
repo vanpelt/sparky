@@ -413,6 +413,49 @@ func TestAnApiKeyIsAlsoAnAgentCredential(t *testing.T) {
 	}
 }
 
+// TestAFailedBuildNamesWhatActuallyExited.
+//
+// In script mode the thing that exited IS the setup script. In agent mode it is
+// the runner around an agent, and an agent build that fails before writing
+// anything has no setup script at all — so "the setup script exited 3" sends
+// that owner looking for a file that does not exist, on a row whose script
+// column is empty.
+func TestAFailedBuildNamesWhatActuallyExited(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(*envs.Environment)
+		want string
+	}{
+		{
+			name: "agent",
+			seed: func(e *envs.Environment) { e.SetupFrom, e.SetupScript = envs.SetupFromAgent, "" },
+			want: "the agent run exited 3",
+		},
+		{
+			name: "script",
+			seed: func(e *envs.Environment) { e.SetupFrom, e.SetupScript = envs.SetupFromRepo, setupScript },
+			want: "the setup script exited 3",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuildRig(t)
+			b.building("alice", "web", "web-build", tc.seed)
+			box, _ := b.boxes.Get("web-build")
+
+			if err := b.ops.SetupDone(context.Background(), box, SetupReport{
+				OK: false, ExitCode: 3, Log: "sparkbox: this box is configured, but it does not run\n",
+			}); err != nil {
+				t.Fatalf("SetupDone: %v", err)
+			}
+			b.ops.awaitEnvBuilds()
+
+			if got := b.envs.rows[envKey("alice", "web")].BuildError; !strings.HasPrefix(got, tc.want) {
+				t.Errorf("build error = %q, want it to start %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAFailedBuildStillRecordsTheScriptTheRunWrote.
 //
 // The guest reports the .sparkbox/setup.sh the run ENDED with whether it

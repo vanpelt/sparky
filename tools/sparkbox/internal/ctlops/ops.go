@@ -264,6 +264,10 @@ type SecretTags interface {
 type NetRules interface {
 	ListRules(owner string) ([]netrules.RuleMeta, error)
 	PutRule(owner, name string, spec netrules.RuleSpec, tags []string) error
+	// DeleteRule is here for exactly one caller: `env rm` taking back the
+	// rule-set `env create` made for it. This package deletes no rule-set a
+	// person wrote, and reclaimDefaultEgress is where that line is drawn.
+	DeleteRule(owner, name string) error
 }
 
 // TemplateBindings is the tag-to-base-image store — the fourth reader of the

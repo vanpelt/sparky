@@ -801,6 +801,185 @@ func (o *Ops) SetupFor(ctx context.Context, b *host.Sandbox) (SetupJob, bool, er
 	return SetupJob{Env: e.Name, Mode: SetupModeScript, Payload: e.SetupScript}, true, nil
 }
 
+// AgentRunner is the payload an agent build ships to the guest: a shell script
+// that runs an agent against this platform's dev-environment guidance and then
+// RUNS WHAT THE AGENT WROTE.
+//
+// THE GATEWAY SHIPS THE RUNNER, NOT THE PROMPT, and that is worth the paragraph
+// because it looks like an indirection for nothing. nodelink.SelfSetupResp
+// gained `mode` as an omitempty field, so a node running an older build
+// unmarshals a job and DROPS it — and that node's own metadata service then
+// renders the hardcoded line 2 it shipped with, `script`. If the payload were a
+// bare prompt, that guest would run several paragraphs of English through bash,
+// backticks and all. Shipping a shell script as the payload makes the same skew
+// merely DEGRADE: the old guest runs the agent correctly and only misses the
+// artifact check the newer worker adds, which is a build that might over-report
+// success rather than a build that executes prose.
+//
+// It is also less code. The guest's agent branch is the mode case and the
+// artifact check; there is no prompt file to stage, chmod, and reason about
+// against the privilege drop.
+//
+// The prompts travel inside QUOTED heredocs, so the shell expands none of them
+// — no $(...), no backtick, no $VAR — and the only value interpolated into the
+// script proper is the environment name, which the store has already
+// constrained to [a-z0-9-]. The terminator is checked rather than assumed.
+//
+// EXPORTED so deploy's tests can run the real thing inside the real guest
+// worker. That crossing is the point: this string is written by the gateway and
+// executed by a guest, the two live in different packages, and both bugs review
+// caught in the previous phase were at exactly this kind of seam. A test that
+// asserts on a copy of the script would not have caught either.
+//
+// WHY IT REPLAYS THE SCRIPT, which is the part hardware taught rather than
+// review. The first agent build on real hardware wrote a genuinely good script
+// — it read the repo's own self-hosting doc and used `sparkbox whoami` instead
+// of hardcoding a domain — and the build reported `ready`. The next `env
+// rebuild` of that environment died on `cd: selfhost: No such file or
+// directory`, a directory the agent believed existed. Nothing was wrong with
+// the code: the agent does the work interactively and writes the script at the
+// end FROM MEMORY, and the only thing checked was that the file was non-empty.
+//
+// So the failure surfaced at the worst possible moment — the first time
+// somebody depended on the environment reproducing itself — and it surfaced as
+// a broken rebuild rather than as a build that never claimed to work. Running
+// the script here moves that discovery back into the build that produced it,
+// where there is still a builder box, an agent, and nobody waiting.
+//
+// A REPLAY IS NOT A FRESH-CHECKOUT RUN, and it is worth being honest about the
+// gap. This runs the script over a box the agent has already configured, so it
+// proves the script is valid shell, that it references nothing that never
+// existed, and that it is safe to run twice — which is exactly the class of
+// mistake writing-from-memory produces. It cannot prove the script would work
+// on a fresh disk, because a step the agent performed by hand and forgot to
+// write down succeeds here by being already done. Closing THAT gap needs a
+// second VM, and this is the ninety percent that needs none.
+func AgentRunner(env string) string {
+	prompt, repair := agentPrompt(env), repairPrompt()
+	for _, p := range []*string{&prompt, &repair} {
+		if strings.Contains(*p, agentPromptEOF) {
+			// Unreachable with host-authored constants, and asserted anyway:
+			// the day somebody makes a prompt configurable, this is what stops
+			// a terminator in it from ending the heredoc early and running the
+			// rest.
+			*p = strings.ReplaceAll(*p, agentPromptEOF, "(redacted)")
+		}
+	}
+	return `#!/usr/bin/env bash
+# Written by the sparkbox gateway for an environment build. It runs an agent
+# against this platform's dev-environment guidance and expects it to leave
+# ` + SetupScriptPath + ` behind; that file, not this box, is the deliverable —
+# so this script then runs it, and a file that does not run is not a build.
+set -uo pipefail
+
+# Resolved here rather than left to PATH: /etc/environment has been sourced by
+# now, so PATH is whatever the owner's variables made it.
+claude_bin=$(command -v claude 2>/dev/null || true)
+[ -n "$claude_bin" ] || claude_bin=/usr/local/bin/claude
+if [ ! -x "$claude_bin" ]; then
+  echo "sparkbox: this sandbox has no agent to write a setup script with; run \` + "`" + `sparkbox update-tools\` + "`" + `" >&2
+  exit 127
+fi
+
+# The interpreter the script is checked and replayed WITH, chosen the way the
+# guest worker chooses the one it will run the script with on every later build
+# — bash when there is one, sh on the slim template — so that what passes here
+# is what runs there.
+sparkbox_sh=$(command -v bash 2>/dev/null || command -v sh 2>/dev/null || echo /bin/sh)
+sparkbox_setup=` + SetupScriptPath + `
+sparkbox_replay=$(mktemp 2>/dev/null || echo /tmp/sparkbox-env-replay.log)
+
+# A bound on ONE replay, not a budget for the build: the guest worker's own
+# timeout is the thing that ends a run, and this only stops a setup script that
+# starts a server in the foreground from eating all of it. A script that needs
+# more than ten minutes to re-run over work already done is a script with a
+# problem worth failing on.
+sparkbox_replay_timeout=600
+
+sparkbox_agent() {
+  # --permission-mode bypassPermissions is required, not preferred: under -p the
+  # ` + "`auto`" + ` mode this platform seeds is downgraded to ` + "`default`" + `, every Write and
+  # Bash is denied, and the run still exits 0.
+  #
+  # --no-session-persistence keeps the transcript out of ~/.claude/projects. This
+  # disk becomes the environment's template and is copied into every fork of it,
+  # and nothing in the capture path strips that directory.
+  "$claude_bin" -p "$1" \
+    --permission-mode bypassPermissions \
+    --output-format text \
+    --no-session-persistence
+}
+
+# sparkbox_verify: is this a script, and does it run?
+#
+# Syntax first, because a parse error is a different sentence from a failure and
+# costs nothing to separate. Then the run itself, captured to a file AND echoed:
+# the log is what the owner reads on a failed build, and the file is what the
+# repair pass gets to read.
+sparkbox_verify() {
+  if ! "$sparkbox_sh" -n "$sparkbox_setup" > "$sparkbox_replay" 2>&1; then
+    echo "sparkbox: $sparkbox_setup is not valid shell:" >&2
+    cat "$sparkbox_replay"
+    return 1
+  fi
+  echo "sparkbox: running $sparkbox_setup to check that it reproduces this box" >&2
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 30 "$sparkbox_replay_timeout" "$sparkbox_sh" "$sparkbox_setup" \
+      </dev/null > "$sparkbox_replay" 2>&1
+  else
+    "$sparkbox_sh" "$sparkbox_setup" </dev/null > "$sparkbox_replay" 2>&1
+  fi
+  sparkbox_rc=$?
+  cat "$sparkbox_replay"
+  return $sparkbox_rc
+}
+
+sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
+` + prompt + `
+` + agentPromptEOF + `
+)"
+
+if [ ! -f "$sparkbox_setup" ]; then
+  # Nothing was written, so there is nothing to check. The guest worker turns
+  # this into the sentence the owner reads, and saying it here as well would
+  # put two different failures in one log for one thing going wrong.
+  exit 0
+fi
+
+if sparkbox_verify; then
+  exit 0
+fi
+
+echo "sparkbox: the script the agent wrote does not run here; asking it once to fix that" >&2
+sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
+` + repair + `
+` + agentPromptEOF + `
+)
+
+--- what happened when the script was run ---
+$(tail -c 4000 "$sparkbox_replay" 2>/dev/null)"
+
+if [ ! -f "$sparkbox_setup" ]; then
+  echo "sparkbox: the repair pass left no $sparkbox_setup behind, so there is nothing to build from" >&2
+  exit 3
+fi
+
+if sparkbox_verify; then
+  exit 0
+fi
+
+# The LAST NON-EMPTY LINE of this log becomes the environment's recorded build
+# error (summarizeBuildLog), so it is written to say the one thing that is both
+# true and surprising: the box is fine, and the script is not.
+echo "sparkbox: this box is configured, but $sparkbox_setup does not run in it, so no later build could reproduce it" >&2
+exit 3
+`
+}
+
+// agentPromptEOF is the heredoc terminator carrying a prompt. Distinctive on
+// purpose: it has to be a string no prompt would contain by accident.
+const agentPromptEOF = "SPARKBOX_AGENT_PROMPT_EOF"
+
 // agentPrompt is what the agent in a builder VM is asked to do.
 //
 // HOST-AUTHORED, AND THAT IS THE POINT. It is the one string in an agent build
@@ -815,79 +994,17 @@ func (o *Ops) SetupFor(ctx context.Context, b *host.Sandbox) (SetupJob, bool, er
 // is already loaded as user-scope memory in every template. Copying either one
 // here would create a second copy to drift.
 //
-// The last paragraph is the one that matters most and is easy to read as
-// boilerplate. The DELIVERABLE IS THE SCRIPT, not the running box: the guest
+// The last two steps are the ones that matter most and are the easiest to read
+// as boilerplate. The DELIVERABLE IS THE SCRIPT, not the running box: the guest
 // reports .sparkbox/setup.sh back, the row records it, and the next build of
 // this environment is an ordinary script build. An agent that configures a
 // perfect box and writes nothing down has produced a disk nobody can reproduce
 // — which is the state this whole feature exists to get out of.
-// AgentRunner wraps the prompt in the shell that runs the agent with it, and
-// the gateway does this rather than the guest for ONE reason that is worth the
-// paragraph: a mixed-version fleet.
 //
-// nodelink.SelfSetupResp gained `mode` as an omitempty field, so a node running
-// an older build unmarshals a job and DROPS it — and that node's own metadata
-// service then renders the hardcoded line 2 it shipped with, `script`. If the
-// payload were a bare prompt, that guest would run several paragraphs of
-// English through bash, backticks and all. Shipping a shell script as the
-// payload makes the same skew merely DEGRADE: the old guest runs the agent
-// correctly and only misses the artifact check below, which is a build that
-// might over-report success rather than a build that executes prose.
-//
-// It is also less code. The guest's agent branch is now the mode case and the
-// artifact check; there is no prompt file to stage, chmod, and reason about
-// against the privilege drop.
-//
-// The prompt travels inside a QUOTED heredoc, so the shell expands none of it —
-// no $(...), no backtick, no $VAR — and the only value interpolated into the
-// script proper is the environment name, which the store has already
-// constrained to [a-z0-9-]. The terminator is checked rather than assumed.
-// EXPORTED so deploy's tests can run the real thing inside the real guest
-// worker. That crossing is the point: this string is written by the gateway and
-// executed by a guest, the two live in different packages, and both bugs review
-// caught in the previous phase were at exactly this kind of seam. A test that
-// asserts on a copy of the script would not have caught either.
-func AgentRunner(env string) string {
-	prompt := agentPrompt(env)
-	if strings.Contains(prompt, agentPromptEOF) {
-		// Unreachable with a host-authored constant, and asserted anyway: the
-		// day somebody makes the prompt configurable, this is what stops a
-		// terminator in it from ending the heredoc early and running the rest.
-		prompt = strings.ReplaceAll(prompt, agentPromptEOF, "(redacted)")
-	}
-	return `#!/usr/bin/env bash
-# Written by the sparkbox gateway for an environment build. It runs an agent
-# against this platform's dev-environment guidance and expects it to leave
-# ` + SetupScriptPath + ` behind; that file, not this box, is the deliverable.
-set -uo pipefail
-
-# Resolved here rather than left to PATH: /etc/environment has been sourced by
-# now, so PATH is whatever the owner's variables made it.
-claude_bin=$(command -v claude 2>/dev/null || true)
-[ -n "$claude_bin" ] || claude_bin=/usr/local/bin/claude
-if [ ! -x "$claude_bin" ]; then
-  echo "sparkbox: this sandbox has no agent to write a setup script with; run \` + "`" + `sparkbox update-tools\` + "`" + `" >&2
-  exit 127
-fi
-
-# --permission-mode bypassPermissions is required, not preferred: under -p the
-# ` + "`auto`" + ` mode this platform seeds is downgraded to ` + "`default`" + `, every Write and
-# Bash is denied, and the run still exits 0.
-#
-# --no-session-persistence keeps the transcript out of ~/.claude/projects. This
-# disk becomes the environment's template and is copied into every fork of it,
-# and nothing in the capture path strips that directory.
-exec "$claude_bin" -p "$(cat <<'` + agentPromptEOF + `'
-` + prompt + `
-` + agentPromptEOF + `
-)"   --permission-mode bypassPermissions   --output-format text   --no-session-persistence
-`
-}
-
-// agentPromptEOF is the heredoc terminator carrying the prompt. Distinctive on
-// purpose: it has to be a string no prompt would contain by accident.
-const agentPromptEOF = "SPARKBOX_AGENT_PROMPT_EOF"
-
+// Step 5 tells the agent the truth about what happens next rather than leaving
+// it to be discovered: the script IS run, immediately, and a script that does
+// not run fails the build. Asking for idempotence without saying it will be
+// checked got scripts that cloned into a directory that already existed.
 func agentPrompt(env string) string {
 	return `You are configuring a fresh Sparkbox microVM so this project runs in it.
 Nobody is watching and nobody can answer a question, so do not ask any.
@@ -904,17 +1021,70 @@ Then, in this directory:
 3. Prove it works before you consider it done: ` + "`curl -fsS http://localhost:PORT`" + `
    must succeed.
 4. Write down everything you did as ` + SetupScriptPath + ` in this directory: a
-   plain, idempotent bash script that takes a fresh checkout to the same
-   running state.
+   plain bash script that takes a fresh checkout to the same running state.
+5. Run it — ` + "`bash " + SetupScriptPath + "`" + ` — right here, and fix it until it exits 0.
 
-Step 4 is the deliverable. The disk you leave behind becomes the environment
-"` + env + `", and every later build of it runs your script instead of running you —
-so an environment whose box works but whose script is missing is a failure, not
-a success. If you cannot get the project running, still write ` + SetupScriptPath + `
-with the part that does work, and say plainly in your final message what is
+Step 4 is the deliverable and step 5 is how you find out whether it is real. You
+are writing that file from memory, and the mistakes that come from doing that —
+a directory you created by hand, a step in the wrong order, a path that only
+ever existed in this session — are invisible until somebody rebuilds from it
+months later. Running it is how you see them now.
+
+Step 5 also means every step must be safe to repeat, because the work of steps
+1 to 3 is already done by the time you run it: ` + "`mkdir -p`" + ` rather than ` + "`mkdir`" + `,
+skip a clone whose directory exists, and let an already-installed package be
+fine. This is checked automatically the moment you finish, and a script that
+does not run cleanly here fails the build.
+
+The disk you leave behind becomes the environment "` + env + `", and every later
+build of it runs your script instead of running you — so an environment whose
+box works but whose script does not is a failure, not a success. If you cannot
+get the project running, still write ` + SetupScriptPath + ` with the part that does
+work, make that part run cleanly, and say plainly in your final message what is
 missing and why.
 
 Do not commit, push, or open a pull request; somebody will review this file.
+`
+}
+
+// repairPrompt is the second and last agent invocation of a build: the script
+// the first one wrote did not run, and this asks for it to be fixed.
+//
+// It is a SEPARATE, FRESH agent rather than a continuation, because there is no
+// session to continue — the first run is deliberately started with
+// --no-session-persistence so its transcript never lands on a disk that becomes
+// a template. Everything this one needs is therefore stated: the file is in the
+// checkout it starts in, and the failure is appended to this text by the shell
+// from the replay it just captured.
+//
+// ONE ROUND, not a loop. A second agent that cannot make a script run is not
+// usually one round away from making it run, the build has a wall-clock budget
+// shared with the run that got here, and a failed build keeps its builder
+// paused — so a person can look at the box, the log and the script, which is
+// more useful than a third machine-written guess.
+//
+// The refusal in the third paragraph is the one that matters. The cheapest way
+// to make a failing script exit 0 is to stop it doing anything, and this run is
+// graded by exit status alone; saying so is what stops "fix it" from being read
+// as "make the error go away".
+func repairPrompt() string {
+	return `The setup script in this checkout was written to configure this microVM, and
+it does not run. Fix it. Nobody is watching and nobody can answer a question,
+so do not ask any.
+
+Read ` + SetupScriptPath + `, work out from the output below why it failed, and
+rewrite the file so that running it again here exits 0. It is being run over a
+box that is ALREADY configured, so every step has to be safe to repeat:
+` + "`mkdir -p`" + ` rather than ` + "`mkdir`" + `, skip a clone whose directory is already there,
+and let an already-installed package be fine.
+
+Do not make it pass by making it do less. Deleting the step that failed, or
+wrapping the script in ` + "`|| true`" + `, produces a file that exits 0 and builds
+nothing — and the next build of this environment runs that file instead of
+running you, on a fresh checkout where the work really does need doing. If a
+step genuinely cannot work here, keep it and say so in your final message.
+
+Do not commit, push, or open a pull request.
 `
 }
 
@@ -989,7 +1159,18 @@ func (o *Ops) completeBuild(ctx context.Context, e envs.Environment, box string,
 		// a person needs to finish the job by hand — and it is the reason
 		// `env capture` exists. Destroying it would throw all of that away at
 		// the exact moment somebody wants it.
-		reason := fmt.Sprintf("the setup script exited %d", r.ExitCode)
+		// WHAT EXITED, named for what it was. In script mode the thing that
+		// exited IS the setup script. In agent mode it is the runner around an
+		// agent, and telling somebody whose agent never wrote a script that
+		// "the setup script exited 3" sends them looking for a file that does
+		// not exist. The predicate is SetupFor's, and e is the row as the build
+		// started, so recordReportedScript above cannot have changed the
+		// answer.
+		what := "the setup script"
+		if e.SetupFrom == envs.SetupFromAgent && strings.TrimSpace(e.SetupScript) == "" {
+			what = "the agent run"
+		}
+		reason := fmt.Sprintf("%s exited %d", what, r.ExitCode)
 		if summary != "" {
 			reason += ": " + summary
 		}
