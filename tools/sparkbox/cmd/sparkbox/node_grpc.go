@@ -479,3 +479,10 @@ func (n grpcNetworkHooks) GetNetworkUsage(ctx context.Context) ([]*nodev1.Networ
 	}
 	return out, nil
 }
+
+func (n grpcNetworkHooks) NetworkDenials(ctx context.Context, sandbox string, reset bool) (netpush.DenialCapture, error) {
+	if reset {
+		return netpush.DenialCapture{}, n.syncer.StartDenialCapture(ctx, sandbox)
+	}
+	return n.syncer.FinishDenialCapture(ctx, sandbox)
+}

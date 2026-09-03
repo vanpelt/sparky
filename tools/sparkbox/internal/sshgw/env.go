@@ -297,6 +297,20 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 	if e.BuildError != "" {
 		fmt.Fprintf(s, "  %-12s %s\r\n", "build error", e.BuildError)
 	}
+	for i, denied := range e.BuildDenials {
+		label := ""
+		if i == 0 {
+			label = "blocked DNS"
+		}
+		word := "queries"
+		if denied.Queries == 1 {
+			word = "query"
+		}
+		fmt.Fprintf(s, "  %-12s %s  (%d %s)\r\n", label, denied.Domain, denied.Queries, word)
+	}
+	if e.BuildDenialOverflow > 0 {
+		fmt.Fprintf(s, "  %-12s %d more blocked queries were omitted\r\n", "", e.BuildDenialOverflow)
+	}
 	if e.BuildBox != "" && e.State != string(envs.StateBuilding) {
 		fmt.Fprintf(s, "  %-12s %s — kept and paused, with the half-built disk in it\r\n",
 			"builder", e.BuildBox)

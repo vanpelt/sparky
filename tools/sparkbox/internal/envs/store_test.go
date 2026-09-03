@@ -505,6 +505,31 @@ func TestBuildSessionOutlivesTheBuilder(t *testing.T) {
 	}
 }
 
+func TestBuildDenialsRoundTripAndClearAtNextBuild(t *testing.T) {
+	s := openTest(t)
+	must(t, mustPut(t, s, "alice", "web", ""))
+	must(t, s.SetState("alice", "web", StateBuilding, "web-build", ""))
+	want := []BuildDeniedDomain{{
+		Domain: "registry.npmjs.org", Queries: 3, QTypes: []string{"A", "AAAA"},
+		FirstSeenUnix: 100, LastSeenUnix: 102,
+	}}
+	must(t, s.SetBuildDenials("alice", "web", want, 4))
+	must(t, s.SetState("alice", "web", StateFailed, "web-build", "npm failed"))
+
+	got, err := s.Get("alice", "web")
+	must(t, err)
+	if !reflect.DeepEqual(got.BuildDenials, want) || got.BuildDenialOverflow != 4 {
+		t.Fatalf("denials = %+v overflow=%d", got.BuildDenials, got.BuildDenialOverflow)
+	}
+
+	must(t, s.SetState("alice", "web", StateBuilding, "web-build", ""))
+	got, err = s.Get("alice", "web")
+	must(t, err)
+	if len(got.BuildDenials) != 0 || got.BuildDenialOverflow != 0 {
+		t.Fatalf("stale denials survived rebuild: %+v overflow=%d", got.BuildDenials, got.BuildDenialOverflow)
+	}
+}
+
 // TestABuildSessionColumnIsAddedToAnOlderDatabase. CREATE TABLE IF NOT EXISTS
 // is a no-op on a database that already has the table, so a column added to the
 // schema reaches new installs only — and the host that has been building

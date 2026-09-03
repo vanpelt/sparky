@@ -39,6 +39,7 @@ service NodeControl {
 
   rpc ApplyNetworkPolicy(ApplyNetworkPolicyRequest) returns (Operation);
   rpc GetNetworkUsage(GetNetworkUsageRequest) returns (GetNetworkUsageResponse);
+  rpc NetworkDenials(NetworkDenialsRequest) returns (NetworkDenialsResponse);
 
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
@@ -362,6 +363,25 @@ message NetworkUsage {
 
 message GetNetworkUsageResponse {
   repeated NetworkUsage usage = 1;
+}
+
+message NetworkDenialsRequest {
+  string sandbox = 1;
+  bool begin_capture = 2;
+}
+
+message NetworkDeniedDomain {
+  string domain = 1;
+  uint64 queries = 2;
+  repeated string qtypes = 3;
+  int64 first_seen_unix = 4;
+  int64 last_seen_unix = 5;
+}
+
+message NetworkDenialsResponse {
+  string capture_id = 1;
+  repeated NetworkDeniedDomain domains = 2;
+  uint64 overflow_queries = 3;
 }
 
 message GetOperationRequest {

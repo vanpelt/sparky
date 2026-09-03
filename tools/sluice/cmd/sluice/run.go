@@ -15,6 +15,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sluice/internal/allowlist"
 	"github.com/vanpelt/sparky/tools/sluice/internal/control"
+	"github.com/vanpelt/sparky/tools/sluice/internal/denials"
 	"github.com/vanpelt/sparky/tools/sluice/internal/dnsproxy"
 	"github.com/vanpelt/sparky/tools/sluice/internal/ipmap"
 	"github.com/vanpelt/sparky/tools/sluice/internal/meter"
@@ -54,6 +55,7 @@ type runOpts struct {
 	syncInterval   time.Duration
 	reportInterval time.Duration
 	apiSocket      string
+	guestSubnet    string
 }
 
 func runCmd(args []string) int {
@@ -72,6 +74,7 @@ func runCmd(args []string) int {
 	fs.DurationVar(&o.syncInterval, "sync-interval", 5*time.Second, "tap-discovery and allow-set sync period")
 	fs.DurationVar(&o.reportInterval, "report-interval", 30*time.Second, "per-domain bandwidth report period (0 disables)")
 	fs.StringVar(&o.apiSocket, "api-listen", "", "path to a Unix control socket serving per-VM bandwidth + accepting per-tap policy (empty disables)")
+	fs.StringVar(&o.guestSubnet, "guest-subnet", "172.30.0.0/16", "IPv4 prefix sparkbox divides into per-sandbox /30s")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -96,9 +99,14 @@ func runCmd(args []string) int {
 	// policy on top as VMs' tags change. In open-untagged mode a tap with no
 	// per-tap policy is left unrestricted (untagged sandbox = unlimited egress).
 	pol := policy.New(list)
+	if err := pol.SetGuestSubnet(o.guestSubnet); err != nil {
+		log.Error("guest subnet", "err", err)
+		return 2
+	}
 	pol.SetDefaultAllow(o.openUntagged)
 
 	im := ipmap.New()
+	denied := denials.New()
 	im.MinTTL = o.minTTL
 
 	// Static always-allow IPs (e.g. an infra endpoint reached by IP).
@@ -122,7 +130,7 @@ func runCmd(args []string) int {
 		return 2
 	}
 	proxy, err := dnsproxy.New(dnsproxy.Config{
-		Allow: pol, IPMap: im, Upstreams: o.upstreams, Deny: deny, Logger: log,
+		Allow: pol, IPMap: im, Upstreams: o.upstreams, Deny: deny, Logger: log, Denials: denied,
 	})
 	if err != nil {
 		log.Error("dns proxy", "err", err)
@@ -187,7 +195,7 @@ func runCmd(args []string) int {
 		if mtr != nil {
 			cm = mtr
 		}
-		srv := control.New(cm, im, pol, kick, log)
+		srv := control.New(cm, im, pol, kick, log, denied)
 		go func() {
 			if err := srv.Serve(ctx, o.apiSocket); err != nil {
 				log.Error("control socket", "path", o.apiSocket, "err", err)

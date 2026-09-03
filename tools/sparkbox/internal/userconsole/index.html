@@ -429,6 +429,9 @@
   .env-strip.building { border-color: hsl(var(--amber) / .45); background: hsl(var(--amber) / .08);
     color: hsl(var(--foreground)); }
   .env-strip .mono { color: inherit; }
+  .env-strip.denials { display: block; border-color: hsl(var(--amber) / .35); background: hsl(var(--amber) / .055);
+    color: hsl(var(--foreground)); }
+  .env-strip.denials .domains { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 
   /* State badges. Same anatomy as the machine states — a dot carries the
      colour, the word stays quiet — so ready/building/failed/draft read at the
@@ -2615,6 +2618,18 @@
       (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
   }
 
+  function envDenials(e) {
+    const domains = e.build_denials || [];
+    if (!domains.length && !e.build_denial_overflow) return "";
+    const rows = domains.map((d) => '<span><span class="mono">' + esc(d.domain) +
+      "</span> · " + d.queries + (d.queries === 1 ? " query" : " queries") + "</span>").join("");
+    const overflow = e.build_denial_overflow
+      ? '<span class="muted">' + e.build_denial_overflow + " more queries omitted</span>"
+      : "";
+    return '<div class="env-strip denials"><strong>Blocked by egress policy during the last build</strong>' +
+      '<div class="domains">' + rows + overflow + "</div></div>";
+  }
+
   function envCard(e) {
     const st = e.state || "draft";
     const buildLabel = st === "ready" || st === "failed" ? "Rebuild" : "Build";
@@ -2643,6 +2658,7 @@
       "</div>" +
       (e.description ? '<div class="env-sub">' + esc(e.description) + "</div>" : "") +
       envStrip(e) +
+      envDenials(e) +
       '<div class="env-grid">' +
         envCol("Repos", e.repos, "none") +
         envCol("Secrets", e.secrets, "none") +

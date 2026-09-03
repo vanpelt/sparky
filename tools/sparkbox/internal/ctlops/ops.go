@@ -27,6 +27,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
@@ -189,6 +190,7 @@ type Environments interface {
 	SetScript(owner, name, script, from string) error
 	SetState(owner, name string, st envs.State, box, buildErr string) error
 	SetBuildSession(owner, name, url string) error
+	SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error
 	Building() ([]envs.Environment, error)
 }
 
@@ -206,6 +208,14 @@ type Environments interface {
 // has.
 type NetPusher interface {
 	PushNet(ctx context.Context) error
+}
+
+// BuildDenialCapturer is the optional diagnostic half of the network plane.
+// A deployment without it still enforces policy and builds normally; it simply
+// cannot retain the exact DNS names policy refused during that build.
+type BuildDenialCapturer interface {
+	BeginBuildDenials(ctx context.Context, sandbox string) error
+	FinishBuildDenials(ctx context.Context, sandbox string) (netpush.DenialCapture, error)
 }
 
 // SetupStarter nudges a BUILDER's guest into fetching and running the setup

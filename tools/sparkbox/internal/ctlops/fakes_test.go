@@ -1469,6 +1469,20 @@ func (f *fakeEnvs) SetBuildSession(owner, name, url string) error {
 	return nil
 }
 
+func (f *fakeEnvs) SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error {
+	f.c.add("envs.SetBuildDenials %s/%s domains=%d", owner, name, len(domains))
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		return nil
+	}
+	e.BuildDenials = append([]envs.BuildDeniedDomain(nil), domains...)
+	e.BuildDenialOverflow = overflow
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
 func (f *fakeEnvs) SetState(owner, name string, st envs.State, box, buildErr string) error {
 	f.c.add("envs.SetState %s/%s state=%s", owner, name, st)
 	k := envKey(owner, name)
@@ -1480,6 +1494,10 @@ func (f *fakeEnvs) SetState(owner, name string, st envs.State, box, buildErr str
 		buildErr = ""
 	}
 	e.State, e.BuildBox, e.BuildError = st, box, buildErr
+	if st == envs.StateBuilding {
+		e.BuildDenials = nil
+		e.BuildDenialOverflow = 0
+	}
 	// updated_at moves on every state change, exactly as the real UPDATE does.
 	// It is what buildStartedAt reads, so a fake that skipped it would make the
 	// reconciler untestable.

@@ -406,7 +406,9 @@ the new one is captured, so a rebuild that fails costs only the time.
 A new environment gets an **egress rule-set named after it**, so its sandboxes
 reach the package registries, github and the model API and not the rest of the
 internet. Widen it in the console's Network panel, or pass `--open-egress` on
-create to have no rules at all.
+create to have no rules at all. While a build runs, Sparkbox captures the exact
+DNS names that rule-set blocks and keeps the bounded summary on the environment
+row, so the console and API can show which dependency hosts need review.
 
 All of it is on the other two doors too: an **Environments** tab on
 `my.<domain>` beside Secrets, Network and Repos — the four panels are one object

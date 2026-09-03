@@ -2049,7 +2049,7 @@ func (f netpushFleet) List() []netpush.Sandbox {
 		if b.State != vmm.StateRunning {
 			continue
 		}
-		out = append(out, netpush.Sandbox{Name: b.Name, Owner: b.Owner, HostIP: b.HostIP})
+		out = append(out, netpush.Sandbox{ID: b.ID, Name: b.Name, Owner: b.Owner, HostIP: b.HostIP})
 	}
 	return out
 }

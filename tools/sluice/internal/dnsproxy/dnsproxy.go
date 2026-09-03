@@ -23,6 +23,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/vanpelt/sparky/tools/sluice/internal/denials"
 	"github.com/vanpelt/sparky/tools/sluice/internal/ipmap"
 )
 
@@ -60,6 +61,10 @@ type ClientAllower interface {
 	AllowedFor(client netip.Addr, name string) (bool, string)
 }
 
+type ClientTapper interface {
+	TapForClient(client netip.Addr) string
+}
+
 // Config configures a Proxy.
 type Config struct {
 	Allow     Allower
@@ -69,6 +74,7 @@ type Config struct {
 	Deny      DenyMode      // reply for blocked names
 	Timeout   time.Duration // per-upstream exchange timeout
 	Logger    *slog.Logger
+	Denials   *denials.Recorder // optional build-scoped policy-denial recorder
 }
 
 // Proxy is a dns.Handler implementing the allowlist gate.
@@ -151,6 +157,13 @@ func (p *Proxy) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	}
 	if !allowed {
 		atomic.AddUint64(&p.stats.Denied, 1)
+		if p.cfg.Denials != nil {
+			tap := ""
+			if mapper, ok := p.cfg.Allow.(ClientTapper); ok {
+				tap = mapper.TapForClient(clientAddr)
+			}
+			p.cfg.Denials.Record(tap, name, dns.TypeToString[q.Qtype])
+		}
 		p.log.Info("dns", "decision", "deny", "client", client,
 			"name", name, "type", dns.TypeToString[q.Qtype])
 		return p.denyReply(req)

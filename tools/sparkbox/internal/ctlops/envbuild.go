@@ -336,12 +336,58 @@ func (o *Ops) startBuild(ctx context.Context, c Caller, name, box, mode, script 
 	if err := o.pushBuilderEgress(ctx, c.Handle, name, box, mode); err != nil {
 		return EnvironmentInfo{}, err
 	}
+	o.beginBuildDenials(ctx, c.Handle, name, box)
 	if err := o.nudgeBuilder(ctx, c, name, box); err != nil {
 		return EnvironmentInfo{}, err
 	}
 	o.log.Info("environment build started", "user", c.Handle, "env", name, "sandbox", box,
 		"mode", mode, "script_bytes", len(script))
 	return o.environmentInfo(c.Handle, name)
+}
+
+func (o *Ops) beginBuildDenials(ctx context.Context, owner, name, box string) {
+	capture, ok := o.netPusher.(BuildDenialCapturer)
+	if !ok {
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), PauseTimeout)
+	defer cancel()
+	if err := capture.BeginBuildDenials(cctx, box); err != nil {
+		o.log.Warn("could not start an environment build's egress-denial capture",
+			"user", owner, "env", name, "sandbox", box, "err", err)
+	}
+}
+
+func (o *Ops) recordBuildDenials(ctx context.Context, owner, name, box string) {
+	if box == "" {
+		return
+	}
+	capture, ok := o.netPusher.(BuildDenialCapturer)
+	if !ok {
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), PauseTimeout)
+	defer cancel()
+	result, err := capture.FinishBuildDenials(cctx, box)
+	if err != nil {
+		o.log.Debug("could not read an environment build's egress-denial capture",
+			"user", owner, "env", name, "sandbox", box, "err", err)
+		return
+	}
+	domains := make([]envs.BuildDeniedDomain, 0, len(result.Domains))
+	for _, d := range result.Domains {
+		domains = append(domains, envs.BuildDeniedDomain{
+			Domain: d.Domain, Queries: d.Queries, QTypes: append([]string(nil), d.QTypes...),
+			FirstSeenUnix: d.FirstSeenUnix, LastSeenUnix: d.LastSeenUnix,
+		})
+	}
+	if err := o.envs.SetBuildDenials(owner, name, domains, result.OverflowQueries); err != nil {
+		o.log.Warn("could not record an environment build's blocked domains",
+			"user", owner, "env", name, "sandbox", box, "err", err)
+		return
+	}
+	o.log.Info("environment build blocked domains recorded", "user", owner, "env", name,
+		"sandbox", box, "domains", len(domains), "overflow_queries", result.OverflowQueries)
 }
 
 // pushBuilderEgress puts this builder into the egress policy before its guest
@@ -1261,6 +1307,7 @@ func (o *Ops) completeBuild(ctx context.Context, e envs.Environment, box string,
 		o.failBuild(ctx, owner, name, box, reason)
 		return
 	}
+	o.recordBuildDenials(ctx, owner, name, box)
 
 	if err := o.captureBuild(ctx, owner, name, box); err != nil {
 		o.failBuild(ctx, owner, name, box,
@@ -1571,6 +1618,7 @@ func (o *Ops) expireBuild(ctx context.Context, e envs.Environment, cutoff time.D
 	// the box is about to go, and what the agent was doing for forty-five
 	// minutes is the only evidence there will ever be.
 	o.recordBuildSession(ctx, e, e.BuildBox)
+	o.recordBuildDenials(ctx, e.Owner, e.Name, e.BuildBox)
 	if o.boxes == nil {
 		o.markFailedBox(e.Owner, e.Name, e.BuildBox, reason, false)
 		return
@@ -1659,6 +1707,7 @@ func (o *Ops) buildingFor(b *host.Sandbox) (envs.Environment, bool, error) {
 // has failed, and reporting a pause error instead would replace a sentence
 // somebody can act on with one they cannot.
 func (o *Ops) failBuild(ctx context.Context, owner, name, box, reason string) {
+	o.recordBuildDenials(ctx, owner, name, box)
 	if box != "" && o.boxes != nil {
 		pctx, cancel := withBudget(ctx, PauseTimeout)
 		if err := o.boxes.Pause(pctx, box); err != nil {

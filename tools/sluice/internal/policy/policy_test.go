@@ -95,12 +95,12 @@ func TestTapGrantsAreScopedAndSkipInfra(t *testing.T) {
 func TestAllowedForPerClient(t *testing.T) {
 	p := New(mustList(t, "base.com"))
 	p.ReplaceTaps(map[string]*allowlist.List{
-		"sbtap3": mustList(t, "github.com"), // policied VM at 172.30.3.2
+		"sbtap3": mustList(t, "github.com"), // policied VM in /30 slot 3
 	})
 
-	policied := addr("172.30.3.2") // sbtap3, has a policy
-	untagged := addr("172.30.7.2") // sbtap7, no policy
-	host := addr("10.9.9.9")       // not a guest at all
+	policied := addr("172.30.0.14") // sbtap3, has a policy
+	untagged := addr("172.30.0.30") // sbtap7, no policy
+	host := addr("10.9.9.9")        // not a guest at all
 
 	// Default mode (defaultAllow=false): a tap with no policy is base-only.
 	if ok, _ := p.AllowedFor(untagged, "youtube.com"); ok {
@@ -147,22 +147,30 @@ func TestIsEnforcedTracksPerTapPolicy(t *testing.T) {
 }
 
 func TestTapForGuest(t *testing.T) {
+	p := New(nil)
 	cases := map[string]string{
-		"172.30.3.2":   "sbtap3",
-		"172.30.240.2": "sbtap240",
-		"172.30.3.1":   "", // gateway, not the guest
-		"172.30.3.3":   "", // wrong host octet
-		"10.0.0.2":     "", // not the sandbox subnet
-		"::1":          "", // IPv6 loopback
+		"172.30.0.2":  "sbtap0",
+		"172.30.0.14": "sbtap3",
+		"172.30.5.2":  "sbtap320",
+		"172.30.0.13": "", // gateway, not the guest
+		"172.30.0.15": "", // broadcast, not the guest
+		"10.0.0.2":    "", // not the sandbox subnet
+		"::1":         "", // IPv6 loopback
 	}
 	for in, want := range cases {
-		if got := tapForGuest(addr(in)); got != want {
+		if got := p.TapForClient(addr(in)); got != want {
 			t.Errorf("tapForGuest(%s) = %q, want %q", in, got, want)
 		}
 	}
 	// A v4-mapped v6 address should still resolve to its tap.
-	if got := tapForGuest(netip.MustParseAddr("::ffff:172.30.5.2")); got != "sbtap5" {
-		t.Errorf("tapForGuest(v4-mapped) = %q, want sbtap5", got)
+	if got := p.TapForClient(netip.MustParseAddr("::ffff:172.30.5.2")); got != "sbtap320" {
+		t.Errorf("tapForGuest(v4-mapped) = %q, want sbtap320", got)
+	}
+	if err := p.SetGuestSubnet("10.44.16.0/20"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.TapForClient(addr("10.44.17.6")); got != "sbtap65" {
+		t.Errorf("configured subnet mapping = %q, want sbtap65", got)
 	}
 }
 

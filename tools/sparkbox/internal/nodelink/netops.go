@@ -33,6 +33,11 @@ type NetControl interface {
 	Usage(ctx context.Context, owner string) (map[string]netpush.VMUsage, error)
 }
 
+type NetDenialControl interface {
+	StartDenialCapture(context.Context, string) error
+	FinishDenialCapture(context.Context, string) (netpush.DenialCapture, error)
+}
+
 // CodeNoSluice is what a machine with no egress gateway answers both requests
 // with.
 //
@@ -93,5 +98,20 @@ func registerNetOps(conn *Conn, node string, net NetControl) {
 		// nobody can diff between two captures.
 		sort.Slice(out.VMs, func(i, j int) bool { return out.VMs[i].Name < out.VMs[j].Name })
 		return out, nil
+	})
+
+	handle(conn, TypeNetDenials, func(ctx context.Context, req NetDenialsReq) (NetDenialsResp, error) {
+		if net == nil || !net.Enabled() {
+			return NetDenialsResp{}, NoSluice(node)
+		}
+		capture, ok := net.(NetDenialControl)
+		if !ok {
+			return NetDenialsResp{}, NoSluice(node)
+		}
+		if req.Reset {
+			return NetDenialsResp{}, capture.StartDenialCapture(ctx, req.Sandbox)
+		}
+		got, err := capture.FinishDenialCapture(ctx, req.Sandbox)
+		return NetDenialsResp{Capture: got}, err
 	})
 }

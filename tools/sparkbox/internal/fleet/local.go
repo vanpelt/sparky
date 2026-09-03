@@ -221,3 +221,20 @@ func (l *localNode) NetUsage(ctx context.Context) (map[string]netpush.VMUsage, e
 	// a decision that gates one user's view of another's VM.
 	return l.net.Usage(ctx, "")
 }
+
+func (l *localNode) NetDenials(ctx context.Context, sandbox string, reset bool) (netpush.DenialCapture, error) {
+	if l.net == nil || !l.net.Enabled() {
+		return netpush.DenialCapture{}, nodelink.NoSluice(l.name)
+	}
+	capture, ok := l.net.(interface {
+		StartDenialCapture(context.Context, string) error
+		FinishDenialCapture(context.Context, string) (netpush.DenialCapture, error)
+	})
+	if !ok {
+		return netpush.DenialCapture{}, nodelink.NoSluice(l.name)
+	}
+	if reset {
+		return netpush.DenialCapture{}, capture.StartDenialCapture(ctx, sandbox)
+	}
+	return capture.FinishDenialCapture(ctx, sandbox)
+}

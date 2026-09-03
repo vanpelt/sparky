@@ -6,6 +6,7 @@ set -euo pipefail
 readonly dns_ip="${SPARKBOX_SLUICE_DNS_IP:-172.30.0.53}"
 readonly socket="${SPARKBOX_SLUICE_SOCKET:-/run/sluice/sluice.sock}"
 readonly allowlist="${SPARKBOX_SLUICE_ALLOWLIST:-/etc/sparkbox/sluice-allowlist.txt}"
+readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 
 case "$dns_ip" in
 	*[!0-9.]*|'')
@@ -34,6 +35,7 @@ exec /usr/local/bin/sluice run \
 	--allowlist "$allowlist" \
 	--dns-listen "$dns_ip:53" \
 	--tap-prefix sbtap \
+	--guest-subnet "$guest_subnet" \
 	--allow-ip "$dns_ip" \
 	--enforce \
 	--open-untagged \

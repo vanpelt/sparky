@@ -18,6 +18,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
@@ -551,6 +552,65 @@ func TestAnAgentBuildRefusesWhenItsEgressPolicyCannotBeApplied(t *testing.T) {
 type failingNetPusher struct{}
 
 func (failingNetPusher) PushNet(context.Context) error { return errors.New("sluice is not answering") }
+
+type captureNetPusher struct {
+	begun    []string
+	finished []string
+	result   netpush.DenialCapture
+}
+
+func (*captureNetPusher) PushNet(context.Context) error { return nil }
+func (p *captureNetPusher) BeginBuildDenials(_ context.Context, box string) error {
+	p.begun = append(p.begun, box)
+	return nil
+}
+func (p *captureNetPusher) FinishBuildDenials(_ context.Context, box string) (netpush.DenialCapture, error) {
+	p.finished = append(p.finished, box)
+	return p.result, nil
+}
+
+func TestBuildRecordsPolicyDeniedDomainsBeforePausingFailure(t *testing.T) {
+	b := newBuildRig(t)
+	b.env("alice", "web", withScript(setupScript))
+	pusher := &captureNetPusher{result: netpush.DenialCapture{
+		Domains:         []netpush.DeniedDomain{{Domain: "registry.npmjs.org", Queries: 3, QTypes: []string{"A", "AAAA"}}},
+		OverflowQueries: 2,
+	}}
+	b.ops.netPusher = pusher
+
+	if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(pusher.begun, []string{"web-build"}) {
+		t.Fatalf("begun = %v", pusher.begun)
+	}
+	box, _ := b.boxes.Get("web-build")
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{ExitCode: 1, Log: "npm failed\n"}); err != nil {
+		t.Fatal(err)
+	}
+	b.ops.awaitEnvBuilds()
+
+	row := b.row(t, "alice", "web")
+	if len(row.BuildDenials) != 1 || row.BuildDenials[0].Domain != "registry.npmjs.org" || row.BuildDenialOverflow != 2 {
+		t.Fatalf("denials = %+v overflow=%d", row.BuildDenials, row.BuildDenialOverflow)
+	}
+	if !slices.Equal(pusher.finished, []string{"web-build"}) {
+		t.Fatalf("finished = %v", pusher.finished)
+	}
+	calls := b.calls.all()
+	denials, pause := -1, -1
+	for i, call := range calls {
+		if strings.HasPrefix(call, "envs.SetBuildDenials") {
+			denials = i
+		}
+		if call == "Pause web-build" {
+			pause = i
+		}
+	}
+	if denials < 0 || pause < 0 || denials > pause {
+		t.Fatalf("denials must be captured before pause: %v", calls)
+	}
+}
 
 // TestAnOverrunAgentBuildDestroysItsBuilder is the one place the two modes are
 // treated differently after they start, and the asymmetry is deliberate.

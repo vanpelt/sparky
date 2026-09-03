@@ -130,8 +130,9 @@ const (
 	// The egress plane, gateway -> node. Policy is pushed because the rules
 	// that produce it live in the gateway's store; usage is pulled because the
 	// meter that produces it is attached to the node's own taps.
-	TypeNetPolicy = "net.policy"
-	TypeNetUsage  = "net.usage"
+	TypeNetPolicy  = "net.policy"
+	TypeNetUsage   = "net.usage"
+	TypeNetDenials = "net.denials"
 
 	// NODE -> gateway requests. Identity stays upstream because the signing key
 	// never leaves the gateway; route self-service stays upstream because route
@@ -974,6 +975,18 @@ type NetPolicyReq struct {
 // two by hand, for a payload that is passed straight through.
 type NetUsageResp struct {
 	VMs []netpush.VMUsage `json:"vms"`
+}
+
+// NetDenialsReq starts or reads one sandbox's build-scoped DNS denial capture.
+// Reset is idempotent because the node keys the capture by the sandbox's
+// immutable ID rather than by its reusable name or tap.
+type NetDenialsReq struct {
+	Sandbox string `json:"sandbox"`
+	Reset   bool   `json:"reset,omitempty"`
+}
+
+type NetDenialsResp struct {
+	Capture netpush.DenialCapture `json:"capture"`
 }
 
 // ---------------------------------------------------------------------------

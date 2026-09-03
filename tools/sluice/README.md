@@ -25,8 +25,9 @@ destinations were never resolved through the gate, so they are not reachable.
 
 ## Why this shape
 
-The host is already the default gateway and NAT for every guest (`172.30.<idx>.1`
-on `sbtap<idx>`), so all egress crosses one chokepoint we own. Guest traffic is
+The host is already the default gateway and NAT for every guest (the first
+address in its sequential `/30` slot, on `sbtap<idx>`), so all egress crosses
+one chokepoint we own. Guest traffic is
 TLS, so the host cannot see URLs — but it **can** see, and gate on, the domain
 (via DNS) and count bytes per remote IP (via eBPF), which is exactly what
 "allowlist domains + per-site bandwidth" needs. Full URL capture would require a
@@ -58,6 +59,7 @@ sudo sluice run --allowlist allowlist.txt --enforce
 | `--enforce` | `false` | drop egress to addresses the allowlist never resolved |
 | `--open-untagged` | `false` | enforce only taps with a pushed per-tap policy; untagged VMs stay unrestricted |
 | `--tap-prefix` | `sbtap` | attach the meter to interfaces with this prefix |
+| `--guest-subnet` | `172.30.0.0/16` | IPv4 prefix divided into Sparkbox's sequential per-sandbox `/30` slots; must match Sparkbox |
 | `--allow-ip` | — | always-reachable IP that bypasses DNS (repeatable) |
 | `--deny` | `nxdomain` | reply for blocked names: `nxdomain` or `refused` |
 | `--min-ttl` | `5m` | floor on how long a resolved IP stays reachable |
@@ -103,6 +105,14 @@ control plane over a Unix socket (no auth — reachability is the permission):
   effect on the next reconcile (a push pokes one immediately). Enforcement is
   per-tap in the kernel allow-set, so a tag that grants a domain only opens it
   for VMs carrying that tag.
+- `POST /denials/<tap>/start` and `POST /denials/<tap>/finish` — start and
+  read a bounded DNS-policy-denial capture. Both take
+  `{"capture_id":"<immutable sandbox id>"}`. Repeating `start` with the same
+  ID is idempotent; a different ID replaces stale data left by a VM that used
+  the same tap. Captures aggregate query count, type, and first/last observation
+  time for at most 256 distinct domains. At most 4096 captures are retained;
+  abandoned captures expire after two idle hours. Only exact DNS policy denials
+  are recorded, not raw-IP eBPF drops or upstream DNS failures.
 
 A tap that appears in a `PUT /policy` body becomes an *enforced* tap. Under
 `--open-untagged`, only enforced taps are filtered; a VM the caller omits (no
@@ -117,7 +127,7 @@ tag-derived rules and renders the bandwidth report.
 
 ## Guest configuration
 
-Guests must resolve through their gateway (`172.30.<idx>.1`), where sluice
+Guests must resolve through their per-slot gateway, where sluice
 listens. sparkbox wires this for you: start the gateway with
 
 ```sh
@@ -152,6 +162,7 @@ cmd/sluice            CLI: `run` and `check`
 internal/allowlist    domain matching (apex+subdomain, wildcard)
 internal/ipmap        TTL IP→domain table; doubles as the egress allow-set
 internal/dnsproxy     miekg/dns handler: gate, forward, record, log
+internal/denials      bounded, build-scoped denied-domain captures
 internal/report       join eBPF byte counters to domains → bandwidth table
 internal/meter        cilium/ebpf loader, TCX attach, map I/O (Linux only)
 internal/meter/bpf    sluice.c — the TC program (meter + enforce)

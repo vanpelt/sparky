@@ -82,9 +82,11 @@ type EnvironmentInfo struct {
 	// --hivemind-api, and while an agent build is still in flight — the row
 	// learns it when the build reports, so a surface that wants to link a build
 	// IN PROGRESS reads the builder sandbox's own live session instead.
-	BuildSession string     `json:"build_session,omitempty"`
-	BuiltAt      *time.Time `json:"built_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	BuildSession        string                   `json:"build_session,omitempty"`
+	BuildDenials        []envs.BuildDeniedDomain `json:"build_denials,omitempty"`
+	BuildDenialOverflow uint64                   `json:"build_denial_overflow,omitempty"`
+	BuiltAt             *time.Time               `json:"built_at,omitempty"`
+	CreatedAt           time.Time                `json:"created_at"`
 
 	// The composition. Every one of these is what carries this environment's
 	// tag right now, read from the store that owns it — never a copy kept here,
@@ -798,21 +800,23 @@ func (o *Ops) composition(owner string) envComposition {
 // never carried out of this package by a listing — see EnvironmentInfo.
 func (c envComposition) info(e envs.Environment) EnvironmentInfo {
 	ei := EnvironmentInfo{
-		Name:         e.Name,
-		Description:  e.Description,
-		State:        string(e.State),
-		SetupFrom:    e.SetupFrom,
-		HasSetup:     e.SetupScript != "",
-		SetupBytes:   len(e.SetupScript),
-		BuildBox:     e.BuildBox,
-		BuildError:   e.BuildError,
-		BuildSession: e.BuildSession,
-		BuiltAt:      e.BuiltAt,
-		CreatedAt:    e.CreatedAt,
-		Repos:        c.repos[e.Name],
-		Secrets:      c.secrets[e.Name],
-		Rules:        c.rules[e.Name],
-		Snapshot:     c.snapshot[e.Name],
+		Name:                e.Name,
+		Description:         e.Description,
+		State:               string(e.State),
+		SetupFrom:           e.SetupFrom,
+		HasSetup:            e.SetupScript != "",
+		SetupBytes:          len(e.SetupScript),
+		BuildBox:            e.BuildBox,
+		BuildError:          e.BuildError,
+		BuildSession:        e.BuildSession,
+		BuildDenials:        append([]envs.BuildDeniedDomain(nil), e.BuildDenials...),
+		BuildDenialOverflow: e.BuildDenialOverflow,
+		BuiltAt:             e.BuiltAt,
+		CreatedAt:           e.CreatedAt,
+		Repos:               c.repos[e.Name],
+		Secrets:             c.secrets[e.Name],
+		Rules:               c.rules[e.Name],
+		Snapshot:            c.snapshot[e.Name],
 	}
 	if c.vars != nil {
 		ei.Vars = c.vars(e.Name)

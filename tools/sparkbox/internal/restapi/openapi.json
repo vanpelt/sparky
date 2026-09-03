@@ -3040,6 +3040,17 @@
             "type": "string",
             "description": "Why the last build failed: the summarised last line of the guest's log."
           },
+          "build_denials": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/BuildDeniedDomain" },
+            "description": "Exact DNS names the egress policy refused during the most recent build, aggregated and bounded. Absent when none were observed or denial capture was unavailable."
+          },
+          "build_denial_overflow": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Additional denied DNS queries omitted after the distinct-domain capture limit was reached."
+          },
           "built_at": {
             "type": "string",
             "format": "date-time",
@@ -3066,6 +3077,17 @@
             "type": "string",
             "description": "The base image bound to this tag, absent when it boots the operator default."
           }
+        }
+      },
+      "BuildDeniedDomain": {
+        "type": "object",
+        "required": ["domain", "queries", "qtypes", "first_seen_unix", "last_seen_unix"],
+        "properties": {
+          "domain": { "type": "string", "example": "registry.npmjs.org" },
+          "queries": { "type": "integer", "format": "int64", "minimum": 0, "example": 6 },
+          "qtypes": { "type": "array", "items": { "type": "string" }, "example": ["A", "AAAA"] },
+          "first_seen_unix": { "type": "integer", "format": "int64" },
+          "last_seen_unix": { "type": "integer", "format": "int64" }
         }
       },
       "EnvironmentList": {

@@ -9,6 +9,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netpush"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/nodelink"
 )
 
 // ControlTransport is the operator's control-plane rollout choice.
@@ -272,4 +273,27 @@ func (s *ControlSelector) NetUsage(ctx context.Context) (map[string]netpush.VMUs
 		return ssh.NetUsage(ctx)
 	}
 	return nil, err
+}
+
+func (s *ControlSelector) NetDenials(ctx context.Context, sandbox string, reset bool) (netpush.DenialCapture, error) {
+	class := ControlClassReadOnly
+	if reset {
+		class = ControlClassIdempotent
+	}
+	chosen := s.choiceFor(class)
+	ext, ok := chosen.(netDenialNode)
+	if !ok {
+		return netpush.DenialCapture{}, nodelink.NoSluice(chosen.Name())
+	}
+	capture, err := ext.NetDenials(ctx, sandbox, reset)
+	if err == nil {
+		return capture, nil
+	}
+	grpc, ssh, mode := s.pairFor(class)
+	if mode == ControlTransportAuto && chosen == grpc && !grpc.Healthy() {
+		if fallback, ok := ssh.(netDenialNode); ok {
+			return fallback.NetDenials(ctx, sandbox, reset)
+		}
+	}
+	return netpush.DenialCapture{}, err
 }

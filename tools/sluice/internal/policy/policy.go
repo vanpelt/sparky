@@ -24,6 +24,7 @@
 package policy
 
 import (
+	"fmt"
 	"net/netip"
 	"strconv"
 	"sync"
@@ -38,6 +39,7 @@ type Policy struct {
 	base         *allowlist.List
 	perTap       map[string]*allowlist.List // tap name (sbtap<idx>) -> its allowlist
 	defaultAllow bool                       // a tap with no per-tap policy resolves anything
+	guestPrefix  netip.Prefix               // divided into sequential /30 guest slots
 }
 
 // New returns a Policy with the given base list and no per-tap overrides. base
@@ -46,7 +48,20 @@ func New(base *allowlist.List) *Policy {
 	if base == nil {
 		base, _ = allowlist.New(nil)
 	}
-	return &Policy{base: base, perTap: map[string]*allowlist.List{}}
+	return &Policy{base: base, perTap: map[string]*allowlist.List{}, guestPrefix: netip.MustParsePrefix("172.30.0.0/16")}
+}
+
+// SetGuestSubnet configures the IPv4 prefix sparkbox divides into sequential
+// /30 slots. It must match sparkbox's --guest-subnet value.
+func (p *Policy) SetGuestSubnet(raw string) error {
+	prefix, err := netip.ParsePrefix(raw)
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() > 30 {
+		return fmt.Errorf("invalid IPv4 guest subnet %q", raw)
+	}
+	p.mu.Lock()
+	p.guestPrefix = prefix.Masked()
+	p.mu.Unlock()
+	return nil
 }
 
 // SetDefaultAllow controls what a tap with no per-tap policy may resolve. When
@@ -122,7 +137,7 @@ func (p *Policy) AllowedFor(client netip.Addr, name string) (bool, string) {
 	if ok, pat := p.base.Allowed(name); ok {
 		return true, pat
 	}
-	if tap := tapForGuest(client); tap != "" {
+	if tap := tapForGuest(p.guestPrefix, client); tap != "" {
 		if l := p.perTap[tap]; l != nil {
 			if ok, pat := l.Allowed(name); ok {
 				return true, pat
@@ -136,13 +151,16 @@ func (p *Policy) AllowedFor(client netip.Addr, name string) (bool, string) {
 	return false, ""
 }
 
-// tapForGuest maps a guest's source address (172.30.<idx>.2) to its tap name
-// (sbtap<idx>), the same 1:1 addressing sparkbox's firecracker driver assigns.
-// It returns "" for any other address (the host, IPv6, a non-firecracker setup),
-// which callers treat as "no per-tap policy". Kept in sync with netpush.TapName
-// on the sparkbox side — the two modules can't share code, but the derivation is
-// deliberately identical.
-func tapForGuest(a netip.Addr) string {
+// TapForClient maps a DNS client's source address to the tap that owns its /30
+// slot. It is also used by the denial recorder, so the DNS decision and its
+// attribution cannot disagree.
+func (p *Policy) TapForClient(a netip.Addr) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return tapForGuest(p.guestPrefix, a)
+}
+
+func tapForGuest(prefix netip.Prefix, a netip.Addr) string {
 	if !a.Is4() {
 		if a.Is4In6() {
 			a = a.Unmap()
@@ -153,11 +171,18 @@ func tapForGuest(a netip.Addr) string {
 	if !a.Is4() {
 		return ""
 	}
-	o := a.As4()
-	if o[0] != 172 || o[1] != 30 || o[3] != 2 {
+	if !prefix.Contains(a) {
 		return ""
 	}
-	return "sbtap" + strconv.Itoa(int(o[2]))
+	o := a.As4()
+	b := prefix.Addr().As4()
+	addr := uint32(o[0])<<24 | uint32(o[1])<<16 | uint32(o[2])<<8 | uint32(o[3])
+	base := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+	offset := addr - base
+	if offset%4 != 2 {
+		return ""
+	}
+	return "sbtap" + strconv.FormatUint(uint64(offset/4), 10)
 }
 
 // TapPatterns returns the canonical patterns configured for a tap (nil if the

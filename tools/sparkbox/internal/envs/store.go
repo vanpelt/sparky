@@ -54,6 +54,7 @@ package envs
 import (
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -143,10 +144,27 @@ type Environment struct {
 	// column existed. It OUTLIVES the builder deliberately: a successful build
 	// destroys its box, and the transcript is then the only surviving account
 	// of why the setup script looks the way it does.
-	BuildSession string     `json:"build_session,omitempty"`
-	BuiltAt      *time.Time `json:"built_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	BuildSession        string              `json:"build_session,omitempty"`
+	BuildDenials        []BuildDeniedDomain `json:"build_denials,omitempty"`
+	BuildDenialOverflow uint64              `json:"build_denial_overflow,omitempty"`
+	BuiltAt             *time.Time          `json:"built_at,omitempty"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
+}
+
+// BuildDeniedDomain is one DNS name the egress policy refused during the most
+// recent build. It contains no URL, path, payload, or resolved address.
+type BuildDeniedDomain struct {
+	Domain        string   `json:"domain"`
+	Queries       uint64   `json:"queries"`
+	QTypes        []string `json:"qtypes"`
+	FirstSeenUnix int64    `json:"first_seen_unix"`
+	LastSeenUnix  int64    `json:"last_seen_unix"`
+}
+
+type buildDenialRecord struct {
+	Domains         []BuildDeniedDomain `json:"domains"`
+	OverflowQueries uint64              `json:"overflow_queries,omitempty"`
 }
 
 // Store is the environments database handle.
@@ -230,6 +248,7 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			build_box   TEXT NOT NULL DEFAULT '',
 			build_error TEXT NOT NULL DEFAULT '',
 			build_session TEXT NOT NULL DEFAULT '',
+			build_denials TEXT NOT NULL DEFAULT '',
 			built_at    TIMESTAMP,
 			created_at  TIMESTAMP NOT NULL,
 			updated_at  TIMESTAMP NOT NULL,
@@ -246,6 +265,10 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 	// most want an agent's transcript are the ones on the host that has been
 	// building them since before this column existed.
 	if err := addColumnIfMissing(db, "environments", "build_session", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
+	if err := addColumnIfMissing(db, "environments", "build_denials", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
@@ -458,6 +481,11 @@ func (s *Store) SetState(owner, name string, st State, box, buildErr string) err
 			UPDATE environments SET build_state = ?, build_box = ?, build_error = ?, built_at = ?, updated_at = ?
 			WHERE owner = ? AND name = ?`,
 			string(st), box, buildErr, now, now, owner, name)
+	} else if st == StateBuilding {
+		res, err = s.db.Exec(`
+			UPDATE environments SET build_state = ?, build_box = ?, build_error = ?, build_denials = '', updated_at = ?
+			WHERE owner = ? AND name = ?`,
+			string(st), box, buildErr, now, owner, name)
 	} else {
 		res, err = s.db.Exec(`
 			UPDATE environments SET build_state = ?, build_box = ?, build_error = ?, updated_at = ?
@@ -495,6 +523,24 @@ func (s *Store) SetBuildSession(owner, name, url string) error {
 	return err
 }
 
+// SetBuildDenials records the bounded policy-denial summary for the most
+// recent build. It is best-effort build evidence, like BuildSession, and a
+// missing row is intentionally not promoted into a build failure.
+func (s *Store) SetBuildDenials(owner, name string, domains []BuildDeniedDomain, overflow uint64) error {
+	record := buildDenialRecord{Domains: domains, OverflowQueries: overflow}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err = s.db.Exec(`
+		UPDATE environments SET build_denials = ?, updated_at = ?
+		WHERE owner = ? AND name = ?`,
+		string(encoded), time.Now().UTC(), owner, strings.TrimSpace(name))
+	return err
+}
+
 // Building returns every environment in StateBuilding, across ALL owners, for
 // the reconciler that runs at startup.
 //
@@ -527,7 +573,7 @@ func (s *Store) Building() ([]Environment, error) {
 func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, error) {
 	rows, err := s.db.Query(`
 		SELECT DISTINCT e.owner, e.name, e.description, e.setup_sh, e.setup_from,
-		       e.build_state, e.build_box, e.build_error, e.build_session,
+		       e.build_state, e.build_box, e.build_error, e.build_session, e.build_denials,
 		       e.built_at, e.created_at, e.updated_at
 		FROM environments e
 		JOIN sandbox_tags bt ON bt.tag = e.name AND bt.owner = e.owner
@@ -547,7 +593,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 // day a second table grows a `name`.
 const selectCols = `
 	SELECT owner, name, description, setup_sh, setup_from,
-	       build_state, build_box, build_error, build_session,
+	       build_state, build_box, build_error, build_session, build_denials,
 	       built_at, created_at, updated_at
 	FROM environments`
 
@@ -563,8 +609,9 @@ func scanEnv(sc scanner) (Environment, error) {
 	var e Environment
 	var state string
 	var builtAt sql.NullTime
+	var buildDenials string
 	if err := sc.Scan(&e.Owner, &e.Name, &e.Description, &e.SetupScript, &e.SetupFrom,
-		&state, &e.BuildBox, &e.BuildError, &e.BuildSession,
+		&state, &e.BuildBox, &e.BuildError, &e.BuildSession, &buildDenials,
 		&builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Environment{}, ErrNoSuchEnvironment
@@ -572,6 +619,14 @@ func scanEnv(sc scanner) (Environment, error) {
 		return Environment{}, err
 	}
 	e.State = State(state)
+	if buildDenials != "" {
+		var record buildDenialRecord
+		if err := json.Unmarshal([]byte(buildDenials), &record); err != nil {
+			return Environment{}, fmt.Errorf("decode build denials: %w", err)
+		}
+		e.BuildDenials = record.Domains
+		e.BuildDenialOverflow = record.OverflowQueries
+	}
 	if builtAt.Valid {
 		t := builtAt.Time.UTC()
 		e.BuiltAt = &t

@@ -13,7 +13,9 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/vanpelt/sparky/tools/sluice/internal/allowlist"
+	"github.com/vanpelt/sparky/tools/sluice/internal/denials"
 	"github.com/vanpelt/sparky/tools/sluice/internal/ipmap"
+	"github.com/vanpelt/sparky/tools/sluice/internal/policy"
 )
 
 // fakeUpstream answers A queries for names in `zone`, else NXDOMAIN.
@@ -127,6 +129,29 @@ func TestDeniedNameNotForwarded(t *testing.T) {
 	}
 	if p.StatsSnapshot().Denied != 1 {
 		t.Errorf("Denied stat = %d, want 1", p.StatsSnapshot().Denied)
+	}
+}
+
+func TestDeniedNameEntersActiveTapCapture(t *testing.T) {
+	al, _ := allowlist.New([]string{"github.com"})
+	pol := policy.New(al)
+	recorder := denials.New()
+	recorder.Start("sbtap320", "box-id")
+	p, err := New(Config{
+		Allow: pol, IPMap: ipmap.New(), Upstreams: []string{"upstream:53"},
+		Client: &fakeUpstream{}, Denials: recorder,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ServeDNS(&capWriter{}, query("Registry.NPMJS.org", dns.TypeAAAA))
+	got, err := recorder.Snapshot("sbtap320", "box-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Domains) != 1 || got.Domains[0].Name != "registry.npmjs.org" || got.Domains[0].Queries != 1 {
+		t.Fatalf("capture = %+v", got)
 	}
 }
 
