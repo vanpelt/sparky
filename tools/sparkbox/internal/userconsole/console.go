@@ -1285,9 +1285,15 @@ func (h *Handler) listSecrets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, metas)
 }
 
+// Value is a POINTER so an omitted value can be told from an empty one. A
+// secret's value is write-only — nothing can read it back to re-send it — so a
+// request that only means to move the tags has no value to supply, and the old
+// shape made "" the only way to say that: it would have overwritten the secret
+// with nothing. Absent means "leave the value alone".
 type secretReq struct {
-	Value string   `json:"value"`
-	Tags  []string `json:"tags"`
+	Value   *string  `json:"value"`
+	Tags    []string `json:"tags"`
+	Renamed string   `json:"rename_to"`
 }
 
 // putSecret creates or updates a secret and re-pushes the owner's running
@@ -1304,7 +1310,25 @@ func (h *Handler) putSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handle := handleFrom(r)
-	if err := h.secrets.PutSecret(handle, envName, req.Value, req.Tags); err != nil {
+	// Rename first: it is the only step that can fail on a name already held,
+	// and doing it before the tag/value write means a refused rename leaves
+	// nothing moved. Afterwards every later step addresses the NEW name.
+	if req.Renamed != "" && req.Renamed != envName {
+		if err := h.secrets.RenameSecret(handle, envName, req.Renamed); err != nil {
+			writeErr(w, statusFor(err), err.Error())
+			return
+		}
+		h.log.Info("user console renamed secret", "from", envName, "to", req.Renamed, "handle", handle)
+		envName = req.Renamed
+	}
+	if req.Value != nil {
+		if err := h.secrets.PutSecret(handle, envName, *req.Value, req.Tags); err != nil {
+			writeErr(w, statusFor(err), err.Error())
+			return
+		}
+	} else if err := h.secrets.RetagSecret(handle, envName, req.Tags); err != nil {
+		// Tags only. RetagSecret refuses a name that does not exist, which is
+		// the right answer: without a value there is nothing to create.
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -2012,7 +2036,7 @@ func statusFor(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, netrules.ErrInvalidRule), errors.Is(err, repos.ErrInvalidRepo):
 		return http.StatusBadRequest
-	case errors.Is(err, routes.ErrSubdomainTaken):
+	case errors.Is(err, routes.ErrSubdomainTaken), errors.Is(err, secrets.ErrSecretNameInUse):
 		return http.StatusConflict
 	}
 	msg := err.Error()
