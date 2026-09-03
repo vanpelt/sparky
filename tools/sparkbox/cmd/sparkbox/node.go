@@ -453,9 +453,9 @@ type gatewayRouteControl struct {
 	node  string
 }
 
-func (c gatewayRouteControl) SetVisibility(ctx context.Context, box *host.Sandbox, visibility string) (metadata.RouteVisibility, error) {
-	resp, err := c.fleet.SelfVisibility(ctx, c.node, nodelink.SelfVisibilityReq{Sandbox: box.Name, Visibility: visibility})
-	return metadata.RouteVisibility{Sandbox: resp.Sandbox, Visibility: resp.Visibility, Routes: resp.Routes}, err
+func (c gatewayRouteControl) SetVisibility(ctx context.Context, box *host.Sandbox, visibility string, port int) (metadata.RouteVisibility, error) {
+	resp, err := c.fleet.SelfVisibility(ctx, c.node, nodelink.SelfVisibilityReq{Sandbox: box.Name, Visibility: visibility, Port: port})
+	return metadata.RouteVisibility{Sandbox: resp.Sandbox, Visibility: resp.Visibility, Port: resp.Port, Routes: resp.Routes}, err
 }
 
 func (c gatewayRouteControl) SetPort(ctx context.Context, box *host.Sandbox, port int) (metadata.RoutePort, error) {
@@ -465,11 +465,11 @@ func (c gatewayRouteControl) SetPort(ctx context.Context, box *host.Sandbox, por
 
 type relayRouteControl struct{ up *nodelink.Uplink }
 
-func (c relayRouteControl) SetVisibility(ctx context.Context, box *host.Sandbox, visibility string) (metadata.RouteVisibility, error) {
+func (c relayRouteControl) SetVisibility(ctx context.Context, box *host.Sandbox, visibility string, port int) (metadata.RouteVisibility, error) {
 	var resp nodelink.SelfVisibilityResp
 	err := c.up.Request(ctx, nodelink.TypeSelfVisibility,
-		nodelink.SelfVisibilityReq{Sandbox: box.Name, Visibility: visibility}, &resp)
-	return metadata.RouteVisibility{Sandbox: resp.Sandbox, Visibility: resp.Visibility, Routes: resp.Routes}, err
+		nodelink.SelfVisibilityReq{Sandbox: box.Name, Visibility: visibility, Port: port}, &resp)
+	return metadata.RouteVisibility{Sandbox: resp.Sandbox, Visibility: resp.Visibility, Port: resp.Port, Routes: resp.Routes}, err
 }
 
 func (c relayRouteControl) SetPort(ctx context.Context, box *host.Sandbox, port int) (metadata.RoutePort, error) {

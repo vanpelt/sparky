@@ -536,10 +536,16 @@ func TestControlGolden(t *testing.T) {
 		wantErr: "sparkbox: no sandbox named \"ghost\"\r\n", wantExit: 1,
 	}, {
 		name: "share without a name", handle: "alice", args: []string{"share"},
-		wantErr: "usage: ssh ctl@<gateway> share <name> [public|private]\r\n", wantExit: 2,
+		wantErr: "usage: ssh ctl@<gateway> share <name> [<port>] [public|private|forget]\r\n", wantExit: 2,
 	}, {
 		name: "share with a visibility that isn't one", handle: "alice", args: []string{"share", "alice-box", "sorta"},
 		wantErr: "sparkbox: visibility must be 'public' or 'private', not \"sorta\"\r\n", wantExit: 2,
+	}, {
+		name: "share with a port that isn't one", handle: "alice", args: []string{"share", "alice-box", "http", "public"},
+		wantErr: "sparkbox: port must be from 1 through 65535, not \"http\"\r\n", wantExit: 2,
+	}, {
+		name: "share forget without a port", handle: "alice", args: []string{"share", "alice-box", "forget"},
+		wantErr: "sparkbox: forget needs a port — `share alice-box 5173 forget`.\r\n", wantExit: 2,
 	}, {
 		name: "share reports a sandbox with no routes", handle: "alice", args: []string{"share", "alice-box"},
 		wantOut: "alice-box has no web routes yet.\r\n", wantExit: 0,

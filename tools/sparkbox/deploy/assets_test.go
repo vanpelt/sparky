@@ -158,7 +158,9 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	cli := guestFile(t, root, "usr/local/bin/sparkbox")
 	for _, want := range []string{
 		"$META/self/pin", "$META/self/unpin", "$META/self",
-		"$META/self/visibility/public", "$META/self/visibility/private",
+		// Visibility is per port: the verb carries an optional PORT that
+		// becomes ?port= on the same endpoint.
+		"$META/self/visibility/$_vis?port=$2", "$META/self/visibility/$_vis",
 		"$META/self/port/$2",
 		// `repos` delegates instead of reimplementing the manifest read: the
 		// rule that reports where a repo lives must be the same rule that put
@@ -230,7 +232,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=26\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=27\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -265,8 +267,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 // update wantPayloadSum here to the sum the failure prints. Both, in that order.
 func TestIdentityRevMovesWithThePayload(t *testing.T) {
 	const (
-		wantRev        = 26
-		wantPayloadSum = "1db4e6667ff5b25dee0dea610e673ef9af4235e701efd7cb4e44226a61447a69"
+		wantRev        = 27
+		wantPayloadSum = "6f807c2b594ad2fd5a87f3bbfb9dd6eb18b883f923ca6c88c078b16cd33f31d0"
 	)
 	src, err := os.ReadFile("install-guest-identity.sh")
 	if err != nil {

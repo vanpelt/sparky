@@ -416,19 +416,43 @@ func TestSessionBearerTokenNeverReachesUpstream(t *testing.T) {
 	}
 }
 
-func TestAnyPortURLOverridesRoutePort(t *testing.T) {
+// An any-port URL forwards to the port the visitor named — but it is gated on
+// THAT port's own visibility, not the route's. The default port being public
+// must not publish everything else the sandbox happens to be listening on.
+func TestAnyPortURLIsGatedOnItsOwnPort(t *testing.T) {
 	as := newAuthStack(t)
 	ctx := context.Background()
 	if _, err := as.mgr.Create(ctx, "multi", "alice", "ubuntu", 1, 512); err != nil {
 		t.Fatal(err)
 	}
-	// Route's configured port points nowhere; the URL names the live one.
+	// The route's configured port points nowhere; the URL names the live one.
 	livePort := echoBackend(t)
 	as.route(t, "multi", "multi", "alice", 9999, routes.VisibilityPublic)
+	anyPortHost := fmt.Sprintf("multi.hivemind.tools:%d", livePort)
 
-	resp := as.req(t, fmt.Sprintf("multi.hivemind.tools:%d", livePort))
-	if resp.StatusCode != http.StatusOK {
+	if resp := as.req(t, anyPortHost); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a public default port must not publish :%d too, got %d", livePort, resp.StatusCode)
+	}
+	// The owner still reaches it — private means "sign in and own it".
+	tok := as.token(t, "alice", "alice@example.com")
+	if resp := as.req(t, anyPortHost, withBearer(tok)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner should reach their own private port, got %d", resp.StatusCode)
+	}
+
+	// Opening that one port opens exactly it.
+	if err := as.store.SetPortVisibility("multi", livePort, routes.VisibilityPublic); err != nil {
+		t.Fatal(err)
+	}
+	if resp := as.req(t, anyPortHost); resp.StatusCode != http.StatusOK {
 		t.Fatalf("any-port URL should forward to the port in the host, got %d", resp.StatusCode)
+	}
+	// …and closing the default port leaves the opened one open: the two are
+	// independent, which is the whole point of settling visibility per port.
+	if err := as.store.SetVisibility("multi", routes.VisibilityPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if resp := as.req(t, anyPortHost); resp.StatusCode != http.StatusOK {
+		t.Fatalf("closing the default port closed :%d as well, got %d", livePort, resp.StatusCode)
 	}
 }
 

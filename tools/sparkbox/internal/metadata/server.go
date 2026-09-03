@@ -148,14 +148,17 @@ type Identity interface {
 // calling sandbox. A gateway implementation writes locally; a node relays over
 // its authenticated fleet link.
 type RouteControl interface {
-	SetVisibility(ctx context.Context, box *host.Sandbox, visibility string) (RouteVisibility, error)
+	SetVisibility(ctx context.Context, box *host.Sandbox, visibility string, port int) (RouteVisibility, error)
 	SetPort(ctx context.Context, box *host.Sandbox, port int) (RoutePort, error)
 }
 
 type RouteVisibility struct {
 	Sandbox    string `json:"sandbox"`
 	Visibility string `json:"visibility"`
-	Routes     int    `json:"routes"`
+	// Port is the single guest port that changed, or zero when the change was
+	// the whole sandbox's.
+	Port   int `json:"port,omitempty"`
+	Routes int `json:"routes"`
 }
 
 type RoutePort struct {
@@ -700,11 +703,24 @@ func (s *Server) visibility(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sparkbox: visibility must be public or private", http.StatusBadRequest)
 		return
 	}
+	// ?port= narrows the change to one guest port of this sandbox's hostname.
+	// Absent means the whole sandbox, which is asymmetric on purpose: private
+	// closes every port, public opens only the default one. See
+	// ctlops.SetVisibility for why.
+	port := 0
+	if raw := r.URL.Query().Get("port"); raw != "" {
+		p, err := strconv.Atoi(raw)
+		if err != nil || p < 1 || p > 65535 {
+			http.Error(w, "sparkbox: port must be from 1 through 65535", http.StatusBadRequest)
+			return
+		}
+		port = p
+	}
 	if s.routes == nil {
 		http.Error(w, "sparkbox: route self-service is not enabled", http.StatusNotImplemented)
 		return
 	}
-	result, err := s.routes.SetVisibility(r.Context(), box, visibility)
+	result, err := s.routes.SetVisibility(r.Context(), box, visibility, port)
 	if err != nil {
 		s.failRouteControl(w, box, err)
 		return

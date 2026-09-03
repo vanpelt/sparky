@@ -303,15 +303,20 @@ const scheduleHelp = "usage: ssh ctl@<gateway> schedule ls\r\n" +
 	"\r\n" +
 	"  ssh ctl@<gateway> schedule add mybox \"*/30 * * * *\" /usr/local/bin/sync\r\n"
 
-const sharingHelp = "usage: ssh ctl@<gateway> share <name> [public|private]\r\n" +
+const sharingHelp = "usage: ssh ctl@<gateway> share <name> [<port>] [public|private|forget]\r\n" +
 	"       ssh ctl@<gateway> session-token [--ttl <dur>]\r\n" +
 	"\r\n" +
-	"  share <name>                   who can reach this sandbox's URLs today\r\n" +
-	"  share <name> public            anyone with the URL can reach it\r\n" +
-	"  share <name> private           visitors must sign in and own it (the default)\r\n" +
+	"  share <name>                   who can reach this sandbox's ports today\r\n" +
+	"  share <name> public            open the DEFAULT port only\r\n" +
+	"  share <name> private           close every port (the default state)\r\n" +
+	"  share <name> 5173 public       open https://<name>.<domain>:5173\r\n" +
+	"  share <name> 5173 private      close it, but keep it listed\r\n" +
+	"  share <name> 5173 forget       stop listing it (still closed)\r\n" +
 	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
 	"\r\n" +
-	"visibility is per sandbox: every route pointing at it flips together.\r\n" +
+	"visibility is per PORT. `public` with no port opens only the default one,\r\n" +
+	"so publishing a preview never publishes the debugger beside it; `private`\r\n" +
+	"with no port closes everything, because a panic button has to.\r\n" +
 	"\r\n" +
 	"  TOKEN=$(ssh ctl@<gateway> session-token | tr -d '\\r\\n')\r\n" +
 	"  curl -H \"Authorization: Bearer $TOKEN\" https://api.<domain>/v1/sandboxes\r\n"

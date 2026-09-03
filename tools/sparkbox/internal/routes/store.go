@@ -25,10 +25,14 @@ import (
 // DefaultPort is forwarded to when a route doesn't specify one.
 const DefaultPort = 8000
 
-// Visibility governs whether the proxy edge gates a route behind a login.
+// Visibility governs whether the proxy edge gates a request behind a login.
 // Private is the default: a visitor must present a valid session identifying a
 // handle that owns the sandbox (or an operator). Public restores the old
 // unauthenticated web-preview behaviour, opt-in via `ctl@ share <name> public`.
+//
+// It is settled PER PORT, not per route: a Route's own Visibility governs its
+// portless URL, and every other port the same hostname serves is answered from
+// route_ports (private when it has no row). See ports.go.
 const (
 	VisibilityPrivate = "private"
 	VisibilityPublic  = "public"
@@ -121,6 +125,24 @@ func Open(path string) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
+	// route_ports holds visibility for the ports a subdomain serves that are
+	// NOT its own — the any-port URLs the edge forwards with no route row. See
+	// ports.go. The cascade is why it references routes rather than standing
+	// alone: a deleted or renamed subdomain must not leave a public port
+	// behind for whoever claims that name next, and foreign_keys is ON above.
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS route_ports (
+			subdomain  TEXT NOT NULL
+				REFERENCES routes(subdomain) ON DELETE CASCADE ON UPDATE CASCADE,
+			port       INTEGER NOT NULL,
+			visibility TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (subdomain, port)
+		);
+	`); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -202,6 +224,14 @@ func (s *Store) Upsert(r Route) error {
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(subdomain) DO UPDATE SET port = excluded.port`,
 		r.Subdomain, r.Sandbox, r.Owner, r.Port, r.Visibility, r.CreatedAt); err != nil {
+		return err
+	}
+	// One opinion per port: the port this route now forwards to is answered by
+	// routes.visibility, so a route_ports row for it (a port the owner had
+	// pinned before promoting it to default) would be shadowed here and
+	// resurface, stale, if the default ever moved off it again. See ports.go.
+	if _, err := tx.Exec(`DELETE FROM route_ports WHERE subdomain = ? AND port = ?`,
+		r.Subdomain, r.Port); err != nil {
 		return err
 	}
 	return tx.Commit()

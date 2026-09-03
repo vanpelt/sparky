@@ -341,6 +341,12 @@ type Routes interface {
 	SetVisibility(subdomain, visibility string) error
 	GetBySubdomain(subdomain string) (routes.Route, bool, error)
 	Upsert(r routes.Route) error
+	// The per-port half: a route's own port is the four above, every other
+	// port the same hostname serves is these four. See internal/routes/ports.go.
+	ListPortsBySandbox(sandbox string) ([]routes.PortRoute, error)
+	SetPortVisibility(subdomain string, port int, visibility string) error
+	ForgetPort(subdomain string, port int) error
+	PrivatizeAll(subdomain string) (int, error)
 }
 
 // NodeRoster is the fleet's node registry. Nil makes every node operation

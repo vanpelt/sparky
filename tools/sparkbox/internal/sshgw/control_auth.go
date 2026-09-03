@@ -3,6 +3,8 @@ package sshgw
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
@@ -55,9 +57,14 @@ func (g *Gateway) controlEmail(s gssh.Session, c ctlops.Caller, args []string, l
 	}
 }
 
-// controlShare shows or sets a sandbox's web-route visibility. Visibility is
-// per-sandbox (every route pointing at it flips together), matching the "who
-// can reach this VM" mental model. Owner-only.
+// controlShare shows or sets who can reach a sandbox's URLs. Owner-only.
+//
+// Visibility is settled per PORT, so the port is an optional middle argument:
+// `share box 5173 public` opens https://box.<domain>:5173 and says nothing
+// about anything else. Omitting it is deliberately asymmetric — `private`
+// closes every port (the panic button, which has to mean what it says) while
+// `public` opens only the default port, because a command that publishes
+// whatever happened to be listening when it ran is a trap.
 func (g *Gateway) controlShare(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
 	// The host-not-configured answer comes first, before the usage line: a box
 	// with no proxy cannot share anything however the command was typed.
@@ -66,14 +73,17 @@ func (g *Gateway) controlShare(s gssh.Session, c ctlops.Caller, args []string, l
 		s.Exit(1) //nolint:errcheck
 		return
 	}
-	if len(args) == 0 {
-		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> share <name> [public|private]\r\n", ControlUser)
+	usage := func() {
+		fmt.Fprintf(s.Stderr(), "usage: ssh %s@<gateway> share <name> [<port>] [public|private|forget]\r\n", ControlUser)
 		s.Exit(2) //nolint:errcheck
+	}
+	if len(args) == 0 || len(args) > 3 {
+		usage()
 		return
 	}
 	name := args[0]
 
-	// No visibility arg → report current state.
+	// No further arg → report current state, one line per addressable port.
 	if len(args) == 1 {
 		rs, err := g.ops.Visibility(s.Context(), c, name)
 		if err != nil {
@@ -86,22 +96,78 @@ func (g *Gateway) controlShare(s gssh.Session, c ctlops.Caller, args []string, l
 			return
 		}
 		for _, r := range rs {
-			fmt.Fprintf(s, "%-8s https://%s.%s  → :%d\r\n", r.Visibility, r.Subdomain, g.domainHint(), r.Port)
+			url := "https://" + r.Subdomain + "." + g.domainHint()
+			note := ""
+			if r.Default {
+				note = "  (default)"
+			} else {
+				url += ":" + strconv.Itoa(r.Port)
+			}
+			fmt.Fprintf(s, "%-8s %-44s → :%d%s\r\n", r.Visibility, url, r.Port, note)
 		}
 		s.Exit(0) //nolint:errcheck
 		return
 	}
 
-	vis := args[1]
-	res, err := g.ops.SetVisibility(s.Context(), c, name, vis)
+	// `share <name> <verb>` or `share <name> <port> <verb>`. The port is
+	// accepted with or without a leading colon, since that is how it is
+	// written in every URL this command talks about.
+	verb := args[len(args)-1]
+	port := 0
+	if len(args) == 3 {
+		p, err := strconv.Atoi(strings.TrimPrefix(args[1], ":"))
+		if err != nil || p < 1 || p > 65535 {
+			fmt.Fprintf(s.Stderr(), "sparkbox: port must be from 1 through 65535, not %q\r\n", args[1])
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		port = p
+	}
+
+	if verb == "forget" {
+		if port == 0 {
+			fmt.Fprintf(s.Stderr(), "sparkbox: forget needs a port — `share %s 5173 forget`.\r\n", name)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		if _, err := g.ops.ForgetPort(s.Context(), c, name, port); err != nil {
+			failCtl(s, log, "share", err)
+			return
+		}
+		fmt.Fprintf(s, "%s no longer lists :%d — it is private, like every port nobody has mentioned.\r\n", name, port)
+		s.Exit(0) //nolint:errcheck
+		return
+	}
+	// An unrecognised verb is not caught here on purpose: ctlops names the two
+	// it accepts and quotes what it was given, which reads better than a usage
+	// block for the one typo people actually make.
+	if port != 0 {
+		if _, err := g.ops.SetPortVisibility(s.Context(), c, name, port, verb); err != nil {
+			failCtl(s, log, "share", err)
+			return
+		}
+		if verb == routes.VisibilityPublic {
+			fmt.Fprintf(s, "https://%s.%s:%d is now public — anyone with the URL can reach it.\r\n",
+				name, g.domainHint(), port)
+		} else {
+			fmt.Fprintf(s, "https://%s.%s:%d is now private — visitors must sign in and own it.\r\n",
+				name, g.domainHint(), port)
+		}
+		s.Exit(0) //nolint:errcheck
+		return
+	}
+
+	res, err := g.ops.SetVisibility(s.Context(), c, name, verb)
 	if err != nil {
 		failCtl(s, log, "share", err)
 		return
 	}
-	if vis == routes.VisibilityPublic {
-		fmt.Fprintf(s, "%s is now public — anyone with the URL can reach it (%d route(s)).\r\n", name, res.Changed)
+	if verb == routes.VisibilityPublic {
+		fmt.Fprintf(s, "%s's default port is now public — anyone with https://%s.%s can reach it.\r\n",
+			name, name, g.domainHint())
+		fmt.Fprintf(s, "Other ports stay private; open one with `share %s <port> public`.\r\n", name)
 	} else {
-		fmt.Fprintf(s, "%s is now private — visitors must sign in and own it (%d route(s)).\r\n", name, res.Changed)
+		fmt.Fprintf(s, "%s is now private — visitors must sign in and own it (%d port(s)).\r\n", name, res.Changed)
 	}
 	s.Exit(0) //nolint:errcheck
 }

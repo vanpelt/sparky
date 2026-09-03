@@ -199,12 +199,19 @@ type ScheduleInfo struct {
 	LastError string     `json:"last_error,omitempty"`
 }
 
+// RouteInfo is one addressable PORT of a sandbox — not one route row. A route
+// contributes its own port (Default, reached at the portless URL) plus an entry
+// for every extra port configured under the same hostname, which the edge
+// serves as https://<subdomain>.<domain>:<port> with no row of its own.
 type RouteInfo struct {
 	Subdomain  string `json:"subdomain"`
 	Sandbox    string `json:"sandbox"`
 	Port       int    `json:"port"`
 	Visibility string `json:"visibility"`
 	URL        string `json:"url,omitempty"`
+	// Default marks the route's own port: the one the portless hostname
+	// forwards to, and the one a bare `share <name> public` opens.
+	Default bool `json:"default,omitempty"`
 }
 
 // NodeInfo is one machine in the fleet as an operator sees it: the roster row

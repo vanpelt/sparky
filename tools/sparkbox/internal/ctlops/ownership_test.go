@@ -101,6 +101,14 @@ func ownCases() []ownCase {
 			_, err := r.ops.SetVisibility(ctx, c, t, "public")
 			return err
 		}},
+		{"SetPortVisibility", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.SetPortVisibility(ctx, c, t, 5173, "public")
+			return err
+		}},
+		{"ForgetPort", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.ForgetPort(ctx, c, t, 5173)
+			return err
+		}},
 		{"DeleteSnapshot", "snapshot", func(r *rig, c Caller, t string) error {
 			return r.ops.DeleteSnapshot(ctx, c, t)
 		}},

@@ -16,6 +16,7 @@ package fleet_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -81,9 +82,10 @@ func (s *fakeRows) under(sandbox string) []string {
 // modelled by subdomain as well as by sandbox — a route row's owner column is
 // what gates a private route, and the collision check a rename makes reads it.
 type fakeRoutes struct {
-	mu   sync.Mutex
-	byID map[string]routes.Route // subdomain -> row
-	fail error
+	mu    sync.Mutex
+	byID  map[string]routes.Route // subdomain -> row
+	ports map[string]string       // "subdomain:port" -> visibility, non-default only
+	fail  error
 }
 
 func newRoutes() *fakeRoutes { return &fakeRoutes{byID: map[string]routes.Route{}} }
@@ -127,6 +129,47 @@ func (s *fakeRoutes) SetVisibility(subdomain, visibility string) error {
 	r.Visibility = visibility
 	s.byID[subdomain] = r
 	return nil
+}
+
+// ports is the non-default half, keyed "subdomain:port", exactly as
+// routes.Store's route_ports table is: the route's own port lives on the Route
+// and SetPortVisibility writes through to it.
+func (s *fakeRoutes) SetPortVisibility(subdomain string, port int, visibility string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.byID[subdomain]
+	if !ok {
+		return routes.ErrNoSuchRoute
+	}
+	if r.Port == port {
+		r.Visibility = visibility
+		s.byID[subdomain] = r
+		return nil
+	}
+	if s.ports == nil {
+		s.ports = map[string]string{}
+	}
+	s.ports[fmt.Sprintf("%s:%d", subdomain, port)] = visibility
+	return nil
+}
+
+func (s *fakeRoutes) PrivatizeAll(subdomain string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.byID[subdomain]
+	if !ok {
+		return 0, routes.ErrNoSuchRoute
+	}
+	r.Visibility = routes.VisibilityPrivate
+	s.byID[subdomain] = r
+	changed := 1
+	for k, v := range s.ports {
+		if strings.HasPrefix(k, subdomain+":") && v != routes.VisibilityPrivate {
+			s.ports[k] = routes.VisibilityPrivate
+			changed++
+		}
+	}
+	return changed, nil
 }
 
 func (s *fakeRoutes) DeleteBySandbox(sandbox string) error {
@@ -285,20 +328,55 @@ func TestRemoteSandboxCanManageOnlyItsOwnGatewayRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// `public` with no port opens the DEFAULT port only — the guest half of the
+	// asymmetry argued in ctlops.SetVisibility. The custom hostname is somebody
+	// else's decision and stays shut.
 	visibility, err := r.f.SelfVisibility(context.Background(), "boxb", nodelink.SelfVisibilityReq{
 		Sandbox: "far-away", Visibility: routes.VisibilityPublic,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if visibility.Routes != 2 || visibility.Visibility != routes.VisibilityPublic {
+	if visibility.Routes != 1 || visibility.Visibility != routes.VisibilityPublic {
 		t.Errorf("visibility = %+v", visibility)
+	}
+	if row, _, _ := r.routes.GetBySubdomain("far-away"); row.Visibility != routes.VisibilityPublic {
+		t.Errorf("the default route stayed %s", row.Visibility)
+	}
+	if row, _, _ := r.routes.GetBySubdomain("web-far-away"); row.Visibility != routes.VisibilityPrivate {
+		t.Errorf("a portless `public` opened web-far-away too; it is %s", row.Visibility)
+	}
+
+	// A named port reaches only that port of the default hostname.
+	if _, err := r.f.SelfVisibility(context.Background(), "boxb", nodelink.SelfVisibilityReq{
+		Sandbox: "far-away", Visibility: routes.VisibilityPublic, Port: 5173,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.routes.ports["far-away:5173"]; got != routes.VisibilityPublic {
+		t.Errorf(":5173 = %q, want public", got)
+	}
+
+	// `private` with no port is the panic button: everything closes.
+	if _, err := r.f.SelfVisibility(context.Background(), "boxb", nodelink.SelfVisibilityReq{
+		Sandbox: "far-away", Visibility: routes.VisibilityPrivate,
+	}); err != nil {
+		t.Fatal(err)
 	}
 	for _, sub := range []string{"far-away", "web-far-away"} {
 		row, _, _ := r.routes.GetBySubdomain(sub)
-		if row.Visibility != routes.VisibilityPublic {
+		if row.Visibility != routes.VisibilityPrivate {
 			t.Errorf("route %s stayed %s", sub, row.Visibility)
 		}
+	}
+	if got := r.routes.ports["far-away:5173"]; got != routes.VisibilityPrivate {
+		t.Errorf(":5173 survived the panic button as %q", got)
+	}
+	// Put the default back where the rest of this test expects it.
+	if _, err := r.f.SelfVisibility(context.Background(), "boxb", nodelink.SelfVisibilityReq{
+		Sandbox: "far-away", Visibility: routes.VisibilityPublic,
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	port, err := r.f.SelfPort(context.Background(), "boxb", nodelink.SelfPortReq{Sandbox: "far-away", Port: 5173})

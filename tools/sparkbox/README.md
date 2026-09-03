@@ -125,9 +125,12 @@ session for a different account or creates one without asking. An empty org list
 is off, never everyone. See
 [`docs/hivemind-signin-design.md`](docs/hivemind-signin-design.md).
 
-Publish a port to the world with `ssh ctl@<domain> share <name> public`
-(`private` re-gates it); set the forwarded address with `ssh ctl@<domain> email
-set you@example.com`. Any port works without pre-registering a route: a boot-time
+Publish a port to the world with `ssh ctl@<domain> share <name> <port> public`
+(`private` re-gates it). Visibility is settled per port, so opening a preview
+never opens the debugger beside it; with no port, `public` opens only the
+machine's default port while `private` closes every one. Set the forwarded
+address with `ssh ctl@<domain> email set you@example.com`. Any port works
+without pre-registering a route: a boot-time
 `iptables REDIRECT` (`deploy/sparkbox-net.sh`) funnels the private port range to
 the single TLS edge, which recovers the dialed port via `SO_ORIGINAL_DST`. See
 [`docs/authenticated-proxy-design.md`](docs/authenticated-proxy-design.md).

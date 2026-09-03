@@ -331,6 +331,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("POST /api/machines/{name}/port", mutate(h.setPort))
 	mux.Handle("PUT /api/machines/{name}/tags", mutate(h.setTags))
 	mux.Handle("POST /api/routes/{subdomain}/visibility", mutate(h.setVisibility))
+	mux.Handle("DELETE /api/routes/{subdomain}/ports/{port}", mutate(h.forgetPort))
 	mux.Handle("GET /api/snapshots", require(h.listSnapshots))
 	mux.Handle("POST /api/snapshots/{snapshot}/fork", mutate(h.fork))
 	mux.Handle("POST /api/snapshots/{snapshot}/delete", mutate(h.deleteSnapshot))
@@ -414,14 +415,26 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// routeStatus is a web route as shown in the UI: where it points, who may
-// reach it, and whether a TCP dial to the forwarded port currently succeeds.
-// Listening is only meaningful while the sandbox is running.
+// routeStatus is one addressable PORT as shown in the UI — not one route row.
+// Visibility is settled per port, so a route contributes its own port (Default,
+// reached at the portless URL) plus an entry for every other port under the
+// same hostname: ones the owner configured, and ones the host's scan found
+// listening. Listening is only meaningful while the sandbox is running.
 type routeStatus struct {
 	Subdomain  string `json:"subdomain"`
 	Port       int    `json:"port"`
 	Visibility string `json:"visibility"`
 	Listening  bool   `json:"listening"`
+	// Default marks the route's own port: the portless URL, which the strip
+	// pins to the front because it is the URL people actually have.
+	Default bool `json:"default,omitempty"`
+	// Pinned marks a port the owner has an opinion about, as opposed to one
+	// that merely turned up in a scan. It is what keeps a port on the strip
+	// when nothing is listening, and only a pinned port can be forgotten.
+	Pinned bool `json:"pinned,omitempty"`
+	// Service is the small display name the host's port scan read off the
+	// listener's own HTTP response ("Vite", "Jupyter"), when it found one.
+	Service string `json:"service,omitempty"`
 }
 
 // sandboxView is a Sandbox plus its routes, tags, and live stats for the
@@ -451,9 +464,13 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 		return boxes[i].LastActive.After(boxes[j].LastActive)
 	})
 	views := make([]sandboxView, len(boxes))
+	// scans holds each running box's port scan, filled by the vitals read below
+	// and consumed after the wait. The scan is why the strip can show ports
+	// nobody configured: the host already probes the supported HTTPS ports for
+	// the terminal's menu, so listing them here costs one field, not a fan-out.
+	scans := make([]host.Vitals, len(boxes))
 	var wg sync.WaitGroup
 	for i, b := range boxes {
-		remote := h.probe.Remote(b)
 		views[i] = sandboxView{Sandbox: webui.Public(b), Routes: []routeStatus{}, Tags: []string{}}
 		if h.secrets != nil {
 			if tags, err := h.secrets.TagsFor(b.Name); err != nil {
@@ -475,44 +492,149 @@ func (h *Handler) machines(w http.ResponseWriter, r *http.Request) {
 		// local manager it used to.
 		if b.State == vmm.StateRunning {
 			wg.Add(1)
-			go func(box *host.Sandbox, mem **int64, cpu **float64) {
+			go func(box *host.Sandbox, view *sandboxView, scan *host.Vitals) {
 				defer wg.Done()
 				v, err := h.probe.Vitals(r.Context(), h.vitals, box)
 				if err != nil {
 					h.log.Debug("vitals unavailable", "sandbox", box.Name, "node", box.Node, "err", err)
 					return
 				}
-				*mem, *cpu = v.MemUsedMB, v.CPUSeconds
-			}(b, &views[i].MemUsedMB, &views[i].CPUSeconds)
+				view.MemUsedMB, view.CPUSeconds = v.MemUsedMB, v.CPUSeconds
+				*scan = v
+			}(b, &views[i], &scans[i])
 		}
-		if h.routes == nil {
-			continue
-		}
-		rs, err := h.routes.ListBySandbox(b.Name)
-		if err != nil {
-			h.log.Warn("route list failed", "sandbox", b.Name, "err", err)
-			continue
-		}
-		for _, rt := range rs {
-			views[i].Routes = append(views[i].Routes, routeStatus{Subdomain: rt.Subdomain, Port: rt.Port, Visibility: rt.Visibility})
-		}
-		// Probe every forwarded port of a running sandbox concurrently; the
-		// whole fan-out is bounded by one probe budget, not routes × timeout.
+	}
+	wg.Wait()
+
+	// Second wave, once the scans are in: turn each sandbox's routes, its
+	// configured extra ports and whatever the scan found listening into one
+	// ordered strip, then dial the configured ports the scan does not cover.
+	if h.routes == nil {
+		writeJSON(w, http.StatusOK, views)
+		return
+	}
+	var wg2 sync.WaitGroup
+	for i, b := range boxes {
+		views[i].Routes = h.portStrip(b, scans[i])
+		// Probe every configured port of a running sandbox concurrently; the
+		// whole fan-out is bounded by one probe budget, not ports × timeout.
 		// b, not the view, carries the address: the view's copy has had it
 		// dropped on the way to the browser.
 		if b.State != vmm.StateRunning || b.HostIP == "" {
 			continue
 		}
+		remote := h.probe.Remote(b)
 		for j := range views[i].Routes {
-			wg.Add(1)
+			if views[i].Routes[j].Listening {
+				continue // the scan already answered for this one
+			}
+			wg2.Add(1)
 			go func(addr string, listening *bool) {
-				defer wg.Done()
+				defer wg2.Done()
 				*listening = h.listening(r.Context(), addr, remote)
 			}(net.JoinHostPort(b.HostIP, strconv.Itoa(views[i].Routes[j].Port)), &views[i].Routes[j].Listening)
 		}
 	}
-	wg.Wait()
+	wg2.Wait()
 	writeJSON(w, http.StatusOK, views)
+}
+
+// portStrip is every port of one sandbox the console can address, in the order
+// the page draws them: the default hostname's own port first — it is the URL
+// people have — then the rest of that hostname's ports by number, then any
+// other route rows with their own ports.
+//
+// Three sources feed it and they mean different things. A route row is a
+// hostname and the port it forwards to. A route_ports row is an opinion the
+// owner recorded about another port, which is what holds a port on the strip
+// while nothing is listening on it. The scan is what is listening right now,
+// which is how a dev server that just came up appears without being configured
+// at all — private, like every port nobody has said anything about.
+func (h *Handler) portStrip(b *host.Sandbox, scan host.Vitals) []routeStatus {
+	rs, err := h.routes.ListBySandbox(b.Name)
+	if err != nil {
+		h.log.Warn("route list failed", "sandbox", b.Name, "err", err)
+		return []routeStatus{}
+	}
+	if len(rs) == 0 {
+		return []routeStatus{}
+	}
+	pinned, err := h.routes.ListPortsBySandbox(b.Name)
+	if err != nil {
+		h.log.Warn("route port list failed", "sandbox", b.Name, "err", err)
+	}
+	// The default hostname is the one named after the sandbox; a box whose
+	// route was renamed out from under it falls back to its first row, which
+	// is also the only row it has.
+	sort.SliceStable(rs, func(i, j int) bool {
+		if (rs[i].Subdomain == b.Name) != (rs[j].Subdomain == b.Name) {
+			return rs[i].Subdomain == b.Name
+		}
+		return rs[i].Subdomain < rs[j].Subdomain
+	})
+	def := rs[0]
+
+	names := make(map[int]string, len(scan.PortServices))
+	for _, svc := range scan.PortServices {
+		names[svc.Port] = svc.Name
+	}
+	live := make(map[int]bool, len(scan.ListeningPorts))
+	for _, p := range scan.ListeningPorts {
+		live[p] = true
+	}
+
+	out := make([]routeStatus, 0, len(rs)+len(pinned)+len(scan.ListeningPorts))
+	entry := func(sub string, port int, vis string, isDefault, isPinned bool) routeStatus {
+		return routeStatus{
+			Subdomain: sub, Port: port, Visibility: vis,
+			Default: isDefault, Pinned: isPinned,
+			Listening: live[port], Service: names[port],
+		}
+	}
+	// A route's own port is never "pinned": pinned means there is a
+	// route_ports row behind it, which is exactly the set of entries that can
+	// be forgotten. A route's port is the route's, and goes with it.
+	out = append(out, entry(def.Subdomain, def.Port, def.Visibility, true, false))
+
+	// The default hostname's other ports: everything configured under it, plus
+	// everything the scan found, minus the default port itself. Sorted by
+	// number so the strip does not reshuffle as services come and go.
+	extra := map[int]string{} // port -> visibility, "" for scan-only
+	for _, p := range pinned {
+		if p.Subdomain == def.Subdomain && p.Port != def.Port {
+			extra[p.Port] = p.Visibility
+		}
+	}
+	for _, p := range scan.ListeningPorts {
+		if p != def.Port {
+			if _, ok := extra[p]; !ok {
+				extra[p] = ""
+			}
+		}
+	}
+	ports := make([]int, 0, len(extra))
+	for p := range extra {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	for _, p := range ports {
+		vis, isPinned := extra[p], extra[p] != ""
+		if !isPinned {
+			vis = routes.VisibilityPrivate
+		}
+		out = append(out, entry(def.Subdomain, p, vis, false, isPinned))
+	}
+
+	// Any other hostname pointed at this sandbox, with its own ports.
+	for _, rt := range rs[1:] {
+		out = append(out, entry(rt.Subdomain, rt.Port, rt.Visibility, false, false))
+		for _, p := range pinned {
+			if p.Subdomain == rt.Subdomain && p.Port != rt.Port {
+				out = append(out, entry(rt.Subdomain, p.Port, p.Visibility, false, true))
+			}
+		}
+	}
+	return out
 }
 
 // usageView is the Machines tab's footprint card: what this owner's sandboxes
@@ -883,17 +1005,22 @@ func (h *Handler) setTags(w http.ResponseWriter, r *http.Request) {
 
 type visibilityReq struct {
 	Visibility string `json:"visibility"`
+	// Port names one guest port under this hostname. Zero means the route's
+	// own port — the portless URL — which is what this endpoint has always
+	// meant and what a client that predates per-port visibility sends.
+	Port int `json:"port,omitempty"`
 }
 
-// setVisibility flips one route between public and private — finer-grained
-// than `ctl@ share`, which flips every route of a sandbox together.
+// setVisibility opens or closes ONE port of one hostname. It is the console's
+// finest-grained visibility control: `ctl@ share` can speak for a whole
+// sandbox, this always names exactly what it changes.
+//
+// Setting a port private is not the same as forgetting it. The store keeps the
+// row either way, and the row is what holds the port on the strip so it can be
+// pre-authorised before anything is listening on it; forgetPort removes it.
 func (h *Handler) setVisibility(w http.ResponseWriter, r *http.Request) {
 	sub := r.PathValue("subdomain")
 	sess, _ := edgeauth.From(r.Context())
-	if h.routes == nil {
-		writeErr(w, http.StatusNotImplemented, "web routes are not enabled on this host")
-		return
-	}
 	var req visibilityReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "malformed request")
@@ -903,21 +1030,79 @@ func (h *Handler) setVisibility(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("visibility must be %q or %q", routes.VisibilityPublic, routes.VisibilityPrivate))
 		return
 	}
-	rt, found, err := h.routes.GetBySubdomain(sub)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	rt, ok := h.ownedRoute(w, r, sub)
+	if !ok {
 		return
 	}
-	if !found || (rt.Owner != sess.Handle && !sess.Operator) {
-		writeErr(w, http.StatusNotFound, fmt.Sprintf("no route named %q", sub))
+	port := req.Port
+	if port == 0 {
+		port = rt.Port
+	}
+	if port < 1 || port > 65535 {
+		writeErr(w, http.StatusBadRequest, "port must be from 1 through 65535")
 		return
 	}
-	if err := h.routes.SetVisibility(sub, req.Visibility); err != nil {
+	// SetPortVisibility writes the route's own port through to routes.visibility
+	// and any other port to its own row, so this one call covers both without
+	// the console having to know which kind of port it was handed.
+	if err := h.routes.SetPortVisibility(sub, port, req.Visibility); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	h.log.Info("user console changed route visibility", "subdomain", sub, "visibility", req.Visibility, "handle", sess.Handle)
+	h.log.Info("user console changed port visibility",
+		"subdomain", sub, "port", port, "visibility", req.Visibility, "handle", sess.Handle)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// forgetPort drops a port the owner had recorded an opinion about, taking it
+// off the strip. The port stays private — it goes back to being one of the
+// ports nobody has said anything about, which is what every port is until
+// somebody does. A route's own port has no row to drop and is refused.
+func (h *Handler) forgetPort(w http.ResponseWriter, r *http.Request) {
+	sub := r.PathValue("subdomain")
+	sess, _ := edgeauth.From(r.Context())
+	port, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil || port < 1 || port > 65535 {
+		writeErr(w, http.StatusBadRequest, "port must be from 1 through 65535")
+		return
+	}
+	rt, ok := h.ownedRoute(w, r, sub)
+	if !ok {
+		return
+	}
+	if port == rt.Port {
+		writeErr(w, http.StatusBadRequest,
+			fmt.Sprintf("port %d is the hostname's own port — set it private instead", port))
+		return
+	}
+	if err := h.routes.ForgetPort(sub, port); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	h.log.Info("user console forgot a port", "subdomain", sub, "port", port, "handle", sess.Handle)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ownedRoute resolves {subdomain} to a route the session may act on. Like
+// ownedBox, "does not exist" and "belongs to someone else" answer identically
+// so ownership is never leaked. It writes the error itself; ok=false means the
+// caller must stop.
+func (h *Handler) ownedRoute(w http.ResponseWriter, r *http.Request, sub string) (routes.Route, bool) {
+	if h.routes == nil {
+		writeErr(w, http.StatusNotImplemented, "web routes are not enabled on this host")
+		return routes.Route{}, false
+	}
+	sess, _ := edgeauth.From(r.Context())
+	rt, found, err := h.routes.GetBySubdomain(sub)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return routes.Route{}, false
+	}
+	if !found || (rt.Owner != sess.Handle && !sess.Operator) {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("no route named %q", sub))
+		return routes.Route{}, false
+	}
+	return rt, true
 }
 
 // snapshotRow is one snapshot as this console serves it: the stored record,

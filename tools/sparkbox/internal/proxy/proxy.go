@@ -8,13 +8,16 @@
 // myvm.hivemind.tools with no extra setup; users can add routes on other
 // subdomains or ports via the control API.
 //
-// A route is public or private (routes.Visibility). Public routes are
-// unauthenticated web previews — whatever the sandbox serves, the same model as
-// exe.dev's per-sandbox URLs. Private routes (the default) are gated: a visitor
-// must present a session identifying a handle that owns the sandbox, or an
-// operator, and that identity is forwarded upstream as X-Forwarded-* headers.
-// Gating is active only when SetAuth has wired a session verifier; without it
-// (local/mock runs) every route serves openly.
+// Each PORT of a route is public or private (routes.Visibility), not the route
+// as a whole: myvm.hivemind.tools and myvm.hivemind.tools:5173 are gated
+// independently, so publishing a preview never publishes the debugger listening
+// beside it. A public port is an unauthenticated web preview — whatever the
+// sandbox serves, the same model as exe.dev's per-sandbox URLs. A private port
+// (the default, including every port nobody has said anything about) is gated:
+// a visitor must present a session identifying a handle that owns the sandbox,
+// or an operator, and that identity is forwarded upstream as X-Forwarded-*
+// headers. Gating is active only when SetAuth has wired a session verifier;
+// without it (local/mock runs) every route serves openly.
 package proxy
 
 import (
@@ -554,7 +557,9 @@ func (s *Server) notListeningHint(r *http.Request, port int) template.HTML {
 			`forwards by default; no sparkbox process is holding it. Start your app and `+
 			`reload.</p>`+
 			`<p><strong>Any other port works too</strong>, with no configuration: put it `+
-			`in the URL, e.g. <code>https://%s:5173</code>.</p>`,
+			`in the URL, e.g. <code>https://%s:5173</code>. Each port has its own `+
+			`visibility and starts private, so a port you reach while signed in is `+
+			`not one you have published.</p>`,
 		port, host))
 }
 
@@ -599,6 +604,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The forwarded port comes from the URL (…:4444) when the visitor named one,
+	// otherwise the route's configured port. This is what makes any-port URLs
+	// work with no per-port route row. It is resolved BEFORE the gate because
+	// the gate is per-port: :5173 being public says nothing about :8000.
+	port := s.targetPort(r, route)
+	vis, err := s.store.VisibilityForPort(route, port)
+	if err != nil {
+		s.log.Error("port visibility lookup failed", "subdomain", sub, "port", port, "err", err)
+		s.errorPage(w, r, http.StatusInternalServerError, "Route lookup failed",
+			"The proxy couldn't consult its routing table. This is a sparkbox fault, not yours.", "")
+		return
+	}
+	// Carry the port actually being served on the copy everything downstream
+	// reads: the gate authorises this port, and an upstream error names it
+	// rather than the route's default.
+	route.Port, route.Visibility = port, vis
+
 	// The auth gate runs BEFORE resume-on-connect: an unauthenticated hit on a
 	// paused private sandbox must redirect to login without waking the VM, so
 	// the gate is never a free way to spin up someone else's box.
@@ -613,11 +635,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// failure may name the machine a sandbox lives on. See machineFailed.
 		r = r.WithContext(ctxr)
 	}
-
-	// The forwarded port comes from the URL (…:4444) when the visitor named one,
-	// otherwise the route's configured port. This is what makes any-port URLs
-	// work with no per-port route row.
-	port := s.targetPort(r, route)
 
 	// Resume-on-connect: bring the sandbox up if it was reaped, and keep it
 	// marked active so the reaper leaves it alone while it's serving traffic.
@@ -659,9 +676,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// another's sandbox — a cross-tenant bleed with no error and no log line.
 	// The guest never sees the name: Rewrite restores the client's Host.
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(box.HostIP, strconv.Itoa(port))}
-	// Report the actually-forwarded port in any upstream error, not the route's
-	// default, since an any-port URL can override it.
-	route.Port = port
 	ctx2 := context.WithValue(ctxr, targetKey, target)
 	ctx2 = httptrace.WithClientTrace(ctx2, &httptrace.ClientTrace{
 		GotFirstResponseByte: func() {
