@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sparkbox — my machines</title>
+<title>sparkbox</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
 <style>
   /* Monochrome by design: the only chroma is a small set of state signals
@@ -135,6 +135,10 @@
   .menu-pop button.btn-danger { color: hsl(var(--red)); }
   .menu-pop button.btn-danger:hover:not(:disabled) { background: hsl(var(--red) / .1); }
   .menu-pop .sep { height: 1px; background: hsl(var(--border)); margin: 3px 0; }
+  /* The last card's menu opened past the fold and stayed there. Flipped above
+     its trigger when it would not fit below — set by the toggle, not by CSS,
+     because only layout knows how much room is left. */
+  .menu-pop.up { top: auto; bottom: calc(100% + 5px); }
 
   .m-body {
     border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
@@ -341,13 +345,42 @@
   label { display: block; font-size: 12.5px; font-weight: 500; margin-bottom: 5px; }
   .field-hint { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
 
-  /* secrets form */
+  /* The one form shape, shared by secrets, network rules, repos and
+     environments. Every one of them is a MODE now — its own card, hidden until
+     asked for, nothing under it inside that card — so the old "inline strip
+     wedged above a table" grid (1fr 1.4fr 1fr auto, with a rule beneath it to
+     fence the strip off from the rows) describes none of them any more. */
   .secret-form { padding: 14px; display: grid; gap: 13px;
-    grid-template-columns: 1fr 1.4fr 1fr auto; align-items: start;
-    border-bottom: 1px solid hsl(var(--border)); }
+    grid-template-columns: 1fr 1fr 1fr; align-items: start; }
   @media (max-width: 860px) { .secret-form { grid-template-columns: 1fr; } }
   .secret-form input { width: 100%; }
-  .secret-form .save { align-self: end; }
+  /* A field deliberately fixed for the life of the form, not disabled
+     furniture: still readable and selectable, visibly not a place to type. */
+  .secret-form input[readonly] {
+    background: hsl(var(--muted) / .6); color: hsl(var(--muted-foreground)); cursor: default;
+  }
+  .secret-form input[readonly]:focus { border-color: hsl(var(--border)); box-shadow: none; }
+  .secret-form .wide { grid-column: 1 / -1; }
+  .secret-form .two { grid-column: span 2; }
+  @media (max-width: 860px) { .secret-form .two { grid-column: 1 / -1; } }
+  .secret-form .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .secret-form .check input { width: auto; }
+  .secret-form .row { display: flex; gap: 8px; align-items: center; }
+
+  /* A tag field is the machine list's chip editor put in a form: the same
+     chips with the same ×, and the same "+ tag" input. Tags are a SET you add
+     to and take from, and a comma-separated text box makes you retype the
+     whole set to change one of them. */
+  .tag-field {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: 100%;
+    min-height: 35px; padding: 5px 6px; cursor: text;
+    border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--background));
+  }
+  .tag-field:focus-within { border-color: hsl(var(--muted-foreground)); }
+  .tag-field .chip-input { border-style: solid; border-color: transparent; flex: 1 1 88px; }
+  .tag-field .chip-input:focus { outline: none; }
+  .tag-field .none { font-size: 11.5px; color: hsl(var(--muted-foreground)); padding-left: 3px; }
 
   /* ---------- environments ----------
      An environment is far more like a machine than like a secret: one name,
@@ -358,26 +391,19 @@
      row. Nothing here is a new idiom; it is the card that is already on the
      Machines tab, with different contents. */
 
-  /* The tab's own header. Not a .panel-head, because the cards below are not
-     inside one card — the same relationship the machine list has with the
-     page. Shaped like .fp-head so the two read as the same level. */
-  .env-top { display: flex; align-items: flex-end; justify-content: space-between;
+  /* A tab's own header: what the tab is, and the one button that adds to it.
+     Not a .panel-head, because the cards below are not inside one card — the
+     same relationship the machine list has with the page. Shaped like .fp-head
+     so the two read as the same level. Shared by every tab that has a form. */
+  .tab-top { display: flex; align-items: flex-end; justify-content: space-between;
     gap: 12px 16px; flex-wrap: wrap; margin-bottom: 14px; }
-  .env-top h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }
-  .env-top .hint { display: block; margin-top: 2px; max-width: 66ch; }
+  .tab-top h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }
+  .tab-top .hint { display: block; margin-top: 2px; max-width: 66ch; }
 
   /* The create/edit form is a mode, not furniture: it is hidden until asked
      for. Visible, it was 430px of inputs and hints above the first
      environment — the page's own content pushed below the fold by the box
      used to add to it. */
-  .env-form { grid-template-columns: 1fr 1fr 1fr; border-bottom: 0; }
-  @media (max-width: 860px) { .env-form { grid-template-columns: 1fr; } }
-  .env-form .wide { grid-column: 1 / -1; }
-  .env-form .two { grid-column: span 2; }
-  @media (max-width: 860px) { .env-form .two { grid-column: 1 / -1; } }
-  .env-form .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
-  .env-form .check input { width: auto; }
-  .env-form .row { display: flex; gap: 8px; align-items: center; }
 
   .env-card { margin-bottom: 10px; }
   .env-card .m-head { align-items: baseline; }
@@ -490,6 +516,12 @@
     border-bottom: 1px solid hsl(var(--border));
   }
   .notice strong { color: hsl(var(--foreground)); font-weight: 600; }
+  /* A notice that IS the card — the "not enabled on this host" states — has
+     nothing under it to be ruled off from. */
+  .card.notice { border-bottom: 0; }
+  /* and one that is a grid cell in a form is positioned by the grid, not by
+     the 14px gutter it uses when it sits between a form and a table. */
+  .secret-form .tag-warn { margin: 0; }
 
   /* sign-in / error / empty */
   .signin-wrap { min-height: 62vh; display: grid; place-items: center; }
@@ -626,10 +658,19 @@
 
     <!-- SECRETS TAB -->
     <div id="tab-secrets" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="tab-top">
+        <div>
           <h2>Secrets</h2>
-          <span class="hint">delivered as environment variables to machines that share a tag</span>
+          <span class="hint">Delivered as environment variables to every machine that carries one
+            of their tags. Values are write-only — saved once, never shown again.</span>
+        </div>
+        <button class="btn-primary" id="sec-new">New secret</button>
+      </div>
+
+      <div class="card panel hidden" id="sec-form-card">
+        <div class="panel-head">
+          <h2 id="sec-form-title">New secret</h2>
+          <span class="hint" id="sec-form-hint">the tags decide which machines receive it</span>
         </div>
         <div class="notice">
           Values are <strong>write-only</strong>: once saved they can be updated or deleted, never
@@ -642,26 +683,34 @@
             <label for="sec-name">Name</label>
             <input id="sec-name" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="OPENAI_API_KEY" maxlength="64" />
-            <div class="field-hint">UPPER_SNAKE_CASE, up to 64 chars</div>
+            <div class="field-hint" id="sec-name-hint">UPPER_SNAKE_CASE, up to 64 chars</div>
           </div>
           <div>
             <label for="sec-value">Value</label>
             <input id="sec-value" type="password" class="mono" autocomplete="off"
               spellcheck="false" placeholder="value (never shown again)" />
-            <div class="field-hint">single line, up to 4 KiB</div>
+            <div class="field-hint" id="sec-value-hint">single line, up to 4 KiB</div>
           </div>
           <div>
-            <label for="sec-tags">Tags</label>
-            <input id="sec-tags" type="text" class="mono" autocomplete="off"
-              spellcheck="false" placeholder="ml, prod" />
-            <div class="field-hint">comma-separated; matches machine tags</div>
+            <label for="sec-tags-in">Tags</label>
+            <div class="tag-field" id="sec-tags">
+              <input id="sec-tags-in" class="chip-input" type="text" placeholder="+ tag"
+                maxlength="40" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-hint">Enter or comma adds one; matches machine tags</div>
           </div>
-          <button type="submit" class="btn-primary save" id="sec-save">Save</button>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="sec-save">Save secret</button>
+            <button type="button" class="btn-outline" id="sec-cancel">Cancel</button>
+          </div>
         </form>
-        <div id="secrets-disabled" class="notice hidden">
-          Secrets are disabled on this host: the encryption key does not match the stored
-          data. An operator must resolve the key mismatch before secrets can be used.
-        </div>
+      </div>
+
+      <div id="secrets-disabled" class="card notice hidden">
+        Secrets are disabled on this host: the encryption key does not match the stored
+        data. An operator must resolve the key mismatch before secrets can be used.
+      </div>
+      <div class="card panel" id="secrets-table">
         <div class="table-scroll">
           <table>
             <thead>
@@ -670,16 +719,29 @@
             <tbody id="secret-rows"></tbody>
           </table>
         </div>
-        <div id="secrets-empty" class="empty hidden">No secrets yet. Add one above, then tag a machine to deliver it.</div>
+      </div>
+      <div id="secrets-empty" class="card empty hidden">
+        No secrets yet. A secret is a value your machines get as an environment variable, and
+        the tags you give it decide which ones.
+        <div style="margin-top:12px"><button class="btn-primary" id="sec-empty-new">New secret</button></div>
       </div>
     </div>
 
     <!-- NETWORK TAB -->
     <div id="tab-network" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="tab-top">
+        <div>
           <h2>Network rules</h2>
-          <span class="hint">per-tag egress allowlists — applied to running machines that share a tag</span>
+          <span class="hint">Per-tag egress allowlists. A machine carrying a rule-set's tag may
+            reach those domains and nothing else, for as long as it runs.</span>
+        </div>
+        <button class="btn-primary" id="nr-new">New rule-set</button>
+      </div>
+
+      <div class="card panel hidden" id="nr-form-card">
+        <div class="panel-head">
+          <h2 id="nr-form-title">New rule-set</h2>
+          <span class="hint" id="nr-form-hint">the tags decide which machines it governs</span>
         </div>
         <div class="notice">
           A rule-set is a list of domains a machine may reach. Tag a machine with a rule-set's
@@ -692,25 +754,33 @@
             <label for="nr-name">Name</label>
             <input id="nr-name" type="text" autocomplete="off"
               spellcheck="false" placeholder="CI egress" maxlength="64" />
-            <div class="field-hint">a short label, up to 64 chars</div>
+            <div class="field-hint" id="nr-name-hint">a short label, up to 64 chars</div>
           </div>
-          <div class="grow">
+          <div class="two">
+            <label for="nr-tags-in">Tags</label>
+            <div class="tag-field" id="nr-tags">
+              <input id="nr-tags-in" class="chip-input" type="text" placeholder="+ tag"
+                maxlength="40" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-hint">Enter or comma adds one; matches machine tags</div>
+          </div>
+          <div class="wide">
             <label for="nr-allow">Allowed domains</label>
             <textarea id="nr-allow" class="mono" autocomplete="off" spellcheck="false"
               placeholder="github.com&#10;*.githubusercontent.com&#10;pypi.org"></textarea>
             <div class="field-hint">one per line — <code class="mono">github.com</code> (apex + subdomains) or <code class="mono">*.example.com</code> (subdomains only) · <a href="#" id="nr-prefill" class="linkish">prefill common trusted domains</a></div>
           </div>
-          <div>
-            <label for="nr-tags">Tags</label>
-            <input id="nr-tags" type="text" class="mono" autocomplete="off"
-              spellcheck="false" placeholder="ci, build" />
-            <div class="field-hint">comma-separated; matches machine tags</div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="nr-save">Save rule-set</button>
+            <button type="button" class="btn-outline" id="nr-cancel">Cancel</button>
           </div>
-          <button type="submit" class="btn-primary save" id="nr-save">Save rule-set</button>
         </form>
-        <div id="netrules-disabled" class="notice hidden">
-          Network rules are not enabled on this host.
-        </div>
+      </div>
+
+      <div id="netrules-disabled" class="card notice hidden">
+        Network rules are not enabled on this host.
+      </div>
+      <div class="card panel" id="netrules-table">
         <div class="table-scroll">
           <table>
             <thead>
@@ -719,13 +789,17 @@
             <tbody id="netrule-rows"></tbody>
           </table>
         </div>
-        <div id="netrules-empty" class="empty hidden">No rule-sets yet. Add one above, then tag a machine to enforce it.</div>
+      </div>
+      <div id="netrules-empty" class="card empty hidden">
+        No rule-sets yet. One lists the domains a machine may reach; tag a machine with its name
+        to hold it to that list.
+        <div style="margin-top:12px"><button class="btn-primary" id="nr-empty-new">New rule-set</button></div>
       </div>
     </div>
 
     <!-- ENVIRONMENTS TAB -->
     <div id="tab-environments" class="hidden">
-      <div class="env-top">
+      <div class="tab-top">
         <div>
           <h2>Environments</h2>
           <span class="hint">The repos, secrets, egress and variables a machine gets, and a disk
@@ -746,12 +820,12 @@
           <code class="mono">&lt;name&gt;-build</code> and keeps its disk, so the next machine you
           make starts with the work already done.
         </div>
-        <form id="env-form" class="secret-form env-form">
+        <form id="env-form" class="secret-form">
           <div>
             <label for="env-name">Name</label>
             <input id="env-name" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="web" maxlength="40" />
-            <div class="field-hint">lowercase, digits, dashes — this is the tag</div>
+            <div class="field-hint" id="env-name-hint">lowercase, digits, dashes — this is the tag</div>
           </div>
           <div class="two">
             <label for="env-desc">Description</label>
@@ -787,7 +861,7 @@
               secrets and rule-sets are only ever added here; detach them on their own tab.
             </div>
           </div>
-          <div class="check wide">
+          <div class="check wide" id="env-open-row">
             <input id="env-open" type="checkbox" />
             <label for="env-open" style="margin:0">
               Skip the default egress rule-set (new environments only)
@@ -798,16 +872,6 @@
             <button type="button" class="btn-outline" id="env-cancel">Cancel</button>
           </div>
         </form>
-      </div>
-
-      <div id="envs-disabled" class="card empty hidden">
-        Environments are not enabled on this host.
-      </div>
-      <div id="env-list"></div>
-      <div id="envs-empty" class="card empty hidden">
-        No environments yet. One holds the repos, secrets and variables a project needs, and a
-        disk with its setup already run.
-        <div style="margin-top:12px"><button class="btn-primary" id="env-empty-new">New environment</button></div>
       </div>
 
       <div class="card panel hidden" id="env-script-panel">
@@ -830,14 +894,34 @@
           <span class="hint" id="env-script-note"></span>
         </div>
       </div>
+
+      <div id="envs-disabled" class="card empty hidden">
+        Environments are not enabled on this host.
+      </div>
+      <div id="env-list"></div>
+      <div id="envs-empty" class="card empty hidden">
+        No environments yet. One holds the repos, secrets and variables a project needs, and a
+        disk with its setup already run.
+        <div style="margin-top:12px"><button class="btn-primary" id="env-empty-new">New environment</button></div>
+      </div>
+
     </div>
 
     <!-- REPOS TAB -->
     <div id="tab-repos" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="tab-top">
+        <div>
           <h2>Repos</h2>
-          <span class="hint">GitHub checkouts cloned into machines that share a tag</span>
+          <span class="hint">GitHub checkouts cloned into every machine that carries one of their
+            tags, while it boots.</span>
+        </div>
+        <button class="btn-primary" id="rp-new">Attach a repo</button>
+      </div>
+
+      <div class="card panel hidden" id="rp-form-card">
+        <div class="panel-head">
+          <h2 id="rp-form-title">Attach a repository</h2>
+          <span class="hint" id="rp-form-hint">the tags decide which machines clone it</span>
         </div>
         <div class="notice">
           An attachment is <strong>configuration, not a copy</strong>: a machine created with one of
@@ -847,12 +931,20 @@
           not cloned, and <code class="mono">sparkbox repos sync</code> inside the machine does the
           work when you ask for it. Detaching leaves existing checkouts where they are.
         </div>
-        <form id="repo-form" class="secret-form repo-form">
+        <form id="repo-form" class="secret-form">
           <div>
             <label for="rp-slug">Repository</label>
             <input id="rp-slug" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="wandb/hivemind" maxlength="120" />
-            <div class="field-hint">owner/name on github.com</div>
+            <div class="field-hint" id="rp-slug-hint">owner/name on github.com</div>
+          </div>
+          <div class="two">
+            <label for="rp-tags-in">Tags</label>
+            <div class="tag-field" id="rp-tags">
+              <input id="rp-tags-in" class="chip-input" type="text" placeholder="+ tag"
+                maxlength="40" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-hint">Enter or comma adds one; matches machine tags</div>
           </div>
           <div>
             <label for="rp-ref">Branch</label>
@@ -867,12 +959,6 @@
             <div class="field-hint">optional; under the home directory</div>
           </div>
           <div>
-            <label for="rp-tags">Tags</label>
-            <input id="rp-tags" type="text" class="mono" autocomplete="off"
-              spellcheck="false" placeholder="hm, ml" />
-            <div class="field-hint">comma-separated; matches machine tags</div>
-          </div>
-          <div>
             <label for="rp-access">Access</label>
             <select id="rp-access">
               <option value="read">Read-only</option>
@@ -880,16 +966,22 @@
             </select>
             <div class="field-hint">what its git credential may do</div>
           </div>
-          <button type="submit" class="btn-primary save" id="rp-save">Attach</button>
+          <div id="repo-default-warn" class="tag-warn hidden wide">
+            The <code class="mono">default</code> tag is carried by <strong>every machine you create
+            from now on</strong>, so this repository is cloned into all of them. Worth wanting on
+            purpose — dotfiles, the repo you always work in — and surprising by accident.
+          </div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="rp-save">Attach repository</button>
+            <button type="button" class="btn-outline" id="rp-cancel">Cancel</button>
+          </div>
         </form>
-        <div id="repo-default-warn" class="tag-warn hidden">
-          The <code class="mono">default</code> tag is carried by <strong>every machine you create
-          from now on</strong>, so this repository is cloned into all of them. Worth wanting on
-          purpose — dotfiles, the repo you always work in — and surprising by accident.
-        </div>
-        <div id="repos-disabled" class="notice hidden">
-          Repos are not enabled on this host.
-        </div>
+      </div>
+
+      <div id="repos-disabled" class="card notice hidden">
+        Repos are not enabled on this host.
+      </div>
+      <div class="card panel" id="repos-table">
         <div class="table-scroll">
           <table>
             <thead>
@@ -898,7 +990,11 @@
             <tbody id="repo-rows"></tbody>
           </table>
         </div>
-        <div id="repos-empty" class="empty hidden">No repositories yet. Attach one above, then tag a machine to clone it.</div>
+      </div>
+      <div id="repos-empty" class="card empty hidden">
+        No repositories yet. Attach one and every machine carrying its tags clones it while it
+        boots.
+        <div style="margin-top:12px"><button class="btn-primary" id="rp-empty-new">Attach a repo</button></div>
       </div>
     </div>
   </div>
@@ -1341,7 +1437,11 @@
     // otherwise rebuild the card and snap the menu shut under the cursor. Both
     // card lists have one, so this is not scoped to the machines.
     if (document.querySelector(".menu-pop:not(.hidden)")) return true;
-    return !!(ae && ae.tagName === "INPUT" && ae.closest("#machine-list"));
+    // Every table that repaints on the poll now carries an inline "+ tag" box,
+    // so the guard covers all of them: a half-typed tag is mid-interaction on
+    // the Secrets tab for exactly the reason it is on the Machines tab.
+    return !!(ae && ae.tagName === "INPUT" &&
+      ae.closest("#machine-list, #secret-rows, #netrule-rows, #repo-rows"));
   }
 
   // Delegated toggle for the ··· overflow menus: a click on a trigger opens its
@@ -1364,6 +1464,16 @@
       closeMenus(pop);
       pop.classList.toggle("hidden", !willOpen);
       trigger.setAttribute("aria-expanded", String(willOpen));
+      // Measure once it is laid out, and always from the default side, or a
+      // menu that flipped once stays flipped after the page scrolls back.
+      if (willOpen) {
+        pop.classList.remove("up");
+        const box = pop.getBoundingClientRect();
+        const trig = trigger.getBoundingClientRect();
+        if (box.bottom > window.innerHeight - 8 && trig.top > box.height + 8) {
+          pop.classList.add("up");
+        }
+      }
       return;
     }
     closeMenus();
@@ -2107,35 +2217,196 @@
 
   // ---- secrets ----
 
+  // ---- shared form + tag plumbing ----
+
+  // Every tab's add/edit form is the same mode: its own card, hidden until
+  // asked for, scrolled to rather than jumping the page to the top.
+  function openForm(cardId, focusId) {
+    $(cardId).classList.remove("hidden");
+    $(cardId).scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const f = focusId && $(focusId);
+    if (f) f.focus();
+  }
+
+  function closeForm(cardId) { $(cardId).classList.add("hidden"); }
+
+  // tagField turns a .tag-field div into the chip editor the machine list
+  // already uses: chips with an ×, and a "+ tag" box. Tags are a SET you add
+  // to and take from, and a comma-separated text input makes you retype the
+  // whole set to change one member of it.
+  //
+  // It returns a handle rather than being read off the DOM at submit time,
+  // because the committed chips and the half-typed text in the box are
+  // different things — get() commits what is in the box first, so a tag
+  // someone typed but never pressed Enter on is still saved.
+  function tagField(hostId, onChange) {
+    const host = $(hostId);
+    const input = host.querySelector("input");
+    let tags = [];
+
+    function paint() {
+      host.querySelectorAll(".chip").forEach((n) => n.remove());
+      const frag = document.createDocumentFragment();
+      for (const t of tags) {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.textContent = t;
+        const x = document.createElement("button");
+        x.type = "button";
+        x.className = "chip-x";
+        x.textContent = "×";
+        x.title = "remove " + t;
+        x.setAttribute("aria-label", "remove tag " + t);
+        x.addEventListener("click", (ev) => { ev.stopPropagation(); remove(t); });
+        chip.appendChild(x);
+        frag.appendChild(chip);
+      }
+      host.insertBefore(frag, input);
+      if (onChange) onChange(tags.slice());
+    }
+
+    function remove(t) {
+      tags = tags.filter((x) => x !== t);
+      paint();
+      input.focus();
+    }
+
+    // Returns false when something in the text was not a tag, so the caller
+    // can leave it in the box for the person to fix rather than dropping it.
+    //
+    // It repaints ONLY when the set actually changed. Clicking a chip's × blurs
+    // the input first, and a blur that rebuilt the chips every time would
+    // replace the very button being pressed between its mousedown and its
+    // mouseup — the class of bug where a click silently never lands.
+    function add(raw) {
+      let ok = true;
+      let changed = false;
+      for (const t of String(raw || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean)) {
+        if (!TAG_RE.test(t)) {
+          toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+          ok = false;
+          continue;
+        }
+        if (tags.indexOf(t) < 0) { tags.push(t); changed = true; }
+      }
+      if (changed) paint();
+      return ok;
+    }
+
+    input.addEventListener("keydown", (e) => {
+      // Enter commits the tag instead of submitting the form — in a chip box
+      // that is what Enter means, and the form still has its own Save.
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        if (add(input.value)) input.value = "";
+        return;
+      }
+      if (e.key === "Backspace" && !input.value && tags.length) {
+        e.preventDefault();
+        remove(tags[tags.length - 1]);
+      }
+    });
+    input.addEventListener("blur", () => { if (add(input.value)) input.value = ""; });
+    host.addEventListener("click", (e) => { if (e.target === host) input.focus(); });
+
+    return {
+      get() {
+        if (input.value.trim() && add(input.value)) input.value = "";
+        return tags.slice();
+      },
+      set(list) {
+        tags = (list || []).slice();
+        input.value = "";
+        paint();
+      },
+    };
+  }
+
+  // tagCell is the same editor again, this time inside a table row, so the
+  // common edit by far — add a tag, drop a tag — costs one click and never
+  // opens a form. On secrets that used to be impossible: the form made you
+  // retype the VALUE, which nothing can read back to prefill.
+  function tagCell(id, tags, empty) {
+    const list = tags || [];
+    return '<div class="chips">' +
+      list.map((t) =>
+        '<span class="chip">' + esc(t) +
+        '<button class="chip-x" data-rmtag="' + esc(t) + '" data-tagid="' + esc(id) +
+        '" title="remove ' + esc(t) + '" aria-label="remove tag ' + esc(t) + '">×</button></span>').join("") +
+      (list.length ? "" : '<span class="muted">' + esc(empty) + "</span>") +
+      '<input class="chip-input" data-addtag="' + esc(id) +
+      '" placeholder="+ tag" maxlength="40" autocomplete="off" spellcheck="false" />' +
+      "</div>";
+  }
+
+  // wireTagCells binds every tagCell under root. body() builds the PUT for the
+  // row's own endpoint — each kind sends its whole object back, so the caller
+  // supplies the rest of it from the row it already has.
+  function wireTagCells(root, opts) {
+    const find = (id) => (opts.list || []).find((x) => opts.keyOf(x) === id);
+
+    function apply(row, tags, el) {
+      const id = opts.keyOf(row);
+      if (opts.guard && !opts.guard(row, tags)) return;
+      mutate(opts.kind + "tags:" + id, el, async () => {
+        await api(opts.url(id), { method: "PUT", body: opts.body(row, tags) });
+        toast(tags.length ? id + " now carries " + tags.join(", ") : id + " has no tags — it reaches no machine");
+      });
+    }
+
+    root.querySelectorAll("button[data-rmtag]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const row = find(btn.dataset.tagid);
+        if (!row) return;
+        apply(row, (row.tags || []).filter((t) => t !== btn.dataset.rmtag), btn);
+      }));
+    root.querySelectorAll("input[data-addtag]").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const t = inp.value.trim();
+        if (!t) return;
+        if (!TAG_RE.test(t)) {
+          return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+        }
+        const row = find(inp.dataset.addtag);
+        if (!row) return;
+        if ((row.tags || []).indexOf(t) >= 0) { inp.value = ""; return; }
+        apply(row, (row.tags || []).concat(t), inp);
+      }));
+  }
+
   function renderSecrets(list) {
     const rows = $("secret-rows");
     rows.innerHTML = "";
     for (const s of list) {
       const name = s.name || s.env_name || "";
-      const tags = (s.tags || []).length
-        ? (s.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
-        : '<span class="muted">– none: reaches no machine</span>';
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(name) + "</td>" +
-        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + tagCell(name, s.tags, "– none: reaches no machine") + "</td>" +
         "<td>v" + (s.version | 0) + "</td>" +
         '<td class="age">' + rel(s.updated_at) + "</td>" +
         '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-edit="' + esc(name) +
-            '" data-tags="' + esc((s.tags || []).join(",")) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm" data-edit="' + esc(name) + '">Edit…</button> ' +
           '<button class="btn-outline btn-sm btn-danger" data-del-secret="' + esc(name) + '">Delete</button></td>';
       rows.appendChild(tr);
     }
     $("secrets-empty").classList.toggle("hidden", list.length > 0);
+    $("secrets-table").classList.toggle("hidden", list.length === 0);
+    // Tags move without a form and without the value: the secret's own PUT now
+    // treats an absent value as "leave it alone".
+    wireTagCells(rows, {
+      kind: "secret",
+      list: list,
+      keyOf: (x) => x.name || x.env_name || "",
+      url: (id) => "/api/secrets/" + encodeURIComponent(id),
+      body: (row, tags) => ({ tags: tags }),
+    });
     rows.querySelectorAll("button[data-edit]").forEach((btn) =>
       btn.addEventListener("click", () => {
-        // Prefill the form for an update; the value is write-only, so it
-        // always starts blank — saving overwrites the stored value.
-        $("sec-name").value = btn.dataset.edit;
-        $("sec-tags").value = btn.dataset.tags;
-        $("sec-value").value = "";
-        $("sec-value").focus();
+        const row = list.find((x) => (x.name || x.env_name) === btn.dataset.edit);
+        editSecret(row || { name: btn.dataset.edit, tags: [] });
       }));
     rows.querySelectorAll("button[data-del-secret]").forEach((btn) =>
       btn.addEventListener("click", () => {
@@ -2152,32 +2423,80 @@
 
   function secretsDisabled(off) {
     $("secrets-disabled").classList.toggle("hidden", !off);
-    $("secret-form").classList.toggle("hidden", off);
+    $("sec-new").classList.toggle("hidden", off);
+    if (off) closeForm("sec-form-card");
   }
+
+  const secTags = tagField("sec-tags");
+  // The name of the secret the form is editing, or null when it is creating
+  // one. Held rather than read back off the field because the field can be
+  // edited: a rename is "the name it had" plus "the name it has now".
+  let secEditing = null;
+
+  function resetSecretForm() {
+    secEditing = null;
+    $("sec-name").value = "";
+    $("sec-value").value = "";
+    secTags.set([]);
+    $("sec-form-title").textContent = "New secret";
+    $("sec-form-hint").textContent = "the tags decide which machines receive it";
+    $("sec-name-hint").textContent = "UPPER_SNAKE_CASE, up to 64 chars";
+    $("sec-value-hint").textContent = "single line, up to 4 KiB";
+    $("sec-save").textContent = "Save secret";
+  }
+
+  function editSecret(row) {
+    secEditing = row.name || row.env_name || "";
+    $("sec-name").value = secEditing;
+    $("sec-value").value = "";
+    secTags.set(row.tags || []);
+    $("sec-form-title").textContent = "Editing " + secEditing;
+    $("sec-form-hint").textContent = "leave the value blank to keep the one that is stored";
+    // Renaming is a real move server-side — the value is re-sealed under the
+    // new name, because the AAD binds each blob to the name it is stored under.
+    $("sec-name-hint").textContent = "renaming moves the secret; machines get it under the new name";
+    $("sec-value-hint").textContent = "blank keeps the stored value — nothing can read it back to show you";
+    $("sec-save").textContent = "Save changes";
+    openForm("sec-form-card", "sec-value");
+  }
+
+  function newSecret() {
+    resetSecretForm();
+    openForm("sec-form-card", "sec-name");
+  }
+
+  $("sec-new").addEventListener("click", newSecret);
+  $("sec-empty-new").addEventListener("click", newSecret);
+  $("sec-cancel").addEventListener("click", () => { resetSecretForm(); closeForm("sec-form-card"); });
 
   $("secret-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("sec-name").value.trim();
     const value = $("sec-value").value;
-    const tags = $("sec-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    const tags = secTags.get();
     if (!ENV_RE.test(name)) {
       return toast("name must be UPPER_SNAKE_CASE: start with A–Z or _, then A–Z, 0–9, _ (max 64)", true);
     }
-    if (!value) return toast("value is required", true);
-    if (/[\n\r\0]/.test(value)) return toast("value must be a single line", true);
-    if (new TextEncoder().encode(value).length > 4096) return toast("value exceeds 4 KiB", true);
-    for (const t of tags) {
-      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+    // A blank value means "leave it" only when there IS one to leave.
+    if (!secEditing && !value) return toast("value is required", true);
+    if (value) {
+      if (/[\n\r\0]/.test(value)) return toast("value must be a single line", true);
+      if (new TextEncoder().encode(value).length > 4096) return toast("value exceeds 4 KiB", true);
     }
+    const body = { tags: tags };
+    // Absent, not empty: "" is a value somebody may genuinely want to store,
+    // and the two must not collapse into each other.
+    if (value || !secEditing) body.value = value;
+    // The PUT addresses the name the secret has NOW; rename_to is where it goes.
+    const addressed = secEditing || name;
+    if (secEditing && name !== secEditing) body.rename_to = name;
     const btn = $("sec-save");
     btn.disabled = true;
     try {
-      await api("/api/secrets/" + encodeURIComponent(name),
-        { method: "PUT", body: { value: value, tags: tags } });
+      await api("/api/secrets/" + encodeURIComponent(addressed), { method: "PUT", body: body });
       toast(name + " saved — new shells see it now; reboot machines to update running processes");
-      $("sec-name").value = "";
-      $("sec-value").value = "";
-      $("sec-tags").value = "";
+      resetSecretForm();
+      closeForm("sec-form-card");
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -2197,29 +2516,32 @@
         ? allow.slice(0, 6).map((d) => '<span class="chip plain mono">' + esc(d) + "</span>").join(" ") +
           (allow.length > 6 ? ' <span class="muted">+' + (allow.length - 6) + " more</span>" : "")
         : '<span class="muted">no domains</span>';
-      const tags = (r.tags || []).length
-        ? (r.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
-        : '<span class="muted">– none: applies to no machine</span>';
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(r.name) + "</td>" +
         '<td><div class="chips">' + doms + "</div></td>" +
-        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + tagCell(r.name, r.tags, "– none: applies to no machine") + "</td>" +
         '<td class="age">' + rel(r.updated_at) + "</td>" +
         '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-editrule="' + esc(r.name) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm" data-editrule="' + esc(r.name) + '">Edit…</button> ' +
           '<button class="btn-outline btn-sm btn-danger" data-delrule="' + esc(r.name) + '">Delete</button></td>';
       rows.appendChild(tr);
     }
     $("netrules-empty").classList.toggle("hidden", list.length > 0);
+    $("netrules-table").classList.toggle("hidden", list.length === 0);
+    // A rule-set's PUT replaces the whole object, so the allow list it already
+    // has goes back with the new tags.
+    wireTagCells(rows, {
+      kind: "rule",
+      list: list,
+      keyOf: (x) => x.name,
+      url: (id) => "/api/network-rules/" + encodeURIComponent(id),
+      body: (row, tags) => ({ allow: (row.spec && row.spec.allow) || [], tags: tags }),
+    });
     rows.querySelectorAll("button[data-editrule]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const r = list.find((x) => x.name === btn.dataset.editrule);
-        if (!r) return;
-        $("nr-name").value = r.name;
-        $("nr-allow").value = ((r.spec && r.spec.allow) || []).join("\n");
-        $("nr-tags").value = (r.tags || []).join(", ");
-        $("nr-name").focus();
+        if (r) editNetRule(r);
       }));
     rows.querySelectorAll("button[data-delrule]").forEach((btn) =>
       btn.addEventListener("click", () => {
@@ -2235,8 +2557,49 @@
 
   function netrulesDisabled(off) {
     $("netrules-disabled").classList.toggle("hidden", !off);
-    $("netrule-form").classList.toggle("hidden", off);
+    $("nr-new").classList.toggle("hidden", off);
+    if (off) closeForm("nr-form-card");
   }
+
+  const nrTags = tagField("nr-tags");
+  let nrEditing = null;
+
+  function resetNetRuleForm() {
+    nrEditing = null;
+    $("nr-name").value = "";
+    $("nr-name").readOnly = false;
+    $("nr-allow").value = "";
+    nrTags.set([]);
+    $("nr-form-title").textContent = "New rule-set";
+    $("nr-form-hint").textContent = "the tags decide which machines it governs";
+    $("nr-name-hint").textContent = "a short label, up to 64 chars";
+    $("nr-save").textContent = "Save rule-set";
+  }
+
+  function editNetRule(r) {
+    nrEditing = r.name;
+    $("nr-name").value = r.name;
+    // Same reason the environment form fixes its name: the PUT is addressed by
+    // it, so typing over it would quietly create a SECOND rule-set holding a
+    // copy of this one's domains rather than renaming this one.
+    $("nr-name").readOnly = true;
+    $("nr-allow").value = ((r.spec && r.spec.allow) || []).join("\n");
+    nrTags.set(r.tags || []);
+    $("nr-form-title").textContent = "Editing " + r.name;
+    $("nr-form-hint").textContent = "the domains below replace the ones stored";
+    $("nr-name-hint").textContent = "fixed — the tag machines already carry";
+    $("nr-save").textContent = "Save changes";
+    openForm("nr-form-card", "nr-allow");
+  }
+
+  function newNetRule() {
+    resetNetRuleForm();
+    openForm("nr-form-card", "nr-name");
+  }
+
+  $("nr-new").addEventListener("click", newNetRule);
+  $("nr-empty-new").addEventListener("click", newNetRule);
+  $("nr-cancel").addEventListener("click", () => { resetNetRuleForm(); closeForm("nr-form-card"); });
 
   // Claude Code's default "Trusted" network domains (per code.claude.com/docs)
   // plus hivemind.wandb.tools — a one-click starting point for a rule-set, and
@@ -2271,7 +2634,8 @@
       objects.githubusercontent.com oracle.com packagecloud.io packages.microsoft.com
       packagist.org pkg-npm.githubusercontent.com pkg.go.dev pkg.stainless.com pkgs.k8s.io
       platform.claude.com plugins.gradle.org portal.azure.com ppa.launchpad.net
-      production.cloudflare.docker.com proxy.golang.org pub.dev public.ecr.aws pypa.io pypi.org
+      production.cloudflare.docker.com production.cloudfront.docker.com proxy.golang.org pub.dev
+      public.ecr.aws pypa.io pypi.org
       pypi.python.org pythonhosted.org registry-1.docker.io registry.gitlab.com
       registry.npmjs.org registry.yarnpkg.com release-assets.githubusercontent.com
       releases.hashicorp.com repo.anaconda.com repo.maven.apache.org repo.maven.org
@@ -2300,20 +2664,16 @@
     e.preventDefault();
     const name = $("nr-name").value.trim();
     const allow = $("nr-allow").value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-    const tags = $("nr-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    const tags = nrTags.get();
     if (!name) return toast("name is required", true);
-    for (const t of tags) {
-      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
-    }
     const btn = $("nr-save");
     btn.disabled = true;
     try {
       await api("/api/network-rules/" + encodeURIComponent(name),
         { method: "PUT", body: { allow: allow, tags: tags } });
       toast(name + " saved — applies to tagged machines within seconds");
-      $("nr-name").value = "";
-      $("nr-allow").value = "";
-      $("nr-tags").value = "";
+      resetNetRuleForm();
+      closeForm("nr-form-card");
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -2370,35 +2730,40 @@
     const rows = $("repo-rows");
     rows.innerHTML = "";
     for (const r of list) {
-      const tags = (r.tags || []).length
-        ? (r.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
-        : '<span class="muted">– none: reaches no machine</span>';
       const ref = r.ref ? ' <span class="chip plain">' + esc(r.ref) + "</span>" : "";
       const where = r.path ? '<div class="muted">~/' + esc(r.path) + "</div>" : "";
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(r.slug) + ref + where + "</td>" +
-        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + tagCell(r.slug, r.tags, "– none: reaches no machine") + "</td>" +
         "<td>" + (r.access === "write" ? "read + push" : "read-only") + "</td>" +
         "<td>" + appCell(r) + '<div>' + userAuthCell(r) + "</div></td>" +
         '<td class="age">' + rel(r.created_at) + "</td>" +
         '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Edit…</button> ' +
           '<button class="btn-outline btn-sm btn-danger" data-del-repo="' + esc(r.slug) + '">Detach</button></td>';
       rows.appendChild(tr);
     }
     $("repos-empty").classList.toggle("hidden", list.length > 0);
+    $("repos-table").classList.toggle("hidden", list.length === 0);
+    // A repo's PUT replaces the whole attachment, so everything it already has
+    // rides along with the new tags — the asymmetry that makes a bare tag edit
+    // silently drop a branch or a write credential otherwise.
+    wireTagCells(rows, {
+      kind: "repo",
+      list: list,
+      keyOf: (x) => x.slug,
+      url: (id) => "/api/repos/" + encodeURIComponent(id),
+      body: (row, tags) => ({ ref: row.ref || "", path: row.path || "", access: row.access, tags: tags }),
+      // The `default` tag is on every machine its owner makes from then on.
+      guard: (row, tags) => tags.indexOf("default") < 0 || (row.tags || []).indexOf("default") >= 0 ||
+        confirm("The default tag is carried by every machine you create from now on, so " +
+          row.slug + " will be cloned into all of them. Attach it to default?"),
+    });
     rows.querySelectorAll("button[data-editrepo]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const r = list.find((x) => x.slug === btn.dataset.editrepo);
-        if (!r) return;
-        $("rp-slug").value = r.slug;
-        $("rp-ref").value = r.ref || "";
-        $("rp-path").value = r.path || "";
-        $("rp-tags").value = (r.tags || []).join(", ");
-        $("rp-access").value = r.access === "write" ? "write" : "read";
-        repoDefaultWarn();
-        $("rp-slug").focus();
+        if (r) editRepo(r);
       }));
     rows.querySelectorAll("button[data-del-repo]").forEach((btn) =>
       btn.addEventListener("click", () => {
@@ -2427,32 +2792,70 @@
 
   function reposDisabled(off) {
     $("repos-disabled").classList.toggle("hidden", !off);
-    $("repo-form").classList.toggle("hidden", off);
-  }
-
-  function repoTags() {
-    return $("rp-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    $("rp-new").classList.toggle("hidden", off);
+    if (off) closeForm("rp-form-card");
   }
 
   // The `default` tag is on every machine its owner creates from then on, so a
-  // repo attached to it is cloned into all of them. Shown while typing as well
-  // as confirmed on submit: the point is to be read before the click, not to
-  // put one more dialog between someone and a thing they meant to do.
-  function repoDefaultWarn() {
-    $("repo-default-warn").classList.toggle("hidden", repoTags().indexOf("default") < 0);
+  // repo attached to it is cloned into all of them. Shown while the tags are
+  // being edited as well as confirmed on submit: the point is to be read
+  // before the click, not to put one more dialog between someone and a thing
+  // they meant to do.
+  function repoDefaultWarn(tags) {
+    $("repo-default-warn").classList.toggle("hidden", (tags || []).indexOf("default") < 0);
   }
 
-  $("rp-tags").addEventListener("input", repoDefaultWarn);
+  const rpTags = tagField("rp-tags", repoDefaultWarn);
+  let rpEditing = null;
+
+  function resetRepoForm() {
+    rpEditing = null;
+    $("rp-slug").value = "";
+    $("rp-slug").readOnly = false;
+    $("rp-ref").value = "";
+    $("rp-path").value = "";
+    $("rp-access").value = "read";
+    rpTags.set([]);
+    $("rp-form-title").textContent = "Attach a repository";
+    $("rp-form-hint").textContent = "the tags decide which machines clone it";
+    $("rp-slug-hint").textContent = "owner/name on github.com";
+    $("rp-save").textContent = "Attach repository";
+  }
+
+  function editRepo(r) {
+    rpEditing = r.slug;
+    $("rp-slug").value = r.slug;
+    // Addressed by slug, like the other two forms: typing over it would attach
+    // a different repository rather than change this one.
+    $("rp-slug").readOnly = true;
+    $("rp-ref").value = r.ref || "";
+    $("rp-path").value = r.path || "";
+    $("rp-access").value = r.access === "write" ? "write" : "read";
+    rpTags.set(r.tags || []);
+    $("rp-form-title").textContent = "Editing " + r.slug;
+    $("rp-form-hint").textContent = "everything below replaces the current attachment";
+    $("rp-slug-hint").textContent = "fixed — detach it to attach a different repository";
+    $("rp-save").textContent = "Save changes";
+    openForm("rp-form-card", "rp-ref");
+  }
+
+  function newRepo() {
+    resetRepoForm();
+    openForm("rp-form-card", "rp-slug");
+  }
+
+  $("rp-new").addEventListener("click", newRepo);
+  $("rp-empty-new").addEventListener("click", newRepo);
+  $("rp-cancel").addEventListener("click", () => { resetRepoForm(); closeForm("rp-form-card"); });
 
   $("repo-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const slug = $("rp-slug").value.trim();
-    const tags = repoTags();
+    const tags = rpTags.get();
     if (!SLUG_RE.test(slug)) return toast("repository must be owner/name, e.g. wandb/hivemind", true);
-    for (const t of tags) {
-      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
-    }
-    if (tags.indexOf("default") >= 0 &&
+    // Only when it is being ADDED — re-saving a repo that already has it is not
+    // the moment to ask again.
+    if (tags.indexOf("default") >= 0 && !rpEditing &&
       !confirm("The default tag is carried by every machine you create from now on, so " + slug +
         " will be cloned into all of them. Attach it to default?")) return;
     const btn = $("rp-save");
@@ -2468,12 +2871,8 @@
         },
       });
       toast(slug + " attached — cloned into new machines carrying its tags");
-      $("rp-slug").value = "";
-      $("rp-ref").value = "";
-      $("rp-path").value = "";
-      $("rp-tags").value = "";
-      $("rp-access").value = "read";
-      repoDefaultWarn();
+      resetRepoForm();
+      closeForm("rp-form-card");
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -2610,7 +3009,7 @@
               '">Keep this disk</button>'
             : "") + "</div>"
       : "";
-    return '<div class="env-strip failed"><div class="msg">' + esc(e.build_error) +
+    return '<div class="env-strip failed"><div class="msg">' + esc(endSentence(e.build_error)) +
       (box ? ' <span class="mono">' + esc(box) + "</span> is still there." : "") +
       "</div>" + actions + "</div>";
   }
@@ -2650,7 +3049,9 @@
 
   function envCard(e) {
     const st = e.state || "draft";
-    const buildLabel = st === "ready" || st === "failed" ? "Rebuild" : "Build";
+    const isRebuild = st === "ready" || st === "failed";
+    const buildLabel = isRebuild ? "Rebuild" : "Build";
+    const rebuildAttr = isRebuild ? '" data-envrebuild="1' : "";
     const envRepos = e.repos || [];
     const canLaunch = st === "ready" && launchSub && envRepos.length > 0;
     let launchAction = "";
@@ -2670,7 +3071,7 @@
       ' aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">' +
       DOTS + '</button><div class="menu-pop hidden">' +
       '<button data-envedit="' + esc(e.name) + '">Edit environment…</button>' +
-      (canLaunch ? '<button data-envbuild="' + esc(e.name) + '">Rebuild</button>' : '') +
+      (canLaunch ? '<button data-envbuild="' + esc(e.name) + rebuildAttr + '">Rebuild</button>' : '') +
       '<div class="sep"></div>' +
       '<button class="btn-danger" data-envdel="' + esc(e.name) + '">Delete…</button>' +
       "</div></div>";
@@ -2683,7 +3084,7 @@
           // A disabled "Build" next to a badge that says building is a control
           // that only restates the state. It comes back when the build ends.
           (st === "building" || canLaunch ? "" :
-            '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + '">' +
+            '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + rebuildAttr + '">' +
             buildLabel + "</button>") +
           menu +
         "</div>" +
@@ -2718,6 +3119,14 @@
     host.querySelectorAll("button[data-envbuild]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const name = btn.dataset.envbuild;
+        // Every other destructive action on this page asks first — both deletes
+        // and "Keep this disk" do. A rebuild is minutes of unattended agent that
+        // REPLACES the image new machines boot from, and it sits one row under
+        // "Edit environment…" in the same menu, so it asks too.
+        if (btn.dataset.envrebuild &&
+            !confirm("Rebuild " + name + "? A throwaway machine runs its setup again — this takes " +
+              "minutes, and if it succeeds it replaces the disk new machines start from. " +
+              "The machines you have now are unaffected.")) return;
         mutate("envbuild:" + name, btn, async () => {
           await api("/api/environments/" + encodeURIComponent(name) + "/build", { method: "POST" });
           toast("building " + name + " — this takes minutes; the card updates itself");
@@ -2751,12 +3160,22 @@
         if (!e) return;
         envEditing = e.name;
         $("env-name").value = e.name;
+        // The name IS the tag — machines, secrets, repos, rule-sets and a bound
+        // base image all hang off it, so there is nothing here that could
+        // rename them. Typing over it used to CLONE: a second environment, the
+        // original untouched, and the source's secrets attached to a new tag
+        // that no verb can strip them from again.
+        $("env-name").readOnly = true;
+        $("env-name-hint").textContent = "fixed — the tag machines already carry";
         $("env-desc").value = e.description || "";
         $("env-repos").value = (e.repos || []).join(", ");
         $("env-secrets").value = (e.secrets || []).join(", ");
         $("env-rules").value = (e.rules || []).join(", ");
         $("env-vars").value = (e.vars || []).map((v) => v.name + "=" + v.value).join("\n");
         $("env-open").checked = false;
+        // Its own label says "new environments only"; a live control that does
+        // nothing is worse than an absent one.
+        $("env-open-row").classList.add("hidden");
         $("env-form-title").textContent = "Editing " + e.name;
         $("env-form-hint").textContent = "the description and variables below replace what is stored";
         $("env-save").textContent = "Save changes";
@@ -2778,9 +3197,11 @@
           // worst about configuration that is still sitting there.
           const inherited = (res.kept_vars || []).length;
           toast("deleted " + name +
-            (kept ? " — " + kept + " attached object(s) still carry the tag" : "") +
+            (kept ? " — " + plural(kept, "attached object still carries", "attached objects still carry") +
+              " the tag" : "") +
             (res.removed_rule ? "; its egress rule-set went with it" : "") +
-            (inherited ? "; " + inherited + " variable(s) it adopted were kept" : "") +
+            (inherited ? "; " + plural(inherited, "variable it adopted was", "variables it adopted were") +
+              " kept" : "") +
             (res.kept_snapshot ? "; the tag still boots from " + res.kept_snapshot : ""));
           if (envEditing === name) resetEnvForm();
         });
@@ -2800,7 +3221,9 @@
   function openEnvForm() {
     $("env-form-card").classList.remove("hidden");
     $("env-form-card").scrollIntoView({ block: "nearest", behavior: "smooth" });
-    $("env-name").focus();
+    // On an edit the name is fixed, so the first thing you can actually change
+    // is where the caret belongs.
+    ($("env-name").readOnly ? $("env-desc") : $("env-name")).focus();
   }
 
   function closeEnvForm() {
@@ -2812,6 +3235,9 @@
     for (const id of ["env-name", "env-desc", "env-repos", "env-secrets", "env-rules", "env-vars"]) {
       $(id).value = "";
     }
+    $("env-name").readOnly = false;
+    $("env-name-hint").textContent = "lowercase, digits, dashes — this is the tag";
+    $("env-open-row").classList.remove("hidden");
     $("env-open").checked = false;
     $("env-form-title").textContent = "New environment";
     $("env-form-hint").textContent = "the name is the tag machines carry to get all of this";
@@ -2826,6 +3252,18 @@
   $("env-new").addEventListener("click", newEnvironment);
   $("env-empty-new").addEventListener("click", newEnvironment);
   $("env-cancel").addEventListener("click", () => { resetEnvForm(); closeEnvForm(); });
+
+  // "1 thing still carries" / "2 things still carry". The console says counts
+  // out loud in toasts, and "1 attached object(s)" reads like a placeholder.
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+
+  // A sentence the console did not write ends where its author left it — the
+  // guest's build error has no full stop, so appending to it ran two sentences
+  // together ("…could reproduce it web-build is still there.").
+  function endSentence(t) {
+    const s = String(t || "").trim();
+    return !s || /[.!?]$/.test(s) ? s : s + ".";
+  }
 
   function splitList(id) {
     return $(id).value.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
@@ -2907,6 +3345,8 @@
       $("env-script-note").textContent = "";
       $("env-script-panel").classList.remove("hidden");
       $("env-script").focus();
+      $("env-script").setSelectionRange(0, 0);
+      $("env-script").scrollTop = 0;
       $("env-script-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
     } catch (e) {
       toast(e.message, true);
@@ -2944,7 +3384,8 @@
   // Environments leads the bar and is what a bare visit opens: the machine list
   // used to be reachable by simply arriving, and a deep link to it must not
   // stop existing because the default moved.
-  const HASH_TABS = { "#repos": "repos", "#environments": "environments", "#machines": "machines" };
+  const HASH_TABS = { "#repos": "repos", "#environments": "environments", "#machines": "machines",
+    "#secrets": "secrets", "#network": "network" };
   // ENVIRONMENTS IS THE LANDING TAB. An environment is the thing a person
   // decides — the repos, secrets, egress and disk a machine will get — and a
   // machine is what they get afterwards; opening on the composition rather than
@@ -2961,6 +3402,9 @@
       $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
       $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
       $("tab-repos").classList.toggle("hidden", btn.dataset.tab !== "repos");
+      // The browser tab said "my machines" on every tab, including the one that
+      // now opens by default. The bar already names each view; reuse it.
+      document.title = "sparkbox — " + btn.textContent.trim().toLowerCase();
     }));
   const initialTabButton = document.querySelector('.tab[data-tab="' + initialTab + '"]');
   if (initialTabButton) initialTabButton.click();

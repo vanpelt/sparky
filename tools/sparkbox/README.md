@@ -218,8 +218,9 @@ not, so a forgotten tab cannot pin a sandbox warm forever.
 The guest login banner lists every attached repository with its checkout path,
 current branch, and compact ahead/behind/dirty markers. `sparkbox status` shows
 the same resource and lifecycle snapshot used by the xterm `/vitals` strip,
-plus the gateway's latest repository map (`--json` is the stable agent-facing
-form); `sparkbox repos` inspects the filesystem immediately, and
+plus the host's latest repository map and cached HiveMind session catalog
+(`--json` is the stable agent-facing form); `sparkbox repos` inspects the
+filesystem immediately, and
 `sparkbox repos sync` is the only post-boot command that may safely fast-forward
 a clean checkout. A fetch-only guest timer refreshes the gateway's advisory repo
 state every five minutes, including unpushed commits and divergence, so consoles
@@ -770,8 +771,8 @@ snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
-(a lean Ubuntu 24.04 + Go/Python·uv/Node + headless Chrome and the agent-browser
-CLI, ~4GB — replacing the
+(a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome
+and the agent-browser CLI, ~4GB — replacing the
 ~30GB `codex-universal`). It logs in as a non-root **`sparky`** user, declared by
 the image's `sparkbox.login-user` label and honored end-to-end (build-rootfs bakes
 the gateway key into `/home/sparky`, the release manifest carries

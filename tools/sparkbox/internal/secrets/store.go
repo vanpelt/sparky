@@ -70,6 +70,11 @@ var (
 	// gated — recovery is users re-entering values. The "not enabled" wording
 	// maps to 501 via the console's statusFor convention.
 	ErrNotEnabled = errors.New("secrets are not enabled (encryption key does not match stored data)")
+	// ErrSecretNameInUse is returned by RenameSecret when the owner already
+	// holds a secret under the new name. Renaming onto it would have to either
+	// destroy that value or merge two rows, and neither is something a rename
+	// should decide on its own.
+	ErrSecretNameInUse = errors.New("a secret with that name already exists")
 )
 
 // envNameRe bounds env names to the portable shell-identifier form.
@@ -616,6 +621,77 @@ func (s *Store) RetagSecret(owner, envName string, tags []string) error {
 		if _, err := tx.Exec(`INSERT INTO secret_tags (secret_id, tag) VALUES (?, ?)`, id, tag); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+// RenameSecret changes the env name of an existing secret, keeping its value,
+// its tags, its version and its row id, or returns ErrNoSuchSecret.
+//
+// It has to touch the ciphertext even though the value does not change: the
+// AAD binds every blob to (owner, env name, id), which is exactly what stops a
+// row being re-homed under another name by editing the database. So a rename
+// is an unseal under the old name followed by a seal under the new one — the
+// same move Resealer makes for an owner rename, and the reason a rename cannot
+// be done without the key.
+//
+// The version is deliberately NOT bumped, for RetagSecret's reason: version
+// counts changes to the secret MATERIAL, and this is the same value under a
+// different name. Callers re-push the affected sandboxes.
+func (s *Store) RenameSecret(owner, oldName, newName string) error {
+	if owner == "" {
+		return fmt.Errorf("secret needs an owner")
+	}
+	// The value rules do not apply to a rename (nothing is being written), but
+	// the NAME rules do, and they are the same ones PutSecret would enforce.
+	if err := checkEnvRow("secret", newName, ""); err != nil {
+		return err
+	}
+	if oldName == newName {
+		return nil
+	}
+	now := time.Now().UTC()
+
+	// No s.disabled gate: unlike the delivery paths this is a write, and a
+	// store whose key does not match answers through the unseal below with
+	// ErrUndecryptable — which says the specific thing that went wrong.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var id string
+	var blob []byte
+	if err := tx.QueryRow(`SELECT id, ciphertext FROM secrets WHERE owner = ? AND env_name = ?`,
+		owner, oldName).Scan(&id, &blob); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNoSuchSecret
+		}
+		return err
+	}
+	var taken string
+	switch err := tx.QueryRow(`SELECT id FROM secrets WHERE owner = ? AND env_name = ?`,
+		owner, newName).Scan(&taken); {
+	case err == nil:
+		return ErrSecretNameInUse
+	case err != sql.ErrNoRows:
+		return err
+	}
+
+	plaintext, err := unseal(s.aead, aadFor(owner, oldName, id), blob)
+	if err != nil {
+		return err
+	}
+	ciphertext, err := seal(s.aead, aadFor(owner, newName, id), plaintext)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE secrets SET env_name = ?, ciphertext = ?, key_id = ?, updated_at = ? WHERE id = ?`,
+		newName, ciphertext, keyID, now, id); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

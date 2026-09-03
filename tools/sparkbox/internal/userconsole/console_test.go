@@ -1633,3 +1633,116 @@ func TestSnapshotListSurvivesABindingStoreError(t *testing.T) {
 		t.Fatalf("rows = %v (err %v), want the snapshot listed", plain, err)
 	}
 }
+
+// A secret's value is write-only: nothing can read it back to re-send it. So
+// "also give this token the tag web" has to be expressible without a value, and
+// the old request shape made "" the only way to say it — which would have
+// overwritten the secret with nothing. An absent value now means "leave it".
+func TestPutSecretWithoutAValueMovesOnlyTheTags(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	if err := tc.secrets.PutSecret("alice", "API_KEY", "keep-me", []string{"prod"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := tc.secrets.SetTags("webby", "alice", []string{"web"}); err != nil {
+		t.Fatalf("tag machine: %v", err)
+	}
+
+	rec := tc.do(t, "PUT", "/api/secrets/API_KEY", "alice", map[string]any{"tags": []string{"prod", "web"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tags-only put: status %d (%s)", rec.Code, rec.Body)
+	}
+
+	// The value survived, and it is now delivered to the machine the new tag
+	// reaches — which is the whole point of the request.
+	env, err := tc.secrets.EnvForSandbox("webby", "alice")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if env["API_KEY"] != "keep-me" {
+		t.Fatalf("value after a tags-only put = %q, want the stored one", env["API_KEY"])
+	}
+}
+
+// An explicitly empty value is still a value — a caller that sends "" means to
+// blank the secret, and that must not be confused with omitting the field.
+func TestPutSecretWithAnEmptyValueStillWrites(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	if err := tc.secrets.PutSecret("alice", "API_KEY", "old", []string{"web"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := tc.secrets.SetTags("webby", "alice", []string{"web"}); err != nil {
+		t.Fatalf("tag machine: %v", err)
+	}
+
+	if rec := tc.do(t, "PUT", "/api/secrets/API_KEY", "alice",
+		map[string]any{"value": "", "tags": []string{"web"}}); rec.Code != http.StatusOK {
+		t.Fatalf("empty-value put: status %d (%s)", rec.Code, rec.Body)
+	}
+	env, err := tc.secrets.EnvForSandbox("webby", "alice")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if env["API_KEY"] != "" {
+		t.Fatalf("value = %q, want the empty string the caller asked for", env["API_KEY"])
+	}
+}
+
+// Renaming is a move, and it goes through the store's unseal/re-seal because
+// the AAD binds each blob to its name. Over the API it is one PUT.
+func TestPutSecretRenames(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	if err := tc.secrets.PutSecret("alice", "GH_TOKEN", "ghp_x", []string{"web"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := tc.secrets.SetTags("webby", "alice", []string{"web"}); err != nil {
+		t.Fatalf("tag machine: %v", err)
+	}
+
+	rec := tc.do(t, "PUT", "/api/secrets/GH_TOKEN", "alice",
+		map[string]any{"rename_to": "GITHUB_TOKEN", "tags": []string{"web"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename: status %d (%s)", rec.Code, rec.Body)
+	}
+	env, err := tc.secrets.EnvForSandbox("webby", "alice")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if env["GITHUB_TOKEN"] != "ghp_x" {
+		t.Fatalf("renamed value = %q, want the stored one", env["GITHUB_TOKEN"])
+	}
+	if _, ok := env["GH_TOKEN"]; ok {
+		t.Fatal("the old name is still delivered after a rename")
+	}
+}
+
+// A rename onto a name the owner already holds is refused, and — because the
+// rename runs BEFORE the tag write — nothing else in the request moves either.
+func TestPutSecretRenameConflictLeavesEverythingAlone(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	for name, val := range map[string]string{"GH_TOKEN": "ghp_a", "NPM_TOKEN": "npm_b"} {
+		if err := tc.secrets.PutSecret("alice", name, val, []string{"web"}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	rec := tc.do(t, "PUT", "/api/secrets/GH_TOKEN", "alice",
+		map[string]any{"rename_to": "NPM_TOKEN", "tags": []string{"other"}})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rename onto a held name: status %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+
+	metas, err := tc.secrets.ListSecrets("alice")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, m := range metas {
+		if len(m.Tags) != 1 || m.Tags[0] != "web" {
+			t.Fatalf("%s tags = %v, want the original [web] — the refused rename still wrote tags",
+				m.Name, m.Tags)
+		}
+	}
+}
