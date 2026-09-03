@@ -629,12 +629,12 @@
       "get": {
         "operationId": "share.get",
         "tags": ["sandboxes"],
-        "summary": "List a sandbox's web routes",
-        "description": "Every forwarded hostname pointing at this sandbox, with the port it forwards to and whether it is reachable without signing in.",
+        "summary": "List a sandbox's addressable ports",
+        "description": "Every port this sandbox can be reached on, and who may reach it. A forwarded hostname contributes its own port (`default: true`, served at the portless URL) plus an entry for every other port configured under the same hostname, which the edge serves as `https://<subdomain>.<domain>:<port>`.",
         "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
         "responses": {
           "200": {
-            "description": "The routes.",
+            "description": "The ports.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Visibility" },
@@ -645,7 +645,15 @@
                       "sandbox": "demo",
                       "port": 8000,
                       "visibility": "private",
-                      "url": "https://demo.example.com"
+                      "url": "https://demo.example.com",
+                      "default": true
+                    },
+                    {
+                      "subdomain": "demo",
+                      "sandbox": "demo",
+                      "port": 5173,
+                      "visibility": "public",
+                      "url": "https://demo.example.com:5173"
                     }
                   ]
                 }
@@ -660,8 +668,8 @@
       "put": {
         "operationId": "share.set",
         "tags": ["sandboxes"],
-        "summary": "Make a sandbox public or private",
-        "description": "Flips **every** route of the sandbox together, matching `ssh ctl@example.com share`. `private` requires a signed-in owner (or operator); `public` serves anyone.",
+        "summary": "Open or close a sandbox's ports",
+        "description": "Visibility is settled per port. With `port`, this changes that one port of the sandbox's default hostname; `visibility` may also be `forget`, which drops the port from the listing without ever exposing it.\n\nWithout `port` it acts on the sandbox as a whole, and is deliberately asymmetric — matching `ssh ctl@example.com share`: `private` closes **every** port, because a panic button has to mean it, while `public` opens only the **default** port, so no single call can publish whatever happened to be listening when it ran.\n\n`private` requires a signed-in owner (or operator); `public` serves anyone.",
         "parameters": [
           { "$ref": "#/components/parameters/SandboxName" },
           { "$ref": "#/components/parameters/IdempotencyKey" }
@@ -671,7 +679,7 @@
           "content": {
             "application/json": {
               "schema": { "$ref": "#/components/schemas/VisibilityRequest" },
-              "example": { "visibility": "public" }
+              "example": { "visibility": "public", "port": 5173 }
             }
           }
         },
@@ -2316,22 +2324,31 @@
       },
       "Route": {
         "type": "object",
-        "description": "One forwarded hostname.",
+        "description": "One addressable port of a sandbox.",
         "required": ["subdomain", "sandbox", "port", "visibility"],
         "properties": {
           "subdomain": { "type": "string", "example": "demo" },
           "sandbox": { "type": "string", "example": "demo" },
           "port": {
             "type": "integer",
-            "description": "The guest port this hostname forwards to.",
+            "description": "The guest port this entry addresses.",
             "example": 8000
           },
           "visibility": {
             "type": "string",
             "enum": ["public", "private"],
-            "description": "`private` requires a signed-in owner or operator."
+            "description": "`private` requires a signed-in owner or operator. It applies to THIS port alone."
           },
-          "url": { "type": "string", "format": "uri", "example": "https://demo.example.com" }
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "The default port's URL is portless; every other port is the same hostname with the port on it.",
+            "example": "https://demo.example.com"
+          },
+          "default": {
+            "type": "boolean",
+            "description": "True for the hostname's own port — the one its portless URL forwards to, and the one a `public` with no `port` opens."
+          }
         }
       },
       "Visibility": {
@@ -2344,7 +2361,7 @@
           },
           "changed": {
             "type": "integer",
-            "description": "How many routes this call flipped. Absent on a read."
+            "description": "How many ports this call changed the answer for. Absent on a read."
           }
         }
       },
@@ -2354,7 +2371,15 @@
         "properties": {
           "visibility": {
             "type": "string",
-            "enum": ["public", "private"]
+            "enum": ["public", "private", "forget"],
+            "description": "`forget` is only valid with `port`: it drops the port from the listing, leaving it private like every port nobody has mentioned."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "One guest port of the sandbox's default hostname. Omit to act on the sandbox as a whole — see the operation description for why that is asymmetric.",
+            "example": 5173
           }
         }
       },

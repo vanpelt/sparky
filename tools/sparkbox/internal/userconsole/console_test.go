@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -507,10 +508,12 @@ func TestPortChangePreservesVisibility(t *testing.T) {
 	if err := json.Unmarshal(tc.do(t, "GET", "/api/machines", "alice", nil).Body.Bytes(), &views); err != nil {
 		t.Fatal(err)
 	}
-	if len(views) != 1 || len(views[0].Routes) != 1 {
+	// The strip also carries whatever the box is listening on, which is not
+	// this test's business — but the default port is always its first entry.
+	if len(views) != 1 || len(views[0].Routes) == 0 {
 		t.Fatalf("unexpected machine list: %+v", views)
 	}
-	if r := views[0].Routes[0]; r.Port != 9090 || r.Visibility != "public" {
+	if r := views[0].Routes[0]; r.Port != 9090 || r.Visibility != "public" || !r.Default {
 		t.Fatalf("unexpected route view: %+v", r)
 	}
 
@@ -579,8 +582,81 @@ func TestMachineListShowsTagsStatsAndState(t *testing.T) {
 	if v.CPUSeconds == nil {
 		t.Fatal("running sandbox should report cpu_seconds")
 	}
-	if len(v.Routes) != 1 || v.Routes[0].Visibility != routes.VisibilityPrivate {
-		t.Fatalf("expected one private default route, got %+v", v.Routes)
+	// The default port heads the strip and is private until somebody says
+	// otherwise. Anything after it is whatever the box is listening on, which
+	// depends on the machine running the test.
+	if len(v.Routes) == 0 || !v.Routes[0].Default || v.Routes[0].Visibility != routes.VisibilityPrivate {
+		t.Fatalf("expected a private default port first, got %+v", v.Routes)
+	}
+	for _, r := range v.Routes[1:] {
+		if r.Visibility != routes.VisibilityPrivate {
+			t.Errorf("a port nobody configured is %s, want private: %+v", r.Visibility, r)
+		}
+	}
+}
+
+// Visibility is per port: the console can open one without touching the rest,
+// a port can be listed before anything is on it, and forgetting it takes it
+// off the strip without ever having exposed it.
+func TestConsoleSettlesVisibilityPerPort(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+
+	// Add a port nothing is listening on, then open it.
+	for _, vis := range []string{"private", "public"} {
+		rec := tc.do(t, "POST", "/api/routes/webby/visibility", "alice",
+			map[string]any{"visibility": vis, "port": 5173})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("set :5173 %s: status %d (%s)", vis, rec.Code, rec.Body)
+		}
+	}
+	rt, _, err := tc.routes.GetBySubdomain("webby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Visibility != routes.VisibilityPrivate {
+		t.Fatalf("opening :5173 changed the default port to %q", rt.Visibility)
+	}
+	if got, err := tc.routes.VisibilityForPort(rt, 5173); err != nil || got != routes.VisibilityPublic {
+		t.Fatalf("VisibilityForPort(5173) = %q, %v", got, err)
+	}
+
+	var views []sandboxView
+	if err := json.Unmarshal(tc.do(t, "GET", "/api/machines", "alice", nil).Body.Bytes(), &views); err != nil {
+		t.Fatal(err)
+	}
+	var found *routeStatus
+	for i, r := range views[0].Routes {
+		if r.Port == 5173 {
+			found = &views[0].Routes[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf(":5173 is not on the strip: %+v", views[0].Routes)
+	}
+	if !found.Pinned || found.Default || found.Visibility != routes.VisibilityPublic {
+		t.Fatalf(":5173 = %+v", *found)
+	}
+
+	// Forgetting takes it off the strip; the default port cannot be forgotten,
+	// because its visibility is the route's and there is no row to drop.
+	if rec := tc.do(t, "DELETE", "/api/routes/webby/ports/5173", "alice", nil); rec.Code != http.StatusOK {
+		t.Fatalf("forget :5173: status %d (%s)", rec.Code, rec.Body)
+	}
+	if got, err := tc.routes.VisibilityForPort(rt, 5173); err != nil || got != routes.VisibilityPrivate {
+		t.Fatalf("VisibilityForPort(5173) after forget = %q, %v", got, err)
+	}
+	if rec := tc.do(t, "DELETE", "/api/routes/webby/ports/"+strconv.Itoa(rt.Port), "alice", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("forgetting the default port: status %d, want 400", rec.Code)
+	}
+	// Another owner may not touch any of it, and is told the same "no such
+	// route" as if it did not exist.
+	if rec := tc.do(t, "POST", "/api/routes/webby/visibility", "bob",
+		map[string]any{"visibility": "public", "port": 5173}); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner set: status %d, want 404", rec.Code)
+	}
+	if rec := tc.do(t, "DELETE", "/api/routes/webby/ports/5173", "bob", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner forget: status %d, want 404", rec.Code)
 	}
 }
 

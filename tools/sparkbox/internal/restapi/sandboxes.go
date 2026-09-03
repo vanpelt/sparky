@@ -51,7 +51,11 @@ type tagsRequest struct {
 }
 
 type visibilityRequest struct {
-	Visibility string `json:"visibility"` // "public" | "private"
+	Visibility string `json:"visibility"` // "public" | "private" | "forget" (port only)
+	// Port names ONE guest port of the sandbox's default hostname. Omitted (0)
+	// keeps the whole-sandbox meaning, which is asymmetric on purpose — see
+	// ctlops.SetVisibility.
+	Port int `json:"port,omitempty"`
 }
 
 type tagsResponse struct {
@@ -270,17 +274,30 @@ func (h *Handler) getVisibility(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, visibilityResponse{Routes: rs})
 }
 
-// setVisibility flips EVERY route of the sandbox together — the per-sandbox
-// granularity `ctl share` has always had, and the one that matches how people
-// think about "who can reach this VM". The user console's per-route endpoint is
-// a different operation and stays where it is.
+// setVisibility settles who can reach a sandbox's URLs.
+//
+// With a port, it is that one port of the default hostname. Without one it is
+// the sandbox as a whole, and asymmetric: "private" closes every port, "public"
+// opens only the default one. Both spellings are `ctl share`, and the reasoning
+// for the asymmetry lives with it in ctlops.SetVisibility. The user console's
+// per-route endpoint is a different operation and stays where it is.
 func (h *Handler) setVisibility(w http.ResponseWriter, r *http.Request) {
 	const op = "share.set"
 	var req visibilityRequest
 	if !h.decode(w, r, op, &req) {
 		return
 	}
-	res, err := h.ops.SetVisibility(r.Context(), caller(r), r.PathValue("name"), req.Visibility)
+	name := r.PathValue("name")
+	var res ctlops.VisibilityResult
+	var err error
+	switch {
+	case req.Port != 0 && req.Visibility == "forget":
+		res, err = h.ops.ForgetPort(r.Context(), caller(r), name, req.Port)
+	case req.Port != 0:
+		res, err = h.ops.SetPortVisibility(r.Context(), caller(r), name, req.Port, req.Visibility)
+	default:
+		res, err = h.ops.SetVisibility(r.Context(), caller(r), name, req.Visibility)
+	}
 	if err != nil {
 		h.fail(w, r, op, err)
 		return

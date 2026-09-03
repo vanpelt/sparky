@@ -140,10 +140,16 @@
   .m-stat .value { font-size: 13px; font-weight: 600; margin-top: 1px;
     font-variant-numeric: tabular-nums; }
   .m-stat .value small { font-weight: 500; color: hsl(var(--muted-foreground)); }
-  /* tags and web routes sit side by side; they stack on a narrow viewport */
+  /* Tags and ports sit side by side; they stack on a narrow viewport. The
+     minmax(0, …) is load bearing: a grid item defaults to min-width:auto, so
+     without it the port strip refuses to shrink below its widest content and
+     crushes the tags column instead of scrolling. Ports get the larger share
+     because a busy machine has more of them than it has tags. */
   .m-foot { border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 11px 22px; align-items: start; }
-  @media (max-width: 640px) { .m-foot { grid-template-columns: 1fr; } }
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
+    gap: 11px 22px; align-items: start; }
+  @media (max-width: 640px) { .m-foot { grid-template-columns: minmax(0, 1fr); } }
+  .m-sect { min-width: 0; }
   .m-sect .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
     color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
   /* the per-VM egress panel spans the full card width under the two-col foot */
@@ -238,8 +244,7 @@
   .badge.offline { color: hsl(var(--red)); border-color: hsl(var(--red) / .3); }
   .badge.offline .dot { background: hsl(var(--red)); }
 
-  /* route rows + chips */
-  .route-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  /* port chips */
   .route {
     display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -253,13 +258,54 @@
   .route.live .dot { background: hsl(var(--green)); box-shadow: 0 0 0 2px hsl(var(--green) / .16); }
   .route.dead .dot { background: hsl(var(--red) / .8); }
   .route.idle .dot { background: transparent; border: 1px solid hsl(var(--muted-foreground)); }
-  /* the visibility pill is a click-to-toggle button */
-  .vis { font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px;
+  /* the visibility pill is a click-to-toggle button, one per port */
+  .vis { font-size: 10.5px; font-weight: 500; padding: 2px 8px;
     border: 1px solid transparent; cursor: pointer; line-height: 1.35; }
   .vis.private { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
   .vis.private:hover:not(:disabled) { color: hsl(var(--foreground)); }
   .vis.public { background: hsl(var(--amber) / .14); color: hsl(var(--amber)); border-color: hsl(var(--amber) / .28); }
   .vis.public:hover:not(:disabled) { background: hsl(var(--amber) / .22); }
+
+  /* The port strip: every port this machine answers on, one line, default
+     first, scrolled sideways rather than wrapped — a machine running five dev
+     servers should not push the card below it off the screen.
+     "+ port" sits OUTSIDE the scroller so it stays reachable on a busy strip;
+     flex:0 1 auto keeps it tucked against a short one instead of stranded at
+     the far right. */
+  .ports-row { display: flex; align-items: flex-start; gap: 8px; }
+  .port-strip {
+    display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0;
+    overflow-x: auto; overflow-y: hidden; padding-bottom: 5px;
+    scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .port-strip::-webkit-scrollbar { height: 6px; }
+  .port-strip::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
+  .port-strip::-webkit-scrollbar-track { background: transparent; }
+  /* Link and pill are one object: the pill toggles the port the link opens, and
+     a gap between them would read as two unrelated controls. */
+  .pchip { display: inline-flex; align-items: stretch; flex: 0 0 auto; }
+  .pchip .route { border-radius: 6px 0 0 6px; border-right: none; padding-right: 6px; }
+  .pchip .vis {
+    border-radius: 0 6px 6px 0; border: 1px solid hsl(var(--border));
+    padding: 2px 7px; align-self: stretch;
+  }
+  .pchip .vis.public { border-color: hsl(var(--amber) / .28); }
+  /* Forgetting a port is cheap and reversible (it stays private either way), so
+     the control is quiet until the chip is pointed at or tabbed into. */
+  .pchip .forget {
+    display: none; align-items: center; padding: 0 5px; margin-left: 3px;
+    font-size: 12px; line-height: 1; cursor: pointer; border-radius: 6px;
+    border: 1px solid hsl(var(--border)); background: none; color: hsl(var(--muted-foreground));
+  }
+  .pchip:hover .forget, .pchip:focus-within .forget { display: inline-flex; }
+  .pchip .forget:hover { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); }
+  .port-add {
+    flex: 0 0 auto; margin-top: 1px;
+    font-size: 12px; line-height: 1; padding: 4px 8px; cursor: pointer;
+    border-radius: 6px; border: 1px dashed hsl(var(--border));
+    background: none; color: hsl(var(--muted-foreground));
+  }
+  .port-add:hover { color: hsl(var(--foreground)); border-color: hsl(var(--muted-foreground)); }
 
   .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .chip {
@@ -650,6 +696,18 @@
     </div>
   </dialog>
 
+  <!-- ADD A PORT TO THE STRIP -->
+  <dialog id="addport-dlg">
+    <h3>Add a port to <span id="addport-name" class="mono"></span></h3>
+    <p>Lists a guest port so you can open it before anything is listening on it.
+      It is added <strong>private</strong> — click its pill to make it public.</p>
+    <input id="addport-input" type="number" min="1" max="65535" class="mono" placeholder="5173" />
+    <div class="row">
+      <button class="btn-outline" id="addport-cancel" type="button">Cancel</button>
+      <button class="btn-primary" id="addport-go" type="button">Add port</button>
+    </div>
+  </dialog>
+
   <!-- TURBO -->
   <dialog id="turbo-dlg">
     <h3 id="turbo-title">Turn on turbo</h3>
@@ -1021,7 +1079,7 @@
   function editing() {
     const ae = document.activeElement;
     if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open ||
-        $("turbo-dlg").open) return true;
+        $("addport-dlg").open || $("turbo-dlg").open) return true;
     // an open ··· overflow menu counts as mid-interaction: the 4s repaint would
     // otherwise rebuild the card and snap the menu shut under the cursor.
     if (document.querySelector("#machine-list .menu-pop:not(.hidden)")) return true;
@@ -1160,34 +1218,69 @@
       "</div>";
   }
 
+  // routePanel draws the port strip: one chip per port this machine answers on,
+  // on a single sideways-scrolling line with the default port pinned to the
+  // front. Visibility is per port, so every chip carries its own toggle — the
+  // default port being public says nothing about :5173 beside it.
+  //
+  // The chips come from the server already ordered and already merged from its
+  // three sources (route rows, ports the owner configured, ports its scan found
+  // listening); the page's job is to draw them, not to decide what is on it.
   function routePanel(b) {
     const rs = b.routes || [];
     const running = b.state === "running";
-    let html = rs.map((r) => {
+    const host = (r) => esc(r.subdomain) + "." + esc(domain());
+    // Ports of the machine's own hostname are named by port alone; a port under
+    // some OTHER hostname pointed at the same machine has to say which, or
+    // notebook:8888 and the machine's own :8888 are the same chip twice.
+    const home = (rs.find((r) => r.default) || rs[0]).subdomain;
+    const chips = rs.map((r) => {
       const cls = running ? (r.listening ? "live" : "dead") : "idle";
+      const what = r.service ? r.service + " on :" + (r.port | 0) : "port " + (r.port | 0);
       const title = running
-        ? (r.listening ? "listening" : "nothing listening on port " + r.port)
+        ? (r.listening ? what + " — listening" : "nothing listening on port " + (r.port | 0))
         : "paused — a request will wake it";
-      const href = location.protocol + "//" + esc(r.subdomain) + "." + esc(domain()) + portSuffix();
+      // A route's own port is the portless URL; every other port is the same
+      // hostname with the port on it, which is how the edge addresses them.
+      const href = location.protocol + "//" + host(r) +
+        (r.default ? portSuffix() : ":" + (r.port | 0));
+      // The default chip names the machine and the rest name only their port —
+      // repeating the hostname across the strip would crowd out the ports —
+      // except a port on a different hostname, which has nothing else to go on.
+      const label = (r.default || r.subdomain !== home ? esc(r.subdomain) + " " : "") +
+        '<span class="port">:' + (r.port | 0) + "</span>";
       const vis = r.visibility === "public" ? "public" : "private";
       const flip = vis === "public" ? "private" : "public";
-      // The visibility pill IS the toggle — click it to flip public/private;
-      // data-vis carries the target state the existing handler posts.
-      return '<div class="route-row">' +
+      // The visibility pill IS the toggle — click it to flip this ONE port;
+      // data-vis carries the target state, data-port the port it applies to.
+      const forget = r.pinned
+        ? '<button class="forget" data-forget="' + esc(r.subdomain) + '" data-port="' + (r.port | 0) +
+          '" title="Stop listing port ' + (r.port | 0) + ' — it stays private" aria-label="Forget port ' +
+          (r.port | 0) + '">&times;</button>'
+        : "";
+      return '<span class="pchip">' +
         '<a class="route ' + cls + '" target="_blank" rel="noopener" href="' + href +
-        '" title="' + esc(title) + '"><span class="dot"></span>' + esc(r.subdomain) +
-        ' <span class="port">:' + (r.port | 0) + "</span></a>" +
+        '" title="' + esc(title) + '"><span class="dot"></span>' + label + "</a>" +
         '<button class="vis ' + vis + '" data-vis="' + flip + '" data-sub="' + esc(r.subdomain) +
-        '" title="' + (flip === "public"
-          ? "Click to make public — anyone on the internet can reach this route"
-          : "Click to make private — only signed-in visitors can reach this route") +
-        '">' + vis + "</button>" +
-        "</div>";
+        '" data-port="' + (r.port | 0) + '" title="' + (flip === "public"
+          ? "Click to make port " + (r.port | 0) + " public — anyone on the internet can reach it"
+          : "Click to make port " + (r.port | 0) + " private — only signed-in visitors can reach it") +
+        '">' + vis + "</button>" + forget +
+        "</span>";
     }).join("");
-    if (!rs.length) html = '<span class="muted" style="font-size:12px">no web routes</span>';
-    // The default port (guest port the machine's <name> route forwards to) is
-    // edited from the ··· actions menu, which opens the port dialog.
-    return html;
+    if (!rs.length) {
+      return '<span class="muted" style="font-size:12px">no web routes</span>';
+    }
+    // A port is added under the machine's default hostname, which is what the
+    // edge serves every any-port URL from.
+    const def = rs.find((r) => r.default) || rs[0];
+    const add = b.state === "archived" ? "" :
+      '<button class="port-add" data-addport="' + esc(def.subdomain) +
+      '" data-host="' + host(def) +
+      '" title="Add a port to this list so you can open it before anything is listening">+ port</button>';
+    // data-strip is what lets the repaint put the sideways scroll back.
+    return '<div class="ports-row"><div class="port-strip" data-strip="' + esc(b.name) + '">' +
+      chips + "</div>" + add + "</div>";
   }
 
   function machineCard(b) {
@@ -1340,7 +1433,7 @@
       '<div class="m-foot">' +
         '<div class="m-sect"><div class="label">Tags <span style="text-transform:none;letter-spacing:0">' +
           "— secrets and network rules with a matching tag apply to this machine</span></div>" + tagChips(b) + "</div>" +
-        '<div class="m-sect"><div class="label">Web routes</div>' + routePanel(b) + "</div>" +
+        '<div class="m-sect"><div class="label">Ports</div>' + routePanel(b) + "</div>" +
         netSection(b) +
       "</div>" +
     "</div>";
@@ -1375,7 +1468,17 @@
     const cards = list.map(machineCard);
     if (editing()) return;
     const wrap = $("machine-list");
+    // The port strip scrolls sideways, and innerHTML below throws that away.
+    // Somebody who scrolled out to :16686 would watch it snap back every four
+    // seconds, so carry each strip's position across the repaint by machine.
+    const scrolled = {};
+    wrap.querySelectorAll(".port-strip[data-strip]").forEach((s) => {
+      if (s.scrollLeft) scrolled[s.dataset.strip] = s.scrollLeft;
+    });
     wrap.innerHTML = cards.join("");
+    wrap.querySelectorAll(".port-strip[data-strip]").forEach((s) => {
+      if (scrolled[s.dataset.strip]) s.scrollLeft = scrolled[s.dataset.strip];
+    });
     $("machines-empty").classList.toggle("hidden", list.length > 0);
 
     wrap.querySelectorAll("button[data-act]").forEach((btn) =>
@@ -1405,12 +1508,25 @@
         setTags(b.name, (b.tags || []).concat(tag), inp);
       }));
     wrap.querySelectorAll("button[data-vis]").forEach((btn) =>
-      btn.addEventListener("click", () =>
-        mutate("vis:" + btn.dataset.sub, btn, async () => {
+      btn.addEventListener("click", () => {
+        const port = Number(btn.dataset.port) || 0;
+        mutate("vis:" + btn.dataset.sub + ":" + port, btn, async () => {
           await api("/api/routes/" + encodeURIComponent(btn.dataset.sub) + "/visibility",
-            { method: "POST", body: { visibility: btn.dataset.vis } });
-          toast(btn.dataset.sub + " is now " + btn.dataset.vis);
-        })));
+            { method: "POST", body: { visibility: btn.dataset.vis, port: port } });
+          toast(btn.dataset.sub + ":" + port + " is now " + btn.dataset.vis);
+        });
+      }));
+    wrap.querySelectorAll("button[data-forget]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const port = Number(btn.dataset.port) || 0;
+        mutate("forget:" + btn.dataset.forget + ":" + port, btn, async () => {
+          await api("/api/routes/" + encodeURIComponent(btn.dataset.forget) +
+            "/ports/" + port, { method: "DELETE" });
+          toast("port " + port + " is no longer listed");
+        });
+      }));
+    wrap.querySelectorAll("button[data-addport]").forEach((btn) =>
+      btn.addEventListener("click", () => openAddPort(btn.dataset.addport, btn.dataset.host)));
     wrap.querySelectorAll("button[data-portdlg]").forEach((btn) =>
       btn.addEventListener("click", () => openPort(btn.dataset.portdlg, btn.dataset.port)));
     wrap.querySelectorAll("button[data-delbox]").forEach((btn) =>
@@ -1566,6 +1682,44 @@
         { method: "POST", body: { port: port } });
       dlg.close();
       toast(name + " now forwards port " + port);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- add-a-port dialog ----
+
+  // Adding a port only LISTS it: the row goes in private, so this dialog can
+  // never be the thing that exposes something. Opening it is a second,
+  // deliberate click on the chip's pill.
+  function openAddPort(sub, host) {
+    $("addport-name").textContent = host;
+    $("addport-input").value = "";
+    const dlg = $("addport-dlg");
+    dlg._sub = sub;
+    dlg.showModal();
+    $("addport-input").focus();
+  }
+
+  $("addport-cancel").addEventListener("click", () => $("addport-dlg").close());
+  $("addport-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("addport-go").click(); }
+  });
+  $("addport-go").addEventListener("click", async () => {
+    const dlg = $("addport-dlg");
+    const sub = dlg._sub;
+    const port = parseInt($("addport-input").value, 10);
+    if (!port || port < 1 || port > 65535) return toast("port must be 1–65535", true);
+    const btn = $("addport-go");
+    btn.disabled = true;
+    try {
+      await api("/api/routes/" + encodeURIComponent(sub) + "/visibility",
+        { method: "POST", body: { visibility: "private", port: port } });
+      dlg.close();
+      toast("port " + port + " added — click its pill to make it public");
       await refresh();
     } catch (e) {
       toast(e.message, true);

@@ -24,6 +24,9 @@ func (f *Fleet) SelfVisibility(_ context.Context, node string, req nodelink.Self
 	if !routes.ValidVisibility(req.Visibility) {
 		return nodelink.SelfVisibilityResp{}, ctlops.Invalid(nodelink.OpLink, "bad_visibility", "visibility must be public or private")
 	}
+	if req.Port < 0 || req.Port > 65535 {
+		return nodelink.SelfVisibilityResp{}, ctlops.Invalid(nodelink.OpLink, "bad_port", "port must be from 1 through 65535")
+	}
 	rows, err := f.sides.routes.ListBySandbox(box.Name)
 	if err != nil {
 		return nodelink.SelfVisibilityResp{}, ctlops.Fail(nodelink.OpLink, err)
@@ -31,16 +34,59 @@ func (f *Fleet) SelfVisibility(_ context.Context, node string, req nodelink.Self
 	if len(rows) == 0 {
 		return nodelink.SelfVisibilityResp{}, ctlops.Fail(nodelink.OpLink, routes.ErrNoSuchRoute)
 	}
+	// Every row is owner-checked before anything is written, port-scoped call
+	// or not: the guest names no subdomain, so this layer is what stands
+	// between a sandbox and a route somebody else's box left pointing at it.
 	for _, row := range rows {
 		if row.Owner != box.Owner {
 			return nodelink.SelfVisibilityResp{}, ctlops.Denied(nodelink.OpLink, "route_owner_mismatch", "a route for this sandbox belongs to another owner")
 		}
-		if err := f.sides.routes.SetVisibility(row.Subdomain, req.Visibility); err != nil {
+	}
+
+	// One named port of this sandbox's own hostname.
+	if req.Port > 0 {
+		sub := defaultSubdomain(box.Name, rows)
+		if err := f.sides.routes.SetPortVisibility(sub, req.Port, req.Visibility); err != nil {
 			return nodelink.SelfVisibilityResp{}, ctlops.Fail(nodelink.OpLink, err)
 		}
+		f.log.Info("sandbox changed its own port visibility",
+			"sandbox", box.Name, "owner", box.Owner, "subdomain", sub, "port", req.Port, "visibility", req.Visibility)
+		return nodelink.SelfVisibilityResp{Sandbox: box.Name, Visibility: req.Visibility, Port: req.Port, Routes: 1}, nil
 	}
-	f.log.Info("sandbox changed its own route visibility", "sandbox", box.Name, "owner", box.Owner, "visibility", req.Visibility, "routes", len(rows))
-	return nodelink.SelfVisibilityResp{Sandbox: box.Name, Visibility: req.Visibility, Routes: len(rows)}, nil
+
+	// No port: private closes everything, public opens only the default port.
+	// The asymmetry is ctlops.SetVisibility's and is argued there; it is
+	// restated here rather than delegated because this path authorizes from a
+	// placement ledger, not from a caller's handle.
+	changed := 0
+	if req.Visibility == routes.VisibilityPrivate {
+		for _, row := range rows {
+			n, err := f.sides.routes.PrivatizeAll(row.Subdomain)
+			if err != nil {
+				return nodelink.SelfVisibilityResp{}, ctlops.Fail(nodelink.OpLink, err)
+			}
+			changed += n
+		}
+	} else {
+		if err := f.sides.routes.SetVisibility(defaultSubdomain(box.Name, rows), req.Visibility); err != nil {
+			return nodelink.SelfVisibilityResp{}, ctlops.Fail(nodelink.OpLink, err)
+		}
+		changed = 1
+	}
+	f.log.Info("sandbox changed its own route visibility", "sandbox", box.Name, "owner", box.Owner, "visibility", req.Visibility, "ports", changed)
+	return nodelink.SelfVisibilityResp{Sandbox: box.Name, Visibility: req.Visibility, Routes: changed}, nil
+}
+
+// defaultSubdomain is the hostname a guest means when it says nothing: the
+// route named after the sandbox, which is the one every sandbox is created
+// with. rows is never empty here, so the fallback is a row rather than "".
+func defaultSubdomain(name string, rows []routes.Route) string {
+	for _, row := range rows {
+		if row.Subdomain == name {
+			return row.Subdomain
+		}
+	}
+	return rows[0].Subdomain
 }
 
 func (f *Fleet) SelfPort(_ context.Context, node string, req nodelink.SelfPortReq) (nodelink.SelfPortResp, error) {

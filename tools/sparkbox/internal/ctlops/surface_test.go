@@ -155,7 +155,11 @@ func TestEmailReadWriteClear(t *testing.T) {
 	}
 }
 
-func TestVisibilityFlipsEveryRouteTogether(t *testing.T) {
+// Visibility is per port, and the no-port flip is deliberately asymmetric:
+// `public` opens only the default port, `private` closes everything. This is
+// the whole rule in one test, because the asymmetry is the part that will look
+// like a bug to somebody reading it later.
+func TestVisibilityIsPerPortAndPublicOpensOnlyTheDefault(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	r.routes.rs["alicebox"] = append(r.routes.rs["alicebox"], routes.Route{
@@ -167,6 +171,11 @@ func TestVisibilityFlipsEveryRouteTogether(t *testing.T) {
 	if err != nil || len(before) != 2 {
 		t.Fatalf("Visibility = %v, %v", before, err)
 	}
+	// The sandbox's own hostname sorts first however the store answered, and
+	// its entry is the default port: the portless URL.
+	if before[0].Subdomain != "alicebox" || !before[0].Default {
+		t.Errorf("first entry = %+v, want alicebox's default port", before[0])
+	}
 	if before[0].URL != "https://alicebox.example.test" {
 		t.Errorf("route URL = %q", before[0].URL)
 	}
@@ -175,16 +184,71 @@ func TestVisibilityFlipsEveryRouteTogether(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetVisibility: %v", err)
 	}
-	if got.Changed != 2 {
-		t.Errorf("changed = %d, want both routes of the sandbox", got.Changed)
-	}
-	for _, ri := range got.Routes {
-		if ri.Visibility != routes.VisibilityPublic {
-			t.Errorf("route %s stayed %s", ri.Subdomain, ri.Visibility)
-		}
+	if got.Changed != 1 {
+		t.Errorf("changed = %d, want only the default port", got.Changed)
 	}
 	if got.Routes == nil {
 		t.Error("Routes must never be nil")
+	}
+	for _, ri := range got.Routes {
+		want := routes.VisibilityPrivate
+		if ri.Subdomain == "alicebox" {
+			want = routes.VisibilityPublic
+		}
+		if ri.Visibility != want {
+			t.Errorf("%s:%d is %s, want %s", ri.Subdomain, ri.Port, ri.Visibility, want)
+		}
+	}
+
+	// One named port of the default hostname, and nothing else moves.
+	if _, err := r.ops.SetPortVisibility(ctx, alice(), "alicebox", 5173, routes.VisibilityPublic); err != nil {
+		t.Fatalf("SetPortVisibility: %v", err)
+	}
+	after, err := r.ops.Visibility(ctx, alice(), "alicebox")
+	if err != nil || len(after) != 3 {
+		t.Fatalf("Visibility = %v, %v; want the new port listed", after, err)
+	}
+	var found bool
+	for _, ri := range after {
+		if ri.Subdomain == "alicebox" && ri.Port == 5173 {
+			found = true
+			if ri.Visibility != routes.VisibilityPublic || ri.Default {
+				t.Errorf(":5173 = %+v", ri)
+			}
+			if ri.URL != "https://alicebox.example.test:5173" {
+				t.Errorf(":5173 URL = %q, want the any-port URL", ri.URL)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("port 5173 is not listed: %+v", after)
+	}
+
+	// The panic button: no port, and every port of every route closes.
+	closed, err := r.ops.SetVisibility(ctx, alice(), "alicebox", routes.VisibilityPrivate)
+	if err != nil {
+		t.Fatalf("SetVisibility private: %v", err)
+	}
+	if closed.Changed < 3 {
+		t.Errorf("changed = %d, want every port of both routes", closed.Changed)
+	}
+	for _, ri := range closed.Routes {
+		if ri.Visibility != routes.VisibilityPrivate {
+			t.Errorf("%s:%d stayed %s", ri.Subdomain, ri.Port, ri.Visibility)
+		}
+	}
+
+	// Forgetting takes the port off the listing without exposing anything.
+	if _, err := r.ops.ForgetPort(ctx, alice(), "alicebox", 5173); err != nil {
+		t.Fatalf("ForgetPort: %v", err)
+	}
+	gone, err := r.ops.Visibility(ctx, alice(), "alicebox")
+	if err != nil || len(gone) != 2 {
+		t.Fatalf("Visibility = %v, %v; want :5173 gone", gone, err)
+	}
+	// The default port has no row to forget — it is the route's.
+	if _, err := r.ops.ForgetPort(ctx, alice(), "alicebox", before[0].Port); err == nil {
+		t.Error("forgetting the default port should be refused")
 	}
 }
 
