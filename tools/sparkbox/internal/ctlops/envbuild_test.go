@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +48,12 @@ type fakeRepoFiles struct {
 	// asked records every (slug, ref, path) in order, so a test can prove the
 	// walk stopped at the first hit rather than reading every attachment.
 	asked []string
+	// mu, because drift detection reads several environments' repositories at
+	// once (annotateScriptDrift). The real stores are already safe under that —
+	// ghapp guards its caches and repos.Store goes through database/sql — and
+	// this fake has to be too, or the race detector reports the harness instead
+	// of the code.
+	mu sync.Mutex
 }
 
 func repoFileKey(owner, name, ref, path string) string {
@@ -55,6 +62,8 @@ func repoFileKey(owner, name, ref, path string) string {
 
 func (f *fakeRepoFiles) ReadFile(_ context.Context, _ ghapp.Installation, owner, name, ref, path string) ([]byte, error) {
 	k := repoFileKey(owner, name, ref, path)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.c.add("files.ReadFile %s", k)
 	f.asked = append(f.asked, k)
 	if err, ok := f.errs[k]; ok {
@@ -714,9 +723,14 @@ func TestBuildRefusesWithoutANudgeChannel(t *testing.T) {
 // Resolving the script
 // ---------------------------------------------------------------------------
 
-// TestBuildPrefersTheStoredScript is the rule that keeps a hand-fixed script
+// TestBuildKeepsAScriptSomebodyTyped is the rule that keeps a hand-fixed script
 // from being silently overwritten by the repository on the next rebuild.
-func TestBuildPrefersTheStoredScript(t *testing.T) {
+//
+// The repository IS read — that is how drift is noticed at all, and it is what
+// lets a card say the two disagree — but a row that was not seeded from a
+// repository is never replaced by one. The seed is the whole test: this row has
+// none, so nothing here authorises a write.
+func TestBuildKeepsAScriptSomebodyTyped(t *testing.T) {
 	b := newBuildRig(t)
 	b.env("alice", "web", withScript("#!/bin/sh\necho the one somebody typed\n"))
 	b.attach("alice", "wandb/hivemind", "main", "web")
@@ -726,12 +740,122 @@ func TestBuildPrefersTheStoredScript(t *testing.T) {
 	if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
 		t.Fatalf("BuildEnvironment: %v", err)
 	}
-	if len(b.files.asked) != 0 {
-		t.Errorf("the repository was read even though the row had a script: %v", b.files.asked)
-	}
 	row := b.row(t, "alice", "web")
 	if !strings.Contains(row.SetupScript, "somebody typed") || row.SetupFrom != envs.SetupFromManual {
 		t.Errorf("script/origin = %q/%q, want the stored pair untouched", row.SetupScript, row.SetupFrom)
+	}
+	if row.SetupSeedSHA != "" {
+		t.Errorf("seed = %q, want empty — a typed script was never seeded from a repository", row.SetupSeedSHA)
+	}
+	if b.calls.has("envs.SetSeededScript alice/web") {
+		t.Errorf("a typed script was re-seeded from a repository: %v", b.calls.all())
+	}
+}
+
+// withSeededScript is a row as a repository seeded it: the script, the origin,
+// and the seed stamp that says the row is still a clean copy of that file.
+func withSeededScript(s string) func(*envs.Environment) {
+	return func(e *envs.Environment) {
+		e.SetupScript, e.SetupFrom = s, envs.SetupFromRepo
+		e.SetupSeedSHA = envs.ScriptSHA(s)
+	}
+}
+
+// TestBuildTakesANewerScriptFromTheRepository is the other half, and the one
+// that makes "commit it and rebuild" true.
+//
+// The row here is a clean copy of what the repository seeded — same bytes, and
+// the seed says so — so a repository that has since moved ahead is the author
+// of the newer version and the build takes it. Without this, an environment
+// seeded once goes on building that first script for as long as it exists, no
+// matter what anybody commits, and nothing anywhere says so.
+func TestBuildTakesANewerScriptFromTheRepository(t *testing.T) {
+	b := newBuildRig(t)
+	b.env("alice", "web", withSeededScript(setupScript))
+	b.attach("alice", "wandb/hivemind", "main", "web")
+	const updated = "#!/bin/sh\necho now with the missing package\n"
+	b.file("wandb/hivemind", "main", SetupScriptPath, updated)
+	b.calls.reset()
+
+	if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
+		t.Fatalf("BuildEnvironment: %v", err)
+	}
+	row := b.row(t, "alice", "web")
+	if row.SetupScript != updated {
+		t.Errorf("script = %q, want the repository's newer one", row.SetupScript)
+	}
+	// The seed moves with it, or the next commit would look like divergence.
+	if row.SetupSeedSHA != envs.ScriptSHA(updated) {
+		t.Errorf("seed = %q, want it to move with the script", row.SetupSeedSHA)
+	}
+	// And it is the newer script that is actually built, not merely stored.
+	box, found := b.boxes.Get("web-build")
+	if !found {
+		t.Fatal("the build made no builder")
+	}
+	job, ok, err := b.ops.SetupFor(context.Background(), box)
+	if err != nil || !ok {
+		t.Fatalf("SetupFor = %v/%v", ok, err)
+	}
+	if !strings.Contains(job.Payload, base64.StdEncoding.EncodeToString([]byte(updated))) {
+		t.Error("the builder was handed the old script")
+	}
+}
+
+// TestBuildKeepsARepairedScriptEvenThoughItCameFromARepository is the case the
+// seed exists for. setup_from still says `repo` after a repair pass rewrites
+// the script — the origin column answers "how should a later build decide",
+// not "who typed this" — so origin alone would authorise overwriting a fix that
+// was never committed back. The seed does not: the row no longer hashes to it,
+// so the repository's copy loses.
+func TestBuildKeepsARepairedScriptEvenThoughItCameFromARepository(t *testing.T) {
+	b := newBuildRig(t)
+	const repaired = "#!/bin/sh\necho the fix that made it run\n"
+	b.env("alice", "web", func(e *envs.Environment) {
+		// Seeded once, then rewritten in the builder: the script no longer
+		// hashes to the seed, and the origin never changed.
+		e.SetupScript, e.SetupFrom = repaired, envs.SetupFromRepo
+		e.SetupSeedSHA = envs.ScriptSHA(setupScript)
+	})
+	b.attach("alice", "wandb/hivemind", "main", "web")
+	b.file("wandb/hivemind", "main", SetupScriptPath, "#!/bin/sh\necho something else\n")
+	b.calls.reset()
+
+	if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
+		t.Fatalf("BuildEnvironment: %v", err)
+	}
+	if row := b.row(t, "alice", "web"); row.SetupScript != repaired {
+		t.Errorf("script = %q, want the repaired one kept", row.SetupScript)
+	}
+}
+
+// TestBuildAdoptsTheRepositoryOnceTheScriptIsCommittedBack closes the loop the
+// platform actually asks people to walk: an agent wrote the script, the owner
+// committed it, and from then on the repository is where it lives.
+//
+// The row and the repository hold identical bytes while the seed is still empty
+// — the row was never seeded from anywhere — so the content comparison has to
+// come first. Consulting the seed first would report this as divergence, which
+// is telling somebody who just did the right thing that they did not.
+func TestBuildAdoptsTheRepositoryOnceTheScriptIsCommittedBack(t *testing.T) {
+	b := newBuildRig(t)
+	b.env("alice", "web", func(e *envs.Environment) {
+		e.SetupScript, e.SetupFrom = setupScript, envs.SetupFromAgent
+	})
+	b.attach("alice", "wandb/hivemind", "main", "web")
+	b.file("wandb/hivemind", "main", SetupScriptPath, setupScript)
+	b.calls.reset()
+
+	if _, err := b.ops.BuildEnvironment(context.Background(), alice(), "web"); err != nil {
+		t.Fatalf("BuildEnvironment: %v", err)
+	}
+	row := b.row(t, "alice", "web")
+	if row.SetupSeedSHA != envs.ScriptSHA(setupScript) {
+		t.Errorf("seed = %q, want the committed file adopted so the NEXT commit is picked up",
+			row.SetupSeedSHA)
+	}
+	if row.SetupScript != setupScript {
+		t.Errorf("script = %q, want it unchanged — nothing about the content moved", row.SetupScript)
 	}
 }
 

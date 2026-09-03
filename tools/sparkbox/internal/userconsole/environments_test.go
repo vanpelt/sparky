@@ -150,6 +150,21 @@ func (f *fakeEnvOps) SetEnvScript(c ctlops.Caller, name, script, from string) er
 	return nil
 }
 
+// AdoptRepoScript is the "Use <repo>'s" button. The fake records the call and
+// clears the drift verdict, because that is what the real one does — the row
+// and the repository now hold the same bytes.
+func (f *fakeEnvOps) AdoptRepoScript(_ context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error) {
+	f.note(c, "script.from_repo "+name)
+	e, ok := f.rows[name]
+	if !ok {
+		return ctlops.EnvironmentInfo{}, envs.ErrNoSuchEnvironment
+	}
+	e.ScriptDrift = ctlops.ScriptDriftMatch
+	e.HasSetup = true
+	f.rows[name] = e
+	return e, nil
+}
+
 func (f *fakeEnvOps) BuildEnvironment(_ context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error) {
 	f.note(c, "build "+name)
 	e := f.rows[name]

@@ -52,6 +52,7 @@
 package envs
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -136,9 +137,25 @@ type Environment struct {
 	Description string `json:"description,omitempty"`
 	SetupScript string `json:"setup_script,omitempty"` // captured .sparkbox/setup.sh; "" until a build runs
 	SetupFrom   string `json:"setup_from,omitempty"`   // "repo" | "agent" | "manual" | ""
-	State       State  `json:"state"`
-	BuildBox    string `json:"build_box,omitempty"` // builder sandbox name while one exists
-	BuildError  string `json:"build_error,omitempty"`
+	// SetupSeedSHA is ScriptSHA of the script AS IT WAS READ OUT OF A
+	// REPOSITORY, and it exists to answer one question no other column can:
+	// has this row been changed since it was seeded?
+	//
+	// SetupScript alone cannot answer it. A repair pass rewrites the script and
+	// leaves setup_from saying `repo`, and so does an owner who edits the file
+	// in the builder — so "the row and the repository differ" is ambiguous
+	// between "the repository moved ahead" and "this environment has its own
+	// version now", and those two want opposite handling. With the seed
+	// recorded, the row's own script hashing to it means untouched, which is
+	// the only case where taking the repository's newer script is safe.
+	//
+	// "" for an environment seeded before this column existed, for one whose
+	// script was piped in by hand, and for one an agent wrote — all of which
+	// read as "not a clean copy of a repository's file", which is correct.
+	SetupSeedSHA string `json:"setup_seed_sha,omitempty"`
+	State        State  `json:"state"`
+	BuildBox     string `json:"build_box,omitempty"` // builder sandbox name while one exists
+	BuildError   string `json:"build_error,omitempty"`
 	// BuildSession is the HiveMind session URL of the agent that built this
 	// environment, "" for a script build and for anything built before the
 	// column existed. It OUTLIVES the builder deliberately: a successful build
@@ -285,6 +302,7 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			description TEXT NOT NULL DEFAULT '',
 			setup_sh    TEXT NOT NULL DEFAULT '',
 			setup_from  TEXT NOT NULL DEFAULT '',
+			setup_seed_sha TEXT NOT NULL DEFAULT '',
 			build_state TEXT NOT NULL DEFAULT 'draft',
 			build_box   TEXT NOT NULL DEFAULT '',
 			build_error TEXT NOT NULL DEFAULT '',
@@ -311,6 +329,16 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 	if err := addColumnIfMissing(db, "environments", "build_denials", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
+	// Empty on every environment that predates this column, which reads as "not
+	// a clean copy of a repository's file" — so the first thing drift detection
+	// says about a host's existing environments is "these have their own
+	// version", never "safe to overwrite from the repository". Erring that way
+	// round is the whole reason the column holds the seed rather than a
+	// last-checked timestamp: an unknown history must not authorise a write.
+	if err := addColumnIfMissing(db, "environments", "setup_seed_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
@@ -516,6 +544,46 @@ func (s *Store) SetScript(owner, name, script, from string) error {
 	return nil
 }
 
+// ScriptSHA is how a setup script is compared with another copy of itself. It
+// is a content hash and nothing else — never an identifier, never shown — so
+// the only property that matters is that two byte-identical scripts agree and
+// two different ones do not.
+func ScriptSHA(script string) string {
+	if script == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(script))
+	return hex.EncodeToString(sum[:])
+}
+
+// SetSeededScript records a script that was READ OUT OF A REPOSITORY, stamping
+// the seed alongside it in one statement.
+//
+// Separate from SetScript, and the separation is the point: every other writer
+// of setup_sh — the repair pass, `env script --set`, an agent's deliverable —
+// must leave the seed alone, because the seed is the record of what the
+// repository last said and their whole significance is that they DISAGREE with
+// it. One combined method with a "should I stamp the seed too" flag would put
+// that decision at four call sites instead of in the type system.
+func (s *Store) SetSeededScript(owner, name, script string) error {
+	name = strings.TrimSpace(name)
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(
+		`UPDATE environments SET setup_sh = ?, setup_from = ?, setup_seed_sha = ?, updated_at = ?
+		 WHERE owner = ? AND name = ?`,
+		script, SetupFromRepo, ScriptSHA(script), now, owner, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNoSuchEnvironment
+	}
+	return nil
+}
+
 // SetState moves an environment through its build lifecycle.
 //
 // Two of the rules are in the SQL rather than in the caller on purpose. The
@@ -645,6 +713,7 @@ func (s *Store) Building() ([]Environment, error) {
 func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, error) {
 	rows, err := s.db.Query(`
 		SELECT DISTINCT e.owner, e.name, e.description, e.setup_sh, e.setup_from,
+		       e.setup_seed_sha,
 		       e.build_state, e.build_box, e.build_error, e.build_session, e.build_denials,
 		       e.adopted, e.built_at, e.created_at, e.updated_at
 		FROM environments e
@@ -665,6 +734,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 // day a second table grows a `name`.
 const selectCols = `
 	SELECT owner, name, description, setup_sh, setup_from,
+	       setup_seed_sha,
 	       build_state, build_box, build_error, build_session, build_denials,
 	       adopted, built_at, created_at, updated_at
 	FROM environments`
@@ -684,6 +754,7 @@ func scanEnv(sc scanner) (Environment, error) {
 	var buildDenials string
 	var adopted string
 	if err := sc.Scan(&e.Owner, &e.Name, &e.Description, &e.SetupScript, &e.SetupFrom,
+		&e.SetupSeedSHA,
 		&state, &e.BuildBox, &e.BuildError, &e.BuildSession, &buildDenials,
 		&adopted, &builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {

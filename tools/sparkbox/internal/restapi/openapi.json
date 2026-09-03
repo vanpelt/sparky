@@ -1462,6 +1462,38 @@
         }
       }
     },
+    "/v1/environments/{name}/script/from-repo": {
+      "post": {
+        "operationId": "env.script.from_repo",
+        "tags": ["environments"],
+        "summary": "Take the setup script from an attached repository",
+        "description": "Replaces this environment's setup script with the `.sparkbox/setup.sh` in the first attached repository that has one, and records it as having come from there.\n\nIt exists for one verdict. A stored script that is still a clean copy of what a repository gave it is refreshed automatically on every build, so committing a change and rebuilding is enough. Once the script has been changed here \u2014 by the build's repair pass, or through `PUT .../script` \u2014 nothing overwrites it, because the row is sometimes the only copy of a fix that was never committed back. `script_drift` then reads `diverged`, and this is how a person says the repository's version is the one they want.\n\nThis is the only path in the environments family that deliberately discards a setup script, which is why it is asked for by name rather than decided by a build.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "200": {
+            "description": "The environment, now holding the repository's script.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Environment" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "No repository attached to this environment has a .sparkbox/setup.sh to take.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" },
+          "502": {
+            "description": "github.com did not answer, so what the repository holds could not be read.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          }
+        }
+      }
+    },
     "/v1/environments/{name}/build": {
       "post": {
         "operationId": "env.build",

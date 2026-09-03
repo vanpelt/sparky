@@ -432,6 +432,14 @@
   .env-strip.denials { display: block; border-color: hsl(var(--amber) / .35); background: hsl(var(--amber) / .055);
     color: hsl(var(--foreground)); }
   .env-strip.denials .domains { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  /* Drift is not a failure and must not wear the failure's red. The card is
+     saying "the file in your repository is not the one this builds" — news,
+     not damage — so it borrows the building strip's amber frame and the page's
+     own ink, and the two informational verdicts drop the fill entirely. */
+  .env-strip.drift { border-color: hsl(var(--amber) / .45); background: hsl(var(--amber) / .08);
+    color: hsl(var(--foreground)); }
+  .env-strip.drift.quiet { border-color: hsl(var(--border)); background: transparent;
+    color: hsl(var(--muted-foreground)); }
 
   /* State badges. Same anatomy as the machine states — a dot carries the
      colour, the word stays quiet — so ready/building/failed/draft read at the
@@ -1390,6 +1398,7 @@
     if (d.delRepo) return "delrepo:" + d.delRepo;
     if (d.envbuild) return "envbuild:" + d.envbuild;
     if (d.envcapture) return "envcapture:" + d.envcapture;
+    if (d.envfromrepo) return "envfromrepo:" + d.envfromrepo;
     if (d.envdel) return "envdel:" + d.envdel;
     return null;
   }
@@ -2620,10 +2629,18 @@
   // writes and then runs one, is.
   function envFoot(e) {
     const from = SETUP_FROM[e.setup_from] || "recorded";
+    // The no-script sentence has to know about the repository, or it is simply
+    // wrong: an environment with no script of its own whose repository HAS a
+    // .sparkbox/setup.sh gets a script build off that file, and telling its
+    // owner that a build would run an agent sends them looking for a token they
+    // do not need.
+    const noScript = e.script_drift === "repo_only"
+      ? "<strong>No setup script yet</strong> — Build reads one from " + esc(e.script_drift_repo)
+      : "<strong>No setup script</strong> — Build asks an agent to write one, then runs what it wrote";
     const what = e.has_setup
       ? "<strong>Setup script</strong> — " + from +
         (e.setup_bytes ? " · " + bytes(e.setup_bytes) : "")
-      : "<strong>No setup script</strong> — Build asks an agent to write one, then runs what it wrote";
+      : noScript;
     // A script an agent wrote is the only one whose author can be read back,
     // and the foot is where this card already says where the script came from.
     // The failed strip carries its own copy of this link because a failure is
@@ -2634,6 +2651,53 @@
     return '<div class="env-foot"><div>' + what + wrote + "</div>" +
       '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">' +
       (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
+  }
+
+  // What a build would actually run, when that is not what the repository
+  // holds. A build takes its script from the environment, not from github, so
+  // an environment seeded once would otherwise go on building that first script
+  // for as long as it existed while its repository moved on — with nothing
+  // anywhere saying so.
+  //
+  // A MATCH RENDERS NOTHING, and so does an unknown. This strip exists to
+  // interrupt; one that appeared on every card to report that all was well
+  // would teach people to stop reading the place the warning lives.
+  function envDrift(e) {
+    const repo = e.script_drift_repo || "the repository";
+    const path = '<span class="mono">.sparkbox/setup.sh</span>';
+    if (e.script_drift === "repo_ahead") {
+      // Handled by the rebuild itself: this row is still a clean copy of what
+      // the repository seeded, so the next build takes the newer one. The
+      // strip is an invitation, and the button is the same Rebuild the card
+      // already has — put here because this is where the reason is.
+      return '<div class="env-strip drift"><div class="msg">' + path + " in " +
+        esc(repo) + " has changed since this was built. A rebuild picks it up." +
+        '</div><div class="chips"><button class="btn-outline btn-sm" data-envbuild="' +
+        esc(e.name) + '">Rebuild</button></div></div>';
+    }
+    if (e.script_drift === "diverged") {
+      // Nothing resolves this one on its own, and that is deliberate: this
+      // environment's script has been changed since it came from the
+      // repository — by the build's repair pass, or by hand — so it may be the
+      // only copy of a fix nobody committed back. Both files are named, the
+      // consequence is stated, and the destructive choice is a button somebody
+      // presses rather than something a build decides.
+      return '<div class="env-strip drift"><div class="msg">This environment\'s setup script ' +
+        "has been changed since it came from " + esc(repo) + ", so it no longer matches " +
+        path + " there — and a rebuild keeps <strong>this</strong> one. " +
+        "Commit it back, or take the repository's version." +
+        '</div><div class="chips">' +
+        '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">Read this one</button>' +
+        '<button class="btn-outline btn-sm" data-envfromrepo="' + esc(e.name) +
+        '" data-repo="' + esc(repo) + '">Use ' + esc(repo) + "'s</button></div></div>";
+    }
+    if (e.script_drift === "repo_only") {
+      // Not drift: a correction. Without it the card's foot says a build would
+      // ask an agent to write a script, when in fact it will read this file.
+      return '<div class="env-strip drift quiet"><div class="msg">The next build reads ' +
+        path + " from " + esc(repo) + " and records it here.</div></div>";
+    }
+    return "";
   }
 
   function envDenials(e) {
@@ -2690,6 +2754,7 @@
       "</div>" +
       (e.description ? '<div class="env-sub">' + esc(e.description) + "</div>" : "") +
       envStrip(e) +
+      envDrift(e) +
       envDenials(e) +
       '<div class="env-grid">' +
         envCol("Repos", e.repos, "none") +
@@ -2741,6 +2806,21 @@
           toast("keeping " + name + "'s disk — this takes a few minutes");
           await api("/api/environments/" + encodeURIComponent(name) + "/capture", { method: "POST" });
           toast(name + " captured");
+        });
+      }));
+    host.querySelectorAll("button[data-envfromrepo]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envfromrepo;
+        const repo = btn.dataset.repo || "the repository";
+        // Confirmed, because it is the one action on this card that throws a
+        // setup script away — and the script it throws away may be the only
+        // copy of a fix a build's repair pass made and nobody committed.
+        if (!confirm("Replace " + name + "'s setup script with the .sparkbox/setup.sh in " +
+            repo + "? The version stored here is discarded.")) return;
+        mutate("envfromrepo:" + name, btn, async () => {
+          await api("/api/environments/" + encodeURIComponent(name) + "/script/from-repo",
+            { method: "POST" });
+          toast(name + " now uses " + repo + "'s setup script — rebuild to apply it");
         });
       }));
     host.querySelectorAll("button[data-envscript]").forEach((btn) =>

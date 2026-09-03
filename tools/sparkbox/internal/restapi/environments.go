@@ -172,6 +172,24 @@ func (h *Handler) putEnvScript(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, environmentScript{Script: req.Script, From: envs.SetupFromManual})
 }
 
+// adoptRepoScript replaces this environment's setup script with the
+// .sparkbox/setup.sh in one of its repositories.
+//
+// POST and not PUT, because the caller is not supplying the representation —
+// they are asking the server to go and get one, and which file that turns out
+// to be is the server's answer. It returns the environment rather than the
+// script so a console can re-render the card, drift verdict and all, from one
+// response.
+func (h *Handler) adoptRepoScript(w http.ResponseWriter, r *http.Request) {
+	const op = "env.script.from_repo"
+	info, err := h.ops.AdoptRepoScript(r.Context(), caller(r), r.PathValue("name"))
+	if err != nil {
+		h.fail(w, r, op, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
 // buildEnvironment starts a build and returns the row, in `building`, right
 // away. See the file header for why it is not job-backed.
 //

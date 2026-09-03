@@ -265,6 +265,7 @@ func (h *Handler) routes() []route {
 		{"DELETE", "/v1/environments/{name}", "env.rm", authMutate, h.deleteEnvironment},
 		{"GET", "/v1/environments/{name}/script", "env.script", authRead, h.getEnvScript},
 		{"PUT", "/v1/environments/{name}/script", "env.script.set", authMutate, h.putEnvScript},
+		{"POST", "/v1/environments/{name}/script/from-repo", "env.script.from_repo", authMutate, h.adoptRepoScript},
 		{"POST", "/v1/environments/{name}/build", "env.build", authMutate, h.buildEnvironment},
 		{"POST", "/v1/environments/{name}/capture", "env.capture", authMutate, h.captureEnvironment},
 

@@ -52,7 +52,6 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -60,7 +59,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 )
 
@@ -677,10 +675,74 @@ type RepoFileReader interface {
 // trusting the feature. The repository is consulted only when the row has
 // nothing — that is what "seed" means.
 func (o *Ops) resolveSetupScript(ctx context.Context, op string, c Caller, e envs.Environment) (string, error) {
-	if strings.TrimSpace(e.SetupScript) != "" {
-		return e.SetupScript, nil
+	if strings.TrimSpace(e.SetupScript) == "" {
+		return o.seedSetupScript(ctx, op, c, e.Name)
 	}
-	return o.seedSetupScript(ctx, op, c, e.Name)
+	return o.refreshSetupScript(ctx, op, c, e), nil
+}
+
+// refreshSetupScript is what makes "commit it and rebuild" true.
+//
+// The row's script is what a build runs, and for most of this feature's life
+// that was the end of it: an environment seeded from a repository in March went
+// on building March's script for as long as it existed, no matter what was
+// committed afterwards, and nothing said so. That is a bad failure because it
+// is silent and because it contradicts what everybody assumes a rebuild does.
+//
+// It is also not fixable by simply preferring the repository, because the row
+// is sometimes the newer of the two — a repair pass rewrote it, or somebody
+// piped one in — and taking github's copy then would undo work that was never
+// committed back. So the rule is the narrow one, and the seed is what makes it
+// decidable: TAKE THE REPOSITORY'S SCRIPT ONLY WHEN THIS ROW IS STILL A CLEAN
+// COPY OF WHAT THE REPOSITORY LAST GAVE IT. Anything else builds what the row
+// holds, and the drift verdict on the environment's card asks a person instead.
+//
+// It NEVER FAILS A BUILD. Every error here — github unreachable, the file gone,
+// the store refusing the write — falls back to the script the row already has,
+// because "we could not check whether your script was current" is not a reason
+// to refuse to build the one you have.
+func (o *Ops) refreshSetupScript(ctx context.Context, op string, c Caller, e envs.Environment) string {
+	if !o.canReadRepoScripts() {
+		return e.SetupScript
+	}
+	found, err := o.readRepoSetupScript(ctx, op, c.Handle, e.Name)
+	if err != nil || found.Script == "" {
+		return e.SetupScript
+	}
+	if found.Script == e.SetupScript {
+		// Identical, and the seed may not say so yet — the ordinary way that
+		// happens is the one the platform asks for: an agent wrote the script,
+		// the owner committed it, and now the repository is its home. Stamping
+		// the seed is what enrols this environment in tracking that file from
+		// here on, so the NEXT commit is picked up automatically.
+		//
+		// Not for a script somebody typed in. `env script --set` means "this
+		// one, mine", and a manual script that happens to match today must not
+		// quietly become repository-owned tomorrow.
+		if e.SetupSeedSHA != envs.ScriptSHA(found.Script) && e.SetupFrom != envs.SetupFromManual {
+			if err := o.envs.SetSeededScript(c.Handle, e.Name, found.Script); err != nil {
+				o.log.Warn("could not record where an environment's setup script came from",
+					"user", c.Handle, "env", e.Name, "slug", found.Slug, "err", err)
+			}
+		}
+		return e.SetupScript
+	}
+	// They differ. Only an untouched row may be replaced.
+	if e.SetupSeedSHA == "" || envs.ScriptSHA(e.SetupScript) != e.SetupSeedSHA {
+		o.log.Info("an environment's setup script differs from its repository and was not replaced",
+			"user", c.Handle, "env", e.Name, "slug", found.Slug,
+			"reason", "the row has been changed since it was seeded")
+		return e.SetupScript
+	}
+	if err := o.envs.SetSeededScript(c.Handle, e.Name, found.Script); err != nil {
+		o.log.Warn("could not take an updated setup script from a repository",
+			"user", c.Handle, "env", e.Name, "slug", found.Slug, "err", err)
+		return e.SetupScript
+	}
+	o.log.Info("environment setup script refreshed from its repository",
+		"user", c.Handle, "env", e.Name, "slug", found.Slug, "bytes", len(found.Script))
+	o.forgetDrift(c.Handle, e.Name)
+	return found.Script
 }
 
 // seedSetupScript reads .sparkbox/setup.sh out of the environment's attached
@@ -702,87 +764,30 @@ func (o *Ops) resolveSetupScript(ctx context.Context, op string, c Caller, e env
 // present as "you have no setup script" and send somebody off to write one they
 // already have.
 func (o *Ops) seedSetupScript(ctx context.Context, op string, c Caller, name string) (string, error) {
-	if o.repos == nil || o.ghApp == nil || o.repoFiles == nil {
-		return "", nil
-	}
-	list, err := o.repos.ListRepos(c.Handle)
+	found, err := o.readRepoSetupScript(ctx, op, c.Handle, name)
 	if err != nil {
-		o.log.Warn("could not read repo attachments while seeding a setup script",
-			"user", c.Handle, "env", name, "err", err)
+		// The one error that must not be read as "there is no script".
+		// github being unreachable here would otherwise start an AGENT build
+		// for a project with a perfectly good committed one.
+		return "", err
+	}
+	if found.Script == "" {
 		return "", nil
 	}
-	mine := make([]repos.Repo, 0, len(list))
-	for _, r := range list {
-		if slicesContainsFold(r.Tags, name) {
-			mine = append(mine, r)
-		}
+	// SetSeededScript, not SetScript: this is the one writer that stamps the
+	// seed, because it is the one that knows the row is now a clean copy of
+	// what the repository said. Everything downstream — the drift verdict on
+	// the card, and whether a later build may take a newer version by itself —
+	// is decided by that stamp.
+	if err := o.envs.SetSeededScript(c.Handle, name, found.Script); err != nil {
+		return "", envStoreError(op, name, err)
 	}
-	sort.Slice(mine, func(i, j int) bool { return mine[i].Slug < mine[j].Slug })
-
-	var upstream error
-	for _, r := range mine {
-		owner, repoName, ok := repos.SplitSlug(r.Slug)
-		if !ok {
-			continue
-		}
-		inst, err := o.ghApp.InstallationFor(ctx, owner, repoName)
-		if err != nil {
-			if errors.Is(err, ghapp.ErrUpstream) {
-				upstream = err
-			}
-			continue
-		}
-		// r.Ref may be empty, which ReadFile takes to mean the repository's
-		// default branch — the same thing the checkout the script will run in
-		// was made from.
-		b, err := o.repoFiles.ReadFile(ctx, inst, owner, repoName, r.Ref, SetupScriptPath)
-		switch {
-		case errors.Is(err, ghapp.ErrNoSuchFile):
-			continue
-		case errors.Is(err, ghapp.ErrUpstream):
-			upstream = err
-			continue
-		case err != nil:
-			o.log.Warn("could not read a setup script from an attached repository",
-				"user", c.Handle, "env", name, "slug", r.Slug, "err", err)
-			continue
-		}
-		script := string(b)
-		if strings.TrimSpace(script) == "" {
-			// A file that is there and says nothing is not a script. Treating
-			// it as one would start a build that captures an untouched base
-			// image and calls it an environment.
-			continue
-		}
-		if len(script) > MaxSetupScript {
-			// Refused, never truncated: half a script is what every future fork
-			// of this environment would run.
-			o.log.Warn("an attached repository's setup script is too large to use",
-				"user", c.Handle, "env", name, "slug", r.Slug, "bytes", len(script), "max", MaxSetupScript)
-			continue
-		}
-		if err := o.envs.SetScript(c.Handle, name, script, envs.SetupFromRepo); err != nil {
-			return "", envStoreError(op, name, err)
-		}
-		o.log.Info("environment setup script seeded from a repository",
-			"user", c.Handle, "env", name, "slug", r.Slug, "ref", r.Ref, "bytes", len(script))
-		return script, nil
-	}
-	if upstream != nil {
-		return "", &Error{
-			Kind: KindUpstream, Op: op, Code: "github_unreachable",
-			Msg: "github.com did not answer, so there is no way to tell whether " + name +
-				" has a setup script in one of its repositories. Try again in a moment.",
-			Verbatim: true, Err: upstream,
-		}
-	}
-	return "", nil
+	o.log.Info("environment setup script seeded from a repository",
+		"user", c.Handle, "env", name, "slug", found.Slug, "bytes", len(found.Script))
+	o.forgetDrift(c.Handle, name)
+	return found.Script, nil
 }
 
-// slicesContainsFold is the tag comparison this file needs. Tags reach the
-// stores lowercased (NormalizeTags, envName), so a fold is belt and braces —
-// but a hand-written sandbox_tags row, or a store whose collation differs, must
-// not silently exclude an attachment from its own environment.
 func slicesContainsFold(list []string, want string) bool {
 	for _, s := range list {
 		if strings.EqualFold(s, want) {

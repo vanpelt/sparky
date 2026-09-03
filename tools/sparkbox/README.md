@@ -423,6 +423,22 @@ This is best-effort and never a refusal: a builder with no `claude` or no agent
 credential reports the script's own error exactly as it used to, naming the
 `secret set CLAUDE_CODE_OAUTH_TOKEN --tag <env>` that would turn repair on.
 
+**A build's script comes from the environment, not from github** — that is what
+makes a rebuild reproducible — and the cost of that used to be silent: an
+environment seeded from a repository in March went on building March's script
+for as long as it existed, however much was committed afterwards. So a stored
+script that is **still a clean copy of what its repository gave it** is
+refreshed on every build. Commit a change to `.sparkbox/setup.sh`, run `env
+rebuild`, and that is the script that runs.
+
+Once it has been changed here — by the repair pass above, or by `env script
+--set` — nothing overwrites it, because the row is then sometimes the only copy
+of a fix nobody committed back. `env show` and the console card say the two
+disagree, and name both ways out: commit yours, or take the repository's with
+`env script <name> --from-repo`. The environment records what the repository
+last gave it, which is what tells those two cases apart; an environment older
+than that record, or one whose script was typed in, is always the second case.
+
 `env rebuild <name>` is a second name for `env build` — a build already boots
 the stock image and runs the current script, never the environment's own last
 snapshot, so an environment cannot accumulate. The old image stays bound until

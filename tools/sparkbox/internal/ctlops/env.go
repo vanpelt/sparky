@@ -76,8 +76,18 @@ type EnvironmentInfo struct {
 	SetupFrom   string `json:"setup_from,omitempty"`
 	HasSetup    bool   `json:"has_setup"`
 	SetupBytes  int    `json:"setup_bytes"`
-	BuildBox    string `json:"build_box,omitempty"`
-	BuildError  string `json:"build_error,omitempty"`
+	// ScriptDrift says whether this environment's script still agrees with the
+	// .sparkbox/setup.sh in the repository it came from — one of
+	// ScriptDriftMatch, ScriptDriftRepoAhead, ScriptDriftDiverged,
+	// ScriptDriftRepoOnly, or "" for no answer (envdrift.go). The empty string
+	// is common and means "not known", never "fine", so a surface renders it as
+	// nothing rather than as reassurance.
+	ScriptDrift string `json:"script_drift,omitempty"`
+	// ScriptDriftRepo is the slug the comparison was made against, set whenever
+	// ScriptDrift is.
+	ScriptDriftRepo string `json:"script_drift_repo,omitempty"`
+	BuildBox        string `json:"build_box,omitempty"`
+	BuildError      string `json:"build_error,omitempty"`
 	// BuildSession links to the HiveMind transcript of the agent that built
 	// this environment. Empty for a script build, for a host with no
 	// --hivemind-api, and while an agent build is still in flight — the row
@@ -206,6 +216,11 @@ func (o *Ops) ListEnvironments(c Caller) ([]EnvironmentInfo, error) {
 	for _, e := range list {
 		out = append(out, comp.info(e))
 	}
+	// One bounded pass for the whole listing, on the same argument as the
+	// composition above: a dozen environments must not be a dozen serial round
+	// trips to github, and the listing renders whether or not the answers
+	// arrive in time (envdrift.go).
+	o.annotateScriptDrift(list, out)
 	return out, nil
 }
 
@@ -223,7 +238,9 @@ func (o *Ops) GetEnvironment(c Caller, name string) (EnvironmentInfo, error) {
 	if err != nil {
 		return EnvironmentInfo{}, envStoreError(op, name, err)
 	}
-	return o.composition(c.Handle).info(e), nil
+	out := []EnvironmentInfo{o.composition(c.Handle).info(e)}
+	o.annotateScriptDrift([]envs.Environment{e}, out)
+	return out[0], nil
 }
 
 // EnvironmentsForTags returns the caller's environments whose name appears in
@@ -722,7 +739,64 @@ func (o *Ops) SetEnvScript(c Caller, name, script, from string) error {
 	}
 	o.log.Info("environment setup script set", "user", c.Handle, "env", name,
 		"from", from, "bytes", len(script))
+	o.forgetDrift(c.Handle, name)
 	return nil
+}
+
+// AdoptRepoScript takes the .sparkbox/setup.sh out of an attached repository
+// and makes it this environment's script, seed and all.
+//
+// It is the answer to the one verdict nothing else resolves. When an
+// environment's script has DIVERGED — changed by a repair pass, or by somebody
+// — no build will overwrite it, and that is the right default: the row is
+// sometimes the only copy of a fix that was never committed. But it leaves a
+// person holding two scripts and no way to say "the repository's is the one I
+// want" short of copying the file through their own terminal.
+//
+// Explicit for exactly that reason. Everything automatic in this feature is
+// gated on the row being an untouched copy of what a repository gave it; this
+// is the only path that overwrites work, and a person has to ask for it by
+// name.
+func (o *Ops) AdoptRepoScript(ctx context.Context, c Caller, name string) (EnvironmentInfo, error) {
+	const op = "env.script.from_repo"
+	if o.envs == nil {
+		return EnvironmentInfo{}, Disabled(op, envDisabledSentence)
+	}
+	name, err := envName(op, name)
+	if err != nil {
+		return EnvironmentInfo{}, err
+	}
+	// Owner-scoped first, so another owner's environment and one nobody has are
+	// the same masked answer.
+	if _, err := o.envs.Get(c.Handle, name); err != nil {
+		return EnvironmentInfo{}, envStoreError(op, name, err)
+	}
+	if !o.canReadRepoScripts() {
+		return EnvironmentInfo{}, Disabled(op,
+			"this host cannot read files out of repositories, so there is nothing to take a setup script from.")
+	}
+	found, err := o.readRepoSetupScript(ctx, op, c.Handle, name)
+	if err != nil {
+		// github_unreachable, already phrased. Never mistaken for "no script".
+		return EnvironmentInfo{}, err
+	}
+	if found.Script == "" {
+		return EnvironmentInfo{}, &Error{
+			Kind: KindConflict, Op: op, Code: "no_repo_script",
+			Msg: "no repository attached to " + name + " has a " + SetupScriptPath + " to take.",
+			Hint: "Attach one with `env set " + name + " --repo <owner>/<name>`, or write " +
+				SetupScriptPath + " in a repository that already carries this tag.",
+			Details:  map[string]any{"environment": name, "path": SetupScriptPath},
+			Verbatim: true,
+		}
+	}
+	if err := o.envs.SetSeededScript(c.Handle, name, found.Script); err != nil {
+		return EnvironmentInfo{}, envStoreError(op, name, err)
+	}
+	o.log.Info("environment setup script taken from its repository on request",
+		"user", c.Handle, "env", name, "slug", found.Slug, "bytes", len(found.Script))
+	o.forgetDrift(c.Handle, name)
+	return o.GetEnvironment(c, name)
 }
 
 // ---------------------------------------------------------------------------
