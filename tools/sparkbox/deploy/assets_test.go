@@ -3067,6 +3067,13 @@ func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 	if !strings.Contains(got, "--permission-mode\nbypassPermissions\n") {
 		t.Errorf("the agent was not run with --permission-mode bypassPermissions:\n%s", got)
 	}
+	// A print-mode bootstrap has no harness left to deliver a monitor event or
+	// scheduled wakeup after the response ends. Letting the agent select either
+	// tool recreates a live failure where it ended cleanly while `make dev` was
+	// still running and never came back to write the deliverable.
+	if !strings.Contains(got, "--disallowedTools\nMonitor\nScheduleWakeup\n") {
+		t.Errorf("the agent could defer work past its one print-mode turn:\n%s", got)
+	}
 	// The transcript is the only window anybody has into an unattended agent:
 	// the log tail is cut to a sentence by the time it reaches a row, and the
 	// box is destroyed on success. Every template seeds a hivemind daemon that
@@ -3074,6 +3081,99 @@ func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 	// would put the build back to being unwatchable.
 	if strings.Contains(got, "--no-session-persistence") {
 		t.Errorf("the agent ran with session persistence off, so nothing can watch the build:\n%s", got)
+	}
+}
+
+// TestTheRealAgentRunnerRecoversWhenTheFirstAgentWritesNothing is the failure
+// seen on hardware: the first print-mode agent sent `make dev` to a Monitor,
+// scheduled a later wakeup, and ended its response. The process therefore
+// returned 0 before .sparkbox/setup.sh existed even though useful setup work
+// was still running in the box. One fresh pass should inspect that state and
+// finish the deliverable instead of failing immediately.
+func TestTheRealAgentRunnerRecoversWhenTheFirstAgentWritesNothing(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes-2"), goodSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, script, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the recovery agent wrote a valid script: %s", state, log)
+	}
+	if got := decodeScript(t, script); !strings.Contains(got, "deps installed") {
+		t.Errorf("the environment did not record the recovery agent's script: %q", got)
+	}
+	if got := strings.TrimSpace(w.read("claude-calls")); got != "2" {
+		t.Errorf("agent calls = %s, want 2 (initial run and one recovery)", got)
+	}
+	recovery := w.read("claude-prompt-2")
+	for _, want := range []string{
+		"previous unattended setup agent ended", ctlops.SetupScriptPath,
+		"one and only recovery pass", "sparkbox docs dev-environment", "sparkbox set-port",
+	} {
+		if !strings.Contains(recovery, want) {
+			t.Errorf("recovery prompt does not mention %q:\n%s", want, recovery)
+		}
+	}
+}
+
+// TestTheRealAgentRunnerStopsAfterTwoMissingArtifacts pins the retry bound. A
+// missing deliverable gets one useful second chance, not an agent loop that
+// consumes the whole environment-build budget while producing nothing.
+func TestTheRealAgentRunnerStopsAfterTwoMissingArtifacts(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0 — the worker reports the runner's failure", code)
+	}
+	state, exit, script, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed\n%s", state, log)
+	}
+	if exit != "3" {
+		t.Errorf("exit = %q, want 3 — the runner should report its bounded recovery failure", exit)
+	}
+	if script != "" {
+		t.Errorf("reported script = %q, want none", script)
+	}
+	if !strings.Contains(log, "two agent passes finished without writing") {
+		t.Errorf("log does not explain the exhausted missing-artifact recovery:\n%s", log)
+	}
+	if got := strings.TrimSpace(w.read("claude-calls")); got != "2" {
+		t.Errorf("agent calls = %s, want exactly 2", got)
+	}
+}
+
+// TestTheRealAgentRunnerDoesNotSpendAThirdPassRepairingTheRecoveryScript keeps
+// the same two-agent ceiling when the missing-artifact recovery does produce a
+// script but that script fails verification. The script is still reported so
+// the paused builder remains useful to a person finishing it by hand.
+func TestTheRealAgentRunnerDoesNotSpendAThirdPassRepairingTheRecoveryScript(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes-2"), brokenSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0 — the worker reports the runner's failure", code)
+	}
+	state, exit, script, log := w.report()
+	if state != "failed" || exit != "3" {
+		t.Fatalf("state/exit = %q/%q, want failed/3\n%s", state, exit, log)
+	}
+	if got := decodeScript(t, script); !strings.Contains(got, "cd selfhost") {
+		t.Errorf("the failed recovery script was not preserved: %q", got)
+	}
+	if !strings.Contains(log, "recovery agent wrote") || !strings.Contains(log, "does not run") {
+		t.Errorf("log does not explain why the recovery script was refused:\n%s", log)
+	}
+	if got := strings.TrimSpace(w.read("claude-calls")); got != "2" {
+		t.Errorf("agent calls = %s, want exactly 2", got)
 	}
 }
 

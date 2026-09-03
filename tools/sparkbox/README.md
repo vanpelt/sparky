@@ -388,10 +388,15 @@ than after booting a VM to find out.
 the build done. An agent does the work interactively and writes the script at
 the end from memory, so the mistakes it makes are the ones that come from
 that — a directory it created by hand, a path that only ever existed in the
-session — and none of them show up until somebody rebuilds months later. A
-script that fails is handed back to one fresh agent to fix; if it fails again
-the build fails, with the script recorded and the builder paused, so `env
-capture` still adopts the box the agent did get working.
+session — and none of them show up until somebody rebuilds months later. The
+first run gets at most one fresh recovery agent: if it wrote no script, the
+recovery pass inspects the running processes and logs it left behind and
+finishes the deliverable; if it wrote a script that fails, the recovery pass
+gets that failure to fix. If the second pass still leaves no working script,
+the build fails, with any script recorded and the builder paused, so `env
+capture` still adopts the box the agent did get working. Deferred monitors and
+scheduled wakeups are disabled for these one-turn agents because there is no
+live agent process to receive them after `claude -p` returns.
 
 `env rebuild <name>` is a second name for `env build` — a build already boots
 the stock image and runs the current script, never the environment's own last

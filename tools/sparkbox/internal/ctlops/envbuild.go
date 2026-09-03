@@ -856,8 +856,8 @@ func (o *Ops) SetupFor(ctx context.Context, b *host.Sandbox) (SetupJob, bool, er
 // write down succeeds here by being already done. Closing THAT gap needs a
 // second VM, and this is the ninety percent that needs none.
 func AgentRunner(env string) string {
-	prompt, repair := agentPrompt(env), repairPrompt()
-	for _, p := range []*string{&prompt, &repair} {
+	prompt, missing, repair := agentPrompt(env), missingScriptPrompt(), repairPrompt()
+	for _, p := range []*string{&prompt, &missing, &repair} {
 		if strings.Contains(*p, agentPromptEOF) {
 			// Unreachable with host-authored constants, and asserted anyway:
 			// the day somebody makes a prompt configurable, this is what stops
@@ -921,7 +921,8 @@ sparkbox_agent() {
   # its work bought consistency with nothing.
   "$claude_bin" -p "$1" \
     --permission-mode bypassPermissions \
-    --output-format text
+    --output-format text \
+    --disallowedTools Monitor ScheduleWakeup
 }
 
 # sparkbox_verify: is this a script, and does it run?
@@ -953,15 +954,40 @@ sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
 ` + agentPromptEOF + `
 )"
 
-if [ ! -f "$sparkbox_setup" ]; then
-  # Nothing was written, so there is nothing to check. The guest worker turns
-  # this into the sentence the owner reads, and saying it here as well would
-  # put two different failures in one log for one thing going wrong.
-  exit 0
+# A print-mode agent is one process and one turn. If it nevertheless ends while
+# waiting for work it sent to the background, give one FRESH agent the
+# filesystem and the explicit missing deliverable rather than failing a box
+# whose setup may still be completing. This is also the retry for every other
+# clean exit with no artifact. Empty is missing: the guest reports only a
+# non-empty script, so accepting a zero-byte file here would only defer the same
+# failure to its outer artifact check.
+sparkbox_agent_retried=0
+if [ ! -s "$sparkbox_setup" ]; then
+  echo "sparkbox: the first agent left no $sparkbox_setup; asking one fresh agent to finish the build" >&2
+  sparkbox_agent_retried=1
+  sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
+` + missing + `
+` + agentPromptEOF + `
+)"
+fi
+
+if [ ! -s "$sparkbox_setup" ]; then
+  # Exit nonzero ourselves so the worker preserves this more precise last line
+  # instead of replacing it with the generic no-artifact sentence.
+  echo "sparkbox: two agent passes finished without writing a non-empty $sparkbox_setup, so there is nothing to build from" >&2
+  exit 3
 fi
 
 if sparkbox_verify; then
   exit 0
+fi
+
+# One retry total. If the missing-artifact recovery wrote a broken script, keep
+# it for env capture and fail here rather than spending a third agent run on a
+# build whose single retry has already been used.
+if [ "$sparkbox_agent_retried" = 1 ]; then
+  echo "sparkbox: the recovery agent wrote $sparkbox_setup, but it does not run in this box, so no later build could reproduce it" >&2
+  exit 3
 fi
 
 echo "sparkbox: the script the agent wrote does not run here; asking it once to fix that" >&2
@@ -1023,6 +1049,12 @@ func agentPrompt(env string) string {
 	return `You are configuring a fresh Sparkbox microVM so this project runs in it.
 Nobody is watching and nobody can answer a question, so do not ask any.
 
+This is one non-interactive turn. The build checks for the finished setup script
+as soon as your response ends; there is no later turn in which to finish it. Do
+not send work to a background monitor, schedule a wakeup, or end your response
+while a command you depend on is still running. Wait for long-running setup in
+this turn with a bounded foreground command, then finish and verify the script.
+
 Start by running ` + "`sparkbox docs dev-environment`" + ` and follow it. It is short, and it
 is this platform's own guidance for exactly this job.
 
@@ -1056,6 +1088,35 @@ box works but whose script does not is a failure, not a success. If you cannot
 get the project running, still write ` + SetupScriptPath + ` with the part that does
 work, make that part run cleanly, and say plainly in your final message what is
 missing and why.
+
+Do not commit, push, or open a pull request; somebody will review this file.
+`
+}
+
+// missingScriptPrompt is the second and last agent invocation when the first
+// one returned without its deliverable. It is fresh for the same reason as the
+// broken-script repair pass below: the filesystem and observable process state
+// are evidence; the first agent's account of unfinished work is not. In
+// particular, an earlier command may still be running in the background, so
+// this prompt tells the recovery agent to inspect before starting a duplicate.
+func missingScriptPrompt() string {
+	return `The previous unattended setup agent ended before writing a non-empty ` + SetupScriptPath + `.
+This is the one and only recovery pass. Nobody is watching and nobody can answer
+a question, so do not ask any.
+
+Inspect this checkout, the running processes, and any setup logs left in /tmp to
+find how far the previous attempt got. Work already sent to the background may
+still be running: wait for or repair it instead of blindly starting a duplicate.
+Read sparkbox docs dev-environment for the platform contract. Finish installing
+the project's dependencies and start its development service as a systemd --user
+unit on 0.0.0.0 if the first attempt did not. Select the human-facing port with
+sparkbox set-port PORT and prove curl -fsS http://localhost:PORT succeeds. Then
+write every required step as an idempotent ` + SetupScriptPath + ` and run that
+script here until it exits 0.
+
+This is one non-interactive turn. Do not use a background monitor, schedule a
+wakeup, or end your response before the script exists and has been verified; the
+build checks for it immediately when this response ends.
 
 Do not commit, push, or open a pull request; somebody will review this file.
 `

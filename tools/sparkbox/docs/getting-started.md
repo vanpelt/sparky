@@ -249,9 +249,12 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   will carry. What the agent writes is then **run**, in that same builder: an
   agent writes the script at the end from memory, so a build whose only test was
   "the file is not empty" could report success and still leave an environment
-  that cannot rebuild itself. If the script fails, the failure goes back to a
-  fresh agent once; if it fails again the build fails, with the script recorded
-  and the builder paused for `env capture`. A new environment also gets an egress rule-set named after it, so
+  that cannot rebuild itself. The first run gets one fresh recovery pass if it
+  writes no script or writes one that fails; deferred monitors and scheduled
+  wakeups are disabled because `claude -p` has no later turn in which to receive
+  them. If the recovery pass still leaves no working script, the build fails,
+  with any script recorded and the builder paused for `env capture`. A new
+  environment also gets an egress rule-set named after it, so
   its sandboxes reach the package registries, github and the model API and not
   the rest of the internet (`--open-egress` on create opts out).
   It is all on the other two doors as well: an Environments tab on
