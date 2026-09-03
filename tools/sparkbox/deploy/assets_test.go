@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -3081,6 +3082,21 @@ func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
 	// would put the build back to being unwatchable.
 	if strings.Contains(got, "--no-session-persistence") {
 		t.Errorf("the agent ran with session persistence off, so nothing can watch the build:\n%s", got)
+	}
+}
+
+// Darwin still ships Bash 3.2 at /bin/bash. The guest runner normally uses a
+// newer Bash, but these cross-boundary tests execute on both Darwin and Linux,
+// and the runner should not need a parser feature newer than its own syntax.
+func TestTheRealAgentRunnerParsesWithDarwinSystemBash(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin system Bash is only present on Darwin runners")
+	}
+	cmd := exec.Command("/bin/bash", "-n")
+	runner := ctlops.AgentRunner("webapp")
+	cmd.Stdin = strings.NewReader(runner)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("agent runner does not parse with Darwin system Bash: %v\n%s", err, out)
 	}
 }
 

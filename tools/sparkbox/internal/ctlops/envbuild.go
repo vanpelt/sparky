@@ -935,6 +935,7 @@ fi
 sparkbox_sh=$(command -v bash 2>/dev/null || command -v sh 2>/dev/null || echo /bin/sh)
 sparkbox_setup=` + SetupScriptPath + `
 sparkbox_replay=$(mktemp 2>/dev/null || echo /tmp/sparkbox-env-replay.log)
+sparkbox_prompt="$sparkbox_replay.prompt"
 
 # A bound on ONE replay, not a budget for the build: the guest worker's own
 # timeout is the thing that ends a run, and this only stops a setup script that
@@ -995,10 +996,10 @@ sparkbox_verify() {
   return $sparkbox_rc
 }
 
-sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
+cat > "$sparkbox_prompt" <<'` + agentPromptEOF + `'
 ` + prompt + `
 ` + agentPromptEOF + `
-)"
+sparkbox_agent "$(cat "$sparkbox_prompt")"
 
 # A print-mode agent is one process and one turn. If it nevertheless ends while
 # waiting for work it sent to the background, give one FRESH agent the
@@ -1011,10 +1012,10 @@ sparkbox_agent_retried=0
 if [ ! -s "$sparkbox_setup" ]; then
   echo "sparkbox: the first agent left no $sparkbox_setup; asking one fresh agent to finish the build" >&2
   sparkbox_agent_retried=1
-  sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
+  cat > "$sparkbox_prompt" <<'` + agentPromptEOF + `'
 ` + missing + `
 ` + agentPromptEOF + `
-)"
+  sparkbox_agent "$(cat "$sparkbox_prompt")"
 fi
 
 if [ ! -s "$sparkbox_setup" ]; then
@@ -1037,13 +1038,12 @@ if [ "$sparkbox_agent_retried" = 1 ]; then
 fi
 
 echo "sparkbox: the script the agent wrote does not run here; asking it once to fix that" >&2
-sparkbox_agent "$(cat <<'` + agentPromptEOF + `'
+cat > "$sparkbox_prompt" <<'` + agentPromptEOF + `'
 ` + repair + `
 ` + agentPromptEOF + `
-)
-
---- what happened when the script was run ---
-$(tail -c 4000 "$sparkbox_replay" 2>/dev/null)"
+printf '\n--- what happened when the script was run ---\n' >> "$sparkbox_prompt"
+tail -c 4000 "$sparkbox_replay" >> "$sparkbox_prompt" 2>/dev/null || true
+sparkbox_agent "$(cat "$sparkbox_prompt")"
 
 if [ ! -f "$sparkbox_setup" ]; then
   echo "sparkbox: the repair pass left no $sparkbox_setup behind, so there is nothing to build from" >&2
