@@ -1006,12 +1006,20 @@ type IdentityDocResp struct {
 type SelfVisibilityReq struct {
 	Sandbox    string `json:"sandbox"`
 	Visibility string `json:"visibility"`
+	// Port names ONE guest port of the sandbox's default hostname. Zero — the
+	// shape older nodes send, and what a bare `sparkbox make-public` means —
+	// keeps the whole-sandbox meaning: private closes every port, public opens
+	// only the default one.
+	Port int `json:"port,omitempty"`
 }
 
 type SelfVisibilityResp struct {
 	Sandbox    string `json:"sandbox"`
 	Visibility string `json:"visibility"`
-	Routes     int    `json:"routes"`
+	// Port echoes the single port that changed, or zero for a whole-sandbox
+	// change. Routes counts the ports the answer now applies to.
+	Port   int `json:"port,omitempty"`
+	Routes int `json:"routes"`
 }
 
 type SelfPortReq struct {

@@ -622,9 +622,10 @@ func (f *fakeSchedules) Delete(id string) error {
 // ---------------------------------------------------------------------------
 
 type fakeRoutes struct {
-	c   *calls
-	rs  map[string][]routes.Route // by sandbox
-	err error
+	c     *calls
+	rs    map[string][]routes.Route     // by sandbox
+	ports map[string][]routes.PortRoute // non-default ports, by subdomain
+	err   error
 }
 
 func (f *fakeRoutes) ListBySandbox(sandbox string) ([]routes.Route, error) {
@@ -686,6 +687,95 @@ func (f *fakeRoutes) SetVisibility(subdomain, visibility string) error {
 		}
 	}
 	return nil
+}
+
+// The per-port half. ports is keyed by subdomain and holds only the NON-default
+// ports, exactly as routes.Store's route_ports table does — the route's own
+// port lives on the Route above, and SetPortVisibility writes through to it.
+func (f *fakeRoutes) ListPortsBySandbox(sandbox string) ([]routes.PortRoute, error) {
+	f.c.add("ListPortsBySandbox %s", sandbox)
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []routes.PortRoute
+	for _, r := range f.rs[sandbox] {
+		out = append(out, f.ports[r.Subdomain]...)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Subdomain != out[j].Subdomain {
+			return out[i].Subdomain < out[j].Subdomain
+		}
+		return out[i].Port < out[j].Port
+	})
+	return out, nil
+}
+
+func (f *fakeRoutes) SetPortVisibility(subdomain string, port int, visibility string) error {
+	f.c.add("SetPortVisibility %s:%d %s", subdomain, port, visibility)
+	if f.err != nil {
+		return f.err
+	}
+	for box, list := range f.rs {
+		for i := range list {
+			if list[i].Subdomain != subdomain {
+				continue
+			}
+			if list[i].Port == port {
+				f.rs[box][i].Visibility = visibility
+				return nil
+			}
+		}
+	}
+	if f.ports == nil {
+		f.ports = map[string][]routes.PortRoute{}
+	}
+	for i, p := range f.ports[subdomain] {
+		if p.Port == port {
+			f.ports[subdomain][i].Visibility = visibility
+			return nil
+		}
+	}
+	f.ports[subdomain] = append(f.ports[subdomain],
+		routes.PortRoute{Subdomain: subdomain, Port: port, Visibility: visibility})
+	return nil
+}
+
+func (f *fakeRoutes) ForgetPort(subdomain string, port int) error {
+	f.c.add("ForgetPort %s:%d", subdomain, port)
+	if f.err != nil {
+		return f.err
+	}
+	kept := f.ports[subdomain][:0]
+	for _, p := range f.ports[subdomain] {
+		if p.Port != port {
+			kept = append(kept, p)
+		}
+	}
+	f.ports[subdomain] = kept
+	return nil
+}
+
+func (f *fakeRoutes) PrivatizeAll(subdomain string) (int, error) {
+	f.c.add("PrivatizeAll %s", subdomain)
+	if f.err != nil {
+		return 0, f.err
+	}
+	changed := 0
+	for box, list := range f.rs {
+		for i := range list {
+			if list[i].Subdomain == subdomain {
+				f.rs[box][i].Visibility = routes.VisibilityPrivate
+				changed++
+			}
+		}
+	}
+	for i, p := range f.ports[subdomain] {
+		if p.Visibility != routes.VisibilityPrivate {
+			f.ports[subdomain][i].Visibility = routes.VisibilityPrivate
+			changed++
+		}
+	}
+	return changed, nil
 }
 
 // ---------------------------------------------------------------------------

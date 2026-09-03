@@ -59,9 +59,16 @@ def _machines(tick):
          "cpu_seconds": None, "image": "universal", "last_active": _iso(600),
          "net_rx_bytes": 48213, "net_tx_bytes": 9004,
          "pinned": False, "env_undecryptable": False, "tags": [],
+         # The port strip: the default port first, then this hostname's other
+         # ports, then any extra hostname. "pinned" is a port the owner has an
+         # opinion about (the only kind that can be forgotten); an unpinned one
+         # only turned up in the host's scan.
          "routes": [
+             {"subdomain": "dazzling-canyon", "port": 8000, "visibility": "public",
+              "listening": False, "default": True},
+             {"subdomain": "dazzling-canyon", "port": 5173, "visibility": "private",
+              "listening": False, "pinned": True},
              {"subdomain": "app", "port": 4444, "visibility": "public", "listening": False},
-             {"subdomain": "dazzling-canyon", "port": 8000, "visibility": "public", "listening": False},
          ]},
         {"name": "brave-meadow", "state": "running", "vcpus": 8,
          "mem_mb": 16384, "mem_used_mb": 6820, "disk_mb": 12040, "disk_total_mb": 25600,
@@ -69,9 +76,20 @@ def _machines(tick):
          "net_rx_bytes": 4923847112, "net_tx_bytes": 812394002,
          "pinned": True, "env_undecryptable": False, "tags": ["ml", "prod"],
          "turbo": True, "base_vcpus": 4, "base_mem_mb": 8192,
+         # Enough ports to make the strip scroll, which is what it is for.
          "routes": [
-             {"subdomain": "brave-meadow", "port": 8080, "visibility": "private", "listening": True},
-             {"subdomain": "api", "port": 3000, "visibility": "public", "listening": True},
+             {"subdomain": "brave-meadow", "port": 8080, "visibility": "private",
+              "listening": True, "default": True, "service": "uvicorn"},
+             {"subdomain": "brave-meadow", "port": 3000, "visibility": "public",
+              "listening": True, "pinned": True, "service": "Next.js"},
+             {"subdomain": "brave-meadow", "port": 5173, "visibility": "private",
+              "listening": True, "service": "Vite"},
+             {"subdomain": "brave-meadow", "port": 6006, "visibility": "private",
+              "listening": True, "service": "Storybook"},
+             {"subdomain": "brave-meadow", "port": 8888, "visibility": "private",
+              "listening": False, "pinned": True},
+             {"subdomain": "brave-meadow", "port": 16686, "visibility": "private",
+              "listening": True, "service": "Jaeger"},
              {"subdomain": "notebook", "port": 8888, "visibility": "private", "listening": False},
          ]},
         {"name": "cold-harbor", "state": "archived", "vcpus": 4,
@@ -79,7 +97,8 @@ def _machines(tick):
          "cpu_seconds": None, "image": "universal", "last_active": _iso(90000),
          "net_rx_bytes": 73400320, "net_tx_bytes": 15728640,
          "pinned": False, "env_undecryptable": False, "tags": ["staging"],
-         "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private", "listening": False}]},
+         "routes": [{"subdomain": "cold-harbor", "port": 8080, "visibility": "private",
+                     "listening": False, "default": True}]},
     ]
 
 # The owner rollup behind the Machines tab's footprint card. It is mock data of

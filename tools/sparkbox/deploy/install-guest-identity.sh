@@ -18,7 +18,7 @@ MNT=${1:?usage: install-guest-identity.sh <rootfs-mountpoint>}
 [ -d "$MNT" ] || { echo "no such mountpoint: $MNT" >&2; exit 1; }
 
 # Bump when the payload below changes so hosts re-patch their templates.
-IDENTITY_REV=24
+IDENTITY_REV=25
 
 # The metadata port must match internal/metadata.DefaultPort.
 META_PORT=8967
@@ -242,7 +242,9 @@ Repositories:
 
 Identity and networking:
   whoami [--json]                Show the sandbox owner and linked GitHub user
-  make-public | make-private     Change the default web route visibility
+  make-public [PORT]             Open a port to anyone with the URL. With no
+                                 PORT, only the default port is opened
+  make-private [PORT]            Close a port. With no PORT, close every one
   set-port PORT                  Point the default web route at PORT (1–65535)
 
 Tools:
@@ -430,8 +432,20 @@ case "${1:-}" in
     _call POST "$META/self/snapshot?tag=$SPARKBOX_TAG&name=$SPARKBOX_SNAPSHOT&plan=$SPARKBOX_PLAN" \
       || exit $?
     ;;
-  make-public)  exec curl -fsS --max-time 10 -X POST "$META/self/visibility/public" ;;
-  make-private) exec curl -fsS --max-time 10 -X POST "$META/self/visibility/private" ;;
+  # Visibility is settled per port. An optional PORT narrows the change to
+  # https://<name>.<domain>:PORT; with none, `make-public` opens only the
+  # default port (never whatever else happens to be listening) while
+  # `make-private` closes every port, because a panic button has to.
+  make-public | make-private)
+    _vis="${1#make-}"
+    if [ -n "${2:-}" ]; then
+      case "$2" in ''|*[!0-9]*) echo "sparkbox: port must be from 1 through 65535" >&2; exit 2 ;; esac
+      [ "$2" -ge 1 ] && [ "$2" -le 65535 ] \
+        || { echo "sparkbox: port must be from 1 through 65535" >&2; exit 2; }
+      exec curl -fsS --max-time 10 -X POST "$META/self/visibility/$_vis?port=$2"
+    fi
+    exec curl -fsS --max-time 10 -X POST "$META/self/visibility/$_vis"
+    ;;
   set-port)
     case "${2:-}" in ''|*[!0-9]*) echo "sparkbox: port must be from 1 through 65535" >&2; exit 2 ;; esac
     [ "$2" -ge 1 ] && [ "$2" -le 65535 ] \

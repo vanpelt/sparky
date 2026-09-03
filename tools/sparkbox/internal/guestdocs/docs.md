@@ -108,8 +108,10 @@ The explicitly exposed development ports are {{COMMON_HTTPS_PORTS}}.
 From inside the VM:
 
 - `sparkbox set-port PORT` changes the default route's forwarded port.
-- `sparkbox make-public` makes all routes for this VM unauthenticated.
-- `sparkbox make-private` restores authenticated access to all routes.
+- `sparkbox make-public [PORT]` makes one port unauthenticated. With no PORT it
+  opens only the default port, never whatever else is listening.
+- `sparkbox make-private [PORT]` restores authenticated access. With no PORT it
+  closes every port.
 
 A dev server's own Host-header check and hot-reload client both need explicit
 wiring for a domain that is never `localhost`. See

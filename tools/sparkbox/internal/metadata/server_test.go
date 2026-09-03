@@ -56,6 +56,7 @@ func (f fakeAccounts) Get(handle string) (users.User, error) {
 
 type fakeRouteControl struct {
 	visibility string
+	visPort    int // the port the visibility change named, 0 for the whole sandbox
 	port       int
 }
 
@@ -76,9 +77,9 @@ func (f *fakeRepoStatusSink) SetRepoStatus(name string, rows []host.RepoStatus, 
 	return nil
 }
 
-func (f *fakeRouteControl) SetVisibility(_ context.Context, box *host.Sandbox, visibility string) (RouteVisibility, error) {
-	f.visibility = visibility
-	return RouteVisibility{Sandbox: box.Name, Visibility: visibility, Routes: 2}, nil
+func (f *fakeRouteControl) SetVisibility(_ context.Context, box *host.Sandbox, visibility string, port int) (RouteVisibility, error) {
+	f.visibility, f.visPort = visibility, port
+	return RouteVisibility{Sandbox: box.Name, Visibility: visibility, Port: port, Routes: 2}, nil
 }
 
 func (f *fakeRouteControl) SetPort(_ context.Context, box *host.Sandbox, port int) (RoutePort, error) {
@@ -267,6 +268,9 @@ func TestSandboxCanManageItsOwnRoutes(t *testing.T) {
 	}{
 		{"/self/visibility/public", `"visibility":"public"`},
 		{"/self/visibility/private", `"visibility":"private"`},
+		// ?port= narrows a visibility change to one guest port; the answer
+		// echoes it back so the guest can see what it actually changed.
+		{"/self/visibility/public?port=5173", `"port":5173`},
 		{"/self/port/5173", `"port":5173`},
 	} {
 		rec := requestMethod(s, http.MethodPost, tc.path, "172.30.5.2", "172.30.5.1")
@@ -274,7 +278,11 @@ func TestSandboxCanManageItsOwnRoutes(t *testing.T) {
 			t.Errorf("POST %s = %d %s", tc.path, rec.Code, rec.Body)
 		}
 	}
-	for _, path := range []string{"/self/visibility/secret", "/self/port/0", "/self/port/65536", "/self/port/nope"} {
+	for _, path := range []string{
+		"/self/visibility/secret", "/self/port/0", "/self/port/65536", "/self/port/nope",
+		"/self/visibility/public?port=0", "/self/visibility/public?port=99999",
+		"/self/visibility/public?port=nope",
+	} {
 		if rec := requestMethod(s, http.MethodPost, path, "172.30.5.2", "172.30.5.1"); rec.Code != http.StatusBadRequest {
 			t.Errorf("POST %s = %d, want 400", path, rec.Code)
 		}

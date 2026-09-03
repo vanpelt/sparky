@@ -63,6 +63,8 @@ type RouteRows interface {
 	GetBySubdomain(subdomain string) (routes.Route, bool, error)
 	ListBySandbox(sandbox string) ([]routes.Route, error)
 	SetVisibility(subdomain, visibility string) error
+	SetPortVisibility(subdomain string, port int, visibility string) error
+	PrivatizeAll(subdomain string) (int, error)
 }
 
 // sides is the set of gateway stores a remote sandbox's name has to be carried

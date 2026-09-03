@@ -356,16 +356,23 @@ from the design above are noted.
   stripped) in `Rewrite`. `SO_ORIGINAL_DST` recovery is build-tagged
   (`origdst_linux.go` / `origdst_other.go`).
 - **`internal/sshgw`** — `ctl@` verbs `session-token [--ttl]`, `share <name>
-  [public|private]`, `email [set|clear]` (`control_auth.go`).
+  [<port>] [public|private|forget]`, `email [set|clear]` (`control_auth.go`).
 - **`deploy/sparkbox-net.sh`** — `SPARKBOX_EDGE` nat chain REDIRECTing the
   private port range (v4, and v6 when `SUBNET6` is set) to the edge, hooked only
   for uplink traffic so guest→gateway metadata is never caught; excludes admin
   sshd (:2222) and the edge port.
 
-**Deviations from the design.** Visibility is **per-subdomain (route row)**, not
-per-(sandbox,port): the routes table is keyed by subdomain, and `ctl@ share`
-flips every route of a sandbox together, which matches the "who can reach this
-VM" model. The target port is taken from the Host header when `SO_ORIGINAL_DST`
+**Visibility is per-(subdomain, port)**, as designed. The routes table is keyed
+by subdomain and carries the visibility of the port its portless URL forwards
+to; `route_ports` (`internal/routes/ports.go`) carries every other port the same
+hostname serves, and a port with no row is private. `ctl@ share <name> <port>`,
+the console's port strip, and the guest's `sparkbox make-public PORT` all write
+one port. The no-port spellings are deliberately asymmetric: `private` closes
+every port (a panic button has to mean it) while `public` opens only the default
+one, so no single command can publish whatever happened to be listening when it
+ran.
+
+**Deviations from the design.** The target port is taken from the Host header when `SO_ORIGINAL_DST`
 is unavailable (non-Linux dev, or a direct :443 hit), with the getsockopt value
 authoritative when present — so the feature is exercisable on the mock stack
 without iptables. M2 (offline SSHSIG login) and M3 (share lists) are not built;
