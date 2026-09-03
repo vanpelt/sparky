@@ -908,6 +908,7 @@ func serve(args []string) error {
 		Checkpoints: localCheckpointOps{mgr: mgr},
 		Users:       userStore, Secrets: secretsStore,
 		Schedules: scheduleStore, Routes: routeStore, Sessions: sessionSigner,
+		Identity:     issuer,
 		DefaultImage: *defaultImage, Domain: *proxyDomain,
 		GatewayGuestSubnet: *guestSubnet,
 		XtermSubdomain:     xtermLabel, InvitesPerUser: *invitesPer,
@@ -1707,6 +1708,10 @@ type gatewayStores struct {
 	Schedules   *schedule.Store
 	Routes      *routes.Store
 	Sessions    *edgeauth.Signer
+	// Identity is the public half of the guest OIDC issuer. The AWP backend
+	// uses it to preflight the requested audience and report the issuer without
+	// gaining access to signing material.
+	Identity ctlops.WorkloadIdentity
 	// Repos and GitHubApp are declared as the ctlops INTERFACES, not as the
 	// concrete *repos.Store and *ghapp.App, and that is load-bearing: a
 	// concrete field holding a nil pointer becomes a non-nil interface once it
@@ -1798,6 +1803,7 @@ func newGatewayOps(s gatewayStores) *ctlops.Ops {
 		// tagging without the secret verbs (or the reverse) stays expressible.
 		Secrets:  s.Secrets,
 		Sessions: s.Sessions,
+		Identity: s.Identity,
 		// The repo half is two fields for the same reason Tagger and Secrets
 		// are: attaching a repository and asking github.com about it are
 		// separate capabilities, and a host with the store but no App key can

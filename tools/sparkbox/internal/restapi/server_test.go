@@ -48,6 +48,13 @@ func (stubGitHub) Profile(context.Context, string) (users.GitHubProfile, error) 
 	return users.GitHubProfile{}, nil
 }
 
+type stubWorkloadIdentity struct{}
+
+func (stubWorkloadIdentity) URL() string { return "https://oidc." + testDomain }
+func (stubWorkloadIdentity) AudienceAllowed(audience string) bool {
+	return audience == "https://awp.example.test"
+}
+
 type testAPI struct {
 	h       http.Handler
 	handler *Handler
@@ -146,7 +153,7 @@ func newTestAPI(t *testing.T) *testAPI {
 	ops := ctlops.New(ctlops.Config{
 		Sandboxes: mgr, Templates: mgr, Accounts: userStore,
 		Tags: secretStore, Schedules: schedStore, Routes: routeStore,
-		Sessions: signer, GitHub: stubGitHub{},
+		Sessions: signer, Identity: stubWorkloadIdentity{}, GitHub: stubGitHub{},
 		TemplateTags: bindStore,
 		Environments: envStore, EnvVars: secretStore, SecretTags: secretStore,
 		DefaultImage: "ubuntu", Domain: testDomain, XtermSubdomain: "xterm",
@@ -287,6 +294,11 @@ func sample(rt route) (path string, body any) {
 		body = emailRequest{Email: ""}
 	case "session-token":
 		body = tokenRequest{TTL: "1h"}
+	case "awp.create":
+		body = awpCreateRequest{
+			SandboxID: "ghost", RunID: "run-ghost", TenantID: "tenant-ghost",
+			ControlPlaneURL: "https://awp.example.test", OIDCAudience: "https://awp.example.test",
+		}
 	}
 	return path, body
 }
@@ -870,6 +882,99 @@ func TestSandboxLifecycle(t *testing.T) {
 	}
 }
 
+func TestAWPBackendLifecycleIsOperatorOnlyAndTokenless(t *testing.T) {
+	ta := newTestAPI(t)
+	builder := ta.create(t, "awp-builder", "opsy")
+	if _, err := ta.mgr.Snapshot(context.Background(), builder.Name, "awp-runtime", "opsy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ta.binds.Bind("opsy", "awp", "awp-runtime"); err != nil {
+		t.Fatal(err)
+	}
+	req := awpCreateRequest{
+		SandboxID: "awp-demo", RunID: "run-123", TenantID: "tenant-456",
+		ControlPlaneURL: "https://awp.example.test", OIDCAudience: "https://awp.example.test",
+		VCPUs: 2, MemMB: 2048,
+	}
+
+	denied := ta.do(t, "POST", "/v1/awp/sandboxes", "alice", req)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("non-operator create: status %d, want 403 (%s)", denied.Code, denied.Body)
+	}
+	if e := decodeErr(t, denied); e.Code != "not_operator" {
+		t.Fatalf("non-operator code = %q, want not_operator", e.Code)
+	}
+
+	rec := ta.do(t, "POST", "/v1/awp/sandboxes", "opsy", req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: status %d, want 201 (%s)", rec.Code, rec.Body)
+	}
+	var created ctlops.AWPSandboxInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.SandboxID != req.SandboxID || created.RunID != req.RunID || !created.Sandbox.Pinned {
+		t.Fatalf("created = %+v", created)
+	}
+	if created.WorkloadIdentity.Issuer != "https://oidc."+testDomain ||
+		created.WorkloadIdentity.Audience != req.OIDCAudience ||
+		created.WorkloadIdentity.SandboxID == "" {
+		t.Fatalf("workload identity = %+v", created.WorkloadIdentity)
+	}
+
+	tags, err := ta.secrets.TagsFor(req.SandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var launchTag string
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, "awp-") {
+			launchTag = tag
+		}
+	}
+	if launchTag == "" {
+		t.Fatalf("tags = %v, want private awp-* launch tag", tags)
+	}
+	vars, err := ta.secrets.VarsForTag("opsy", launchTag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vars {
+		if v.Name == "BOOTSTRAP_TOKEN" {
+			t.Fatal("AWP launch persisted a bootstrap bearer token")
+		}
+	}
+	if len(vars) != 7 {
+		t.Fatalf("launch vars = %v, want seven non-secret identity fields", vars)
+	}
+
+	rec = ta.do(t, "GET", "/v1/awp/sandboxes/awp-demo", "opsy", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: status %d (%s)", rec.Code, rec.Body)
+	}
+
+	ta.create(t, "ordinary", "opsy")
+	rec = ta.do(t, "DELETE", "/v1/awp/sandboxes/ordinary", "opsy", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete ordinary through AWP: status %d, want 404 (%s)", rec.Code, rec.Body)
+	}
+	if _, ok := ta.mgr.Get("ordinary"); !ok {
+		t.Fatal("AWP route destroyed an ordinary sandbox")
+	}
+
+	rec = ta.do(t, "DELETE", "/v1/awp/sandboxes/awp-demo", "opsy", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete: status %d (%s)", rec.Code, rec.Body)
+	}
+	if _, ok := ta.mgr.Get("awp-demo"); ok {
+		t.Fatal("AWP VM survived delete")
+	}
+	vars, err = ta.secrets.VarsForTag("opsy", launchTag)
+	if err != nil || len(vars) != 0 {
+		t.Fatalf("launch vars after delete = %v, %v", vars, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Async
 // ---------------------------------------------------------------------------
@@ -1153,7 +1258,7 @@ func TestAccountEndpoints(t *testing.T) {
 	if caps.Archiving {
 		t.Fatal("archiving reported enabled without object storage")
 	}
-	if !caps.Tags || !caps.Scheduling || !caps.Routes || !caps.SessionTokens || !caps.Terminal {
+	if !caps.AWP || !caps.Tags || !caps.Scheduling || !caps.Routes || !caps.SessionTokens || !caps.Terminal {
 		t.Fatalf("capabilities %+v", caps)
 	}
 

@@ -149,6 +149,7 @@ type fakeSandboxes struct {
 	archiving   bool
 	err         error // returned by every mutating method when set
 	repoSyncErr error // returned by ResyncRepos when set
+	awaitEnvErr error // returned by AwaitEnv when set
 	// destroyErr fails only the destroy, which is the one half-failure an
 	// environment build treats as non-fatal: the disk exists and the tag points
 	// at it, so a leftover box must not turn a finished build into a failed one.
@@ -183,7 +184,7 @@ func (f *fakeSandboxes) Create(ctx context.Context, name, owner, image string, v
 		return nil, f.err
 	}
 	b := &host.Sandbox{
-		Name: name, Owner: owner, Image: image, State: vmm.StateRunning,
+		ID: "provider-" + name, Name: name, Owner: owner, Image: image, State: vmm.StateRunning,
 		VCPUs: vcpus, MemMB: memMB, CreatedAt: time.Unix(0, 0).UTC(),
 		SSHAddr: "127.0.0.1:2200", SSHUser: "sparky",
 	}
@@ -289,7 +290,7 @@ func (f *fakeSandboxes) ResyncRepos(ctx context.Context, name string) error {
 
 func (f *fakeSandboxes) AwaitEnv(ctx context.Context, name string) error {
 	f.c.add("AwaitEnv %s", name)
-	return nil
+	return f.awaitEnvErr
 }
 func (f *fakeSandboxes) MarkActive(name string) { f.c.add("Touch %s", name) }
 func (f *fakeSandboxes) ArchivingEnabled() bool { return f.archiving }

@@ -42,6 +42,10 @@
       "description": "Sandbox lifecycle: create, pause, resume, archive, resize, rename, destroy, plus tags and route visibility."
     },
     {
+      "name": "awp",
+      "description": "Operator-only provisional backend contract for AWP. Each request creates one pinned Sparkbox Firecracker VM from the template bound to the `awp` tag."
+    },
+    {
       "name": "snapshots",
       "description": "Templates taken from a sandbox, and the forks made from them."
     },
@@ -741,6 +745,97 @@
               }
             }
           }
+        }
+      }
+    },
+    "/v1/awp/sandboxes": {
+      "post": {
+        "operationId": "awp.create",
+        "tags": ["awp"],
+        "summary": "Provision an AWP runtime VM",
+        "description": "Operator only. Creates one pinned Firecracker VM carrying the fixed `awp` tag, which must have an AWP runtime snapshot bound to it; no binding is a fail-closed 409 rather than a generic VM. A private per-launch tag delivers the non-secret run identity to `/etc/environment` before this call succeeds.\n\nThere is deliberately no bootstrap bearer token in this contract. The guest requests a Sparkbox workload identity token for `oidc_audience`; AWP verifies its issuer and immutable `sandbox_id` claim, then exchanges it for the short-lived run credential. Until that exchange exists, the AWP runtime image can boot in warm mode to prove the VM lifecycle and runtime health surface.\n\nThe current HTTP caller uses an operator's Sparkbox session. This is the temporary action edge; an AWP-to-Sparkbox OIDC authenticator can replace that transport credential without changing this request or the guest identity flow.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AWPCreateRequest" },
+              "example": {
+                "sandbox_id": "sbx-0195e6d2",
+                "run_id": "run-0195e6d2",
+                "tenant_id": "tenant-acme",
+                "control_plane_url": "https://awp.example.com",
+                "oidc_audience": "https://awp.example.com",
+                "vcpus": 4,
+                "mem_mb": 12288
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The AWP VM is running, pinned, and has received its launch metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AWPSandbox" }
+              }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": {
+            "description": "The sandbox id is already in use, or the operator has not bound an AWP runtime snapshot to the `awp` tag.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" },
+          "503": { "$ref": "#/components/responses/HostAtCapacity" },
+          "507": { "$ref": "#/components/responses/DiskPoolFull" }
+        }
+      }
+    },
+    "/v1/awp/sandboxes/{name}": {
+      "get": {
+        "operationId": "awp.get",
+        "tags": ["awp"],
+        "summary": "Read an AWP runtime VM",
+        "description": "Operator only. Returns launch metadata only for a VM created through the AWP backend; an ordinary Sparkbox VM answers 404 on this surface.",
+        "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
+        "responses": {
+          "200": {
+            "description": "The AWP provider record.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AWPSandbox" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "delete": {
+        "operationId": "awp.rm",
+        "tags": ["awp"],
+        "summary": "Destroy an AWP runtime VM",
+        "description": "Operator only. Destroys the VM and deletes its non-secret per-launch configuration. Refuses ordinary Sparkbox VMs.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SandboxName" },
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Destroyed.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Deleted" } } }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
         }
       }
     },
@@ -2273,6 +2368,22 @@
           }
         }
       },
+      "Forbidden": {
+        "description": "The authenticated account is not a Sparkbox operator.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "kind": "denied",
+                "op": "awp.create",
+                "code": "not_operator",
+                "message": "only an operator may provision AWP sandboxes"
+              }
+            }
+          }
+        }
+      },
       "NotFound": {
         "description": "No such resource — or it belongs to someone else. The two are deliberately indistinguishable.",
         "content": {
@@ -2414,6 +2525,7 @@
         "description": "What this host has configured. A false field means those endpoints answer 501.",
         "required": [
           "archiving",
+          "awp",
           "snapshots",
           "scheduling",
           "tags",
@@ -2428,6 +2540,7 @@
         ],
         "properties": {
           "archiving": { "type": "boolean", "description": "Object storage is configured." },
+          "awp": { "type": "boolean", "description": "The operator-only AWP backend is enabled: tags, non-secret launch variables, and guest workload identity are all configured." },
           "snapshots": { "type": "boolean", "description": "The VM driver can capture templates." },
           "scheduling": { "type": "boolean", "description": "Platform cron is enabled." },
           "tags": { "type": "boolean", "description": "The secrets store is open, so tags exist." },
@@ -2534,6 +2647,65 @@
             "description": "The browser terminal, when this host serves them.",
             "example": "https://demo-xterm.example.com"
           }
+        }
+      },
+      "AWPCreateRequest": {
+        "type": "object",
+        "description": "One cold AWP launch. All identity fields are non-secret; the guest obtains its run credential by exchanging Sparkbox workload identity.",
+        "required": ["sandbox_id", "run_id", "tenant_id", "control_plane_url", "oidc_audience"],
+        "properties": {
+          "sandbox_id": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The AWP logical sandbox id and Sparkbox VM name. It must also satisfy Sparkbox's sandbox-name grammar."
+          },
+          "run_id": { "type": "string", "maxLength": 256 },
+          "tenant_id": { "type": "string", "maxLength": 256 },
+          "control_plane_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute HTTPS AWP runtime-service origin; credentials, query and fragment are refused."
+          },
+          "oidc_audience": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute HTTPS audience the guest requests. It must be in this Sparkbox issuer's configured audience allowlist."
+          },
+          "node": {
+            "type": "string",
+            "description": "Optional Sparkbox fleet node. Usually omitted so the `awp` template binding chooses its node."
+          },
+          "vcpus": { "type": "integer", "format": "int64", "minimum": 0 },
+          "mem_mb": { "type": "integer", "format": "int64", "minimum": 0 }
+        }
+      },
+      "AWPWorkloadIdentity": {
+        "type": "object",
+        "required": ["issuer", "audience", "sandbox_id"],
+        "properties": {
+          "issuer": { "type": "string", "format": "uri" },
+          "audience": { "type": "string", "format": "uri" },
+          "sandbox_id": {
+            "type": "string",
+            "description": "Immutable Sparkbox provider UUID carried in the guest token's `sandbox_id` claim. AWP should bind this claim during exchange."
+          }
+        }
+      },
+      "AWPSandbox": {
+        "type": "object",
+        "required": ["sandbox", "sandbox_id", "run_id", "tenant_id", "control_plane_url", "runtime_port", "workload_identity"],
+        "properties": {
+          "sandbox": { "$ref": "#/components/schemas/Sandbox" },
+          "sandbox_id": { "type": "string", "description": "AWP's logical sandbox id." },
+          "run_id": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "control_plane_url": { "type": "string", "format": "uri" },
+          "runtime_port": {
+            "type": "integer",
+            "const": 8000,
+            "description": "Port served by agent-runtime inside the Firecracker guest and by Sparkbox's default route."
+          },
+          "workload_identity": { "$ref": "#/components/schemas/AWPWorkloadIdentity" }
         }
       },
       "SandboxList": {
