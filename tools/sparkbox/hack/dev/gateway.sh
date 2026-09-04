@@ -43,18 +43,16 @@
 #   SPARKBOX_DEV_HANDLE       operator handle seeded into users.conf (default $USER)
 #   SPARKBOX_DEV_SSH_KEY      public key for that handle (default ~/.ssh/id_*.pub)
 #   SPARKBOX_GITHUB_APP_CLIENT_ID
-#                             client id of a GitHub App to mint repo credentials
-#                             with. Unset leaves repo attachments unavailable,
-#                             which is what `repo add` reports today.
-#   SPARKBOX_DEV_OP_ITEM      1Password secret reference to that App's private
-#                             key, e.g. op://Hivemind-Dev/github-app-key/password.
-#                             Read on start into the key dir, removed on stop.
-#   SPARKBOX_DEV_OP_ACCOUNT   1Password account for the read (default: whichever
-#                             account `op` resolves the reference in). Name it
-#                             when more than one account is signed in.
+#                             GitHub App that mints repo credentials; defaults to
+#                             the dev App below. Empty disables attachments.
+#   SPARKBOX_DEV_OP_ITEM      1Password reference to that App's private key, read
+#                             on start into the key dir and removed on stop.
+#                             Empty skips 1Password entirely.
+#   SPARKBOX_DEV_OP_ACCOUNT   1Password account for the read. Empty lets `op`
+#                             resolve the reference in whichever it likes.
 #   SPARKBOX_GITHUB_APP_KEY_FILE
-#                             use a PEM already on disk instead of 1Password.
-#                             Takes precedence; the two are mutually exclusive.
+#                             a PEM already on disk instead of 1Password. Wins,
+#                             and the two are mutually exclusive.
 set -euo pipefail
 
 # --- bash floor -------------------------------------------------------------
@@ -97,6 +95,19 @@ readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:-dev.localhost}"
 readonly edge_port="${SPARKBOX_DEV_EDGE_PORT:-8081}"
 readonly ssh_port="${SPARKBOX_DEV_SSH_PORT:-2222}"
 readonly api_port="${SPARKBOX_DEV_API_PORT:-18080}"
+
+# The dev GitHub App, and where its private key lives. Checked in because
+# neither is a secret: a client id is a public identifier that travels in the
+# request minting a device code (see defaultGitHubClientID in cmd/sparkbox), and
+# a 1Password reference is an address, useless without a session on the account.
+# The key itself is never in the tree.
+#
+# Both are defaults rather than constants, so another machine points at its own
+# App and vault with two exports and no diff. Empty disables that half: it is
+# how a checkout with no access to this vault runs the gateway clean.
+readonly app_client_id="${SPARKBOX_GITHUB_APP_CLIENT_ID-Iv23liZ9eVp3hIxJnALL}"
+readonly app_key_ref="${SPARKBOX_DEV_OP_ITEM-op://Hivemind-Dev/github-app-key/password}"
+readonly app_key_account="${SPARKBOX_DEV_OP_ACCOUNT-coreweave.1password.com}"
 
 # The five private keys --require-keys refuses to mint, plus the two public
 # halves that live in the state dir rather than the key dir. Names come from
@@ -230,67 +241,100 @@ derive_trust_pubs() {
 # reference it was given and touches nothing else.
 readonly app_key_file="$key_dir/github_app_key.pem"
 
+# Set by app_key_warn so warn_app_config does not restate a consequence the
+# caller has already been told about.
+app_key_warned=""
+
 fetch_app_key() {
-  local ref="${SPARKBOX_DEV_OP_ITEM:-}"
   # An explicit key file wins and suppresses the 1Password path entirely. Two
   # sources for one secret, silently preferring one, is how you end up debugging
   # an App that is not the App you edited.
   if [ -n "${SPARKBOX_GITHUB_APP_KEY_FILE:-}" ]; then
-    [ -z "$ref" ] || die "set SPARKBOX_GITHUB_APP_KEY_FILE or SPARKBOX_DEV_OP_ITEM, not both"
+    [ -z "$app_key_ref" ] ||
+      die "set SPARKBOX_GITHUB_APP_KEY_FILE or SPARKBOX_DEV_OP_ITEM, not both"
     [ -r "$SPARKBOX_GITHUB_APP_KEY_FILE" ] ||
       die "SPARKBOX_GITHUB_APP_KEY_FILE=$SPARKBOX_GITHUB_APP_KEY_FILE is not readable"
     return 0
   fi
-  # Unconditional, so a run without the reference cannot inherit the key a
+  # Unconditional, so a run without a reference cannot inherit the key a
   # previous run left behind and mint against an App nobody named.
   rm -f "$app_key_file"
-  [ -n "$ref" ] || return 0
-  command -v op > /dev/null 2>&1 ||
-    die "SPARKBOX_DEV_OP_ITEM is set but the 1Password CLI is not on PATH (brew install 1password-cli)"
+  [ -n "$app_key_ref" ] || return 0
 
-  local args=(read --no-newline "$ref")
-  [ -n "${SPARKBOX_DEV_OP_ACCOUNT:-}" ] && args+=(--account "$SPARKBOX_DEV_OP_ACCOUNT")
+  # Every 1Password outcome below is a WARNING, never fatal, and the difference
+  # matters because the reference above is a checked-in default: a machine that
+  # cannot reach that vault, or a desktop-app session that has come unstuck
+  # again, must not be unable to start the dev gateway at all. GitHub
+  # attachments are one feature; the control plane is the reason to run this.
+  # Contradictory local configuration still dies, because that is a typo the
+  # operator can fix and not a dependency having a bad day.
+  if ! command -v op > /dev/null 2>&1; then
+    app_key_warn "the 1Password CLI is not on PATH (brew install 1password-cli)"
+    return 0
+  fi
+
+  local args=(read --no-newline "$app_key_ref")
+  [ -n "$app_key_account" ] && args+=(--account "$app_key_account")
 
   # Redirected straight to the destination under a restrictive umask rather than
   # captured into a variable: a private key in a shell variable is inherited by
-  # every child of this script, and it would reach the gateway's own environment.
+  # every child of this script, including the gateway itself.
   if ! (umask 077; op "${args[@]}" > "$app_key_file"); then
     rm -f "$app_key_file"
-    echo "gateway.sh: could not read $ref from 1Password." >&2
-    echo "  A 'RequestDelegatedSession' error is the desktop-app integration, not the" >&2
-    echo "  reference: Settings -> Developer -> Integrate with 1Password CLI, then restart" >&2
-    echo "  the app fully. 'op signin' skips the desktop app entirely. Note that 'op whoami'" >&2
-    echo "  answers from local config even while the session is broken, so it proves" >&2
-    echo "  nothing -- 'op vault list' is the test." >&2
-    die "1Password read failed"
+    app_key_warn "op could not read $app_key_ref (see the error above)" \
+      "a 'RequestDelegatedSession' error is the desktop-app integration, not the" \
+      "reference: Settings -> Developer -> Integrate with 1Password CLI, then" \
+      "restart the app fully. 'op signin' skips the desktop app entirely." \
+      "'op whoami' answers from local config even while the session is broken," \
+      "so it proves nothing -- 'op vault list' is the test."
+    return 0
   fi
   # op exits 0 having written nothing when the field exists and is empty, which
   # would otherwise surface as an unhelpful PEM parse error from ghapp.LoadKey.
-  [ -s "$app_key_file" ] || {
+  if [ ! -s "$app_key_file" ]; then
     rm -f "$app_key_file"
-    die "$ref resolved to an empty value; check the field name (a reference ends in its field)"
-  }
+    app_key_warn "$app_key_ref resolved to an empty value" \
+      "check the field name -- a reference ends in its field, not its item."
+    return 0
+  fi
   chmod 0600 "$app_key_file"
   export SPARKBOX_GITHUB_APP_KEY_FILE="$app_key_file"
   echo "read the GitHub App key from 1Password into $app_key_file"
 }
 
+# One shape for every "no App key, carrying on" message, so the consequence is
+# stated once and cannot drift between the four ways of getting here.
+app_key_warn() {
+  app_key_warned=1
+  echo "gateway.sh: $1" >&2
+  shift
+  local line
+  for line in "$@"; do
+    echo "            $line" >&2
+  done
+  echo "            starting without GitHub App credentials: attachments stay" >&2
+  echo "            unavailable and 'repo add' will say so. Everything else runs." >&2
+}
+
 # Both halves or neither, and say which is missing. cmd/sparkbox logs this too,
 # but it logs one line from inside a starting server; a box configured halfway
 # should hear about it before the gateway comes up rather than when a clone
-# fails inside a VM.
+# fails inside a VM at boot.
 warn_app_config() {
-  local have_key="" have_id=""
-  [ -n "${SPARKBOX_GITHUB_APP_KEY_FILE:-}" ] && have_key=1
-  [ -n "${SPARKBOX_GITHUB_APP_CLIENT_ID:-}" ] && have_id=1
-  if [ -n "$have_key" ] && [ -z "$have_id" ]; then
-    echo "gateway.sh: a GitHub App key is present but SPARKBOX_GITHUB_APP_CLIENT_ID is not" >&2
-    echo "            set, so repo attachments stay disabled: a key cannot say which App" >&2
-    echo "            it belongs to" >&2
-  elif [ -z "$have_key" ] && [ -n "$have_id" ]; then
-    echo "gateway.sh: SPARKBOX_GITHUB_APP_CLIENT_ID is set but no key was found; set" >&2
-    echo "            SPARKBOX_DEV_OP_ITEM or SPARKBOX_GITHUB_APP_KEY_FILE" >&2
+  if [ -n "${SPARKBOX_GITHUB_APP_KEY_FILE:-}" ]; then
+    [ -n "$app_client_id" ] && return 0
+    echo "gateway.sh: a GitHub App key is present but SPARKBOX_GITHUB_APP_CLIENT_ID is" >&2
+    echo "            empty, so repo attachments stay disabled: a key cannot say which" >&2
+    echo "            App it belongs to" >&2
+    return 0
   fi
+  # No key. Only worth a line if somebody named an App to use it with, and only
+  # if fetch_app_key has not already explained why there is no key.
+  [ -n "$app_client_id" ] || return 0
+  [ -z "$app_key_warned" ] || return 0
+  app_key_warn "SPARKBOX_GITHUB_APP_CLIENT_ID names an App but no key was found" \
+    "set SPARKBOX_DEV_OP_ITEM to a 1Password reference, or" \
+    "SPARKBOX_GITHUB_APP_KEY_FILE to a PEM on disk."
 }
 
 # --- run --------------------------------------------------------------------
@@ -313,6 +357,10 @@ serve() {
   export SPARKBOX_SSH_ADVERTISE_HOST="${SPARKBOX_SSH_ADVERTISE_HOST:-127.0.0.1}"
   export SPARKBOX_NODE_NAME="${SPARKBOX_NODE_NAME:-dev-gateway}"
   export SPARKBOX_CLUSTER_ID="${SPARKBOX_CLUSTER_ID:-dev}"
+  # Exported rather than passed as a flag because that is how the production
+  # entrypoint takes it (gateway-entrypoint.sh builds --github-app-client-id
+  # from this), and the whole point of this script is to run that file unedited.
+  export SPARKBOX_GITHUB_APP_CLIENT_ID="$app_client_id"
   exec "$dev_bash" "$entrypoint" \
     --ssh-addr "127.0.0.1:$ssh_port" \
     --proxy-addr "127.0.0.1:$edge_port" \

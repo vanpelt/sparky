@@ -110,35 +110,53 @@ clone: `internal/users/githubdevice.go` requests **no scope at all**, on purpose
 and a GitHub App's user token reaches only repositories that App is installed on.
 Linking proves who you are; it is not a credential.
 
-So this needs its own App. Register a **dev** App rather than pointing at the
-cluster's — the two differ only in which repositories they are installed on, and
-a dev box that can mint against production installations is the thing worth
-avoiding. It needs no public URL: minting is outbound-only, gateway to
-api.github.com. No callback, no webhook, no tunnel.
+So this needs its own App — a **dev** App, not the cluster's. The two differ
+only in which repositories they are installed on, and a dev box that can mint
+against production installations is the thing worth avoiding. It needs no public
+URL: minting is outbound-only, gateway to api.github.com. No callback, no
+webhook, no tunnel.
 
-1. Create a GitHub App. Repository permissions **Contents**, **Pull requests**
-   and **Issues** — the set `internal/metadata/repos.go` asks for, narrowed to
-   what the installation actually granted.
-2. Generate a private key. Put the PEM in 1Password.
-3. Install the App on the repositories you want to attach.
-4. Point the gateway at both halves:
+One is already registered and wired up, so on this machine there is nothing to
+do — `gateway.sh` defaults to client id `Iv23liZ9eVp3hIxJnALL` and reads its key
+from `op://Hivemind-Dev/github-app-key/password` in the `coreweave.1password.com`
+account. Both are checked in because neither is a secret: a client id is a public
+identifier that travels in the request minting a device code (`cmd/sparkbox`
+ships one for the same reason), and a 1Password reference is an address, useless
+without a session on that account. The key itself is never in the tree.
+
+To point at your own instead, or at none:
 
 ```sh
-export SPARKBOX_GITHUB_APP_CLIENT_ID=Iv23li...              # public, not a secret
-export SPARKBOX_DEV_OP_ITEM='op://Hivemind-Dev/github-app-key/password'
-export SPARKBOX_DEV_OP_ACCOUNT=coreweave.1password.com      # only if several are signed in
-hack/dev/gateway.sh restart
+export SPARKBOX_GITHUB_APP_CLIENT_ID=Iv23li...              # your App
+export SPARKBOX_DEV_OP_ITEM='op://YourVault/your-item/password'
+export SPARKBOX_DEV_OP_ACCOUNT=your.1password.com           # or "" to let op choose
+export SPARKBOX_DEV_OP_ITEM=                                # or: skip 1Password entirely
+export SPARKBOX_GITHUB_APP_KEY_FILE=/path/to/app.pem        # a PEM already on disk
 ```
 
+Registering one takes about five minutes: create the App with repository
+permissions **Contents**, **Pull requests** and **Issues** (the set
+`internal/metadata/repos.go` asks for, narrowed to what the installation actually
+granted), generate a private key, put the PEM in a vault, and install the App on
+the repositories you want to attach.
+
 `start` reads the reference into `.dev/gateway/keys/github_app_key.pem` at 0600
-and `stop` removes it, so the vault holds the only durable copy. Half a
-configuration is called out before the server starts rather than surfacing later
-as a clone failure inside a VM. `SPARKBOX_GITHUB_APP_KEY_FILE` still takes a PEM
-already on disk; setting both is refused rather than resolved by precedence.
+and `stop` removes it, so the vault holds the only durable copy — which is the
+point, since `.dev/` is disposable and this key cannot be regenerated from here.
+
+**A 1Password problem is never fatal.** A missing `op`, a broken session, an
+empty field: each warns, says attachments will be unavailable, and lets the
+gateway start. The reference is a checked-in default, so a checkout with no
+access to that vault has to run the control plane fine, and the desktop-app
+integration is flaky enough that making it load-bearing would be a bad trade.
+Contradictory *local* configuration still stops the run — an unreadable
+`SPARKBOX_GITHUB_APP_KEY_FILE`, or both sources set at once — because that is a
+typo, not a dependency having a bad day.
 
 Then, on the dev box: `github link` (an `assertion` link is refused by
-`attachIdentity`), `repo add owner/name`, and `repo check` — which exists because
-every other surface reports success whether or not the App was ever installed.
+`attachIdentity`), `github install` for the URL that installs *this* App,
+`repo add owner/name`, and `repo check` — which exists because every other
+surface reports success whether or not the App was ever installed.
 
 **`sparkbox fetch-secrets --provider op` is the wrong tool here**, despite being
 the production path for this exact file. It walks the whole secret manifest and
