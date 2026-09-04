@@ -109,7 +109,7 @@ if [ -n "${module:-}" ]; then
     nested=$(cat "$param")
     case "$nested" in
       1|Y|y) pass "$module.nested" "$nested" ;;
-      *)     failf "$module.nested" "$nested — nested virtualization is off on this host (mitigation posture, or deliberate); it is not ours to flip on CKS" ;;
+      *)     failf "$module.nested" "$nested — nested virtualization is OFF on this host. KVM then advertises no VMX/SVM to any guest and faults every VMX instruction with #UD, so no VMM can expose nested here. module_param(nested, bool, 0444) is read-only at runtime: changing it needs a modprobe.d drop-in or kernel cmdline plus a module reload or reboot. On CKS that is CoreWeave's operation, not ours." ;;
     esac
   else
     warnf "$module.nested" "$param not readable; module not loaded or sysfs hidden — check from the host"

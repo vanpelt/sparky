@@ -32,33 +32,86 @@ Hypervisor feature. But the pause path does **not** map one-to-one, and it is th
 mechanism the whole node's security model is built around; §3 and the
 [port design](cloud-hypervisor-port-design.md) cost it honestly.
 
-**Firecracker's limit is narrower and stranger than the first draft said.**
-Firecracker does not *mask* VMX/SVM. Its CPUID normaliser touches only
-CPUID.1:ECX bits 15, 24 and 31; everything else is whatever
-`KVM_GET_SUPPORTED_CPUID` returns, and KVM sets the VMX/SVM bit there whenever
-`kvm_{intel,amd}.nested=1`, which is the upstream default. Sparkbox sets no CPU
-template. **So a Sparkbox guest on a stock Node very likely already sees the
-`vmx` bit today** — it cannot use it only because our guest kernel is built
-without `CONFIG_KVM`. What Firecracker actually lacks is (a) any supported
-per-microVM switch, and (b) nested state in its snapshot: it never issues
-`KVM_GET_NESTED_STATE` and its serialised MSR list omits the VMX capability MSRs
-`0x480`–`0x491`, so pausing a guest with a live L2 loses the inner VM. That
-second point is the real, unfixable blocker, and it is why this is a VMM
-decision rather than a kernel-config decision.
+**Firecracker's limit is narrower than the first draft said, and the node's
+limit binds before it does.** Firecracker does not *mask* VMX/SVM: its CPUID
+normaliser touches only CPUID.1:ECX bits 15, 24 and 31, and we set no CPU
+template. The first draft inferred from that that our guests probably already
+see the `vmx` bit. **Measured on the live CKS node, they do not** — `grep` for
+`vmx|svm` in a running sandbox returns nothing (M0, §10). The inference was
+sound about Firecracker and wrong about the system, because it forgot who
+supplies the bit in the first place:
 
-Two consequences follow immediately, and the second is free:
+```c
+/* arch/x86/kvm/vmx/vmx.c, vmx_set_cpu_caps() */
+if (nested)
+        kvm_cpu_cap_set(X86_FEATURE_VMX);
+```
 
-- The cheapest experiment for the *goal* is not a port. Add `CONFIG_KVM*` to the
-  guest kernel and a Firecracker **custom CPU template** setting CPUID.1:ECX[5],
-  and an L2 may well boot today. It would be unsupported (upstream states
-  in-tree that "Firecracker is not tested with nested virtualization" and ships
-  `tests/integration_tests/security/test_nv.py` as a guard), and pause would
-  corrupt it — but it answers "does our stack want this" for a day's work. §9 M0
-  folds it in.
-- The cheapest *hardening* is also not a port. Pinning a masking template
-  (T2CL/T2/C3 on Intel, T2A on AMD, all of which clear the bit) would make "our
-  guests see no VMX" a property of Sparkbox rather than of CoreWeave's module
-  parameters. That is worth doing regardless of what we decide here.
+KVM advertises VMX in `KVM_GET_SUPPORTED_CPUID` **only** when the module
+parameter is on. An empty grep in the guest is therefore a reading of the
+*node*: `kvm_intel.nested=0` (or the AMD equivalent). Confirm it directly with
+`hack/probe-cks-nested.sh`, which reads
+`/sys/module/kvm_{intel,amd}/parameters/nested`.
+
+What Firecracker actually lacks is (a) any supported per-microVM switch, and (b)
+nested state in its snapshot — it never issues `KVM_GET_NESTED_STATE` and its
+serialised MSR list omits the VMX capability MSRs `0x480`–`0x491`, so pausing a
+guest with a live L2 loses the inner VM. That second point is the real,
+unfixable blocker, and it is why this is a VMM decision rather than a
+kernel-config decision. But it is now the *second* blocker, behind the node.
+
+Two consequences, and they point in opposite directions:
+
+- **The port is unblocked; the feature is not.** See §1a.
+- **The masking-CPU-template idea is deferred, not dead.** With `nested=0` there
+  is nothing to mask, and our "guests see no VMX" posture is real. But it is the
+  node's doing, not ours — so the day CoreWeave sets `nested=1` on a pool,
+  *every* Firecracker guest on it starts seeing the bit, because we set no
+  template. Exposure inverts from opt-in to opt-out on a module reload we do not
+  perform. If we ever get a nested-enabled pool, pinning T2CL/T2/C3 (Intel) or
+  T2A (AMD) for non-nested sandboxes stops being optional.
+
+## 1a. Pod KVM access is not guest nested virtualization
+
+The natural next thought — *the pod already has `/dev/kvm`, so can we not just
+build against that?* — is right about the port and wrong about the feature, and
+the distinction is worth stating precisely because nothing in a Pod spec
+expresses it.
+
+**Yes, for the port.** Cloud Hypervisor needs exactly what Firecracker needs:
+`/dev/kvm` and a TAP, both already allocated to `vmm-helper` by our device
+plugin, in a chroot the helper already builds. Nothing in the driver, the helper
+protocol, the kernel work, the artifact plumbing or the parity harness requires
+one additional host privilege, device, capability or sysctl. **M1 is buildable
+and testable today on the access model we already have, with nested never
+enabled.** That is a real de-risking: the port does not wait on CoreWeave.
+
+**No, for nested.** `/dev/kvm` lets a process create VMs. Whether *those* VMs may
+create VMs is decided by `kvm_intel.nested` / `kvm_amd.nested`, and three
+properties of that parameter put it out of reach of any pod-level change:
+
+1. It gates the CPUID advertisement, as above — so a guest cannot be told it has
+   VMX by a VMM that was never offered the bit.
+2. It gates the instruction handlers. With `nested=0` every VMX exit lands in
+   `handle_vmx_instruction()`, which injects `#UD` — upstream's own comment says
+   "When nested=0, all VMX instruction VM Exits filter here. The handlers are
+   overwritten by `nested_vmx_hardware_setup()` when nested=1." So even a forged
+   CPUID bit would fault on `VMXON`.
+3. It is `module_param(nested, bool, 0444)` — **read-only at runtime**. Changing
+   it means reloading `kvm_intel`/`kvm_amd` or rebooting the node, with a
+   `modprobe.d` drop-in or a kernel command line. On CKS that is CoreWeave's
+   operation on their image, not a privileged DaemonSet we could ship.
+
+The consequence for Cloud Hypervisor specifically: on a `nested=0` node,
+`--cpus nested=on` is **accepted and does nothing**. Cloud Hypervisor does not
+add the VMX bit; it only refrains from clearing a bit KVM already offered. So
+the port alone changes nothing observable for a user, and the headline
+capability waits on a node-level change we do not control.
+
+Sequencing follows directly: build M1 on the existing access model, and open the
+CoreWeave conversation **in parallel and now**, because it is the long pole. Ask
+for a dedicated pool rather than a fleet-wide flip — §7's containment argument
+and the three shadow-MMU CVEs make "enable nested everywhere" the wrong ask.
 
 **Nested virtualization is a real capability gap, but the premise needs
 restating.** exe.dev does publicly name its VMM — "We happen to use Cloud
@@ -90,11 +143,19 @@ virtualization" model in `security-hardening.md` already gives us Kata's securit
 shape with a four-verb protocol instead of an OCI/agent/virtiofsd surface. §4
 argues the other side before concluding.
 
-**Recommendation unchanged in direction, sharpened in cost:** build
-`internal/vmm/cloudhypervisor` beside the Firecracker driver, pin **v52.0 or
-later**, and gate nested per sandbox on a node preflight. Budget it as a driver
-rewrite plus a new integration-test harness, not as a few hundred lines. §9 has
-the plan; the [risk register](nested-virtualization-design.md) has the kill
+**Recommendation, now in two independent halves:**
+
+1. **Build the driver** — `internal/vmm/cloudhypervisor` beside the Firecracker
+   one, pinned **v52.0 or later**, on the KVM access the pod already has.
+   Unblocked today. Budget it as a driver rewrite plus a new integration-test
+   harness, not as a few hundred lines.
+2. **Ask CoreWeave for a nested-enabled pool** — in parallel, because
+   `kvm_*.nested` is a load-time module parameter on their image and nothing we
+   build reaches it.
+
+Half 1 without half 2 buys optionality and Cloud Hypervisor's other properties,
+not the feature that prompted this. Say so when justifying the work. §9 has the
+plan; the [risk register](nested-virtualization-design.md) has the kill
 criteria.
 
 A note on words: "linking fnodes" in the ask is the XFS reflink clone
@@ -419,13 +480,17 @@ whether `nested` is deliberately set anywhere, the kernel patch cadence per pool
 
 ## 10. M0 results
 
-Not yet run — this session has no CKS kubeconfig. Fill in from
-`hack/probe-cks-nested.sh` and date it; the answers gate M1's pin and M2
-entirely.
+Partially answered. The guest-side question was settled by hand on 2026-09-04:
+**a live sandbox sees neither `vmx` nor `svm`.** That is the measurement that
+corrects §1's inference, and it points at `kvm_*.nested=0` on the node — but the
+node-side probe has not been run, so that remains the leading explanation rather
+than a fact. Everything else below is still open; this session has no CKS
+kubeconfig. Fill in from `hack/probe-cks-nested.sh` and date it. Line 2 of the
+CoreWeave table is now the critical path, not M1.
 
 | | |
 |---|---|
-| date / operator | |
+| date / operator | guest check: 2026-09-04, vanpelt |
 | node | |
 | kernel | |
 | os / runtime / arch | |
@@ -435,14 +500,15 @@ entirely.
 | CVE-2026-53359 / -64561 / -80726 | |
 | Landlock ABI | |
 | node preflight verdict | |
-| **guest sees vmx/svm** | |
+| **guest sees vmx/svm** | **no** (neither flag present, 2026-09-04) |
 | node pools | |
 
 CoreWeave answers:
 
 | question | answer |
 |---|---|
-| Is `kvm_{intel,amd}.nested` deliberately set, and stable? | |
+| **Will you enable `kvm_{intel,amd}.nested=1` on a pool for us?** It is a load-time module parameter (`0444`), so it needs a `modprobe.d` drop-in or kernel cmdline plus a module reload or reboot on their image. **This is the critical path.** | |
+| Is `kvm_{intel,amd}.nested` currently set anywhere in this fleet? | |
 | Kernel patch cadence per CPU pool? | |
 | Is landlock in the node kernel's `CONFIG_LSM`? | |
 | Can we have a second CPU pool for nested sandboxes? | |

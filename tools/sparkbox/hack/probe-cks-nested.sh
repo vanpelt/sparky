@@ -169,7 +169,11 @@ else
         # parameter, not our doing.
         warnf "guest cpuid" "guest sees '$flag' (kernel $gkernel) — as the spike predicted. A masking CPU template (T2CL/T2/C3 on Intel, T2A on AMD) would make this OUR property; today it is the Node's." ;;
       "")
-        pass "guest cpuid" "guest sees neither vmx nor svm (kernel $gkernel) — the Node masks it or nested is off there" ;;
+        # Measured on 2026-09-04 and expected: KVM only advertises VMX/SVM in
+        # KVM_GET_SUPPORTED_CPUID when the module's nested parameter is on, so an
+        # empty answer here is almost always a reading of the NODE. Section 3
+        # above has the direct check.
+        pass "guest cpuid" "guest sees neither vmx nor svm (kernel $gkernel) — expected when $([ -n "${node:-}" ] && echo "$node" || echo "the node") has kvm_*.nested=0; see the module parameter in section 3" ;;
       *)
         warnf "guest cpuid" "unexpected output: $flag" ;;
     esac
