@@ -2,3 +2,6 @@
 /sparkbox
 # local mock-run state dir (`--state-dir ./state`)
 /state/
+# local dev environment: working-tree binaries, gateway state, fleet private
+# keys minted by hack/dev/gateway.sh (see hack/dev/README.md)
+/.dev/
