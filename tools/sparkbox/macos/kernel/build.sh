@@ -337,6 +337,12 @@ verify_outputs() {
     CONFIG_IP_NF_IPTABLES
     CONFIG_IP_NF_NAT
     CONFIG_NETFILTER_XT_TARGET_REDIRECT
+    # sparkbox-net.sh parks the sluice resolver and edge addresses on `type
+    # dummy` interfaces. Apple's base config leaves it unset and this kernel has
+    # no loadable modules, so its absence is fatal to the VM node and shows up
+    # only as iproute2's `Error: Unknown device type.` — which names no symbol.
+    CONFIG_DUMMY
+    CONFIG_BPF_JIT
   )
   local symbol
   for symbol in "${required_symbols[@]}"; do

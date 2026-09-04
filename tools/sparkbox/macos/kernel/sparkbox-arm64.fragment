@@ -28,3 +28,21 @@ CONFIG_IP_NF_NAT=y
 CONFIG_NET_NS=y
 CONFIG_BRIDGE=y
 CONFIG_VETH=y
+
+# deploy/sparkbox-net.sh:149 does `ip link add sparkdns type dummy` to park the
+# sluice resolver address (SLUICE_DNS_IP, 172.30.0.53/32) on an interface of its
+# own, and :229 does the same for the edge IP. Apple's base config leaves
+# CONFIG_DUMMY unset, and this kernel is built with no loadable modules at all
+# (/lib/modules is empty, there is no modprobe), so the type is simply absent:
+# the helper dies with iproute2's `Error: Unknown device type.` before it ever
+# opens its socket. Measured on 6.14.9-sparkbox-poc — veth and bridge come up
+# fine there, dummy does not.
+CONFIG_DUMMY=y
+
+# Apple's base config leaves the JIT off even though the arm64 defaults want it
+# (CONFIG_HAVE_EBPF_JIT=y and CONFIG_ARCH_WANT_DEFAULT_BPF_JIT=y are both set).
+# sluice's TCX programs load and enforce correctly under the interpreter — that
+# was measured on the stock kernel, so this is not what makes egress filtering
+# work — but running the interpreter here and the JIT on CKS makes local egress
+# numbers mean something different from the cluster's for no reason.
+CONFIG_BPF_JIT=y
