@@ -41,6 +41,8 @@
 #   SPARKBOX_DEV_DATA_DIR       reflink data volume    (default /srv/sparkbox/data)
 set -euo pipefail
 
+readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly module_dir="$(cd "$script_dir/../.." && pwd)"
 readonly machine="${SPARKBOX_DEV_MACHINE:-sparkbox}"
 readonly host_ip="${SPARKBOX_DEV_HOST_IP:-192.168.64.1}"
 readonly reg_port="${SPARKBOX_DEV_REGISTRY_PORT:-5001}"
@@ -144,6 +146,33 @@ for dev in /dev/kvm /dev/net/tun; do
     ok "$dev" "$(stat -c '%A %U:%G' "$dev" 2>/dev/null || echo present)"
   else
     bad "$dev" "missing — this machine did not boot the KVM outer kernel"
+  fi
+done
+
+# --- network device types ---------------------------------------------------
+# The outer kernel is built with NO loadable modules (/lib/modules is empty,
+# there is no modprobe), so a device type either compiled in or does not exist.
+# deploy/sparkbox-net.sh creates `sparkdns` and the edge IP as `type dummy`, and
+# Apple's base config leaves CONFIG_DUMMY unset — so on a kernel built before
+# macos/kernel/sparkbox-arm64.fragment added it, vmm-helper dies at startup with
+# iproute2's bare `Error: Unknown device type.` before it opens its socket.
+# sluice then cannot bind its resolver, the node cannot reach the helper socket,
+# and three containers exit within seconds of each other. Nothing in that
+# cascade names the kernel.
+#
+# Probing is better than reading a config the running kernel may not even
+# expose: create one, delete it, report what happened.
+for type in dummy bridge veth; do
+  probe="sbprobe$$"
+  case "$type" in
+    veth) add_args="peer name ${probe}b" ;;
+    *)    add_args="" ;;
+  esac
+  if ip link add "$probe" type "$type" $add_args > /dev/null 2>&1; then
+    ip link del "$probe" > /dev/null 2>&1
+    ok "netdev $type" "supported"
+  else
+    bad "netdev $type" "this kernel cannot create '$type' links — rebuild it: macos/kernel/build.sh"
   fi
 done
 
@@ -315,9 +344,92 @@ run_guest() {
   return "$rc"
 }
 
+# The machine stores an ABSOLUTE path to the outer kernel, chosen when it was
+# created (macos/poc.sh passes --kernel "$OUT_DIR/vmlinux-kvm"). Create the
+# machine from a git worktree and it is pinned to that worktree forever — and
+# macos/out/ is gitignored, so the kernel does not travel with the branch.
+#
+# This is not hypothetical. A machine here was pinned to a worktree that had
+# since been DELETED. It ran for thirteen hours because the image was already
+# loaded, and died the first time it was stopped:
+#
+#   kernel binary not found at '.../.claude/worktrees/<gone>/macos/out/vmlinux-kvm'
+#
+# Worse than the outage: re-pointing it at this checkout silently downgraded the
+# kernel by six weeks, because the built artifact here predated the fragment
+# that adds CONFIG_DUMMY — see the netdev probe in the guest script.
+check_kernel_path() {
+  local configured local_kernel
+  configured=$(container machine inspect "$machine" 2>/dev/null |
+    sed -n 's/.*"kernel"[^"]*"\([^"]*\)".*/\1/p' | head -1)
+  local_kernel="$module_dir/macos/out/vmlinux-kvm"
+
+  if [ -z "$configured" ]; then
+    return 0 # this container CLI does not report it; nothing to check against
+  fi
+  if [ ! -f "$configured" ]; then
+    die "$machine boots a kernel that no longer exists:
+       $configured
+     It was created from a directory that has since been removed (a git worktree,
+     most likely). The machine keeps running until it is stopped, and then cannot
+     start again.
+     fix: build this checkout's kernel and re-point the machine at it —
+       macos/kernel/build.sh
+       container machine set -n $machine kernel=$local_kernel"
+  fi
+  case "$configured" in
+    "$local_kernel") ;;
+    *"/.claude/worktrees/"*)
+      note_stale "$machine boots $configured
+     That is inside a git worktree. macos/out/ is gitignored, so deleting the
+     worktree strands this machine. Re-point it at $local_kernel once built."
+      ;;
+    *)
+      note_stale "$machine boots $configured, not this checkout's
+       $local_kernel
+     That is legal — but the two can drift, and a kernel older than
+     macos/kernel/sparkbox-arm64.fragment fails in ways that look like sparkbox bugs."
+      ;;
+  esac
+}
+
+note_stale() { printf 'WARN  %s\n' "$*" >&2; }
+
+# Is the built kernel older than the config it claims to be built from?
+#
+# macos/out/ is gitignored and macos/kernel/sparkbox-arm64.fragment is not, so
+# the two drift silently: pull a branch that changes the fragment and your
+# kernel is simply wrong, with no signal anywhere. The build already records
+# fragment_sha256 in its manifest, so the comparison costs one shasum.
+#
+# A WARN rather than a failure: a fragment change need not break anything, and
+# the things that DO break have functional probes in the guest script that name
+# themselves. This is the one that explains them.
+check_kernel_freshness() {
+  local manifest=$module_dir/macos/out/kernel-manifest.txt
+  local fragment=$module_dir/macos/kernel/sparkbox-arm64.fragment
+  [ -f "$manifest" ] && [ -f "$fragment" ] || return 0
+  command -v shasum > /dev/null 2>&1 || return 0
+
+  local built want
+  built=$(sed -n 's/^fragment_sha256=//p' "$manifest" | head -1)
+  want=$(shasum -a 256 "$fragment" | awk '{print $1}')
+  [ -n "$built" ] || return 0
+  [ "$built" = "$want" ] && return 0
+
+  note_stale "the built kernel does not match macos/kernel/sparkbox-arm64.fragment
+     built from: $built
+     fragment is: $want
+     The kernel in macos/out/ predates the config checked into this branch, and
+     macos/out/ is gitignored so it did not travel with it.
+     fix: macos/kernel/build.sh"
+}
+
 cmd_ensure() {
   need_container_cli
   require_running
+  check_kernel_path
+  check_kernel_freshness
   echo "== ensure $machine =="
   if run_guest ensure; then
     echo "machine ready"
@@ -341,6 +453,7 @@ cmd_status() {
   fi
   container machine ls 2>/dev/null | sed -n '1p;/^'"$machine"' /p' | sed 's/^/  /'
   echo
+  check_kernel_freshness
   run_guest status
 }
 
