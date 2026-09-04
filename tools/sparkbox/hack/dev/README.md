@@ -267,6 +267,58 @@ Until that was true the upstream `.pub` was written once and never refreshed,
 so re-minting the gateway identity — which is exactly what starting a gateway in
 a fresh checkout does — silently stranded every sandbox created afterwards.
 
+## Keeping the identity: `secrets.sh`
+
+The line above — *"re-minting the gateway identity is exactly what starting a
+gateway in a fresh checkout does"* — is the whole reason this exists. `.dev/` is
+disposable and the keys inside it are not:
+
+- the **node** copies the gateway's host key into its control dir on its first
+  successful link and trusts *that* from then on, so a re-mint means it refuses
+  every link afterwards;
+- the **rootfs template** carries the gateway's upstream public key as the login
+  user's `authorized_keys`, so a re-mint means the gateway can no longer ssh
+  into any sandbox created before it;
+- the **OIDC signing key** derives the KEK for every user secret in the
+  database, so a re-mint silently orphans all of them.
+
+```sh
+hack/dev/secrets.sh push     # .dev/gateway/keys -> 1Password
+hack/dev/secrets.sh pull     # 1Password -> .dev/gateway/keys, then derive .pub
+hack/dev/secrets.sh status   # what exists where, and whether they agree
+```
+
+It is a thin wrapper around `deploy/sync-fleet-secrets.sh`, which already does
+this for a real fleet and has the parts that are easy to get wrong: values
+travel in a template rather than argv, and **every write is proved by reading it
+back** — `op item create` can accept a write and store an empty field, and a
+backup you cannot restore is worse than none.
+
+Three things it deliberately does not do:
+
+- **It refuses the fleet vault.** The fleet default is `Sparkbox` and this one
+  is `Sparkbox-Dev`; they differ by four characters, and one is reached by
+  forgetting to set a variable. A `push` there would overwrite the fleet's
+  gateway, upstream and OIDC keys with a laptop's.
+- **It does not touch `github-app-key`**, which is already escrowed in a
+  *different* vault and account (`op://Hivemind-Dev/…`, see `gateway.sh`). Two
+  sources for one secret, silently preferring one, is how you end up debugging
+  an App that is not the App you edited. Nor does it mint a webhook secret,
+  Cloudflare token or console password — this box uses none of them, and an
+  escrowed value nobody consumes is indistinguishable from one that matters.
+- **It does not store the `.pub` halves.** `ssh-keygen -y` regenerates them from
+  the `.pem` byte for byte, so escrowing them would be a second copy of the same
+  fact that can disagree with the first. `pull` derives them, and `gateway.sh`
+  now derives them on every start — a *restored* identity is complete, so
+  `mint_identity` never runs and nothing else would.
+
+After a `pull`, run `hack/dev/up.sh node`: the node still has the old host key
+pinned, and `up.sh` clears that pin when it disagrees.
+
+`hack/dev/test-secrets.sh` covers all of the above against a stub `op` on PATH,
+including the two refusals, and runs in CI. A real vault cannot: `op` needs an
+authorized desktop app or a service account token.
+
 ## The gateway loop
 
 ```sh

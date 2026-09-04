@@ -215,6 +215,16 @@ jobs:
           }
           ./macos/test-bootstrap.sh
 
+      # hack/dev/secrets.sh escrows the dev box's fleet identity in 1Password,
+      # and the failure it exists to prevent is a key you believe is backed up
+      # and is not — found out when the identity is already gone. A real vault
+      # cannot run here (op needs an authorized desktop app or a service account
+      # token), so the harness shims `op` onto PATH and checks the round trip
+      # byte for byte. It also pins the refusals: the fleet vault, and a write
+      # that op accepts and silently discards.
+      - name: dev secret escrow contract (hack/dev/test-secrets.sh)
+        run: ./hack/dev/test-secrets.sh
+
       # hack/stage-darwin-artifacts.sh is otherwise run ONLY by the release
       # workflow, which fires only on a `v*` tag — so a typo in it surfaces
       # while cutting a release, at the worst possible moment. It needs no
