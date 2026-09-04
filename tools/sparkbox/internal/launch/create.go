@@ -27,7 +27,8 @@ func (h *Handler) post(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
 	c := ctlops.Caller{Handle: sess.Handle}
 
-	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("ref"), r.URL.Query().Get("env"))
+	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"),
+		r.URL.Query().Get("ref"), r.URL.Query().Get("env"), r.URL.Query().Get(freshParam))
 	if bad != nil {
 		h.refuse(w, r, t, bad)
 		return
@@ -109,6 +110,19 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 		}
 	}
 	key := c.Handle + "\x00" + strings.ToLower(t.Slug) + "\x00" + want + "\x00" + strings.ToLower(t.Env)
+	if t.Fresh {
+		// A DIFFERENT flight, because the two buttons want opposite things from
+		// the same tuple. Collapsing them would make the outcome depend on
+		// which press arrived first: a "create a new one" that merged into an
+		// in-flight reuse would hand back the very sandbox the visitor had just
+		// said they did not want, and it would do it silently, with the
+		// redirect looking exactly like a success.
+		//
+		// Two presses of the SAME button still collapse, which is the whole
+		// point of the group — a double-click on "create a new one" is one new
+		// sandbox, not two.
+		key += "\x00new"
+	}
 
 	// The shared work is detached from THIS request's cancellation, deliberately
 	// — the same reason internal/host/manager.go holds a process-lifetime ctx
@@ -131,7 +145,14 @@ func (h *Handler) createOrReuse(ctx context.Context, c ctlops.Caller, t target) 
 		if err != nil {
 			return nil, err
 		}
-		if best != nil {
+		// The reuse, and the one thing `?new=1` turns off. Note what that
+		// costs: the idempotency this resolve provides is gone with it, so a
+		// second press a minute later — a retry after a lost response, the
+		// page reopened from history — really does build a second sandbox.
+		// That is the request, not a defect: the visitor pressed a button that
+		// says "create a new one" on a page that had already offered them the
+		// one they have. The ceiling is still --max-running-per-owner.
+		if best != nil && !t.Fresh {
 			return best.Info, nil
 		}
 

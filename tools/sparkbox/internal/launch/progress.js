@@ -14,35 +14,58 @@
 // the spinner. The handler re-validates every value from the path, the query
 // and the session regardless.
 (function () {
-  var form = document.querySelector("form[data-busy]");
-  if (!form) {
+  // Every form on the page, not the first one. The reuse screen has two —
+  // "open the one you have" and "create a new one" — and they post to
+  // different URLs with opposite meanings, so a handler bound only to the
+  // first would leave the second submitting into a page that paints nothing.
+  var forms = document.querySelectorAll("form[data-busy]");
+  if (!forms.length) {
     return;
   }
-  var button = form.querySelector("button");
-  var label = button ? button.textContent : "";
+  var buttons = [];
+  var labels = [];
+  for (var i = 0; i < forms.length; i++) {
+    var b = forms[i].querySelector("button");
+    buttons.push(b);
+    labels.push(b ? b.textContent : "");
+  }
+  // ONE flag across all of them, because the choice is exclusive: whichever
+  // button was pressed, pressing the other now would abandon a create that is
+  // already in flight and start a different one.
   var sent = false;
 
-  form.addEventListener("submit", function (event) {
-    if (sent) {
-      // A second press cannot make a second sandbox — the server collapses
-      // concurrent presses onto one create and re-resolves inside the flight —
-      // but it can restart a request that is already in flight and make the
-      // wait longer than it needed to be.
-      event.preventDefault();
-      return;
-    }
-    sent = true;
-    document.body.classList.add("creating");
-    if (button) {
-      // Deliberately not button.disabled. A disabled control is dropped from
-      // the submission, and browsers disagree about whether disabling one
-      // inside its own submit handler cancels the navigation; aria-disabled
-      // plus pointer-events says the same thing to a person and to a screen
-      // reader without touching the POST that is already leaving.
-      button.setAttribute("aria-disabled", "true");
-      button.textContent = "Creating…";
-    }
-  });
+  function onSubmit(index) {
+    return function (event) {
+      if (sent) {
+        // A second press cannot make a second sandbox — the server collapses
+        // concurrent presses onto one create and re-resolves inside the flight
+        // — but it can restart a request that is already in flight and make
+        // the wait longer than it needed to be.
+        event.preventDefault();
+        return;
+      }
+      sent = true;
+      document.body.classList.add("creating");
+      for (var j = 0; j < buttons.length; j++) {
+        if (!buttons[j]) {
+          continue;
+        }
+        // Deliberately not button.disabled. A disabled control is dropped from
+        // the submission, and browsers disagree about whether disabling one
+        // inside its own submit handler cancels the navigation; aria-disabled
+        // plus pointer-events says the same thing to a person and to a screen
+        // reader without touching the POST that is already leaving.
+        buttons[j].setAttribute("aria-disabled", "true");
+        if (j === index) {
+          buttons[j].textContent = "Creating…";
+        }
+      }
+    };
+  }
+
+  for (var k = 0; k < forms.length; k++) {
+    forms[k].addEventListener("submit", onSubmit(k));
+  }
 
   // A page restored from the back/forward cache comes back frozen exactly as it
   // was left — spinner spinning, button inert — for a create that finished
@@ -54,9 +77,12 @@
     }
     sent = false;
     document.body.classList.remove("creating");
-    if (button) {
-      button.removeAttribute("aria-disabled");
-      button.textContent = label;
+    for (var m = 0; m < buttons.length; m++) {
+      if (!buttons[m]) {
+        continue;
+      }
+      buttons[m].removeAttribute("aria-disabled");
+      buttons[m].textContent = labels[m];
     }
   });
 })();

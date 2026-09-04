@@ -1123,21 +1123,38 @@ model, not a column. Worth noting that owner scoping is also what bounds Part
 
 **No environment composing several tags.** Part 1.
 
-**No garbage collection of the snapshots an environment creates.** Each `env
-build` captures a new snapshot named `<tag>-<YYMMDD-HHMM>`, and the previous
-generation survives, unbound — which is deliberate, because it is the only thing
-that makes a bad build recoverable with one `snapshot bind`
-(`docs/tag-templates-design.md` Part 10). It is also a slow leak, and worse than
-it looks: snapshots are **unmetered**. Nothing anywhere counts them, by number
-or by bytes, and they land in the image directory every VM on the machine
-reflinks from. An environment rebuilt weekly is 52 templates a year that nobody
-is told about.
+**Garbage collection of the snapshots an environment creates: N is 3.** Each
+`env build` captures a new snapshot named `<tag>-<YYMMDD-HHMM>`, and the
+previous generation survives, unbound — which is deliberate, because it is the
+only thing that makes a bad build recoverable with one `snapshot bind`
+(`docs/tag-templates-design.md` Part 10). Left alone it was also a slow leak,
+and worse than it looked: snapshots are **unmetered**. Nothing anywhere counts
+them, by number or by bytes, and they land in the image directory every VM on
+the machine reflinks from. An environment rebuilt weekly was 52 templates a year
+that nobody was told about.
 
-The fix is not hard — keep the last N per environment, or expire on age — and it
-is deliberately not in Phase A, because a retention policy on a thing that also
-serves as somebody's rollback needs a decision about N that nobody has an
-opinion on yet. What Phase A **must** do is make `env rm` list the snapshots it
-is leaving behind rather than silently orphaning them.
+`captureBuild` now sweeps after it binds (`ctlops.EnvBuildSnapshotKeep`,
+`pruneBuildSnapshots`): the newest three of that environment's build captures
+survive, including the one just bound, and everything older is deleted. Three is
+the smallest number that keeps what the leak was buying — one deletes the
+rollback at the moment it is wanted, two leaves nowhere to stand when the
+rollback target is itself the broken one, which is the usual shape of "it broke
+sometime this week".
+
+The sweep recognises a build's own captures by **two** facts, and both are
+necessary: the name is one `snapshotNameFor` would have produced for this
+environment, *and* the source sandbox is that environment's builder. Name alone
+would take `sparkbox snapshot web` from inside an ordinary box, which is
+somebody's deliberate save of their own work; `FromBox` alone would take
+`snapshot create web-build mine`, which is a name a person chose. It is best
+effort and runs after the row says `ready` — a template that could not be
+deleted is a log line, never a build reported as failed to somebody whose
+environment is finished — and it makes no bound check of its own, because
+`DeleteSnapshot` already refuses a bound snapshot and the rule belongs in one
+place.
+
+Still outstanding: `env rm` should list the snapshots it is leaving behind
+rather than silently orphaning them.
 
 **On CKS, an environment's template is node-local and can evaporate.** The
 cluster Deployment is pinned to one exact Node and uses a named hostPath

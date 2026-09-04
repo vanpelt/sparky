@@ -60,7 +60,34 @@ type target struct {
 	// Env is the raw ?env= value after whitespace/case normalization. Its row,
 	// ownership, readiness, and repository membership are resolved by ctlops.
 	Env string
+	// Fresh is `?new=1`: build a sandbox even though one that matches already
+	// exists. It is the second button on the confirm screen and nothing else —
+	// no badge mints it, and `ctl badge` never emits it — because the default
+	// this door was built around is right nearly every time: clicking the same
+	// link twice should land in the same box.
+	//
+	// It exists because "nearly every time" is not every time. The environment
+	// this box was forked from has been rebuilt since; the disk has drifted
+	// somewhere unrecoverable; two agents want the same branch. Before it, the
+	// only way to say so was to leave the page, open a terminal, and create by
+	// hand — which is the exact moment the door was supposed to remove.
+	//
+	// A GET carrying it still writes nothing: it suppresses the automatic
+	// handoff and shows the confirm screen, which is a page with a button on
+	// it, not a create. Only the POST creates, and only after that button.
+	Fresh bool
 }
+
+// freshParam is the query parameter behind target.Fresh, and `1` is the only
+// value that turns it on.
+//
+// Anything else — `true`, `yes`, an empty value — is IGNORED rather than
+// refused, which is the same promise parseTarget makes about parameters it does
+// not know at all: these URLs sit in comments that outlive the deployment, and
+// a link must never 400 on a spelling. The only producer of this parameter is
+// the form on this door's own confirm screen, so there is exactly one spelling
+// to honour.
+const freshParam = "new"
 
 // candidate is one of the caller's existing sandboxes that holds this
 // repository, paired with the branch it actually holds it on.
@@ -82,7 +109,7 @@ type candidate struct {
 // comments that outlive the deployment, so a host built years from now must
 // still honour a link written today, and a link written today must not 400 on a
 // host that learned a parameter after it was written.
-func parseTarget(owner, repo, ref, env string) (target, *ctlops.Error) {
+func parseTarget(owner, repo, ref, env, fresh string) (target, *ctlops.Error) {
 	slug := owner + "/" + repo
 	// repos.ValidSlug, never a hand-rolled regexp. The two halves are not the
 	// same grammar — the owner is a GitHub login and the name additionally
@@ -122,7 +149,20 @@ func parseTarget(owner, repo, ref, env string) (target, *ctlops.Error) {
 		return target{}, ctlops.Invalid(op, "bad_ref",
 			"%q is not a branch or tag name — it has to start with a letter or a digit, and it cannot contain \"..\".", ref)
 	}
-	return target{Slug: slug, Ref: ref, Env: strings.ToLower(strings.TrimSpace(env))}, nil
+	return target{
+		Slug:  slug,
+		Ref:   ref,
+		Env:   strings.ToLower(strings.TrimSpace(env)),
+		Fresh: fresh == "1",
+	}, nil
+}
+
+// fresh returns this target with the create-a-new-one flag set, so the confirm
+// screen can build the second button's action out of the first one's target
+// rather than reassembling a URL beside it.
+func (t target) fresh() target {
+	t.Fresh = true
+	return t
 }
 
 // normalizeRef folds a ref that is merely the attachment's own default down to

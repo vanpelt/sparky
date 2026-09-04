@@ -16,7 +16,7 @@ func readyEnvironment(name string) map[string]ctlops.EnvironmentInfo {
 }
 
 func TestParseTargetNormalizesEnvironmentName(t *testing.T) {
-	got, err := parseTarget("wandb", "hivemind", "", "  HiveMind  ")
+	got, err := parseTarget("wandb", "hivemind", "", "  HiveMind  ", "")
 	if err != nil {
 		t.Fatal(err)
 	}
