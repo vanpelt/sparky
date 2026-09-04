@@ -276,6 +276,15 @@ command -v curl >/dev/null || die "curl is required"
 # throwaway container (see the /build note above).
 run_builder() {
   local jobs="$1"
+  # Expanded below as ${input_env_args[@]+"${input_env_args[@]}"}, not the
+  # obvious "${input_env_args[@]}". This array is empty whenever the caller did
+  # not set SPARKBOX_KERNEL_INPUTS_IN_IMAGE, and expanding an empty array under
+  # `set -u` is an unbound-variable error in bash before 4.4 — so the plain form
+  # aborts this script on macOS, whose /bin/bash is 3.2.57, with
+  # `input_env_args[@]: unbound variable` and no kernel. It went unnoticed
+  # because the default path is fetch.sh (download the CI-built asset) and CI
+  # runs this on linux under bash 5. Same defect the gateway entrypoint has on
+  # macOS; hack/dev/gateway.sh works around it by re-execing under a newer bash.
   local input_env_args=()
   # Preserve the image's default when the caller did not select an input mode,
   # but carry an explicit choice across the outer/inner script boundary.
@@ -293,7 +302,7 @@ run_builder() {
         --volume "${OUT_DIR}:/out" \
         --env SPARKBOX_KERNEL_BUILD_CONTAINER=1 \
         --env "SPARKBOX_KERNEL_BUILD_JOBS=${jobs}" \
-        "${input_env_args[@]}" \
+        ${input_env_args[@]+"${input_env_args[@]}"} \
         "${KERNEL_BUILD_IMAGE}" \
         /bin/bash /src/build.sh
       ;;
@@ -303,7 +312,7 @@ run_builder() {
         --volume "${OUT_DIR}:/out" \
         --env SPARKBOX_KERNEL_BUILD_CONTAINER=1 \
         --env "SPARKBOX_KERNEL_BUILD_JOBS=${jobs}" \
-        "${input_env_args[@]}" \
+        ${input_env_args[@]+"${input_env_args[@]}"} \
         --env "SPARKBOX_OUT_UID=$(id -u)" \
         --env "SPARKBOX_OUT_GID=$(id -g)" \
         "${KERNEL_BUILD_IMAGE}" \
