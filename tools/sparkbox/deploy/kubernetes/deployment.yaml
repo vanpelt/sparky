@@ -333,6 +333,14 @@ spec:
             #
             # A 256 MiB working-set charge admits up to 48 simultaneously warm
             # children; the remainder stay durable and resume after one is paused.
+            #
+            # This is an ADMISSION charge, and only sometimes a real balloon
+            # target. The idle reaper will not squeeze a guest below what the
+            # balloon device says it is actually touching, and does not squeeze
+            # at all until an owner pool or the node budget is ~85% full — an
+            # inflation nobody needed costs the guest a full reclaim pass and
+            # shows up as an idle sandbox pegging its vCPUs. Genuine overage is
+            # still reclaimed promptly by the memory-pressure controller.
             - name: SPARKBOX_MEM_RESERVE_MB
               value: "256"
             - name: SPARKBOX_OWNER_MEMORY_POOL_MB

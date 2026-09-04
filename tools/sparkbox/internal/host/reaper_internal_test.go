@@ -320,3 +320,71 @@ func TestPressureReclaimsTurboBeforeNormalVM(t *testing.T) {
 		t.Fatalf("turbo pressure balloon target = %d, want only the %d MiB excess", stats.TargetMiB, want)
 	}
 }
+
+// TestIdleBalloonNeverSqueezesBelowTheLiveWorkingSet pins the fix for a guest
+// that burned four vCPUs for the better part of an hour and could not be
+// rescued by anything the control plane knew how to do.
+//
+// A 4026 MiB sandbox was ballooned to its 256 MiB reserve two minutes into a
+// boot that had not finished. containerd then failed eleven times, docker took
+// fourteen minutes, and the in-guest agent never started at all — so no traffic
+// ever moved, the activity floor never fired, and nothing deflated the balloon.
+// The reserve is a guess made before the guest exists; what the guest is
+// measurably touching is not, and the balloon device already reports it.
+func TestIdleBalloonNeverSqueezesBelowTheLiveWorkingSet(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 256})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "booting", "alice", "ubuntu", 4, 4026); err != nil {
+		t.Fatal(err)
+	}
+	// Mid-boot with docker coming up: 2 GiB of the 4026 in real use.
+	m.driver.(*mock.Driver).SetInUseMiB("booting", 2048)
+
+	m.boxes["booting"].LastActive = time.Now().Add(-5 * time.Minute)
+	m.reapOnce(ctx, time.Minute, time.Hour)
+
+	st, err := m.balloon.BalloonStats(ctx, "booting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Squeezing to the 256 MiB reserve would reclaim 3770 MiB — the exact
+	// inflation that wedged the real guest.
+	if st.TargetMiB > 4026-2048 {
+		t.Fatalf("balloon reclaimed %d MiB, leaving the guest %d MiB while it was using 2048 MiB",
+			st.TargetMiB, 4026-st.TargetMiB)
+	}
+}
+
+// TestIdleBalloonWaitsForActualMemoryDemand is the "only when it makes sense"
+// half. Inflating a balloon makes the guest fault its whole working set back in
+// later; on a host with RAM to spare that is pure churn, and it is what turns
+// an idle fleet into a CPU-spike generator. Genuine overage is the pressure
+// controller's job.
+func TestIdleBalloonWaitsForActualMemoryDemand(t *testing.T) {
+	// A node budget of 90% of 64 GiB, with one idle guest nowhere near it.
+	m := internalManager(t, Options{MemReserveMB: 1024, HostMemMB: 65536, MemAdmissionPct: 90})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "idle", "alice", "ubuntu", 1, 8192); err != nil {
+		t.Fatal(err)
+	}
+	// A working set well clear of the reserve, so that when the balloon does
+	// fire it is the demand gate being tested and not the live-working-set
+	// floor: 1.5 x 3000 MiB still leaves 3692 MiB worth reclaiming.
+	m.driver.(*mock.Driver).SetInUseMiB("idle", 3000)
+	m.boxes["idle"].LastActive = time.Now().Add(-5 * time.Minute)
+	m.reapOnce(ctx, time.Minute, time.Hour)
+
+	if m.boxes["idle"].Ballooned {
+		t.Error("an idle guest on a host with 64 GiB to spare must not be squeezed")
+	}
+
+	// Same guest, same idleness — but now it is most of the node's budget, so
+	// reclaiming it actually buys something.
+	m.mu.Lock()
+	m.hostMemMB = 3000
+	m.mu.Unlock()
+	m.reapOnce(ctx, time.Minute, time.Hour)
+	if !m.boxes["idle"].Ballooned {
+		t.Error("a guest whose node is over its memory watermark must still be reclaimed")
+	}
+}
