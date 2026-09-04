@@ -130,9 +130,58 @@ all three yourself. `devpod plan` marks both omissions `[BLOCKING]`, including
 the specific one — *"one sandbox is 12288 MB on a 12079 MB machine"* — and that
 line is the only warning there is.
 
-## Why guests are slow here: the block device costs per REQUEST
+## The one that mattered: transparent huge pages
 
-Measured, not guessed. Reading the same 8 MiB out of one guest:
+Guest RAM is anonymous memory Firecracker `mmap`s. Every page the guest touches
+for the *first* time faults through two stage-2 layers — ours, and Apple's
+underneath it. Measured in this machine, that costs **~300 us per fault**:
+about 3,300 faults/sec, or **~13 MB/s** of first-touch memory. The very same
+allocation made directly in the machine, no VM involved, runs at 4,600 MB/s.
+
+A **350x** penalty, and nothing about it looks like a memory problem.
+
+What it looks like instead is that *boot* is slow, because boot is what touches
+most of guest RAM (the kernel initialises a `struct page` for all of it). So the
+cost scales with `mem_size_mib` while everything else looks fine — userspace
+compute in a booted guest runs at full speed. Same kernel, same rootfs, time to
+`/init`:
+
+| guest RAM | time to init |
+|---|---|
+| 512 MiB  | 1.43 s |
+| 1024 MiB | 1.42 s |
+| 2048 MiB | **25.74 s** |
+| 4026 MiB | **34.08 s** |
+
+A cliff, not a slope. THP collapses 512 of those faults into one:
+
+| `transparent_hugepage/enabled` | 4026 MiB guest, time to init |
+|---|---|
+| `madvise` (Apple's default) | 29.82 s |
+| `always` | **0.23 s** |
+
+`machine.sh ensure` now sets `always` and reports it, so this is handled. The
+trap is that `madvise` *looks* enabled — but Firecracker does not `madvise()`
+its guest memory, so `madvise` means no THP here at all.
+
+We do **not** use Firecracker's own `huge_pages: "2M"`, which gets the same
+result (0.21 s): that is `MAP_HUGETLB`, it needs pages reserved up front, and it
+is incompatible with the balloon device. THP needs no code change, keeps the
+balloon, and keeps snapshots.
+
+Setting it is a live sysctl. It is deliberately NOT wired to `machine.sh`'s
+`changed` flag, because that flag restarts docker — which kills the node Pod and
+every sandbox on it.
+
+With `always`, a `new+<name>` sandbox reaches `running` in **4 s**, the whole
+boot costs 6.5 CPU-seconds, `containerd` starts in **1.05 s**, and
+`systemctl --failed` is empty.
+
+## Why guests are also slow here: the block device costs per REQUEST
+
+This is real and measured, but it is the *second* effect, not the first — see
+the THP section above for what actually caused the wedge. Reading the same
+8 MiB out of one guest:
 
 | request size | requests | time |
 |---|---|---|
@@ -144,16 +193,17 @@ Time tracks the request COUNT, not the bytes — 33x for identical data. Bulk
 throughput is fine (~45 MB/s at 64 KiB); it is small-file I/O that falls off a
 cliff, at roughly 2.85 ms per 4 KiB read where the host does it in microseconds.
 
-That is the whole reason `containerd` fails and boots take fifteen minutes. A
-boot is thousands of small reads — shared libraries for `ldconfig`, unit files
-for systemd, layer metadata for containerd. `containerd.service` has
-`TimeoutStartSec=90`, cannot finish inside it, is killed, retries, and fails
-about eleven times; `docker.service` then waits on it forever and the in-guest
-agent never starts, so `ssh`, the browser terminal and the REST API all answer
-*"could not reach the sandbox's shell"*.
+This compounds the memory cost above: a boot is also thousands of small reads —
+shared libraries for `ldconfig`, unit files for systemd, layer metadata for
+containerd. Before the THP fix the two together put `containerd.service` past
+its `TimeoutStartSec=90`, so it was killed and retried about eleven times;
+`docker.service` then waited on it forever and the in-guest agent never started,
+so `ssh`, the browser terminal and the REST API all answered *"could not reach
+the sandbox's shell"*. With THP on, containerd starts in 1.05 s and none of that
+happens.
 
-Every bulk benchmark says the storage is healthy, which is why this took a long
-time to find. For the record, what is NOT the cause:
+Every bulk benchmark says the storage is healthy. For the record, what is NOT
+the cause of either effect:
 
 - **Host storage.** L1 cold-reads 128 MB from the same XFS-on-loop in 382 ms.
 - **The backing file.** 209 extents, and L1 reads 128 MB out of `rootfs.ext4`

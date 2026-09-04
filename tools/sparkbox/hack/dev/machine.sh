@@ -182,6 +182,57 @@ else
   bad cgroup "/sys/fs/cgroup is not cgroup2fs; the Pod's resource limits will not apply"
 fi
 
+# --- transparent huge pages -------------------------------------------------
+# The single largest performance factor in this environment, by two orders of
+# magnitude. Guest RAM is anonymous memory Firecracker mmaps, and every page the
+# guest touches for the first time faults through TWO stage-2 layers: ours, and
+# Apple's underneath it. Measured here, that costs ~300us per fault — about
+# 3,300 faults/sec, or ~13MB/s of first-touch memory, against 4,600MB/s for the
+# very same allocation made directly in this machine. A 350x penalty.
+#
+# Nothing about it looks like a memory problem from the outside. Boot is what
+# touches most of guest RAM (the kernel initialises a struct page for all of
+# it), so the symptom is that BOOT scales with mem_size_mib and everything else
+# looks normal: userspace compute in the booted guest runs at full speed. The
+# measured cliff, same kernel and rootfs, time to /init:
+#
+#     512MB 1.43s | 1024MB 1.42s | 2048MB 25.74s | 4026MB 34.08s
+#
+# THP collapses 512 of those faults into one. With enabled=always the same
+# 4026MB guest reaches init in 0.23s instead of 29.82s -- and that is the whole
+# difference between a sandbox that boots and one that trips its 90s systemd
+# timeouts and looks, from the host, like a VM pegging four cores forever.
+#
+# Apple's machine image ships `madvise`, which is the trap: Firecracker does not
+# madvise its guest memory, so `madvise` means no THP at all here. We do NOT use
+# Firecracker's own huge_pages="2M" instead -- that is MAP_HUGETLB, needs pages
+# reserved up front, and is incompatible with the balloon device.
+thp=/sys/kernel/mm/transparent_hugepage/enabled
+thp_was=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' "$thp" 2>/dev/null)
+if [ -w "$thp" ]; then
+  case "$thp_was" in
+    always) ok thp "always" ;;
+    *)
+      # deliberately NOT `changed=1`: that flag means "docker's config moved,
+      # restart the daemon", and a restart kills the node Pod and every sandbox
+      # on it. THP is a live sysctl -- it takes effect on the next guest boot
+      # with nothing restarted.
+      if echo always > "$thp" 2>/dev/null; then
+        ok thp "was ${thp_was:-unset}, set to always"
+      else
+        bad thp "could not set $thp to 'always' — guest boots will take ~30s instead of ~0.2s"
+      fi
+      ;;
+  esac
+elif [ -r "$thp" ]; then
+  case "$thp_was" in
+    always) ok thp "always" ;;
+    *) bad thp "$thp is not writable and is not 'always' — guest boots will be ~100x slower" ;;
+  esac
+else
+  bad thp "no THP support in this kernel — guest boots will be ~100x slower"
+fi
+
 # --- the data volume --------------------------------------------------------
 fstype=$(findmnt -no FSTYPE "$data_dir" 2>/dev/null || true)
 if [ -n "$fstype" ]; then
