@@ -24,6 +24,11 @@
   --blue: 217 91% 56%;
   --red: 0 72% 51%;
   --violet: 262 83% 66%;
+  /* Declared alongside the tokens, in all four blocks, so the browser's OWN
+     surfaces follow the theme too: the popup a <select> opens, scrollbars,
+     spinner buttons, the text caret. Without it a dark page hands those to the
+     OS in light, which is half of the "native control on a dark card" look. */
+  color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -41,6 +46,7 @@
     --blue: 217 91% 66%;
     --red: 0 84% 65%;
     --violet: 262 83% 74%;
+    color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
@@ -48,12 +54,14 @@
   --muted: 240 3.7% 15.9%; --muted-foreground: 240 5% 64.9%; --border: 240 3.7% 15.9%;
   --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%; --ring: 240 4.9% 83.9%;
   --green: 142 69% 58%; --amber: 38 92% 60%; --blue: 217 91% 66%; --red: 0 84% 65%; --violet: 262 83% 74%;
+  color-scheme: dark;
 }
 :root[data-theme="light"] {
   --background: 0 0% 100%; --foreground: 240 10% 3.9%; --card: 0 0% 100%;
   --muted: 240 4.8% 95.9%; --muted-foreground: 240 3.8% 46.1%; --border: 240 5.9% 90%;
   --primary: 240 5.9% 10%; --primary-foreground: 0 0% 98%; --ring: 240 5.9% 10%;
   --green: 142 71% 45%; --amber: 38 92% 50%; --blue: 217 91% 56%; --red: 0 72% 51%; --violet: 262 83% 66%;
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
