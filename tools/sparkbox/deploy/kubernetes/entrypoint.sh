@@ -30,7 +30,7 @@ readonly hot_dir="$data_dir/hot"
 readonly vm_state_dir="${SPARKBOX_VM_STATE_DIR:-$hot_dir}"
 readonly key_dir="${SPARKBOX_KEY_DIR:-/run/sparkbox/keys}"
 readonly durable_dir="${SPARKBOX_DURABLE_DIR:-/mnt/sparkbox-durable}"
-readonly release="${SPARKBOX_RELEASE:-v0.7.4}"
+readonly release="${SPARKBOX_RELEASE:-v0.8.0}"
 readonly artifact_base="${SPARKBOX_ARTIFACT_BASE:-https://github.com/vanpelt/sparky/releases/download}"
 readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:?SPARKBOX_PROXY_DOMAIN is required}"
 readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
@@ -106,8 +106,8 @@ esac
 readonly firecracker_sha256="${SPARKBOX_FIRECRACKER_SHA256:-2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7}"
 readonly firecracker_version="${SPARKBOX_FIRECRACKER_VERSION:-v1.16.1}"
 readonly jailer_sha256="${SPARKBOX_JAILER_SHA256:-1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd}"
-readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-9d98275572b38a52dd078454a4b1d8f629205a1d182f3dfcc3f9ab2b0c281839}"
-readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-ccf86704bc2b80b0756740cd1d057172b484d01b8e7c48763a8f7a4e3ee90e15}"
+readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-c28ec55ac6be32e2efc065f8920f71705bee21d9dd398c9f1af5f9bfaea93ed7}"
+readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-390024bd72e728cb6340e4011d36368ee350f199f2c2a5677ac09be58d9d86e1}"
 
 mkdir -p \
   "$asset_dir" "$image_dir" "$template_dir" "$tools_dir" "$control_dir" "$hot_dir" \
