@@ -811,11 +811,18 @@ installations. Firecracker requires reflinks for both template clones and
 snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
-Firecracker cannot give a sandbox nested virtualization (no `/dev/kvm` inside
-the guest). [`docs/cloud-hypervisor-feasibility.md`](docs/cloud-hypervisor-feasibility.md)
-is the spike on swapping the VMM for Cloud Hypervisor to get it, what that
-touches, and why nested has to be per-sandbox opt-in on CKS;
-`hack/probe-nested-virt.sh` is its host preflight.
+Firecracker cannot give a sandbox usable nested virtualization: it has no
+supported switch, and — decisively — no nested state in its snapshots, so
+pausing a guest that is running an inner VM loses it.
+[`docs/cloud-hypervisor-feasibility.md`](docs/cloud-hypervisor-feasibility.md)
+is the spike on swapping the VMM for Cloud Hypervisor to get it, with
+[`docs/cloud-hypervisor-port-design.md`](docs/cloud-hypervisor-port-design.md)
+(driver mapping, helper protocol, kernel and artifacts) and
+[`docs/nested-virtualization-design.md`](docs/nested-virtualization-design.md)
+(per-sandbox plumbing, risk register, kill criteria) behind it.
+`hack/probe-nested-virt.sh` is the host preflight: CPU flags, `/dev/kvm`, the
+KVM module's `nested` and `ept`/`npt` parameters, Landlock, and the three 2026
+shadow-MMU escapes a nested-enabled node must be patched against.
 
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome
