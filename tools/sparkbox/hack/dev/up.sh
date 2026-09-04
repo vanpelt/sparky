@@ -68,6 +68,7 @@ readonly node_name="${SPARKBOX_DEV_NODE_NAME:-macdev}"
 readonly ssh_port="${SPARKBOX_DEV_SSH_PORT:-2222}"
 readonly key_dir="$module_dir/.dev/gateway/keys"
 readonly host_key_pub="$key_dir/gateway_host_key.pub"
+readonly upstream_key_pub="$key_dir/gateway_upstream_key.pub"
 
 # How much of the container machine one sandbox may claim. The node's built-in
 # default is a CKS-sized 4 vCPU / 12288 MB slice, and nothing downstream notices
@@ -111,18 +112,43 @@ preflight() {
 }
 
 # --- the node's trust bundle ------------------------------------------------
-# ONE file, never the directory: $key_dir also holds five private keys, and the
-# node has no business with any of them. It verifies the gateway's host key on
-# every link and needs exactly that public half.
+# TWO named files, never the directory: $key_dir also holds five PRIVATE keys,
+# and the node has no business with any of them. These two are public halves and
+# each has a distinct job:
 #
-# Re-copied on every run rather than only when absent, because the failure it
-# prevents is silent: re-minting the gateway identity leaves a stale .pub here
-# and the node then refuses to link, with the mismatch visible only in its logs.
+#   gateway_host_key.pub      the node verifies the gateway on every link
+#   gateway_upstream_key.pub  prepare-vm-assets bakes this into the rootfs
+#                             template as the login user's authorized_keys, and
+#                             it is how the gateway later SSHes INTO a sandbox
+#
+# Both are re-copied on every run rather than only when absent, because the
+# failure that causes is silent. Re-minting the gateway identity — exactly what
+# starting a gateway in a fresh checkout does — leaves a stale .pub here.
+#
+# Stale host key: the node refuses to link, visible only in its logs.
+#
+# Stale upstream key: far worse, because everything looks healthy. The node
+# links, sandboxes create and boot and report `running`, and only the one thing
+# that needs the key fails — the gateway cannot SSH in, so `ssh <name>@gateway`,
+# the browser terminal and the REST API all answer "could not reach the
+# sandbox's shell". Nothing names the key. This is not hypothetical: the
+# upstream .pub sat unrefreshed here through an identity re-mint while the host
+# key beside it was current, and cost a long day of chasing the wrong layer.
+#
+# The template cannot repair itself later, which is why this must be right up
+# front: the node runs with --disable-host-rootfs-mounts (uid 65532, no
+# CAP_SYS_ADMIN, and deliberately never mount(2) on a guest-authored ext4), so
+# per-create key injection is skipped by design and whatever the template was
+# built with is the only key in the guest.
 seed_trust() {
   [ -f "$host_key_pub" ] || die "no $host_key_pub — start the gateway once so it mints its identity"
+  [ -f "$upstream_key_pub" ] || die "no $upstream_key_pub — start the gateway once so it mints its identity"
   {
     printf "mkdir -p %q\ncat > %q <<'PUBKEY'\n" "$pod_trust" "$pod_trust/gateway_host_key.pub"
     cat "$host_key_pub"
+    printf "PUBKEY\n"
+    printf "cat > %q <<'PUBKEY'\n" "$pod_trust/gateway_upstream_key.pub"
+    cat "$upstream_key_pub"
     printf "PUBKEY\n"
     # And drop the node's OWN pinned copy whenever it disagrees.
     #
@@ -400,7 +426,7 @@ cmd_up() {
 
   step "trust bundle"
   seed_trust
-  note "copied gateway_host_key.pub into $pod_trust"
+  note "copied gateway_host_key.pub + gateway_upstream_key.pub into $pod_trust"
 
   step "node Pod"
   if node_online; then

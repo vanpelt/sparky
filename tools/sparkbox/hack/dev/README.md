@@ -259,6 +259,42 @@ If `shell` times out during the banner exchange, that is not sshd refusing:
 sshd is running and the guest is too starved to answer it. `console` is then
 the only view left, and it still works.
 
+### …but the guest booted fine and still will not answer
+
+Then suspect the **gateway key in the template**, which fails in a way that
+looks nothing like a key problem: the node links, the sandbox creates and boots
+and reports `running`, `systemctl --failed` is empty — and every route in still
+says *"could not reach the sandbox's shell"*, because the gateway cannot SSH
+into a guest that does not hold its public key.
+
+The node runs with `--disable-host-rootfs-mounts` (uid 65532, no
+`CAP_SYS_ADMIN`, and deliberately never `mount(2)` on a guest-authored ext4), so
+per-create key injection is skipped by design. Whatever `prepare-vm-assets`
+baked into the template is the only key in the guest, and the template cannot
+repair itself later.
+
+Check it — these three must all match:
+
+```sh
+# 1. what the gateway will authenticate with
+cat .dev/gateway/keys/gateway_upstream_key.pub
+
+# 2. what prepare-vm-assets will bake, and 3. what the template actually carries
+container machine run -i --root --name sparkbox -- bash -s <<'SH'
+cat /srv/sparkbox/data/devpod-trust/gateway_upstream_key.pub
+mkdir -p /mnt/kc && mount -o ro,loop \
+  /srv/sparkbox/data/devpod/images/universal.ext4 /mnt/kc
+cat /mnt/kc/home/sparky/.ssh/authorized_keys
+umount /mnt/kc
+SH
+```
+
+`up.sh` re-copies both public keys into the trust dir on every run and
+`prepare-vm-assets` re-bakes the template, so `hack/dev/up.sh node` is the fix.
+Until that was true the upstream `.pub` was written once and never refreshed,
+so re-minting the gateway identity — which is exactly what starting a gateway in
+a fresh checkout does — silently stranded every sandbox created afterwards.
+
 ## The gateway loop
 
 ```sh
