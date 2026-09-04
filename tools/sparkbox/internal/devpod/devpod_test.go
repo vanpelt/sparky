@@ -1346,3 +1346,23 @@ func argvFor(t *testing.T, p *Plan, container string) []string {
 	}
 	return argv
 }
+
+// TestBlockIOEngineIsNotInheritedFromCKS pins the one env override whose empty
+// value clears the manifest instead of keeping it.
+//
+// deployment.yaml pins SPARKBOX_BLOCK_IO_ENGINE=Sync for CKS, where firecracker
+// device creation lands on snapshot restore and wake-ups are the common case.
+// A dev pod inheriting that silently gave up the Async default measured 2.4x
+// faster to boot here -- and nothing in the pod's output would have said so.
+func TestBlockIOEngineIsNotInheritedFromCKS(t *testing.T) {
+	manifest := envOf(t, mustPlan(t, testOptions()), "sparkbox-node", "SPARKBOX_BLOCK_IO_ENGINE")
+	if manifest != "" {
+		t.Fatalf("dev node inherited the CKS block engine pin %q; empty must clear it so the binary's Async default applies", manifest)
+	}
+
+	o := testOptions()
+	o.BlockIOEngine = "Sync"
+	if got := envOf(t, mustPlan(t, o), "sparkbox-node", "SPARKBOX_BLOCK_IO_ENGINE"); got != "Sync" {
+		t.Fatalf("Options.BlockIOEngine=Sync rendered %q, want Sync", got)
+	}
+}

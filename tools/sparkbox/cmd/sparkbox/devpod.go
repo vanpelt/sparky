@@ -38,6 +38,7 @@ func devpodCommand(args []string) error {
 		hostMemMB   = fs.Int64("host-mem-mb", 0, "SPARKBOX_HOST_MEM_MB for admission control; 0 keeps the manifest's CKS value, which is far larger than a laptop")
 		defVCPUs    = fs.Int64("default-vcpus", 0, "SPARKBOX_DEFAULT_VCPUS: vCPUs for a sandbox nobody sized, which is every `new@` sandbox; 0 keeps the binary's CKS-sized built-in (4)")
 		defMemMB    = fs.Int64("default-mem-mb", 0, "SPARKBOX_DEFAULT_MEM_MB: RAM for a sandbox nobody sized; 0 keeps the built-in 12288, which on a laptop's container machine is a guest larger than the machine")
+		blockIO     = fs.String("block-io-engine", "", "SPARKBOX_BLOCK_IO_ENGINE: Sync | Async; empty CLEARS the manifest's CKS Sync pin so the binary's Async default applies, which boots 2.4x faster here")
 		nodeName    = fs.String("node-name", "", "SPARKBOX_NODE_NAME; empty keeps the manifest's cks-poc")
 		hivemindAPI = fs.String("hivemind-api", "", "SPARKBOX_HIVEMIND_API; empty leaves the presence lease off")
 		prefix      = fs.String("prefix", devpod.DefaultPrefix, "name prefix for the docker network, volumes and containers")
@@ -72,6 +73,7 @@ func devpodCommand(args []string) error {
 		HostMemMB:     *hostMemMB,
 		DefaultVCPUs:  *defVCPUs,
 		DefaultMemMB:  *defMemMB,
+		BlockIOEngine: *blockIO,
 		NodeName:      *nodeName,
 		HivemindAPI:   *hivemindAPI,
 		NetworkSubnet: *subnet,
