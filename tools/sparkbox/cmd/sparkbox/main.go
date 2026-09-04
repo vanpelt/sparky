@@ -78,7 +78,7 @@ import (
 var version = "dev"
 
 func main() {
-	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets|version> [flags]"
+	const usage = "usage: sparkbox <serve|setup|doctor|devpod|fetch-secrets|version> [flags]"
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -91,6 +91,8 @@ func main() {
 		err = setup(os.Args[2:])
 	case "doctor":
 		err = doctor(os.Args[2:])
+	case "devpod":
+		err = devpodCommand(os.Args[2:])
 	case "fetch-secrets":
 		err = fetchSecrets(os.Args[2:])
 	case "version", "--version", "-v":
