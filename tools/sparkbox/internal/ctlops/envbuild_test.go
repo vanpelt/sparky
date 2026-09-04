@@ -251,7 +251,11 @@ func TestBuildRefusesBeforeTheFirstWrite(t *testing.T) {
 				}
 			},
 			kind: KindConflict, code: "build_box_exists",
-			want: []string{"web-build", "env capture web", "rm web-build"},
+			want: []string{
+				"web-build",
+				"ssh ctl@example.test env capture web",
+				"ssh ctl@example.test rm web-build",
+			},
 		},
 		{
 			// No script anywhere is the AGENT path, so what a person hits here
@@ -1314,7 +1318,17 @@ func TestSetupDoneFailureLeavesTheBuilderPaused(t *testing.T) {
 	if row.State != envs.StateFailed || row.BuildBox != "web-build" {
 		t.Fatalf("row = %+v, want failed naming its builder", row)
 	}
-	for _, want := range []string{"exited 42", "404 not found", "web-build", "env capture web"} {
+	// Every command in the sentence is spelled the way it is TYPED. The message
+	// is read from a shell that is not the gateway's — a console card, a
+	// `create --env` refusal, somebody's laptop — so a bare `env capture web`
+	// next to a full `ssh web-build@example.test` reads as two commands for the
+	// same shell, and only one of them runs.
+	for _, want := range []string{
+		"exited 42", "404 not found", "web-build",
+		"ssh web-build@example.test",
+		"ssh ctl@example.test env capture web",
+		"ssh ctl@example.test rm web-build",
+	} {
 		if !strings.Contains(row.BuildError, want) {
 			t.Errorf("build_error does not mention %q: %q", want, row.BuildError)
 		}

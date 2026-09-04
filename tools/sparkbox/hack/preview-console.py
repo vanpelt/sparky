@@ -228,8 +228,16 @@ _ENVIRONMENTS = [
      "has_setup": True, "setup_bytes": 902, "setup_from": "agent",
      "state": "failed", "build_box": "weave-py-build", "snapshot": "",
      "build_session": "https://hivemind.example/sessions/weave-py-build",
+     # The whole stored sentence, the way markFailedBox writes it: the reason,
+     # then the builder and the three commands that recover from it. It is here
+     # in full because this card renders build_error verbatim, so the preview
+     # has to show how long the real thing is next to the buttons that do the
+     # same three things.
      "build_error": "sparkbox: this box is configured, but .sparkbox/setup.sh does not "
-                    "run in it, so no later build could reproduce it"},
+                    "run in it, so no later build could reproduce it. The builder "
+                    "weave-py-build is paused \u2014 `ssh weave-py-build@sparkbox.example` to look, "
+                    "then `ssh ctl@sparkbox.example env capture weave-py` to finish it, or "
+                    "`ssh ctl@sparkbox.example rm weave-py-build` to start over"},
     {"name": "scratch", "description": "empty starting point for one-off experiments",
      "repos": [], "secrets": [], "rules": [], "vars": [],
      "has_setup": False, "setup_bytes": 0, "setup_from": "", "state": "draft", "snapshot": ""},

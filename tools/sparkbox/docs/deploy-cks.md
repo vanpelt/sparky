@@ -425,7 +425,7 @@ this deployment gained a choice of architecture.
 Every build receives a traceable full-SHA tag and a branch tag. The default
 branch also updates `edge`. A release adds one more: `build-artifacts.yml`
 calls this workflow as a reusable job once it has published the release, so a
-`v*` tag also produces `ghcr.io/vanpelt/sparkbox-cks:v0.7.4` built from the
+`v*` tag also produces `ghcr.io/vanpelt/sparkbox-cks:v0.8.0` built from the
 tagged commit. That job is gated on `publish` deliberately — the image pins the
 release it downloads at Pod start, so tagging an image for a release that is
 still a draft would give you a Pod that CrashLoops on a 404.
@@ -458,7 +458,7 @@ visibility to public so CKS can pull it without an image-pull secret. The image
 contains the current Sparkbox and Sluice binaries, the base Sluice allow-list,
 host networking tools, and the template refresher. At Pod startup it downloads
 and SHA-256-verifies the Firecracker, kernel, and universal rootfs artifacts for
-the architecture `uname -m` reports, pinned to Sparkbox `v0.7.4`, then downloads
+the architecture `uname -m` reports, pinned to Sparkbox `v0.8.0`, then downloads
 the current agent CLI bundles and patches the template. The runtime
 image also carries the repository's canonical `images/motd`; its digest is part
 of the template freshness stamp, so a branch build can update the static login

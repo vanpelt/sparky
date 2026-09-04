@@ -204,8 +204,8 @@ func (o *Ops) BuildEnvironment(ctx context.Context, c Caller, name string) (Envi
 		return EnvironmentInfo{}, &Error{
 			Kind: KindConflict, Op: op, Code: "build_box_exists",
 			Msg: "a sandbox named " + box + " already exists, and that is the name this build needs. " +
-				"If it is a builder left over from a previous attempt, finish it with `env capture " + name +
-				"` or remove it with `rm " + box + "`.",
+				"If it is a builder left over from a previous attempt, finish it with `" + o.ctlHint() +
+				" env capture " + name + "` or remove it with `" + o.ctlHint() + " rm " + box + "`.",
 			Details:  map[string]any{"environment": name, "sandbox": box},
 			Verbatim: true,
 		}
@@ -514,10 +514,11 @@ func (o *Ops) envBuildable(op string) error {
 // answer is a box name they can ssh into and watch.
 func (o *Ops) alreadyBuilding(op string, e envs.Environment) *Error {
 	msg := "environment " + e.Name + " is already building" + buildBoxPhrase(e) + "."
-	hint := "Watch it with `env show " + e.Name + "`."
+	hint := "Watch it with `" + o.ctlHint() + " env show " + e.Name + "`."
 	if e.BuildBox != "" {
-		hint = "Watch it with `env show " + e.Name + "`, or look inside with `" +
-			o.sshHint(e.BuildBox) + "`. If that build is stuck, `rm " + e.BuildBox + "` and start again."
+		hint = "Watch it with `" + o.ctlHint() + " env show " + e.Name + "`, or look inside with `" +
+			o.sshHint(e.BuildBox) + "`. If that build is stuck, `" + o.ctlHint() + " rm " + e.BuildBox +
+			"` and start again."
 	}
 	return &Error{
 		Kind: KindConflict, Op: op, Code: "env_already_building",
@@ -611,8 +612,8 @@ func (o *Ops) agentBuildable(op, owner, env string) error {
 			Msg: "environment " + env + " has no setup script, so building it means having an agent write one — " +
 				"and your " + outOfReach.Name + " is tagged " + strings.Join(outOfReach.Tags, ", ") +
 				", which no builder for " + env + " will carry.",
-			Hint: "Re-save it so it reaches this environment: `claude setup-token | ssh ctl@<gateway> secret set " +
-				outOfReach.Name + " --tag " + env + "`. Or write " + SetupScriptPath +
+			Hint: "Re-save it so it reaches this environment: `claude setup-token | " + o.ctlHint() +
+				" secret set " + outOfReach.Name + " --tag " + env + "`. Or write " + SetupScriptPath +
 				" yourself and skip the agent entirely.",
 			Details:  map[string]any{"environment": env, "secret": outOfReach.Name, "tags": outOfReach.Tags},
 			Verbatim: true,
@@ -622,7 +623,7 @@ func (o *Ops) agentBuildable(op, owner, env string) error {
 		Kind: KindConflict, Op: op, Code: "env_no_agent_credential",
 		Msg: "environment " + env + " has no setup script, so building it means having an agent write one — " +
 			"and you have no " + AgentCredential + " for the builder to sign in with.",
-		Hint: "Save one with `claude setup-token | ssh ctl@<gateway> secret set " + AgentCredential +
+		Hint: "Save one with `claude setup-token | " + o.ctlHint() + " secret set " + AgentCredential +
 			"`, then run this again. Or write " + SetupScriptPath +
 			" in a repository attached to " + env + " and it will be used instead of an agent.",
 		Details:  map[string]any{"environment": env, "secret": AgentCredential},
@@ -2034,15 +2035,23 @@ func (o *Ops) markFailed(owner, name, box, reason string) {
 // possibly still writing to its filesystem. The name has to stay on the row —
 // dropping it would tell somebody nothing is left when something is — so the
 // name is kept and the sentence changes.
+//
+// Every command in the sentence carries its own `ssh …@<domain>` prefix. This
+// string is stored on the row and then read from somewhere that is NOT the
+// gateway's control channel — a console card in a browser, a `create --env`
+// refusal, somebody's laptop — so a bare `env capture web` sitting next to a
+// full `ssh web-build@<domain>` reads as two commands for the same shell when
+// only one of them is, and the reader finds that out by having it fail.
 func (o *Ops) markFailedBox(owner, name, box, reason string, paused bool) {
 	msg := reason
 	switch {
 	case box != "" && paused:
 		msg += ". The builder " + box + " is paused — `" + o.sshHint(box) +
-			"` to look, then `env capture " + name + "` to finish it, or `rm " + box + "` to start over"
+			"` to look, then `" + o.ctlHint() + " env capture " + name + "` to finish it, or `" +
+			o.ctlHint() + " rm " + box + "` to start over"
 	case box != "":
-		msg += ". The builder " + box + " could not be stopped and may still be running — remove it with `rm " +
-			box + "`"
+		msg += ". The builder " + box + " could not be stopped and may still be running — remove it with `" +
+			o.ctlHint() + " rm " + box + "`"
 	}
 	if err := o.envs.SetState(owner, name, envs.StateFailed, box, msg); err != nil {
 		o.log.Error("could not record an environment build failure",
