@@ -127,6 +127,7 @@ func serve(args []string) error {
 		idleTimeout          = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
 		idleBalloon          = fs.Duration("idle-balloon", 20*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb). Only takes effect while a memory budget is actually filling up — see --mem-admission-pct and --owner-memory-pool-mb — because an inflation the host had no use for costs the guest a full reclaim pass and buys nothing. Two minutes was the old default and it reliably squeezed guests that had not finished booting")
 		activityCPU          = fs.Float64("activity-cpu-pct", 0, "treat a sandbox as active while it burns at least this % of one host core (0 disables, the default); opt in for unattended CPU-only work")
+		blockIOEngine        = fs.String("block-io-engine", "", "firecracker block backend: Async (io_uring, the default) or Sync (one request at a time). A guest boot is thousands of small reads and this device costs per REQUEST, not per byte: reading the same 8 MiB took 5845ms in 2048 4k requests versus 177ms in 128 64k ones. Async is a developer preview upstream — its io_uring workers live in the root cgroup, so they cannot be attributed to one VM or capped there, and they consume PIDs; set Sync on a node packing many sandboxes if that bites")
 		activityNetKB        = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
 		defaultVCPUs         = fs.Int64("default-vcpus", 0, "vCPUs for a sandbox created without an explicit size, which is every `new@` sandbox (0 = the built-in 4). Size this for the machine the node is on: admission control compares against host RAM and cannot notice that one VM at the ceiling is larger than the whole host")
 		defaultMemMB         = fs.Int64("default-mem-mb", 0, "RAM in MB for a sandbox created without an explicit size (0 = the built-in 12288). See --default-vcpus")
@@ -301,7 +302,8 @@ func serve(args []string) error {
 			maxPerOwner: *maxPerOwner, maxBoxesPerOwner: *maxBoxesPerOwner,
 			memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
 			defaultVCPUs: *defaultVCPUs, defaultMemMB: *defaultMemMB,
-			memReserve: *memReserve, ownerMemPool: *ownerMemPool,
+			blockIOEngine: *blockIOEngine,
+			memReserve:    *memReserve, ownerMemPool: *ownerMemPool,
 			ownerMemBurst: *ownerMemBurst, diskPool: *diskPool,
 			controlTransport: *nodeControlTransport, grpcAddr: *nodeGRPCAddr,
 			guestDataTransport: *guestDataTransport,
@@ -523,7 +525,7 @@ func serve(args []string) error {
 		driver, err = newFirecrackerDriver(
 			*kernelPath, *imageDir, *templateDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
 			*chrootJailer, *privilegedHelper, *privilegedHelperBin, *helperControllerGID, *noRootfsMounts,
-			*guestSubnet, *subnet6, *defaultLogin, *guestDNS,
+			*guestSubnet, *subnet6, *defaultLogin, *guestDNS, *blockIOEngine,
 		)
 		if err != nil {
 			return err

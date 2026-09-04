@@ -130,6 +130,50 @@ all three yourself. `devpod plan` marks both omissions `[BLOCKING]`, including
 the specific one — *"one sandbox is 12288 MB on a 12079 MB machine"* — and that
 line is the only warning there is.
 
+## Why guests are slow here: the block device costs per REQUEST
+
+Measured, not guessed. Reading the same 8 MiB out of one guest:
+
+| request size | requests | time |
+|---|---|---|
+| 4 KiB  | 2048 | **5845 ms** |
+| 64 KiB | 128  | **177 ms** |
+| 1 MiB  | 8    | **270 ms** |
+
+Time tracks the request COUNT, not the bytes — 33x for identical data. Bulk
+throughput is fine (~45 MB/s at 64 KiB); it is small-file I/O that falls off a
+cliff, at roughly 2.85 ms per 4 KiB read where the host does it in microseconds.
+
+That is the whole reason `containerd` fails and boots take fifteen minutes. A
+boot is thousands of small reads — shared libraries for `ldconfig`, unit files
+for systemd, layer metadata for containerd. `containerd.service` has
+`TimeoutStartSec=90`, cannot finish inside it, is killed, retries, and fails
+about eleven times; `docker.service` then waits on it forever and the in-guest
+agent never starts, so `ssh`, the browser terminal and the REST API all answer
+*"could not reach the sandbox's shell"*.
+
+Every bulk benchmark says the storage is healthy, which is why this took a long
+time to find. For the record, what is NOT the cause:
+
+- **Host storage.** L1 cold-reads 128 MB from the same XFS-on-loop in 382 ms.
+- **The backing file.** 209 extents, and L1 reads 128 MB out of `rootfs.ext4`
+  in 25-50 ms.
+- **Reflink copy-on-write.** Costs 2.8x, and the penalty is on READS.
+- **The guest clock.** Measured against host wall time: ratio 0.934.
+- **CPU or virtualization traps.** Compute is *faster* in the guest than in L1
+  (562 ms vs 1154 ms on the same loop), and KVM exits run 930-1500/sec, which
+  is nothing.
+
+The remaining cost is the nested round trip per I/O: guest, L1 KVM, firecracker
+userspace, L1 `pread`, Apple's virtio, macOS — then an interrupt injected back
+down. CKS pays that once. This box pays it twice, and it only shows up when you
+do it thousands of times.
+
+`--block-io-engine` now defaults to `Async` (io_uring) instead of firecracker's
+one-request-at-a-time `Sync`, which keeps requests in flight instead of
+serialising them: a 2.4x faster boot (90.4s -> 37.5s) on an otherwise identical
+VM, and 27% off bulk writes. It does not close the gap, it makes it survivable.
+
 ## When the guest will not answer
 
 Every supported route into a sandbox goes through the in-guest agent on `:8000`:
