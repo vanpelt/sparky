@@ -42,6 +42,19 @@
 #   SPARKBOX_DEV_API_PORT     default 18080 (the Pod's 8080 is usually OrbStack's)
 #   SPARKBOX_DEV_HANDLE       operator handle seeded into users.conf (default $USER)
 #   SPARKBOX_DEV_SSH_KEY      public key for that handle (default ~/.ssh/id_*.pub)
+#   SPARKBOX_GITHUB_APP_CLIENT_ID
+#                             client id of a GitHub App to mint repo credentials
+#                             with. Unset leaves repo attachments unavailable,
+#                             which is what `repo add` reports today.
+#   SPARKBOX_DEV_OP_ITEM      1Password secret reference to that App's private
+#                             key, e.g. op://Hivemind-Dev/github-app-key/password.
+#                             Read on start into the key dir, removed on stop.
+#   SPARKBOX_DEV_OP_ACCOUNT   1Password account for the read (default: whichever
+#                             account `op` resolves the reference in). Name it
+#                             when more than one account is signed in.
+#   SPARKBOX_GITHUB_APP_KEY_FILE
+#                             use a PEM already on disk instead of 1Password.
+#                             Takes precedence; the two are mutually exclusive.
 set -euo pipefail
 
 # --- bash floor -------------------------------------------------------------
@@ -197,6 +210,89 @@ derive_trust_pubs() {
   done
 }
 
+# --- github app key ---------------------------------------------------------
+# The one fleet secret that cannot be minted locally: GitHub holds the public
+# half, so a dev box either gets an App's private key or answers "no GitHub App
+# is configured on this host" to every `repo add`.
+#
+# It is read from 1Password on start rather than kept in the tree, and removed
+# on stop, so the only durable copy is the one in the vault. That is the point:
+# .dev/ is disposable and this key is not regenerable from here.
+#
+# Deliberately NOT `sparkbox fetch-secrets --provider op`, which is the
+# production path for exactly this file. Fetch walks the entire secret manifest
+# and writes every hit into --key-dir, so pointing it at a vault holding a real
+# fleet identity would overwrite this box's locally minted gateway, upstream and
+# OIDC keys with that fleet's -- and a dev gateway holding production identity
+# keys is a worse outcome than a dev gateway with no GitHub App. A vault holding
+# only this one key does not work either: three manifest entries are
+# required:true and a missing one is a hard failure. So this reads the single
+# reference it was given and touches nothing else.
+readonly app_key_file="$key_dir/github_app_key.pem"
+
+fetch_app_key() {
+  local ref="${SPARKBOX_DEV_OP_ITEM:-}"
+  # An explicit key file wins and suppresses the 1Password path entirely. Two
+  # sources for one secret, silently preferring one, is how you end up debugging
+  # an App that is not the App you edited.
+  if [ -n "${SPARKBOX_GITHUB_APP_KEY_FILE:-}" ]; then
+    [ -z "$ref" ] || die "set SPARKBOX_GITHUB_APP_KEY_FILE or SPARKBOX_DEV_OP_ITEM, not both"
+    [ -r "$SPARKBOX_GITHUB_APP_KEY_FILE" ] ||
+      die "SPARKBOX_GITHUB_APP_KEY_FILE=$SPARKBOX_GITHUB_APP_KEY_FILE is not readable"
+    return 0
+  fi
+  # Unconditional, so a run without the reference cannot inherit the key a
+  # previous run left behind and mint against an App nobody named.
+  rm -f "$app_key_file"
+  [ -n "$ref" ] || return 0
+  command -v op > /dev/null 2>&1 ||
+    die "SPARKBOX_DEV_OP_ITEM is set but the 1Password CLI is not on PATH (brew install 1password-cli)"
+
+  local args=(read --no-newline "$ref")
+  [ -n "${SPARKBOX_DEV_OP_ACCOUNT:-}" ] && args+=(--account "$SPARKBOX_DEV_OP_ACCOUNT")
+
+  # Redirected straight to the destination under a restrictive umask rather than
+  # captured into a variable: a private key in a shell variable is inherited by
+  # every child of this script, and it would reach the gateway's own environment.
+  if ! (umask 077; op "${args[@]}" > "$app_key_file"); then
+    rm -f "$app_key_file"
+    echo "gateway.sh: could not read $ref from 1Password." >&2
+    echo "  A 'RequestDelegatedSession' error is the desktop-app integration, not the" >&2
+    echo "  reference: Settings -> Developer -> Integrate with 1Password CLI, then restart" >&2
+    echo "  the app fully. 'op signin' skips the desktop app entirely. Note that 'op whoami'" >&2
+    echo "  answers from local config even while the session is broken, so it proves" >&2
+    echo "  nothing -- 'op vault list' is the test." >&2
+    die "1Password read failed"
+  fi
+  # op exits 0 having written nothing when the field exists and is empty, which
+  # would otherwise surface as an unhelpful PEM parse error from ghapp.LoadKey.
+  [ -s "$app_key_file" ] || {
+    rm -f "$app_key_file"
+    die "$ref resolved to an empty value; check the field name (a reference ends in its field)"
+  }
+  chmod 0600 "$app_key_file"
+  export SPARKBOX_GITHUB_APP_KEY_FILE="$app_key_file"
+  echo "read the GitHub App key from 1Password into $app_key_file"
+}
+
+# Both halves or neither, and say which is missing. cmd/sparkbox logs this too,
+# but it logs one line from inside a starting server; a box configured halfway
+# should hear about it before the gateway comes up rather than when a clone
+# fails inside a VM.
+warn_app_config() {
+  local have_key="" have_id=""
+  [ -n "${SPARKBOX_GITHUB_APP_KEY_FILE:-}" ] && have_key=1
+  [ -n "${SPARKBOX_GITHUB_APP_CLIENT_ID:-}" ] && have_id=1
+  if [ -n "$have_key" ] && [ -z "$have_id" ]; then
+    echo "gateway.sh: a GitHub App key is present but SPARKBOX_GITHUB_APP_CLIENT_ID is not" >&2
+    echo "            set, so repo attachments stay disabled: a key cannot say which App" >&2
+    echo "            it belongs to" >&2
+  elif [ -z "$have_key" ] && [ -n "$have_id" ]; then
+    echo "gateway.sh: SPARKBOX_GITHUB_APP_CLIENT_ID is set but no key was found; set" >&2
+    echo "            SPARKBOX_DEV_OP_ITEM or SPARKBOX_GITHUB_APP_KEY_FILE" >&2
+  fi
+}
+
 # --- run --------------------------------------------------------------------
 # The production entrypoint, with the dev-only overrides appended. It is not
 # executable in the tree (the Containerfile chmods it on the way into the
@@ -264,6 +360,8 @@ cmd_start() {
   fi
   seed_users
   identity_complete || mint_identity
+  fetch_app_key
+  warn_app_config
   printf '\n=== %s: start %s ===\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$bin" >> "$log_file"
   serve &
   echo $! > "$pid_file"
@@ -305,6 +403,10 @@ cmd_stop() {
     kill -9 "$pid" 2>/dev/null || true
   fi
   rm -f "$pid_file"
+  # The vault is the durable copy; nothing needs this one once the process
+  # holding it is gone. Only the file this script wrote, never an operator's own
+  # SPARKBOX_GITHUB_APP_KEY_FILE.
+  rm -f "$app_key_file"
   echo "stopped (pid $pid)"
 }
 

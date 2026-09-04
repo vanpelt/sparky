@@ -96,6 +96,64 @@ wrapper is what is permissive: it re-runs the mint pass whenever the local set
 is incomplete, because a half-deleted *local* identity is a scratch directory to
 rebuild, not a fleet to lock out. Delete a key on CKS and you get the refusal.
 
+## GitHub repo attachments
+
+Out of the box `repo add` answers *"no GitHub App is configured on this host"*,
+and it is right to: minting a repo credential needs an App's RSA private key,
+and unlike every other key this dev box uses, that one cannot be generated here.
+GitHub holds the public half.
+
+The account-linking flow is unaffected and needs nothing — `--github-client-id`
+defaults to a shipped public client id and the device flow has no callback URL,
+so `github link` works on `dev.localhost` as-is. But a linking token cannot
+clone: `internal/users/githubdevice.go` requests **no scope at all**, on purpose,
+and a GitHub App's user token reaches only repositories that App is installed on.
+Linking proves who you are; it is not a credential.
+
+So this needs its own App. Register a **dev** App rather than pointing at the
+cluster's — the two differ only in which repositories they are installed on, and
+a dev box that can mint against production installations is the thing worth
+avoiding. It needs no public URL: minting is outbound-only, gateway to
+api.github.com. No callback, no webhook, no tunnel.
+
+1. Create a GitHub App. Repository permissions **Contents**, **Pull requests**
+   and **Issues** — the set `internal/metadata/repos.go` asks for, narrowed to
+   what the installation actually granted.
+2. Generate a private key. Put the PEM in 1Password.
+3. Install the App on the repositories you want to attach.
+4. Point the gateway at both halves:
+
+```sh
+export SPARKBOX_GITHUB_APP_CLIENT_ID=Iv23li...              # public, not a secret
+export SPARKBOX_DEV_OP_ITEM='op://Hivemind-Dev/github-app-key/password'
+export SPARKBOX_DEV_OP_ACCOUNT=coreweave.1password.com      # only if several are signed in
+hack/dev/gateway.sh restart
+```
+
+`start` reads the reference into `.dev/gateway/keys/github_app_key.pem` at 0600
+and `stop` removes it, so the vault holds the only durable copy. Half a
+configuration is called out before the server starts rather than surfacing later
+as a clone failure inside a VM. `SPARKBOX_GITHUB_APP_KEY_FILE` still takes a PEM
+already on disk; setting both is refused rather than resolved by precedence.
+
+Then, on the dev box: `github link` (an `assertion` link is refused by
+`attachIdentity`), `repo add owner/name`, and `repo check` — which exists because
+every other surface reports success whether or not the App was ever installed.
+
+**`sparkbox fetch-secrets --provider op` is the wrong tool here**, despite being
+the production path for this exact file. It walks the whole secret manifest and
+writes every hit into `--key-dir`, so aiming it at a vault holding a real fleet
+identity would overwrite this box's minted gateway, upstream and OIDC keys with
+that fleet's. A vault holding only the App key does not work either: three
+manifest entries are `required: true` and a missing one is fatal. Hence the
+single-reference read.
+
+If `op` fails with `RequestDelegatedSession: cannot setup session`, that is the
+desktop-app integration, not your reference — Settings → Developer → Integrate
+with 1Password CLI, then restart the app fully, or use `op signin` to skip the
+desktop app. `op whoami` answers from local config even while the session is
+broken; `op vault list` is the test.
+
 ## NO SILENT CAPS
 
 Three deliberate deviations from the Pod, all announced in `gateway.sh`'s header:
@@ -128,6 +186,10 @@ about:
   anything about capacity or permissions on the real volume are untested.
 - **sandboxes.** With the mock driver nothing boots. Lifecycle *bookkeeping* is
   exercised; guests, networking, snapshots, and agents are not.
+- **the fleet's GitHub App.** With a dev App attached (above) the minting path
+  is real, but the installations, repositories and permission grants are yours
+  and not the cluster's. `fetch-secrets`, which is how the App key actually
+  reaches a Pod, is deliberately not the path used here.
 
 The five-container tier (`sparkbox devpod`) covers some of the middle of that
 list and records what it still cannot reproduce in `Plan.Divergences`. Nothing
