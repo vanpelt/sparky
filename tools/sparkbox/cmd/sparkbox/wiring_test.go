@@ -23,6 +23,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/federation"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
@@ -950,9 +951,16 @@ func TestNodeMetadataCarriesEveryGuestDoorTheGatewayHas(t *testing.T) {
 		guestSubnet:       testNodeGuestSubnet,
 		toolsDir:          filepath.Join(dir, "tools"),
 		guestSelfSnapshot: true,
+		federation:        federation.Default("https://hivemind.wandb.tools"),
 	}
 	o := nodeMetadataOptions(mgr, uplink, identity,
 		newRelayRepos(uplink, identity.currentGRPC, log), opts, log)
+	// The federation list is a door of the same kind: a node that served an
+	// empty one would leave its guests minting nothing while the gateway's
+	// mint for HiveMind — which is a guest able to tell where it landed.
+	if got := o.Federation.Names(); len(got) != 1 || got[0] != "hivemind" {
+		t.Errorf("a node's metadata service serves federators %v, want the fleet's list", got)
+	}
 
 	for name, door := range map[string]any{
 		"Manager":        o.Manager,

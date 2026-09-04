@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/federation"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestdocs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
@@ -297,8 +298,10 @@ type Server struct {
 	allowSelfSnapshot bool
 	log               *slog.Logger
 	defAud            string
-	openAI            OpenAI
-	guestNet          guestnet.Network
+	// feds is the list of relying parties served at /federation. See
+	// federation.go.
+	feds     federation.Config
+	guestNet guestnet.Network
 
 	mu     sync.Mutex
 	recent map[string][]time.Time // sandbox -> mint times inside the window
@@ -354,9 +357,10 @@ type Options struct {
 	Logger            *slog.Logger
 	// DefaultAudience is used when a caller passes no ?aud=.
 	DefaultAudience string
-	// OpenAI is this fleet's OpenAI workload-identity federation config, served
-	// at /openai. A zero value answers 501 there and leaves guests alone.
-	OpenAI OpenAI
+	// Federation is the fleet's list of relying parties, served to guests at
+	// /federation. A zero value serves an empty list and guests mint nothing;
+	// main.go substitutes federation.Default when the operator gave no file.
+	Federation federation.Config
 	// GuestSubnet must match the VM driver's IPv4 prefix. Empty uses the
 	// standalone compatibility default.
 	GuestSubnet string
@@ -390,7 +394,7 @@ func NewChecked(opts Options) (*Server, error) {
 		envSetup:          opts.EnvSetup,
 		allowSelfSnapshot: opts.AllowSelfSnapshot,
 		defAud:            opts.DefaultAudience,
-		openAI:            opts.OpenAI.withDefaults(),
+		feds:              opts.Federation.WithDefaults(),
 		guestNet:          guestNetwork,
 		recent:            map[string][]time.Time{},
 	}, nil
@@ -400,7 +404,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /token", s.token)
 	mux.HandleFunc("GET /identity", s.identity)
-	mux.HandleFunc("GET /openai", s.openai)
+	mux.HandleFunc("GET /federation", s.serveFederation)
 	mux.HandleFunc("GET /repos", s.repoManifest)
 	mux.HandleFunc("POST /repos/status", s.publishRepoStatus)
 	mux.HandleFunc("GET /github/credential", s.githubCredential)

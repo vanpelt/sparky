@@ -24,8 +24,8 @@ IDENTITY_REV=28
 META_PORT=8967
 
 # Which account runs the agent in this guest? The token unit runs as root, but
-# the daemon reading /var/run/secrets/hivemind/token runs as the login user — so
-# the token has to be readable by them. Derive that user from the tree itself:
+# the clients reading the assertions it writes (hivemind's daemon, codex) run as
+# the login user — so the tokens have to be readable by them. Derive that user from the tree itself:
 # build-rootfs.sh baked the gateway key into exactly one home's authorized_keys
 # (see its sparkbox.login-user handling), so the non-root account that owns an
 # authorized_keys IS the login user. Default root (legacy root-login templates).
@@ -37,24 +37,28 @@ done < "$MNT/etc/passwd"
 
 mkdir -p "$MNT/usr/local/bin" "$MNT/usr/local/sbin"
 
-# Fetch this sandbox's OIDC id token from the host metadata service and park it
-# where hivemind's zero-config auth chain already looks. The host authenticates
+# Fetch this sandbox's OIDC assertions from the host metadata service and park
+# each where its relying party's client already looks. The host authenticates
 # us by our network position — our own tap is the only way to reach its
 # metadata endpoint as us — so no secret is baked into the image and nothing
 # has to be injected per sandbox.
 #
-# HIVEMIND_OIDC_TOKEN_FILE defaults to /var/run/secrets/hivemind/token, and the
-# daemon re-reads that file ~5 minutes before expiry. Keeping the path fresh is
-# the whole integration: `hivemind start` federates with no env vars, no login,
-# and nothing pasted.
+# WHICH parties is the host's to say, not this script's. GET /federation serves
+# the fleet's list (internal/federation, one `<name> TAB <key> TAB <value>` line
+# per fact) and this walks it: HiveMind's token at /var/run/secrets/hivemind/token,
+# which the daemon re-reads ~5 minutes before expiry so `hivemind start`
+# federates with no env vars, no login and nothing pasted; OpenAI's assertion
+# where `codex` reads it; and whatever an operator adds in a deploy. Nothing
+# about any party is written here, which is what lets the next one be a
+# configuration change rather than a template rebuild.
 sed -e "s/@@META_PORT@@/$META_PORT/g" -e "s/@@SANDBOX_USER@@/$SANDBOX_USER/g" \
     > "$MNT/usr/local/sbin/sparkbox-token" <<'EOF'
 #!/bin/sh
-# Refresh this sandbox's OIDC id token and identity snapshot.
+# Refresh this sandbox's OIDC assertions and identity snapshot.
 set -eu
-TOKEN_FILE=${HIVEMIND_OIDC_TOKEN_FILE:-/var/run/secrets/hivemind/token}
+FEDERATION_FILE=/run/sparkbox/federation
 IDENTITY_FILE=/run/sparkbox/identity.json
-# The account that reads the token (the login user; root on legacy templates).
+# The account that reads the assertions (the login user; root on legacy templates).
 SANDBOX_USER=@@SANDBOX_USER@@
 
 # The metadata service listens on our default gateway: the host end of our own
@@ -63,24 +67,78 @@ GW=$(ip -4 route show default | awk '{print $3; exit}')
 [ -n "$GW" ] || { echo "sparkbox-token: no default gateway" >&2; exit 1; }
 META="http://$GW:@@META_PORT@@"
 
-mkdir -p "$(dirname "$TOKEN_FILE")" /run/sparkbox
-# 0755 (not 0700) so the non-root SANDBOX_USER can traverse to the token; the
-# token file itself stays 0600, owned by that user, so only they (and root) read.
-chmod 0755 "$(dirname "$TOKEN_FILE")"
+mkdir -p /run/sparkbox
 
-# Write via temp file + rename: the daemon re-reads this path on its own
-# schedule, so it must never catch a half-written token.
-TMP="$TOKEN_FILE.tmp"
-if curl -fsS --max-time 10 "$META/token" -o "$TMP"; then
-  chmod 0600 "$TMP"
-  [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
-    && chown "$SANDBOX_USER" "$TMP"
-  mv -f "$TMP" "$TOKEN_FILE"
+# The list of relying parties. Served rather than baked, so a corrected
+# provider id or a newly added party reaches a running box on its next refresh
+# — and a fork template that crossed fleets reads THIS fleet's list on its
+# first boot here rather than the one it was forked under.
+TMP="$FEDERATION_FILE.tmp"
+if curl -fsS --max-time 10 "$META/federation" -o "$TMP"; then
+  chmod 0644 "$TMP"
+  mv -f "$TMP" "$FEDERATION_FILE"
 else
   rm -f "$TMP"
-  echo "sparkbox-token: could not fetch a token from $META" >&2
-  exit 1
+  # A host having a bad minute, or one that predates /federation. Keep the
+  # last list we saw; with none, fall back to what every fleet did before the
+  # list existed — one assertion for the host's default audience, at the path
+  # hivemind reads — so an old host never leaves a new template tokenless.
+  if [ ! -s "$FEDERATION_FILE" ]; then
+    printf 'hivemind\ttoken_file\t/var/run/secrets/hivemind/token\n' > "$FEDERATION_FILE"
+  fi
 fi
+
+# fed <name> <key>: every value of <key> for <name>, one per line. awk rather
+# than grep so a '.' in a name is a dot and a value is read to the end of the
+# line — the host guarantees no field carries a tab.
+fed() {
+  awk -F'\t' -v n="$1" -v k="$2" '$1 == n && $2 == k { print $3 }' "$FEDERATION_FILE"
+}
+# mint <audience> <out>: fetch an assertion. --data-urlencode rather than
+# pasting the audience into the query: it is a URL, so it carries a ':' and two
+# '/' of its own, and one day it will carry something that needs escaping. An
+# empty audience asks for the host's default.
+mint() {
+  if [ -n "$1" ]; then
+    curl -fsS --max-time 10 -G --data-urlencode "aud=$1" "$META/token" -o "$2"
+  else
+    curl -fsS --max-time 10 "$META/token" -o "$2"
+  fi
+}
+
+# Every party is attempted whatever happened to the one before it: a bad
+# minute at one audience must not cost the box its assertion for another. The
+# exit status at the end reports whether ANY failed, which is what makes
+# systemd retry, and it is decided last so the identity snapshot and the
+# environment block below are refreshed either way.
+failed=0
+for name in $(awk -F'\t' '!seen[$1]++ { print $1 }' "$FEDERATION_FILE"); do
+  aud=$(fed "$name" audience)
+  file=$(fed "$name" token_file)
+  [ -n "$file" ] || { echo "sparkbox-token: $name: no token_file in the list" >&2; continue; }
+  dir=$(dirname "$file")
+  mkdir -p "$dir"
+  # 0700 and owned by the account that runs the agent, which is what OpenAI's
+  # guidance asks for and what every other client tolerates: root writes the
+  # file, the login user reads it, and no third party has business here. The
+  # file itself is 0600, owned by that user, so only they (and root) read it.
+  chmod 0700 "$dir"
+  [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
+    && chown "$SANDBOX_USER" "$dir"
+  # Write via temp file + rename: the daemon re-reads this path on its own
+  # schedule, so it must never catch a half-written token.
+  TMP="$file.tmp"
+  if mint "$aud" "$TMP"; then
+    chmod 0600 "$TMP"
+    [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
+      && chown "$SANDBOX_USER" "$TMP"
+    mv -f "$TMP" "$file"
+  else
+    rm -f "$TMP"
+    echo "sparkbox-token: could not fetch a $name assertion (aud ${aud:-default}) from $META" >&2
+    failed=1
+  fi
+done
 
 # The decoded claims, so shells and tools can cheaply answer "who am I"
 # without parsing a JWT. Fetched separately because it mints nothing: every
@@ -94,73 +152,13 @@ else
   rm -f "$TMP"
 fi
 
-# ---- OpenAI workload identity federation ------------------------------------
-#
-# Same bargain as the hivemind token above, one audience over: OpenAI verifies
-# an assertion signed by our issuer and exchanges it (RFC 8693) for an access
-# token that lives at most an hour, so a sandbox calls the OpenAI API and runs
-# `codex` with no API key and no browser login anywhere in the picture.
-#
-# LAST in this script, and deliberately so. Everything above is what a sandbox
-# cannot work without; this is an integration a fleet may not even have
-# configured. A host that answers 501 at /openai — the default — must leave the
-# guest exactly as it was, and a host that is having a bad minute must not cost
-# the box its hivemind token, which is why nothing here can reach the `exit 1`
-# above.
-OPENAI_CONF=/run/sparkbox/openai.json
-TMP="$OPENAI_CONF.tmp"
-if curl -fsS --max-time 10 "$META/openai" -o "$TMP"; then
-  chmod 0644 "$TMP"
-  mv -f "$TMP" "$OPENAI_CONF"
-else
-  # 501 is the ordinary answer on a fleet that does not federate with OpenAI,
-  # and it has to erase the config rather than leave the last one lying around:
-  # a fork template carries /etc/environment across fleets, and stale
-  # identifiers would point a guest at a provider that will never mint for it.
-  rm -f "$TMP" "$OPENAI_CONF"
-fi
+# Unconditional, including when the list is empty: this is also what REMOVES
+# a party's variables from a guest whose fleet dropped it, so `codex` goes
+# back to its ordinary login instead of failing against a rule that no longer
+# exists.
+/usr/local/sbin/sparkbox-federation-env "$FEDERATION_FILE" "$IDENTITY_FILE" || true
 
-if [ -s "$OPENAI_CONF" ]; then
-  # Same reader as sparkbox-git-identity uses on identity.json, for the same
-  # reason: no JSON parser is a dependency this early boot path may take on,
-  # and [[:space:]]* after the colon is load-bearing because the metadata
-  # service encodes with SetIndent.
-  oai_field() {
-    sed -n 's/.*"'"$1"'":[[:space:]]*"\([^"]*\)".*/\1/p' "$OPENAI_CONF" | head -1
-  }
-  OPENAI_AUD=$(oai_field audience)
-  OPENAI_TOKEN_FILE=$(oai_field token_file)
-  if [ -n "$OPENAI_AUD" ] && [ -n "$OPENAI_TOKEN_FILE" ]; then
-    OPENAI_DIR=$(dirname "$OPENAI_TOKEN_FILE")
-    mkdir -p "$OPENAI_DIR"
-    # 0700 and owned by the account that runs the agent, which is what OpenAI
-    # asks for. It differs from the hivemind directory above (0755) because
-    # nothing else has to traverse this one: root writes the file, the login
-    # user reads it, and no third party has business here.
-    chmod 0700 "$OPENAI_DIR"
-    [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
-      && chown "$SANDBOX_USER" "$OPENAI_DIR"
-    TMP="$OPENAI_TOKEN_FILE.tmp"
-    # --data-urlencode rather than pasting the audience into the query: it is
-    # a URL, so it carries a ':' and two '/' of its own, and one day it will
-    # carry something that needs escaping.
-    if curl -fsS --max-time 10 -G --data-urlencode "aud=$OPENAI_AUD" "$META/token" -o "$TMP"; then
-      chmod 0600 "$TMP"
-      [ "$SANDBOX_USER" != root ] && id "$SANDBOX_USER" >/dev/null 2>&1 \
-        && chown "$SANDBOX_USER" "$TMP"
-      mv -f "$TMP" "$OPENAI_TOKEN_FILE"
-    else
-      rm -f "$TMP"
-      echo "sparkbox-token: could not fetch an OpenAI assertion from $META" >&2
-    fi
-  fi
-fi
-
-# Unconditional, including when the fetch above found nothing: this is also
-# what REMOVES the managed block from a guest whose fleet has turned federation
-# off, so `codex` goes back to its ordinary login instead of failing against a
-# rule that no longer exists.
-/usr/local/sbin/sparkbox-openai-env "$OPENAI_CONF" "$IDENTITY_FILE" || true
+exit "$failed"
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-token"
 
@@ -253,14 +251,14 @@ mv -f "$tmp" "$GITCONFIG"
 EOF
 chmod 0755 "$MNT/usr/local/sbin/sparkbox-git-identity"
 
-# Advertise the OpenAI federation configuration to every process in the guest.
+# Advertise each relying party's configuration to every process in the guest.
 #
-# /etc/environment and nothing else. It is the only file that reaches BOTH an
-# interactive shell (pam_env, at session setup) and the non-interactive
-# `ssh box '<cmd>'` execs agents actually run — those read no profile at all,
-# which is the same reasoning refresh-agent-tools.sh writes down for
-# AGENT_BROWSER_EXECUTABLE_PATH. A /etc/profile.d drop-in would quietly cover
-# only half the sandbox.
+# /etc/environment and nothing else for the credentials. It is the only file
+# that reaches BOTH an interactive shell (pam_env, at session setup) and the
+# non-interactive `ssh box '<cmd>'` execs agents actually run — those read no
+# profile at all, which is the same reasoning refresh-agent-tools.sh writes
+# down for AGENT_BROWSER_EXECUTABLE_PATH. A /etc/profile.d drop-in would
+# quietly cover only half the sandbox.
 #
 # The block is rewritten between its own markers, so envsync's secrets block
 # (different markers, pushed over SSH) and the toolchain PATH the image bakes
@@ -268,46 +266,57 @@ chmod 0755 "$MNT/usr/local/sbin/sparkbox-git-identity"
 # the template because these identifiers are fleet configuration: correcting a
 # provider id must not mean rebuilding an image, and a fork template that
 # crosses fleets must be able to be corrected on its next boot.
-cat > "$MNT/usr/local/sbin/sparkbox-openai-env" <<'EOF'
+cat > "$MNT/usr/local/sbin/sparkbox-federation-env" <<'EOF'
 #!/bin/sh
-# Render the OpenAI workload-identity block in /etc/environment.
+# Render the federation block in /etc/environment and each relying party's
+# attribution snippet in /etc/profile.d, from the list sparkbox-token fetched.
 #
-# Usage: sparkbox-openai-env [<openai.json> [<identity.json>]]
-# A missing or unconfigured openai.json removes the block, which is how a fleet
-# turning federation off reaches boxes that are already running.
+# Usage: sparkbox-federation-env [<federation> [<identity.json>]]
+# A missing or empty list removes the block and every snippet, which is how a
+# fleet dropping a party reaches boxes that are already running.
 set -eu
-CONF=${1:-/run/sparkbox/openai.json}
+FED=${1:-/run/sparkbox/federation}
 IDENTITY_FILE=${2:-/run/sparkbox/identity.json}
 # Overridable so the deploy tests can run this against a tree instead of the
 # machine running them, exactly as SPARKBOX_GITCONFIG does above.
 ENVFILE=${SPARKBOX_ENVIRONMENT:-/etc/environment}
-BEGIN='# >>> sparkbox openai federation (managed) >>>'
-END='# <<< sparkbox openai federation (managed) <<<'
+PROFILE_D=${SPARKBOX_PROFILE_D:-/etc/profile.d}
+BEGIN='# >>> sparkbox federation (managed) >>>'
+END='# <<< sparkbox federation (managed) <<<'
+STAMP='# Written by sparkbox-federation-env. Edits are overwritten every 45 minutes.'
 
+# The list is `<name> TAB <key> TAB <value>`, one fact per line; see
+# internal/federation. names() is mint order, fed() every value of one key.
+names() { [ -s "$FED" ] || return 0; awk -F'\t' '!seen[$1]++ { print $1 }' "$FED"; }
+fed() {
+  [ -s "$FED" ] || return 0
+  awk -F'\t' -v n="$1" -v k="$2" '$1 == n && $2 == k { print $3 }' "$FED"
+}
+# Same reader as sparkbox-git-identity uses on identity.json, for the same
+# reason: no JSON parser is a dependency this early boot path may take on, and
+# [[:space:]]* after the colon is load-bearing because the metadata service
+# encodes with SetIndent.
 field() {
   [ -s "$2" ] || return 0
   sed -n 's/.*"'"$1"'":[[:space:]]*"\([^"]*\)".*/\1/p' "$2" | head -1
 }
 
+# One block for every party: the variable that names its token file, then
+# whatever else its client reads. No value carries whitespace — the host
+# refuses a list that does — so the word-splitting below is exact.
 body=""
-token_file=$(field token_file "$CONF")
-rule=$(field federation_rule_id "$CONF")
-provider=$(field identity_provider_id "$CONF")
-service_account=$(field service_account_id "$CONF")
-
-# The token file is what every consumer needs, and a rule or provider id is
-# what makes presenting it mean anything. Missing either, write no block: the
-# half-configured state is strictly worse than none, because a Codex that finds
-# OPENAI_IDENTITY_TOKEN_FILE set federates instead of offering to log in.
-if [ -n "$token_file" ] && { [ -n "$rule" ] || [ -n "$provider" ]; }; then
-  body="OPENAI_IDENTITY_TOKEN_FILE=$token_file"
-  [ -n "$rule" ] && body="$body
-OPENAI_FEDERATION_RULE_ID=$rule"
-  [ -n "$provider" ] && body="$body
-OPENAI_IDENTITY_PROVIDER_ID=$provider"
-  [ -n "$service_account" ] && body="$body
-OPENAI_SERVICE_ACCOUNT_ID=$service_account"
-fi
+add() { body="$body$1
+"; }
+for name in $(names); do
+  token_file=$(fed "$name" token_file)
+  token_env=$(fed "$name" token_file_env)
+  if [ -n "$token_env" ] && [ -n "$token_file" ]; then
+    add "$token_env=$token_file"
+  fi
+  for kv in $(fed "$name" env); do
+    add "$kv"
+  done
+done
 
 # Rebuild in one pass and rename over the target, so being killed mid-write
 # cannot leave a half-deleted marker behind — the shape sparkbox-git-identity
@@ -324,31 +333,44 @@ fi
 if [ -n "$body" ]; then
   {
     printf '%s\n' "$BEGIN"
-    printf '%s\n' "$body"
+    printf '%s' "$body"
     printf '%s\n' "$END"
   } >> "$tmp"
 fi
 chmod 0644 "$tmp"
 mv -f "$tmp" "$ENVFILE"
 
-# Audit attribution, so an OpenAI admin reading their logs sees which sandbox
-# made a request and not only which principal.
+# Audit attribution, so an admin reading a relying party's logs sees which
+# sandbox made a request and not only which principal. Only for a party whose
+# list entry names a variable for it (context_env), and it is the one thing
+# here that is a SECOND file, a split forced rather than chosen.
 #
-# A SECOND file, and that split is forced rather than chosen. This value is a
-# JSON object, so it contains double quotes, and /etc/environment cannot carry
-# one safely: written bare it survives pam_env but a shell that sources the file
-# performs quote removal on it — measured, not feared, `{"instance_id":"box"}`
-# comes back as `{instance_id:box}`, which is no longer JSON — and written
-# quoted it depends on pam_env stripping the pair back off, which is not a
-# promise that file format makes. A profile.d snippet is unambiguously shell, so
-# `export VAR='{"a":"b"}' means exactly one thing to the only reader it has.
+# The value is a JSON object, so it contains double quotes, and
+# /etc/environment cannot carry one safely: written bare it survives pam_env
+# but a shell that sources the file performs quote removal on it — measured,
+# not feared, `{"instance_id":"box"}` comes back as `{instance_id:box}`, which
+# is no longer JSON — and written quoted it depends on pam_env stripping the
+# pair back off, which is not a promise that file format makes. A profile.d
+# snippet is unambiguously shell, so `export VAR='{"a":"b"}'` means exactly one
+# thing to the only reader it has.
 #
 # The cost is honest and small: profile.d reaches login shells, so an
 # interactive sandbox attributes and a non-interactive `ssh box '<cmd>'` exec
 # does not. That is the right way round for a field OpenAI documents as
 # optional — the credentials that MUST reach both readers are the plain
 # identifiers above, which have no quoting problem at all.
-PROFILE=${SPARKBOX_PROFILE_D:-/etc/profile.d}/sparkbox-openai.sh
+#
+# Every snippet this script wrote before goes first, so a party that left the
+# list takes its attribution with it. The stamp is the test, not the name: a
+# file somebody else put here under a similar name is not ours to remove.
+if [ -d "$PROFILE_D" ]; then
+  for f in "$PROFILE_D"/sparkbox-*.sh; do
+    [ -f "$f" ] || continue
+    if [ "$(head -n 1 "$f" 2>/dev/null)" = "$STAMP" ]; then
+      rm -f "$f"
+    fi
+  done
+fi
 # Sandbox names, owners and node names already sit inside OpenAI's identifier
 # grammar (letters, digits, and . _ : / @ -); the tr is for a name shape nobody
 # has invented yet, and it is also what keeps a single quote out of a
@@ -357,30 +379,31 @@ clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._:/@-' | cut -c1-128; }
 instance=$(clean "$(field sandbox "$IDENTITY_FILE")")
 owner=$(clean "$(field owner "$IDENTITY_FILE")")
 node=$(clean "$(field box "$IDENTITY_FILE")")
-if [ -n "$body" ] && [ -n "$instance" ]; then
-  # Assembled by concatenation rather than in one ${var:+...} expansion: a
-  # literal } inside a parameter expansion is a shell portability argument
-  # nobody should have to win to read this.
-  labels=""
-  [ -n "$owner" ] && labels="\"owner\":\"$owner\""
-  [ -n "$node" ] && [ -n "$labels" ] && labels="$labels,"
-  [ -n "$node" ] && labels="$labels\"box\":\"$node\""
-  context="{\"instance_id\":\"$instance\""
-  [ -n "$labels" ] && context="$context,\"labels\":{$labels}"
-  context="$context}"
-  mkdir -p "$(dirname "$PROFILE")"
-  tmp=$(mktemp "$PROFILE.XXXXXX") || exit 0
+[ -n "$instance" ] || exit 0
+# Assembled by concatenation rather than in one ${var:+...} expansion: a
+# literal } inside a parameter expansion is a shell portability argument
+# nobody should have to win to read this.
+labels=""
+[ -n "$owner" ] && labels="\"owner\":\"$owner\""
+[ -n "$node" ] && [ -n "$labels" ] && labels="$labels,"
+[ -n "$node" ] && labels="$labels\"box\":\"$node\""
+context="{\"instance_id\":\"$instance\""
+[ -n "$labels" ] && context="$context,\"labels\":{$labels}"
+context="$context}"
+for name in $(names); do
+  ctx_env=$(fed "$name" context_env)
+  [ -n "$ctx_env" ] || continue
+  mkdir -p "$PROFILE_D"
+  tmp=$(mktemp "$PROFILE_D/sparkbox-$name.sh.XXXXXX") || continue
   {
-    printf '%s\n' "# Written by sparkbox-openai-env. Edits are overwritten every 45 minutes."
-    printf "export OPENAI_WORKLOAD_IDENTITY_CONTEXT='%s'\n" "$context"
+    printf '%s\n' "$STAMP"
+    printf "export %s='%s'\n" "$ctx_env" "$context"
   } > "$tmp"
   chmod 0644 "$tmp"
-  mv -f "$tmp" "$PROFILE"
-else
-  rm -f "$PROFILE"
-fi
+  mv -f "$tmp" "$PROFILE_D/sparkbox-$name.sh"
+done
 EOF
-chmod 0755 "$MNT/usr/local/sbin/sparkbox-openai-env"
+chmod 0755 "$MNT/usr/local/sbin/sparkbox-federation-env"
 
 # A tiny in-guest control client. The metadata service authenticates the
 # caller from its tap source address, so this carries no operator credential

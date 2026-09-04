@@ -39,12 +39,10 @@ readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 # the same empty string, so passing it unconditionally is safe.
 readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
 
-# OpenAI workload identity federation. Identifiers rather than secrets, so they
-# ride the deployment env like the HiveMind origin above. Empty is off.
-readonly openai_provider_id="${SPARKBOX_OPENAI_PROVIDER_ID:-}"
-readonly openai_service_account_id="${SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID:-}"
-readonly openai_rule_id="${SPARKBOX_OPENAI_RULE_ID:-}"
-readonly openai_audience="${SPARKBOX_OPENAI_AUDIENCE:-}"
+# The relying parties every sandbox keeps an assertion for, from the optional
+# sparkbox-federation ConfigMap deploy.sh --federation-config writes. Absent,
+# the binary federates with HiveMind alone, exactly as before the list existed.
+readonly federation_config="${SPARKBOX_FEDERATION_CONFIG:-/etc/sparkbox/federation/federation.json}"
 readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
 readonly mem_admission_pct="${SPARKBOX_MEM_ADMISSION_PCT:-80}"
 readonly max_running_per_owner="${SPARKBOX_MAX_RUNNING_PER_OWNER:-2}"
@@ -398,32 +396,22 @@ fi
 # can install into a VM whose template predates the current CLIs. Both
 # containers mount the same data hostPath; sparkbox-node mounts it readOnly,
 # which is all serving ever needs. It is never relayed to the gateway.
-# Built as an array so an unset value passes NO flag at all. `--openai-audience ""`
-# would not merely be a no-op: it would override the binary's own default with
-# an empty audience, and the issuer would then be asked to mint for "".
-#
-# `if` blocks rather than `[ -n "$x" ] && args+=(...)`: under `set -e` a
-# short-circuited AND-list is a failing statement, and whether that ends the
-# process is a shell-lawyering argument this container should not be having on
-# the last line before exec. github_app_args above is written the same way.
-openai_args=()
-if [ -n "$openai_provider_id" ]; then
-  openai_args+=(--openai-provider-id "$openai_provider_id")
-fi
-if [ -n "$openai_service_account_id" ]; then
-  openai_args+=(--openai-service-account-id "$openai_service_account_id")
-fi
-if [ -n "$openai_rule_id" ]; then
-  openai_args+=(--openai-rule-id "$openai_rule_id")
-fi
-if [ -n "$openai_audience" ]; then
-  openai_args+=(--openai-audience "$openai_audience")
+# Built as an array so an absent ConfigMap passes NO flag at all: the flag's
+# empty value already means "the built-in default", but a path to a file that
+# does not exist is an error, and an optional mount that is not there is a
+# directory with nothing in it. `if` rather than `[ -s ... ] && args+=(...)`:
+# under `set -e` a short-circuited AND-list is a failing statement, and whether
+# that ends the process is a shell-lawyering argument this container should
+# not be having on the last line before exec.
+federation_args=()
+if [ -s "$federation_config" ]; then
+  federation_args=(--federation-config "$federation_config")
 fi
 
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
   --hivemind-api "$hivemind_api" \
-  "${openai_args[@]}" \
+  "${federation_args[@]}" \
   --state-dir "$control_dir" \
 	--vm-state-dir "$vm_state_dir" \
   --checkpoint-dir "$durable_dir" \

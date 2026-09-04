@@ -1,8 +1,12 @@
 # OpenAI workload identity federation
 
 Status: **implemented** (2026-09-02), **not yet deployed** — nothing is on until
-a deploy passes `--openai-provider-id` / `--openai-rule-id`, and those come from
-an OpenAI organization admin.
+a deploy passes a `--federation-config` naming an `openai` entry, and the ids
+in it come from an OpenAI organization admin.
+
+This is the OpenAI-specific half. The mechanism — the list of relying parties,
+how the host serves it and how the guest walks it — is
+[federation.md](federation.md); OpenAI is one entry in that list.
 
 ## Why
 
@@ -47,101 +51,64 @@ a person's sandboxes, and per-sandbox scoping goes in a CEL condition on the
 
 ## What shipped
 
-### Host
+### The entry
 
-`internal/metadata/openai.go` — `metadata.OpenAI`, the fleet's federation
-configuration, served to guests at `GET /openai` and answering **501** on a
-fleet that has not configured it. Four flags feed it, on both the gateway and
-the node (`cmd/sparkbox/main.go`, `cmd/sparkbox/node.go`):
+```json
+{
+  "name": "openai",
+  "audience": "https://api.openai.com/v1",
+  "token_file": "/var/run/secrets/openai.com/identity-token",
+  "token_file_env": "OPENAI_IDENTITY_TOKEN_FILE",
+  "context_env": "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+  "env": {
+    "OPENAI_FEDERATION_RULE_ID": "idpm_...",
+    "OPENAI_IDENTITY_PROVIDER_ID": "idp_...",
+    "OPENAI_SERVICE_ACCOUNT_ID": "svc_..."
+  }
+}
+```
 
-```
---openai-provider-id          idp_...    OpenAI Workload Identity Provider
---openai-service-account-id   svc_...    service account the rule maps to
---openai-rule-id              idpm_...   federation rule; the one codex needs
---openai-audience                        default https://api.openai.com/v1
-```
+`federation.OpenAI(provider, rule, serviceAccount)` builds exactly this, and a
+test pins `deploy/kubernetes/federation.example.json` to it, so the example an
+operator copies and the entry the tests exercise cannot drift.
+
+- **Audience** `https://api.openai.com/v1` is what OpenAI's own Kubernetes guide
+  tells operators to project, so an admin configuring the provider sees a value
+  they have seen before. It is opaque to both ends and must match the
+  provider's configured audience exactly. It joins `--oidc-audiences` by
+  construction, like every audience in the list.
+- **Token file** `/var/run/secrets/openai.com/identity-token`: the directory
+  OpenAI's guidance names, mode 0600 in a 0700 directory owned by the login
+  user, refreshed every 45 minutes against a 1-hour assertion. Codex reads the
+  path from `OPENAI_IDENTITY_TOKEN_FILE`.
+- **`OPENAI_FEDERATION_RULE_ID`** is the one identifier Codex needs. The
+  provider and service-account ids are what the OpenAI SDKs take when they
+  perform the exchange themselves.
+- **`OPENAI_WORKLOAD_IDENTITY_CONTEXT`** is the optional audit attribution,
+  `{"instance_id":"<sandbox>","labels":{"owner":"...","box":"..."}}`, so an
+  admin reading their logs sees which sandbox made a request and not only which
+  principal. It lives in `/etc/profile.d/sparkbox-openai.sh` rather than
+  `/etc/environment` for the reason federation.md spells out: a JSON value
+  cannot ride that file safely.
 
 None of these is a secret. They name a provider and a rule that grant nothing
-without an assertion this fleet's OIDC key signed, which is why they ride the
-deployment environment rather than Secret Manager.
+without an assertion this fleet's OIDC key signed, which is why they ride a
+ConfigMap rather than Secret Manager.
 
-Two decisions worth keeping:
-
-- **A provider or rule id is what turns the feature on — an audience is not.**
-  A guest that exported `OPENAI_IDENTITY_TOKEN_FILE` with no rule to present the
-  assertion against would leave Codex *worse* than untouched: it federates, it
-  fails, and it never falls back to the login the user could have completed.
-- **The audience joins `--oidc-audiences` by construction** (`withOpenAIAudience`),
-  rather than by the operator remembering to repeat it. Those are two statements
-  of one fact, and the failure when they disagree is remote from its cause:
-  everything configures cleanly and guests take a 400 from a mint nobody is
-  watching. It never widens an *empty* allowlist, because empty means "any" and
-  appending would silently narrow it.
-
-A node signs nothing — `Issue` relays to the gateway, whose allowlist is what
-can refuse an audience — so the node takes these flags purely as configuration
-to hand its own guests, exactly as it already takes `--hivemind-audience`.
-
-### Guest (`deploy/install-guest-identity.sh`, `IDENTITY_REV=25`)
-
-`sparkbox-token`, which already refreshes the HiveMind assertion on boot and
-every 45 minutes, gained a second half:
-
-1. `GET /openai`; a 501 erases `/run/sparkbox/openai.json` and stops here.
-2. `GET /token?aud=<audience>` → `/var/run/secrets/openai.com/identity-token`,
-   mode 0600, in a 0700 directory owned by the login user. That is the path and
-   the permissions OpenAI's own guidance asks for.
-3. `sparkbox-openai-env` renders the managed block in `/etc/environment`.
-
-It runs **last**, and that ordering is load-bearing: the HiveMind fetch above
-exits 1 on failure and is what a sandbox cannot work without, so an integration
-a fleet may not even have configured must never be able to reach that exit.
-
-`sparkbox-openai-env` is called **unconditionally**, including when the fetch
-found nothing — that call is what removes a stale block from a box whose fleet
-turned federation off, and from a fork template that crossed fleets.
-
-Refresh cadence is unchanged at 45 minutes against a 1-hour assertion, the
-kubelet's shape for projected tokens.
-
-### The environment split, and why there are two files
-
-`/etc/environment` carries the credentials:
-
-```
-OPENAI_IDENTITY_TOKEN_FILE=/var/run/secrets/openai.com/identity-token
-OPENAI_FEDERATION_RULE_ID=idpm_...
-OPENAI_IDENTITY_PROVIDER_ID=idp_...
-OPENAI_SERVICE_ACCOUNT_ID=svc_...
-```
-
-It is the only file that reaches both an interactive shell (pam_env) and the
-non-interactive `ssh box '<cmd>'` execs agents actually run, which read no
-profile at all.
-
-`/etc/profile.d/sparkbox-openai.sh` carries the optional audit attribution:
-
-```sh
-export OPENAI_WORKLOAD_IDENTITY_CONTEXT='{"instance_id":"dazzling-canyon","labels":{"owner":"vanpelt","box":"..."}}'
-```
-
-The split is forced, not chosen. That value is a JSON object, so it contains
-double quotes, and `/etc/environment` cannot carry one safely: written bare it
-survives pam_env but a shell sourcing the file performs quote removal on it —
-measured, not feared, `{"instance_id":"box"}` comes back as `{instance_id:box}`,
-which is no longer JSON — and written quoted it depends on pam_env stripping the
-pair back off, which is not a promise that file format makes. A profile.d
-snippet is unambiguously shell.
-
-The cost is that attribution reaches login shells and not `ssh box '<cmd>'`.
-That is the right way round for a field OpenAI documents as optional: the
-credentials that *must* reach both readers are plain identifiers with no
-quoting problem at all.
+**Half-configured is worse than off.** A guest that exports
+`OPENAI_IDENTITY_TOKEN_FILE` with no rule or provider to present the assertion
+against leaves Codex *worse* than untouched: it federates, it fails, and it
+never falls back to the login the user could have completed. So an `openai`
+entry needs at least `OPENAI_FEDERATION_RULE_ID` or
+`OPENAI_IDENTITY_PROVIDER_ID` in its `env` — and dropping the entry from the
+list is what turns it off cleanly, because the guest removes the whole block on
+its next refresh.
 
 ### Egress
 
 `deploy/sluice-allowlist.txt` gained `api.openai.com`, `auth.openai.com` and
-`chatgpt.com`; the user console's trusted-domains prefill gained the same three.
+`chatgpt.com`; `netrules.TrustedDomains` (the console's prefill and a new
+environment's default rule-set) gained the same three.
 **`auth.openai.com` is the one that matters** — it is where the assertion is
 exchanged, so without it a tagged sandbox fails closed and `codex` falls back to
 asking for a login. Note the seed file is only written when absent, so a fleet
@@ -228,34 +195,37 @@ anything. A rule may additionally match up to 32 exact top-level scalar claims
 (`sub` excluded) or a CEL condition.
 
 If per-seat is ever genuinely wanted, the hook is small: the metadata service
-already knows the caller's owner, so it is a field on `metadata.OpenAI` and a
-handle → rule map. The quota, not the plumbing, is what makes it a bad idea.
+already knows the caller's owner, so it is a per-owner `env` on the `openai`
+entry and a handle → rule map. The quota, not the plumbing, is what makes it a
+bad idea.
 
 ## Turning it on
 
+Copy `deploy/kubernetes/federation.example.json`, fill in the three ids, and:
+
 ```
-deploy/kubernetes/deploy.sh --image ... \
-  --openai-provider-id idp_... \
-  --openai-service-account-id svc_... \
-  --openai-rule-id idpm_...
+sparkbox federation check federation.json      # optional; deploy.sh runs it too
+deploy/kubernetes/deploy.sh --image ... --federation-config federation.json
 ```
 
-All four are **carried forward** on a later re-run, like `--hivemind-api` and
-unlike `--hivemind-manifest`: they are a permanent fact about the deployment, so
-dropping one is always a mistake and the symptom is remote — nothing fails at
-deploy time, and days later somebody's `codex` asks them to log in.
+The list is stored in the `sparkbox-federation` ConfigMap and **carried
+forward** on a later re-run by simply not being touched, like `--hivemind-api`
+and unlike `--hivemind-manifest`: it is a permanent fact about the deployment.
+Every run echoes the live list, and says so when `openai` is missing from it,
+because the symptom of losing it is remote — nothing fails at deploy time, and
+days later somebody's `codex` asks them to log in.
 
 Running sandboxes pick it up on their next 45-minute refresh; new ones get it at
 boot. Nothing needs a rebuild: the audience, the identifiers and the token path
 are all served, never baked. Templates do need one `refresh-agent-tools.sh` pass
-for `IDENTITY_REV=25`, which the daily timer performs on its own.
+for `IDENTITY_REV=28`, which the daily timer performs on its own.
 
 ## Verifying
 
 From inside a sandbox:
 
 ```
-cat /run/sparkbox/openai.json            # the fleet's configuration
+cat /run/sparkbox/federation             # the list, as served; openai's lines among it
 ls -l /var/run/secrets/openai.com/       # 0700 dir, 0600 token, owned by you
 codex login status                       # "Logged in using workload identity"
 codex exec "Reply with only: workload identity is working"
@@ -269,11 +239,16 @@ failed — the first is their rule, the second is our issuer.
 
 ## Tests
 
-- `internal/metadata/openai_test.go` — the endpoint, its defaults, its 501, and
-  that an audience alone does not enable anything.
-- `cmd/sparkbox/openai_test.go` — the audience reaches the issuer allowlist, is
-  not added twice, and never narrows an empty one.
-- `deploy/openai_test.go` — runs the real `sparkbox-openai-env` against a tree,
-  in both JSON encodings, and asserts the attribution context survives being
-  sourced by a shell. Every branch was also exercised under `dash`, which is the
+The mechanism's tests are listed in [federation.md](federation.md). The
+OpenAI-specific ones:
+
+- `internal/federation` — `federation.OpenAI` exports exactly what Codex and
+  the SDKs read, and an id the admin did not hand back is not exported empty.
+- `deploy/federation_test.go` — the real `sparkbox-federation-env` against a
+  tree with the OpenAI entry, in both identity encodings: the four variables,
+  the attribution context surviving being sourced by a shell and staying under
+  OpenAI's 1,024-byte cap, and the block and snippet going away when the entry
+  leaves the list. Every branch was also exercised under `dash`, which is the
   `/bin/sh` a real sandbox runs these with.
+- `deploy/federation_test.go` — the example file loads and its `openai` entry
+  is `federation.OpenAI`'s.

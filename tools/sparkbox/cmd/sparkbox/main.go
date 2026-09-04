@@ -20,7 +20,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,6 +33,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/federation"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
@@ -79,7 +79,7 @@ import (
 var version = "dev"
 
 func main() {
-	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets|version> [flags]"
+	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets|federation|version> [flags]"
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -94,6 +94,8 @@ func main() {
 		err = doctor(os.Args[2:])
 	case "fetch-secrets":
 		err = fetchSecrets(os.Args[2:])
+	case "federation":
+		err = federationCmd(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("sparkbox %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 	default:
@@ -173,10 +175,7 @@ func serve(args []string) error {
 		oidcSub              = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
 		webhookSub           = fs.String("webhook-subdomain", ghwebhook.DefaultSubdomain, "subdomain receiving GitHub App webhook deliveries at <webhook-subdomain>.<domain>"+ghwebhook.Path+" (empty disables it). Every delivery is verified against SPARKBOX_GITHUB_WEBHOOK_SECRET, and a host without that secret serves nothing here at all rather than an endpoint that accepts anything — so set the secret on this host before setting the webhook URL in the App")
 		oidcAud              = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
-		openaiAudience       = fs.String("openai-audience", metadata.DefaultOpenAIAudience, "`aud` sparkbox mints OpenAI workload-identity assertions for. It must match the audience configured on the OpenAI Workload Identity Provider exactly, and is added to --oidc-audiences automatically whenever OpenAI federation is on, so the two can never drift apart")
-		openaiProviderID     = fs.String("openai-provider-id", "", "OpenAI Workload Identity Provider id (idp_...) this fleet's assertions are verified by. Setting it — or --openai-rule-id — is what turns OpenAI federation on: sandboxes then keep a fresh assertion at "+metadata.DefaultOpenAITokenFile+" and export the variables the OpenAI SDKs and Codex read. Not a secret; it names a provider that grants nothing without an assertion this fleet's OIDC key signed")
-		openaiServiceAccount = fs.String("openai-service-account-id", "", "OpenAI service account id (svc_...) the federation rule maps to. Wanted by the OpenAI SDKs, which perform the token exchange themselves; Codex resolves it from the rule instead")
-		openaiRuleID         = fs.String("openai-rule-id", "", "OpenAI federation rule / mapping id (idpm_...), exported to sandboxes as OPENAI_FEDERATION_RULE_ID. This is the one identifier Codex needs")
+		federationConfig     = fs.String("federation-config", "", "JSON file listing the relying parties every sandbox keeps an OIDC assertion for — HiveMind, OpenAI workload identity, and whatever an operator adds next (see docs/federation.md). Each entry names an audience, the path the guest keeps the assertion at, and the environment variables its client reads; every audience is added to --oidc-audiences automatically so the two can never drift apart. Empty means HiveMind alone, at --hivemind-audience. Identifiers, not secrets: a provider or rule id grants nothing without an assertion this fleet's OIDC key signed")
 		hivemindAPI          = fs.String("hivemind-api", "", "HiveMind API origin used to protect VMs with live agent sessions (empty disables)")
 		hivemindAudience     = fs.String("hivemind-audience", defaultAudience, "OIDC audience used for HiveMind workload-token exchange")
 		hivemindInterval     = fs.Duration("hivemind-presence-interval", time.Minute, "how often to refresh HiveMind session-presence leases")
@@ -274,6 +273,18 @@ func serve(args []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	metricsRegistry := fleetmetrics.New()
 
+	// The relying parties every guest keeps an assertion for. Loaded before
+	// the node/gateway fork because both halves serve it: the gateway to its
+	// own guests and into its issuer's allowlist, the node to its guests
+	// alone. One file on both machines, so a fleet cannot answer /federation
+	// differently depending on which machine the placer picked a sandbox onto.
+	feds, err := federation.Load(*federationConfig, federation.Default(*hivemindAudience))
+	if err != nil {
+		return fmt.Errorf("federation config: %w", err)
+	}
+	log.Info("guest federation", "federators", feds.Names(), "audiences", feds.Audiences(),
+		"config", firstOr([]string{*federationConfig}, "built-in"))
+
 	// Node mode forks here, before a single store is opened. Nothing below this
 	// line runs on a node: the users, secrets, routes, schedules, netrules,
 	// repos, placement and roster stores, the OIDC issuer, the SSH gateway, the
@@ -308,10 +319,10 @@ func serve(args []string) error {
 			hivemindAPI:        *hivemindAPI, hivemindAudience: *hivemindAudience,
 			hivemindInterval: *hivemindInterval,
 			// A node signs nothing — Issue relays to the gateway, whose
-			// allowlist decides whether the audience is permitted. What it
-			// still needs is the configuration to hand its own guests, on the
-			// same terms as --hivemind-audience above.
-			openAI:      openaiFederation(*openaiAudience, *openaiProviderID, *openaiServiceAccount, *openaiRuleID),
+			// allowlist decides whether an audience is permitted. What it
+			// still needs is the list to hand its own guests, on the same
+			// terms as --hivemind-audience above.
+			federation:  feds,
 			metricsAddr: *metricsAddr, metrics: metricsRegistry, log: log,
 		})
 	}
@@ -411,24 +422,18 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("previous oidc signing key: %w", err)
 	}
-	openAI := openaiFederation(*openaiAudience, *openaiProviderID, *openaiServiceAccount, *openaiRuleID)
-	// The OpenAI audience joins the allowlist by construction rather than by
-	// the operator remembering to repeat it in --oidc-audiences. Those are two
-	// statements of one fact, and the failure when they disagree is remote from
-	// its cause: everything configures cleanly, and then guests take a 400 from
-	// a mint they cannot see, an hour into a deploy.
+	// Every federator's audience joins the allowlist by construction rather
+	// than by the operator remembering to repeat it in --oidc-audiences. Those
+	// are two statements of one fact, and the failure when they disagree is
+	// remote from its cause: everything configures cleanly, and then guests
+	// take a 400 from a mint they cannot see, an hour into a deploy.
 	issuer, err := oidc.New(oidc.Options{
 		IssuerURL: "https://" + *oidcSub + "." + *proxyDomain,
 		Signer:    oidcKey, Previous: prevKey,
-		Audiences: withOpenAIAudience(splitList(*oidcAud), openAI),
+		Audiences: federation.WithAudiences(splitList(*oidcAud), feds),
 	})
 	if err != nil {
 		return fmt.Errorf("oidc issuer: %w", err)
-	}
-	if openAI.Configured() {
-		log.Info("OpenAI workload identity federation enabled",
-			"audience", openAI.AudienceOrDefault(), "provider", *openaiProviderID,
-			"rule", *openaiRuleID, "service_account", *openaiServiceAccount)
 	}
 
 	// The edge session signer is keyed off the OIDC signing material (HKDF), so
@@ -1165,7 +1170,7 @@ func serve(args []string) error {
 			EnvSetup:          envSetupOps{ops: ops},
 			AllowSelfSnapshot: *guestSelfSnapshot,
 			DefaultAudience:   firstOr(splitList(*oidcAud), defaultAudience),
-			OpenAI:            openAI,
+			Federation:        feds,
 			GuestSubnet:       *guestSubnet,
 		})
 		if err != nil {
@@ -2255,36 +2260,6 @@ func firstOr(list []string, def string) string {
 		return list[0]
 	}
 	return def
-}
-
-// openaiFederation assembles the OpenAI workload-identity configuration from
-// the four flags. Both the gateway and the node build it the same way, from
-// the same flags, so a fleet cannot answer /openai differently depending on
-// which machine the placer happened to pick a sandbox onto.
-func openaiFederation(aud, provider, serviceAccount, rule string) metadata.OpenAI {
-	return metadata.OpenAI{
-		Audience:         aud,
-		IdentityProvider: provider,
-		ServiceAccount:   serviceAccount,
-		FederationRule:   rule,
-	}
-}
-
-// withOpenAIAudience adds the OpenAI audience to the issuer's allowlist when
-// federation is configured, and otherwise returns the list untouched.
-//
-// It never widens an empty list. Empty means "any audience", and appending to
-// it would silently narrow the issuer to one value — turning a permissive
-// development host into one that refuses the mint it was performing yesterday.
-func withOpenAIAudience(allowed []string, openAI metadata.OpenAI) []string {
-	if !openAI.Configured() || len(allowed) == 0 {
-		return allowed
-	}
-	aud := openAI.AudienceOrDefault()
-	if slices.Contains(allowed, aud) {
-		return allowed
-	}
-	return append(allowed, aud)
 }
 
 // portOf extracts the numeric port from a listen address like ":443" or

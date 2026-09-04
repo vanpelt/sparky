@@ -269,7 +269,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 func TestIdentityRevMovesWithThePayload(t *testing.T) {
 	const (
 		wantRev        = 28
-		wantPayloadSum = "a7297698cee6cc46fbde3b49ba7c6385e901296566863878e688f5a65b08c1c8"
+		wantPayloadSum = "d010ef0c1499e6b12fc5c2fc25e415b9bee5483b8b2a308f168b3dade8ca84fe"
 	)
 	src, err := os.ReadFile("install-guest-identity.sh")
 	if err != nil {

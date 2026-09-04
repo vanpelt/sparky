@@ -23,6 +23,9 @@ spec:
         app.kubernetes.io/part-of: sparky
       annotations:
         sparkbox.dev/users-hash: __SPARKBOX_USERS_HASH__
+        # The federation list is read once at startup, so a change to the
+        # ConfigMap has to roll the pod; deploy.sh stamps its hash here.
+        sparkbox.dev/federation-hash: __SPARKBOX_FEDERATION_HASH__
     spec:
       serviceAccountName: sparkbox-gateway
       automountServiceAccountToken: false
@@ -81,19 +84,6 @@ spec:
               value: __SPARKBOX_HIVEMIND_API__
             - name: SPARKBOX_HIVEMIND_SIGNIN_ORGS
               value: __SPARKBOX_HIVEMIND_SIGNIN_ORGS__
-            # OpenAI workload identity federation. Identifiers, not secrets:
-            # they name a provider and a rule that grant nothing without an
-            # assertion this fleet's OIDC key signed. The gateway needs them to
-            # add the audience to its issuer allowlist; the node needs them to
-            # answer its own guests. Empty everywhere is federation off.
-            - name: SPARKBOX_OPENAI_PROVIDER_ID
-              value: __SPARKBOX_OPENAI_PROVIDER_ID__
-            - name: SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID
-              value: __SPARKBOX_OPENAI_SERVICE_ACCOUNT_ID__
-            - name: SPARKBOX_OPENAI_RULE_ID
-              value: __SPARKBOX_OPENAI_RULE_ID__
-            - name: SPARKBOX_OPENAI_AUDIENCE
-              value: __SPARKBOX_OPENAI_AUDIENCE__
             # optional, like the console password above: a gateway without it
             # mounts no webhook receiver at all rather than one that accepts
             # unverified deliveries, so an absent Secret is a configuration
@@ -160,6 +150,9 @@ spec:
             - name: users
               mountPath: /etc/sparkbox/users
               readOnly: true
+            - name: federation
+              mountPath: /etc/sparkbox/federation
+              readOnly: true
       volumes:
         - name: durable
           persistentVolumeClaim:
@@ -181,3 +174,15 @@ spec:
           secret:
             secretName: sparkbox-users
             defaultMode: 0440
+        # The relying parties every sandbox keeps an assertion for: HiveMind,
+        # OpenAI workload identity, whatever an operator adds next. Identifiers,
+        # not secrets — a provider or rule id grants nothing without an
+        # assertion this fleet's OIDC key signed — so a ConfigMap, written by
+        # deploy.sh --federation-config. Optional: with none, the binary
+        # federates with HiveMind alone, exactly as it did before the list
+        # existed. The gateway needs it to add each audience to its issuer's
+        # allowlist; the node needs it to answer its own guests.
+        - name: federation
+          configMap:
+            name: sparkbox-federation
+            optional: true
