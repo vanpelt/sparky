@@ -75,6 +75,31 @@ pasted. The guest is authenticated by its network position (it can only reach
 the metadata endpoint over its own tap), exactly like a cloud IMDS. See
 [`docs/identity-federation-design.md`](docs/identity-federation-design.md).
 
+HiveMind is one entry in a **list** of relying parties, and the list is
+configuration rather than code. `--federation-config FILE` names a JSON file
+with, per party, the audience to mint for, the path the guest keeps the
+assertion at, and the environment variables its client reads; every audience
+joins `--oidc-audiences` automatically, and the guest walks whatever the host
+serves. Add OpenAI's workload identity and every sandbox keeps a second
+assertion where `codex` and the OpenAI SDKs read it, so they authenticate with
+**no API key anywhere in the VM** and no browser login in a VM that has no
+browser:
+
+```json
+{"federators": [
+  {"name": "hivemind", "audience": "https://hivemind.wandb.tools"},
+  {"name": "openai", "audience": "https://api.openai.com/v1",
+   "token_file": "/var/run/secrets/openai.com/identity-token",
+   "token_file_env": "OPENAI_IDENTITY_TOKEN_FILE",
+   "env": {"OPENAI_FEDERATION_RULE_ID": "idpm_..."}}
+]}
+```
+
+Without a file, the fleet federates with HiveMind alone. See
+[`docs/federation.md`](docs/federation.md) for the format and
+[`docs/openai-workload-identity.md`](docs/openai-workload-identity.md) for the
+exact list to hand an OpenAI admin.
+
 Sparkbox can also keep an otherwise-idle VM reachable while HiveMind reports a
 live agent session inside it:
 

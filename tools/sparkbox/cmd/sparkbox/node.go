@@ -36,6 +36,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/federation"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/grpcidentity"
@@ -118,6 +119,11 @@ type nodeOptions struct {
 	diskPool         int64
 	hivemindAPI      string
 	hivemindAudience string
+	// federation is the fleet's list of relying parties, served to this
+	// machine's own guests. A node holds no signing key, so this is config
+	// only: the mint itself still relays to the gateway, whose audience
+	// allowlist is the thing that can refuse it.
+	federation       federation.Config
 	hivemindInterval time.Duration
 
 	controlTransport   string
@@ -388,6 +394,8 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		}()
 		log.Info("guest metadata service enabled", "addr", opts.metaAddr,
 			"signing", "relayed to the gateway", "tools_dir", opts.toolsDir)
+		log.Info("guest federation", "federators", opts.federation.Names(),
+			"audiences", opts.federation.Audiences())
 	}
 
 	log.Info("sparkbox node up", "node", opts.nodeName, "gateway", opts.gateway,
@@ -550,6 +558,7 @@ func nodeMetadataOptions(
 		// and each would sit in `building` until its timeout invented a cause.
 		EnvSetup:          relayEnvSetup{up: uplink},
 		AllowSelfSnapshot: opts.guestSelfSnapshot,
+		Federation:        opts.federation,
 		GuestSubnet:       opts.guestSubnet,
 		// No default audience here: the gateway substitutes its own, which is
 		// the only one that could be right — the allowlist that decides whether

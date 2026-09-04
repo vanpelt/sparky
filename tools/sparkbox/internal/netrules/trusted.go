@@ -4,7 +4,11 @@ package netrules
 // sandbox reach the ordinary places software comes from".
 //
 // It is Claude Code's own published trusted-network list (code.claude.com/docs)
-// plus hivemind.wandb.tools, and it is HERE, in Go, because three surfaces need
+// plus the hosts the two federations a sandbox is wired for out of the box
+// reach: hivemind.wandb.tools, and OpenAI's api./auth./chatgpt hosts (without
+// auth.openai.com a tagged box cannot exchange its assertion, and `codex` falls
+// back to asking a person to log in inside a VM with no browser). It is HERE,
+// in Go, because three surfaces need
 // the same answer and two of them used to hold their own copy: the console's
 // "add the trusted domains" prefill, the default egress rule-set a new
 // environment gets, and this package's own tests. A copy that drifts is not a
@@ -34,13 +38,14 @@ var TrustedDomains = []string{
 	"*.packagecloud.io", "*.sentry.io", "*.sourceforge.net", "*.ubuntu.com",
 	"accounts.google.com", "anaconda.com", "anaconda.org", "apache.org",
 	"api.anthropic.com", "api.bitbucket.org", "api.github.com",
-	"api.honeycomb.io", "api.metacpan.org", "api.nuget.org", "api.pub.dev",
-	"api.rubygems.org", "api.statsig.com", "apt.releases.hashicorp.com",
-	"archive.apache.org", "archive.releases.hashicorp.com",
-	"archive.ubuntu.com", "auth.docker.io", "avatars.githubusercontent.com",
-	"azure.com", "binaries.prisma.sh", "bitbucket.org",
-	"browser-intake-us5-datadoghq.com", "camo.githubusercontent.com",
-	"cdn.cocoapods.org", "central.maven.org", "claude.ai",
+	"api.honeycomb.io", "api.metacpan.org", "api.nuget.org", "api.openai.com",
+	"api.pub.dev", "api.rubygems.org", "api.statsig.com",
+	"apt.releases.hashicorp.com", "archive.apache.org",
+	"archive.releases.hashicorp.com", "archive.ubuntu.com", "auth.docker.io",
+	"auth.openai.com", "avatars.githubusercontent.com", "azure.com",
+	"binaries.prisma.sh", "bitbucket.org", "browser-intake-us5-datadoghq.com",
+	"camo.githubusercontent.com", "cdn.cocoapods.org", "central.maven.org",
+	"chatgpt.com", "claude.ai",
 	"cloud.google.com", "cocoapods.org", "code.claude.com",
 	"codeload.github.com", "compute.googleapis.com", "conda.anaconda.org",
 	"container.googleapis.com", "continuum.io", "cpan.org", "crates.io",

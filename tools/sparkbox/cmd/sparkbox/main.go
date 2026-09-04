@@ -33,6 +33,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envsync"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/federation"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleetmetrics"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/frontdoor"
@@ -78,7 +79,7 @@ import (
 var version = "dev"
 
 func main() {
-	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets|version> [flags]"
+	const usage = "usage: sparkbox <serve|setup|doctor|fetch-secrets|federation|version> [flags]"
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -93,6 +94,8 @@ func main() {
 		err = doctor(os.Args[2:])
 	case "fetch-secrets":
 		err = fetchSecrets(os.Args[2:])
+	case "federation":
+		err = federationCmd(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("sparkbox %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 	default:
@@ -172,6 +175,7 @@ func serve(args []string) error {
 		oidcSub              = fs.String("oidc-subdomain", "oidc", "subdomain serving the OIDC discovery document and JWKS")
 		webhookSub           = fs.String("webhook-subdomain", ghwebhook.DefaultSubdomain, "subdomain receiving GitHub App webhook deliveries at <webhook-subdomain>.<domain>"+ghwebhook.Path+" (empty disables it). Every delivery is verified against SPARKBOX_GITHUB_WEBHOOK_SECRET, and a host without that secret serves nothing here at all rather than an endpoint that accepts anything — so set the secret on this host before setting the webhook URL in the App")
 		oidcAud              = fs.String("oidc-audiences", defaultAudience, "comma-separated allowlist of `aud` values id tokens may be minted for (empty = any)")
+		federationConfig     = fs.String("federation-config", "", "JSON file listing the relying parties every sandbox keeps an OIDC assertion for — HiveMind, OpenAI workload identity, and whatever an operator adds next (see docs/federation.md). Each entry names an audience, the path the guest keeps the assertion at, and the environment variables its client reads; every audience is added to --oidc-audiences automatically so the two can never drift apart. Empty means HiveMind alone, at --hivemind-audience. Identifiers, not secrets: a provider or rule id grants nothing without an assertion this fleet's OIDC key signed")
 		hivemindAPI          = fs.String("hivemind-api", "", "HiveMind API origin used to protect VMs with live agent sessions (empty disables)")
 		hivemindAudience     = fs.String("hivemind-audience", defaultAudience, "OIDC audience used for HiveMind workload-token exchange")
 		hivemindInterval     = fs.Duration("hivemind-presence-interval", time.Minute, "how often to refresh HiveMind session-presence leases")
@@ -269,6 +273,18 @@ func serve(args []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	metricsRegistry := fleetmetrics.New()
 
+	// The relying parties every guest keeps an assertion for. Loaded before
+	// the node/gateway fork because both halves serve it: the gateway to its
+	// own guests and into its issuer's allowlist, the node to its guests
+	// alone. One file on both machines, so a fleet cannot answer /federation
+	// differently depending on which machine the placer picked a sandbox onto.
+	feds, err := federation.Load(*federationConfig, federation.Default(*hivemindAudience))
+	if err != nil {
+		return fmt.Errorf("federation config: %w", err)
+	}
+	log.Info("guest federation", "federators", feds.Names(), "audiences", feds.Audiences(),
+		"config", firstOr([]string{*federationConfig}, "built-in"))
+
 	// Node mode forks here, before a single store is opened. Nothing below this
 	// line runs on a node: the users, secrets, routes, schedules, netrules,
 	// repos, placement and roster stores, the OIDC issuer, the SSH gateway, the
@@ -302,7 +318,12 @@ func serve(args []string) error {
 			guestDataTransport: *guestDataTransport,
 			hivemindAPI:        *hivemindAPI, hivemindAudience: *hivemindAudience,
 			hivemindInterval: *hivemindInterval,
-			metricsAddr:      *metricsAddr, metrics: metricsRegistry, log: log,
+			// A node signs nothing — Issue relays to the gateway, whose
+			// allowlist decides whether an audience is permitted. What it
+			// still needs is the list to hand its own guests, on the same
+			// terms as --hivemind-audience above.
+			federation:  feds,
+			metricsAddr: *metricsAddr, metrics: metricsRegistry, log: log,
 		})
 	}
 
@@ -401,10 +422,15 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("previous oidc signing key: %w", err)
 	}
+	// Every federator's audience joins the allowlist by construction rather
+	// than by the operator remembering to repeat it in --oidc-audiences. Those
+	// are two statements of one fact, and the failure when they disagree is
+	// remote from its cause: everything configures cleanly, and then guests
+	// take a 400 from a mint they cannot see, an hour into a deploy.
 	issuer, err := oidc.New(oidc.Options{
 		IssuerURL: "https://" + *oidcSub + "." + *proxyDomain,
 		Signer:    oidcKey, Previous: prevKey,
-		Audiences: splitList(*oidcAud),
+		Audiences: federation.WithAudiences(splitList(*oidcAud), feds),
 	})
 	if err != nil {
 		return fmt.Errorf("oidc issuer: %w", err)
@@ -1144,6 +1170,7 @@ func serve(args []string) error {
 			EnvSetup:          envSetupOps{ops: ops},
 			AllowSelfSnapshot: *guestSelfSnapshot,
 			DefaultAudience:   firstOr(splitList(*oidcAud), defaultAudience),
+			Federation:        feds,
 			GuestSubnet:       *guestSubnet,
 		})
 		if err != nil {

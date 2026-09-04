@@ -21,6 +21,10 @@ spec:
         app.kubernetes.io/name: sparkbox
         app.kubernetes.io/component: vm-node
         app.kubernetes.io/part-of: sparky
+      annotations:
+        # See the gateway's copy: the federation list is read once at startup,
+        # so a change to the ConfigMap has to roll the pod.
+        sparkbox.dev/federation-hash: __SPARKBOX_FEDERATION_HASH__
     spec:
       serviceAccountName: sparkbox-node
       automountServiceAccountToken: false
@@ -435,6 +439,9 @@ spec:
               mountPath: /run/sparkbox-vmm
             - name: sluice-socket
               mountPath: /run/sluice
+            - name: federation
+              mountPath: /etc/sparkbox/federation
+              readOnly: true
       volumes:
         - name: data
           hostPath:
@@ -456,3 +463,11 @@ spec:
         - name: sluice-socket
           emptyDir:
             sizeLimit: 1Mi
+        # See the gateway's copy. A node signs nothing — the mint relays up —
+        # so this is purely what its own guests are told to ask for, and it
+        # has to be the SAME list: a sandbox must not be able to tell which
+        # machine it landed on from the parties it was offered.
+        - name: federation
+          configMap:
+            name: sparkbox-federation
+            optional: true

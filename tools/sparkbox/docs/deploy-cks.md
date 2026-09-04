@@ -823,7 +823,10 @@ This reaches **newly created** sandboxes only: the refresher patches the rootfs
 template, and an existing VM keeps the hivemind on its own disk across
 pause/resume.
 
-Unlike `--proxy-domain` and `--hivemind-api`, this is **not** carried forward —
+Unlike `--proxy-domain`, `--hivemind-api` and the `--federation-config` list
+(which lives in the `sparkbox-federation` ConfigMap and is carried forward by
+not being touched; see [federation.md](federation.md)), this is **not** carried
+forward —
 a test pin is meant to end, and one that silently reinstated itself on every
 future deploy would be the worse failure. A run that drops one says so in its
 output rather than reverting in silence, which is what the previous

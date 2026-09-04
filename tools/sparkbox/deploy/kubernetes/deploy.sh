@@ -29,6 +29,15 @@ Options:
                           gateway already uses; empty closes the door). Needs
                           --hivemind-api, which is the back channel the
                           single-use handoff code is redeemed over
+  --federation-config FILE
+                          JSON list of the relying parties every sandbox keeps
+                          an OIDC assertion for: HiveMind, OpenAI workload
+                          identity, whatever comes next. See
+                          federation.example.json beside this script and
+                          docs/federation.md. Stored in the sparkbox-federation
+                          ConfigMap and read by both the gateway and the node
+                          (default: whatever is already deployed; with nothing
+                          deployed, HiveMind alone)
   --hivemind-manifest URL release manifest deciding which hivemind new sandboxes
                           get, e.g. .../manifests/hivemind-1.0.8rc1.json
                           (default: the latest release). Use it to put a release
@@ -51,6 +60,7 @@ requested_github_app_client_id=
 requested_hivemind_api=
 requested_hivemind_signin_orgs=
 requested_hivemind_manifest=
+requested_federation_config=
 public_key="${HOME}/.ssh/id_ed25519.pub"
 private_key=
 operator=$(id -un)
@@ -81,6 +91,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --hivemind-manifest)
       requested_hivemind_manifest=${2:?--hivemind-manifest requires a value}
+      shift 2
+      ;;
+    --federation-config)
+      requested_federation_config=${2:?--federation-config requires a value}
       shift 2
       ;;
     --hivemind-api)
@@ -382,7 +396,59 @@ if [ -n "$hivemind_signin_orgs" ]; then
   fi
 fi
 
-# Deliberately NOT carried forward, unlike the three above, and the asymmetry is
+# The federation list lives in its own ConfigMap rather than in the pod env,
+# because it is a document and not a value — and because a ConfigMap is carried
+# forward by simply not being touched, which is the property the three above
+# have to reproduce by reading the live deployment back. Passing a file replaces
+# the list; passing nothing keeps what is deployed. What it must not do is
+# vanish quietly, so the live list is echoed either way: a party missing from
+# it is a `codex` asking somebody to log in inside a VM with no browser, days
+# from now, with nothing in the deploy output to connect it to.
+federation_configmap=sparkbox-federation
+if [ -n "$requested_federation_config" ]; then
+  [ -s "$requested_federation_config" ] || {
+    echo "--federation-config: $requested_federation_config is missing or empty" >&2
+    exit 1
+  }
+  # The binary is the validator: a list it refuses is a gateway that will not
+  # start, so refuse it here, before anything is applied, with the same words.
+  if command -v sparkbox >/dev/null 2>&1; then
+    sparkbox federation check "$requested_federation_config" || exit 1
+  fi
+  "${k[@]}" -n "$namespace" create configmap "$federation_configmap" \
+    --from-file="federation.json=$requested_federation_config" \
+    --dry-run=client -o yaml | "${k[@]}" apply -f -
+fi
+deployed_federation=$(
+  "${k[@]}" -n "$namespace" get configmap "$federation_configmap" \
+    -o 'jsonpath={.data.federation\.json}' 2>/dev/null || true
+)
+if [ -n "$deployed_federation" ]; then
+  federation_names=$(printf '%s' "$deployed_federation" \
+    | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '\n' ' ')
+  echo "Guest federation: ${federation_names:-(a list naming nobody)}"
+  case " $federation_names " in
+    *" hivemind "*) ;;
+    *) echo "  hivemind is NOT in the list, so \`hivemind start\` in a sandbox will have no token." ;;
+  esac
+  case " $federation_names " in
+    *" openai "*) ;;
+    *) echo "  openai is not in the list; sandboxes need an API key for OpenAI and a login for \`codex\`." ;;
+  esac
+else
+  echo "Guest federation: hivemind (built-in default; no $federation_configmap ConfigMap)"
+  echo "  Pass --federation-config to add OpenAI workload identity or another party;"
+  echo "  see federation.example.json."
+fi
+# Rolls the pods when the list changes and only then: the binary reads it once,
+# at startup, and a ConfigMap edit alone restarts nothing.
+if command -v sha256sum >/dev/null 2>&1; then
+  federation_hash=$(printf '%s' "$deployed_federation" | sha256sum | awk '{print $1}')
+else
+  federation_hash=$(printf '%s' "$deployed_federation" | shasum -a 256 | awk '{print $1}')
+fi
+
+# Deliberately NOT carried forward, unlike the four above, and the asymmetry is
 # the point. Those three are permanent facts about this deployment, so losing one
 # is always a mistake. A manifest override is the opposite: it is how a release
 # candidate gets onto real hardware, it is meant to end, and a test pin that
@@ -511,6 +577,7 @@ sed \
   -e "s|__SPARKBOX_GITHUB_APP_CLIENT_ID__|$github_app_client_id|g" \
   -e "s|__SPARKBOX_HIVEMIND_API__|$hivemind_api|g" \
   -e "s|__SPARKBOX_HIVEMIND_SIGNIN_ORGS__|$hivemind_signin_orgs|g" \
+  -e "s|__SPARKBOX_FEDERATION_HASH__|$federation_hash|g" \
   "$script_dir/gateway-deployment.yaml" | "${k[@]}" apply -f -
 sed \
   -e "s|__SPARKBOX_IMAGE__|$image|g" \
@@ -519,6 +586,7 @@ sed \
   -e "s|__SPARKBOX_NODE__|$node|g" \
   -e "s|__SPARKBOX_HIVEMIND_API__|$hivemind_api|g" \
   -e "s|__HIVEMIND_MANIFEST__|$hivemind_manifest|g" \
+  -e "s|__SPARKBOX_FEDERATION_HASH__|$federation_hash|g" \
   "$script_dir/deployment.yaml" | "${k[@]}" apply -f -
 "${k[@]}" apply -f "$script_dir/service.yaml"
 

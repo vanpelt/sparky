@@ -233,7 +233,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=27\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=28\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -268,8 +268,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 // update wantPayloadSum here to the sum the failure prints. Both, in that order.
 func TestIdentityRevMovesWithThePayload(t *testing.T) {
 	const (
-		wantRev        = 27
-		wantPayloadSum = "6f807c2b594ad2fd5a87f3bbfb9dd6eb18b883f923ca6c88c078b16cd33f31d0"
+		wantRev        = 28
+		wantPayloadSum = "d010ef0c1499e6b12fc5c2fc25e415b9bee5483b8b2a308f168b3dade8ca84fe"
 	)
 	src, err := os.ReadFile("install-guest-identity.sh")
 	if err != nil {

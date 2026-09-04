@@ -38,6 +38,11 @@ readonly guest_subnet="${SPARKBOX_GUEST_SUBNET:-172.30.0.0/20}"
 # presence monitor and `ctl sessions` off entirely; the flag's own default is
 # the same empty string, so passing it unconditionally is safe.
 readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
+
+# The relying parties every sandbox keeps an assertion for, from the optional
+# sparkbox-federation ConfigMap deploy.sh --federation-config writes. Absent,
+# the binary federates with HiveMind alone, exactly as before the list existed.
+readonly federation_config="${SPARKBOX_FEDERATION_CONFIG:-/etc/sparkbox/federation/federation.json}"
 readonly host_mem_mb="${SPARKBOX_HOST_MEM_MB:-22000}"
 readonly mem_admission_pct="${SPARKBOX_MEM_ADMISSION_PCT:-80}"
 readonly max_running_per_owner="${SPARKBOX_MAX_RUNNING_PER_OWNER:-2}"
@@ -391,9 +396,22 @@ fi
 # can install into a VM whose template predates the current CLIs. Both
 # containers mount the same data hostPath; sparkbox-node mounts it readOnly,
 # which is all serving ever needs. It is never relayed to the gateway.
+# Built as an array so an absent ConfigMap passes NO flag at all: the flag's
+# empty value already means "the built-in default", but a path to a file that
+# does not exist is an error, and an optional mount that is not there is a
+# directory with nothing in it. `if` rather than `[ -s ... ] && args+=(...)`:
+# under `set -e` a short-circuited AND-list is a failing statement, and whether
+# that ends the process is a shell-lawyering argument this container should
+# not be having on the last line before exec.
+federation_args=()
+if [ -s "$federation_config" ]; then
+  federation_args=(--federation-config "$federation_config")
+fi
+
 exec /usr/local/bin/sparkbox serve \
   --driver firecracker \
   --hivemind-api "$hivemind_api" \
+  "${federation_args[@]}" \
   --state-dir "$control_dir" \
 	--vm-state-dir "$vm_state_dir" \
   --checkpoint-dir "$durable_dir" \

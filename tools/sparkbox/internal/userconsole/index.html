@@ -2602,8 +2602,12 @@
   $("nr-cancel").addEventListener("click", () => { resetNetRuleForm(); closeForm("nr-form-card"); });
 
   // Claude Code's default "Trusted" network domains (per code.claude.com/docs)
-  // plus hivemind.wandb.tools — a one-click starting point for a rule-set, and
-  // the same set a new environment's default rule-set is built from.
+  // plus the hosts the federations a sandbox is wired for out of the box need:
+  // hivemind.wandb.tools, and OpenAI's api./auth./chatgpt hosts — without
+  // auth.openai.com a tagged box cannot exchange its assertion, and `codex`
+  // falls back to asking a person to log in inside a VM with no browser. A
+  // one-click starting point for a rule-set, and the same set a new
+  // environment's default rule-set is built from.
   //
   // THIS IS A COPY. The canonical list is netrules.TrustedDomains, which the
   // server uses for that default; this one exists because a browser cannot
@@ -2614,12 +2618,12 @@
       *.googleapis.com *.microsoftonline.com *.modelcontextprotocol.io *.nixos.org
       *.packagecloud.io *.sentry.io *.sourceforge.net *.ubuntu.com accounts.google.com
       anaconda.com anaconda.org apache.org api.anthropic.com api.bitbucket.org api.github.com
-      api.honeycomb.io api.metacpan.org api.nuget.org api.pub.dev api.rubygems.org
+      api.honeycomb.io api.metacpan.org api.nuget.org api.openai.com api.pub.dev api.rubygems.org
       api.statsig.com apt.releases.hashicorp.com archive.apache.org
-      archive.releases.hashicorp.com archive.ubuntu.com auth.docker.io
+      archive.releases.hashicorp.com archive.ubuntu.com auth.docker.io auth.openai.com
       avatars.githubusercontent.com azure.com binaries.prisma.sh bitbucket.org
       browser-intake-us5-datadoghq.com camo.githubusercontent.com cdn.cocoapods.org
-      central.maven.org claude.ai cloud.google.com cocoapods.org code.claude.com
+      central.maven.org chatgpt.com claude.ai cloud.google.com cocoapods.org code.claude.com
       codeload.github.com compute.googleapis.com conda.anaconda.org container.googleapis.com
       continuum.io cpan.org crates.io dev.azure.com developer.android.com developer.apple.com
       dl.k8s.io docs.claude.com dot.net dotnet.microsoft.com download.docker.com

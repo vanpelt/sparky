@@ -27,6 +27,11 @@ readonly hivemind_api="${SPARKBOX_HIVEMIND_API:-}"
 # the default — leaves the door unmounted, which is also what happens if this is
 # set and hivemind_api is not: there would be nothing to redeem a code against.
 readonly hivemind_signin_orgs="${SPARKBOX_HIVEMIND_SIGNIN_ORGS:-}"
+
+# The relying parties every sandbox keeps an assertion for, from the optional
+# sparkbox-federation ConfigMap deploy.sh --federation-config writes. Absent,
+# the binary federates with HiveMind alone, exactly as before the list existed.
+readonly federation_config="${SPARKBOX_FEDERATION_CONFIG:-/etc/sparkbox/federation/federation.json}"
 readonly node_name="${SPARKBOX_NODE_NAME:-cks-gateway}"
 readonly cluster_id="${SPARKBOX_CLUSTER_ID:-cks-poc}"
 proxy_advertise_port="${SPARKBOX_PROXY_ADVERTISE_PORT:-}"
@@ -55,9 +60,22 @@ if [ -n "$github_app_client_id" ]; then
   github_app_args=(--github-app-client-id "$github_app_client_id")
 fi
 
+# Built as an array so an absent ConfigMap passes NO flag at all: the flag's
+# empty value already means "the built-in default", but a path to a file that
+# does not exist is an error, and an optional mount that is not there is a
+# directory with nothing in it. `if` rather than `[ -s ... ] && args+=(...)`:
+# under `set -e` a short-circuited AND-list is a failing statement, and whether
+# that ends the process is a shell-lawyering argument this container should
+# not be having on the last line before exec.
+federation_args=()
+if [ -s "$federation_config" ]; then
+  federation_args=(--federation-config "$federation_config")
+fi
+
 exec /usr/local/bin/sparkbox serve \
   --gateway-only \
   --hivemind-api "$hivemind_api" \
+  "${federation_args[@]}" \
   --hivemind-signin-orgs "$hivemind_signin_orgs" \
   --driver mock \
   --state-dir "$state_dir" \
