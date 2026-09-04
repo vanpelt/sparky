@@ -307,6 +307,17 @@ spec:
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
               value: "480000"
+            # The size a sandbox gets when nobody named one, which is every
+            # `new@` sandbox. "0" keeps the binary's built-in 4 vCPU / 12288 MB,
+            # which is what this cluster wants. They are declared anyway so a
+            # node on smaller hardware has an obvious knob instead of a default
+            # nobody knew existed. Admission control does not cover this: it
+            # measures a sandbox against host RAM, so one VM at the ceiling
+            # still "fits" a host that is smaller than the VM.
+            - name: SPARKBOX_DEFAULT_VCPUS
+              value: "0"
+            - name: SPARKBOX_DEFAULT_MEM_MB
+              value: "0"
             - name: SPARKBOX_MEM_ADMISSION_PCT
               value: "90"
             - name: SPARKBOX_MAX_RUNNING_PER_OWNER

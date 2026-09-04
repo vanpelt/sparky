@@ -42,8 +42,12 @@ func reservedName(name string) bool { return reserved.Name(name) }
 // `new@` path always does; the HTTP API may override). Bounded only by host
 // capacity — an 8c/16t/64GB box fits ~5 of these before overcommit.
 const (
-	defaultVCPUs int64 = 4
-	defaultMemMB int64 = 12288
+	// DefaultVCPUs and DefaultMemMB are exported because a caller that has to
+	// decide whether they fit a given machine — internal/devpod, sizing a node
+	// for a laptop's container machine — must read the real number rather than
+	// restate it.
+	DefaultVCPUs int64 = 4
+	DefaultMemMB int64 = 12288
 
 	// activityInterval is the shortest gap between activity marks we retain for
 	// one sandbox. A mark is deliberately approximate: the idle thresholds are
@@ -642,6 +646,8 @@ type Manager struct {
 	ownerMemPoolMB     int64                   // per-owner effective-memory budget; 0 = disabled
 	ownerMemBurstMB    int64                   // temporary per-owner ceiling for turbo; 0 = baseline pool
 	diskPoolMB         int64                   // per-owner pooled-disk budget in MB; 0 = disabled
+	defVCPUs           int64                   // vCPUs for a sandbox created without a size; 0 = DefaultVCPUs
+	defMemMB           int64                   // MB for a sandbox created without a size; 0 = DefaultMemMB
 	archivePfx         string                  // object-key prefix for archives (default "archives")
 	checkpointPfx      string                  // object-key prefix for checkpoints (default "checkpoints")
 	nodeName           string                  // this host's name in capacity reports
@@ -737,6 +743,18 @@ type Options struct {
 	// owners' burst ceilings overlap, and node admission remains authoritative.
 	// Zero uses OwnerMemoryPoolMB (no borrowing above the baseline).
 	OwnerMemoryBurstMB int64
+	// DefaultVCPUs and DefaultMemMB size a sandbox whose caller named no size —
+	// which is every `new@` sandbox. Zero keeps the package defaults below,
+	// which are sized for a CKS node.
+	//
+	// They exist because those defaults are not universally safe: a node runs
+	// them whatever it is, and a dev box inside a 12 GB Linux VM would hand a
+	// single sandbox 12288 MB — a guest larger than the machine hosting it.
+	// Admission control cannot catch that (it compares against HostMemMB, and
+	// one VM at the ceiling still "fits" a host claiming to be a cluster node),
+	// so the size has to be settable per node rather than inferred from one.
+	DefaultVCPUs int64
+	DefaultMemMB int64
 	// NodeName identifies this host in capacity reports (defaults to "local").
 	NodeName string
 	// Arch and Release describe this host in capacity reports: the CPU
@@ -832,6 +850,8 @@ func NewManager(opts Options) (*Manager, error) {
 		checkpointStageDir: opts.CheckpointStagingDir,
 		maxPerOwner:        opts.MaxRunningPerOwner,
 		maxBoxesPerOwner:   opts.MaxSandboxesPerOwner,
+		defVCPUs:           opts.DefaultVCPUs,
+		defMemMB:           opts.DefaultMemMB,
 		memAdmitPct:        opts.MemAdmissionPct,
 		hostMemMB:          opts.HostMemMB,
 		reserveMB:          opts.MemReserveMB,
@@ -951,6 +971,25 @@ func NewManager(opts Options) (*Manager, error) {
 	return m, m.save()
 }
 
+// defaultVCPUs and defaultMemMB are the size a sandbox gets when its creator
+// named none. Options.DefaultVCPUs / DefaultMemMB override the package
+// constants so a node can be sized for the machine it is actually on; see
+// Options for why that is node configuration rather than something admission
+// control can be trusted to catch.
+func (m *Manager) defaultVCPUs() int64 {
+	if m.defVCPUs > 0 {
+		return m.defVCPUs
+	}
+	return DefaultVCPUs
+}
+
+func (m *Manager) defaultMemMB() int64 {
+	if m.defMemMB > 0 {
+		return m.defMemMB
+	}
+	return DefaultMemMB
+}
+
 func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
 	if !validName(name) {
 		return nil, &NameError{Problem: NameInvalid, Noun: "sandbox", Name: name}
@@ -959,10 +998,10 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		return nil, &NameError{Problem: NameReserved, Noun: "sandbox", Name: name}
 	}
 	if vcpus <= 0 {
-		vcpus = defaultVCPUs
+		vcpus = m.defaultVCPUs()
 	}
 	if memMB <= 0 {
-		memMB = defaultMemMB
+		memMB = m.defaultMemMB()
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

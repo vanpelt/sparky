@@ -36,6 +36,8 @@ func devpodCommand(args []string) error {
 		trustDir    = fs.String("trust-dir", "", "host directory replacing the sparkbox-node-trust Secret; must hold gateway_host_key.pub")
 		binDir      = fs.String("bin-dir", "", "host directory of linux binaries to bind-mount over the image's (sparkbox, sparkbox-vmm-helper, sluice)")
 		hostMemMB   = fs.Int64("host-mem-mb", 0, "SPARKBOX_HOST_MEM_MB for admission control; 0 keeps the manifest's CKS value, which is far larger than a laptop")
+		defVCPUs    = fs.Int64("default-vcpus", 0, "SPARKBOX_DEFAULT_VCPUS: vCPUs for a sandbox nobody sized, which is every `new@` sandbox; 0 keeps the binary's CKS-sized built-in (4)")
+		defMemMB    = fs.Int64("default-mem-mb", 0, "SPARKBOX_DEFAULT_MEM_MB: RAM for a sandbox nobody sized; 0 keeps the built-in 12288, which on a laptop's container machine is a guest larger than the machine")
 		nodeName    = fs.String("node-name", "", "SPARKBOX_NODE_NAME; empty keeps the manifest's cks-poc")
 		hivemindAPI = fs.String("hivemind-api", "", "SPARKBOX_HIVEMIND_API; empty leaves the presence lease off")
 		prefix      = fs.String("prefix", devpod.DefaultPrefix, "name prefix for the docker network, volumes and containers")
@@ -68,6 +70,8 @@ func devpodCommand(args []string) error {
 		Prefix:        *prefix,
 		TrustDir:      *trustDir,
 		HostMemMB:     *hostMemMB,
+		DefaultVCPUs:  *defVCPUs,
+		DefaultMemMB:  *defMemMB,
 		NodeName:      *nodeName,
 		HivemindAPI:   *hivemindAPI,
 		NetworkSubnet: *subnet,

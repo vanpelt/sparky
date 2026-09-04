@@ -128,6 +128,8 @@ func serve(args []string) error {
 		idleBalloon          = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
 		activityCPU          = fs.Float64("activity-cpu-pct", 0, "treat a sandbox as active while it burns at least this % of one host core (0 disables, the default); opt in for unattended CPU-only work")
 		activityNetKB        = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
+		defaultVCPUs         = fs.Int64("default-vcpus", 0, "vCPUs for a sandbox created without an explicit size, which is every `new@` sandbox (0 = the built-in 4). Size this for the machine the node is on: admission control compares against host RAM and cannot notice that one VM at the ceiling is larger than the whole host")
+		defaultMemMB         = fs.Int64("default-mem-mb", 0, "RAM in MB for a sandbox created without an explicit size (0 = the built-in 12288). See --default-vcpus")
 		maxPerOwner          = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
 		maxBoxesPerOwner     = fs.Int("max-sandboxes-per-owner", 0, "max total running, paused, and archived sandboxes per owner (0 = unlimited)")
 		memAdmitPct          = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
@@ -298,6 +300,7 @@ func serve(args []string) error {
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
 			maxPerOwner: *maxPerOwner, maxBoxesPerOwner: *maxBoxesPerOwner,
 			memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
+			defaultVCPUs: *defaultVCPUs, defaultMemMB: *defaultMemMB,
 			memReserve: *memReserve, ownerMemPool: *ownerMemPool,
 			ownerMemBurst: *ownerMemBurst, diskPool: *diskPool,
 			controlTransport: *nodeControlTransport, grpcAddr: *nodeGRPCAddr,
@@ -665,6 +668,8 @@ func serve(args []string) error {
 		MaxSandboxesPerOwner: *maxBoxesPerOwner,
 		MemAdmissionPct:      *memAdmitPct,
 		HostMemMB:            hostMem,
+		DefaultVCPUs:         *defaultVCPUs,
+		DefaultMemMB:         *defaultMemMB,
 		MemReserveMB:         *memReserve,
 		OwnerMemoryPoolMB:    *ownerMemPool,
 		OwnerMemoryBurstMB:   *ownerMemBurst,
