@@ -38,12 +38,44 @@ func (p *Plan) DockerArgv() [][]string {
 			"--label", LabelPod + "=" + p.Options.Prefix,
 			v.Source,
 		})
+		if argv, ok := p.fsGroupArgv(v); ok {
+			out = append(out, argv)
+		}
 	}
 	out = append(out, p.holderArgv())
 	for _, c := range p.Containers {
 		out = append(out, p.containerArgv(c))
 	}
 	return out
+}
+
+// fsGroupArgv reproduces the kubelet's fsGroup pass over one freshly created
+// volume: group-own it to the Pod's fsGroup and set the setgid bit so anything
+// created inside inherits that group.
+//
+// Only volumes docker actually created, and only the ephemeral ones. That is
+// not a shortcut, it is what Kubernetes does — fsGroup applies to volume types
+// that support ownership management (emptyDir, Secret, projected) and NOT to
+// hostPath, whose permissions belong to the host. Applying it to the data tier
+// would also mean chowning a 25 GiB rootfs template on every `up`.
+//
+// The image is the pod's own, so this pulls nothing extra; it runs as root
+// because chowning to another group requires it, and it exits immediately.
+func (p *Plan) fsGroupArgv(v Volume) ([]string, bool) {
+	if p.FSGroup == nil || !v.Create || v.Kind != "volume" || !v.Ephemeral {
+		return nil, false
+	}
+	gid := fmt.Sprintf("%d", *p.FSGroup)
+	return []string{
+		"docker", "run", "--rm",
+		"--label", LabelPod + "=" + p.Options.Prefix,
+		"--platform", "linux/" + p.Options.Arch,
+		"--user", "0:0",
+		"--mount", "type=volume,src=" + v.Source + ",dst=/fsgroup",
+		"--entrypoint", "/bin/sh",
+		p.Options.Image,
+		"-ec", "chown -R :" + gid + " /fsgroup && chmod g+rwXs /fsgroup",
+	}, true
 }
 
 func (p *Plan) holderArgv() []string {

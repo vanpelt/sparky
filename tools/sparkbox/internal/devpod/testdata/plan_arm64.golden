@@ -1,8 +1,12 @@
 docker network create --label sparkbox.devpod=sparkbox-dev --subnet 172.29.128.0/24 sparkbox-dev-net
 docker volume create --label sparkbox.devpod=sparkbox-dev sparkbox-dev-tmp
+docker run --rm --label sparkbox.devpod=sparkbox-dev --platform linux/arm64 --user 0:0 --mount type=volume,src=sparkbox-dev-tmp,dst=/fsgroup --entrypoint /bin/sh sparkbox-dev:latest -ec 'chown -R :65532 /fsgroup && chmod g+rwXs /fsgroup'
 docker volume create --label sparkbox.devpod=sparkbox-dev sparkbox-dev-checkpoint-scratch
+docker run --rm --label sparkbox.devpod=sparkbox-dev --platform linux/arm64 --user 0:0 --mount type=volume,src=sparkbox-dev-checkpoint-scratch,dst=/fsgroup --entrypoint /bin/sh sparkbox-dev:latest -ec 'chown -R :65532 /fsgroup && chmod g+rwXs /fsgroup'
 docker volume create --label sparkbox.devpod=sparkbox-dev sparkbox-dev-vmm-socket
+docker run --rm --label sparkbox.devpod=sparkbox-dev --platform linux/arm64 --user 0:0 --mount type=volume,src=sparkbox-dev-vmm-socket,dst=/fsgroup --entrypoint /bin/sh sparkbox-dev:latest -ec 'chown -R :65532 /fsgroup && chmod g+rwXs /fsgroup'
 docker volume create --label sparkbox.devpod=sparkbox-dev sparkbox-dev-sluice-socket
+docker run --rm --label sparkbox.devpod=sparkbox-dev --platform linux/arm64 --user 0:0 --mount type=volume,src=sparkbox-dev-sluice-socket,dst=/fsgroup --entrypoint /bin/sh sparkbox-dev:latest -ec 'chown -R :65532 /fsgroup && chmod g+rwXs /fsgroup'
 docker run --detach --name sparkbox-dev-netns --label sparkbox.devpod=sparkbox-dev --label sparkbox.devpod.container=netns --platform linux/arm64 --network sparkbox-dev-net --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 --sysctl net.ipv4.conf.all.rp_filter=1 --sysctl net.ipv4.conf.default.rp_filter=1 --publish 127.0.0.1:9090:9090 --user 65532:65532 --cap-drop ALL --read-only --security-opt no-new-privileges --entrypoint /bin/sleep sparkbox-dev:latest infinity
 docker run --rm --name sparkbox-dev-scrub-retired-gateway-state --label sparkbox.devpod=sparkbox-dev --label sparkbox.devpod.container=scrub-retired-gateway-state --platform linux/arm64 --network container:sparkbox-dev-netns --user 0 --cap-drop ALL --security-opt no-new-privileges --read-only --mount type=bind,src=/srv/sparkbox/data/devpod,dst=/var/lib/sparkbox --entrypoint /bin/sh sparkbox-dev:latest -ec 'rm -f \
   /var/lib/sparkbox/control/sparkbox.db \
@@ -52,8 +56,8 @@ volume vmm-socket: emptyDir sizeLimit 1Mi -> unbounded docker volume sparkbox-de
   why: docker volumes have no size limit. `devpod down` removes this one, which is what keeps it per-run the way an emptyDir is.
 volume sluice-socket: emptyDir sizeLimit 1Mi -> unbounded docker volume sparkbox-dev-sluice-socket
   why: docker volumes have no size limit. `devpod down` removes this one, which is what keeps it per-run the way an emptyDir is.
-securityContext: pod fsGroup 65532 / fsGroupChangePolicy OnRootMismatch not applied
-  why: docker has no fsGroup. The prepare-vm-assets init container chowns the paths the controller actually writes, which is what makes this survivable.
+securityContext: pod fsGroup 65532 is emulated with a chown pass, not applied by the runtime (fsGroupChangePolicy OnRootMismatch is ignored)
+  why: docker has no fsGroup, so DockerArgv chowns each created volume to that group and sets the setgid bit — what the kubelet does, and only for the volume types Kubernetes applies it to. The hostPath data tier is deliberately excluded, exactly as in Kubernetes, because prepare-vm-assets owns those paths. fsGroupChangePolicy has no analogue: the pass is unconditional, where OnRootMismatch would skip it when the root already matches, so a large data tier would be slower here than on CKS.
 serviceAccount: serviceAccountName sparkbox-node is ignored
   why: there is no API server. automountServiceAccountToken is false in the manifest, so nothing in the Pod reads one.
 devices: sparkbox.dev/kvm, /tun and /loop are granted with --device from internal/deviceplugin.DefaultResources

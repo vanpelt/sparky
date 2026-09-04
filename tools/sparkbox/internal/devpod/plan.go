@@ -75,6 +75,18 @@ type Plan struct {
 	Containers []Container
 	// StopTimeout comes from the Pod's terminationGracePeriodSeconds.
 	StopTimeout int64
+	// FSGroup is the Pod's securityContext.fsGroup, emulated in DockerArgv.
+	//
+	// It is not cosmetic and skipping it does not merely lose a permission
+	// nicety: sluice creates its control socket as root with mode 0660, and
+	// sparkbox-node runs as uid 65532. On CKS the shared emptyDir is
+	// group-owned by fsGroup, so the node's gid matches and it connects. Get
+	// this wrong locally and the node hangs forever in the sluice-readiness
+	// poll at the top of entrypoint.sh, logging nothing at all — which is a
+	// remarkably hard failure to read, because every container reports Up and
+	// the two with healthchecks report healthy. Measured, on the first run
+	// that got this far.
+	FSGroup *int64
 
 	divergences []Divergence
 }
@@ -243,6 +255,9 @@ func BuildPlan(src *Source, o Options) (*Plan, error) {
 	p := &Plan{Options: o}
 	if pod.TerminationGracePeriodSeconds != nil {
 		p.StopTimeout = *pod.TerminationGracePeriodSeconds
+	}
+	if pod.SecurityContext != nil {
+		p.FSGroup = pod.SecurityContext.FSGroup
 	}
 
 	if err := p.buildVolumes(pod); err != nil {
@@ -960,8 +975,13 @@ func (p *Plan) recordDivergences(src *Source, pod podspec.PodSpec) {
 		if sc.FSGroup != nil {
 			p.add(Divergence{
 				Area: "securityContext",
-				What: fmt.Sprintf("pod fsGroup %d / fsGroupChangePolicy %s not applied", *sc.FSGroup, sc.FSGroupChangePolicy),
-				Why:  "docker has no fsGroup. The prepare-vm-assets init container chowns the paths the controller actually writes, which is what makes this survivable.",
+				What: fmt.Sprintf("pod fsGroup %d is emulated with a chown pass, not applied by the runtime (fsGroupChangePolicy %s is ignored)",
+					*sc.FSGroup, sc.FSGroupChangePolicy),
+				Why: "docker has no fsGroup, so DockerArgv chowns each created volume to that group and sets the setgid bit — " +
+					"what the kubelet does, and only for the volume types Kubernetes applies it to. The hostPath data tier is " +
+					"deliberately excluded, exactly as in Kubernetes, because prepare-vm-assets owns those paths. " +
+					"fsGroupChangePolicy has no analogue: the pass is unconditional, where OnRootMismatch would skip it when the " +
+					"root already matches, so a large data tier would be slower here than on CKS.",
 			})
 		}
 		// Everything else the Pod-level context can say is a privilege

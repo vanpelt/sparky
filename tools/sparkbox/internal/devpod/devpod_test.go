@@ -360,13 +360,75 @@ func TestReadOnlyParentMountPrecedesSubPaths(t *testing.T) {
 	}
 }
 
+// The Pod declares fsGroup 65532. Without emulating it, sluice's control
+// socket — created by root at mode 0660 in a shared emptyDir — is unreachable
+// by sparkbox-node at uid 65532, and the node hangs in entrypoint.sh's
+// sluice-readiness poll forever, logging nothing while every container still
+// reports Up and the two with healthchecks report healthy. That was observed on
+// real hardware, which is the only reason this is emulated rather than merely
+// recorded as a divergence.
+func TestFSGroupIsAppliedToEphemeralVolumesOnly(t *testing.T) {
+	plan := mustPlan(t, testOptions())
+	if plan.FSGroup == nil || *plan.FSGroup != 65532 {
+		t.Fatalf("fsGroup = %v, want the manifest's 65532", plan.FSGroup)
+	}
+
+	chowned := map[string]bool{}
+	for _, a := range plan.DockerArgv() {
+		if len(a) < 2 || a[1] != "run" {
+			continue
+		}
+		script := a[len(a)-1]
+		if !strings.Contains(script, "chown -R :65532 /fsgroup") {
+			continue
+		}
+		if !strings.Contains(script, "chmod g+rwXs /fsgroup") {
+			t.Errorf("fsGroup pass sets the group but not the setgid bit: %q", script)
+		}
+		src := ""
+		for _, arg := range a {
+			if strings.HasPrefix(arg, "type=volume,src=") {
+				src = strings.TrimSuffix(strings.TrimPrefix(arg, "type=volume,src="), ",dst=/fsgroup")
+			}
+		}
+		if src == "" {
+			t.Fatalf("fsGroup pass names no volume: %v", a)
+		}
+		chowned[src] = true
+	}
+
+	for _, v := range plan.Volumes {
+		if !v.Create || v.Kind != "volume" {
+			continue
+		}
+		switch {
+		case v.Ephemeral && !chowned[v.Source]:
+			t.Errorf("ephemeral volume %s (%s) got no fsGroup pass; anything root creates in it "+
+				"is unreachable by uid 65532", v.Name, v.Source)
+		case !v.Ephemeral && chowned[v.Source]:
+			// Kubernetes does not apply fsGroup to hostPath, and doing so here
+			// would chown a 25 GiB rootfs template on every `up`.
+			t.Errorf("durable volume %s (%s) got an fsGroup pass; Kubernetes applies fsGroup only to "+
+				"volume types that support ownership management", v.Name, v.Source)
+		}
+	}
+	if len(chowned) == 0 {
+		t.Fatal("no volume got an fsGroup pass at all")
+	}
+}
+
 func TestInitContainersRunFirstAndBlock(t *testing.T) {
 	plan := mustPlan(t, testOptions())
 	argv := plan.DockerArgv()
 	order := []string{}
 	for _, a := range argv {
 		if len(a) > 1 && a[1] == "run" {
-			order = append(order, nameFlag(a))
+			// The fsGroup chown pass is also a `docker run`, but it is a
+			// one-shot with no --name that runs before the holder exists. It
+			// is not part of the Pod's container order.
+			if n := nameFlag(a); n != "" {
+				order = append(order, n)
+			}
 		}
 	}
 	want := []string{
