@@ -146,7 +146,7 @@ type SelfSnapshotPlan struct {
 	Busy   string `json:"busy,omitempty"`
 	Turbo  bool   `json:"turbo,omitempty"`
 	DiskMB int64  `json:"disk_mb,omitempty"`
-	// CtlHint is `ssh ctl@<domain>` and SSHHint is `ssh <sandbox>.<domain>`,
+	// CtlHint is `ssh ctl@<domain>` and SSHHint is `ssh <sandbox>@<domain>`,
 	// both host-authored for the reason above.
 	CtlHint string `json:"ctl_hint"`
 	SSHHint string `json:"ssh_hint"`
@@ -199,12 +199,19 @@ type ScheduleInfo struct {
 	LastError string     `json:"last_error,omitempty"`
 }
 
+// RouteInfo is one addressable PORT of a sandbox — not one route row. A route
+// contributes its own port (Default, reached at the portless URL) plus an entry
+// for every extra port configured under the same hostname, which the edge
+// serves as https://<subdomain>.<domain>:<port> with no row of its own.
 type RouteInfo struct {
 	Subdomain  string `json:"subdomain"`
 	Sandbox    string `json:"sandbox"`
 	Port       int    `json:"port"`
 	Visibility string `json:"visibility"`
 	URL        string `json:"url,omitempty"`
+	// Default marks the route's own port: the one the portless hostname
+	// forwards to, and the one a bare `share <name> public` opens.
+	Default bool `json:"default,omitempty"`
 }
 
 // NodeInfo is one machine in the fleet as an operator sees it: the roster row
@@ -341,6 +348,29 @@ type CreateArgs struct {
 	// reason they are — the boot that reads the manifest happens once the
 	// sandbox exists, and both have to be true by then. See reporef.go.
 	Refs []RepoRef
+	// Env names an environment to boot this sandbox as. "" means none.
+	//
+	// It resolves to exactly one tag — an environment's name IS its tag — which
+	// is UNIONED with Tags rather than replacing them: `--env web --tag ci` is
+	// somebody asking for their web environment plus one more selector, and
+	// dropping either half would silently withhold secrets, checkouts or egress
+	// they asked for.
+	//
+	// A name that is not an environment, or one whose build has never finished,
+	// is REFUSED before the first write. Falling back to the default image
+	// would hand somebody a sandbox with none of the toolchain they named and
+	// no reason to look at the command they ran — resolveTemplate's rule, for
+	// the same failure seen one layer up.
+	Env string
+	// FromBase ignores every template binding these tags carry and boots the
+	// operator's default image.
+	//
+	// It is how a rebuild gets a clean universal image to run an environment's
+	// setup script on: an environment that boots from its OWN last snapshot
+	// would accumulate every side effect of every previous build, and the
+	// second rebuild would no longer be reproducible from the script. Nothing
+	// on a user-facing surface sets this in Phase A.
+	FromBase bool
 }
 
 type ForkArgs struct {

@@ -440,7 +440,7 @@ func TestGuestLifecycleRequestsReachGatewayWithAuthenticatedNode(t *testing.T) {
 		Turbo:    true,
 		DiskMB:   4300,
 		CtlHint:  "ssh ctl@catnip.sh",
-		SSHHint:  "ssh alices-box.catnip.sh",
+		SSHHint:  "ssh alices-box@catnip.sh",
 		Token:    "tok-abc",
 		Carriers: []ctlops.TaggedSandbox{{Name: "alices-box", State: "running", Self: true}},
 	}
@@ -573,6 +573,160 @@ func TestGuestLifecycleWithoutAControlPlaneIsToldSo(t *testing.T) {
 		var typed *ctlops.Error
 		if !errors.As(err, &typed) || typed.Code != CodeNoSelfLifecycle {
 			t.Errorf("%s: err = %v, want code %s", name, err, CodeNoSelfLifecycle)
+		}
+	}
+}
+
+// TestEnvironmentSetupRequestsReachGatewayWithAuthenticatedNode round-trips the
+// two frames a builder VM on a node produces: the fetch that asks whether it has
+// a job, and the report that says what running it did.
+//
+// The "no job" answer is asserted alongside the job, because it is the one
+// nearly every VM in the fleet gets and because it is the answer an absent
+// relay imitates — a guest told "no job" runs nothing and exits 0, which is
+// indistinguishable from success anywhere except the row left in `building`.
+func TestEnvironmentSetupRequestsReachGatewayWithAuthenticatedNode(t *testing.T) {
+	var gotNode string
+	var gotResult SelfSetupResultReq
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfSetup: func(_ context.Context, n string, req SelfSetupReq) (SelfSetupResp, error) {
+				gotNode = n
+				if req.Sandbox != "web-build" {
+					return SelfSetupResp{}, nil
+				}
+				return SelfSetupResp{Job: true, Env: "web", Script: "#!/bin/sh\nmake deps\n"}, nil
+			},
+			OnSelfSetupResult: func(_ context.Context, n string, req SelfSetupResultReq) (SelfSetupResultResp, error) {
+				gotNode, gotResult = n, req
+				return SelfSetupResultResp{Sandbox: req.Sandbox}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var job SelfSetupResp
+	if err := u.Request(ctx, TypeSelfSetup, SelfSetupReq{Sandbox: "web-build"}, &job); err != nil {
+		t.Fatal(err)
+	}
+	if gotNode != "roster-node" {
+		t.Errorf("node = %q; the hook must be handed the authenticated name", gotNode)
+	}
+	if !job.Job || job.Env != "web" || job.Script != "#!/bin/sh\nmake deps\n" {
+		t.Errorf("job = %+v", job)
+	}
+
+	var idle SelfSetupResp
+	if err := u.Request(ctx, TypeSelfSetup, SelfSetupReq{Sandbox: "alices-box"}, &idle); err != nil {
+		t.Fatal(err)
+	}
+	if idle.Job || idle.Script != "" || idle.Env != "" {
+		t.Errorf("an ordinary box was handed %+v", idle)
+	}
+
+	var ack SelfSetupResultResp
+	if err := u.Request(ctx, TypeSelfSetupResult, SelfSetupResultReq{
+		Sandbox: "web-build", OK: true, ExitCode: 0,
+		Script: "#!/bin/sh\nmake deps\n", Log: "+ make deps\n",
+	}, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.Sandbox != "web-build" || gotNode != "roster-node" {
+		t.Errorf("ack = %+v, node = %q", ack, gotNode)
+	}
+	if !gotResult.OK || gotResult.Script != "#!/bin/sh\nmake deps\n" || gotResult.Log != "+ make deps\n" {
+		t.Errorf("the report lost something crossing the link: %+v", gotResult)
+	}
+}
+
+// TestEnvironmentSetupRequestsAreBoundedBeforeTheHook.
+//
+// The two strings in a report are guest-authored, and the cap they already
+// passed was enforced on ANOTHER MACHINE. So they are bounded again here, and
+// refused rather than truncated: half a script is what every future fork of the
+// environment would run, and a silently shortened log is a report the gateway
+// did not actually receive.
+func TestEnvironmentSetupRequestsAreBoundedBeforeTheHook(t *testing.T) {
+	reached := false
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{
+			OnSelfSetup: func(context.Context, string, SelfSetupReq) (SelfSetupResp, error) {
+				reached = true
+				return SelfSetupResp{}, nil
+			},
+			OnSelfSetupResult: func(context.Context, string, SelfSetupResultReq) (SelfSetupResultResp, error) {
+				reached = true
+				return SelfSetupResultResp{}, nil
+			},
+		})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for name, call := range map[string]func() error{
+		"a fetch naming no sandbox": func() error {
+			return u.Request(ctx, TypeSelfSetup, SelfSetupReq{}, &SelfSetupResp{})
+		},
+		"a report naming no sandbox": func() error {
+			return u.Request(ctx, TypeSelfSetupResult, SelfSetupResultReq{OK: true}, &SelfSetupResultResp{})
+		},
+		"a report with an impossible exit status": func() error {
+			return u.Request(ctx, TypeSelfSetupResult,
+				SelfSetupResultReq{Sandbox: "web-build", ExitCode: 256}, &SelfSetupResultResp{})
+		},
+		"a script larger than any setup script may be": func() error {
+			return u.Request(ctx, TypeSelfSetupResult, SelfSetupResultReq{
+				Sandbox: "web-build", Script: strings.Repeat("a", MaxSelfSetupScriptBytes+1),
+			}, &SelfSetupResultResp{})
+		},
+		"a log larger than any tail may be": func() error {
+			return u.Request(ctx, TypeSelfSetupResult, SelfSetupResultReq{
+				Sandbox: "web-build", Log: strings.Repeat("a", MaxSelfSetupLogBytes+1),
+			}, &SelfSetupResultResp{})
+		},
+	} {
+		err := call()
+		var typed *ctlops.Error
+		if !errors.As(err, &typed) || typed.Kind != ctlops.KindInvalid {
+			t.Errorf("%s: err = %v, want an invalid-request error", name, err)
+		}
+	}
+	if reached {
+		t.Error("a malformed environment-setup request reached the gateway's hook")
+	}
+}
+
+// TestEnvironmentSetupWithoutAControlPlaneIsToldSo: the nil hook answers in a
+// sentence with its own code, so "this deployment builds no environments" and
+// "this gateway is too old to speak the pair" are not one diagnosis — and so
+// the node can turn it into the same 501 a gateway-local guest would read.
+func TestEnvironmentSetupWithoutAControlPlaneIsToldSo(t *testing.T) {
+	node, _ := newPipePair(t, nil, func(c *Conn) {
+		registerUplinkOps(c, "roster-node", Hooks{})
+	})
+	u := NewUplink()
+	defer u.attach(node)()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for name, call := range map[string]func() error{
+		"fetch": func() error {
+			return u.Request(ctx, TypeSelfSetup, SelfSetupReq{Sandbox: "web-build"}, &SelfSetupResp{})
+		},
+		"report": func() error {
+			return u.Request(ctx, TypeSelfSetupResult,
+				SelfSetupResultReq{Sandbox: "web-build", OK: true}, &SelfSetupResultResp{})
+		},
+	} {
+		err := call()
+		var typed *ctlops.Error
+		if !errors.As(err, &typed) || typed.Code != CodeNoEnvSetup {
+			t.Errorf("%s: err = %v, want code %s", name, err, CodeNoEnvSetup)
 		}
 	}
 }

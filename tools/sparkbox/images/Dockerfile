@@ -79,7 +79,7 @@ RUN rm -f /etc/dpkg/dpkg.cfg.d/excludes /etc/dpkg/dpkg.cfg.d/01_nodoc && \
     rm -f /usr/sbin/policy-rc.d && \
     rm -rf /var/lib/apt/lists/* /run/sshd && mkdir -p /run/sshd
 
-# ---- toolchains: Go, Node, uv, starship -----------------------------------
+# ---- toolchains: Go, Node, Kubernetes, uv, starship, direnv ---------------
 # Installed system-wide under /usr/local so they resolve in NON-interactive ssh
 # execs (which read /etc/environment's PATH, not a profile) — this is why we use
 # the official tarballs rather than a per-user nvm/pyenv.
@@ -99,6 +99,39 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 RUN curl -fsSL https://starship.rs/install.sh | sh -s -- -y -b /usr/local/bin
+
+# Keep kubectl on the Kubernetes release bundled by Kind. The CLIs are pinned
+# and checksum-verified; Kind pulls its (much larger) node image only when a
+# sandbox actually creates a cluster.
+ARG KIND_VERSION=v0.33.0
+ARG KUBECTL_VERSION=v1.37.0
+ARG DIRENV_VERSION=v2.37.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+      amd64) \
+        KIND_SHA256=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d; \
+        KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f; \
+        DIRENV_SHA256=1f1b93dd6f38523fde26dfac96151ef9d31a374e3005cd3345fb93555ae0c9b5 \
+        ;; \
+      arm64) \
+        KIND_SHA256=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2; \
+        KUBECTL_SHA256=922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3; \
+        DIRENV_SHA256=2a9cef8d73521d6a3ec3f2871c4b747b8c4cc038628c1b57a7efa42b393a2d82 \
+        ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    TOOL_TMP=$(mktemp -d) && trap 'rm -rf "$TOOL_TMP"' EXIT && \
+    curl -fsSL "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}" \
+      -o "$TOOL_TMP/kind" && \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
+      -o "$TOOL_TMP/kubectl" && \
+    curl -fsSL "https://github.com/direnv/direnv/releases/download/${DIRENV_VERSION}/direnv.linux-${ARCH}" \
+      -o "$TOOL_TMP/direnv" && \
+    printf '%s  %s\n' \
+      "$KIND_SHA256" "$TOOL_TMP/kind" \
+      "$KUBECTL_SHA256" "$TOOL_TMP/kubectl" \
+      "$DIRENV_SHA256" "$TOOL_TMP/direnv" | sha256sum -c - && \
+    install -m 0755 "$TOOL_TMP/kind" "$TOOL_TMP/kubectl" "$TOOL_TMP/direnv" /usr/local/bin/
 
 # Tailscale via its apt keyring (the official install.sh method). Installed but
 # disabled below — a sandbox runs `sudo tailscale up` when it wants a tailnet.

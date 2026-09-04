@@ -7,5 +7,6 @@ case $- in *i*)
   if ! infocmp "$TERM" >/dev/null 2>&1; then export TERM=xterm-256color; fi
   export STARSHIP_CONFIG=/etc/starship.toml
   if command -v starship >/dev/null 2>&1; then eval "$(starship init bash)"; fi
+  if command -v direnv >/dev/null 2>&1; then eval "$(direnv hook bash)"; fi
   ;;
 esac

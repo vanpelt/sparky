@@ -24,6 +24,7 @@ func TestParseCreateArgs(t *testing.T) {
 		args     []string
 		wantTags []string
 		wantNode string
+		wantEnv  string
 		wantRest []string
 		wantRefs []ctlops.RepoRef
 	}{
@@ -68,9 +69,25 @@ func TestParseCreateArgs(t *testing.T) {
 		// a request for a repository called "weird" that nobody attached.
 		{name: "an equals in a branch name is not a scope", args: []string{"--ref", "weird=name"},
 			wantRefs: []ctlops.RepoRef{{Ref: "weird=name"}}},
+		// --env, whose whole reason for being parsed here is the same as
+		// --node's and one degree worse: unparsed, `--env prod` is not a
+		// refusal, it is the two tags `--env` and `prod`, and BOTH then fail
+		// the tag grammar inside ctlops.NormalizeTags and vanish. The user
+		// would get a stock sandbox composed of nothing they named.
+		{name: "env with a value", args: []string{"--env", "web"}, wantEnv: "web"},
+		{name: "env in the equals form", args: []string{"--env=web"}, wantEnv: "web"},
+		{name: "env and a bare tag", args: []string{"--env", "web", "ml"},
+			wantEnv: "web", wantRest: []string{"ml"}},
+		// Last wins, like --node and unlike --tag: a sandbox boots from one
+		// disk, so it has one environment.
+		{name: "the last env wins", args: []string{"--env", "a", "--env=b"}, wantEnv: "b"},
 		// The flags coexist, and none of them leaks into the tag list.
 		{name: "everything at once", args: []string{"--tag", "ml", "--node", "dgx", "--ref", "a/b=main", "box"},
 			wantTags: []string{"ml"}, wantNode: "dgx", wantRest: []string{"box"},
+			wantRefs: []ctlops.RepoRef{{Slug: "a/b", Ref: "main"}}},
+		{name: "env alongside everything else", args: []string{
+			"--env", "web", "--tag", "ml", "--node", "dgx", "--ref", "a/b=main", "box"},
+			wantEnv: "web", wantTags: []string{"ml"}, wantNode: "dgx", wantRest: []string{"box"},
 			wantRefs: []ctlops.RepoRef{{Slug: "a/b", Ref: "main"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,6 +100,16 @@ func TestParseCreateArgs(t *testing.T) {
 			}
 			if got.Node != tc.wantNode {
 				t.Errorf("node = %q, want %q", got.Node, tc.wantNode)
+			}
+			if got.Env != tc.wantEnv {
+				t.Errorf("env = %q, want %q", got.Env, tc.wantEnv)
+			}
+			// The tripwire the whole flag exists for: nothing --env consumed
+			// may reappear as a tag.
+			for _, w := range append(append([]string{}, got.Tags...), got.Rest...) {
+				if w == "--env" || (tc.wantEnv != "" && w == tc.wantEnv) {
+					t.Errorf("--env leaked into the tag list: tags %#v rest %#v", got.Tags, got.Rest)
+				}
 			}
 			if !reflect.DeepEqual(got.Rest, tc.wantRest) {
 				t.Errorf("rest = %#v, want %#v", got.Rest, tc.wantRest)
@@ -113,6 +140,16 @@ func TestParseCreateArgsRejects(t *testing.T) {
 	// And the tag grammar's own refusals still arrive through this door.
 	if _, err := parseCreateArgs([]string{"--node", "dgx", "--tag"}); err == nil {
 		t.Error("--tag with no value was accepted")
+	}
+	// --env refuses on the same terms, and for the sharpest version of the
+	// reason: a `--env` swallowed as a tag is a sandbox with none of the
+	// environment the user named and nothing anywhere that mentions it.
+	for _, args := range [][]string{{"--env"}, {"ml", "--env"}, {"--env="}, {"--env", "   "}} {
+		if _, err := parseCreateArgs(args); err == nil {
+			t.Errorf("parseCreateArgs(%q) was accepted", args)
+		} else if !strings.Contains(err.Error(), "--env needs a value") {
+			t.Errorf("parseCreateArgs(%q) = %v, want a sentence naming the flag", args, err)
+		}
 	}
 	// --ref refuses on the same terms, including the scoped form with an empty
 	// right-hand side: `--ref owner/repo=` names a repository and no branch,

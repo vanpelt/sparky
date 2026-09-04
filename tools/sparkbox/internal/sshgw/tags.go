@@ -75,6 +75,10 @@ func parseCreateArgs(args []string) (created, error) {
 	if err != nil {
 		return created{}, err
 	}
+	env, rest, err := splitEnvFlag(rest)
+	if err != nil {
+		return created{}, err
+	}
 	refs, rest, err := splitRefFlag(rest)
 	if err != nil {
 		return created{}, err
@@ -83,7 +87,7 @@ func parseCreateArgs(args []string) (created, error) {
 	if err != nil {
 		return created{}, err
 	}
-	return created{Tags: tags, Node: node, Refs: refs, Rest: rest}, nil
+	return created{Tags: tags, Node: node, Env: env, Refs: refs, Rest: rest}, nil
 }
 
 // created is what the grammar above resolved. A struct rather than four
@@ -93,8 +97,50 @@ func parseCreateArgs(args []string) (created, error) {
 type created struct {
 	Tags []string
 	Node string
+	Env  string
 	Refs []ctlops.RepoRef
 	Rest []string
+}
+
+// splitEnvFlag pulls `--env x` / `--env=x` out of an argument list.
+//
+// It is here for the reason splitNodeFlag is, and the reason is sharper: the
+// new@ door reads every bare word as a tag, so a door that did not know this
+// flag would turn `ssh new@gw -- --env prod` into the two tags `--env` and
+// `prod`, both of which then fail tagRe inside ctlops.NormalizeTags and vanish.
+// The user would get a sandbox with none of the environment they named, on the
+// stock image, and nothing anywhere would mention it.
+//
+// The last --env wins, like --node and unlike --tag: a sandbox boots from one
+// disk, so it has one environment, and naming a second is a correction rather
+// than a list. (The environment's TAG is unioned with --tag by ctlops — see
+// CreateArgs.Env — so `--env web --tag ci` still means both.)
+func splitEnvFlag(args []string) (env string, rest []string, err error) {
+	seen := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--env":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("%s needs a value, e.g. %s web", a, a)
+			}
+			env, seen = args[i+1], true
+			i++
+		case strings.HasPrefix(a, "--env="):
+			env, seen = strings.TrimPrefix(a, "--env="), true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	// `--env=` and `--env "  "` are the same mistake as leaving the value off
+	// the end. Reading either as "no environment" would build a sandbox with
+	// none of what the user asked for and say nothing about it — which is the
+	// exact failure this function exists to prevent, arrived at from the other
+	// direction.
+	if env = strings.TrimSpace(env); seen && env == "" {
+		return "", nil, fmt.Errorf("--env needs a value, e.g. --env web")
+	}
+	return env, rest, nil
 }
 
 // splitRefFlag pulls `--ref` out, in the same two spellings and with the same

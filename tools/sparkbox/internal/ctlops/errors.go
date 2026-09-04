@@ -206,6 +206,11 @@ var notFoundMsg = map[string]string{
 	// mistypes a tag and reads `no snapshot named "cuda"` goes looking for a
 	// snapshot, when what is missing is the binding that would have named one.
 	"template_binding": "no tag %q has a template bound",
+	// One sentence for "you have no environment called that" and for "somebody
+	// else does" — an environment names a private repository list and a secret
+	// set, so the two must be indistinguishable here as well as in the store's
+	// owner-scoped query.
+	"environment": "no environment named %q",
 }
 
 // NotFound is the ONE constructor for the masked answer. Existence and

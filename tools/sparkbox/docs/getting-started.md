@@ -226,6 +226,45 @@ public **HTTPS** edge, add a wildcard DNS record and turn on TLS (next section).
   off. Capturing needs a host that can loop-mount the image, so a deployment run
   with `--disable-host-rootfs-mounts` refuses it. See
   [tag-templates-design.md](tag-templates-design.md).
+- **Environments.** A tag names four things at once; an environment is the
+  object that name deserves — a description, plain (non-secret) variables, and
+  the setup script the project needs, with the tag as its name.
+  ```sh
+  ssh -p 2222 ctl@<host> env create web --repo wandb/hivemind --secret GITHUB_TOKEN
+  ssh -p 2222 ctl@<host> env build web     # returns as soon as the build starts
+  ssh -t new@<host> -- --env web           # boots from the disk that build made
+  ```
+  `env build` boots one sandbox called `web-build`, runs the setup script inside
+  the checkout, and — when it succeeds — the gateway captures that box and binds
+  the capture to the tag. The script is the one you piped in with `env script web
+  --set`, or `.sparkbox/setup.sh` read out of an attached repository and then
+  recorded, so the next build is the same build. It is asynchronous: read the
+  outcome with `env show web` rather than by waiting. A build that fails leaves
+  its builder **paused** with the half-built disk in it, so you can `ssh
+  web-build@<host>`, fix what was missing, and keep exactly that disk with `env
+  capture web`. With NO script anywhere it runs an agent in the builder instead —
+  `claude -p` against `sparkbox docs dev-environment` — and keeps the
+  `.sparkbox/setup.sh` it writes, so the next build of the same environment is
+  an ordinary script build; that needs a `CLAUDE_CODE_OAUTH_TOKEN` the builder
+  will carry. What the agent writes is then **run**, in that same builder: an
+  agent writes the script at the end from memory, so a build whose only test was
+  "the file is not empty" could report success and still leave an environment
+  that cannot rebuild itself. The first run gets one fresh recovery pass if it
+  writes no script or writes one that fails; deferred monitors and scheduled
+  wakeups are disabled because `claude -p` has no later turn in which to receive
+  them. If the recovery pass still leaves no working script, the build fails,
+  with any script recorded and the builder paused for `env capture`. A new
+  environment also gets an egress rule-set named after it, so
+  its sandboxes reach the package registries, github and the model API and not
+  the rest of the internet (`--open-egress` on create opts out). A build keeps
+  a bounded summary of the DNS names that policy blocked, visible on the
+  environment afterward, so a missing dependency host is diagnosable without
+  reading node logs.
+  It is all on the other two doors as well: an Environments tab on
+  `my.<domain>`, and `/v1/environments` on the REST API.
+  `--env-build-timeout` (default 45m) bounds how long a build may sit unfinished
+  before a sweep gives up on it — a script build's builder is left paused, an
+  agent build's is destroyed. See [environments-design.md](environments-design.md).
 - **Agent CLI drift.** A template is frozen at the tool versions of the day it
   was captured, so `snapshot create` refreshes them first and a long-lived
   sandbox catches up on demand with `sparkbox update-tools` (`--check` to look

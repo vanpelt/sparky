@@ -22,6 +22,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/routes"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/schedule"
@@ -57,6 +58,7 @@ type testAPI struct {
 	routes  *routes.Store
 	sched   *schedule.Store
 	binds   *templates.Store
+	envs    *envs.Store
 	signer  *edgeauth.Signer
 }
 
@@ -107,6 +109,20 @@ func newTestAPI(t *testing.T) *testAPI {
 	}
 	t.Cleanup(func() { bindStore.Close() })
 
+	// Environments, wired for the same reason the binding store above is: every
+	// gateway opens one, and a fixture without it would model a host that does
+	// not exist and answer 501 from every environment route in every test.
+	//
+	// EnvVars and SecretTags are the SAME secrets store through its other two
+	// halves — a second secrets.Open on one file would be a second connection
+	// with a second derived KEK — and the environment store shares that file
+	// too, because it reads the sandbox_tags table those own.
+	envStore, err := envs.Open(filepath.Join(dir, "secrets.db"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { envStore.Close() })
+
 	mgr, err := host.NewManager(host.Options{
 		StateDir: dir, Driver: driver,
 		GatewayPublicKey: sshgw.PublicKeyLine(upstreamKey), Logger: log,
@@ -132,6 +148,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		Tags: secretStore, Schedules: schedStore, Routes: routeStore,
 		Sessions: signer, GitHub: stubGitHub{},
 		TemplateTags: bindStore,
+		Environments: envStore, EnvVars: secretStore, SecretTags: secretStore,
 		DefaultImage: "ubuntu", Domain: testDomain, XtermSubdomain: "xterm",
 		Log: log,
 	})
@@ -144,6 +161,7 @@ func newTestAPI(t *testing.T) *testAPI {
 	return &testAPI{
 		h: h.Handler(), handler: h, mgr: mgr, driver: driver, users: userStore,
 		secrets: secretStore, routes: routeStore, sched: schedStore, binds: bindStore,
+		envs:   envStore,
 		signer: signer,
 	}
 }

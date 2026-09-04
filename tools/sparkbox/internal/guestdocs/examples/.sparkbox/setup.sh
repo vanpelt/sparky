@@ -2,10 +2,12 @@
 # .sparkbox/setup.sh — replays this VM's dev-environment setup.
 #
 # Written by the agent that first configured this project to run inside a
-# Sparkbox VM, and kept current by whichever agent changes that setup next —
-# Sparkbox itself never writes or runs this file. Check it into the project's
-# own repo so a fresh checkout, a fresh VM, or a teammate's VM can reproduce
-# the same setup with `bash .sparkbox/setup.sh` instead of re-deriving it.
+# Sparkbox VM, and kept current by whichever agent changes that setup next.
+# Check it into the project's own repo so a fresh checkout, a fresh VM, or a
+# teammate's VM can reproduce the same setup with `bash .sparkbox/setup.sh`
+# instead of re-deriving it. Nothing runs it on an ordinary VM's boot; the one
+# thing that does is `ssh ctl@<gateway> env build <name>`, which runs it in a
+# builder VM and captures the result as that environment's disk.
 #
 # Every step below is idempotent: installs are safe to repeat, the systemd
 # unit is rewritten and reloaded rather than appended to, and `sparkbox

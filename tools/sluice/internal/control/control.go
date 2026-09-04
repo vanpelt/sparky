@@ -3,11 +3,13 @@
 // it and pushes per-tap egress policy to it. The socket is root-owned and never
 // leaves the box, so there is no auth or TLS — reachability is the permission.
 //
-// Three endpoints:
+// Five endpoints:
 //
 //	GET  /report.json  -> per-tap per-domain bandwidth (report.DomainUsage)
 //	PUT  /policy       -> replace the per-tap allowlists (sbtap<idx> -> patterns)
 //	POST /ready/<tap>  -> wait until TCX attachment + map reconciliation
+//	POST /denials/<tap>/start  -> arm a build-scoped DNS denial capture
+//	POST /denials/<tap>/finish -> snapshot that capture without deleting it
 //
 // The report joins the eBPF per-tap byte counters to domains through the same
 // IP→domain table the DNS proxy fills, and labels each bucket by tap name so
@@ -25,9 +27,11 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sluice/internal/allowlist"
+	"github.com/vanpelt/sparky/tools/sluice/internal/denials"
 	"github.com/vanpelt/sparky/tools/sluice/internal/policy"
 	"github.com/vanpelt/sparky/tools/sluice/internal/report"
 )
@@ -50,17 +54,18 @@ type Server struct {
 	pol      *policy.Policy
 	poke     func() // request an immediate reconcile after a policy change
 	log      *slog.Logger
+	denials  *denials.Recorder
 }
 
 // New builds a control server. poke may be nil.
-func New(m Meter, resolver report.Resolver, pol *policy.Policy, poke func(), log *slog.Logger) *Server {
+func New(m Meter, resolver report.Resolver, pol *policy.Policy, poke func(), log *slog.Logger, denied *denials.Recorder) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if poke == nil {
 		poke = func() {}
 	}
-	return &Server{meter: m, resolver: resolver, pol: pol, poke: poke, log: log}
+	return &Server{meter: m, resolver: resolver, pol: pol, poke: poke, log: log, denials: denied}
 }
 
 // Handler returns the HTTP mux, exposed for testing without a real socket.
@@ -69,10 +74,60 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /report.json", s.getReport)
 	mux.HandleFunc("PUT /policy", s.putPolicy)
 	mux.HandleFunc("POST /ready/{tap}", s.readyTap)
+	mux.HandleFunc("POST /denials/{tap}/start", s.startDenials)
+	mux.HandleFunc("POST /denials/{tap}/finish", s.finishDenials)
 	return mux
 }
 
 var tapNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,15}$`)
+
+type denialRequest struct {
+	CaptureID string `json:"capture_id"`
+}
+
+func (s *Server) denialRequest(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+	tap := r.PathValue("tap")
+	if !tapNameRE.MatchString(tap) {
+		http.Error(w, "invalid tap name", http.StatusBadRequest)
+		return "", "", false
+	}
+	var req denialRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || strings.TrimSpace(req.CaptureID) == "" {
+		http.Error(w, "capture_id is required", http.StatusBadRequest)
+		return "", "", false
+	}
+	return tap, strings.TrimSpace(req.CaptureID), true
+}
+
+func (s *Server) startDenials(w http.ResponseWriter, r *http.Request) {
+	if s.denials == nil {
+		http.Error(w, "denial capture unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	tap, id, ok := s.denialRequest(w, r)
+	if !ok {
+		return
+	}
+	s.denials.Start(tap, id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) finishDenials(w http.ResponseWriter, r *http.Request) {
+	if s.denials == nil {
+		http.Error(w, "denial capture unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	tap, id, ok := s.denialRequest(w, r)
+	if !ok {
+		return
+	}
+	capture, err := s.denials.Snapshot(tap, id)
+	if err != nil {
+		http.Error(w, "denial capture not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, capture)
+}
 
 func (s *Server) readyTap(w http.ResponseWriter, r *http.Request) {
 	tap := r.PathValue("tap")

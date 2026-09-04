@@ -64,6 +64,20 @@ func helpTopics() []helpTopic {
 		blurb:   "cloned in before you arrive",
 		page:    repoUsage,
 	}, {
+		// After repos and secrets, because an environment is the word for a
+		// composition of both and reads as nonsense before them. The row is 30
+		// runes of verbs and a 22-rune blurb, which lands inside the 80 columns
+		// TestControlHelpHidesOperatorTopics holds this listing to.
+		//
+		// `build` took `rm`'s place the moment it existed: `rm` is guessable
+		// from every other topic on this index, and the verb that turns a
+		// composition into a disk is the only one nobody would think to try.
+		name:    "environments",
+		aliases: []string{"env", "envs", "environment"},
+		verbs:   "env ls · show · create · build",
+		blurb:   "a named way of working",
+		page:    envUsage,
+	}, {
 		// A topic of its own, which it was not: `help badge` used to land on the
 		// repos page and every mistyped `badge` printed it — a page about
 		// attaching repositories, forks and ref overrides, for somebody who
@@ -289,15 +303,20 @@ const scheduleHelp = "usage: ssh ctl@<gateway> schedule ls\r\n" +
 	"\r\n" +
 	"  ssh ctl@<gateway> schedule add mybox \"*/30 * * * *\" /usr/local/bin/sync\r\n"
 
-const sharingHelp = "usage: ssh ctl@<gateway> share <name> [public|private]\r\n" +
+const sharingHelp = "usage: ssh ctl@<gateway> share <name> [<port>] [public|private|forget]\r\n" +
 	"       ssh ctl@<gateway> session-token [--ttl <dur>]\r\n" +
 	"\r\n" +
-	"  share <name>                   who can reach this sandbox's URLs today\r\n" +
-	"  share <name> public            anyone with the URL can reach it\r\n" +
-	"  share <name> private           visitors must sign in and own it (the default)\r\n" +
+	"  share <name>                   who can reach this sandbox's ports today\r\n" +
+	"  share <name> public            open the DEFAULT port only\r\n" +
+	"  share <name> private           close every port (the default state)\r\n" +
+	"  share <name> 5173 public       open https://<name>.<domain>:5173\r\n" +
+	"  share <name> 5173 private      close it, but keep it listed\r\n" +
+	"  share <name> 5173 forget       stop listing it (still closed)\r\n" +
 	"  session-token [--ttl <dur>]    mint a browser/API token for private URLs\r\n" +
 	"\r\n" +
-	"visibility is per sandbox: every route pointing at it flips together.\r\n" +
+	"visibility is per PORT. `public` with no port opens only the default one,\r\n" +
+	"so publishing a preview never publishes the debugger beside it; `private`\r\n" +
+	"with no port closes everything, because a panic button has to.\r\n" +
 	"\r\n" +
 	"  TOKEN=$(ssh ctl@<gateway> session-token | tr -d '\\r\\n')\r\n" +
 	"  curl -H \"Authorization: Bearer $TOKEN\" https://api.<domain>/v1/sandboxes\r\n"

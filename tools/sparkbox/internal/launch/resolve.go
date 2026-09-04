@@ -2,10 +2,12 @@ package launch
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
@@ -38,10 +40,13 @@ const codeNoAttachment = "no_attachment"
 // would build a box with an empty working tree every single time.
 const codeUntaggedAttachment = "untagged_attachment"
 
-// target is a launch link's whole meaning: which repository, and which branch.
-// There is no third field and there is never going to be one — see the package
-// comment on why a tag, a node, a name or a command in a URL is a different and
-// much worse product.
+const (
+	codeEnvRepoMismatch = "environment_repo_mismatch"
+	codeEnvNotReady     = "environment_not_ready"
+)
+
+// target is a launch link's whole meaning: repository, branch, and an optional
+// owner-scoped environment selection that must be confirmed by the clicker.
 type target struct {
 	// Slug is "owner/name" as the URL spelled it, already validated. It is used
 	// for matching, which is case-insensitive; anything DISPLAYED comes from the
@@ -52,6 +57,9 @@ type target struct {
 	// "whatever the attachment says", which is not the same as any particular
 	// branch name — see normalizeRef.
 	Ref string
+	// Env is the raw ?env= value after whitespace/case normalization. Its row,
+	// ownership, readiness, and repository membership are resolved by ctlops.
+	Env string
 }
 
 // candidate is one of the caller's existing sandboxes that holds this
@@ -65,15 +73,16 @@ type candidate struct {
 	Ref string
 }
 
-// parseTarget validates the two parameters a launch link may carry and refuses
-// everything else by never looking at it.
+// parseTarget validates the path/ref grammar and normalizes the optional
+// environment name. The environment itself is resolved under the caller by
+// resolve; unknown parameters are ignored by never looking at them.
 //
 // Unknown query parameters are not read and not refused. That is a
 // forward-compatibility promise rather than laxness: this URL goes into
 // comments that outlive the deployment, so a host built years from now must
 // still honour a link written today, and a link written today must not 400 on a
 // host that learned a parameter after it was written.
-func parseTarget(owner, repo, ref string) (target, *ctlops.Error) {
+func parseTarget(owner, repo, ref, env string) (target, *ctlops.Error) {
 	slug := owner + "/" + repo
 	// repos.ValidSlug, never a hand-rolled regexp. The two halves are not the
 	// same grammar — the owner is a GitHub login and the name additionally
@@ -113,7 +122,7 @@ func parseTarget(owner, repo, ref string) (target, *ctlops.Error) {
 		return target{}, ctlops.Invalid(op, "bad_ref",
 			"%q is not a branch or tag name — it has to start with a letter or a digit, and it cannot contain \"..\".", ref)
 	}
-	return target{Slug: slug, Ref: ref}, nil
+	return target{Slug: slug, Ref: ref, Env: strings.ToLower(strings.TrimSpace(env))}, nil
 }
 
 // normalizeRef folds a ref that is merely the attachment's own default down to
@@ -175,11 +184,120 @@ func findRepo(list []repos.Repo, slug string) (repos.Repo, bool) {
 	return repos.Repo{}, false
 }
 
+// environmentLister is the optional half of Sandboxes: the control plane's
+// answer to "which of these tags are environments, and when did they last
+// change".
+//
+// It is taken by ASSERTION off h.ops rather than added to Sandboxes, the same
+// shape and the same reasoning as envAwaiter (create.go). Sandboxes is narrow
+// on purpose, *ctlops.Ops always has this method, and a test fake that does not
+// is a fake with no environments to choose between — so the fallback below is
+// the honest behaviour for it rather than a capability check anybody deploys.
+type environmentLister interface {
+	EnvironmentsForTags(c ctlops.Caller, tags []string) ([]ctlops.EnvironmentInfo, error)
+}
+
+// tagChoice is the tag set a launch link will create with, and the reasoning
+// the confirm page renders next to it.
+type tagChoice struct {
+	// Tags is what Create is handed. It is att.Tags with at most one
+	// environment left in it.
+	Tags []string
+	// Chosen is the environment that survived, "" when no choice was made —
+	// either because none of the tags is an environment, or because only one
+	// is. It is the ordinary case and the page says nothing about it.
+	Chosen string
+	// Dropped are the environments left off, so the page can name them. A
+	// visitor who lands in `web` when they were thinking of `ci` needs to be
+	// told, and this is the only screen that can tell them.
+	Dropped []string
+}
+
+// launchTags decides which of an attachment's tags a create should carry.
+//
+// THE PROBLEM IT SOLVES. A repository attachment can carry several tags and a
+// sandbox has exactly one rootfs, so when two of those tags are environments
+// with different base images, ctlops.resolveTemplate refuses the create as
+// `template_ambiguous` and says "create it with only one of those tags" — sound
+// advice for somebody at a terminal, and useless to somebody who clicked a link
+// in a comment. A repository attached to two built environments had a
+// permanently dead launch link.
+//
+// THE RULE. Every tag that is not an environment rides along untouched; among
+// the ones that are, the most recently updated wins. That is the environment
+// its owner was last working in, which is the best available guess at the one
+// they meant, and it is a guess that the confirm page shows and their other
+// sandboxes escape.
+//
+// NEVER FATAL. A host whose ops predates this method, or a store that stumbles,
+// falls back to the whole tag set — which is exactly today's behaviour, up to
+// and including the 409 — because a launch door that refused to open on a
+// degraded read would be worse than one that occasionally asks the visitor to
+// pick. Same discipline as alsoClones and awaitEnv.
+func (h *Handler) launchTags(c ctlops.Caller, att repos.Repo) tagChoice {
+	all := slices.Clone(att.Tags)
+	lister, ok := h.ops.(environmentLister)
+	if !ok {
+		return tagChoice{Tags: all}
+	}
+	list, err := lister.EnvironmentsForTags(c, att.Tags)
+	if err != nil {
+		h.log.Warn("launch could not read the environments on an attachment's tags",
+			"user", c.Handle, "slug", att.Slug, "err", err)
+		return tagChoice{Tags: all}
+	}
+	return pickTags(all, list)
+}
+
+// pickTags is launchTags' whole decision, separated from the read so it can be
+// tabled.
+//
+// It does NOT rely on the order it is handed. EnvironmentsForTags already sorts
+// newest-first, and depending on that here would make this function's answer a
+// property of two places instead of one — so the winner is computed again,
+// with the same rule: latest UpdatedAt, name ascending to break a tie.
+//
+// The tiebreak is load-bearing rather than tidy. Two environments saved in the
+// same write second is an ordinary thing, and without a total order the same
+// link would open a different sandbox on alternate clicks — the exact
+// duplicate-per-click failure normalizeRef exists to prevent, arriving by
+// another road.
+func pickTags(tags []string, list []ctlops.EnvironmentInfo) tagChoice {
+	if len(list) < 2 {
+		return tagChoice{Tags: tags}
+	}
+	best := list[0]
+	for _, e := range list[1:] {
+		switch {
+		case e.UpdatedAt.After(best.UpdatedAt):
+			best = e
+		case e.UpdatedAt.Equal(best.UpdatedAt) && e.Name < best.Name:
+			best = e
+		}
+	}
+	drop := make(map[string]bool, len(list))
+	var dropped []string
+	for _, e := range list {
+		if e.Name != best.Name {
+			drop[e.Name] = true
+			dropped = append(dropped, e.Name)
+		}
+	}
+	sort.Strings(dropped)
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if !drop[t] {
+			out = append(out, t)
+		}
+	}
+	return tagChoice{Tags: out, Chosen: best.Name, Dropped: dropped}
+}
+
 // resolve answers the only question a click asks: does this person already have
 // a sandbox holding this repository on this branch, and if not, what do we need
 // to tell them before offering to build one.
 //
-// It is three reads and no writes, and that is a contract rather than an
+// It is reads and no writes, and that is a contract rather than an
 // implementation detail. A link in a public comment is fetched by scanners,
 // previewers and prefetchers nobody consented to, so the GET behind it must not
 // create a sandbox, wake a paused one, write a tag or a ref row, or consume a
@@ -193,7 +311,7 @@ func findRepo(list []repos.Repo, slug string) (repos.Repo, bool) {
 // it.
 //
 // The returns are: the matched attachment (the display authority for the slug
-// and the only source of tags a create may carry), the best existing sandbox to
+// and the ordinary path's source of tags), the best existing sandbox to
 // hand the visitor back if there is one, and every OTHER sandbox of theirs on
 // this repository — which the confirm page renders as the human escape hatch
 // for the one branch case no fold can decide.
@@ -238,6 +356,29 @@ func (h *Handler) resolve(ctx context.Context, c ctlops.Caller, t target) (repos
 		return att, nil, nil, ctlops.Invalid(op, codeUntaggedAttachment,
 			"%s is attached but carries no tag, so no sandbox will ever clone it.", att.Slug)
 	}
+	if t.Env != "" {
+		if h.envs == nil {
+			return att, nil, nil, ctlops.Disabled(op,
+				"this host does not support environment launch links.")
+		}
+		env, err := h.envs.GetEnvironment(c, t.Env)
+		if err != nil {
+			return att, nil, nil, err
+		}
+		if env.State != string(envs.StateReady) {
+			return att, nil, nil, &ctlops.Error{
+				Kind: ctlops.KindConflict, Op: op, Code: codeEnvNotReady,
+				Msg: "environment " + env.Name + " is not ready yet; finish its build before launching it.",
+			}
+		}
+		if !containsFold(att.Tags, env.Name) {
+			return att, nil, nil, ctlops.Invalid(op, codeEnvRepoMismatch,
+				"%s is not attached to environment %s.", att.Slug, env.Name)
+		}
+		// Keep the canonical environment name returned by ctlops. envName folds
+		// case and whitespace there too, and Create must receive the same name.
+		t.Env = env.Name
+	}
 
 	names, err := h.repos.SandboxesForRepo(c.Handle, gitHubHost, att.Slug)
 	if err != nil {
@@ -272,6 +413,9 @@ func (h *Handler) resolve(ctx context.Context, c ctlops.Caller, t target) (repos
 			// A tag row survives its sandbox in a window the manager closes
 			// asynchronously, and List is the ledger. A name with no record is
 			// a box we cannot redirect anybody to.
+			continue
+		}
+		if t.Env != "" && !containsFold(info.Tags, t.Env) {
 			continue
 		}
 		manifest, err := h.repos.ReposForSandbox(name, c.Handle)
@@ -317,6 +461,15 @@ func (h *Handler) resolve(ctx context.Context, c ctlops.Caller, t target) (repos
 		others = nil
 	}
 	return att, best, others, nil
+}
+
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // reachableOnly drops sandboxes whose node is not answering the control plane,

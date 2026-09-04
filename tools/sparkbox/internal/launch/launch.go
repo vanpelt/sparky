@@ -10,7 +10,7 @@
 // text is effectively immutable and whose readers arrive months later. Its
 // canonical form is
 //
-//	https://<launch>.<domain>/<owner>/<repo>[?ref=<git ref>]
+//	https://<launch>.<domain>/<owner>/<repo>[?ref=<git ref>&env=<environment>]
 //
 // and its promise is narrow on purpose: whoever clicks it signs in as
 // THEMSELVES, and lands in THEIR OWN sandbox with that repository checked out
@@ -51,11 +51,12 @@
 // caller-supplied text would be an injection primitive on the one route in this
 // package with no session behind it.
 //
-// # Why no tag may ever be a URL parameter
+// # Why an environment is not an arbitrary tag
 //
-// This is the hard rule of the package, and it is the reason `tag=`, `node=`,
-// `name=` and a command are all absent from the grammar rather than merely
-// unimplemented.
+// `tag=`, `node=`, `name=` and a command remain absent from the grammar. An
+// optional `env=` is narrower: it names an owner-scoped environment row, must
+// be ready, and must already select the repository in the path. It is always
+// shown back to the clicker on a confirmation page and revalidated on POST.
 //
 // internal/ctlops/sandbox.go:36 states it from the other side: "Create stamps
 // tags BEFORE Sandboxes.Create, because Create fires the secret-env push
@@ -64,15 +65,12 @@
 // and hands the guest every secret of the sandbox's owner that shares a tag
 // with it. A tag is therefore a selector over the OWNER's decrypted secrets.
 //
-// Put that selector in a URL and you have handed the author of a public,
-// immutable comment the ability to choose which of the CLICKER's secrets are
-// decrypted into a VM whose working tree sits at a branch the same author
-// chose. Narrowing the parameter to "a tag that selects the named attachment"
-// does not close it — a repository carried on both `dev` and `prod` still lets
-// the author pick — and it would put the tag rule in a second place, where it
-// goes stale the moment the attachment's tags change. So tags come from exactly
-// one place: the matched attachment's stored Tags, read from the store under
-// the session's own handle.
+// A raw tag in a URL would hand the author of a public comment a selector over
+// the CLICKER's decrypted secrets. `env=` therefore never silently redirects:
+// the clicker sees the selected environment and its effective tags before the
+// POST. The POST resolves the environment through ctlops under the session's
+// own handle again and Create receives Env, not URL-derived Tags. That keeps
+// authorization and environment composition in their existing single owner.
 //
 // # What a GET may do
 //
@@ -123,6 +121,13 @@ type Sandboxes interface {
 	List(ctx context.Context, c ctlops.Caller) ([]ctlops.SandboxInfo, error)
 	Get(ctx context.Context, c ctlops.Caller, name string) (ctlops.SandboxInfo, error)
 	Create(ctx context.Context, c ctlops.Caller, a ctlops.CreateArgs) (ctlops.SandboxInfo, error)
+}
+
+// Environments is the one owner-scoped environment read this door needs.
+// *ctlops.Ops satisfies both this and Sandboxes; keeping the capabilities
+// separate makes the additional authority visible in Handler.
+type Environments interface {
+	GetEnvironment(c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
 }
 
 // Attachments is the slice of *repos.Store this door needs.
@@ -215,6 +220,7 @@ type Config struct {
 // fakes with no sqlite file and no VM driver anywhere.
 type Handler struct {
 	ops   Sandboxes
+	envs  Environments
 	repos Attachments
 
 	accounts edgeauth.Accounts
@@ -284,6 +290,7 @@ func New(cfg Config) *Handler {
 
 	return &Handler{
 		ops:       cfg.Ops,
+		envs:      cfg.Ops,
 		repos:     cfg.Repos,
 		accounts:  cfg.Accounts,
 		signer:    cfg.Signer,

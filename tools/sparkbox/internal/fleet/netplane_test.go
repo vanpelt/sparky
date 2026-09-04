@@ -6,6 +6,7 @@ package fleet_test
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/fleet"
@@ -175,6 +176,44 @@ func TestNetUsageReadsTheMachineHoldingTheSandbox(t *testing.T) {
 	}
 	if len(u.Domains) != 1 || u.Domains[0].Domain != "pypi.org" {
 		t.Errorf("domains = %+v", u.Domains)
+	}
+}
+
+func TestBuildDenialsReachTheMachineHoldingTheSandbox(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	index := newIndex(t)
+	f := newFleet(t, mgr, index)
+
+	n := newFakeNode("laptop")
+	n.metered = true
+	n.netDenials = netpush.DenialCapture{
+		CaptureID: "box-id",
+		Domains:   []netpush.DeniedDomain{{Domain: "registry.npmjs.org", Queries: 2}},
+	}
+	attach(t, f, n, running(&host.Sandbox{Name: "there", Owner: "alice", Image: "universal"}))
+	place(t, index, "there", "alice", "laptop")
+
+	if err := f.BeginBuildDenials(context.Background(), "there"); err != nil {
+		t.Fatalf("BeginBuildDenials: %v", err)
+	}
+	got, err := f.FinishBuildDenials(context.Background(), "there")
+	if err != nil {
+		t.Fatalf("FinishBuildDenials: %v", err)
+	}
+	if got.CaptureID != "box-id" || len(got.Domains) != 1 || got.Domains[0].Domain != "registry.npmjs.org" {
+		t.Fatalf("capture = %+v", got)
+	}
+	want := []string{"net.denials there true", "net.denials there false"}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var calls []string
+	for _, call := range n.calls {
+		if strings.HasPrefix(call, "net.denials ") {
+			calls = append(calls, call)
+		}
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("denial calls = %v, want %v", calls, want)
 	}
 }
 

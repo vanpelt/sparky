@@ -491,6 +491,7 @@ func (g *Gateway) handle(s gssh.Session) {
 		// if the create fails.
 		box, err := g.ops.Create(ctx, caller(s, user), ctlops.CreateArgs{
 			Name: requestedName, Tags: tags, Node: parsed.Node, Refs: parsed.Refs,
+			Env: parsed.Env,
 		})
 		if err != nil {
 			g.failStart(s, log, "create sandbox", err)
@@ -499,6 +500,13 @@ func (g *Gateway) handle(s gssh.Session) {
 		tagNote := ""
 		if len(tags) > 0 {
 			tagNote = fmt.Sprintf(" [tags: %s]", strings.Join(tags, ", "))
+		}
+		// The environment is named separately from the tags it resolves to,
+		// because `--env web` and `--tag web` are not the same request even
+		// though they select the same secrets: one of them also decided which
+		// disk this box booted from.
+		if parsed.Env != "" {
+			tagNote = fmt.Sprintf(" [env: %s]%s", parsed.Env, tagNote)
 		}
 		// Where it landed, and only when the caller asked: on a single-box
 		// deployment there is one answer and printing it every time would be

@@ -30,10 +30,21 @@ Cold starts can make the first request slower than subsequent requests.
 
 ## Access
 
-Routes are private by default and use the Sparkbox browser session. Make a
-route public only when the service should be reachable without your account.
-Run `sparkbox make-public` or `sparkbox make-private` inside the VM to change
-all of its routes together.
+Every port is private by default and uses the Sparkbox browser session. Make a
+port public only when the service on it should be reachable without your
+account.
+
+```sh
+sparkbox make-public          # the default port only
+sparkbox make-public 5173     # https://your-box.<domain>:5173
+sparkbox make-private 5173    # close that one again
+sparkbox make-private         # close every port
+```
+
+Visibility is per port, so opening one says nothing about the others: a public
+preview on the default port leaves a debugger on `5173` gated. `make-public`
+with no port therefore opens only the default port, while `make-private` with
+no port closes all of them.
 
 ## WebSockets and streaming
 

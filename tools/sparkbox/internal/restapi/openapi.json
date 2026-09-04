@@ -54,6 +54,10 @@
       "description": "GitHub repositories attached to your tags. Every sandbox carrying a tag clones the repos attached to it at boot, using a short-lived installation token it fetches itself — no personal access token is stored anywhere."
     },
     {
+      "name": "environments",
+      "description": "The named object over the tag primitive: the checkouts, secrets, egress rules and variables a project needs, plus the setup script and the disk that has already run it. An environment's name IS a tag, so it composes what that tag already selects."
+    },
+    {
       "name": "terminal",
       "description": "The browser terminal's WebSocket, the same one https://<name>-xterm.example.com opens."
     },
@@ -629,12 +633,12 @@
       "get": {
         "operationId": "share.get",
         "tags": ["sandboxes"],
-        "summary": "List a sandbox's web routes",
-        "description": "Every forwarded hostname pointing at this sandbox, with the port it forwards to and whether it is reachable without signing in.",
+        "summary": "List a sandbox's addressable ports",
+        "description": "Every port this sandbox can be reached on, and who may reach it. A forwarded hostname contributes its own port (`default: true`, served at the portless URL) plus an entry for every other port configured under the same hostname, which the edge serves as `https://<subdomain>.<domain>:<port>`.",
         "parameters": [{ "$ref": "#/components/parameters/SandboxName" }],
         "responses": {
           "200": {
-            "description": "The routes.",
+            "description": "The ports.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Visibility" },
@@ -645,7 +649,15 @@
                       "sandbox": "demo",
                       "port": 8000,
                       "visibility": "private",
-                      "url": "https://demo.example.com"
+                      "url": "https://demo.example.com",
+                      "default": true
+                    },
+                    {
+                      "subdomain": "demo",
+                      "sandbox": "demo",
+                      "port": 5173,
+                      "visibility": "public",
+                      "url": "https://demo.example.com:5173"
                     }
                   ]
                 }
@@ -660,8 +672,8 @@
       "put": {
         "operationId": "share.set",
         "tags": ["sandboxes"],
-        "summary": "Make a sandbox public or private",
-        "description": "Flips **every** route of the sandbox together, matching `ssh ctl@example.com share`. `private` requires a signed-in owner (or operator); `public` serves anyone.",
+        "summary": "Open or close a sandbox's ports",
+        "description": "Visibility is settled per port. With `port`, this changes that one port of the sandbox's default hostname; `visibility` may also be `forget`, which drops the port from the listing without ever exposing it.\n\nWithout `port` it acts on the sandbox as a whole, and is deliberately asymmetric — matching `ssh ctl@example.com share`: `private` closes **every** port, because a panic button has to mean it, while `public` opens only the **default** port, so no single call can publish whatever happened to be listening when it ran.\n\n`private` requires a signed-in owner (or operator); `public` serves anyone.",
         "parameters": [
           { "$ref": "#/components/parameters/SandboxName" },
           { "$ref": "#/components/parameters/IdempotencyKey" }
@@ -671,7 +683,7 @@
           "content": {
             "application/json": {
               "schema": { "$ref": "#/components/schemas/VisibilityRequest" },
-              "example": { "visibility": "public" }
+              "example": { "visibility": "public", "port": 5173 }
             }
           }
         },
@@ -1215,6 +1227,299 @@
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/environments": {
+      "get": {
+        "operationId": "env.list",
+        "tags": ["environments"],
+        "summary": "List your environments",
+        "description": "Each row carries its whole composition \u2014 the repos, secrets, rule-sets and variables that currently carry its tag \u2014 read from the store that owns each one rather than from a copy, so a secret you tagged by hand a minute ago appears here.\n\n`setup_bytes` and `setup_from` describe the setup script without inlining a page of shell per row; `GET /v1/environments/{name}/script` returns the text.",
+        "responses": {
+          "200": {
+            "description": "Your environments.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnvironmentList" },
+                "example": {
+                  "environments": [
+                    {
+                      "name": "web",
+                      "description": "the marketing site + its API",
+                      "state": "ready",
+                      "setup_from": "agent",
+                      "has_setup": true,
+                      "setup_bytes": 3746,
+                      "built_at": "2026-09-02T11:42:00Z",
+                      "created_at": "2026-09-01T09:00:00Z",
+                      "repos": ["wandb/hivemind"],
+                      "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
+                      "rules": ["web"],
+                      "vars": [{ "name": "NODE_ENV", "value": "development" }],
+                      "snapshot": "web-260902-1142"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "post": {
+        "operationId": "env.set",
+        "tags": ["environments"],
+        "summary": "Create an environment, or add to one",
+        "description": "Create and update are one verb, because they are one gesture: naming an environment that already exists adds to it.\n\n**An environment's name IS a tag**, so everything named here is attached to that tag and reaches every sandbox carrying it. Attachments ADD \u2014 a secret can belong to three environments at once, and nothing here detaches one. `secrets` and `rules` must already exist; naming one that does not is a refusal rather than a create, because an environment that quietly invented an empty rule-set would be a subtractive policy nobody wrote.\n\n`vars` are set outright, since a variable is keyed by (owner, tag, name) and has no other owner to union with. `description` is optional in the strict sense: omit it and the existing one is left alone, send `\"\"` to clear it.\n\nA NEW environment is also given an egress rule-set named after it, allowing the operator's trusted list plus the distribution archives \u2014 so a sandbox on this tag is governed rather than unrestricted. `open_egress` skips that, and it is skipped anyway when the caller names their own rules, when something already governs the tag, or when sandboxes already carry it.\n\nEvery refusal this can make is made before the first write: there is no transaction spanning the five stores an environment composes, so ordering is what makes \"it failed\" mean \"nothing moved\".",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EnvironmentRequest" },
+              "example": {
+                "name": "web",
+                "description": "the marketing site + its API",
+                "repos": [{ "slug": "wandb/hivemind" }],
+                "secrets": ["GITHUB_TOKEN"],
+                "vars": [{ "name": "NODE_ENV", "value": "development" }]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The environment, with its composition.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Environment" },
+                "example": {
+                  "name": "web",
+                  "description": "the marketing site + its API",
+                  "state": "ready",
+                  "setup_from": "agent",
+                  "has_setup": true,
+                  "setup_bytes": 3746,
+                  "built_at": "2026-09-02T11:42:00Z",
+                  "created_at": "2026-09-01T09:00:00Z",
+                  "repos": ["wandb/hivemind"],
+                  "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
+                  "rules": ["web"],
+                  "vars": [{ "name": "NODE_ENV", "value": "development" }],
+                  "snapshot": "web-260902-1142"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "A repo was named and your GitHub link is not proved directly \u2014 the same gate `POST /v1/repos` applies.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "404": {
+            "description": "A secret or rule-set you named does not exist.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "409": {
+            "description": "`env_tag_in_use`: this would CREATE an environment over a tag that is already carrying repositories, secrets, rule-sets, variables, a base image or sandboxes, all of which it would adopt. `details` names each of them. Re-send with `adopt: true` to go ahead, or pick a name nothing carries.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "429": {
+            "description": "You are at the per-owner environment limit.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/environments/{name}": {
+      "get": {
+        "operationId": "env.get",
+        "tags": ["environments"],
+        "summary": "Show one environment",
+        "description": "Somebody else's environment answers exactly like one that does not exist.",
+        "responses": {
+          "200": {
+            "description": "The environment.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Environment" },
+                "example": {
+                  "name": "web",
+                  "description": "the marketing site + its API",
+                  "state": "ready",
+                  "setup_from": "agent",
+                  "has_setup": true,
+                  "setup_bytes": 3746,
+                  "built_at": "2026-09-02T11:42:00Z",
+                  "created_at": "2026-09-01T09:00:00Z",
+                  "repos": ["wandb/hivemind"],
+                  "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
+                  "rules": ["web"],
+                  "vars": [{ "name": "NODE_ENV", "value": "development" }],
+                  "snapshot": "web-260902-1142"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "delete": {
+        "operationId": "env.rm",
+        "tags": ["environments"],
+        "summary": "Remove an environment",
+        "description": "Deletes the environment, its variables, and the template binding that pointed its tag at a base image. It also takes back the egress rule-set `env.set` created for it \u2014 but only while that rule-set is still the one this API wrote: named for the environment, carrying that tag alone, unedited, and with no sandbox running under it.\n\n**It deletes no secret, no repo attachment, and no rule-set you wrote.** Those are objects with their own lifetimes that merely carry this tag, usually alongside others. The answer lists what still carries it \u2014 both the reassurance that nothing was thrown away, and the map for somebody who did want it thrown away.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "200": {
+            "description": "What was removed, and what survived it.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnvironmentDeleted" },
+                "example": {
+                  "name": "web",
+                  "repos": ["wandb/hivemind"],
+                  "secrets": ["GITHUB_TOKEN"],
+                  "rules": [],
+                  "unbound": "web-260902-1142",
+                  "removed_rule": "web",
+                  "resynced": []
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/environments/{name}/script": {
+      "get": {
+        "operationId": "env.script",
+        "tags": ["environments"],
+        "summary": "Read the setup script",
+        "description": "The script a build runs in the checkout. `from` says where it came from: `repo` (read out of an attached repository), `agent` (written by the agent a build ran), or `manual` (sent here or piped in over SSH). An environment with no script yet answers with an empty one, and its next build asks an agent to write it.",
+        "responses": {
+          "200": {
+            "description": "The script and its origin.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnvironmentScript" },
+                "example": {
+                  "script": "#!/usr/bin/env bash\nset -euo pipefail\n\npnpm install\n",
+                  "from": "agent"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      },
+      "put": {
+        "operationId": "env.script.set",
+        "tags": ["environments"],
+        "summary": "Record a setup script",
+        "description": "Records what the NEXT build runs. Nothing is re-pushed and no sandbox is touched: a setup script is read by a build, not by a running guest.\n\nThe origin is recorded as `manual` whatever it was before \u2014 a script sent here came from a person, and recording it as `repo` or `agent` would tell the next build to go looking for a source that did not write it.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EnvironmentScript" },
+              "example": { "script": "#!/usr/bin/env bash\nset -euo pipefail\n\npnpm install\n" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The script as recorded.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/EnvironmentScript" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/environments/{name}/build": {
+      "post": {
+        "operationId": "env.build",
+        "tags": ["environments"],
+        "summary": "Build this environment's base image",
+        "description": "Boots one throwaway sandbox called `<name>-build` on the operator's stock image, carrying this environment's tag \u2014 so its secrets, checkouts and egress rules are all there \u2014 runs the setup script inside the primary checkout, then captures that disk and binds it to the tag. The next sandbox created with `--env <name>` boots from it, with the work already done.\n\n**With no setup script anywhere, it runs an agent instead**: `claude -p` against this platform's own dev-environment guidance, which is asked to leave `.sparkbox/setup.sh` behind. That script is then RUN in the builder. The first run gets at most one fresh recovery agent if it leaves no script or if the script fails; deferred monitors and scheduled wakeups are disabled because a one-turn `claude -p` process cannot receive them after it returns. If the recovery pass still leaves no working script, the build fails with any script preserved \u2014 an agent writes the script from memory at the end of its run, so an unrun script is a guess. An agent build needs a `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` on the `default` tag or this one; without either the build is refused at the door rather than after forty minutes.\n\n**This returns as soon as the build STARTS.** The row moves to `building` and the work outlives the request by minutes to tens of minutes; poll `GET /v1/environments/{name}`. It is not a job, because the environment row is the durable state and a second answer in the job registry would be the worse one \u2014 it is in memory and evicted.\n\nA build that fails leaves its builder **paused** with the half-built disk in it, so you can `ssh <name>-build@<domain>`, fix what was missing, and keep exactly that disk with `env.capture`. An agent build that overruns its budget is destroyed instead: nobody is going to finish an agent's work by hand in a box they never asked for.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "200": {
+            "description": "The environment, now `building`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Environment" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "A build is already running, the name is taken by a sandbox, or there is nothing to build from.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "422": {
+            "description": "An agent build with no agent credential on `default` or this environment's tag.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "501": { "$ref": "#/components/responses/Disabled" }
+        }
+      }
+    },
+    "/v1/environments/{name}/capture": {
+      "post": {
+        "operationId": "env.capture",
+        "tags": ["environments"],
+        "summary": "Adopt a failed build's builder as the base image",
+        "description": "The recovery path, and the reason a failed build keeps its builder instead of destroying it. Somebody ssh's into `<name>-build`, installs the package the script was missing, and runs this \u2014 and the environment is built, from the disk they just fixed, with no second run of a script that was never going to work.\n\nIt packs a rootfs, so it is a job on the same budget `snapshot.create` uses: it waits ten seconds and answers 200 if it finished, or 202 with a job to poll if it did not.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Prefer" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The environment, now `ready`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Environment" } }
+            }
+          },
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "This environment has no builder sandbox to capture.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
           "501": { "$ref": "#/components/responses/Disabled" }
         }
       }
@@ -2118,7 +2423,8 @@
           "fleet",
           "repos",
           "github_app",
-          "template_tags"
+          "template_tags",
+          "environments"
         ],
         "properties": {
           "archiving": { "type": "boolean", "description": "Object storage is configured." },
@@ -2131,7 +2437,8 @@
           "fleet": { "type": "boolean", "description": "This host is a gateway other machines can join, so the node endpoints answer. It says nothing about whether any machine has joined." },
           "repos": { "type": "boolean", "description": "The repo store is open, so repositories can be attached to tags at all." },
           "github_app": { "type": "boolean", "description": "This host holds a GitHub App key, which is what turns an attachment into a clone of a PRIVATE repository. False leaves attachment working and public repos cloning." },
-          "template_tags": { "type": "boolean", "description": "A tag can name the base image its sandboxes boot from, so `/v1/templates/{tag}` answers. False is a host with no binding store, where every create takes the operator's default image — a different statement from `snapshots`, since a host can hold snapshots to fork by name with nowhere to record a binding." }
+          "template_tags": { "type": "boolean", "description": "A tag can name the base image its sandboxes boot from, so `/v1/templates/{tag}` answers. False is a host with no binding store, where every create takes the operator's default image — a different statement from `snapshots`, since a host can hold snapshots to fork by name with nowhere to record a binding." },
+          "environments": { "type": "boolean", "description": "A composition — repositories, secrets, plain variables, egress rules and a base image — can be named and booted from as one object. False is a host with no environment store, where the environment endpoints answer 501 and a create naming one is refused; it says nothing about `tags`, which keep working on their own, because an environment is a name for a tag rather than a replacement for one." }
         }
       },
       "RepoStatus": {
@@ -2316,22 +2623,31 @@
       },
       "Route": {
         "type": "object",
-        "description": "One forwarded hostname.",
+        "description": "One addressable port of a sandbox.",
         "required": ["subdomain", "sandbox", "port", "visibility"],
         "properties": {
           "subdomain": { "type": "string", "example": "demo" },
           "sandbox": { "type": "string", "example": "demo" },
           "port": {
             "type": "integer",
-            "description": "The guest port this hostname forwards to.",
+            "description": "The guest port this entry addresses.",
             "example": 8000
           },
           "visibility": {
             "type": "string",
             "enum": ["public", "private"],
-            "description": "`private` requires a signed-in owner or operator."
+            "description": "`private` requires a signed-in owner or operator. It applies to THIS port alone."
           },
-          "url": { "type": "string", "format": "uri", "example": "https://demo.example.com" }
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "The default port's URL is portless; every other port is the same hostname with the port on it.",
+            "example": "https://demo.example.com"
+          },
+          "default": {
+            "type": "boolean",
+            "description": "True for the hostname's own port — the one its portless URL forwards to, and the one a `public` with no `port` opens."
+          }
         }
       },
       "Visibility": {
@@ -2344,7 +2660,7 @@
           },
           "changed": {
             "type": "integer",
-            "description": "How many routes this call flipped. Absent on a read."
+            "description": "How many ports this call changed the answer for. Absent on a read."
           }
         }
       },
@@ -2354,7 +2670,15 @@
         "properties": {
           "visibility": {
             "type": "string",
-            "enum": ["public", "private"]
+            "enum": ["public", "private", "forget"],
+            "description": "`forget` is only valid with `port`: it drops the port from the listing, leaving it private like every port nobody has mentioned."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "One guest port of the sandbox's default hostname. Omit to act on the sandbox as a whole — see the operation description for why that is asymmetric.",
+            "example": 5173
           }
         }
       },
@@ -2672,6 +2996,236 @@
           }
         }
       },
+      "EnvVar": {
+        "type": "object",
+        "description": "A plain, non-secret environment variable, delivered to the guest in the same managed block as the secrets. A secret of the same name wins.",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string", "example": "NODE_ENV" },
+          "value": { "type": "string", "example": "development" }
+        }
+      },
+      "Environment": {
+        "type": "object",
+        "description": "An environment and everything currently carrying its tag.",
+        "required": [
+          "name",
+          "state",
+          "has_setup",
+          "setup_bytes",
+          "created_at",
+          "repos",
+          "secrets",
+          "rules",
+          "vars"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The environment's name, which IS its tag.",
+            "example": "web"
+          },
+          "description": { "type": "string" },
+          "state": {
+            "type": "string",
+            "enum": ["draft", "building", "ready", "failed"],
+            "description": "`draft` has never been built; `ready` has a base image bound to its tag. A `failed` environment may STILL have one \u2014 the binding is written at the end of a successful capture, so a failed REBUILD leaves the previous good image in place; `built_at` is what tells the two apart."
+          },
+          "setup_from": {
+            "type": "string",
+            "enum": ["repo", "agent", "manual"],
+            "description": "Where the recorded setup script came from."
+          },
+          "has_setup": { "type": "boolean" },
+          "setup_bytes": { "type": "integer" },
+          "build_box": {
+            "type": "string",
+            "description": "The builder sandbox, while one exists. A failed build leaves it paused."
+          },
+          "build_error": {
+            "type": "string",
+            "description": "Why the last build failed: the summarised last line of the guest's log."
+          },
+          "build_denials": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/BuildDeniedDomain" },
+            "description": "Exact DNS names the egress policy refused during the most recent build, aggregated and bounded. Absent when none were observed or denial capture was unavailable."
+          },
+          "build_denial_overflow": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Additional denied DNS queries omitted after the distinct-domain capture limit was reached."
+          },
+          "built_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When a capture last succeeded. Absent means no image was ever bound."
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this environment's composition last changed. It is what decides between environments when something has to pick one — a launch link for a repository attached to several opens the most recently updated."
+          },
+          "repos": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Repository slugs attached to this tag."
+          },
+          "secrets": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Secret NAMES carrying this tag. Never values."
+          },
+          "rules": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Egress rule-sets carrying this tag."
+          },
+          "vars": { "type": "array", "items": { "$ref": "#/components/schemas/EnvVar" } },
+          "snapshot": {
+            "type": "string",
+            "description": "The base image bound to this tag, absent when it boots the operator default."
+          }
+        }
+      },
+      "BuildDeniedDomain": {
+        "type": "object",
+        "required": ["domain", "queries", "qtypes", "first_seen_unix", "last_seen_unix"],
+        "properties": {
+          "domain": { "type": "string", "example": "registry.npmjs.org" },
+          "queries": { "type": "integer", "format": "int64", "minimum": 0, "example": 6 },
+          "qtypes": { "type": "array", "items": { "type": "string" }, "example": ["A", "AAAA"] },
+          "first_seen_unix": { "type": "integer", "format": "int64" },
+          "last_seen_unix": { "type": "integer", "format": "int64" }
+        }
+      },
+      "EnvironmentList": {
+        "type": "object",
+        "required": ["environments"],
+        "properties": {
+          "environments": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Environment" }
+          }
+        }
+      },
+      "EnvironmentRepo": {
+        "type": "object",
+        "description": "One repository attachment, with the same per-repo passthrough `POST /v1/repos` takes. Any `tags` here are unioned with the environment's own name.",
+        "required": ["slug"],
+        "properties": {
+          "slug": { "type": "string", "example": "wandb/hivemind" },
+          "host": { "type": "string", "description": "Empty means github.com." },
+          "ref": {
+            "type": "string",
+            "description": "Empty means the repository's default branch."
+          },
+          "path": {
+            "type": "string",
+            "description": "Empty means the default clone layout."
+          },
+          "write": { "type": "boolean", "description": "Ask for a token that can push." },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "EnvironmentRequest": {
+        "type": "object",
+        "description": "Create-and-update in one. Everything here ADDS except `vars`, which are set outright, and `description`, which replaces when sent and is left alone when omitted.",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
+            "description": "The environment's name, which becomes its tag. `default` is refused."
+          },
+          "description": {
+            "type": "string",
+            "description": "Omit to leave the existing description alone; send \"\" to clear it."
+          },
+          "repos": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/EnvironmentRepo" }
+          },
+          "secrets": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Secret names, which must already exist."
+          },
+          "rules": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Egress rule-set names, which must already exist."
+          },
+          "vars": { "type": "array", "items": { "$ref": "#/components/schemas/EnvVar" } },
+          "open_egress": {
+            "type": "boolean",
+            "description": "On create: skip the default egress rule-set. Never stored."
+          },
+          "adopt": {
+            "type": "boolean",
+            "description": "On create: agree to take on a tag that is already carrying repositories, secrets, rule-sets, variables, a base image or sandboxes. Without it such a create answers 409 `env_tag_in_use`, whose `details` name exactly what would be adopted. Never stored — what IS stored is the variables and base image that were found, so that deleting the environment later does not destroy them."
+          }
+        }
+      },
+      "EnvironmentScript": {
+        "type": "object",
+        "required": ["script"],
+        "properties": {
+          "script": { "type": "string", "description": "The setup script, as text." },
+          "from": {
+            "type": "string",
+            "enum": ["repo", "agent", "manual"],
+            "description": "Read-only: a script sent to this API is recorded as `manual`."
+          }
+        }
+      },
+      "EnvironmentDeleted": {
+        "type": "object",
+        "description": "What the removal did, and what it deliberately did not do.",
+        "required": ["name", "repos", "secrets", "rules", "resynced"],
+        "properties": {
+          "name": { "type": "string" },
+          "repos": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Repo attachments that still carry the tag. NOT deleted."
+          },
+          "secrets": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Secrets that still carry the tag. NOT deleted."
+          },
+          "rules": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Rule-sets that still carry the tag. NOT deleted."
+          },
+          "unbound": {
+            "type": "string",
+            "description": "The snapshot the tag no longer boots from. The snapshot itself is kept."
+          },
+          "removed_rule": {
+            "type": "string",
+            "description": "The auto-created egress rule-set that went with the environment \u2014 the one thing here that WAS deleted."
+          },
+          "kept_vars": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Variables that were on the tag BEFORE this environment adopted it, and so were kept. An environment's own variables are deleted with it."
+          },
+          "kept_snapshot": {
+            "type": "string",
+            "description": "The base image the tag still boots from, because it was bound before this environment adopted the tag."
+          },
+          "resynced": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Running sandboxes whose environment block was re-pushed."
+          }
+        }
+      },
       "Whoami": {
         "type": "object",
         "required": ["handle", "status", "operator", "subject"],
@@ -2905,7 +3459,7 @@
             "type": "object",
             "required": ["type", "name"],
             "properties": {
-              "type": { "type": "string", "enum": ["sandbox", "snapshot"] },
+              "type": { "type": "string", "enum": ["sandbox", "snapshot", "environment"] },
               "name": { "type": "string" }
             }
           },

@@ -788,6 +788,30 @@ func (s *Server) GetNetworkUsage(ctx context.Context, _ *nodev1.GetNetworkUsageR
 	return &nodev1.GetNetworkUsageResponse{Usage: usage}, nil
 }
 
+func (s *Server) NetworkDenials(ctx context.Context, request *nodev1.NetworkDenialsRequest) (*nodev1.NetworkDenialsResponse, error) {
+	if s.config.Network == nil {
+		return nil, status.Error(codes.FailedPrecondition, "network denial capture is not supported by this node")
+	}
+	if request.GetSandbox() == "" {
+		return nil, status.Error(codes.InvalidArgument, "sandbox is required")
+	}
+	capture, err := s.config.Network.NetworkDenials(ctx, request.GetSandbox(), request.GetBeginCapture())
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "capture network denials: %v", err)
+	}
+	response := &nodev1.NetworkDenialsResponse{
+		CaptureId: capture.CaptureID, OverflowQueries: capture.OverflowQueries,
+		Domains: make([]*nodev1.NetworkDeniedDomain, 0, len(capture.Domains)),
+	}
+	for _, domain := range capture.Domains {
+		response.Domains = append(response.Domains, &nodev1.NetworkDeniedDomain{
+			Domain: domain.Domain, Queries: domain.Queries, Qtypes: domain.QTypes,
+			FirstSeenUnix: domain.FirstSeenUnix, LastSeenUnix: domain.LastSeenUnix,
+		})
+	}
+	return response, nil
+}
+
 func (s *Server) GetOperation(ctx context.Context, request *nodev1.GetOperationRequest) (*nodev1.Operation, error) {
 	if request.GetOperationId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "operation_id is required")

@@ -143,9 +143,10 @@ type fakeNode struct {
 	calls     []string
 	// The egress plane. metered false is a machine with no sluice, which is the
 	// default because it is the state every node was in before this existed.
-	metered  bool
-	netAllow map[string][]string
-	netUsage map[string]netpush.VMUsage
+	metered    bool
+	netAllow   map[string][]string
+	netUsage   map[string]netpush.VMUsage
+	netDenials netpush.DenialCapture
 	// The instrument reads. vitals is keyed by sandbox name and holds the CPU
 	// seconds this machine would report; vitalsErr makes the machine fail the
 	// way an unreachable one does.
@@ -457,6 +458,16 @@ func (n *fakeNode) NetUsage(context.Context) (map[string]netpush.VMUsage, error)
 		return nil, nodelink.NoSluice(n.name)
 	}
 	return n.netUsage, nil
+}
+
+func (n *fakeNode) NetDenials(_ context.Context, sandbox string, begin bool) (netpush.DenialCapture, error) {
+	n.record(fmt.Sprintf("net.denials %s %t", sandbox, begin))
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if !n.metered {
+		return netpush.DenialCapture{}, nodelink.NoSluice(n.name)
+	}
+	return n.netDenials, nil
 }
 
 var _ fleet.Node = (*fakeNode)(nil)

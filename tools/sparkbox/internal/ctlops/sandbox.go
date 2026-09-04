@@ -41,6 +41,24 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	if err != nil {
 		return SandboxInfo{}, Invalid(op, "bad_tag", "%v", err)
 	}
+	// --env resolves BEFORE defaultTags and before the tag store is checked,
+	// because it produces a tag like any other and every rule below has to see
+	// it: the host must have somewhere to stamp it, `default` still rides
+	// along, and the template it binds is resolved from the same list. It is
+	// unioned rather than substituted — `--env web --tag ci` asked for both —
+	// and its refusals land here, before the first write, for the reason
+	// nameIsFree and placeable do: a create that cannot possibly succeed must
+	// not leave tag rows behind for a sandbox that never exists.
+	if a.Env != "" {
+		envTag, err := o.resolveEnvTag(op, c.Handle, a.Env)
+		if err != nil {
+			return SandboxInfo{}, err
+		}
+		if !slices.Contains(tags, envTag) {
+			tags = append(tags, envTag)
+			slices.Sort(tags)
+		}
+	}
 	if len(tags) > 0 && o.tags == nil {
 		return SandboxInfo{}, Disabled(op, "tagging is not enabled on this host")
 	}
@@ -68,9 +86,18 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	// none may be written before the two refusals below — same reason as
 	// nameIsFree and placeable. resolveTemplate falls back to the default image,
 	// so tpl.Image is always the image to build.
-	tpl, err := o.resolveTemplate(op, c.Handle, tags)
-	if err != nil {
-		return SandboxInfo{}, err
+	//
+	// FromBase short-circuits the whole lookup rather than un-picking its
+	// answer: it is the caller saying "ignore the bindings entirely", which is
+	// a different statement from "these tags happen to bind nothing", and
+	// running the resolution anyway would still refuse a create whose binding
+	// points at a deleted snapshot — the exact case a rebuild-from-base exists
+	// to recover from.
+	tpl := resolvedTemplate{Image: o.defaultImage}
+	if !a.FromBase {
+		if tpl, err = o.resolveTemplate(op, c.Handle, tags); err != nil {
+			return SandboxInfo{}, err
+		}
 	}
 	if err := o.templateNodeAgrees(op, a.Node, tpl); err != nil {
 		return SandboxInfo{}, err

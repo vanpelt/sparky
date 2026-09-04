@@ -22,6 +22,17 @@
 // rewritten do the delivery paths answer ErrNotEnabled (tags stay functional
 // throughout). The per-row key_id column reserves the wrapped-DEK
 // re-encryption migration without building it.
+//
+// This package also holds plain, declared-non-sensitive environment variables
+// (the env_vars table, PutVar and friends). They live here rather than in a
+// package of their own for two reasons: this package composes /etc/environment,
+// so keeping vars beside secrets means EnvForSandbox stays the single delivery
+// query and internal/envsync needs no change at all; and this package is the
+// only writer of sandbox_tags, so a var joins to a sandbox through exactly the
+// machinery a secret already uses. Var values are stored in PLAINTEXT on
+// purpose — they are declared non-sensitive (NODE_ENV, LOG_LEVEL, a service
+// URL), and nothing on the var path touches the AEAD or the keycheck sentinel,
+// so an undecryptable-secrets state never disables vars.
 package secrets
 
 import (
@@ -49,20 +60,30 @@ var (
 	// ErrNoSuchSecret is returned when an operation targets an env name the
 	// owner has no secret for.
 	ErrNoSuchSecret = errors.New("no such secret")
+	// ErrNoSuchVar is the env_vars counterpart of ErrNoSuchSecret: DeleteVar
+	// targeted a (tag, name) the owner has no plain var for. It maps to 404 via
+	// the console's statusFor convention.
+	ErrNoSuchVar = errors.New("no such env var")
 	// ErrNotEnabled is returned by the delivery paths (EnvForSandbox,
 	// SandboxesForSecret) when the keycheck sentinel failed at Open and could
 	// not be rewritten under the current KEK. Writes and listing are never
 	// gated — recovery is users re-entering values. The "not enabled" wording
 	// maps to 501 via the console's statusFor convention.
 	ErrNotEnabled = errors.New("secrets are not enabled (encryption key does not match stored data)")
+	// ErrSecretNameInUse is returned by RenameSecret when the owner already
+	// holds a secret under the new name. Renaming onto it would have to either
+	// destroy that value or merge two rows, and neither is something a rename
+	// should decide on its own.
+	ErrSecretNameInUse = errors.New("a secret with that name already exists")
 )
 
 // envNameRe bounds env names to the portable shell-identifier form.
 var envNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
 
-// reservedEnvNames are refused at PutSecret: delivering them via
-// /etc/environment would poison every guest session (and a pushed PATH breaks
-// the SSH delivery pipeline itself). Mirrored in envsync's render-time gate.
+// reservedEnvNames are refused at PutSecret and PutVar alike (via checkEnvRow):
+// delivering them via /etc/environment would poison every guest session (and a
+// pushed PATH breaks the SSH delivery pipeline itself). Mirrored in envsync's
+// render-time gate.
 var reservedEnvNames = map[string]bool{
 	"PATH":            true,
 	"LD_PRELOAD":      true,
@@ -139,6 +160,19 @@ type SecretMeta struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// Var is a plain, declared-non-sensitive environment variable attached to a
+// tag. Unlike SecretMeta it carries its Value: there is nothing to hide, which
+// is the whole point of declaring a var instead of a secret — a console can
+// show it, an environment definition can round-trip it, and an edit does not
+// have to re-type it.
+type Var struct {
+	Tag       string    `json:"tag"`
+	Name      string    `json:"name"`
+	Value     string    `json:"value"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type Store struct {
 	mu       sync.Mutex // serialises writes (sqlite is single-writer)
 	db       *sql.DB
@@ -211,6 +245,24 @@ func Open(path string, kek []byte, log *slog.Logger) (*Store, error) {
 		);
 
 		CREATE TABLE IF NOT EXISTS secrets_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);
+
+		-- env_vars holds plaintext, declared-non-sensitive variables. Note the
+		-- deliberate key difference from secrets: a secret is UNIQUE (owner,
+		-- env_name) — one value per owner, and its tags only choose where that
+		-- one value lands — whereas a var is keyed by TAG as well, so NODE_ENV
+		-- can be "development" under one environment and "staging" under
+		-- another for the same person. That per-tag value is the reason this
+		-- table exists instead of a plaintext column on secrets.
+		CREATE TABLE IF NOT EXISTS env_vars (
+			owner      TEXT NOT NULL,
+			tag        TEXT NOT NULL,
+			name       TEXT NOT NULL,
+			value      TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (owner, tag, name)
+		);
+		CREATE INDEX IF NOT EXISTS env_vars_owner ON env_vars(owner);
 	`); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
@@ -395,6 +447,43 @@ func (s *Store) RenameSandbox(old, new string) error {
 	return tx.Commit()
 }
 
+// checkEnvRow applies the rules every row this store may deliver has to
+// satisfy, whether it is an encrypted secret or a plaintext var: a portable
+// shell-identifier name, none of the reserved loader/PATH knobs, ≤ 4 KiB, and
+// no '\r', '\n', NUL or '#'. The two writers share one implementation on
+// purpose — a var must never be able to carry a payload a secret could not,
+// since both end up as lines in the same /etc/environment block. kind names the
+// row type in the message and is the only difference between the callers;
+// PutSecret's wording is unchanged.
+func checkEnvRow(kind, envName, value string) error {
+	if !envNameRe.MatchString(envName) {
+		return fmt.Errorf("invalid env name %q (want [A-Z_][A-Z0-9_]*, max 64 chars)", envName)
+	}
+	if reservedEnvNames[envName] {
+		return fmt.Errorf("env name %s is reserved: it would break the guest's session environment", envName)
+	}
+	if len(value) > maxValueLen {
+		return fmt.Errorf("%s value for %s exceeds %d bytes", kind, envName, maxValueLen)
+	}
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return fmt.Errorf("%s value for %s contains a newline or NUL and cannot be an env var", kind, envName)
+	}
+	if strings.Contains(value, "#") {
+		return fmt.Errorf("%s value for %s contains '#', which /etc/environment treats as a comment even inside quotes", kind, envName)
+	}
+	return nil
+}
+
+// ValidateVar reports whether a plain env var could be written and delivered,
+// without writing it.
+//
+// It exists so a caller composing several stores in one command can refuse a
+// bad var BEFORE its first write, rather than discovering the rule from PutVar
+// after an environment row and a retagged secret are already committed. The
+// rules are the same ones PutVar enforces, from the same implementation, so the
+// two cannot drift.
+func ValidateVar(name, value string) error { return checkEnvRow("var", name, value) }
+
 // PutSecret creates or updates the owner's secret for envName, replacing its
 // tag set. An update bumps version and re-encrypts under a fresh nonce. The
 // value must be a deliverable env var: ≤ 4 KiB, no newlines, no NULs, and no
@@ -408,20 +497,8 @@ func (s *Store) PutSecret(owner, envName, value string, tags []string) error {
 	if owner == "" {
 		return fmt.Errorf("secret needs an owner")
 	}
-	if !envNameRe.MatchString(envName) {
-		return fmt.Errorf("invalid env name %q (want [A-Z_][A-Z0-9_]*, max 64 chars)", envName)
-	}
-	if reservedEnvNames[envName] {
-		return fmt.Errorf("env name %s is reserved: it would break the guest's session environment", envName)
-	}
-	if len(value) > maxValueLen {
-		return fmt.Errorf("secret value for %s exceeds %d bytes", envName, maxValueLen)
-	}
-	if strings.ContainsAny(value, "\r\n\x00") {
-		return fmt.Errorf("secret value for %s contains a newline or NUL and cannot be an env var", envName)
-	}
-	if strings.Contains(value, "#") {
-		return fmt.Errorf("secret value for %s contains '#', which /etc/environment treats as a comment even inside quotes", envName)
+	if err := checkEnvRow("secret", envName, value); err != nil {
+		return err
 	}
 	tags, err := normTags(tags)
 	if err != nil {
@@ -480,6 +557,141 @@ func (s *Store) PutSecret(owner, envName, value string, tags []string) error {
 		if _, err := tx.Exec(`INSERT INTO secret_tags (secret_id, tag) VALUES (?, ?)`, id, tag); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+// RetagSecret replaces the tag set of an existing secret WITHOUT touching its
+// value, its version or its key id, or returns ErrNoSuchSecret.
+//
+// It exists because PutSecret is the only other way to change a tag set and it
+// demands the value, which no surface can supply: values are write-only from
+// every API's point of view (there is deliberately no read-a-value method), so
+// "also give this secret the tag `web`" was previously expressible only by
+// asking the user to paste their token again. That is not a small annoyance —
+// re-pasting a credential to change a label is exactly the sort of step that
+// gets skipped, and the environment then reaches a sandbox without it.
+//
+// The version is deliberately NOT bumped: version counts changes to the secret
+// MATERIAL, which is what a guest re-reads, and a tag change alters who
+// receives the row rather than what it says. Callers that need the delivery
+// refreshed re-push the affected sandboxes, exactly as they do after a
+// PutSecret.
+//
+// An empty tag set defaults to DefaultTag for PutSecret's reason: a secret
+// tagged with nothing reaches no sandbox at all, and that failure is silent
+// until somebody's agent asks them to log in.
+func (s *Store) RetagSecret(owner, envName string, tags []string) error {
+	if owner == "" {
+		return fmt.Errorf("secret needs an owner")
+	}
+	tags, err := normTags(tags)
+	if err != nil {
+		return err
+	}
+	if len(tags) == 0 {
+		tags = []string{DefaultTag}
+	}
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var id string
+	// Owner-scoped in the SELECT, so another owner's secret of the same name is
+	// simply not found — the same answer as a name nobody holds.
+	if err := tx.QueryRow(`SELECT id FROM secrets WHERE owner = ? AND env_name = ?`, owner, envName).Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNoSuchSecret
+		}
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE secrets SET updated_at = ? WHERE id = ?`, now, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM secret_tags WHERE secret_id = ?`, id); err != nil {
+		return err
+	}
+	for _, tag := range tags {
+		if _, err := tx.Exec(`INSERT INTO secret_tags (secret_id, tag) VALUES (?, ?)`, id, tag); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// RenameSecret changes the env name of an existing secret, keeping its value,
+// its tags, its version and its row id, or returns ErrNoSuchSecret.
+//
+// It has to touch the ciphertext even though the value does not change: the
+// AAD binds every blob to (owner, env name, id), which is exactly what stops a
+// row being re-homed under another name by editing the database. So a rename
+// is an unseal under the old name followed by a seal under the new one — the
+// same move Resealer makes for an owner rename, and the reason a rename cannot
+// be done without the key.
+//
+// The version is deliberately NOT bumped, for RetagSecret's reason: version
+// counts changes to the secret MATERIAL, and this is the same value under a
+// different name. Callers re-push the affected sandboxes.
+func (s *Store) RenameSecret(owner, oldName, newName string) error {
+	if owner == "" {
+		return fmt.Errorf("secret needs an owner")
+	}
+	// The value rules do not apply to a rename (nothing is being written), but
+	// the NAME rules do, and they are the same ones PutSecret would enforce.
+	if err := checkEnvRow("secret", newName, ""); err != nil {
+		return err
+	}
+	if oldName == newName {
+		return nil
+	}
+	now := time.Now().UTC()
+
+	// No s.disabled gate: unlike the delivery paths this is a write, and a
+	// store whose key does not match answers through the unseal below with
+	// ErrUndecryptable — which says the specific thing that went wrong.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var id string
+	var blob []byte
+	if err := tx.QueryRow(`SELECT id, ciphertext FROM secrets WHERE owner = ? AND env_name = ?`,
+		owner, oldName).Scan(&id, &blob); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNoSuchSecret
+		}
+		return err
+	}
+	var taken string
+	switch err := tx.QueryRow(`SELECT id FROM secrets WHERE owner = ? AND env_name = ?`,
+		owner, newName).Scan(&taken); {
+	case err == nil:
+		return ErrSecretNameInUse
+	case err != sql.ErrNoRows:
+		return err
+	}
+
+	plaintext, err := unseal(s.aead, aadFor(owner, oldName, id), blob)
+	if err != nil {
+		return err
+	}
+	ciphertext, err := seal(s.aead, aadFor(owner, newName, id), plaintext)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE secrets SET env_name = ?, ciphertext = ?, key_id = ?, updated_at = ? WHERE id = ?`,
+		newName, ciphertext, keyID, now, id); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -560,15 +772,35 @@ func (s *Store) ListSecrets(owner string) ([]SecretMeta, error) {
 	return out, trows.Err()
 }
 
-// EnvForSandbox computes the environment a sandbox should see: every secret
-// of the sandbox's owner sharing a tag with the sandbox. Owner scoping is
-// structural — the join requires bt.owner = s.owner AND s.owner = ?, so no
-// caller mistake can pull another owner's values. Decryption is
-// all-or-nothing: one undecryptable row fails the whole call with
-// ErrUndecryptable, never a partial environment.
+// EnvForSandbox computes the environment a sandbox should see: every plain var
+// and every secret of the sandbox's owner sharing a tag with the sandbox. Owner
+// scoping is structural in both queries — each join requires bt.owner = x.owner
+// AND x.owner = ?, so no caller mistake can pull another owner's values.
+// Decryption is all-or-nothing: one undecryptable row fails the whole call with
+// ErrUndecryptable, never a partial environment (and never the vars alone).
+//
+// The merge order is load-bearing: vars are read FIRST and secrets are written
+// over them, so on a name collision the SECRET wins. The reverse would let a
+// plaintext row shadow an encrypted one — a var named the same as a secret
+// would silently replace it in the guest, which is both a wrong value and a
+// downgrade a user never asked for. Collisions are otherwise legal and quiet;
+// nothing refuses a var whose name matches a secret, because the two are
+// written by different surfaces at different times and refusing at write time
+// would only move the surprise.
+//
+// This is the single delivery query. internal/envsync calls it and knows
+// nothing about vars.
 func (s *Store) EnvForSandbox(sandbox, owner string) (map[string]string, error) {
 	if s.disabled { // delivery-only gate: writes/listing recover the store
+		// Unchanged from before vars existed: a store that cannot verify its
+		// own key refuses to compute an environment at all rather than deliver
+		// the half of it that happens to be plaintext. Vars remain reachable
+		// through VarsForSandbox, which is never gated.
 		return nil, ErrNotEnabled
+	}
+	env, err := s.VarsForSandbox(sandbox, owner)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := s.db.Query(`
 		SELECT DISTINCT s.id, s.env_name, s.ciphertext
@@ -596,13 +828,14 @@ func (s *Store) EnvForSandbox(sandbox, owner string) (map[string]string, error) 
 		return nil, err
 	}
 
-	env := make(map[string]string, len(sealedRows))
 	for _, r := range sealedRows {
 		pt, err := unseal(s.aead, aadFor(owner, r.name, r.id), r.blob)
 		if err != nil {
+			// All-or-nothing: drop the vars already collected too, so a caller
+			// can never mistake a partial environment for a whole one.
 			return nil, fmt.Errorf("secret %s: %w", r.name, ErrUndecryptable)
 		}
-		env[r.name] = string(pt)
+		env[r.name] = string(pt) // secrets overwrite vars, never the other way
 	}
 	return env, nil
 }
@@ -633,6 +866,154 @@ func (s *Store) SandboxesForSecret(owner, envName string) ([]string, error) {
 		out = append(out, sandbox)
 	}
 	return out, rows.Err()
+}
+
+// --- plain env vars ------------------------------------------------------
+//
+// Everything from here to normTags operates on env_vars. None of it touches
+// s.aead, s.disabled, or the keycheck sentinel: vars are plaintext by
+// declaration, so an OIDC key rotation that orphans every secret must still
+// leave vars listable, writable, and deliverable. The one place the two meet is
+// EnvForSandbox, which merges them.
+
+// PutVar creates or updates the owner's plain env var name under tag. The name
+// and value rules are exactly a secret's — same helper, same refusals — because
+// both end up as lines in the same /etc/environment block. The value is stored
+// as given, in plaintext: a var is a declaration that this string is not
+// sensitive. Anything that needs encrypting is a secret, not a var.
+//
+// Unlike a secret, which is UNIQUE (owner, env_name), a var is keyed by tag as
+// well, so the same name under two tags is two independent rows with two
+// values.
+func (s *Store) PutVar(owner, tag, name, value string) error {
+	if owner == "" {
+		return fmt.Errorf("env var needs an owner")
+	}
+	if err := checkEnvRow("env var", name, value); err != nil {
+		return err
+	}
+	tag, err := normTag(tag)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Upsert rather than select-then-write: the primary key is the whole
+	// identity of the row, so there is no version to bump and nothing to
+	// re-seal, and created_at survives an update.
+	_, err = s.db.Exec(`
+		INSERT INTO env_vars (owner, tag, name, value, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (owner, tag, name)
+		DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		owner, tag, name, value, now, now)
+	return err
+}
+
+// DeleteVar removes one of the owner's vars, or ErrNoSuchVar. It is scoped to
+// (owner, tag, name) — the same var name under another of the owner's tags is
+// a different row and is left alone.
+func (s *Store) DeleteVar(owner, tag, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`DELETE FROM env_vars WHERE owner = ? AND tag = ? AND name = ?`, owner, tag, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNoSuchVar
+	}
+	return nil
+}
+
+// ListVars returns every var the owner has, across all tags, sorted by tag then
+// name. Values are included — see Var.
+func (s *Store) ListVars(owner string) ([]Var, error) {
+	return s.queryVars(`
+		SELECT tag, name, value, created_at, updated_at FROM env_vars
+		WHERE owner = ? ORDER BY tag, name`, owner)
+}
+
+// VarsForTag returns the owner's vars carrying exactly tag, sorted by name.
+func (s *Store) VarsForTag(owner, tag string) ([]Var, error) {
+	return s.queryVars(`
+		SELECT tag, name, value, created_at, updated_at FROM env_vars
+		WHERE owner = ? AND tag = ? ORDER BY name`, owner, tag)
+}
+
+func (s *Store) queryVars(query string, args ...any) ([]Var, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Var
+	for rows.Next() {
+		var v Var
+		if err := rows.Scan(&v.Tag, &v.Name, &v.Value, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// VarsForSandbox computes the plain env vars a sandbox should see: every var of
+// the sandbox's owner sharing a tag with the sandbox. Owner scoping is
+// structural, exactly as in EnvForSandbox — the join requires bt.owner =
+// v.owner AND v.owner = ?, so no caller mistake can pull another owner's rows.
+//
+// A sandbox carrying two tags that both define the same name is resolved
+// deterministically rather than by whatever order sqlite felt like: rows arrive
+// ordered by tag, and later assignment wins, so the alphabetically last tag
+// supplies the value.
+func (s *Store) VarsForSandbox(sandbox, owner string) (map[string]string, error) {
+	rows, err := s.db.Query(`
+		SELECT v.name, v.value
+		FROM env_vars v
+		JOIN sandbox_tags bt ON bt.tag = v.tag AND bt.owner = v.owner
+		WHERE bt.sandbox = ? AND v.owner = ?
+		ORDER BY v.tag`, sandbox, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	env := map[string]string{}
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		env[name] = value
+	}
+	return env, rows.Err()
+}
+
+// DeleteVarsForTag removes every var the owner holds under tag — the cleanup an
+// environment's deletion performs. It is scoped to one owner: an identical tag
+// string belonging to somebody else is untouched.
+func (s *Store) DeleteVarsForTag(owner, tag string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM env_vars WHERE owner = ? AND tag = ?`, owner, tag)
+	return err
+}
+
+// normTag validates a single tag through the same filter normTags applies to a
+// list, and supplies DefaultTag when the caller names none — for the reason
+// spelled out on DefaultTag: a row attached to no tag reaches no sandbox, and
+// that failure is silent minutes later inside a guest rather than loud here.
+func normTag(tag string) (string, error) {
+	if tag == "" {
+		return DefaultTag, nil
+	}
+	tags, err := normTags([]string{tag})
+	if err != nil {
+		return "", err
+	}
+	return tags[0], nil
 }
 
 // normTags validates, sorts, and de-duplicates a tag list.

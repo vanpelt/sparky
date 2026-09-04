@@ -130,8 +130,9 @@ const (
 	// The egress plane, gateway -> node. Policy is pushed because the rules
 	// that produce it live in the gateway's store; usage is pulled because the
 	// meter that produces it is attached to the node's own taps.
-	TypeNetPolicy = "net.policy"
-	TypeNetUsage  = "net.usage"
+	TypeNetPolicy  = "net.policy"
+	TypeNetUsage   = "net.usage"
+	TypeNetDenials = "net.denials"
 
 	// NODE -> gateway requests. Identity stays upstream because the signing key
 	// never leaves the gateway; route self-service stays upstream because route
@@ -156,6 +157,20 @@ const (
 	TypeSelfRepoCred      = "sandbox.self_repo_credential"
 	TypeSelfRepoAuthStart = "sandbox.self_repo_authorization_start"
 	TypeSelfRepoAuthPoll  = "sandbox.self_repo_authorization_poll"
+	// The environment-build pair travels gateway-ward for the lifecycle trio's
+	// reason, twice over: the environments store, the tag-to-template bindings
+	// and the placement ledger are all on the gateway, and a node holds none of
+	// the three. Whether a VM is any environment's builder is a row up there,
+	// and a successful report ends in a capture that re-points a tag — which is
+	// the one operation the fleet has to record under the owner it knows rather
+	// than the one a node reports.
+	//
+	// Unrelayed they answer 501 on every node, which on a control-plane-only
+	// gateway is every sandbox there is: a builder reads that as "no job", exits
+	// without running anything, and the environment sits in `building` until it
+	// times out with a cause that is not the real one.
+	TypeSelfSetup       = "sandbox.self_setup"
+	TypeSelfSetupResult = "sandbox.self_setup_result"
 
 	// Certificate enrollment, NODE -> gateway. The SSH control link is the
 	// bootstrap authentication: the request carries no node name because the
@@ -962,6 +977,18 @@ type NetUsageResp struct {
 	VMs []netpush.VMUsage `json:"vms"`
 }
 
+// NetDenialsReq starts or reads one sandbox's build-scoped DNS denial capture.
+// Reset is idempotent because the node keys the capture by the sandbox's
+// immutable ID rather than by its reusable name or tap.
+type NetDenialsReq struct {
+	Sandbox string `json:"sandbox"`
+	Reset   bool   `json:"reset,omitempty"`
+}
+
+type NetDenialsResp struct {
+	Capture netpush.DenialCapture `json:"capture"`
+}
+
 // ---------------------------------------------------------------------------
 // Workload identity
 // ---------------------------------------------------------------------------
@@ -1006,12 +1033,20 @@ type IdentityDocResp struct {
 type SelfVisibilityReq struct {
 	Sandbox    string `json:"sandbox"`
 	Visibility string `json:"visibility"`
+	// Port names ONE guest port of the sandbox's default hostname. Zero — the
+	// shape older nodes send, and what a bare `sparkbox make-public` means —
+	// keeps the whole-sandbox meaning: private closes every port, public opens
+	// only the default one.
+	Port int `json:"port,omitempty"`
 }
 
 type SelfVisibilityResp struct {
 	Sandbox    string `json:"sandbox"`
 	Visibility string `json:"visibility"`
-	Routes     int    `json:"routes"`
+	// Port echoes the single port that changed, or zero for a whole-sandbox
+	// change. Routes counts the ports the answer now applies to.
+	Port   int `json:"port,omitempty"`
+	Routes int `json:"routes"`
 }
 
 type SelfPortReq struct {
@@ -1220,6 +1255,82 @@ type SelfRepoAuthPollReq struct {
 type SelfRepoAuthPollResp struct {
 	State string `json:"state"`
 	Slug  string `json:"slug,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Environment builds: the job a builder VM fetches, and what it reports
+// ---------------------------------------------------------------------------
+
+// MaxSelfSetupScriptBytes and MaxSelfSetupLogBytes bound the two guest-authored
+// strings in a report. They are stated here as well as at the metadata door
+// (maxSetupScript, maxSetupLog in internal/metadata/envsetup.go) and hold the
+// same values on purpose: the body crossing this link ORIGINATED IN A GUEST, so
+// it is bounded where it arrives and not only where it was parsed. A cap
+// enforced in one place is a cap that moves the day somebody adds a second
+// caller — and the second caller here would be a node, which is precisely the
+// machine whose numbers this gateway does not take on trust.
+//
+// Both are far below MaxFrameBytes even at JSON's worst-case escaping, so a
+// report at the ceiling is a request the gateway refuses in a sentence rather
+// than a line the reader tears the link down over.
+const (
+	MaxSelfSetupScriptBytes = 64 << 10
+	MaxSelfSetupLogBytes    = 8 << 10
+)
+
+// SelfSetupReq is a node asking whether one of its sandboxes has a setup script
+// to run. A name and nothing else, for IdentityReq's reason and one sharper:
+// the metadata door this relays deliberately names NOTHING — no environment, no
+// build — because the job a caller has is decided entirely by the gateway from
+// its own rows. Adding a field here would put back exactly what that door was
+// arranged to leave out.
+type SelfSetupReq struct {
+	Sandbox string `json:"sandbox"`
+}
+
+// SelfSetupResp is the job, or the absence of one.
+//
+// Job is explicit rather than inferred from an empty Script: "no job" is the
+// answer nearly every VM in the fleet gets, and a guest must not be able to
+// start a build because a field happened to arrive empty. Env and Mode are
+// host-authored and carry no secret; the node's metadata service checks both
+// are renderable before they become lines 1 and 2 of the guest's response,
+// exactly as the gateway's does, because that check belongs where the format is
+// written.
+//
+// THE JSON TAG STAYS `script` THOUGH THE FIELD NOW CARRIES A PROMPT IN AGENT
+// MODE. Renaming it would be tidier and is the wrong trade: gateway and node
+// are separate processes that can run separate builds of this package, and a
+// renamed tag makes a new gateway's payload arrive at an old node as an empty
+// string — a builder that runs nothing and reports success. An unknown MODE, by
+// contrast, fails loudly at the guest by name. So the field keeps the name it
+// shipped with and the comment carries the meaning.
+type SelfSetupResp struct {
+	Job  bool   `json:"job"`
+	Env  string `json:"env,omitempty"`
+	Mode string `json:"mode,omitempty"`
+	// Script is the mode's payload: the setup script, or the agent's prompt.
+	Script string `json:"script,omitempty"`
+}
+
+// SelfSetupResultReq is a builder's report, already parsed and bounded by the
+// node's metadata door and bounded again on arrival. Script is the verbatim
+// bytes of the run's .sparkbox/setup.sh (empty when unchanged), not base64: the
+// guest's wire format needs an encoding because it is line-oriented sh output,
+// and JSON does not.
+type SelfSetupResultReq struct {
+	Sandbox  string `json:"sandbox"`
+	OK       bool   `json:"ok"`
+	ExitCode int    `json:"exit_code"`
+	Script   string `json:"script,omitempty"`
+	Log      string `json:"log,omitempty"`
+}
+
+// SelfSetupResultResp is the acceptance and nothing else. What the report
+// triggers — a strip, a tool refresh, a pause and a capture — outlives this
+// reply by minutes, and the VM that sent it is paused for most of them.
+type SelfSetupResultResp struct {
+	Sandbox string `json:"sandbox"`
 }
 
 // ---------------------------------------------------------------------------

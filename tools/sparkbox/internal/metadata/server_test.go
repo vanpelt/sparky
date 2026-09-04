@@ -56,6 +56,7 @@ func (f fakeAccounts) Get(handle string) (users.User, error) {
 
 type fakeRouteControl struct {
 	visibility string
+	visPort    int // the port the visibility change named, 0 for the whole sandbox
 	port       int
 }
 
@@ -76,9 +77,9 @@ func (f *fakeRepoStatusSink) SetRepoStatus(name string, rows []host.RepoStatus, 
 	return nil
 }
 
-func (f *fakeRouteControl) SetVisibility(_ context.Context, box *host.Sandbox, visibility string) (RouteVisibility, error) {
-	f.visibility = visibility
-	return RouteVisibility{Sandbox: box.Name, Visibility: visibility, Routes: 2}, nil
+func (f *fakeRouteControl) SetVisibility(_ context.Context, box *host.Sandbox, visibility string, port int) (RouteVisibility, error) {
+	f.visibility, f.visPort = visibility, port
+	return RouteVisibility{Sandbox: box.Name, Visibility: visibility, Port: port, Routes: 2}, nil
 }
 
 func (f *fakeRouteControl) SetPort(_ context.Context, box *host.Sandbox, port int) (RoutePort, error) {
@@ -222,6 +223,64 @@ func TestSelfStatusIncludesReportedReposForHumansAndAgents(t *testing.T) {
 	}
 }
 
+func TestSelfStatusIncludesCachedHiveMindSessionsForHumansAndAgents(t *testing.T) {
+	s := fixture(t)
+	box, _ := s.mgr.(fakeBoxes).GetByHostIP("172.30.5.2")
+	box.HiveMind = &host.HiveMindSessionSnapshot{
+		ObservedAt: time.Date(2026, 9, 3, 14, 30, 0, 0, time.UTC),
+		Sessions: []host.HiveMindSession{
+			{
+				ID: "session-1", Title: "Polish environment status", State: "ended",
+				AgentType: "codex", Model: "gpt-5.6",
+				URL: "https://hivemind.example/sessions/session-1",
+			},
+			{ID: "session-2", State: "ended"},
+		},
+		TotalCount: 7,
+		HasMore:    true,
+	}
+
+	human := request(s, "/self?format=text", "172.30.5.2", "172.30.5.1")
+	for _, want := range []string{
+		"HiveMind sessions (2 of 7 shown, cached at 2026-09-03T14:30:00Z):",
+		"Polish environment status [ended]", "codex · gpt-5.6",
+		"https://hivemind.example/sessions/session-1", "session-2 [ended]",
+	} {
+		if !strings.Contains(human.Body.String(), want) {
+			t.Errorf("human status missing %q:\n%s", want, human.Body)
+		}
+	}
+
+	agent := request(s, "/self", "172.30.5.2", "172.30.5.1")
+	for _, want := range []string{
+		`"hivemind":{"observed_at":"2026-09-03T14:30:00Z"`,
+		`"sessions":[{"id":"session-1"`, `"total_count":7`, `"has_more":true`,
+	} {
+		if !strings.Contains(agent.Body.String(), want) {
+			t.Errorf("JSON status missing %q: %s", want, agent.Body)
+		}
+	}
+}
+
+func TestSelfStatusDistinguishesAnObservedEmptyHiveMindCatalog(t *testing.T) {
+	s := fixture(t)
+	box, _ := s.mgr.(fakeBoxes).GetByHostIP("172.30.5.2")
+	box.HiveMind = &host.HiveMindSessionSnapshot{
+		ObservedAt: time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC),
+		Sessions:   []host.HiveMindSession{},
+	}
+
+	human := request(s, "/self?format=text", "172.30.5.2", "172.30.5.1")
+	if want := "HiveMind sessions: none recorded, cached at 2026-09-03T15:00:00Z"; !strings.Contains(human.Body.String(), want) {
+		t.Errorf("human status missing %q:\n%s", want, human.Body)
+	}
+
+	agent := request(s, "/self", "172.30.5.2", "172.30.5.1")
+	if !strings.Contains(agent.Body.String(), `"sessions":[]`) {
+		t.Errorf("observed empty catalog is not an empty JSON list: %s", agent.Body)
+	}
+}
+
 func TestSandboxCanPinAndUnpinItself(t *testing.T) {
 	s := fixture(t)
 	for _, tc := range []struct {
@@ -267,6 +326,9 @@ func TestSandboxCanManageItsOwnRoutes(t *testing.T) {
 	}{
 		{"/self/visibility/public", `"visibility":"public"`},
 		{"/self/visibility/private", `"visibility":"private"`},
+		// ?port= narrows a visibility change to one guest port; the answer
+		// echoes it back so the guest can see what it actually changed.
+		{"/self/visibility/public?port=5173", `"port":5173`},
 		{"/self/port/5173", `"port":5173`},
 	} {
 		rec := requestMethod(s, http.MethodPost, tc.path, "172.30.5.2", "172.30.5.1")
@@ -274,7 +336,11 @@ func TestSandboxCanManageItsOwnRoutes(t *testing.T) {
 			t.Errorf("POST %s = %d %s", tc.path, rec.Code, rec.Body)
 		}
 	}
-	for _, path := range []string{"/self/visibility/secret", "/self/port/0", "/self/port/65536", "/self/port/nope"} {
+	for _, path := range []string{
+		"/self/visibility/secret", "/self/port/0", "/self/port/65536", "/self/port/nope",
+		"/self/visibility/public?port=0", "/self/visibility/public?port=99999",
+		"/self/visibility/public?port=nope",
+	} {
 		if rec := requestMethod(s, http.MethodPost, path, "172.30.5.2", "172.30.5.1"); rec.Code != http.StatusBadRequest {
 			t.Errorf("POST %s = %d, want 400", path, rec.Code)
 		}

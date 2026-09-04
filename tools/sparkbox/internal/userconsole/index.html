@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sparkbox — my machines</title>
+<title>sparkbox</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>" />
 <style>
   /* Monochrome by design: the only chroma is a small set of state signals
@@ -46,6 +46,13 @@
   .btn-danger-solid { background: hsl(var(--red)); color: #fff; border-color: hsl(var(--red)); }
   .btn-danger-solid:hover:not(:disabled) { opacity: .9; }
   a.btn-primary { text-decoration: none; padding: 7px 13px; }
+  /* A LINK dressed as an outlined button. The structural base in shared.css is
+     scoped to <button>, and the one control here that leaves this origin — the
+     transcript of the agent building an environment, which lives in HiveMind —
+     has to be an <a> so it opens in a tab and offers a copyable address. */
+  a.btn-outline { text-decoration: none; font: inherit; display: inline-flex;
+    align-items: center; gap: 6px; white-space: nowrap; transition: .12s ease;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border)); }
   /* icon button — the ··· overflow trigger, and the two header actions worth a
      single click. They lose their words on purpose: a row of four outlined text
      buttons was the loudest thing on a card whose job is to show numbers. */
@@ -128,6 +135,10 @@
   .menu-pop button.btn-danger { color: hsl(var(--red)); }
   .menu-pop button.btn-danger:hover:not(:disabled) { background: hsl(var(--red) / .1); }
   .menu-pop .sep { height: 1px; background: hsl(var(--border)); margin: 3px 0; }
+  /* The last card's menu opened past the fold and stayed there. Flipped above
+     its trigger when it would not fit below — set by the toggle, not by CSS,
+     because only layout knows how much room is left. */
+  .menu-pop.up { top: auto; bottom: calc(100% + 5px); }
 
   .m-body {
     border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
@@ -140,10 +151,16 @@
   .m-stat .value { font-size: 13px; font-weight: 600; margin-top: 1px;
     font-variant-numeric: tabular-nums; }
   .m-stat .value small { font-weight: 500; color: hsl(var(--muted-foreground)); }
-  /* tags and web routes sit side by side; they stack on a narrow viewport */
+  /* Tags and ports sit side by side; they stack on a narrow viewport. The
+     minmax(0, …) is load bearing: a grid item defaults to min-width:auto, so
+     without it the port strip refuses to shrink below its widest content and
+     crushes the tags column instead of scrolling. Ports get the larger share
+     because a busy machine has more of them than it has tags. */
   .m-foot { border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 11px 22px; align-items: start; }
-  @media (max-width: 640px) { .m-foot { grid-template-columns: 1fr; } }
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
+    gap: 11px 22px; align-items: start; }
+  @media (max-width: 640px) { .m-foot { grid-template-columns: minmax(0, 1fr); } }
+  .m-sect { min-width: 0; }
   .m-sect .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
     color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
   /* the per-VM egress panel spans the full card width under the two-col foot */
@@ -238,8 +255,7 @@
   .badge.offline { color: hsl(var(--red)); border-color: hsl(var(--red) / .3); }
   .badge.offline .dot { background: hsl(var(--red)); }
 
-  /* route rows + chips */
-  .route-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  /* port chips */
   .route {
     display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -253,13 +269,54 @@
   .route.live .dot { background: hsl(var(--green)); box-shadow: 0 0 0 2px hsl(var(--green) / .16); }
   .route.dead .dot { background: hsl(var(--red) / .8); }
   .route.idle .dot { background: transparent; border: 1px solid hsl(var(--muted-foreground)); }
-  /* the visibility pill is a click-to-toggle button */
-  .vis { font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px;
+  /* the visibility pill is a click-to-toggle button, one per port */
+  .vis { font-size: 10.5px; font-weight: 500; padding: 2px 8px;
     border: 1px solid transparent; cursor: pointer; line-height: 1.35; }
   .vis.private { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
   .vis.private:hover:not(:disabled) { color: hsl(var(--foreground)); }
   .vis.public { background: hsl(var(--amber) / .14); color: hsl(var(--amber)); border-color: hsl(var(--amber) / .28); }
   .vis.public:hover:not(:disabled) { background: hsl(var(--amber) / .22); }
+
+  /* The port strip: every port this machine answers on, one line, default
+     first, scrolled sideways rather than wrapped — a machine running five dev
+     servers should not push the card below it off the screen.
+     "+ port" sits OUTSIDE the scroller so it stays reachable on a busy strip;
+     flex:0 1 auto keeps it tucked against a short one instead of stranded at
+     the far right. */
+  .ports-row { display: flex; align-items: flex-start; gap: 8px; }
+  .port-strip {
+    display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0;
+    overflow-x: auto; overflow-y: hidden; padding-bottom: 5px;
+    scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .port-strip::-webkit-scrollbar { height: 6px; }
+  .port-strip::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
+  .port-strip::-webkit-scrollbar-track { background: transparent; }
+  /* Link and pill are one object: the pill toggles the port the link opens, and
+     a gap between them would read as two unrelated controls. */
+  .pchip { display: inline-flex; align-items: stretch; flex: 0 0 auto; }
+  .pchip .route { border-radius: 6px 0 0 6px; border-right: none; padding-right: 6px; }
+  .pchip .vis {
+    border-radius: 0 6px 6px 0; border: 1px solid hsl(var(--border));
+    padding: 2px 7px; align-self: stretch;
+  }
+  .pchip .vis.public { border-color: hsl(var(--amber) / .28); }
+  /* Forgetting a port is cheap and reversible (it stays private either way), so
+     the control is quiet until the chip is pointed at or tabbed into. */
+  .pchip .forget {
+    display: none; align-items: center; padding: 0 5px; margin-left: 3px;
+    font-size: 12px; line-height: 1; cursor: pointer; border-radius: 6px;
+    border: 1px solid hsl(var(--border)); background: none; color: hsl(var(--muted-foreground));
+  }
+  .pchip:hover .forget, .pchip:focus-within .forget { display: inline-flex; }
+  .pchip .forget:hover { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); }
+  .port-add {
+    flex: 0 0 auto; margin-top: 1px;
+    font-size: 12px; line-height: 1; padding: 4px 8px; cursor: pointer;
+    border-radius: 6px; border: 1px dashed hsl(var(--border));
+    background: none; color: hsl(var(--muted-foreground));
+  }
+  .port-add:hover { color: hsl(var(--foreground)); border-color: hsl(var(--muted-foreground)); }
 
   .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .chip {
@@ -288,13 +345,141 @@
   label { display: block; font-size: 12.5px; font-weight: 500; margin-bottom: 5px; }
   .field-hint { font-size: 11.5px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
 
-  /* secrets form */
+  /* The one form shape, shared by secrets, network rules, repos and
+     environments. Every one of them is a MODE now — its own card, hidden until
+     asked for, nothing under it inside that card — so the old "inline strip
+     wedged above a table" grid (1fr 1.4fr 1fr auto, with a rule beneath it to
+     fence the strip off from the rows) describes none of them any more. */
   .secret-form { padding: 14px; display: grid; gap: 13px;
-    grid-template-columns: 1fr 1.4fr 1fr auto; align-items: start;
-    border-bottom: 1px solid hsl(var(--border)); }
+    grid-template-columns: 1fr 1fr 1fr; align-items: start; }
   @media (max-width: 860px) { .secret-form { grid-template-columns: 1fr; } }
   .secret-form input { width: 100%; }
-  .secret-form .save { align-self: end; }
+  /* A field deliberately fixed for the life of the form, not disabled
+     furniture: still readable and selectable, visibly not a place to type. */
+  .secret-form input[readonly] {
+    background: hsl(var(--muted) / .6); color: hsl(var(--muted-foreground)); cursor: default;
+  }
+  .secret-form input[readonly]:focus { border-color: hsl(var(--border)); box-shadow: none; }
+  .secret-form .wide { grid-column: 1 / -1; }
+  .secret-form .two { grid-column: span 2; }
+  @media (max-width: 860px) { .secret-form .two { grid-column: 1 / -1; } }
+  .secret-form .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .secret-form .check input { width: auto; }
+  .secret-form .row { display: flex; gap: 8px; align-items: center; }
+
+  /* A tag field is the machine list's chip editor put in a form: the same
+     chips with the same ×, and the same "+ tag" input. Tags are a SET you add
+     to and take from, and a comma-separated text box makes you retype the
+     whole set to change one of them. */
+  .tag-field {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: 100%;
+    min-height: 35px; padding: 5px 6px; cursor: text;
+    border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px);
+    background: hsl(var(--background));
+  }
+  .tag-field:focus-within { border-color: hsl(var(--muted-foreground)); }
+  .tag-field .chip-input { border-style: solid; border-color: transparent; flex: 1 1 88px; }
+  .tag-field .chip-input:focus { outline: none; }
+  .tag-field .none { font-size: 11.5px; color: hsl(var(--muted-foreground)); padding-left: 3px; }
+
+  /* ---------- environments ----------
+     An environment is far more like a machine than like a secret: one name,
+     one state, and four different lists hanging off it. So it is drawn with
+     the machine card's own anatomy — head, body grid, foot — rather than as a
+     table row, where those four lists shared one cell, wrapped a chip per
+     line, and left the other four cells floating in the middle of a 190px
+     row. Nothing here is a new idiom; it is the card that is already on the
+     Machines tab, with different contents. */
+
+  /* A tab's own header: what the tab is, and the one button that adds to it.
+     Not a .panel-head, because the cards below are not inside one card — the
+     same relationship the machine list has with the page. Shaped like .fp-head
+     so the two read as the same level. Shared by every tab that has a form. */
+  .tab-top { display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 12px 16px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tab-top h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }
+  .tab-top .hint { display: block; margin-top: 2px; max-width: 66ch; }
+
+  /* The create/edit form is a mode, not furniture: it is hidden until asked
+     for. Visible, it was 430px of inputs and hints above the first
+     environment — the page's own content pushed below the fold by the box
+     used to add to it. */
+
+  .env-card { margin-bottom: 10px; }
+  .env-card .m-head { align-items: baseline; }
+  /* The description, in the page's own face. It used to inherit .mono from the
+     name cell above it and be clipped at 22 characters, which read as a
+     truncation bug rather than a subtitle. */
+  .env-sub { padding: 0 14px 11px; font-size: 12.5px; color: hsl(var(--muted-foreground));
+    max-width: 72ch; margin-top: -4px; }
+
+  /* Four lists, four labelled columns — which is the whole reason this stopped
+     being a table cell. Plain monospace lines rather than chips: under a
+     column heading a pill adds a grey background and no information, and the
+     heading already answers the question the chips could not ("is `web` a
+     rule-set, a tag or a variable?"). */
+  .env-grid { border-top: 1px solid hsl(var(--border)); padding: 11px 14px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 22px; align-items: start; }
+  @media (max-width: 900px) { .env-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .env-grid { grid-template-columns: 1fr; } }
+  .env-col .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+    color: hsl(var(--muted-foreground)); margin-bottom: 4px; }
+  .env-col .val { font-size: 12.5px; line-height: 1.6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere; }
+  .env-col .val.none { font-family: inherit; color: hsl(var(--muted-foreground)); }
+
+  /* The foot says what the next build will actually run, which is this
+     platform's one genuinely unusual promise and was previously rendered as
+     "3746 B / from agent". */
+  .env-foot { border-top: 1px solid hsl(var(--border)); padding: 9px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px 14px; flex-wrap: wrap; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+  .env-foot strong { color: hsl(var(--foreground)); font-weight: 550; }
+
+  /* The two states that are a situation rather than a fact get a strip of
+     their own under the head, carrying the machine you would go and look at
+     and the action that resolves it. A failed build used to be 150px of grey
+     clipped guest log inside a table cell. */
+  .env-strip { margin: 0 14px 11px; padding: 9px 11px; font-size: 12.5px;
+    border: 1px solid; border-radius: calc(var(--radius) - 2px);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+  .env-strip .msg { overflow-wrap: anywhere; max-width: 82ch; }
+  .env-strip.failed { border-color: hsl(var(--red) / .4); background: hsl(var(--red) / .06);
+    color: hsl(var(--red)); }
+  /* Amber frames it; the words stay in the page's own ink. --amber at 50%
+     lightness is this palette's weakest colour on a light background, and a
+     strip that tells somebody where the build is has to be readable. Red is
+     strong enough at both lightnesses to carry its own text, and an error
+     written in red is worth the difference. */
+  .env-strip.building { border-color: hsl(var(--amber) / .45); background: hsl(var(--amber) / .08);
+    color: hsl(var(--foreground)); }
+  .env-strip .mono { color: inherit; }
+  .env-strip.denials { display: block; border-color: hsl(var(--amber) / .35); background: hsl(var(--amber) / .055);
+    color: hsl(var(--foreground)); }
+  .env-strip.denials .domains { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+
+  /* State badges. Same anatomy as the machine states — a dot carries the
+     colour, the word stays quiet — so ready/building/failed/draft read at the
+     same glance as running/paused/archived one tab over. */
+  .badge.ready { color: hsl(var(--green)); border-color: transparent; padding-left: 2px; }
+  .badge.ready .dot { background: hsl(var(--green)); box-shadow: 0 0 0 3px hsl(var(--green) / .16); }
+  .badge.building { color: hsl(var(--amber)); border-color: hsl(var(--amber) / .35); }
+  /* A build is minutes long, so the lamp blinks for the whole of it: the same
+     steps() lamp as the turbo switch, which is this console's existing way of
+     saying "this is happening right now". */
+  .badge.building .dot { background: hsl(var(--amber)); animation: led 1s steps(1) infinite; }
+  @media (prefers-reduced-motion: reduce) { .badge.building .dot { animation: none; } }
+  .badge.failed { color: hsl(var(--red)); border-color: hsl(var(--red) / .35); }
+  .badge.failed .dot { background: hsl(var(--red)); }
+  .badge.draft { color: hsl(var(--muted-foreground)); }
+  .badge.draft .dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+
+  .script-box { width: 100%; min-height: 260px; resize: vertical; padding: 9px 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border));
+    background: hsl(var(--background)); color: hsl(var(--foreground)); }
+  .script-actions { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; }
 
   /* repos form — one field more than the secrets grid, and a <select> the
      input rules above cannot reach: they are typed to input[type=…], so an
@@ -305,6 +490,17 @@
     font: inherit; width: 100%; padding: 7px 10px; border-radius: calc(var(--radius) - 2px);
     border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground));
   }
+  /* Behind upstream, on a machine card. Amber and not the red .env-warn above,
+     for the same reason .tag-warn is: nothing is wrong and nothing is at risk —
+     somebody else pushed, and this checkout will have it on the next pull. Red
+     is kept for the state where deleting this machine LOSES something, which is
+     a dirty checkout or a commit that exists nowhere else. A card that shouts
+     the same colour at both teaches people to ignore the colour. */
+  .env-warn.soft {
+    border-color: hsl(var(--amber) / .4);
+    color: hsl(var(--amber)); background: hsl(var(--amber) / .07);
+  }
+  .env-warn.soft strong, .env-warn.soft code { color: hsl(var(--amber)); }
   /* the `default` tag warning: amber rather than the red .env-warn above,
      because it is a consequence to understand, not something broken. */
   .tag-warn {
@@ -320,6 +516,12 @@
     border-bottom: 1px solid hsl(var(--border));
   }
   .notice strong { color: hsl(var(--foreground)); font-weight: 600; }
+  /* A notice that IS the card — the "not enabled on this host" states — has
+     nothing under it to be ruled off from. */
+  .card.notice { border-bottom: 0; }
+  /* and one that is a grid cell in a form is positioned by the grid, not by
+     the 14px gutter it uses when it sits between a form and a table. */
+  .secret-form .tag-warn { margin: 0; }
 
   /* sign-in / error / empty */
   .signin-wrap { min-height: 62vh; display: grid; place-items: center; }
@@ -397,7 +599,8 @@
     </header>
 
     <div class="tabs">
-      <button class="tab active" data-tab="machines">Machines</button>
+      <button class="tab active" data-tab="environments">Environments</button>
+      <button class="tab" data-tab="machines">Machines</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="repos">Repos</button>
@@ -455,10 +658,19 @@
 
     <!-- SECRETS TAB -->
     <div id="tab-secrets" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="tab-top">
+        <div>
           <h2>Secrets</h2>
-          <span class="hint">delivered as environment variables to machines that share a tag</span>
+          <span class="hint">Delivered as environment variables to every machine that carries one
+            of their tags. Values are write-only — saved once, never shown again.</span>
+        </div>
+        <button class="btn-primary" id="sec-new">New secret</button>
+      </div>
+
+      <div class="card panel hidden" id="sec-form-card">
+        <div class="panel-head">
+          <h2 id="sec-form-title">New secret</h2>
+          <span class="hint" id="sec-form-hint">the tags decide which machines receive it</span>
         </div>
         <div class="notice">
           Values are <strong>write-only</strong>: once saved they can be updated or deleted, never
@@ -471,26 +683,34 @@
             <label for="sec-name">Name</label>
             <input id="sec-name" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="OPENAI_API_KEY" maxlength="64" />
-            <div class="field-hint">UPPER_SNAKE_CASE, up to 64 chars</div>
+            <div class="field-hint" id="sec-name-hint">UPPER_SNAKE_CASE, up to 64 chars</div>
           </div>
           <div>
             <label for="sec-value">Value</label>
             <input id="sec-value" type="password" class="mono" autocomplete="off"
               spellcheck="false" placeholder="value (never shown again)" />
-            <div class="field-hint">single line, up to 4 KiB</div>
+            <div class="field-hint" id="sec-value-hint">single line, up to 4 KiB</div>
           </div>
           <div>
-            <label for="sec-tags">Tags</label>
-            <input id="sec-tags" type="text" class="mono" autocomplete="off"
-              spellcheck="false" placeholder="ml, prod" />
-            <div class="field-hint">comma-separated; matches machine tags</div>
+            <label for="sec-tags-in">Tags</label>
+            <div class="tag-field" id="sec-tags">
+              <input id="sec-tags-in" class="chip-input" type="text" placeholder="+ tag"
+                maxlength="40" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-hint">Enter or comma adds one; matches machine tags</div>
           </div>
-          <button type="submit" class="btn-primary save" id="sec-save">Save</button>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="sec-save">Save secret</button>
+            <button type="button" class="btn-outline" id="sec-cancel">Cancel</button>
+          </div>
         </form>
-        <div id="secrets-disabled" class="notice hidden">
-          Secrets are disabled on this host: the encryption key does not match the stored
-          data. An operator must resolve the key mismatch before secrets can be used.
-        </div>
+      </div>
+
+      <div id="secrets-disabled" class="card notice hidden">
+        Secrets are disabled on this host: the encryption key does not match the stored
+        data. An operator must resolve the key mismatch before secrets can be used.
+      </div>
+      <div class="card panel" id="secrets-table">
         <div class="table-scroll">
           <table>
             <thead>
@@ -499,16 +719,29 @@
             <tbody id="secret-rows"></tbody>
           </table>
         </div>
-        <div id="secrets-empty" class="empty hidden">No secrets yet. Add one above, then tag a machine to deliver it.</div>
+      </div>
+      <div id="secrets-empty" class="card empty hidden">
+        No secrets yet. A secret is a value your machines get as an environment variable, and
+        the tags you give it decide which ones.
+        <div style="margin-top:12px"><button class="btn-primary" id="sec-empty-new">New secret</button></div>
       </div>
     </div>
 
     <!-- NETWORK TAB -->
     <div id="tab-network" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="tab-top">
+        <div>
           <h2>Network rules</h2>
-          <span class="hint">per-tag egress allowlists — applied to running machines that share a tag</span>
+          <span class="hint">Per-tag egress allowlists. A machine carrying a rule-set's tag may
+            reach those domains and nothing else, for as long as it runs.</span>
+        </div>
+        <button class="btn-primary" id="nr-new">New rule-set</button>
+      </div>
+
+      <div class="card panel hidden" id="nr-form-card">
+        <div class="panel-head">
+          <h2 id="nr-form-title">New rule-set</h2>
+          <span class="hint" id="nr-form-hint">the tags decide which machines it governs</span>
         </div>
         <div class="notice">
           A rule-set is a list of domains a machine may reach. Tag a machine with a rule-set's
@@ -521,25 +754,33 @@
             <label for="nr-name">Name</label>
             <input id="nr-name" type="text" autocomplete="off"
               spellcheck="false" placeholder="CI egress" maxlength="64" />
-            <div class="field-hint">a short label, up to 64 chars</div>
+            <div class="field-hint" id="nr-name-hint">a short label, up to 64 chars</div>
           </div>
-          <div class="grow">
+          <div class="two">
+            <label for="nr-tags-in">Tags</label>
+            <div class="tag-field" id="nr-tags">
+              <input id="nr-tags-in" class="chip-input" type="text" placeholder="+ tag"
+                maxlength="40" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-hint">Enter or comma adds one; matches machine tags</div>
+          </div>
+          <div class="wide">
             <label for="nr-allow">Allowed domains</label>
             <textarea id="nr-allow" class="mono" autocomplete="off" spellcheck="false"
               placeholder="github.com&#10;*.githubusercontent.com&#10;pypi.org"></textarea>
             <div class="field-hint">one per line — <code class="mono">github.com</code> (apex + subdomains) or <code class="mono">*.example.com</code> (subdomains only) · <a href="#" id="nr-prefill" class="linkish">prefill common trusted domains</a></div>
           </div>
-          <div>
-            <label for="nr-tags">Tags</label>
-            <input id="nr-tags" type="text" class="mono" autocomplete="off"
-              spellcheck="false" placeholder="ci, build" />
-            <div class="field-hint">comma-separated; matches machine tags</div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="nr-save">Save rule-set</button>
+            <button type="button" class="btn-outline" id="nr-cancel">Cancel</button>
           </div>
-          <button type="submit" class="btn-primary save" id="nr-save">Save rule-set</button>
         </form>
-        <div id="netrules-disabled" class="notice hidden">
-          Network rules are not enabled on this host.
-        </div>
+      </div>
+
+      <div id="netrules-disabled" class="card notice hidden">
+        Network rules are not enabled on this host.
+      </div>
+      <div class="card panel" id="netrules-table">
         <div class="table-scroll">
           <table>
             <thead>
@@ -548,16 +789,139 @@
             <tbody id="netrule-rows"></tbody>
           </table>
         </div>
-        <div id="netrules-empty" class="empty hidden">No rule-sets yet. Add one above, then tag a machine to enforce it.</div>
       </div>
+      <div id="netrules-empty" class="card empty hidden">
+        No rule-sets yet. One lists the domains a machine may reach; tag a machine with its name
+        to hold it to that list.
+        <div style="margin-top:12px"><button class="btn-primary" id="nr-empty-new">New rule-set</button></div>
+      </div>
+    </div>
+
+    <!-- ENVIRONMENTS TAB -->
+    <div id="tab-environments" class="hidden">
+      <div class="tab-top">
+        <div>
+          <h2>Environments</h2>
+          <span class="hint">The repos, secrets, egress and variables a machine gets, and a disk
+            with its setup already run. A machine joins one by carrying its name as a tag.</span>
+        </div>
+        <button class="btn-primary" id="env-new">New environment</button>
+      </div>
+
+      <div class="card panel hidden" id="env-form-card">
+        <div class="panel-head">
+          <h2 id="env-form-title">New environment</h2>
+          <span class="hint" id="env-form-hint">the name is the tag machines carry to get all of this</span>
+        </div>
+        <div class="notice">
+          Everything you attach here reaches every machine tagged with this name — the Secrets,
+          Network and Repos tabs are the same attachments seen one kind at a time.
+          <strong>Build</strong> then runs the setup script once in a throwaway machine called
+          <code class="mono">&lt;name&gt;-build</code> and keeps its disk, so the next machine you
+          make starts with the work already done.
+        </div>
+        <form id="env-form" class="secret-form">
+          <div>
+            <label for="env-name">Name</label>
+            <input id="env-name" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="web" maxlength="40" />
+            <div class="field-hint" id="env-name-hint">lowercase, digits, dashes — this is the tag</div>
+          </div>
+          <div class="two">
+            <label for="env-desc">Description</label>
+            <input id="env-desc" type="text" autocomplete="off"
+              placeholder="the web stack — node 20 and postgres" maxlength="200" />
+            <div class="field-hint">optional; what this way of working is for</div>
+          </div>
+          <div>
+            <label for="env-repos">Repos</label>
+            <input id="env-repos" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="wandb/hivemind" />
+            <div class="field-hint">comma-separated <code class="mono">owner/name</code></div>
+          </div>
+          <div>
+            <label for="env-secrets">Secrets</label>
+            <input id="env-secrets" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="GITHUB_TOKEN" />
+            <div class="field-hint">must already exist on the Secrets tab</div>
+          </div>
+          <div>
+            <label for="env-rules">Rule-sets</label>
+            <input id="env-rules" type="text" class="mono" autocomplete="off"
+              spellcheck="false" placeholder="ci-egress" />
+            <div class="field-hint">optional; from the Network tab</div>
+          </div>
+          <div class="wide">
+            <label for="env-vars">Variables</label>
+            <textarea id="env-vars" class="mono" autocomplete="off" spellcheck="false"
+              placeholder="NODE_ENV=development&#10;LOG_LEVEL=debug"></textarea>
+            <div class="field-hint">
+              one <code class="mono">NAME=value</code> per line — plain values, delivered beside
+              the secrets. Saving replaces this whole list, so a line you remove is unset. Repos,
+              secrets and rule-sets are only ever added here; detach them on their own tab.
+            </div>
+          </div>
+          <div class="check wide" id="env-open-row">
+            <input id="env-open" type="checkbox" />
+            <label for="env-open" style="margin:0">
+              Skip the default egress rule-set (new environments only)
+            </label>
+          </div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="env-save">Save environment</button>
+            <button type="button" class="btn-outline" id="env-cancel">Cancel</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card panel hidden" id="env-script-panel">
+        <div class="panel-head">
+          <h2 id="env-script-title">setup.sh</h2>
+          <span class="hint" id="env-script-origin"></span>
+        </div>
+        <div class="notice">
+          The script a build runs, in the checkout, as you. It is read at
+          <strong>build</strong> time and never by a running machine, so saving one changes what
+          the next build does and nothing about the machines running now.
+        </div>
+        <div style="padding:14px">
+          <textarea id="env-script" class="script-box" spellcheck="false"
+            placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;&#10;pnpm install"></textarea>
+        </div>
+        <div class="script-actions">
+          <button class="btn-primary" id="env-script-save">Save script</button>
+          <button class="btn-outline" id="env-script-close">Close</button>
+          <span class="hint" id="env-script-note"></span>
+        </div>
+      </div>
+
+      <div id="envs-disabled" class="card empty hidden">
+        Environments are not enabled on this host.
+      </div>
+      <div id="env-list"></div>
+      <div id="envs-empty" class="card empty hidden">
+        No environments yet. One holds the repos, secrets and variables a project needs, and a
+        disk with its setup already run.
+        <div style="margin-top:12px"><button class="btn-primary" id="env-empty-new">New environment</button></div>
+      </div>
+
     </div>
 
     <!-- REPOS TAB -->
     <div id="tab-repos" class="hidden">
-      <div class="card panel">
-        <div class="panel-head">
+      <div class="tab-top">
+        <div>
           <h2>Repos</h2>
-          <span class="hint">GitHub checkouts cloned into machines that share a tag</span>
+          <span class="hint">GitHub checkouts cloned into every machine that carries one of their
+            tags, while it boots.</span>
+        </div>
+        <button class="btn-primary" id="rp-new">Attach a repo</button>
+      </div>
+
+      <div class="card panel hidden" id="rp-form-card">
+        <div class="panel-head">
+          <h2 id="rp-form-title">Attach a repository</h2>
+          <span class="hint" id="rp-form-hint">the tags decide which machines clone it</span>
         </div>
         <div class="notice">
           An attachment is <strong>configuration, not a copy</strong>: a machine created with one of
@@ -567,12 +931,20 @@
           not cloned, and <code class="mono">sparkbox repos sync</code> inside the machine does the
           work when you ask for it. Detaching leaves existing checkouts where they are.
         </div>
-        <form id="repo-form" class="secret-form repo-form">
+        <form id="repo-form" class="secret-form">
           <div>
             <label for="rp-slug">Repository</label>
             <input id="rp-slug" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="wandb/hivemind" maxlength="120" />
-            <div class="field-hint">owner/name on github.com</div>
+            <div class="field-hint" id="rp-slug-hint">owner/name on github.com</div>
+          </div>
+          <div class="two">
+            <label for="rp-tags-in">Tags</label>
+            <div class="tag-field" id="rp-tags">
+              <input id="rp-tags-in" class="chip-input" type="text" placeholder="+ tag"
+                maxlength="40" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-hint">Enter or comma adds one; matches machine tags</div>
           </div>
           <div>
             <label for="rp-ref">Branch</label>
@@ -587,12 +959,6 @@
             <div class="field-hint">optional; under the home directory</div>
           </div>
           <div>
-            <label for="rp-tags">Tags</label>
-            <input id="rp-tags" type="text" class="mono" autocomplete="off"
-              spellcheck="false" placeholder="hm, ml" />
-            <div class="field-hint">comma-separated; matches machine tags</div>
-          </div>
-          <div>
             <label for="rp-access">Access</label>
             <select id="rp-access">
               <option value="read">Read-only</option>
@@ -600,16 +966,22 @@
             </select>
             <div class="field-hint">what its git credential may do</div>
           </div>
-          <button type="submit" class="btn-primary save" id="rp-save">Attach</button>
+          <div id="repo-default-warn" class="tag-warn hidden wide">
+            The <code class="mono">default</code> tag is carried by <strong>every machine you create
+            from now on</strong>, so this repository is cloned into all of them. Worth wanting on
+            purpose — dotfiles, the repo you always work in — and surprising by accident.
+          </div>
+          <div class="row wide">
+            <button type="submit" class="btn-primary" id="rp-save">Attach repository</button>
+            <button type="button" class="btn-outline" id="rp-cancel">Cancel</button>
+          </div>
         </form>
-        <div id="repo-default-warn" class="tag-warn hidden">
-          The <code class="mono">default</code> tag is carried by <strong>every machine you create
-          from now on</strong>, so this repository is cloned into all of them. Worth wanting on
-          purpose — dotfiles, the repo you always work in — and surprising by accident.
-        </div>
-        <div id="repos-disabled" class="notice hidden">
-          Repos are not enabled on this host.
-        </div>
+      </div>
+
+      <div id="repos-disabled" class="card notice hidden">
+        Repos are not enabled on this host.
+      </div>
+      <div class="card panel" id="repos-table">
         <div class="table-scroll">
           <table>
             <thead>
@@ -618,7 +990,11 @@
             <tbody id="repo-rows"></tbody>
           </table>
         </div>
-        <div id="repos-empty" class="empty hidden">No repositories yet. Attach one above, then tag a machine to clone it.</div>
+      </div>
+      <div id="repos-empty" class="card empty hidden">
+        No repositories yet. Attach one and every machine carrying its tags clones it while it
+        boots.
+        <div style="margin-top:12px"><button class="btn-primary" id="rp-empty-new">Attach a repo</button></div>
       </div>
     </div>
   </div>
@@ -647,6 +1023,18 @@
     <div class="row">
       <button class="btn-outline" id="port-cancel" type="button">Cancel</button>
       <button class="btn-primary" id="port-go" type="button">Set port</button>
+    </div>
+  </dialog>
+
+  <!-- ADD A PORT TO THE STRIP -->
+  <dialog id="addport-dlg">
+    <h3>Add a port to <span id="addport-name" class="mono"></span></h3>
+    <p>Lists a guest port so you can open it before anything is listening on it.
+      It is added <strong>private</strong> — click its pill to make it public.</p>
+    <input id="addport-input" type="number" min="1" max="65535" class="mono" placeholder="5173" />
+    <div class="row">
+      <button class="btn-outline" id="addport-cancel" type="button">Cancel</button>
+      <button class="btn-primary" id="addport-go" type="button">Add port</button>
     </div>
   </dialog>
 
@@ -716,6 +1104,7 @@
   // /api/me. Empty means this host serves none, and every Terminal button
   // disappears — the console never links to a host that answers nothing.
   let termSub = "";
+  let launchSub = "";
 
   // terminalURL is the per-machine terminal page: one origin per machine, which
   // is what keeps one machine's page from scripting another's socket. The
@@ -725,6 +1114,15 @@
   // will not issue, and fails as an unreadable browser cert error.
   function terminalURL(name) {
     return location.protocol + "//" + name + "-" + termSub + "." + domain() + portSuffix();
+  }
+
+  // The go service shows the environment choice back to the user, then
+  // owner-checks it and its repository again when the confirmation is posted.
+  function launchURL(slug, env) {
+    const parts = String(slug || "").split("/");
+    if (!launchSub || parts.length !== 2 || !parts[0] || !parts[1]) return "";
+    return location.protocol + "//" + launchSub + "." + domain() + portSuffix() + "/" +
+      parts.map(encodeURIComponent).join("/") + "?env=" + encodeURIComponent(env);
   }
 
   function show(view) {
@@ -768,7 +1166,15 @@
       throw err;
     }
     if (!r.ok) {
-      throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      // The body is {error, code?}. `code` is the server's stable machine token
+      // and is carried onto the Error so a caller can act on a specific refusal
+      // — matching on the sentence is exactly the coupling it exists to
+      // prevent. Everything else keeps reading .message as before.
+      const body = await r.json().catch(() => ({}));
+      const err = new Error(body.error || r.statusText);
+      err.code = body.code || "";
+      err.status = r.status;
+      throw err;
     }
     return r.json().catch(() => null);
   }
@@ -781,6 +1187,11 @@
   // so they inherit the button's state — except the two transport glyphs, which
   // are solid, because a play triangle and a pause bar are shapes everyone has
   // seen filled and nobody has seen outlined.
+  // The overflow trigger, shared by the machine and environment cards.
+  const DOTS = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+    '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/>' +
+    '<circle cx="19" cy="12" r="1.7"/></svg>';
+
   const ICON = {
     // A prompt: the one glyph that means "shell" to the people who live in one.
     term: '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/>' +
@@ -1021,11 +1432,16 @@
   function editing() {
     const ae = document.activeElement;
     if ($("rename-dlg").open || $("port-dlg").open || $("confirm-dlg").open ||
-        $("turbo-dlg").open) return true;
+        $("addport-dlg").open || $("turbo-dlg").open) return true;
     // an open ··· overflow menu counts as mid-interaction: the 4s repaint would
-    // otherwise rebuild the card and snap the menu shut under the cursor.
-    if (document.querySelector("#machine-list .menu-pop:not(.hidden)")) return true;
-    return !!(ae && ae.tagName === "INPUT" && ae.closest("#machine-list"));
+    // otherwise rebuild the card and snap the menu shut under the cursor. Both
+    // card lists have one, so this is not scoped to the machines.
+    if (document.querySelector(".menu-pop:not(.hidden)")) return true;
+    // Every table that repaints on the poll now carries an inline "+ tag" box,
+    // so the guard covers all of them: a half-typed tag is mid-interaction on
+    // the Secrets tab for exactly the reason it is on the Machines tab.
+    return !!(ae && ae.tagName === "INPUT" &&
+      ae.closest("#machine-list, #secret-rows, #netrule-rows, #repo-rows"));
   }
 
   // Delegated toggle for the ··· overflow menus: a click on a trigger opens its
@@ -1033,7 +1449,7 @@
   // closes them — the item's own action handler still fires on the same click,
   // and closing synchronously lets the follow-up repaint land (editing() above).
   function closeMenus(except) {
-    document.querySelectorAll("#machine-list .menu-pop:not(.hidden)").forEach((m) => {
+    document.querySelectorAll(".menu-pop:not(.hidden)").forEach((m) => {
       if (m === except) return;
       m.classList.add("hidden");
       const t = m.previousElementSibling;
@@ -1048,6 +1464,16 @@
       closeMenus(pop);
       pop.classList.toggle("hidden", !willOpen);
       trigger.setAttribute("aria-expanded", String(willOpen));
+      // Measure once it is laid out, and always from the default side, or a
+      // menu that flipped once stays flipped after the page scrolls back.
+      if (willOpen) {
+        pop.classList.remove("up");
+        const box = pop.getBoundingClientRect();
+        const trig = trigger.getBoundingClientRect();
+        if (box.bottom > window.innerHeight - 8 && trig.top > box.height + 8) {
+          pop.classList.add("up");
+        }
+      }
       return;
     }
     closeMenus();
@@ -1072,6 +1498,9 @@
     if (d.del) return "delsnap:" + d.del;
     if (d.delSecret) return "delsecret:" + d.delSecret;
     if (d.delRepo) return "delrepo:" + d.delRepo;
+    if (d.envbuild) return "envbuild:" + d.envbuild;
+    if (d.envcapture) return "envcapture:" + d.envcapture;
+    if (d.envdel) return "envdel:" + d.envdel;
     return null;
   }
 
@@ -1160,34 +1589,69 @@
       "</div>";
   }
 
+  // routePanel draws the port strip: one chip per port this machine answers on,
+  // on a single sideways-scrolling line with the default port pinned to the
+  // front. Visibility is per port, so every chip carries its own toggle — the
+  // default port being public says nothing about :5173 beside it.
+  //
+  // The chips come from the server already ordered and already merged from its
+  // three sources (route rows, ports the owner configured, ports its scan found
+  // listening); the page's job is to draw them, not to decide what is on it.
   function routePanel(b) {
     const rs = b.routes || [];
     const running = b.state === "running";
-    let html = rs.map((r) => {
+    const host = (r) => esc(r.subdomain) + "." + esc(domain());
+    // Ports of the machine's own hostname are named by port alone; a port under
+    // some OTHER hostname pointed at the same machine has to say which, or
+    // notebook:8888 and the machine's own :8888 are the same chip twice.
+    const home = (rs.find((r) => r.default) || rs[0]).subdomain;
+    const chips = rs.map((r) => {
       const cls = running ? (r.listening ? "live" : "dead") : "idle";
+      const what = r.service ? r.service + " on :" + (r.port | 0) : "port " + (r.port | 0);
       const title = running
-        ? (r.listening ? "listening" : "nothing listening on port " + r.port)
+        ? (r.listening ? what + " — listening" : "nothing listening on port " + (r.port | 0))
         : "paused — a request will wake it";
-      const href = location.protocol + "//" + esc(r.subdomain) + "." + esc(domain()) + portSuffix();
+      // A route's own port is the portless URL; every other port is the same
+      // hostname with the port on it, which is how the edge addresses them.
+      const href = location.protocol + "//" + host(r) +
+        (r.default ? portSuffix() : ":" + (r.port | 0));
+      // The default chip names the machine and the rest name only their port —
+      // repeating the hostname across the strip would crowd out the ports —
+      // except a port on a different hostname, which has nothing else to go on.
+      const label = (r.default || r.subdomain !== home ? esc(r.subdomain) + " " : "") +
+        '<span class="port">:' + (r.port | 0) + "</span>";
       const vis = r.visibility === "public" ? "public" : "private";
       const flip = vis === "public" ? "private" : "public";
-      // The visibility pill IS the toggle — click it to flip public/private;
-      // data-vis carries the target state the existing handler posts.
-      return '<div class="route-row">' +
+      // The visibility pill IS the toggle — click it to flip this ONE port;
+      // data-vis carries the target state, data-port the port it applies to.
+      const forget = r.pinned
+        ? '<button class="forget" data-forget="' + esc(r.subdomain) + '" data-port="' + (r.port | 0) +
+          '" title="Stop listing port ' + (r.port | 0) + ' — it stays private" aria-label="Forget port ' +
+          (r.port | 0) + '">&times;</button>'
+        : "";
+      return '<span class="pchip">' +
         '<a class="route ' + cls + '" target="_blank" rel="noopener" href="' + href +
-        '" title="' + esc(title) + '"><span class="dot"></span>' + esc(r.subdomain) +
-        ' <span class="port">:' + (r.port | 0) + "</span></a>" +
+        '" title="' + esc(title) + '"><span class="dot"></span>' + label + "</a>" +
         '<button class="vis ' + vis + '" data-vis="' + flip + '" data-sub="' + esc(r.subdomain) +
-        '" title="' + (flip === "public"
-          ? "Click to make public — anyone on the internet can reach this route"
-          : "Click to make private — only signed-in visitors can reach this route") +
-        '">' + vis + "</button>" +
-        "</div>";
+        '" data-port="' + (r.port | 0) + '" title="' + (flip === "public"
+          ? "Click to make port " + (r.port | 0) + " public — anyone on the internet can reach it"
+          : "Click to make port " + (r.port | 0) + " private — only signed-in visitors can reach it") +
+        '">' + vis + "</button>" + forget +
+        "</span>";
     }).join("");
-    if (!rs.length) html = '<span class="muted" style="font-size:12px">no web routes</span>';
-    // The default port (guest port the machine's <name> route forwards to) is
-    // edited from the ··· actions menu, which opens the port dialog.
-    return html;
+    if (!rs.length) {
+      return '<span class="muted" style="font-size:12px">no web routes</span>';
+    }
+    // A port is added under the machine's default hostname, which is what the
+    // edge serves every any-port URL from.
+    const def = rs.find((r) => r.default) || rs[0];
+    const add = b.state === "archived" ? "" :
+      '<button class="port-add" data-addport="' + esc(def.subdomain) +
+      '" data-host="' + host(def) +
+      '" title="Add a port to this list so you can open it before anything is listening">+ port</button>';
+    // data-strip is what lets the repaint put the sideways scroll back.
+    return '<div class="ports-row"><div class="port-strip" data-strip="' + esc(b.name) + '">' +
+      chips + "</div>" + add + "</div>";
   }
 
   function machineCard(b) {
@@ -1288,11 +1752,9 @@
     // object-storage cleanup matters most — set off below a separator.
     const menuItems = coreItems.concat(
       coreItems.length ? ['<div class="sep"></div>'] : [], [removeItem]);
-    const dots = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
-      '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
     const menuHTML = menuItems.length
       ? '<div class="menu"><button type="button" class="btn-icon" data-menu aria-haspopup="true"' +
-        ' aria-expanded="false" title="More actions" aria-label="More actions">' + dots + "</button>" +
+        ' aria-expanded="false" title="More actions" aria-label="More actions">' + DOTS + "</button>" +
         '<div class="menu-pop hidden">' + menuItems.join("") + "</div></div>"
       : "";
     const actions = termBtn + powerBtn +
@@ -1310,14 +1772,30 @@
       ? '<div class="env-warn">Secrets for this machine cannot be decrypted — the encryption key' +
         " has changed. Nothing was pushed. Re-enter the affected secrets in the Secrets tab.</div>"
       : "";
-    const repoNotes = [];
-    if (repoAhead) repoNotes.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
-    if (repoBehind) repoNotes.push(repoBehind + " commit" + (repoBehind === 1 ? "" : "s") + " behind upstream");
-    if (repoDirty) repoNotes.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
-    const repoWarn = repoNotes.length
-      ? '<div class="env-warn"><strong>Repository attention:</strong> ' + esc(repoNotes.join(" · ")) +
-        '. Run <code class="mono">sparkbox status</code> in the machine for details.</div>'
-      : "";
+    // Two different sentences, because they are two different situations and
+    // only one of them can cost somebody work.
+    //
+    // AT RISK: an unpushed commit or a dirty checkout exists in this VM and
+    // nowhere else, so deleting the machine loses it. That is the red one.
+    // BEHIND: somebody else pushed. Nothing here is in danger and a pull fixes
+    // it whenever the owner feels like it — amber, and phrased as news rather
+    // than as a fault. When both are true the red banner carries both facts,
+    // because a card with two banners buries the one that matters.
+    const atRisk = [];
+    if (repoAhead) atRisk.push(repoAhead + " unpushed commit" + (repoAhead === 1 ? "" : "s"));
+    if (repoDirty) atRisk.push(repoDirty + " dirty checkout" + (repoDirty === 1 ? "" : "s"));
+    // Counted once and phrased twice: the amber banner says "behind upstream"
+    // in its own label, and repeating it in the sentence reads as a stutter.
+    const behind = repoBehind ? repoBehind + " commit" + (repoBehind === 1 ? "" : "s") : "";
+    let repoWarn = "";
+    if (atRisk.length) {
+      repoWarn = '<div class="env-warn"><strong>Only in this machine:</strong> ' +
+        esc(atRisk.join(" · ")) + (behind ? " (and " + esc(behind) + " behind upstream)" : "") +
+        '. Push before you remove it — run <code class="mono">sparkbox status</code> inside for details.</div>';
+    } else if (behind) {
+      repoWarn = '<div class="env-warn soft"><strong>Behind upstream:</strong> ' + esc(behind) +
+        ' to pull. Nothing here is at risk.</div>';
+    }
 
     return '<div class="card machine">' +
       '<div class="m-head">' +
@@ -1340,7 +1818,7 @@
       '<div class="m-foot">' +
         '<div class="m-sect"><div class="label">Tags <span style="text-transform:none;letter-spacing:0">' +
           "— secrets and network rules with a matching tag apply to this machine</span></div>" + tagChips(b) + "</div>" +
-        '<div class="m-sect"><div class="label">Web routes</div>' + routePanel(b) + "</div>" +
+        '<div class="m-sect"><div class="label">Ports</div>' + routePanel(b) + "</div>" +
         netSection(b) +
       "</div>" +
     "</div>";
@@ -1375,7 +1853,17 @@
     const cards = list.map(machineCard);
     if (editing()) return;
     const wrap = $("machine-list");
+    // The port strip scrolls sideways, and innerHTML below throws that away.
+    // Somebody who scrolled out to :16686 would watch it snap back every four
+    // seconds, so carry each strip's position across the repaint by machine.
+    const scrolled = {};
+    wrap.querySelectorAll(".port-strip[data-strip]").forEach((s) => {
+      if (s.scrollLeft) scrolled[s.dataset.strip] = s.scrollLeft;
+    });
     wrap.innerHTML = cards.join("");
+    wrap.querySelectorAll(".port-strip[data-strip]").forEach((s) => {
+      if (scrolled[s.dataset.strip]) s.scrollLeft = scrolled[s.dataset.strip];
+    });
     $("machines-empty").classList.toggle("hidden", list.length > 0);
 
     wrap.querySelectorAll("button[data-act]").forEach((btn) =>
@@ -1405,12 +1893,25 @@
         setTags(b.name, (b.tags || []).concat(tag), inp);
       }));
     wrap.querySelectorAll("button[data-vis]").forEach((btn) =>
-      btn.addEventListener("click", () =>
-        mutate("vis:" + btn.dataset.sub, btn, async () => {
+      btn.addEventListener("click", () => {
+        const port = Number(btn.dataset.port) || 0;
+        mutate("vis:" + btn.dataset.sub + ":" + port, btn, async () => {
           await api("/api/routes/" + encodeURIComponent(btn.dataset.sub) + "/visibility",
-            { method: "POST", body: { visibility: btn.dataset.vis } });
-          toast(btn.dataset.sub + " is now " + btn.dataset.vis);
-        })));
+            { method: "POST", body: { visibility: btn.dataset.vis, port: port } });
+          toast(btn.dataset.sub + ":" + port + " is now " + btn.dataset.vis);
+        });
+      }));
+    wrap.querySelectorAll("button[data-forget]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const port = Number(btn.dataset.port) || 0;
+        mutate("forget:" + btn.dataset.forget + ":" + port, btn, async () => {
+          await api("/api/routes/" + encodeURIComponent(btn.dataset.forget) +
+            "/ports/" + port, { method: "DELETE" });
+          toast("port " + port + " is no longer listed");
+        });
+      }));
+    wrap.querySelectorAll("button[data-addport]").forEach((btn) =>
+      btn.addEventListener("click", () => openAddPort(btn.dataset.addport, btn.dataset.host)));
     wrap.querySelectorAll("button[data-portdlg]").forEach((btn) =>
       btn.addEventListener("click", () => openPort(btn.dataset.portdlg, btn.dataset.port)));
     wrap.querySelectorAll("button[data-delbox]").forEach((btn) =>
@@ -1574,6 +2075,44 @@
     }
   });
 
+  // ---- add-a-port dialog ----
+
+  // Adding a port only LISTS it: the row goes in private, so this dialog can
+  // never be the thing that exposes something. Opening it is a second,
+  // deliberate click on the chip's pill.
+  function openAddPort(sub, host) {
+    $("addport-name").textContent = host;
+    $("addport-input").value = "";
+    const dlg = $("addport-dlg");
+    dlg._sub = sub;
+    dlg.showModal();
+    $("addport-input").focus();
+  }
+
+  $("addport-cancel").addEventListener("click", () => $("addport-dlg").close());
+  $("addport-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("addport-go").click(); }
+  });
+  $("addport-go").addEventListener("click", async () => {
+    const dlg = $("addport-dlg");
+    const sub = dlg._sub;
+    const port = parseInt($("addport-input").value, 10);
+    if (!port || port < 1 || port > 65535) return toast("port must be 1–65535", true);
+    const btn = $("addport-go");
+    btn.disabled = true;
+    try {
+      await api("/api/routes/" + encodeURIComponent(sub) + "/visibility",
+        { method: "POST", body: { visibility: "private", port: port } });
+      dlg.close();
+      toast("port " + port + " added — click its pill to make it public");
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // ---- remove (destroy) dialog ----
 
   // Removing an archived machine also drops its rootfs copy from object storage
@@ -1678,35 +2217,196 @@
 
   // ---- secrets ----
 
+  // ---- shared form + tag plumbing ----
+
+  // Every tab's add/edit form is the same mode: its own card, hidden until
+  // asked for, scrolled to rather than jumping the page to the top.
+  function openForm(cardId, focusId) {
+    $(cardId).classList.remove("hidden");
+    $(cardId).scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const f = focusId && $(focusId);
+    if (f) f.focus();
+  }
+
+  function closeForm(cardId) { $(cardId).classList.add("hidden"); }
+
+  // tagField turns a .tag-field div into the chip editor the machine list
+  // already uses: chips with an ×, and a "+ tag" box. Tags are a SET you add
+  // to and take from, and a comma-separated text input makes you retype the
+  // whole set to change one member of it.
+  //
+  // It returns a handle rather than being read off the DOM at submit time,
+  // because the committed chips and the half-typed text in the box are
+  // different things — get() commits what is in the box first, so a tag
+  // someone typed but never pressed Enter on is still saved.
+  function tagField(hostId, onChange) {
+    const host = $(hostId);
+    const input = host.querySelector("input");
+    let tags = [];
+
+    function paint() {
+      host.querySelectorAll(".chip").forEach((n) => n.remove());
+      const frag = document.createDocumentFragment();
+      for (const t of tags) {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.textContent = t;
+        const x = document.createElement("button");
+        x.type = "button";
+        x.className = "chip-x";
+        x.textContent = "×";
+        x.title = "remove " + t;
+        x.setAttribute("aria-label", "remove tag " + t);
+        x.addEventListener("click", (ev) => { ev.stopPropagation(); remove(t); });
+        chip.appendChild(x);
+        frag.appendChild(chip);
+      }
+      host.insertBefore(frag, input);
+      if (onChange) onChange(tags.slice());
+    }
+
+    function remove(t) {
+      tags = tags.filter((x) => x !== t);
+      paint();
+      input.focus();
+    }
+
+    // Returns false when something in the text was not a tag, so the caller
+    // can leave it in the box for the person to fix rather than dropping it.
+    //
+    // It repaints ONLY when the set actually changed. Clicking a chip's × blurs
+    // the input first, and a blur that rebuilt the chips every time would
+    // replace the very button being pressed between its mousedown and its
+    // mouseup — the class of bug where a click silently never lands.
+    function add(raw) {
+      let ok = true;
+      let changed = false;
+      for (const t of String(raw || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean)) {
+        if (!TAG_RE.test(t)) {
+          toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+          ok = false;
+          continue;
+        }
+        if (tags.indexOf(t) < 0) { tags.push(t); changed = true; }
+      }
+      if (changed) paint();
+      return ok;
+    }
+
+    input.addEventListener("keydown", (e) => {
+      // Enter commits the tag instead of submitting the form — in a chip box
+      // that is what Enter means, and the form still has its own Save.
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        if (add(input.value)) input.value = "";
+        return;
+      }
+      if (e.key === "Backspace" && !input.value && tags.length) {
+        e.preventDefault();
+        remove(tags[tags.length - 1]);
+      }
+    });
+    input.addEventListener("blur", () => { if (add(input.value)) input.value = ""; });
+    host.addEventListener("click", (e) => { if (e.target === host) input.focus(); });
+
+    return {
+      get() {
+        if (input.value.trim() && add(input.value)) input.value = "";
+        return tags.slice();
+      },
+      set(list) {
+        tags = (list || []).slice();
+        input.value = "";
+        paint();
+      },
+    };
+  }
+
+  // tagCell is the same editor again, this time inside a table row, so the
+  // common edit by far — add a tag, drop a tag — costs one click and never
+  // opens a form. On secrets that used to be impossible: the form made you
+  // retype the VALUE, which nothing can read back to prefill.
+  function tagCell(id, tags, empty) {
+    const list = tags || [];
+    return '<div class="chips">' +
+      list.map((t) =>
+        '<span class="chip">' + esc(t) +
+        '<button class="chip-x" data-rmtag="' + esc(t) + '" data-tagid="' + esc(id) +
+        '" title="remove ' + esc(t) + '" aria-label="remove tag ' + esc(t) + '">×</button></span>').join("") +
+      (list.length ? "" : '<span class="muted">' + esc(empty) + "</span>") +
+      '<input class="chip-input" data-addtag="' + esc(id) +
+      '" placeholder="+ tag" maxlength="40" autocomplete="off" spellcheck="false" />' +
+      "</div>";
+  }
+
+  // wireTagCells binds every tagCell under root. body() builds the PUT for the
+  // row's own endpoint — each kind sends its whole object back, so the caller
+  // supplies the rest of it from the row it already has.
+  function wireTagCells(root, opts) {
+    const find = (id) => (opts.list || []).find((x) => opts.keyOf(x) === id);
+
+    function apply(row, tags, el) {
+      const id = opts.keyOf(row);
+      if (opts.guard && !opts.guard(row, tags)) return;
+      mutate(opts.kind + "tags:" + id, el, async () => {
+        await api(opts.url(id), { method: "PUT", body: opts.body(row, tags) });
+        toast(tags.length ? id + " now carries " + tags.join(", ") : id + " has no tags — it reaches no machine");
+      });
+    }
+
+    root.querySelectorAll("button[data-rmtag]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const row = find(btn.dataset.tagid);
+        if (!row) return;
+        apply(row, (row.tags || []).filter((t) => t !== btn.dataset.rmtag), btn);
+      }));
+    root.querySelectorAll("input[data-addtag]").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const t = inp.value.trim();
+        if (!t) return;
+        if (!TAG_RE.test(t)) {
+          return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+        }
+        const row = find(inp.dataset.addtag);
+        if (!row) return;
+        if ((row.tags || []).indexOf(t) >= 0) { inp.value = ""; return; }
+        apply(row, (row.tags || []).concat(t), inp);
+      }));
+  }
+
   function renderSecrets(list) {
     const rows = $("secret-rows");
     rows.innerHTML = "";
     for (const s of list) {
       const name = s.name || s.env_name || "";
-      const tags = (s.tags || []).length
-        ? (s.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
-        : '<span class="muted">– none: reaches no machine</span>';
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(name) + "</td>" +
-        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + tagCell(name, s.tags, "– none: reaches no machine") + "</td>" +
         "<td>v" + (s.version | 0) + "</td>" +
         '<td class="age">' + rel(s.updated_at) + "</td>" +
         '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-edit="' + esc(name) +
-            '" data-tags="' + esc((s.tags || []).join(",")) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm" data-edit="' + esc(name) + '">Edit…</button> ' +
           '<button class="btn-outline btn-sm btn-danger" data-del-secret="' + esc(name) + '">Delete</button></td>';
       rows.appendChild(tr);
     }
     $("secrets-empty").classList.toggle("hidden", list.length > 0);
+    $("secrets-table").classList.toggle("hidden", list.length === 0);
+    // Tags move without a form and without the value: the secret's own PUT now
+    // treats an absent value as "leave it alone".
+    wireTagCells(rows, {
+      kind: "secret",
+      list: list,
+      keyOf: (x) => x.name || x.env_name || "",
+      url: (id) => "/api/secrets/" + encodeURIComponent(id),
+      body: (row, tags) => ({ tags: tags }),
+    });
     rows.querySelectorAll("button[data-edit]").forEach((btn) =>
       btn.addEventListener("click", () => {
-        // Prefill the form for an update; the value is write-only, so it
-        // always starts blank — saving overwrites the stored value.
-        $("sec-name").value = btn.dataset.edit;
-        $("sec-tags").value = btn.dataset.tags;
-        $("sec-value").value = "";
-        $("sec-value").focus();
+        const row = list.find((x) => (x.name || x.env_name) === btn.dataset.edit);
+        editSecret(row || { name: btn.dataset.edit, tags: [] });
       }));
     rows.querySelectorAll("button[data-del-secret]").forEach((btn) =>
       btn.addEventListener("click", () => {
@@ -1723,32 +2423,80 @@
 
   function secretsDisabled(off) {
     $("secrets-disabled").classList.toggle("hidden", !off);
-    $("secret-form").classList.toggle("hidden", off);
+    $("sec-new").classList.toggle("hidden", off);
+    if (off) closeForm("sec-form-card");
   }
+
+  const secTags = tagField("sec-tags");
+  // The name of the secret the form is editing, or null when it is creating
+  // one. Held rather than read back off the field because the field can be
+  // edited: a rename is "the name it had" plus "the name it has now".
+  let secEditing = null;
+
+  function resetSecretForm() {
+    secEditing = null;
+    $("sec-name").value = "";
+    $("sec-value").value = "";
+    secTags.set([]);
+    $("sec-form-title").textContent = "New secret";
+    $("sec-form-hint").textContent = "the tags decide which machines receive it";
+    $("sec-name-hint").textContent = "UPPER_SNAKE_CASE, up to 64 chars";
+    $("sec-value-hint").textContent = "single line, up to 4 KiB";
+    $("sec-save").textContent = "Save secret";
+  }
+
+  function editSecret(row) {
+    secEditing = row.name || row.env_name || "";
+    $("sec-name").value = secEditing;
+    $("sec-value").value = "";
+    secTags.set(row.tags || []);
+    $("sec-form-title").textContent = "Editing " + secEditing;
+    $("sec-form-hint").textContent = "leave the value blank to keep the one that is stored";
+    // Renaming is a real move server-side — the value is re-sealed under the
+    // new name, because the AAD binds each blob to the name it is stored under.
+    $("sec-name-hint").textContent = "renaming moves the secret; machines get it under the new name";
+    $("sec-value-hint").textContent = "blank keeps the stored value — nothing can read it back to show you";
+    $("sec-save").textContent = "Save changes";
+    openForm("sec-form-card", "sec-value");
+  }
+
+  function newSecret() {
+    resetSecretForm();
+    openForm("sec-form-card", "sec-name");
+  }
+
+  $("sec-new").addEventListener("click", newSecret);
+  $("sec-empty-new").addEventListener("click", newSecret);
+  $("sec-cancel").addEventListener("click", () => { resetSecretForm(); closeForm("sec-form-card"); });
 
   $("secret-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("sec-name").value.trim();
     const value = $("sec-value").value;
-    const tags = $("sec-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    const tags = secTags.get();
     if (!ENV_RE.test(name)) {
       return toast("name must be UPPER_SNAKE_CASE: start with A–Z or _, then A–Z, 0–9, _ (max 64)", true);
     }
-    if (!value) return toast("value is required", true);
-    if (/[\n\r\0]/.test(value)) return toast("value must be a single line", true);
-    if (new TextEncoder().encode(value).length > 4096) return toast("value exceeds 4 KiB", true);
-    for (const t of tags) {
-      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
+    // A blank value means "leave it" only when there IS one to leave.
+    if (!secEditing && !value) return toast("value is required", true);
+    if (value) {
+      if (/[\n\r\0]/.test(value)) return toast("value must be a single line", true);
+      if (new TextEncoder().encode(value).length > 4096) return toast("value exceeds 4 KiB", true);
     }
+    const body = { tags: tags };
+    // Absent, not empty: "" is a value somebody may genuinely want to store,
+    // and the two must not collapse into each other.
+    if (value || !secEditing) body.value = value;
+    // The PUT addresses the name the secret has NOW; rename_to is where it goes.
+    const addressed = secEditing || name;
+    if (secEditing && name !== secEditing) body.rename_to = name;
     const btn = $("sec-save");
     btn.disabled = true;
     try {
-      await api("/api/secrets/" + encodeURIComponent(name),
-        { method: "PUT", body: { value: value, tags: tags } });
+      await api("/api/secrets/" + encodeURIComponent(addressed), { method: "PUT", body: body });
       toast(name + " saved — new shells see it now; reboot machines to update running processes");
-      $("sec-name").value = "";
-      $("sec-value").value = "";
-      $("sec-tags").value = "";
+      resetSecretForm();
+      closeForm("sec-form-card");
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -1768,29 +2516,32 @@
         ? allow.slice(0, 6).map((d) => '<span class="chip plain mono">' + esc(d) + "</span>").join(" ") +
           (allow.length > 6 ? ' <span class="muted">+' + (allow.length - 6) + " more</span>" : "")
         : '<span class="muted">no domains</span>';
-      const tags = (r.tags || []).length
-        ? (r.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
-        : '<span class="muted">– none: applies to no machine</span>';
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(r.name) + "</td>" +
         '<td><div class="chips">' + doms + "</div></td>" +
-        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + tagCell(r.name, r.tags, "– none: applies to no machine") + "</td>" +
         '<td class="age">' + rel(r.updated_at) + "</td>" +
         '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-editrule="' + esc(r.name) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm" data-editrule="' + esc(r.name) + '">Edit…</button> ' +
           '<button class="btn-outline btn-sm btn-danger" data-delrule="' + esc(r.name) + '">Delete</button></td>';
       rows.appendChild(tr);
     }
     $("netrules-empty").classList.toggle("hidden", list.length > 0);
+    $("netrules-table").classList.toggle("hidden", list.length === 0);
+    // A rule-set's PUT replaces the whole object, so the allow list it already
+    // has goes back with the new tags.
+    wireTagCells(rows, {
+      kind: "rule",
+      list: list,
+      keyOf: (x) => x.name,
+      url: (id) => "/api/network-rules/" + encodeURIComponent(id),
+      body: (row, tags) => ({ allow: (row.spec && row.spec.allow) || [], tags: tags }),
+    });
     rows.querySelectorAll("button[data-editrule]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const r = list.find((x) => x.name === btn.dataset.editrule);
-        if (!r) return;
-        $("nr-name").value = r.name;
-        $("nr-allow").value = ((r.spec && r.spec.allow) || []).join("\n");
-        $("nr-tags").value = (r.tags || []).join(", ");
-        $("nr-name").focus();
+        if (r) editNetRule(r);
       }));
     rows.querySelectorAll("button[data-delrule]").forEach((btn) =>
       btn.addEventListener("click", () => {
@@ -1806,15 +2557,62 @@
 
   function netrulesDisabled(off) {
     $("netrules-disabled").classList.toggle("hidden", !off);
-    $("netrule-form").classList.toggle("hidden", off);
+    $("nr-new").classList.toggle("hidden", off);
+    if (off) closeForm("nr-form-card");
   }
 
+  const nrTags = tagField("nr-tags");
+  let nrEditing = null;
+
+  function resetNetRuleForm() {
+    nrEditing = null;
+    $("nr-name").value = "";
+    $("nr-name").readOnly = false;
+    $("nr-allow").value = "";
+    nrTags.set([]);
+    $("nr-form-title").textContent = "New rule-set";
+    $("nr-form-hint").textContent = "the tags decide which machines it governs";
+    $("nr-name-hint").textContent = "a short label, up to 64 chars";
+    $("nr-save").textContent = "Save rule-set";
+  }
+
+  function editNetRule(r) {
+    nrEditing = r.name;
+    $("nr-name").value = r.name;
+    // Same reason the environment form fixes its name: the PUT is addressed by
+    // it, so typing over it would quietly create a SECOND rule-set holding a
+    // copy of this one's domains rather than renaming this one.
+    $("nr-name").readOnly = true;
+    $("nr-allow").value = ((r.spec && r.spec.allow) || []).join("\n");
+    nrTags.set(r.tags || []);
+    $("nr-form-title").textContent = "Editing " + r.name;
+    $("nr-form-hint").textContent = "the domains below replace the ones stored";
+    $("nr-name-hint").textContent = "fixed — the tag machines already carry";
+    $("nr-save").textContent = "Save changes";
+    openForm("nr-form-card", "nr-allow");
+  }
+
+  function newNetRule() {
+    resetNetRuleForm();
+    openForm("nr-form-card", "nr-name");
+  }
+
+  $("nr-new").addEventListener("click", newNetRule);
+  $("nr-empty-new").addEventListener("click", newNetRule);
+  $("nr-cancel").addEventListener("click", () => { resetNetRuleForm(); closeForm("nr-form-card"); });
+
   // Claude Code's default "Trusted" network domains (per code.claude.com/docs)
-  // plus the two federations a sandbox is wired for out of the box:
+  // plus the hosts the federations a sandbox is wired for out of the box need:
   // hivemind.wandb.tools, and OpenAI's api./auth./chatgpt hosts — without
   // auth.openai.com a tagged box cannot exchange its assertion, and `codex`
-  // falls back to asking a person to log in inside a VM with no browser.
-  // A one-click starting point for a rule-set.
+  // falls back to asking a person to log in inside a VM with no browser. A
+  // one-click starting point for a rule-set, and the same set a new
+  // environment's default rule-set is built from.
+  //
+  // THIS IS A COPY. The canonical list is netrules.TrustedDomains, which the
+  // server uses for that default; this one exists because a browser cannot
+  // import Go, and a test compares the two as sets so they cannot drift into
+  // "the prefill button offers something the default does not allow".
   var TRUSTED_DOMAINS = `
       *.amazonaws.com *.api.aws *.data.mcr.microsoft.com *.datadoghq.com *.datadoghq.eu *.gcr.io
       *.googleapis.com *.microsoftonline.com *.modelcontextprotocol.io *.nixos.org
@@ -1837,10 +2635,11 @@
       index.golang.org index.rubygems.org java.com java.net jcenter.bintray.com json-schema.org
       json.schemastore.org k8s.io kotlinlang.org launchpad.net maven.org mcr.microsoft.com
       metacpan.org microsoft.com nodejs.org npm.pkg.github.com npmjs.com npmjs.org nuget.org
-      objects.githubusercontent.com ode.js oracle.com packagecloud.io packages.microsoft.com
+      objects.githubusercontent.com oracle.com packagecloud.io packages.microsoft.com
       packagist.org pkg-npm.githubusercontent.com pkg.go.dev pkg.stainless.com pkgs.k8s.io
       platform.claude.com plugins.gradle.org portal.azure.com ppa.launchpad.net
-      production.cloudflare.docker.com proxy.golang.org pub.dev public.ecr.aws pypa.io pypi.org
+      production.cloudflare.docker.com production.cloudfront.docker.com proxy.golang.org pub.dev
+      public.ecr.aws pypa.io pypi.org
       pypi.python.org pythonhosted.org registry-1.docker.io registry.gitlab.com
       registry.npmjs.org registry.yarnpkg.com release-assets.githubusercontent.com
       releases.hashicorp.com repo.anaconda.com repo.maven.apache.org repo.maven.org
@@ -1869,20 +2668,16 @@
     e.preventDefault();
     const name = $("nr-name").value.trim();
     const allow = $("nr-allow").value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-    const tags = $("nr-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    const tags = nrTags.get();
     if (!name) return toast("name is required", true);
-    for (const t of tags) {
-      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
-    }
     const btn = $("nr-save");
     btn.disabled = true;
     try {
       await api("/api/network-rules/" + encodeURIComponent(name),
         { method: "PUT", body: { allow: allow, tags: tags } });
       toast(name + " saved — applies to tagged machines within seconds");
-      $("nr-name").value = "";
-      $("nr-allow").value = "";
-      $("nr-tags").value = "";
+      resetNetRuleForm();
+      closeForm("nr-form-card");
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -1939,35 +2734,40 @@
     const rows = $("repo-rows");
     rows.innerHTML = "";
     for (const r of list) {
-      const tags = (r.tags || []).length
-        ? (r.tags || []).map((t) => '<span class="chip plain">' + esc(t) + "</span>").join(" ")
-        : '<span class="muted">– none: reaches no machine</span>';
       const ref = r.ref ? ' <span class="chip plain">' + esc(r.ref) + "</span>" : "";
       const where = r.path ? '<div class="muted">~/' + esc(r.path) + "</div>" : "";
       const tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="name mono">' + esc(r.slug) + ref + where + "</td>" +
-        '<td><div class="chips">' + tags + "</div></td>" +
+        "<td>" + tagCell(r.slug, r.tags, "– none: reaches no machine") + "</td>" +
         "<td>" + (r.access === "write" ? "read + push" : "read-only") + "</td>" +
         "<td>" + appCell(r) + '<div>' + userAuthCell(r) + "</div></td>" +
         '<td class="age">' + rel(r.created_at) + "</td>" +
         '<td class="actions">' +
-          '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Update</button> ' +
+          '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Edit…</button> ' +
           '<button class="btn-outline btn-sm btn-danger" data-del-repo="' + esc(r.slug) + '">Detach</button></td>';
       rows.appendChild(tr);
     }
     $("repos-empty").classList.toggle("hidden", list.length > 0);
+    $("repos-table").classList.toggle("hidden", list.length === 0);
+    // A repo's PUT replaces the whole attachment, so everything it already has
+    // rides along with the new tags — the asymmetry that makes a bare tag edit
+    // silently drop a branch or a write credential otherwise.
+    wireTagCells(rows, {
+      kind: "repo",
+      list: list,
+      keyOf: (x) => x.slug,
+      url: (id) => "/api/repos/" + encodeURIComponent(id),
+      body: (row, tags) => ({ ref: row.ref || "", path: row.path || "", access: row.access, tags: tags }),
+      // The `default` tag is on every machine its owner makes from then on.
+      guard: (row, tags) => tags.indexOf("default") < 0 || (row.tags || []).indexOf("default") >= 0 ||
+        confirm("The default tag is carried by every machine you create from now on, so " +
+          row.slug + " will be cloned into all of them. Attach it to default?"),
+    });
     rows.querySelectorAll("button[data-editrepo]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const r = list.find((x) => x.slug === btn.dataset.editrepo);
-        if (!r) return;
-        $("rp-slug").value = r.slug;
-        $("rp-ref").value = r.ref || "";
-        $("rp-path").value = r.path || "";
-        $("rp-tags").value = (r.tags || []).join(", ");
-        $("rp-access").value = r.access === "write" ? "write" : "read";
-        repoDefaultWarn();
-        $("rp-slug").focus();
+        if (r) editRepo(r);
       }));
     rows.querySelectorAll("button[data-del-repo]").forEach((btn) =>
       btn.addEventListener("click", () => {
@@ -1996,32 +2796,70 @@
 
   function reposDisabled(off) {
     $("repos-disabled").classList.toggle("hidden", !off);
-    $("repo-form").classList.toggle("hidden", off);
-  }
-
-  function repoTags() {
-    return $("rp-tags").value.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    $("rp-new").classList.toggle("hidden", off);
+    if (off) closeForm("rp-form-card");
   }
 
   // The `default` tag is on every machine its owner creates from then on, so a
-  // repo attached to it is cloned into all of them. Shown while typing as well
-  // as confirmed on submit: the point is to be read before the click, not to
-  // put one more dialog between someone and a thing they meant to do.
-  function repoDefaultWarn() {
-    $("repo-default-warn").classList.toggle("hidden", repoTags().indexOf("default") < 0);
+  // repo attached to it is cloned into all of them. Shown while the tags are
+  // being edited as well as confirmed on submit: the point is to be read
+  // before the click, not to put one more dialog between someone and a thing
+  // they meant to do.
+  function repoDefaultWarn(tags) {
+    $("repo-default-warn").classList.toggle("hidden", (tags || []).indexOf("default") < 0);
   }
 
-  $("rp-tags").addEventListener("input", repoDefaultWarn);
+  const rpTags = tagField("rp-tags", repoDefaultWarn);
+  let rpEditing = null;
+
+  function resetRepoForm() {
+    rpEditing = null;
+    $("rp-slug").value = "";
+    $("rp-slug").readOnly = false;
+    $("rp-ref").value = "";
+    $("rp-path").value = "";
+    $("rp-access").value = "read";
+    rpTags.set([]);
+    $("rp-form-title").textContent = "Attach a repository";
+    $("rp-form-hint").textContent = "the tags decide which machines clone it";
+    $("rp-slug-hint").textContent = "owner/name on github.com";
+    $("rp-save").textContent = "Attach repository";
+  }
+
+  function editRepo(r) {
+    rpEditing = r.slug;
+    $("rp-slug").value = r.slug;
+    // Addressed by slug, like the other two forms: typing over it would attach
+    // a different repository rather than change this one.
+    $("rp-slug").readOnly = true;
+    $("rp-ref").value = r.ref || "";
+    $("rp-path").value = r.path || "";
+    $("rp-access").value = r.access === "write" ? "write" : "read";
+    rpTags.set(r.tags || []);
+    $("rp-form-title").textContent = "Editing " + r.slug;
+    $("rp-form-hint").textContent = "everything below replaces the current attachment";
+    $("rp-slug-hint").textContent = "fixed — detach it to attach a different repository";
+    $("rp-save").textContent = "Save changes";
+    openForm("rp-form-card", "rp-ref");
+  }
+
+  function newRepo() {
+    resetRepoForm();
+    openForm("rp-form-card", "rp-slug");
+  }
+
+  $("rp-new").addEventListener("click", newRepo);
+  $("rp-empty-new").addEventListener("click", newRepo);
+  $("rp-cancel").addEventListener("click", () => { resetRepoForm(); closeForm("rp-form-card"); });
 
   $("repo-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const slug = $("rp-slug").value.trim();
-    const tags = repoTags();
+    const tags = rpTags.get();
     if (!SLUG_RE.test(slug)) return toast("repository must be owner/name, e.g. wandb/hivemind", true);
-    for (const t of tags) {
-      if (!TAG_RE.test(t)) return toast("bad tag " + t + ": lowercase letters, digits, dashes (max 40)", true);
-    }
-    if (tags.indexOf("default") >= 0 &&
+    // Only when it is being ADDED — re-saving a repo that already has it is not
+    // the moment to ask again.
+    if (tags.indexOf("default") >= 0 && !rpEditing &&
       !confirm("The default tag is carried by every machine you create from now on, so " + slug +
         " will be cloned into all of them. Attach it to default?")) return;
     const btn = $("rp-save");
@@ -2037,12 +2875,8 @@
         },
       });
       toast(slug + " attached — cloned into new machines carrying its tags");
-      $("rp-slug").value = "";
-      $("rp-ref").value = "";
-      $("rp-path").value = "";
-      $("rp-tags").value = "";
-      $("rp-access").value = "read";
-      repoDefaultWarn();
+      resetRepoForm();
+      closeForm("rp-form-card");
       await refresh();
     } catch (e2) {
       toast(e2.message, true);
@@ -2051,17 +2885,530 @@
     }
   });
 
+  // ---- environments ----
+
+  // The environment the form is currently EDITING, or null when it is a blank
+  // create form. It is the difference between "leave this alone" and "clear
+  // it": the same two fields — description and variables — are replaced outright
+  // when they belong to a row somebody opened, and left untouched when the form
+  // was never populated. Without it, typing an existing name into an empty form
+  // to add a secret would silently wipe that environment's description and
+  // every variable on it.
+  let envEditing = null;
+  let lastEnvs = [];
+
+  // One vocabulary for where a setup script came from, shared by the card foot
+  // and the editor's header — "recorded from agent" and "written by an agent"
+  // were the same fact in two dialects.
+  const SETUP_FROM = {
+    agent: "written by an agent, then run in the builder",
+    repo: "committed in the repo",
+    manual: "written by hand",
+  };
+
+  // One labelled column per kind of attachment. Absence is stated rather than
+  // left blank: "this environment has no secrets" is a fact somebody came here
+  // to check, and an empty column reads as a rendering failure.
+  function envCol(label, items, empty) {
+    const body = (items && items.length)
+      ? '<div class="val">' + items.map(esc).join("<br />") + "</div>"
+      : '<div class="val none">' + empty + "</div>";
+    return '<div class="env-col"><div class="label">' + label + "</div>" + body + "</div>";
+  }
+
+  // machineFor is the machine list looked up by name. The Environments panel
+  // reads it for the one machine an environment ever names — its builder —
+  // rather than asking the server a second question about a box that is
+  // already in the response beside it.
+  function machineFor(name) {
+    return name ? lastMachines.find((m) => m.name === name) || null : null;
+  }
+
+  // sessionLink renders a HiveMind transcript as an outlined link.
+  //
+  // The href is host-checked on the way out (webui.SessionLink) and escaped
+  // again here, and the session TITLE — which is written by whatever the agent
+  // was doing — never becomes markup: it is a title attribute, so a long one
+  // is a hover rather than a card that stops fitting. rel is set because this
+  // is the one control on the page that leaves the origin.
+  function sessionLink(url, title, label) {
+    return '<a class="btn-outline btn-sm" href="' + esc(url) + '" target="_blank"' +
+      ' rel="noopener noreferrer"' + (title ? ' title="' + esc(title) + '"' : "") +
+      ">" + esc(label) + "</a>";
+  }
+
+  // sessionLinkInline is the same link as prose rather than as a control, for
+  // the foot line where it sits inside a sentence about the setup script.
+  function sessionLinkInline(url, label) {
+    return '<a class="linkish" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' +
+      esc(label) + "</a>";
+  }
+
+  // The dot carries the colour and the word stays quiet — the same badge
+  // anatomy as running/paused/archived one tab over, so the two lists read at
+  // the same glance.
+  function envBadge(st) {
+    const word = st === "ready" || st === "building" || st === "failed" ? st : "draft";
+    return '<span class="badge ' + word + '"><span class="dot"></span>' + word + "</span>";
+  }
+
+  // What a machine made from this environment would boot from. It is the whole
+  // product of a build, so it sits on the head line beside the state rather
+  // than in a column of its own.
+  function envBoots(e) {
+    if (e.state === "ready" && e.snapshot) {
+      return "built " + rel(e.built_at) + " · " + esc(e.snapshot);
+    }
+    // Nothing, mid-build: the strip below already names the machine it is
+    // happening in, and "boots the default image" under a blinking "building"
+    // is a fact that is about to stop being true.
+    return e.state === "building" ? "" : "boots the default image";
+  }
+
+  // The two states that are a situation rather than a fact get a strip under
+  // the head, carrying the machine you would go and look at and the action
+  // that resolves it.
+  function envStrip(e) {
+    if (e.state === "building") {
+      // The live transcript, when there is one. An agent build is minutes of
+      // an unattended agent working, and the log tail is cut to a sentence by
+      // the time it reaches this card — so a link to what it is actually doing
+      // is the difference between a spinner and a build somebody can follow.
+      //
+      // It comes off the BUILDER's own row in the machine list, which the same
+      // poll already fetched: the builder is an ordinary sandbox, and its
+      // vitals carry whatever HiveMind last said about it. A script build has
+      // no agent and therefore no link, which needs no special case.
+      const live = machineFor(e.build_box || (e.name + "-build"));
+      const watch = live && live.hivemind_session_url
+        ? '<div class="chips">' + sessionLink(live.hivemind_session_url,
+            live.hivemind_session_title, "Watch the agent") + "</div>"
+        : "";
+      return '<div class="env-strip building"><div class="msg">Building in <span class="mono">' +
+        esc(e.build_box || (e.name + "-build")) +
+        "</span>. This takes minutes; the card updates itself.</div>" + watch + "</div>";
+    }
+    if (e.state !== "failed" || !e.build_error) return "";
+    // The builder is deliberately left paused on a failure, so the two things
+    // worth offering are a shell in it and adopting its disk as-is. Both are
+    // here rather than in the overflow menu: they only exist in this state.
+    const box = e.build_box;
+    const live = box ? machineFor(box) : null;
+    // The transcript is recorded on the row when the build reports, so it is
+    // here whether or not the builder still is — and on a failed AGENT build it
+    // is usually the fastest way to see what went wrong, because the box is
+    // paused and its log is behind an ssh.
+    const read = e.build_session
+      ? sessionLink(e.build_session, "", "Read what the agent did")
+      : "";
+    const actions = box || read
+      ? '<div class="chips">' +
+          (box && live
+            ? '<button class="btn-outline btn-sm" data-envterm="' + esc(box) +
+              '" data-running="' + (live.state === "running" ? 1 : 0) + '">Open a terminal</button>'
+            : "") +
+          read +
+          (box
+            ? '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
+              '">Keep this disk</button>'
+            : "") + "</div>"
+      : "";
+    return '<div class="env-strip failed"><div class="msg">' + esc(endSentence(e.build_error)) +
+      (box ? ' <span class="mono">' + esc(box) + "</span> is still there." : "") +
+      "</div>" + actions + "</div>";
+  }
+
+  // The foot says what the next build will actually run. "3746 B" was not that
+  // fact; where the script came from, and that an absent one means an agent
+  // writes and then runs one, is.
+  function envFoot(e) {
+    const from = SETUP_FROM[e.setup_from] || "recorded";
+    const what = e.has_setup
+      ? "<strong>Setup script</strong> — " + from +
+        (e.setup_bytes ? " · " + bytes(e.setup_bytes) : "")
+      : "<strong>No setup script</strong> — Build asks an agent to write one, then runs what it wrote";
+    // A script an agent wrote is the only one whose author can be read back,
+    // and the foot is where this card already says where the script came from.
+    // The failed strip carries its own copy of this link because a failure is
+    // read from the top of the card; a succeeded build is read from here.
+    const wrote = e.build_session && e.state !== "failed"
+      ? " · " + sessionLinkInline(e.build_session, "how it was written")
+      : "";
+    return '<div class="env-foot"><div>' + what + wrote + "</div>" +
+      '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">' +
+      (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
+  }
+
+  function envDenials(e) {
+    const domains = e.build_denials || [];
+    if (!domains.length && !e.build_denial_overflow) return "";
+    const rows = domains.map((d) => '<span><span class="mono">' + esc(d.domain) +
+      "</span> · " + d.queries + (d.queries === 1 ? " query" : " queries") + "</span>").join("");
+    const overflow = e.build_denial_overflow
+      ? '<span class="muted">' + e.build_denial_overflow + " more queries omitted</span>"
+      : "";
+    return '<div class="env-strip denials"><strong>Blocked by egress policy during the last build</strong>' +
+      '<div class="domains">' + rows + overflow + "</div></div>";
+  }
+
+  function envCard(e) {
+    const st = e.state || "draft";
+    const isRebuild = st === "ready" || st === "failed";
+    const buildLabel = isRebuild ? "Rebuild" : "Build";
+    const rebuildAttr = isRebuild ? '" data-envrebuild="1' : "";
+    const envRepos = e.repos || [];
+    const canLaunch = st === "ready" && launchSub && envRepos.length > 0;
+    let launchAction = "";
+    if (canLaunch && envRepos.length === 1) {
+      launchAction = '<button class="btn-primary btn-sm" data-envlaunch="' + esc(e.name) +
+        '" data-repo="' + esc(envRepos[0]) + '">🚀 Launch</button>';
+    } else if (canLaunch) {
+      launchAction = '<div class="menu"><button type="button" class="btn-primary btn-sm" data-menu' +
+        ' aria-haspopup="true" aria-expanded="false">🚀 Launch</button><div class="menu-pop hidden">' +
+        envRepos.map((slug) => '<button data-envlaunch="' + esc(e.name) + '" data-repo="' +
+          esc(slug) + '">' + esc(slug) + '</button>').join("") + "</div></div>";
+    }
+    // One action plus a menu, which is this console's own vocabulary: the
+    // machine card lost its row of outlined buttons for being the loudest
+    // thing on it, and a five-button environment row was the same mistake.
+    const menu = '<div class="menu"><button type="button" class="btn-icon" data-menu' +
+      ' aria-haspopup="true" aria-expanded="false" title="More actions" aria-label="More actions">' +
+      DOTS + '</button><div class="menu-pop hidden">' +
+      '<button data-envedit="' + esc(e.name) + '">Edit environment…</button>' +
+      (canLaunch ? '<button data-envbuild="' + esc(e.name) + rebuildAttr + '">Rebuild</button>' : '') +
+      '<div class="sep"></div>' +
+      '<button class="btn-danger" data-envdel="' + esc(e.name) + '">Delete…</button>' +
+      "</div></div>";
+    return '<div class="card env-card">' +
+      '<div class="m-head">' +
+        '<div class="m-title"><span class="name mono">' + esc(e.name) + "</span>" +
+          envBadge(st) + '<span class="spec">' + envBoots(e) + "</span></div>" +
+        '<div class="m-actions">' +
+          launchAction +
+          // A disabled "Build" next to a badge that says building is a control
+          // that only restates the state. It comes back when the build ends.
+          (st === "building" || canLaunch ? "" :
+            '<button class="btn-outline btn-sm" data-envbuild="' + esc(e.name) + rebuildAttr + '">' +
+            buildLabel + "</button>") +
+          menu +
+        "</div>" +
+      "</div>" +
+      (e.description ? '<div class="env-sub">' + esc(e.description) + "</div>" : "") +
+      envStrip(e) +
+      envDenials(e) +
+      '<div class="env-grid">' +
+        envCol("Repos", e.repos, "none") +
+        envCol("Secrets", e.secrets, "none") +
+        envCol("Egress", e.rules, "unrestricted") +
+        envCol("Variables", (e.vars || []).map((v) => v.name), "none") +
+      "</div>" +
+      envFoot(e) +
+    "</div>";
+  }
+
+  function renderEnvs(list) {
+    lastEnvs = list;
+    const host = $("env-list");
+    // Same bargain the machine list makes with the 4s poll: a repaint rebuilds
+    // every card, which would snap an open ··· menu shut under the cursor.
+    if (host.querySelector(".menu-pop:not(.hidden)")) return;
+    host.innerHTML = list.map(envCard).join("");
+    // One invitation at a time. The empty card's own button is the call to
+    // action; the header's would be a second one three lines above it.
+    const off = !$("envs-disabled").classList.contains("hidden");
+    const empty = !off && list.length === 0;
+    $("envs-empty").classList.toggle("hidden", !empty);
+    $("env-new").classList.toggle("hidden", off || empty);
+
+    host.querySelectorAll("button[data-envbuild]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envbuild;
+        // Every other destructive action on this page asks first — both deletes
+        // and "Keep this disk" do. A rebuild is minutes of unattended agent that
+        // REPLACES the image new machines boot from, and it sits one row under
+        // "Edit environment…" in the same menu, so it asks too.
+        if (btn.dataset.envrebuild &&
+            !confirm("Rebuild " + name + "? A throwaway machine runs its setup again — this takes " +
+              "minutes, and if it succeeds it replaces the disk new machines start from. " +
+              "The machines you have now are unaffected.")) return;
+        mutate("envbuild:" + name, btn, async () => {
+          await api("/api/environments/" + encodeURIComponent(name) + "/build", { method: "POST" });
+          toast("building " + name + " — this takes minutes; the card updates itself");
+        });
+      }));
+    host.querySelectorAll("button[data-envlaunch]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const href = launchURL(btn.dataset.repo, btn.dataset.envlaunch);
+        if (href) window.location.assign(href);
+      }));
+    host.querySelectorAll("button[data-envterm]").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        openTerminal(btn.dataset.envterm, btn.dataset.running === "1", btn)));
+    host.querySelectorAll("button[data-envcapture]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envcapture;
+        if (!confirm("Keep " + name + "-build exactly as it is and make it this environment's base image?")) return;
+        mutate("envcapture:" + name, btn, async () => {
+          // Synchronous and slow: it packs a rootfs. The button stays disabled
+          // for the whole wait, which is the honest progress indicator.
+          toast("keeping " + name + "'s disk — this takes a few minutes");
+          await api("/api/environments/" + encodeURIComponent(name) + "/capture", { method: "POST" });
+          toast(name + " captured");
+        });
+      }));
+    host.querySelectorAll("button[data-envscript]").forEach((btn) =>
+      btn.addEventListener("click", () => openEnvScript(btn.dataset.envscript, btn)));
+    host.querySelectorAll("button[data-envedit]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const e = list.find((x) => x.name === btn.dataset.envedit);
+        if (!e) return;
+        envEditing = e.name;
+        $("env-name").value = e.name;
+        // The name IS the tag — machines, secrets, repos, rule-sets and a bound
+        // base image all hang off it, so there is nothing here that could
+        // rename them. Typing over it used to CLONE: a second environment, the
+        // original untouched, and the source's secrets attached to a new tag
+        // that no verb can strip them from again.
+        $("env-name").readOnly = true;
+        $("env-name-hint").textContent = "fixed — the tag machines already carry";
+        $("env-desc").value = e.description || "";
+        $("env-repos").value = (e.repos || []).join(", ");
+        $("env-secrets").value = (e.secrets || []).join(", ");
+        $("env-rules").value = (e.rules || []).join(", ");
+        $("env-vars").value = (e.vars || []).map((v) => v.name + "=" + v.value).join("\n");
+        $("env-open").checked = false;
+        // Its own label says "new environments only"; a live control that does
+        // nothing is worse than an absent one.
+        $("env-open-row").classList.add("hidden");
+        $("env-form-title").textContent = "Editing " + e.name;
+        $("env-form-hint").textContent = "the description and variables below replace what is stored";
+        $("env-save").textContent = "Save changes";
+        openEnvForm();
+      }));
+    host.querySelectorAll("button[data-envdel]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.envdel;
+        if (!confirm("Delete environment " + name + "? Its secrets, repos and rule-sets are kept — " +
+            "only the environment, its variables and its base image binding go.")) return;
+        mutate("envdel:" + name, btn, async () => {
+          const res = await api("/api/environments/" + encodeURIComponent(name), { method: "DELETE" });
+          // What SURVIVED is the point of the verb, so it is said rather than
+          // left for somebody to go and check.
+          const kept = (res.repos || []).length + (res.secrets || []).length + (res.rules || []).length;
+          // Variables and the base image are the two things a delete normally
+          // DOES take, so an environment that adopted them and gave them back
+          // has to say so — otherwise somebody who knows the rule assumes the
+          // worst about configuration that is still sitting there.
+          const inherited = (res.kept_vars || []).length;
+          toast("deleted " + name +
+            (kept ? " — " + plural(kept, "attached object still carries", "attached objects still carry") +
+              " the tag" : "") +
+            (res.removed_rule ? "; its egress rule-set went with it" : "") +
+            (inherited ? "; " + plural(inherited, "variable it adopted was", "variables it adopted were") +
+              " kept" : "") +
+            (res.kept_snapshot ? "; the tag still boots from " + res.kept_snapshot : ""));
+          if (envEditing === name) resetEnvForm();
+        });
+      }));
+    reapplyInflight(host);
+  }
+
+  // Called before renderEnvs, which is what decides whether the header's
+  // "New environment" is shown — it depends on this having been set first.
+  function envsDisabled(off) {
+    $("envs-disabled").classList.toggle("hidden", !off);
+    if (off) closeEnvForm();
+  }
+
+  // The form is a mode. Opening it scrolls it into view rather than jumping
+  // the page to the top, which is what an edit used to do from four cards down.
+  function openEnvForm() {
+    $("env-form-card").classList.remove("hidden");
+    $("env-form-card").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    // On an edit the name is fixed, so the first thing you can actually change
+    // is where the caret belongs.
+    ($("env-name").readOnly ? $("env-desc") : $("env-name")).focus();
+  }
+
+  function closeEnvForm() {
+    $("env-form-card").classList.add("hidden");
+  }
+
+  function resetEnvForm() {
+    envEditing = null;
+    for (const id of ["env-name", "env-desc", "env-repos", "env-secrets", "env-rules", "env-vars"]) {
+      $(id).value = "";
+    }
+    $("env-name").readOnly = false;
+    $("env-name-hint").textContent = "lowercase, digits, dashes — this is the tag";
+    $("env-open-row").classList.remove("hidden");
+    $("env-open").checked = false;
+    $("env-form-title").textContent = "New environment";
+    $("env-form-hint").textContent = "the name is the tag machines carry to get all of this";
+    $("env-save").textContent = "Save environment";
+  }
+
+  function newEnvironment() {
+    resetEnvForm();
+    openEnvForm();
+  }
+
+  $("env-new").addEventListener("click", newEnvironment);
+  $("env-empty-new").addEventListener("click", newEnvironment);
+  $("env-cancel").addEventListener("click", () => { resetEnvForm(); closeEnvForm(); });
+
+  // "1 thing still carries" / "2 things still carry". The console says counts
+  // out loud in toasts, and "1 attached object(s)" reads like a placeholder.
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+
+  // A sentence the console did not write ends where its author left it — the
+  // guest's build error has no full stop, so appending to it ran two sentences
+  // together ("…could reproduce it web-build is still there.").
+  function endSentence(t) {
+    const s = String(t || "").trim();
+    return !s || /[.!?]$/.test(s) ? s : s + ".";
+  }
+
+  function splitList(id) {
+    return $(id).value.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+  }
+
+  $("env-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("env-name").value.trim().toLowerCase();
+    if (!name) return toast("name is required", true);
+    if (!TAG_RE.test(name)) {
+      return toast("bad name " + name + ": lowercase letters, digits, dashes (max 40)", true);
+    }
+    const vars = [];
+    for (const line of $("env-vars").value.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      const eq = t.indexOf("=");
+      if (eq <= 0) return toast("bad variable " + t + ": write it as NAME=value", true);
+      vars.push({ name: t.slice(0, eq).trim(), value: t.slice(eq + 1) });
+    }
+    const body = {
+      repos: splitList("env-repos").map((slug) => ({ slug: slug })),
+      secrets: splitList("env-secrets"),
+      rules: splitList("env-rules"),
+      open_egress: $("env-open").checked,
+    };
+    // Only a form that was POPULATED from a card may clear these two. On a blank
+    // create form an empty box means "I did not fill this in", not "delete what
+    // is there" — and typing an existing name into one is how somebody adds a
+    // secret to an environment they already have.
+    const editing = envEditing === name;
+    const desc = $("env-desc").value.trim();
+    if (editing || desc) body.description = desc;
+    if (editing || vars.length) body.vars = vars;
+    const btn = $("env-save");
+    btn.disabled = true;
+    try {
+      const url = "/api/environments/" + encodeURIComponent(name);
+      try {
+        await api(url, { method: "PUT", body: body });
+      } catch (e1) {
+        // An environment's name IS its tag, and tags are older than
+        // environments — so this name may already be carrying somebody's repos,
+        // secrets, variables, base image or running machines, all of which the
+        // environment would adopt on the spot. The server refuses that create
+        // and says what is there; the decision is the person's, so it is put to
+        // them in their own words and the same request is sent again.
+        //
+        // Matched on `code`, never on the sentence: the wording is the server's
+        // to improve.
+        if (e1.code !== "env_tag_in_use" || !confirm(e1.message + "\n\nCreate it anyway?")) throw e1;
+        await api(url, { method: "PUT", body: Object.assign({}, body, { adopt: true }) });
+      }
+      toast(name + " saved");
+      resetEnvForm();
+      closeEnvForm();
+      await refresh();
+    } catch (e2) {
+      toast(e2.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- the setup script editor ----
+
+  let envScriptName = null;
+
+  async function openEnvScript(name, btn) {
+    btn.disabled = true;
+    try {
+      const got = await api("/api/environments/" + encodeURIComponent(name) + "/script");
+      envScriptName = name;
+      $("env-script-title").textContent = ".sparkbox/setup.sh — " + name;
+      $("env-script-origin").textContent = got.from
+        ? (SETUP_FROM[got.from] || "recorded from " + got.from)
+        : "nothing recorded yet";
+      $("env-script").value = got.script || "";
+      $("env-script-note").textContent = "";
+      $("env-script-panel").classList.remove("hidden");
+      $("env-script").focus();
+      $("env-script").setSelectionRange(0, 0);
+      $("env-script").scrollTop = 0;
+      $("env-script-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $("env-script-save").addEventListener("click", async () => {
+    if (!envScriptName) return;
+    const btn = $("env-script-save");
+    btn.disabled = true;
+    try {
+      await api("/api/environments/" + encodeURIComponent(envScriptName) + "/script",
+        { method: "PUT", body: { script: $("env-script").value } });
+      $("env-script-origin").textContent = SETUP_FROM.manual;
+      $("env-script-note").textContent = "saved — the next build runs this";
+      toast("setup script saved for " + envScriptName);
+      await refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("env-script-close").addEventListener("click", () => {
+    envScriptName = null;
+    $("env-script-panel").classList.add("hidden");
+  });
+
   // ---- tabs / shell ----
 
-  const initialTab = window.location.hash === "#repos" ? "repos" : "machines";
+  // The tab a link can land on directly. #machines is here now that
+  // Environments leads the bar and is what a bare visit opens: the machine list
+  // used to be reachable by simply arriving, and a deep link to it must not
+  // stop existing because the default moved.
+  const HASH_TABS = { "#repos": "repos", "#environments": "environments", "#machines": "machines",
+    "#secrets": "secrets", "#network": "network" };
+  // ENVIRONMENTS IS THE LANDING TAB. An environment is the thing a person
+  // decides — the repos, secrets, egress and disk a machine will get — and a
+  // machine is what they get afterwards; opening on the composition rather than
+  // on the instances puts the console's first screen on the choice being made.
+  // The bar's first tab and the default are the same tab on purpose: an
+  // interface whose second tab is the one that opens reads as a bug.
+  const initialTab = HASH_TABS[window.location.hash] || "environments";
 
   document.querySelectorAll(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
       $("tab-machines").classList.toggle("hidden", btn.dataset.tab !== "machines");
+      $("tab-environments").classList.toggle("hidden", btn.dataset.tab !== "environments");
       $("tab-secrets").classList.toggle("hidden", btn.dataset.tab !== "secrets");
       $("tab-network").classList.toggle("hidden", btn.dataset.tab !== "network");
       $("tab-repos").classList.toggle("hidden", btn.dataset.tab !== "repos");
+      // The browser tab said "my machines" on every tab, including the one that
+      // now opens by default. The bar already names each view; reuse it.
+      document.title = "sparkbox — " + btn.textContent.trim().toLowerCase();
     }));
   const initialTabButton = document.querySelector('.tab[data-tab="' + initialTab + '"]');
   if (initialTabButton) initialTabButton.click();
@@ -2087,9 +3434,10 @@
 
   async function refresh() {
     try {
-      const [rm, ru, rs, rn, rnr, rrp] = await Promise.all([
+      const [rm, ru, rs, rn, rnr, rrp, rev] = await Promise.all([
         fetch("/api/machines"), fetch("/api/usage"), fetch("/api/secrets"),
         fetch("/api/snapshots"), fetch("/api/network-rules"), fetch("/api/repos"),
+        fetch("/api/environments"),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
@@ -2156,6 +3504,18 @@
         fresh = false;
         toast("repos refresh failed: " + (await errText(rrp)), true);
       }
+      // 501 = no environment store on this host; same treatment as the two above.
+      if (rev.status === 501) {
+        envsDisabled(true);
+        renderEnvs([]);
+      } else if (rev.ok) {
+        envsDisabled(false);
+        const list = await rev.json();
+        renderEnvs(Array.isArray(list) ? list : []);
+      } else {
+        fresh = false;
+        toast("environments refresh failed: " + (await errText(rev)), true);
+      }
       if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
       if (!timer) timer = setInterval(refresh, 4000);
     } catch (e) {
@@ -2174,6 +3534,7 @@
     try {
       const me = await api("/api/me");
       termSub = me.terminal_subdomain || "";
+      launchSub = me.launch_subdomain || "";
       const who = $("who");
       who.textContent = me.handle + (me.operator ? " · operator" : "");
       who.className = "badge" + (me.operator ? " op" : "");

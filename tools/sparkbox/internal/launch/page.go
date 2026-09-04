@@ -253,7 +253,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
 	c := ctlops.Caller{Handle: sess.Handle}
 
-	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("ref"))
+	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("ref"), r.URL.Query().Get("env"))
 	if bad != nil {
 		h.refuse(w, r, t, bad)
 		return
@@ -265,11 +265,11 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, r, t, ctlops.AsError(op, err))
 		return
 	}
-	if best != nil {
+	if best != nil && t.Env == "" {
 		h.handoff(w, r, t, best.Info)
 		return
 	}
-	h.render(w, http.StatusOK, h.confirm(c, t, att, others))
+	h.render(w, http.StatusOK, h.confirm(c, t, att, best, others))
 }
 
 // home answers GET / on this door: a bare visit to go.<domain>, with no
@@ -289,8 +289,8 @@ func (h *Handler) home(w http.ResponseWriter, r *http.Request) {
 		Title:   "Launch links · sparkbox",
 		Heading: "Launch links",
 		Lead: "This door turns a link in a pull-request comment into a sandbox of your own, " +
-			"with the repository already checked out. A link names a repository and, optionally, a branch — nothing else.",
-		Command: h.origin + "/<owner>/<repo>?ref=<branch>",
+			"with the repository already checked out. A link names a repository and may select a branch or one of your environments.",
+		Command: h.origin + "/<owner>/<repo>?ref=<branch>&env=<environment>",
 		Steps: []step{
 			{Lead: "Nothing in the link names you.", Body: "Whoever clicks it signs in as themselves and gets their own sandbox, built from their own attachments and their own secrets."},
 			{Lead: "The repository has to be attached to your account first.", Body: "A sandbox clones what you attached, not what the link's author attached."},
@@ -352,8 +352,12 @@ func (h *Handler) handoff(w http.ResponseWriter, r *http.Request, t target, info
 // the surprise this page exists to remove — `default` is stamped on every
 // create, so a visitor who has three repositories on `default` gets three
 // checkouts from a link that named one.
-func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, others []candidate) pageData {
-	tags := createTags(att)
+func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, best *candidate, others []candidate) pageData {
+	choice := h.launchTags(c, att)
+	if t.Env != "" {
+		choice = tagChoice{Tags: []string{t.Env}, Chosen: t.Env}
+	}
+	tags := createTags(choice.Tags)
 	facts := []fact{{
 		Label: "Repository",
 		Value: att.Slug,
@@ -363,6 +367,10 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, others []ca
 		// and must still show the repository the way its owner attached it.
 		Sub: "cloned into the sandbox with a GitHub token minted for it",
 	}}
+	if t.Env != "" {
+		facts = append(facts, fact{Label: "Environment", Value: t.Env, Mono: true,
+			Sub: "selects this environment's disk, repositories, secrets, egress, and variables"})
+	}
 	if want := normalizeRef(att.Ref, t.Ref); want != "" {
 		facts = append(facts, fact{Label: "Branch", Value: want, Mono: true})
 	} else if att.Ref != "" {
@@ -371,9 +379,18 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, others []ca
 	} else {
 		facts = append(facts, fact{Label: "Branch", Value: "its default branch"})
 	}
+	tagSub := "tags decide which of your secrets are pushed into the sandbox"
+	// A dropped environment is the one thing on this page the visitor could not
+	// work out from the pills, because it is named by its ABSENCE. They are
+	// about to land in `web` when this repository is also in `ci`, and if that
+	// is not what they wanted, the Others list below is how they get there.
+	if len(choice.Dropped) > 0 {
+		tagSub = "this repository is in more than one environment, so it opens in " + choice.Chosen +
+			" — the one you changed most recently. Left off: " + strings.Join(choice.Dropped, ", ")
+	}
 	facts = append(facts, fact{
 		Label: "Tags", Pills: tags,
-		Sub: "tags decide which of your secrets are pushed into the sandbox",
+		Sub: tagSub,
 	})
 	if also := h.alsoClones(c, att, tags); len(also) > 0 {
 		facts = append(facts, fact{
@@ -396,6 +413,11 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, others []ca
 		Home:   h.homeURL,
 		Others: h.otherBoxes(others),
 		Foot:   foot,
+	}
+	if best != nil {
+		data.Heading = "Open a sandbox for"
+		data.Lead = "This environment already has a matching sandbox. Confirm the environment selection, then open it."
+		data.Submit = "Open " + best.Info.Name
 	}
 	if len(data.Others) > 0 {
 		// Only when there is in fact something below to point at. A note
@@ -647,11 +669,12 @@ func stateClass(state string) string {
 // gets by exactly the tag most people keep their shared secrets on. Sorted, and
 // deduplicated by the Contains check, so the page reads the same as `ls` will.
 //
-// This is also the ONLY place a tag enters this feature. Nothing here reads a
-// tag from the URL, and the package comment explains at length why a tag in a
-// public link would be a selector over the CLICKER's decrypted secrets.
-func createTags(att repos.Repo) []string {
-	out := slices.Clone(att.Tags)
+// It takes the CHOSEN tags rather than the attachment. launchTags may drop an
+// ambiguous environment, while an explicit owner-checked environment replaces
+// the ordinary choice with its single tag. Nothing accepts a raw tag from the
+// URL. The page must list exactly what Create will carry.
+func createTags(chosen []string) []string {
+	out := slices.Clone(chosen)
 	if !slices.Contains(out, secrets.DefaultTag) {
 		out = append(out, secrets.DefaultTag)
 	}
@@ -707,8 +730,8 @@ func (h *Handler) alsoClones(c ctlops.Caller, att repos.Repo, tags []string) []s
 // The slug is written literally: both halves were validated against the
 // store's own grammar, so neither can contain a '/', a '?' or a '#', and
 // percent-encoding a path segment here would arrive back as a segment no route
-// matches. The ref goes through url.QueryEscape, which turns `feat/x` into
-// `feat%2Fx` — deliberately different from the literal `?ref=feat/x` the badge
+// matches. url.Values escapes a ref like `feat/x` as `feat%2Fx` — deliberately
+// different from the literal `?ref=feat/x` the badge
 // markdown emits. That form is written for a human retyping it into a comment,
 // where a %2F is one more thing to get wrong; this one is written by a program
 // and read by a browser, where the fully-escaped form is the one that cannot be
@@ -716,8 +739,15 @@ func (h *Handler) alsoClones(c ctlops.Caller, att repos.Repo, tags []string) []s
 // POST handler back.
 func formAction(t target) string {
 	action := "/" + t.Slug
+	query := url.Values{}
 	if t.Ref != "" {
-		action += "?ref=" + url.QueryEscape(t.Ref)
+		query.Set("ref", t.Ref)
+	}
+	if t.Env != "" {
+		query.Set("env", t.Env)
+	}
+	if encoded := query.Encode(); encoded != "" {
+		action += "?" + encoded
 	}
 	return action
 }
@@ -748,7 +778,7 @@ func (h *Handler) sshHost() string {
 func (h *Handler) noteUnknownParams(r *http.Request) {
 	var unknown []string
 	for key := range r.URL.Query() {
-		if key != "ref" {
+		if key != "ref" && key != "env" {
 			unknown = append(unknown, key)
 		}
 	}

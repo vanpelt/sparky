@@ -205,6 +205,13 @@ type Fleet struct {
 	// fleet as its sandbox store. Nil — a deployment with no control plane —
 	// answers the node in a sentence rather than leaving it waiting.
 	selfLife SelfLifecycle
+	// envSetup is the environment-build door a builder VM on another machine
+	// knocks on: what to run, and what happened when it ran. Installed
+	// post-construction by SetEnvSetup for selfLife's reason, and nil — a
+	// deployment that builds no environments — answers the node in a sentence
+	// rather than leaving a build waiting for its 45-minute timeout. See
+	// envsetup.go.
+	envSetup EnvSetup
 	// repos resolves a sandbox's repo attachments and mints the git credential
 	// for one of them, on any machine. Nil until SetRepos — a deployment with
 	// no attachment store or no GitHub App key — with the same answer as

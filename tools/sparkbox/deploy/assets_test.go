@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,10 +13,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/metadata"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/publicports"
 )
@@ -156,7 +159,9 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	cli := guestFile(t, root, "usr/local/bin/sparkbox")
 	for _, want := range []string{
 		"$META/self/pin", "$META/self/unpin", "$META/self",
-		"$META/self/visibility/public", "$META/self/visibility/private",
+		// Visibility is per port: the verb carries an optional PORT that
+		// becomes ?port= on the same endpoint.
+		"$META/self/visibility/$_vis?port=$2", "$META/self/visibility/$_vis",
 		"$META/self/port/$2",
 		// `repos` delegates instead of reimplementing the manifest read: the
 		// rule that reports where a repo lives must be the same rule that put
@@ -215,6 +220,10 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 		"snapshot [OPTIONS] [TAG [NAME]]",
 		"whoami [--json]",
 		"update-tools [--check]",
+		// The environment a box came out of is a question an agent working
+		// inside one asks, so the verb has to be discoverable from the help
+		// rather than only from the design doc.
+		"env                            Show the environment",
 		"Exit codes (stable for scripts and agents):",
 	} {
 		if !strings.Contains(cli, want) {
@@ -224,7 +233,7 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 	if !strings.Contains(cli, "repo authorize OWNER/NAME") {
 		t.Errorf("guest CLI usage line does not mention per-repository authorization:\n%s", cli)
 	}
-	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=25\n" {
+	if rev := guestFile(t, root, "etc/sparkbox/identity-rev"); rev != "IDENTITY_REV=28\n" {
 		t.Fatalf("identity revision = %q — bump it whenever the payload changes, or refresh-agent-tools.sh will leave published templates stale", rev)
 	}
 }
@@ -259,8 +268,8 @@ func TestGuestPayloadInstallsSelfControlCLI(t *testing.T) {
 // update wantPayloadSum here to the sum the failure prints. Both, in that order.
 func TestIdentityRevMovesWithThePayload(t *testing.T) {
 	const (
-		wantRev        = 25
-		wantPayloadSum = "34f5c74d8161325e3f1381e239a9f9b19285cffe53cf975a9fb7fa0cee70dd12"
+		wantRev        = 28
+		wantPayloadSum = "a7297698cee6cc46fbde3b49ba7c6385e901296566863878e688f5a65b08c1c8"
 	)
 	src, err := os.ReadFile("install-guest-identity.sh")
 	if err != nil {
@@ -2565,5 +2574,965 @@ func TestGuestForkIdentityResetIsOrderedBeforeKeyGeneration(t *testing.T) {
 	link := filepath.Join(root, "etc/systemd/system/multi-user.target.wants/sparkbox-identity-reset.service")
 	if _, err := os.Lstat(link); err != nil {
 		t.Fatalf("the identity reset unit is not enabled: %v", err)
+	}
+}
+
+// The environment build runner, driven for real.
+//
+// `ctl env build <name>` creates a builder sandbox, nudges the unit below, and
+// then waits: the environment row sits in `building` until this worker posts a
+// result. So the properties worth pinning are behavioural rather than textual —
+// the script runs in the checkout, with the owner's environment, as the person
+// and not as root; and a report comes back on every path a 200 can take.
+//
+// The stub curl serves the job and captures the report, exactly as the repo
+// worker's stub serves a manifest: no network, no VM, no metadata service.
+type envWorld struct {
+	t     *testing.T
+	root  string // the guest tree
+	fix   string // job, job.code, requests and the captured report
+	stub  string // the ip/curl stubs
+	work  string // the checkout the setup is expected to run in
+	extra []string
+}
+
+func newEnvWorld(t *testing.T) *envWorld {
+	t.Helper()
+	root := fakeGuestTree(t, true)
+	w := &envWorld{
+		t:    t,
+		root: root,
+		fix:  t.TempDir(),
+		stub: t.TempDir(),
+		work: filepath.Join(root, "home/sparky/proj"),
+	}
+	for _, dir := range []string{w.work, filepath.Join(root, "run/sparkbox")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What sparkbox-repos publishes when the sandbox has one checkout, and the
+	// owner's environment as internal/envsync's PushEnv leaves it: KEY="value"
+	// lines, PATH included.
+	w.write(filepath.Join(root, "run/sparkbox/repos.dir"), w.work+"\n")
+	// The stub directory is on the PATH that /etc/environment sets, because in a
+	// real guest the agent binary lives at /usr/local/bin/claude and that IS on
+	// this PATH. The distinction matters: the worker sources /etc/environment
+	// INSIDE the unprivileged child, so this PATH — not the one the test process
+	// exports — is what a setup script or the gateway's agent runner resolves
+	// against.
+	w.write(filepath.Join(root, "etc/environment"),
+		"PATH=\""+w.stub+":/usr/bin:/bin:/usr/local/bin\"\nSETUP_SECRET=\"s3cr3t\"\n")
+	installGuestPayload(t, root)
+
+	writeExecutable(t, filepath.Join(w.stub, "ip"), `#!/bin/sh
+[ "$1" = -4 ] && echo "default via 10.0.0.1 dev eth0"
+`)
+	// A stub `claude`, ALWAYS installed, and its presence is not only about
+	// convenience: the worker resolves the agent binary with `command -v
+	// claude`, so without a stub on PATH an agent-mode test would find and run
+	// the REAL claude on whatever machine is running `go test` — network, quota
+	// and all — which is how this test first discovered agent mode worked.
+	//
+	// It records its argv so a test can assert the invocation, and it is driven
+	// by files rather than by flags so a subtest can describe the agent's
+	// behaviour without re-writing the stub: claude-exit is the status it exits
+	// with, and claude-writes is the .sparkbox/setup.sh it leaves behind (none,
+	// if the file is absent — which is the measured real-world case of an agent
+	// that is denied every tool call and still exits 0).
+	//
+	// It also counts its calls, because the runner invokes an agent TWICE when
+	// the script it gets does not run: claude-writes-1 and claude-writes-2
+	// override claude-writes for one call each, which is how a test describes
+	// an agent that writes something broken and then fixes it. The prompt of
+	// each call is kept separately, so the repair round can be asserted to
+	// carry the failure it is supposed to be repairing.
+	writeExecutable(t, filepath.Join(w.stub, "claude"), `#!/bin/sh
+n=$(cat "$SPARKBOX_TEST_DIR/claude-calls" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$SPARKBOX_TEST_DIR/claude-calls"
+for a in "$@"; do printf '%s\n' "$a"; done >> "$SPARKBOX_TEST_DIR/claude-args"
+printf '%s' "$2" > "$SPARKBOX_TEST_DIR/claude-prompt-$n"
+printf 'agent ran in %s\n' "$(pwd)"
+writes="$SPARKBOX_TEST_DIR/claude-writes-$n"
+[ -f "$writes" ] || writes="$SPARKBOX_TEST_DIR/claude-writes"
+if [ -f "$writes" ]; then
+  mkdir -p .sparkbox
+  cp "$writes" .sparkbox/setup.sh
+fi
+exit "$(cat "$SPARKBOX_TEST_DIR/claude-exit" 2>/dev/null || echo 0)"
+`)
+	// Honours both call shapes the worker makes: the -o/-w job fetch and the
+	// --data-binary report. A staged job.code of 204 is the answer every VM in
+	// the fleet that is not a builder gets.
+	writeExecutable(t, filepath.Join(w.stub, "curl"), `#!/bin/sh
+out=; code=; data=; url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -w) code=1; shift 2 ;;
+    --data-binary) data=${2#@}; shift 2 ;;
+    http*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+echo "$url" >> "$SPARKBOX_TEST_DIR/requests"
+case "$url" in
+  */self/setup/result)
+    if [ -n "$data" ]; then cp "$data" "$SPARKBOX_TEST_DIR/result"; fi
+    exit 0 ;;
+  */self/setup)
+    st=$(cat "$SPARKBOX_TEST_DIR/job.code" 2>/dev/null || echo 204)
+    if [ "$st" = 200 ] && [ -n "$out" ]; then cp "$SPARKBOX_TEST_DIR/job" "$out"; fi
+    if [ -n "$code" ]; then printf '%s' "$st"; fi
+    exit 0 ;;
+  */self*)
+    printf 'sandbox: quiet-lake\nstate: running\n'
+    exit 0 ;;
+esac
+exit 0
+`)
+	w.noJob()
+	return w
+}
+
+func (w *envWorld) write(path, body string) {
+	w.t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// job stages the 200 the gateway serves a builder: the environment name, the
+// mode, and base64 of the script — the only encoding a guest with no JSON
+// encoder can read back with sed and base64.
+func (w *envWorld) job(name, mode, script string) {
+	w.t.Helper()
+	w.write(filepath.Join(w.fix, "job"),
+		name+"\n"+mode+"\n"+base64.StdEncoding.EncodeToString([]byte(script))+"\n")
+	w.write(filepath.Join(w.fix, "job.code"), "200")
+}
+
+func (w *envWorld) noJob() {
+	w.t.Helper()
+	w.write(filepath.Join(w.fix, "job.code"), "204")
+}
+
+func (w *envWorld) env() []string {
+	return append(append(os.Environ(),
+		"PATH="+w.stub+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPARKBOX_TEST_DIR="+w.fix,
+		"SPARKBOX_ENV_ROOT="+w.root,
+		"SPARKBOX_ENV_SETUP_TIMEOUT=60"), w.extra...)
+}
+
+func (w *envWorld) run() (stdout, stderr string, code int) {
+	w.t.Helper()
+	cmd := exec.Command("sh", filepath.Join(w.root, "usr/local/sbin/sparkbox-env-setup"))
+	cmd.Env = w.env()
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
+		w.t.Fatalf("run sparkbox-env-setup: %v", err)
+	}
+	return out.String(), errb.String(), code
+}
+
+// report is the body the worker POSTed, split into its three header lines and
+// the log tail beneath them.
+func (w *envWorld) report() (state, exit, script, log string) {
+	w.t.Helper()
+	body, err := os.ReadFile(filepath.Join(w.fix, "result"))
+	if err != nil {
+		w.t.Fatalf("no report was sent: %v", err)
+	}
+	parts := strings.SplitN(string(body), "\n", 4)
+	for len(parts) < 4 {
+		parts = append(parts, "")
+	}
+	return parts[0], parts[1], parts[2], parts[3]
+}
+
+// read returns one of the stub-driven fixture files, which is how a test asks
+// what the agent was actually told and how many times it was asked.
+func (w *envWorld) read(name string) string {
+	w.t.Helper()
+	body, err := os.ReadFile(filepath.Join(w.fix, name))
+	if err != nil {
+		w.t.Fatalf("the fixture file %s was never written: %v", name, err)
+	}
+	return string(body)
+}
+
+// decodeScript unwraps the third line of a report, which is the setup script as
+// base64 — the only encoding a guest with no JSON encoder can produce.
+func decodeScript(t *testing.T, script string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(script))
+	if err != nil {
+		t.Fatalf("reported script is not base64: %v (%q)", err, script)
+	}
+	return string(raw)
+}
+
+func (w *envWorld) requests() []string {
+	body, err := os.ReadFile(filepath.Join(w.fix, "requests"))
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(body))
+}
+
+func (w *envWorld) status() string {
+	body, err := os.ReadFile(filepath.Join(w.root, "run/sparkbox/env-setup.status"))
+	if err != nil {
+		return ""
+	}
+	return string(body)
+}
+
+// TestEnvSetupSaysNothingWithoutAJob is the path every VM in the fleet takes.
+// The unit is startable by hand in any sandbox, and in all but a builder the
+// honest answer is 204 — one request, no files, no journal line. A worker that
+// wrote a status file or complained here would put an environment nobody asked
+// for into every box that ever ran it.
+func TestEnvSetupSaysNothingWithoutAJob(t *testing.T) {
+	w := newEnvWorld(t)
+	stdout, stderr, code := w.run()
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	if got := w.requests(); len(got) != 1 || !strings.HasSuffix(got[0], "/self/setup") {
+		t.Fatalf("requests = %v; a no-job run must ask once and stop", got)
+	}
+	if s := w.status(); s != "" {
+		t.Fatalf("a no-job run wrote a status file:\n%s", s)
+	}
+	for _, name := range []string{"env-setup.sh", "env-setup.log", "env-setup.lock"} {
+		if _, err := os.Stat(filepath.Join(w.root, "run/sparkbox", name)); err == nil {
+			t.Errorf("a no-job run left %s behind", name)
+		}
+	}
+}
+
+// TestEnvSetupRunsTheSetupWhereThePersonWould is the whole feature in one run:
+// the script arrives base64 over the tap-authenticated metadata channel, runs in
+// the primary checkout with the owner's pushed environment, and the file it
+// leaves behind is what comes back for the environment row to keep.
+func TestEnvSetupRunsTheSetupWhereThePersonWould(t *testing.T) {
+	w := newEnvWorld(t)
+	w.job("webapp", "script", `echo "cwd=$PWD"
+echo "secret=$SETUP_SECRET"
+echo "home=$HOME"
+mkdir -p .sparkbox
+printf '#!/bin/sh\necho rewritten\n' > .sparkbox/setup.sh
+`)
+	stdout, stderr, code := w.run()
+	if code != 0 {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	state, exit, script, log := w.report()
+	if state != "ok" || exit != "0" {
+		t.Fatalf("report = %q/%q, log:\n%s", state, exit, log)
+	}
+	// The checkout, not the home directory: every relative path in a
+	// `.sparkbox/setup.sh` is relative to the repository it lives in.
+	if want := "cwd=" + w.work; !strings.Contains(log, want) {
+		t.Errorf("the setup did not run in the checkout (%q):\n%s", want, log)
+	}
+	// A systemd unit gets no pam_env, so without the explicit source the run
+	// would have none of the owner's secrets — which is most of the reason an
+	// environment carries a tag at all.
+	if !strings.Contains(log, "secret=s3cr3t") {
+		t.Errorf("/etc/environment never reached the setup script:\n%s", log)
+	}
+	if want := "home=" + filepath.Join(w.root, "home/sparky"); !strings.Contains(log, want) {
+		t.Errorf("HOME was not the login user's (%q):\n%s", want, log)
+	}
+	// The run's own output, not the file it was asked to run: a setup script
+	// that discovers what a project actually needs may write itself down again,
+	// and the environment must record what it would run NEXT time.
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(script))
+	if err != nil {
+		t.Fatalf("reported script is not base64: %v", err)
+	}
+	if string(decoded) != "#!/bin/sh\necho rewritten\n" {
+		t.Errorf("reported script = %q", decoded)
+	}
+	if got := w.status(); !strings.Contains(got, "environment: webapp") ||
+		!strings.Contains(got, "state: ok") || !strings.Contains(got, "exit: 0") {
+		t.Errorf("status file does not describe the finished run:\n%s", got)
+	}
+	// The script is staged 0700, never world-readable: it is the owner's, it can
+	// carry their setup decisions, and /run/sparkbox is traversable by anyone in
+	// the box.
+	info, err := os.Stat(filepath.Join(w.root, "run/sparkbox/env-setup.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("staged setup script mode = %v, want 0700", perm)
+	}
+}
+
+// TestEnvSetupAlwaysReportsSomething: every path past the 200 ends in a POST.
+// The gateway holds the row in `building` until one arrives, so a run that gives
+// up quietly is a build that never finishes and a person watching a spinner.
+func TestEnvSetupAlwaysReportsSomething(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		env, mode  string
+		script     string
+		wantState  string
+		wantExit   string
+		wantInLog  string
+		wantNoRun  bool
+		expectExit int
+	}{
+		{
+			name: "a failing script is reported with its own status",
+			env:  "webapp", mode: "script",
+			script:    "echo trying\nexit 7\n",
+			wantState: "failed", wantExit: "7", wantInLog: "trying",
+			expectExit: 0,
+		},
+		{
+			// `agent` used to be the unknown mode this case was written around.
+			// It is a mode the payload now RUNS, so the property — an unknown
+			// mode is refused by name rather than guessed at — needs a value
+			// that is still unknown, or the assertion quietly stops testing
+			// anything. It matters because a guest older than its gateway is
+			// the normal state during a rollout.
+			name: "a mode this payload does not know is refused, not guessed at",
+			env:  "webapp", mode: "telepathy",
+			script:    "echo should-not-run\n",
+			wantState: "failed", wantInLog: "telepathy", wantNoRun: true,
+			expectExit: 1,
+		},
+		{
+			name: "a job with no usable environment name is refused",
+			env:  "../etc/shadow", mode: "script",
+			script:    "echo should-not-run\n",
+			wantState: "failed", wantInLog: "environment name", wantNoRun: true,
+			expectExit: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newEnvWorld(t)
+			w.job(tc.env, tc.mode, tc.script)
+			_, _, code := w.run()
+			if code != tc.expectExit {
+				t.Errorf("exit = %d, want %d", code, tc.expectExit)
+			}
+			state, exit, _, log := w.report()
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q (log %q)", state, tc.wantState, log)
+			}
+			if tc.wantExit != "" && exit != tc.wantExit {
+				t.Errorf("exit line = %q, want %q", exit, tc.wantExit)
+			}
+			if !strings.Contains(log, tc.wantInLog) {
+				t.Errorf("log does not mention %q:\n%s", tc.wantInLog, log)
+			}
+			if tc.wantNoRun && strings.Contains(log, "should-not-run") {
+				t.Errorf("the script ran anyway:\n%s", log)
+			}
+		})
+	}
+}
+
+// TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus is the test that stops
+// agent mode shipping broken and looking fine.
+//
+// `claude -p` exits 0 for a run in which every tool call was DENIED — measured,
+// not supposed. So a worker that reports success on rc == 0 would report a
+// successful build for an agent that touched nothing, and the gateway would go
+// on to capture an untouched base image as the environment's disk. Nobody
+// downstream can tell the difference: the row says ready, the snapshot exists,
+// and the environment is empty.
+//
+// The deliverable of an agent build is the setup script, so the artifact is the
+// only honest signal, and these cases pin it from both sides.
+//
+// The payload here is a stand-in rather than the real runner; the case below
+// runs the real one.
+func TestEnvSetupAgentModeJudgesTheArtifactNotTheExitStatus(t *testing.T) {
+	const writesIt = "mkdir -p .sparkbox\nprintf '%s' \"$AGENT_WROTE\" > .sparkbox/setup.sh\n"
+	for _, tc := range []struct {
+		name       string
+		payload    string
+		wantState  string
+		wantScript string
+		wantInLog  string
+	}{
+		{
+			name:      "an agent that writes the script succeeds",
+			payload:   "echo working\n" + writesIt + "exit 0\n",
+			wantState: "ok", wantScript: "#!/usr/bin/env bash\nnpm ci\n",
+			wantInLog: "working",
+		},
+		{
+			name:      "an agent that exits 0 having written nothing FAILS",
+			payload:   "echo I am terribly sorry, I was not permitted to do that\nexit 0\n",
+			wantState: "failed", wantInLog: "without writing",
+		},
+		{
+			name:      "an agent that fails is reported with its own status",
+			payload:   "echo could not authenticate\nexit 3\n",
+			wantState: "failed", wantInLog: "could not authenticate",
+		},
+		{
+			// The script an agent wrote is reported even when the run failed,
+			// for the same reason script mode reports one: it is the record of
+			// what happened, and a person finishing the build by hand starts
+			// from what the agent got as far as.
+			name:      "a failed agent's partial script is still reported",
+			payload:   writesIt + "exit 5\n",
+			wantState: "failed", wantScript: "#!/usr/bin/env bash\nnpm ci\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newEnvWorld(t)
+			w.extra = append(w.extra, "AGENT_WROTE=#!/usr/bin/env bash\nnpm ci\n")
+			w.job("webapp", "agent", tc.payload)
+			if _, _, code := w.run(); code != 0 {
+				t.Errorf("exit = %d, want 0 — the worker reports and exits 0 either way", code)
+			}
+			state, _, script, log := w.report()
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q (log %q)", state, tc.wantState, log)
+			}
+			var decoded string
+			if script != "" {
+				raw, err := base64.StdEncoding.DecodeString(script)
+				if err != nil {
+					t.Fatalf("reported script is not base64: %v (%q)", err, script)
+				}
+				decoded = string(raw)
+			}
+			if decoded != tc.wantScript {
+				t.Errorf("reported script = %q, want %q", decoded, tc.wantScript)
+			}
+			if tc.wantInLog != "" && !strings.Contains(log, tc.wantInLog) {
+				t.Errorf("log does not mention %q:\n%s", tc.wantInLog, log)
+			}
+		})
+	}
+}
+
+// TestTheRealAgentRunnerWorksInTheRealGuestWorker runs the exact string the
+// gateway ships — ctlops.AgentRunner — inside the exact worker a guest runs,
+// against a stub `claude`.
+//
+// It crosses a package boundary on purpose. The gateway writes this script and
+// a guest executes it, they live in different packages with no compiler
+// relationship, and BOTH bugs review caught in the previous phase were at
+// exactly this kind of seam. A test that asserted on a hand-written copy of the
+// script would agree with itself forever.
+func TestTheRealAgentRunnerWorksInTheRealGuestWorker(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), goodSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, _, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the gateway's own runner did not complete: %s", state, log)
+	}
+
+	args, err := os.ReadFile(filepath.Join(w.fix, "claude-args"))
+	if err != nil {
+		t.Fatalf("the agent was never invoked: %v", err)
+	}
+	got := string(args)
+	// One argv element carrying the whole prompt, un-expanded. The prompt rides
+	// a QUOTED heredoc, so if that ever became unquoted the $(...) and backticks
+	// a future prompt might contain would run instead of travelling as text.
+	if !strings.Contains(got, "sparkbox docs dev-environment") {
+		t.Errorf("the prompt did not reach the agent as one argument:\n%s", got)
+	}
+	if !strings.Contains(got, ".sparkbox/setup.sh") {
+		t.Errorf("the prompt never names the deliverable:\n%s", got)
+	}
+	// bypassPermissions is REQUIRED, not preference. Under -p the `auto` mode
+	// this platform seeds is downgraded to `default` and every Write and Bash is
+	// denied, while the run still exits 0 — an agent build without this flag
+	// does nothing and reports success.
+	if !strings.Contains(got, "--permission-mode\nbypassPermissions\n") {
+		t.Errorf("the agent was not run with --permission-mode bypassPermissions:\n%s", got)
+	}
+	// A print-mode bootstrap has no harness left to deliver a monitor event or
+	// scheduled wakeup after the response ends. Letting the agent select either
+	// tool recreates a live failure where it ended cleanly while `make dev` was
+	// still running and never came back to write the deliverable.
+	if !strings.Contains(got, "--disallowedTools\nMonitor\nScheduleWakeup\n") {
+		t.Errorf("the agent could defer work past its one print-mode turn:\n%s", got)
+	}
+	// The transcript is the only window anybody has into an unattended agent:
+	// the log tail is cut to a sentence by the time it reaches a row, and the
+	// box is destroyed on success. Every template seeds a hivemind daemon that
+	// syncs ~/.claude/projects as the run happens, so suppressing the session
+	// would put the build back to being unwatchable.
+	if strings.Contains(got, "--no-session-persistence") {
+		t.Errorf("the agent ran with session persistence off, so nothing can watch the build:\n%s", got)
+	}
+}
+
+// Darwin still ships Bash 3.2 at /bin/bash. The guest runner normally uses a
+// newer Bash, but these cross-boundary tests execute on both Darwin and Linux,
+// and the runner should not need a parser feature newer than its own syntax.
+func TestTheRealAgentRunnerParsesWithDarwinSystemBash(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin system Bash is only present on Darwin runners")
+	}
+	cmd := exec.Command("/bin/bash", "-n")
+	runner := ctlops.AgentRunner("webapp")
+	cmd.Stdin = strings.NewReader(runner)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("agent runner does not parse with Darwin system Bash: %v\n%s", err, out)
+	}
+}
+
+// TestTheRealAgentRunnerRecoversWhenTheFirstAgentWritesNothing is the failure
+// seen on hardware: the first print-mode agent sent `make dev` to a Monitor,
+// scheduled a later wakeup, and ended its response. The process therefore
+// returned 0 before .sparkbox/setup.sh existed even though useful setup work
+// was still running in the box. One fresh pass should inspect that state and
+// finish the deliverable instead of failing immediately.
+func TestTheRealAgentRunnerRecoversWhenTheFirstAgentWritesNothing(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes-2"), goodSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, script, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the recovery agent wrote a valid script: %s", state, log)
+	}
+	if got := decodeScript(t, script); !strings.Contains(got, "deps installed") {
+		t.Errorf("the environment did not record the recovery agent's script: %q", got)
+	}
+	if got := strings.TrimSpace(w.read("claude-calls")); got != "2" {
+		t.Errorf("agent calls = %s, want 2 (initial run and one recovery)", got)
+	}
+	recovery := w.read("claude-prompt-2")
+	for _, want := range []string{
+		"previous unattended setup agent ended", ctlops.SetupScriptPath,
+		"one and only recovery pass", "sparkbox docs dev-environment", "sparkbox set-port",
+	} {
+		if !strings.Contains(recovery, want) {
+			t.Errorf("recovery prompt does not mention %q:\n%s", want, recovery)
+		}
+	}
+}
+
+// TestTheRealAgentRunnerStopsAfterTwoMissingArtifacts pins the retry bound. A
+// missing deliverable gets one useful second chance, not an agent loop that
+// consumes the whole environment-build budget while producing nothing.
+func TestTheRealAgentRunnerStopsAfterTwoMissingArtifacts(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0 — the worker reports the runner's failure", code)
+	}
+	state, exit, script, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed\n%s", state, log)
+	}
+	if exit != "3" {
+		t.Errorf("exit = %q, want 3 — the runner should report its bounded recovery failure", exit)
+	}
+	if script != "" {
+		t.Errorf("reported script = %q, want none", script)
+	}
+	if !strings.Contains(log, "two agent passes finished without writing") {
+		t.Errorf("log does not explain the exhausted missing-artifact recovery:\n%s", log)
+	}
+	if got := strings.TrimSpace(w.read("claude-calls")); got != "2" {
+		t.Errorf("agent calls = %s, want exactly 2", got)
+	}
+}
+
+// TestTheRealAgentRunnerDoesNotSpendAThirdPassRepairingTheRecoveryScript keeps
+// the same two-agent ceiling when the missing-artifact recovery does produce a
+// script but that script fails verification. The script is still reported so
+// the paused builder remains useful to a person finishing it by hand.
+func TestTheRealAgentRunnerDoesNotSpendAThirdPassRepairingTheRecoveryScript(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes-2"), brokenSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0 — the worker reports the runner's failure", code)
+	}
+	state, exit, script, log := w.report()
+	if state != "failed" || exit != "3" {
+		t.Fatalf("state/exit = %q/%q, want failed/3\n%s", state, exit, log)
+	}
+	if got := decodeScript(t, script); !strings.Contains(got, "cd selfhost") {
+		t.Errorf("the failed recovery script was not preserved: %q", got)
+	}
+	if !strings.Contains(log, "recovery agent wrote") || !strings.Contains(log, "does not run") {
+		t.Errorf("log does not explain why the recovery script was refused:\n%s", log)
+	}
+	if got := strings.TrimSpace(w.read("claude-calls")); got != "2" {
+		t.Errorf("agent calls = %s, want exactly 2", got)
+	}
+}
+
+// TestTheRealAgentRunnerDegradesOnAnOldNodeInsteadOfRunningProse.
+//
+// nodelink.SelfSetupResp gained `mode` as an omitempty field, so a node running
+// an older build DROPS it and then renders the hardcoded `script` its own
+// metadata service shipped with. That skew is the normal state during a fleet
+// rollout, and it is why the gateway ships a shell script rather than a bare
+// prompt: run as `script`, the payload still invokes the agent correctly and
+// only the artifact check is missed. A bare prompt would have been paragraphs
+// of English executed by bash, backticks and all.
+func TestTheRealAgentRunnerDegradesOnAnOldNodeInsteadOfRunningProse(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), goodSetupScript)
+	// mode `script`, which is what an old node's metadata service renders.
+	w.job("webapp", "script", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, _, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the agent did not run under the old node's mode: %s", state, log)
+	}
+	if _, err := os.ReadFile(filepath.Join(w.fix, "claude-args")); err != nil {
+		t.Fatalf("the agent was never invoked under mode=script: %v", err)
+	}
+}
+
+// The two setup scripts an agent-mode test describes its agent by. They are
+// real scripts and not markers, because the runner RUNS what the agent leaves
+// behind: goodSetupScript is written to be safe to run twice over its own work
+// (which is what the prompt asks the agent for), and brokenSetupScript fails
+// the way the first agent build on real hardware failed — a `cd` into a
+// directory that only ever existed in the agent's memory of the session.
+const (
+	goodSetupScript = "#!/usr/bin/env bash\nset -e\nmkdir -p .sparkbox/state\necho \"deps installed\"\n"
+
+	brokenSetupScript = "#!/usr/bin/env bash\nset -e\ncd selfhost\necho \"never reached\"\n"
+)
+
+// TestTheRealAgentRunnerRefusesAScriptThatDoesNotRun is the hardware bug, in a
+// test.
+//
+// The first agent build on the live cluster wrote a good-looking script, the
+// build reported `ready`, and the NEXT rebuild of that environment died on
+// `cd: selfhost: No such file or directory`. Nothing had checked that the
+// script ran, because the agent does the work interactively and writes the file
+// at the end from memory — so the only failure available was the one that
+// arrives months later, to whoever first depends on the environment
+// reproducing itself.
+//
+// What it asserts is the whole point of the change: a build like that FAILS,
+// and it fails with the script still reported, because the owner wants the
+// eighty percent the agent got right on a box they can still ssh into.
+func TestTheRealAgentRunnerRefusesAScriptThatDoesNotRun(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), brokenSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0 — the worker reports, it does not fail", code)
+	}
+	state, exit, script, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed: a script that does not run is not a build\n%s", state, log)
+	}
+	if exit != "3" {
+		t.Errorf("exit = %q, want 3 — the runner's own status for an unrunnable script", exit)
+	}
+	// The last non-empty line is what the gateway records as the build error, so
+	// it has to say the thing that is true and surprising rather than repeating
+	// the shell's error.
+	if !strings.Contains(log, "does not run in it") {
+		t.Errorf("the log never says the script is what failed:\n%s", log)
+	}
+	// KEPT. recordReportedScript stores a reported script whether the build
+	// succeeded or not, and this is the case that makes that matter: the owner
+	// finishes it by hand in the paused builder and runs `env capture`.
+	if got := decodeScript(t, script); !strings.Contains(got, "cd selfhost") {
+		t.Errorf("the failed build did not report the script the agent wrote: %q", got)
+	}
+	// Twice: written, run, handed back to be fixed, run again.
+	if got := w.read("claude-calls"); strings.TrimSpace(got) != "2" {
+		t.Errorf("the agent was invoked %s times, want 2 (the write and the one repair round)", got)
+	}
+}
+
+// TestTheRealAgentRunnerHasTheScriptFixedAndFinishes: the repair round is not
+// decoration. An agent writing from memory gets a path or an ordering wrong far
+// more often than it gets the project wrong, and it is holding a box where the
+// answer can be checked — so the cheap fix is to hand it the failure and let it
+// try once, before failing a build whose work is otherwise done.
+func TestTheRealAgentRunnerHasTheScriptFixedAndFinishes(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes-1"), brokenSetupScript)
+	w.write(filepath.Join(w.fix, "claude-writes-2"), goodSetupScript)
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, script, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q, want ok — the repaired script runs: %s", state, log)
+	}
+	if got := decodeScript(t, script); !strings.Contains(got, "deps installed") {
+		t.Errorf("the environment recorded the broken script rather than the fixed one: %q", got)
+	}
+	// The repair round is a FRESH agent rather than a resume of the first, so
+	// handing it the failure is the only way it can know what to fix.
+	repair := w.read("claude-prompt-2")
+	if !strings.Contains(repair, "cd: selfhost") {
+		t.Errorf("the repair prompt does not carry the failure it is repairing:\n%s", repair)
+	}
+	if !strings.Contains(repair, "does not run") {
+		t.Errorf("the repair prompt does not say what it is asking for:\n%s", repair)
+	}
+}
+
+// TestTheRealAgentRunnerRefusesShellItCannotEvenParse. A syntax error is not a
+// failed run and is worth its own sentence: `bash -n` costs nothing, and the
+// alternative is a parse error buried in whatever the shell printed before it
+// gave up.
+func TestTheRealAgentRunnerRefusesShellItCannotEvenParse(t *testing.T) {
+	w := newEnvWorld(t)
+	w.write(filepath.Join(w.fix, "claude-exit"), "0")
+	w.write(filepath.Join(w.fix, "claude-writes"), "#!/usr/bin/env bash\nif [ -f x ; then\n")
+	w.job("webapp", "agent", ctlops.AgentRunner("webapp"))
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	state, _, _, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed\n%s", state, log)
+	}
+	if !strings.Contains(log, "not valid shell") {
+		t.Errorf("the log does not name the parse error as one:\n%s", log)
+	}
+}
+
+// TestEnvSetupBoundsWhatItSendsBack. The host caps the body it will read, and a
+// body it refuses is a report that never lands — so the guest has to be the one
+// that truncates. The two halves truncate differently on purpose: a log is
+// meaningful cut off at the tail, and a setup script is not meaningful cut off
+// anywhere, so an oversized script is reported as absent (which the gateway
+// reads as "unchanged") rather than as half of itself.
+func TestEnvSetupBoundsWhatItSendsBack(t *testing.T) {
+	w := newEnvWorld(t)
+	if err := os.MkdirAll(filepath.Join(w.work, ".sparkbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w.write(filepath.Join(w.work, ".sparkbox/setup.sh"),
+		"#!/bin/sh\n"+strings.Repeat("# padding\n", 8000))
+	w.job("webapp", "script", "i=0\nwhile [ $i -lt 4000 ]; do echo \"line $i of noise\"; i=$((i+1)); done\n")
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	state, _, script, log := w.report()
+	if state != "ok" {
+		t.Fatalf("state = %q", state)
+	}
+	if script != "" {
+		t.Errorf("an oversized .sparkbox/setup.sh was reported anyway (%d bytes of base64)", len(script))
+	}
+	if len(log) > 8192 {
+		t.Errorf("log tail = %d bytes, want at most 8192", len(log))
+	}
+	if !strings.Contains(log, "report cap") {
+		t.Errorf("nothing in the log says the script was left out:\n%s", log)
+	}
+}
+
+// TestEnvSetupStopsAScriptThatNeverStops. An unbounded run holds the
+// environment in `building` for as long as the box lives, which is the failure
+// mode with no floor: nobody is at a terminal, and the script is waiting on a
+// prompt that will never be answered.
+func TestEnvSetupStopsAScriptThatNeverStops(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("no timeout(1) in PATH; the guest image has coreutils")
+	}
+	w := newEnvWorld(t)
+	w.extra = []string{"SPARKBOX_ENV_SETUP_TIMEOUT=1"}
+	w.job("webapp", "script", "echo starting\nsleep 30\n")
+
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	state, exit, _, log := w.report()
+	if state != "failed" {
+		t.Fatalf("state = %q, want failed (log %q)", state, log)
+	}
+	if exit != "124" && exit != "137" {
+		t.Errorf("exit line = %q, want timeout's 124 or 137", exit)
+	}
+	if !strings.Contains(log, "was stopped") {
+		t.Errorf("the log does not say the script was stopped:\n%s", log)
+	}
+}
+
+// TestEnvSetupRunsOnceAtATime: two nudges arriving together must not run
+// somebody's setup script twice against the same tree. The second one is
+// declined and says so, and it does not report — reporting would race a result
+// the first run has not produced yet.
+func TestEnvSetupRunsOnceAtATime(t *testing.T) {
+	w := newEnvWorld(t)
+	w.job("webapp", "script", "echo hello\n")
+	lock := filepath.Join(w.root, "run/sparkbox/env-setup.lock")
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A live holder: this test's own pid is running by definition.
+	w.write(filepath.Join(lock, "pid"), strconv.Itoa(os.Getpid())+"\n")
+
+	stdout, stderr, code := w.run()
+	if code != 0 || stdout != "" {
+		t.Fatalf("exit = %d, stdout = %q", code, stdout)
+	}
+	if !strings.Contains(stderr, "already in progress") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(w.fix, "result")); err == nil {
+		t.Error("the declined run reported a result the other run had not finished")
+	}
+	// A lock left by a process that is gone must not wedge the environment
+	// forever: the next nudge takes it over.
+	w.write(filepath.Join(lock, "pid"), "2147483646\n")
+	if _, _, code := w.run(); code != 0 {
+		t.Fatalf("exit = %d after a stale lock", code)
+	}
+	if state, _, _, _ := w.report(); state != "ok" {
+		t.Errorf("state = %q after taking over a stale lock", state)
+	}
+}
+
+// TestEnvSetupUnitIsNudgedNeverBooted. This unit has no [Install] section and
+// no symlink, and that is the design: the gateway starts it after the secrets
+// are pushed, which removes the race against that push entirely. A future
+// `WantedBy=multi-user.target` would reintroduce it and make every VM in the
+// fleet run a unit to be told 204.
+func TestEnvSetupUnitIsNudgedNeverBooted(t *testing.T) {
+	root := fakeGuestTree(t, true)
+	installGuestPayload(t, root)
+	unit := guestFile(t, root, "etc/systemd/system/sparkbox-env-setup.service")
+
+	for _, want := range []string{
+		"Type=oneshot",
+		"RemainAfterExit=yes",
+		"ExecStart=/usr/local/sbin/sparkbox-env-setup",
+		"After=network-online.target sparkbox-net.service sparkbox-token.service sparkbox-repos.service",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("sparkbox-env-setup.service missing %q:\n%s", want, unit)
+		}
+	}
+	for _, bad := range []string{"WantedBy=", "[Install]"} {
+		if strings.Contains(unit, bad) {
+			t.Errorf("sparkbox-env-setup.service carries %q; it is started by a gateway "+
+				"nudge after the secret push, never by boot ordering:\n%s", bad, unit)
+		}
+	}
+	// The same rule sparkbox-repos.service holds, for a job that takes longer
+	// than a clone: nothing may put a setup script in front of a first attach.
+	if strings.Contains("\n"+unit, "\nBefore=") {
+		t.Errorf("sparkbox-env-setup.service orders itself before something:\n%s", unit)
+	}
+	if _, err := os.Lstat(filepath.Join(root,
+		"etc/systemd/system/multi-user.target.wants/sparkbox-env-setup.service")); err == nil {
+		t.Error("sparkbox-env-setup.service is enabled; it must only ever run when the gateway nudges it")
+	}
+	// systemd's kill must never be the thing that ends a build: the worker's own
+	// timeout reports what happened, where a killed unit leaves the gateway
+	// waiting on a POST that is never made.
+	deadline := regexp.MustCompile(`TimeoutStartSec=(\d+)`).FindStringSubmatch(unit)
+	if deadline == nil {
+		t.Fatalf("sparkbox-env-setup.service has no TimeoutStartSec:\n%s", unit)
+	}
+	worker := guestFile(t, root, "usr/local/sbin/sparkbox-env-setup")
+	own := regexp.MustCompile(`TIMEOUT=\$\{SPARKBOX_ENV_SETUP_TIMEOUT:-(\d+)\}`).FindStringSubmatch(worker)
+	if own == nil {
+		t.Fatalf("the worker has no default timeout")
+	}
+	unitSec, _ := strconv.Atoi(deadline[1])
+	workerSec, _ := strconv.Atoi(own[1])
+	if unitSec <= workerSec {
+		t.Errorf("TimeoutStartSec=%d does not outlast the worker's own %ds bound", unitSec, workerSec)
+	}
+}
+
+// TestGuestEnvVerbOrientsInsideTheBox. An agent that arrives in a builder — or
+// in any box — should be able to ask what environment it is standing in without
+// leaving the VM. It reads local state and the host's own /self; it cannot start
+// a build, because composing and building an environment is a control-plane act
+// taken from outside.
+func TestGuestEnvVerbOrientsInsideTheBox(t *testing.T) {
+	w := newEnvWorld(t)
+	cli := filepath.Join(w.root, "usr/local/bin/sparkbox")
+	status := filepath.Join(w.root, "run/sparkbox/env-setup.status")
+	run := func() (string, int) {
+		t.Helper()
+		cmd := exec.Command("sh", cli, "env")
+		cmd.Env = append(w.env(), "SPARKBOX_ENV_STATUS_FILE="+status)
+		var out bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &out
+		code := 0
+		var ee *exec.ExitError
+		if err := cmd.Run(); errors.As(err, &ee) {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return out.String(), code
+	}
+
+	// A box that never built an environment says so, and points at the command
+	// that does build one — which is not this one.
+	out, code := run()
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, out)
+	}
+	for _, want := range []string{"sandbox: quiet-lake", "no setup has run", "env build"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("`sparkbox env` output missing %q:\n%s", want, out)
+		}
+	}
+
+	w.job("webapp", "script", "echo hello\n")
+	if _, _, rc := w.run(); rc != 0 {
+		t.Fatalf("build run exit = %d", rc)
+	}
+	out, code = run()
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, out)
+	}
+	for _, want := range []string{"environment: webapp", "mode: script", "state: ok"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("`sparkbox env` output missing %q:\n%s", want, out)
+		}
 	}
 }

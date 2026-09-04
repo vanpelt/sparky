@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -264,6 +265,13 @@ var apiEndpoints = []struct{ method, path string }{
 	{"GET", "/api/network-rules"},
 	{"PUT", "/api/network-rules/somerule"},
 	{"DELETE", "/api/network-rules/somerule"},
+	{"GET", "/api/environments"},
+	{"PUT", "/api/environments/web"},
+	{"DELETE", "/api/environments/web"},
+	{"GET", "/api/environments/web/script"},
+	{"PUT", "/api/environments/web/script"},
+	{"POST", "/api/environments/web/build"},
+	{"POST", "/api/environments/web/capture"},
 	{"GET", "/api/repos"},
 	{"POST", "/api/repos/wandb%2Fhivemind/authorize"},
 	{"PUT", "/api/repos/wandb%2Fhivemind"},
@@ -507,10 +515,12 @@ func TestPortChangePreservesVisibility(t *testing.T) {
 	if err := json.Unmarshal(tc.do(t, "GET", "/api/machines", "alice", nil).Body.Bytes(), &views); err != nil {
 		t.Fatal(err)
 	}
-	if len(views) != 1 || len(views[0].Routes) != 1 {
+	// The strip also carries whatever the box is listening on, which is not
+	// this test's business — but the default port is always its first entry.
+	if len(views) != 1 || len(views[0].Routes) == 0 {
 		t.Fatalf("unexpected machine list: %+v", views)
 	}
-	if r := views[0].Routes[0]; r.Port != 9090 || r.Visibility != "public" {
+	if r := views[0].Routes[0]; r.Port != 9090 || r.Visibility != "public" || !r.Default {
 		t.Fatalf("unexpected route view: %+v", r)
 	}
 
@@ -579,8 +589,81 @@ func TestMachineListShowsTagsStatsAndState(t *testing.T) {
 	if v.CPUSeconds == nil {
 		t.Fatal("running sandbox should report cpu_seconds")
 	}
-	if len(v.Routes) != 1 || v.Routes[0].Visibility != routes.VisibilityPrivate {
-		t.Fatalf("expected one private default route, got %+v", v.Routes)
+	// The default port heads the strip and is private until somebody says
+	// otherwise. Anything after it is whatever the box is listening on, which
+	// depends on the machine running the test.
+	if len(v.Routes) == 0 || !v.Routes[0].Default || v.Routes[0].Visibility != routes.VisibilityPrivate {
+		t.Fatalf("expected a private default port first, got %+v", v.Routes)
+	}
+	for _, r := range v.Routes[1:] {
+		if r.Visibility != routes.VisibilityPrivate {
+			t.Errorf("a port nobody configured is %s, want private: %+v", r.Visibility, r)
+		}
+	}
+}
+
+// Visibility is per port: the console can open one without touching the rest,
+// a port can be listed before anything is on it, and forgetting it takes it
+// off the strip without ever having exposed it.
+func TestConsoleSettlesVisibilityPerPort(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+
+	// Add a port nothing is listening on, then open it.
+	for _, vis := range []string{"private", "public"} {
+		rec := tc.do(t, "POST", "/api/routes/webby/visibility", "alice",
+			map[string]any{"visibility": vis, "port": 5173})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("set :5173 %s: status %d (%s)", vis, rec.Code, rec.Body)
+		}
+	}
+	rt, _, err := tc.routes.GetBySubdomain("webby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Visibility != routes.VisibilityPrivate {
+		t.Fatalf("opening :5173 changed the default port to %q", rt.Visibility)
+	}
+	if got, err := tc.routes.VisibilityForPort(rt, 5173); err != nil || got != routes.VisibilityPublic {
+		t.Fatalf("VisibilityForPort(5173) = %q, %v", got, err)
+	}
+
+	var views []sandboxView
+	if err := json.Unmarshal(tc.do(t, "GET", "/api/machines", "alice", nil).Body.Bytes(), &views); err != nil {
+		t.Fatal(err)
+	}
+	var found *routeStatus
+	for i, r := range views[0].Routes {
+		if r.Port == 5173 {
+			found = &views[0].Routes[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf(":5173 is not on the strip: %+v", views[0].Routes)
+	}
+	if !found.Pinned || found.Default || found.Visibility != routes.VisibilityPublic {
+		t.Fatalf(":5173 = %+v", *found)
+	}
+
+	// Forgetting takes it off the strip; the default port cannot be forgotten,
+	// because its visibility is the route's and there is no row to drop.
+	if rec := tc.do(t, "DELETE", "/api/routes/webby/ports/5173", "alice", nil); rec.Code != http.StatusOK {
+		t.Fatalf("forget :5173: status %d (%s)", rec.Code, rec.Body)
+	}
+	if got, err := tc.routes.VisibilityForPort(rt, 5173); err != nil || got != routes.VisibilityPrivate {
+		t.Fatalf("VisibilityForPort(5173) after forget = %q, %v", got, err)
+	}
+	if rec := tc.do(t, "DELETE", "/api/routes/webby/ports/"+strconv.Itoa(rt.Port), "alice", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("forgetting the default port: status %d, want 400", rec.Code)
+	}
+	// Another owner may not touch any of it, and is told the same "no such
+	// route" as if it did not exist.
+	if rec := tc.do(t, "POST", "/api/routes/webby/visibility", "bob",
+		map[string]any{"visibility": "public", "port": 5173}); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner set: status %d, want 404", rec.Code)
+	}
+	if rec := tc.do(t, "DELETE", "/api/routes/webby/ports/5173", "bob", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner forget: status %d, want 404", rec.Code)
 	}
 }
 
@@ -795,7 +878,7 @@ func TestValidationErrorsAreBadRequest(t *testing.T) {
 func TestIndexShipsRecoveryAffordances(t *testing.T) {
 	tc := newTestConsole(t)
 	body := tc.do(t, "GET", "/", "", nil).Body.String()
-	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()", `/sparkbox-logo.png`} {
+	for _, want := range []string{`id="error-view"`, `id="error-retry"`, "portSuffix()", `/sparkbox-logo.png`, `?env=`, `🚀 Launch`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index.html missing %s", want)
 		}
@@ -1358,16 +1441,19 @@ func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
 	var me struct {
 		Handle            string `json:"handle"`
 		TerminalSubdomain string `json:"terminal_subdomain"`
+		LaunchSubdomain   string `json:"launch_subdomain"`
 	}
-	rec := newTestConsole(t).do(t, "GET", "/api/me", "alice", nil)
+	tc := newTestConsole(t)
+	tc.handler.SetLaunchSubdomain("go")
+	rec := tc.do(t, "GET", "/api/me", "alice", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("me: status %d (%s)", rec.Code, rec.Body)
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
 		t.Fatal(err)
 	}
-	if me.Handle != "alice" || me.TerminalSubdomain != "xterm" {
-		t.Fatalf("me = %+v, want handle alice and terminal_subdomain xterm", me)
+	if me.Handle != "alice" || me.TerminalSubdomain != "xterm" || me.LaunchSubdomain != "go" {
+		t.Fatalf("me = %+v, want handle alice, terminal_subdomain xterm, and launch_subdomain go", me)
 	}
 
 	// Terminals off: the field is omitted entirely, not sent empty-but-present.
@@ -1378,6 +1464,9 @@ func TestMeAdvertisesTerminalSubdomain(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "terminal_subdomain") {
 		t.Errorf("terminals disabled but /api/me advertised one: %s", rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "launch_subdomain") {
+		t.Errorf("launch links disabled but /api/me advertised one: %s", rec.Body)
 	}
 }
 
@@ -1542,5 +1631,118 @@ func TestSnapshotListSurvivesABindingStoreError(t *testing.T) {
 	var plain []*host.Snapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &plain); err != nil || len(plain) != 1 {
 		t.Fatalf("rows = %v (err %v), want the snapshot listed", plain, err)
+	}
+}
+
+// A secret's value is write-only: nothing can read it back to re-send it. So
+// "also give this token the tag web" has to be expressible without a value, and
+// the old request shape made "" the only way to say it — which would have
+// overwritten the secret with nothing. An absent value now means "leave it".
+func TestPutSecretWithoutAValueMovesOnlyTheTags(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	if err := tc.secrets.PutSecret("alice", "API_KEY", "keep-me", []string{"prod"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := tc.secrets.SetTags("webby", "alice", []string{"web"}); err != nil {
+		t.Fatalf("tag machine: %v", err)
+	}
+
+	rec := tc.do(t, "PUT", "/api/secrets/API_KEY", "alice", map[string]any{"tags": []string{"prod", "web"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tags-only put: status %d (%s)", rec.Code, rec.Body)
+	}
+
+	// The value survived, and it is now delivered to the machine the new tag
+	// reaches — which is the whole point of the request.
+	env, err := tc.secrets.EnvForSandbox("webby", "alice")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if env["API_KEY"] != "keep-me" {
+		t.Fatalf("value after a tags-only put = %q, want the stored one", env["API_KEY"])
+	}
+}
+
+// An explicitly empty value is still a value — a caller that sends "" means to
+// blank the secret, and that must not be confused with omitting the field.
+func TestPutSecretWithAnEmptyValueStillWrites(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	if err := tc.secrets.PutSecret("alice", "API_KEY", "old", []string{"web"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := tc.secrets.SetTags("webby", "alice", []string{"web"}); err != nil {
+		t.Fatalf("tag machine: %v", err)
+	}
+
+	if rec := tc.do(t, "PUT", "/api/secrets/API_KEY", "alice",
+		map[string]any{"value": "", "tags": []string{"web"}}); rec.Code != http.StatusOK {
+		t.Fatalf("empty-value put: status %d (%s)", rec.Code, rec.Body)
+	}
+	env, err := tc.secrets.EnvForSandbox("webby", "alice")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if env["API_KEY"] != "" {
+		t.Fatalf("value = %q, want the empty string the caller asked for", env["API_KEY"])
+	}
+}
+
+// Renaming is a move, and it goes through the store's unseal/re-seal because
+// the AAD binds each blob to its name. Over the API it is one PUT.
+func TestPutSecretRenames(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	if err := tc.secrets.PutSecret("alice", "GH_TOKEN", "ghp_x", []string{"web"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := tc.secrets.SetTags("webby", "alice", []string{"web"}); err != nil {
+		t.Fatalf("tag machine: %v", err)
+	}
+
+	rec := tc.do(t, "PUT", "/api/secrets/GH_TOKEN", "alice",
+		map[string]any{"rename_to": "GITHUB_TOKEN", "tags": []string{"web"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename: status %d (%s)", rec.Code, rec.Body)
+	}
+	env, err := tc.secrets.EnvForSandbox("webby", "alice")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if env["GITHUB_TOKEN"] != "ghp_x" {
+		t.Fatalf("renamed value = %q, want the stored one", env["GITHUB_TOKEN"])
+	}
+	if _, ok := env["GH_TOKEN"]; ok {
+		t.Fatal("the old name is still delivered after a rename")
+	}
+}
+
+// A rename onto a name the owner already holds is refused, and — because the
+// rename runs BEFORE the tag write — nothing else in the request moves either.
+func TestPutSecretRenameConflictLeavesEverythingAlone(t *testing.T) {
+	tc := newTestConsole(t)
+	tc.create(t, "webby", "alice")
+	for name, val := range map[string]string{"GH_TOKEN": "ghp_a", "NPM_TOKEN": "npm_b"} {
+		if err := tc.secrets.PutSecret("alice", name, val, []string{"web"}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	rec := tc.do(t, "PUT", "/api/secrets/GH_TOKEN", "alice",
+		map[string]any{"rename_to": "NPM_TOKEN", "tags": []string{"other"}})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rename onto a held name: status %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+
+	metas, err := tc.secrets.ListSecrets("alice")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, m := range metas {
+		if len(m.Tags) != 1 || m.Tags[0] != "web" {
+			t.Fatalf("%s tags = %v, want the original [web] — the refused rename still wrote tags",
+				m.Name, m.Tags)
+		}
 	}
 }

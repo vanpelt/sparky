@@ -374,9 +374,16 @@ func (o *Ops) ctlHint() string {
 
 // sshHint is how the person reading a plan gets back into this sandbox after it
 // is paused — the one line that makes "nothing is lost" checkable.
+//
+// The sandbox is the SSH USER, not the host. `ssh <sandbox>.<domain>` resolves
+// (the wildcard points at this gateway) and then fails with `no sandbox named
+// <your local username>`, because routing reads the user and ssh sends whoever
+// you are locally. It is printed to somebody whose snapshot or build just
+// stopped, which is the worst moment to hand out a command that almost works;
+// the ctlHint above has always had the shape right.
 func (o *Ops) sshHint(sandbox string) string {
 	if o.domain == "" {
 		return "ssh " + sandbox + "@<gateway>"
 	}
-	return "ssh " + sandbox + "." + o.domain
+	return "ssh " + sandbox + "@" + o.domain
 }

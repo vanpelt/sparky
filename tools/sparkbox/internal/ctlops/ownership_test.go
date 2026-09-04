@@ -101,6 +101,14 @@ func ownCases() []ownCase {
 			_, err := r.ops.SetVisibility(ctx, c, t, "public")
 			return err
 		}},
+		{"SetPortVisibility", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.SetPortVisibility(ctx, c, t, 5173, "public")
+			return err
+		}},
+		{"ForgetPort", "sandbox", func(r *rig, c Caller, t string) error {
+			_, err := r.ops.ForgetPort(ctx, c, t, 5173)
+			return err
+		}},
 		{"DeleteSnapshot", "snapshot", func(r *rig, c Caller, t string) error {
 			return r.ops.DeleteSnapshot(ctx, c, t)
 		}},
@@ -319,6 +327,49 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// contract instead — see TestAdmitIsNotOperatorReachable for the half
 		// that is testable.
 		"AdmitGitHubLogin": true,
+		// Environments are keyed (owner, name) for the same reason secrets and
+		// repos are, and the store's every query carries the owner on both
+		// sides of the tag join — so the handle is not an argument and the name
+		// the caller passes selects only among their own. The masking is
+		// asserted directly instead, in env_test.go, because the answer for
+		// another owner's environment must be byte-identical to the answer for
+		// one nobody has.
+		"ListEnvironments": true, "GetEnvironment": true, "PutEnvironment": true,
+		"DeleteEnvironment": true, "SetEnvVar": true, "UnsetEnvVar": true,
+		// EnvironmentsForTags names TAGS rather than an environment, which
+		// sounds like a wider surface and is a narrower one: it cannot name a
+		// row at all. It reads the caller's own List and keeps whichever names
+		// happen to match, so a tag somebody else's environment uses returns
+		// nothing rather than theirs — the same structural scoping, reached
+		// without a name to mask.
+		"EnvironmentsForTags": true,
+		// The setup-script pair names an environment and nothing else, so it is
+		// scoped exactly as the six above are: envs.Store.Get and SetScript
+		// both carry the owner in their WHERE clause, and a name belonging to
+		// somebody else comes back as ErrNoSuchEnvironment.
+		"EnvScript": true, "SetEnvScript": true,
+		// The build pair names an environment and is scoped exactly as those
+		// eight are, through the same owner-carrying Get. The one extra thing
+		// they name — the builder sandbox — is DERIVED from the environment's
+		// own name and its row, never passed in, and each one still goes
+		// through o.owned before touching it. TestBuildRefusesBeforeTheFirstWrite
+		// and TestCaptureEnvironmentRefusals assert the masking directly, for
+		// the reason the environment verbs above do.
+		"BuildEnvironment": true, "CaptureEnvironment": true,
+		// The guest door takes a sandbox RECORD the host resolved from a tap,
+		// not a name and not a Caller — there is nobody here to check a target
+		// against. What stands in for the owner gate is the comparison of the
+		// environment row's owner against that record's, which is asserted
+		// directly in TestSetupForAnswersOnlyItsOwnBuilder and
+		// TestSetupDoneRefusesACrossOwnerBuilder because it is a security
+		// boundary rather than a query filter.
+		"SetupFor": true, "SetupDone": true,
+		// The reconciler acts for no person at all: it walks every owner's
+		// in-flight builds through the one store query with no owner term, and
+		// takes a context and nothing else. Its owner discipline is the same
+		// comparison the guest door makes, asserted in
+		// TestReconcileEnvironmentBuilds.
+		"ReconcileEnvironmentBuilds": true,
 	}
 	covered := map[string]bool{}
 	for _, tc := range ownCases() {
