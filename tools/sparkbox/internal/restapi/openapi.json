@@ -2979,6 +2979,12 @@
             "type": "string",
             "description": "Present when installing the App is the fix.",
             "example": "https://github.com/apps/sparkbox/installations/new"
+          },
+          "missing_permissions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Permissions this host would mint for the repository that the App was never granted, sorted. Never a reason the attachment is unreachable — it clones and pushes without any of them; these are the extra reads (Dependabot alerts, code scanning, Actions, checks, commit statuses, deployments) that `gh` in a sandbox will 403 on. Grant them on the App at github.com, then have each installing account accept the updated permissions.",
+            "example": ["vulnerability_alerts"]
           }
         }
       },

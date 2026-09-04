@@ -144,9 +144,16 @@ type Installation struct {
 // no caller should send an empty permission map to MintToken, which refuses it
 // precisely because an absent list means EVERY permission the installation has.
 func (i Installation) Narrow(want map[string]string) map[string]string {
+	return NarrowTo(i.Permissions, want)
+}
+
+// NarrowTo is Narrow against a permission map on its own, for the callers that
+// hold one without the Installation it came from — the console caches what an
+// installation reported so a four-second poll does not re-ask github.com.
+func NarrowTo(have, want map[string]string) map[string]string {
 	out := make(map[string]string, len(want))
 	for name, level := range want {
-		held, ok := i.Permissions[name]
+		held, ok := have[name]
 		if !ok {
 			continue
 		}

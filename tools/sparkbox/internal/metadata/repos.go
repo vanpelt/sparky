@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -189,6 +190,17 @@ type LocalRepos struct {
 	// and Credential answers ErrNotEnabled.
 	App      *ghapp.App
 	UserAuth *ghuser.Manager
+	// Log is optional; nil discards. It exists for exactly one line — the
+	// fallback from a user-attributed token to the App bot, which is otherwise
+	// an invisible change of who GitHub thinks is acting.
+	Log *slog.Logger
+}
+
+func (l LocalRepos) log() *slog.Logger {
+	if l.Log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return l.Log
 }
 
 func (l LocalRepos) StartAuthorization(ctx context.Context, box *host.Sandbox, slug string) (AuthorizationStart, error) {
@@ -272,7 +284,11 @@ func (l LocalRepos) authorizationSubject(ctx context.Context, box *host.Sandbox,
 	if err != nil {
 		return ghuser.Subject{}, githubError(err)
 	}
-	perms := inst.Narrow(map[string]string{"contents": ghapp.PermWrite, "pull_requests": ghapp.PermWrite, "issues": ghapp.PermWrite})
+	// Write, because this path only runs for a write attachment (checked
+	// above) and the consent screen has to cover what the credential path will
+	// later ask for — see ghapp.MintPermissions on why a consent set and a mint
+	// set that disagree expire into a bot token.
+	perms := inst.Narrow(ghapp.MintPermissions(ghapp.PermWrite))
 	perms["contents"] = ghapp.PermWrite
 	return ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID,
 		Slug: entry.Slug, Target: inst.AccountLogin, Permissions: perms}, nil
@@ -437,6 +453,8 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	// `gh issue` are most of why anybody wants it there. A token that can push a
 	// branch but not open a pull request for it is a strange half-grant, so the
 	// set follows the attachment: read attachments read, write attachments write.
+	// ghapp.MintPermissions holds the list, and the read-only tier it adds on top
+	// (Dependabot alerts, CI, deployments) is there for the same reason.
 	//
 	// The installation-token fallback is still one repository, one hour and
 	// never written down. A write attachment may instead have an encrypted,
@@ -446,7 +464,7 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	if entry.Access == repos.AccessWrite {
 		perm = ghapp.PermWrite
 	}
-	want := map[string]string{"contents": perm, "pull_requests": perm, "issues": perm}
+	want := ghapp.MintPermissions(perm)
 	// Narrowed to what the App was actually granted, because GitHub refuses a
 	// token request naming a permission the installation lacks OUTRIGHT rather
 	// than trimming it — so asking for pull_requests from an App that was never
@@ -460,9 +478,20 @@ func (l LocalRepos) Credential(ctx context.Context, box *host.Sandbox, slug stri
 	if entry.Access == repos.AccessWrite && l.UserAuth != nil {
 		subject := ghuser.Subject{Owner: box.Owner, GitHubID: u.GitHubID,
 			InstallationID: inst.ID, Slug: entry.Slug, Target: inst.AccountLogin, Permissions: perms}
-		if userToken, ok, userErr := l.UserAuth.Token(ctx, subject); userErr == nil && ok {
+		userToken, ok, userErr := l.UserAuth.Token(ctx, subject)
+		switch {
+		case userErr == nil && ok:
 			return Credential{Username: credentialUsername, Password: userToken.AccessToken,
 				ExpiresAt: userToken.AccessExpiresAt}, nil
+		case userErr != nil:
+			// Falling through to the bot is the right behaviour — a repository
+			// that still clones beats one that does not — but it is a SILENT
+			// change of identity: commits stop being attributed to the owner
+			// who deliberately asked for attribution, and nothing upstream says
+			// why. ghuser logs its own reasons; this line is what ties one to
+			// the sandbox that lost the attribution.
+			l.log().Warn("github user attribution unavailable; falling back to the app bot",
+				"owner", box.Owner, "sandbox", box.Name, "repo", entry.Slug, "err", userErr)
 		}
 	}
 	tok, err := l.App.MintToken(ctx, inst, []string{name}, perms)

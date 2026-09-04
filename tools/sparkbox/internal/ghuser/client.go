@@ -32,6 +32,11 @@ var (
 	ErrWrongUser  = errors.New("github authorization belongs to a different user")
 	ErrWrongScope = errors.New("github authorization is not restricted to the requested repository")
 	ErrNoRefresh  = errors.New("github app did not issue an expiring user token with a refresh token")
+	// ErrScopeRefused is a scoped-token request GitHub rejected as invalid
+	// rather than as unauthenticated. The permission set is the only part of
+	// that request this platform ever changes, so it is the thing to retry
+	// narrower — see Manager.deriveVerified.
+	ErrScopeRefused = errors.New("github refused the requested scoped token")
 )
 
 type Config struct {
@@ -234,6 +239,14 @@ func (c *Client) Scope(ctx context.Context, accessToken, target string, repoID i
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
+		// 403 and 422 are the two GitHub uses for "that request named something
+		// you may not have": 422 for a permission outside the app's grant, 403
+		// for one outside this user's authorization. Both are worth one retry
+		// with a narrower set; a 401 (bad client credentials) or a 5xx is not,
+		// and retrying either would only double the damage.
+		if resp.StatusCode == http.StatusUnprocessableEntity || resp.StatusCode == http.StatusForbidden {
+			return ScopedToken{}, fmt.Errorf("%w: github returned %s", ErrScopeRefused, resp.Status)
+		}
 		return ScopedToken{}, fmt.Errorf("github returned %s creating a scoped user token", resp.Status)
 	}
 	var out struct {

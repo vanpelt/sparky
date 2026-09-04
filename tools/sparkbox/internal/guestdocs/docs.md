@@ -141,6 +141,28 @@ From inside the VM:
 Attaching and detaching happen outside the VM, with `ssh ctl@<domain> repo add`
 or from the web console.
 
+### What the repository credential can read
+
+`gh` runs on the same per-repository credential `git` does, and it covers more
+than code and pull requests. These all work inside a checkout, without any
+setup:
+
+    gh api repos/{owner}/{repo}/dependabot/alerts       # Dependabot alerts
+    gh api repos/{owner}/{repo}/code-scanning/alerts    # code scanning
+    gh run list                                         # workflow runs
+    gh run view <id> --log                              # and their logs
+    gh pr checks                                        # checks on a PR
+
+There is no `gh dependabot` subcommand — security alerts are reachable through
+`gh api` only, which is worth knowing before concluding the credential lacks
+the permission.
+
+Those five are read-only whatever the attachment says. A `--write` attachment
+raises code, pull requests and issues to write; it does not let anything in the
+VM dismiss an alert, cancel a run or create a deployment. A 403 on one of the
+reads above usually means the App was never granted that permission on the
+repository, which the **repos** panel in the web console reports per row.
+
 A sync can do exactly three things to a checkout that already exists: fetch it,
 fast-forward it when the tree is clean, or say why it did neither. It never
 resets, rebases, merges anything but a fast-forward, stashes or deletes —

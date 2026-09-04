@@ -82,6 +82,17 @@ type RepoCheck struct {
 	Reachable  bool     `json:"reachable"`
 	Reason     string   `json:"reason,omitempty"`
 	InstallURL string   `json:"install_url,omitempty"`
+	// Missing names the permissions this host would mint for the repository
+	// that the installation was never granted, sorted. It is never a Reason:
+	// the attachment is reachable and clones fine without any of them.
+	//
+	// It is here because the alternative is silence. A minted token is narrowed
+	// to what the installation holds before it is requested — necessarily, since
+	// GitHub refuses a request naming a permission it lacks outright rather than
+	// trimming it — and a permission the operator never granted is dropped in
+	// exactly the same way as one whose name this code spells wrong. Both
+	// produce a working, quieter token and a 403 inside a sandbox hours later.
+	Missing []string `json:"missing_permissions,omitempty"`
 }
 
 // ListRepos returns the caller's attachments. Reading is not gated on the
@@ -394,6 +405,11 @@ func (o *Ops) checkRepo(ctx context.Context, u users.User, r repos.Repo) (RepoCh
 		return check, nil
 	}
 	check.Reachable = true
+	// Measured against the write set whatever the attachment says, because the
+	// question is which permission NAMES the App is short of; Missing does not
+	// compare levels, and a read attachment on a read-granted App is short of
+	// nothing.
+	check.Missing = ghapp.Missing(inst.Permissions, ghapp.MintPermissions(ghapp.PermWrite))
 	return check, nil
 }
 

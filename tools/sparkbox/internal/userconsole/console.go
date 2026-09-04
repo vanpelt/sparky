@@ -1446,6 +1446,13 @@ const (
 type appProbe struct {
 	state string
 	note  string
+	// missing is the minted permissions this installation does not hold. It
+	// rides along because the probe already has the installation in hand and
+	// asking again would double this panel's github.com traffic.
+	missing []string
+	// perms is what the installation reported holding, kept so the row can say
+	// whether a stored user grant is narrower than what would be minted now.
+	perms map[string]string
 	at    time.Time
 }
 
@@ -1472,6 +1479,22 @@ type repoView struct {
 	UserAuth        string `json:"user_auth"`
 	UserAuthEnabled bool   `json:"user_auth_enabled,omitempty"`
 	GitHubLogin     string `json:"github_login,omitempty"`
+	// UserAuthStale marks a grant that works but was consented to under a
+	// narrower permission set than this host now mints. Only ever true
+	// alongside UserAuth "user": it is a nudge to re-authorize, not a failure,
+	// and without it the widening is invisible — the row keeps saying "you",
+	// the token keeps pushing, and `gh api .../dependabot/alerts` keeps 403ing
+	// with nothing anywhere to explain the difference.
+	UserAuthStale bool `json:"user_auth_stale,omitempty"`
+	// MissingPermissions is what this host would mint for the repository but
+	// the installation was never granted, sorted.
+	//
+	// It is the answer to "I added Dependabot alerts to the App, did it land",
+	// which is otherwise unanswerable from here: Narrow drops an ungranted
+	// permission silently, so a permission the operator forgot and a permission
+	// whose name is misspelled in readScope produce byte-identical behaviour.
+	// One list, straight from what github.com says the installation holds.
+	MissingPermissions []string `json:"missing_permissions,omitempty"`
 }
 
 // listRepos returns the session's repo attachments in full, each carrying the
@@ -1501,16 +1524,27 @@ func (h *Handler) listRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	strongUser := userErr == nil && u.Active() && u.GitHubVerifiedAt != nil && users.StrongGitHubLink(u.GitHubVia) && u.GitHubID > 0
 	for _, rp := range list {
-		state, note := h.appState(handle, rp)
-		v := repoView{Repo: rp, App: state, AppNote: note, UserAuth: "bot"}
+		probe := h.appState(handle, rp)
+		v := repoView{Repo: rp, App: probe.state, AppNote: probe.note, UserAuth: "bot",
+			MissingPermissions: probe.missing}
 		if strongUser {
 			v.GitHubLogin = u.GitHubLogin
-			v.UserAuthEnabled = rp.Access == repos.AccessWrite && state == appReady && h.userAuth != nil && h.userAuth.WebEnabled()
-			if rp.Access == repos.AccessWrite && state == appReady && h.userAuth != nil && h.userAuth.Authorized(handle, rp.Slug, u.GitHubID) {
+			v.UserAuthEnabled = rp.Access == repos.AccessWrite && probe.state == appReady && h.userAuth != nil && h.userAuth.WebEnabled()
+			if rp.Access == repos.AccessWrite && probe.state == appReady && h.userAuth != nil && h.userAuth.Authorized(handle, rp.Slug, u.GitHubID) {
 				v.UserAuth = "user"
+				// Compared against what this repository's installation can
+				// actually be asked for, not against the raw minted set: an App
+				// that was never granted Dependabot alerts would otherwise make
+				// every authorized row nag forever about a permission
+				// re-authorizing cannot obtain.
+				if probe.perms != nil {
+					want := ghapp.NarrowTo(probe.perms, ghapp.MintPermissions(ghapp.PermWrite))
+					want["contents"] = ghapp.PermWrite
+					v.UserAuthStale = !h.userAuth.Covers(handle, rp.Slug, u.GitHubID, want)
+				}
 			}
 		}
-		if state == appMissing {
+		if probe.state == appMissing {
 			v.InstallURL = h.app.InstallURL()
 		}
 		views = append(views, v)
@@ -1613,7 +1647,10 @@ func (h *Handler) repoAuthorizationSubject(ctx context.Context, handle, slug str
 	if err != nil {
 		return ghuser.Subject{}, err
 	}
-	perms := inst.Narrow(map[string]string{"contents": ghapp.PermWrite, "pull_requests": ghapp.PermWrite, "issues": ghapp.PermWrite})
+	// Write, because only a write attachment reaches this door. The set must be
+	// the same one internal/metadata mints with — see ghapp.MintPermissions for
+	// what a consent screen narrower than the mint set costs an hour later.
+	perms := inst.Narrow(ghapp.MintPermissions(ghapp.PermWrite))
 	perms["contents"] = ghapp.PermWrite
 	return ghuser.Subject{Owner: handle, GitHubID: u.GitHubID, InstallationID: inst.ID, RepoID: repoID,
 		Slug: entry.Slug, Target: inst.AccountLogin, Permissions: perms}, nil
@@ -1647,16 +1684,16 @@ func repoAuthorizationStatus(err error) int {
 // The answer is per ACCOUNT, not per repository, because it includes
 // ghapp.Authorize — see probeApp. Two people attaching the same slug get two
 // cache entries, which is the point.
-func (h *Handler) appState(handle string, rp repos.Repo) (state, note string) {
+func (h *Handler) appState(handle string, rp repos.Repo) appProbe {
 	if h.app == nil {
-		return appOff, ""
+		return appProbe{state: appOff}
 	}
 	owner, name, ok := repos.SplitSlug(rp.Slug)
 	if !ok {
 		// Unreachable through this API — the store refuses such a slug — but a
 		// row written by an older or a future writer must not send nonsense to
 		// github.com on a four-second timer.
-		return appUnknown, "this attachment's slug is not an owner/name repository"
+		return appProbe{state: appUnknown, note: "this attachment's slug is not an owner/name repository"}
 	}
 	key := probeKey(handle, rp.Host, rp.Slug)
 	h.appMu.Lock()
@@ -1670,9 +1707,9 @@ func (h *Handler) appState(handle string, rp repos.Repo) (state, note string) {
 		go h.probeApp(key, handle, owner, name)
 	}
 	if have {
-		return p.state, p.note
+		return p
 	}
-	return appChecking, ""
+	return appProbe{state: appChecking}
 }
 
 // probeApp asks github.com once and records the answer.
@@ -1692,7 +1729,7 @@ func (h *Handler) appState(handle string, rp repos.Repo) (state, note string) {
 func (h *Handler) probeApp(key, handle, owner, name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), appProbeTimeout)
 	defer cancel()
-	state, note := h.probeOnce(ctx, handle, owner, name)
+	probe := h.probeOnce(ctx, handle, owner, name)
 
 	h.appMu.Lock()
 	defer h.appMu.Unlock()
@@ -1713,7 +1750,8 @@ func (h *Handler) probeApp(key, handle, owner, name string) {
 			h.appSeen = map[string]appProbe{}
 		}
 	}
-	h.appSeen[key] = appProbe{state: state, note: note, at: time.Now()}
+	probe.at = time.Now()
+	h.appSeen[key] = probe
 }
 
 // attachAllowed is the console's half of the one attachment rule, delegating to
@@ -1738,33 +1776,38 @@ func (h *Handler) attachAllowed(handle string) error {
 // respond"): the first two are things to go and fix, the third is a thing to
 // ask again about in a minute, and a UI that renders them alike sends people to
 // fix something that was never broken.
-func (h *Handler) probeOnce(ctx context.Context, handle, owner, name string) (state, note string) {
+func (h *Handler) probeOnce(ctx context.Context, handle, owner, name string) appProbe {
 	u, err := h.accounts.Get(handle)
 	if err != nil {
 		// The session already passed edgeauth, which reads the same record, so
 		// this is a store that broke between two reads rather than an unknown
 		// account. Either way there is no identity to authorize with.
-		return appUnknown, "could not read this account's GitHub link"
+		return appProbe{state: appUnknown, note: "could not read this account's GitHub link"}
 	}
 	inst, err := h.app.InstallationFor(ctx, owner, name)
 	if err != nil {
 		switch {
 		case errors.Is(err, ghapp.ErrNotInstalled):
-			return appMissing, err.Error()
+			return appProbe{state: appMissing, note: err.Error()}
 		case errors.Is(err, ghapp.ErrNotConfigured):
-			return appOff, ""
+			return appProbe{state: appOff}
 		case errors.Is(err, ghapp.ErrUpstream):
-			return appUnknown, err.Error()
+			return appProbe{state: appUnknown, note: err.Error()}
 		}
-		return appBlocked, err.Error()
+		return appProbe{state: appBlocked, note: err.Error()}
 	}
 	if err := h.app.Authorize(ctx, inst, u.GitHubID, u.GitHubLogin); err != nil {
 		if errors.Is(err, ghapp.ErrUpstream) {
-			return appUnknown, err.Error()
+			return appProbe{state: appUnknown, note: err.Error()}
 		}
-		return appBlocked, err.Error()
+		return appProbe{state: appBlocked, note: err.Error()}
 	}
-	return appReady, ""
+	// Measured against the write set unconditionally, even for a read
+	// attachment: the question the panel answers is "what is the App short of",
+	// and Missing compares names, not levels. A read attachment on an App that
+	// holds contents:read is short of nothing.
+	return appProbe{state: appReady, perms: inst.Permissions,
+		missing: ghapp.Missing(inst.Permissions, ghapp.MintPermissions(ghapp.PermWrite))}
 }
 
 // probeKey folds the slug because github.com does: wandb/Hivemind and
