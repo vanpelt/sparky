@@ -94,6 +94,12 @@ if you only want the log line:
 | **Metadata** | Read-only (mandatory, auto-selected) | resolving a repo to its installation |
 | **Pull requests** | **Read and write** | `gh pr create`, `gh pr list`, `gh pr view` |
 | **Issues** | Read and write (optional) | `gh issue` |
+| **Dependabot alerts** | Read-only | `gh api repos/{owner}/{repo}/dependabot/alerts` |
+| **Code scanning alerts** | Read-only | `gh api repos/{owner}/{repo}/code-scanning/alerts` |
+| **Actions** | Read-only | `gh run list`, `gh run view --log` |
+| **Checks** | Read-only | `gh pr checks` |
+| **Commit statuses** | Read-only | the green tick on a commit |
+| **Deployments** | Read-only | `gh api repos/{owner}/{repo}/deployments` |
 
 **Organization permissions** — one, and only if you will install on an org:
 
@@ -125,8 +131,18 @@ credential-helper protocol, so it runs on the same per-repository token `git`
 does (a wrapper in the guest hands it over as `GH_TOKEN` for the
 length of one command and writes nothing to disk). A token that can push a
 branch but cannot open a pull request for it is a strange half-grant, so the
-minted set follows the attachment's access level across all of these
-permissions: `--write` attachments get write, everything else gets read.
+minted set follows the attachment's access level across Contents, Pull requests
+and Issues: `--write` attachments get write, everything else gets read.
+
+**The six read-only rows below Issues are the questions an agent is actually
+asked.** "What's vulnerable in here", "why is CI red", "what shipped" — all of
+them are `gh api` calls against endpoints that a Contents-and-Pull-requests
+token cannot touch, and every one of them 403s inside a sandbox whose token can
+push to that very repository. Unlike the first three, these do **not** follow
+the attachment: they are pinned to read at every access level. A write
+attachment says an agent may push code; it does not say an agent may dismiss a
+security alert or cancel a production deploy, and the token is handed to a
+model.
 
 Every one of them is narrowed to what the app actually holds before the token is
 requested, so **granting fewer of these is safe** — an app with Contents alone
@@ -134,6 +150,31 @@ still clones, and `gh` simply cannot open PRs with it. That matters because
 GitHub refuses a token request naming a permission the installation lacks
 *outright* rather than trimming it: without the narrowing step, adding Pull
 requests to this list would have broken every clone on an app that predates it.
+
+The cost of that safety is silence. A permission you forgot to grant and a
+permission whose name sparkbox spells wrong produce the identical
+working-but-narrower token, with no error anywhere. The **repos** panel in the
+user console prints what the installation is short of per repository (*app
+lacks: vulnerability_alerts*), read straight from what github.com reports the
+installation holding — check there after granting, rather than assuming.
+
+### Adding permissions to an app that is already installed
+
+Two things have to happen, in this order, and neither is automatic:
+
+1. Change the permissions on the App at github.com.
+2. **Every account that installed it accepts the update.** GitHub mails the
+   owner; until they accept, the installation still reports the old set and
+   sparkbox narrows the new permissions straight back out.
+
+Users who chose *authorize as me* need a third step. A GitHub App user
+authorization carries the permissions the user approved at the moment they
+approved them, and a token refresh cannot reach past that — so an existing
+grant keeps working at the old, narrower set. Sparkbox detects this rather than
+failing: the refresh retries with the core set, keeps the attribution, records
+what was actually granted, and the console marks the row *older permissions*
+with a **Re-authorize** button. Nothing breaks if nobody clicks it; the new
+reads just stay unavailable on that repository.
 
 Leave **Account permissions** entirely empty.
 

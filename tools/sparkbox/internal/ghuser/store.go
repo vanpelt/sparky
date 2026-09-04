@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +28,19 @@ type Grant struct {
 	RepoID         int64
 	Slug           string
 	Token          Token
+	// Permissions is what the scoped token GitHub actually issued carries — not
+	// what was asked for. The two differ whenever the platform's minted set is
+	// widened: an existing user authorization was consented to under the old
+	// set and cannot be re-scoped past it, so the refresh falls back and this
+	// records the narrower reality.
+	//
+	// It is stored so the console can say "this grant predates the permissions
+	// this host now mints, re-authorize it" without a round trip to github.com
+	// on a four-second poll, and so a refresh knows what it is allowed to ask
+	// for a second time. Not secret — a permission name is configuration — so
+	// it is a plain column and not part of the sealed AAD, which also means
+	// widening it later cannot orphan a stored ciphertext.
+	Permissions map[string]string
 }
 
 type Store struct {
@@ -76,7 +91,83 @@ func Open(path string, kek []byte) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Grants written before the minted permission set became data carry no
+	// record of what they were consented to under. They are left empty rather
+	// than backfilled with a guess: the old authorize path hardcoded `write` on
+	// all three core permissions but Narrow could have downgraded any of them,
+	// so a backfill would be wrong in exactly the direction that makes a
+	// refresh ask for more than the grant holds. An empty column reads as
+	// "unknown", and Manager treats unknown as "try the full set, fall back".
+	if err := addColumnIfMissing(db, "github_scoped_user_grants", "permissions", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db, aead: aead}, nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN unless the column already
+// exists. sqlite has no ADD COLUMN IF NOT EXISTS, and a bare ALTER errors on
+// the second boot, so we consult table_info first. This package's own copy, per
+// the deliberate per-package duplication convention.
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
+}
+
+// encodePermissions renders a permission set as a stable, sorted, greppable
+// string: "actions=read,contents=write". Sorted so the same set never produces
+// two different rows, and text rather than JSON so a human reading the table
+// with sqlite3 can see what a grant holds.
+func encodePermissions(perms map[string]string) string {
+	if len(perms) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(perms))
+	for name, level := range perms {
+		parts = append(parts, name+"="+level)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// decodePermissions is encodePermissions' inverse. A malformed entry is
+// dropped rather than failing the read: this column is advisory — it decides
+// whether a nudge is shown and which set a refresh retries with — and a grant
+// that still holds a working token must not become unreadable because one
+// field was written by something else.
+func decodePermissions(s string) map[string]string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		name, level, ok := strings.Cut(part, "=")
+		if !ok || name == "" || level == "" {
+			continue
+		}
+		out[name] = level
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -97,10 +188,10 @@ func (s *Store) Put(g Grant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err = s.db.Exec(`INSERT OR REPLACE INTO github_scoped_user_grants
-		(owner, github_id, installation_id, repo_id, slug, access_token, refresh_token, access_expires_at, refresh_expires_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(owner, github_id, installation_id, repo_id, slug, access_token, refresh_token, access_expires_at, refresh_expires_at, updated_at, permissions)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		g.Owner, g.GitHubID, g.InstallationID, g.RepoID, g.Slug, access, refresh,
-		g.Token.AccessExpiresAt, g.Token.RefreshExpiresAt, time.Now().UTC())
+		g.Token.AccessExpiresAt, g.Token.RefreshExpiresAt, time.Now().UTC(), encodePermissions(g.Permissions))
 	return err
 }
 
@@ -119,10 +210,11 @@ func (s *Store) GetBySlug(owner, slug string) (Grant, error) {
 func (s *Store) get(where string, args ...any) (Grant, error) {
 	var g Grant
 	var access, refresh []byte
+	var perms string
 	err := s.db.QueryRow(`SELECT owner, github_id, installation_id, repo_id, slug, access_token, refresh_token,
-		access_expires_at, refresh_expires_at FROM github_scoped_user_grants WHERE `+where, args...).
+		access_expires_at, refresh_expires_at, permissions FROM github_scoped_user_grants WHERE `+where, args...).
 		Scan(&g.Owner, &g.GitHubID, &g.InstallationID, &g.RepoID, &g.Slug, &access, &refresh,
-			&g.Token.AccessExpiresAt, &g.Token.RefreshExpiresAt)
+			&g.Token.AccessExpiresAt, &g.Token.RefreshExpiresAt, &perms)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Grant{}, ErrNoGrant
 	}
@@ -137,6 +229,7 @@ func (s *Store) get(where string, args ...any) (Grant, error) {
 	if err != nil {
 		return Grant{}, err
 	}
+	g.Permissions = decodePermissions(perms)
 	return g, nil
 }
 

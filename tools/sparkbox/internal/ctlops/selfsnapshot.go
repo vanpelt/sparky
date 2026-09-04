@@ -330,12 +330,28 @@ func (o *Ops) carriersOf(owner, self, tag string) []TaggedSandbox {
 // The previous generation survives, unbound, so `snapshot ls` becomes that
 // tag's history and a rollback is one `snapshot bind` away.
 func snapshotNameFor(tag string, at time.Time) string {
+	return snapshotStem(tag) + "-" + at.UTC().Format(snapshotStampLayout)
+}
+
+// snapshotStampLayout and snapshotStampRe are the timestamp half of that name,
+// written down once because two things now depend on it: the writer above, and
+// the retention sweep in envbuild.go, which recognises the captures an `env
+// build` made by the shape of the name it gave them. A sweep matching a pattern
+// the writer had moved on from would silently stop deleting anything, so the
+// pattern and the format string live beside each other.
+const snapshotStampLayout = "060102-1504"
+
+var snapshotStampRe = regexp.MustCompile(`^\d{6}-\d{4}$`)
+
+// snapshotStem is the part of a generated name that identifies the tag: the tag
+// itself, truncated to what host's 41-character limit leaves after the stamp,
+// with any trailing separator removed so the one below is the only one.
+func snapshotStem(tag string) string {
 	stem := tag
 	if len(stem) > selfStemMax {
 		stem = stem[:selfStemMax]
 	}
-	stem = strings.TrimRight(stem, "-")
-	return stem + "-" + at.UTC().Format("060102-1504")
+	return strings.TrimRight(stem, "-")
 }
 
 // digest is the plan's token: a fingerprint of every fact the plan REPORTED.

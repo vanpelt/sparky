@@ -415,6 +415,15 @@
      environment — the page's own content pushed below the fold by the box
      used to add to it. */
 
+  /* Every one of those forms opens ABOVE the list it writes into, and none of
+     them carried the gap the list's own cards do (.env-card, .footprint) — so
+     the Save row sat flush against the first card below and the two read as
+     one card with a form stuck to the top of it. The rule is one list rather
+     than a margin on .card because the tables below are the last thing in
+     their tab and gain nothing from it. */
+  #env-form-card, #env-script-panel,
+  #sec-form-card, #nr-form-card, #rp-form-card { margin-bottom: 14px; }
+
   .env-card { margin-bottom: 10px; }
   .env-card .m-head { align-items: baseline; }
   /* The description, in the page's own face. It used to inherit .mono from the
@@ -635,7 +644,7 @@
 
     <div class="tabs">
       <button class="tab active" data-tab="environments">Environments</button>
-      <button class="tab" data-tab="machines">Machines</button>
+      <button class="tab" data-tab="machines">Sparks</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="repos">Repos</button>
@@ -2764,12 +2773,31 @@
 
   function userAuthCell(r) {
     if (r.user_auth === "user") {
-      return '<span class="app-ok">you' + (r.github_login ? ' (@' + esc(r.github_login) + ')' : '') + '</span>';
+      const who = '<span class="app-ok">you' + (r.github_login ? ' (@' + esc(r.github_login) + ')' : '') + '</span>';
+      // The grant works; it is just narrower than what this host mints now, so
+      // the wording is an offer and not a warning. Without it the widening is
+      // invisible: the row still says "you" and the token still pushes, while
+      // the reads it was widened for keep coming back 403.
+      if (!r.user_auth_stale) return who;
+      return who + '<div class="muted" title="This authorization predates permissions this host now requests. ' +
+        'Re-authorize to pick them up.">older permissions</div>' +
+        '<div><button class="btn-outline btn-sm" data-authrepo="' + esc(r.slug) + '">Re-authorize</button></div>';
     }
     const fallback = '<span class="muted">bot</span>';
     if (!r.user_auth_enabled) return fallback;
     return fallback + '<div><button class="btn-outline btn-sm" data-authrepo="' +
       esc(r.slug) + '">Authorize as me</button></div>';
+  }
+
+  // What the App is short of on this repository. Read-only and easy to miss on
+  // purpose: nothing here is broken, but it is the only place that answers
+  // "I granted the App Dependabot alerts — did it land", because a permission
+  // the installation lacks is dropped from the minted token in silence.
+  function missingPermsCell(r) {
+    if (!Array.isArray(r.missing_permissions) || !r.missing_permissions.length) return "";
+    return '<div class="muted" title="Granted on the App at github.com, then accepted by the account that owns ' +
+      esc(r.slug) + ', these ride into the sandbox token.">app lacks: ' +
+      esc(r.missing_permissions.join(", ")) + "</div>";
   }
 
   function renderRepos(list) {
@@ -2783,7 +2811,7 @@
         '<td class="name mono">' + esc(r.slug) + ref + where + "</td>" +
         "<td>" + tagCell(r.slug, r.tags, "– none: reaches no machine") + "</td>" +
         "<td>" + (r.access === "write" ? "read + push" : "read-only") + "</td>" +
-        "<td>" + appCell(r) + '<div>' + userAuthCell(r) + "</div></td>" +
+        "<td>" + appCell(r) + '<div>' + userAuthCell(r) + "</div>" + missingPermsCell(r) + "</td>" +
         '<td class="age">' + rel(r.created_at) + "</td>" +
         '<td class="actions">' +
           '<button class="btn-outline btn-sm" data-editrepo="' + esc(r.slug) + '">Edit…</button> ' +

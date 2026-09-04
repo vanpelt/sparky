@@ -100,6 +100,16 @@
     background: hsl(var(--amber) / .07); font-size: 12.5px; line-height: 1.5;
   }
   .caution svg { width: 15px; height: 15px; flex: none; margin-top: 2px; color: hsl(var(--amber)); }
+  /* The stale-disk note is the same panel in the page's own neutral colours.
+     Amber is spent on the one sentence about running a stranger's branch, and
+     a second amber panel directly above it would halve what the first one is
+     worth — this one is a fact about a box the visitor owns, not a risk they
+     are agreeing to. */
+  .caution.stale {
+    border-color: hsl(var(--border)); background: hsl(var(--muted));
+    color: hsl(var(--muted-foreground));
+  }
+  .caution.stale svg { color: hsl(var(--muted-foreground)); }
 
   .actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   form { margin: 0; }
@@ -213,6 +223,13 @@
     </dl>
     {{end}}
 
+    {{if .Stale}}
+    <div class="caution stale">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      <span>{{.Stale}}</span>
+    </div>
+    {{end}}
+
     {{if .Caution}}
     <div class="caution">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
@@ -233,6 +250,11 @@
       {{if .Action}}
       <form method="post" action="{{.Action}}" data-busy="Creating…">
         <button class="btn-primary" type="submit">{{.Submit}}</button>
+      </form>
+      {{end}}
+      {{if .Alt}}
+      <form method="post" action="{{.Alt.Action}}" data-busy="Creating…">
+        <button class="btn-outline" type="submit">{{.Alt.Submit}}</button>
       </form>
       {{end}}
       {{if .Home}}<a class="btn-outline" href="{{.Home}}">Your sandboxes</a>{{end}}

@@ -1097,7 +1097,7 @@ func serve(args []string) error {
 	// different manifest — or a different refusal — depending on which machine
 	// the placer happened to pick, which is exactly the fact a sandbox must not
 	// be able to observe. LocalRepos is a value; copying it is the intent.
-	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp, UserAuth: ghUserManager}
+	localRepos := metadata.LocalRepos{Repos: repoStore, Users: userStore, App: ghApp, UserAuth: ghUserManager, Log: log}
 	// Installed here rather than beside SetRules for the same reason SetIdentity
 	// is: it is unconditional and independent of whether this gateway serves a
 	// metadata endpoint of its own. A --gateway-only control plane holds no VMs

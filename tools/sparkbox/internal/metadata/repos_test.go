@@ -896,3 +896,164 @@ func TestLocalManifestMatchesTheOverrideWhateverTheCase(t *testing.T) {
 		t.Fatalf("manifest = %+v, want the attachment marked", manifest.Repos)
 	}
 }
+
+// The read tier is what makes the credential useful for the questions an agent
+// is actually asked. `gh api repos/{o}/{r}/dependabot/alerts` was the report
+// that started this: a sandbox whose token could push to the repository could
+// not read that repository's own security alerts.
+func TestLocalCredentialCarriesTheReadOnlyTier(t *testing.T) {
+	stub := newGitHubStub(t,
+		installedWithPermissions(4242, "alice-gh", map[string]string{
+			"contents": "write", "pull_requests": "write", "issues": "write",
+			"vulnerability_alerts": "read", "security_events": "read",
+			"actions": "read", "checks": "read", "statuses": "read", "deployments": "read",
+		}),
+		mintsToken(time.Now().Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	seedTag(t, local.db, "alice-box", "alice", "ci")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind", Access: repos.AccessWrite}, []string{"ci"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind"); err != nil {
+		t.Fatal(err)
+	}
+	_, mints := stub.seen()
+	if len(mints) != 1 {
+		t.Fatalf("mints = %v", mints)
+	}
+	for _, want := range []string{
+		`"vulnerability_alerts":"read"`, `"security_events":"read"`, `"actions":"read"`,
+		`"checks":"read"`, `"statuses":"read"`, `"deployments":"read"`,
+		`"contents":"write"`, `"pull_requests":"write"`, `"issues":"write"`,
+	} {
+		if !strings.Contains(mints[0], want) {
+			t.Errorf("mint body %s is missing %s", mints[0], want)
+		}
+	}
+	// Still one repository: widening what the token may DO never widens what it
+	// may do it TO.
+	if !strings.Contains(mints[0], `["hivemind"]`) {
+		t.Errorf("token was not scoped to the one repository: %s", mints[0])
+	}
+}
+
+// A write attachment says an agent may push code. It does not say an agent may
+// dismiss a security alert or cancel a production deploy, and the token is
+// handed to a model — so the read tier stays read even when the App holds write
+// on every one of those permissions and the attachment is --write.
+func TestLocalCredentialNeverRaisesTheReadTierToWrite(t *testing.T) {
+	stub := newGitHubStub(t,
+		installedWithPermissions(4242, "alice-gh", map[string]string{
+			"contents": "write", "pull_requests": "write", "issues": "write",
+			"vulnerability_alerts": "write", "security_events": "write",
+			"actions": "write", "checks": "write", "statuses": "write", "deployments": "write",
+		}),
+		mintsToken(time.Now().Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	seedTag(t, local.db, "alice-box", "alice", "ci")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind", Access: repos.AccessWrite}, []string{"ci"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind"); err != nil {
+		t.Fatal(err)
+	}
+	_, mints := stub.seen()
+	if len(mints) != 1 {
+		t.Fatalf("mints = %v", mints)
+	}
+	for _, name := range []string{"vulnerability_alerts", "security_events", "actions", "checks", "statuses", "deployments"} {
+		if !strings.Contains(mints[0], `"`+name+`":"read"`) {
+			t.Errorf("%s was not read-only in a write attachment's token: %s", name, mints[0])
+		}
+	}
+}
+
+// An App that predates the read tier must keep cloning exactly as it did.
+// GitHub refuses a request naming a permission the installation lacks OUTRIGHT
+// rather than trimming it, so this is not a nicety: without the narrowing,
+// adding a line to readScope would break every clone on every deployment whose
+// App had not been updated and re-accepted.
+func TestLocalCredentialStillWorksOnAnAppThatPredatesTheReadTier(t *testing.T) {
+	stub := newGitHubStub(t,
+		installedWithPermissions(4242, "alice-gh", map[string]string{"contents": "write"}),
+		mintsToken(time.Now().Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	seedTag(t, local.db, "alice-box", "alice", "ci")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind", Access: repos.AccessWrite}, []string{"ci"}); err != nil {
+		t.Fatal(err)
+	}
+	cred, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.Password != "ghs_minted" {
+		t.Fatalf("credential = %q", cred.Password)
+	}
+	_, mints := stub.seen()
+	if len(mints) != 1 {
+		t.Fatalf("mints = %v", mints)
+	}
+	for _, name := range []string{"vulnerability_alerts", "security_events", "actions", "checks",
+		"statuses", "deployments", "pull_requests", "issues"} {
+		if strings.Contains(mints[0], name) {
+			t.Errorf("asked for %s, which this installation does not hold: %s", name, mints[0])
+		}
+	}
+	if !strings.Contains(mints[0], `"contents":"write"`) {
+		t.Errorf("the one permission the App does hold was not requested: %s", mints[0])
+	}
+}
+
+// Falling back to the bot is right — a repository that still clones beats one
+// that does not — but it silently changes who GitHub thinks is acting, for an
+// owner who deliberately asked for attribution. One log line ties the loss to
+// the sandbox it happened in.
+func TestLocalCredentialLogsWhenUserAttributionFallsBackToTheBot(t *testing.T) {
+	now := time.Now().UTC()
+	stub := newGitHubStub(t, installedFor(4242, "alice-gh"), mintsToken(now.Add(time.Hour)))
+	local := localFixture(t, verifiedUser("alice", 4242, "alice-gh"), stub)
+	var logged bytes.Buffer
+	local.Log = slog.New(slog.NewTextHandler(&logged, nil))
+	seedTag(t, local.db, "alice-box", "alice", "hm")
+	if err := local.Repos.PutRepo("alice", repos.Repo{Slug: "wandb/hivemind", Access: repos.AccessWrite}, []string{"hm"}); err != nil {
+		t.Fatal(err)
+	}
+	grantStore, err := ghuser.Open(local.db, ghuser.DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = grantStore.Close() })
+	// A client pointed at a GitHub that is not there: the refresh below cannot
+	// succeed, which is the shape of every real reason this falls back.
+	client, err := ghuser.NewClient(ghuser.Config{ClientID: "Iv23liTEST", ClientSecret: "s",
+		TokenURL: "http://127.0.0.1:1/token", APIURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.UserAuth = ghuser.NewManager(client, grantStore, slog.New(slog.DiscardHandler))
+	if err := grantStore.Put(ghuser.Grant{
+		Owner: "alice", GitHubID: 4242, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		// Already expired, so the credential path must refresh — and fail.
+		Token: ghuser.Token{AccessToken: "ghu_alice", RefreshToken: "ghr_alice",
+			AccessExpiresAt: now.Add(-time.Hour), RefreshExpiresAt: now.Add(30 * 24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cred, err := local.Credential(context.Background(), aliceBox(), "wandb/hivemind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.Password != "ghs_minted" {
+		t.Fatalf("credential = %q, want the bot fallback", cred.Password)
+	}
+	out := logged.String()
+	if !strings.Contains(out, "falling back to the app bot") ||
+		!strings.Contains(out, "wandb/hivemind") || !strings.Contains(out, "alice-box") {
+		t.Fatalf("fallback was not logged with the sandbox that lost attribution: %s", out)
+	}
+	// The whole point of the line is that it is not a secret leak.
+	if strings.Contains(out, "ghu_alice") || strings.Contains(out, "ghr_alice") || strings.Contains(out, "ghs_minted") {
+		t.Fatalf("the fallback log carried a token: %s", out)
+	}
+}
