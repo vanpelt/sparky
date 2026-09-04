@@ -415,6 +415,15 @@
      environment — the page's own content pushed below the fold by the box
      used to add to it. */
 
+  /* Every one of those forms opens ABOVE the list it writes into, and none of
+     them carried the gap the list's own cards do (.env-card, .footprint) — so
+     the Save row sat flush against the first card below and the two read as
+     one card with a form stuck to the top of it. The rule is one list rather
+     than a margin on .card because the tables below are the last thing in
+     their tab and gain nothing from it. */
+  #env-form-card, #env-script-panel,
+  #sec-form-card, #nr-form-card, #rp-form-card { margin-bottom: 14px; }
+
   .env-card { margin-bottom: 10px; }
   .env-card .m-head { align-items: baseline; }
   /* The description, in the page's own face. It used to inherit .mono from the
@@ -635,7 +644,7 @@
 
     <div class="tabs">
       <button class="tab active" data-tab="environments">Environments</button>
-      <button class="tab" data-tab="machines">Machines</button>
+      <button class="tab" data-tab="machines">Sparks</button>
       <button class="tab" data-tab="secrets">Secrets</button>
       <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="repos">Repos</button>
