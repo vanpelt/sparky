@@ -341,6 +341,22 @@ spec:
             # inflation nobody needed costs the guest a full reclaim pass and
             # shows up as an idle sandbox pegging its vCPUs. Genuine overage is
             # still reclaimed promptly by the memory-pressure controller.
+            # Firecracker's synchronous block engine, explicitly rather than by
+            # default. Async (io_uring) is a large win for small-random-read
+            # workloads and is what the Mac dev box runs, but it adds ~110ms to
+            # device creation — and device creation here INCLUDES snapshot
+            # restore, which is the scale-to-zero wake-up path every edge
+            # request takes through proxy.Prepare. Boots would get faster and
+            # wake-ups slower, and on a fleet of mostly-paused sandboxes
+            # wake-ups are the common case.
+            #
+            # Its io_uring workers also spawn in the root cgroup on kernels
+            # before 5.12 (so they escape this container's cpu/memory limits and
+            # consume node PIDs), and upstream still calls the engine a
+            # developer preview. Flip this to Async once resume latency has been
+            # measured on a real node with both engines.
+            - name: SPARKBOX_BLOCK_IO_ENGINE
+              value: "Sync"
             - name: SPARKBOX_MEM_RESERVE_MB
               value: "256"
             - name: SPARKBOX_OWNER_MEMORY_POOL_MB
