@@ -83,7 +83,6 @@ type nodeOptions struct {
 	helperControllerGID     int
 	disableHostRootfsMounts bool
 	defaultLogin            string
-	blockIOEngine           string
 	guestSubnet             string
 	subnet6                 string
 	guestDNS                string
@@ -215,7 +214,6 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			opts.chrootJailer, opts.privilegedHelperSocket, opts.privilegedHelperBin,
 			opts.helperControllerGID, opts.disableHostRootfsMounts,
 			opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS,
-			opts.blockIOEngine,
 		)
 		if err != nil {
 			return err

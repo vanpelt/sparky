@@ -44,23 +44,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-// blockIOEngine resolves Options.BlockIOEngine to what the API wants: a
-// pointer, because the field is omitempty and a nil leaves firecracker on its
-// own default. Empty configuration means Async — the engine we want everywhere
-// unless an operator has a reason not to.
-func (d *Driver) blockIOEngine() *string {
-	switch d.opts.BlockIOEngine {
-	case "":
-		return strPtr(models.DriveIoEngineAsync)
-	case models.DriveIoEngineSync:
-		// Explicitly the old behaviour. Send it rather than omitting it, so the
-		// choice is visible in the API log that firecracker prints.
-		return strPtr(models.DriveIoEngineSync)
-	default:
-		return strPtr(d.opts.BlockIOEngine)
-	}
-}
-
 type Options struct {
 	// KernelPath is an uncompressed vmlinux built with the microVM config.
 	KernelPath string
@@ -83,17 +66,6 @@ type Options struct {
 	VMStateDir string
 	// FirecrackerBin is the firecracker binary path (default: $PATH lookup).
 	FirecrackerBin string
-	// BlockIOEngine selects firecracker's block backend: "Async" for io_uring,
-	// "Sync" for the default one-request-at-a-time engine. Empty means Async,
-	// because a guest boot is thousands of small reads and the sync engine
-	// serialises every one of them — see the drive config in Start for the
-	// measurements.
-	//
-	// It is settable because Async is a developer preview upstream: its
-	// io_uring workers spawn in the root cgroup, so they cannot be attributed
-	// to a VM or capped by one, and they consume PIDs. A node packing dozens of
-	// sandboxes may prefer the older behaviour, and "Sync" restores it exactly.
-	BlockIOEngine string
 	// JailerBin enables Firecracker's jailer when non-empty. It must be the
 	// jailer from the same Firecracker release as FirecrackerBin. Empty keeps
 	// the legacy direct launcher.
@@ -799,7 +771,6 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			snapshotPaths = []string{jailedMemName, jailedStateName}
 		}
 	}
-	ioEngine := d.blockIOEngine()
 	fcCfg := sdk.Config{
 		SocketPath:      sock,
 		KernelImagePath: kernelPath,
@@ -809,29 +780,6 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			PathOnHost:   strPtr(drivePath),
 			IsRootDevice: boolPtr(true),
 			IsReadOnly:   boolPtr(false),
-			// io_uring rather than firecracker's default synchronous engine,
-			// which serves one block request at a time on the VMM thread.
-			//
-			// A guest boot is thousands of SMALL reads — shared libraries for
-			// ldconfig, unit files for systemd, layer metadata for containerd —
-			// and the cost of this device is per-request, not per-byte.
-			// Measured on the Mac dev box reading the same 8 MiB from a guest:
-			//
-			//   bs=4k   2048 reqs   5845 ms
-			//   bs=64k   128 reqs    177 ms
-			//   bs=1M      8 reqs    270 ms
-			//
-			// 33x more time for the same bytes, purely because there were more
-			// requests. Sync serialises them; io_uring keeps them in flight.
-			// End to end that was a 2.4x faster boot (90.4s -> 37.5s) on an
-			// otherwise identical VM, with 27% off bulk writes as well.
-			//
-			// The engine is a developer preview upstream and its io_uring
-			// workers live in the root cgroup, so they cannot be attributed to
-			// one VM or capped there, and they consume PIDs. That matters on a
-			// node packing dozens of sandboxes, which is why this is a flag and
-			// not a constant — see Options.BlockIOEngine.
-			IoEngine: ioEngine,
 		}},
 		NetworkInterfaces: sdk.NetworkInterfaces{{
 			StaticConfiguration: &sdk.StaticNetworkConfiguration{

@@ -355,36 +355,36 @@ func TestIdleBalloonNeverSqueezesBelowTheLiveWorkingSet(t *testing.T) {
 	}
 }
 
-// TestIdleBalloonWaitsForActualMemoryDemand is the "only when it makes sense"
-// half. Inflating a balloon makes the guest fault its whole working set back in
-// later; on a host with RAM to spare that is pure churn, and it is what turns
-// an idle fleet into a CPU-spike generator. Genuine overage is the pressure
-// controller's job.
-func TestIdleBalloonWaitsForActualMemoryDemand(t *testing.T) {
-	// A node budget of 90% of 64 GiB, with one idle guest nowhere near it.
-	m := internalManager(t, Options{MemReserveMB: 1024, HostMemMB: 65536, MemAdmissionPct: 90})
+// The same floor, reached through the OTHER caller. The idle reaper is not the
+// only thing that inflates a balloon: reclaimMemory asks for a specific number
+// of megabytes to close a real overage, and only the idle path was ever
+// guarded — so the trap stayed open on the path that fires under genuine
+// memory pressure, exactly when a guest can least afford it.
+//
+// The candidate ranking bounds a reclaim to `observed - reserve`, which hides
+// this for a guest using half its RAM or less: the leftover happens to land
+// above the working set anyway. It stops hiding it once the guest is using
+// more than (MemMB + reserve)/2, which is where a real boot sits. Hence 3000
+// of 4026 and not, say, 2048 — at 2048 this test passes without the fix.
+func TestPressureBalloonNeverSqueezesBelowTheLiveWorkingSet(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 256, OwnerMemoryPoolMB: 512})
 	ctx := context.Background()
-	if _, err := m.Create(ctx, "idle", "alice", "ubuntu", 1, 8192); err != nil {
+	if _, err := m.Create(ctx, "booting", "alice", "ubuntu", 4, 4026); err != nil {
 		t.Fatal(err)
 	}
-	// A working set well clear of the reserve, so that when the balloon does
-	// fire it is the demand gate being tested and not the live-working-set
-	// floor: 1.5 x 3000 MiB still leaves 3692 MiB worth reclaiming.
-	m.driver.(*mock.Driver).SetInUseMiB("idle", 3000)
-	m.boxes["idle"].LastActive = time.Now().Add(-5 * time.Minute)
-	m.reapOnce(ctx, time.Minute, time.Hour)
+	m.driver.(*mock.Driver).SetInUseMiB("booting", 3000)
+	m.refreshMemoryUsage(ctx)
+	m.boxes["booting"].LastActive = time.Now().Add(-time.Hour)
 
-	if m.boxes["idle"].Ballooned {
-		t.Error("an idle guest on a host with 64 GiB to spare must not be squeezed")
+	// Ask for far more than the guest can safely give.
+	m.reclaimMemory(ctx, "alice", 4000)
+
+	st, err := m.balloon.BalloonStats(ctx, "booting")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Same guest, same idleness — but now it is most of the node's budget, so
-	// reclaiming it actually buys something.
-	m.mu.Lock()
-	m.hostMemMB = 3000
-	m.mu.Unlock()
-	m.reapOnce(ctx, time.Minute, time.Hour)
-	if !m.boxes["idle"].Ballooned {
-		t.Error("a guest whose node is over its memory watermark must still be reclaimed")
+	if st.TargetMiB > 4026-3000 {
+		t.Fatalf("pressure reclaimed %d MiB, leaving the guest %d MiB while it was using 3000 MiB",
+			st.TargetMiB, 4026-st.TargetMiB)
 	}
 }

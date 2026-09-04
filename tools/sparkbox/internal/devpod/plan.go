@@ -43,19 +43,6 @@ type Options struct {
 	// keeps the built-ins and records the divergence.
 	DefaultVCPUs int64
 	DefaultMemMB int64
-	// BlockIOEngine overrides SPARKBOX_BLOCK_IO_ENGINE, and is the one
-	// override whose empty value CLEARS the manifest rather than keeping it.
-	//
-	// The manifest pins Sync because on CKS firecracker's device creation lands
-	// on snapshot restore -- the scale-to-zero wake-up every edge request takes
-	// -- and on a mostly-paused fleet wake-ups are the common case. A dev pod
-	// is neither mostly-paused nor latency-bound on wake-ups, and it pays the
-	// nested per-IO round trip twice where CKS pays it once, which is where
-	// Async (io_uring) was measured 2.4x faster to boot.
-	//
-	// So empty emits an empty variable, entrypoint.sh omits the flag, and the
-	// binary's own Async default applies. Set it to keep or force a value.
-	BlockIOEngine string
 	// NodeName overrides SPARKBOX_NODE_NAME so a dev node does not enroll
 	// under the live node's identity. Empty keeps the manifest value.
 	NodeName string
@@ -689,10 +676,6 @@ func (p *Plan) buildEnv(src *Source, c podspec.Container) ([]KeyValue, error) {
 			if o.DefaultMemMB > 0 {
 				value = fmt.Sprintf("%d", o.DefaultMemMB)
 			}
-		case "SPARKBOX_BLOCK_IO_ENGINE":
-			// Unconditional, unlike every case above: empty is a real answer
-			// here ("let the binary choose"), not "no opinion". See the field.
-			value = o.BlockIOEngine
 		}
 		out = append(out, KeyValue{env.Name, value})
 	}

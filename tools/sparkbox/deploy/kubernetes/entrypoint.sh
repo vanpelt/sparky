@@ -45,7 +45,6 @@ readonly max_sandboxes_per_owner="${SPARKBOX_MAX_SANDBOXES_PER_OWNER:-0}"
 readonly mem_reserve_mb="${SPARKBOX_MEM_RESERVE_MB:-0}"
 # Empty leaves the binary's default (Async/io_uring). Set Sync to fall back to
 # firecracker's one-request-at-a-time engine.
-readonly block_io_engine="${SPARKBOX_BLOCK_IO_ENGINE:-}"
 # Sandbox size when the creator named none, which is every `new@` sandbox. 0
 # keeps the binary's CKS-sized built-ins (4 vCPU / 12288 MB). A node on smaller
 # hardware has to set these: admission control measures a sandbox against host
@@ -463,7 +462,6 @@ exec /usr/local/bin/sparkbox serve \
   --max-running-per-owner "$max_running_per_owner" \
   --max-sandboxes-per-owner "$max_sandboxes_per_owner" \
   --mem-reserve-mb "$mem_reserve_mb" \
-  ${block_io_engine:+--block-io-engine "$block_io_engine"} \
   --default-vcpus "$default_vcpus" \
   --default-mem-mb "$default_mem_mb" \
   --owner-memory-pool-mb "$owner_memory_pool_mb" \

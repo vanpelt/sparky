@@ -42,11 +42,11 @@ func reservedName(name string) bool { return reserved.Name(name) }
 // `new@` path always does; the HTTP API may override). Bounded only by host
 // capacity — an 8c/16t/64GB box fits ~5 of these before overcommit.
 const (
-	// DefaultVCPUs and DefaultMemMB are exported because a caller that has to
-	// decide whether they fit a given machine — internal/devpod, sizing a node
-	// for a laptop's container machine — must read the real number rather than
-	// restate it.
-	DefaultVCPUs int64 = 4
+	// DefaultMemMB is exported because a caller that has to decide whether a
+	// sandbox fits a given machine — internal/devpod, sizing a node for a
+	// laptop's container machine — must read the real number rather than
+	// restate it. defaultVCPUs has no such caller.
+	defaultVCPUs int64 = 4
 	DefaultMemMB int64 = 12288
 
 	// activityInterval is the shortest gap between activity marks we retain for
@@ -658,6 +658,7 @@ type Manager struct {
 	actNetBytes        uint64                  // activity floor: bytes per sample; 0 = off
 	vitals             map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
 	memUsed            map[string]int64        // latest observed guest working set per running sandbox
+	memUsedAt          time.Time               // when memUsed was last refreshed, so two controllers on one cadence sample once
 	// balloonedAt is when the reaper last inflated a sandbox's balloon, for the
 	// settle window applyVitals judges CPU against. Cleared by deflate and by
 	// every path that drops the vitals baseline.
@@ -980,7 +981,7 @@ func (m *Manager) defaultVCPUs() int64 {
 	if m.defVCPUs > 0 {
 		return m.defVCPUs
 	}
-	return DefaultVCPUs
+	return defaultVCPUs
 }
 
 func (m *Manager) defaultMemMB() int64 {
@@ -1244,14 +1245,6 @@ func (m *Manager) observedMemMB(b *Sandbox) int64 {
 		return used
 	}
 	return m.sandboxEffectiveMemMB(b)
-}
-
-// measuredMemMB is observedMemMB without the fall back to the configured
-// ceiling: 0 means "this sandbox has never been measured", which is a different
-// answer from "it is using all of its RAM" and the only safe one for a caller
-// deciding how hard to squeeze it. Callers hold m.mu.
-func (m *Manager) measuredMemMB(name string) int64 {
-	return m.memUsed[name]
 }
 
 func (m *Manager) Get(name string) (*Sandbox, bool) {
@@ -3024,11 +3017,6 @@ const balloonHeadroomPct = 50
 // is a straight loss.
 const minBalloonReclaimMiB = 512
 
-// balloonDemandPct is how full a memory budget must be before the *timed* idle
-// balloon does anything at all. See reapOnce: below this watermark the host has
-// RAM to spare and reclaiming an idle guest's pages buys nothing.
-const balloonDemandPct = 85
-
 // refreshVitals samples every running sandbox's CPU and network counters, adds
 // the network delta to its lifetime totals, and resets the idle clock of any
 // sandbox busier than the configured activity floors.
@@ -3240,52 +3228,20 @@ func (m *Manager) reconcileMemoryPressure(ctx context.Context) {
 	}
 }
 
-// memoryDemand snapshots how close each owner, and the node as a whole, is to
-// its memory budget, and returns a predicate the reaper uses to decide whether
-// squeezing one owner's idle guest is worth doing at all.
-//
-// This is the "only when it makes sense" half of the balloon policy. The other
-// mechanism — RunMemoryPressureController — already reclaims when a budget is
-// genuinely exceeded, and it reclaims only the excess, from cold boxes, bounded
-// by the overage. The timed idle balloon exists to get ahead of that, so it
-// should engage as the budget fills and stay out of the way otherwise. Below
-// balloonDemandPct of both the owner pool and the node budget, it does nothing.
-//
-// A node with neither budget configured has no demand signal to read. It keeps
-// the old unconditional behaviour rather than silently never reclaiming, since
-// on such a node the pressure controller has no budget to act on either.
-// Callers must not hold m.mu.
-func (m *Manager) memoryDemand() func(owner string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	owners := make(map[string]int64)
-	var nodeUsed int64
-	for _, b := range m.boxes {
-		if b.State != vmm.StateRunning {
-			continue
-		}
-		used := m.observedMemMB(b)
-		nodeUsed += used
-		owners[b.Owner] += used
-	}
-	ownerPool := m.ownerMemPoolMB
-	nodeBudget := int64(0)
-	if m.memAdmitPct > 0 && m.hostMemMB > 0 {
-		nodeBudget = m.hostMemMB * int64(m.memAdmitPct) / 100
-	}
-	if ownerPool <= 0 && nodeBudget <= 0 {
-		return func(string) bool { return true }
-	}
-	nodeTight := nodeBudget > 0 && nodeUsed*100 >= nodeBudget*balloonDemandPct
-	tight := make(map[string]bool, len(owners))
-	for owner, used := range owners {
-		tight[owner] = ownerPool > 0 && used*100 >= ownerPool*balloonDemandPct
-	}
-	return func(owner string) bool { return nodeTight || tight[owner] }
-}
+// memSampleTTL is how long a working-set sample stays good enough to reuse.
+// The reaper and the memory-pressure controller both need one and both run on
+// the same one-minute cadence, so their tickers land within microseconds of
+// each other; without this, every running guest is asked for balloon stats
+// twice per minute for identical data.
+const memSampleTTL = 5 * time.Second
 
 func (m *Manager) refreshMemoryUsage(ctx context.Context) {
+	m.mu.Lock()
+	fresh := !m.memUsedAt.IsZero() && time.Since(m.memUsedAt) < memSampleTTL
+	m.mu.Unlock()
+	if fresh {
+		return
+	}
 	sampleCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -3309,6 +3265,9 @@ func (m *Manager) refreshMemoryUsage(ctx context.Context) {
 		}()
 	}
 	wg.Wait()
+	m.mu.Lock()
+	m.memUsedAt = time.Now()
+	m.mu.Unlock()
 }
 
 // reclaimMemory balloons cold, unpinned VMs until their projected reclaim
@@ -3418,16 +3377,13 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 	// sandbox that is working but receiving no inbound traffic isn't reaped.
 	m.refreshVitals(ctx)
 	boxes := m.List()
-	// The balloon stage is demand-driven, not merely time-driven. Both halves of
-	// that decision — is any memory actually wanted, and how hard may this guest
-	// be squeezed — need working sets measured now rather than whenever the
-	// pressure controller last ran. That sampling is one driver call per running
-	// guest, so it is paid only when some guest has actually gone idle long
-	// enough to be a candidate; on a busy node that is most ticks skipped.
-	wantsMemory := func(string) bool { return true }
-	if m.balloon != nil && m.reserveMB > 0 && balloonAfter > 0 && anyBalloonCandidate(boxes, balloonAfter) {
+	// workingSetFloor reads m.memUsed, so the balloon stage needs working sets
+	// measured now rather than whenever the pressure controller last ran. Paid
+	// only on a node that can balloon at all; refreshMemoryUsage itself skips a
+	// pass whose sample is still fresh, so the two controllers on the same
+	// cadence do not each pay for one.
+	if m.balloon != nil && m.reserveMB > 0 && balloonAfter > 0 {
 		m.refreshMemoryUsage(ctx)
-		wantsMemory = m.memoryDemand()
 	}
 	for _, b := range boxes {
 		// Pinned sandboxes hold their full RAM on purpose so in-guest
@@ -3448,36 +3404,11 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 				m.log.Info("reaper paused idle sandbox", "name", b.Name)
 			}
 		case m.reserveMB > 0 && balloonAfter > 0 && !b.Ballooned && idle > balloonAfter:
-			// Idleness alone is not a reason to reclaim. Inflating a balloon
-			// makes the guest fault its whole working set back in later, and on
-			// a host with RAM to spare that cost buys nothing at all — it is
-			// pure churn, and it is what a "why is this idle box pegging four
-			// vCPUs" investigation actually finds. Squeeze only when something
-			// is close to wanting the memory; genuine overage is the pressure
-			// controller's job and it reclaims exactly the excess.
-			if !wantsMemory(b.Owner) {
-				continue
-			}
 			if err := m.balloonDown(ctx, b.Name); err != nil {
 				m.log.Warn("reaper balloon-down failed", "name", b.Name, "err", err)
 			}
 		}
 	}
-}
-
-// anyBalloonCandidate reports whether any sandbox in boxes could be ballooned
-// on this pass, so the caller can skip the balloon-stat sampling entirely when
-// none can.
-func anyBalloonCandidate(boxes []*Sandbox, balloonAfter time.Duration) bool {
-	for _, b := range boxes {
-		if b.Pinned || b.Ballooned || b.State != vmm.StateRunning {
-			continue
-		}
-		if time.Since(b.LastActive) > balloonAfter {
-			return true
-		}
-	}
-	return false
 }
 
 // RefreshDiskUsage re-measures every non-archived sandbox's durable filesystem
@@ -3607,16 +3538,29 @@ func (m *Manager) setBalloonTarget(ctx context.Context, name string, reclaimMiB 
 		return nil
 	}
 	floor := m.workingSetFloor(b)
-	if reclaimMiB <= 0 {
-		// The idle path takes a guest all the way down to its reserve, which is
-		// only safe if the reserve can actually hold what the guest is doing.
-		// Raise it to the measured working set plus headroom; an unmeasured
-		// sandbox (0) keeps the configured reserve, which is what the pooled
-		// accounting already assumes for it.
-		if live := m.measuredMemMB(name); live > 0 {
-			if want := live + live*balloonHeadroomPct/100; want > floor {
-				floor = want
-			}
+	// Never squeeze a guest below what the balloon device says it is actually
+	// touching. The configured reserve is a guess made before the guest
+	// existed, and going under the live set is self-reinforcing: the guest has
+	// to fault the whole set back in, which pegs its vCPUs, and a guest that
+	// cannot run never produces the activity that would deflate the balloon.
+	//
+	// Both paths get that floor; only the idle path also gets headroom. The
+	// idle path is opportunistic — nobody is waiting for this memory, so
+	// leaving room to grow costs nothing. The pressure path is closing a real
+	// overage, where being too conservative means an admission failure instead
+	// of a thrashing guest, so it reclaims right down to the live set.
+	//
+	// An unmeasured sandbox reads as 0 and keeps the configured reserve, which
+	// is what the pooled accounting already assumes for it. Deliberately not
+	// observedMemMB, whose fall back to the configured ceiling would read as
+	// "using everything" and stop the reaper ballooning at all.
+	if live := m.memUsed[name]; live > 0 {
+		want := live
+		if reclaimMiB <= 0 {
+			want = live + live*balloonHeadroomPct/100
+		}
+		if want > floor {
+			floor = want
 		}
 	}
 	if floor > b.MemMB {
@@ -3649,12 +3593,17 @@ func (m *Manager) setBalloonTarget(ctx context.Context, name string, reclaimMiB 
 		// the guest is left with, and a guest left below its working set will
 		// thrash instead of idling.
 		m.log.Info("reaper ballooned down idle sandbox", "name", name,
-			"reclaim_mb", target, "floor_mb", floor, "measured_mb", m.measuredMemMB(name))
+			"reclaim_mb", target, "floor_mb", floor, "measured_mb", m.memUsed[name])
 	}
 	m.observe(b, "ballooned")
 	return m.save()
 }
 
+// workingSetFloor is the configured least-RAM for a sandbox: the admission
+// reserve, doubled for turbo. It is the floor before anything is known about
+// what the guest is actually touching, which is why it is only a ranking
+// quantity here — setBalloonTarget raises it to the measured working set
+// before any balloon is actually inflated. Callers hold m.mu.
 func (m *Manager) workingSetFloor(b *Sandbox) int64 {
 	floor := m.reserveMB
 	if b.Turbo {

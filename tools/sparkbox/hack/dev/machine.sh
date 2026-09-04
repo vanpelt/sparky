@@ -209,28 +209,21 @@ fi
 # reserved up front, and is incompatible with the balloon device.
 thp=/sys/kernel/mm/transparent_hugepage/enabled
 thp_was=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' "$thp" 2>/dev/null)
-if [ -w "$thp" ]; then
-  case "$thp_was" in
-    always) ok thp "always" ;;
-    *)
-      # deliberately NOT `changed=1`: that flag means "docker's config moved,
-      # restart the daemon", and a restart kills the node Pod and every sandbox
-      # on it. THP is a live sysctl -- it takes effect on the next guest boot
-      # with nothing restarted.
-      if echo always > "$thp" 2>/dev/null; then
-        ok thp "was ${thp_was:-unset}, set to always"
-      else
-        bad thp "could not set $thp to 'always' — guest boots will take ~30s instead of ~0.2s"
-      fi
-      ;;
-  esac
-elif [ -r "$thp" ]; then
-  case "$thp_was" in
-    always) ok thp "always" ;;
-    *) bad thp "$thp is not writable and is not 'always' — guest boots will be ~100x slower" ;;
-  esac
-else
+if [ -z "$thp_was" ]; then
   bad thp "no THP support in this kernel — guest boots will be ~100x slower"
+elif [ "$thp_was" = always ]; then
+  ok thp "always"
+elif [ "$mode" != ensure ]; then
+  # status reports, never repairs.
+  bad thp "$thp_was, not always — guest boots will be ~100x slower; fix: machine.sh ensure"
+# deliberately NOT `changed=1`: that flag means "docker's config moved, restart
+# the daemon", and a restart kills the node Pod and every sandbox on it. THP is
+# a live sysctl -- it takes effect on the next guest boot with nothing
+# restarted.
+elif echo always > "$thp" 2>/dev/null; then
+  ok thp "was $thp_was, set to always"
+else
+  bad thp "could not set $thp to 'always' — guest boots will take ~30s instead of ~0.2s"
 fi
 
 # --- the data volume --------------------------------------------------------

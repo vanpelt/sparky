@@ -54,83 +54,7 @@ optional — sandboxes boot without either; only repo attachments need them.
 ~27GB one-way ratchet that carries the custom KVM-capable outer kernel, so
 `machine.sh` adopts one and never creates, starts or deletes one.
 
-## Sandboxes are sized for the machine, not for CKS
-
-`up.sh` reads the container machine's RAM and core count and passes
-`-host-mem-mb`, `-default-mem-mb` and `-default-vcpus` derived from them — a
-third of RAM and half the cores per sandbox, overridable with
-`SPARKBOX_DEV_SANDBOX_MEM_DIVISOR` and `SPARKBOX_DEV_SANDBOX_CPU_DIVISOR`.
-
-It does that because the defaults underneath are a cluster's. A sandbox nobody
-sizes gets **4 vCPU / 12288 MB**, and `deployment.yaml` declares
-`SPARKBOX_HOST_MEM_MB=480000` — both right for a CKS node, both catastrophic in
-a container machine with ~12 GB and 8 cores, where a single guest is larger
-than the entire machine.
-
-Nothing refuses that. Admission control asks whether a sandbox fits the host's
-RAM, and one VM at the ceiling technically does; the manifest's 480000 means it
-does not even ask honestly. So a guest is promised memory that does not exist,
-and what happens when it reaches for it is the host's decision rather than the
-guest's — and four vCPUs out of eight leaves the node supervising the guest
-competing with it for cores.
-
-**Do not read a wedged guest as proof of this.** The sizing is worth fixing
-because a VM larger than its host is indefensible on its own terms. It is not
-what wedged the guest that prompted the fix, and a correctly sized 4026 MB
-replacement wedged in exactly the same way.
-
-## What actually wedged it: the idle reaper's balloon
-
-The guest that pegged four vCPUs for an hour was **ballooned down to its 256 MB
-reserve two minutes into a boot that had not finished**. Firecracker's own log
-is where this is visible, and it is one line:
-
-```
-The API server received a Patch request on "/balloon" with body "{\"amount_mib\":3770}"
-```
-
-3770 of 4026 MB, taken from a guest that was starting docker. containerd then
-failed to start eleven times, docker took fourteen minutes, and the in-guest
-agent never came up at all. All four vCPUs sat at ~100% **system** time — page
-reclaim, not guest work — and `guest=0` in `/proc/<vmm>/task/*/stat` the whole
-time.
-
-It could not recover on its own, and that is the important part. The balloon is
-deflated by evidence of activity, and the activity floors are
-`--activity-cpu-pct` (**0 by default** — CPU is not a signal unless you opt in)
-and `--activity-net-kb`. A guest starved before its agent started moves no
-traffic, so it reads as perfectly idle forever. Squeezing it is what makes it
-look idle, which is what keeps it squeezed.
-
-Three changes now stand between you and that:
-
-- The idle reaper will not squeeze a guest below **1.5x what the balloon device
-  says it is actually using**. A booting guest has a large working set and is
-  left alone; a genuinely idle one still gives its RAM back.
-- It does not squeeze at all until an owner pool or the node budget is ~85%
-  full. An inflation nobody needed costs the guest a full reclaim pass on the
-  next touch and buys the host nothing — that is the CPU spike, and it was
-  firing on every idle sandbox every two minutes.
-- `--idle-balloon` now defaults to **20 minutes**, not 2.
-
-Genuine memory overage is still reclaimed promptly, by the memory-pressure
-controller, which reclaims exactly the excess from the coldest guests.
-
-To see it live on a running guest:
-
-```sh
-container machine run -i --root --name sparkbox -- bash -s <<'EOF'
-S=/srv/sparkbox/data/devpod/hot/jailer/firecracker/sparkbox-0/root/fc.sock
-curl -s --unix-socket $S http://localhost/balloon/statistics
-EOF
-```
-
-Driving `sparkbox devpod up` by hand instead of through `up.sh` means passing
-all three yourself. `devpod plan` marks both omissions `[BLOCKING]`, including
-the specific one — *"one sandbox is 12288 MB on a 12079 MB machine"* — and that
-line is the only warning there is.
-
-## The one that mattered: transparent huge pages
+## Start with this one: transparent huge pages
 
 Guest RAM is anonymous memory Firecracker `mmap`s. Every page the guest touches
 for the *first* time faults through two stage-2 layers — ours, and Apple's
@@ -177,52 +101,98 @@ With `always`, a `new+<name>` sandbox reaches `running` in **4 s**, the whole
 boot costs 6.5 CPU-seconds, `containerd` starts in **1.05 s**, and
 `systemctl --failed` is empty.
 
-## Why guests are also slow here: the block device costs per REQUEST
+### What is NOT the cause
 
-This is real and measured, but it is the *second* effect, not the first — see
-the THP section above for what actually caused the wedge. Reading the same
-8 MiB out of one guest:
+Kept so nobody re-runs them. Every one of these was measured and cleared: host
+storage (L1 cold-reads 128 MB in 382 ms), the backing file (209 extents, 25-50
+ms for 128 MB), reflink copy-on-write (2.8x, and the penalty is on reads), the
+guest clock (ratio 0.934 against host wall time), the serial console (2000
+bytes in 10 ms), memory compaction (zero stalls across a 4 GB touch), and CPU
+or virtualization traps — guest compute is *faster* than the VM hosting it
+(562 ms vs 1154 ms on the same loop).
 
-| request size | requests | time |
-|---|---|---|
-| 4 KiB  | 2048 | **5845 ms** |
-| 64 KiB | 128  | **177 ms** |
-| 1 MiB  | 8    | **270 ms** |
+Small-file guest I/O also looked catastrophic on the way here: reading 8 MiB
+took 5845 ms in 2048 4 KiB requests against 177 ms in 128 64 KiB ones, which
+reads as a per-request cost. Most of that was this same memory bug — with THP
+on, the identical 4 KiB run takes **20 ms**, and firecracker's `Async`
+(io_uring) block engine measures indistinguishable from the default `Sync`
+(530 ms vs 502 ms total boot). There was a `--block-io-engine` flag here for a
+while; it was removed once that was measured.
 
-Time tracks the request COUNT, not the bytes — 33x for identical data. Bulk
-throughput is fine (~45 MB/s at 64 KiB); it is small-file I/O that falls off a
-cliff, at roughly 2.85 ms per 4 KiB read where the host does it in microseconds.
+## The other one: the idle reaper's balloon
 
-This compounds the memory cost above: a boot is also thousands of small reads —
-shared libraries for `ldconfig`, unit files for systemd, layer metadata for
-containerd. Before the THP fix the two together put `containerd.service` past
-its `TimeoutStartSec=90`, so it was killed and retried about eleven times;
-`docker.service` then waited on it forever and the in-guest agent never started,
-so `ssh`, the browser terminal and the REST API all answered *"could not reach
-the sandbox's shell"*. With THP on, containerd starts in 1.05 s and none of that
-happens.
+The guest that pegged four vCPUs for an hour was **ballooned down to its 256 MB
+reserve two minutes into a boot that had not finished**. Firecracker's own log
+is where this is visible, and it is one line:
 
-Every bulk benchmark says the storage is healthy. For the record, what is NOT
-the cause of either effect:
+```
+The API server received a Patch request on "/balloon" with body "{\"amount_mib\":3770}"
+```
 
-- **Host storage.** L1 cold-reads 128 MB from the same XFS-on-loop in 382 ms.
-- **The backing file.** 209 extents, and L1 reads 128 MB out of `rootfs.ext4`
-  in 25-50 ms.
-- **Reflink copy-on-write.** Costs 2.8x, and the penalty is on READS.
-- **The guest clock.** Measured against host wall time: ratio 0.934.
-- **CPU or virtualization traps.** Compute is *faster* in the guest than in L1
-  (562 ms vs 1154 ms on the same loop), and KVM exits run 930-1500/sec, which
-  is nothing.
+3770 of 4026 MB, taken from a guest that was starting docker. containerd then
+failed to start eleven times, docker took fourteen minutes, and the in-guest
+agent never came up at all. All four vCPUs sat at ~100% **system** time — page
+reclaim, not guest work — and `guest=0` in `/proc/<vmm>/task/*/stat` the whole
+time.
 
-The remaining cost is the nested round trip per I/O: guest, L1 KVM, firecracker
-userspace, L1 `pread`, Apple's virtio, macOS — then an interrupt injected back
-down. CKS pays that once. This box pays it twice, and it only shows up when you
-do it thousands of times.
+It could not recover on its own, and that is the important part. The balloon is
+deflated by evidence of activity, and the activity floors are
+`--activity-cpu-pct` (**0 by default** — CPU is not a signal unless you opt in)
+and `--activity-net-kb`. A guest starved before its agent started moves no
+traffic, so it reads as perfectly idle forever. Squeezing it is what makes it
+look idle, which is what keeps it squeezed.
 
-`--block-io-engine` now defaults to `Async` (io_uring) instead of firecracker's
-one-request-at-a-time `Sync`, which keeps requests in flight instead of
-serialising them: a 2.4x faster boot (90.4s -> 37.5s) on an otherwise identical
-VM, and 27% off bulk writes. It does not close the gap, it makes it survivable.
+Two changes now stand between you and that:
+
+- **No path** squeezes a guest below what the balloon device says it is
+  actually using — the idle reaper leaves 1.5x it, the memory-pressure
+  controller reclaims down to it but never past it. A booting guest has a large
+  working set and is left alone; a genuinely idle one still gives its RAM back.
+  Only the idle path was guarded at first, which left the same trap open on the
+  path that fires under real pressure.
+- `--idle-balloon` now defaults to **20 minutes**, not 2.
+
+Genuine memory overage is still reclaimed promptly, by the memory-pressure
+controller, which reclaims exactly the excess from the coldest guests.
+
+To see it live on a running guest:
+
+```sh
+container machine run -i --root --name sparkbox -- bash -s <<'EOF'
+S=/srv/sparkbox/data/devpod/hot/jailer/firecracker/sparkbox-0/root/fc.sock
+curl -s --unix-socket $S http://localhost/balloon/statistics
+EOF
+```
+
+Driving `sparkbox devpod up` by hand instead of through `up.sh` means passing
+all three yourself. `devpod plan` marks the omissions `[BLOCKING]`, including
+the specific one — *"one sandbox is 12288 MB on a 12079 MB machine"* — and that
+line is the only warning there is.
+
+## Sandboxes are sized for the machine, not for CKS
+
+`up.sh` reads the container machine's RAM and core count and passes
+`-host-mem-mb`, `-default-mem-mb` and `-default-vcpus` derived from them — a
+third of RAM and half the cores per sandbox, overridable with
+`SPARKBOX_DEV_SANDBOX_MEM_DIVISOR` and `SPARKBOX_DEV_SANDBOX_CPU_DIVISOR`.
+
+It does that because the defaults underneath are a cluster's. A sandbox nobody
+sizes gets **4 vCPU / 12288 MB**, and `deployment.yaml` declares
+`SPARKBOX_HOST_MEM_MB=480000` — both right for a CKS node, both catastrophic in
+a container machine with ~12 GB and 8 cores, where a single guest is larger
+than the entire machine.
+
+Nothing refuses that. Admission control asks whether a sandbox fits the host's
+RAM, and one VM at the ceiling technically does; the manifest's 480000 means it
+does not even ask honestly. So a guest is promised memory that does not exist,
+and what happens when it reaches for it is the host's decision rather than the
+guest's — and four vCPUs out of eight leaves the node supervising the guest
+competing with it for cores.
+
+**Do not read a wedged guest as proof of this.** The sizing is worth fixing
+because a VM larger than its host is indefensible on its own terms. It is not
+what wedged the guest that prompted the fix, and a correctly sized 4026 MB
+replacement wedged in exactly the same way.
 
 ## When the guest will not answer
 
@@ -235,9 +205,6 @@ every couple of seconds, and there is nowhere to go next.
 ```sh
 hack/dev/guest.sh console <name>        # the serial console: the real boot log
 hack/dev/guest.sh console <name> -f     # follow it
-hack/dev/guest.sh shell   <name> [cmd]  # ssh past the agent, to the guest's sshd
-hack/dev/guest.sh jump    <name> [port] # leave the forwarder up for scp, ports, …
-hack/dev/guest.sh stop                  # tear the forwarder down
 ```
 
 **`console` asks nothing of the guest.** firecracker writes ttyS0 to the
@@ -248,16 +215,21 @@ buries its own evidence under thousands of redraws. `console` strips both and
 ends with a **"still waiting"** summary naming each unit systemd is stuck on and
 for how long. That summary is usually the whole answer.
 
-**`shell` bypasses the agent** and talks to the guest's own sshd on `:22`. That
-lives in the node pod's network namespace, which neither the Mac nor even the
-machine's root namespace can route to, so a forwarder binds a listener in the
-root namespace — where the Mac reaches it over vmnet — and only *then* enters
-the pod's namespace to dial. A socket keeps the namespace it was bound in,
-which is what lets one process hold both ends.
+There is deliberately no `shell` mode. One existed and was deleted: it stood up
+a bind-then-`setns` forwarder to reach the guest's own sshd, and it never
+worked — it dialled with the operator's ssh identities while a guest's
+`authorized_keys` holds only the gateway's key, and its reused listener port
+could answer for the wrong guest, which is indistinguishable from the bug you
+would be debugging. It cost real time during the investigation above.
 
-If `shell` times out during the banner exchange, that is not sshd refusing:
-sshd is running and the guest is too starved to answer it. `console` is then
-the only view left, and it still works.
+If you do need a shell past the agent, the node container is already in the
+guest's network namespace and already has an ssh client, so it is one composed
+command and nothing is left running afterwards:
+
+```sh
+container machine run -i --root --name sparkbox -- \
+  docker exec -i sparkbox-dev-sparkbox-node ssh sparky@<guest-ip>
+```
 
 ### …but the guest booted fine and still will not answer
 

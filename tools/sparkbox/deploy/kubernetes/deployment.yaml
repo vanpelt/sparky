@@ -307,17 +307,6 @@ spec:
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
               value: "480000"
-            # The size a sandbox gets when nobody named one, which is every
-            # `new@` sandbox. "0" keeps the binary's built-in 4 vCPU / 12288 MB,
-            # which is what this cluster wants. They are declared anyway so a
-            # node on smaller hardware has an obvious knob instead of a default
-            # nobody knew existed. Admission control does not cover this: it
-            # measures a sandbox against host RAM, so one VM at the ceiling
-            # still "fits" a host that is smaller than the VM.
-            - name: SPARKBOX_DEFAULT_VCPUS
-              value: "0"
-            - name: SPARKBOX_DEFAULT_MEM_MB
-              value: "0"
             - name: SPARKBOX_MEM_ADMISSION_PCT
               value: "90"
             - name: SPARKBOX_MAX_RUNNING_PER_OWNER
@@ -335,28 +324,11 @@ spec:
             # children; the remainder stay durable and resume after one is paused.
             #
             # This is an ADMISSION charge, and only sometimes a real balloon
-            # target. The idle reaper will not squeeze a guest below what the
-            # balloon device says it is actually touching, and does not squeeze
-            # at all until an owner pool or the node budget is ~85% full — an
-            # inflation nobody needed costs the guest a full reclaim pass and
-            # shows up as an idle sandbox pegging its vCPUs. Genuine overage is
-            # still reclaimed promptly by the memory-pressure controller.
-            # Firecracker's synchronous block engine, explicitly rather than by
-            # default. Async (io_uring) is a large win for small-random-read
-            # workloads and is what the Mac dev box runs, but it adds ~110ms to
-            # device creation — and device creation here INCLUDES snapshot
-            # restore, which is the scale-to-zero wake-up path every edge
-            # request takes through proxy.Prepare. Boots would get faster and
-            # wake-ups slower, and on a fleet of mostly-paused sandboxes
-            # wake-ups are the common case.
-            #
-            # Its io_uring workers also spawn in the root cgroup on kernels
-            # before 5.12 (so they escape this container's cpu/memory limits and
-            # consume node PIDs), and upstream still calls the engine a
-            # developer preview. Flip this to Async once resume latency has been
-            # measured on a real node with both engines.
-            - name: SPARKBOX_BLOCK_IO_ENGINE
-              value: "Sync"
+            # target: no path will squeeze a guest below what the balloon device
+            # says it is actually touching. Going under that is self-reinforcing
+            # — the guest refaults its whole working set, which pegs its vCPUs,
+            # and a guest that cannot run never produces the activity that would
+            # deflate the balloon.
             - name: SPARKBOX_MEM_RESERVE_MB
               value: "256"
             - name: SPARKBOX_OWNER_MEMORY_POOL_MB
