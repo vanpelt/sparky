@@ -66,6 +66,16 @@ type pageData struct {
 	Action     string
 	Submit     string
 	ActionNote string
+	// Alt is the second button beside Action, when the screen has two honest
+	// answers rather than one. Only the reuse screen does: "open the one you
+	// have" and "build another anyway". Nil renders nothing, so every other
+	// screen stays exactly the one-button page it was.
+	Alt *altAction
+	// Stale is the sentence about an existing sandbox whose disk predates its
+	// environment's current build. Empty on every other screen, and empty on
+	// this one too whenever the two cannot be compared — see staleNote, which
+	// says nothing rather than guessing.
+	Stale string
 	// Home is the user console, when this host has one configured. Empty
 	// renders no link rather than a guessed hostname.
 	Home string
@@ -73,6 +83,15 @@ type pageData struct {
 	// repository, each a link straight to its own terminal.
 	Others []otherBox
 	Foot   string
+}
+
+// altAction is the secondary button: its own form, its own action, its own
+// label. It carries no fields, exactly like the primary one — everything the
+// POST acts on is re-derived from the path, the query and the session — so the
+// difference between the two buttons is entirely in the URL they post to.
+type altAction struct {
+	Action string
+	Submit string
 }
 
 // fact is one row of the "here is what this will do" block.
@@ -253,7 +272,8 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	sess, _ := edgeauth.From(r.Context())
 	c := ctlops.Caller{Handle: sess.Handle}
 
-	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("ref"), r.URL.Query().Get("env"))
+	t, bad := parseTarget(r.PathValue("owner"), r.PathValue("repo"),
+		r.URL.Query().Get("ref"), r.URL.Query().Get("env"), r.URL.Query().Get(freshParam))
 	if bad != nil {
 		h.refuse(w, r, t, bad)
 		return
@@ -264,6 +284,16 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.refuse(w, r, t, ctlops.AsError(op, err))
 		return
+	}
+	// `?new=1` demotes the match instead of dropping it. The visitor asked to
+	// build a second sandbox, so `best` must not be the thing the button opens
+	// — but it is still one of their boxes on this repository, and the one they
+	// were most likely looking at when they pressed the link, so it belongs at
+	// the head of the list below rather than nowhere. rank already put it
+	// first, which is why prepending preserves the order.
+	if t.Fresh && best != nil {
+		others = append([]candidate{*best}, others...)
+		best = nil
 	}
 	if best != nil && t.Env == "" {
 		h.handoff(w, r, t, best.Info)
@@ -414,10 +444,25 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, best *candi
 		Others: h.otherBoxes(others),
 		Foot:   foot,
 	}
+	if t.Fresh {
+		// The visitor arrived here by pressing "create a new one" on the screen
+		// below, so the lead must not go on claiming they have nothing — they
+		// can see the box they already have, listed underneath.
+		data.Lead = "This builds a second sandbox on this repository, alongside the ones below. " +
+			"It is a separate box with its own disk; nothing about the ones you already have changes."
+	}
 	if best != nil {
 		data.Heading = "Open a sandbox for"
 		data.Lead = "This environment already has a matching sandbox. Confirm the environment selection, then open it."
 		data.Submit = "Open " + best.Info.Name
+		// The second door, and it is a form rather than a link because it
+		// creates: a GET on this URL paints the confirm screen again, and
+		// nothing on this page may build a VM without a press.
+		data.Alt = &altAction{
+			Action: formAction(t.fresh()),
+			Submit: "Create a new one",
+		}
+		data.Stale = h.staleNote(c, t, *best)
 	}
 	if len(data.Others) > 0 {
 		// Only when there is in fact something below to point at. A note
@@ -427,6 +472,46 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, best *candi
 		data.ActionNote = "or open one you already have, below"
 	}
 	return data
+}
+
+// staleNote is the warning that the sandbox this screen offers to open was
+// forked from an older disk than the environment now has.
+//
+// THE COMPARISON IS TIMES, NOT IMAGES, and that is deliberate rather than a
+// shortcut. A sandbox's rootfs is fixed at create and never re-forked, so a box
+// made before its environment's current build CANNOT be running that build's
+// disk — the two facts needed to say so are already on the payloads this door
+// holds (SandboxInfo.CreatedAt) or can read (EnvironmentInfo.BuiltAt), and the
+// alternative would mean putting the template name on the public sandbox
+// payload, which internal/ctlops.SandboxInfo drops on purpose along with every
+// other piece of internal topology.
+//
+// It says NOTHING wherever the comparison cannot be made honestly: a host with
+// no environment store, a link with no ?env=, an environment that has never
+// been built, a store that would not answer. The one thing this must never do
+// is warn on a box that is perfectly current — this screen is the first thing a
+// stranger sees of the product, and a scary sentence that is usually wrong is
+// worse than no sentence at all.
+//
+// The store is read a second time here (resolve already fetched this
+// environment to check readiness) rather than threaded through resolve's return
+// values. It is one sqlite row on a path that is already rendering a page, and
+// it costs nothing on the fast path that matters — the handoff redirect never
+// reaches this function.
+func (h *Handler) staleNote(c ctlops.Caller, t target, best candidate) string {
+	if h.envs == nil || t.Env == "" {
+		return ""
+	}
+	env, err := h.envs.GetEnvironment(c, t.Env)
+	if err != nil || env.BuiltAt == nil {
+		return ""
+	}
+	if !best.Info.CreatedAt.Before(*env.BuiltAt) {
+		return ""
+	}
+	return "Heads up: " + best.Info.Name + " was created before " + env.Name +
+		" was last built, so it is running the older disk — whatever that build " +
+		"installed is not in it. Creating a new one gets you the current image."
 }
 
 // refuse renders a *ctlops.Error as a screen rather than a status line.
@@ -746,6 +831,9 @@ func formAction(t target) string {
 	if t.Env != "" {
 		query.Set("env", t.Env)
 	}
+	if t.Fresh {
+		query.Set(freshParam, "1")
+	}
 	if encoded := query.Encode(); encoded != "" {
 		action += "?" + encoded
 	}
@@ -778,7 +866,7 @@ func (h *Handler) sshHost() string {
 func (h *Handler) noteUnknownParams(r *http.Request) {
 	var unknown []string
 	for key := range r.URL.Query() {
-		if key != "ref" && key != "env" {
+		if key != "ref" && key != "env" && key != freshParam {
 			unknown = append(unknown, key)
 		}
 	}

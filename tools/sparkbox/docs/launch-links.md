@@ -587,6 +587,57 @@ The cheapest structural fix is on the attachment, not the link: attach with an
 explicit branch (`repo add wandb/hivemind --ref main --tag hm`) and the residual
 row cannot occur for that repository at all.
 
+## `?new=1` — reuse, overruled
+
+Reuse is right nearly every time and wrong sometimes: the environment this box
+was forked from has been rebuilt since, the disk has drifted somewhere
+unrecoverable, two agents want the same branch. Before `?new=1` the only way to
+say so was to leave the page and create by hand, which is the exact moment this
+door exists to remove.
+
+It is **not a link parameter in the badge sense**. `ctl badge` never mints it
+and no comment should carry it; the only producer is the second button on the
+confirm screen, which is why `1` is the sole spelling honoured and every other
+value is ignored rather than refused.
+
+What it changes, and nothing else:
+
+- **GET** suppresses the automatic handoff and paints the confirm screen. The
+  matching sandbox is **demoted, not hidden** — it moves to the head of "your
+  sandboxes on this repository" — because it is still theirs and still the one
+  they were most likely looking at. A GET carrying it still writes nothing.
+- **POST** skips the reuse branch inside `createOrReuse`. That branch *is* this
+  door's idempotency, so with the flag on, a second press a minute later really
+  does build a second sandbox. That is the request. The ceiling is still
+  `--max-running-per-owner`.
+- The singleflight key gains a `new` segment, so the two buttons are two
+  flights. Collapsing them would make the outcome depend on arrival order: a
+  "create a new one" merged into an in-flight reuse would hand back the very
+  sandbox the visitor said they did not want, and the redirect would look
+  exactly like a success.
+
+## The stale-disk note
+
+When the screen offers to open an existing sandbox on an `?env=` link, it also
+answers a question the visitor could not otherwise ask: *is that box running the
+environment's current image?*
+
+The test is **times, not images**. A sandbox's rootfs is fixed at create and
+never re-forked, so a box created before its environment's `built_at` cannot be
+running that build's disk. Both facts are already on payloads this door holds
+(`SandboxInfo.CreatedAt`) or can read (`EnvironmentInfo.BuiltAt`); the
+alternative — putting the template name on the public sandbox payload — is a
+piece of internal topology `ctlops.SandboxInfo` drops on purpose.
+
+It says nothing wherever the comparison cannot be made honestly: no environment
+store, no `?env=`, an environment that has never been built, a store that would
+not answer. That asymmetry is deliberate. This screen is the first thing a
+stranger sees of the product, and a scary sentence that is usually wrong is
+worse than no sentence at all.
+
+The note and `?new=1` are one feature: the note says why you would want a fresh
+box, and the button beside it is how you get one.
+
 ---
 
 # Part 6 — "you are already running as many sandboxes as this host allows"
