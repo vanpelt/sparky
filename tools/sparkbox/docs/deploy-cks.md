@@ -409,9 +409,18 @@ behind, not something to put on a timer.
 ## Runtime image from GitHub Actions
 
 `.github/workflows/sparkbox-cks-image.yml` builds this Containerfile for
-`linux/amd64` and publishes it to GitHub Container Registry on every push that
-changes Sparkbox or the workflow. It needs no registry secret: the workflow's
-`GITHUB_TOKEN` receives `packages: write`.
+`linux/amd64` and `linux/arm64` and publishes one multi-arch index to GitHub
+Container Registry on every push that changes Sparkbox or the workflow. It needs
+no registry secret: the workflow's `GITHUB_TOKEN` receives `packages: write`.
+The Go stages cross-compile from the runner's own architecture, but the
+`ubuntu:24.04` runtime stage runs `apt-get` for the target, so the arm64 half
+goes through QEMU and is the slower of the two.
+
+This cluster is unaffected by that: `deploy.sh` still selects Nodes labelled
+`kubernetes.io/arch=amd64`, and the pinned Node above is one of them. The arm64
+half of the index exists for the other hosts that run these same entrypoints —
+arm64 bare metal, and the local dev environment in `hack/dev/` — not because
+this deployment gained a choice of architecture.
 
 Every build receives a traceable full-SHA tag and a branch tag. The default
 branch also updates `edge`. A release adds one more: `build-artifacts.yml`
@@ -432,20 +441,25 @@ IMAGE="$REPO@$DIGEST"
 ```
 
 The digest is the immutable runtime image identity. The index includes the
-linux/amd64 image plus its provenance attestation; pin the index digest rather
-than copying the child image digest reported by one runtime. The agent CLI
-versions remain intentionally fast-moving: the immutable image contains the
-bootstrap logic, while the entrypoint resolves current Claude, Codex, Pi, and
-HiveMind releases before patching a stale template.
+linux/amd64 and linux/arm64 images plus their provenance attestations; pin the
+index digest rather than copying the child image digest reported by one runtime,
+which pins a single architecture and fails to pull on the other. `crane manifest
+"$REPO:sha-$SHA"` prints what an index actually holds, which is worth a look on
+an older digest: an index built before the workflow went multi-arch contains
+amd64 alone.
+
+The agent CLI versions remain intentionally fast-moving: the immutable image
+contains the bootstrap logic, while the entrypoint resolves current Claude,
+Codex, Pi, and HiveMind releases before patching a stale template.
 
 GHCR packages are private until their visibility is changed. After the first
 workflow run, open the `sparkbox-cks` package settings on GitHub and change its
 visibility to public so CKS can pull it without an image-pull secret. The image
 contains the current Sparkbox and Sluice binaries, the base Sluice allow-list,
 host networking tools, and the template refresher. At Pod startup it downloads
-and SHA-256-verifies the Firecracker,
-kernel, and universal rootfs artifacts pinned to Sparkbox `v0.8.0`, then
-downloads the current agent CLI bundles and patches the template. The runtime
+and SHA-256-verifies the Firecracker, kernel, and universal rootfs artifacts for
+the architecture `uname -m` reports, pinned to Sparkbox `v0.8.0`, then downloads
+the current agent CLI bundles and patches the template. The runtime
 image also carries the repository's canonical `images/motd`; its digest is part
 of the template freshness stamp, so a branch build can update the static login
 banner without waiting for a full rootfs release. Only trusted operator base
@@ -453,6 +467,40 @@ templates such as `universal.ext4` are patched. User-derived `snap-*.ext4`
 templates remain untouched. The first start downloads the roughly 750 MB
 release payload plus those CLI bundles and decompresses a sparse ext4 image.
 Later same-Node Pod starts reuse the cached artifacts and template.
+
+### The pinned artifact checksums
+
+`entrypoint.sh` hardcodes the SHA-256 of everything it fetches, so a Pod either
+gets the bytes that release published or refuses to start. The artifacts are
+built per architecture and are not bit-reproducible, so there is no single
+checksum for a kernel — there are two, and one entrypoint carries both sets:
+
+```text
+SPARKBOX_FIRECRACKER_SHA256_AMD64   SPARKBOX_FIRECRACKER_SHA256_ARM64
+SPARKBOX_JAILER_SHA256_AMD64        SPARKBOX_JAILER_SHA256_ARM64
+SPARKBOX_KERNEL_SHA256_AMD64        SPARKBOX_KERNEL_SHA256_ARM64
+SPARKBOX_ROOTFS_SHA256_AMD64        SPARKBOX_ROOTFS_SHA256_ARM64
+```
+
+Each overrides the compiled-in default for its architecture. The entrypoint
+selects the set matching `uname -m` and never looks at the other, so setting an
+`_ARM64` value on this amd64 Node changes nothing.
+
+The older unsuffixed `SPARKBOX_FIRECRACKER_SHA256`, `SPARKBOX_JAILER_SHA256`,
+`SPARKBOX_KERNEL_SHA256` and `SPARKBOX_ROOTFS_SHA256` predate multi-arch and
+still **win** wherever they are set — an unsuffixed value applies to whichever
+architecture the Pod turns out to be, which is exactly why the suffixed pairs
+were added. Existing deployments that set one keep working; new ones should not
+acquire one.
+
+These are an escape hatch for pointing a Pod at an artifact set this repository
+does not pin, and belong with `SPARKBOX_RELEASE` and `SPARKBOX_ARTIFACT_BASE`
+rather than on their own: an override without the release it describes just
+verifies the wrong bytes successfully. The defaults are the supported path.
+`hack/check-cks-pin.sh` diffs them against the pinned release's own
+`manifest-<arch>.env` for both architectures and the image workflow runs it
+before anything is built, so a release bump that moves the constants for only
+one architecture fails at build time rather than on arm64 hardware.
 
 ## Preserve the gateway identity
 

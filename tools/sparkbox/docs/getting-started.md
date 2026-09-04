@@ -514,3 +514,38 @@ ssh -i mykey -p 2222 new@localhost
 ```
 
 `go test ./...` runs the end-to-end suite over exactly this stack.
+
+### When the mock driver is not enough
+
+The mock driver stops at the control plane: it never boots a VM, so it cannot
+show you what the deployment's *shape* does. For that there is
+[`hack/dev/`](../hack/dev/README.md), which runs the CKS deployment's own four
+entrypoint scripts against a working-tree binary — `gateway-entrypoint.sh`
+natively on a Mac, and the five-container node Pod rendered out of
+`deploy/kubernetes/*.yaml` by `sparkbox devpod`. The gateway tier still serves
+from `--driver mock`, behind the real entrypoint, edge and consoles; the Pod
+tier is the one that brings the uid and capability boundaries, the devices and
+mounts, the init ordering, and Firecracker itself. See that README for the loop,
+its prerequisites, and what each tier has actually been run against; it is a
+local environment, not a second supported way to run sparkbox.
+
+One command brings all of it up, and is safe to re-run:
+
+```sh
+sparkbox setup --machine-name sparkbox   # once, if you have no container machine
+hack/dev/up.sh
+ssh -p 2222 new+mybox@127.0.0.1
+```
+
+With a node linked, that last line boots a real aarch64 Firecracker guest — the
+gateway tier alone still serves from `--driver mock` and cannot.
+
+It reproduces the Pod, not the platform. Nothing local proves amd64 behavior,
+the Kubernetes scheduler and its resource limits, the device plugin, the
+NetworkPolicy/Cilium boundaries, the public LoadBalancer, or the VAST durable
+tier; `sparkbox devpod plan` prints the divergences it knows about, and
+[deploy-cks.md](deploy-cks.md) remains the description of the real thing.
+
+The mock driver therefore stays the default lane for control-plane work: 250
+test files, no VM and no KVM, and it is what CI runs on `main` and every pull
+request.

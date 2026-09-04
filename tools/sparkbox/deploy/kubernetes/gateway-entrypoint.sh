@@ -55,7 +55,12 @@ if [ -n "$github_app_client_id" ]; then
   github_app_args=(--github-app-client-id "$github_app_client_id")
 fi
 
-exec /usr/local/bin/sparkbox serve \
+# The binary is the one input that is not already env-driven, and the only
+# reason it needs to be: hack/dev/gateway.sh runs THIS script unmodified on a
+# developer's Mac against a working-tree build, so the script a change is
+# exercised against is byte-identical to the one CKS runs. In the Pod nothing
+# sets SPARKBOX_BIN and the path below is the image's.
+exec "${SPARKBOX_BIN:-/usr/local/bin/sparkbox}" serve \
   --gateway-only \
   --hivemind-api "$hivemind_api" \
   --hivemind-signin-orgs "$hivemind_signin_orgs" \
