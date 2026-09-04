@@ -336,8 +336,14 @@
     border: 1px dashed hsl(var(--border)); background: transparent; color: hsl(var(--foreground));
   }
 
-  /* inputs */
-  input[type=text], input[type=password], input[type=number] {
+  /* inputs.
+     The :not() is load-bearing. `input[type=text]` outweighs a bare `.chip-input`
+     on specificity, so without it this rule wins over the chip box above and
+     hands it the full 14px/7px field skin — which is why the chip inputs INSIDE
+     a form used to stand 12px taller than the fields beside them while the ones
+     the machine table builds in JS looked right: those carry no type attribute,
+     so this rule never matched them in the first place. */
+  input[type=text]:not(.chip-input), input[type=password], input[type=number] {
     font: inherit; padding: 7px 10px; border-radius: calc(var(--radius) - 2px);
     border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground));
   }
@@ -373,7 +379,11 @@
      whole set to change one of them. */
   .tag-field {
     display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: 100%;
-    min-height: 35px; padding: 5px 6px; cursor: text;
+    /* 37px is what an ordinary text field in this form measures (21px line +
+       7px padding either side + the border). A tag box is the same field with
+       chips in it, so it holds that height whether it is empty or full rather
+       than growing a row taller than its neighbours. */
+    min-height: 37px; padding: 5px 6px; cursor: text;
     border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px);
     background: hsl(var(--background));
   }
@@ -489,15 +499,32 @@
     background: hsl(var(--background)); color: hsl(var(--foreground)); }
   .script-actions { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; }
 
-  /* repos form — one field more than the secrets grid, and a <select> the
-     input rules above cannot reach: they are typed to input[type=…], so an
-     unstyled select would render as a light native control on a dark card. */
-  .repo-form { grid-template-columns: 1.5fr .85fr 1.1fr 1.1fr .95fr auto; }
-  @media (max-width: 860px) { .repo-form { grid-template-columns: 1fr; } }
-  .repo-form select {
-    font: inherit; width: 100%; padding: 7px 10px; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground));
+  /* The one <select> in this console — the repo form's Access. The input rules
+     above cannot reach it: they are typed to input[type=…], so an undressed
+     select renders as a light native control sitting on a dark card. This used
+     to be written as `.repo-form select`, and .repo-form stopped existing when
+     every form became a card on the one .secret-form grid — so the rule matched
+     nothing and the native control was what shipped.
+
+     appearance:none is what actually removes the OS skin; the arrow it takes
+     with it is drawn back by .select-wrap, because the native one comes with a
+     background patch no rule can restyle. The height is spelled out to match a
+     text field exactly: a select does not compute its box from padding the way
+     an input does. */
+  .select-wrap { position: relative; display: block; }
+  .select-wrap::after {
+    content: ""; position: absolute; right: 12px; top: 50%; margin-top: -5px;
+    width: 6px; height: 6px; transform: rotate(45deg); pointer-events: none;
+    border-right: 1.5px solid hsl(var(--muted-foreground));
+    border-bottom: 1.5px solid hsl(var(--muted-foreground));
   }
+  .secret-form select {
+    appearance: none; -webkit-appearance: none;
+    font: inherit; width: 100%; height: 37px; padding: 0 30px 0 10px; cursor: pointer;
+    border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border));
+    background: hsl(var(--background)); color: hsl(var(--foreground));
+  }
+  .secret-form select:hover { border-color: hsl(var(--muted-foreground)); }
   /* Behind upstream, on a machine card. Amber and not the red .env-warn above,
      for the same reason .tag-warn is: nothing is wrong and nothing is at risk —
      somebody else pushed, and this checkout will have it on the next pull. Red
@@ -968,10 +995,12 @@
           </div>
           <div>
             <label for="rp-access">Access</label>
-            <select id="rp-access">
-              <option value="read">Read-only</option>
-              <option value="write">Read + push</option>
-            </select>
+            <span class="select-wrap">
+              <select id="rp-access">
+                <option value="read">Read-only</option>
+                <option value="write" selected>Read + push</option>
+              </select>
+            </span>
             <div class="field-hint">what its git credential may do</div>
           </div>
           <div id="repo-default-warn" class="tag-warn hidden wide">
@@ -2823,7 +2852,12 @@
     $("rp-slug").readOnly = false;
     $("rp-ref").value = "";
     $("rp-path").value = "";
-    $("rp-access").value = "read";
+    // Read + push is the default: almost every repository somebody attaches
+    // here is one they intend to commit to from inside the machine, and a
+    // read-only credential turns that into a push failure long after the form
+    // is closed. `repo add` on the ctl channel still defaults to read and takes
+    // --write, because a scripted attach should not silently widen a token.
+    $("rp-access").value = "write";
     rpTags.set([]);
     $("rp-form-title").textContent = "Attach a repository";
     $("rp-form-hint").textContent = "the tags decide which machines clone it";
