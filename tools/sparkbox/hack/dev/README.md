@@ -18,6 +18,38 @@ tier plus everything the pod tier needs to exist before it can run: the local
 registry, the Apple container machine, and the image that moves between them —
 `registry.sh`, `machine.sh`, `image.sh`.
 
+## Start here
+
+```sh
+sparkbox setup --machine-name sparkbox   # once, if you have no container machine
+hack/dev/up.sh                           # everything else, idempotent
+ssh -p 2222 new+mybox@127.0.0.1          # a real aarch64 Firecracker guest
+```
+
+`up.sh` is the front door. It runs `machine.sh ensure`, `image.sh all`,
+`gateway.sh start` and `sparkbox devpod up` in the order they need, and makes
+the three joins between them that nothing else does — the wider SSH bind, the
+host key copied into the machine, and the node approval. Each of those fails far
+from its cause if you skip it, which is why they are worth a script rather than
+a paragraph: a loopback listener looks like a gateway with no nodes, a missing
+host key looks like a node that never comes online, and overlapping guest
+subnets are refused at `node approve` with no hint that the *gateway* is the
+half to move.
+
+It is safe to re-run. A converged environment is left alone rather than
+rebuilt — in particular it will not stop a node that is carrying sandboxes, so
+re-running it does not cost somebody their build. `up.sh down` stops the gateway
+and the node Pod but keeps the machine, the image and the node's data volume;
+`up.sh status` reports all three tiers read-only.
+
+Two things it cannot finish, and says so: the 1Password session that unlocks the
+GitHub App key, and `github link`, which is an interactive device flow. Both are
+optional — sandboxes boot without either; only repo attachments need them.
+
+`sparkbox setup` is deliberately outside all of this. The container machine is a
+~27GB one-way ratchet that carries the custom KVM-capable outer kernel, so
+`machine.sh` adopts one and never creates, starts or deletes one.
+
 ## The gateway loop
 
 ```sh
@@ -217,6 +249,10 @@ local covers the last three.
 
 ## Booting real sandboxes: linking the node
 
+`up.sh` does all of this. It is written out because when the link breaks, the
+symptom is never where the cause is, and because a fleet node on real hardware
+needs the same three things lined up by hand.
+
 The gateway can only bookkeep sandboxes. Booting them needs a VM node, which is
 what `sparkbox devpod` runs. Three things have to line up, and each fails with
 its own sentence if it does not.
@@ -261,6 +297,13 @@ Then approve it from the Mac, by fingerprint, with the subnet it reports:
 ssh -p 2222 ctl@127.0.0.1 node ls
 ssh -p 2222 ctl@127.0.0.1 node approve SHA256:... --guest-subnet 172.30.0.0/20
 ```
+
+A fingerprint and not a name, because a node picks its own name and the gateway
+has nothing to check it against — `ctlops.ApproveNode` argues that out. `up.sh`
+automates the ceremony rather than skipping it: it reads the fingerprint from
+the node's own console inside the machine, checks the roster is offering that
+same one, and approves only on a match. Approving whatever the roster happens to
+hold would be the shortcut that turns the ceremony into theatre.
 
 The node retries with growing backoff while pending, so it can take up to a
 minute to flip to `online` after approval — it is not stuck. Then

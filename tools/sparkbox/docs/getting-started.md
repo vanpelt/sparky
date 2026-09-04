@@ -529,6 +529,17 @@ mounts, the init ordering, and Firecracker itself. See that README for the loop,
 its prerequisites, and what each tier has actually been run against; it is a
 local environment, not a second supported way to run sparkbox.
 
+One command brings all of it up, and is safe to re-run:
+
+```sh
+sparkbox setup --machine-name sparkbox   # once, if you have no container machine
+hack/dev/up.sh
+ssh -p 2222 new+mybox@127.0.0.1
+```
+
+With a node linked, that last line boots a real aarch64 Firecracker guest — the
+gateway tier alone still serves from `--driver mock` and cannot.
+
 It reproduces the Pod, not the platform. Nothing local proves amd64 behavior,
 the Kubernetes scheduler and its resource limits, the device plugin, the
 NetworkPolicy/Cilium boundaries, the public LoadBalancer, or the VAST durable
