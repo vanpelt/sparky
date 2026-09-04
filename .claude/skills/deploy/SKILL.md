@@ -1,7 +1,16 @@
 ---
 name: deploy
-description: Deploy sparkbox to the CoreWeave CKS cluster that serves catnip.sh. Use when asked to deploy, roll, ship, or update sparkbox on CKS — a main build, an unmerged branch build, a release tag — or to pin a hivemind release candidate onto real hardware.
+description: Deploy sparkbox to the CoreWeave CKS cluster that serves catnip.sh, or bring up / refresh the local Mac dev environment. Use when asked to deploy, roll, ship, or update sparkbox — on CKS (a main build, an unmerged branch build, a release tag), on the local dev box, or to pin a hivemind release candidate onto real hardware.
 ---
+
+# Deploy sparkbox
+
+Two targets, and they are not the same procedure. **CKS is the live one and is
+everything below.** The local Mac dev environment has its own, much shorter,
+one — see [Deploying to the Mac dev box](#deploying-to-the-mac-dev-box) at the
+end. If the request does not say which, ask: "deploy" has meant CKS
+historically, but rolling a change onto the dev box first is usually what
+someone wants when they are mid-change.
 
 # Deploy sparkbox to CKS
 
@@ -207,3 +216,128 @@ the SHA you resolved, on **both** containers.
   the baseline change (owners are charged `max(0, DiskMB - BaseDiskMB)`). It takes
   effect on a binary swap with no flag. Re-check `--disk-pool-mb-per-owner`
   against what you meant; reasoning in `docs/resource-model-design.md`.
+
+---
+
+# Deploying to the Mac dev box
+
+A separate target with a separate procedure: `tools/sparkbox/hack/dev/`, a
+gateway running natively on macOS plus the five-container node Pod inside
+Apple's container machine, booting real aarch64 Firecracker guests. Nothing
+here touches CKS and nothing above applies — no kubectl, no image digest, no
+release pin.
+
+**Read `tools/sparkbox/hack/dev/README.md` rather than reconstructing this.**
+It is the reference; what follows is only the deploy-shaped part of it.
+
+## Roll a working-tree change onto it
+
+```sh
+cd tools/sparkbox
+hack/dev/up.sh                 # idempotent, safe to re-run, ~1 min warm
+```
+
+`up.sh` is the whole thing: it ensures the container machine, builds the image
+**from the live working tree**, pushes it to the local registry, pulls it into
+the machine, starts the gateway from the production entrypoint, seeds the trust
+bundle, starts the node Pod and approves it by fingerprint.
+
+Two things to know before running it:
+
+- **A converged environment is left alone.** If the node is already online and
+  carrying sandboxes, `up.sh` will not restart it, so a re-run does not cost
+  somebody their build. To rebuild anyway: `hack/dev/up.sh down && hack/dev/up.sh`.
+- **Gateway-only changes do not need it.** `hack/dev/gateway.sh restart` is
+  1.7s warm, ~6s after a relink, and covers the edge proxy, auth, consoles,
+  REST API and SSH doors. Reach for `up.sh` when the change is in the node, the
+  guest payload, or the manifests.
+
+`hack/dev/up.sh status` reports all three tiers read-only; `down` stops the
+gateway and the Pod but keeps the machine, the image and the node's data.
+
+## Sizing is the trap here, not flags
+
+CKS's trap is a flag that must be re-passed. The dev box's is the opposite: a
+default that is correct on a cluster node and ruinous on a laptop.
+
+A sandbox nobody sized gets the binary's built-in **4 vCPU / 12288 MB**, and
+the node's manifest declares `SPARKBOX_HOST_MEM_MB=480000`. Inside a container
+machine with ~12 GB and 8 cores that means one guest is larger than the whole
+machine, and **nothing refuses it** — admission control only asks whether a
+sandbox fits the host's RAM, which one VM at the ceiling technically does. So
+the guest is promised memory that does not exist, and half the machine's cores
+go to a guest the node has to supervise from the other half.
+
+`up.sh` now measures the machine and passes `-host-mem-mb`, `-default-mem-mb`
+and `-default-vcpus` sized to it (a third of RAM, half the cores; override with
+`SPARKBOX_DEV_SANDBOX_MEM_DIVISOR` / `_CPU_DIVISOR`). If you drive
+`sparkbox devpod up` by hand instead, pass all three — `devpod plan` marks both
+omissions `[BLOCKING]`, and that line is the only warning you get.
+
+## A guest pegging its vCPUs is the balloon until proven otherwise
+
+Right-sizing does **not** fix a wedged guest, and the first correctly-sized
+replacement wedged identically. The cause is the idle reaper: it used to
+squeeze any sandbox idle for two minutes down to `--mem-reserve-mb` (256 MB),
+including one that had not finished booting. Check firecracker's own log first:
+
+```sh
+hack/dev/guest.sh console <name> | head        # or, for the raw API log:
+container machine run -i --root --name sparkbox -- bash -s <<'EOF'
+docker logs sparkbox-dev-vmm-helper 2>&1 | grep -F 'Patch request on "/balloon"'
+EOF
+```
+
+An `{"amount_mib": …}` close to the guest's whole `mem_size_mib` is the
+diagnosis. The guest cannot recover from it on its own: the balloon deflates on
+*activity*, `--activity-cpu-pct` is **0 by default**, and a guest starved before
+its agent started moves no network traffic — so being squeezed is what makes it
+look idle, which is what keeps it squeezed.
+
+The reaper no longer squeezes below 1.5x the guest's measured working set, does
+nothing until an owner pool or the node budget is ~85% full, and `--idle-balloon`
+now defaults to 20 minutes rather than 2. **This applies to CKS too** —
+`deployment.yaml` never pinned `--idle-balloon`, so production was running the
+two-minute default against 12 GB guests.
+
+## When a guest will not answer
+
+The supported ways into a sandbox — `ssh <name>@gateway`, the browser terminal,
+the REST API — all go through the in-guest agent on `:8000`. A guest whose boot
+never finished has no agent, so all three answer *"could not reach the
+sandbox's shell; it may still be starting"* and there is no next step.
+
+`hack/dev/guest.sh` is that next step:
+
+```sh
+hack/dev/guest.sh console <name>        # the serial console: the boot log
+hack/dev/guest.sh console <name> -f     # follow it
+hack/dev/guest.sh shell   <name>        # ssh straight to the guest's own sshd
+```
+
+`console` needs nothing of the guest at all and ends with a **"still waiting"**
+summary naming the units systemd is stuck on, which is usually the answer.
+`shell` bypasses the agent by forwarding into the pod's network namespace; if
+it times out during the banner exchange, sshd is running but the guest is too
+starved to answer, and `console` is the only view left.
+
+## Verify
+
+```sh
+ssh -p 2222 ctl@127.0.0.1 node ls    # macdev approved and online
+ssh -p 2222 ctl@127.0.0.1 list       # the inventory survived
+ssh -p 2222 new+mybox@127.0.0.1      # a real aarch64 Firecracker guest
+```
+
+Then the console at `http://my.dev.localhost:8081` — browsers resolve
+`*.localhost` with no `/etc/hosts`, but `curl` does not, so send the name in a
+header instead.
+
+## What a green run here is not evidence about
+
+`hack/dev/README.md` has the full list under **NO SILENT CAPS**; the short
+version is that this is a darwin/arm64 gateway against an arm64 guest, with no
+scheduler, no NetworkPolicy, no LoadBalancer, no VAST durable tier, and a dev
+GitHub App rather than the fleet's. Deploying here is not a rehearsal of
+deploying to CKS. It is a much faster way to find out whether the change works
+at all.
