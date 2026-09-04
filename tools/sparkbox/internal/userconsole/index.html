@@ -1639,6 +1639,17 @@
     const rs = b.routes || [];
     const running = b.state === "running";
     const host = (r) => esc(r.subdomain) + "." + esc(domain());
+    // BEFORE anything reads rs[0]. A sandbox with no routes at all is rare but
+    // real — a machine the control plane has re-adopted without its route store,
+    // which is what a rebuilt gateway hands you — and every line below assumes
+    // there is a first route to name. This guard used to sit at the bottom of
+    // the function, where it was unreachable: `home` dereferenced rs[0] first
+    // and threw "Cannot read properties of undefined (reading 'subdomain')",
+    // which the caller reports as `refresh failed`, so ONE such sandbox blanks
+    // the whole dashboard rather than its own row.
+    if (!rs.length) {
+      return '<span class="muted" style="font-size:12px">no web routes</span>';
+    }
     // Ports of the machine's own hostname are named by port alone; a port under
     // some OTHER hostname pointed at the same machine has to say which, or
     // notebook:8888 and the machine's own :8888 are the same chip twice.
@@ -1677,9 +1688,6 @@
         '">' + vis + "</button>" + forget +
         "</span>";
     }).join("");
-    if (!rs.length) {
-      return '<span class="muted" style="font-size:12px">no web routes</span>';
-    }
     // A port is added under the machine's default hostname, which is what the
     // edge serves every any-port URL from.
     const def = rs.find((r) => r.default) || rs[0];
