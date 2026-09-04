@@ -811,6 +811,12 @@ installations. Firecracker requires reflinks for both template clones and
 snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
+Firecracker cannot give a sandbox nested virtualization (no `/dev/kvm` inside
+the guest). [`docs/cloud-hypervisor-feasibility.md`](docs/cloud-hypervisor-feasibility.md)
+is the spike on swapping the VMM for Cloud Hypervisor to get it, what that
+touches, and why nested has to be per-sandbox opt-in on CKS;
+`hack/probe-nested-virt.sh` is its host preflight.
+
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome
 and the agent-browser CLI, ~4GB — replacing the
