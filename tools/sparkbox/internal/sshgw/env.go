@@ -122,6 +122,11 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"so an environment never accumulates. the old image stays bound until the new\r\n" +
 	"one is captured, so a rebuild that fails costs you nothing but the time.\r\n" +
 	"\r\n" +
+	"each build leaves its capture as `<name>-<YYMMDD-HHMM>` in `snapshot ls`, and\r\n" +
+	"the three newest are kept — the one bound now and two to roll back to with\r\n" +
+	"`snapshot bind`. older ones are deleted, unless you bound one to a tag of its\r\n" +
+	"own, which is how you keep a build forever.\r\n" +
+	"\r\n" +
 	"a new environment gets a default egress rule-set named after it, so its\r\n" +
 	"sandboxes reach the package registries, github and the model API and not the\r\n" +
 	"rest of the internet. widen it in the console's Network panel, or pass\r\n" +

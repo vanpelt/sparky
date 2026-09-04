@@ -8,6 +8,22 @@ the box's hostname and the domain are different on every deployment — `<name>`
 is `$(hostname)`, and `<domain>` below is whatever `sparkbox whoami` reports on
 its `domain:` line, never a literal to hardcode.
 
+## Install what the project already documents
+
+Before any of the below, get the project's own dependencies in — the way the
+project says to. Its README, `CONTRIBUTING`, `AGENTS.md` and `Makefile` are the
+instructions, and following them beats inferring a toolchain from the
+lockfiles, because they are also where the steps that are not installs live:
+the code generation, the `pre-commit install`, the first build that costs ten
+minutes once and a second every time after.
+
+Run the install to completion rather than leaving it to first use — `uv sync`,
+`pnpm install`, `bundle install`, `go mod download`, whatever this project
+declares. That matters more here than on a laptop: `ssh ctl@<gateway> env build
+<name>` captures this disk as the image every later sandbox on the environment
+boots from, so a dependency installed now is installed once for everybody, and
+one left out is downloaded again by every person who opens a sandbox on it.
+
 ## Bind to 0.0.0.0
 
 Same rule as the proxy guide: listen on `0.0.0.0` (or a framework's

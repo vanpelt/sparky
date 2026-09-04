@@ -1386,6 +1386,17 @@ Do not commit, push, or open a pull request; somebody will review this file.
 // it to be discovered: the script IS run, immediately, and a script that does
 // not run fails the build. Asking for idempotence without saying it will be
 // checked got scripts that cloned into a directory that already existed.
+//
+// Step 1 names the project's own instructions AHEAD of any install command, and
+// asks for the install to be finished here rather than left to first use, for
+// the reason the numbering hides: the deliverable is a DISK. A toolchain
+// inferred from the lockfiles gets the installs and misses everything around
+// them — the code generation, the `pre-commit install`, the first build that is
+// ten minutes once and a second afterwards — because nothing on disk implies
+// those, and the README that does say so is right there. And a `uv sync` or
+// `pnpm install` deferred to first use is not deferred once: it is paid again
+// by every person who ever opens a sandbox on this environment, which is the
+// cost this whole feature exists to pay down.
 func agentPrompt(env string) string {
 	return `You are configuring a fresh Sparkbox microVM so this project runs in it.
 Nobody is watching and nobody can answer a question, so do not ask any.
@@ -1401,8 +1412,14 @@ is this platform's own guidance for exactly this job.
 
 Then, in this directory:
 
-1. Work out what this project is and install what it needs — system packages
-   with ` + "`sudo apt-get -y`" + ` first, then the project's own package manager.
+1. Install what this project needs, following the project's OWN instructions —
+   its README, CONTRIBUTING, AGENTS.md and Makefile — rather than inferring a
+   toolchain from the lockfiles. System packages with ` + "`sudo apt-get -y`" + ` first, then
+   its dependency install run to completion (` + "`uv sync`" + `, ` + "`pnpm install`" + `, and
+   whatever else it declares), then any code generation, hooks or first build
+   those instructions describe. Leave nothing for first use: this disk becomes
+   the image, so a step skipped here is paid again by every person who opens a
+   sandbox on this environment.
 2. Start its dev server as a ` + "`systemd --user`" + ` unit listening on 0.0.0.0, and run
    ` + "`sparkbox set-port PORT`" + ` for the port a person should open.
 3. Prove it works before you consider it done: ` + "`curl -fsS http://localhost:PORT`" + `
@@ -1449,8 +1466,10 @@ Inspect this checkout, the running processes, and any setup logs left in /tmp to
 find how far the previous attempt got. Work already sent to the background may
 still be running: wait for or repair it instead of blindly starting a duplicate.
 Read sparkbox docs dev-environment for the platform contract. Finish installing
-the project's dependencies and start its development service as a systemd --user
-unit on 0.0.0.0 if the first attempt did not. Select the human-facing port with
+the project's dependencies — following the project's own README, CONTRIBUTING or
+Makefile, and running the install to completion rather than leaving it to first
+use — and start its development service as a systemd --user unit on 0.0.0.0 if
+the first attempt did not. Select the human-facing port with
 sparkbox set-port PORT and prove curl -fsS http://localhost:PORT succeeds. Then
 write every required step as an idempotent ` + SetupScriptPath + ` and run that
 script here until it exits 0.
@@ -1816,7 +1835,99 @@ func (o *Ops) captureBuild(ctx context.Context, owner, name, box string) error {
 		return err
 	}
 	o.log.Info("environment built", "user", owner, "env", name, "sandbox", box, "snapshot", snap)
+	o.pruneBuildSnapshots(ctx, owner, name)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// retention
+// ---------------------------------------------------------------------------
+
+// EnvBuildSnapshotKeep is how many of an environment's build captures survive a
+// build, the newest — the one just bound — included.
+//
+// It exists because a build makes a snapshot and nothing ever took one away.
+// Each capture is named <env>-<YYMMDD-HHMM> and the previous generation is left
+// unbound on purpose: it is the only thing that makes a bad build recoverable
+// with one `snapshot bind`. But snapshots are UNMETERED — nothing counts them
+// by number or by bytes — and they land in the image directory every VM on the
+// machine reflinks from, so an environment rebuilt weekly is fifty-two 25 GB
+// templates a year that nobody was ever told about.
+//
+// Three is the smallest number that keeps the property the leak was buying. One
+// would delete the rollback the moment the build that needs rolling back
+// finishes, which is exactly when it is wanted. Two keeps a rollback but leaves
+// nowhere to stand when the rollback target is itself the broken one — the
+// common shape of "it broke sometime this week". Three is the previous good
+// one, and the one before that.
+const EnvBuildSnapshotKeep = 3
+
+// pruneBuildSnapshots deletes an environment's superseded build captures,
+// keeping the newest EnvBuildSnapshotKeep.
+//
+// IT SWEEPS ONLY WHAT A BUILD MADE, and the two conditions that decide this are
+// both necessary. The NAME must be one snapshotNameFor would have produced for
+// this environment, and the SOURCE SANDBOX must be this environment's builder.
+// Name alone is not enough: `sparkbox snapshot web` from inside an ordinary box
+// produces a byte-identical shape of name, and that capture is somebody's own
+// deliberate save of their own work — deleting it because a build happened
+// later would be this routine destroying a thing no automated process created.
+// FromBox alone is not enough either, because `snapshot create web-build mine`
+// is a name a person chose in a box they may keep for weeks.
+//
+// It is BEST EFFORT and it runs after the row says ready. Every failure is a
+// log line: the build is over, the disk exists and the tag points at it, and
+// there is no version of "the old templates could not be deleted" that is worth
+// reporting as a failed build to somebody whose environment is finished. The
+// bound check is not made here at all — DeleteSnapshot refuses a bound snapshot
+// on its own, and letting that refusal be the guard means the rule lives in one
+// place rather than in every caller that deletes.
+func (o *Ops) pruneBuildSnapshots(ctx context.Context, owner, env string) {
+	if o.templates == nil {
+		return
+	}
+	prefix, builder := snapshotStem(env)+"-", builderName(env)
+	var mine []*host.Snapshot
+	for _, s := range o.templates.Snapshots(owner) {
+		if s.FromBox != builder || !strings.HasPrefix(s.Name, prefix) {
+			continue
+		}
+		if !snapshotStampRe.MatchString(strings.TrimPrefix(s.Name, prefix)) {
+			continue
+		}
+		mine = append(mine, s)
+	}
+	if len(mine) <= EnvBuildSnapshotKeep {
+		return
+	}
+	// Sorted here rather than relied on: Snapshots is documented newest-first,
+	// but this decides what is DELETED, and an order that silently changed
+	// would delete the newest three instead of keeping them. The name is the
+	// tie-break because it carries the same timestamp to the minute, so two
+	// captures with an identical CreatedAt still order the way they were made.
+	slices.SortFunc(mine, func(a, b *host.Snapshot) int {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return b.CreatedAt.Compare(a.CreatedAt)
+		}
+		return strings.Compare(b.Name, a.Name)
+	})
+
+	// Detached and given its own budget: ctx here has already spent a capture
+	// out of the build's timeout, and a sweep that inherits five seconds does
+	// nothing except leave the leak in place while looking like it ran.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), PauseTimeout)
+	defer cancel()
+	for _, s := range mine[EnvBuildSnapshotKeep:] {
+		if err := o.DeleteSnapshot(ctx, Caller{Handle: owner}, s.Name); err != nil {
+			o.log.Warn("could not delete a superseded environment build snapshot",
+				"user", owner, "env", env, "snapshot", s.Name, "err", err,
+				"next", "remove it by hand with `snapshot rm "+s.Name+"`")
+			continue
+		}
+		o.log.Info("deleted a superseded environment build snapshot",
+			"user", owner, "env", env, "snapshot", s.Name,
+			"kept", EnvBuildSnapshotKeep)
+	}
 }
 
 // ---------------------------------------------------------------------------

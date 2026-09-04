@@ -1704,3 +1704,137 @@ func TestSummarizeBuildLog(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// retention
+// ---------------------------------------------------------------------------
+
+// seedBuildSnapshot puts a snapshot on the fake templates store as though an
+// earlier build of `env` had captured it: the name snapshotNameFor would have
+// produced at that minute, and the builder as its source box.
+func (b *buildRig) seedBuildSnapshot(owner, env string, at time.Time) string {
+	name := snapshotNameFor(env, at)
+	b.tmpl.snaps[owner+"/"+name] = &host.Snapshot{
+		Name: name, Owner: owner, FromBox: env + "-build",
+		Image: "snap-" + owner + "-" + name, CreatedAt: at,
+	}
+	return name
+}
+
+// TestABuildKeepsThreeGenerationsOfItsOwnSnapshots.
+//
+// The leak this closes is silent and unmetered — a weekly rebuild is fifty-two
+// 25 GB templates a year that nothing counts — so the assertion is on both
+// halves: the oldest are gone, and the newest three, rollback included, are
+// not.
+func TestABuildKeepsThreeGenerationsOfItsOwnSnapshots(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build")
+
+	// Five earlier generations, oldest first. The capture this build is about
+	// to take is the sixth, so three of these six survive.
+	base := time.Unix(0, 0).UTC()
+	var older []string
+	for i := 5; i >= 1; i-- {
+		older = append(older, b.seedBuildSnapshot("alice", "web", base.Add(-time.Duration(i)*time.Hour)))
+	}
+	box, _ := b.boxes.Get("web-build")
+	b.calls.reset()
+
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{OK: true, ExitCode: 0}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+
+	fresh := snapshotNameFor("web", base)
+	keep := map[string]bool{fresh: true, older[3]: true, older[4]: true}
+	for _, name := range append(older, fresh) {
+		_, still := b.tmpl.snaps["alice/"+name]
+		if keep[name] && !still {
+			t.Errorf("snapshot %q was deleted; the newest %d must survive", name, EnvBuildSnapshotKeep)
+		}
+		if !keep[name] && still {
+			t.Errorf("snapshot %q survived; only the newest %d should", name, EnvBuildSnapshotKeep)
+		}
+	}
+}
+
+// TestTheSweepLeavesSnapshotsNoBuildMade.
+//
+// Both conditions are load-bearing and this is what says so. A capture somebody
+// took by hand from their own box carries a name of exactly the same shape, and
+// deleting it because a build happened later would be this routine destroying
+// work no automated process created.
+func TestTheSweepLeavesSnapshotsNoBuildMade(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build")
+	base := time.Unix(0, 0).UTC()
+
+	// Enough build captures that the sweep certainly runs.
+	var built []string
+	for i := 5; i >= 1; i-- {
+		built = append(built, b.seedBuildSnapshot("alice", "web", base.Add(-time.Duration(i)*time.Hour)))
+	}
+	// `sparkbox snapshot web` from inside an ordinary box: same name shape, a
+	// different source box.
+	byHand := snapshotNameFor("web", base.Add(-9*time.Hour))
+	b.tmpl.snaps["alice/"+byHand] = &host.Snapshot{
+		Name: byHand, Owner: "alice", FromBox: "alicebox",
+		Image: "snap-alice-" + byHand, CreatedAt: base.Add(-9 * time.Hour),
+	}
+	// `snapshot create web-build keeper`: the builder as its source, a name a
+	// person chose.
+	named := "keeper"
+	b.tmpl.snaps["alice/"+named] = &host.Snapshot{
+		Name: named, Owner: "alice", FromBox: "web-build",
+		Image: "snap-alice-" + named, CreatedAt: base.Add(-9 * time.Hour),
+	}
+	box, _ := b.boxes.Get("web-build")
+	b.calls.reset()
+
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{OK: true, ExitCode: 0}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+	for _, name := range []string{byHand, named} {
+		if _, still := b.tmpl.snaps["alice/"+name]; !still {
+			t.Errorf("snapshot %q was swept; only an `env build` capture may be", name)
+		}
+	}
+	// And the sweep did run, so the assertion above is about a sweep that had
+	// the chance to take them.
+	if _, still := b.tmpl.snaps["alice/"+built[0]]; still {
+		t.Errorf("the oldest build capture %q survived: %v", built[0], b.calls.all())
+	}
+}
+
+// TestTheSweepNeverFailsAFinishedBuild. The disk exists and the tag points at
+// it; "the old templates could not be deleted" is a log line, not a failure
+// handed to somebody whose environment is ready.
+func TestTheSweepNeverFailsAFinishedBuild(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build")
+	base := time.Unix(0, 0).UTC()
+	for i := 5; i >= 1; i-- {
+		b.seedBuildSnapshot("alice", "web", base.Add(-time.Duration(i)*time.Hour))
+	}
+	// Bound to a tag of its own, which is the one thing DeleteSnapshot refuses
+	// — the rollback somebody pinned deliberately.
+	pinned := snapshotNameFor("web", base.Add(-5*time.Hour))
+	if _, _, err := b.bindings.Bind("alice", "last-good", pinned); err != nil {
+		t.Fatal(err)
+	}
+	box, _ := b.boxes.Get("web-build")
+
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{OK: true, ExitCode: 0}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+	row := b.envs.rows[envKey("alice", "web")]
+	if row.State != envs.StateReady {
+		t.Errorf("state = %q, want ready even though a snapshot could not be swept", row.State)
+	}
+	if _, still := b.tmpl.snaps["alice/"+pinned]; !still {
+		t.Errorf("bound snapshot %q was deleted", pinned)
+	}
+}
