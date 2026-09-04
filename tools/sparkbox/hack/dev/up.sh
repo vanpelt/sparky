@@ -245,20 +245,32 @@ GUEST
 # which is the shortcut that would make the ceremony theatre.
 approve_node() {
   local claim fp subnet rostered
-  # Wait for it rather than demanding it be there already. The node container
+  # Wait for one of TWO outcomes, because only one of them involves a
+  # fingerprint at all.
+  #
+  # A node prints `node approve SHA256:… --guest-subnet …` only while it is
+  # WAITING to be approved. Re-create the Pod on a data volume that already
+  # holds an approved identity — which is what a node roll does — and it links
+  # straight up and never prints anything. Waiting for a fingerprint there can
+  # only ever time out, and the roll then reports failure for a node that is
+  # online and carrying sandboxes.
+  #
+  # The other half of the wait is the reason it is a loop: the node container
   # starts behind prepare-vm-assets, which on a Pod whose assets were dropped
-  # takes minutes — so "has it printed a fingerprint" is a race that a warm
-  # re-run wins and a cold one loses, and losing it aborted a roll that was
-  # otherwise fine.
+  # takes minutes, so neither answer is available immediately.
   local waited=0
   while :; do
+    if node_online; then
+      note "$node_name linked with the identity it already had; nothing to approve"
+      return 0
+    fi
     claim=$(node_says | tr -d '\r')
     [ -n "$claim" ] && break
     [ "$waited" -ge 300 ] &&
-      die "the node has not printed a fingerprint after ${waited}s.
+      die "after ${waited}s $node_name is neither online nor asking to be approved.
      hack/dev/up.sh status, and: container machine run -i --root --name $machine -- \\
        bash -c 'docker logs sparkbox-dev-sparkbox-node'"
-    [ "$waited" = 0 ] && note "waiting for the node to print its fingerprint"
+    [ "$waited" = 0 ] && note "waiting for the node to link or to print its fingerprint"
     sleep 5
     waited=$(( waited + 5 ))
   done
