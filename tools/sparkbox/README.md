@@ -820,9 +820,12 @@ is the spike on swapping the VMM for Cloud Hypervisor to get it, with
 (driver mapping, helper protocol, kernel and artifacts) and
 [`docs/nested-virtualization-design.md`](docs/nested-virtualization-design.md)
 (per-sandbox plumbing, risk register, kill criteria) behind it.
-`hack/probe-nested-virt.sh` is the host preflight: CPU flags, `/dev/kvm`, the
+`hack/probe-nested-virt.sh` is the host preflight — CPU flags, `/dev/kvm`, the
 KVM module's `nested` and `ept`/`npt` parameters, Landlock, and the three 2026
-shadow-MMU escapes a nested-enabled node must be patched against.
+shadow-MMU escapes a nested-enabled node must be patched against — and
+`hack/probe-cks-nested.sh` runs it against the live CKS deployment, read-only,
+alongside the one `grep` that settles whether our Firecracker guests already see
+the VMX bit.
 
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome

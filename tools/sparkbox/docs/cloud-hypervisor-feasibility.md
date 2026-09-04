@@ -380,15 +380,72 @@ pool oversells.
 
 ## 9. Spike plan
 
-### M0 — Node preflight, plus the free experiment (hours)
+### M0 — Node preflight (one command, minutes)
 
-Run `hack/probe-nested-virt.sh` in the live `vmm-helper` container: CPU flags,
-`/dev/kvm`, `nested`, `ept`/`npt`, all three CVE gates, Landlock. While there,
-settle §1's inference: boot one throwaway Firecracker guest with a `CONFIG_KVM`
-kernel and read `/proc/cpuinfo` for `vmx`. If the bit is there, we learn that our
-current exposure is a Node property, and a masking CPU template becomes worth
-pinning regardless of this port. Ask CoreWeave about nested, patch cadence, and
-whether a second pool is available.
+`hack/probe-cks-nested.sh` is M0. It is read-only — `kubectl get`/`exec` plus one
+optional `ssh` — and it answers all three questions in one pass:
+
+```sh
+# from tools/sparkbox, with the CKS kubeconfig live
+hack/probe-cks-nested.sh --sandbox <a-live-sandbox>
+```
+
+**A. Can the Node host nested guests?** It pipes `hack/probe-nested-virt.sh`
+into the `vmm-helper` container over stdin — nothing is written to the node — so
+the answer describes the very process that would exec the VMM: CPU flags,
+`/dev/kvm`, `nested`, `ept`/`npt`, Landlock, and all three CVE gates.
+
+**B. Does a Firecracker guest already see VMX/SVM?** §1 argues from source that
+it does; this settles it by reading `/proc/cpuinfo` in a live sandbox. The first
+draft of this plan proposed building a `CONFIG_KVM` guest kernel for this. That
+is unnecessary: `X86_FEATURE_VMX` is CPUID.1:ECX[5], printed by the kernel's
+generic cpuinfo flag loop through `cpu_has()`, entirely independent of
+`CONFIG_KVM` — and the Firecracker CI config sets `CONFIG_X86_FEATURE_NAMES=y`,
+so the flags line is populated. One `grep`, no build, no template, no risk.
+
+Seeing the flag is not a vulnerability: without `CONFIG_KVM` the guest cannot
+use it. What it would mean is that "our guests see no VMX" is currently a
+property of **CoreWeave's module parameters, not of Sparkbox** — and that
+pinning a masking CPU template (T2CL/T2/C3 on Intel, T2A on AMD) is worth doing
+whatever we decide about this port.
+
+**C. What shape is the fleet?** Node kernel, OS, arch, CPU vendor, device-plugin
+allocatables, and whether a second pool exists to isolate nested sandboxes onto.
+
+The script ends by printing the four questions only CoreWeave can answer:
+whether `nested` is deliberately set anywhere, the kernel patch cadence per pool
+(the binding gate is CVE-2026-80726), whether landlock is in the node kernel's
+`CONFIG_LSM`, and whether a second CPU pool is available.
+
+## 10. M0 results
+
+Not yet run — this session has no CKS kubeconfig. Fill in from
+`hack/probe-cks-nested.sh` and date it; the answers gate M1's pin and M2
+entirely.
+
+| | |
+|---|---|
+| date / operator | |
+| node | |
+| kernel | |
+| os / runtime / arch | |
+| CPU vendor and flags (`vmx`/`svm`, `ept`/`npt`) | |
+| `kvm_*.nested` | |
+| `kvm_*.ept` / `.npt` | |
+| CVE-2026-53359 / -64561 / -80726 | |
+| Landlock ABI | |
+| node preflight verdict | |
+| **guest sees vmx/svm** | |
+| node pools | |
+
+CoreWeave answers:
+
+| question | answer |
+|---|---|
+| Is `kvm_{intel,amd}.nested` deliberately set, and stable? | |
+| Kernel patch cadence per CPU pool? | |
+| Is landlock in the node kernel's `CONFIG_LSM`? | |
+| Can we have a second CPU pool for nested sandboxes? | |
 
 ### M1 — Driver beside driver (weeks, not days)
 
