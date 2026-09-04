@@ -21,7 +21,9 @@
 # deviates from the Pod in exactly three announced ways:
 #
 #   1. listeners are bound to 127.0.0.1 rather than 0.0.0.0, because users.conf
-#      here holds the developer's own real public key.
+#      here holds the developer's own real public key. SPARKBOX_DEV_SSH_BIND
+#      moves the SSH listener alone off loopback, which is what a node Pod in
+#      the Apple container machine needs to link out to; see below.
 #   2. TLS is off (SPARKBOX_PROXY_TLS=false): there is no public DNS name and no
 #      ACME challenge that could be answered for one.
 #   3. the fleet identity is minted locally into .dev/gateway/keys instead of
@@ -39,6 +41,18 @@
 #                             to 127.0.0.1 with no /etc/hosts entry
 #   SPARKBOX_DEV_EDGE_PORT    default 8081
 #   SPARKBOX_DEV_SSH_PORT     default 2222
+#   SPARKBOX_DEV_GUEST_SUBNET this gateway's own guest prefix, default
+#                             10.201.0.0/20. Must not overlap a node's, which is
+#                             172.30.0.0/20 from deployment.yaml; `node approve`
+#                             refuses the overlap.
+#   SPARKBOX_DEV_SSH_BIND     address the SSH gateway listens on, default
+#                             127.0.0.1. `sparkbox devpod`'s node links out to
+#                             this port and cannot reach loopback on the Mac, so
+#                             pointing a node at this gateway means 0.0.0.0 (or
+#                             the vmnet host address, usually 192.168.64.1).
+#                             Only this listener moves; the edge and API stay on
+#                             loopback because only a browser on this Mac uses
+#                             them.
 #   SPARKBOX_DEV_API_PORT     default 18080 (the Pod's 8080 is usually OrbStack's)
 #   SPARKBOX_DEV_HANDLE       operator handle seeded into users.conf (default $USER)
 #   SPARKBOX_DEV_SSH_KEY      public key for that handle (default ~/.ssh/id_*.pub)
@@ -95,6 +109,29 @@ readonly proxy_domain="${SPARKBOX_PROXY_DOMAIN:-dev.localhost}"
 readonly edge_port="${SPARKBOX_DEV_EDGE_PORT:-8081}"
 readonly ssh_port="${SPARKBOX_DEV_SSH_PORT:-2222}"
 readonly api_port="${SPARKBOX_DEV_API_PORT:-18080}"
+# Loopback by default, for the reason in the header. A node Pod running in the
+# Apple container machine reaches this Mac at the vmnet host address and cannot
+# reach 127.0.0.1, so linking one means widening this listener and nothing else:
+# node control and guest data both ride the node's own outbound connection to
+# this port (it is the single gateway-directed flow the cluster's Cilium egress
+# policy allows), so the edge and API can stay on loopback.
+readonly ssh_bind="${SPARKBOX_DEV_SSH_BIND:-127.0.0.1}"
+
+# The address space this gateway hands its OWN guests, which must not overlap
+# the one a fleet node hands its guests -- `node approve` refuses the overlap,
+# and that refusal is the whole reason this is set.
+#
+# It has to be set here because gateway-entrypoint.sh passes no --guest-subnet,
+# so the binary falls back to guestnet.DefaultPrefix, 172.30.0.0/16. The node
+# Pod's is 172.30.0.0/20 (deployment.yaml, which internal/devpod derives from
+# rather than duplicating), and a /20 inside that /16 is exactly the collision
+# the approval transaction exists to catch. Moving the gateway is the correct
+# half to move: the node's value is production config this environment is
+# supposed to reproduce, not something to edit until the local run is happy.
+#
+# --gateway-only runs the mock driver, so nothing ever boots into this prefix.
+# It is reserved, not used, and it only has to be somewhere else.
+readonly gw_guest_subnet="${SPARKBOX_DEV_GUEST_SUBNET:-10.201.0.0/20}"
 
 # The dev GitHub App, and where its private key lives. Checked in because
 # neither is a secret: a client id is a public identifier that travels in the
@@ -362,7 +399,8 @@ serve() {
   # from this), and the whole point of this script is to run that file unedited.
   export SPARKBOX_GITHUB_APP_CLIENT_ID="$app_client_id"
   exec "$dev_bash" "$entrypoint" \
-    --ssh-addr "127.0.0.1:$ssh_port" \
+    --ssh-addr "$ssh_bind:$ssh_port" \
+    --guest-subnet "$gw_guest_subnet" \
     --proxy-addr "127.0.0.1:$edge_port" \
     --api-addr "127.0.0.1:$api_port" \
     --proxy-advertise-port "$edge_port" \
@@ -473,6 +511,36 @@ cmd_status() {
   ssh      ssh -p $ssh_port ctl@127.0.0.1
   log      $log_file
 EOF
+  node_hint
+}
+
+# What to do next about VM nodes, which is the difference between a gateway that
+# can bookkeep sandboxes and one that can boot them. `serve --gateway-only` runs
+# the mock driver, so this gateway is never itself a VM node no matter how it is
+# bound: without a real one, creating a sandbox fails in internal/fleet with
+# "this gateway has no VM nodes; enrol and approve one".
+node_hint() {
+  if [ "$ssh_bind" = "127.0.0.1" ]; then
+    cat <<EOF
+  nodes    none can link: SSH is on loopback, which the container machine cannot
+           reach. Re-run with SPARKBOX_DEV_SSH_BIND=0.0.0.0 to accept a node.
+EOF
+    return 0
+  fi
+  cat <<EOF
+  nodes    accepting links on $ssh_bind:$ssh_port — inside the machine, run
+           sparkbox devpod up -gateway $(vmnet_host):$ssh_port -trust-dir <dir holding gateway_host_key.pub>
+           then approve it here: ssh -p $ssh_port ctl@127.0.0.1 node ls / node approve <fp>
+EOF
+}
+
+# The address a guest of the Apple container machine reaches this Mac on. Read
+# from the interface rather than hardcoded: the vmnet subnet is assigned by the
+# host and 192.168.64.0/24 is a default, not a guarantee.
+vmnet_host() {
+  local addr
+  addr=$(ifconfig 2>/dev/null | awk '/inet 192\.168\.6[0-9]\./ {print $2; exit}')
+  printf '%s' "${addr:-192.168.64.1}"
 }
 
 cmd_logs() {

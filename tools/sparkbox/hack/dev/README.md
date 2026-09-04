@@ -202,8 +202,10 @@ about:
 - **the VAST durable tier.** `.dev/gateway/durable` is a local directory on APFS.
   RWX semantics, the migration Job, sqlite over a network filesystem, and
   anything about capacity or permissions on the real volume are untested.
-- **sandboxes.** With the mock driver nothing boots. Lifecycle *bookkeeping* is
-  exercised; guests, networking, snapshots, and agents are not.
+- **sandboxes, from the gateway alone.** `--gateway-only` runs the mock driver,
+  so this process never boots a guest itself no matter how it is configured.
+  Link the node Pod to it (below) and real microVMs boot; without one, creating
+  a sandbox fails in `internal/fleet` with *"this gateway has no VM nodes"*.
 - **the fleet's GitHub App.** With a dev App attached (above) the minting path
   is real, but the installations, repositories and permission grants are yours
   and not the cluster's. `fetch-secrets`, which is how the App key actually
@@ -212,6 +214,61 @@ about:
 The five-container tier (`sparkbox devpod`) covers some of the middle of that
 list and records what it still cannot reproduce in `Plan.Divergences`. Nothing
 local covers the last three.
+
+## Booting real sandboxes: linking the node
+
+The gateway can only bookkeep sandboxes. Booting them needs a VM node, which is
+what `sparkbox devpod` runs. Three things have to line up, and each fails with
+its own sentence if it does not.
+
+**1. The gateway has to be reachable.** Its SSH listener is the single flow a
+node uses — control *and* guest data both ride the node's own outbound
+connection to it, which is why the cluster's Cilium egress policy allows exactly
+`gateway:2222` and nothing else toward it. That listener is on loopback by
+default and the container machine cannot reach loopback on the Mac:
+
+```sh
+SPARKBOX_DEV_SSH_BIND=0.0.0.0 hack/dev/gateway.sh restart
+```
+
+Only the SSH listener moves. The edge and API stay on 127.0.0.1, because only a
+browser on this Mac uses them. `gateway.sh status` says which mode it is in and
+prints the next command either way.
+
+**2. The two guest prefixes must not overlap.** `node approve` reserves the
+address space a machine may hand its guests and refuses a collision. The node
+Pod's is `172.30.0.0/20`, from `deployment.yaml`; the gateway's own would
+otherwise default to `guestnet.DefaultPrefix` — `172.30.0.0/16` — which contains
+it. `gateway.sh` therefore passes `--guest-subnet 10.201.0.0/20`
+(`SPARKBOX_DEV_GUEST_SUBNET`). Moving the *gateway* is the correct half to move:
+the node's value is production config this environment reproduces rather than
+edits. Nothing boots into the gateway's prefix — it is reserved, not used.
+
+**3. The node needs the gateway's host key**, since it verifies it on every
+link. `gateway.sh` derives `gateway_host_key.pub` into `.dev/gateway/keys/`;
+copy that one file — not the directory, which holds private keys — into a
+trust dir inside the machine, then link:
+
+```sh
+sparkbox devpod up -image <ref> -data /srv/sparkbox/data/devpod \
+  -trust-dir /srv/sparkbox/data/devpod-trust \
+  -gateway 192.168.64.1:2222 -driver firecracker -node-name macdev
+```
+
+Then approve it from the Mac, by fingerprint, with the subnet it reports:
+
+```sh
+ssh -p 2222 ctl@127.0.0.1 node ls
+ssh -p 2222 ctl@127.0.0.1 node approve SHA256:... --guest-subnet 172.30.0.0/20
+```
+
+The node retries with growing backoff while pending, so it can take up to a
+minute to flip to `online` after approval — it is not stuck. Then
+`ssh new+<name>@127.0.0.1` boots a real aarch64 Firecracker guest.
+
+Re-minting the gateway identity invalidates the copied `gateway_host_key.pub`,
+and the node will refuse the link until the trust dir is refreshed. Nothing
+detects that for you.
 
 ## The pod loop: registry, machine, image
 
