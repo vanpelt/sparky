@@ -2676,7 +2676,13 @@
             "description": "Optional Sparkbox fleet node. Usually omitted so the `awp` template binding chooses its node."
           },
           "vcpus": { "type": "integer", "format": "int64", "minimum": 0 },
-          "mem_mb": { "type": "integer", "format": "int64", "minimum": 0 }
+          "mem_mb": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 32768,
+            "description": "Memory ceiling in MiB. Zero or omission uses the Sparkbox default; AWP test sandboxes are capped at 32 GiB."
+          }
         }
       },
       "AWPWorkloadIdentity": {

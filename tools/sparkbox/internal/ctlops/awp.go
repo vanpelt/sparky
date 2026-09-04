@@ -16,6 +16,7 @@ import (
 const (
 	awpTag       = "awp"
 	awpTagPrefix = "awp-"
+	awpMaxMemMB  = 32 * 1024
 )
 
 type awpNameLock struct {
@@ -228,6 +229,10 @@ func (o *Ops) requireAWPTemplate(op, owner string) error {
 }
 
 func validateAWPCreate(op string, a AWPCreateArgs) error {
+	if a.MemMB < 0 || a.MemMB > awpMaxMemMB {
+		return Invalid(op, "invalid_mem_mb",
+			"mem_mb must be between 0 and %d MiB (32 GiB); zero uses the Sparkbox default", awpMaxMemMB)
+	}
 	for _, item := range []struct {
 		field string
 		value string

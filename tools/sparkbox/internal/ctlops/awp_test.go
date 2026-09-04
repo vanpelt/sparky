@@ -148,6 +148,26 @@ func TestAWPCreateRefusesAudienceBeforeAnyWrite(t *testing.T) {
 	}
 }
 
+func TestAWPCreateEnforcesMemoryLimitBeforeAnyWrite(t *testing.T) {
+	r := newRig(t)
+	enableAWP(r)
+	a := awpArgs()
+	a.MemMB = awpMaxMemMB
+	if err := validateAWPCreate("awp.create", a); err != nil {
+		t.Fatalf("32 GiB boundary rejected: %v", err)
+	}
+
+	a.MemMB++
+	r.calls.reset()
+	_, err := r.ops.CreateAWPSandbox(context.Background(), Caller{Handle: "opsy"}, a)
+	if !IsKind(err, KindInvalid) || err.(*Error).Code != "invalid_mem_mb" {
+		t.Fatalf("err = %v, want invalid_mem_mb", err)
+	}
+	if got := r.calls.mutating(); len(got) != 0 {
+		t.Fatalf("oversized AWP create reached writes: %v", got)
+	}
+}
+
 func TestAWPCreateRefusesGenericImageWhenTemplateIsUnbound(t *testing.T) {
 	r := newRig(t)
 	enableAWP(r)

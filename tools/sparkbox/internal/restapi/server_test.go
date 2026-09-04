@@ -905,7 +905,20 @@ func TestAWPBackendLifecycleIsOperatorOnlyAndTokenless(t *testing.T) {
 		t.Fatalf("non-operator code = %q, want not_operator", e.Code)
 	}
 
-	rec := ta.do(t, "POST", "/v1/awp/sandboxes", "opsy", req)
+	oversized := req
+	oversized.MemMB = 32*1024 + 1
+	rec := ta.do(t, "POST", "/v1/awp/sandboxes", "opsy", oversized)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized create: status %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+	if e := decodeErr(t, rec); e.Code != "invalid_mem_mb" {
+		t.Fatalf("oversized create code = %q, want invalid_mem_mb", e.Code)
+	}
+	if _, ok := ta.mgr.Get(req.SandboxID); ok {
+		t.Fatal("oversized AWP request created a VM")
+	}
+
+	rec = ta.do(t, "POST", "/v1/awp/sandboxes", "opsy", req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: status %d, want 201 (%s)", rec.Code, rec.Body)
 	}

@@ -62,6 +62,10 @@ Sparkbox lifecycle record plus this identity descriptor:
 }
 ```
 
+`mem_mb` is optional: zero or omission uses Sparkbox's default. This provisional
+AWP surface rejects allocations above 32768 MiB (32 GiB) before it writes any
+tags, launch metadata, or VM state.
+
 That final `sandbox_id` is Sparkbox's immutable provider UUID and is also the
 claim in the token minted to the guest. AWP should bind it during exchange. The
 logical AWP sandbox id, run id, tenant id, VM name, or operator account are
