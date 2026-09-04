@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -990,6 +991,8 @@ type repoRow struct {
 	UserAuth        string   `json:"user_auth"`
 	UserAuthEnabled bool     `json:"user_auth_enabled"`
 	GitHubLogin     string   `json:"github_login"`
+	UserAuthStale   bool     `json:"user_auth_stale"`
+	MissingPerms    []string `json:"missing_permissions"`
 }
 
 func TestRepoCRUD(t *testing.T) {
@@ -1092,6 +1095,119 @@ func TestRepoListShowsUserCredentialAndBrowserAvailability(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].UserAuth != "user" || !rows[0].UserAuthEnabled || rows[0].GitHubLogin != "alice-gh" {
 		t.Fatalf("repo auth row = %+v", rows)
+	}
+	// A grant written before permissions were recorded is unknown, not stale.
+	// Marking it stale would ask every user who has ever authorized a
+	// repository to re-authorize, on no evidence at all.
+	if rows[0].UserAuthStale {
+		t.Error("a grant with no recorded permission set was reported as stale")
+	}
+}
+
+// authorizedRepoConsole is the fixture the two permission-reporting tests share:
+// one write attachment, one stored grant carrying granted, and a probe that has
+// already recorded what the installation holds.
+func authorizedRepoConsole(t *testing.T, held, granted map[string]string) *testConsole {
+	t.Helper()
+	tc := newTestConsole(t)
+	if rec := tc.do(t, "PUT", "/api/repos/wandb%2Fhivemind", "alice",
+		map[string]any{"access": "write", "tags": []string{"hm"}}); rec.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", rec.Code, rec.Body.String())
+	}
+	client, err := ghuser.NewClient(ghuser.Config{ClientID: "Iv23liTEST", ClientSecret: "client-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := ghuser.Open(filepath.Join(t.TempDir(), "grants.db"), ghuser.DeriveKEK([]byte("test signing material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Put(ghuser.Grant{
+		Owner: "alice", GitHubID: 7, InstallationID: 42, RepoID: 99, Slug: "wandb/hivemind",
+		Permissions: granted,
+		Token: ghuser.Token{AccessToken: "ghu_secret", RefreshToken: "ghr_secret",
+			AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := ghapp.New(ghapp.Config{ClientID: "Iv23liTEST", Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc.handler.SetGitHubApp(app)
+	tc.handler.appSeen = map[string]appProbe{
+		probeKey("alice", defaultRepoHost, "wandb/hivemind"): {state: appReady, at: time.Now(),
+			perms:   held,
+			missing: ghapp.Missing(held, ghapp.MintPermissions(ghapp.PermWrite))},
+	}
+	tc.handler.SetGitHubUserAuth(ghuser.NewManager(client, store, nil))
+	return tc
+}
+
+func repoRows(t *testing.T, tc *testConsole) []repoRow {
+	t.Helper()
+	rec := tc.do(t, "GET", "/api/repos", "alice", nil)
+	var rows []repoRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want one", rows)
+	}
+	return rows
+}
+
+// Narrow drops a permission the installation lacks in silence, so "I granted
+// the App Dependabot alerts — did it land" is otherwise unanswerable from
+// anywhere. This row is the answer, read straight from what github.com reports
+// the installation holding.
+func TestRepoRowReportsWhatTheInstallationIsShortOf(t *testing.T) {
+	full := ghapp.MintPermissions(ghapp.PermWrite)
+	tc := authorizedRepoConsole(t, full, full)
+	if got := repoRows(t, tc)[0].MissingPerms; len(got) != 0 {
+		t.Fatalf("missing = %v on an App that holds everything, want none", got)
+	}
+
+	short := ghapp.MintPermissions(ghapp.PermWrite)
+	delete(short, "vulnerability_alerts")
+	delete(short, "security_events")
+	tc = authorizedRepoConsole(t, short, short)
+	got := repoRows(t, tc)[0].MissingPerms
+	if !slices.Equal(got, []string{"security_events", "vulnerability_alerts"}) {
+		t.Fatalf("missing = %v, want both ungranted names, sorted", got)
+	}
+}
+
+// A user grant consented to under the old set still works and still attributes
+// to its owner — it just cannot carry the new reads. Without this flag the
+// widening is invisible: the row keeps saying "you", the token keeps pushing,
+// and the reads it was widened for keep coming back 403 with nothing anywhere
+// to explain the difference.
+func TestRepoRowMarksAGrantNarrowerThanTheMintedSet(t *testing.T) {
+	full := ghapp.MintPermissions(ghapp.PermWrite)
+
+	tc := authorizedRepoConsole(t, full, ghapp.CoreMintPermissions(ghapp.PermWrite))
+	row := repoRows(t, tc)[0]
+	if row.UserAuth != "user" || !row.UserAuthStale {
+		t.Fatalf("row = %+v, want an authorized row marked stale", row)
+	}
+
+	// The same grant against an App that was never granted the read tier is NOT
+	// stale: re-authorizing cannot obtain a permission the installation lacks,
+	// so nagging about it would be a button that can never go away.
+	tc = authorizedRepoConsole(t, ghapp.CoreMintPermissions(ghapp.PermWrite), ghapp.CoreMintPermissions(ghapp.PermWrite))
+	if row := repoRows(t, tc)[0]; row.UserAuthStale {
+		t.Fatalf("row = %+v, want no nudge for a permission the App itself lacks", row)
+	}
+
+	tc = authorizedRepoConsole(t, full, full)
+	if row := repoRows(t, tc)[0]; row.UserAuthStale {
+		t.Fatalf("row = %+v, want an up-to-date grant left alone", row)
 	}
 }
 

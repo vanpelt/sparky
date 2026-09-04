@@ -194,12 +194,27 @@ func (g *Gateway) repoCheck(s gssh.Session, c ctlops.Caller, log *slog.Logger) {
 		failCtl(s, log, "repo check", err)
 		return
 	}
+	var short bool
 	for _, rc := range checks {
 		state := "ok"
 		if !rc.Reachable {
 			state = "unreachable"
 		}
 		fmt.Fprintf(s, "%-40s %-12s %s\r\n", truncate(rc.Slug, 40), state, rc.Reason)
+		// Not a failure and not indented under the reason: the repository is
+		// reachable and clones. It is the one place that answers "I granted the
+		// App Dependabot alerts — did it land", which is otherwise unanswerable
+		// because an ungranted permission is dropped from the token in silence.
+		if len(rc.Missing) > 0 {
+			short = true
+			fmt.Fprintf(s, "%-40s %-12s app lacks: %s\r\n", "", "", strings.Join(rc.Missing, ", "))
+		}
+	}
+	if short {
+		fmt.Fprint(s, "\r\nnote: the permissions above are not granted to the App on those repos, so the\r\n"+
+			"      sandbox token cannot use them — `gh api .../dependabot/alerts` and friends\r\n"+
+			"      will 403. Grant them on the App at github.com, then have each account\r\n"+
+			"      accept the updated permissions. Cloning and pushing are unaffected.\r\n")
 	}
 	if len(checks) == 0 {
 		fmt.Fprint(s, "no repos attached — attach one with:\r\n"+

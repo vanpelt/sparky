@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 )
 
 type Subject struct {
@@ -243,12 +245,13 @@ func (m *Manager) Poll(ctx context.Context, owner, id string) (AuthorizationStat
 }
 
 func (m *Manager) saveVerified(ctx context.Context, subject Subject, tok Token) error {
-	scoped, err := m.deriveVerified(ctx, subject, tok)
+	scoped, granted, err := m.deriveVerified(ctx, subject, tok)
 	if err != nil {
 		return err
 	}
 	grant := Grant{Owner: subject.Owner, GitHubID: subject.GitHubID,
-		InstallationID: subject.InstallationID, RepoID: subject.RepoID, Slug: subject.Slug, Token: scoped}
+		InstallationID: subject.InstallationID, RepoID: subject.RepoID, Slug: subject.Slug,
+		Token: scoped, Permissions: granted}
 	if err := m.store.Put(grant); err != nil {
 		return err
 	}
@@ -261,19 +264,53 @@ func (m *Manager) saveVerified(ctx context.Context, subject Subject, tok Token) 
 // may be persisted or handed to a guest. The broad access token exists only in
 // this stack frame; its rotating refresh token is retained so the same process
 // can be repeated when the derived token expires.
-func (m *Manager) deriveVerified(ctx context.Context, subject Subject, broad Token) (Token, error) {
+//
+// It returns the permissions the token actually carries, which is not always
+// the set it was asked for. A GitHub App user authorization is consented to
+// under the App's permissions AS THEY WERE at the moment the user approved it,
+// and re-scoping cannot reach past that — so the first time this platform's
+// minted set grows, every grant approved before the growth would fail here.
+// Failing means deleting the grant and falling back to the App bot, which
+// silently takes attribution away from the person who explicitly asked for it,
+// an hour after a deploy they did not make. So a refusal retries once with the
+// core set: the grant keeps working exactly as well as it did yesterday, the
+// narrower reality is what gets stored, and the console turns that into a
+// visible "re-authorize" rather than an invisible downgrade.
+func (m *Manager) deriveVerified(ctx context.Context, subject Subject, broad Token) (Token, map[string]string, error) {
 	if err := m.client.VerifyUser(ctx, broad.AccessToken, subject.GitHubID); err != nil {
-		return Token{}, err
+		return Token{}, nil, err
 	}
-	scoped, err := m.client.Scope(ctx, broad.AccessToken, subject.Target, subject.RepoID, subject.Permissions)
+	granted := subject.Permissions
+	scoped, err := m.client.Scope(ctx, broad.AccessToken, subject.Target, subject.RepoID, granted)
+	if errors.Is(err, ErrScopeRefused) && !ghapp.IsCoreOnly(granted) {
+		core := coreOf(granted)
+		m.log.Warn("github refused the full scoped permission set; retrying with the core set",
+			"owner", subject.Owner, "repo", subject.Slug, "err", err)
+		granted = core
+		scoped, err = m.client.Scope(ctx, broad.AccessToken, subject.Target, subject.RepoID, granted)
+	}
 	if err != nil {
-		return Token{}, err
+		return Token{}, nil, err
 	}
 	if err := m.client.Verify(ctx, scoped.AccessToken, subject.GitHubID, subject.RepoID); err != nil {
-		return Token{}, err
+		return Token{}, nil, err
 	}
 	return Token{AccessToken: scoped.AccessToken, RefreshToken: broad.RefreshToken,
-		AccessExpiresAt: scoped.AccessExpiresAt, RefreshExpiresAt: broad.RefreshExpiresAt}, nil
+		AccessExpiresAt: scoped.AccessExpiresAt, RefreshExpiresAt: broad.RefreshExpiresAt}, granted, nil
+}
+
+// coreOf is the core tier at the levels want asked for, so a retry after a
+// refusal never asks for MORE than the original request on any permission it
+// keeps. ghapp.CoreMintPermissions supplies the names; the levels come from
+// want because a read attachment must not be retried at write.
+func coreOf(want map[string]string) map[string]string {
+	out := map[string]string{}
+	for name := range ghapp.CoreMintPermissions(ghapp.PermRead) {
+		if level, ok := want[name]; ok {
+			out[name] = level
+		}
+	}
+	return out
 }
 
 // Token returns false for an absent grant so callers can deliberately fall
@@ -319,7 +356,7 @@ func (m *Manager) Token(ctx context.Context, subject Subject) (Token, bool, erro
 		return Token{}, false, fmt.Errorf("refresh github user token: %w", err)
 	}
 	subject.RepoID = g.RepoID
-	scoped, err := m.deriveVerified(ctx, subject, broad)
+	scoped, granted, err := m.deriveVerified(ctx, subject, broad)
 	if err != nil {
 		_ = m.store.Delete(subject.Owner, g.RepoID)
 		m.log.Warn("refreshed github user grant failed verification; using installation token",
@@ -327,8 +364,34 @@ func (m *Manager) Token(ctx context.Context, subject Subject) (Token, bool, erro
 		return Token{}, false, err
 	}
 	g.Token = scoped
+	g.Permissions = granted
 	if err := m.store.Put(g); err != nil {
 		return Token{}, false, err
 	}
 	return scoped, true, nil
+}
+
+// Covers reports whether the stored grant for this repository already carries
+// everything want asks for. False for an absent grant, so a caller can render
+// one nudge for "not authorized" and another for "authorized under an older
+// permission set" without asking twice.
+//
+// Like Authorized, it reads the store and never calls GitHub: the console asks
+// it once per row on a four-second poll.
+func (m *Manager) Covers(owner, slug string, githubID int64, want map[string]string) bool {
+	if m == nil {
+		return false
+	}
+	g, err := m.store.GetBySlug(owner, slug)
+	if err != nil || g.GitHubID != githubID || !strings.EqualFold(g.Slug, slug) {
+		return false
+	}
+	// A grant written before this column existed records nothing. Reporting it
+	// as covered is the deliberate choice: the alternative nags every user who
+	// has ever authorized a repository to re-authorize, on no evidence, and the
+	// first refresh after this ships replaces the empty record with a real one.
+	if len(g.Permissions) == 0 {
+		return true
+	}
+	return ghapp.Covers(g.Permissions, want)
 }

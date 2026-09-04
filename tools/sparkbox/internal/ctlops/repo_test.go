@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -548,6 +549,52 @@ func TestCheckReposReportsPerAttachment(t *testing.T) {
 	}
 	if byslug["wandb/secret-thing"].Reachable || byslug["wandb/secret-thing"].Reason == "" {
 		t.Errorf("an uninstalled repo reported %+v", byslug["wandb/secret-thing"])
+	}
+}
+
+// A permission the App was never granted is dropped from the minted token in
+// silence — it has to be, because GitHub refuses a request naming one outright
+// rather than trimming it. `repo check` is where that silence is broken: the
+// row stays reachable (it clones fine) and says what the token will be short
+// of, which is otherwise only discoverable as a 403 inside a sandbox hours
+// later.
+func TestCheckReposNamesThePermissionsTheAppLacks(t *testing.T) {
+	r := newRig(t)
+	_, app := withRepos(r)
+	linkGitHub(r, "alice", "alice-gh", users.GitHubViaKeys, 99)
+	app.installed["wandb/hivemind"] = ghapp.Installation{ID: 42, AccountID: 7, AccountLogin: "wandb",
+		AccountType: "Organization", Permissions: map[string]string{
+			"contents": "write", "pull_requests": "write", "issues": "write",
+			"security_events": "read", "actions": "read", "checks": "read",
+			"statuses": "read", "deployments": "read",
+			// vulnerability_alerts deliberately absent: the exact gap that made
+			// `gh api .../dependabot/alerts` 403 in a sandbox that could push.
+		}}
+	if _, err := r.ops.AttachRepo(context.Background(), alice(), RepoArgs{Slug: "wandb/hivemind"}); err != nil {
+		t.Fatal(err)
+	}
+
+	checks, err := r.ops.CheckRepos(context.Background(), alice())
+	if err != nil {
+		t.Fatalf("CheckRepos: %v", err)
+	}
+	if len(checks) != 1 || !checks[0].Reachable || checks[0].Reason != "" {
+		t.Fatalf("checks %+v, want one reachable row: a missing permission is not a failure", checks)
+	}
+	if !slices.Equal(checks[0].Missing, []string{"vulnerability_alerts"}) {
+		t.Fatalf("missing = %v, want exactly the ungranted permission", checks[0].Missing)
+	}
+
+	// And an App that holds the lot says nothing, so the note is not permanent
+	// furniture on every deployment.
+	app.installed["wandb/hivemind"] = ghapp.Installation{ID: 42, AccountID: 7, AccountLogin: "wandb",
+		AccountType: "Organization", Permissions: ghapp.MintPermissions(ghapp.PermWrite)}
+	checks, err = r.ops.CheckRepos(context.Background(), alice())
+	if err != nil {
+		t.Fatalf("CheckRepos: %v", err)
+	}
+	if len(checks) != 1 || len(checks[0].Missing) != 0 {
+		t.Fatalf("missing = %v on a fully granted App, want none", checks[0].Missing)
 	}
 }
 
