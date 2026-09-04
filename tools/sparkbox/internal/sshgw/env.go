@@ -50,6 +50,7 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"       ssh ctl@<gateway> env rm <name>\r\n" +
 	"       ssh ctl@<gateway> env script <name>\r\n" +
 	"       cat setup.sh | ssh ctl@<gateway> env script <name> --set\r\n" +
+	"       ssh ctl@<gateway> env script <name> --from-repo\r\n" +
 	"       ssh ctl@<gateway> env build <name>\r\n" +
 	"       ssh ctl@<gateway> env rebuild <name>\r\n" +
 	"       ssh ctl@<gateway> env capture <name>\r\n" +
@@ -100,6 +101,13 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"there is none, from .sparkbox/setup.sh in one of its repositories — which is\r\n" +
 	"then stored, so the next build is the same build. `sparkbox docs\r\n" +
 	"dev-environment` describes what belongs in that file.\r\n" +
+	"\r\n" +
+	"a stored script that is still a CLEAN COPY of the one its repository gave it\r\n" +
+	"is refreshed on every build, so committing a change to .sparkbox/setup.sh and\r\n" +
+	"running `env rebuild` picks it up. once it has been changed here — by the\r\n" +
+	"repair pass, or by `--set` — nothing overwrites it, `env show` says the two\r\n" +
+	"disagree, and `env script <name> --from-repo` is how you choose the\r\n" +
+	"repository's version.\r\n" +
 	"\r\n" +
 	"with NO script anywhere, `env build` runs an AGENT in the builder instead: it\r\n" +
 	"reads `sparkbox docs dev-environment`, gets the project running, and writes\r\n" +
@@ -273,6 +281,13 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 		setup += "  (read it with `env script " + e.Name + "`)"
 	}
 	fmt.Fprintf(s, "  %-12s %s\r\n", "setup", setup)
+	// Whether that script is still the one in the repository. Printed only when
+	// there is something to say — a match and an unknown both print nothing,
+	// because this line exists to interrupt somebody and "your script is fine"
+	// is not worth interrupting anybody for.
+	if drift := envDriftLine(e); drift != "" {
+		fmt.Fprintf(s, "  %-12s %s\r\n", "script", drift)
+	}
 	// The build. This is the half of `env show` somebody runs while something is
 	// happening, so both live states say what to do next rather than only what
 	// state they are in: a build in flight is watchable and a failed one is
@@ -642,10 +657,26 @@ func parseEnvSet(args []string) (ctlops.EnvArgs, []string, error) {
 // envScript prints an environment's setup script, or reads a new one from
 // stdin under --set.
 func (g *Gateway) envScript(s gssh.Session, c ctlops.Caller, args []string, log *slog.Logger) {
-	name, set, err := parseEnvScript(args)
+	name, set, fromRepo, err := parseEnvScript(args)
 	if err != nil {
 		fmt.Fprintf(s.Stderr(), "sparkbox: %v\r\n%s", err, envUsage)
 		s.Exit(2) //nolint:errcheck
+		return
+	}
+	if fromRepo {
+		// The one path that deliberately overwrites this environment's script
+		// with somebody else's copy of it, which is why it is a flag a person
+		// types rather than anything a build decides.
+		info, err := g.ops.AdoptRepoScript(s.Context(), c, name)
+		if err != nil {
+			failCtl(s, log, "env script", err)
+			return
+		}
+		fmt.Fprintf(s, "%s now uses the %s in %s (%d bytes).\r\n",
+			info.Name, ctlops.SetupScriptPath, info.ScriptDriftRepo, info.SetupBytes)
+		fmt.Fprintf(s, "build it with:  ssh %s@%s env rebuild %s\r\n",
+			ControlUser, g.sshHint(), info.Name)
+		s.Exit(0) //nolint:errcheck
 		return
 	}
 	if !set {
@@ -695,29 +726,37 @@ func (g *Gateway) envScript(s gssh.Session, c ctlops.Caller, args []string, log 
 }
 
 // parseEnvScript reads `<name> [--set]`.
-func parseEnvScript(args []string) (name string, set bool, err error) {
+func parseEnvScript(args []string) (name string, set, fromRepo bool, err error) {
 	var names []string
 	for _, a := range args {
 		switch a {
 		case "--set", "--save":
 			set = true
+		case "--from-repo", "--from-repository":
+			fromRepo = true
 		default:
 			if strings.HasPrefix(a, "-") {
-				return "", false, fmt.Errorf("unknown flag %q", a)
+				return "", false, false, fmt.Errorf("unknown flag %q", a)
 			}
 			names = append(names, a)
 		}
 	}
+	if set && fromRepo {
+		// Two sources for one file. Refused rather than ranked, because either
+		// ranking silently discards what the person meant by the other flag.
+		return "", false, false, fmt.Errorf(
+			"--set reads a script from stdin and --from-repo takes the one in the repository; pick one")
+	}
 	switch len(names) {
 	case 0:
-		return "", false, fmt.Errorf("name the environment, e.g. `env script web`")
+		return "", false, false, fmt.Errorf("name the environment, e.g. `env script web`")
 	case 1:
-		return names[0], set, nil
+		return names[0], set, fromRepo, nil
 	default:
 		// The grammar somebody will try first, and the one that must not be
 		// read as a script: `env script web ./setup.sh` would otherwise store a
 		// filename, or nothing at all. See this file's header.
-		return "", false, fmt.Errorf(
+		return "", false, false, fmt.Errorf(
 			"the script is read from stdin, not from the command line — pipe it in instead:\r\n"+
 				"       cat %s | ssh %s@<gateway> env script %s --set", names[1], ControlUser, names[0])
 	}
@@ -872,4 +911,38 @@ func (g *Gateway) envCapture(s gssh.Session, c ctlops.Caller, name string, log *
 	fmt.Fprintf(s, "the builder is gone; sandboxes boot that disk now:\r\n"+
 		"  ssh %s@%s -- --env %s\r\n", NewSandboxUser, g.sshHint(), info.Name)
 	s.Exit(0) //nolint:errcheck
+}
+
+// envDriftLine is what `env show` says about an environment's setup script
+// having moved away from the repository it came from, or "" when there is
+// nothing to say.
+//
+// A MATCH PRINTS NOTHING, and so does an unknown. This line's whole job is to
+// interrupt somebody who was about to build a script they did not mean to, and
+// a row that appeared on every environment to report that everything was fine
+// would train people to skip the place the warning lives.
+//
+// The two real verdicts get different sentences because they have different
+// answers. ScriptDriftRepoAhead is handled BY the rebuild — the row is still a
+// clean copy of what the repository seeded, so the next build takes the newer
+// one on its own — and the sentence is an invitation. ScriptDriftDiverged is
+// handled by nothing: this environment's script has been changed since it was
+// seeded, by a repair pass or by somebody, so a person has to choose, and the
+// sentence says plainly which of the two a rebuild would run.
+func envDriftLine(e ctlops.EnvironmentInfo) string {
+	switch e.ScriptDrift {
+	case ctlops.ScriptDriftRepoAhead:
+		return ctlops.SetupScriptPath + " in " + e.ScriptDriftRepo +
+			" has changed since this was built — `env rebuild " + e.Name + "` picks it up"
+	case ctlops.ScriptDriftDiverged:
+		return "differs from " + ctlops.SetupScriptPath + " in " + e.ScriptDriftRepo +
+			" and has been changed since it came from there, so a rebuild keeps THIS one. " +
+			"Read it with `env script " + e.Name + "`, or take the repository's with `env script " +
+			e.Name + " --from-repo`"
+	case ctlops.ScriptDriftRepoOnly:
+		return "none recorded yet — the next build reads " + ctlops.SetupScriptPath +
+			" from " + e.ScriptDriftRepo
+	default:
+		return ""
+	}
 }

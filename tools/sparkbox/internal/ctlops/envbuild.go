@@ -47,11 +47,11 @@ package ctlops
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -59,7 +59,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 )
 
@@ -676,10 +675,74 @@ type RepoFileReader interface {
 // trusting the feature. The repository is consulted only when the row has
 // nothing — that is what "seed" means.
 func (o *Ops) resolveSetupScript(ctx context.Context, op string, c Caller, e envs.Environment) (string, error) {
-	if strings.TrimSpace(e.SetupScript) != "" {
-		return e.SetupScript, nil
+	if strings.TrimSpace(e.SetupScript) == "" {
+		return o.seedSetupScript(ctx, op, c, e.Name)
 	}
-	return o.seedSetupScript(ctx, op, c, e.Name)
+	return o.refreshSetupScript(ctx, op, c, e), nil
+}
+
+// refreshSetupScript is what makes "commit it and rebuild" true.
+//
+// The row's script is what a build runs, and for most of this feature's life
+// that was the end of it: an environment seeded from a repository in March went
+// on building March's script for as long as it existed, no matter what was
+// committed afterwards, and nothing said so. That is a bad failure because it
+// is silent and because it contradicts what everybody assumes a rebuild does.
+//
+// It is also not fixable by simply preferring the repository, because the row
+// is sometimes the newer of the two — a repair pass rewrote it, or somebody
+// piped one in — and taking github's copy then would undo work that was never
+// committed back. So the rule is the narrow one, and the seed is what makes it
+// decidable: TAKE THE REPOSITORY'S SCRIPT ONLY WHEN THIS ROW IS STILL A CLEAN
+// COPY OF WHAT THE REPOSITORY LAST GAVE IT. Anything else builds what the row
+// holds, and the drift verdict on the environment's card asks a person instead.
+//
+// It NEVER FAILS A BUILD. Every error here — github unreachable, the file gone,
+// the store refusing the write — falls back to the script the row already has,
+// because "we could not check whether your script was current" is not a reason
+// to refuse to build the one you have.
+func (o *Ops) refreshSetupScript(ctx context.Context, op string, c Caller, e envs.Environment) string {
+	if !o.canReadRepoScripts() {
+		return e.SetupScript
+	}
+	found, err := o.readRepoSetupScript(ctx, op, c.Handle, e.Name)
+	if err != nil || found.Script == "" {
+		return e.SetupScript
+	}
+	if found.Script == e.SetupScript {
+		// Identical, and the seed may not say so yet — the ordinary way that
+		// happens is the one the platform asks for: an agent wrote the script,
+		// the owner committed it, and now the repository is its home. Stamping
+		// the seed is what enrols this environment in tracking that file from
+		// here on, so the NEXT commit is picked up automatically.
+		//
+		// Not for a script somebody typed in. `env script --set` means "this
+		// one, mine", and a manual script that happens to match today must not
+		// quietly become repository-owned tomorrow.
+		if e.SetupSeedSHA != envs.ScriptSHA(found.Script) && e.SetupFrom != envs.SetupFromManual {
+			if err := o.envs.SetSeededScript(c.Handle, e.Name, found.Script); err != nil {
+				o.log.Warn("could not record where an environment's setup script came from",
+					"user", c.Handle, "env", e.Name, "slug", found.Slug, "err", err)
+			}
+		}
+		return e.SetupScript
+	}
+	// They differ. Only an untouched row may be replaced.
+	if e.SetupSeedSHA == "" || envs.ScriptSHA(e.SetupScript) != e.SetupSeedSHA {
+		o.log.Info("an environment's setup script differs from its repository and was not replaced",
+			"user", c.Handle, "env", e.Name, "slug", found.Slug,
+			"reason", "the row has been changed since it was seeded")
+		return e.SetupScript
+	}
+	if err := o.envs.SetSeededScript(c.Handle, e.Name, found.Script); err != nil {
+		o.log.Warn("could not take an updated setup script from a repository",
+			"user", c.Handle, "env", e.Name, "slug", found.Slug, "err", err)
+		return e.SetupScript
+	}
+	o.log.Info("environment setup script refreshed from its repository",
+		"user", c.Handle, "env", e.Name, "slug", found.Slug, "bytes", len(found.Script))
+	o.forgetDrift(c.Handle, e.Name)
+	return found.Script
 }
 
 // seedSetupScript reads .sparkbox/setup.sh out of the environment's attached
@@ -701,87 +764,30 @@ func (o *Ops) resolveSetupScript(ctx context.Context, op string, c Caller, e env
 // present as "you have no setup script" and send somebody off to write one they
 // already have.
 func (o *Ops) seedSetupScript(ctx context.Context, op string, c Caller, name string) (string, error) {
-	if o.repos == nil || o.ghApp == nil || o.repoFiles == nil {
-		return "", nil
-	}
-	list, err := o.repos.ListRepos(c.Handle)
+	found, err := o.readRepoSetupScript(ctx, op, c.Handle, name)
 	if err != nil {
-		o.log.Warn("could not read repo attachments while seeding a setup script",
-			"user", c.Handle, "env", name, "err", err)
+		// The one error that must not be read as "there is no script".
+		// github being unreachable here would otherwise start an AGENT build
+		// for a project with a perfectly good committed one.
+		return "", err
+	}
+	if found.Script == "" {
 		return "", nil
 	}
-	mine := make([]repos.Repo, 0, len(list))
-	for _, r := range list {
-		if slicesContainsFold(r.Tags, name) {
-			mine = append(mine, r)
-		}
+	// SetSeededScript, not SetScript: this is the one writer that stamps the
+	// seed, because it is the one that knows the row is now a clean copy of
+	// what the repository said. Everything downstream — the drift verdict on
+	// the card, and whether a later build may take a newer version by itself —
+	// is decided by that stamp.
+	if err := o.envs.SetSeededScript(c.Handle, name, found.Script); err != nil {
+		return "", envStoreError(op, name, err)
 	}
-	sort.Slice(mine, func(i, j int) bool { return mine[i].Slug < mine[j].Slug })
-
-	var upstream error
-	for _, r := range mine {
-		owner, repoName, ok := repos.SplitSlug(r.Slug)
-		if !ok {
-			continue
-		}
-		inst, err := o.ghApp.InstallationFor(ctx, owner, repoName)
-		if err != nil {
-			if errors.Is(err, ghapp.ErrUpstream) {
-				upstream = err
-			}
-			continue
-		}
-		// r.Ref may be empty, which ReadFile takes to mean the repository's
-		// default branch — the same thing the checkout the script will run in
-		// was made from.
-		b, err := o.repoFiles.ReadFile(ctx, inst, owner, repoName, r.Ref, SetupScriptPath)
-		switch {
-		case errors.Is(err, ghapp.ErrNoSuchFile):
-			continue
-		case errors.Is(err, ghapp.ErrUpstream):
-			upstream = err
-			continue
-		case err != nil:
-			o.log.Warn("could not read a setup script from an attached repository",
-				"user", c.Handle, "env", name, "slug", r.Slug, "err", err)
-			continue
-		}
-		script := string(b)
-		if strings.TrimSpace(script) == "" {
-			// A file that is there and says nothing is not a script. Treating
-			// it as one would start a build that captures an untouched base
-			// image and calls it an environment.
-			continue
-		}
-		if len(script) > MaxSetupScript {
-			// Refused, never truncated: half a script is what every future fork
-			// of this environment would run.
-			o.log.Warn("an attached repository's setup script is too large to use",
-				"user", c.Handle, "env", name, "slug", r.Slug, "bytes", len(script), "max", MaxSetupScript)
-			continue
-		}
-		if err := o.envs.SetScript(c.Handle, name, script, envs.SetupFromRepo); err != nil {
-			return "", envStoreError(op, name, err)
-		}
-		o.log.Info("environment setup script seeded from a repository",
-			"user", c.Handle, "env", name, "slug", r.Slug, "ref", r.Ref, "bytes", len(script))
-		return script, nil
-	}
-	if upstream != nil {
-		return "", &Error{
-			Kind: KindUpstream, Op: op, Code: "github_unreachable",
-			Msg: "github.com did not answer, so there is no way to tell whether " + name +
-				" has a setup script in one of its repositories. Try again in a moment.",
-			Verbatim: true, Err: upstream,
-		}
-	}
-	return "", nil
+	o.log.Info("environment setup script seeded from a repository",
+		"user", c.Handle, "env", name, "slug", found.Slug, "bytes", len(found.Script))
+	o.forgetDrift(c.Handle, name)
+	return found.Script, nil
 }
 
-// slicesContainsFold is the tag comparison this file needs. Tags reach the
-// stores lowercased (NormalizeTags, envName), so a fold is belt and braces —
-// but a hand-written sandbox_tags row, or a store whose collation differs, must
-// not silently exclude an attachment from its own environment.
 func slicesContainsFold(list []string, want string) bool {
 	for _, s := range list {
 		if strings.EqualFold(s, want) {
@@ -845,7 +851,14 @@ func (o *Ops) SetupFor(ctx context.Context, b *host.Sandbox) (SetupJob, bool, er
 			"user", e.Owner, "env", e.Name, "sandbox", b.Name)
 		return SetupJob{}, false, nil
 	}
-	return SetupJob{Env: e.Name, Mode: SetupModeScript, Payload: e.SetupScript}, true, nil
+	// The payload is a RUNNER around the stored script rather than the script
+	// itself, for the two reasons on ScriptRunner: it runs the script from
+	// .sparkbox/setup.sh in the checkout, which is the path it was written to
+	// be run from, and it gives a script that fails one agent pass at making it
+	// run. The mode stays `script` — what changed is how a script build runs,
+	// not what kind of build it is, and the row still says the honest thing to
+	// the reconciler and to `env show`.
+	return SetupJob{Env: e.Name, Mode: SetupModeScript, Payload: ScriptRunner(e.Name, e.SetupScript)}, true, nil
 }
 
 // AgentRunner is the payload an agent build ships to the guest: a shell script
@@ -966,11 +979,7 @@ sparkbox_agent() {
   # box, and every ORDINARY sandbox in the fleet already persists sessions onto
   # a disk somebody may snapshot. Making the builder the one place that hides
   # its work bought consistency with nothing.
-  "$claude_bin" -p "$1" \
-    --permission-mode bypassPermissions \
-    --output-format text \
-    --disallowedTools Monitor ScheduleWakeup
-}
+` + agentInvocation + `}
 
 # sparkbox_verify: is this a script, and does it run?
 #
@@ -1065,6 +1074,291 @@ exit 3
 // agentPromptEOF is the heredoc terminator carrying a prompt. Distinctive on
 // purpose: it has to be a string no prompt would contain by accident.
 const agentPromptEOF = "SPARKBOX_AGENT_PROMPT_EOF"
+
+// agentInvocation is the ONE way anything in this file starts an agent, shared
+// by the two runners rather than written twice.
+//
+// The flags are not stylistic and drift between two copies of them would be
+// silent: --permission-mode bypassPermissions is required because under -p the
+// `auto` mode this platform seeds is downgraded to `default`, every Write and
+// Bash is denied, and the run still exits 0 — a repair that changed nothing,
+// reported as one that worked.
+//
+// THE TRANSCRIPT IS PERSISTED ON PURPOSE, and it is the only way anybody can
+// see what an unattended agent did. The run takes minutes, its log tail is
+// bounded to a sentence by the time it reaches a row, and a builder that
+// succeeds is destroyed a minute later — so without the transcript the honest
+// answer to "what did it do" is the diff and nothing else. Every template seeds
+// a hivemind daemon (deploy/refresh-agent-tools.sh) which syncs
+// ~/.claude/projects as the session runs, and that session is what the console
+// links to from the environment's row.
+const agentInvocation = `  "$claude_bin" -p "$1" \
+    --permission-mode bypassPermissions \
+    --output-format text \
+    --disallowedTools Monitor ScheduleWakeup
+`
+
+// ScriptRunner is the payload a SCRIPT build ships to the guest: the
+// environment's own setup script, placed where a setup script lives, run, and —
+// when it fails — handed to one agent to fix.
+//
+// WHY THE SCRIPT IS NOT SHIPPED BARE, which is what this used to do. The guest
+// worker stages whatever it is sent at /run/sparkbox/env-setup.sh and runs it
+// with the checkout as the working directory. That is fine for a script that
+// only uses relative paths and wrong for the first line most setup scripts
+// actually open with:
+//
+//	cd "$(dirname "${BASH_SOURCE[0]}")/.."
+//
+// which is correct for a file at .sparkbox/setup.sh and lands in /run for a
+// copy staged there. It was found on real hardware, and the way it was found is
+// the argument for fixing it here: an AGENT build verifies its script by
+// running .sparkbox/setup.sh in the checkout, so the script passed at the
+// moment it was written and failed the first time the same environment was
+// rebuilt from it. A build that cannot replay the script its own previous build
+// wrote is the one failure this feature exists to prevent.
+//
+// So the placement is the fix and the repair is the second half: the script
+// runs from .sparkbox/setup.sh, exactly as `bash .sparkbox/setup.sh` in a
+// checkout would, which is the sentence the platform's own guidance has been
+// telling agents to write for.
+//
+// WHY THIS LIVES IN THE GATEWAY AND NOT THE GUEST WORKER. A payload is just a
+// script, so every sandbox already in the fleet runs this the moment the
+// gateway is updated — no `sparkbox update-tools`, no version skew to reason
+// about. The worker's contract is unchanged: it stages a script, runs it, reads
+// .sparkbox/setup.sh back, and believes the exit status.
+//
+// POSIX sh, deliberately, and unlike AgentRunner: the worker picks bash when
+// the template has one and sh when it does not, an agent build needs a template
+// rich enough to have `claude` in it, and a script build does not. So no
+// pipefail, no arrays, no PIPESTATUS.
+func ScriptRunner(env, script string) string {
+	repair := scriptRepairPrompt(env)
+	if strings.Contains(repair, agentPromptEOF) {
+		repair = strings.ReplaceAll(repair, agentPromptEOF, "(redacted)")
+	}
+	// BASE64 AND NOT A HEREDOC OF THE SCRIPT ITSELF. The script is the owner's
+	// and may contain anything, including a line equal to whatever terminator
+	// was chosen — which would end the heredoc early and run the remainder of
+	// their file as this runner's shell. Encoding removes the question rather
+	// than answering it, and `base64 -d` is already required of every guest
+	// that takes a setup job at all.
+	return `#!/usr/bin/env bash
+# Written by the sparkbox gateway for an environment build. It runs this
+# environment's setup script from ` + SetupScriptPath + ` in the checkout — the
+# path the script was written to be run from — and, if it fails, gives one agent
+# one pass at making it run.
+set -u
+
+sparkbox_setup=` + SetupScriptPath + `
+sparkbox_work=$(mktemp 2>/dev/null || echo /tmp/sparkbox-env-setup.log)
+sparkbox_replay="$sparkbox_work.log"
+sparkbox_rc_file="$sparkbox_work.rc"
+sparkbox_prompt="$sparkbox_work.prompt"
+sparkbox_staged="$sparkbox_work.sh"
+
+# A bound on the RE-RUN only, never on the first one. The first run is the build
+# — a cold ` + "`docker compose build`" + ` or a first ` + "`cargo build`" + ` is legitimately long, and
+# the guest worker's own timeout is what ends a run that hangs. The re-run
+# happens over a box the first run already configured, so a repaired script that
+# still needs a quarter of an hour to repeat itself is a script with a problem
+# worth failing on.
+sparkbox_repair_timeout=900
+
+# Resolved the way the guest worker resolves it, so that what runs here is what
+# runs on every later build: bash when the template has one, sh on the slim one.
+sparkbox_sh=$(command -v bash 2>/dev/null || command -v sh 2>/dev/null || echo /bin/sh)
+
+cat > "$sparkbox_staged.b64" <<'SPARKBOX_SETUP_B64_EOF'
+` + base64.StdEncoding.EncodeToString([]byte(script)) + `
+SPARKBOX_SETUP_B64_EOF
+if ! base64 -d < "$sparkbox_staged.b64" > "$sparkbox_staged" 2>/dev/null; then
+  echo "sparkbox: this environment's setup script did not decode in the builder" >&2
+  exit 1
+fi
+
+# WHERE THE SCRIPT RUNS FROM, which is the whole point of this runner. The
+# working directory is already the primary checkout; the script belongs at
+# $sparkbox_setup inside it, because that is the path it was written to be run
+# from and the path a person types.
+#
+# Identical is the ordinary case and it writes nothing: the environment's stored
+# script came out of this very repository, so the file is already there and
+# already right. A missing cmp (a very slim template) fails the test and takes
+# the copy path, which writes the same bytes over the same bytes.
+if [ -f "$sparkbox_setup" ] && cmp -s "$sparkbox_staged" "$sparkbox_setup" 2>/dev/null; then
+  echo "sparkbox: running $sparkbox_setup from this checkout"
+else
+  if [ -e "$sparkbox_setup" ]; then
+    # Not silent, because it is a real divergence: somebody piped a script in
+    # with ` + "`env script --set`" + ` and the checkout holds a different one. The
+    # stored script is what a build runs, by definition, so it is what gets
+    # written — and ` + "`git diff`" + ` in this builder shows exactly what changed.
+    echo "sparkbox: this environment's stored setup script differs from the $sparkbox_setup in this checkout; the stored one is what a build runs, so it is written there for this run" >&2
+  fi
+  if mkdir -p "$(dirname "$sparkbox_setup")" 2>/dev/null && cp "$sparkbox_staged" "$sparkbox_setup" 2>/dev/null; then
+    chmod 0755 "$sparkbox_setup" 2>/dev/null || true
+  else
+    # No writable checkout to put it in — a read-only mount, or an environment
+    # with no repository at all running in a home directory that will not take
+    # the file. Running the staged copy is the old behaviour and it is the one
+    # this runner exists to avoid, so it is announced rather than fallen into.
+    echo "sparkbox: could not place the setup script at $sparkbox_setup, so it runs from $sparkbox_staged instead; a script that locates its project relative to its own path will not find it from there" >&2
+    sparkbox_setup=$sparkbox_staged
+  fi
+fi
+
+# tee so the output is BOTH streamed to the build log as it happens — somebody
+# tailing a fifteen-minute build should see it move — and kept in a file, which
+# is what the repair agent is given to read.
+sparkbox_tee() {
+  if command -v tee >/dev/null 2>&1; then
+    tee "$sparkbox_replay"
+  else
+    cat > "$sparkbox_replay"
+    cat "$sparkbox_replay"
+  fi
+}
+
+# The exit status travels through a FILE because it is produced inside a
+# pipeline, and a POSIX shell gives the pipeline its last command's status —
+# tee's, which is 0 for every script that ever failed. pipefail would answer
+# this in bash and does not exist in the sh this may be running under.
+sparkbox_run() {
+  if [ -n "${1:-}" ] && command -v timeout >/dev/null 2>&1; then
+    { timeout -k 30 "$1" "$sparkbox_sh" "$sparkbox_setup" </dev/null 2>&1; echo $? > "$sparkbox_rc_file"; } | sparkbox_tee
+  else
+    { "$sparkbox_sh" "$sparkbox_setup" </dev/null 2>&1; echo $? > "$sparkbox_rc_file"; } | sparkbox_tee
+  fi
+  sparkbox_rc=$(cat "$sparkbox_rc_file" 2>/dev/null || echo 1)
+  case "$sparkbox_rc" in ''|*[!0-9]*) sparkbox_rc=1 ;; esac
+}
+
+# The last non-empty line of a failed run, which is almost always the error
+# itself. It is appended to the sentences below because summarizeBuildLog takes
+# the LAST non-empty line of the whole log as the environment's recorded build
+# error — so a bare "no agent was available" would replace the actual failure
+# with a note about the thing that did not happen.
+sparkbox_last() {
+  grep -v '^[[:space:]]*$' "$sparkbox_replay" 2>/dev/null | tail -n 1
+}
+
+sparkbox_run ""
+if [ "$sparkbox_rc" = 0 ]; then
+  exit 0
+fi
+
+# ---- the failure, and the one pass at fixing it ----
+#
+# Every path out of here that does NOT run an agent exits with the script's own
+# status and ends the log with the script's own error, because that is what the
+# environment's row shows and what the person reading it has to act on.
+
+claude_bin=$(command -v claude 2>/dev/null || true)
+[ -n "$claude_bin" ] || claude_bin=/usr/local/bin/claude
+if [ ! -x "$claude_bin" ]; then
+  echo "sparkbox: $sparkbox_setup exited $sparkbox_rc and this box has no agent to repair it with: $(sparkbox_last)" >&2
+  exit "$sparkbox_rc"
+fi
+
+# Checked here rather than left to a 401 four minutes in. A script build is NOT
+# refused for want of a credential — the script is expected to work, and usually
+# does — so this is the first moment the absence matters, and it names the fix.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "sparkbox: $sparkbox_setup exited $sparkbox_rc and no agent credential reached this builder, so nothing tried to repair it — attach one with 'secret set ` + AgentCredential + ` --tag ` + env + `': $(sparkbox_last)" >&2
+  exit "$sparkbox_rc"
+fi
+
+sparkbox_agent() {
+` + agentInvocation + `}
+
+echo "sparkbox: $sparkbox_setup exited $sparkbox_rc; giving one agent one pass at making it run" >&2
+cat > "$sparkbox_prompt" <<'` + agentPromptEOF + `'
+` + repair + `
+` + agentPromptEOF + `
+printf '\n--- what happened when %s was run ---\n' "$sparkbox_setup" >> "$sparkbox_prompt"
+tail -c 4000 "$sparkbox_replay" >> "$sparkbox_prompt" 2>/dev/null || true
+sparkbox_agent "$(cat "$sparkbox_prompt")"
+
+# The deliverable is the file at the conventional path, whatever this run was
+# started from: if the script had to run from a staged copy above, an agent that
+# wrote a real ` + SetupScriptPath + ` has produced the thing the guest worker
+# reads back, and that is what gets verified.
+if [ -s "` + SetupScriptPath + `" ]; then
+  sparkbox_setup=` + SetupScriptPath + `
+fi
+if [ ! -s "$sparkbox_setup" ]; then
+  echo "sparkbox: the repair pass left no $sparkbox_setup behind, so there is nothing to build from" >&2
+  exit 3
+fi
+
+echo "sparkbox: re-running $sparkbox_setup to check the repair" >&2
+sparkbox_run "$sparkbox_repair_timeout"
+if [ "$sparkbox_rc" = 0 ]; then
+  echo "sparkbox: an agent repaired $sparkbox_setup and it now runs. The repaired file is recorded on this environment and is what later builds will run — commit it back to the project so the two agree." >&2
+  exit 0
+fi
+
+# ONE pass, and this is where it ends. A second agent that could not make a
+# script run is not usually one round away from making it run, the build shares
+# one wall-clock budget with the run that got here, and a failed build keeps its
+# builder paused — so a person can open the box, the log and the script, which
+# beats a third machine-written guess.
+echo "sparkbox: an agent was given one pass at $sparkbox_setup and it still does not run here: $(sparkbox_last)" >&2
+exit "$sparkbox_rc"
+`
+}
+
+// scriptRepairPrompt is the one agent invocation of a SCRIPT build: the
+// project's own setup script did not run in a fresh microVM, and this asks for
+// it to be fixed.
+//
+// It is deliberately NOT repairPrompt. That one talks to an agent about a file
+// it wrote itself minutes ago in a box it configured itself; this one talks to
+// an agent about somebody's committed infrastructure, on a box where NOTHING is
+// set up yet, and the difference changes what is true: the failure here is
+// usually a first-run failure — a missing package, a path that only existed on
+// the machine the script was written on, an assumption about a tool the base
+// image does not have — not an idempotence bug.
+//
+// The refusal in the fourth paragraph is the one that matters, and it matters
+// more here than in the agent case. This script is committed to a repository
+// and the repaired version is recorded on the environment, so an agent that
+// makes the error go away by deleting the step that failed has written a file
+// that exits 0, builds nothing, and is then run on every later build of this
+// environment by everybody who uses it.
+func scriptRepairPrompt(env string) string {
+	return `This project's setup script did not run in this microVM. Fix it. Nobody is
+watching and nobody can answer a question, so do not ask any.
+
+You are in a FRESH box that this script was supposed to configure, and it failed
+partway through, so assume nothing is installed or running unless you check.
+Read ` + SetupScriptPath + `, work out from the output below why it failed, and
+do the work by hand until the project is genuinely set up — then rewrite the
+file so that running it again here exits 0. Read ` + "`sparkbox docs dev-environment`" + `
+for what this platform expects of that file: an idempotent script, the project's
+development service as a systemd --user unit bound to 0.0.0.0, and the
+human-facing port selected with ` + "`sparkbox set-port PORT`" + `.
+
+It is re-run immediately, over a box you have just configured, so every step has
+to be safe to repeat: ` + "`mkdir -p`" + ` rather than ` + "`mkdir`" + `, skip a clone whose
+directory is already there, and let an already-installed package be fine.
+
+Do not make it pass by making it do less. Deleting the step that failed, or
+wrapping it in ` + "`|| true`" + `, produces a file that exits 0 and builds nothing — and
+this file is committed infrastructure: it is recorded on the ` + env + `
+environment and run on every later build of it, on a fresh checkout where the
+work really does need doing. If a step genuinely cannot work here, keep it and
+say so in your final message.
+
+This is one non-interactive turn. Do not use a background monitor, schedule a
+wakeup, or end your response before the script is fixed; it is re-run as soon as
+this response ends.
+
+Do not commit, push, or open a pull request; somebody will review this file.
+`
+}
 
 // agentPrompt is what the agent in a builder VM is asked to do.
 //

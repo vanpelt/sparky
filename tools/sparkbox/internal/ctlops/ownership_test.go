@@ -348,6 +348,15 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// both carry the owner in their WHERE clause, and a name belonging to
 		// somebody else comes back as ErrNoSuchEnvironment.
 		"EnvScript": true, "SetEnvScript": true,
+		// AdoptRepoScript is the same pair's third member and is scoped the
+		// same way, with one extra step worth naming: it reads a file out of a
+		// REPOSITORY, so it could in principle reach something the environment
+		// gate does not cover. It cannot. The walk is over o.repos.ListRepos of
+		// the CALLER's handle, filtered to attachments carrying this
+		// environment's tag, and the environment itself is fetched through the
+		// owner-carrying Get before any of that runs — so the only files it can
+		// read are ones the caller already attached to their own environment.
+		"AdoptRepoScript": true,
 		// The build pair names an environment and is scoped exactly as those
 		// eight are, through the same owner-carrying Get. The one extra thing
 		// they name — the builder sandbox — is DERIVED from the environment's

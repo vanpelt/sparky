@@ -45,6 +45,7 @@ type Environments interface {
 	UnsetEnvVar(ctx context.Context, c ctlops.Caller, env, name string) error
 	EnvScript(c ctlops.Caller, name string) (script, from string, err error)
 	SetEnvScript(c ctlops.Caller, name, script, from string) error
+	AdoptRepoScript(ctx context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
 	BuildEnvironment(ctx context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
 	CaptureEnvironment(ctx context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
 }
@@ -271,6 +272,24 @@ func (h *Handler) putEnvScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// adoptRepoScript replaces this environment's script with the one in an
+// attached repository. It is the card's "Use <repo>'s" button, and it is the
+// only action in this panel that discards a setup script — which is why the
+// page asks before calling it, and why nothing about a build does this by
+// itself.
+func (h *Handler) adoptRepoScript(w http.ResponseWriter, r *http.Request) {
+	if h.envs == nil {
+		writeErr(w, http.StatusNotImplemented, "environments are not enabled on this host")
+		return
+	}
+	info, err := h.envs.AdoptRepoScript(r.Context(), envCaller(r), r.PathValue("name"))
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 // buildEnvironment starts a build and RETURNS. It is not a job: the environment

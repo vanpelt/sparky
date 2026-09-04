@@ -188,6 +188,12 @@ type Environments interface {
 	List(owner string) ([]envs.Environment, error)
 	Delete(owner, name string) error
 	SetScript(owner, name, script, from string) error
+	// SetSeededScript is the one writer that stamps setup_seed_sha, and it is
+	// separate from SetScript for that reason alone: the seed records what a
+	// REPOSITORY last said, so every other writer of the script — a repair
+	// pass, `env script --set`, an agent's deliverable — must leave it as it
+	// was. Their whole significance is that they disagree with it.
+	SetSeededScript(owner, name, script string) error
 	SetState(owner, name string, st envs.State, box, buildErr string) error
 	SetBuildSession(owner, name, url string) error
 	SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error
@@ -555,6 +561,15 @@ type Ops struct {
 	envBuildTimeout time.Duration
 	envBuilds       singleflight.Group
 	envBuildsWG     sync.WaitGroup
+
+	// scriptDrift caches, per environment, what its repository's
+	// .sparkbox/setup.sh last hashed to (envdrift.go). In memory and not in the
+	// store on purpose: it is an observation about github made at a moment, and
+	// a restart that forgets it asks again, where a persisted one would have to
+	// carry its own staleness rules into every reader.
+	scriptDriftMu sync.Mutex
+	scriptDrift   map[string]driftEntry
+	scriptDriftSF singleflight.Group
 }
 
 // awaitEnvBuilds blocks until every detached environment-build completion has

@@ -1457,6 +1457,24 @@ func (f *fakeEnvs) SetScript(owner, name, script, from string) error {
 	return nil
 }
 
+// SetSeededScript mirrors the real store: it is the ONLY writer that stamps
+// the seed. A fake that stamped it from SetScript too would make every test
+// agree that a repaired script is still a clean copy of its repository, which
+// is the exact confusion the column exists to prevent.
+func (f *fakeEnvs) SetSeededScript(owner, name, script string) error {
+	f.c.add("envs.SetSeededScript %s/%s", owner, name)
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		return envs.ErrNoSuchEnvironment
+	}
+	e.SetupScript, e.SetupFrom = script, envs.SetupFromRepo
+	e.SetupSeedSHA = envs.ScriptSHA(script)
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
 func (f *fakeEnvs) SetBuildSession(owner, name, url string) error {
 	f.c.add("envs.SetBuildSession %s/%s %s", owner, name, url)
 	k := envKey(owner, name)
