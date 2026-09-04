@@ -93,21 +93,55 @@ if [ -z "$proxy_advertise_port" ]; then
 fi
 readonly proxy_advertise_port
 
+# Two names per architecture, because they disagree: the release assets are
+# named with Go's GOARCH (amd64/arm64) and upstream Firecracker's are named with
+# uname's (x86_64/aarch64). Mixing them up is what made fetch_upstream_jailer
+# amd64-only.
 case "$(uname -m)" in
   x86_64)
     readonly artifact_arch=amd64
+    readonly upstream_arch=x86_64
+    ;;
+  aarch64|arm64)
+    readonly artifact_arch=arm64
+    readonly upstream_arch=aarch64
     ;;
   *)
-    echo "unsupported Kubernetes POC architecture: $(uname -m) (expected x86_64)" >&2
+    echo "unsupported Kubernetes POC architecture: $(uname -m) (expected x86_64 or aarch64)" >&2
     exit 1
     ;;
 esac
 
-readonly firecracker_sha256="${SPARKBOX_FIRECRACKER_SHA256:-2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7}"
+# The release artifacts are built per architecture and are not bit-reproducible,
+# so every checksum below is arch-specific and can only be filled in after that
+# release is published. Each stays on its own
+# `readonly <name>_<arch>="${SPARKBOX_..._<ARCH>:-<default>}"` line: that is the
+# shape hack/check-cks-pin.sh reads with sed to diff BOTH arches against the
+# release's own manifest-<arch>.env at build time. Values below are verbatim
+# from v0.7.4's manifest-amd64.env and manifest-arm64.env.
+readonly firecracker_sha256_amd64="${SPARKBOX_FIRECRACKER_SHA256_AMD64:-2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7}"
+readonly jailer_sha256_amd64="${SPARKBOX_JAILER_SHA256_AMD64:-1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd}"
+readonly kernel_sha256_amd64="${SPARKBOX_KERNEL_SHA256_AMD64:-9d98275572b38a52dd078454a4b1d8f629205a1d182f3dfcc3f9ab2b0c281839}"
+readonly rootfs_sha256_amd64="${SPARKBOX_ROOTFS_SHA256_AMD64:-ccf86704bc2b80b0756740cd1d057172b484d01b8e7c48763a8f7a4e3ee90e15}"
+readonly firecracker_sha256_arm64="${SPARKBOX_FIRECRACKER_SHA256_ARM64:-71ca0733576579a75cef268a8fd0ae0629b761b9844559c611f144132ac6038a}"
+readonly jailer_sha256_arm64="${SPARKBOX_JAILER_SHA256_ARM64:-7db39d34991ccdd8d12aacab384b1dcbe35e79c27823e4e4d33725d4b504edd7}"
+readonly kernel_sha256_arm64="${SPARKBOX_KERNEL_SHA256_ARM64:-839d12cfa56fdd372d93fb84de5804a353e6137523c4d37bbbea6cd8b37d4d90}"
+readonly rootfs_sha256_arm64="${SPARKBOX_ROOTFS_SHA256_ARM64:-250f0a3efb665e06ae421f000d73b7d6554114f4659801703c23673c77f26313}"
+
 readonly firecracker_version="${SPARKBOX_FIRECRACKER_VERSION:-v1.16.1}"
-readonly jailer_sha256="${SPARKBOX_JAILER_SHA256:-1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd}"
-readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-9d98275572b38a52dd078454a4b1d8f629205a1d182f3dfcc3f9ab2b0c281839}"
-readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-ccf86704bc2b80b0756740cd1d057172b484d01b8e7c48763a8f7a4e3ee90e15}"
+
+# Resolve the pins for this host. The unsuffixed SPARKBOX_<THING>_SHA256
+# predates multi-arch and still wins where it is set. Indirect expansion without
+# a `:-` fallback on purpose: `set -u` then aborts loudly if an architecture ever
+# reaches here with a pin missing, rather than fetching against an empty digest.
+firecracker_pin="firecracker_sha256_$artifact_arch"
+jailer_pin="jailer_sha256_$artifact_arch"
+kernel_pin="kernel_sha256_$artifact_arch"
+rootfs_pin="rootfs_sha256_$artifact_arch"
+readonly firecracker_sha256="${SPARKBOX_FIRECRACKER_SHA256:-${!firecracker_pin}}"
+readonly jailer_sha256="${SPARKBOX_JAILER_SHA256:-${!jailer_pin}}"
+readonly kernel_sha256="${SPARKBOX_KERNEL_SHA256:-${!kernel_pin}}"
+readonly rootfs_sha256="${SPARKBOX_ROOTFS_SHA256:-${!rootfs_pin}}"
 
 mkdir -p \
   "$asset_dir" "$image_dir" "$template_dir" "$tools_dir" "$control_dir" "$hot_dir" \
@@ -155,9 +189,9 @@ fetch_upstream_jailer() {
   echo "downloading matching jailer from Firecracker $firecracker_version"
   curl --fail --location --retry 5 --retry-all-errors \
     --connect-timeout 15 --output "$archive" \
-    "https://github.com/firecracker-microvm/firecracker/releases/download/$firecracker_version/firecracker-$firecracker_version-x86_64.tgz"
+    "https://github.com/firecracker-microvm/firecracker/releases/download/$firecracker_version/firecracker-$firecracker_version-$upstream_arch.tgz"
   tar -xOf "$archive" \
-    "release-$firecracker_version-x86_64/jailer-$firecracker_version-x86_64" \
+    "release-$firecracker_version-$upstream_arch/jailer-$firecracker_version-$upstream_arch" \
     > "$extracted"
   printf '%s  %s\n' "$jailer_sha256" "$extracted" | sha256sum --check --status
   mv "$extracted" "$destination"

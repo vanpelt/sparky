@@ -15,11 +15,21 @@
 #                             the stale checksum, and CrashLoops.
 #
 # v0.6.0 shipped exactly that. This turns both into a build-time failure.
+#
+# The image is multi-arch, and each architecture's artifacts are built
+# separately, so each has its own set of constants and its own way to be wrong.
+# With no arguments this checks every architecture the image publishes; naming
+# architectures checks only those (CI called it `check-cks-pin.sh amd64` before
+# arm64 existed, and that still means "amd64 only").
 set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 entrypoint="$script_dir/../deploy/kubernetes/entrypoint.sh"
-arch="${1:-amd64}"
+if [ "$#" -gt 0 ]; then
+  arches=("$@")
+else
+  arches=(amd64 arm64)
+fi
 
 value_of() {
   # Pull the default out of `readonly name="${OVERRIDE:-value}"`.
@@ -57,13 +67,6 @@ if [ -r "$deployment" ]; then
   echo "deployment.yaml agrees: $release"
 fi
 
-manifest_url="https://github.com/vanpelt/sparky/releases/download/$release/manifest-$arch.env"
-manifest=$(curl -fsSL "$manifest_url") || {
-  echo "FAIL: cannot fetch $manifest_url" >&2
-  echo "  entrypoint.sh pins $release; does that release exist and have assets?" >&2
-  exit 1
-}
-
 manifest_value() { printf '%s\n' "$manifest" | sed -n "s/^$1=//p"; }
 
 status=0
@@ -73,6 +76,13 @@ check() { # check <label> <entrypoint-var> <manifest-key>
   want=$(manifest_value "$3")
   if [ -z "$want" ]; then
     echo "  skip $label (not in manifest-$arch.env)"
+  elif [ -z "$got" ]; then
+    # A renamed or dropped constant reads as empty, which would otherwise look
+    # like an ordinary mismatch and send the reader hunting for a checksum typo.
+    echo "  FAIL $label"
+    echo "         entrypoint.sh: no 'readonly $2=\"\${...:-...}\"' line"
+    echo "       $release manifest: $want"
+    status=1
   elif [ "$got" = "$want" ]; then
     echo "  ok   $label $got"
   else
@@ -83,11 +93,22 @@ check() { # check <label> <entrypoint-var> <manifest-key>
   fi
 }
 
-echo "entrypoint.sh pins $release (arch $arch)"
-check kernel      kernel_sha256      SHA256_VMLINUX
-check rootfs      rootfs_sha256      SHA256_ROOTFS
-check firecracker firecracker_sha256 SHA256_FIRECRACKER
-check jailer      jailer_sha256      SHA256_JAILER
+for arch in "${arches[@]}"; do
+  manifest_url="https://github.com/vanpelt/sparky/releases/download/$release/manifest-$arch.env"
+  manifest=$(curl -fsSL "$manifest_url") || {
+    echo "FAIL: cannot fetch $manifest_url" >&2
+    echo "  entrypoint.sh pins $release; does that release exist and have $arch assets?" >&2
+    exit 1
+  }
+
+  echo "entrypoint.sh pins $release (arch $arch)"
+  # The constants are suffixed by arch because one entrypoint serves both:
+  # the image is multi-arch and picks its set from `uname -m` at Pod start.
+  check kernel      "kernel_sha256_$arch"      SHA256_VMLINUX
+  check rootfs      "rootfs_sha256_$arch"      SHA256_ROOTFS
+  check firecracker "firecracker_sha256_$arch" SHA256_FIRECRACKER
+  check jailer      "jailer_sha256_$arch"      SHA256_JAILER
+done
 
 if [ "$status" -ne 0 ]; then
   cat >&2 <<MSG
@@ -98,8 +119,8 @@ Because the artifacts are rebuilt per release and are not bit-reproducible,
 the constants can only be filled in AFTER that release is published. Read the
 values out of the release's own manifest and commit them alongside the pin:
 
-  curl -fsSL $manifest_url
+  curl -fsSL https://github.com/vanpelt/sparky/releases/download/$release/manifest-<arch>.env
 MSG
   exit 1
 fi
-echo "pinned checksums match $release"
+echo "pinned checksums match $release for ${arches[*]}"

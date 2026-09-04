@@ -58,7 +58,7 @@ env:
 
 jobs:
   build:
-    name: build linux/amd64
+    name: build linux/amd64,linux/arm64
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -68,8 +68,19 @@ jobs:
       # build time and splits into two silent failures at run time — a warm
       # cache silently keeps the PREVIOUS release's kernel and rootfs, a cold
       # one CrashLoops on a checksum error. v0.6.0 shipped both.
+      #
+      # No argument means every architecture the image below publishes. One
+      # image serves both, so an arm64-only mismatch would ship inside a
+      # manifest list tagged with the release and fail only on arm64 hardware.
       - name: pinned checksums match the pinned release
-        run: tools/sparkbox/hack/check-cks-pin.sh amd64
+        run: tools/sparkbox/hack/check-cks-pin.sh
+
+      # linux/arm64 needs QEMU: the Go stages cross-compile from
+      # $BUILDPLATFORM, but the ubuntu:24.04 runtime stage runs apt-get for the
+      # target architecture.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v4
 
@@ -100,7 +111,7 @@ jobs:
         with:
           context: tools
           file: tools/sparkbox/deploy/kubernetes/Containerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             SPARKBOX_VERSION=${{ inputs.release_tag || format('{0}-cks', github.sha) }}
