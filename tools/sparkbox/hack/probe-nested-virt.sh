@@ -116,6 +116,55 @@ if [ -n "${module:-}" ]; then
   fi
 fi
 
+# --- 3b. what KVM actually offers a guest -------------------------------------
+# The module parameter is the cause; this is the effect, and the effect is what
+# a VMM can pass on. KVM sets X86_FEATURE_VMX / X86_FEATURE_SVM in
+# KVM_GET_SUPPORTED_CPUID only `if (nested)`, so reading the bit back settles in
+# one ioctl what the parameter only implies -- and it is the number to compare
+# against a guest's own CPUID when the two disagree. Read-only: the ioctl is on
+# the /dev/kvm fd and creates no VM.
+if [ "$arch" = x86_64 ] && [ -c /dev/kvm ] && command -v python3 >/dev/null 2>&1; then
+  kvm_offers=$(python3 - <<'PY' 2>&1
+import fcntl, struct, array, os
+KVM_GET_SUPPORTED_CPUID = 0xC008AE05  # _IOWR(0xAE, 0x05, struct kvm_cpuid2)
+NENT = 256
+try:
+    fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+except OSError as e:
+    print("err:cannot open /dev/kvm: %s" % e.strerror); raise SystemExit
+buf = array.array("B", b"\x00" * (8 + NENT * 40))
+struct.pack_into("<II", buf, 0, NENT, 0)
+try:
+    fcntl.ioctl(fd, KVM_GET_SUPPORTED_CPUID, buf, True)
+except OSError as e:
+    print("err:KVM_GET_SUPPORTED_CPUID failed: %s" % e.strerror); raise SystemExit
+nent = struct.unpack_from("<I", buf, 0)[0]
+leaves = {}
+for i in range(nent):
+    f, ix, fl, a, b, c, d = struct.unpack_from("<IIIIIII", buf, 8 + i * 40)
+    leaves.setdefault(f, (a, b, c, d))
+vmx = (leaves.get(1, (0, 0, 0, 0))[2] >> 5) & 1
+svm = (leaves.get(0x80000001, (0, 0, 0, 0))[2] >> 2) & 1
+print("ok:%d:%d:0x%08x" % (vmx, svm, leaves.get(1, (0, 0, 0, 0))[2]))
+PY
+)
+  IFS=: read -r ko_status ko_vmx ko_svm ko_ecx <<<"$kvm_offers"
+  if [ "$ko_status" = ok ]; then
+    ko_have=""
+    [ "$ko_vmx" = 1 ] && ko_have="VMX"
+    [ "$ko_svm" = 1 ] && ko_have="${ko_have:+$ko_have and }SVM"
+    if [ -n "$ko_have" ]; then
+      pass "KVM offers guests" "$ko_have in KVM_GET_SUPPORTED_CPUID (leaf 1 ECX $ko_ecx) -- a VMM can pass nested through"
+    else
+      failf "KVM offers guests" "neither VMX nor SVM in KVM_GET_SUPPORTED_CPUID (leaf 1 ECX $ko_ecx) -- no VMM can expose nested here whatever it is asked to do"
+    fi
+  elif [ "$ko_status" = err ]; then
+    warnf "KVM offers guests" "${kvm_offers#err:}"
+  else
+    warnf "KVM offers guests" "could not read KVM_GET_SUPPORTED_CPUID"
+  fi
+fi
+
 # --- 4. kernel fixes for the 2026 nested-virt escapes -------------------------
 # Stable series -> first release carrying the fix, transcribed from the kernel.org
 # CVE records themselves (git.kernel.org/pub/scm/linux/security/vulns.git,
@@ -177,7 +226,33 @@ fi
 # --- 5. Landlock ---------------------------------------------------------------
 # Cloud Hypervisor's --landlock requires Landlock ABI v3 and fails vm.create
 # outright without it, so this is a node property exactly like kvm.nested.
-if [ -r /sys/kernel/security/lsm ]; then
+#
+# Ask the kernel directly first: landlock_create_ruleset(NULL, 0,
+# LANDLOCK_CREATE_RULESET_VERSION) returns the ABI version and needs no
+# privilege, no securityfs mount and no readable dmesg. That matters because the
+# way we actually run this probe is `kubectl exec -c vmm-helper`, and the node
+# Pod has no /sys/kernel/security -- the securityfs path below answered WARN on
+# CKS for a Node whose real answer is ABI 7. The syscall number is 444 on every
+# Linux architecture that has it.
+landlock_abi=""
+if command -v python3 >/dev/null 2>&1; then
+  landlock_abi=$(python3 - <<'PY' 2>/dev/null
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+r = libc.syscall(ctypes.c_long(444), None, ctypes.c_size_t(0), ctypes.c_uint(1))
+print(r if r > 0 else "")
+PY
+)
+elif command -v perl >/dev/null 2>&1; then
+  landlock_abi=$(perl -e 'my $r = syscall(444, 0, 0, 1); print $r > 0 ? $r : ""' 2>/dev/null)
+fi
+if [ -n "$landlock_abi" ]; then
+  if [ "$landlock_abi" -lt 3 ]; then
+    warnf "landlock" "ABI v$landlock_abi; cloud-hypervisor --landlock needs v3 and fails VM creation below it"
+  else
+    pass "landlock" "ABI v$landlock_abi (>= v3, what cloud-hypervisor --landlock pins)"
+  fi
+elif [ -r /sys/kernel/security/lsm ]; then
   if grep -qw landlock /sys/kernel/security/lsm; then
     abi=$(dmesg 2>/dev/null | sed -n 's/.*landlock: Up and running.*ABI version \([0-9]*\).*/\1/p' | tail -1)
     if [ -n "$abi" ] && [ "$abi" -lt 3 ]; then
@@ -189,7 +264,7 @@ if [ -r /sys/kernel/security/lsm ]; then
     warnf "landlock" "not in the active LSM list; cloud-hypervisor --landlock would fail VM creation (chroot and seccomp are unaffected)"
   fi
 else
-  warnf "landlock" "/sys/kernel/security/lsm not readable; confirm landlock is in CONFIG_LSM from the host"
+  warnf "landlock" "landlock_create_ruleset() gave no version (no python3/perl, or the syscall is unavailable) and /sys/kernel/security/lsm is not readable; confirm landlock is in CONFIG_LSM from the host"
 fi
 
 # --- 6. optional: the VMM itself ----------------------------------------------

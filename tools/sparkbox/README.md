@@ -811,9 +811,12 @@ installations. Firecracker requires reflinks for both template clones and
 snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
-Firecracker cannot give a sandbox usable nested virtualization: it has no
-supported switch, and — decisively — no nested state in its snapshots, so
-pausing a guest that is running an inner VM loses it.
+Firecracker has no supported switch for nested virtualization and — decisively —
+no nested state in its snapshots, so pausing a guest that is running an inner VM
+loses it. M0 of the spike, run against CKS on 2026-09-04, found the rest of the
+stack readier than expected: the node has `kvm_intel.nested=Y` and every sandbox
+already carries the VMX bit in its CPUID. The one thing left in the way is that
+our guest kernel is built without `CONFIG_KVM_INTEL`.
 [`docs/cloud-hypervisor-feasibility.md`](docs/cloud-hypervisor-feasibility.md)
 is the spike on swapping the VMM for Cloud Hypervisor to get it, with
 [`docs/cloud-hypervisor-port-design.md`](docs/cloud-hypervisor-port-design.md)
@@ -821,11 +824,14 @@ is the spike on swapping the VMM for Cloud Hypervisor to get it, with
 [`docs/nested-virtualization-design.md`](docs/nested-virtualization-design.md)
 (per-sandbox plumbing, risk register, kill criteria) behind it.
 `hack/probe-nested-virt.sh` is the host preflight — CPU flags, `/dev/kvm`, the
-KVM module's `nested` and `ept`/`npt` parameters, Landlock, and the three 2026
+KVM module's `nested` and `ept`/`npt` parameters, what
+`KVM_GET_SUPPORTED_CPUID` actually offers a guest, Landlock, and the three 2026
 shadow-MMU escapes a nested-enabled node must be patched against — and
 `hack/probe-cks-nested.sh` runs it against the live CKS deployment, read-only,
-alongside the one `grep` that settles whether our Firecracker guests already see
-the VMX bit.
+alongside the guest-side CPUID and `MSR_IA32_FEAT_CTL` read that settles whether
+our Firecracker guests already have the VMX bit. Read that pair rather than
+`grep vmx /proc/cpuinfo`, which gives a false negative here and cost this spike
+a revision.
 
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome

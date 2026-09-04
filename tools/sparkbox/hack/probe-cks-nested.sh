@@ -142,40 +142,77 @@ case "$probe_rc" in
   *) warnf "node preflight" "undetermined (exit $probe_rc)" ;;
 esac
 
-say "4. Question B — does a Firecracker guest already see VMX/SVM?"
+say "4. Question B — does a Firecracker guest already have the VMX/SVM bit?"
+# DO NOT ask /proc/cpuinfo. It answers a different question and it answered it
+# wrongly for us on 2026-09-04, which is how this spike came to blame the node.
+#
+# /proc/cpuinfo prints X86_FEATURE_VMX, and the guest kernel CLEARS that cap in
+# init_ia32_feat_ctl() whenever MSR_IA32_FEAT_CTL comes back locked without
+# FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX. Our guest kernel locks it that way itself:
+# the Firecracker CI config we merge over has `# CONFIG_VIRTUALIZATION is not
+# set`, and that same function only sets the enable bit under
+# IS_ENABLED(CONFIG_KVM_INTEL). So an absent `vmx` in /proc/cpuinfo is a
+# statement about OUR kernel config, and says nothing at all about the node or
+# the VMM.
+#
+# CPUID.1:ECX[5] via /dev/cpu/0/cpuid is the hardware bit itself, untouched by
+# any of that, and the guest kernel's own cap-clearing never rewrites it. Read
+# the MSR too, so the two are always reported together and the next reader
+# cannot repeat the confusion.
+guest_probe='
+sudo python3 -c "
+import struct, os
+f = os.open(\"/dev/cpu/0/cpuid\", os.O_RDONLY)
+os.lseek(f, 1, os.SEEK_SET)
+a, b, c, d = struct.unpack(\"<IIII\", os.read(f, 16))
+print(\"cpuid1ecx=0x%08x vmx=%d\" % (c, (c >> 5) & 1))
+try:
+    m = os.open(\"/dev/cpu/0/msr\", os.O_RDONLY)
+    os.lseek(m, 0x3a, os.SEEK_SET)
+    v = struct.unpack(\"<Q\", os.read(m, 8))[0]
+    print(\"featctl=0x%016x locked=%d vmx_outside_smx=%d\" % (v, v & 1, (v >> 2) & 1))
+except Exception as e:
+    print(\"featctl=unreadable(%s)\" % e)
+print(\"proccpuinfo_vmx=%d\" % int(bool(__import__(\"re\").search(r\"\\bvmx\\b\", open(\"/proc/cpuinfo\").read()))))
+"
+echo "---"; uname -r; echo "---"; ls /dev/kvm 2>&1 || true'
 if [ -z "$sandbox" ]; then
   warnf "guest cpuid" "no --sandbox given; skipped"
   cat <<EOF
     Run this against any live sandbox to settle it — it is read-only and takes
-    seconds. The guest kernel has no CONFIG_KVM, but the flag is a CPUID bit the
-    kernel prints regardless, so its presence is the whole answer:
+    seconds. Note it reads CPUID directly, NOT /proc/cpuinfo: the guest kernel
+    clears the vmx cap from /proc/cpuinfo by itself because it is built without
+    CONFIG_KVM_INTEL, so /proc/cpuinfo gives a false negative here.
 
-      ssh $USER-box@$domain 'grep -o -m1 -E "\\b(vmx|svm)\\b" /proc/cpuinfo; ls /dev/kvm 2>&1'
+      ssh $USER-box@$domain '$(printf '%s' "$guest_probe" | tr '\n' ' ')'
 
     Then re-run this script with --sandbox <name> to record it.
 EOF
 else
   guest=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
-    "$sandbox@$domain" 'grep -o -m1 -E "\b(vmx|svm)\b" /proc/cpuinfo || true; echo "---"; uname -r; echo "---"; ls /dev/kvm 2>&1 || true' 2>&1)
+    "$sandbox@$domain" "$guest_probe" 2>&1)
   if [ $? -ne 0 ]; then
     warnf "guest cpuid" "could not ssh to $sandbox@$domain: $(printf '%s' "$guest" | head -1)"
   else
-    flag=$(printf '%s' "$guest" | sed -n '1p')
-    gkernel=$(printf '%s' "$guest" | sed -n '3p')
-    case "$flag" in
-      vmx|svm)
-        # Not a vulnerability by itself: without CONFIG_KVM the guest cannot use
-        # it. It does mean the absence of nested exposure is CoreWeave's module
-        # parameter, not our doing.
-        warnf "guest cpuid" "guest sees '$flag' (kernel $gkernel) — as the spike predicted. A masking CPU template (T2CL/T2/C3 on Intel, T2A on AMD) would make this OUR property; today it is the Node's." ;;
-      "")
-        # Measured on 2026-09-04 and expected: KVM only advertises VMX/SVM in
-        # KVM_GET_SUPPORTED_CPUID when the module's nested parameter is on, so an
-        # empty answer here is almost always a reading of the NODE. Section 3
-        # above has the direct check.
-        pass "guest cpuid" "guest sees neither vmx nor svm (kernel $gkernel) — expected when $([ -n "${node:-}" ] && echo "$node" || echo "the node") has kvm_*.nested=0; see the module parameter in section 3" ;;
+    cpuid_vmx=$(printf '%s' "$guest" | sed -n 's/.*cpuid1ecx=[^ ]* vmx=\([01]\).*/\1/p' | head -1)
+    proc_vmx=$(printf '%s' "$guest" | sed -n 's/.*proccpuinfo_vmx=\([01\]\).*/\1/p' | head -1)
+    # `uname -r` is the line immediately after the first --- separator.
+    gkernel=$(printf '%s\n' "$guest" | sed -n '/^---$/{n;p;q;}')
+    case "$cpuid_vmx" in
+      1)
+        flag=vmx
+        # Measured on CKS 2026-09-04: the bit IS there. Firecracker's CPUID
+        # normaliser never clears it and Sparkbox pins no CPU template, so the
+        # node's nested=Y flows straight through to the guest. Not a
+        # vulnerability on its own — the guest kernel has no CONFIG_KVM to use it
+        # with — but the exposure is ours to mask, not CoreWeave's to withhold.
+        warnf "guest cpuid" "guest CPUID.1:ECX[5]=1 — the guest ALREADY has the VMX bit (kernel $gkernel). /proc/cpuinfo says $([ "$proc_vmx" = 1 ] && echo yes || echo no), which is the guest kernel's own FEAT_CTL lock, not the hardware. A masking template (T2CL/T2/C3 Intel, T2A AMD) is the lever if we want it gone." ;;
+      0)
+        flag=none
+        pass "guest cpuid" "guest CPUID.1:ECX[5]=0 — the VMM or the node is withholding VMX (kernel $gkernel); cross-check 'KVM offers guests' in section 3" ;;
       *)
-        warnf "guest cpuid" "unexpected output: $flag" ;;
+        flag="unreadable"
+        warnf "guest cpuid" "could not read CPUID from the guest — is /dev/cpu/0/cpuid present and is python3 installed?" ;;
     esac
     printf '%s\n' "$guest" | sed 's/^/    /'
   fi
@@ -189,17 +226,22 @@ Paste into docs/cloud-hypervisor-feasibility.md §10 (M0 results):
 | kernel | ${kernel:-?} |
 | os / runtime / arch | ${os:-?} / ${runtime:-?} / ${arch:-?} |
 | node preflight | exit $probe_rc (see above) |
-| guest sees vmx/svm | ${flag:-not measured} |
+| guest CPUID.1:ECX[5] (VMX) | ${flag:-not measured} |
 | node pools | ${pools:-?} |
 
 Still to ask CoreWeave, because no probe answers them:
-  1. Is kvm_{intel,amd}.nested deliberately set anywhere in this fleet, and can
-     we rely on it staying that way?
-  2. What is the kernel patch cadence per CPU pool? The binding gate is
-     CVE-2026-80726 (6.1.183 / 6.6.152 / 6.12.104 / 6.18.45 / 7.1.9).
-  3. Is landlock in the node kernel's CONFIG_LSM? Cloud Hypervisor pins ABI v3
-     and fails vm.create without it.
-  4. Can we get a second CPU node pool, to isolate nested-enabled sandboxes?
+  1. Is kvm_{intel,amd}.nested deliberately set anywhere in this fleet, or is it
+     just KVM's upstream default? Can we rely on it staying that way?
+  2. What is the kernel patch cadence per CPU pool, and does this node image
+     carry backports for the three 2026 shadow-MMU escapes? The version table
+     above can only judge upstream stable series, and a CoreWeave kernel is a
+     custom build whose patch level says nothing about what was backported. The
+     binding gate is CVE-2026-80726 (6.1.183 / 6.6.152 / 6.12.104 / 6.18.45 /
+     7.1.9 upstream).
+  3. Can we get a second CPU node pool, to isolate nested-enabled sandboxes?
+
+(Landlock is no longer on this list: section 3 measures the ABI version with a
+syscall, which works from inside the node Pod.)
 EOF
 
 echo

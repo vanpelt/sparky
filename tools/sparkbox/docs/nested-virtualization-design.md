@@ -555,6 +555,9 @@ baseline is worse than §7 originally stated: Sparkbox sets no Firecracker CPU
 template (`internal/vmm/firecracker/fc.go` `MachineCfg` carries only
 `VcpuCount`, `MemSizeMib`, `Smt`), and Firecracker's normaliser does not clear
 VMX/SVM, so on a `kvm_*.nested=1` Node our guests already see the bit today.
+**Measured on CKS 2026-09-04 and no longer an inference:** `g084f44` has
+`kvm_intel.nested=Y` and a live sandbox's CPUID.1:ECX reads `0xfffa3227` — bit 5
+set. See cloud-hypervisor-feasibility.md §10.
 What stops an L2 is the guest kernel's missing `CONFIG_KVM` — and M1 removes
 that, for every sandbox, because there is one pinned `vmlinux-<arch>` asset.
 After M1 the guarantee that non-nested sandboxes cannot run an L2 rests
@@ -784,10 +787,11 @@ such.
    run Docker normally". Costs a rootfs change, not a VMM. It does nothing for
    an Android emulator or an inner KVM guest.
 3. **A dedicated bare-metal nested pool running the existing Firecracker
-   driver with a masking-inverse CPU template.** A custom template setting
-   CPUID.1:ECX[5] (Intel) or CPUID.80000001:ECX[2] (AMD) plus `CONFIG_KVM` in
-   the guest kernel exposes VMX/SVM on a `nested=1` Node with the VMM we
-   already ship, and §8.1's fallback — refuse pause-with-snapshot, cold-boot
+   driver.** This was written expecting to need a "masking-inverse" CPU template
+   that sets CPUID.1:ECX[5] (Intel) or CPUID.80000001:ECX[2] (AMD). **M0 showed
+   no template is needed at all** — the bit is already in the guest's CPUID on
+   `g084f44`, so `CONFIG_KVM` in the guest kernel is the entire change, and
+   §8.1's fallback — refuse pause-with-snapshot, cold-boot
    via `DropSnapshots` — covers the missing nested state. Days, not
    milestones. It is unsupported upstream (`src/vmm/src/arch/x86_64/msr.rs`:
    "Firecracker is not tested with nested virtualization"), Firecracker does
