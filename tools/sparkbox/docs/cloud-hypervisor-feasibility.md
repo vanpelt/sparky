@@ -81,13 +81,26 @@ blocker, and it is the whole reason to consider Cloud Hypervisor.** The case for
 the port narrows accordingly: it buys *pausable* nested guests, not nested
 guests.
 
+**M0b then ran the experiment that follows from this, and it worked (§11).**
+With `CONFIG_KVM_INTEL` in the guest kernel, a Firecracker sandbox on the CKS
+node booted an inner Firecracker microVM to userspace. One kernel-config line,
+no VMM change, on the version already deployed.
+
+**But a snapshot destroys it, silently.** Pausing that sandbox and snapshotting
+it returned HTTP 204 at every step and produced a normal-looking 3.0 GB
+snapshot. On restore the sandbox came back and the inner VM was gone — and the
+sandbox's own kernel took `kernel BUG at arch/x86/kvm/x86.c:511`
+(`kvm_spurious_fault`) on the resume path, because Firecracker restored its
+vCPUs without the nested state they believed they had.
+
 Three consequences:
 
-- **The cheap experiment comes first, and it is not a port.** Turning on
-  `CONFIG_KVM_INTEL` in our guest kernel is a one-line fragment change to a
-  kernel we already build. If an L2 then boots under Firecracker, nested works
-  today, with pause/snapshot as the known caveat. Nothing about that experiment
-  needs Cloud Hypervisor, and it should be run before M1 is costed. See §9 M0b.
+- **The capability gap is not a capability gap.** It is a snapshot-fidelity
+  gap. Nested virtualization works on Firecracker today; what does not work is
+  pausing it, and Sparkbox pauses sandboxes automatically as its idle model. The
+  Cloud Hypervisor case narrows to exactly one property — whether its snapshot
+  brings back a working L2 — and that property has not been tested by anyone
+  here. It should be, before any driver work.
 - **CoreWeave is off the critical path** for the capability. Ask them the
   kernel-CVE question (below), not for a nested-enabled pool — they already
   ship one.
@@ -178,28 +191,37 @@ virtualization" model in `security-hardening.md` already gives us Kata's securit
 shape with a four-verb protocol instead of an OCI/agent/virtiofsd surface. §4
 argues the other side before concluding.
 
-**Recommendation, revised after the full M0 run (§10):**
+**Recommendation, revised after M0 and M0b were both run on hardware
+(§10, §11):**
 
-1. **Run M0b first** — a guest kernel with `CONFIG_KVM_INTEL`, and try to boot
-   an L2 under the Firecracker we already ship. One fragment line and a kernel
-   build. M0 measured every other precondition as already satisfied, so this is
-   the step that turns "feasible" into "works" or "does not", and it costs
-   hours. §9 M0b.
+1. **Answer one question before committing to any driver work:** does Cloud
+   Hypervisor's snapshot actually bring back a working L2? It issues
+   `KVM_GET_NESTED_STATE`, which Firecracker does not — but issuing the ioctl is
+   not the same as restoring a guest that runs, and nobody has tested it. The
+   entire port now rests on this single property, because §11 established that
+   everything *else* about nested virtualization already works on the VMM we
+   ship. Days, and it needs no Sparkbox code.
 2. **Then cost the driver** — `internal/vmm/cloudhypervisor` beside the
    Firecracker one, pinned **v52.0 or later**, on the KVM access the pod already
-   has. Unblocked today, and a driver rewrite plus a new integration-test
-   harness rather than a few hundred lines. But justify it against what M0b
-   shows: if an L2 boots, this buys *pausable* nested guests, not nested guests.
+   has. A driver rewrite plus a new integration-test harness, not a few hundred
+   lines. Justified only by (1): this buys **pausable** nested guests, not
+   nested guests.
 3. **Ask CoreWeave one security question** — whether the non-LTS
    `6.17.13-…-coreweave-amd64` node image carries the three shadow-MMU
    backports. Not a provisioning request: they already ship `nested=Y`. This is
    the only hard gate M0 left open, and it gates enabling the feature for
    anyone, on any VMM.
+4. **Independently of all of the above, treat the silent-snapshot behaviour in
+   §11 as a bug to defend against.** Firecracker returns 204 for a snapshot
+   taken with a live inner VM and the restored sandbox's kernel then hits a
+   `BUG()`. If a `CONFIG_KVM` guest kernel ever ships, the reaper's automatic
+   pause becomes a way to panic a user's sandbox with no error anywhere.
 
-The previous revision made half 2 wait on a nested-enabled pool from CoreWeave
-and called that the long pole. **There is no such long pole**; §10 has the
-measurements. §9 has the plan; the [risk register](nested-virtualization-design.md)
-has the kill criteria.
+The first revision made the port wait on a nested-enabled pool from CoreWeave
+and called that the long pole. **There is no such long pole**, and there is no
+capability gap either — there is a snapshot-fidelity gap. §10 and §11 have the
+measurements; the [risk register](nested-virtualization-design.md) has the kill
+criteria.
 
 A note on words: "linking fnodes" in the ask is the XFS reflink clone
 (`cp --reflink=always`, Linux `FICLONE`) that lets many sandboxes share one base
@@ -530,7 +552,10 @@ The script ends by printing the questions only CoreWeave can answer. After the
 2026-09-04 run there are three, and the binding one is whether this non-LTS
 6.17 node image carries the shadow-MMU backports — see §10.
 
-### M0b — Does an L2 boot under the VMM we already ship? (hours)
+### M0b — Does an L2 boot under the VMM we already ship? (hours) — **RUN, §11**
+
+**Both answers are in §11: yes it boots, and a snapshot silently destroys it.**
+The procedure below is what was run; `hack/m0b/` is the harness.
 
 M0 removed every reason to believe the answer is no, and left exactly one thing
 between a sandbox and an inner VM: our guest kernel is built over Firecracker's
@@ -553,14 +578,17 @@ experiment before costing the port.
    it is the entire remaining case for Cloud Hypervisor, and right now it is an
    argument from source rather than an observation.
 
-Outcome determines everything downstream. If (3) works, nested virtualization
-ships on Firecracker with a documented "do not pause a nested guest" caveat, and
-M1 becomes a question about pause quality rather than about capability. If (3)
-fails, M1's justification is restored in full and we will know precisely why.
+What actually happened: (3) worked and (4) failed harder than predicted — the
+snapshot succeeded with no error and the restored sandbox's kernel `BUG()`ed.
+M1 is therefore a question about pause fidelity, not about capability.
 
 This needs an x86_64 KVM host. The Mac dev box is arm64 and cannot answer it;
-the CKS node can, which makes step 3 the first part of this spike that is not
-read-only.
+the CKS node can, which made this the first part of the spike that is not
+read-only. `hack/m0b/run-on-cks.sh` contains it: a privileged Pod in its own
+throwaway namespace, `hostPath` `/dev/kvm` (the device plugin cannot help —
+`sparkbox.dev/kvm` is allocatable 1 and held by `vmm-helper`), CPU and memory
+capped so a kernel build cannot pressure the sandboxes sharing the node, and
+deleted on exit.
 
 **Do not merge the kernel-config change.** A guest kernel with `CONFIG_KVM_INTEL`
 turns the VMX bit every sandbox already carries (§10) from inert into usable, for
@@ -622,6 +650,88 @@ CoreWeave answers:
 | Is `kvm_intel.nested=Y` deliberate, or just KVM's default? Either way, will it stay that way — and would we be told before it changed? | |
 | Kernel patch cadence per CPU pool, and how a security backport reaches a running node? | |
 | Can we have a second CPU pool, to isolate nested-enabled sandboxes? | |
+
+## 11. M0b results — the inner VM boots, and a snapshot destroys it
+
+Run on the CKS node on 2026-09-04, in a throwaway privileged Pod in its own
+namespace (`hack/m0b/run-on-cks.sh`, then `hack/m0b/pause-test.sh`). It took no
+device-plugin allocation, read and wrote nothing under `/var/lib/sparkbox`,
+touched no existing object, and was deleted afterwards; the sparkbox Pods came
+through at 3/3 Ready with 0 restarts.
+
+Three layers: L0 the container on the node, L1 a Firecracker microVM on the
+sparkbox guest kernel plus `hack/m0b/kernel-config.nested.fragment`, L2 a
+Firecracker microVM launched from inside L1. Both guests are initramfs-only —
+no drives, no TAP.
+
+**Part 1 — does an L2 boot? Yes.**
+
+| | |
+|---|---|
+| kernel | 6.1.155 built with `CONFIG_KVM=y`, `CONFIG_KVM_INTEL=y` (verified in the resulting `.config`, not assumed from the fragment) |
+| VMM | Firecracker v1.16.1 — the version already deployed |
+| L1 `/proc/cpuinfo` | **`vmx` present** — with `CONFIG_KVM_INTEL` the kernel takes the other branch in `init_ia32_feat_ctl()`, exactly as §10 predicted |
+| L1 `/dev/kvm` | present at boot |
+| L1 `kvm_intel.nested` | `Y` |
+| **L2** | **booted to userspace**, `uname -r` 6.1.155, 1 vCPU; both VMMs exited 0 |
+
+So nested virtualization needs no VMM change. One kernel-config line is the
+whole difference, and the capability works on the Firecracker we ship today.
+
+**Part 2 — does it survive a pause? No, and it fails in the worst way.**
+
+| | |
+|---|---|
+| L2 live, `PATCH /vm {"state":"Paused"}` | **HTTP 204** |
+| `PUT /snapshot/create` (Full) | **HTTP 204** — 3.0 GB mem file, 26 KB state file |
+| `PUT /snapshot/load` (`resume_vm: true`) | **HTTP 204** |
+| L1 after restore | alive — 15 ticks in 15 s |
+| **L2 after restore** | **0 ticks. Gone.** |
+
+And the restored sandbox's own kernel panics on the way:
+
+```
+[    2.009778] ------------[ cut here ]------------
+[    2.010055] kernel BUG at arch/x86/kvm/x86.c:511!
+[    2.010316] invalid opcode: 0000 [#1] PREEMPT SMP NOPTI
+[    2.010592] CPU: 1 PID: 256 Comm: fc_vcpu 0 Not tainted 6.1.155 #1
+[    2.010907] RIP: 0010:kvm_spurious_fault+0xe/0x10
+             ? __vmx_interrupt_blocked+0x3a/0x80
+               vmx_interrupt_allowed+0x34/0x70
+               kvm_arch_vcpu_runnable+0x10e/0x1b0
+               kvm_vcpu_block / kvm_vcpu_halt / vcpu_run
+               kvm_arch_vcpu_ioctl_run  <- the inner VMM's KVM_RUN
+```
+
+`kvm_spurious_fault()` is `BUG_ON(!kvm_rebooting)` — the handler for a VMX
+instruction faulting when it had no business faulting. Firecracker restored L1's
+vCPUs without their nested state, so L1's KVM came back believing it had a
+loaded VMCS that no longer exists, and the first `vmread` on the resume path
+took a fault it has no recovery for. It is the source-level claim
+(no `KVM_GET_NESTED_STATE`, MSRs `0x480`–`0x491` absent from the serialised
+list) arriving as a kernel `BUG()`.
+
+**The important detail is that every API call returned 204.** Firecracker does
+not refuse to snapshot a VM with a live inner guest, and does not warn. It
+writes a snapshot that looks entirely normal — correct size, no error — and
+detonates on restore. A loud refusal would be a documentable caveat; a silent
+one is a data-loss bug wearing a success code.
+
+**What this does to the case for the port.** It sharpens it rather than
+weakening it. Sparkbox pauses sandboxes as its *idle model* — scale-to-zero is
+automatic and the reaper does it unattended — so "nested until something pauses
+you" is not a caveat a user can work around, and the failure lands on the
+sandbox's own kernel rather than just on the inner VM. Either nested sandboxes
+become non-pausable (`DropSnapshots`, cold boot, and they stop being cheap), or
+the VMM has to carry nested state through a snapshot. That is the decision M1
+now exists to serve, and it is a much narrower and more defensible one than "we
+need Cloud Hypervisor for nested virtualization".
+
+**Not measured:** whether Cloud Hypervisor's snapshot actually preserves nested
+state. It issues `KVM_GET_NESTED_STATE`, but "issues the ioctl" is not "restores
+a working L2", and this branch has not tested it. That is now M1's first
+question, and it should be answered before any driver work is committed to —
+the whole port rests on it.
 
 ### M1 — Driver beside driver (weeks, not days)
 
