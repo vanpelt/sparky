@@ -7,7 +7,8 @@ Companions: [cloud-hypervisor-feasibility.md](cloud-hypervisor-feasibility.md)
 [cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) (how),
 [nested-virtualization-design.md](nested-virtualization-design.md) (risk register
 and kill criteria), [cocoon-evaluation.md](cocoon-evaluation.md) (why we are not
-adopting someone else's engine).
+adopting someone else's engine). §1a and §1b measure what CoreWeave's own
+sandbox platform actually does, from `coreweave/aviato`.
 
 This document exists because the spike that produced those found something
 awkward: **the reason we started was not the reason to finish.** We went looking
@@ -31,16 +32,24 @@ input we do not control.
 
 ## The position we are defending
 
-> We are moving to Cloud Hypervisor because GPU-capable sandboxes are on the
-> roadmap and Firecracker structurally cannot get there, and because doing it
-> proves our VMM abstraction carries a second backend — which is what makes
-> QEMU-for-GPU a driver rather than a rewrite. We are explicitly **not** claiming
-> a security, performance, or nested-virtualization win: on those the engines are
-> a wash and we will say so. The two things Cloud Hypervisor gives us that we
-> cannot get otherwise are a per-sandbox VMX gate and live CPU/memory resize.
+> **The work worth doing is proving the VMM abstraction carries a second
+> backend.** Which backend comes second is a smaller question than it looked,
+> and the honest answer changed once we read CoreWeave's own platform: they run
+> **Kata + QEMU**, not Cloud Hypervisor. So "align with CoreWeave" points at
+> QEMU, and Cloud Hypervisor's remaining case is narrow and specific — a
+> per-sandbox VMX gate, pausable nested guests, and live CPU/memory resize. We
+> are explicitly **not** claiming a security, performance, or
+> nested-virtualization win: on those the engines are a wash and we will say so.
 
 Everything in that paragraph is falsifiable. The rest of this document is the
-evidence for each clause, and §7 is the case for the opposite conclusion.
+evidence for each clause, §7 is the case for changing nothing, and §1a is the
+measurement that revised an earlier draft of this document.
+
+> **Revision note.** An earlier draft made the GPU roadmap plus organisational
+> alignment the load-bearing argument *for Cloud Hypervisor specifically*, on the
+> assumption that CoreWeave ran it under Kata. §1a measures that assumption and
+> it is false. The argument for a second backend survives; the argument for that
+> backend being Cloud Hypervisor does not.
 
 ## 1. GPU and organisational alignment — the load-bearing argument
 
@@ -62,15 +71,98 @@ This reframes what the port is for. It is not "move to Cloud Hypervisor". It is:
 interfaces — has exactly one implementation, so it is unproven. A second backend
 is what turns "QEMU for GPU sandboxes" from a rewrite into a driver.**
 
-CoreWeave runs Kata already. If they run it on Cloud Hypervisor, we inherit
-shared operational vocabulary, their kernel and VMM debugging experience, and
-their security review. That is a real benefit and it is also the answer to "why
-are you on Firecracker?" — a question worth being able to answer well.
+CoreWeave runs Kata already, so aligning with them buys shared operational
+vocabulary, their kernel and VMM debugging experience, and their security review.
+That is a real benefit, and it is also the answer to "why are you on
+Firecracker?" — a question worth being able to answer well.
 
-> **Open question, and it is load-bearing: confirm which VMM CoreWeave actually
-> runs under Kata, and whether GPU sandboxes are a committed roadmap item or an
-> aspiration.** Neither is verifiable from public sources. Both change the
-> conclusion.
+**Which VMM they run under Kata was the load-bearing open question in the first
+draft of this document. §1a answers it from their repo: QEMU.** That does not
+weaken the case for a second backend — Firecracker is the one VMM in this
+conversation that Kata does not support for device assignment — but it does move
+where the second backend should point.
+
+## 1a. What CoreWeave actually runs — measured, not assumed
+
+Read from `coreweave/aviato` (Go module `github.com/coreweave/sandbox`, the "CW
+Sandbox" platform) on 2026-09-04: 1,566 commits since 2025-11-18, active daily.
+
+**It is a Kubernetes control plane, not a VMM.** A sandbox is a `batchv1.Job`
+whose Pod carries a `RuntimeClassName`; isolation is delegated entirely to Kata.
+The only runtime-class-aware code in the whole repo is a helper that splits the
+class name on `-._/` and looks for the token `kata`.
+
+| Runtime class | Status |
+|---|---|
+| `kata-qemu` | **shipped and deployed** — the production CPU default |
+| `kata-qemu-nvidia-gpu` | **shipped and deployed** — the GPU class, selected automatically when any container requests a GPU |
+| **`kata-clh`** (Cloud Hypervisor) | **wired nowhere.** Four references in the entire repo: one design-doc line, one struct comment, and two inside a single unit test |
+| `gvisor` / `runsc` | doc and fixture text only; zero occurrences of `runsc`. There is no second isolation tier |
+
+The live production policy (`docs/ops/policies/serverless-pool-policy.yaml`):
+
+```yaml
+allowed_runtime_classes: [kata-qemu, kata-qemu-nvidia-gpu]
+default_cpu_runtime_class: kata-qemu
+default_gpu_runtime_class: kata-qemu-nvidia-gpu
+```
+
+`docs/architecture/design.md:411` does say "kata-clh for CPU, kata-qemu for GPU"
+— so the Cloud Hypervisor intent existed once and was not pursued. **Design-doc
+text is not a deployment.** This is exactly the kind of claim that should be
+checked in a repo rather than assumed from a conversation, and checking it
+changed our recommendation.
+
+GPU sandboxes are real and actively worked: hugepages sized `ceil(memory) + 8Gi`
+as the guest memory backing store, `gpu.nvidia.com/class`/`vram` node labels, the
+standard `nvidia.com/gpu` device plugin, and a priority gate against Kata
+telemetry placeholder pods. There is **no VFIO, nested-virt or `/dev/kvm` code in
+aviato at all** — GPU passthrough lives in CoreWeave's node images, outside this
+repo.
+
+**Consequence for §1.** If organisational alignment is the argument, it points at
+**QEMU**, not Cloud Hypervisor. Firecracker remains the odd one out — it is not a
+Kata-supported VMM for device assignment and it still cannot do VFIO — so the
+case for *a* second backend is unchanged and arguably strengthened. The case for
+that backend being Cloud Hypervisor now rests only on §4 and §5.
+
+## 1b. Aviato's non-goals are our product
+
+The more important finding is not about VMMs. Stated as explicit non-goals or
+`Unimplemented` stubs in aviato:
+
+| Capability | Aviato | Sparkbox |
+|---|---|---|
+| pause / resume, scale-to-zero | RPC stubs returning `CWSANDBOX_NOT_IMPLEMENTED`; `STATE_PAUSED` exists and nothing produces it | the core idle model |
+| memory snapshot | "**no CRIU**; only on-disk bytes" | shipped |
+| fork / clone | filesystem snapshot restored from a **tarball**, explicitly not copy-on-write and no lineage DAG | reflink CoW from a template |
+| durable per-sandbox disk | "no PVC/CSI; single tarball PUT per snapshot" | 25 GB per-VM durable rootfs |
+| SSH | none anywhere; access is Connect RPC exec or an HTTPS endpoint | the primary door |
+| lifetime | **10 minutes default**, 30-day hard cap, `ActiveDeadlineSeconds` on the Job; immutable after create | long-lived, mutable dev boxes |
+| live migration | explicit non-goal | not built either |
+
+Conversely aviato has what we do not and would be expensive to rebuild:
+multi-cluster fleet scheduling, per-tenant policy and quota, node-budget
+accounting, W&B tenancy integration, a Kafka lifecycle outbox, and the CKS
+provisioning path. It overlaps us on VM-grade isolation, per-sandbox HTTPS
+endpoints, per-sandbox egress control, and templates.
+
+**The strategic read: aviato is a complement, not a duplicate — and the overlap
+is growing.** Watch `docs/specs/sandbox-fleet-capacity-manager.md` and
+`docs/specs/persistent-sandbox-endpoints.md`, both of which move toward territory
+we occupy.
+
+**And there is a remarkably small integration seam.** Aviato treats a runtime
+class as an opaque string; the only surfaces are `allowed_runtime_classes` in a
+pool policy and a Kubernetes `RuntimeClass` object carrying `scheduling` and
+`overhead`. A sparkbox-backed runtime class that the aviato Runner can pin is a
+much cheaper path to "CoreWeave alignment" than matching their VMM, and it is
+worth costing before any VMM work is justified on alignment grounds.
+
+**The sharpest version of the strategic point:** a VMM port advances *none* of
+the capabilities in the table above. Every sparkbox differentiator already works
+on Firecracker. That is the strongest argument in this document against treating
+the port as urgent.
 
 ## 2. Performance — the right instinct, the wrong conclusion
 
@@ -241,18 +333,24 @@ whether or not we ever add a second VMM. The honest framing:
 
 ## 9. What to do next
 
-1. **Answer the load-bearing question.** Confirm with CoreWeave which VMM they
-   run under Kata, and whether GPU sandboxes are committed or aspirational. If
-   aspirational, this is a "not yet".
-2. **Do the pin-lag work regardless.** It is the largest real security lever in
-   §3 and it is independent of this decision.
-3. **Build the parity harness regardless.** Same reasoning.
-4. **If the answer to (1) is yes:** proceed with M1 as scoped in
-   [cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md), reading
-   cocoon's Cloud Hypervisor backend first (see
-   [cocoon-evaluation.md](cocoon-evaluation.md) for the specific list), and treat
-   `image_type=raw` and the masking CPU template as day-one requirements rather
-   than hardening to schedule later.
-5. **Independent of everything above:** do not ship a `CONFIG_KVM` guest kernel
+1. ~~Confirm which VMM CoreWeave runs under Kata.~~ **Answered in §1a: Kata +
+   QEMU. `kata-clh` is wired nowhere.** The remaining question for them is
+   whether GPU sandboxes matter to *us*, and on what horizon.
+2. **Build the parity harness first, against the driver we already have.** It is
+   the honest deliverable, we need it on any VMM, and it de-risks whichever
+   backend comes second. Today's 1,300 lines of driver tests never boot a guest;
+   `hack/m0b/` is the seed of a harness that does. **This does not require the
+   VMM question to be settled**, which is its main virtue given §1a.
+3. **Do the pin-lag work regardless.** It is the largest real security lever in
+   §3 and independent of this decision.
+4. **Then choose the second backend on evidence.** Cloud Hypervisor for the VMX
+   gate, pausable nested guests and live resize (§4, §5); QEMU for organisational
+   and GPU alignment (§1a). The harness makes that a measurement rather than an
+   argument. If Cloud Hypervisor: read cocoon's backend first
+   ([cocoon-evaluation.md](cocoon-evaluation.md)), and treat `image_type=raw` and
+   the masking CPU template as day-one requirements, not hardening to schedule.
+5. **Cost the runtime-class seam** (§1b) before justifying any VMM work on
+   alignment grounds. It may buy the alignment far more cheaply.
+6. **Independent of everything above:** do not ship a `CONFIG_KVM` guest kernel
    until the per-sandbox gate exists. It would turn the idle reaper into a way to
    panic a user's sandbox with no error anywhere.
