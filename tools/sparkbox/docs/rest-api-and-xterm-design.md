@@ -1149,7 +1149,7 @@ The page and its socket are served from `https://<name>.xterm.<domain>`:
 | Path | Handler |
 |---|---|
 | `GET /` | the xterm.js page, behind `edgeauth.Require` |
-| `GET /assets/{file}` | the vendored xterm.js 5.5.0 / addon-fit 0.10.0 / addon-web-links 0.11.0 / xterm.css, `//go:embed`, `Cache-Control: public, max-age=31536000, immutable` |
+| `GET /assets/{file}` | the vendored xterm.js 5.5.0 / addon-fit 0.10.0 / addon-web-links 0.11.0 / addon-clipboard 0.2.0 / xterm.css, `//go:embed`, `Cache-Control: public, max-age=31536000, immutable` |
 | `GET /ws` | the PTY bridge, subprotocol `sparkbox.terminal.v1` |
 
 There is **no** `/api/session` endpoint; the pre-flight the design proposed
