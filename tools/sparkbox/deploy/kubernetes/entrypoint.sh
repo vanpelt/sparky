@@ -63,6 +63,21 @@ readonly node_key_dir="${SPARKBOX_NODE_KEY_DIR:-$data_dir/node-identity}"
 readonly skip_prepare="${SPARKBOX_SKIP_PREPARE:-false}"
 readonly chroot_jailer="${SPARKBOX_CHROOT_JAILER:-false}"
 readonly disable_host_rootfs_mounts="${SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS:-false}"
+# The VMM this node runs: firecracker (default) or qemu. One image carries both
+# -- firecracker is downloaded and checksum-verified below, qemu is installed in
+# the Containerfile -- so switching is a variable, not a different image.
+#
+# It is NOT a variable you can flip back and forth. See driver_args below and
+# vmm.ClaimStateDir: the drivers store sandbox disks and snapshots in layouts
+# the other cannot read, so a node changing VMM must have every sandbox archived
+# or destroyed first and then start once with SPARKBOX_ALLOW_VMM_CHANGE=true.
+readonly vmm_driver="${SPARKBOX_DRIVER:-firecracker}"
+readonly qemu_machine_type="${SPARKBOX_QEMU_MACHINE_TYPE:-}"
+readonly allow_vmm_change="${SPARKBOX_ALLOW_VMM_CHANGE:-false}"
+case "$vmm_driver" in
+  firecracker|qemu) ;;
+  *) echo "SPARKBOX_DRIVER must be firecracker or qemu, got: $vmm_driver" >&2; exit 1 ;;
+esac
 readonly privileged_helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-}"
 readonly sluice_socket="${SPARKBOX_SLUICE_SOCKET:-}"
 readonly guest_dns="${SPARKBOX_GUEST_DNS:-}"
@@ -400,19 +415,58 @@ role_args=(
   --users /etc/sparkbox/users/users.conf
   --cluster-id "$cluster_id"
 )
+# Which VMM this node runs. Firecracker stays the default, so an existing
+# deployment that passes nothing keeps its exact behaviour.
+#
+# The choice is a NODE property, not a per-sandbox one, and it is not reversible
+# by flipping this back: the two drivers keep sandbox disks and snapshots in
+# layouts the other does not read (qemu-vms vs fc-vms, one state.migrate vs a
+# mem.snap/state.snap pair). sparkbox refuses to start when the VM state
+# directory was created by the other driver -- see vmm.ClaimStateDir -- so a
+# node genuinely changing VMM must have every sandbox archived or destroyed
+# first, and then be started once with SPARKBOX_ALLOW_VMM_CHANGE=true.
+driver_args=(--driver "$vmm_driver")
+if [ "$vmm_driver" = qemu ]; then
+	# QEMU is baked into this image (the Containerfile installs the per-arch
+	# qemu-system package); only firecracker/kernel/rootfs are downloaded and
+	# checksummed at Pod start. An explicit machine type is the expert path --
+	# the driver's per-arch default is pinned and versioned, and the migration
+	# stream is bound to whatever is used here, so overriding it strands every
+	# sandbox paused under the previous value.
+	if [ -n "$qemu_machine_type" ]; then
+		driver_args+=(--machine-type "$qemu_machine_type")
+	fi
+fi
+if [ "$allow_vmm_change" = true ]; then
+	driver_args+=(--allow-vmm-change)
+fi
+
 jail_args=(--jailer "$jailer")
 if [ "$chroot_jailer" = true ]; then
 	jail_args=(--chroot-jailer --jailer-chroot-base "$hot_dir/jailer")
 fi
-if [ "$disable_host_rootfs_mounts" = true ]; then
-	jail_args+=(--disable-host-rootfs-mounts)
+# The jailer flags describe Firecracker's confinement and sparkbox REFUSES them
+# alongside --driver qemu rather than ignoring them, because a node that
+# accepted them would look hardened while running an unconfined VMM. Until the
+# privileged helper can launch QEMU, a QEMU node is the direct launcher and says
+# so by not being handed them.
+if [ "$vmm_driver" = qemu ]; then
+	jail_args=()
+	if [ "$disable_host_rootfs_mounts" = true ]; then
+		jail_args+=(--disable-host-rootfs-mounts)
+	fi
 fi
-if [ -n "$privileged_helper_socket" ]; then
-	jail_args+=(
-		--privileged-helper-socket "$privileged_helper_socket"
-		--privileged-helper-bin /usr/local/bin/sparkbox-vmm-helper
-		--helper-controller-gid "$controller_gid"
-	)
+if [ "$vmm_driver" != qemu ]; then
+	if [ "$disable_host_rootfs_mounts" = true ]; then
+		jail_args+=(--disable-host-rootfs-mounts)
+	fi
+	if [ -n "$privileged_helper_socket" ]; then
+		jail_args+=(
+			--privileged-helper-socket "$privileged_helper_socket"
+			--privileged-helper-bin /usr/local/bin/sparkbox-vmm-helper
+			--helper-controller-gid "$controller_gid"
+		)
+	fi
 fi
 metrics_addr=
 if [ -n "$gateway_addr" ]; then
@@ -434,7 +488,7 @@ fi
 # containers mount the same data hostPath; sparkbox-node mounts it readOnly,
 # which is all serving ever needs. It is never relayed to the gateway.
 exec /usr/local/bin/sparkbox serve \
-  --driver firecracker \
+  "${driver_args[@]}" \
   --hivemind-api "$hivemind_api" \
   --state-dir "$control_dir" \
 	--vm-state-dir "$vm_state_dir" \

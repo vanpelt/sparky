@@ -31,8 +31,31 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
 
 FROM ubuntu:24.04
 
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# TARGETARCH is what makes this ONE image that can run either VMM. Firecracker,
+# the guest kernel and the rootfs are still downloaded and SHA-256-verified at
+# Pod start by entrypoint.sh, because they are release artifacts we publish and
+# pin. QEMU is not: it is a distro package with a large dynamic closure and no
+# upstream static build, so it is baked in here instead.
+#
+# The per-arch package name matters. `qemu-system` is a metapackage that pulls
+# in every target emulator -- hundreds of megabytes of machines we will never
+# boot -- so pick the one that matches and fail loudly on an architecture nobody
+# has thought about, rather than silently shipping an image with no VMM in it.
+# hack/parity/Dockerfile has done exactly this since the parity suite existed;
+# this is the same rule in the image we actually deploy.
+#
+# Ubuntu 24.04 ships QEMU 8.2.2, which is the floor the driver requires: the
+# `file:` migration URI that Pause depends on landed in 8.2, and pc-q35-8.2 /
+# virt-8.2 are the versioned machine types the driver pins snapshots to.
+ARG TARGETARCH
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) qemu_pkg=qemu-system-x86 ;; \
+      arm64) qemu_pkg=qemu-system-arm ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates \
       coreutils \
       curl \
@@ -45,7 +68,19 @@ RUN apt-get update \
       util-linux \
       zerofree \
       zstd \
-    && rm -rf /var/lib/apt/lists/*
+      "$qemu_pkg"; \
+    rm -rf /var/lib/apt/lists/*
+
+# Prove the arch-specific half above did what it claims, at BUILD time rather
+# than on a node an hour later, and prove the version floor while we are here.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) qemu=qemu-system-x86_64 ;; \
+      arm64) qemu=qemu-system-aarch64 ;; \
+    esac; \
+    "$qemu" --version | head -1; \
+    "$qemu" --version | head -1 | grep -qE 'version (8\.[2-9]|[9-9][0-9]*\.|[1-9][0-9]+\.)' \
+      || { echo "QEMU is older than the 8.2 the driver requires" >&2; exit 1; }
 
 COPY --from=build /out/sparkbox /usr/local/bin/sparkbox
 COPY --from=build /out/sparkbox-device-plugin /usr/local/bin/sparkbox-device-plugin
