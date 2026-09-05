@@ -215,9 +215,10 @@ else
   bad "pull did not restore the OIDC signing key"
 fi
 
-# The .pub halves are derived, not stored, and nothing else will make them:
-# gateway.sh derives them only inside mint_identity, which a restored identity
-# skips. Without these, up.sh's seed_trust has nothing to give the node.
+# The .pub halves are derived, not stored, and pull must derive them itself:
+# gateway.sh's derive_trust_pubs skips a .pub that already exists, so it would
+# leave the previous identity's public half sitting next to the newly restored
+# .pem. Without these, up.sh's seed_trust has nothing to give the node.
 for name in gateway_host_key gateway_upstream_key; do
   if [ -s "$keys/$name.pub" ]; then
     ok "pull derived $name.pub"

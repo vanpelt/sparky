@@ -1133,17 +1133,28 @@ type dialError struct {
 func (e *dialError) Error() string { return "dial " + e.sandbox + ": " + e.msg }
 func (e *dialError) Unwrap() error { return e.cause }
 
+// DialMessage is the sentence a user gets when a dial to a sandbox's shell
+// failed. Exported because it is the SAME sentence at every door — ssh, the
+// browser terminal, the REST API — and "the same failure reads the same way
+// whichever door you knocked on" is only true for as long as one function
+// decides it. It stopped being true once: the browser terminal carried its own
+// literal, which had drifted to a truncated copy of unreachableShell while its
+// comment still claimed the sentences matched.
+func DialMessage(err error) string {
+	var typed *ctlops.Error
+	if errors.As(err, &typed) {
+		return typed.Msg
+	}
+	if AuthRejected(err) {
+		return StaleGuestKey
+	}
+	return unreachableShell
+}
+
 // dialFailure wraps a dial error for a caller that will store or display the
 // sentence. See the section comment above.
 func dialFailure(sandbox string, err error) error {
-	var typed *ctlops.Error
-	if errors.As(err, &typed) {
-		return &dialError{sandbox: sandbox, msg: typed.Msg, cause: err}
-	}
-	if AuthRejected(err) {
-		return &dialError{sandbox: sandbox, msg: StaleGuestKey, cause: err}
-	}
-	return &dialError{sandbox: sandbox, msg: unreachableShell, cause: err}
+	return &dialError{sandbox: sandbox, msg: DialMessage(err), cause: err}
 }
 
 // unreachableShell is what a user is told when the dial failed for a reason
@@ -1193,11 +1204,9 @@ func failDial(s gssh.Session, log *slog.Logger, sandbox string, err error) {
 	}
 	log.Error("dial vm failed", "sandbox", sandbox, "err", err)
 	// The same sentence the stored path gets, for the same reason: a locked-out
-	// sandbox reads identically whichever door you knocked on.
-	msg := unreachableShell
-	if AuthRejected(err) {
-		msg = StaleGuestKey
-	}
+	// sandbox reads identically whichever door you knocked on. (The typed
+	// ctlops case returned above, so DialMessage's first branch cannot fire.)
+	msg := DialMessage(err)
 	fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n", msg)
 	s.Exit(1) //nolint:errcheck
 }

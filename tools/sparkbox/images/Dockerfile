@@ -184,6 +184,28 @@ RUN systemctl set-default multi-user.target && \
     # vmlinux lacks IP_NF_RAW/NF_TABLES/etc and docker's bridge networking fails
     # on it. nginx + tailscale stay OFF (start on demand); tailscale also needs
     # CONFIG_TUN from that same kernel.
+    #
+    # AND IF YOU ADD A UNIT HERE THAT A HOST-WRITTEN KERNEL ARG SHOULD GATE,
+    # read /proc/cmdline in a script — the way sparkbox-repos, sparkbox-netcfg
+    # and sparkbox-identity-reset all do. ConditionKernelCommandLine= looks like
+    # the obvious shortcut and is INERT in these guests, silently and in the
+    # worst direction. This rootfs is built from a container image and keeps
+    # /.dockerenv, so systemd-detect-virt answers "docker"; a systemd that
+    # believes it is in a container answers command-line conditions from
+    # /proc/1/cmdline — its own argv, "/sbin/init" — not the kernel's. Measured
+    # in a real sandbox: ConditionKernelCommandLine=quiet FAILED on a guest
+    # whose /proc/cmdline plainly contains `quiet`. Every positive condition is
+    # false, every negation true, whatever the host wrote, with nothing in the
+    # journal naming the cause. It cost a full debugging cycle on a feature that
+    # shipped, read correctly in review, and did nothing at all on hardware.
+    #
+    # This enable is BELT AND BRACES, not what puts docker in the boot path:
+    # docker-ce's .deb enables its own units at install time. If you ever want
+    # docker out of the boot path, deleting this line changes nothing — you must
+    # `systemctl disable` them AND rm the multi-user.target.wants symlinks the
+    # package left behind. Verified the hard way: an image built without this
+    # line still had multi-user.target.wants/docker.service, and only the
+    # timestamps on the symlinks gave it away.
     systemctl enable docker.service docker.socket containerd.service 2>/dev/null || true && \
     systemctl disable nginx.service tailscaled.service 2>/dev/null || true && \
     mkdir -p /etc/systemd/journald.conf.d && \

@@ -380,13 +380,11 @@ wait_online() {
   return 1
 }
 
-cmd_up() {
-  preflight
-  [ "$SPARKBOX_DEV_SSH_BIND" = "127.0.0.1" ] &&
-    die "SPARKBOX_DEV_SSH_BIND=127.0.0.1 cannot accept a node link: the container machine
-     cannot reach loopback on this Mac. Unset it, or use hack/dev/gateway.sh directly
-     for a gateway-only run."
-
+# The machine-and-image preamble, shared by `up` and `node`. Both need the
+# container machine's devices and a freshly built image before anything can be
+# rolled; one copy is what stops a new build stage from reaching only one of the
+# two entry points.
+ensure_machine_and_image() {
   step "Apple container machine"
   "$script_dir/machine.sh" ensure
 
@@ -396,6 +394,32 @@ cmd_up() {
     step "node image: build from this working tree, push, pull"
     "$script_dir/image.sh" all
   fi
+}
+
+# Restart the node Pod and get it approved and online. Shared by `up` (when the
+# node is not already converged) and by `node` (which always rolls). Says what
+# it is about to cost first: rolling the Pod stops every guest on it.
+roll_node() {
+  local carrying
+  carrying=$(node_sandbox_count)
+  if [ -n "$carrying" ] && [ "$carrying" != 0 ]; then
+    note "restarting the node Pod; the $carrying sandbox(es) it holds will stop"
+  fi
+  start_node
+
+  step "approval"
+  approve_node
+  wait_online || true
+}
+
+cmd_up() {
+  preflight
+  [ "$SPARKBOX_DEV_SSH_BIND" = "127.0.0.1" ] &&
+    die "SPARKBOX_DEV_SSH_BIND=127.0.0.1 cannot accept a node link: the container machine
+     cannot reach loopback on this Mac. Unset it, or use hack/dev/gateway.sh directly
+     for a gateway-only run."
+
+  ensure_machine_and_image
 
   step "gateway"
   if "$script_dir/gateway.sh" status > /dev/null 2>&1; then
@@ -442,16 +466,7 @@ cmd_up() {
     note "$node_name is already linked and online, carrying $(node_sandbox_count) sandbox(es); leaving it alone"
     note "to rebuild it anyway: hack/dev/up.sh down && hack/dev/up.sh"
   else
-    local carrying
-    carrying=$(node_sandbox_count)
-    if [ -n "$carrying" ] && [ "$carrying" != 0 ]; then
-      note "restarting the node Pod; the $carrying sandbox(es) it holds will stop"
-    fi
-    start_node
-
-    step "approval"
-    approve_node
-    wait_online || true
+    roll_node
   fi
 
   step "ready"
@@ -493,15 +508,7 @@ EOF
 # the same fleet identity it already trusts.
 cmd_node() {
   preflight
-  step "Apple container machine"
-  "$script_dir/machine.sh" ensure
-
-  if [ "${SPARKBOX_DEV_SKIP_IMAGE:-0}" = 1 ]; then
-    step "image (skipped: SPARKBOX_DEV_SKIP_IMAGE=1)"
-  else
-    step "node image: build from this working tree, push, pull"
-    "$script_dir/image.sh" all
-  fi
+  ensure_machine_and_image
 
   "$script_dir/gateway.sh" status > /dev/null 2>&1 ||
     die "the gateway is not running, so a node has nothing to link to.
@@ -511,16 +518,7 @@ cmd_node() {
   seed_trust
 
   step "node Pod"
-  local carrying
-  carrying=$(node_sandbox_count)
-  if [ -n "$carrying" ] && [ "$carrying" != 0 ]; then
-    note "the $carrying sandbox(es) this node holds will stop"
-  fi
-  start_node
-
-  step "approval"
-  approve_node
-  wait_online || true
+  roll_node
 
   step "ready"
   ctl node ls 2>&1 || true

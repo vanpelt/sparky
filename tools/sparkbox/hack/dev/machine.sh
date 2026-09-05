@@ -474,8 +474,18 @@ run_guest() {
 # that adds CONFIG_DUMMY — see the netdev probe in the guest script.
 check_kernel_path() {
   local configured local_kernel
+  # jq rather than a regex over the raw JSON, the way macos/poc.sh and
+  # macos/smoke.sh already read this command. Deliberately shape-agnostic — the
+  # first STRING-valued "kernel" field anywhere in the document — because the
+  # container CLI shipping today does not echo the path back at all (create
+  # takes --kernel; inspect returns no such key), so there is no observed
+  # nesting to hard-code and a guessed `.[0].kernel` would fail exactly as
+  # silently as the regex it replaced. Absent jq, skip: the same thing an
+  # unrecognised format has always done, two lines below.
+  command -v jq > /dev/null 2>&1 || return 0
   configured=$(container machine inspect "$machine" 2>/dev/null |
-    sed -n 's/.*"kernel"[^"]*"\([^"]*\)".*/\1/p' | head -1)
+    jq -r '[.. | objects | select(has("kernel")) | .kernel]
+           | map(select(type == "string")) | first // empty' 2>/dev/null)
   local_kernel="$module_dir/macos/out/vmlinux-kvm"
 
   if [ -z "$configured" ]; then

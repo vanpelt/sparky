@@ -99,11 +99,13 @@ fi
 # from the .pem byte for byte, so escrowing them would be a second copy of the
 # same fact that can disagree with the first.
 #
-# They must exist after a pull, though, and nothing else will make them.
-# gateway.sh derives them only inside mint_identity, which a complete restored
-# identity skips by definition — so a pull without this leaves up.sh's
-# seed_trust with no gateway_upstream_key.pub and the node with nothing to
-# trust.
+# They must be CORRECT after a pull, and gateway.sh cannot make them so.
+# gateway.sh's derive_trust_pubs skips any .pub that already exists — right for
+# its job, wrong for this one: a pull writes a .pem belonging to a different
+# identity over whatever was here, and the .pub sitting beside it still belongs
+# to the old one. Overwriting unconditionally is the whole point of doing it
+# again here. A stale upstream .pub is the silent failure up.sh's seed_trust
+# header describes at length: everything looks healthy and no shell works.
 derive_pubs() {
   local name
   for name in gateway_host_key gateway_upstream_key; do

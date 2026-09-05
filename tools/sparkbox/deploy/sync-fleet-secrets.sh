@@ -222,54 +222,53 @@ generate_missing() {
   # trap, and it is echoed for the same reason the console password is: a
   # secret nobody can read is a secret nobody can paste. Rotating it is one
   # edit on each side, with no re-consent and no flag day.
-  local ws=${GITHUB_WEBHOOK_SECRET:-}
-  if excluded github-webhook-secret; then ws=SKIP; fi
-  if [ "$ws" != SKIP ] && [ -z "$ws" ] && [ -f "$SECRETS_DIR/.env" ]; then
-    ws=$(sed -n 's/^SPARKBOX_GITHUB_WEBHOOK_SECRET=//p' "$SECRETS_DIR/.env")
-  fi
-  if [ "$ws" != SKIP ] && [ -z "$ws" ] && [ -f "$GITHUB_WEBHOOK_SECRET_FILE" ]; then
-    ws=$(cat "$GITHUB_WEBHOOK_SECRET_FILE")
-  fi
-  if [ "$ws" != SKIP ] && [ -z "$ws" ]; then
-    # Hex, not base64: this value is typed or pasted into a web form and then
-    # compared byte for byte, and hex has no characters a form, a shell or a
-    # copy-paste can mangle.
-    ws=$(openssl rand -hex 32)
-    echo "== generated github webhook secret (stored as github-webhook-secret) =="
-    echo "   $ws"
-    echo "   paste it into the App's Settings -> Webhook -> Secret"
-  fi
-  if [ "$ws" != SKIP ]; then
+  if ! excluded github-webhook-secret; then
+    local ws=${GITHUB_WEBHOOK_SECRET:-}
+    if [ -z "$ws" ] && [ -f "$SECRETS_DIR/.env" ]; then
+      ws=$(sed -n 's/^SPARKBOX_GITHUB_WEBHOOK_SECRET=//p' "$SECRETS_DIR/.env")
+    fi
+    if [ -z "$ws" ] && [ -f "$GITHUB_WEBHOOK_SECRET_FILE" ]; then
+      ws=$(cat "$GITHUB_WEBHOOK_SECRET_FILE")
+    fi
+    if [ -z "$ws" ]; then
+      # Hex, not base64: this value is typed or pasted into a web form and then
+      # compared byte for byte, and hex has no characters a form, a shell or a
+      # copy-paste can mangle.
+      ws=$(openssl rand -hex 32)
+      echo "== generated github webhook secret (stored as github-webhook-secret) =="
+      echo "   $ws"
+      echo "   paste it into the App's Settings -> Webhook -> Secret"
+    fi
     ( umask 077; printf '%s' "$ws" > "$GITHUB_WEBHOOK_SECRET_FILE" )
   fi
 
   # Cloudflare token and console password are values, not files: stage them as
   # files so the manifest loop stays uniform.
-  local cf=${CLOUDFLARE_API_TOKEN:-}
-  if [ -z "$cf" ] && [ -f "$SECRETS_DIR/.env" ]; then
-    cf=$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$SECRETS_DIR/.env")
-  fi
-  if excluded cloudflare-api-token; then cf=""; fi
-  if [ -n "$cf" ]; then
-    ( umask 077; printf '%s' "$cf" > "$SECRETS_DIR/cloudflare_api_token" )
+  if ! excluded cloudflare-api-token; then
+    local cf=${CLOUDFLARE_API_TOKEN:-}
+    if [ -z "$cf" ] && [ -f "$SECRETS_DIR/.env" ]; then
+      cf=$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$SECRETS_DIR/.env")
+    fi
+    if [ -n "$cf" ]; then
+      ( umask 077; printf '%s' "$cf" > "$SECRETS_DIR/cloudflare_api_token" )
+    fi
   fi
 
-  local cp=${CONSOLE_PASSWORD:-}
-  if excluded console-password; then
-    return 0
+  if ! excluded console-password; then
+    local cp=${CONSOLE_PASSWORD:-}
+    if [ -z "$cp" ] && [ -f "$SECRETS_DIR/.env" ]; then
+      cp=$(sed -n 's/^SPARKBOX_CONSOLE_PASSWORD=//p' "$SECRETS_DIR/.env")
+    fi
+    if [ -z "$cp" ] && [ -f "$SECRETS_DIR/console_password" ]; then
+      cp=$(cat "$SECRETS_DIR/console_password")
+    fi
+    if [ -z "$cp" ]; then
+      cp=$(openssl rand -base64 18)
+      echo "== generated console password (stored as console-password) =="
+      echo "   $cp"
+    fi
+    ( umask 077; printf '%s' "$cp" > "$SECRETS_DIR/console_password" )
   fi
-  if [ -z "$cp" ] && [ -f "$SECRETS_DIR/.env" ]; then
-    cp=$(sed -n 's/^SPARKBOX_CONSOLE_PASSWORD=//p' "$SECRETS_DIR/.env")
-  fi
-  if [ -z "$cp" ] && [ -f "$SECRETS_DIR/console_password" ]; then
-    cp=$(cat "$SECRETS_DIR/console_password")
-  fi
-  if [ -z "$cp" ]; then
-    cp=$(openssl rand -base64 18)
-    echo "== generated console password (stored as console-password) =="
-    echo "   $cp"
-  fi
-  ( umask 077; printf '%s' "$cp" > "$SECRETS_DIR/console_password" )
 }
 
 # --- commands ---------------------------------------------------------------

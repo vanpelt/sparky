@@ -59,39 +59,6 @@ mrun() { container machine run -i --root --name "$machine" -- bash -s; }
 
 command -v container > /dev/null 2>&1 || die "no \`container\` CLI on this Mac"
 
-# --- which VM is which ------------------------------------------------------
-# A sandbox's guest address comes from the slot the node gave it. Rather than
-# reimplement that arithmetic, read the address firecracker was actually booted
-# with: every VM's boot_args is logged verbatim on the /boot-source PUT, and it
-# carries both `sparkbox_host=<name>` and `ip=<guest>::<gateway>:...`.
-#
-# The two are matched on the same line rather than in one pattern, because
-# boot_args is a set and not a sequence: sparkbox_host comes after ip= for one
-# VM and before it for the next, so any single expression spanning them matches
-# only whichever order happened to be sampled while it was written.
-guest_ip() {
-  local name=$1
-  mrun <<GUEST 2>/dev/null | tr -d '\r' | tail -1
-docker logs $helper 2>&1 |
-  grep -F '/boot-source' |
-  grep -E 'sparkbox_host=$name([^A-Za-z0-9._-]|\$)' |
-  tail -1 |
-  grep -oE 'ip=[0-9.]+::' |
-  head -1 |
-  sed -e 's/^ip=//' -e 's/:://'
-GUEST
-}
-
-require_guest() {
-  local name=$1 ip
-  [ -n "$name" ] || die "which sandbox? usage: guest.sh $2 <name>"
-  ip=$(guest_ip "$name")
-  [ -n "$ip" ] || die "no VM named $name has booted on this node.
-     \`ssh -p 2222 ctl@127.0.0.1 list\` shows what exists; a sandbox that is
-     paused has no address until something resumes it."
-  printf '%s' "$ip"
-}
-
 # --- console ----------------------------------------------------------------
 # firecracker writes the guest's ttyS0 to its own stdout, so the console is
 # interleaved with the VMM's API log and with systemd's ANSI progress spinner

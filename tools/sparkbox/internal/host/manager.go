@@ -658,7 +658,6 @@ type Manager struct {
 	actNetBytes        uint64                  // activity floor: bytes per sample; 0 = off
 	vitals             map[string]vitalsSample // last CPU/net reading per sandbox, for deltas
 	memUsed            map[string]int64        // latest observed guest working set per running sandbox
-	memUsedAt          time.Time               // when memUsed was last refreshed, so two controllers on one cadence sample once
 	// balloonedAt is when the reaper last inflated a sandbox's balloon, for the
 	// settle window applyVitals judges CPU against. Cleared by deflate and by
 	// every path that drops the vitals baseline.
@@ -3279,20 +3278,18 @@ func (m *Manager) reconcileMemoryPressure(ctx context.Context) {
 	}
 }
 
-// memSampleTTL is how long a working-set sample stays good enough to reuse.
-// The reaper and the memory-pressure controller both need one and both run on
-// the same one-minute cadence, so their tickers land within microseconds of
-// each other; without this, every running guest is asked for balloon stats
-// twice per minute for identical data.
-const memSampleTTL = 5 * time.Second
-
+// refreshMemoryUsage samples every running guest's working set through the
+// balloon, in parallel, and stores it in m.memUsed.
+//
+// There is no freshness cache in front of this. There was: a 5s TTL, so that the
+// reaper and the pressure controller — same one-minute cadence — would not each
+// pay for a sample. It depended on the two tickers staying within 5s of each
+// other, which is not something either of them promises: the reaper reaches here
+// only after RefreshDiskUsage and refreshVitals, both serial passes over every
+// sandbox. The caller-side guard in reapOnce (anyBalloonCandidate) removes the
+// overlap at its source on almost every tick, which is a fact about the work
+// rather than about when two goroutines happened to wake.
 func (m *Manager) refreshMemoryUsage(ctx context.Context) {
-	m.mu.Lock()
-	fresh := !m.memUsedAt.IsZero() && time.Since(m.memUsedAt) < memSampleTTL
-	m.mu.Unlock()
-	if fresh {
-		return
-	}
 	sampleCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -3316,9 +3313,6 @@ func (m *Manager) refreshMemoryUsage(ctx context.Context) {
 		}()
 	}
 	wg.Wait()
-	m.mu.Lock()
-	m.memUsedAt = time.Now()
-	m.mu.Unlock()
 }
 
 // reclaimMemory balloons cold, unpinned VMs until their projected reclaim
@@ -3429,11 +3423,13 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 	m.refreshVitals(ctx)
 	boxes := m.List()
 	// workingSetFloor reads m.memUsed, so the balloon stage needs working sets
-	// measured now rather than whenever the pressure controller last ran. Paid
-	// only on a node that can balloon at all; refreshMemoryUsage itself skips a
-	// pass whose sample is still fresh, so the two controllers on the same
-	// cadence do not each pay for one.
-	if m.balloon != nil && m.reserveMB > 0 && balloonAfter > 0 {
+	// measured now rather than whenever the pressure controller last ran. Only
+	// the balloon stage below consumes them, and it runs on a sandbox that is
+	// idle past balloonAfter and not already ballooned — so scan for one first
+	// rather than sampling unconditionally. With the default 20m idle-balloon
+	// almost every tick has no candidate, and the scan is a pass over a slice we
+	// already copied against a round trip to every running guest's VMM.
+	if m.balloon != nil && m.reserveMB > 0 && balloonAfter > 0 && anyBalloonCandidate(boxes, balloonAfter) {
 		m.refreshMemoryUsage(ctx)
 	}
 	for _, b := range boxes {
@@ -3460,6 +3456,25 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 			}
 		}
 	}
+}
+
+// anyBalloonCandidate reports whether any sandbox would reach the balloon case
+// of reapOnce's switch on this tick. It deliberately mirrors that case's guard —
+// unpinned, running, not already ballooned, idle past balloonAfter — minus the
+// pause branch that takes precedence, which only means we may sample for a
+// sandbox that gets paused instead. That is the safe direction to be wrong in:
+// the cost is one wasted sample, where missing a candidate would balloon it
+// against a stale working set. Keep the two in step.
+func anyBalloonCandidate(boxes []*Sandbox, balloonAfter time.Duration) bool {
+	for _, b := range boxes {
+		if b.Pinned || b.State != vmm.StateRunning || b.Ballooned {
+			continue
+		}
+		if time.Since(b.LastActive) > balloonAfter {
+			return true
+		}
+	}
+	return false
 }
 
 // RefreshDiskUsage re-measures every non-archived sandbox's durable filesystem

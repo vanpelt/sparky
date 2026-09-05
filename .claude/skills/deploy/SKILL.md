@@ -312,14 +312,15 @@ sandbox's shell; it may still be starting"* and there is no next step.
 ```sh
 hack/dev/guest.sh console <name>        # the serial console: the boot log
 hack/dev/guest.sh console <name> -f     # follow it
-hack/dev/guest.sh shell   <name>        # ssh straight to the guest's own sshd
 ```
 
 `console` needs nothing of the guest at all and ends with a **"still waiting"**
 summary naming the units systemd is stuck on, which is usually the answer.
-`shell` bypasses the agent by forwarding into the pod's network namespace; if
-it times out during the banner exchange, sshd is running but the guest is too
-starved to answer, and `console` is the only view left.
+
+`console` is the only subcommand. There was a `shell` that forwarded into the
+pod's network namespace to reach the guest's own sshd; it was removed because it
+never reliably worked, and `guest.sh`'s header carries the `docker exec … ssh`
+recipe to use instead.
 
 ## Verify
 
