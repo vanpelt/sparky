@@ -12,27 +12,134 @@ import (
 	"io"
 	"net"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"time"
 )
 
 const (
-	ProtocolVersion = 1
+	// ProtocolVersion 2 adds the machine fields a QEMU launch needs. Version 1
+	// is still accepted, because the controller and the helper are separate
+	// CONTAINERS of one Pod and restart independently: a rolling update briefly
+	// has one on each image, and a hard version match would turn that window
+	// into "every launch fails" rather than "the old client keeps working".
+	// A version-1 request is a Firecracker launch by definition — it predates
+	// there being another backend to ask for.
+	ProtocolVersion = 2
+	// MinProtocolVersion is the oldest request the server still answers.
+	MinProtocolVersion = 1
+
 	OpPing          = "ping"
 	OpLaunch        = "launch"
 	OpSnapshot      = "snapshot-outputs"
 	OpCPUTime       = "cpu-time"
 	maxMessageBytes = 4096
+
+	// MaxCmdlineBytes bounds the guest kernel command line. The whole message
+	// is read through a 4 KiB limit, so this cannot be raised without raising
+	// that too; the real line is ~300 bytes.
+	MaxCmdlineBytes = 2048
+	// MaxVCPUs and MaxMemMB bound the machine a caller can ask for. They are
+	// sanity limits, not policy — admission control lives in the controller —
+	// but the helper is the privileged process and must not build an argv from
+	// numbers it has not looked at.
+	MaxVCPUs = 256
+	MaxMemMB = 1 << 20 // 1 TiB
 )
 
-// Request is deliberately path-free. The helper derives every path from its
-// immutable startup configuration after validating Name and Slot.
+// Backend names the VMM this helper launches. It is a SERVER-SIDE startup
+// flag and never appears in a Request, which is the point: the securityContext
+// comment in deploy/kubernetes/deployment.yaml calls this socket "the entire
+// long-lived Linux privilege boundary" and says its protocol contains no
+// commands. A field letting the unprivileged controller pick which binary the
+// root process executes would make that sentence false.
+//
+// One helper launches one VMM for its whole life, which also matches how a node
+// works: vmm.ClaimStateDir already refuses to let a node's VM state directory
+// change hands between drivers, so a helper that could serve both would be
+// serving a situation that cannot arise.
+type Backend string
+
+const (
+	BackendFirecracker Backend = "firecracker"
+	BackendQEMU        Backend = "qemu"
+)
+
+// ParseBackend maps the operator-facing flag value onto a Backend. An empty
+// value is Firecracker, so every existing deployment keeps its behaviour
+// without changing a flag.
+func ParseBackend(v string) (Backend, error) {
+	switch v {
+	case "", string(BackendFirecracker):
+		return BackendFirecracker, nil
+	case string(BackendQEMU):
+		return BackendQEMU, nil
+	default:
+		return "", fmt.Errorf("unknown vmm backend %q (want %q or %q)", v, BackendFirecracker, BackendQEMU)
+	}
+}
+
+// Request is deliberately path-free and command-free. The helper derives every
+// path from its immutable startup configuration after validating Name and Slot,
+// and it chooses the VMM from ITS OWN startup flag rather than from anything
+// here — a controller that could name the binary to run would not be a boundary.
+//
+// # WHY THE MACHINE FIELDS EXIST, AND WHY THEY ARE NOT A COMMAND
+//
+// Firecracker takes an empty argv and receives its machine configuration over
+// its own REST socket afterwards, so a launch needed nothing but a name and a
+// slot. QEMU takes the entire machine on the command line and there is no
+// after. The helper therefore has to know the vCPU count, the memory size and
+// the guest kernel command line to build an argv at all.
+//
+// Those three are data, not instructions: the helper validates each, places
+// each at a fixed position in an argv IT constructs, and passes Cmdline as a
+// single element of an exec vector — never through a shell — so a value
+// containing spaces stays one token and cannot become another QEMU option.
+// Everything that selects behaviour (which binary, which machine type, which
+// kernel image, every path) still comes from the helper's own startup flags.
 type Request struct {
 	Version int    `json:"version"`
 	Op      string `json:"op"`
 	Name    string `json:"name,omitempty"`
 	Slot    int    `json:"slot,omitempty"`
 	Resume  bool   `json:"resume,omitempty"`
+	VCPUs   int64  `json:"vcpus,omitempty"`
+	MemMB   int64  `json:"mem_mb,omitempty"`
+	Cmdline string `json:"cmdline,omitempty"`
+}
+
+// cmdlineRE is the guest kernel command line the helper will accept: printable
+// ASCII, no control characters, no quotes or shell metacharacters that would
+// make a reader wonder whether this ever reaches a shell (it does not).
+//
+// The line is composed by the controller from values it derives — the guest's
+// addresses, its DNS, its machine-id, the sparkbox_fresh marker — so this is a
+// shape check rather than a policy one. A NUL would be rejected by execve
+// itself, far less legibly; a newline would be the one character that could
+// confuse a log reader into seeing two events.
+var cmdlineRE = regexp.MustCompile(`^[A-Za-z0-9 ._:,=/@%+-]*$`)
+
+// ValidateMachine checks the fields a QEMU launch adds. Split out from the
+// server so it is testable without a Linux host, and exported-adjacent so the
+// client can fail early rather than after a round trip.
+func ValidateMachine(req Request) error {
+	if req.VCPUs < 1 || req.VCPUs > MaxVCPUs {
+		return fmt.Errorf("vcpus %d out of range (1..%d)", req.VCPUs, MaxVCPUs)
+	}
+	if req.MemMB < 1 || req.MemMB > MaxMemMB {
+		return fmt.Errorf("memory %d MiB out of range (1..%d)", req.MemMB, MaxMemMB)
+	}
+	if req.Cmdline == "" {
+		return errors.New("guest kernel command line is required")
+	}
+	if len(req.Cmdline) > MaxCmdlineBytes {
+		return fmt.Errorf("guest kernel command line is %d bytes, limit %d", len(req.Cmdline), MaxCmdlineBytes)
+	}
+	if !cmdlineRE.MatchString(req.Cmdline) {
+		return errors.New("guest kernel command line contains characters outside the accepted set")
+	}
+	return nil
 }
 
 type Response struct {

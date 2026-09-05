@@ -42,7 +42,15 @@ const (
 var vmNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}$`)
 
 type ServerOptions struct {
-	SocketPath             string
+	SocketPath string
+	// Backend is the VMM this helper launches for its whole life. Empty means
+	// Firecracker, so an existing deployment keeps its behaviour untouched.
+	Backend Backend
+	// QemuBin and MachineType are read only when Backend is BackendQEMU. They
+	// live here rather than in a Request because they select what gets executed
+	// and how the machine is modelled — see the Backend doc comment.
+	QemuBin                string
+	MachineType            string
 	FirecrackerBin         string
 	KernelPath             string
 	VMStateDir             string
@@ -254,8 +262,14 @@ func (s *server) handle(ctx context.Context, conn *net.UnixConn) {
 }
 
 func (s *server) validateRequest(req Request) error {
-	if req.Version != ProtocolVersion {
-		return fmt.Errorf("unsupported helper protocol version %d", req.Version)
+	// A RANGE, not an equality. The controller and this helper are separate
+	// containers of one Pod with independent restarts, so a rolling update has a
+	// window with one on each image. An equality check turns that window into
+	// "every launch fails"; accepting the previous version turns it into "the
+	// old client keeps working, without the fields it never sent".
+	if req.Version < MinProtocolVersion || req.Version > ProtocolVersion {
+		return fmt.Errorf("unsupported helper protocol version %d (this helper speaks %d..%d)",
+			req.Version, MinProtocolVersion, ProtocolVersion)
 	}
 	switch req.Op {
 	case OpPing:
@@ -269,6 +283,20 @@ func (s *server) validateRequest(req Request) error {
 	}
 	if req.Slot < 0 || req.Slot >= s.network.Capacity() {
 		return errors.New("VM slot is outside the configured subnet")
+	}
+	// The machine fields are required exactly when this helper is going to build
+	// a QEMU argv out of them, and meaningless otherwise — Firecracker is
+	// launched with an empty argv and configured over its own socket afterwards.
+	// Checking them by backend rather than by protocol version is what lets a
+	// version-2 Firecracker client keep sending nothing.
+	if req.Op == OpLaunch && s.opts.Backend == BackendQEMU {
+		if req.Version < 2 {
+			return fmt.Errorf("this helper launches QEMU and needs protocol version 2 or later, "+
+				"but the client sent version %d; the controller container is running an older image", req.Version)
+		}
+		if err := ValidateMachine(req); err != nil {
+			return err
+		}
 	}
 	return nil
 }
