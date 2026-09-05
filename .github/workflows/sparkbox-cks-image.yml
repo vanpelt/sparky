@@ -40,10 +40,47 @@ on:
     # it under cancel-in-progress. A release builds this image exactly once,
     # through workflow_call, after publish.
     branches: ["**"]
+    # The build context is `tools`, and the Containerfile COPYs both modules
+    # wholesale — so everything below is genuinely IN the context. Being in the
+    # context is not the same as reaching the image, though, and the difference
+    # is a multi-arch build (QEMU-emulated arm64, ~5 minutes) that produces
+    # bytes identical to the last one. The negations name the parts of the
+    # context that cannot change what is published; the re-includes after them
+    # are the individual files inside those parts that can.
+    #
+    # Order is load-bearing: GitHub applies these in sequence, so a later `!`
+    # excludes and a later positive re-includes. Keep the exceptions last.
+    #
+    # Anything else under the two modules stays a trigger on purpose. go:embed
+    # pulls .html, .css, .js, .png, .svg, .json, .yaml, .sh, .env, .conf, unit
+    # templates and even markdown (internal/guestdocs) into the binaries, so
+    # narrowing this by file extension rather than by directory would drop a
+    # rebuild that was needed. A missed build ships stale bytes under a fresh
+    # SHA tag; a redundant one only costs five minutes.
     paths:
       - .github/workflows/sparkbox-cks-image.yml
       - tools/sparkbox/**
       - tools/sluice/**
+      # Tests are copied into the context but `go build ./cmd/...` never
+      # compiles them, and nothing embeds a testdata dir.
+      - "!tools/sparkbox/**/*_test.go"
+      - "!tools/sluice/**/*_test.go"
+      - "!tools/sparkbox/**/testdata/**"
+      - "!tools/sluice/**/testdata/**"
+      # Prose, dev-loop scripts, and the GUEST image. That last one is the
+      # easiest to misread: images/Dockerfile builds the rootfs a sandbox runs,
+      # which this image downloads from a release at Pod start rather than
+      # containing — build-artifacts.yml is what rebuilds it.
+      - "!tools/sparkbox/docs/**"
+      - "!tools/sparkbox/hack/**"
+      - "!tools/sparkbox/images/**"
+      - "!tools/sparkbox/*.md"
+      - "!tools/sluice/*.md"
+      # The two files inside those directories that do reach a build: motd is
+      # COPYed into the runtime stage, and check-cks-pin.sh is the gate this
+      # workflow runs before anything is built.
+      - tools/sparkbox/images/motd
+      - tools/sparkbox/hack/check-cks-pin.sh
 
 concurrency:
   group: sparkbox-cks-image-${{ github.ref }}

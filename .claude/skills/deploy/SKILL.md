@@ -71,6 +71,17 @@ IMAGE="$REPO@$(crane digest "$REPO:sha-$SHA")"
   prints), not the child image digest a runtime reports.
 - Two commits merged in one push produce **one** image, for the tip. A missing
   tag for a middle commit is expected — use the tip.
+- **The tip itself can have no `sha-` tag.** The workflow skips commits that
+  cannot change the image — tests, `docs/`, `hack/`, the guest `images/` dir —
+  so a branch ending in a test-only commit never built one. That is not a
+  failed build; there is simply nothing new to deploy. Fall back to the branch
+  tag, which names the newest image the branch produced (`/` becomes `-`):
+
+  ```sh
+  IMAGE="$REPO@$(crane digest "$REPO:$(git rev-parse --abbrev-ref HEAD | tr / -)")"
+  ```
+
+  Check `gh run list` first — a build still running looks the same from here.
 - `:edge` also tracks main, but resolve it to a digest rather than deploying a
   moving tag.
 
