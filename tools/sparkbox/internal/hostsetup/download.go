@@ -152,14 +152,54 @@ func decompressor(p string) (dest string, wrap func(io.Reader) (io.ReadCloser, e
 	}
 }
 
+// assetStampPath is where downloadVerify records WHICH release a decompressed
+// artifact came from: a sidecar next to it holding the sha256 of the compressed
+// asset it was expanded from.
+//
+// It exists because the sha in the manifest covers bytes that are never kept.
+// The rootfs is streamed straight from .zst into a 25GB ext4 image, so there is
+// nothing on disk to hash back. Without the stamp the only available check is
+// "a file is there", and a host that already had a template read as satisfied
+// forever: a release that changed ONLY the guest image — new agent tool
+// versions, new guest packages, anything in images/Dockerfile — never reached
+// an existing host, silently, because the kernel and firecracker shas still
+// matched and nothing recorded what the template was.
+//
+// WHAT IT DOES NOT CLAIM, and the reason agenttools.go reads its own stamp out
+// of the template with debugfs instead of trusting a file beside it: this
+// answers "which release did downloadVerify last expand here", not "what is
+// inside this template". Anything that replaces the .ext4 without going through
+// downloadVerify — a hand-built template swapped in during an investigation,
+// say — leaves the stamp describing the file that used to be there. That is no
+// worse than the existence-only check it replaces, which could not see such a
+// swap either, but it is a weaker claim than a sha over the file itself and
+// should not be read as more.
+func assetStampPath(dest string) string { return dest + ".sha256" }
+
+// assetStampMatches reports whether dest was expanded from the asset with this
+// sha. A MISSING stamp is deliberately a mismatch: a template laid down before
+// stamping existed could be any release, and re-fetching one that happened to
+// be current costs a download, where trusting one that is stale costs the bug
+// this stamp exists to close.
+func assetStampMatches(dest, sha string) bool {
+	if sha == "" {
+		return false
+	}
+	b, err := os.ReadFile(assetStampPath(dest))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(b)) == sha
+}
+
 // downloadVerify fetches a.URL, verifying a.SHA256 over the wire bytes as it
 // streams (never buffering the body). A compressed a.Dest is decompressed
 // during the same pass, so the multi-GB rootfs costs one disk write and its
 // compressed form never lands on disk. Idempotency: an uncompressed artifact
 // is skipped when a.Dest already matches the sha; a compressed one is skipped
-// when its decompressed target exists (the sha covers bytes that are never
-// kept, so existence is the strongest cheap check). A failure — including a
-// sha mismatch discovered only after the stream ends — leaves no partial file.
+// when its decompressed target carries a stamp naming the same compressed sha
+// (see assetStampPath). A failure — including a sha mismatch discovered only
+// after the stream ends — leaves no partial file.
 func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool, err error) {
 	dest, wrap := decompressor(a.Dest)
 	if wrap == nil {
@@ -169,7 +209,13 @@ func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool
 			}
 		}
 	} else if _, serr := os.Stat(dest); serr == nil {
-		return false, nil
+		// Compressed: the wire sha cannot be recomputed from what we kept, so
+		// the stamp is what says which release this is. No sha to compare
+		// against at all (an unpinned manifest) keeps the old behaviour, since
+		// existence is then genuinely all there is.
+		if a.SHA256 == "" || assetStampMatches(dest, a.SHA256) {
+			return false, nil
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return false, err
@@ -230,6 +276,16 @@ func downloadVerify(ctx context.Context, f Fetcher, a Artifact) (downloaded bool
 	if err := os.Rename(tmp, dest); err != nil {
 		os.Remove(tmp)
 		return false, err
+	}
+	// Stamp AFTER the rename, so a crash in between leaves an unstamped file
+	// that the next run re-fetches rather than a stamp promising a file that is
+	// not there. Reported rather than swallowed: a directory that just took a
+	// multi-GB write refusing 65 bytes is a real problem, and a missing stamp
+	// silently returns this host to re-fetching the rootfs on every run.
+	if wrap != nil && a.SHA256 != "" {
+		if err := os.WriteFile(assetStampPath(dest), []byte(a.SHA256+"\n"), 0o644); err != nil {
+			return true, fmt.Errorf("stamp %s: %w", assetStampPath(dest), err)
+		}
 	}
 	return true, nil
 }

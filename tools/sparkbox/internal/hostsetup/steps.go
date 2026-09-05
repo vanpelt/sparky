@@ -726,22 +726,36 @@ func stepFetchArtifacts() Step {
 		// here at all: a host with a kernel and a rootfs but no firecracker
 		// binary reported "present" and the step never ran.
 		Satisfied: func(e *Env) (bool, string, error) {
-			for _, w := range []struct{ name, path, sha string }{
-				{"kernel", e.Cfg.KernelPath, e.Manifest.SHA256Vmlinux},
-				{"firecracker", e.Cfg.FirecrackerBin, e.Manifest.SHA256Firecrkr},
-				// The rootfs sha in the manifest covers the COMPRESSED asset,
-				// which downloadVerify streams straight through into the
-				// decompressed image and never keeps — so there is nothing on
-				// disk to compare it against. Existence plus a non-zero size is
-				// the strongest cheap check available here, and saying so is
-				// better than implying a verification that is not happening.
-				{"rootfs", e.Cfg.rootfsPath(), ""},
+			for _, w := range []struct {
+				name, path, sha string
+				// stamped: the sha names the COMPRESSED asset this file was
+				// expanded from, so it is compared against the sidecar
+				// downloadVerify writes rather than against the file's own
+				// bytes — there is nothing on disk to hash back. See
+				// assetStampPath.
+				stamped bool
+			}{
+				{"kernel", e.Cfg.KernelPath, e.Manifest.SHA256Vmlinux, false},
+				{"firecracker", e.Cfg.FirecrackerBin, e.Manifest.SHA256Firecrkr, false},
+				// Checked at all only since the stamp existed. Before it, this
+				// was existence-only, and the whole step is gated as a unit —
+				// so a release that changed ONLY the guest image left the
+				// kernel and firecracker shas matching, reported satisfied, and
+				// never fetched the new template. That is the most common kind
+				// of release there is.
+				{"rootfs", e.Cfg.rootfsPath(), e.Manifest.SHA256Rootfs, true},
 			} {
 				fi, err := os.Stat(w.path)
 				if err != nil || fi.Size() == 0 {
 					return false, "", nil
 				}
 				if w.sha == "" {
+					continue
+				}
+				if w.stamped {
+					if !assetStampMatches(w.path, w.sha) {
+						return false, "", nil
+					}
 					continue
 				}
 				have, herr := sha256File(w.path)
@@ -757,7 +771,7 @@ func stepFetchArtifacts() Step {
 				// is no manifest to compare against. Do not pretend otherwise.
 				return true, "kernel + firecracker + rootfs present (release unresolved — shas unchecked)", nil
 			}
-			return true, "kernel + firecracker match " + e.Manifest.Release + ", rootfs present", nil
+			return true, "kernel + firecracker + rootfs match " + e.Manifest.Release, nil
 		},
 		Plan: func(e *Env) string {
 			return "download + sha256-verify vmlinux, firecracker, rootfs (decompress)"
