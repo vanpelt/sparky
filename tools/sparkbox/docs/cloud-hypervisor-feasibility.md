@@ -8,6 +8,12 @@ audited draft's central conclusion. Where a draft was wrong, the correction is
 stated rather than quietly patched; the errors were instructive, and the last one
 in particular is a lesson about measuring the wrong file.
 
+**The decision this feeds is argued in [vmm-choice.md](vmm-choice.md)** — read
+that first if you want the case for or against the port rather than its
+mechanics. Short version: the port is defensible on the GPU roadmap and on
+proving the driver abstraction carries a second backend, and *not* on security,
+performance, or nested virtualization, where the two engines are a wash.
+
 Companion to [security-hardening.md](security-hardening.md) (the CKS boundary
 this has to preserve), [cks-reflink-persistence-plan.md](cks-reflink-persistence-plan.md)
 (the reflink disk model this must not break) and
