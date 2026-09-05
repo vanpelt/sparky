@@ -469,6 +469,55 @@ Firecracker writes a full memory image. **Firecracker archives about 20% faster*
 (92.00s/92.70s against 124.45s/115.46s). Neither has been investigated, and both
 are driver questions before they are VMM questions.
 
+### x86_64, on the CKS node
+
+The first run of either driver on the architecture we actually serve. Same
+throwaway Pod, 8 CPUs and 12 GiB cap, 2 GiB guests, node otherwise busy serving
+real sandboxes.
+
+| case | Firecracker | QEMU |
+| --- | --- | --- |
+| BootAndSSH | 1.68s | 1.61s |
+| TwoAtOnce | 1.79s | 1.87s |
+| Destroy | 2.16s | **0.98s** |
+| RootfsPresence | 9.61s | **0.34s** |
+| PauseResume | 13.69s | **8.16s** |
+| DestroyThenReuseName | 14.12s | **7.79s** |
+| Rename | 12.82s | **9.47s** |
+| DiskReport | 8.36s | **6.69s** |
+| DiskResize | 13.94s | **10.02s** |
+| ForkFromTemplate | 29.04s | 28.17s |
+| Archive | 127.21s | **97.56s** |
+| CreateRefusesResidue | **11.52s** | 13.78s |
+| Balloon | **7.29s** | 12.21s |
+| CPUStats | **10.88s** | 12.91s |
+| NetStats | 13.92s | **8.04s** |
+| **Reboot** | **FAIL** | **5.10s** |
+| total | 289.89s (18/19) | **224.71s (19/19)** |
+
+**QEMU passes 19/19 here and Firecracker does not**, which is not the result
+anyone ordered. Note also that `Archive` reverses from arm64: Firecracker won it
+by 20% there and loses it by 23% here.
+
+A guest boots to SSH in **1.6s** on this node, both drivers.
+
+### The one x86_64 failure: Firecracker `Reboot`
+
+Reproduced twice, deterministic, and QEMU passes the same case on the same node
+minutes apart — so it is the Firecracker driver on this architecture, not the
+environment:
+
+    create preboot9766121 (NewSandbox=false): start vm: Firecracker did not
+    create API socket .../fc-vms/preboot9766121/fc.sock: context deadline exceeded
+
+The failing call is the **second** `Create` for one VM name — the cold boot that
+`testReboot` does after `Pause` + `DropSnapshots`, which is exactly the path a
+user's "reboot my sandbox" takes. `BootAndSSH` passes on the same run at 1.68s,
+so ordinary `Create` is fine. The obvious explanation, a stale `fc.sock`, is
+wrong: `fc.go:757` already unlinks it before boot. **Not yet diagnosed**, and it
+should be, because it is a shipping-driver failure on the architecture the fleet
+runs.
+
 ### How not to measure this, learned the hard way
 
 An earlier draft of the table above reported QEMU booting 1.8x *faster* than

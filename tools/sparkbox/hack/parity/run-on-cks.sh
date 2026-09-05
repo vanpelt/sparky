@@ -60,8 +60,13 @@ pkg=./internal/vmm/firecracker
 image=""
 machine_type=""
 timeout=90m
+# Lower than the suite's own 180s default. This node boots a guest in seconds;
+# a three-minute ceiling here only decides how long a MISCONFIGURED run takes to
+# tell you, and at nineteen cases that is the difference between four minutes
+# and an hour.
+boot_timeout_s=60
 keep=0
-nodedata=/var/lib/sparkbox
+nodedata=
 scratch_gb=40
 login_user=""
 
@@ -73,6 +78,7 @@ while [ "$#" -gt 0 ]; do
     --machine-type) machine_type=${2:?--machine-type needs a name}; shift 2 ;;
     --keep)      keep=1; shift ;;
     --timeout)   timeout=${2:?--timeout needs a value}; shift 2 ;;
+    --boot-timeout) boot_timeout_s=${2:?--boot-timeout needs seconds}; shift 2 ;;
     --namespace) namespace=${2:?--namespace needs a value}; shift 2 ;;
     --context)   context=${2:?--context needs a value}; shift 2 ;;
     --node-data)  nodedata=${2:?--node-data needs a path}; shift 2 ;;
@@ -113,6 +119,29 @@ if [ -z "$image" ]; then
   image="ghcr.io/${owner:-vanpelt}/sparkbox-parity:${branch:-edge}"
 fi
 
+# Where the node's assets live ON THE HOST. Not /var/lib/sparkbox: that is the
+# path the deployment mounts them AT, inside its containers. The host path is a
+# hostPath volume on the sparkbox-node Deployment (/mnt/local/sparkbox-poc as of
+# this writing), so read it from there rather than hardcoding a value that goes
+# stale the first time the namespace or the mount moves. Getting this wrong does
+# not fail loudly -- the Pod simply never becomes Ready, with the reason three
+# screens deep in `describe`.
+if [ -z "$nodedata" ]; then
+  nodedata=$("${k[@]}" -n sparkbox-poc get deploy sparkbox-node -o json 2>/dev/null \
+    | python3 -c '
+import json,sys
+try: sp = json.load(sys.stdin)["spec"]["template"]["spec"]
+except Exception: sys.exit(0)
+want = {m["name"] for c in sp["containers"] for m in c.get("volumeMounts", [])
+        if m.get("mountPath") == "/var/lib/sparkbox"}
+for v in sp.get("volumes", []):
+    if v["name"] in want and "hostPath" in v:
+        print(v["hostPath"]["path"]); break
+' || true)
+  [ -n "$nodedata" ] || die "could not read the node data hostPath from deploy/sparkbox-node; pass --node-data"
+  echo "node data on the host: $nodedata"
+fi
+
 say "1. building the linux/amd64 parity test binary"
 echo "   package: $pkg"
 ( cd "$sparkbox" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
@@ -121,7 +150,7 @@ ls -lh "$out/parity-amd64.test" | awk '{print "   " $5, $9}'
 
 say "2. namespace/$namespace and the runner Pod"
 "${k[@]}" get ns "$namespace" >/dev/null 2>&1 || "${k[@]}" create ns "$namespace" >/dev/null
-"${k[@]}" -n "$namespace" apply -f - >/dev/null <<YAML
+"${k[@]}" -n "$namespace" apply -f - <<YAML || die "pod manifest rejected (see the error above)"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -132,10 +161,15 @@ spec:
   terminationGracePeriodSeconds: 5
   containers:
     - name: runner
-      # Stock ubuntu, and step 5 installs what the suite shells out to
-      # (e2fsprogs, zerofree, zstd, iproute2, xfsprogs). Deliberately NOT the
-      # NOT the sparkbox node image: this Pod should not be confusable with part
-      # of the deployment, in a `kubectl get pods -A` or by anything else.
+      # The parity toolchain image (hack/parity/Dockerfile): QEMU plus the
+      # filesystem tools the driver shells out to, and nothing else.
+      #
+      # Deliberately NOT the sparkbox node image. This Pod should not be
+      # confusable with part of the deployment by someone reading
+      # 'kubectl get pods -A' on a live cluster -- and note the quoting there:
+      # this heredoc is unquoted, so a backtick would run a command and paste
+      # its output into the manifest. That is not hypothetical; it is the bug
+      # that made this script fail the first time it was ever run.
       image: ${image}
       command: ["sleep", "infinity"]
       securityContext:
@@ -208,8 +242,15 @@ PREP
 image_name=$("${k[@]}" -n "$namespace" exec parity -- \
   bash -c 'basename "$(ls /work/scratch/images/*.ext4 | head -1)" .ext4')
 if [ -z "$login_user" ]; then
-  login_user=$("${k[@]}" -n "$namespace" exec parity -- \
-    bash -c 'cat /nodedata/images/*.login-user 2>/dev/null | head -1' || true)
+  # The sidecar sits next to the TEMPLATE, not next to the base image: on a live
+  # node /nodedata/images holds universal.ext4 and a .ready marker and nothing
+  # else, while /nodedata/templates carries a .login-user beside each snapshot.
+  # Look in both. Getting this wrong is expensive and silent -- the driver falls
+  # back to root, every SSH handshake fails as the wrong user, and each case
+  # burns the FULL boot timeout before failing. That is what the first real run
+  # of this script did: nineteen cases, exactly three minutes apart.
+  login_user=$("${k[@]}" -n "$namespace" exec parity -- bash -c \
+    'cat /nodedata/images/*.login-user /nodedata/templates/*.login-user 2>/dev/null | head -1' || true)
 fi
 # root is the driver's own default, and it is the wrong guess for our images
 # (hack/images/Dockerfile labels them sparky). Getting it wrong fails at the SSH
@@ -254,6 +295,7 @@ say "6. running the suite"
   SPARKBOX_PARITY_SUBNET=172.31.0.0/24 \
   SPARKBOX_PARITY_VCPUS=2 \
   SPARKBOX_PARITY_MEM_MB=2048 \
+  SPARKBOX_PARITY_BOOT_TIMEOUT_S="$boot_timeout_s" \
   SPARKBOX_PARITY_QEMU="$qemu_bin" \
   SPARKBOX_PARITY_MACHINE_TYPE="$machine_type" \
   /work/parity.test -test.run "$runre" -test.v -test.timeout "$timeout" \
