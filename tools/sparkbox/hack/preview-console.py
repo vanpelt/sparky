@@ -504,11 +504,18 @@ def _ws_recv(rfile):
             return
 
 
+def _ws_close(wfile, code, reason):
+    # Mirrors internal/xterm/ws.go's closeWith: a 2-byte close code followed
+    # by a UTF-8 reason, in the close frame's own payload — not a data frame.
+    _ws_send(wfile, struct.pack("!H", code) + reason.encode("utf-8"), 0x8)
+
+
 _PROMPT = "\x1b[32mpreview\x1b[0m:\x1b[34m~\x1b[0m$ "
 _BANNER = (
     "\x1b[36mSparkbox preview shell\x1b[0m \u2014 a fake PTY, not a real sandbox.\r\n"
     "Type \x1b[1mclip\x1b[0m to test the OSC 52 clipboard addon, or drag-select any\r\n"
-    "of this text and Ctrl/Cmd+C to test a plain copy.\r\n\r\n"
+    "of this text and Ctrl/Cmd+C to test a plain copy. \x1b[1mexit\x1b[0m ends the\r\n"
+    "session like a real shell would.\r\n\r\n"
 )
 
 
@@ -558,8 +565,17 @@ def _fake_pty(rfile, wfile):
             for b in payload:
                 if b in (0x0D, 0x0A):  # Enter
                     _ws_send(wfile, b"\r\n", 0x2)
-                    _run_fake_command(line.decode("utf-8", "replace"), wfile)
+                    cmd = line.decode("utf-8", "replace").strip()
                     line.clear()
+                    if cmd == "exit":
+                        # Same two-part goodbye as a real shell: the exit
+                        # status over the socket, then the 4001 close that
+                        # tells the page to show "Shell exited" rather than
+                        # treat this as a dropped connection to retry.
+                        _ws_send(wfile, json.dumps({"type": "exit", "code": 0}).encode(), 0x1)
+                        _ws_close(wfile, 4001, "shell exited with 0")
+                        return
+                    _run_fake_command(cmd, wfile)
                     _ws_send(wfile, _PROMPT.encode("utf-8"), 0x2)
                 elif b in (0x7F, 0x08):  # Backspace
                     if line:
