@@ -59,7 +59,7 @@ import (
 //	              <- boot calls this to build-or-replay -append,
 //	              (d *Driver) kernelArgs(name string,
 //	              idx int, fresh bool) (string, error), guestargs.MachineID(name string)
-//	              string, hostnet.MAC(qemuMACOUI, idx int) string, guestargs.DNSArg(guestDNS,
+//	              string, guestnet.MACFor(qemuMACOUI, idx int) string, guestargs.DNSArg(guestDNS,
 //	              gatewayIP string) (string, error), guestargs.ValidateDNS(guestDNS
 //	              string) error  <- New calls this one.
 //	lifecycle.go  Create, Pause, Resume, Destroy, plus everything they need:
@@ -254,7 +254,7 @@ import (
 //	-drive file=<rootfs>,format=raw,if=none,id=rootfs
 //	-device virtio-blk-pci,drive=rootfs,romfile=
 //	-netdev tap,id=net0,ifname=<d.net.TapName(idx)>,script=no,downscript=no
-//	-device virtio-net-pci,netdev=net0,mac=<hostnet.MAC(qemuMACOUI, idx)>,romfile=
+//	-device virtio-net-pci,netdev=net0,mac=<guestnet.MACFor(qemuMACOUI, idx)>,romfile=
 //	-device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,romfile=
 //	-qmp unix:<qmp.sock>,server=on,wait=off
 //	-nographic -serial file:<serial.log> -monitor none
@@ -446,6 +446,27 @@ type Options struct {
 	// ever been run on x86_64 and guessing a machine model that determines
 	// snapshot compatibility is not the place to be optimistic.
 	MachineType string
+	// PrivilegedHelperSocket moves VM launch, tap creation and jail construction
+	// into the root-owned helper, exactly as it does for the firecracker driver.
+	// Empty is the DIRECT LAUNCHER: this process execs QEMU itself, which is
+	// what a dev box and the parity suite use.
+	//
+	// It changes what this driver may assume about its own container. On CKS the
+	// controller runs with every capability dropped and NO device node at all —
+	// the device plugin's sparkbox.dev/kvm allocation belongs to the helper — so
+	// the /dev/kvm probe in New and the stale-tap sweep are BOTH conditional on
+	// this being empty, mirroring fc.go:303 and fc.go:314. Measured on the CKS
+	// node: a hostPath bind mount of /dev/kvm is not enough, the device cgroup
+	// refuses it even to uid 0 holding DAC_OVERRIDE, so a driver that probes
+	// unconditionally cannot start in the container that would run it.
+	PrivilegedHelperSocket string
+	// PrivilegedHelperBin is the launch client the driver execs; it holds no
+	// privilege of its own and only keeps an authenticated connection open for
+	// the VMM's lifetime.
+	PrivilegedHelperBin string
+	// HelperControllerGID is the group the helper shares VM files and the QMP
+	// socket with, so this unprivileged process can reach them.
+	HelperControllerGID int
 	// DisableHostRootfsMounts skips per-create key injection and the template
 	// sanitize pass — the two runtime paths that otherwise loop-mount a
 	// guest-authored ext4 in the management process. Templates must then
@@ -695,11 +716,20 @@ func New(opts Options) (*Driver, error) {
 		d.net.Uplink6 = hostnet.DefaultRoute6Dev()
 	}
 
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		// -cpu host, which the spike measured and which every timing in it
-		// assumes, is a KVM-only model. TCG would boot and would not be a
-		// sandbox host.
-		return nil, fmt.Errorf("qemu driver requires /dev/kvm: %w", err)
+	// Only the process that will actually open /dev/kvm may insist on it.
+	// Under the privileged helper this one never does — the helper holds the
+	// device-plugin allocation and execs QEMU — and on CKS this container has no
+	// device node at all, so an unconditional probe here is not a safety check,
+	// it is a driver that cannot start. fc.go:303 has had this guard from the
+	// beginning; the qemu driver was written against the direct launcher and
+	// inherited the check without it.
+	if opts.PrivilegedHelperSocket == "" {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			// -cpu host, which the spike measured and which every timing in it
+			// assumes, is a KVM-only model. TCG would boot and would not be a
+			// sandbox host.
+			return nil, fmt.Errorf("qemu driver requires /dev/kvm: %w", err)
+		}
 	}
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
@@ -708,7 +738,17 @@ func New(opts Options) (*Driver, error) {
 	// would then fail with "Device or resource busy". Nothing of ours is
 	// running in a fresh process, so sweep them now — and only ours: see
 	// tapPrefix.
-	d.net.SweepStale()
+	//
+	// Gated the way the firecracker driver gates it. Under the helper the taps
+	// are not ours to sweep: the helper creates and destroys them, it can still
+	// own running guests when this container restarts alone (separate
+	// containers of one Pod with independent restarts), and `ip link del` on a
+	// live guest's tap would take its network away mid-session. That it
+	// currently fails for lack of NET_ADMIN is an accident of the deployment,
+	// not a design.
+	if opts.PrivilegedHelperSocket == "" {
+		d.net.SweepStale()
+	}
 	return d, nil
 }
 

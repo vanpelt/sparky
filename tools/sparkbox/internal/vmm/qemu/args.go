@@ -5,10 +5,11 @@ package qemu
 import (
 	"fmt"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 )
 
 // This file is the whole of what the driver tells QEMU at exec time: one argv
@@ -39,7 +40,7 @@ type qemuSpec struct {
 	MemMB       int64  // -m, and the balloon's baseline (see caps_vmm.go)
 	RootfsPath  string // the raw ext4 image backing /dev/vda
 	TapName     string // an already-created host tap, from d.net.TapName(idx)
-	MAC         string // from hostnet.MAC(qemuMACOUI, idx)
+	MAC         string // from guestnet.MACFor(qemuMACOUI, idx)
 	QMPSocket   string // the monitor socket; boot unlinks it before exec
 	SerialLog   string // -serial file: target
 	RestoreFrom string // "" for a cold boot, else the state.migrate to load
@@ -277,7 +278,7 @@ func (d *Driver) qemuArgs(name string, st *vmState, rootfs, cmdline string, rest
 		MemMB:       st.memMB,
 		RootfsPath:  rootfs,
 		TapName:     d.net.TapName(st.idx),
-		MAC:         hostnet.MAC(qemuMACOUI, st.idx),
+		MAC:         guestnet.MACFor(qemuMACOUI, st.idx),
 		QMPSocket:   d.qmpSocketPath(name),
 		SerialLog:   d.serialLogPath(name),
 	}

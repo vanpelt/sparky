@@ -181,10 +181,3 @@ func DefaultRoute6Dev() string {
 	}
 	return ""
 }
-
-// MAC is a stable locally-administered address for one slot. oui3 is the third
-// octet and separates the drivers, so two drivers sharing a subnet on one host
-// (which only the parity suite does) cannot hand out the same MAC.
-func MAC(oui3 byte, idx int) string {
-	return fmt.Sprintf("02:5b:%02x:00:%02x:%02x", oui3, (idx>>8)&0xff, idx&0xff)
-}

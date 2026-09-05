@@ -481,19 +481,19 @@ func TestBootCmdlineReplaysTheBootLineOnARestore(t *testing.T) {
 }
 
 func TestMacForIsSlotStableAndDistinctFromFirecracker(t *testing.T) {
-	if got, want := hostnet.MAC(qemuMACOUI, 0), "02:5b:01:00:00:00"; got != want {
-		t.Errorf("hostnet.MAC(qemuMACOUI, 0) = %s, want %s", got, want)
+	if got, want := guestnet.MACFor(qemuMACOUI, 0), "02:5b:01:00:00:00"; got != want {
+		t.Errorf("guestnet.MACFor(qemuMACOUI, 0) = %s, want %s", got, want)
 	}
-	if got, want := hostnet.MAC(qemuMACOUI, 258), "02:5b:01:00:01:02"; got != want {
-		t.Errorf("hostnet.MAC(qemuMACOUI, 258) = %s, want %s", got, want)
+	if got, want := guestnet.MACFor(qemuMACOUI, 258), "02:5b:01:00:01:02"; got != want {
+		t.Errorf("guestnet.MACFor(qemuMACOUI, 258) = %s, want %s", got, want)
 	}
 	// The firecracker driver's third octet is 00. Two drivers on one host share
 	// an L2 segment, and a duplicated MAC there presents as intermittent
 	// unreachability rather than as a collision anybody can see.
-	if strings.HasPrefix(hostnet.MAC(qemuMACOUI, 1), "02:5b:00:") {
-		t.Errorf("macFor must not collide with the firecracker driver's 02:5b:00: range; got %s", hostnet.MAC(qemuMACOUI, 1))
+	if strings.HasPrefix(guestnet.MACFor(qemuMACOUI, 1), "02:5b:00:") {
+		t.Errorf("macFor must not collide with the firecracker driver's 02:5b:00: range; got %s", guestnet.MACFor(qemuMACOUI, 1))
 	}
-	if hostnet.MAC(qemuMACOUI, 1) == hostnet.MAC(qemuMACOUI, 2) {
+	if guestnet.MACFor(qemuMACOUI, 1) == guestnet.MACFor(qemuMACOUI, 2) {
 		t.Error("macFor must be injective over slots")
 	}
 }

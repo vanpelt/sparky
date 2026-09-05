@@ -167,3 +167,25 @@ func addrFromUint32(value uint32) netip.Addr {
 	binary.BigEndian.PutUint32(octets[:], value)
 	return netip.AddrFrom4(octets)
 }
+
+// MACFor is the guest NIC address for a network slot.
+//
+// It lives here, rather than in a driver, because TWO processes have to agree
+// on it and they are not the same program. On the privileged-helper path the
+// helper builds the QEMU argv, so the helper picks the MAC; everywhere else the
+// driver does. A restored guest whose NIC came back on a different address
+// would present the guest kernel with a new interface — its netcfg hook has
+// never seen that MAC, and the sandbox loses its network on resume rather than
+// at boot, which is the hardest version of this bug to find.
+//
+// 02: is the locally-administered unicast prefix, and the low two bytes encode
+// the slot, which is why Network.Capacity above 1<<16 is refused by the drivers.
+// oui3 is the third octet and separates the drivers: the firecracker driver
+// uses 0x00 and the qemu driver 0x01. Every other per-slot namespace (the tap
+// name, the /30, the /127) is already distinct between them, and the MAC has to
+// be too -- two drivers sharing a host would otherwise hand the same address to
+// two live guests on one L2 segment, which presents as intermittent
+// unreachability rather than as a collision.
+func MACFor(oui3 byte, index int) string {
+	return fmt.Sprintf("02:5b:%02x:00:%02x:%02x", oui3, (index>>8)&0xff, index&0xff)
+}
