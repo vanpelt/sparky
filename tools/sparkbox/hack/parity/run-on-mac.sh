@@ -22,7 +22,16 @@
 #
 # Usage:
 #   hack/parity/run-on-mac.sh [--run <regex>] [--keep] [--timeout 60m]
-#                             [--machine sparkbox]
+#                             [--machine sparkbox] [--pkg <import path>]
+#
+# --pkg and --base are what point it at a driver other than firecracker. The
+# QEMU suite needs both: a different package to compile, and a base image with
+# qemu-system-aarch64 in it, because sparkbox-cks:dev has no QEMU at all and
+# every case would fail at exec of the VMM before anything about the driver was
+# learned. hack/qemu-spike/Dockerfile builds the image that does.
+#
+#   hack/parity/run-on-mac.sh --pkg ./internal/vmm/qemu \
+#     --run TestQEMUParity --base 127.0.0.1:5001/sparkbox-qemu:dev
 set -uo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -30,6 +39,7 @@ sparkbox=$(dirname "$(dirname "$here")")
 
 machine=sparkbox
 runre='TestFirecrackerParity'
+pkg=./internal/vmm/firecracker
 timeout=60m
 keep=0
 # 1 GiB, not the 2 GiB a real sandbox gets. The suite only needs sshd, and this
@@ -48,13 +58,14 @@ cname=sparkbox-parity
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --run)      runre=${2:?--run needs a regex}; shift 2 ;;
+    --pkg)      pkg=${2:?--pkg needs an import path}; shift 2 ;;
     --keep)     keep=1; shift ;;
     --timeout)  timeout=${2:?--timeout needs a value}; shift 2 ;;
     --machine)  machine=${2:?--machine needs a name}; shift 2 ;;
     --mem)      mem_mb=${2:?--mem needs MiB}; shift 2 ;;
     --boot-timeout) boot_timeout_s=${2:?--boot-timeout needs seconds}; shift 2 ;;
     --base)     base_ref=${2:?--base needs a ref}; shift 2 ;;
-    -h|--help)  sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -86,9 +97,9 @@ mkdir -p "$out"
 # --- 1. build the test binary -------------------------------------------------
 # `go test -c` so the container needs no Go toolchain and no source tree: the
 # binary is the whole payload.
-say "1. building the linux/arm64 parity test binary"
+say "1. building the linux/arm64 parity test binary for $pkg"
 ( cd "$sparkbox" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-    go test -c -o "$out/parity.test" ./internal/vmm/firecracker ) || die "go test -c failed"
+    go test -c -o "$out/parity.test" "$pkg" ) || die "go test -c failed"
 ls -lh "$out/parity.test" | awk '{print "   " $5, $9}'
 
 # --- 2. ship it through the registry ------------------------------------------

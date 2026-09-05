@@ -31,8 +31,14 @@ import (
 // The gate is SPARKBOX_VMM_PARITY=1 and nothing else. Deliberately not a build
 // tag: a tag keeps the file out of `go test ./...` by never compiling it, so it
 // stops catching the signature drift that is half of what a parity suite is for.
-// With an env gate, `go test ./...` on a laptop compiles every line here and
-// skips at run time.
+// With an env gate, `go test ./...` on a LINUX checkout compiles every line here
+// and skips at run time.
+//
+// It buys nothing on the arm64 Mac this project is developed on: this file, like
+// the rest of the package, is //go:build linux, so `go test ./...` there omits
+// the package entirely rather than compiling and skipping it. The Linux CI job
+// (or `GOOS=linux go vet ./...`) is what actually catches signature drift.
+// internal/vmm/qemu/parity_linux_test.go carries the same qualification.
 func TestFirecrackerParity(t *testing.T) {
 	vmmtest.RequireGate(t)
 	cfg := loadParityConfig(t)

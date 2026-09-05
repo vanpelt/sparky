@@ -349,15 +349,28 @@ framing:
    console's disk meter and pooled quota are computed from a number that never
    moves. That is the kind of thing 1,300 lines of tests that never boot a guest
    cannot see, and the reason this was the right thing to do first. Adding a
-   second backend is now a `Fixture` plus a `Traits` declaration.
+   second backend is now a `Fixture` plus a `Traits` declaration — and that has
+   since been tested rather than asserted (item 4).
 3. **Do the pin-lag work regardless.** It is the largest real security lever in
    §3 and independent of this decision.
-4. **Then choose the second backend on evidence.** Cloud Hypervisor for the VMX
-   gate, pausable nested guests and live resize (§4, §5); QEMU for organisational
-   and GPU alignment (§1a). The harness makes that a measurement rather than an
-   argument. If Cloud Hypervisor: read cocoon's backend first
-   ([cocoon-evaluation.md](cocoon-evaluation.md)), and treat `image_type=raw` and
-   the masking CPU template as day-one requirements, not hardening to schedule.
+4. ~~**Then choose the second backend on evidence.**~~ **Chosen and built:
+   QEMU.** `internal/vmm/qemu` is green 19/19 against real guests
+   ([qemu-spike.md](qemu-spike.md) for the measurements,
+   [vmm-parity-harness.md](vmm-parity-harness.md) for what the port found).
+   Alignment (§1a) was the opening argument, but two things decided it. First,
+   Cloud Hypervisor **structurally loses `Ballooner.BalloonStats`** —
+   `/vm.balloon-stats` ships on no released version, and
+   [cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) §1 works
+   out that a driver returning zeros makes `Manager.MemStats` read every sandbox
+   as pegged at its ceiling and balloon *innocent* sandboxes to relieve an
+   overage that does not exist. QEMU answers it from a released version, measured
+   on hardware. Second, Cloud Hypervisor is close enough to a Firecracker clone
+   — REST on a Unix socket, per-VM argv, a small snapshot file set — that porting
+   to it would have proved little about the abstraction; QEMU differs on every
+   one of those axes and therefore actually tested it. **The abstraction passed:
+   `driver.go` needed no change.** The Cloud Hypervisor design work is not wasted
+   — it is still the reference for a VMX gate, pausable nested guests and live
+   resize (§4, §5), and its §1 trap list transferred to QEMU almost verbatim.
 5. **Cost the runtime-class seam** (§1b) before justifying any VMM work on
    alignment grounds. It may buy the alignment far more cheaply.
 6. **Independent of everything above:** do not ship a `CONFIG_KVM` guest kernel

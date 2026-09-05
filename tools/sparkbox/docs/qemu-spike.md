@@ -100,6 +100,20 @@ Scratch must be on the reflink XFS, which is what `hack/parity/run-on-mac.sh`
 already arranges. Worth stating because the failure mode is a slow test, not an
 error.
 
+## Since superseded: the driver exists and the suite is green
+
+Everything above is the hand-driven spike that decided the backend. The driver
+it justified is `internal/vmm/qemu`, and it passes all nineteen parity cases
+against real guests — see
+[vmm-parity-harness.md](vmm-parity-harness.md#what-the-second-driver-found) for
+what the port found, the Firecracker-vs-QEMU timings, and the harness gap the
+port exposed. `hack/parity/run-on-mac.sh --pkg ./internal/vmm/qemu --run
+TestQEMUParity --base 127.0.0.1:5001/sparkbox-qemu:dev` reproduces it; the base
+image is `sparkbox-cks:dev` plus `qemu-system-arm`, because the stock node image
+has no QEMU and every case would fail at exec of the VMM.
+
+Three of the entries below are now answered, and are struck through.
+
 ## Not measured — do not assume these
 
 - **x86_64.** Everything above is arm64. `hack/parity/run-on-cks.sh` exists and
@@ -108,12 +122,13 @@ error.
   Hypervisor's one measured win (`cloud-hypervisor-feasibility.md` §11). QEMU
   almost certainly manages it and that is worth nothing until someone runs it.
 - **Whether `-incoming` tolerates a changed disk.** It must not, and the driver
-  contract already assumes it does not, but it was not tested.
+  contract already assumes it does not, but it was not tested. Still open — the
+  parity suite's `Rename` case exercises the *refusal*, not the tolerance.
 - **CPU and net stats.** Expected to lift unchanged — both read the host
   (`/proc/<pid>/stat`, `/sys/class/net/sbtapN/statistics/*`) and neither asks
   the VMM anything. Unverified.
-- **Any of the 19 parity cases.** The spike drove QEMU by hand; nothing has run
-  through `vmmtest`.
+- ~~**Any of the 19 parity cases.**~~ **All nineteen pass.** 385.99s total on
+  the arm64 dev box, all ten capabilities present, no skips.
 
 ## Reproducing
 

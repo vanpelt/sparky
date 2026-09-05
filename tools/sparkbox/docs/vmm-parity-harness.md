@@ -393,3 +393,79 @@ Write `internal/vmm/<name>/parity_linux_test.go`, build a `Fixture`, declare the
 the suite then reports is a measurement of the abstraction rather than an
 argument about it — which was the point of building it before choosing the
 backend.
+
+That claim has now been tested. `internal/vmm/qemu` is the second backend
+([qemu-spike.md](qemu-spike.md) for why QEMU and not Cloud Hypervisor), and the
+integration really was a `Fixture` plus a `Traits` declaration: **the abstraction
+in `driver.go` needed no change at all.** All eleven compile-time assertions
+compile against it, all ten capabilities are present, and the suite went green
+19/19 on its first real-guest run.
+
+### What the second driver found
+
+Three things, in increasing order of how much they matter.
+
+**The abstraction holds.** No method of `vmm.Driver` or of the ten capability
+interfaces had to be widened, split or relaxed to admit a VMM with a different
+control protocol (QMP, not REST) and a different snapshot mechanism (one
+migration file, not a `mem`/`state` pair). The one interface that was *predicted*
+to be a problem — `Ballooner.BalloonStats`, which
+[cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) §1 shows Cloud
+Hypervisor cannot satisfy from any released version — QEMU satisfies in full, and
+the parity run proves it on hardware: `free 847, available 880 MiB`.
+
+**Several capability implementations lift, but two of them lift *wrongly*, and
+silently.** `Renamer.RenameVM` refuses a rename over a snapshot by stat-ing the
+literal `mem.snap`/`state.snap` pair; against a one-file snapshot that stat
+matches nothing and the refusal quietly stops refusing. `Rebooter.DropSnapshots`
+has the same defect in the other direction — it removes two files QEMU never
+writes and leaves the real one in place, for exactly the `Resume` it exists to
+prevent. Both are the shape this suite was built to catch, and its `Rename` and
+`Reboot` cases do catch them.
+
+**The suite has a gap of its own, and porting against it is what exposed it.**
+`NetStats` cannot catch an rx/tx swap. It pushes 8 MiB into the guest and 8 MiB
+out, then asserts both counters grew past the *same* 4 MiB threshold
+(`capabilities.go:534-582`), so a driver that swaps the directions — or reports
+one shared counter for both — passes green. `NetStatser`'s contract is that the
+numbers are guest-oriented while the host's `sbtapN` counters are host-oriented,
+so the swap is real code that this case does not verify. Fixing it needs
+asymmetric payloads and per-direction thresholds. Until then the QEMU wiring's
+`RealGuest` comment records the gap rather than claiming the coverage.
+
+### Firecracker vs QEMU, same box, same nineteen cases
+
+Single runs on the arm64 dev box, 1 GiB guests, not averaged — indicative, not a
+benchmark. Total 315.87s vs 385.99s.
+
+| case | Firecracker | QEMU |
+| --- | --- | --- |
+| BootAndSSH | 7.55s | **4.11s** |
+| PauseResume | 22.59s | **6.43s** |
+| ForkFromTemplate | 75.51s | **54.46s** |
+| TwoAtOnce | 5.53s | **3.58s** |
+| RootfsPresence | 2.35s | **0.73s** |
+| Destroy | 3.46s | 3.45s |
+| Balloon | 14.23s | 14.65s |
+| CreateRefusesResidue | 10.00s | 9.15s |
+| DestroyThenReuseName | 9.31s | 7.30s |
+| CPUStats | 13.90s | 15.63s |
+| NetStats | 7.47s | 11.56s |
+| DiskResize | 21.72s | 28.12s |
+| Archive | **92.00s** | 124.45s |
+| Reboot | **9.39s** | 26.28s |
+| Rename | **11.64s** | 32.73s |
+| DiskReport | **9.18s** | 43.36s |
+
+The result that matters is the one nobody expects: **QEMU boots faster than
+Firecracker here, and pauses 3.5x faster.** Firecracker's boot-time reputation is
+earned on 125ms microVMs with a minimal kernel and no init; we boot a full
+systemd guest with sshd, where that advantage is inside the noise and the driver
+path — reflink clone, key injection, tap setup, SSH readiness — dominates. Anyone
+choosing a VMM for this product on published boot benchmarks is reading a number
+measured on a different workload.
+
+Every case where Firecracker wins is pause-heavy. That points at the QEMU
+driver's `stop` → `migrate` → `quit` → relaunch cycle being heavier than
+Firecracker's snapshot-in-place, which is a driver question and not a VMM one.
+It has not been investigated.
