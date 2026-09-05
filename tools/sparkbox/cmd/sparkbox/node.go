@@ -74,6 +74,9 @@ type nodeOptions struct {
 	kernelPath              string
 	imageDir                string
 	templateDir             string
+	qemuBin                 string
+	machineType             string
+	allowVMMChange          bool
 	jailerBin               string
 	jailerChrootBase        string
 	jailerUIDBase           int
@@ -208,6 +211,9 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		md.LoginUser = opts.defaultLogin
 		driver = md
 	case "firecracker":
+		if err := vmm.ClaimStateDir(opts.vmStateDir, opts.driverName, opts.allowVMMChange); err != nil {
+			return err
+		}
 		driver, err = newFirecrackerDriver(
 			opts.kernelPath, opts.imageDir, opts.templateDir, opts.vmStateDir,
 			opts.jailerBin, opts.jailerChrootBase, opts.jailerUIDBase,
@@ -218,8 +224,28 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		if err != nil {
 			return err
 		}
+	case "qemu":
+		if err := qemuRefusesJailerFlags(opts.jailerBin, opts.chrootJailer, opts.privilegedHelperSocket); err != nil {
+			return err
+		}
+		if err := vmm.ClaimStateDir(opts.vmStateDir, opts.driverName, opts.allowVMMChange); err != nil {
+			return err
+		}
+		driver, err = newQemuDriver(
+			opts.kernelPath, opts.imageDir, opts.templateDir, opts.vmStateDir,
+			opts.qemuBin, opts.machineType, opts.disableHostRootfsMounts,
+			opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS,
+		)
+		if err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown driver %q", opts.driverName)
+	}
+	if opts.allowVMMChange {
+		log.Warn("--allow-vmm-change was set: this node has taken ownership of the VM state directory "+
+			"from another VMM. Any sandbox disk left in the previous driver's tree is now unreferenced.",
+			"driver", opts.driverName, "vm-state-dir", opts.vmStateDir)
 	}
 	defer driver.Close()
 

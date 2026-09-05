@@ -496,6 +496,26 @@ const (
 	// other's live networking. Neither prefix is a prefix of the other, so the
 	// two sweeps cannot overlap. (The spike's throwaway probe used "sbtapq0",
 	// which fc's sweep would have eaten — that is how the hazard was noticed.)
+	//
+	// UNIFYING THIS IS PLANNED, AND IT BELONGS WITH THE PRIVILEGED HELPER, NOT
+	// BEFORE IT. The payoff is entirely on that path: internal/netpush,
+	// internal/hostsetup's sluice --tap-prefix, internal/vmhelper's own tapName
+	// and deploy/sparkbox-net.sh all hardcode "sbtap", and under the helper the
+	// tap is created by the helper anyway — so a QEMU node running there would
+	// have the driver's name for the device disagree with the device that
+	// exists. That is the change to make, once the driver has a helper path.
+	//
+	// It cannot be made now, and vmm.ClaimStateDir is not enough to make it
+	// safe. The claim stops a second driver from being CONSTRUCTED against a
+	// state directory the first one owns, which covers every deployment. It does
+	// not cover the parity suite: each fixture builds its own MkdirTemp state
+	// dir, so both drivers claim cleanly, while sweepStaleTaps is host-global.
+	// `go test ./...` on a gated Linux host runs the two packages concurrently,
+	// and a shared prefix would have each driver's New() delete the other's live
+	// taps mid-run. When the helper path lands, this constant follows the
+	// helper's name and the sweep gets the same `PrivilegedHelperSocket == ""`
+	// guard fc.go:314 already has — which is what makes it a non-issue there,
+	// because the helper path does not sweep at all.
 	tapPrefix = "sbqtap"
 
 	// balloonDeviceID must appear as `id=` on the -device line: the QOM path
@@ -599,12 +619,18 @@ func New(opts Options) (*Driver, error) {
 			opts.QemuBin = "qemu-system-x86_64"
 		}
 		if opts.MachineType == "" {
-			// docs/qemu-spike.md is entirely arm64, and hack/parity/run-on-cks.sh
-			// has never been run. Rather than guess a versioned q35 that every
-			// future snapshot would be bound to, make the first x86_64 operator
-			// state it.
-			return nil, errors.New("qemu driver on amd64 needs an explicit machine type " +
-				"(e.g. pc-q35-8.2): the migration stream is bound to it and no x86_64 run has happened yet")
+			// This used to refuse to guess, because no x86_64 run had happened.
+			// One has: the parity suite is 19/19 on the production CKS node
+			// against pc-q35-8.2, which is what hack/parity/run-on-cks.sh
+			// resolves as the newest versioned q35 the packaged QEMU 8.2 knows.
+			//
+			// sata=off and vmport=off are measured hardening, not taste — see
+			// the -nodefaults comment in args.go for the `info qtree` device
+			// lists. They belong on the machine type because they are machine
+			// properties; an operator who overrides MachineType gets exactly
+			// what they asked for and loses them, which is why the override is
+			// documented as the expert path it is.
+			opts.MachineType = "pc-q35-8.2,sata=off,vmport=off"
 		}
 	default:
 		return nil, fmt.Errorf("qemu driver has no known machine type for GOARCH %q", runtime.GOARCH)

@@ -290,6 +290,11 @@ func TestBuildQemuArgsColdBoot(t *testing.T) {
 		"-M", "virt-8.2",
 		"-cpu", "host",
 		"-enable-kvm",
+		// Measured hardening, not decoration: see the -nodefaults comment in
+		// args.go for the `info qtree` device lists it is derived from. Its
+		// position in this list is part of the assertion, because the argv is
+		// what the migration stream is matched against.
+		"-nodefaults",
 		"-m", "1024",
 		"-smp", "2",
 		"-kernel", "/assets/vmlinux",
