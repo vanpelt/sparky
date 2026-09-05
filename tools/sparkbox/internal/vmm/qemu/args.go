@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 )
 
 // This file is the whole of what the driver tells QEMU at exec time: one argv
@@ -400,9 +402,13 @@ func machineIDFor(name string) string {
 // sharing a VMStateDir and a host would otherwise hand the same address to two
 // live guests on the same L2 segment, which presents as intermittent
 // unreachability rather than as a collision.
-func macFor(idx int) string {
-	return fmt.Sprintf("02:5b:01:00:%02x:%02x", (idx>>8)&0xff, idx&0xff)
-}
+// macFor delegates to guestnet so the privileged helper and this driver cannot
+// drift. The helper builds the QEMU argv on its own path and therefore picks
+// the MAC itself; two copies of this formula would eventually disagree, and the
+// symptom would be a sandbox that loses its network on RESUME rather than at
+// boot, because the guest kernel sees an interface its netcfg hook has never
+// seen before.
+func macFor(idx int) string { return guestnet.MACFor(idx) }
 
 // validateGuestDNS accepts only the empty string (feature off), the "gateway"
 // sentinel, or a bare IP literal. Anything else — a hostname, or a value with
