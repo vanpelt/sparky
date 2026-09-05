@@ -19,13 +19,24 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-// Compile-time capability checks, mirroring the mock's: the manager
-// type-asserts for these, so losing one silently degrades the fleet.
+// Compile-time capability checks: every optional interface in vmm, not the four
+// somebody happened to write down. host.Manager reaches each of these by type
+// assertion and falls back silently when the assertion fails, so a capability
+// lost to a refactor — a receiver changed from pointer to value, a method
+// renamed, a signature drifting — degrades the fleet with no error anywhere.
+// This block is the only thing that turns that into a build failure.
 var (
+	_ vmm.Driver           = (*Driver)(nil)
+	_ vmm.Archivable       = (*Driver)(nil)
+	_ vmm.DiskReporter     = (*Driver)(nil)
+	_ vmm.TemplateReporter = (*Driver)(nil)
+	_ vmm.RootfsPresencer  = (*Driver)(nil)
 	_ vmm.Renamer          = (*Driver)(nil)
 	_ vmm.Rebooter         = (*Driver)(nil)
 	_ vmm.CPUStatser       = (*Driver)(nil)
-	_ vmm.TemplateReporter = (*Driver)(nil)
+	_ vmm.NetStatser       = (*Driver)(nil)
+	_ vmm.DiskResizer      = (*Driver)(nil)
+	_ vmm.Ballooner        = (*Driver)(nil)
 )
 
 // TestV6Addressing checks the per-slot /127 carving from the delegated /64.

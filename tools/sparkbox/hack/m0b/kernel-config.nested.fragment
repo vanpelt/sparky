@@ -1,0 +1,26 @@
+# M0b EXPERIMENT ONLY -- do NOT merge into hack/kernel-config.fragment.
+#
+# Firecracker's CI microvm config carries `# CONFIG_VIRTUALIZATION is not set`,
+# and that single line is the whole reason a sandbox cannot run an inner VM.
+# Everything else is already in place: the CKS node has kvm_intel.nested=Y, KVM
+# advertises VMX in KVM_GET_SUPPORTED_CPUID, and a live sandbox's CPUID.1:ECX
+# already has bit 5 set (docs/cloud-hypervisor-feasibility.md section 10).
+#
+# It also has a second, less obvious effect. init_ia32_feat_ctl() only sets
+# FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX under IS_ENABLED(CONFIG_KVM_INTEL), then
+# locks MSR_IA32_FEAT_CTL either way and clears X86_FEATURE_VMX when the enable
+# bit is missing. So today's guests lock themselves out at boot and delete their
+# own `vmx` flag -- which is why `grep vmx /proc/cpuinfo` in a sandbox reports a
+# false negative. Turning this on flips that branch as a side effect.
+#
+# Built in as `=y` rather than `=m` so /dev/kvm exists at boot with no modprobe
+# and no module files in the initramfs.
+#
+# WHY THIS IS NOT MERGED: it converts the VMX bit every sandbox already carries
+# from inert into usable, for every sandbox at once, because there is one pinned
+# vmlinux-<arch> asset. Section 7's per-sandbox gating and the node's CVE status
+# both have to land first.
+CONFIG_VIRTUALIZATION=y
+CONFIG_KVM=y
+CONFIG_KVM_INTEL=y
+CONFIG_KVM_AMD=y
