@@ -460,6 +460,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.split("?")[0] in ("/openapi.json", "/openapi.yaml"):
             self._sendfile(_pkg("restapi", "openapi.json"), "application/json")
             return
+        # The console's own index.html points <img src="/sparkbox-logo.png">
+        # at the console handler's route (console.go's h.logo), not the
+        # /assets/ path the terminal uses — mirror it with the same file.
+        if self.path.split("?")[0] == "/sparkbox-logo.png":
+            self._sendfile(_pkg("userconsole", "sparkbox-logo.png"), "image/png")
+            return
         # The terminal's vendored xterm.js and its addons, served from the same
         # /assets/ paths the real handler uses.
         if PAGE["assets"] and self.path.startswith("/assets/"):
@@ -553,7 +559,8 @@ def main():
         PAGE = PAGES[name]
         INDEX = PAGE["index"]
     port = int(args[0]) if args else 8799
-    srv = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    host = os.environ.get("HOST", "127.0.0.1")
+    srv = http.server.HTTPServer((host, port), Handler)
     print(f"sparkbox page preview → http://localhost:{port}")
     print(f"  serving {os.path.relpath(INDEX)} with mock data (edit + refresh to iterate)")
     print(f"  dark: http://localhost:{port}/?theme=dark   light: http://localhost:{port}/?theme=light")
