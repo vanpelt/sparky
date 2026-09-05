@@ -326,7 +326,10 @@ one-way door.
 **The real cost is not the driver.** Our Firecracker driver is ~2,150 lines, and
 **its 1,300 lines of tests never boot a guest** — every lifecycle end-to-end runs
 against the mock. The parity harness is the actual deliverable, and we need it
-whether or not we ever add a second VMM. The honest framing:
+whether or not we ever add a second VMM. It now exists
+([vmm-parity-harness.md](vmm-parity-harness.md)), which retires this paragraph's
+cost estimate: the remaining cost of a second backend is the backend. The honest
+framing:
 
 > We are buying the boot-level integration suite we are missing, and getting a
 > second VMM along the way.
@@ -336,11 +339,17 @@ whether or not we ever add a second VMM. The honest framing:
 1. ~~Confirm which VMM CoreWeave runs under Kata.~~ **Answered in §1a: Kata +
    QEMU. `kata-clh` is wired nowhere.** The remaining question for them is
    whether GPU sandboxes matter to *us*, and on what horizon.
-2. **Build the parity harness first, against the driver we already have.** It is
-   the honest deliverable, we need it on any VMM, and it de-risks whichever
-   backend comes second. Today's 1,300 lines of driver tests never boot a guest;
-   `hack/m0b/` is the seed of a harness that does. **This does not require the
-   VMM question to be settled**, which is its main virtue given §1a.
+2. ~~**Build the parity harness first, against the driver we already have.**~~
+   **Built and green: [vmm-parity-harness.md](vmm-parity-harness.md).** Nineteen
+   cases in `internal/vmm/vmmtest`, parameterised by driver, run against real
+   microVMs; the compile-time capability assertions went from four to all ten.
+   It found a product bug on its first run — `DiskUsageMB` reports the
+   *template's* usage for the life of a sandbox, because it reads a superblock
+   Linux does not write back while the filesystem is mounted, so both the
+   console's disk meter and pooled quota are computed from a number that never
+   moves. That is the kind of thing 1,300 lines of tests that never boot a guest
+   cannot see, and the reason this was the right thing to do first. Adding a
+   second backend is now a `Fixture` plus a `Traits` declaration.
 3. **Do the pin-lag work regardless.** It is the largest real security lever in
    §3 and independent of this decision.
 4. **Then choose the second backend on evidence.** Cloud Hypervisor for the VMX

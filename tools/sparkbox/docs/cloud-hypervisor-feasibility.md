@@ -823,6 +823,12 @@ work across the pause, repeated pause/resume cycles, or restore onto a
 different host. M1's parity harness should cover those before nested sandboxes
 are offered to anyone.
 
+**The parity harness now exists** —
+[vmm-parity-harness.md](vmm-parity-harness.md), nineteen cases in
+`internal/vmm/vmmtest`, green against the Firecracker driver on real microVMs.
+It does not yet contain any of the four nested cases above; that is where they
+belong, and adding them is a set of cases rather than a new harness.
+
 ### M1 — Driver beside driver (weeks, not days)
 
 Lift the VMM-neutral half of `fc.go` into shared packages; write

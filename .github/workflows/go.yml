@@ -604,3 +604,94 @@ jobs:
           SPARKBOX_BIN: ${{ runner.temp }}/sparkbox
           RELEASE: v0-smoke
         run: ./hack/smoke-container.sh
+
+  # --------------------------------------------------------- kvm-probe -------
+  # Can a hosted runner run the VMM parity harness?
+  #
+  # This job exists because the answer is currently an assumption. The comments
+  # on the `smoke` job say "hosted runners have no nested virtualization, so
+  # /dev/kvm is a placeholder file" — which is certainly true of
+  # ubuntu-24.04-arm, the runner that job uses, and is a claim about a DIFFERENT
+  # runner image when applied to x86_64. docs/vmm-parity-harness.md picks where
+  # the harness runs, and this is the measurement that decision needs; the same
+  # mistake — reading one artifact's behaviour as another's — is what
+  # docs/cloud-hypervisor-feasibility.md section 10 had to correct on hardware.
+  #
+  # It records three things and fails on none of them:
+  #
+  #   1. is /dev/kvm present and openable, and does the CPU advertise the
+  #      virtualization bit;
+  #   2. does any writable filesystem here support reflink — the driver refuses
+  #      to fall back to a full 25 GiB template copy, so without one the answer
+  #      is "only with a loopback XFS", which the job also tests;
+  #   3. how much room the disks actually have, since a 25 GiB rootfs template
+  #      is the fixture.
+  #
+  # Cheap, unfailing, and it turns the open question into data on the next run.
+  kvm-probe:
+    name: hosted-runner KVM + reflink probe
+    needs: changes
+    if: needs.changes.outputs.sparkbox == 'true'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - name: /dev/kvm
+        run: |
+          set -uo pipefail
+          echo "== runner"; uname -a; nproc
+          echo "== /dev/kvm"
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm
+            # A placeholder FILE and a character device are very different
+            # answers, and `ls` alone does not make the difference obvious.
+            [ -c /dev/kvm ] && echo "VERDICT_KVM=character-device" || echo "VERDICT_KVM=not-a-device"
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              echo "VERDICT_KVM_ACCESS=rw-as-$(id -un)"
+            else
+              sudo -n true 2>/dev/null && echo "VERDICT_KVM_ACCESS=needs-sudo" \
+                                       || echo "VERDICT_KVM_ACCESS=unreadable"
+            fi
+          else
+            echo "VERDICT_KVM=absent"
+          fi
+          echo "== cpu"
+          grep -m1 -oE '\b(vmx|svm)\b' /proc/cpuinfo || echo "VERDICT_CPU=no-virt-flag"
+          for f in /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested; do
+            [ -r "$f" ] && echo "$f=$(cat "$f")"
+          done
+
+      - name: reflink
+        run: |
+          set -uo pipefail
+          echo "== filesystems"; df -hT / /mnt "$RUNNER_TEMP" 2>/dev/null
+          probe() { # <dir>
+            local d=$1
+            [ -d "$d" ] || { echo "$d: absent"; return; }
+            dd if=/dev/zero of="$d/.reflink-src" bs=1M count=8 status=none 2>/dev/null || {
+              echo "$d: not writable"; return; }
+            if cp --reflink=always "$d/.reflink-src" "$d/.reflink-dst" 2>/dev/null; then
+              echo "VERDICT_REFLINK $d=yes"
+            else
+              echo "VERDICT_REFLINK $d=no"
+            fi
+            rm -f "$d/.reflink-src" "$d/.reflink-dst"
+          }
+          probe "$RUNNER_TEMP"
+          probe /mnt
+
+          # The fallback the parity runners use on a host with no reflink-capable
+          # mount: an XFS image, loopback-mounted. If this works, a hosted runner
+          # can host the harness even though its root filesystem cannot.
+          sudo apt-get install -y -qq xfsprogs >/dev/null 2>&1
+          img=${RUNNER_TEMP}/reflink.xfs
+          truncate -s 4G "$img"
+          if sudo mkfs.xfs -q -m reflink=1 "$img" && sudo mkdir -p /mnt/xfsprobe &&
+             sudo mount -o loop "$img" /mnt/xfsprobe; then
+            sudo dd if=/dev/zero of=/mnt/xfsprobe/src bs=1M count=8 status=none
+            sudo cp --reflink=always /mnt/xfsprobe/src /mnt/xfsprobe/dst \
+              && echo "VERDICT_LOOPBACK_XFS=yes" || echo "VERDICT_LOOPBACK_XFS=no"
+            sudo umount /mnt/xfsprobe
+          else
+            echo "VERDICT_LOOPBACK_XFS=cannot-mount"
+          fi
+          rm -f "$img"
