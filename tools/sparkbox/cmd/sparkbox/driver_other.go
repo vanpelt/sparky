@@ -18,3 +18,12 @@ func newFirecrackerDriver(
 ) (vmm.Driver, error) {
 	return nil, fmt.Errorf("the firecracker driver requires a Linux host with KVM (this is %s); use --driver mock for local development", runtime.GOOS)
 }
+
+func newQemuDriver(
+	kernelPath, imageDir, templateDir, vmStateDir string,
+	qemuBin, machineType string,
+	disableHostRootfsMounts bool,
+	guestSubnet, subnet6, loginUser, guestDNS string,
+) (vmm.Driver, error) {
+	return nil, fmt.Errorf("the qemu driver requires a Linux host with KVM (this is %s); use --driver mock for local development", runtime.GOOS)
+}
