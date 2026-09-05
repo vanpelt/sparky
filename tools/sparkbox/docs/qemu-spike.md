@@ -127,8 +127,13 @@ Three of the entries below are now answered, and are struck through.
 - **CPU and net stats.** Expected to lift unchanged — both read the host
   (`/proc/<pid>/stat`, `/sys/class/net/sbtapN/statistics/*`) and neither asks
   the VMM anything. Unverified.
-- ~~**Any of the 19 parity cases.**~~ **All nineteen pass.** 385.99s total on
-  the arm64 dev box, all ten capabilities present, no skips.
+- ~~**Any of the 19 parity cases.**~~ **All nineteen pass.** 236.90s total on
+  the arm64 dev box against Firecracker's 225.12s, all ten capabilities present,
+  no skips. Read the timings in
+  [vmm-parity-harness.md](vmm-parity-harness.md#how-not-to-measure-this-learned-the-hard-way)
+  with its caveats: a first pass at this comparison was wrong in both directions
+  because the machine was resized between runs and a cold page cache inflated
+  three cases by 4-6x.
 
 ## Reproducing
 

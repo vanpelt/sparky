@@ -435,37 +435,61 @@ asymmetric payloads and per-direction thresholds. Until then the QEMU wiring's
 
 ### Firecracker vs QEMU, same box, same nineteen cases
 
-Single runs on the arm64 dev box, 1 GiB guests, not averaged — indicative, not a
-benchmark. Total 315.87s vs 385.99s.
+Two runs each, back to back on the arm64 dev box with 32 GiB and 1 GiB guests.
+Totals 225.12s (Firecracker) against 236.90s (QEMU).
 
 | case | Firecracker | QEMU |
 | --- | --- | --- |
-| BootAndSSH | 7.55s | **4.11s** |
-| PauseResume | 22.59s | **6.43s** |
-| ForkFromTemplate | 75.51s | **54.46s** |
-| TwoAtOnce | 5.53s | **3.58s** |
-| RootfsPresence | 2.35s | **0.73s** |
-| Destroy | 3.46s | 3.45s |
-| Balloon | 14.23s | 14.65s |
-| CreateRefusesResidue | 10.00s | 9.15s |
-| DestroyThenReuseName | 9.31s | 7.30s |
-| CPUStats | 13.90s | 15.63s |
-| NetStats | 7.47s | 11.56s |
-| DiskResize | 21.72s | 28.12s |
-| Archive | **92.00s** | 124.45s |
-| Reboot | **9.39s** | 26.28s |
-| Rename | **11.64s** | 32.73s |
-| DiskReport | **9.18s** | 43.36s |
+| PauseResume | 9.57s | **5.20s** |
+| ForkFromTemplate | 48.18s | **36.52s** |
+| DestroyThenReuseName | 9.06s | **7.40s** |
+| CreateRefusesResidue | 7.09s | **5.33s** |
+| RootfsPresence | 2.16s | **1.11s** |
+| DiskResize | 10.03s | **8.50s** |
+| NetStats | 5.50s | **4.96s** |
+| BootAndSSH | **2.97s** | 3.49s |
+| Destroy | **2.92s** | 3.67s |
+| TwoAtOnce | **3.35s** | 3.77s |
+| DiskReport | **4.33s** | 6.80s |
+| Reboot | **6.16s** | 9.34s |
+| Balloon | **6.45s** | 7.89s |
+| Rename | **7.12s** | 8.42s |
+| CPUStats | **7.51s** | 9.04s |
+| Archive | **92.70s** | 115.46s |
 
-The result that matters is the one nobody expects: **QEMU boots faster than
-Firecracker here, and pauses 3.5x faster.** Firecracker's boot-time reputation is
-earned on 125ms microVMs with a minimal kernel and no init; we boot a full
-systemd guest with sshd, where that advantage is inside the noise and the driver
-path — reflink clone, key injection, tap setup, SSH readiness — dominates. Anyone
-choosing a VMM for this product on published boot benchmarks is reading a number
-measured on a different workload.
+**The two engines are within 5% of each other**, and that is the result that
+matters: QEMU costs essentially nothing in performance, so the backend choice
+rests on capability and alignment rather than on speed — which is what
+[vmm-choice.md](vmm-choice.md) argued before any of this was measured.
 
-Every case where Firecracker wins is pause-heavy. That points at the QEMU
-driver's `stop` → `migrate` → `quit` → relaunch cycle being heavier than
-Firecracker's snapshot-in-place, which is a driver question and not a VMM one.
-It has not been investigated.
+Two differences survive repetition. **QEMU pauses about twice as fast** (5.20s
+and 6.43s against 9.57s and 22.59s), which is plausible on mechanism: `migrate`
+skips zero pages and wrote 57 MB for a 1 GiB guest in the spike, where
+Firecracker writes a full memory image. **Firecracker archives about 20% faster**
+(92.00s/92.70s against 124.45s/115.46s). Neither has been investigated, and both
+are driver questions before they are VMM questions.
+
+### How not to measure this, learned the hard way
+
+An earlier draft of the table above reported QEMU booting 1.8x *faster* than
+Firecracker, and Firecracker winning DiskReport by 4.7x. Both were wrong, and how
+they were wrong is worth more than the numbers.
+
+**The container machine was resized from 12 GiB to 32 GiB between the two runs.**
+Nothing in either runner's output recorded machine memory, so nothing in the
+committed artifacts would have caught it; it surfaced only because the devpod
+containers' uptime had reset. Firecracker's own total moved **315.87s → 225.12s**
+for that change alone, with `BootAndSSH` going 7.55s → 2.97s. That is a larger
+effect than any difference between the two VMMs, from a variable nobody was
+recording.
+
+**Three of the four largest apparent gaps evaporated on a repeat run** on the
+same machine: DiskReport 43.36s → 6.80s, Rename 32.73s → 8.42s, Reboot 26.28s →
+9.34s. That first QEMU run happened minutes after a machine boot, with a cold
+page cache. A single run on this box is close to worthless.
+
+So: `run-on-mac.sh` now logs total machine memory beside the free-memory and
+firecracker-process-count checks it already printed, and a comparison is only
+credible if both drivers ran back to back on the same machine and the gap
+survived a repeat. The same caution applies to §2's memory-cliff finding, which
+was measured at 12 GiB and is milder at 32.

@@ -131,6 +131,13 @@ cp --reflink=always /srv/sparkbox/data/devpod/images/universal.ext4 \
 rm -f /srv/sparkbox/data/parity/scratch/.reflink-probe
 echo "reflink on /srv/sparkbox/data: ok"
 free -m | sed -n '1,2p'
+# Total machine memory, not just what is free right now. This machine was once
+# resized from 12 to 32 GiB between two parity runs, and because nothing logged
+# it the two runs were compared as if they were the same box: Firecracker's own
+# total moved 315.87s -> 225.12s on that change alone, a bigger swing than any
+# difference between the two VMMs. A timing is not comparable to another timing
+# unless this line matches. See docs/vmm-parity-harness.md.
+echo "machine memory: $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo), $(nproc) CPUs"
 n=$(pgrep -c firecracker || true)
 echo "firecracker processes already running on this machine: ${n:-0} (the dev pod's sandboxes)"
 echo "EXIT 0"
