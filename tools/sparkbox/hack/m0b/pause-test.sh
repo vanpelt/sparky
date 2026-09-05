@@ -25,6 +25,10 @@ L1_MEM=${L1_MEM:-3072}
 L2_MEM=${L2_MEM:-512}
 WAIT=${WAIT:-45}
 
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=lib-guests.sh
+. "$here/lib-guests.sh"
+
 step()   { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 marker() { printf 'M0B_%s=%s\n' "$1" "$2"; }
 api()    { # <method> <path> [body]
@@ -32,68 +36,12 @@ api()    { # <method> <path> [body]
     -H 'Accept: application/json' -H 'Content-Type: application/json' \
     ${3:+-d "$3"} -w '\nHTTP:%{http_code}\n' 2>&1
 }
-# Wait for a marker to appear in a log rather than sleeping a guessed interval.
-await() { # <file> <pattern> <seconds>
-  local i=0
-  while [ "$i" -lt "$3" ]; do
-    grep -q "$2" "$1" 2>/dev/null && return 0
-    i=$((i + 1)); sleep 1
-  done
-  return 1
-}
-
-for f in "$out/vmlinux" "$out/firecracker"; do
-  [ -s "$f" ] || { echo "missing $f -- run inside-pod.sh first" >&2; exit 1; }
-done
-busybox_bin=$(command -v busybox) || { echo "no busybox" >&2; exit 1; }
-
-build_initramfs() { ( cd "$1" && find . -print0 | cpio --null -o -H newc --quiet ) | gzip -9 >"$2"; }
 
 # --- 1. long-lived guests -----------------------------------------------------
+# From lib-guests.sh, so ch-snapshot-test.sh boots byte-identical images and the
+# outer VMM is the only thing that differs between the two experiments.
 step "1. initramfs (both guests tick once a second)"
-rm -rf "$out/p2root" && mkdir -p "$out/p2root"/{bin,proc,sys,dev}
-cp "$busybox_bin" "$out/p2root/bin/busybox"; ln -sf busybox "$out/p2root/bin/sh"
-cat >"$out/p2root/init" <<'P2'
-#!/bin/sh
-/bin/busybox --install -s /bin
-mount -t proc proc /proc 2>/dev/null
-echo "M0B_P_L2_ALIVE=yes"
-i=0
-while : ; do echo "M0B_P_L2_TICK=$i"; i=$((i+1)); sleep 1; done
-P2
-chmod +x "$out/p2root/init"
-build_initramfs "$out/p2root" "$out/p2-initrd.gz"
-
-rm -rf "$out/p1root" && mkdir -p "$out/p1root"/{bin,proc,sys,dev,vm}
-cp "$busybox_bin" "$out/p1root/bin/busybox"; ln -sf busybox "$out/p1root/bin/sh"
-cp "$out/firecracker"    "$out/p1root/vm/firecracker"
-cp "$out/vmlinux"        "$out/p1root/vm/vmlinux"
-cp "$out/p2-initrd.gz"   "$out/p1root/vm/l2-initrd.gz"
-cat >"$out/p1root/vm/l2.json" <<P2CFG
-{
-  "boot-source": {
-    "kernel_image_path": "/vm/vmlinux",
-    "initrd_path": "/vm/l2-initrd.gz",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
-  },
-  "drives": [],
-  "machine-config": { "vcpu_count": 1, "mem_size_mib": $L2_MEM, "smt": false }
-}
-P2CFG
-cat >"$out/p1root/init" <<'P1'
-#!/bin/sh
-/bin/busybox --install -s /bin
-mount -t proc proc /proc 2>/dev/null
-mount -t sysfs sys /sys 2>/dev/null
-mount -t devtmpfs dev /dev 2>/dev/null
-echo "M0B_P_L1_ALIVE=yes"
-[ -c /dev/kvm ] && echo "M0B_P_L1_DEVKVM=yes" || echo "M0B_P_L1_DEVKVM=no"
-/vm/firecracker --no-api --config-file /vm/l2.json &
-i=0
-while : ; do echo "M0B_P_L1_TICK=$i"; i=$((i+1)); sleep 1; done
-P1
-chmod +x "$out/p1root/init"
-build_initramfs "$out/p1root" "$out/p1-initrd.gz"
+build_tick_guests || exit 1
 
 # --- 2. boot L1 under the API so it can be paused ------------------------------
 step "2. boot L1 with an API socket"
@@ -121,8 +69,7 @@ else
   tail -30 "$out/pause-l1.log" >&2
   kill "$fc_pid" 2>/dev/null; exit 1
 fi
-l2_before=$(grep -c 'M0B_P_L2_TICK=' "$out/pause-l1.log")
-marker P_L2_TICKS_BEFORE "$l2_before"
+marker P_L2_TICKS_BEFORE "$(count_matches 'M0B_P_L2_TICK=' "$out/pause-l1.log")"
 
 # --- 3. pause + snapshot -------------------------------------------------------
 step "3. pause, then snapshot with the L2 live"
@@ -173,12 +120,8 @@ fi
 # guest that died produces none, and the difference is unambiguous.
 sleep 15
 kill "$fc2_pid" 2>/dev/null; wait "$fc2_pid" 2>/dev/null
-# No `|| echo 0`: grep -c already prints 0 when it matches nothing, and it exits
-# 1 at the same time, so the fallback would append a second line and every
-# later [ -gt ] would die with "integer expression expected".
-l1_after=$(grep -c 'M0B_P_L1_TICK=' "$out/pause-l1-restored.log" 2>/dev/null)
-l2_after=$(grep -c 'M0B_P_L2_TICK=' "$out/pause-l1-restored.log" 2>/dev/null)
-l1_after=${l1_after:-0}; l2_after=${l2_after:-0}
+l1_after=$(count_matches 'M0B_P_L1_TICK=' "$out/pause-l1-restored.log")
+l2_after=$(count_matches 'M0B_P_L2_TICK=' "$out/pause-l1-restored.log")
 marker P_L1_TICKS_AFTER "$l1_after"
 marker P_L2_TICKS_AFTER "$l2_after"
 echo "--- restored console (tail) ---"

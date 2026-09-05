@@ -93,14 +93,19 @@ sandbox's own kernel took `kernel BUG at arch/x86/kvm/x86.c:511`
 (`kvm_spurious_fault`) on the resume path, because Firecracker restored its
 vCPUs without the nested state they believed they had.
 
+**And Cloud Hypervisor v53.0 does carry it through (§12).** Same guests, same
+node, `--cpus nested=on`: pause, snapshot and restore all succeeded and **both
+the sandbox and its inner VM resumed mid-flight** — tick counters continuing
+exactly where they stopped, no reboot, no `BUG()`. With `nested=off` the same
+guest sees no `vmx`, gets no `/dev/kvm`, and cannot start an inner VM at all.
+
 Three consequences:
 
-- **The capability gap is not a capability gap.** It is a snapshot-fidelity
-  gap. Nested virtualization works on Firecracker today; what does not work is
-  pausing it, and Sparkbox pauses sandboxes automatically as its idle model. The
-  Cloud Hypervisor case narrows to exactly one property — whether its snapshot
-  brings back a working L2 — and that property has not been tested by anyone
-  here. It should be, before any driver work.
+- **The capability gap is not a capability gap.** It is a snapshot-fidelity gap
+  plus a masking gap. Nested virtualization works on Firecracker today; what
+  does not work is pausing it — and Sparkbox pauses sandboxes automatically as
+  its idle model — or preventing it per sandbox. Cloud Hypervisor closes both,
+  measured (§12).
 - **CoreWeave is off the critical path** for the capability. Ask them the
   kernel-CVE question (below), not for a nested-enabled pool — they already
   ship one.
@@ -191,36 +196,44 @@ virtualization" model in `security-hardening.md` already gives us Kata's securit
 shape with a four-verb protocol instead of an OCI/agent/virtiofsd surface. §4
 argues the other side before concluding.
 
-**Recommendation, revised after M0 and M0b were both run on hardware
-(§10, §11):**
+**Recommendation, after M0, M0b and M0c were all run on hardware
+(§10, §11, §12):**
 
-1. **Answer one question before committing to any driver work:** does Cloud
-   Hypervisor's snapshot actually bring back a working L2? It issues
-   `KVM_GET_NESTED_STATE`, which Firecracker does not — but issuing the ioctl is
-   not the same as restoring a guest that runs, and nobody has tested it. The
-   entire port now rests on this single property, because §11 established that
-   everything *else* about nested virtualization already works on the VMM we
-   ship. Days, and it needs no Sparkbox code.
-2. **Then cost the driver** — `internal/vmm/cloudhypervisor` beside the
-   Firecracker one, pinned **v52.0 or later**, on the KVM access the pod already
-   has. A driver rewrite plus a new integration-test harness, not a few hundred
-   lines. Justified only by (1): this buys **pausable** nested guests, not
-   nested guests.
+**Do the port.** Every load-bearing assumption behind that sentence is now
+measured rather than argued, and the two that could have killed it — that the
+node might not allow nested at all, and that Cloud Hypervisor's snapshot might
+not actually preserve an inner VM — both came back favourable.
+
+1. **Build the driver** — `internal/vmm/cloudhypervisor` beside the Firecracker
+   one, pinned **v52.0 or later** (v53.0 is what was tested), on the KVM access
+   the pod already has. A driver rewrite plus the parity harness that does not
+   exist today, not a few hundred lines. §3 and the
+   [port design](cloud-hypervisor-port-design.md) cost the pause path honestly;
+   it is still the largest single piece and the one most likely under-costed.
+2. **Know what it buys, precisely.** Not nested virtualization — §11 showed
+   that already works on Firecracker for the price of one kernel-config line.
+   It buys two things Firecracker cannot do at any price: an inner VM that
+   survives a pause (§12), and a per-sandbox `nested=off` gate that actually
+   masks VMX (§12's control). The second is a security capability, not a
+   feature, and it is the one that makes shipping nested to anyone defensible.
 3. **Ask CoreWeave one security question** — whether the non-LTS
    `6.17.13-…-coreweave-amd64` node image carries the three shadow-MMU
    backports. Not a provisioning request: they already ship `nested=Y`. This is
-   the only hard gate M0 left open, and it gates enabling the feature for
-   anyone, on any VMM.
-4. **Independently of all of the above, treat the silent-snapshot behaviour in
-   §11 as a bug to defend against.** Firecracker returns 204 for a snapshot
-   taken with a live inner VM and the restored sandbox's kernel then hits a
-   `BUG()`. If a `CONFIG_KVM` guest kernel ever ships, the reaper's automatic
-   pause becomes a way to panic a user's sandbox with no error anywhere.
+   the only hard gate left, it is unanswerable from here, and it blocks
+   enabling nested for anyone on any VMM.
+4. **Until the port lands, do not ship a `CONFIG_KVM` guest kernel.** §11's
+   failure is silent: Firecracker returns 204 for a snapshot taken with a live
+   inner VM and the restored sandbox's kernel then hits `BUG()`. Scale-to-zero
+   pauses sandboxes automatically and unattended, so that kernel would turn the
+   idle reaper into a way to panic a user's sandbox with no error anywhere. The
+   one-line fragment is the cheapest possible foot-gun and it is deliberately
+   parked in `hack/m0b/`, not in the tracked fragment.
 
-The first revision made the port wait on a nested-enabled pool from CoreWeave
-and called that the long pole. **There is no such long pole**, and there is no
-capability gap either — there is a snapshot-fidelity gap. §10 and §11 have the
-measurements; the [risk register](nested-virtualization-design.md) has the kill
+The first revision made this wait on a nested-enabled pool from CoreWeave and
+called that the long pole. There was no such long pole; there was no capability
+gap either. There is a snapshot-fidelity gap and a masking gap, and Cloud
+Hypervisor closes both — measured, on our hardware, with a control. §10–§12 have
+the numbers; the [risk register](nested-virtualization-design.md) has the kill
 criteria.
 
 A note on words: "linking fnodes" in the ask is the XFS reflink clone
@@ -727,11 +740,82 @@ the VMM has to carry nested state through a snapshot. That is the decision M1
 now exists to serve, and it is a much narrower and more defensible one than "we
 need Cloud Hypervisor for nested virtualization".
 
-**Not measured:** whether Cloud Hypervisor's snapshot actually preserves nested
-state. It issues `KVM_GET_NESTED_STATE`, but "issues the ioctl" is not "restores
-a working L2", and this branch has not tested it. That is now M1's first
-question, and it should be answered before any driver work is committed to —
-the whole port rests on it.
+## 12. M0c results — Cloud Hypervisor carries the nested guest through
+
+The single property the port rests on, measured on the CKS node on 2026-09-04
+(`hack/m0b/ch-snapshot-test.sh`, same throwaway Pod discipline as §11).
+
+Same L1 and same L2 as §11, built by `hack/m0b/lib-guests.sh` so that **the
+outer VMM is the only variable** — the inner VMM stays Firecracker in both
+experiments, because that is the one already watched to boot an L2. Both guests
+emit a tick per second, so "did it survive" is a matter of counting console
+lines rather than inference.
+
+Cloud Hypervisor **v53.0** (above the v52.0 floor), `--cpus boot=2,nested=on`.
+Our `vmlinux` boots it unmodified — the Firecracker CI config already sets
+`CONFIG_PVH=y`, which is what Cloud Hypervisor's x86_64 entry path needs.
+
+| | Firecracker v1.16.1 (§11) | **Cloud Hypervisor v53.0** |
+|---|---|---|
+| L1 `vmx` / `/dev/kvm` | yes / yes | yes / yes |
+| L2 boots | yes | **yes** |
+| pause | 204 | rc 0 |
+| snapshot with L2 live | 204 — 3.0 GB mem, **26 KB** state | rc 0 — 3.0 GB `memory-ranges`, **66 KB** `state.json` |
+| restore | 204 | rc 0 |
+| **L1 after restore** | alive | alive |
+| **L2 after restore** | **gone** | **alive** |
+| guest kernel `BUG()` | `kvm_spurious_fault` | **none** |
+
+**It resumed; it did not restart.** The distinction matters and was checked
+rather than assumed. The last ticks before the snapshot were `L1_TICK=1` /
+`L2_TICK=0`; the first ticks after the restore were `L1_TICK=2` / `L2_TICK=1`.
+Exact continuation, no gap. The restored console contains no `..._ALIVE=yes`
+line and no `Linux version` banner from either guest — neither one booted. The
+inner VM came back mid-flight.
+
+The 26 KB → 66 KB difference in the state file is the nested state that
+Firecracker never captures.
+
+### The control: `nested=off` is a real gate
+
+Without this the experiment would prove less than it appears to. On Firecracker
+— which has no nested switch at all — the VMX bit reached the guest anyway, so
+"we passed `nested=on` and it worked" does not by itself show the flag did
+anything.
+
+| `--cpus` | L1 `vmx` | L1 `/dev/kvm` | L2 |
+|---|---|---|---|
+| `nested=on` | yes | yes | boots, and survives snapshot/restore |
+| `nested=off` | **no** | **no** | never starts (L1 itself is fine — 26 ticks) |
+
+So `nested` is a genuine per-VM switch, and Cloud Hypervisor's CPUID masking
+works. That is precisely the per-sandbox gate §7's security argument needs and
+Firecracker cannot offer: today every sandbox carries the VMX bit because we
+have no way to ask for it to be removed.
+
+### One piece of alarming-looking noise
+
+Restore logs a warning for each of twelve MSRs:
+
+```
+WARN:hypervisor/src/kvm/mod.rs:3343 -- Detected faulty MSR 0x480 while setting MSRs
+  0x480 0x485 0x486 0x488 0x48a 0x48b 0x48c 0x48d 0x48e 0x48f 0x490 0x491
+```
+
+That is exactly the VMX capability MSR range. They are read-only to a VM, so
+KVM rejects the writes and Cloud Hypervisor warns and continues; the nested
+state is restored through `KVM_SET_NESTED_STATE`, not through them, which is
+why the L2 survives regardless. **Cosmetic — but it looks like the failure, and
+someone reading these logs during an incident will reasonably conclude the
+restore broke.** Worth a note wherever we surface VMM logs.
+
+### What is still not known
+
+This tested one snapshot/restore cycle of an idle inner VM on one host. It did
+not test a fork (restoring the same snapshot twice), an inner VM doing real
+work across the pause, repeated pause/resume cycles, or restore onto a
+different host. M1's parity harness should cover those before nested sandboxes
+are offered to anyone.
 
 ### M1 — Driver beside driver (weeks, not days)
 

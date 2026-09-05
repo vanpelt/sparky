@@ -817,7 +817,11 @@ sandbox already carries the VMX bit in its CPUID, and a guest kernel built with
 `CONFIG_KVM_INTEL` boots an inner microVM. What does **not** work is pausing
 one — Firecracker keeps no nested state in a snapshot, returns HTTP 204 anyway,
 and the restored sandbox's kernel hits `BUG at arch/x86/kvm/x86.c:511`. Since
-scale-to-zero pauses sandboxes automatically, that is the real gap.
+scale-to-zero pauses sandboxes automatically, that is the real gap. Cloud
+Hypervisor v53.0 closes it: on the same node with the same guests, the sandbox
+**and** its inner VM both resumed mid-flight from a snapshot, and `--cpus
+nested=off` genuinely masks VMX, which is the per-sandbox gate Firecracker
+cannot offer.
 [`docs/cloud-hypervisor-feasibility.md`](docs/cloud-hypervisor-feasibility.md)
 is the spike on swapping the VMM for Cloud Hypervisor to get it, with
 [`docs/cloud-hypervisor-port-design.md`](docs/cloud-hypervisor-port-design.md)
@@ -835,7 +839,10 @@ that follows: `run-on-cks.sh` puts a throwaway privileged Pod on the node (its
 own namespace, capped CPU and memory, deleted on exit, no device-plugin
 allocation and nothing written under `/var/lib/sparkbox`), builds the guest
 kernel with `kernel-config.nested.fragment`, and boots a microVM inside a
-microVM; `pause-test.sh` then snapshots the outer one to show what that costs.
+microVM; `pause-test.sh` then snapshots the outer one to show what that costs
+under Firecracker, and `ch-snapshot-test.sh` repeats it under Cloud Hypervisor
+with a `nested=off` control (`lib-guests.sh` builds the guests both share, so
+the outer VMM is the only variable).
 Read the probes rather than
 `grep vmx /proc/cpuinfo`, which gives a false negative here and cost this spike
 a revision.
