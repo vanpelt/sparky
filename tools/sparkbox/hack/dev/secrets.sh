@@ -49,8 +49,11 @@ readonly key_dir="${SPARKBOX_DEV_KEY_DIR:-$gw_dir/keys}"
 # Overridable alongside the key dir: node_ca_cert.pem lives in the state dir
 # while its key lives in the key dir, and the fleet script requires the two to
 # be both present or both absent. Moving one without the other reads as a
-# half-written CA.
-readonly state_dir="${SPARKBOX_DEV_STATE_DIR:-$gw_dir/state}"
+# half-written CA — which is exactly what a wrong default produces here, since
+# the key is always found and the cert never is. So this path is gateway.sh's
+# own `state_dir`, spelled the same way (durable/gateway/control, the
+# entrypoint's default), not a plausible-looking .dev/gateway/state.
+readonly state_dir="${SPARKBOX_DEV_STATE_DIR:-$gw_dir/durable/gateway/control}"
 readonly sync="$module_dir/deploy/sync-fleet-secrets.sh"
 
 # A vault of its own, and NOT the fleet's. `push` overwrites whatever is in the

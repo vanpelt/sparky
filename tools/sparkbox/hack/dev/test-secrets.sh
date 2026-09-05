@@ -283,6 +283,43 @@ else
   bad "the fleet default regressed: $out"
 fi
 
+# --- the default state dir ----------------------------------------------------
+# The one path every other check in this file steps over: `dev()` above always
+# passes SPARKBOX_DEV_STATE_DIR, so the DEFAULT was never exercised — and it was
+# wrong. It named .dev/gateway/state while gateway.sh puts the state dir at
+# .dev/gateway/durable/gateway/control, so node_ca_key.pem was always found in
+# the key dir and node_ca_cert.pem never was, and the fleet script refuses that
+# combination as a half-written CA. Every real run would have died there; only a
+# run with the override could pass, which is to say only this file's runs.
+#
+# Asserted against gateway.sh's own definition rather than a literal, because
+# the invariant is that the two agree — a path spelled correctly here and then
+# moved there is the same outage. Source-level rather than behavioural for the
+# reason the bug survived: taking the default means writing into the checkout's
+# real .dev/, which a test must not do.
+resolve_state_dir() {
+  (
+    unset SPARKBOX_DEV_STATE_DIR
+    gw_dir=GW
+    # Only the assignments, without `readonly`, so both can be evaluated in one
+    # shell and neither script's other side effects run.
+    eval "$(grep -E '^readonly (durable_dir|state_dir)=' "$1" | sed 's/^readonly //')"
+    printf '%s' "${state_dir:-}"
+  )
+}
+gw_state=$(resolve_state_dir "$script_dir/gateway.sh")
+dev_state=$(resolve_state_dir "$secrets_sh")
+if [ -z "$gw_state" ] || [ -z "$dev_state" ]; then
+  # Not "they differ": one of the scripts stopped declaring a state_dir the way
+  # this check reads it, which would otherwise pass as two empty strings.
+  bad "could not resolve a state dir (gateway.sh=$gw_state secrets.sh=$dev_state)"
+elif [ "$gw_state" = "$dev_state" ]; then
+  ok "secrets.sh's default state dir is gateway.sh's (${dev_state#GW/})"
+else
+  bad "secrets.sh defaults the state dir to ${dev_state#GW/} but gateway.sh writes it to ${gw_state#GW/};
+       node_ca_cert.pem will never be found and every push will refuse a half-written CA"
+fi
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "all $CASES checks passed"

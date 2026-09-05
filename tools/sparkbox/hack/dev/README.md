@@ -267,6 +267,36 @@ Until that was true the upstream `.pub` was written once and never refreshed,
 so re-minting the gateway identity — which is exactly what starting a gateway in
 a fresh checkout does — silently stranded every sandbox created afterwards.
 
+#### …and the template fix does nothing for a sandbox that already exists
+
+`up.sh node` repairs the **template**. A sandbox created before the re-mint has
+its own copy of that template as its rootfs, made once at create time, and the
+paragraph above is exactly why nothing rewrites it afterwards. So the three keys
+can all match and that sandbox still cannot be reached. **Recreate it** — `ctl rm
+<name>`, then `ssh new+<name>@` — there is no in-place repair.
+
+The gateway now says so rather than making you find it: a key the guest refuses
+is reported as *"this sandbox trusts an older gateway identity"* at the ssh door
+and in the browser terminal, instead of the "may still be starting" sentence
+that is true of every other dial failure and false of this one.
+
+To read the key out of a **running** guest — the loop-mount above only sees the
+template — go through the image with `debugfs`, which needs no mount and no
+cooperation from the guest:
+
+```sh
+container machine run -i --root --name sparkbox -- bash -s <<'SH'
+pid=$(pgrep -f '^/firecracker' | head -1)     # one per running VM; check cmdline
+debugfs -R "cat /home/sparky/.ssh/authorized_keys" "/proc/$pid/root/rootfs.ext4"
+SH
+```
+
+The same trick reads the guest's journal when no route into it works, which is
+the only view that answers "is the guest broken, or just unreachable?" — dump
+`/var/log/journal/<machine-id>/system.journal` with `debugfs -R dump` and read it
+with `journalctl --file`. A locked-out guest is perfectly healthy inside and its
+sshd says so plainly: `Connection closed by authenticating user sparky [preauth]`.
+
 ## Keeping the identity: `secrets.sh`
 
 The line above — *"re-minting the gateway identity is exactly what starting a
@@ -318,6 +348,16 @@ pinned, and `up.sh` clears that pin when it disagrees.
 `hack/dev/test-secrets.sh` covers all of the above against a stub `op` on PATH,
 including the two refusals, and runs in CI. A real vault cannot: `op` needs an
 authorized desktop app or a service account token.
+
+The first real `push` has since been run — `op vault create Sparkbox-Dev`, then
+`push`, then `status` reporting all six secrets present on both sides and
+matching. It found the one thing a stub could not: `SPARKBOX_DEV_STATE_DIR`
+defaulted to `.dev/gateway/state` while `gateway.sh` writes the state dir to
+`.dev/gateway/durable/gateway/control`, so `node_ca_key.pem` was always found and
+`node_ca_cert.pem` never was, and every real run would have refused a
+half-written CA. The suite passed throughout, because `dev()` sets that variable
+on every call and so never took the default. It now asserts the default against
+`gateway.sh`'s own definition instead.
 
 ## The gateway loop
 

@@ -354,3 +354,116 @@ func TestDialFailureNamesNoAddress(t *testing.T) {
 		t.Error("a node outage stopped being classifiable once it was rendered")
 	}
 }
+
+// rejectingSSHServer is a real sshd that completes the handshake and then
+// refuses every key, which is what a sandbox created before the gateway's
+// identity changed does: its authorized_keys was baked into the rootfs at
+// create time and nothing rewrites it afterwards.
+//
+// A real server rather than a canned error because the whole point is WHERE the
+// failure lands. A rejected key does not fail the dial — it fails inside
+// xssh.NewClientConn, on the far side of a successful connect, which is the one
+// branch of the retry loop that used to classify nothing at all.
+func rejectingSSHServer(t *testing.T) (net.Listener, *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var handshakes atomic.Int64
+	cfg := &xssh.ServerConfig{
+		PublicKeyCallback: func(xssh.ConnMetadata, xssh.PublicKey) (*xssh.Permissions, error) {
+			return nil, fmt.Errorf("unknown public key")
+		},
+	}
+	cfg.AddHostKey(testSigner(t))
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			handshakes.Add(1)
+			go func() {
+				defer c.Close()
+				// Errors are the expected outcome: every client here is
+				// rejected. Discarded rather than reported, because a test
+				// failure must come from what the CLIENT concluded.
+				sc, chans, reqs, err := xssh.NewServerConn(c, cfg)
+				if err != nil {
+					return
+				}
+				go xssh.DiscardRequests(reqs)
+				for ch := range chans {
+					ch.Reject(xssh.Prohibited, "no") //nolint:errcheck
+				}
+				sc.Close()
+			}()
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return ln, &handshakes
+}
+
+// A guest that refuses the gateway's key must end the loop on the first answer.
+//
+// This is the storm that hid its own cause on the Mac dev box. Retried every
+// 250ms, each attempt paying a full key exchange, it crossed sshd's MaxStartups
+// inside a few seconds — after which sshd drops connections before the banner,
+// the honest "unable to authenticate" is overwritten by `handshake failed: EOF`,
+// and the user is told the shell could not be reached. The guest was healthy the
+// whole time and its journal held the real answer.
+func TestDialUpstreamViaDoesNotRetryARefusedKey(t *testing.T) {
+	ln, handshakes := rejectingSSHServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	c, err := DialUpstreamVia(ctx, (&net.Dialer{}).DialContext, ln.Addr().String(), "sparky", testSigner(t))
+	if c != nil {
+		c.Close()
+	}
+	if err == nil {
+		t.Fatal("dial succeeded against a server that refuses every key")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %v to report a refused key, want the first answer", elapsed)
+	}
+	// The number is the point: at 250ms apart, spending the budget instead of
+	// returning is worth dozens of key exchanges against a guest that can never
+	// say yes.
+	if n := handshakes.Load(); n != 1 {
+		t.Errorf("sshd saw %d connections, want 1: a refused key is being retried", n)
+	}
+	if !AuthRejected(err) {
+		t.Errorf("error %v is not classified as an auth rejection, so no door can name it", err)
+	}
+}
+
+// What the user is told, at both doors. "It may still be starting" is actively
+// wrong for a locked-out sandbox — the guest is healthy and waiting for a key
+// nobody has any more — and it sends the reader to a log that only says the
+// same thing again.
+func TestDialFailureNamesAStaleGuestKey(t *testing.T) {
+	// The shape x/crypto/ssh actually produces; see AuthRejected on why this is
+	// matched as a string.
+	refused := errors.New("vm ssh not reachable: ssh: handshake failed: " +
+		"ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain")
+
+	got := dialFailure("demo", refused).Error()
+	if !strings.Contains(got, StaleGuestKey) {
+		t.Fatalf("stored sentence = %q, want it to carry %q", got, StaleGuestKey)
+	}
+	if strings.Contains(got, unreachableShell) {
+		t.Errorf("a locked-out sandbox is still being reported as one that may still be starting: %q", got)
+	}
+	// It has to say what to DO. This is the only dial failure where the reader
+	// can fix it themselves, and a sentence that stops at the diagnosis leaves
+	// them exactly where the old one did.
+	for _, want := range []string{"recreate", "ctl rm"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the sentence never mentions %q, so it names a cause with no cure: %q", want, got)
+		}
+	}
+}
