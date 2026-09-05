@@ -369,6 +369,23 @@ spec:
               value: "true"
             - name: SPARKBOX_DISABLE_HOST_ROOTFS_MOUNTS
               value: "true"
+            # The VMM this node runs. One image carries both, so this is a
+            # variable rather than a different image.
+            #
+            # Declared explicitly at its default even though entrypoint.sh
+            # already defaults it, because internal/devpod's buildEnv can only
+            # REWRITE keys this manifest declares -- a key that is "a no-op
+            # anyway" and therefore left out silently stops being settable, and
+            # that has already cost one silently-disconnected flag here.
+            #
+            # Changing it on a live node is not reversible by changing it back:
+            # the drivers keep sandbox disks and snapshots in layouts the other
+            # does not read, so sparkbox refuses to start against a state
+            # directory the other driver created. Archive or destroy every
+            # sandbox first, then set SPARKBOX_ALLOW_VMM_CHANGE=true for one
+            # start.
+            - name: SPARKBOX_DRIVER
+              value: "firecracker"
             - name: SPARKBOX_PRIVILEGED_HELPER_SOCKET
               value: /run/sparkbox-vmm/helper.sock
             - name: SPARKBOX_CONTROLLER_UID
