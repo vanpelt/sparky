@@ -737,7 +737,7 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 		NetworkInterfaces: sdk.NetworkInterfaces{{
 			StaticConfiguration: &sdk.StaticNetworkConfiguration{
 				HostDevName: d.net.TapName(st.idx),
-				MacAddress:  hostnet.MAC(0x00, st.idx),
+				MacAddress:  guestnet.MACFor(0x00, st.idx),
 			},
 		}},
 		MachineCfg: models.MachineConfiguration{

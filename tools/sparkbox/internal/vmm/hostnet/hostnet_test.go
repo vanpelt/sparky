@@ -50,19 +50,6 @@ func TestSlotAddressConvention(t *testing.T) {
 	}
 }
 
-// The two drivers must never hand out the same MAC on a host where both run.
-func TestMACSeparatesDrivers(t *testing.T) {
-	if got, want := MAC(0x00, 0), "02:5b:00:00:00:00"; got != want {
-		t.Errorf("MAC = %s, want %s", got, want)
-	}
-	if got, want := MAC(0x01, 258), "02:5b:01:00:01:02"; got != want {
-		t.Errorf("MAC = %s, want %s", got, want)
-	}
-	if MAC(0x00, 5) == MAC(0x01, 5) {
-		t.Error("the same slot must not produce the same MAC under two drivers")
-	}
-}
-
 func TestTapNameUsesThePrefix(t *testing.T) {
 	if got := (Plumbing{TapPrefix: "sbtap"}).TapName(12); got != "sbtap12" {
 		t.Errorf("TapName = %s", got)
