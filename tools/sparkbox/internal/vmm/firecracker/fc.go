@@ -687,6 +687,21 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 // live tap because paused VMs keep their record (idx stays reserved) and the
 // record only goes away after the tap does. The configured prefix determines
 // the bound: every index maps to exactly one /30 inside it.
+// vmmLogTail returns the end of a VM's firecracker.log as ONE line, so it can
+// be folded into an error without wrecking a log message. Empty when there is
+// nothing to say, which is the common case on a healthy boot.
+func vmmLogTail(path string) string {
+	const maxTail = 2 << 10
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	if len(b) > maxTail {
+		b = b[len(b)-maxTail:]
+	}
+	return strings.Join(strings.Fields(string(b)), " ")
+}
+
 func (d *Driver) freeSlot() (int, error) {
 	used := make(map[int]bool, len(d.vms))
 	for _, s := range d.vms {
@@ -823,10 +838,23 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			return fmt.Errorf("prepare chroot jail: %w", err)
 		}
 	} else {
-		cmd = sdk.VMCommandBuilder{}.
+		// Capture the VMM's own stderr. Without this the direct launcher throws
+		// it away, so when Firecracker refuses to start, all the SDK can say is
+		// that no API socket appeared -- which describes the symptom and names
+		// none of the causes. Arrived at the hard way, after an x86_64 failure
+		// whose entire account of itself was "context deadline exceeded".
+		// Best-effort: a boot must not fail because a log file could not be
+		// opened.
+		b := sdk.VMCommandBuilder{}.
 			WithBin(d.opts.FirecrackerBin).
-			WithSocketPath(sock).
-			Build(vmCtx)
+			WithSocketPath(sock)
+		if lf, lerr := os.Create(filepath.Join(dir, "firecracker.log")); lerr == nil {
+			// Safe to close our copy once the child has started: exec dups the
+			// descriptor, so the VMM keeps writing after this returns.
+			defer lf.Close() //nolint:errcheck
+			b = b.WithStdout(lf).WithStderr(lf)
+		}
+		cmd = b.Build(vmCtx)
 	}
 
 	opts := []sdk.Opt{sdk.WithProcessRunner(cmd)}
@@ -866,6 +894,15 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 	// kills the microVM the instant that first connection closes. The VM's
 	// lifetime is owned by vmCtx, cancelled only by Pause/Destroy via st.cancel.
 	if err := m.Start(vmCtx); err != nil {
+		// Put the VMM's own words in the error. The SDK can only report the
+		// symptom it can see -- almost always "did not create API socket ...
+		// context deadline exceeded" -- which names none of the many reasons
+		// Firecracker exits before it binds that socket. The log lives in the
+		// VM directory, so a caller that tears that directory down on failure
+		// would otherwise destroy the only evidence there was.
+		if tail := vmmLogTail(filepath.Join(dir, "firecracker.log")); tail != "" {
+			err = fmt.Errorf("%w (firecracker said: %s)", err, tail)
+		}
 		d.stopMachine(m, cancel)
 		d.cleanupJail(st.idx) //nolint:errcheck
 		return fmt.Errorf("start vm: %w", err)
@@ -2029,17 +2066,36 @@ func (d *Driver) stopVMM(st *vmState) {
 	d.stopMachine(st.machine, st.cancel)
 }
 
+// stopMachine stops a VMM and WAITS for the process to be reaped.
+//
+// The wait is not politeness, and it used to be done only on the privileged
+// helper path. StopVMM sends SIGTERM and returns; the SDK reaps the process in
+// a goroutine and, when cmd.Wait() returns, runs a cleanup func that does
+// os.Remove on the API socket path (machine.go:568 in v1.0.0). Nothing bounds
+// when that lands.
+//
+// A VM's socket path is derived from its NAME, so the next boot of the same
+// sandbox reuses it. Return without waiting and the sequence is:
+//
+//	VMM #1 SIGTERMed, reaper still pending
+//	VMM #2 starts, binds the path, logs "Listening on API socket"
+//	VMM #1's reaper finally runs and unlinks the path -- VMM #2's live socket
+//	VMM #2's waitForSocket stats ENOENT for 3s and reports, misleadingly,
+//	  "Firecracker did not create API socket ... context deadline exceeded"
+//
+// It is a race, so it is intermittent, and it gets likelier the faster the host
+// reaches the second boot: it showed up 7 times in 10 on the x86_64 CKS node
+// and never on the arm64 dev box. Pause + DropSnapshots + start is precisely
+// the path a user's "reboot my sandbox" takes.
 func (d *Driver) stopMachine(machine *sdk.Machine, vmCancel context.CancelFunc) {
 	machine.StopVMM() //nolint:errcheck
 	vmCancel()
-	if d.opts.PrivilegedHelperSocket != "" {
-		if _, err := machine.PID(); err != nil {
-			return
-		}
-		ctx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer waitCancel()
-		machine.Wait(ctx) //nolint:errcheck
+	if _, err := machine.PID(); err != nil {
+		return // never started, or already reaped: nothing to wait for
 	}
+	ctx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer waitCancel()
+	machine.Wait(ctx) //nolint:errcheck
 }
 
 func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
