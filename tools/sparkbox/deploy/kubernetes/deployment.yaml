@@ -307,6 +307,22 @@ spec:
               value: 172.30.0.0/20
             - name: SPARKBOX_HOST_MEM_MB
               value: "480000"
+            # "0" means "keep the binary's built-in", so on THIS cluster both of
+            # these are no-ops and the built-ins (4 vCPU / 12288 MB) are what a
+            # CKS sandbox gets. They are declared anyway, and must stay
+            # declared: internal/devpod's buildEnv rewrites the values of keys
+            # the manifest already carries and cannot introduce new ones, so
+            # these two lines ARE the slot `devpod up -default-mem-mb` writes
+            # into. Deleting them as dead weight does not make the dev pod fall
+            # back to a default — it makes `-default-mem-mb` do nothing at all,
+            # silently, and hands a laptop's container machine a guest larger
+            # than the machine. That is exactly what happened once; see
+            # TestPlanCarriesTheSandboxSizingItWasGiven, which fails if either
+            # line goes.
+            - name: SPARKBOX_DEFAULT_VCPUS
+              value: "0"
+            - name: SPARKBOX_DEFAULT_MEM_MB
+              value: "0"
             - name: SPARKBOX_MEM_ADMISSION_PCT
               value: "90"
             - name: SPARKBOX_MAX_RUNNING_PER_OWNER
