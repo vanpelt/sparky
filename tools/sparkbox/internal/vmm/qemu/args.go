@@ -86,6 +86,30 @@ func buildQemuArgs(spec qemuSpec) ([]string, error) {
 		"-M", spec.MachineType,
 		"-cpu", "host",
 		"-enable-kvm",
+		// -nodefaults, and the machine-type suffixes that go with it, are the
+		// difference between "the three devices we configured" and "those plus
+		// whatever this machine model builds by default". MEASURED with
+		// `info qtree` on the production x86_64 CKS node, QEMU 8.2.2, pc-q35-8.2:
+		//
+		//	-nodefaults       removes VGA, ide-cd, isa-parallel, isa-serial, e1000e
+		//	sata=off          removes ich9-ahci  (-nodefaults alone does NOT)
+		//	vmport=off        removes vmport + vmmouse, the VMware backdoor ports
+		//
+		// There is no floppy on q35 in any configuration, so the FDC bug class
+		// people reach for first was never reachable here. What survives all
+		// three is the irreducible platform: ICH9-LPC, ICH9-SMB, fw_cfg_io,
+		// hpet, i8042, i8257, ioapic, isa-i8259, isa-pcspk, isa-pit, kvmvapic,
+		// mc146818rtc, mch, port92, ps2-kbd, ps2-mouse, q35-pcihost,
+		// smbus-eeprom. The two suffixes ride on Options.MachineType because
+		// they are machine properties, not global flags, and because arm64
+		// -M virt has neither.
+		//
+		// This is also why the argv is frozen before the first production
+		// snapshot rather than tidied later: every one of these tokens changes
+		// which device sections the migration stream carries, and -nodefaults
+		// additionally moves the NIC's PCI address. A guest paused under one
+		// argv cannot be resumed under another.
+		"-nodefaults",
 		"-m", strconv.FormatInt(spec.MemMB, 10),
 		"-smp", strconv.FormatInt(spec.VCPUs, 10),
 		"-kernel", spec.KernelPath,

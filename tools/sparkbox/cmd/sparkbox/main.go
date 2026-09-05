@@ -107,10 +107,48 @@ func main() {
 	}
 }
 
+// qemuRefusesJailerFlags rejects --driver qemu combined with any of the
+// Firecracker confinement flags.
+//
+// It refuses rather than ignores because ignoring is the dangerous option.
+// qemu.Options has no jailer, chroot-jailer or privileged-helper field, so a
+// node started with --driver qemu --chroot-jailer --privileged-helper ... would
+// come up looking exactly like a hardened node and would in fact be running an
+// unconfined VMM as the controller. The operator would have no way to tell:
+// every flag they passed was accepted. An error at startup is the only outcome
+// that cannot be mistaken for the thing they asked for.
+//
+// This is a statement about the flags, not about QEMU. QEMU confines itself —
+// `-runas <uid>:<uid> -run-with chroot=<jail> -sandbox on`, measured on the CKS
+// node, produces a process with every capability dropped — but it does so from
+// its own argv rather than through these flags, and until the driver builds
+// that argv there is nothing here to honour them with.
+func qemuRefusesJailerFlags(jailerBin string, chrootJailer bool, privilegedHelperSocket string) error {
+	var set []string
+	if jailerBin != "" {
+		set = append(set, "--jailer")
+	}
+	if chrootJailer {
+		set = append(set, "--chroot-jailer")
+	}
+	if privilegedHelperSocket != "" {
+		set = append(set, "--privileged-helper")
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf("--driver qemu does not implement %s yet, and starting anyway would give you an "+
+		"unconfined VMM that looks confined. Drop the flag to run the direct launcher knowingly, "+
+		"or stay on --driver firecracker", strings.Join(set, " and "))
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
-		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker")
+		driverName           = fs.String("driver", "mock", "vm driver: mock | firecracker | qemu")
+		qemuBin              = fs.String("qemu-bin", "", "qemu system emulator binary for --driver qemu (default: qemu-system-<arch> on PATH)")
+		machineType          = fs.String("machine-type", "", "qemu -M machine type, which MUST be versioned: the migration stream is bound to it, so an unversioned name silently changes model on a package upgrade and strands every paused sandbox. Empty uses the driver's pinned per-arch default, which is what you want")
+		allowVMMChange       = fs.Bool("allow-vmm-change", false, "let this driver take over a --vm-state-dir another VMM created. Only safe once every sandbox on the node has been archived or destroyed: the two drivers keep disks and snapshots in layouts the other does not read, so anything left behind silently cold-boots from its base image")
 		gatewayOnly          = fs.Bool("gateway-only", false, "run the public control plane without local VM capacity; ordinary creates are placed on an attached fleet node")
 		stateDir             = fs.String("state-dir", "./state", "directory for control state: sqlite stores, certificates, and sandbox metadata")
 		vmStateDir           = fs.String("vm-state-dir", "", "directory for per-VM disks, sockets, and memory snapshots (default: --state-dir)")
@@ -288,6 +326,7 @@ func serve(args []string) error {
 			nodeName: nodeNameOr(*nodeNameFlag), arch: *archFlag,
 			driverName: *driverName, stateDir: *stateDir, vmStateDir: *vmStateDir, keyDir: *keyDir,
 			kernelPath: *kernelPath, imageDir: *imageDir, templateDir: *templateDir,
+			qemuBin: *qemuBin, machineType: *machineType, allowVMMChange: *allowVMMChange,
 			jailerBin: *jailerBin, chrootJailer: *chrootJailer,
 			jailerChrootBase: *jailerChrootBase, jailerUIDBase: *jailerUIDBase,
 			privilegedHelperSocket: *privilegedHelper, privilegedHelperBin: *privilegedHelperBin,
@@ -516,10 +555,17 @@ func serve(args []string) error {
 	var driver vmm.Driver
 	switch *driverName {
 	case "mock":
+		// Deliberately does NOT claim the state dir. The mock holds no tenant
+		// disk worth protecting — it keeps a workdir, not a rootfs — so making
+		// a dev box refuse to go back to a real driver would cost more than it
+		// saves.
 		md := mock.New(*vmStateDir, hostKey)
 		md.LoginUser = *defaultLogin
 		driver = md
 	case "firecracker":
+		if err := vmm.ClaimStateDir(*vmStateDir, *driverName, *allowVMMChange); err != nil {
+			return err
+		}
 		driver, err = newFirecrackerDriver(
 			*kernelPath, *imageDir, *templateDir, *vmStateDir, *jailerBin, *jailerChrootBase, *jailerUIDBase,
 			*chrootJailer, *privilegedHelper, *privilegedHelperBin, *helperControllerGID, *noRootfsMounts,
@@ -528,8 +574,27 @@ func serve(args []string) error {
 		if err != nil {
 			return err
 		}
+	case "qemu":
+		if err := qemuRefusesJailerFlags(*jailerBin, *chrootJailer, *privilegedHelper); err != nil {
+			return err
+		}
+		if err := vmm.ClaimStateDir(*vmStateDir, *driverName, *allowVMMChange); err != nil {
+			return err
+		}
+		driver, err = newQemuDriver(
+			*kernelPath, *imageDir, *templateDir, *vmStateDir, *qemuBin, *machineType,
+			*noRootfsMounts, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
+		)
+		if err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown driver %q", *driverName)
+	}
+	if *allowVMMChange {
+		log.Warn("--allow-vmm-change was set: this process has taken ownership of the VM state directory "+
+			"from another VMM. Any sandbox disk left in the previous driver's tree is now unreferenced.",
+			"driver", *driverName, "vm-state-dir", *vmStateDir)
 	}
 	defer driver.Close()
 
