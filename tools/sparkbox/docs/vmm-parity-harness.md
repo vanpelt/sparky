@@ -501,22 +501,51 @@ by 20% there and loses it by 23% here.
 
 A guest boots to SSH in **1.6s** on this node, both drivers.
 
-### The one x86_64 failure: Firecracker `Reboot`
+### The one x86_64 failure: a socket-unlink race, since fixed
 
-Reproduced twice, deterministic, and QEMU passes the same case on the same node
-minutes apart — so it is the Firecracker driver on this architecture, not the
-environment:
+`Reboot` failed on x86_64 while QEMU passed the same case on the same node. It
+was a real bug in the Firecracker driver, and the way it hid is the interesting
+part.
 
-    create preboot9766121 (NewSandbox=false): start vm: Firecracker did not
-    create API socket .../fc-vms/preboot9766121/fc.sock: context deadline exceeded
+The SDK reports only what it can see:
 
-The failing call is the **second** `Create` for one VM name — the cold boot that
-`testReboot` does after `Pause` + `DropSnapshots`, which is exactly the path a
-user's "reboot my sandbox" takes. `BootAndSSH` passes on the same run at 1.68s,
-so ordinary `Create` is fine. The obvious explanation, a stale `fc.sock`, is
-wrong: `fc.go:757` already unlinks it before boot. **Not yet diagnosed**, and it
-should be, because it is a shipping-driver failure on the architecture the fleet
-runs.
+    Firecracker did not create API socket .../fc.sock: context deadline exceeded
+
+That is false. Firecracker created the socket and said so — but the driver threw
+the VMM's stderr away, so nobody could read it. The first fix was to stop doing
+that: the direct launcher now writes `firecracker.log` beside the VM, and a
+failed start folds its tail into the returned error, the way the QEMU driver has
+always done with `qemuLogTail`. The log then said:
+
+    Running Firecracker v1.16.1
+    Listening on API socket ("/work/.../fc.sock").
+    API server started.
+
+With a probe added at the point of failure, the socket **file did not exist** —
+though Firecracker had bound it and does not unlink on exit.
+
+The unlinker is the SDK. When a VMM exits it runs a cleanup func that does
+`os.Remove(m.Cfg.SocketPath)` (`machine.go:568`, v1.0.0), on the `cmd.Wait()`
+goroutine, unbounded in time. `stopMachine` waited for that reap **only on the
+privileged-helper path**. A socket path is derived from the VM's name, so:
+
+1. `Pause` SIGTERMs VMM #1 and returns; its reaper is still pending.
+2. `DropSnapshots` drops the record, and the next `Create` starts VMM #2 on the
+   same path. It binds, and logs `Listening`.
+3. VMM #1's reaper runs and unlinks the path — VMM #2's live socket.
+4. VMM #2's `waitForSocket` stats ENOENT for three seconds and blames
+   Firecracker for never creating it.
+
+The fix is one guard removed: `stopMachine` now waits for the reap on every
+path, not just the helper's. **7 failures in 10 before, 10 passes in 10 after**,
+and the full suite is now 19/19 on x86_64.
+
+Three things worth keeping from it. A race gets likelier the faster the host, so
+the fast production node found what the dev laptop never could — arm64 never
+failed once. `Pause` + `DropSnapshots` + start is exactly a user's "reboot my
+sandbox". And the shipping CKS deployment was never exposed, because it runs the
+privileged helper, which happened to be the one path that already waited: the
+guard protected production by accident, not by design.
 
 ### How not to measure this, learned the hard way
 

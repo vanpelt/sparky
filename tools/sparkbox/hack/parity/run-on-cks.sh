@@ -149,7 +149,17 @@ echo "   package: $pkg"
 ls -lh "$out/parity-amd64.test" | awk '{print "   " $5, $9}'
 
 say "2. namespace/$namespace and the runner Pod"
-"${k[@]}" get ns "$namespace" >/dev/null 2>&1 || "${k[@]}" create ns "$namespace" >/dev/null
+# A leftover namespace is almost always a previous --keep run, and reusing its
+# Pod does not work: `apply` reconfigures it in place, the emptyDir still holds
+# the old scratch.xfs, and step 5 dies on "appears to contain an existing
+# filesystem". Delete and WAIT -- an async delete loses the same race a beat
+# later, against a Pod that is half gone.
+if "${k[@]}" get ns "$namespace" >/dev/null 2>&1; then
+  say "removing the existing namespace/$namespace (a previous --keep?)"
+  "${k[@]}" delete ns "$namespace" --wait=true --timeout=120s >/dev/null \
+    || die "could not delete the existing namespace/$namespace"
+fi
+"${k[@]}" create ns "$namespace" >/dev/null
 "${k[@]}" -n "$namespace" apply -f - <<YAML || die "pod manifest rejected (see the error above)"
 apiVersion: v1
 kind: Pod
