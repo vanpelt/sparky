@@ -29,9 +29,23 @@
 # is copied into it ONCE (sparse, so it costs its used size and not 25 GiB), and
 # every VM the suite creates is a reflink clone within that image.
 #
+# WHERE THE TOOLCHAIN COMES FROM
+#
+# ghcr.io/<owner>/sparkbox-parity, built by .github/workflows/sparkbox-parity-image.yml
+# on a native runner per architecture. It used to be `ubuntu:24.04` plus an
+# `apt-get install` inside the Pod, which made every run depend on the cluster
+# having egress to an Ubuntu mirror and on that mirror serving the same versions
+# twice. The test BINARY is still copied in per run, so iterating on the suite
+# costs a `go test -c` rather than a CI round trip.
+#
 # Usage:
-#   hack/parity/run-on-cks.sh [--run <regex>] [--keep] [--timeout 90m]
+#   hack/parity/run-on-cks.sh [--run <regex>] [--pkg <import path>] [--image <ref>]
+#                             [--keep] [--timeout 90m] [--machine-type <name>]
 #                             [--namespace parity] [--context <ctx>]
+#
+# --pkg is what points it at a driver other than firecracker:
+#
+#   hack/parity/run-on-cks.sh --pkg ./internal/vmm/qemu --run TestQEMUParity
 set -uo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -40,6 +54,11 @@ sparkbox=$(dirname "$(dirname "$here")")
 namespace=parity
 context=""
 runre='TestFirecrackerParity'
+pkg=./internal/vmm/firecracker
+# Pinned by branch, not `edge`: a parity result should name the toolchain that
+# produced it, and the branch tag is what CI just pushed for this checkout.
+image=""
+machine_type=""
 timeout=90m
 keep=0
 nodedata=/var/lib/sparkbox
@@ -49,13 +68,16 @@ login_user=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --run)       runre=${2:?--run needs a regex}; shift 2 ;;
+    --pkg)       pkg=${2:?--pkg needs an import path}; shift 2 ;;
+    --image)     image=${2:?--image needs a ref}; shift 2 ;;
+    --machine-type) machine_type=${2:?--machine-type needs a name}; shift 2 ;;
     --keep)      keep=1; shift ;;
     --timeout)   timeout=${2:?--timeout needs a value}; shift 2 ;;
     --namespace) namespace=${2:?--namespace needs a value}; shift 2 ;;
     --context)   context=${2:?--context needs a value}; shift 2 ;;
     --node-data)  nodedata=${2:?--node-data needs a path}; shift 2 ;;
     --login-user) login_user=${2:?--login-user needs a name}; shift 2 ;;
-    -h|--help)   sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,55p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -82,9 +104,19 @@ trap cleanup EXIT INT TERM
 out="$sparkbox/.dev/parity"
 mkdir -p "$out"
 
+# Default the image to this checkout's branch tag. Slashes are legal in a branch
+# name and not in a tag, which is the same substitution the workflow makes.
+if [ -z "$image" ]; then
+  branch=$(cd "$sparkbox" && git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
+  owner=$(cd "$sparkbox" && git remote get-url origin 2>/dev/null \
+            | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')
+  image="ghcr.io/${owner:-vanpelt}/sparkbox-parity:${branch:-edge}"
+fi
+
 say "1. building the linux/amd64 parity test binary"
+echo "   package: $pkg"
 ( cd "$sparkbox" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-    go test -c -o "$out/parity-amd64.test" ./internal/vmm/firecracker ) || die "go test -c failed"
+    go test -c -o "$out/parity-amd64.test" "$pkg" ) || die "go test -c failed"
 ls -lh "$out/parity-amd64.test" | awk '{print "   " $5, $9}'
 
 say "2. namespace/$namespace and the runner Pod"
@@ -102,9 +134,9 @@ spec:
     - name: runner
       # Stock ubuntu, and step 5 installs what the suite shells out to
       # (e2fsprogs, zerofree, zstd, iproute2, xfsprogs). Deliberately NOT the
-      # sparkbox node image: this Pod should not be able to be confused for part
+      # NOT the sparkbox node image: this Pod should not be confusable with part
       # of the deployment, in a `kubectl get pods -A` or by anything else.
-      image: ubuntu:24.04
+      image: ${image}
       command: ["sleep", "infinity"]
       securityContext:
         privileged: true          # the only way to pass /dev/kvm without a device plugin
@@ -141,8 +173,13 @@ say "5. preparing a reflink-capable scratch filesystem"
 "${k[@]}" -n "$namespace" exec -i parity -- bash -s <<'PREP'
 set -eu
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq xfsprogs e2fsprogs zerofree zstd iproute2 iputils-ping >/dev/null
+# No apt-get: xfsprogs, e2fsprogs, zerofree, zstd and iproute2 are baked into
+# the image by hack/parity/Dockerfile, so a run does not depend on the cluster
+# reaching an Ubuntu mirror. Fail here rather than three minutes later if the
+# image is somehow the wrong one.
+for t in mkfs.xfs e2fsck zerofree zstd ip; do
+  command -v "$t" >/dev/null 2>&1 || { echo "missing $t: wrong image?" >&2; exit 1; }
+done
 truncate -s 30G /work/scratch.xfs
 mkfs.xfs -q -m reflink=1 /work/scratch.xfs
 mkdir -p /work/scratch
@@ -157,6 +194,14 @@ cp --sparse=always "$img" "/work/scratch/images/$(basename "$img")"
 cp --reflink=always "/work/scratch/images/$(basename "$img")" /work/scratch/state/.probe
 rm -f /work/scratch/state/.probe
 echo "template: $(basename "$img")  scratch: $(df -h /work/scratch | tail -1)"
+# The Mac runner learned this the hard way: a machine was resized between two
+# runs and the two logs were compared as if they came from the same box, which
+# moved Firecracker's total by 40%. A timing is comparable to another timing
+# only if this line matches. See docs/vmm-parity-harness.md.
+echo "pod sees: $(nproc) CPUs, $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
+# nproc reports the HOST's 64 CPUs regardless of this Pod's cgroup cap -- the
+# trap hack/m0b hit when it used nproc for -j. cpu.max is the real limit.
+echo "cgroup cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo unknown)"
 PREP
 [ $? -eq 0 ] || die "scratch preparation failed"
 
@@ -178,6 +223,25 @@ fcbin=$("${k[@]}" -n "$namespace" exec parity -- \
 [ -n "$fcbin" ] || die "no firecracker binary found under $nodedata"
 echo "   image=$image_name login=$login_user kernel=$kernel firecracker=$fcbin"
 
+# QEMU only. The driver REFUSES to default a machine type off arm64
+# (internal/vmm/qemu/qemu.go), and it insists on a VERSIONED name, because the
+# machine model is baked into every migration stream a sandbox pauses into: an
+# unversioned `q35` silently means "whatever this QEMU calls newest", so a QEMU
+# upgrade would strand every existing snapshot. Ask the binary what it has
+# rather than hardcoding a version that expires.
+qemu_bin=""
+if [ "$pkg" != "./internal/vmm/firecracker" ]; then
+  qemu_bin=$("${k[@]}" -n "$namespace" exec parity -- \
+    bash -c 'command -v qemu-system-x86_64' 2>/dev/null || true)
+  [ -n "$qemu_bin" ] || die "qemu-system-x86_64 not in the image ($image)"
+  if [ -z "$machine_type" ]; then
+    machine_type=$("${k[@]}" -n "$namespace" exec parity -- \
+      bash -c "$qemu_bin -M help | awk '{print \$1}' | grep -E '^pc-q35-[0-9]+\\.[0-9]+$' | sort -V | tail -1")
+  fi
+  [ -n "$machine_type" ] || die "could not resolve a versioned pc-q35-* machine type"
+  echo "   qemu=$qemu_bin machine-type=$machine_type"
+fi
+
 say "6. running the suite"
 "${k[@]}" -n "$namespace" exec parity -- env \
   SPARKBOX_VMM_PARITY=1 \
@@ -190,6 +254,8 @@ say "6. running the suite"
   SPARKBOX_PARITY_SUBNET=172.31.0.0/24 \
   SPARKBOX_PARITY_VCPUS=2 \
   SPARKBOX_PARITY_MEM_MB=2048 \
+  SPARKBOX_PARITY_QEMU="$qemu_bin" \
+  SPARKBOX_PARITY_MACHINE_TYPE="$machine_type" \
   /work/parity.test -test.run "$runre" -test.v -test.timeout "$timeout" \
   2>&1 | tee "$out/parity-cks-$(date +%Y%m%d-%H%M%S).log"
 rc=${PIPESTATUS[0]}
