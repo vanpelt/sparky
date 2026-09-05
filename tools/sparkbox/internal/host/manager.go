@@ -3426,9 +3426,10 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 	// measured now rather than whenever the pressure controller last ran. Only
 	// the balloon stage below consumes them, and it runs on a sandbox that is
 	// idle past balloonAfter and not already ballooned — so scan for one first
-	// rather than sampling unconditionally. With the default 20m idle-balloon
-	// almost every tick has no candidate, and the scan is a pass over a slice we
-	// already copied against a round trip to every running guest's VMM.
+	// rather than sampling unconditionally. The reaper ticks every minute and
+	// --idle-balloon defaults to five, so most ticks have no candidate at all,
+	// and the scan is a pass over a slice we already copied against a round trip
+	// to every running guest's VMM.
 	if m.balloon != nil && m.reserveMB > 0 && balloonAfter > 0 && anyBalloonCandidate(boxes, balloonAfter) {
 		m.refreshMemoryUsage(ctx)
 	}
