@@ -991,6 +991,50 @@ func (m *Manager) defaultMemMB() int64 {
 	return DefaultMemMB
 }
 
+// evenMemMB rounds a guest's RAM down to a whole number of 2 MiB pages, which
+// is what decides whether KVM maps the guest with 2 MiB stage-2 blocks or has
+// to spend a 4 KiB PTE on every page of it.
+//
+// arm64 KVM refuses a block mapping unless the host virtual address and the
+// guest physical address are congruent modulo the block size
+// (arch/arm64/kvm/mmu.c, fault_supports_stage2_huge_mapping):
+//
+//	if ((gpa_start & (map_size - 1)) != (uaddr_start & (map_size - 1)))
+//	        return false;
+//
+// after which user_mem_abort() sets force_pte for the WHOLE memslot, not just
+// the ragged edge. Guest DRAM starts at a 2 MiB-aligned GPA, and firecracker
+// v1.16.1 mmaps guest memory with a plain mmap(NULL, …) — no alignment of its
+// own — so an odd number of MiB reliably lands it 1 MiB off and costs us every
+// block mapping.
+//
+// THIS IS A PROXY FOR A CONDITION THE CODE CANNOT SEE, and it has a
+// prerequisite. What KVM actually tests is the address it got, which depends on
+// the host having a 2 MiB-contiguous page to hand: size parity decides
+// congruence only because transparent huge pages are on. Firecracker never
+// madvises, so a host left on the `madvise` default gets no THP and this buys
+// nothing — hack/dev/machine.sh sets THP=always on the dev box for exactly this
+// reason, and the two are halves of one mechanism.
+//
+// Measured on the Mac dev box, same binary and kernel and rootfs, only the size
+// varied: 10725 MiB spent 2.0 kB of stage-2 tables per MB of guest RAM and took
+// 4.77s to first-touch 512MB, where 10724 and 10726 spent 0.028 kB/MB and took
+// 0.27s. It barely shows on bare metal, where a stage-2 fault costs a
+// microsecond or two, but nested under a Mac's hypervisor each one is ~250us
+// and the 512x fault count dominates everything a guest does with fresh memory:
+// a fresh sandbox booted in 2.4s instead of 27s.
+//
+// Upstream fixes this properly in `feat: align guest memory to 2MiB`
+// (1a6655891b64, 2026-07-15), which over-allocates and trims. That landed two
+// weeks after v1.16.1 and is in no release yet; rounding the size is the half
+// we can do from here, and it stays correct once the other half arrives.
+func evenMemMB(memMB int64) int64 {
+	if memMB <= 2 {
+		return memMB
+	}
+	return memMB &^ 1
+}
+
 func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
 	if !validName(name) {
 		return nil, &NameError{Problem: NameInvalid, Noun: "sandbox", Name: name}
@@ -1004,6 +1048,13 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 	if memMB <= 0 {
 		memMB = m.defaultMemMB()
 	}
+	// Round here, where the size is decided, rather than at the VMM: b.MemMB is
+	// what admission charges, what the console reports, and what setBalloonTarget
+	// subtracts the floor from, so a driver that quietly booted something else
+	// would leave every one of those describing a guest that does not exist.
+	// Turbo is safe without its own rounding — TurboFactor is 2, so an even size
+	// doubles to an even size.
+	memMB = evenMemMB(memMB)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// A guest whose authorized_keys is empty is a VM nobody can log into, and

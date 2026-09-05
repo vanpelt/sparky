@@ -190,6 +190,16 @@ fi
 # 3,300 faults/sec, or ~13MB/s of first-touch memory, against 4,600MB/s for the
 # very same allocation made directly in this machine. A 350x penalty.
 #
+# TREAT THAT 350x AS AN UPPER BOUND ON WHAT THP ALONE BUYS. It was measured
+# before we understood the other half of the same condition: KVM only maps a
+# guest in 2MiB blocks when the host virtual address is congruent with the guest
+# physical one mod 2MiB, and firecracker v1.16.1 does not align its mmap, so a
+# guest whose size was an odd number of MiB got 4KiB stage-2 PTEs however many
+# huge pages the host had. The box these numbers came off was in exactly that
+# state, so the figure is the two faults compounded. See evenMemMB() in
+# internal/host/manager.go, which supplies the congruence; THP=always here
+# supplies the contiguous page, and neither is any use without the other.
+#
 # Nothing about it looks like a memory problem from the outside. Boot is what
 # touches most of guest RAM (the kernel initialises a struct page for all of
 # it), so the symptom is that BOOT scales with mem_size_mib and everything else

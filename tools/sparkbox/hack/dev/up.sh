@@ -223,6 +223,12 @@ start_node() {
   [ -n "${host_mem:-}" ] && [ "${host_mem:-0}" -gt 0 ] ||
     die "could not read the container machine's memory; is it running? hack/dev/machine.sh status"
 
+  # A third of RAM is rarely an even number of MiB, and an odd guest size is a
+  # ~18x slowdown on this machine — see evenMemMB() in internal/host/manager.go.
+  # Nothing is rounded here on purpose: the manager rounds what it is handed, so
+  # a second copy of the rule could only ever drift out of step with it. What
+  # this DOES need is machine.sh's THP=always, without which the rounding buys
+  # nothing; `machine.sh ensure` runs above and sets it.
   sandbox_mem=$(( host_mem / mem_divisor ))
   sandbox_cpus=$(( host_cpus / cpu_divisor ))
   [ "$sandbox_cpus" -ge 1 ] || sandbox_cpus=1
