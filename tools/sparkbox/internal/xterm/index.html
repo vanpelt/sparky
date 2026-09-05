@@ -552,6 +552,7 @@
   <script src="/assets/xterm.js"></script>
   <script src="/assets/addon-fit.js"></script>
   <script src="/assets/addon-web-links.js"></script>
+  <script src="/assets/addon-clipboard.js"></script>
   <script>
   (function () {
     /*SHARED_JS*/
@@ -625,6 +626,12 @@
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    // OSC 52 clipboard: lets a program in the guest (tmux's set-clipboard,
+    // vim/nvim's system clipboard, etc.) write the browser's real clipboard
+    // directly, which is the only reliable way to copy out of a full-screen
+    // program that has grabbed mouse reporting — plain drag-select still
+    // needs Shift held to bypass that program's mouse mode first.
+    term.loadAddon(new ClipboardAddon.ClipboardAddon());
     term.open($("term"));
     fit.fit();
     term.focus();

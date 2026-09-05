@@ -10,16 +10,26 @@ that the whole UI renders with no backend.
     python3 hack/preview-console.py docs              # the REST API docs page
     python3 hack/preview-console.py terminal 9000     # the browser terminal
 
+Any page can be asked for the terminal instead by adding ?xterm=true to its
+URL — the console's environments tab grows a "Preview terminal" button that
+does exactly this. /ws answers with a fake PTY (see _fake_pty) rather than a
+real sandbox, so the terminal actually connects: enough to check the chrome,
+type into it, and exercise the OSC 52 clipboard addon with its `clip` command.
+
 The page is re-read on every request, so while you edit it you just refresh the
 browser to see changes. No dependencies (stdlib only).
 
 Add ?theme=dark or ?theme=light to force a theme (default follows the OS).
 """
+import base64
+import hashlib
 import http.server
 import json
 import os
+import struct
 import sys
 import time
+from urllib.parse import parse_qs, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHARED_CSS = os.path.join(HERE, "..", "internal", "webui", "shared.css")
@@ -31,12 +41,10 @@ def _pkg(*parts):
 
 
 # The pages this can preview. `stub` says whether the user console's mock fetch
-# is injected: the docs page needs only its spec (served below) and the terminal
-# needs a WebSocket it cannot have, so both render themselves honestly without
-# it — the terminal shows its own "reconnecting" state, which is a real state
-# worth being able to look at. The terminal's instrument strip does not need the
-# stub either: its /vitals poll is answered by a real route below, so the
-# sparklines animate against mock counters while the shell stays disconnected.
+# is injected: the docs page needs only its spec (served below), and the
+# terminal needs a WebSocket it does not otherwise have — /ws below fakes one
+# rather than leaving it honestly disconnected, because a copy/paste or
+# keybinding change is only checkable against a shell that actually answers.
 PAGES = {
     "console": {"index": _pkg("userconsole", "index.html"), "stub": True,
                 "assets": None},
@@ -47,6 +55,10 @@ PAGES = {
 }
 PAGE = PAGES["console"]
 INDEX = PAGE["index"]
+
+
+def _wants_xterm(path):
+    return parse_qs(urlparse(path).query).get("xterm", [""])[0] == "true"
 
 # ---- mock fleet: one machine per state, plus routes/tags/secrets/snapshots ----
 def _iso(sec_ago):
@@ -345,6 +357,26 @@ _STUB = """
         !/\\/(pause|resume|reboot|archive|pin|unpin|port|tags|rename|snapshot|bandwidth)/.test(u)) return J(machines());
     return J({ ok: true }); // mutations: pretend success
   };
+  // Preview-only: a button on each environment card that opens the xterm
+  // page here with a fake PTY behind it (see _fake_pty in this script's own
+  // server), so a terminal-side change is checkable without a real sandbox.
+  // A MutationObserver rather than a load-time query because envCard() runs
+  // after the /api/environments fetch above resolves, well after this script
+  // does.
+  new MutationObserver(function () {
+    document.querySelectorAll(".env-card .m-actions:not([data-xterm-preview])").forEach(function (el) {
+      el.setAttribute("data-xterm-preview", "1");
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-outline btn-sm";
+      btn.textContent = "🖥 Preview terminal";
+      btn.title = "Open the xterm terminal page against a fake PTY, to check terminal-side changes";
+      btn.addEventListener("click", function () {
+        window.open(location.pathname + "?xterm=true", "_blank");
+      });
+      el.appendChild(btn);
+    });
+  }).observe(document.body, { childList: true, subtree: true });
 })();
 </script>
 """
@@ -413,12 +445,163 @@ _GLOBE_SVG = (
     b'<path d="M1.5 8h13M8 1.5c2 2 2 11 0 13M8 1.5c-2 2-2 11 0 13"/></svg>')
 
 
+# ---- a bare RFC 6455 server, just enough for the terminal's own client ------
+# http.server has no WebSocket support, and xterm.js's index.html hardcodes
+# ws(s)://<host>/ws with subprotocol "sparkbox.terminal.v1" — so a preview of
+# it needs a real (if tiny) upgrade handshake and frame codec, not a mock.
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_accept(key):
+    return base64.b64encode(hashlib.sha1((key + _WS_GUID).encode()).digest()).decode()
+
+
+def _ws_send(wfile, data, opcode):
+    b0 = 0x80 | opcode  # FIN=1, no extensions
+    n = len(data)
+    if n <= 125:
+        header = struct.pack("!BB", b0, n)
+    elif n <= 0xFFFF:
+        header = struct.pack("!BBH", b0, 126, n)
+    else:
+        header = struct.pack("!BBQ", b0, 127, n)
+    wfile.write(header + data)
+    wfile.flush()
+
+
+def _ws_recv(rfile):
+    """Yield (opcode, payload) for each client frame until close or EOF.
+
+    Client frames are always masked; server frames (above) never are — the
+    one asymmetry RFC 6455 insists on. Fragmented frames (FIN=0) are not
+    handled: xterm.js never sends one for a keystroke or a resize message,
+    which is all this ever receives.
+    """
+    while True:
+        hdr = rfile.read(2)
+        if len(hdr) < 2:
+            return
+        b0, b1 = hdr[0], hdr[1]
+        opcode = b0 & 0x0F
+        masked = b1 & 0x80
+        length = b1 & 0x7F
+        if length == 126:
+            ext = rfile.read(2)
+            if len(ext) < 2:
+                return
+            length = struct.unpack("!H", ext)[0]
+        elif length == 127:
+            ext = rfile.read(8)
+            if len(ext) < 8:
+                return
+            length = struct.unpack("!Q", ext)[0]
+        mask_key = rfile.read(4) if masked else b""
+        payload = rfile.read(length) if length else b""
+        if masked and payload:
+            payload = bytes(byte ^ mask_key[i % 4] for i, byte in enumerate(payload))
+        yield opcode, payload
+        if opcode == 0x8:  # close
+            return
+
+
+def _ws_close(wfile, code, reason):
+    # Mirrors internal/xterm/ws.go's closeWith: a 2-byte close code followed
+    # by a UTF-8 reason, in the close frame's own payload — not a data frame.
+    _ws_send(wfile, struct.pack("!H", code) + reason.encode("utf-8"), 0x8)
+
+
+_PROMPT = "\x1b[32mpreview\x1b[0m:\x1b[34m~\x1b[0m$ "
+_BANNER = (
+    "\x1b[36mSparkbox preview shell\x1b[0m \u2014 a fake PTY, not a real sandbox.\r\n"
+    "Type \x1b[1mclip\x1b[0m to test the OSC 52 clipboard addon, or drag-select any\r\n"
+    "of this text and Ctrl/Cmd+C to test a plain copy. \x1b[1mexit\x1b[0m ends the\r\n"
+    "session like a real shell would.\r\n\r\n"
+)
+
+
+def _osc52_set_clipboard(text):
+    # OSC 52: set-clipboard, target "c" (the system clipboard). ClipboardAddon
+    # (internal/xterm/assets/addon-clipboard.js) is what turns this into an
+    # actual navigator.clipboard.writeText() call in the browser.
+    b64 = base64.b64encode(text.encode("utf-8")).decode()
+    return "\x1b]52;c;" + b64 + "\x07"
+
+
+def _run_fake_command(cmd, wfile):
+    cmd = cmd.strip()
+    if cmd == "":
+        return
+    if cmd == "clip":
+        text = "hello from the fake sparkbox terminal"
+        _ws_send(wfile, _osc52_set_clipboard(text).encode("ascii"), 0x2)
+        _ws_send(wfile, ("\x1b[2mwrote %r to the system clipboard over OSC 52 \u2014 "
+                          "paste anywhere to check\x1b[0m\r\n" % text).encode("utf-8"), 0x2)
+    elif cmd == "help":
+        _ws_send(wfile, b"\x1b[2mcommands: clip, help\x1b[0m\r\n", 0x2)
+    else:
+        _ws_send(wfile, ("preview-shell: " + cmd + ": command not found\r\n").encode("utf-8"), 0x2)
+
+
+def _fake_pty(rfile, wfile):
+    # Mirrors the real handshake's status messages (see xterm's index.html
+    # ws.onmessage) closely enough that the connecting/starting/ready chrome
+    # is exercised too, not just the shell once it is up.
+    try:
+        _ws_send(wfile, json.dumps({"type": "status", "state": "starting",
+                                     "note": "Booting the fake preview shell\u2026"}).encode(), 0x1)
+        time.sleep(0.4)
+        _ws_send(wfile, json.dumps({"type": "status", "state": "ready"}).encode(), 0x1)
+        _ws_send(wfile, _BANNER.encode("utf-8"), 0x2)
+        _ws_send(wfile, _PROMPT.encode("utf-8"), 0x2)
+        line = bytearray()
+        for opcode, payload in _ws_recv(rfile):
+            if opcode == 0x8:  # close
+                return
+            if opcode == 0x9:  # ping -> pong, same payload
+                _ws_send(wfile, payload, 0xA)
+                continue
+            if opcode != 0x2:  # only binary frames carry keystrokes; text is resize JSON
+                continue
+            for b in payload:
+                if b in (0x0D, 0x0A):  # Enter
+                    _ws_send(wfile, b"\r\n", 0x2)
+                    cmd = line.decode("utf-8", "replace").strip()
+                    line.clear()
+                    if cmd == "exit":
+                        # Same two-part goodbye as a real shell: the exit
+                        # status over the socket, then the 4001 close that
+                        # tells the page to show "Shell exited" rather than
+                        # treat this as a dropped connection to retry.
+                        _ws_send(wfile, json.dumps({"type": "exit", "code": 0}).encode(), 0x1)
+                        _ws_close(wfile, 4001, "shell exited with 0")
+                        return
+                    _run_fake_command(cmd, wfile)
+                    _ws_send(wfile, _PROMPT.encode("utf-8"), 0x2)
+                elif b in (0x7F, 0x08):  # Backspace
+                    if line:
+                        line.pop()
+                        _ws_send(wfile, b"\b \b", 0x2)
+                elif b == 0x03:  # Ctrl+C
+                    line.clear()
+                    _ws_send(wfile, b"^C\r\n", 0x2)
+                    _ws_send(wfile, _PROMPT.encode("utf-8"), 0x2)
+                elif b >= 0x20:
+                    line.append(b)
+                    _ws_send(wfile, bytes([b]), 0x2)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass  # the tab closed or reloaded; nothing to clean up
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        # The xterm page's own WebSocket, answered by a fake PTY (see
+        # _fake_pty) instead of a real sandbox.
+        if self.path.split("?")[0] == "/ws":
+            self._handle_ws()
+            return
         # Favicons: proxy DuckDuckGo host-side (as the real console does) so the
         # preview shows genuine brand marks; globe SVG on any failure.
         if self.path.startswith("/api/favicon"):
-            from urllib.parse import urlparse, parse_qs
             import urllib.request
             domain = (parse_qs(urlparse(self.path).query).get("domain") or [""])[0]
             body, ctype = _GLOBE_SVG, "image/svg+xml"
@@ -460,18 +643,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.split("?")[0] in ("/openapi.json", "/openapi.yaml"):
             self._sendfile(_pkg("restapi", "openapi.json"), "application/json")
             return
+        # The console's own index.html points <img src="/sparkbox-logo.png">
+        # at the console handler's route (console.go's h.logo), not the
+        # /assets/ path the terminal uses — mirror it with the same file.
+        if self.path.split("?")[0] == "/sparkbox-logo.png":
+            self._sendfile(_pkg("userconsole", "sparkbox-logo.png"), "image/png")
+            return
         # The terminal's vendored xterm.js and its addons, served from the same
-        # /assets/ paths the real handler uses.
-        if PAGE["assets"] and self.path.startswith("/assets/"):
+        # /assets/ paths the real handler uses. Unconditional on the page this
+        # process was started with — ?xterm=true can ask for the terminal from
+        # any page, and its assets have to be reachable when it does.
+        if self.path.startswith("/assets/"):
             name = os.path.basename(self.path.split("?")[0])
             if name == "sparkbox-logo.png":
                 self._sendfile(_pkg("launch", "sparkbox-logo.png"), "image/png")
                 return
             ctype = "text/css" if name.endswith(".css") else "text/javascript"
-            self._sendfile(os.path.join(PAGE["assets"], name), ctype)
+            self._sendfile(os.path.join(PAGES["terminal"]["assets"], name), ctype)
             return
+        # ?xterm=true overrides whichever page this process was started with —
+        # the console's injected "Preview terminal" button reaches it this way.
+        page = PAGES["terminal"] if _wants_xterm(self.path) else PAGE
+        index_path = page["index"]
         try:
-            html = open(INDEX, encoding="utf-8").read()
+            html = open(index_path, encoding="utf-8").read()
             # index.html carries /*SHARED_CSS*/ and /*SHARED_JS*/ markers that
             # the real server (internal/webui.Build) fills in from these same
             # files before minifying; mirror that here so the preview matches
@@ -479,10 +674,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             html = html.replace("/*SHARED_CSS*/", open(SHARED_CSS, encoding="utf-8").read(), 1)
             html = html.replace("/*SHARED_JS*/", open(SHARED_JS, encoding="utf-8").read(), 1)
         except OSError as e:
-            self.send_error(500, f"cannot read {os.path.basename(INDEX)}: {e}")
+            self.send_error(500, f"cannot read {os.path.basename(index_path)}: {e}")
             return
         stub = ""
-        if PAGE["stub"]:
+        if page["stub"]:
             stub = _STUB % {
                 "me": json.dumps(_ME), "secrets": json.dumps(_SECRETS),
                 "snapshots": json.dumps(_SNAPSHOTS), "machines_fn": _machines_js(),
@@ -526,6 +721,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _handle_ws(self):
+        if (self.headers.get("Upgrade", "").lower() != "websocket"
+                or not self.headers.get("Sec-WebSocket-Key")):
+            # checkSession() in the terminal page does a plain GET here to
+            # tell "the session expired" (401) apart from "the network
+            # blipped" whenever the socket drops. This preview has no
+            # sessions, so a harmless 200 keeps that probe honest.
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", _ws_accept(self.headers["Sec-WebSocket-Key"]))
+        self.send_header("Sec-WebSocket-Protocol", "sparkbox.terminal.v1")
+        self.end_headers()
+        self.close_connection = True  # this connection is a raw frame stream now
+        _fake_pty(self.rfile, self.wfile)
+
     def _sendfile(self, path, ctype):
         try:
             with open(path, "rb") as f:
@@ -553,10 +768,15 @@ def main():
         PAGE = PAGES[name]
         INDEX = PAGE["index"]
     port = int(args[0]) if args else 8799
-    srv = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    host = os.environ.get("HOST", "127.0.0.1")
+    # Threaded: a /ws connection blocks its own thread for as long as the fake
+    # shell stays open, and a plain HTTPServer would stall every other request
+    # (favicons, /vitals) behind it.
+    srv = http.server.ThreadingHTTPServer((host, port), Handler)
     print(f"sparkbox page preview → http://localhost:{port}")
     print(f"  serving {os.path.relpath(INDEX)} with mock data (edit + refresh to iterate)")
     print(f"  dark: http://localhost:{port}/?theme=dark   light: http://localhost:{port}/?theme=light")
+    print(f"  xterm preview: http://localhost:{port}/?xterm=true  (fake PTY, try `clip`)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
