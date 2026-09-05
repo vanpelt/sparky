@@ -194,6 +194,57 @@ because a VM larger than its host is indefensible on its own terms. It is not
 what wedged the guest that prompted the fix, and a correctly sized 4026 MB
 replacement wedged in exactly the same way.
 
+## A machine too small does not fail, it rots
+
+Sizing the sandboxes correctly is not enough: the machine also has to hold their
+**page cache**. Each sandbox carries a 25 GB sparse `rootfs.ext4` and, once
+paused, a `mem.snap` the size of its RAM. Two 4 GB sandboxes on a 12 GB machine
+filled 8.6 GB of it with cache, leaving ~1.8 GB free and a fragmented Normal
+zone. From then on every page a guest faulted could land in **direct** reclaim
+or direct compaction — both synchronous, and both charged to the thread that
+faulted, which is a guest vCPU.
+
+That is why it presents as "the VM is slow" and why it is so hard to catch:
+
+- The time lands in **`user`**, not `sys` — the vCPU is stalled on memory, not
+  doing kernel work — so it reads as a slow CPU.
+- **This machine looks idle**, 70-99%, the whole time.
+- It is **progressive**. Fragmentation and cache pressure accumulate, so a
+  sandbox that was fine an hour ago is unusable now, and a fresh one is fine
+  again for a while. Measured on one box over a session: 200 forks 0.372s ->
+  8.3s, `python3 -c "import json,hashlib"` 0.144s -> 2m42s.
+
+Look at the **host's** counters, never the guest's (the guest's are all zero):
+
+    grep -E 'pgsteal_direct|allocstall|compact_stall|compact_fail' /proc/vmstat
+
+`pgsteal_direct` in the millions and `compact_fail` near `compact_stall` is this
+bug. To confirm it in one move, `echo 3 > /proc/sys/vm/drop_caches` **on the
+machine** and re-measure inside the guest, changing nothing in the guest: it
+went 2m42s -> 0.03s and 8.3s -> 1.1s.
+
+Two things keep it away, and you want both. Give the machine real headroom —
+`container machine set -n sparkbox cpus=12 memory=32G`, which is
+**non-destructive** (the disk, the node identity, sandbox rootfs images and the
+gateway's keys all survive; `up.sh` re-links the same node with nothing to
+approve). Then pin the divisors so the extra RAM becomes cache headroom instead
+of bigger guests — they scale off machine RAM, so 32 GB would otherwise mint
+10.9 GB sandboxes and put you straight back:
+
+    SPARKBOX_DEV_SANDBOX_MEM_DIVISOR=8 SPARKBOX_DEV_SANDBOX_CPU_DIVISOR=3 hack/dev/up.sh
+
+`machine.sh ensure` handles the second half by raising
+`vm.watermark_scale_factor` to 200 so kswapd reclaims in the background ahead of
+a boot's burst instead of letting it fall into direct reclaim.
+
+**Do not benchmark this with `memcpy` or `gzip`.** Sequential and
+cache-resident work is unaffected and will tell you everything is fine: on a box
+where `hivemind --version` took 5 minutes, memcpy ran at 35 GB/s and `gzip -d`
+in 0.448s. Only TLB-hostile work shows it — use `200 forks` and
+`python3 -c "import json,hashlib"`. Beware too that repeated runs warm caches
+monotonically (3m02s -> 24.9s -> 5.2s), so compare a *fresh* sandbox against an
+*old* one, never the same one twice.
+
 ## When the guest will not answer
 
 Every supported route into a sandbox goes through the in-guest agent on `:8000`:

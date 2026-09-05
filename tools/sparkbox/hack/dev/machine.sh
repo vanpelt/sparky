@@ -204,9 +204,26 @@ fi
 # timeouts and looks, from the host, like a VM pegging four cores forever.
 #
 # Apple's machine image ships `madvise`, which is the trap: Firecracker does not
-# madvise its guest memory, so `madvise` means no THP at all here. We do NOT use
-# Firecracker's own huge_pages="2M" instead -- that is MAP_HUGETLB, needs pages
-# reserved up front, and is incompatible with the balloon device.
+# madvise its guest memory, so `madvise` means no THP at all here.
+#
+# We do NOT use Firecracker's own huge_pages="2M" instead. It is MAP_HUGETLB and
+# needs pages reserved up front, but the blocker is snapshots. Measured against
+# Firecracker v1.16.1 here: booting with huge_pages="2M" WORKS (the guest comes
+# up with Private_Hugetlb backing its RAM) and `PUT /snapshot/create` works —
+# and then the restore is refused outright:
+#
+#     Cannot restore hugetlbfs backed snapshot by mapping the memory file.
+#     Please use uffd.
+#
+# Sparkbox restores with backend_type "File", so turning huge_pages on would
+# trade a boot-time win for a pause/resume that cannot come back. Adopting it
+# means writing a UFFD page-fault handler process first. Worth knowing that the
+# same handler would also fix a separate bug: a File-restored guest's RAM is a
+# private FILE mapping of mem.snap, and THP never collapses those, so a RESUMED
+# sandbox runs with zero huge pages (AnonHugePages 0, against ~91% on a fresh
+# boot) until it is recreated. UFFD populates an anonymous mapping instead,
+# which is THP-eligible. Firecracker's docs say the balloon stays compatible
+# provided the handler zeroes on UFFD_EVENT_REMOVE.
 thp=/sys/kernel/mm/transparent_hugepage/enabled
 thp_was=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' "$thp" 2>/dev/null)
 if [ -z "$thp_was" ]; then
@@ -224,6 +241,49 @@ elif echo always > "$thp" 2>/dev/null; then
   ok thp "was $thp_was, set to always"
 else
   bad thp "could not set $thp to 'always' — guest boots will take ~30s instead of ~0.2s"
+fi
+
+# --- reclaim watermarks -----------------------------------------------------
+# THP above fixes what a fault COSTS; this fixes who PAYS for one. The default
+# watermark_scale_factor is 10 — 0.1% of RAM — so kswapd does not start
+# reclaiming until free memory is nearly gone. A booting guest allocates in
+# bursts of GBs, outruns kswapd, and the allocation falls into DIRECT reclaim,
+# which is synchronous and charged to the faulting thread: a guest vCPU. The
+# guest then looks CPU-bound while this machine looks 70-99% idle, which is why
+# this is so hard to see from inside a sandbox.
+#
+# Measured on a 12GB machine after a day of two 4GB sandboxes, whose page cache
+# had filled with 25GB sparse rootfs images and 4.2GB mem.snap files:
+#
+#     pgsteal_direct 6,073,908 | compact_stall 95,348 (68,584 FAILED)
+#
+# and in a guest, `python3 -c "import json,hashlib"` took 2m42s, 200 forks 8.3s,
+# `hivemind --version` 5m. `echo 3 > /proc/sys/vm/drop_caches` on THIS machine —
+# with nothing whatsoever changed inside the guest — returned those to 0.03s,
+# 1.1s and ~20s. That is the whole bug, and it is progressive: it arrives only
+# after fragmentation and cache pressure build up, so a box that was fine an
+# hour ago is unusable now.
+#
+# Raising the factor widens the gap between the low and high watermarks so
+# kswapd wakes earlier and reclaims in the BACKGROUND, ahead of the burst. The
+# cost is a little more memory held in reserve. Like THP it is a live sysctl and
+# needs no restart. This does NOT substitute for a machine big enough for its
+# sandboxes — it stops a merely tight machine from degrading into a dead one.
+wsf=/proc/sys/vm/watermark_scale_factor
+wsf_want=200
+wsf_was=$(cat "$wsf" 2>/dev/null || true)
+memtotal=$(awk '/^MemTotal:/{printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)
+if [ -z "$wsf_was" ]; then
+  bad watermarks "no $wsf in this kernel — guest vCPUs will stall in direct reclaim"
+elif [ "$wsf_was" -ge "$wsf_want" ] 2>/dev/null; then
+  ok watermarks "scale_factor=$wsf_was, ${memtotal}MB total"
+elif [ "$mode" != ensure ]; then
+  bad watermarks "scale_factor=$wsf_was, want >=$wsf_want — guest vCPUs will stall in
+                       direct reclaim; fix: hack/dev/machine.sh ensure"
+elif echo "$wsf_want" > "$wsf" 2>/dev/null; then
+  ok watermarks "was $wsf_was, set to $wsf_want (${memtotal}MB total)"
+else
+  bad watermarks "could not set $wsf to $wsf_want — guest vCPUs will stall in direct reclaim"
 fi
 
 # --- the data volume --------------------------------------------------------
