@@ -35,6 +35,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/templates"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/users"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // ---------------------------------------------------------------------------
@@ -196,6 +197,11 @@ type Environments interface {
 	SetSeededScript(owner, name, script string) error
 	SetState(owner, name string, st envs.State, box, buildErr string) error
 	SetBuildSession(owner, name, url string) error
+	// SetRunner is separate from Put for the same reason SetBuildSession is:
+	// Put's update branch touches the description and nothing else, so folding
+	// this into it would let every caller that meant "change the description"
+	// silently change which VMM the environment runs on.
+	SetRunner(owner, name string, runner vmm.Runner) error
 	SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error
 	Building() ([]envs.Environment, error)
 }

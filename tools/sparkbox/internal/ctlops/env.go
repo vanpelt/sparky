@@ -118,6 +118,10 @@ type EnvironmentInfo struct {
 	// Snapshot is the base image bound to this tag, "" when the environment has
 	// none and boots from the operator default.
 	Snapshot string `json:"snapshot,omitempty"`
+	// Runner is the VMM this environment's sandboxes must run on, "" when it
+	// requires none. Unlike everything above it, this is not a property of what
+	// the environment CONTAINS but of where those contents are allowed to run.
+	Runner string `json:"runner,omitempty"`
 }
 
 // EnvArgs is create-and-update in one verb, because the two are the same
@@ -164,6 +168,14 @@ type EnvArgs struct {
 	// Vars are set outright — a var IS keyed by (owner, tag, name), so there is
 	// no other object to union with.
 	Vars []EnvVar
+	// Runner is a POINTER for exactly the reason Description is: this struct is
+	// create-and-update in one, so "not sent" and "sent empty" have to be
+	// different requests. `env set web --var LOG_LEVEL=debug` sends no runner
+	// and means "leave it alone"; sending "" means "place me anywhere again".
+	// Were it a plain string, every edit to anything else would silently drop
+	// the environment's VMM requirement — and it would keep working, on the
+	// wrong VMM, which is the failure this field exists to prevent.
+	Runner *string
 }
 
 // EnvDeleteResult is what `env rm` reports: the environment is gone, and these
@@ -461,6 +473,17 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 			return EnvironmentInfo{}, verbatim(Invalid(op, "bad_var", "%v", err))
 		}
 	}
+	// Parsed with the other refusals and before the first write, for the reason
+	// they all are: `--runner qmeu` cannot possibly succeed, and finding out
+	// from SetRunner would mean reporting failure after envs.Put and RetagSecret
+	// had already committed.
+	var runner vmm.Runner
+	if a.Runner != nil {
+		runner, err = vmm.ParseRequirement(strings.TrimSpace(*a.Runner))
+		if err != nil {
+			return EnvironmentInfo{}, verbatim(Invalid(op, "bad_runner", "%v", err))
+		}
+	}
 
 	// Whether this call CREATES the environment, decided before anything is
 	// written, because after `Put` there is no way to tell: the store's Put is
@@ -516,6 +539,17 @@ func (o *Ops) PutEnvironment(ctx context.Context, c Caller, a EnvArgs) (Environm
 	}
 	if _, err := o.envs.Put(c.Handle, name, description, adopted); err != nil {
 		return EnvironmentInfo{}, envStoreError(op, name, err)
+	}
+	// After Put, because on a create the row does not exist until then. Nothing
+	// already built is re-placed by this: an environment's runner governs the
+	// sandboxes made AFTER it is set, and the ones that exist keep the machine
+	// they are on. That is safe because what an environment binds is a plain
+	// compacted rootfs both VMMs cold-boot identically — only a memory snapshot
+	// is VMM-specific, and no environment holds one.
+	if a.Runner != nil {
+		if err := o.envs.SetRunner(c.Handle, name, runner); err != nil {
+			return EnvironmentInfo{}, envStoreError(op, name, err)
+		}
 	}
 	for _, r := range a.Repos {
 		if err := o.attachRepoToEnv(op, c.Handle, name, r); err != nil {
@@ -1108,6 +1142,7 @@ func (c envComposition) info(e envs.Environment) EnvironmentInfo {
 		Secrets:             c.secrets[e.Name],
 		Rules:               c.rules[e.Name],
 		Snapshot:            c.snapshot[e.Name],
+		Runner:              string(e.Runner),
 	}
 	if c.vars != nil {
 		ei.Vars = c.vars(e.Name)
