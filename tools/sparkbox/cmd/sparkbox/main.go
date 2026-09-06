@@ -2045,7 +2045,7 @@ func (r fleetRoster) join(st fleet.NodeStatus, row nodes.Node) (ctlops.NodeInfo,
 	info := ctlops.NodeInfo{
 		Name: st.Name, Status: st.Status, Online: st.Online, Local: st.Local,
 		Arch: st.Arch, Release: st.Release, Sandboxes: held, LastSeen: st.LastSeen,
-		Egress: st.Egress,
+		Egress: st.Egress, Runner: string(st.Runner),
 	}
 	if row.Name != "" {
 		info.Status, info.FP = row.Status, row.FP

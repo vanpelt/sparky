@@ -50,3 +50,19 @@ func TestNodeLineMarksTheUnmeteredMachine(t *testing.T) {
 		t.Errorf("metered line = %q, want no marker", line)
 	}
 }
+
+// The listing has to answer "which machines run what", because that is the
+// question `no online VM node runs qemu` sends an operator here to ask.
+func TestNodeLineNamesTheVMM(t *testing.T) {
+	qemu := ctlops.NodeInfo{Name: "g084f44", Status: "approved", Online: true, Runner: "qemu"}
+	if line := nodeLine(qemu, false); !strings.Contains(line, "vmm=qemu") {
+		t.Errorf("line = %q, want vmm=qemu", line)
+	}
+	// A machine that has not said shows nothing rather than a guess. Every
+	// unlinked roster row is in this state, and so is a node linked by a build
+	// that predates the capacity field.
+	silent := ctlops.NodeInfo{Name: "laptop", Status: "pending"}
+	if line := nodeLine(silent, false); strings.Contains(line, "vmm=") {
+		t.Errorf("line = %q, want no vmm for a machine that did not say", line)
+	}
+}

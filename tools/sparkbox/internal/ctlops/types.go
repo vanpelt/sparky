@@ -228,6 +228,11 @@ type NodeInfo struct {
 	FP      string `json:"fingerprint"`     // SHA256:… of the node's key
 	Arch    string `json:"arch,omitempty"`  // node-authored, display only
 	Release string `json:"release,omitempty"`
+	// Runner is the VMM this machine runs — node-authored and display only,
+	// like Arch. It is here because an environment can require a VMM, so after
+	// a placement is refused "which machines run what" is the next question,
+	// and this listing is the only place that answers it.
+	Runner string `json:"runner,omitempty"`
 	// Sandboxes is how many placements this machine still holds. It is the one
 	// number that decides whether removing the node is safe, so it is part of
 	// the listing rather than something a client has to derive by cross-
