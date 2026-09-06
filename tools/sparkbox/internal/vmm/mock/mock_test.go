@@ -15,13 +15,23 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-// Compile-time capability checks: the mock must offer everything the manager
-// type-asserts for, or the mock-driven manager tests silently skip paths.
+// Compile-time capability checks: every optional interface in vmm, not the four
+// somebody happened to write down. The mock must offer all of them or the
+// mock-driven manager tests silently skip the paths behind the ones it lost —
+// which is the same failure as the firecracker driver losing one, arriving as a
+// green test run instead of a degraded fleet.
 var (
+	_ vmm.Driver           = (*Driver)(nil)
+	_ vmm.Archivable       = (*Driver)(nil)
+	_ vmm.DiskReporter     = (*Driver)(nil)
+	_ vmm.TemplateReporter = (*Driver)(nil)
+	_ vmm.RootfsPresencer  = (*Driver)(nil)
 	_ vmm.Renamer          = (*Driver)(nil)
 	_ vmm.Rebooter         = (*Driver)(nil)
 	_ vmm.CPUStatser       = (*Driver)(nil)
-	_ vmm.TemplateReporter = (*Driver)(nil)
+	_ vmm.NetStatser       = (*Driver)(nil)
+	_ vmm.DiskResizer      = (*Driver)(nil)
+	_ vmm.Ballooner        = (*Driver)(nil)
 )
 
 // newTestDriver returns a mock driver in a temp state dir plus an

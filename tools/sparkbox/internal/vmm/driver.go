@@ -119,6 +119,13 @@ type DiskReporter interface {
 	// DiskUsageMB is the durable storage used by the sandbox's root filesystem,
 	// excluding representation details such as shared/sparse host extents and
 	// any regenerable memory snapshot.
+	//
+	// Freshness is NOT part of this contract, and the firecracker driver does
+	// not deliver it: it reads the ext4 superblock's free-block count, which
+	// Linux does not write back while the filesystem is mounted, so a running
+	// sandbox reports the figure its template had. Measured by the parity
+	// harness — see docs/vmm-parity-harness.md, and vmmtest.Traits.LiveDiskUsage
+	// for the trait a driver sets when it does track a live guest.
 	DiskUsageMB(ctx context.Context, name string) (int64, error)
 	// DiskCapacityMB is the guest's hard disk ceiling — the size of the rootfs
 	// filesystem, which it cannot grow past. 0 when unknown.

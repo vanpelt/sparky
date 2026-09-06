@@ -1,0 +1,107 @@
+name: sparkbox parity image
+
+# The toolchain image the VMM parity suite runs inside — QEMU, the filesystem
+# tools, and nothing else. See tools/sparkbox/hack/parity/Dockerfile for why it
+# is neither the node image nor built on the machine that runs the suite.
+#
+# It exists so a parity run on the CKS node does not depend on the cluster
+# having egress to an Ubuntu mirror, and so the x86_64 variant is built on an
+# x86_64 runner instead of under emulation on the arm64 dev laptop.
+#
+# Two native runners rather than one runner with binfmt: the Dockerfile's only
+# real work is an `apt-get install` of the target architecture's QEMU, which is
+# exactly the step emulation makes slow. ubuntu-24.04-arm is free for public
+# repositories, so this costs nothing but a manifest merge.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - .github/workflows/sparkbox-parity-image.yml
+      - tools/sparkbox/hack/parity/Dockerfile
+
+concurrency:
+  group: sparkbox-parity-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sparkbox-parity
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false # one arch finishing is still useful; re-run the other leg
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Each leg pushes a per-arch tag. The merge job below turns the pair into
+      # one multi-arch tag, so callers name a single ref and get their own arch.
+      - name: Build and push ${{ matrix.suffix }}
+        uses: docker/build-push-action@v7
+        with:
+          context: tools/sparkbox/hack/parity
+          file: tools/sparkbox/hack/parity/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=parity-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=parity-${{ matrix.suffix }}
+
+  merge:
+    name: multi-arch manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # A branch tag and a SHA tag, matching sparkbox-cks-image.yml's scheme, so
+      # a run can be pinned to the exact toolchain it used. `edge` only on the
+      # default branch.
+      - name: Create and push the manifest
+        env:
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          IS_DEFAULT: ${{ github.ref_name == github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # Branch names carry slashes (claude/foo); a tag cannot.
+          branch_tag=$(printf '%s' "$REF_NAME" | tr '/' '-')
+          tags=("$IMAGE:$SHA" "$IMAGE:$branch_tag")
+          [ "$IS_DEFAULT" = "true" ] && tags+=("$IMAGE:edge")
+          for t in "${tags[@]}"; do
+            docker buildx imagetools create -t "$t" \
+              "$IMAGE:$SHA-amd64" "$IMAGE:$SHA-arm64"
+            echo "pushed $t"
+          done
+          docker buildx imagetools inspect "$IMAGE:$SHA"

@@ -811,6 +811,42 @@ installations. Firecracker requires reflinks for both template clones and
 snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
+Nested virtualization turns out to work on the Firecracker we already ship.
+Measured on the CKS node on 2026-09-04: the node has `kvm_intel.nested=Y`, every
+sandbox already carries the VMX bit in its CPUID, and a guest kernel built with
+`CONFIG_KVM_INTEL` boots an inner microVM. What does **not** work is pausing
+one — Firecracker keeps no nested state in a snapshot, returns HTTP 204 anyway,
+and the restored sandbox's kernel hits `BUG at arch/x86/kvm/x86.c:511`. Since
+scale-to-zero pauses sandboxes automatically, that is the real gap. Cloud
+Hypervisor v53.0 closes it: on the same node with the same guests, the sandbox
+**and** its inner VM both resumed mid-flight from a snapshot, and `--cpus
+nested=off` genuinely masks VMX, which is the per-sandbox gate Firecracker
+cannot offer.
+[`docs/cloud-hypervisor-feasibility.md`](docs/cloud-hypervisor-feasibility.md)
+is the spike on swapping the VMM for Cloud Hypervisor to get it, with
+[`docs/cloud-hypervisor-port-design.md`](docs/cloud-hypervisor-port-design.md)
+(driver mapping, helper protocol, kernel and artifacts) and
+[`docs/nested-virtualization-design.md`](docs/nested-virtualization-design.md)
+(per-sandbox plumbing, risk register, kill criteria) behind it.
+`hack/probe-nested-virt.sh` is the host preflight — CPU flags, `/dev/kvm`, the
+KVM module's `nested` and `ept`/`npt` parameters, what
+`KVM_GET_SUPPORTED_CPUID` actually offers a guest, Landlock, and the three 2026
+shadow-MMU escapes a nested-enabled node must be patched against — and
+`hack/probe-cks-nested.sh` runs it against the live CKS deployment, read-only,
+alongside the guest-side CPUID and `MSR_IA32_FEAT_CTL` read that settles whether
+our Firecracker guests already have the VMX bit. `hack/m0b/` is the experiment
+that follows: `run-on-cks.sh` puts a throwaway privileged Pod on the node (its
+own namespace, capped CPU and memory, deleted on exit, no device-plugin
+allocation and nothing written under `/var/lib/sparkbox`), builds the guest
+kernel with `kernel-config.nested.fragment`, and boots a microVM inside a
+microVM; `pause-test.sh` then snapshots the outer one to show what that costs
+under Firecracker, and `ch-snapshot-test.sh` repeats it under Cloud Hypervisor
+with a `nested=off` control (`lib-guests.sh` builds the guests both share, so
+the outer VMM is the only variable).
+Read the probes rather than
+`grep vmx /proc/cpuinfo`, which gives a false negative here and cost this spike
+a revision.
+
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome
 and the agent-browser CLI, ~4GB — replacing the
