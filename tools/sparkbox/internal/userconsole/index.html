@@ -501,6 +501,12 @@
   .badge.failed .dot { background: hsl(var(--red)); }
   .badge.draft { color: hsl(var(--muted-foreground)); }
   .badge.draft .dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+  /* The VMM requirement. Deliberately dotless: in this console a dot means a
+     STATE — something that changes under you and wants a colour — and where an
+     environment is allowed to run is neither. It keeps the border the state
+     pills give up, so the two never read as one run-on label. */
+  .badge.runner { color: hsl(var(--muted-foreground)); gap: 0; padding: 1px 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; }
 
   .script-box { width: 100%; min-height: 260px; resize: vertical; padding: 9px 11px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
@@ -894,6 +900,20 @@
             <input id="env-rules" type="text" class="mono" autocomplete="off"
               spellcheck="false" placeholder="ci-egress" />
             <div class="field-hint">optional; from the Network tab</div>
+          </div>
+          <div>
+            <label for="env-runner">Runs on</label>
+            <span class="select-wrap">
+              <select id="env-runner">
+                <option value="">Any machine</option>
+                <option value="firecracker">Firecracker</option>
+                <option value="qemu">QEMU</option>
+              </select>
+            </span>
+            <div class="field-hint">
+              which hypervisor its machines must boot on — leave it on any unless this
+              environment was built against one
+            </div>
           </div>
           <div class="wide">
             <label for="env-vars">Variables</label>
@@ -3065,6 +3085,14 @@
     return '<span class="badge ' + word + '"><span class="dot"></span>' + word + "</span>";
   }
 
+  // The VMM this environment's machines are required to run on — and NOTHING
+  // when it requires none, which is nearly every environment. A badge reading
+  // "any" on every card is a word with no reader: it would be on screen more
+  // often than the states are, saying that the ordinary thing is happening.
+  function envRunner(e) {
+    return e.runner ? '<span class="badge runner">' + esc(e.runner) + "</span>" : "";
+  }
+
   // What a machine made from this environment would boot from. It is the whole
   // product of a build, so it sits on the head line beside the state rather
   // than in a column of its own.
@@ -3250,7 +3278,8 @@
     return '<div class="card env-card">' +
       '<div class="m-head">' +
         '<div class="m-title"><span class="name mono">' + esc(e.name) + "</span>" +
-          envBadge(st) + '<span class="spec">' + envBoots(e) + "</span></div>" +
+          envBadge(st) + envRunner(e) +
+          '<span class="spec">' + envBoots(e) + "</span></div>" +
         '<div class="m-actions">' +
           launchAction +
           // A disabled "Build" next to a badge that says building is a control
@@ -3360,12 +3389,14 @@
         $("env-secrets").value = (e.secrets || []).join(", ");
         $("env-rules").value = (e.rules || []).join(", ");
         $("env-vars").value = (e.vars || []).map((v) => v.name + "=" + v.value).join("\n");
+        setEnvRunner(e.runner || "");
         $("env-open").checked = false;
         // Its own label says "new environments only"; a live control that does
         // nothing is worse than an absent one.
         $("env-open-row").classList.add("hidden");
         $("env-form-title").textContent = "Editing " + e.name;
-        $("env-form-hint").textContent = "the description and variables below replace what is stored";
+        $("env-form-hint").textContent =
+          "the description, runs-on and variables below replace what is stored";
         $("env-save").textContent = "Save changes";
         openEnvForm();
       }));
@@ -3418,11 +3449,33 @@
     $("env-form-card").classList.add("hidden");
   }
 
+  // Load the Runs-on select, keeping a value this page has no option for.
+  //
+  // The list of VMMs is the fleet's, not this file's, and a console shipped
+  // before a third one existed would otherwise show blank for it — and then
+  // send "" the moment somebody edited the description, silently un-pinning an
+  // environment from the hypervisor it was built against. An ad-hoc option
+  // makes the select round-trip whatever the server said.
+  function setEnvRunner(v) {
+    const sel = $("env-runner");
+    const stale = sel.querySelector("option[data-adhoc]");
+    if (stale) stale.remove();
+    if (v && !Array.prototype.some.call(sel.options, (o) => o.value === v)) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      opt.dataset.adhoc = "1";
+      sel.appendChild(opt);
+    }
+    sel.value = v;
+  }
+
   function resetEnvForm() {
     envEditing = null;
     for (const id of ["env-name", "env-desc", "env-repos", "env-secrets", "env-rules", "env-vars"]) {
       $(id).value = "";
     }
+    setEnvRunner("");
     $("env-name").readOnly = false;
     $("env-name-hint").textContent = "lowercase, digits, dashes — this is the tag";
     $("env-open-row").classList.remove("hidden");
@@ -3486,6 +3539,12 @@
     const desc = $("env-desc").value.trim();
     if (editing || desc) body.description = desc;
     if (editing || vars.length) body.vars = vars;
+    // Same rule, and the reason it matters more here: sending "" from a blank
+    // CREATE form aimed at a name that already exists would take that
+    // environment's VMM requirement off, and the sandbox would still boot —
+    // on the other hypervisor — so nothing would look wrong.
+    const runner = $("env-runner").value;
+    if (editing || runner) body.runner = runner;
     const btn = $("env-save");
     btn.disabled = true;
     try {

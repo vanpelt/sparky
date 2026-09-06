@@ -1258,7 +1258,8 @@
                       "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
                       "rules": ["web"],
                       "vars": [{ "name": "NODE_ENV", "value": "development" }],
-                      "snapshot": "web-260902-1142"
+                      "snapshot": "web-260902-1142",
+                      "runner": "firecracker"
                     }
                   ]
                 }
@@ -1273,7 +1274,7 @@
         "operationId": "env.set",
         "tags": ["environments"],
         "summary": "Create an environment, or add to one",
-        "description": "Create and update are one verb, because they are one gesture: naming an environment that already exists adds to it.\n\n**An environment's name IS a tag**, so everything named here is attached to that tag and reaches every sandbox carrying it. Attachments ADD \u2014 a secret can belong to three environments at once, and nothing here detaches one. `secrets` and `rules` must already exist; naming one that does not is a refusal rather than a create, because an environment that quietly invented an empty rule-set would be a subtractive policy nobody wrote.\n\n`vars` are set outright, since a variable is keyed by (owner, tag, name) and has no other owner to union with. `description` is optional in the strict sense: omit it and the existing one is left alone, send `\"\"` to clear it.\n\nA NEW environment is also given an egress rule-set named after it, allowing the operator's trusted list plus the distribution archives \u2014 so a sandbox on this tag is governed rather than unrestricted. `open_egress` skips that, and it is skipped anyway when the caller names their own rules, when something already governs the tag, or when sandboxes already carry it.\n\nEvery refusal this can make is made before the first write: there is no transaction spanning the five stores an environment composes, so ordering is what makes \"it failed\" mean \"nothing moved\".",
+        "description": "Create and update are one verb, because they are one gesture: naming an environment that already exists adds to it.\n\n**An environment's name IS a tag**, so everything named here is attached to that tag and reaches every sandbox carrying it. Attachments ADD \u2014 a secret can belong to three environments at once, and nothing here detaches one. `secrets` and `rules` must already exist; naming one that does not is a refusal rather than a create, because an environment that quietly invented an empty rule-set would be a subtractive policy nobody wrote.\n\n`vars` are set outright, since a variable is keyed by (owner, tag, name) and has no other owner to union with. `description` is optional in the strict sense: omit it and the existing one is left alone, send `\"\"` to clear it. `runner` behaves the same way, and pins this environment's sandboxes to one VMM — a requirement an edit to anything else must not quietly drop, since the sandbox would still boot, on the other hypervisor.\n\nA NEW environment is also given an egress rule-set named after it, allowing the operator's trusted list plus the distribution archives \u2014 so a sandbox on this tag is governed rather than unrestricted. `open_egress` skips that, and it is skipped anyway when the caller names their own rules, when something already governs the tag, or when sandboxes already carry it.\n\nEvery refusal this can make is made before the first write: there is no transaction spanning the five stores an environment composes, so ordering is what makes \"it failed\" mean \"nothing moved\".",
         "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
@@ -1285,7 +1286,8 @@
                 "description": "the marketing site + its API",
                 "repos": [{ "slug": "wandb/hivemind" }],
                 "secrets": ["GITHUB_TOKEN"],
-                "vars": [{ "name": "NODE_ENV", "value": "development" }]
+                "vars": [{ "name": "NODE_ENV", "value": "development" }],
+                "runner": "firecracker"
               }
             }
           }
@@ -1309,7 +1311,8 @@
                   "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
                   "rules": ["web"],
                   "vars": [{ "name": "NODE_ENV", "value": "development" }],
-                  "snapshot": "web-260902-1142"
+                  "snapshot": "web-260902-1142",
+                  "runner": "firecracker"
                 }
               }
             }
@@ -1369,7 +1372,8 @@
                   "secrets": ["GITHUB_TOKEN", "DATABASE_URL"],
                   "rules": ["web"],
                   "vars": [{ "name": "NODE_ENV", "value": "development" }],
-                  "snapshot": "web-260902-1142"
+                  "snapshot": "web-260902-1142",
+                  "runner": "firecracker"
                 }
               }
             }
@@ -3125,6 +3129,12 @@
           "snapshot": {
             "type": "string",
             "description": "The base image bound to this tag, absent when it boots the operator default."
+          },
+          "runner": {
+            "type": "string",
+            "enum": ["firecracker", "qemu"],
+            "description": "The VMM this environment's sandboxes must run on. Absent is the common case and means no requirement: place them on any node the fleet offers. Set, it constrains placement to nodes running that hypervisor, so an environment can be pinned to the one whose behaviour it was built and tested against.",
+            "example": "firecracker"
           }
         }
       },
@@ -3170,7 +3180,7 @@
       },
       "EnvironmentRequest": {
         "type": "object",
-        "description": "Create-and-update in one. Everything here ADDS except `vars`, which are set outright, and `description`, which replaces when sent and is left alone when omitted.",
+        "description": "Create-and-update in one. Everything here ADDS except `vars`, which are set outright, and `description` and `runner`, which replace when sent and are left alone when omitted.",
         "required": ["name"],
         "properties": {
           "name": {
@@ -3197,6 +3207,11 @@
             "description": "Egress rule-set names, which must already exist."
           },
           "vars": { "type": "array", "items": { "$ref": "#/components/schemas/EnvVar" } },
+          "runner": {
+            "type": "string",
+            "enum": ["", "firecracker", "qemu"],
+            "description": "The VMM this environment's sandboxes must run on. Like `description`, omit it to leave the existing requirement alone and send \"\" to clear it — so an edit that only sets a variable does not silently un-pin the environment and let its next sandbox boot on the other hypervisor. `mock` is refused: a node may BE mock, but an environment asking for a fake guest would get a sandbox that runs nothing."
+          },
           "open_egress": {
             "type": "boolean",
             "description": "On create: skip the default egress rule-set. Never stored."
