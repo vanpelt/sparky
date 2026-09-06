@@ -298,6 +298,11 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// a node belongs to the fleet, so they are operator-gated instead of
 		// owner-gated — see TestNodeCommandsAreOperatorGated.
 		"ListNodes": true, "ApproveNode": true, "RemoveNode": true,
+		// The AWP backend is an operator integration, not an owner-facing
+		// lifecycle surface. Every method gates the operator bit before looking
+		// up or validating the named sandbox; awp_test.go pins that ordering and
+		// the rule that get/rm only accept AWP-tagged VMs.
+		"CreateAWPSandbox": true, "GetAWPSandbox": true, "DeleteAWPSandbox": true,
 		// Secrets are keyed by (owner, env_name), so the owner scoping is
 		// structural in every store query rather than a name check here: the
 		// caller cannot name another owner's secret because the handle is not

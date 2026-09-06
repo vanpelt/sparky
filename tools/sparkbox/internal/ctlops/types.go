@@ -41,6 +41,29 @@ type SandboxInfo struct {
 	TerminalURL  string       `json:"terminal_url,omitempty"` // https://<name>-xterm.<domain>
 }
 
+// AWPWorkloadIdentity tells the AWP control plane exactly what identity the
+// guest can present. SandboxID is the immutable provider id carried in the
+// Sparkbox token's `sandbox_id` claim; it, not a caller-supplied name or tenant
+// string, is the value AWP should bind during token exchange.
+type AWPWorkloadIdentity struct {
+	Issuer    string `json:"issuer"`
+	Audience  string `json:"audience"`
+	SandboxID string `json:"sandbox_id"`
+}
+
+// AWPSandboxInfo is Sparkbox's provider record for one AWP sandbox. The nested
+// Sandbox is the ordinary lifecycle view; the remaining fields are the durable
+// AWP launch metadata recovered from its private per-launch tag.
+type AWPSandboxInfo struct {
+	Sandbox          SandboxInfo         `json:"sandbox"`
+	SandboxID        string              `json:"sandbox_id"`
+	RunID            string              `json:"run_id"`
+	TenantID         string              `json:"tenant_id"`
+	ControlPlaneURL  string              `json:"control_plane_url"`
+	RuntimePort      int                 `json:"runtime_port"`
+	WorkloadIdentity AWPWorkloadIdentity `json:"workload_identity"`
+}
+
 // RepoStatus is the latest advisory git state a sandbox reported from inside
 // its own filesystem. It is restated rather than exposing host.RepoStatus so
 // the public API remains independent of internal topology records.
@@ -371,6 +394,21 @@ type CreateArgs struct {
 	// second rebuild would no longer be reproducible from the script. Nothing
 	// on a user-facing surface sets this in Phase A.
 	FromBase bool
+}
+
+// AWPCreateArgs is the backend launch contract. It deliberately has no
+// bootstrap token: the AWP-capable guest exchanges its Sparkbox workload
+// identity for a short-lived run credential instead of receiving a bearer
+// secret through the sandbox environment.
+type AWPCreateArgs struct {
+	SandboxID       string
+	RunID           string
+	TenantID        string
+	ControlPlaneURL string
+	OIDCAudience    string
+	Node            string
+	VCPUs           int64
+	MemMB           int64
 }
 
 type ForkArgs struct {

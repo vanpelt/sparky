@@ -228,6 +228,12 @@ func (h *Handler) routes() []route {
 		{"PUT", "/v1/sandboxes/{name}/visibility", "share.set", authMutate, h.setVisibility},
 		{"GET", "/v1/sandboxes/{name}/terminal", "attach", authRead, h.terminalWS},
 
+		// AWP backend proof. Operator-gated inside ctlops: these are lifecycle
+		// operations for the platform integration, not a second user sandbox API.
+		{"POST", "/v1/awp/sandboxes", "awp.create", authMutate, h.createAWPSandbox},
+		{"GET", "/v1/awp/sandboxes/{name}", "awp.get", authRead, h.getAWPSandbox},
+		{"DELETE", "/v1/awp/sandboxes/{name}", "awp.rm", authMutate, h.deleteAWPSandbox},
+
 		// Snapshots and forks.
 		{"GET", "/v1/snapshots", "snapshot.list", authRead, h.listSnapshots},
 		{"POST", "/v1/snapshots", "snapshot.create", authMutate, h.createSnapshot},

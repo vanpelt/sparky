@@ -389,6 +389,16 @@ type Minter interface {
 	Mint(id edgeauth.Identity, ttl time.Duration) (string, time.Time, error)
 }
 
+// WorkloadIdentity is the public half of the guest OIDC issuer. AWP needs the
+// issuer URL in its backend response and, more importantly, must not launch a
+// VM whose requested audience the per-sandbox metadata endpoint will refuse.
+// *oidc.Issuer satisfies this without giving ctlops access to signing keys or
+// token minting.
+type WorkloadIdentity interface {
+	URL() string
+	AudienceAllowed(audience string) bool
+}
+
 // GitHubKeys is the github.com dependency, behind an interface so no test in
 // this package ever makes a network call. A nil one defaults to
 // users.FetchGitHubKeys / users.VerifyGitHubKey / users.FetchGitHubPublicProfile.
@@ -464,12 +474,13 @@ type Config struct {
 	// before the reconciler fails it. 0 takes DefaultEnvBuildTimeout.
 	EnvBuildTimeout time.Duration
 
-	Checkpoints Checkpoints // nil: manual durable checkpoints are KindDisabled
-	Schedules   Schedules   // nil: schedule operations are KindDisabled
-	Routes      Routes      // nil: share operations are KindDisabled
-	Sessions    Minter      // nil: MintSessionToken is KindDisabled
-	Nodes       NodeRoster  // nil: node operations are KindDisabled
-	GitHub      GitHubKeys  // nil: the real github.com client
+	Checkpoints Checkpoints      // nil: manual durable checkpoints are KindDisabled
+	Schedules   Schedules        // nil: schedule operations are KindDisabled
+	Routes      Routes           // nil: share operations are KindDisabled
+	Sessions    Minter           // nil: MintSessionToken is KindDisabled
+	Identity    WorkloadIdentity // nil: AWP creates are KindDisabled
+	Nodes       NodeRoster       // nil: node operations are KindDisabled
+	GitHub      GitHubKeys       // nil: the real github.com client
 	// GitHubDevice runs the OAuth device flow. nil — the default, and the state
 	// of any host with no --github-client-id — leaves the key check as the only
 	// way to link, which is what shipped before this existed.
@@ -519,6 +530,7 @@ type Ops struct {
 	schedules    Schedules
 	routes       Routes
 	sessions     Minter
+	identity     WorkloadIdentity
 	nodes        NodeRoster
 	github       GitHubKeys
 	ghDevice     GitHubDeviceFlow
@@ -547,6 +559,14 @@ type Ops struct {
 	jobs      map[string]*Job
 	stop      chan struct{}
 	closeOnce sync.Once
+
+	// awpLocks serialize lifecycle transitions for one AWP sandbox id. The
+	// ordinary Create path must stamp tags before the manager build, so two
+	// differently-keyed requests racing on one name could otherwise let the
+	// loser roll back the winner's tags. Entries are reference-counted and
+	// removed when the last waiter leaves; this does not grow with run history.
+	awpLocksMu sync.Mutex
+	awpLocks   map[string]*awpNameLock
 
 	// envBuildTimeout bounds one environment build; 0 means
 	// DefaultEnvBuildTimeout. envBuilds collapses concurrent work on one
@@ -598,6 +618,7 @@ func New(cfg Config) *Ops {
 		schedules:          cfg.Schedules,
 		routes:             cfg.Routes,
 		sessions:           cfg.Sessions,
+		identity:           cfg.Identity,
 		nodes:              cfg.Nodes,
 		github:             cfg.GitHub,
 		ghDevice:           cfg.GitHubDevice,
@@ -612,6 +633,7 @@ func New(cfg Config) *Ops {
 		now:                cfg.Now,
 		log:                cfg.Log,
 		jobs:               map[string]*Job{},
+		awpLocks:           map[string]*awpNameLock{},
 		stop:               make(chan struct{}),
 	}
 	if o.now == nil {
@@ -661,7 +683,10 @@ type Caller struct {
 // Capabilities reports what this host actually has configured, so a client can
 // avoid provoking a KindDisabled instead of discovering it by trial.
 type Capabilities struct {
-	Archiving     bool `json:"archiving"`
+	Archiving bool `json:"archiving"`
+	// AWP reports that this host can provision the operator-only AWP backend:
+	// tags, non-secret launch vars, and workload identity are all wired.
+	AWP           bool `json:"awp"`
 	Snapshots     bool `json:"snapshots"`
 	Scheduling    bool `json:"scheduling"`
 	Tags          bool `json:"tags"`
@@ -703,6 +728,7 @@ type Capabilities struct {
 func (o *Ops) Capabilities() Capabilities {
 	return Capabilities{
 		Archiving:     o.boxes != nil && o.boxes.ArchivingEnabled(),
+		AWP:           o.tags != nil && o.envVars != nil && o.identity != nil && o.templateTags != nil,
 		Snapshots:     o.templates != nil && o.templates.Snapshotter(),
 		Scheduling:    o.schedules != nil,
 		Tags:          o.tags != nil,

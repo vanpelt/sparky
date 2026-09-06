@@ -44,6 +44,11 @@ const (
 	testNodeGuestSubnet    = "10.201.0.0/20"
 )
 
+type testWorkloadIdentity struct{}
+
+func (testWorkloadIdentity) URL() string                 { return "https://oidc.example.test" }
+func (testWorkloadIdentity) AudienceAllowed(string) bool { return true }
+
 func TestPrivateAPIExposesMetricsWithoutShadowingControl(t *testing.T) {
 	control := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
@@ -296,6 +301,29 @@ func TestGatewayOpsNamesEnvironments(t *testing.T) {
 
 	if !ops.Capabilities().Environments {
 		t.Fatal("a gateway with an environment store reports environments disabled; ctlops.Config.Environments is unwired")
+	}
+}
+
+// TestGatewayOpsEnablesAWP pins the three-way wiring the backend requires.
+// Tags and vars are two views of the same store; Identity is the issuer's
+// public surface. Dropping any one from newGatewayOps must turn the capability
+// off before the first provision request discovers it in production.
+func TestGatewayOpsEnablesAWP(t *testing.T) {
+	fx := newGatewayFixture(t)
+	log := slog.New(slog.DiscardHandler)
+	store, err := secrets.Open(filepath.Join(t.TempDir(), "awp.db"), secrets.DeriveKEK([]byte("test-awp-ikm")), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	fx.stores.Secrets = store
+	fx.stores.EnvVars = store
+	fx.stores.Identity = testWorkloadIdentity{}
+
+	ops := newGatewayOps(fx.stores)
+	t.Cleanup(ops.Close)
+	if !ops.Capabilities().AWP {
+		t.Fatal("a gateway with tags, vars, and workload identity reports the AWP backend disabled")
 	}
 }
 
