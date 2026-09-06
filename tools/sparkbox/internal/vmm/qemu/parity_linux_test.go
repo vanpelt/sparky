@@ -3,11 +3,8 @@
 package qemu_test
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -70,7 +67,7 @@ func TestQEMUParity(t *testing.T) {
 		if err := os.MkdirAll(templateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		clientKey := newParitySigner(t)
+		clientKey := vmmtest.NewSigner(t)
 		authorized := string(xssh.MarshalAuthorizedKey(clientKey.PublicKey()))
 
 		// New() is called once per subtest against the same subnet, so slot
@@ -117,23 +114,12 @@ func TestQEMUParity(t *testing.T) {
 				// the rootfs (Options.DisableHostRootfsMounts is not set here).
 				// docs/qemu-spike.md booted exactly that guest to SSH in 2.3s.
 				// If it is not a real guest the suite fails at BootAndSSH
-				// regardless — but setting this false ALSO deletes the entire
-				// 8-MiB-each-way traffic half of NetStats, which is what proves
-				// both counters are readable and both move under load.
-				//
-				// HARNESS GAP, worth stating because it is tempting to read
-				// that case as more than it is: NetStats does NOT distinguish
-				// rx from tx. vmmtest/capabilities.go:534 pushes 8 MiB each way
-				// and then asserts rx1 >= rx0+want AND tx1 >= tx0+want against
-				// ONE shared want of 4 MiB, so a driver that swaps the two
-				// directions — or returns the same number for both — passes
-				// green. (Its first command, dd | cat > /dev/null, runs wholly
-				// inside the guest and puts nothing on the tap, so it creates
-				// no asymmetry either.) The direction swap in caps_vmm.go
-				// NetBytes is verified by reading the code against
-				// vmm.NetStatser's contract, not by this suite; catching it for
-				// real needs asymmetric payloads and per-direction thresholds
-				// in vmmtest, which this port does not change.
+				// regardless — but setting this false ALSO deletes the traffic
+				// half of NetStats, which is what proves both counters are
+				// readable, move under load, and are not swapped: the suite
+				// sends 32 MiB out of the guest against 4 MiB in, so
+				// caps_vmm.go's rx/tx inversion is checked rather than merely
+				// read.
 				RealGuest: true,
 
 				// TRUE. Pause is stop -> migrate uri=file: -> query-migrate to
@@ -266,17 +252,17 @@ func loadParityConfig(t *testing.T) parityConfig {
 		t.Fatalf("%s=1 but /dev/kvm is not usable: %v", vmmtest.GateEnv, err)
 	}
 	cfg := parityConfig{
-		kernel:      mustEnv(t, "SPARKBOX_PARITY_KERNEL"),
-		imageDir:    mustEnv(t, "SPARKBOX_PARITY_IMAGE_DIR"),
-		scratch:     mustEnv(t, "SPARKBOX_PARITY_STATE_DIR"),
-		image:       envOr("SPARKBOX_PARITY_IMAGE", "universal"),
+		kernel:      vmmtest.MustEnv(t, "SPARKBOX_PARITY_KERNEL"),
+		imageDir:    vmmtest.MustEnv(t, "SPARKBOX_PARITY_IMAGE_DIR"),
+		scratch:     vmmtest.MustEnv(t, "SPARKBOX_PARITY_STATE_DIR"),
+		image:       vmmtest.EnvOr("SPARKBOX_PARITY_IMAGE", "universal"),
 		qemuBin:     os.Getenv("SPARKBOX_PARITY_QEMU"),
 		machineType: os.Getenv("SPARKBOX_PARITY_MACHINE_TYPE"),
-		subnet:      envOr("SPARKBOX_PARITY_QEMU_SUBNET", "172.31.1.0/24"),
-		loginUser:   envOr("SPARKBOX_PARITY_LOGIN_USER", "root"),
-		vcpus:       envInt(t, "SPARKBOX_PARITY_VCPUS", 2),
-		memMB:       envInt(t, "SPARKBOX_PARITY_MEM_MB", 2048),
-		bootTimeout: time.Duration(envInt(t, "SPARKBOX_PARITY_BOOT_TIMEOUT_S", 180)) * time.Second,
+		subnet:      vmmtest.EnvOr("SPARKBOX_PARITY_QEMU_SUBNET", "172.31.1.0/24"),
+		loginUser:   vmmtest.EnvOr("SPARKBOX_PARITY_LOGIN_USER", "root"),
+		vcpus:       vmmtest.EnvInt(t, "SPARKBOX_PARITY_VCPUS", 2),
+		memMB:       vmmtest.EnvInt(t, "SPARKBOX_PARITY_MEM_MB", 2048),
+		bootTimeout: time.Duration(vmmtest.EnvInt(t, "SPARKBOX_PARITY_BOOT_TIMEOUT_S", 180)) * time.Second,
 	}
 	for _, p := range []string{cfg.kernel, filepath.Join(cfg.imageDir, cfg.image+".ext4")} {
 		if _, err := os.Stat(p); err != nil {
@@ -288,50 +274,8 @@ func loadParityConfig(t *testing.T) parityConfig {
 	}
 	t.Logf("parity fixtures: kernel=%s image=%s/%s.ext4 scratch=%s subnet=%s user=%s qemu=%s machine=%s %dvcpu %dMiB",
 		cfg.kernel, cfg.imageDir, cfg.image, cfg.scratch, cfg.subnet, cfg.loginUser,
-		envOr("SPARKBOX_PARITY_QEMU", "(New's default for this arch)"),
-		envOr("SPARKBOX_PARITY_MACHINE_TYPE", "(New's default for this arch)"),
+		vmmtest.EnvOr("SPARKBOX_PARITY_QEMU", "(New's default for this arch)"),
+		vmmtest.EnvOr("SPARKBOX_PARITY_MACHINE_TYPE", "(New's default for this arch)"),
 		cfg.vcpus, cfg.memMB)
 	return cfg
-}
-
-func mustEnv(t *testing.T, key string) string {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		t.Fatalf("%s=1 requires %s", vmmtest.GateEnv, key)
-	}
-	return v
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func envInt(t *testing.T, key string, fallback int64) int64 {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		t.Fatalf("%s=%q: %v", key, v, err)
-	}
-	return n
-}
-
-func newParitySigner(t *testing.T) xssh.Signer {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := xssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s
 }

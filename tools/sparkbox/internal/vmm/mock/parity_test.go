@@ -1,8 +1,6 @@
 package mock_test
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"testing"
 	"time"
 
@@ -24,8 +22,8 @@ import (
 // The real answers come from internal/vmm/firecracker/parity_linux_test.go.
 func TestMockParity(t *testing.T) {
 	vmmtest.Run(t, func(t *testing.T) *vmmtest.Fixture {
-		hostKey := newSigner(t)
-		clientKey := newSigner(t)
+		hostKey := vmmtest.NewSigner(t)
+		clientKey := vmmtest.NewSigner(t)
 		d := mock.New(t.TempDir(), hostKey)
 		t.Cleanup(func() { d.Close() }) //nolint:errcheck
 		return &vmmtest.Fixture{
@@ -47,17 +45,4 @@ func TestMockParity(t *testing.T) {
 			},
 		}
 	})
-}
-
-func newSigner(t *testing.T) xssh.Signer {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := xssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s
 }

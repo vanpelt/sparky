@@ -189,8 +189,6 @@ func TestQMPCommands(t *testing.T) {
 		want any
 		// wantErr is a substring of the expected error; empty means success.
 		wantErr string
-		// wantEvents are the event names the client must have received, in order.
-		wantEvents []string
 	}{
 		{
 			name: "stop",
@@ -238,9 +236,8 @@ func TestQMPCommands(t *testing.T) {
 				s.reply(req.ID, map[string]any{"status": "paused", "running": false})
 				s.event("RESUME", nil)
 			},
-			run:        func(ctx context.Context, c *qmpConn) (any, error) { return c.QueryStatus(ctx) },
-			want:       "paused",
-			wantEvents: []string{"STOP", "BALLOON_CHANGE", "RESUME"},
+			run:  func(ctx context.Context, c *qmpConn) (any, error) { return c.QueryStatus(ctx) },
+			want: "paused",
 		},
 		{
 			name: "error reply carries class and desc",
@@ -266,8 +263,7 @@ func TestQMPCommands(t *testing.T) {
 			run: func(ctx context.Context, c *qmpConn) (any, error) {
 				return c.BalloonActualBytes(ctx)
 			},
-			wantErr:    "DeviceNotActive",
-			wantEvents: []string{"SHUTDOWN"},
+			wantErr: "DeviceNotActive",
 		},
 		{
 			// QEMU may exit before it flushes the reply to quit; a missing
@@ -535,16 +531,6 @@ func TestQMPCommands(t *testing.T) {
 			}
 			if tc.want != nil && err == nil && got != tc.want {
 				t.Errorf("got %#v, want %#v", got, tc.want)
-			}
-			for _, want := range tc.wantEvents {
-				select {
-				case ev := <-c.Events():
-					if ev.Name != want {
-						t.Errorf("event = %q, want %q", ev.Name, want)
-					}
-				case <-time.After(qmpTestTimeout):
-					t.Fatalf("timed out waiting for event %q", want)
-				}
 			}
 		})
 	}
@@ -839,13 +825,14 @@ func TestQMPConcurrentCommands(t *testing.T) {
 	}
 }
 
-// TestQMPEventFloodDoesNotStallTheReader: the event sink drops rather than
-// blocks, because a stalled reader stalls the monitor for good.
+// TestQMPEventFloodDoesNotStallTheReader: events are decoded and dropped, so a
+// burst of them cannot stall the reader — and a stalled reader stalls the
+// monitor for good.
 func TestQMPEventFloodDoesNotStallTheReader(t *testing.T) {
 	t.Parallel()
 
 	c := newTestQMPConn(t, func(s *fakeQMPServer) {
-		for i := 0; i < qmpEventBufferSize*3; i++ {
+		for i := 0; i < 192; i++ {
 			if !s.event("BALLOON_CHANGE", map[string]any{"actual": i}) {
 				return
 			}
@@ -856,7 +843,7 @@ func TestQMPEventFloodDoesNotStallTheReader(t *testing.T) {
 		}
 	})
 
-	// Nobody ever reads c.Events(); the command must still complete.
+	// The command must still complete behind all of them.
 	ctx, cancel := context.WithTimeout(context.Background(), qmpTestTimeout)
 	defer cancel()
 	state, err := c.QueryStatus(ctx)

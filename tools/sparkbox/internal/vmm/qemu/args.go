@@ -181,17 +181,22 @@ func (s qemuSpec) validate() error {
 	if s.MemMB <= 0 {
 		return fmt.Errorf("qemu argv: memory is %d MiB; the restore argv must repeat the boot argv's value", s.MemMB)
 	}
-	for _, f := range []struct{ what, value string }{
-		{"rootfs path", s.RootfsPath},
-		{"tap name", s.TapName},
-		{"mac address", s.MAC},
-		{"qmp socket path", s.QMPSocket},
-		{"serial log path", s.SerialLog},
-		{"incoming snapshot path", s.RestoreFrom},
+	for _, f := range []struct {
+		what     string
+		value    string
+		optional bool
+	}{
+		{what: "rootfs path", value: s.RootfsPath},
+		{what: "tap name", value: s.TapName},
+		{what: "mac address", value: s.MAC},
+		{what: "qmp socket path", value: s.QMPSocket},
+		{what: "serial log path", value: s.SerialLog},
+		// Empty means "cold boot", not "missing".
+		{what: "incoming snapshot path", value: s.RestoreFrom, optional: true},
 	} {
 		if f.value == "" {
-			if f.what == "incoming snapshot path" {
-				continue // empty means "cold boot", not "missing"
+			if f.optional {
+				continue
 			}
 			return fmt.Errorf("qemu argv: %s is empty", f.what)
 		}

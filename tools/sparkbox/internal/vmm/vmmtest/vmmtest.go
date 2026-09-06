@@ -30,9 +30,12 @@ package vmmtest
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -47,14 +50,11 @@ import (
 // half of the harness. Anything that needs /dev/kvm checks it.
 const GateEnv = "SPARKBOX_VMM_PARITY"
 
-// Gated reports whether this machine has opted into real-guest parity runs.
-func Gated() bool { return os.Getenv(GateEnv) == "1" }
-
 // RequireGate skips unless the machine opted in. Drivers that need /dev/kvm
 // call it from their fixture factory; the mock does not.
 func RequireGate(t *testing.T) {
 	t.Helper()
-	if !Gated() {
+	if os.Getenv(GateEnv) != "1" {
 		t.Skipf("set %s=1 on a host with /dev/kvm and parity fixtures to run this", GateEnv)
 	}
 }
@@ -109,10 +109,6 @@ type Fixture struct {
 	// Resume. Real guests need tens of seconds cold; the mock needs none.
 	BootTimeout time.Duration
 	Traits      Traits
-
-	// DialSSH overrides how the suite reaches a guest. Empty dials
-	// Instance.SSHAddr over tcp, which is right for every driver so far.
-	DialSSH func(ctx context.Context, inst *vmm.Instance, cfg *xssh.ClientConfig) (*xssh.Client, error)
 }
 
 // NewFixture builds a Fixture for one subtest. It must register its own
@@ -147,8 +143,8 @@ type box struct {
 	name string
 	inst *vmm.Instance
 
-	mu       sync.Mutex
-	hostKeys []string // SSH host keys seen, newest last
+	mu      sync.Mutex
+	lastKey string // fingerprint of the most recent SSH host key seen
 }
 
 func newBox(t *testing.T, f *Fixture, name string) *box {
@@ -174,13 +170,16 @@ func (b *box) create(fresh bool) *vmm.Instance {
 	return inst
 }
 
-func (b *box) tryCreate(fresh bool) (*vmm.Instance, error) {
+// tryCreateImage cold-boots the box from a named image, returning the driver's
+// error rather than failing the test. tryCreate and createFrom are the two ways
+// callers want that.
+func (b *box) tryCreateImage(image string, fresh bool) (*vmm.Instance, error) {
 	b.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	inst, err := b.f.Driver.Create(ctx, vmm.Config{
 		Name:             b.name,
-		Image:            b.f.BaseImage,
+		Image:            image,
 		VCPUs:            b.f.VCPUs,
 		MemMB:            b.f.MemMB,
 		GatewayPublicKey: b.f.AuthorizedKey,
@@ -193,24 +192,19 @@ func (b *box) tryCreate(fresh bool) (*vmm.Instance, error) {
 	return inst, nil
 }
 
+func (b *box) tryCreate(fresh bool) (*vmm.Instance, error) {
+	b.t.Helper()
+	return b.tryCreateImage(b.f.BaseImage, fresh)
+}
+
 // createFrom cold-boots the box from a named template instead of the base
 // image. This is the fork path.
 func (b *box) createFrom(image string) *vmm.Instance {
 	b.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	inst, err := b.f.Driver.Create(ctx, vmm.Config{
-		Name:             b.name,
-		Image:            image,
-		VCPUs:            b.f.VCPUs,
-		MemMB:            b.f.MemMB,
-		GatewayPublicKey: b.f.AuthorizedKey,
-		NewSandbox:       true,
-	})
+	inst, err := b.tryCreateImage(image, true)
 	if err != nil {
 		b.t.Fatalf("create %s from template %s: %v", b.name, image, err)
 	}
-	b.inst = inst
 	return inst
 }
 
@@ -266,7 +260,7 @@ func (b *box) dial() *xssh.Client {
 		HostKeyCallback: func(_ string, _ net.Addr, key xssh.PublicKey) error {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			b.hostKeys = append(b.hostKeys, xssh.FingerprintSHA256(key))
+			b.lastKey = xssh.FingerprintSHA256(key)
 			return nil
 		},
 		Timeout: 10 * time.Second,
@@ -290,9 +284,6 @@ func (b *box) dial() *xssh.Client {
 func (b *box) dialOnce(cfg *xssh.ClientConfig) (*xssh.Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if b.f.DialSSH != nil {
-		return b.f.DialSSH(ctx, b.inst, cfg)
-	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", b.inst.SSHAddr)
 	if err != nil {
@@ -311,10 +302,7 @@ func (b *box) dialOnce(cfg *xssh.ClientConfig) (*xssh.Client, error) {
 func (b *box) lastHostKey() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.hostKeys) == 0 {
-		return ""
-	}
-	return b.hostKeys[len(b.hostKeys)-1]
+	return b.lastKey
 }
 
 // run executes a command in the guest and returns its trimmed stdout.
@@ -381,4 +369,54 @@ func wantErr(t *testing.T, err error, what string) {
 func uniq(t *testing.T, stem string) string {
 	t.Helper()
 	return fmt.Sprintf("p%s%d", stem, time.Now().UnixNano()%1e7)
+}
+
+// NewSigner mints a throwaway ed25519 SSH key for a fixture. Every fixture
+// needs one and none of them cares which, so they share this rather than each
+// carrying a copy.
+func NewSigner(t *testing.T) xssh.Signer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := xssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// MustEnv reads a fixture setting the suite cannot invent a default for, and
+// fails naming the gate that made it required.
+func MustEnv(t *testing.T, key string) string {
+	t.Helper()
+	v := os.Getenv(key)
+	if v == "" {
+		t.Fatalf("%s=1 requires %s", GateEnv, key)
+	}
+	return v
+}
+
+// EnvOr reads a fixture setting that has a sensible default.
+func EnvOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// EnvInt is EnvOr for a whole number, failing rather than silently falling back
+// when the value is set but unparseable.
+func EnvInt(t *testing.T, key string, fallback int64) int64 {
+	t.Helper()
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		t.Fatalf("%s=%q: %v", key, v, err)
+	}
+	return n
 }

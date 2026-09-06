@@ -44,6 +44,14 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
+// Every optional capability in vmm, asserted at compile time. host.Manager
+// reaches each of these by type assertion and falls back silently when the
+// assertion fails, so a capability lost to a refactor — a receiver changed from
+// pointer to value, a method renamed, a signature drifting — degrades the fleet
+// with no error anywhere. This line is the only thing that turns that into a
+// build failure.
+var _ vmm.FullDriver = (*Driver)(nil)
+
 type Options struct {
 	// KernelPath is an uncompressed vmlinux built with the microVM config.
 	KernelPath string

@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -305,7 +306,7 @@ func TestBuildQemuArgsColdBoot(t *testing.T) {
 		"-monitor", "none",
 	}
 	argsAssertEqual(t, got, want)
-	if idx := argsIndexOf(got, "-incoming"); idx >= 0 {
+	if idx := slices.Index(got, "-incoming"); idx >= 0 {
 		t.Errorf("a cold boot must not carry -incoming; got %v", got)
 	}
 }
@@ -564,17 +565,8 @@ func argsAssertPair(t *testing.T, args []string, flag, want string) {
 	}
 }
 
-func argsIndexOf(args []string, flag string) int {
-	for i, a := range args {
-		if a == flag {
-			return i
-		}
-	}
-	return -1
-}
-
 func argsValueAfter(args []string, flag string) string {
-	i := argsIndexOf(args, flag)
+	i := slices.Index(args, flag)
 	if i < 0 || i+1 >= len(args) {
 		return ""
 	}

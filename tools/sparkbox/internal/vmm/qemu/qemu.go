@@ -568,22 +568,10 @@ type Driver struct {
 // assertion and falls back silently when the assertion fails, so a capability
 // lost to a refactor — a receiver changed from pointer to value, a method
 // renamed, a signature drifting — degrades the fleet with no error anywhere.
-// This block is the only thing that turns that into a build failure, and for a
-// port it is also the checklist: eleven assertions, twenty methods, and the
-// parity suite skips silently past whichever ones are missing.
-var (
-	_ vmm.Driver           = (*Driver)(nil)
-	_ vmm.Archivable       = (*Driver)(nil)
-	_ vmm.DiskReporter     = (*Driver)(nil)
-	_ vmm.TemplateReporter = (*Driver)(nil)
-	_ vmm.RootfsPresencer  = (*Driver)(nil)
-	_ vmm.Renamer          = (*Driver)(nil)
-	_ vmm.Rebooter         = (*Driver)(nil)
-	_ vmm.CPUStatser       = (*Driver)(nil)
-	_ vmm.NetStatser       = (*Driver)(nil)
-	_ vmm.DiskResizer      = (*Driver)(nil)
-	_ vmm.Ballooner        = (*Driver)(nil)
-)
+// vmm.FullDriver is the whole list in one name, so an eleventh capability
+// breaks this build rather than degrading a fleet. For a port it is also the
+// checklist: the parity suite skips silently past whichever ones are missing.
+var _ vmm.FullDriver = (*Driver)(nil)
 
 func New(opts Options) (*Driver, error) {
 	switch runtime.GOARCH {

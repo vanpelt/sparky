@@ -3,11 +3,8 @@
 package firecracker_test
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -58,7 +55,7 @@ func TestFirecrackerParity(t *testing.T) {
 		if err := os.MkdirAll(templateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		clientKey := newParitySigner(t)
+		clientKey := vmmtest.NewSigner(t)
 		authorized := string(xssh.MarshalAuthorizedKey(clientKey.PublicKey()))
 
 		d, err := fc.New(fc.Options{
@@ -123,16 +120,16 @@ func loadParityConfig(t *testing.T) parityConfig {
 		t.Fatalf("%s=1 but /dev/kvm is not usable: %v", vmmtest.GateEnv, err)
 	}
 	cfg := parityConfig{
-		kernel:         mustEnv(t, "SPARKBOX_PARITY_KERNEL"),
-		imageDir:       mustEnv(t, "SPARKBOX_PARITY_IMAGE_DIR"),
-		scratch:        mustEnv(t, "SPARKBOX_PARITY_STATE_DIR"),
-		image:          envOr("SPARKBOX_PARITY_IMAGE", "universal"),
-		firecrackerBin: envOr("SPARKBOX_PARITY_FIRECRACKER", "firecracker"),
-		subnet:         envOr("SPARKBOX_PARITY_SUBNET", "172.31.0.0/24"),
-		loginUser:      envOr("SPARKBOX_PARITY_LOGIN_USER", "root"),
-		vcpus:          envInt(t, "SPARKBOX_PARITY_VCPUS", 2),
-		memMB:          envInt(t, "SPARKBOX_PARITY_MEM_MB", 2048),
-		bootTimeout:    time.Duration(envInt(t, "SPARKBOX_PARITY_BOOT_TIMEOUT_S", 180)) * time.Second,
+		kernel:         vmmtest.MustEnv(t, "SPARKBOX_PARITY_KERNEL"),
+		imageDir:       vmmtest.MustEnv(t, "SPARKBOX_PARITY_IMAGE_DIR"),
+		scratch:        vmmtest.MustEnv(t, "SPARKBOX_PARITY_STATE_DIR"),
+		image:          vmmtest.EnvOr("SPARKBOX_PARITY_IMAGE", "universal"),
+		firecrackerBin: vmmtest.EnvOr("SPARKBOX_PARITY_FIRECRACKER", "firecracker"),
+		subnet:         vmmtest.EnvOr("SPARKBOX_PARITY_SUBNET", "172.31.0.0/24"),
+		loginUser:      vmmtest.EnvOr("SPARKBOX_PARITY_LOGIN_USER", "root"),
+		vcpus:          vmmtest.EnvInt(t, "SPARKBOX_PARITY_VCPUS", 2),
+		memMB:          vmmtest.EnvInt(t, "SPARKBOX_PARITY_MEM_MB", 2048),
+		bootTimeout:    time.Duration(vmmtest.EnvInt(t, "SPARKBOX_PARITY_BOOT_TIMEOUT_S", 180)) * time.Second,
 	}
 	for _, p := range []string{cfg.kernel, filepath.Join(cfg.imageDir, cfg.image+".ext4")} {
 		if _, err := os.Stat(p); err != nil {
@@ -145,46 +142,4 @@ func loadParityConfig(t *testing.T) parityConfig {
 	t.Logf("parity fixtures: kernel=%s image=%s/%s.ext4 scratch=%s subnet=%s user=%s %dvcpu %dMiB",
 		cfg.kernel, cfg.imageDir, cfg.image, cfg.scratch, cfg.subnet, cfg.loginUser, cfg.vcpus, cfg.memMB)
 	return cfg
-}
-
-func mustEnv(t *testing.T, key string) string {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		t.Fatalf("%s=1 requires %s", vmmtest.GateEnv, key)
-	}
-	return v
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func envInt(t *testing.T, key string, fallback int64) int64 {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		t.Fatalf("%s=%q: %v", key, v, err)
-	}
-	return n
-}
-
-func newParitySigner(t *testing.T) xssh.Signer {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := xssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s
 }

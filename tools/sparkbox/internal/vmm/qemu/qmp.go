@@ -27,10 +27,13 @@ package qemu
 //     else distinguishes them — an event has no "id" even when the outstanding
 //     command did.
 //
-// Events are published on a small buffered channel that DROPS when full, so no
-// event consumer can wedge the reader. A handler must never issue a QMP command
-// from inside the reader's goroutine either: the reply could only be read by the
-// goroutine the handler is blocking.
+// Events are decoded and discarded. Draining them is the load-bearing part —
+// an undrained monitor stops delivering replies — and nothing in the driver
+// needs to observe one, so there is no event stream to subscribe to. If a
+// consumer ever appears (BALLOON_CHANGE is the likely first), add the channel
+// with it: a handler must never issue a QMP command from inside the reader's
+// goroutine, because the reply could only be read by the goroutine the handler
+// is blocking.
 //
 // In-band commands execute serially, so replies do in fact arrive in request
 // order and an id-free client "works" — right up until the first event lands
@@ -49,9 +52,6 @@ import (
 )
 
 const (
-	// qmpEventBufferSize is how many unread events the connection holds before it
-	// starts dropping them. Dropping is deliberate: the reader must never block.
-	qmpEventBufferSize = 64
 	// qmpHandshakeTimeout bounds greeting + qmp_capabilities when the caller's
 	// context carries no deadline of its own.
 	qmpHandshakeTimeout = 10 * time.Second
@@ -117,13 +117,6 @@ func (e *qmpError) Error() string {
 	return "qmp: " + e.Class + ": " + e.Desc
 }
 
-// qmpEvent is one asynchronous notification. Data is the raw `data` object, if
-// the event carried one.
-type qmpEvent struct {
-	Name string
-	Data json.RawMessage
-}
-
 // qmpMessage is any line the server sends. Which kind it is, is decided by
 // which fields are present: "QMP" for the greeting, "event" for an event,
 // otherwise "return" or "error" for a reply.
@@ -162,7 +155,6 @@ type qmpConn struct {
 
 	done      chan struct{} // closed once the reader goroutine has exited
 	closeOnce sync.Once
-	events    chan qmpEvent
 }
 
 // dialQMP connects to a QEMU monitor socket, consumes the greeting and
@@ -191,7 +183,6 @@ func newQMPConn(ctx context.Context, conn net.Conn) (*qmpConn, error) {
 		dec:     json.NewDecoder(conn),
 		pending: map[uint64]chan *qmpMessage{},
 		done:    make(chan struct{}),
-		events:  make(chan qmpEvent, qmpEventBufferSize),
 	}
 	if err := c.handshake(ctx); err != nil {
 		return nil, err
@@ -238,7 +229,6 @@ func (c *qmpConn) handshake(ctx context.Context) error {
 		// QEMU does not emit events before negotiation completes, but skipping
 		// them here costs nothing and keeps the one framing rule uniform.
 		if m.Event != "" {
-			c.publish(m)
 			continue
 		}
 		if m.Greeting != nil {
@@ -262,22 +252,14 @@ func (c *qmpConn) readLoop() {
 		}
 		switch {
 		case m.Event != "":
-			c.publish(m)
+			// Decoded and dropped. Draining is what matters: an undrained
+			// monitor stops delivering replies.
 		case m.Greeting != nil:
 			// Only a reconnected socket could produce a second greeting, and we
 			// never reconnect in place. Ignore rather than tear down.
 		case m.Return != nil || m.Error != nil:
 			c.deliver(&m)
 		}
-	}
-}
-
-// publish hands an event to the sink, dropping it if nobody is keeping up. The
-// alternative is blocking the only goroutine draining the monitor.
-func (c *qmpConn) publish(m qmpMessage) {
-	select {
-	case c.events <- qmpEvent{Name: m.Event, Data: m.Data}:
-	default:
 	}
 }
 
@@ -335,11 +317,6 @@ func (c *qmpConn) closedErr() error {
 	}
 	return errQMPClosed
 }
-
-// Events is the asynchronous event stream. It is buffered and lossy on purpose;
-// nothing in the driver depends on receiving every event, and a consumer that
-// stops reading must not be able to stall the monitor.
-func (c *qmpConn) Events() <-chan qmpEvent { return c.events }
 
 // Execute issues one command and waits for its reply. args may be nil; out may
 // be nil to discard the return value. The context bounds the whole call: on
@@ -509,8 +486,7 @@ func (c *qmpConn) Quit(ctx context.Context) error {
 }
 
 type qmpStatus struct {
-	Status  string `json:"status"`
-	Running bool   `json:"running"`
+	Status string `json:"status"`
 }
 
 // QueryStatus returns the RunState string: running, paused, inmigrate,
@@ -573,34 +549,29 @@ func (c *qmpConn) QueryMigrate(ctx context.Context) (qmpMigrationInfo, error) {
 	return info, err
 }
 
-// AwaitMigration polls query-migrate until the migration reaches a terminal
-// state, distinguishing completed from failed and cancelled. The context is the
-// only bound on how long it will wait.
-func (c *qmpConn) AwaitMigration(ctx context.Context) error {
+// awaitMigration polls query-migrate until done says to stop. done returns
+// (true, nil) to finish successfully, (false, nil) to keep polling, or an error
+// to fail; the two exported wrappers below differ only in that function. The
+// context is the only bound on how long either will wait.
+func (c *qmpConn) awaitMigration(ctx context.Context, done func(qmpMigrationInfo) (bool, error)) error {
 	ticker := time.NewTicker(qmpMigrationPollInterval)
 	defer ticker.Stop()
+	// A file: migration only ever walks none -> setup -> active -> completed,
+	// so an absent status means it has not started yet.
 	last := "none"
 	for {
 		info, err := c.QueryMigrate(ctx)
 		if err != nil {
 			return err
 		}
-		switch info.Status {
-		case "completed":
+		stop, err := done(info)
+		if err != nil {
+			return err
+		}
+		if stop {
 			return nil
-		case "failed":
-			desc := info.ErrorDesc
-			if desc == "" {
-				desc = "no reason given"
-			}
-			return fmt.Errorf("qmp: migration failed: %s", desc)
-		case "cancelled", "cancelling":
-			return errors.New("qmp: migration was cancelled")
-		case "":
-			// A file: migration only ever walks none -> setup -> active ->
-			// completed. An absent status means it has not started yet.
-			last = "none"
-		default:
+		}
+		if info.Status != "" {
 			last = info.Status
 		}
 		select {
@@ -609,6 +580,26 @@ func (c *qmpConn) AwaitMigration(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// AwaitMigration polls query-migrate until the migration reaches a terminal
+// state, distinguishing completed from failed and cancelled.
+func (c *qmpConn) AwaitMigration(ctx context.Context) error {
+	return c.awaitMigration(ctx, func(info qmpMigrationInfo) (bool, error) {
+		switch info.Status {
+		case "completed":
+			return true, nil
+		case "failed":
+			desc := info.ErrorDesc
+			if desc == "" {
+				desc = "no reason given"
+			}
+			return false, fmt.Errorf("qmp: migration failed: %s", desc)
+		case "cancelled", "cancelling":
+			return false, errors.New("qmp: migration was cancelled")
+		}
+		return false, nil
+	})
 }
 
 // MigrateCancel aborts an outgoing migration. It is what makes a failed Pause
@@ -633,23 +624,13 @@ func (c *qmpConn) MigrateCancel(ctx context.Context) error {
 // the caller may unlink it without stranding a full guest's worth of hot tier
 // in an unlinked inode.
 func (c *qmpConn) AwaitMigrationSettled(ctx context.Context) error {
-	ticker := time.NewTicker(qmpMigrationPollInterval)
-	defer ticker.Stop()
-	for {
-		info, err := c.QueryMigrate(ctx)
-		if err != nil {
-			return err
-		}
+	return c.awaitMigration(ctx, func(info qmpMigrationInfo) (bool, error) {
 		switch info.Status {
 		case "", "completed", "failed", "cancelled":
-			return nil
+			return true, nil
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("qmp: migration still %s: %w", info.Status, ctx.Err())
-		case <-ticker.C:
-		}
-	}
+		return false, nil
+	})
 }
 
 // SetBalloonBytes sets the guest's target VISIBLE RAM in bytes — QEMU's units,

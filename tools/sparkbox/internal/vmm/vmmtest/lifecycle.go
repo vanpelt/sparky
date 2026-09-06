@@ -2,7 +2,11 @@ package vmmtest
 
 import (
 	"context"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
@@ -42,17 +46,26 @@ type capability struct {
 	has  func(vmm.Driver) bool
 }
 
+// hasCap reports whether d offers optional capability T. capName derives the
+// display name from T itself, so the inventory below and requireCap's skip
+// message cannot drift from the interface they are talking about — the failure
+// a hand-typed string produces is a rename that leaves every message naming
+// the old interface, which nobody notices because the run stays green.
+func hasCap[T any](d vmm.Driver) bool { _, ok := d.(T); return ok }
+
+func capName[T any]() string { return reflect.TypeOf((*T)(nil)).Elem().String() }
+
 var capabilities = []capability{
-	{"Archivable", func(d vmm.Driver) bool { _, ok := d.(vmm.Archivable); return ok }},
-	{"DiskReporter", func(d vmm.Driver) bool { _, ok := d.(vmm.DiskReporter); return ok }},
-	{"TemplateReporter", func(d vmm.Driver) bool { _, ok := d.(vmm.TemplateReporter); return ok }},
-	{"RootfsPresencer", func(d vmm.Driver) bool { _, ok := d.(vmm.RootfsPresencer); return ok }},
-	{"Renamer", func(d vmm.Driver) bool { _, ok := d.(vmm.Renamer); return ok }},
-	{"Rebooter", func(d vmm.Driver) bool { _, ok := d.(vmm.Rebooter); return ok }},
-	{"CPUStatser", func(d vmm.Driver) bool { _, ok := d.(vmm.CPUStatser); return ok }},
-	{"NetStatser", func(d vmm.Driver) bool { _, ok := d.(vmm.NetStatser); return ok }},
-	{"DiskResizer", func(d vmm.Driver) bool { _, ok := d.(vmm.DiskResizer); return ok }},
-	{"Ballooner", func(d vmm.Driver) bool { _, ok := d.(vmm.Ballooner); return ok }},
+	{capName[vmm.Archivable](), hasCap[vmm.Archivable]},
+	{capName[vmm.DiskReporter](), hasCap[vmm.DiskReporter]},
+	{capName[vmm.TemplateReporter](), hasCap[vmm.TemplateReporter]},
+	{capName[vmm.RootfsPresencer](), hasCap[vmm.RootfsPresencer]},
+	{capName[vmm.Renamer](), hasCap[vmm.Renamer]},
+	{capName[vmm.Rebooter](), hasCap[vmm.Rebooter]},
+	{capName[vmm.CPUStatser](), hasCap[vmm.CPUStatser]},
+	{capName[vmm.NetStatser](), hasCap[vmm.NetStatser]},
+	{capName[vmm.DiskResizer](), hasCap[vmm.DiskResizer]},
+	{capName[vmm.Ballooner](), hasCap[vmm.Ballooner]},
 }
 
 // testCapabilityInventory prints what this driver claims, so a `-v` run answers
@@ -79,12 +92,13 @@ func testCapabilityInventory(t *testing.T, newFixture NewFixture) {
 	t.Logf("%d of %d optional capabilities present", len(capabilities)-missing, len(capabilities))
 }
 
-// requireCap fetches an optional interface or skips with its name.
-func requireCap[T any](t *testing.T, d vmm.Driver, name string) T {
+// requireCap fetches an optional interface or skips, naming the interface it
+// could not find.
+func requireCap[T any](t *testing.T, d vmm.Driver) T {
 	t.Helper()
 	v, ok := d.(T)
 	if !ok {
-		t.Skipf("driver does not implement vmm.%s", name)
+		t.Skipf("driver does not implement %s", capName[T]())
 	}
 	return v
 }
@@ -123,33 +137,13 @@ func testBootAndSSH(t *testing.T, newFixture NewFixture) {
 	}
 }
 
+// containsWord reports whether word appears as a whole field of haystack.
+// Slashes split as well as whitespace, so an "10.0.0.2/24" from `ip -o addr`
+// matches the bare address the driver reported.
 func containsWord(haystack, word string) bool {
-	for _, f := range splitFields(haystack) {
-		if f == word {
-			return true
-		}
-	}
-	return false
-}
-
-func splitFields(s string) []string {
-	var out []string
-	cur := ""
-	for _, r := range s {
-		switch r {
-		case ' ', '\t', '\n', '\r', '/':
-			if cur != "" {
-				out = append(out, cur)
-				cur = ""
-			}
-		default:
-			cur += string(r)
-		}
-	}
-	if cur != "" {
-		out = append(out, cur)
-	}
-	return out
+	return slices.Contains(strings.FieldsFunc(haystack, func(r rune) bool {
+		return r == '/' || unicode.IsSpace(r)
+	}), word)
 }
 
 // testPauseResume covers the idle model. Two separate claims, because a driver
@@ -286,7 +280,7 @@ func testDestroyThenReuseName(t *testing.T, newFixture NewFixture) {
 // guess.
 func testCreateRefusesResidue(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	rb := requireCap[vmm.Rebooter](t, f.Driver, "Rebooter")
+	rb := requireCap[vmm.Rebooter](t, f.Driver)
 
 	b := newBox(t, f, uniq(t, "residue"))
 	b.create(true)

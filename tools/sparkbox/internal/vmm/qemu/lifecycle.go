@@ -502,11 +502,16 @@ func (d *Driver) dialVMM(ctx context.Context, name string, st *vmState) (*qmpCon
 	dctx, cancel := context.WithTimeout(ctx, vmmDialTimeout)
 	defer cancel()
 	sock := d.qmpSocketPath(name)
+	// Both exit checks below must report the same thing; stating it once is
+	// what keeps them from drifting apart.
+	died := func() error {
+		return d.vmmError(name, st, fmt.Sprintf("qemu for %q exited before its monitor was reachable", name), nil)
+	}
 	var lastErr error
 	for {
 		select {
 		case <-st.exited:
-			return nil, d.vmmError(name, st, fmt.Sprintf("qemu for %q exited before its monitor was reachable", name), nil)
+			return nil, died()
 		default:
 		}
 		conn, err := dialQMP(dctx, sock)
@@ -516,7 +521,7 @@ func (d *Driver) dialVMM(ctx context.Context, name string, st *vmState) (*qmpCon
 		lastErr = err
 		select {
 		case <-st.exited:
-			return nil, d.vmmError(name, st, fmt.Sprintf("qemu for %q exited before its monitor was reachable", name), nil)
+			return nil, died()
 		case <-dctx.Done():
 			return nil, d.vmmError(name, st, fmt.Sprintf("qemu monitor for %q never came up", name), lastErr)
 		case <-time.After(vmmPollInterval):
@@ -529,11 +534,14 @@ func (d *Driver) dialVMM(ctx context.Context, name string, st *vmState) (*qmpCon
 func (d *Driver) awaitRunning(ctx context.Context, name string, st *vmState) error {
 	rctx, cancel := context.WithTimeout(ctx, vmmRunnableTimeout)
 	defer cancel()
+	died := func() error {
+		return d.vmmError(name, st, fmt.Sprintf("qemu for %q exited before the guest was running", name), nil)
+	}
 	var lastErr error
 	for {
 		select {
 		case <-st.exited:
-			return d.vmmError(name, st, fmt.Sprintf("qemu for %q exited before the guest was running", name), nil)
+			return died()
 		default:
 		}
 		state, err := st.qmp.QueryStatus(rctx)
@@ -555,7 +563,7 @@ func (d *Driver) awaitRunning(ctx context.Context, name string, st *vmState) err
 		}
 		select {
 		case <-st.exited:
-			return d.vmmError(name, st, fmt.Sprintf("qemu for %q exited before the guest was running", name), nil)
+			return died()
 		case <-rctx.Done():
 			return d.vmmError(name, st, fmt.Sprintf("vm %q never reached the running state", name), lastErr)
 		case <-time.After(vmmPollInterval):

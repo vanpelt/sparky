@@ -19,7 +19,7 @@ import (
 // being there passes a test that unpacks over the top of it.
 func testCheckpointRestore(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	ar := requireCap[vmm.Archivable](t, f.Driver, "Archivable")
+	ar := requireCap[vmm.Archivable](t, f.Driver)
 	ctx := context.Background()
 
 	b := newBox(t, f, uniq(t, "arch"))
@@ -86,7 +86,7 @@ func testCheckpointRestore(t *testing.T, newFixture NewFixture) {
 //     (Traits.SanitizesForks), or two sandboxes share an SSH host key.
 func testForkFromTemplate(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	ar := requireCap[vmm.Archivable](t, f.Driver, "Archivable")
+	ar := requireCap[vmm.Archivable](t, f.Driver)
 	ctx := context.Background()
 
 	src := newBox(t, f, uniq(t, "src"))
@@ -147,7 +147,7 @@ func testForkFromTemplate(t *testing.T, newFixture NewFixture) {
 // answer has to be false when there is genuinely no disk and true when there is.
 func testRootfsPresence(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	p := requireCap[vmm.RootfsPresencer](t, f.Driver, "RootfsPresencer")
+	p := requireCap[vmm.RootfsPresencer](t, f.Driver)
 
 	name := uniq(t, "pres")
 	present, err := p.RootfsPresent(name)
@@ -175,7 +175,7 @@ func testRootfsPresence(t *testing.T, newFixture NewFixture) {
 // is empty, while the disk is untouched.
 func testReboot(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	rb := requireCap[vmm.Rebooter](t, f.Driver, "Rebooter")
+	rb := requireCap[vmm.Rebooter](t, f.Driver)
 
 	b := newBox(t, f, uniq(t, "reboot"))
 	b.create(true)
@@ -217,8 +217,8 @@ func testReboot(t *testing.T, newFixture NewFixture) {
 // cannot be resumed. The driver must refuse rather than produce it.
 func testRename(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	rn := requireCap[vmm.Renamer](t, f.Driver, "Renamer")
-	rb := requireCap[vmm.Rebooter](t, f.Driver, "Rebooter")
+	rn := requireCap[vmm.Renamer](t, f.Driver)
+	rb := requireCap[vmm.Rebooter](t, f.Driver)
 
 	oldBox := newBox(t, f, uniq(t, "old"))
 	newName := uniq(t, "new")
@@ -265,7 +265,7 @@ func testRename(t *testing.T, newFixture NewFixture) {
 // spent, capacity is the ceiling it cannot grow past.
 func testDiskReport(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	dr := requireCap[vmm.DiskReporter](t, f.Driver, "DiskReporter")
+	dr := requireCap[vmm.DiskReporter](t, f.Driver)
 	ctx := context.Background()
 
 	b := newBox(t, f, uniq(t, "disk"))
@@ -336,7 +336,7 @@ func testDiskReport(t *testing.T, newFixture NewFixture) {
 // of spiking every fork's pooled charge.
 func testTemplateUsage(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	tr := requireCap[vmm.TemplateReporter](t, f.Driver, "TemplateReporter")
+	tr := requireCap[vmm.TemplateReporter](t, f.Driver)
 	ctx := context.Background()
 
 	if f.Traits.BaseImageIsTemplate {
@@ -362,9 +362,9 @@ func testTemplateUsage(t *testing.T, newFixture NewFixture) {
 // three are refusals a driver has to make rather than assume the caller made.
 func testDiskResize(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	rz := requireCap[vmm.DiskResizer](t, f.Driver, "DiskResizer")
-	dr := requireCap[vmm.DiskReporter](t, f.Driver, "DiskReporter")
-	rb := requireCap[vmm.Rebooter](t, f.Driver, "Rebooter")
+	rz := requireCap[vmm.DiskResizer](t, f.Driver)
+	dr := requireCap[vmm.DiskReporter](t, f.Driver)
+	rb := requireCap[vmm.Rebooter](t, f.Driver)
 	ctx := context.Background()
 
 	b := newBox(t, f, uniq(t, "resize"))
@@ -420,7 +420,7 @@ func testDiskResize(t *testing.T, newFixture NewFixture) {
 // guest is not this capability.
 func testBalloon(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	bl := requireCap[vmm.Ballooner](t, f.Driver, "Ballooner")
+	bl := requireCap[vmm.Ballooner](t, f.Driver)
 	ctx := context.Background()
 
 	b := newBox(t, f, uniq(t, "balloon"))
@@ -495,7 +495,7 @@ func pollBalloon(t *testing.T, bl vmm.Ballooner, name string, ok func(vmm.Balloo
 // works — which is exactly what the vitals sampler derives utilization from.
 func testCPUStats(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	cs := requireCap[vmm.CPUStatser](t, f.Driver, "CPUStatser")
+	cs := requireCap[vmm.CPUStatser](t, f.Driver)
 	ctx := context.Background()
 
 	b := newBox(t, f, uniq(t, "cpu"))
@@ -529,11 +529,17 @@ func testCPUStats(t *testing.T, newFixture NewFixture) {
 
 // testNetStats covers vmm.NetStatser, whose contract contains a direction swap
 // that is easy to get backwards: rx is what the GUEST received, which is the
-// mirror image of what the host-side tap reports. The suite pushes a large
-// payload each way so the two counters cannot be confused with each other.
+// mirror image of what the host-side tap reports.
+//
+// The two directions carry DIFFERENT payload sizes on purpose. An earlier
+// version pushed the same 8 MiB each way and compared both against one
+// threshold, which meant a driver reporting a single counter for both
+// directions — or reporting them swapped — passed green. The asymmetry is the
+// whole assertion: the guest sends eight times what it receives, so a reversed
+// pair cannot clear both floors.
 func testNetStats(t *testing.T, newFixture NewFixture) {
 	f := newFixture(t)
-	ns := requireCap[vmm.NetStatser](t, f.Driver, "NetStatser")
+	ns := requireCap[vmm.NetStatser](t, f.Driver)
 	ctx := context.Background()
 
 	b := newBox(t, f, uniq(t, "net"))
@@ -548,15 +554,15 @@ func testNetStats(t *testing.T, newFixture NewFixture) {
 		t.Logf("net counters readable (rx %d tx %d); traffic assertions need a real guest", rx0, tx0)
 		return
 	}
-	// ~8 MiB out of the guest, and the same back in, so a driver reporting one
-	// counter for both directions or swapping them is visible.
-	const chunkMB = 8
-	run(t, c, fmt.Sprintf("dd if=/dev/zero bs=1M count=%d status=none | cat > /dev/null", chunkMB))
+	const (
+		uploadMB   = 4  // host -> guest: the guest RECEIVES this, so it lands in rx
+		downloadMB = 32 // guest -> host: the guest SENDS this, so it lands in tx
+	)
 	sess, err := c.NewSession()
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
-	sess.Stdin = io.LimitReader(zeroSource{}, chunkMB<<20)
+	sess.Stdin = io.LimitReader(zeroSource{}, uploadMB<<20)
 	if err := sess.Run("cat > /dev/null"); err != nil {
 		t.Fatalf("upload into guest: %v", err)
 	}
@@ -564,7 +570,7 @@ func testNetStats(t *testing.T, newFixture NewFixture) {
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
-	if _, err := out.Output(fmt.Sprintf("dd if=/dev/zero bs=1M count=%d status=none", chunkMB)); err != nil {
+	if _, err := out.Output(fmt.Sprintf("dd if=/dev/zero bs=1M count=%d status=none", downloadMB)); err != nil {
 		t.Fatalf("download from guest: %v", err)
 	}
 
@@ -573,12 +579,19 @@ func testNetStats(t *testing.T, newFixture NewFixture) {
 		t.Fatalf("NetBytes after traffic: %v", err)
 	}
 	t.Logf("net rx %d -> %d, tx %d -> %d bytes", rx0, rx1, tx0, tx1)
-	want := uint64(chunkMB) << 19 // half the payload, to leave room for framing
-	if rx1 < rx0+want {
-		t.Errorf("guest rx grew by %d bytes after receiving %d MiB", rx1-rx0, chunkMB)
+	// Half of each payload, to leave room for framing and for the acks the
+	// opposite direction carries.
+	if grew := rx1 - rx0; grew < uint64(uploadMB)<<19 {
+		t.Errorf("guest rx grew by %d bytes after receiving %d MiB", grew, uploadMB)
 	}
-	if tx1 < tx0+want {
-		t.Errorf("guest tx grew by %d bytes after sending %d MiB", tx1-tx0, chunkMB)
+	if grew := tx1 - tx0; grew < uint64(downloadMB)<<19 {
+		t.Errorf("guest tx grew by %d bytes after sending %d MiB", grew, downloadMB)
+	}
+	// The payloads differ 8x, so this is what a swapped or single-source pair
+	// fails on even if it somehow cleared both floors.
+	if tx1-tx0 <= rx1-rx0 {
+		t.Errorf("guest tx grew by %d and rx by %d after sending %d MiB and receiving %d MiB: the counters look swapped or identical",
+			tx1-tx0, rx1-rx0, downloadMB, uploadMB)
 	}
 
 	b.pause()

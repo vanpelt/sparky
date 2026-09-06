@@ -17,11 +17,26 @@ import (
 // and its tap, and Ballooner, which is the only capability here that talks to
 // QEMU at all.
 //
-// All four methods hold d.mu for their whole duration and all four must ERROR
-// on a paused sandbox — the parity suite checks that polarity in both
-// directions, and DiskUsageMB/DiskCapacityMB in caps_files.go are the ones that
-// must NOT. st.cmd != nil is the liveness predicate; stopVMM clears st.cmd and
-// st.qmp together once the child is reaped, so a paused record has neither.
+// All four must ERROR on a paused sandbox — the parity suite checks that
+// polarity in both directions, and DiskUsageMB/DiskCapacityMB in caps_files.go
+// are the ones that must NOT. st.cmd != nil is the liveness predicate; stopVMM
+// clears st.cmd and st.qmp together once the child is reaped, so a paused
+// record has neither.
+//
+// None of the four holds d.mu across its I/O. They take it only to copy what
+// they need out of the record — a pid, a tap index, a *qmpConn — and drop it
+// before touching /proc, sysfs or the monitor. That matters because
+// host.Manager fans these out one goroutine per sandbox under a shared
+// deadline (refreshMemoryUsage) and splits them four ways per sandbox
+// (Vitals), explicitly so one wedged VMM cannot cost a caller its other
+// numbers. Holding d.mu here would re-serialize both, and QEMU is the first
+// backend whose stats call can block for qmpCommandTimeout (30s).
+//
+// Dropping the lock cannot break the paused-must-error polarity, because every
+// resource these read is torn down by the pause itself: Pause deletes the tap
+// (sysfs read fails), reaps the child (/proc read fails) and closes the
+// monitor (Execute returns errQMPClosed). A call that races a Pause therefore
+// still returns an error, which is the required answer.
 
 const userHZ = 100
 
@@ -40,15 +55,18 @@ const userHZ = 100
 // is not a shortcut, it is the only source.
 func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	st, ok := d.vms[name]
 	if !ok || st.cmd == nil {
+		d.mu.Unlock()
 		return 0, fmt.Errorf("vm %q not running", name)
 	}
 	if st.cmd.Process == nil {
+		d.mu.Unlock()
 		return 0, fmt.Errorf("vm %q has no VMM process", name)
 	}
 	pid := st.cmd.Process.Pid
+	d.mu.Unlock()
+
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		// A QEMU that died on its own leaves the record in place until
@@ -102,12 +120,14 @@ func procStatCPUTicks(stat string) (uint64, error) {
 // counter — callers must treat a decrease as a reset.
 func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	st, ok := d.vms[name]
 	if !ok || st.cmd == nil {
+		d.mu.Unlock()
 		return 0, 0, fmt.Errorf("vm %q not running", name)
 	}
 	tap := tapName(st.idx)
+	d.mu.Unlock()
+
 	// Guest rx is the tap's tx and vice versa.
 	if rx, err = readTapCounter(tap, "tx_bytes"); err != nil {
 		return 0, 0, err
@@ -156,11 +176,14 @@ func readTapCounter(tap, stat string) (uint64, error) {
 // stat-total-memory (see BalloonStats).
 func (d *Driver) SetBalloonTarget(ctx context.Context, name string, targetMiB int64) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	st, ok := d.vms[name]
 	if !ok || st.cmd == nil || st.qmp == nil {
+		d.mu.Unlock()
 		return fmt.Errorf("vm %q not running", name)
 	}
+	conn, memMB := st.qmp, st.memMB
+	d.mu.Unlock()
+
 	if targetMiB < 0 {
 		targetMiB = 0
 	}
@@ -173,11 +196,11 @@ func (d *Driver) SetBalloonTarget(ctx context.Context, name string, targetMiB in
 	// passed, instead of the near-total inflation this clamp promises.
 	// host.Manager never gets here (workingSetFloor keeps its target below
 	// MemMB), which is exactly why the path has to behave sanely unattended.
-	if targetMiB >= st.memMB {
-		targetMiB = st.memMB - 1
+	if targetMiB >= memMB {
+		targetMiB = memMB - 1
 	}
-	visibleMiB := st.memMB - targetMiB
-	return st.qmp.SetBalloonBytes(ctx, uint64(visibleMiB)<<20)
+	visibleMiB := memMB - targetMiB
+	return conn.SetBalloonBytes(ctx, uint64(visibleMiB)<<20)
 }
 
 // BalloonStats reports the guest's current memory picture. Implements
@@ -220,32 +243,35 @@ func (d *Driver) SetBalloonTarget(ctx context.Context, name string, targetMiB in
 // guest-stats-polling-interval is a QOM property and not part of
 // virtio-balloon's migrated device state — so the blind window is ~1s from the
 // start of a boot that takes 2.3s to reach SSH, and ~1s after a resume. This
-// method deliberately does not wait it out: it holds the driver-wide mutex, and
-// sleeping in here would serialize every Create on the host behind a guest that
-// may never answer. On a restore that re-issue is allowed to fail — losing a
+// method deliberately does not wait it out: sleeping here would stall a fleet
+// poll behind a guest that may never answer. On a restore that re-issue is
+// allowed to fail — losing a
 // guest's restored RAM over a stats property is the worse trade — and st.statsErr
 // is how that arrives here as the same "no sample" error rather than as a
 // pre-pause reading with no way to tell.
 func (d *Driver) BalloonStats(ctx context.Context, name string) (vmm.BalloonStats, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	st, ok := d.vms[name]
 	if !ok || st.cmd == nil || st.qmp == nil {
+		d.mu.Unlock()
 		return vmm.BalloonStats{}, fmt.Errorf("vm %q not running", name)
 	}
+	conn, memMB, statsErr := st.qmp, st.memMB, st.statsErr
+	d.mu.Unlock()
+
 	// A restore whose guest-stats property would not go back on. qom-get still
 	// answers — with the sample the guest pushed before it was paused, complete
 	// with a plausible last-update — so the only way not to serve stale numbers
 	// as fresh ones is to remember that boot could not re-arm the refresh.
-	if st.statsErr != nil {
-		return vmm.BalloonStats{}, fmt.Errorf("vm %q balloon stats: %w (%v)", name, errBalloonNoSample, st.statsErr)
+	if statsErr != nil {
+		return vmm.BalloonStats{}, fmt.Errorf("vm %q balloon stats: %w (%v)", name, errBalloonNoSample, statsErr)
 	}
 
-	actualBytes, err := st.qmp.BalloonActualBytes(ctx)
+	actualBytes, err := conn.BalloonActualBytes(ctx)
 	if err != nil {
 		return vmm.BalloonStats{}, fmt.Errorf("vm %q balloon: %w", name, err)
 	}
-	free, available, err := st.qmp.GuestStats(ctx)
+	free, available, err := conn.GuestStats(ctx)
 	if err != nil {
 		// No sample, or a sample of QEMU's 0xFFFFFFFFFFFFFFFF "unset"
 		// sentinels. Fail rather than report zeros; see above.
@@ -258,12 +284,12 @@ func (d *Driver) BalloonStats(ctx context.Context, name string) (vmm.BalloonStat
 	// short would, under truncation, report 1 MiB held forever, and both the
 	// parity suite's deflate assertion and the reaper's arithmetic want the
 	// honest 0.
-	actualMiB := st.memMB - int64((actualBytes+(1<<19))>>20)
+	actualMiB := memMB - int64((actualBytes+(1<<19))>>20)
 	if actualMiB < 0 {
 		actualMiB = 0
 	}
-	if actualMiB > st.memMB {
-		actualMiB = st.memMB
+	if actualMiB > memMB {
+		actualMiB = memMB
 	}
 
 	return vmm.BalloonStats{

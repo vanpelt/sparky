@@ -234,3 +234,34 @@ type Ballooner interface {
 	// BalloonStats reports the guest's current memory use, when available.
 	BalloonStats(ctx context.Context, name string) (BalloonStats, error)
 }
+
+// FullDriver is every capability this package defines: the required Driver plus
+// all ten optional interfaces.
+//
+// Nothing accepts a FullDriver as a parameter, and nothing should. host.Manager
+// reaches each capability by type assertion on purpose, so a driver is free to
+// implement a subset and the manager degrades around what is missing. This
+// interface exists for the opposite case — a driver that means to offer all of
+// them — so it can say so in one line:
+//
+//	var _ vmm.FullDriver = (*Driver)(nil)
+//
+// The point is what happens when an eleventh capability is added below. Because
+// every caller reaches these by assertion, a driver that quietly stops
+// satisfying one degrades the fleet with no error anywhere: no test fails, no
+// log line appears, the manager just takes the other branch forever. One line
+// per driver turns that into a build failure in every driver at once, which is
+// the only moment anybody is looking.
+type FullDriver interface {
+	Driver
+	Archivable
+	DiskReporter
+	TemplateReporter
+	RootfsPresencer
+	Renamer
+	Rebooter
+	CPUStatser
+	NetStatser
+	DiskResizer
+	Ballooner
+}
