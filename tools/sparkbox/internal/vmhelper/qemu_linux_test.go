@@ -15,30 +15,62 @@ import (
 )
 
 // qemuTestServer builds a QEMU-backed server without newServer's device and
-// binary probes, so the argv contract is checkable on any Linux host.
+// binary probes, so the argv contract is checkable on any Linux host. It does
+// not open a state directory: everything that reads one is on ownableServer.
 func qemuTestServer(t *testing.T) *server {
 	t.Helper()
-	stateDir := t.TempDir()
-	fd, err := unix.Open(stateDir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { unix.Close(fd) }) //nolint:errcheck
 	return &server{
 		opts: ServerOptions{
 			Backend:       BackendQEMU,
 			QemuBin:       "/usr/bin/qemu-system-x86_64",
 			MachineType:   "pc-q35-8.2,sata=off,vmport=off",
 			KernelPath:    "/srv/assets/vmlinux",
-			VMStateDir:    stateDir,
 			ChrootBase:    "/srv/hot/jailer",
 			JailerUIDBase: 100000,
 			ControllerGID: 65532,
 		},
 		network: guestnet.MustParse("172.30.0.0/20"),
 		active:  map[int]activeVM{},
-		stateFD: fd,
+		stateFD: -1,
 	}
+}
+
+// ownableServer is the variant for the tests that actually create files.
+//
+// In production this helper is root and chowns its outputs to a per-slot uid
+// nobody else has. A test process usually is not root, and fchown to another
+// uid is EPERM — so when it is not, the uid base is chosen to make
+// jailUID(slot) this process's OWN uid. The fchown still happens and is still
+// checked; it is simply one the kernel permits. Under root (a container build)
+// the production base is used unchanged.
+func ownableServer(t *testing.T, slot int) *server {
+	t.Helper()
+	s := qemuTestServer(t)
+	stateDir := t.TempDir()
+	fd, err := unix.Open(stateDir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { unix.Close(fd) }) //nolint:errcheck
+	if uid := os.Getuid(); uid != 0 {
+		if uid <= slot {
+			t.Skipf("running as uid %d, which cannot host slot %d's jail uid", uid, slot)
+		}
+		s.opts.JailerUIDBase = uid - slot
+		s.opts.ControllerGID = os.Getgid()
+	}
+	s.opts.VMStateDir = stateDir
+	s.stateFD = fd
+	return s
+}
+
+func mustMkVMDir(t *testing.T, s *server, name string) string {
+	t.Helper()
+	dir := filepath.Join(s.opts.VMStateDir, s.vmRel(name))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func qemuTestRequest() Request {
@@ -98,38 +130,47 @@ func TestFirecrackerServerLayoutIsUnchanged(t *testing.T) {
 func TestQemuCommandConfinesTheChild(t *testing.T) {
 	s := qemuTestServer(t)
 	req := qemuTestRequest()
-	if err := os.MkdirAll(filepath.Join(s.opts.VMStateDir, s.vmRel(req.Name)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd, logFile, err := s.qemuCommand(req)
+	args, err := s.qemuArgs(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close() //nolint:errcheck
-
 	for _, want := range [][2]string{
 		{"-run-with", "chroot=/srv/hot/jailer/qemu/sparkbox-3/root"},
 		{"-runas", "100003:100003"},
 		{"-sandbox", "on"},
 	} {
-		i := slices.Index(cmd.Args, want[0])
-		if i < 0 || i+1 >= len(cmd.Args) || cmd.Args[i+1] != want[1] {
-			t.Errorf("argv is missing %s %s: %v", want[0], want[1], cmd.Args)
+		i := slices.Index(args, want[0])
+		if i < 0 || i+1 >= len(args) || args[i+1] != want[1] {
+			t.Errorf("argv is missing %s %s: %v", want[0], want[1], args)
 		}
 	}
-	// Not SysProcAttr. Chroot here would take effect before QEMU has opened
-	// /dev/kvm or the tap, and a Credential would take away the privilege it
-	// needs to open them at all.
+}
+
+// The process attributes matter as much as the argv. Not SysProcAttr: chroot(2)
+// there would take effect before QEMU has opened /dev/kvm or the tap, and a
+// Credential would take away the privilege it needs to open them at all. And
+// the working directory is what makes the relative paths resolve to the same
+// files before the chroot as after it.
+func TestQemuCommandRunsInTheJailWithoutProcessAttributes(t *testing.T) {
+	s := ownableServer(t, 3)
+	req := qemuTestRequest()
+	mustMkVMDir(t, s, req.Name)
+	cmd, logFile, err := s.qemuCommand(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close() //nolint:errcheck
 	if cmd.SysProcAttr != nil {
 		t.Errorf("the QEMU child was given process attributes: %+v", cmd.SysProcAttr)
 	}
-	// The working directory is what makes the relative paths below resolve to
-	// the same files before the chroot as after it.
 	if got, want := cmd.Dir, s.jailRoot(req.Slot); got != want {
 		t.Errorf("cmd.Dir = %q, want %q", got, want)
 	}
 	if len(cmd.Env) != 0 {
 		t.Errorf("the QEMU child inherited environment: %v", cmd.Env)
+	}
+	if cmd.Stdout != logFile || cmd.Stderr != logFile {
+		t.Error("the QEMU child's output does not go to the per-VM log")
 	}
 }
 
@@ -143,19 +184,14 @@ func TestQemuCommandNamesEveryPerVMPathRelatively(t *testing.T) {
 	s := qemuTestServer(t)
 	req := qemuTestRequest()
 	req.Resume = true
-	if err := os.MkdirAll(filepath.Join(s.opts.VMStateDir, s.vmRel(req.Name)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd, logFile, err := s.qemuCommand(req)
+	args, err := s.qemuArgs(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close() //nolint:errcheck
-
 	// The chroot destination is the one absolute path, and it must be: it is
 	// resolved by chroot(2) itself, from outside the jail.
-	for i, arg := range cmd.Args {
-		if i == 0 || strings.HasPrefix(arg, "chroot=") {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "chroot=") {
 			continue
 		}
 		for _, prefix := range []string{"file=", "file:", "unix:"} {
@@ -169,8 +205,8 @@ func TestQemuCommandNamesEveryPerVMPathRelatively(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"vmlinux", "file=rootfs.ext4,format=raw,if=none,id=rootfs"} {
-		if !slices.Contains(cmd.Args, want) {
-			t.Errorf("argv is missing %q: %v", want, cmd.Args)
+		if !slices.Contains(args, want) {
+			t.Errorf("argv is missing %q: %v", want, args)
 		}
 	}
 }
@@ -181,28 +217,22 @@ func TestQemuCommandNamesEveryPerVMPathRelatively(t *testing.T) {
 func TestQemuCommandRestoreAddsOnlyIncoming(t *testing.T) {
 	s := qemuTestServer(t)
 	req := qemuTestRequest()
-	if err := os.MkdirAll(filepath.Join(s.opts.VMStateDir, s.vmRel(req.Name)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cold, coldLog, err := s.qemuCommand(req)
+	cold, err := s.qemuArgs(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer coldLog.Close() //nolint:errcheck
 	req.Resume = true
-	restore, restoreLog, err := s.qemuCommand(req)
+	restore, err := s.qemuArgs(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restoreLog.Close() //nolint:errcheck
-
-	if got, want := len(restore.Args), len(cold.Args)+2; got != want {
-		t.Fatalf("restore argv has %d elements, want %d: %v", got, want, restore.Args)
+	if got, want := len(restore), len(cold)+2; got != want {
+		t.Fatalf("restore argv has %d elements, want %d: %v", got, want, restore)
 	}
-	if !slices.Equal(restore.Args[:len(cold.Args)], cold.Args) {
-		t.Errorf("restore argv diverges from the boot argv:\n cold %v\n warm %v", cold.Args, restore.Args)
+	if !slices.Equal(restore[:len(cold)], cold) {
+		t.Errorf("restore argv diverges from the boot argv:\n cold %v\n warm %v", cold, restore)
 	}
-	if got := restore.Args[len(cold.Args):]; !slices.Equal(got, []string{"-incoming", "file:state.migrate"}) {
+	if got := restore[len(cold):]; !slices.Equal(got, []string{"-incoming", "file:state.migrate"}) {
 		t.Errorf("restore appends %v", got)
 	}
 }
@@ -213,20 +243,16 @@ func TestQemuCommandRestoreAddsOnlyIncoming(t *testing.T) {
 func TestQemuCommandUsesTheSharedSlotDerivations(t *testing.T) {
 	s := qemuTestServer(t)
 	req := qemuTestRequest()
-	if err := os.MkdirAll(filepath.Join(s.opts.VMStateDir, s.vmRel(req.Name)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd, logFile, err := s.qemuCommand(req)
+	args, err := s.qemuArgs(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close() //nolint:errcheck
-	joined := strings.Join(cmd.Args, " ")
+	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "ifname="+tapName(req.Slot)+",") {
-		t.Errorf("argv does not use the helper's tap name %q: %v", tapName(req.Slot), cmd.Args)
+		t.Errorf("argv does not use the helper's tap name %q: %v", tapName(req.Slot), args)
 	}
 	if !strings.Contains(joined, "mac="+guestnet.MACFor(req.Slot)+",") {
-		t.Errorf("argv does not use guestnet.MACFor(%d) = %q: %v", req.Slot, guestnet.MACFor(req.Slot), cmd.Args)
+		t.Errorf("argv does not use guestnet.MACFor(%d) = %q: %v", req.Slot, guestnet.MACFor(req.Slot), args)
 	}
 }
 
@@ -235,20 +261,16 @@ func TestQemuCommandUsesTheSharedSlotDerivations(t *testing.T) {
 func TestQemuCommandPassesTheCmdlineAsOneToken(t *testing.T) {
 	s := qemuTestServer(t)
 	req := qemuTestRequest()
-	if err := os.MkdirAll(filepath.Join(s.opts.VMStateDir, s.vmRel(req.Name)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd, logFile, err := s.qemuCommand(req)
+	args, err := s.qemuArgs(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close() //nolint:errcheck
-	i := slices.Index(cmd.Args, "-append")
-	if i < 0 || i+1 >= len(cmd.Args) {
-		t.Fatalf("no -append in %v", cmd.Args)
+	i := slices.Index(args, "-append")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatalf("no -append in %v", args)
 	}
-	if cmd.Args[i+1] != req.Cmdline {
-		t.Errorf("-append = %q, want %q", cmd.Args[i+1], req.Cmdline)
+	if args[i+1] != req.Cmdline {
+		t.Errorf("-append = %q, want %q", args[i+1], req.Cmdline)
 	}
 }
 
@@ -256,12 +278,9 @@ func TestQemuCommandPassesTheCmdlineAsOneToken(t *testing.T) {
 // VM directory, NOT in the jail: cleanupSlot removes the jail at every VMM
 // exit, which is exactly when a failed boot's only diagnostic is wanted.
 func TestQemuVMMLogSurvivesTheJail(t *testing.T) {
-	s := qemuTestServer(t)
+	s := ownableServer(t, 3)
 	req := qemuTestRequest()
-	vmDir := filepath.Join(s.opts.VMStateDir, s.vmRel(req.Name))
-	if err := os.MkdirAll(vmDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	vmDir := mustMkVMDir(t, s, req.Name)
 	logFile, err := s.openVMMLog(req)
 	if err != nil {
 		t.Fatal(err)
