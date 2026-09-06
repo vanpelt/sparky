@@ -342,15 +342,15 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	// them: -smp and -m come from the command line on both paths, where
 	// Firecracker recovers them from the snapshot.
 	st := &vmState{idx: idx, vcpus: cfg.VCPUs, memMB: cfg.MemMB}
-	if err := d.net.CreateTap(ctx, st.idx); err != nil {
+	if err := d.createTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
 		// this slot; only recording it in d.vms reserves it, so a failed create
 		// leaks no idx.
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, st, rootfs, false, fresh); err != nil {
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	d.vms[cfg.Name] = st
@@ -788,7 +788,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 		// cold-boots from the preserved rootfs. The memory is lost either way;
 		// the disk is intact.
 		err = fmt.Errorf("install memory snapshot for %q: %w", name, err)
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		if rmErr := d.removeSnapshotFiles(name); rmErr != nil {
 			err = fmt.Errorf("%w (and its stale snapshot could not be removed: %v)", err, rmErr)
 		}
@@ -798,7 +798,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
 	// Resume recreates it via createTap. Leaving it wedges Resume with
 	// "tuntap add: Device or resource busy" on the still-present device.
-	d.net.DeleteTap(st.idx)
+	d.deleteTap(st.idx)
 	st.paused = true
 	return nil
 }
@@ -860,14 +860,14 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 	if _, err := os.Stat(snapshot); err != nil {
 		return nil, fmt.Errorf("no snapshot for %q: %w", name, err)
 	}
-	if err := d.net.CreateTap(ctx, st.idx); err != nil {
+	if err := d.createTap(ctx, st.idx); err != nil {
 		// CreateTap runs four ip(8) commands and returns on the first failure,
 		// so it can leave the device behind — `ip tuntap add` succeeding and
 		// `ip addr add` failing is the realistic shape. Without this, every
 		// later Resume of this sandbox fails at "Device or resource busy" until
 		// the process restarts and the startup sweep clears it, and the retry
 		// looks like a snapshot problem. Create guards the same case.
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	// The restore argv is the cold-boot argv plus -incoming, built by the same
@@ -880,7 +880,7 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 		// Unlike a failed cold boot the tap here was created by us moments ago,
 		// and leaving it behind makes the next Resume fail with "Device or
 		// resource busy" — a retry would then look like a snapshot problem.
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	return d.instance(name, st), nil
@@ -914,7 +914,7 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 			return fmt.Errorf("stop vmm for %q: %w", name, err)
 		}
 	}
-	d.net.DeleteTap(st.idx)
+	d.deleteTap(st.idx)
 	// Drop the record last: it releases the slot (and with it the tap name, the
 	// addresses and the MAC) back to freeSlot, which is only safe once the tap
 	// is actually gone.
