@@ -1,0 +1,49 @@
+# Headscale configuration for Fly.io.
+# Persistent volume at /data/headscale stores SQLite + keys.
+# Fly handles TLS termination — server_url uses https.
+
+server_url: "https://hiveqa-headscale.fly.dev"  # overridden by HEADSCALE_SERVER_URL env
+listen_addr: "0.0.0.0:8080"
+metrics_listen_addr: "0.0.0.0:9090"
+
+grpc_listen_addr: "0.0.0.0:50443"
+grpc_allow_insecure: true
+
+noise:
+  private_key_path: /data/headscale/noise_private.key
+
+prefixes:
+  v4: "100.64.0.0/10"
+  v6: "fd7a:115c:a1e0::/48"
+  allocation: sequential
+
+database:
+  type: sqlite
+  sqlite:
+    path: /data/headscale/db.sqlite
+    write_ahead_log: true
+
+# DERP — embedded server with Tailscale public relays as fallback.
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "fly"
+    region_name: "fly embedded"
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /data/headscale/derp_private.key
+    automatically_add_embedded_derp_region: true
+  urls:
+    - "https://controlplane.tailscale.com/derpmap/default"
+  auto_update_enabled: true
+  update_frequency: 24h
+
+dns:
+  magic_dns: true
+  base_domain: "hiveqa.internal"
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+
+ephemeral_node_inactivity_timeout: 5m

@@ -1,0 +1,22 @@
+## Headscale on Fly.io.
+## Persistent volume mounted at /data/headscale for SQLite + keys.
+## Fly handles TLS termination automatically.
+
+FROM alpine:3.21 AS fetch-headscale
+ARG HEADSCALE_VERSION=0.28.0
+ARG TARGETARCH
+RUN apk add --no-cache curl \
+ && curl -fsSL "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_${TARGETARCH}" \
+    -o /headscale \
+ && chmod +x /headscale
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tini
+COPY --from=fetch-headscale /headscale /usr/local/bin/headscale
+COPY headscale.yaml /etc/headscale/config.yaml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8080 3478/udp 9090
+
+ENTRYPOINT ["tini", "--", "/entrypoint.sh"]
