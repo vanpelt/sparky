@@ -406,7 +406,7 @@ func TestQemuArgsWiresDriverStateIntoTheSpec(t *testing.T) {
 	if !strings.Contains(argsValueAfter(cold, "-drive"), "file="+rootfs+",") {
 		t.Errorf("-drive must name the VM's own rootfs; got %s", argsValueAfter(cold, "-drive"))
 	}
-	if !strings.Contains(argsValueAfter(cold, "-netdev"), "ifname="+tapName(3)+",") {
+	if !strings.Contains(argsValueAfter(cold, "-netdev"), "ifname="+d.tapName(3)+",") {
 		t.Errorf("-netdev must name this slot's tap; got %s", argsValueAfter(cold, "-netdev"))
 	}
 	if !strings.Contains(argsValueAfter(cold, "-append"), " sparkbox_fresh=1") {

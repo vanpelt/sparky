@@ -26,6 +26,7 @@
 package qemu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -35,9 +36,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
 )
 
 // ---------------------------------------------------------------------------
@@ -465,6 +469,20 @@ type Options struct {
 	// HelperControllerGID is the group the helper shares VM files and the QMP
 	// socket with, so this unprivileged process can reach them.
 	HelperControllerGID int
+	// JailerChrootBase is the root-owned directory beneath which the helper
+	// builds its per-slot jails, and it must be the helper's --chroot-base.
+	//
+	// This driver never writes there — it cannot, the jail root is 0710 owned by
+	// a uid this process does not have — and needs it for exactly one thing:
+	// deriving the path of the QMP socket the helper published, so it can dial
+	// the monitor of a VMM it did not start. Empty defaults to
+	// <VMStateDir>/jailer, which is what both entrypoints pass.
+	//
+	// The jail's other path component is a FIXED "qemu", not the emulator's
+	// basename the way Firecracker's is. Deriving it from a binary name would
+	// mean this container needs QEMU's path just to build a string, and would
+	// break silently the day the two containers disagreed about it.
+	JailerChrootBase string
 	// DisableHostRootfsMounts skips per-create key injection and the template
 	// sanitize pass — the two runtime paths that otherwise loop-mount a
 	// guest-authored ext4 in the management process. Templates must then
@@ -538,12 +556,18 @@ const (
 	// guard fc.go:314 already has — which is what makes it a non-issue there,
 	// because the helper path does not sweep at all.
 	tapPrefix = "sbqtap"
+	// helperTapPrefix is the privileged helper's name for the same device, and
+	// it is the firecracker one because the helper is shared: internal/netpush,
+	// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
+	// match "sbtap", and under the helper the tap is created there. The two
+	// sweeps still cannot collide — this driver does not sweep at all when the
+	// helper is configured.
+	helperTapPrefix = "sbtap"
 
-	// balloonDeviceID must appear as `id=` on the -device line: the QOM path
-	// guest stats are read from is derived from it, and an unnamed device lands
-	// under /machine/peripheral-anon/device[N] with an index that shifts
-	// whenever another device is added.
-	balloonDeviceID = "balloon0"
+	// balloonDeviceID is the argv's, from the package that builds the argv:
+	// the QOM path guest stats are read from is derived from `id=`, so the name
+	// this driver polls and the name the command line sets must be one value.
+	balloonDeviceID = qemuargs.BalloonDeviceID
 	balloonQOMPath  = "/machine/peripheral/" + balloonDeviceID
 	// balloonStatsIntervalSecs is how often the guest refreshes balloon stats.
 	// It is a QOM property set at runtime, not migrated device state, so boot
@@ -632,36 +656,56 @@ func New(opts Options) (*Driver, error) {
 		if opts.QemuBin == "" {
 			opts.QemuBin = "qemu-system-aarch64"
 		}
-		if opts.MachineType == "" {
-			opts.MachineType = "virt-8.2"
-		}
 	case "amd64":
 		if opts.QemuBin == "" {
 			opts.QemuBin = "qemu-system-x86_64"
 		}
-		if opts.MachineType == "" {
-			// This used to refuse to guess, because no x86_64 run had happened.
-			// One has: the parity suite is 19/19 on the production CKS node
-			// against pc-q35-8.2, which is what hack/parity/run-on-cks.sh
-			// resolves as the newest versioned q35 the packaged QEMU 8.2 knows.
-			//
-			// sata=off and vmport=off are measured hardening, not taste — see
-			// the -nodefaults comment in args.go for the `info qtree` device
-			// lists. They belong on the machine type because they are machine
-			// properties; an operator who overrides MachineType gets exactly
-			// what they asked for and loses them, which is why the override is
-			// documented as the expert path it is.
-			opts.MachineType = "pc-q35-8.2,sata=off,vmport=off"
-		}
 	default:
-		return nil, fmt.Errorf("qemu driver has no known machine type for GOARCH %q", runtime.GOARCH)
+		return nil, fmt.Errorf("qemu driver has no known emulator for GOARCH %q", runtime.GOARCH)
 	}
-	resolved, err := exec.LookPath(opts.QemuBin)
-	if err != nil {
-		return nil, fmt.Errorf("qemu binary: %w", err)
+	if opts.MachineType == "" {
+		// From qemuargs, not from here, because the privileged helper needs the
+		// same answer and a second pinned copy would drift — first visibly on a
+		// resume that cannot load its stream.
+		machineType, err := qemuargs.DefaultMachineType()
+		if err != nil {
+			return nil, fmt.Errorf("qemu driver: %w", err)
+		}
+		opts.MachineType = machineType
 	}
-	if opts.QemuBin, err = filepath.Abs(resolved); err != nil {
-		return nil, fmt.Errorf("qemu binary: %w", err)
+	// The emulator is resolved once, here, so a later PATH change cannot swap
+	// the binary under a running fleet — but ONLY on the direct path. Under the
+	// helper this process never execs QEMU; the helper holds the binary, and
+	// requiring the controller container to carry one too would make the
+	// hardened deployment fail on something it does not use.
+	if opts.PrivilegedHelperSocket == "" {
+		resolved, err := exec.LookPath(opts.QemuBin)
+		if err != nil {
+			return nil, fmt.Errorf("qemu binary: %w", err)
+		}
+		if opts.QemuBin, err = filepath.Abs(resolved); err != nil {
+			return nil, fmt.Errorf("qemu binary: %w", err)
+		}
+	} else {
+		if !filepath.IsAbs(opts.PrivilegedHelperSocket) {
+			return nil, errors.New("privileged helper socket must be an absolute path")
+		}
+		if opts.PrivilegedHelperBin == "" {
+			opts.PrivilegedHelperBin = "sparkbox-vmm-helper"
+		}
+		resolved, err := exec.LookPath(opts.PrivilegedHelperBin)
+		if err != nil {
+			return nil, fmt.Errorf("privileged helper client: %w", err)
+		}
+		if opts.PrivilegedHelperBin, err = filepath.Abs(resolved); err != nil {
+			return nil, fmt.Errorf("privileged helper client: %w", err)
+		}
+		if opts.HelperControllerGID < 1 {
+			return nil, errors.New("privileged helper requires a controller GID")
+		}
+		if opts.JailerChrootBase == "" {
+			opts.JailerChrootBase = filepath.Join(opts.VMStateDir, "jailer")
+		}
 	}
 
 	guestNetwork, err := guestnet.Parse(opts.Subnet)
@@ -754,6 +798,24 @@ func New(opts Options) (*Driver, error) {
 	// NET_ADMIN is an accident of the deployment, not a design.
 	if opts.PrivilegedHelperSocket == "" {
 		sweepStaleTaps()
+	}
+	if opts.PrivilegedHelperSocket != "" {
+		// Fail at construction rather than at the first Create. The helper is a
+		// separate container of the same Pod, so "it is not there yet" is a
+		// normal startup ordering problem and an operator needs to see it as
+		// one — not as a sandbox that cannot be created for no stated reason.
+		//
+		// This also catches the mismatch that matters most: a helper serving
+		// --backend firecracker answers this ping perfectly well, and the
+		// launch it later refuses is the first sign. There is nothing in the
+		// protocol to ask it with — Backend is deliberately server-side only —
+		// so the entrypoint deriving both from one SPARKBOX_DRIVER is what
+		// keeps them in step.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vmhelper.Ping(ctx, opts.PrivilegedHelperSocket); err != nil {
+			return nil, fmt.Errorf("privileged helper: %w", err)
+		}
 	}
 	return d, nil
 }

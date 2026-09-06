@@ -825,10 +825,13 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 			"--api-sock", jailedSocketName,
 		)
 	} else if d.opts.PrivilegedHelperSocket != "" {
-		cmd = vmhelper.LaunchCommand(
-			d.opts.PrivilegedHelperBin, d.opts.PrivilegedHelperSocket,
-			name, st.idx, snapshot != nil,
-		)
+		// No machine fields: Firecracker takes an empty argv and is configured
+		// over its own REST socket afterwards, which is exactly why the helper
+		// validates them by ITS backend rather than by protocol version.
+		cmd = vmhelper.LaunchCommand(d.opts.PrivilegedHelperBin, vmhelper.Launch{
+			Socket: d.opts.PrivilegedHelperSocket,
+			Name:   name, Slot: st.idx, Resume: snapshot != nil,
+		})
 		cmd.Env = []string{}
 	} else if d.opts.ChrootJailer {
 		cmd, err = d.chrootJailerCommand(vmCtx, st.idx)

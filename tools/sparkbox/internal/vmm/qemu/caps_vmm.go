@@ -107,7 +107,7 @@ func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err er
 	if !ok || st.cmd == nil {
 		return 0, 0, fmt.Errorf("vm %q not running", name)
 	}
-	tap := tapName(st.idx)
+	tap := d.tapName(st.idx)
 	// Guest rx is the tap's tx and vice versa.
 	if rx, err = readTapCounter(tap, "tx_bytes"); err != nil {
 		return 0, 0, err
