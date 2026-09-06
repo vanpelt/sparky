@@ -93,7 +93,13 @@ type EnvironmentInfo struct {
 	// --hivemind-api, and while an agent build is still in flight — the row
 	// learns it when the build reports, so a surface that wants to link a build
 	// IN PROGRESS reads the builder sandbox's own live session instead.
-	BuildSession        string                   `json:"build_session,omitempty"`
+	BuildSession string `json:"build_session,omitempty"`
+	// HasBuildLog and BuildLogBytes are presence-and-size for the most recent
+	// build's own output, SetupScript's reason applied to a second page of
+	// text: a listing that inlined it would be unreadable, and a caller that
+	// wants the text wants only the text — read it with EnvBuildLog.
+	HasBuildLog         bool                     `json:"has_build_log,omitempty"`
+	BuildLogBytes       int                      `json:"build_log_bytes,omitempty"`
 	BuildDenials        []envs.BuildDeniedDomain `json:"build_denials,omitempty"`
 	BuildDenialOverflow uint64                   `json:"build_denial_overflow,omitempty"`
 	BuiltAt             *time.Time               `json:"built_at,omitempty"`
@@ -689,6 +695,13 @@ func (o *Ops) envForVar(op string, c Caller, env string) (string, error) {
 // way MaxTagsPerSandbox is one number both doors read.
 const MaxSetupScript = 64 << 10
 
+// MaxSetupLog caps what this package will store as a build's own log tail. It
+// mirrors nodelink.MaxSelfSetupLogBytes — the wire already refuses a guest's
+// report over that many bytes before ctlops ever sees it — and is re-checked
+// here for the reason recordReportedScript re-checks MaxSetupScript: this
+// package does not trust that every report reaching it crossed that door.
+const MaxSetupLog = 8 << 10
+
 // EnvScript returns the environment's stored setup script and where it came
 // from ("repo", "agent", "manual", or "" when nothing ever looked).
 //
@@ -709,6 +722,30 @@ func (o *Ops) EnvScript(c Caller, name string) (script, from string, err error) 
 		return "", "", envStoreError(op, name, err)
 	}
 	return e.SetupScript, e.SetupFrom, nil
+}
+
+// EnvBuildLog returns the guest-authored tail of the most recent build's own
+// output — the setup script's stdout/stderr in script mode, the runner's in
+// agent mode — and "" when no build has reported one, EnvScript's reason for
+// being a verb rather than a field on EnvironmentInfo applied to the log.
+//
+// Read-only, deliberately: nothing a caller types ever becomes this column,
+// only a guest's report does (recordBuildLog), so there is no SetEnvBuildLog
+// the way SetEnvScript exists next to EnvScript.
+func (o *Ops) EnvBuildLog(c Caller, name string) (string, error) {
+	const op = "env.build_log"
+	if o.envs == nil {
+		return "", Disabled(op, envDisabledSentence)
+	}
+	name, err := envName(op, name)
+	if err != nil {
+		return "", err
+	}
+	e, err := o.envs.Get(c.Handle, name)
+	if err != nil {
+		return "", envStoreError(op, name, err)
+	}
+	return e.BuildLog, nil
 }
 
 // SetEnvScript records a setup script and where it came from.
@@ -1028,6 +1065,8 @@ func (c envComposition) info(e envs.Environment) EnvironmentInfo {
 		BuildBox:            e.BuildBox,
 		BuildError:          e.BuildError,
 		BuildSession:        e.BuildSession,
+		HasBuildLog:         e.BuildLog != "",
+		BuildLogBytes:       len(e.BuildLog),
 		BuildDenials:        append([]envs.BuildDeniedDomain(nil), e.BuildDenials...),
 		BuildDenialOverflow: e.BuildDenialOverflow,
 		BuiltAt:             e.BuiltAt,

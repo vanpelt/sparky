@@ -55,6 +55,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
@@ -1590,6 +1591,13 @@ func (o *Ops) completeBuild(ctx context.Context, e envs.Environment, box string,
 	// to write a file that was already sitting in the checkout.
 	o.recordReportedScript(e, r)
 
+	// AND WHAT THE RUN ITSELF PRINTED, recorded here for the same reason and
+	// with the same weight: on a script build there is no HiveMind transcript
+	// to fall back on, so this is the ONLY account of why a failed run failed
+	// that outlives the paused builder — and a person reading `env show` should
+	// not have to ssh in and find the same bytes by hand.
+	o.recordBuildLog(e, r)
+
 	// AND WHERE THE AGENT THAT WROTE IT CAN BE READ, recorded here for the same
 	// reason and with the same weight: it is the record of what happened, not a
 	// reward for succeeding. This is also the last moment it can be asked for —
@@ -1656,6 +1664,48 @@ func (o *Ops) recordReportedScript(e envs.Environment, r SetupReport) {
 	}
 	if err := o.envs.SetScript(e.Owner, e.Name, r.Script, from); err != nil {
 		o.log.Warn("could not record the setup script a builder reported",
+			"user", e.Owner, "env", e.Name, "err", err)
+	}
+}
+
+// recordBuildLog stores the guest-authored tail of the run's own output,
+// unconditionally — empty included.
+//
+// UNCONDITIONALLY, unlike recordReportedScript's script: an empty script means
+// "unchanged, keep what is stored", because a script is a durable artifact a
+// later build re-runs, but a log is not durable in that sense — it is what
+// THIS run printed, full stop. Skipping the write on an empty report would
+// leave a builder reused after a failure showing that failure's output next to
+// a row that says the rebuild succeeded, which is a worse answer than "quiet
+// run, no log" would have been.
+//
+// The size re-check is defence in depth, not the first door: the metadata
+// handler and the node-link relay both already cap a guest's report at
+// nodelink.MaxSelfSetupLogBytes before it reaches here. It is checked again for
+// the reason recordReportedScript checks MaxSetupScript again — this package
+// does not trust that every report reaching it came through those doors — and
+// it TRUNCATES rather than skips, because the log is diagnostic text rather
+// than an artifact a later build runs: half of it is still useful, where half
+// a script is not.
+//
+// The truncation keeps the END and lands on a rune boundary, for
+// metadata.selfSetupResult's own reasons (envsetup.go:390-413): a tail is
+// diagnostic output, so the bytes nearest the failure are the useful ones, and
+// cutting by byte count can otherwise land inside a multi-byte rune and leave
+// invalid UTF-8 at the new head — which a caller as far away as the console's
+// JSON encoder would be the one to discover.
+func (o *Ops) recordBuildLog(e envs.Environment, r SetupReport) {
+	log := r.Log
+	if len(log) > MaxSetupLog {
+		o.log.Warn("a builder reported a setup log too large to store in full; truncating",
+			"user", e.Owner, "env", e.Name, "bytes", len(log), "max", MaxSetupLog)
+		log = log[len(log)-MaxSetupLog:]
+		for len(log) > 0 && !utf8.RuneStart(log[0]) {
+			log = log[1:]
+		}
+	}
+	if err := o.envs.SetBuildLog(e.Owner, e.Name, log); err != nil {
+		o.log.Warn("could not record a build's setup log",
 			"user", e.Owner, "env", e.Name, "err", err)
 	}
 }

@@ -24,12 +24,13 @@ import (
 // here — it is the Caller, and a handler that built one from the wrong place
 // would be a cross-owner read that no store could catch.
 type fakeEnvOps struct {
-	mu      sync.Mutex
-	callers []string
-	calls   []string
-	rows    map[string]ctlops.EnvironmentInfo
-	scripts map[string]string
-	origins map[string]string
+	mu        sync.Mutex
+	callers   []string
+	calls     []string
+	rows      map[string]ctlops.EnvironmentInfo
+	scripts   map[string]string
+	origins   map[string]string
+	buildLogs map[string]string
 	// lastArgs is what PutEnvironment was handed most recently, and putErr is
 	// what it fails with. Both exist for the adoption seam: the panel's whole
 	// confirm-and-retry rests on a flag arriving and a code coming back.
@@ -39,9 +40,10 @@ type fakeEnvOps struct {
 
 func newFakeEnvOps() *fakeEnvOps {
 	return &fakeEnvOps{
-		rows:    map[string]ctlops.EnvironmentInfo{},
-		scripts: map[string]string{},
-		origins: map[string]string{},
+		rows:      map[string]ctlops.EnvironmentInfo{},
+		scripts:   map[string]string{},
+		origins:   map[string]string{},
+		buildLogs: map[string]string{},
 	}
 }
 
@@ -150,6 +152,14 @@ func (f *fakeEnvOps) SetEnvScript(c ctlops.Caller, name, script, from string) er
 	return nil
 }
 
+func (f *fakeEnvOps) EnvBuildLog(c ctlops.Caller, name string) (string, error) {
+	f.note(c, "log "+name)
+	if _, ok := f.rows[name]; !ok {
+		return "", ctlops.NotFound("env.build_log", "environment", name)
+	}
+	return f.buildLogs[name], nil
+}
+
 // AdoptRepoScript is the "Use <repo>'s" button. The fake records the call and
 // clears the drift verdict, because that is what the real one does — the row
 // and the repository now hold the same bytes.
@@ -210,6 +220,7 @@ func TestEnvironmentRoutesAreDisabledWithoutTheControlPlane(t *testing.T) {
 		{"DELETE", "/api/environments/web"},
 		{"GET", "/api/environments/web/script"},
 		{"PUT", "/api/environments/web/script"},
+		{"GET", "/api/environments/web/log"},
 		{"POST", "/api/environments/web/build"},
 		{"POST", "/api/environments/web/capture"},
 	} {
@@ -340,6 +351,34 @@ func TestAPastedScriptIsRecordedAsManual(t *testing.T) {
 	}
 	if !strings.Contains(got["script"], "pnpm install") || got["from"] != envs.SetupFromManual {
 		t.Errorf("read back %+v", got)
+	}
+}
+
+// The log route is read-only and reads back whatever the control plane holds
+// for the row — there is no PUT counterpart, unlike the script pair.
+func TestGetEnvBuildLogReadsBack(t *testing.T) {
+	tc := newTestConsole(t)
+	f := withEnvOps(t, tc)
+	f.rows["web"] = ctlops.EnvironmentInfo{Name: "web"}
+	f.buildLogs["web"] = "+ pnpm install\nadded 42 packages\n"
+
+	rec := tc.do(t, "GET", "/api/environments/web/log", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got["log"], "added 42 packages") {
+		t.Errorf("read back %+v", got)
+	}
+
+	// No environment: the same masked ErrNoSuchEnvironment answer as every
+	// other environment verb, alice's own row already present or not.
+	rec = tc.do(t, "GET", "/api/environments/nope/log", "alice", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
 	}
 }
 

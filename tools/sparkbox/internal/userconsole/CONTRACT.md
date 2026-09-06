@@ -49,6 +49,7 @@ find by reading the handler.
 | `GET /api/environments` | `listEnvironments` | **501** when there's no environment store on this host |
 | `PUT` \| `DELETE /api/environments/{name}` | `putEnvironment`, `deleteEnvironment` | |
 | `GET` \| `PUT /api/environments/{name}/script` | `getEnvScript`, `putEnvScript` | the setup script editor |
+| `GET /api/environments/{name}/log` | `getEnvBuildLog` | the most recent build's own output; read-only, no `PUT` counterpart |
 | `POST /api/environments/{name}/script/from-repo` | `adoptRepoScript` | |
 | `POST /api/environments/{name}/build` \| `/capture` | `buildEnvironment`, `captureEnvironment` | |
 | `GET /api/repos` | `listRepos` | **501** when repo attachments aren't enabled on this host |

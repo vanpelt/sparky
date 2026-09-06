@@ -358,6 +358,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.Handle("DELETE /api/environments/{name}", mutate(h.deleteEnvironment))
 	mux.Handle("GET /api/environments/{name}/script", require(h.getEnvScript))
 	mux.Handle("PUT /api/environments/{name}/script", mutate(h.putEnvScript))
+	mux.Handle("GET /api/environments/{name}/log", require(h.getEnvBuildLog))
 	mux.Handle("POST /api/environments/{name}/script/from-repo", mutate(h.adoptRepoScript))
 	mux.Handle("POST /api/environments/{name}/build", mutate(h.buildEnvironment))
 	mux.Handle("POST /api/environments/{name}/capture", mutate(h.captureEnvironment))

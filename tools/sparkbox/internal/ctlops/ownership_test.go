@@ -348,6 +348,11 @@ func TestEveryMethodIsClassified(t *testing.T) {
 		// both carry the owner in their WHERE clause, and a name belonging to
 		// somebody else comes back as ErrNoSuchEnvironment.
 		"EnvScript": true, "SetEnvScript": true,
+		// EnvBuildLog is the same pair's read-only cousin, scoped the same way
+		// through the same o.envs.Get(c.Handle, name) — there is no
+		// SetEnvBuildLog because nothing a caller types ever becomes this
+		// column, only a guest's report does (recordBuildLog).
+		"EnvBuildLog": true,
 		// AdoptRepoScript is the same pair's third member and is scoped the
 		// same way, with one extra step worth naming: it reads a file out of a
 		// REPOSITORY, so it could in principle reach something the environment

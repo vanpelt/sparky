@@ -54,6 +54,7 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"       ssh ctl@<gateway> env build <name>\r\n" +
 	"       ssh ctl@<gateway> env rebuild <name>\r\n" +
 	"       ssh ctl@<gateway> env capture <name>\r\n" +
+	"       ssh ctl@<gateway> env log <name>\r\n" +
 	"\r\n" +
 	"  flags: --repo <owner>/<name>  --secret <NAME>  --rule <name>  --var K=V\r\n" +
 	"         --description <text>          every one of them may be repeated\r\n" +
@@ -214,6 +215,14 @@ func (g *Gateway) controlEnv(s gssh.Session, c ctlops.Caller, args []string, log
 		}
 		g.envCapture(s, c, args[1], log)
 
+	case "log":
+		if len(args) < 2 {
+			fmt.Fprint(s.Stderr(), envUsage)
+			s.Exit(2) //nolint:errcheck
+			return
+		}
+		g.envBuildLog(s, c, args[1], log)
+
 	default:
 		fmt.Fprintf(s.Stderr(), "unknown env command %q\r\n%s", args[0], envUsage)
 		s.Exit(2) //nolint:errcheck
@@ -318,6 +327,13 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 	}
 	if e.BuildError != "" {
 		fmt.Fprintf(s, "  %-12s %s\r\n", "build error", e.BuildError)
+	}
+	// The run's own output, once a build has reported one. Printed for every
+	// state that has it, for BuildSession's reason: on a failed build it is the
+	// fastest account of what went wrong, and it is the only one a SCRIPT build
+	// has — there is no HiveMind transcript unless an agent ran.
+	if e.HasBuildLog {
+		fmt.Fprintf(s, "  %-12s %d bytes  (read it with `env log %s`)\r\n", "log", e.BuildLogBytes, e.Name)
 	}
 	for i, denied := range e.BuildDenials {
 		label := ""
@@ -727,6 +743,26 @@ func (g *Gateway) envScript(s gssh.Session, c ctlops.Caller, args []string, log 
 	}
 	fmt.Fprintf(s, "set the setup script on %s (%d bytes)\r\n", name, len(script))
 	fmt.Fprint(s, "it runs when the environment is built; nothing running now is touched.\r\n")
+	s.Exit(0) //nolint:errcheck
+}
+
+// envBuildLog prints the most recent build's own output — the setup script's
+// stdout/stderr in script mode, the runner's in agent mode.
+//
+// Read-only, unlike envScript: nothing a person types ever becomes this
+// column, only a guest's report does, so there is no `--set` here.
+func (g *Gateway) envBuildLog(s gssh.Session, c ctlops.Caller, name string, log *slog.Logger) {
+	buildLog, err := g.ops.EnvBuildLog(c, name)
+	if err != nil {
+		failCtl(s, log, "env log", err)
+		return
+	}
+	if buildLog == "" {
+		fmt.Fprintf(s.Stderr(), "sparkbox: %s has no build log yet — it fills in once a build reports\r\n", name)
+		s.Exit(1) //nolint:errcheck
+		return
+	}
+	writeScript(s, buildLog)
 	s.Exit(0) //nolint:errcheck
 }
 
