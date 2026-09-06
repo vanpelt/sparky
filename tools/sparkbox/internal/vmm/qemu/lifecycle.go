@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -174,24 +173,15 @@ func (d *Driver) hasSnapshot(name string) (bool, error) {
 
 // --- addressing ------------------------------------------------------------
 
-// tapName is derived from the slot alone, like the MAC and the addresses, and
-// is a METHOD because the answer depends on who creates the device.
+// tapName is derived from the slot alone, like the MAC and the addresses.
 //
-// On the direct path this driver creates and sweeps its own taps, and the
-// prefix must differ from the firecracker driver's or one driver's startup
-// sweep would delete the other's live networking (see tapPrefix).
-//
-// Under the helper it creates none: the helper makes the device, in the Pod
-// network namespace shared by both containers, and it calls it sbtap<slot> --
-// the name internal/netpush, internal/hostsetup's sluice --tap-prefix and
-// deploy/sparkbox-net.sh all already hardcode. So this follows the helper's
-// name there, which is what the tapPrefix comment said would happen when this
-// path landed. Neither sweep can reach the other: the helper's runs in the
-// helper, and this driver's is skipped entirely when jailed.
+// It no longer branches on who creates the device, and that is the fix: the
+// helper has always called it sbtap<slot> -- the name internal/netpush,
+// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
+// hardcode -- while this driver's direct path called it something else, so a
+// direct-launch QEMU node had every one of those talking about a device that
+// did not exist. See Options.TapPrefix.
 func (d *Driver) tapName(idx int) string {
-	if d.jailed() {
-		return helperTapPrefix + strconv.Itoa(idx)
-	}
 	return d.net.TapName(idx)
 }
 

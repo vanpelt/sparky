@@ -64,7 +64,8 @@ func runCmd(args []string) int {
 	fs.StringVar(&o.allowlist, "allowlist", "", "path to the allowlist file (required)")
 	fs.StringVar(&o.dnsListen, "dns-listen", ":53", "address for the DNS resolver to bind")
 	fs.Var(&o.upstreams, "upstream", "upstream resolver host:port (repeatable; default 1.1.1.1:53,8.8.8.8:53)")
-	fs.StringVar(&o.tapPrefix, "tap-prefix", "sbtap", "attach the meter to interfaces with this name prefix")
+	fs.StringVar(&o.tapPrefix, "tap-prefix", "sbtap",
+		"attach the meter to interfaces with this name prefix, and derive per-tap policy names from it")
 	fs.Var(&o.staticAllowIPs, "allow-ip", "always-reachable IP, bypassing DNS (repeatable)")
 	fs.BoolVar(&o.enforce, "enforce", false, "drop guest egress to addresses the allowlist never resolved")
 	fs.BoolVar(&o.openUntagged, "open-untagged", false, "only enforce taps that have a per-tap policy pushed over the control socket; taps with none keep unrestricted egress (an untagged sandbox is unlimited). Without this every tap is enforced against the base allowlist")
@@ -104,6 +105,9 @@ func runCmd(args []string) int {
 		return 2
 	}
 	pol.SetDefaultAllow(o.openUntagged)
+	// The same prefix the meter attaches with, so a DNS decision and the
+	// interface it is about cannot be named differently.
+	pol.SetTapPrefix(o.tapPrefix)
 
 	im := ipmap.New()
 	denied := denials.New()

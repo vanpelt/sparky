@@ -114,6 +114,14 @@ func TestQEMUParity(t *testing.T) {
 			// and cannot loop-mount a guest's ext4 at all, which is the whole
 			// reason the flag exists.
 			DisableHostRootfsMounts: cfg.helped(),
+			// The direct path keeps the prefix the two drivers used to differ
+			// on PERMANENTLY, and it is now confined to exactly here. Both
+			// drivers allocate from slot 0 up, so with one prefix they would
+			// name the same device; the differing prefixes are what let this
+			// suite and the firecracker one run concurrently on a gated host.
+			// Empty under the helper, which creates the taps itself and calls
+			// them what every consumer expects.
+			TapPrefix: cfg.directTapPrefix(),
 		})
 		if err != nil {
 			t.Fatalf("qemu.New: %v", err)
@@ -263,6 +271,23 @@ type parityConfig struct {
 // loadParityConfig or the fixture factory rather than scattered.
 func (c parityConfig) helped() bool { return c.helperSocket != "" }
 
+// directTapPrefix keeps this suite's taps out of the firecracker suite's way
+// when both run on one host, and returns empty under the helper, which names
+// the device itself.
+//
+// This is the ONLY place the two drivers' tap names are allowed to differ.
+// They used to differ in the driver itself, which meant a real direct-launch
+// QEMU node named its taps something netpush, sluice and sparkbox-net.sh had
+// never heard of — so egress control on that node applied to nothing, quietly.
+// Keeping the divergence in the test that needs it, rather than in the code
+// that ships, is the whole of the fix.
+func (c parityConfig) directTapPrefix() string {
+	if c.helped() {
+		return ""
+	}
+	return "sbqtap"
+}
+
 // loadParityConfig reads the fixtures from the environment. A missing one is
 // fatal rather than a skip: the gate is already set, so the operator meant to
 // run this, and a harness that silently declines to run is the thing we are
@@ -276,12 +301,13 @@ func (c parityConfig) helped() bool { return c.helperSocket != "" }
 // over; SPARKBOX_PARITY_QEMU and SPARKBOX_PARITY_MACHINE_TYPE replace it.
 //
 // THE SUBNET IS THE EXCEPTION, and it has its own name and its own default for
-// the same reason tapPrefix differs. Every other shared fixture is read-only
+// the same reason directTapPrefix exists. Every other shared fixture is read-only
 // (the kernel, the image dir) or per-case (VMStateDir is a MkdirTemp, the
 // templates live under it); the subnet is mutable HOST-GLOBAL state. Both
 // drivers' freeSlot starts at 0, so on the shared 172.31.0.0/24 slot 0 is
 // 172.31.0.1/172.31.0.2 in both, and the differing tap prefixes are precisely
-// what stops either sweep from cleaning the collision up. `go test ./...` on a
+// what stops either sweep from cleaning the collision up (see
+// directTapPrefix, which is now the only thing that keeps them apart). `go test ./...` on a
 // gated Linux host runs the two packages concurrently (go test's default -p is
 // GOMAXPROCS), Linux accepts the same host address on sbtap0 and sbqtap0, the
 // route to 172.31.0.0/30 becomes ambiguous, and a dial reaches whichever guest

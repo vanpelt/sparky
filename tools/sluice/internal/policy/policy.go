@@ -40,6 +40,7 @@ type Policy struct {
 	perTap       map[string]*allowlist.List // tap name (sbtap<idx>) -> its allowlist
 	defaultAllow bool                       // a tap with no per-tap policy resolves anything
 	guestPrefix  netip.Prefix               // divided into sequential /30 guest slots
+	tapPrefix    string                     // must match the meter's --tap-prefix
 }
 
 // New returns a Policy with the given base list and no per-tap overrides. base
@@ -48,7 +49,34 @@ func New(base *allowlist.List) *Policy {
 	if base == nil {
 		base, _ = allowlist.New(nil)
 	}
-	return &Policy{base: base, perTap: map[string]*allowlist.List{}, guestPrefix: netip.MustParsePrefix("172.30.0.0/16")}
+	return &Policy{
+		base: base, perTap: map[string]*allowlist.List{},
+		guestPrefix: netip.MustParsePrefix("172.30.0.0/16"),
+		tapPrefix:   defaultTapPrefix,
+	}
+}
+
+// defaultTapPrefix must stay equal to the --tap-prefix default in
+// cmd/sluice/run.go and to sparkbox's own tap naming. Nothing enforces that
+// across the two modules; TestTapPrefixMatchesTheFlagDefault checks the half
+// that is checkable from here.
+const defaultTapPrefix = "sbtap"
+
+// SetTapPrefix configures the interface-name prefix this policy derives tap
+// names with. It must match the prefix the meter attaches to.
+//
+// It exists because those two used to be able to disagree. The meter attached
+// to whatever --tap-prefix said while this file hardcoded "sbtap", so running
+// with any other value produced a policy whose per-tap rules were looked up
+// under names no interface had — every DNS decision silently falling through
+// to the base list, and every denial attributed to "".
+func (p *Policy) SetTapPrefix(prefix string) {
+	if prefix == "" {
+		prefix = defaultTapPrefix
+	}
+	p.mu.Lock()
+	p.tapPrefix = prefix
+	p.mu.Unlock()
 }
 
 // SetGuestSubnet configures the IPv4 prefix sparkbox divides into sequential
@@ -137,7 +165,7 @@ func (p *Policy) AllowedFor(client netip.Addr, name string) (bool, string) {
 	if ok, pat := p.base.Allowed(name); ok {
 		return true, pat
 	}
-	if tap := tapForGuest(p.guestPrefix, client); tap != "" {
+	if tap := tapForGuest(p.tapPrefix, p.guestPrefix, client); tap != "" {
 		if l := p.perTap[tap]; l != nil {
 			if ok, pat := l.Allowed(name); ok {
 				return true, pat
@@ -157,10 +185,10 @@ func (p *Policy) AllowedFor(client netip.Addr, name string) (bool, string) {
 func (p *Policy) TapForClient(a netip.Addr) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return tapForGuest(p.guestPrefix, a)
+	return tapForGuest(p.tapPrefix, p.guestPrefix, a)
 }
 
-func tapForGuest(prefix netip.Prefix, a netip.Addr) string {
+func tapForGuest(tapPrefix string, prefix netip.Prefix, a netip.Addr) string {
 	if !a.Is4() {
 		if a.Is4In6() {
 			a = a.Unmap()
@@ -182,7 +210,7 @@ func tapForGuest(prefix netip.Prefix, a netip.Addr) string {
 	if offset%4 != 2 {
 		return ""
 	}
-	return "sbtap" + strconv.FormatUint(uint64(offset/4), 10)
+	return tapPrefix + strconv.FormatUint(uint64(offset/4), 10)
 }
 
 // TapPatterns returns the canonical patterns configured for a tap (nil if the
