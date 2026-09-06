@@ -666,8 +666,14 @@ jobs:
           fi
           echo "== cpu"
           grep -m1 -oE '\b(vmx|svm)\b' /proc/cpuinfo || echo "VERDICT_CPU=no-virt-flag"
+          # An `if` rather than `[ -r ] && echo`: the AND-list is false on the
+          # last iteration whenever the host is not AMD, that becomes the
+          # script's exit status, and `bash -e {0}` fails the step. A job whose
+          # own comment calls it unfailing then failed on every run since it was
+          # added -- and because a failed step skips the rest of the job, the
+          # reflink half below never once executed.
           for f in /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested; do
-            [ -r "$f" ] && echo "$f=$(cat "$f")"
+            if [ -r "$f" ]; then echo "$f=$(cat "$f")"; fi
           done
 
       - name: reflink
