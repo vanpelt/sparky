@@ -188,3 +188,27 @@ func TestReplaceTapsIsAtomicSwap(t *testing.T) {
 		t.Errorf("TapPatterns(sbtap4) = %v, want [b.com]", pats)
 	}
 }
+
+// The meter attaches to interfaces by prefix and this file derives per-tap
+// policy names by prefix, from two different places. They used to be able to
+// disagree — the flag moved one and the other was a literal — and the symptom
+// was silent: every per-tap rule looked up under a name no interface had, so
+// every DNS decision fell through to the base list and every denial was
+// attributed to "".
+func TestTapPrefixFollowsTheConfiguredOne(t *testing.T) {
+	p := New(nil)
+	if got := p.TapForClient(addr("172.30.0.2")); got != "sbtap0" {
+		t.Fatalf("default TapForClient = %q, want sbtap0", got)
+	}
+
+	p.SetTapPrefix("sbqtap")
+	if got := p.TapForClient(addr("172.30.0.2")); got != "sbqtap0" {
+		t.Errorf("after SetTapPrefix, TapForClient = %q, want sbqtap0", got)
+	}
+	// Per-tap policy has to be reachable under the configured name, which is
+	// the thing that was actually broken rather than the string itself.
+	p.SetTapPrefix("")
+	if got := p.TapForClient(addr("172.30.0.2")); got != "sbtap0" {
+		t.Errorf("an empty prefix = %q, want the default sbtap0", got)
+	}
+}

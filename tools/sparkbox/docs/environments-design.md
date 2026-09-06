@@ -1504,10 +1504,27 @@ does not arise either: the QEMU driver has no per-slot uid at all — no
 `JailerUIDBase`, no `SysProcAttr.Credential` — because its confinement is
 written into the argv the helper builds.
 
-So the missing piece is that nothing hands the second driver slot 1. Moving
-allocation into the helper, which already owns occupancy, is the change; and it
-has no recovery consequences, because slots are not persisted anywhere and are
-already reassigned in first-attach order on every restart.
+So the missing piece was that nothing handed the second driver slot 1.
+
+That is now `internal/vmm/slots`. Both drivers take a pool, nil means a private
+one covering their whole subnet — so a single-VMM node allocates exactly as it
+did — and two drivers on one node share one and cannot be given the same index.
+It has no recovery consequences, because slots are not persisted anywhere and
+are already reassigned in first-attach order on every restart. One behaviour did
+change: a slot used to be reserved by the write to the driver's record map, so
+an abandoned create leaked nothing; `Claim` reserves immediately, so every
+create that fails after it hands the slot back explicitly.
+
+The privileged helper serves both VMMs from one process now, and **which VMM a
+launch gets is decided by which socket the controller dialled**, not by anything
+in the request. The obvious design — a backend field in the message — is refused
+by `TestRequestHasNoCallerControlledPathOrCommand`: a request may carry data the
+helper validates and may never carry anything that SELECTS BEHAVIOUR, and a
+backend name is a selection however small the set is. A listening path is not
+part of the message, and a controller told one path can still only start one
+VMM. One PROCESS is the part that matters: two helpers sharing a `--chroot-base`
+would each apply `JailerUIDBase + slot` blind to the other, which is the one
+arrangement in which the per-slot uid really can be issued twice.
 
 **It does not record the runner in the placement ledger.** It could, and the
 argument for it is drift detection; the argument against is that

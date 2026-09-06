@@ -76,14 +76,12 @@ const (
 	qemuJailDir = "qemu"
 )
 
-func (s *server) qemu() bool { return s.opts.Backend == BackendQEMU }
-
 // prepareQemuJail stages the per-slot chroot for a QEMU launch. It shares the
 // ownership and permission model with prepareJail — root-owned traversable
 // base, 0710 jail root, resources owned by the per-slot uid and the controller
 // group — and differs only in what goes inside.
 func (s *server) prepareQemuJail(req Request) error {
-	root := s.jailRoot(req.Slot)
+	root := s.jailRoot(BackendQEMU, req.Slot)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("create chroot jail: %w", err)
 	}
@@ -104,7 +102,7 @@ func (s *server) prepareQemuJail(req Request) error {
 		resources = append(resources, jailedSnapshotName)
 	}
 	for _, name := range resources {
-		if err := s.linkStateResource(root, uid, filepath.Join(s.vmRel(req.Name), name), name); err != nil {
+		if err := s.linkStateResource(root, uid, filepath.Join(s.vmRel(BackendQEMU, req.Name), name), name); err != nil {
 			return err
 		}
 	}
@@ -121,12 +119,12 @@ func (s *server) prepareQemuJail(req Request) error {
 // a confined QEMU cannot create a file the controller is able to read, and a
 // file the controller creates is not one the confined QEMU can write.
 func (s *server) linkFreshOutput(req Request, uid int, name string) error {
-	dirFD, err := s.openState(s.vmRel(req.Name), unix.O_PATH|unix.O_DIRECTORY)
+	dirFD, err := s.openState(s.vmRel(BackendQEMU, req.Name), unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		return fmt.Errorf("open VM directory: %w", err)
 	}
 	defer unix.Close(dirFD) //nolint:errcheck
-	guest := filepath.Join(s.jailRoot(req.Slot), name)
+	guest := filepath.Join(s.jailRoot(BackendQEMU, req.Slot), name)
 	unix.Unlinkat(dirFD, name, 0) //nolint:errcheck
 	os.Remove(guest)              //nolint:errcheck
 	fd, err := unix.Openat(dirFD, name,
@@ -153,7 +151,7 @@ func (s *server) linkFreshOutput(req Request, uid int, name string) error {
 // outlive the jail. With no PL011 driver in the arm64 guest kernel this is the
 // only thing a rejected argv or an unloadable migration stream leaves behind.
 func (s *server) openVMMLog(req Request) (*os.File, error) {
-	fd, err := s.openState(filepath.Join(s.vmRel(req.Name), jailedVMMLogName),
+	fd, err := s.openState(filepath.Join(s.vmRel(BackendQEMU, req.Name), jailedVMMLogName),
 		unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC)
 	if err != nil {
 		return nil, fmt.Errorf("open vmm log: %w", err)
@@ -193,7 +191,7 @@ func (s *server) qemuCommand(req Request) (*exec.Cmd, *os.File, error) {
 	cmd := exec.Command(s.opts.QemuBin, args...)
 	// The working directory is the jail root, which is what makes the relative
 	// paths on the argv resolve to the same files before the chroot as after.
-	cmd.Dir = s.jailRoot(req.Slot)
+	cmd.Dir = s.jailRoot(BackendQEMU, req.Slot)
 	cmd.Env = []string{}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -228,7 +226,7 @@ func (s *server) qemuArgs(req Request) ([]string, error) {
 		QMPSocket: jailedQMPSocketName,
 		SerialLog: jailedSerialLogName,
 		Confine: qemuargs.Confine{
-			ChrootDir: s.jailRoot(req.Slot),
+			ChrootDir: s.jailRoot(BackendQEMU, req.Slot),
 			UID:       s.jailUID(req.Slot),
 			Sandbox:   true,
 		},

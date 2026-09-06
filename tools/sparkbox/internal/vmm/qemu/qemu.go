@@ -43,6 +43,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/slots"
 )
 
 // ---------------------------------------------------------------------------
@@ -470,6 +471,32 @@ type Options struct {
 	// HelperControllerGID is the group the helper shares VM files and the QMP
 	// socket with, so this unprivileged process can reach them.
 	HelperControllerGID int
+	// TapPrefix overrides the host tap device name prefix. Empty is
+	// defaultTapPrefix, which is what every deployment uses and what every
+	// consumer of a tap name assumes.
+	//
+	// IT EXISTS FOR ONE CALLER: the parity suite, which exercises this driver
+	// and the firecracker one against real guests on ONE host, concurrently.
+	// Both allocate from slot 0 up, so with one prefix they would name the same
+	// device — and each driver's startup sweep would delete the other's live
+	// taps on top of that. Neither is a production shape: a node runs one VMM,
+	// and under the privileged helper neither driver creates or sweeps a tap at
+	// all.
+	//
+	// Setting it in production silently disables egress control. sluice's meter
+	// attaches to defaultTapPrefix+, netpush keys per-tap policy on it, and
+	// deploy/sparkbox-net.sh writes its iptables rules against it — none of
+	// which are configurable from here, and all of which would then be talking
+	// about devices that do not exist. There is deliberately no flag for it.
+	TapPrefix string
+	// Slots, when set, is the slot namespace this driver allocates from. Nil
+	// gives it a private one covering its whole subnet, which is what a node
+	// running a single VMM wants and what both drivers did before this existed.
+	//
+	// Two drivers on one node MUST share one. Everything a guest is reachable
+	// by comes out of the slot, so two private pools both answering 0 is two
+	// guests claiming one tap, one uid and one pair of addresses.
+	Slots *slots.Pool
 	// JailerChrootBase is the root-owned directory beneath which the helper
 	// builds its per-slot jails, and it must be the helper's --chroot-base.
 	//
@@ -530,40 +557,26 @@ const (
 	// template, telling the gateway which account to log a fork in as.
 	loginUserSuffix = ".login-user"
 
-	// tapPrefix deliberately differs from the firecracker driver's "sbtap".
-	// Each driver's New() sweeps stale devices carrying its own prefix, so a
-	// shared prefix would mean constructing one driver silently deletes the
-	// other's live networking. Neither prefix is a prefix of the other, so the
-	// two sweeps cannot overlap. (The spike's throwaway probe used "sbtapq0",
-	// which fc's sweep would have eaten — that is how the hazard was noticed.)
+	// defaultTapPrefix is the name EVERY consumer of a tap device already
+	// hardcodes: internal/netpush, internal/vmhelper, internal/hostsetup's
+	// sluice --tap-prefix, deploy/kubernetes/sluice-entrypoint.sh and the
+	// ~15 iptables rules in deploy/sparkbox-net.sh. Both drivers use it.
 	//
-	// UNIFYING THIS IS PLANNED, AND IT BELONGS WITH THE PRIVILEGED HELPER, NOT
-	// BEFORE IT. The payoff is entirely on that path: internal/netpush,
-	// internal/hostsetup's sluice --tap-prefix, internal/vmhelper's own tapName
-	// and deploy/sparkbox-net.sh all hardcode "sbtap", and under the helper the
-	// tap is created by the helper anyway — so a QEMU node running there would
-	// have the driver's name for the device disagree with the device that
-	// exists. That is the change to make, once the driver has a helper path.
+	// THIS USED TO BE "sbqtap" ON THE DIRECT PATH, and that was a silent
+	// product bug rather than a cosmetic difference. On a direct-launch QEMU
+	// node the guests' taps were sbqtap<n>, so sluice's meter — attached to
+	// sbtap+ — never saw them, and netpush pushed per-tap egress policy keyed
+	// on sbtap<n>, a device that did not exist. Egress control was not
+	// degraded on that node; it was absent, and nothing anywhere said so.
 	//
-	// It cannot be made now, and vmm.ClaimStateDir is not enough to make it
-	// safe. The claim stops a second driver from being CONSTRUCTED against a
-	// state directory the first one owns, which covers every deployment. It does
-	// not cover the parity suite: each fixture builds its own MkdirTemp state
-	// dir, so both drivers claim cleanly, while sweepStaleTaps is host-global.
-	// `go test ./...` on a gated Linux host runs the two packages concurrently,
-	// and a shared prefix would have each driver's New() delete the other's live
-	// taps mid-run. When the helper path lands, this constant follows the
-	// helper's name and the sweep gets the same `PrivilegedHelperSocket == ""`
-	// guard fc.go:314 already has — which is what makes it a non-issue there,
-	// because the helper path does not sweep at all.
-	tapPrefix = "sbqtap"
-	// helperTapPrefix is the privileged helper's name for the same device, and
-	// it is the firecracker one because the helper is shared: internal/netpush,
-	// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
-	// match "sbtap", and under the helper the tap is created there. The two
-	// sweeps still cannot collide — this driver does not sweep at all when the
-	// helper is configured.
-	helperTapPrefix = "sbtap"
+	// The divergence bought one thing, named in the comment that used to live
+	// here: each driver's New() sweeps stale devices carrying its own prefix,
+	// so a shared prefix means constructing one driver deletes the other's
+	// live taps. That is now Options.TapPrefix's job, and it is a far better
+	// trade — the sweep hazard is confined to one test fixture, where a lost
+	// tap is a failed test, while the prefix mismatch was confined to
+	// production, where a lost policy is a sandbox with unfiltered egress.
+	defaultTapPrefix = "sbtap"
 
 	// balloonDeviceID is the argv's, from the package that builds the argv:
 	// the QOM path guest stats are read from is derived from `id=`, so the name
@@ -664,8 +677,13 @@ type Driver struct {
 	// dedicated in-prefix sluice DNS listener. They count toward prefix
 	// capacity but are never handed to a VM.
 	reservedSlots map[int]bool
-	prefix6       net.IP // parsed /64 network address; nil disables IPv6
-	uplink6       string // iface backing the v6 default route, for per-guest proxy NDP
+	// slots is the allocator. reservedSlots is still here because it is what
+	// SEEDS the pool, and because New builds one from it before the pool exists.
+	slots *slots.Pool
+	// tapPrefix is Options.TapPrefix resolved against defaultTapPrefix.
+	tapPrefix string
+	prefix6   net.IP // parsed /64 network address; nil disables IPv6
+	uplink6   string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
 // Compile-time capability checks: every optional interface in vmm, not the four
@@ -774,6 +792,23 @@ func New(opts Options) (*Driver, error) {
 			d.reservedSlots[index] = true
 		}
 	}
+	// A pool of this driver's own unless one was handed in, which is what makes
+	// the shared case opt-in: a node running one VMM behaves exactly as it did
+	// when every driver scanned its own records, and a node running two passes
+	// the same pool to both so they cannot be given the same slot — and with it
+	// the same tap, the same uid and the same guest addresses.
+	d.tapPrefix = opts.TapPrefix
+	if d.tapPrefix == "" {
+		d.tapPrefix = defaultTapPrefix
+	}
+	d.slots = opts.Slots
+	if d.slots == nil {
+		reserved := make([]int, 0, len(d.reservedSlots))
+		for idx := range d.reservedSlots {
+			reserved = append(reserved, idx)
+		}
+		d.slots = slots.New(guestNetwork.String(), guestNetwork.Capacity(), reserved...)
+	}
 
 	if opts.Subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
@@ -837,7 +872,7 @@ func New(opts Options) (*Driver, error) {
 	// take its network away mid-session. That it currently fails for lack of
 	// NET_ADMIN is an accident of the deployment, not a design.
 	if opts.PrivilegedHelperSocket == "" {
-		sweepStaleTaps()
+		d.sweepStaleTaps()
 	}
 	if opts.PrivilegedHelperSocket != "" {
 		// Fail at construction rather than at the first Create. The helper is a

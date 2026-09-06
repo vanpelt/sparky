@@ -177,25 +177,16 @@ func (d *Driver) hasSnapshot(name string) (bool, error) {
 func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
 func (d *Driver) guestIP(idx int) string { return d.guestSlot(idx).Guest.String() }
 
-// tapName is derived from the slot alone, like the MAC and the addresses, and
-// is a METHOD because the answer depends on who creates the device.
+// tapName is derived from the slot alone, like the MAC and the addresses.
 //
-// On the direct path this driver creates and sweeps its own taps, and the
-// prefix must differ from the firecracker driver's or one driver's startup
-// sweep would delete the other's live networking (see tapPrefix).
-//
-// Under the helper it creates none: the helper makes the device, in the Pod
-// network namespace shared by both containers, and it calls it sbtap<slot> —
-// the name internal/netpush, internal/hostsetup's sluice --tap-prefix and
-// deploy/sparkbox-net.sh all already hardcode. So this follows the helper's
-// name there, which is what the tapPrefix comment said would happen when this
-// path landed. Neither sweep can reach the other: the helper's runs in the
-// helper, and this driver's is skipped entirely when jailed.
+// It no longer branches on who creates the device, and that is the fix: the
+// helper has always called it sbtap<slot> — the name internal/netpush,
+// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
+// hardcode — while this driver's direct path called it something else, so a
+// direct-launch QEMU node had every one of those talking about a device that
+// did not exist. See defaultTapPrefix.
 func (d *Driver) tapName(idx int) string {
-	if d.jailed() {
-		return helperTapPrefix + strconv.Itoa(idx)
-	}
-	return tapPrefix + strconv.Itoa(idx)
+	return d.tapPrefix + strconv.Itoa(idx)
 }
 
 func (d *Driver) guestSlot(idx int) guestnet.Slot {
@@ -253,26 +244,6 @@ func (d *Driver) releaseName(name string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.creating, name)
-}
-
-// freeSlot returns the lowest network slot no vmState holds. Caller must hold
-// d.mu. Every path that drops a record (Destroy, DropSnapshots, RenameVM)
-// thereby releases its slot for reuse — a reused slot can't collide with a
-// live tap because paused VMs keep their record (idx stays reserved) and the
-// record only goes away after the tap does. The configured prefix determines
-// the bound: every index maps to exactly one /30 inside it.
-func (d *Driver) freeSlot() (int, error) {
-	used := make(map[int]bool, len(d.vms))
-	for _, s := range d.vms {
-		used[s.idx] = true
-	}
-	for idx := 0; idx < d.guestNet.Capacity(); idx++ {
-		if !used[idx] && !d.reservedSlots[idx] {
-			return idx, nil
-		}
-	}
-	return 0, fmt.Errorf("no free network slots in %s (max %d concurrent VMs)",
-		d.guestNet, d.guestNet.Capacity())
 }
 
 // --- Create ----------------------------------------------------------------
@@ -377,7 +348,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
 	}
 
-	idx, err := d.freeSlot()
+	idx, err := d.slots.Claim(cfg.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -387,13 +358,16 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	st := &vmState{idx: idx, vcpus: cfg.VCPUs, memMB: cfg.MemMB}
 	if err := d.createTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
-		// this slot; only recording it in d.vms reserves it, so a failed create
-		// leaks no idx.
+		// this slot. The Release is not optional the way it once was: the slot
+		// is reserved by Claim above, not by the d.vms write below, so a failed
+		// create that did not hand it back would leak one every time.
 		d.deleteTap(st.idx)
+		d.slots.Release(cfg.Name)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, st, rootfs, false, fresh); err != nil {
 		d.deleteTap(st.idx)
+		d.slots.Release(cfg.Name)
 		return nil, err
 	}
 	d.vms[cfg.Name] = st
@@ -823,6 +797,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 			err = fmt.Errorf("%w (and its stale snapshot could not be removed: %v)", err, rmErr)
 		}
 		delete(d.vms, name)
+		d.slots.Release(name)
 		return err
 	}
 	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
@@ -939,9 +914,10 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	}
 	d.deleteTap(st.idx)
 	// Drop the record last: it releases the slot (and with it the tap name, the
-	// addresses and the MAC) back to freeSlot, which is only safe once the tap
+	// addresses and the MAC) back to the pool, which is only safe once the tap
 	// is actually gone.
 	delete(d.vms, name)
+	d.slots.Release(name)
 	// The pack artifact is deliberately a SIBLING of this directory, so an
 	// archive in flight survives the destroy that reclaims the hot tier.
 	return os.RemoveAll(d.vmDir(name))
@@ -1104,13 +1080,13 @@ func (d *Driver) deleteTap(idx int) {
 // firecracker driver runs the same sweep over "sbtap", and neither prefix is a
 // prefix of the other, so one driver's construction cannot delete the other's
 // live networking.
-func sweepStaleTaps() {
+func (d *Driver) sweepStaleTaps() {
 	out, err := exec.Command("ip", "-o", "link", "show").Output()
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		// "3: sbqtap1@if4: <BROADCAST,...>" -> field 1 is the name.
+		// "3: sbtap1@if4: <BROADCAST,...>" -> field 1 is the name.
 		parts := strings.SplitN(line, ": ", 3)
 		if len(parts) < 2 {
 			continue
@@ -1119,7 +1095,7 @@ func sweepStaleTaps() {
 		if i := strings.IndexByte(name, '@'); i >= 0 {
 			name = name[:i]
 		}
-		if strings.HasPrefix(name, tapPrefix) {
+		if strings.HasPrefix(name, d.tapPrefix) {
 			exec.Command("ip", "link", "del", name).Run() //nolint:errcheck
 		}
 	}

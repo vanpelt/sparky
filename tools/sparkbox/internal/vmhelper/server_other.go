@@ -15,6 +15,7 @@ import (
 // non-Linux run if a field were added only to server_linux.go.
 type ServerOptions struct {
 	SocketPath                                  string
+	SecondSocketPath                            string
 	Backend                                     Backend
 	QemuBin, MachineType                        string
 	FirecrackerBin, KernelPath, VMStateDir      string
