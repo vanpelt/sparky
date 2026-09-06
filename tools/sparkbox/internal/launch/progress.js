@@ -58,6 +58,10 @@
         buttons[j].setAttribute("aria-disabled", "true");
         if (j === index) {
           buttons[j].textContent = "Creating…";
+          // Only the pressed button gets the spinner (see page.html's
+          // `form button.pending::before`) — the other one is merely
+          // inert, not also mid-flight.
+          buttons[j].classList.add("pending");
         }
       }
     };
@@ -82,6 +86,7 @@
         continue;
       }
       buttons[m].removeAttribute("aria-disabled");
+      buttons[m].classList.remove("pending");
       buttons[m].textContent = labels[m];
     }
   });

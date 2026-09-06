@@ -98,6 +98,28 @@ func RequireMutation(signer *Signer, accounts Accounts, loginURL, origin string)
 	}
 }
 
+// requestOrigin renders the scheme and host this request was actually
+// addressed to — port included, since r.Host already carries one whenever the
+// client's Host header did. https is NOT assumed: the scheme comes from
+// X-Forwarded-Proto when something in front terminated TLS, and otherwise from
+// the connection, which is what lets a --proxy-tls=false dev loop bounce a
+// visitor back to the http:// URL they actually asked for instead of an https
+// one nothing here is listening on.
+//
+// Lifted from internal/launch/csrf.go and internal/xterm/ws.go, deliberately
+// rather than imported — see csrf.go's own copy for why one edge concern
+// living in three packages stays three copies rather than one shared one.
+func requestOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+		scheme = strings.ToLower(strings.TrimSpace(strings.Split(fwd, ",")[0]))
+	}
+	return scheme + "://" + r.Host
+}
+
 // challenge answers an unauthenticated request: browsers are sent to the
 // login page with the original URL to return to; API clients (no text/html in
 // Accept) get a plain 401.
@@ -107,6 +129,6 @@ func challenge(w http.ResponseWriter, r *http.Request, loginURL string) {
 			http.StatusUnauthorized)
 		return
 	}
-	ret := "https://" + r.Host + r.URL.RequestURI()
+	ret := requestOrigin(r) + r.URL.RequestURI()
 	http.Redirect(w, r, strings.TrimSuffix(loginURL, "/")+"/?return="+url.QueryEscape(ret), http.StatusSeeOther)
 }

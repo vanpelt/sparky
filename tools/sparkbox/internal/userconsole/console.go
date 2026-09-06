@@ -236,12 +236,16 @@ type TemplateTags interface {
 // signer verifies the edge session, and syncer (nil-safe) propagates
 // tag/secret changes to running sandboxes. xtermSub is --xterm-subdomain
 // ("" when browser terminals are disabled). secure should be true when the
-// proxy edge serves TLS.
+// proxy edge serves TLS; port is the edge's advertised port (0 for the
+// scheme's default) — the same convention as edgeauth.LoginConfig.Port. Both
+// feed edgeauth.Origin so the login URL and CSRF origin this handler builds
+// name a host a browser can actually reach on a --proxy-tls=false dev loop,
+// instead of an https:// default-port URL nothing here is listening on.
 func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Store,
 	netrulesStore *netrules.Store, reposStore *repos.Store, netPlane NetPlane,
 	favicons *domainmeta.FaviconCache,
 	accounts edgeauth.Accounts, signer *edgeauth.Signer, syncer OwnerSyncer,
-	subdomain, domain, xtermSub string, secure bool, log *slog.Logger) *Handler {
+	subdomain, domain, xtermSub string, secure bool, port int, log *slog.Logger) *Handler {
 	if subdomain == "" {
 		subdomain = "my"
 	}
@@ -255,7 +259,7 @@ func New(mgr *host.Manager, routeStore *routes.Store, secretsStore *secrets.Stor
 		netrules: netrulesStore, repos: reposStore, netplane: netPlane, favicons: favicons,
 		accounts: accounts, signer: signer, syncer: syncer,
 		domain: domain, xtermSub: strings.Trim(xtermSub, "."), secure: secure, log: log,
-		loginURL: "https://login." + domain + "/",
+		loginURL: edgeauth.Origin("login", domain, secure, port) + "/",
 		origin:   "https://" + subdomain + "." + domain,
 	}
 	if mgr != nil {

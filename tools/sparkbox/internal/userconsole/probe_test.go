@@ -26,7 +26,7 @@ import (
 
 func newProbeHandler(t *testing.T, dial Dialer) *Handler {
 	t.Helper()
-	h := New(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "my", "hivemind.tools", "", false, slog.New(slog.DiscardHandler))
+	h := New(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "my", "hivemind.tools", "", false, 0, slog.New(slog.DiscardHandler))
 	if dial != nil {
 		h.SetDialer(dial)
 	}
