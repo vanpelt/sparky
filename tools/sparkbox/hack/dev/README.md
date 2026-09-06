@@ -12,6 +12,10 @@ Two tiers, in order of how much of the Pod they reproduce and how long they take
 | **native gateway** — `hack/dev/gateway.sh` | `deploy/kubernetes/gateway-entrypoint.sh`, unmodified, on macOS, no container | everything gateway-side: edge proxy, auth and passkeys, consoles, REST API, launch links, SSH doors, roster, OIDC |
 | **five-container pod** — `sparkbox devpod` | the whole node Pod, rendered from `deploy/kubernetes/*.yaml` into docker argv by `internal/devpod` | uids, capabilities, devices, mounts, init ordering — the shape a real sandbox boots in |
 
+And one script that is not a tier but an escape hatch: `guest.sh`, for when a
+guest boots far enough to exist and not far enough to be reachable. See
+[When the guest will not answer](#when-the-guest-will-not-answer).
+
 The rendering half of the pod tier is a separate piece of work
 (`internal/devpod`, `sparkbox devpod`). What this README covers is the gateway
 tier plus everything the pod tier needs to exist before it can run: the local
@@ -49,6 +53,368 @@ optional — sandboxes boot without either; only repo attachments need them.
 `sparkbox setup` is deliberately outside all of this. The container machine is a
 ~27GB one-way ratchet that carries the custom KVM-capable outer kernel, so
 `machine.sh` adopts one and never creates, starts or deletes one.
+
+## Start with this one: transparent huge pages
+
+Guest RAM is anonymous memory Firecracker `mmap`s. Every page the guest touches
+for the *first* time faults through two stage-2 layers — ours, and Apple's
+underneath it. Measured in this machine, that costs **~300 us per fault**:
+about 3,300 faults/sec, or **~13 MB/s** of first-touch memory. The very same
+allocation made directly in the machine, no VM involved, runs at 4,600 MB/s.
+
+A **350x** penalty, and nothing about it looks like a memory problem.
+
+What it looks like instead is that *boot* is slow, because boot is what touches
+most of guest RAM (the kernel initialises a `struct page` for all of it). So the
+cost scales with `mem_size_mib` while everything else looks fine — userspace
+compute in a booted guest runs at full speed. Same kernel, same rootfs, time to
+`/init`:
+
+| guest RAM | time to init |
+|---|---|
+| 512 MiB  | 1.43 s |
+| 1024 MiB | 1.42 s |
+| 2048 MiB | **25.74 s** |
+| 4026 MiB | **34.08 s** |
+
+A cliff, not a slope. THP collapses 512 of those faults into one:
+
+| `transparent_hugepage/enabled` | 4026 MiB guest, time to init |
+|---|---|
+| `madvise` (Apple's default) | 29.82 s |
+| `always` | **0.23 s** |
+
+`machine.sh ensure` now sets `always` and reports it, so this is handled. The
+trap is that `madvise` *looks* enabled — but Firecracker does not `madvise()`
+its guest memory, so `madvise` means no THP here at all.
+
+We do **not** use Firecracker's own `huge_pages: "2M"`, which gets the same
+result (0.21 s): that is `MAP_HUGETLB`, it needs pages reserved up front, and it
+is incompatible with the balloon device. THP needs no code change, keeps the
+balloon, and keeps snapshots.
+
+Setting it is a live sysctl. It is deliberately NOT wired to `machine.sh`'s
+`changed` flag, because that flag restarts docker — which kills the node Pod and
+every sandbox on it.
+
+With `always`, a `new+<name>` sandbox reaches `running` in **4 s**, the whole
+boot costs 6.5 CPU-seconds, `containerd` starts in **1.05 s**, and
+`systemctl --failed` is empty.
+
+### What is NOT the cause
+
+Kept so nobody re-runs them. Every one of these was measured and cleared: host
+storage (L1 cold-reads 128 MB in 382 ms), the backing file (209 extents, 25-50
+ms for 128 MB), reflink copy-on-write (2.8x, and the penalty is on reads), the
+guest clock (ratio 0.934 against host wall time), the serial console (2000
+bytes in 10 ms), memory compaction (zero stalls across a 4 GB touch), and CPU
+or virtualization traps — guest compute is *faster* than the VM hosting it
+(562 ms vs 1154 ms on the same loop).
+
+Small-file guest I/O also looked catastrophic on the way here: reading 8 MiB
+took 5845 ms in 2048 4 KiB requests against 177 ms in 128 64 KiB ones, which
+reads as a per-request cost. Most of that was this same memory bug — with THP
+on, the identical 4 KiB run takes **20 ms**, and firecracker's `Async`
+(io_uring) block engine measures indistinguishable from the default `Sync`
+(530 ms vs 502 ms total boot). There was a `--block-io-engine` flag here for a
+while; it was removed once that was measured.
+
+## The other one: the idle reaper's balloon
+
+The guest that pegged four vCPUs for an hour was **ballooned down to its 256 MB
+reserve two minutes into a boot that had not finished**. Firecracker's own log
+is where this is visible, and it is one line:
+
+```
+The API server received a Patch request on "/balloon" with body "{\"amount_mib\":3770}"
+```
+
+3770 of 4026 MB, taken from a guest that was starting docker. containerd then
+failed to start eleven times, docker took fourteen minutes, and the in-guest
+agent never came up at all. All four vCPUs sat at ~100% **system** time — page
+reclaim, not guest work — and `guest=0` in `/proc/<vmm>/task/*/stat` the whole
+time.
+
+It could not recover on its own, and that is the important part. The balloon is
+deflated by evidence of activity, and the activity floors are
+`--activity-cpu-pct` (**0 by default** — CPU is not a signal unless you opt in)
+and `--activity-net-kb`. A guest starved before its agent started moves no
+traffic, so it reads as perfectly idle forever. Squeezing it is what makes it
+look idle, which is what keeps it squeezed.
+
+Two changes now stand between you and that:
+
+- **No path** squeezes a guest below what the balloon device says it is
+  actually using — the idle reaper leaves 1.5x it, the memory-pressure
+  controller reclaims down to it but never past it. A booting guest has a large
+  working set and is left alone; a genuinely idle one still gives its RAM back.
+  Only the idle path was guarded at first, which left the same trap open on the
+  path that fires under real pressure.
+- `--idle-balloon` now defaults to **5 minutes**, not 2. It briefly read 20,
+  which was a stand-in for the hazard the floor above had already closed. Two
+  minutes was dangerous because nothing stopped the squeeze, not because two
+  minutes is short — and the timer is not optional housekeeping: with
+  `--mem-reserve-mb` set, admission charges every running sandbox the reserve
+  rather than its ceiling, so ballooning is what makes that accounting true.
+  A long value just leaves the node admitting optimistically for longer.
+
+Genuine memory overage is still reclaimed promptly, by the memory-pressure
+controller, which reclaims exactly the excess from the coldest guests.
+
+To see it live on a running guest:
+
+```sh
+container machine run -i --root --name sparkbox -- bash -s <<'EOF'
+S=/srv/sparkbox/data/devpod/hot/jailer/firecracker/sparkbox-0/root/fc.sock
+curl -s --unix-socket $S http://localhost/balloon/statistics
+EOF
+```
+
+Driving `sparkbox devpod up` by hand instead of through `up.sh` means passing
+all three yourself. `devpod plan` marks the omissions `[BLOCKING]`, including
+the specific one — *"one sandbox is 12288 MB on a 12079 MB machine"* — and that
+line is the only warning there is.
+
+## Sandboxes are sized for the machine, not for CKS
+
+`up.sh` reads the container machine's RAM and core count and passes
+`-host-mem-mb`, `-default-mem-mb` and `-default-vcpus` derived from them — a
+third of RAM and half the cores per sandbox, overridable with
+`SPARKBOX_DEV_SANDBOX_MEM_DIVISOR` and `SPARKBOX_DEV_SANDBOX_CPU_DIVISOR`.
+
+It does that because the defaults underneath are a cluster's. A sandbox nobody
+sizes gets **4 vCPU / 12288 MB**, and `deployment.yaml` declares
+`SPARKBOX_HOST_MEM_MB=480000` — both right for a CKS node, both catastrophic in
+a container machine with ~12 GB and 8 cores, where a single guest is larger
+than the entire machine.
+
+Nothing refuses that. Admission control asks whether a sandbox fits the host's
+RAM, and one VM at the ceiling technically does; the manifest's 480000 means it
+does not even ask honestly. So a guest is promised memory that does not exist,
+and what happens when it reaches for it is the host's decision rather than the
+guest's — and four vCPUs out of eight leaves the node supervising the guest
+competing with it for cores.
+
+**Do not read a wedged guest as proof of this.** The sizing is worth fixing
+because a VM larger than its host is indefensible on its own terms. It is not
+what wedged the guest that prompted the fix, and a correctly sized 4026 MB
+replacement wedged in exactly the same way.
+
+## A machine too small does not fail, it rots
+
+Sizing the sandboxes correctly is not enough: the machine also has to hold their
+**page cache**. Each sandbox carries a 25 GB sparse `rootfs.ext4` and, once
+paused, a `mem.snap` the size of its RAM. Two 4 GB sandboxes on a 12 GB machine
+filled 8.6 GB of it with cache, leaving ~1.8 GB free and a fragmented Normal
+zone. From then on every page a guest faulted could land in **direct** reclaim
+or direct compaction — both synchronous, and both charged to the thread that
+faulted, which is a guest vCPU.
+
+That is why it presents as "the VM is slow" and why it is so hard to catch:
+
+- The time lands in **`user`**, not `sys` — the vCPU is stalled on memory, not
+  doing kernel work — so it reads as a slow CPU.
+- **This machine looks idle**, 70-99%, the whole time.
+- It is **progressive**. Fragmentation and cache pressure accumulate, so a
+  sandbox that was fine an hour ago is unusable now, and a fresh one is fine
+  again for a while. Measured on one box over a session: 200 forks 0.372s ->
+  8.3s, `python3 -c "import json,hashlib"` 0.144s -> 2m42s.
+
+Look at the **host's** counters, never the guest's (the guest's are all zero):
+
+    grep -E 'pgsteal_direct|allocstall|compact_stall|compact_fail' /proc/vmstat
+
+`pgsteal_direct` in the millions and `compact_fail` near `compact_stall` is this
+bug. To confirm it in one move, `echo 3 > /proc/sys/vm/drop_caches` **on the
+machine** and re-measure inside the guest, changing nothing in the guest: it
+went 2m42s -> 0.03s and 8.3s -> 1.1s.
+
+Two things keep it away, and you want both. Give the machine real headroom —
+`container machine set -n sparkbox cpus=12 memory=32G`, which is
+**non-destructive** (the disk, the node identity, sandbox rootfs images and the
+gateway's keys all survive; `up.sh` re-links the same node with nothing to
+approve). Then pin the divisors so the extra RAM becomes cache headroom instead
+of bigger guests — they scale off machine RAM, so 32 GB would otherwise mint
+10.9 GB sandboxes and put you straight back:
+
+    SPARKBOX_DEV_SANDBOX_MEM_DIVISOR=8 SPARKBOX_DEV_SANDBOX_CPU_DIVISOR=3 hack/dev/up.sh
+
+`machine.sh ensure` handles the second half by raising
+`vm.watermark_scale_factor` to 200 so kswapd reclaims in the background ahead of
+a boot's burst instead of letting it fall into direct reclaim.
+
+**Do not benchmark this with `memcpy` or `gzip`.** Sequential and
+cache-resident work is unaffected and will tell you everything is fine: on a box
+where `hivemind --version` took 5 minutes, memcpy ran at 35 GB/s and `gzip -d`
+in 0.448s. Only TLB-hostile work shows it — use `200 forks` and
+`python3 -c "import json,hashlib"`. Beware too that repeated runs warm caches
+monotonically (3m02s -> 24.9s -> 5.2s), so compare a *fresh* sandbox against an
+*old* one, never the same one twice.
+
+## When the guest will not answer
+
+Every supported route into a sandbox goes through the in-guest agent on `:8000`:
+`ssh <name>@127.0.0.1`, the browser terminal, the REST API. A guest whose boot
+never finished has no agent, so all three say *"could not reach the sandbox's
+shell; it may still be starting"*, the node logs `connection refused` on `:8000`
+every couple of seconds, and there is nowhere to go next.
+
+```sh
+hack/dev/guest.sh console <name>        # the serial console: the real boot log
+hack/dev/guest.sh console <name> -f     # follow it
+```
+
+**`console` asks nothing of the guest.** firecracker writes ttyS0 to the
+vmm-helper container's stdout, so it works with no network, no sshd and no
+agent. Raw it is unreadable — the VMM's own API log shares that stdout, and
+systemd's progress bar rewrites one line several times a second, so a stuck boot
+buries its own evidence under thousands of redraws. `console` strips both and
+ends with a **"still waiting"** summary naming each unit systemd is stuck on and
+for how long. That summary is usually the whole answer.
+
+There is deliberately no `shell` mode. One existed and was deleted: it stood up
+a bind-then-`setns` forwarder to reach the guest's own sshd, and it never
+worked — it dialled with the operator's ssh identities while a guest's
+`authorized_keys` holds only the gateway's key, and its reused listener port
+could answer for the wrong guest, which is indistinguishable from the bug you
+would be debugging. It cost real time during the investigation above.
+
+If you do need a shell past the agent, the node container is already in the
+guest's network namespace and already has an ssh client, so it is one composed
+command and nothing is left running afterwards:
+
+```sh
+container machine run -i --root --name sparkbox -- \
+  docker exec -i sparkbox-dev-sparkbox-node ssh sparky@<guest-ip>
+```
+
+### …but the guest booted fine and still will not answer
+
+Then suspect the **gateway key in the template**, which fails in a way that
+looks nothing like a key problem: the node links, the sandbox creates and boots
+and reports `running`, `systemctl --failed` is empty — and every route in still
+says *"could not reach the sandbox's shell"*, because the gateway cannot SSH
+into a guest that does not hold its public key.
+
+The node runs with `--disable-host-rootfs-mounts` (uid 65532, no
+`CAP_SYS_ADMIN`, and deliberately never `mount(2)` on a guest-authored ext4), so
+per-create key injection is skipped by design. Whatever `prepare-vm-assets`
+baked into the template is the only key in the guest, and the template cannot
+repair itself later.
+
+Check it — these three must all match:
+
+```sh
+# 1. what the gateway will authenticate with
+cat .dev/gateway/keys/gateway_upstream_key.pub
+
+# 2. what prepare-vm-assets will bake, and 3. what the template actually carries
+container machine run -i --root --name sparkbox -- bash -s <<'SH'
+cat /srv/sparkbox/data/devpod-trust/gateway_upstream_key.pub
+mkdir -p /mnt/kc && mount -o ro,loop \
+  /srv/sparkbox/data/devpod/images/universal.ext4 /mnt/kc
+cat /mnt/kc/home/sparky/.ssh/authorized_keys
+umount /mnt/kc
+SH
+```
+
+`up.sh` re-copies both public keys into the trust dir on every run and
+`prepare-vm-assets` re-bakes the template, so `hack/dev/up.sh node` is the fix.
+Until that was true the upstream `.pub` was written once and never refreshed,
+so re-minting the gateway identity — which is exactly what starting a gateway in
+a fresh checkout does — silently stranded every sandbox created afterwards.
+
+#### …and the template fix does nothing for a sandbox that already exists
+
+`up.sh node` repairs the **template**. A sandbox created before the re-mint has
+its own copy of that template as its rootfs, made once at create time, and the
+paragraph above is exactly why nothing rewrites it afterwards. So the three keys
+can all match and that sandbox still cannot be reached. **Recreate it** — `ctl rm
+<name>`, then `ssh new+<name>@` — there is no in-place repair.
+
+The gateway now says so rather than making you find it: a key the guest refuses
+is reported as *"this sandbox trusts an older gateway identity"* at the ssh door
+and in the browser terminal, instead of the "may still be starting" sentence
+that is true of every other dial failure and false of this one.
+
+To read the key out of a **running** guest — the loop-mount above only sees the
+template — go through the image with `debugfs`, which needs no mount and no
+cooperation from the guest:
+
+```sh
+container machine run -i --root --name sparkbox -- bash -s <<'SH'
+pid=$(pgrep -f '^/firecracker' | head -1)     # one per running VM; check cmdline
+debugfs -R "cat /home/sparky/.ssh/authorized_keys" "/proc/$pid/root/rootfs.ext4"
+SH
+```
+
+The same trick reads the guest's journal when no route into it works, which is
+the only view that answers "is the guest broken, or just unreachable?" — dump
+`/var/log/journal/<machine-id>/system.journal` with `debugfs -R dump` and read it
+with `journalctl --file`. A locked-out guest is perfectly healthy inside and its
+sshd says so plainly: `Connection closed by authenticating user sparky [preauth]`.
+
+## Keeping the identity: `secrets.sh`
+
+The line above — *"re-minting the gateway identity is exactly what starting a
+gateway in a fresh checkout does"* — is the whole reason this exists. `.dev/` is
+disposable and the keys inside it are not:
+
+- the **node** copies the gateway's host key into its control dir on its first
+  successful link and trusts *that* from then on, so a re-mint means it refuses
+  every link afterwards;
+- the **rootfs template** carries the gateway's upstream public key as the login
+  user's `authorized_keys`, so a re-mint means the gateway can no longer ssh
+  into any sandbox created before it;
+- the **OIDC signing key** derives the KEK for every user secret in the
+  database, so a re-mint silently orphans all of them.
+
+```sh
+hack/dev/secrets.sh push     # .dev/gateway/keys -> 1Password
+hack/dev/secrets.sh pull     # 1Password -> .dev/gateway/keys, then derive .pub
+hack/dev/secrets.sh status   # what exists where, and whether they agree
+```
+
+It is a thin wrapper around `deploy/sync-fleet-secrets.sh`, which already does
+this for a real fleet and has the parts that are easy to get wrong: values
+travel in a template rather than argv, and **every write is proved by reading it
+back** — `op item create` can accept a write and store an empty field, and a
+backup you cannot restore is worse than none.
+
+Three things it deliberately does not do:
+
+- **It refuses the fleet vault.** The fleet default is `Sparkbox` and this one
+  is `Sparkbox-Dev`; they differ by four characters, and one is reached by
+  forgetting to set a variable. A `push` there would overwrite the fleet's
+  gateway, upstream and OIDC keys with a laptop's.
+- **It does not touch `github-app-key`**, which is already escrowed in a
+  *different* vault and account (`op://Hivemind-Dev/…`, see `gateway.sh`). Two
+  sources for one secret, silently preferring one, is how you end up debugging
+  an App that is not the App you edited. Nor does it mint a webhook secret,
+  Cloudflare token or console password — this box uses none of them, and an
+  escrowed value nobody consumes is indistinguishable from one that matters.
+- **It does not store the `.pub` halves.** `ssh-keygen -y` regenerates them from
+  the `.pem` byte for byte, so escrowing them would be a second copy of the same
+  fact that can disagree with the first. `pull` derives them, and `gateway.sh`
+  now derives them on every start — a *restored* identity is complete, so
+  `mint_identity` never runs and nothing else would.
+
+After a `pull`, run `hack/dev/up.sh node`: the node still has the old host key
+pinned, and `up.sh` clears that pin when it disagrees.
+
+`hack/dev/test-secrets.sh` covers all of the above against a stub `op` on PATH,
+including the two refusals, and runs in CI. A real vault cannot: `op` needs an
+authorized desktop app or a service account token.
+
+The first real `push` has since been run — `op vault create Sparkbox-Dev`, then
+`push`, then `status` reporting all six secrets present on both sides and
+matching. It found the one thing a stub could not: `SPARKBOX_DEV_STATE_DIR`
+defaulted to `.dev/gateway/state` while `gateway.sh` writes the state dir to
+`.dev/gateway/durable/gateway/control`, so `node_ca_key.pem` was always found and
+`node_ca_cert.pem` never was, and every real run would have refused a
+half-written CA. The suite passed throughout, because `dev()` sets that variable
+on every call and so never took the default. It now asserts the default against
+`gateway.sh`'s own definition instead.
 
 ## The gateway loop
 

@@ -112,6 +112,8 @@ type nodeOptions struct {
 	maxBoxesPerOwner int
 	memAdmitPct      int
 	hostMemMB        int64
+	defaultVCPUs     int64
+	defaultMemMB     int64
 	memReserve       int64
 	ownerMemPool     int64
 	ownerMemBurst    int64
@@ -281,6 +283,8 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		MaxSandboxesPerOwner: opts.maxBoxesPerOwner,
 		MemAdmissionPct:      opts.memAdmitPct,
 		HostMemMB:            hostMem,
+		DefaultVCPUs:         opts.defaultVCPUs,
+		DefaultMemMB:         opts.defaultMemMB,
 		MemReserveMB:         opts.memReserve,
 		OwnerMemoryPoolMB:    opts.ownerMemPool,
 		OwnerMemoryBurstMB:   opts.ownerMemBurst,

@@ -250,6 +250,13 @@ mint_identity() {
 # way deploy.sh derives them for the sparkbox-node-trust Secret. Nothing in a
 # gateway-only run reads them; they are here so `sparkbox devpod`'s node has a
 # trust bundle to mount without re-deriving it.
+#
+# Called on every start, not only after a mint. A mint is not the only way an
+# identity arrives: `hack/dev/secrets.sh pull` restores the .pem halves from
+# 1Password, and a restored identity is COMPLETE, so mint_identity never runs
+# and nothing would derive these. up.sh's seed_trust then dies on a missing
+# gateway_upstream_key.pub. Deriving here is idempotent (each is skipped when
+# present) and costs one ssh-keygen per start.
 derive_trust_pubs() {
   local name
   for name in gateway_host_key gateway_upstream_key; do
@@ -446,6 +453,7 @@ cmd_start() {
   fi
   seed_users
   identity_complete || mint_identity
+  derive_trust_pubs
   fetch_app_key
   warn_app_config
   printf '\n=== %s: start %s ===\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$bin" >> "$log_file"

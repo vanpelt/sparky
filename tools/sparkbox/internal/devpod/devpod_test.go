@@ -1346,3 +1346,50 @@ func argvFor(t *testing.T, p *Plan, container string) []string {
 	}
 	return argv
 }
+
+// TestPlanCarriesTheSandboxSizingItWasGiven is the test whose absence let the
+// dev sizing die silently.
+//
+// buildEnv rewrites the values of keys the MANIFEST already declares and cannot
+// introduce new ones, so SPARKBOX_DEFAULT_VCPUS / SPARKBOX_DEFAULT_MEM_MB in
+// deployment.yaml are not documentation — they are the slot Options writes
+// into. Both carry "0" on CKS, which makes them look like dead weight; deleting
+// them does not restore a default, it disconnects `devpod up -default-mem-mb`
+// from the pod entirely. Options still holds the value, plan.go's case still
+// exists, and nothing fires.
+//
+// The damage is specific: a laptop's container machine then gets the CKS
+// built-in of 12288MB per sandbox, which is larger than the whole machine, and
+// admission control cannot catch it because one VM at the ceiling technically
+// fits. Three of them ran on a 12079MB machine before anyone noticed, and what
+// it looked like from outside was hivemind hanging and 19 seconds to start a
+// shell.
+//
+// A golden file cannot catch this. plan_arm64.golden was regenerated after the
+// keys were removed and faithfully recorded their absence as correct.
+func TestPlanCarriesTheSandboxSizingItWasGiven(t *testing.T) {
+	o := testOptions()
+	o.DefaultVCPUs = 2
+	o.DefaultMemMB = 4026
+	plan := mustPlan(t, o)
+	joined := strings.Join(argvFor(t, plan, "sparkbox-node"), " ")
+
+	for _, want := range []string{
+		"SPARKBOX_DEFAULT_VCPUS=2",
+		"SPARKBOX_DEFAULT_MEM_MB=4026",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the node pod never receives %s, so the sizing the caller asked for is dropped "+
+				"and every sandbox gets the CKS built-in: is the key still declared in deployment.yaml?", want)
+		}
+	}
+
+	// And the CKS path is unchanged: 0 means "keep the built-in", which must
+	// not reach the pod as a size.
+	base := strings.Join(argvFor(t, mustPlan(t, testOptions()), "sparkbox-node"), " ")
+	for _, unwanted := range []string{"SPARKBOX_DEFAULT_VCPUS=2", "SPARKBOX_DEFAULT_MEM_MB=4026"} {
+		if strings.Contains(base, unwanted) {
+			t.Errorf("an unsized plan carries %s; 0 must leave the built-in alone", unwanted)
+		}
+	}
+}

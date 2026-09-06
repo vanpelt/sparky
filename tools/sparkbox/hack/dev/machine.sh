@@ -41,6 +41,8 @@
 #   SPARKBOX_DEV_DATA_DIR       reflink data volume    (default /srv/sparkbox/data)
 set -euo pipefail
 
+readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly module_dir="$(cd "$script_dir/../.." && pwd)"
 readonly machine="${SPARKBOX_DEV_MACHINE:-sparkbox}"
 readonly host_ip="${SPARKBOX_DEV_HOST_IP:-192.168.64.1}"
 readonly reg_port="${SPARKBOX_DEV_REGISTRY_PORT:-5001}"
@@ -147,10 +149,151 @@ for dev in /dev/kvm /dev/net/tun; do
   fi
 done
 
+# --- network device types ---------------------------------------------------
+# The outer kernel is built with NO loadable modules (/lib/modules is empty,
+# there is no modprobe), so a device type either compiled in or does not exist.
+# deploy/sparkbox-net.sh creates `sparkdns` and the edge IP as `type dummy`, and
+# Apple's base config leaves CONFIG_DUMMY unset — so on a kernel built before
+# macos/kernel/sparkbox-arm64.fragment added it, vmm-helper dies at startup with
+# iproute2's bare `Error: Unknown device type.` before it opens its socket.
+# sluice then cannot bind its resolver, the node cannot reach the helper socket,
+# and three containers exit within seconds of each other. Nothing in that
+# cascade names the kernel.
+#
+# Probing is better than reading a config the running kernel may not even
+# expose: create one, delete it, report what happened.
+for type in dummy bridge veth; do
+  probe="sbprobe$$"
+  case "$type" in
+    veth) add_args="peer name ${probe}b" ;;
+    *)    add_args="" ;;
+  esac
+  if ip link add "$probe" type "$type" $add_args > /dev/null 2>&1; then
+    ip link del "$probe" > /dev/null 2>&1
+    ok "netdev $type" "supported"
+  else
+    bad "netdev $type" "this kernel cannot create '$type' links — rebuild it: macos/kernel/build.sh"
+  fi
+done
+
 if [ "$(stat -f -c %T /sys/fs/cgroup 2>/dev/null)" = cgroup2fs ]; then
   ok cgroup "v2 unified"
 else
   bad cgroup "/sys/fs/cgroup is not cgroup2fs; the Pod's resource limits will not apply"
+fi
+
+# --- transparent huge pages -------------------------------------------------
+# The single largest performance factor in this environment, by two orders of
+# magnitude. Guest RAM is anonymous memory Firecracker mmaps, and every page the
+# guest touches for the first time faults through TWO stage-2 layers: ours, and
+# Apple's underneath it. Measured here, that costs ~300us per fault — about
+# 3,300 faults/sec, or ~13MB/s of first-touch memory, against 4,600MB/s for the
+# very same allocation made directly in this machine. A 350x penalty.
+#
+# TREAT THAT 350x AS AN UPPER BOUND ON WHAT THP ALONE BUYS. It was measured
+# before we understood the other half of the same condition: KVM only maps a
+# guest in 2MiB blocks when the host virtual address is congruent with the guest
+# physical one mod 2MiB, and firecracker v1.16.1 does not align its mmap, so a
+# guest whose size was an odd number of MiB got 4KiB stage-2 PTEs however many
+# huge pages the host had. The box these numbers came off was in exactly that
+# state, so the figure is the two faults compounded. See evenMemMB() in
+# internal/host/manager.go, which supplies the congruence; THP=always here
+# supplies the contiguous page, and neither is any use without the other.
+#
+# Nothing about it looks like a memory problem from the outside. Boot is what
+# touches most of guest RAM (the kernel initialises a struct page for all of
+# it), so the symptom is that BOOT scales with mem_size_mib and everything else
+# looks normal: userspace compute in the booted guest runs at full speed. The
+# measured cliff, same kernel and rootfs, time to /init:
+#
+#     512MB 1.43s | 1024MB 1.42s | 2048MB 25.74s | 4026MB 34.08s
+#
+# THP collapses 512 of those faults into one. With enabled=always the same
+# 4026MB guest reaches init in 0.23s instead of 29.82s -- and that is the whole
+# difference between a sandbox that boots and one that trips its 90s systemd
+# timeouts and looks, from the host, like a VM pegging four cores forever.
+#
+# Apple's machine image ships `madvise`, which is the trap: Firecracker does not
+# madvise its guest memory, so `madvise` means no THP at all here.
+#
+# We do NOT use Firecracker's own huge_pages="2M" instead. It is MAP_HUGETLB and
+# needs pages reserved up front, but the blocker is snapshots. Measured against
+# Firecracker v1.16.1 here: booting with huge_pages="2M" WORKS (the guest comes
+# up with Private_Hugetlb backing its RAM) and `PUT /snapshot/create` works —
+# and then the restore is refused outright:
+#
+#     Cannot restore hugetlbfs backed snapshot by mapping the memory file.
+#     Please use uffd.
+#
+# Sparkbox restores with backend_type "File", so turning huge_pages on would
+# trade a boot-time win for a pause/resume that cannot come back. Adopting it
+# means writing a UFFD page-fault handler process first. Worth knowing that the
+# same handler would also fix a separate bug: a File-restored guest's RAM is a
+# private FILE mapping of mem.snap, and THP never collapses those, so a RESUMED
+# sandbox runs with zero huge pages (AnonHugePages 0, against ~91% on a fresh
+# boot) until it is recreated. UFFD populates an anonymous mapping instead,
+# which is THP-eligible. Firecracker's docs say the balloon stays compatible
+# provided the handler zeroes on UFFD_EVENT_REMOVE.
+thp=/sys/kernel/mm/transparent_hugepage/enabled
+thp_was=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' "$thp" 2>/dev/null)
+if [ -z "$thp_was" ]; then
+  bad thp "no THP support in this kernel — guest boots will be ~100x slower"
+elif [ "$thp_was" = always ]; then
+  ok thp "always"
+elif [ "$mode" != ensure ]; then
+  # status reports, never repairs.
+  bad thp "$thp_was, not always — guest boots will be ~100x slower; fix: machine.sh ensure"
+# deliberately NOT `changed=1`: that flag means "docker's config moved, restart
+# the daemon", and a restart kills the node Pod and every sandbox on it. THP is
+# a live sysctl -- it takes effect on the next guest boot with nothing
+# restarted.
+elif echo always > "$thp" 2>/dev/null; then
+  ok thp "was $thp_was, set to always"
+else
+  bad thp "could not set $thp to 'always' — guest boots will take ~30s instead of ~0.2s"
+fi
+
+# --- reclaim watermarks -----------------------------------------------------
+# THP above fixes what a fault COSTS; this fixes who PAYS for one. The default
+# watermark_scale_factor is 10 — 0.1% of RAM — so kswapd does not start
+# reclaiming until free memory is nearly gone. A booting guest allocates in
+# bursts of GBs, outruns kswapd, and the allocation falls into DIRECT reclaim,
+# which is synchronous and charged to the faulting thread: a guest vCPU. The
+# guest then looks CPU-bound while this machine looks 70-99% idle, which is why
+# this is so hard to see from inside a sandbox.
+#
+# Measured on a 12GB machine after a day of two 4GB sandboxes, whose page cache
+# had filled with 25GB sparse rootfs images and 4.2GB mem.snap files:
+#
+#     pgsteal_direct 6,073,908 | compact_stall 95,348 (68,584 FAILED)
+#
+# and in a guest, `python3 -c "import json,hashlib"` took 2m42s, 200 forks 8.3s,
+# `hivemind --version` 5m. `echo 3 > /proc/sys/vm/drop_caches` on THIS machine —
+# with nothing whatsoever changed inside the guest — returned those to 0.03s,
+# 1.1s and ~20s. That is the whole bug, and it is progressive: it arrives only
+# after fragmentation and cache pressure build up, so a box that was fine an
+# hour ago is unusable now.
+#
+# Raising the factor widens the gap between the low and high watermarks so
+# kswapd wakes earlier and reclaims in the BACKGROUND, ahead of the burst. The
+# cost is a little more memory held in reserve. Like THP it is a live sysctl and
+# needs no restart. This does NOT substitute for a machine big enough for its
+# sandboxes — it stops a merely tight machine from degrading into a dead one.
+wsf=/proc/sys/vm/watermark_scale_factor
+wsf_want=200
+wsf_was=$(cat "$wsf" 2>/dev/null || true)
+memtotal=$(awk '/^MemTotal:/{printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)
+if [ -z "$wsf_was" ]; then
+  bad watermarks "no $wsf in this kernel — guest vCPUs will stall in direct reclaim"
+elif [ "$wsf_was" -ge "$wsf_want" ] 2>/dev/null; then
+  ok watermarks "scale_factor=$wsf_was, ${memtotal}MB total"
+elif [ "$mode" != ensure ]; then
+  bad watermarks "scale_factor=$wsf_was, want >=$wsf_want — guest vCPUs will stall in
+                       direct reclaim; fix: hack/dev/machine.sh ensure"
+elif echo "$wsf_want" > "$wsf" 2>/dev/null; then
+  ok watermarks "was $wsf_was, set to $wsf_want (${memtotal}MB total)"
+else
+  bad watermarks "could not set $wsf to $wsf_want — guest vCPUs will stall in direct reclaim"
 fi
 
 # --- the data volume --------------------------------------------------------
@@ -315,9 +458,102 @@ run_guest() {
   return "$rc"
 }
 
+# The machine stores an ABSOLUTE path to the outer kernel, chosen when it was
+# created (macos/poc.sh passes --kernel "$OUT_DIR/vmlinux-kvm"). Create the
+# machine from a git worktree and it is pinned to that worktree forever — and
+# macos/out/ is gitignored, so the kernel does not travel with the branch.
+#
+# This is not hypothetical. A machine here was pinned to a worktree that had
+# since been DELETED. It ran for thirteen hours because the image was already
+# loaded, and died the first time it was stopped:
+#
+#   kernel binary not found at '.../.claude/worktrees/<gone>/macos/out/vmlinux-kvm'
+#
+# Worse than the outage: re-pointing it at this checkout silently downgraded the
+# kernel by six weeks, because the built artifact here predated the fragment
+# that adds CONFIG_DUMMY — see the netdev probe in the guest script.
+check_kernel_path() {
+  local configured local_kernel
+  # jq rather than a regex over the raw JSON, the way macos/poc.sh and
+  # macos/smoke.sh already read this command. Deliberately shape-agnostic — the
+  # first STRING-valued "kernel" field anywhere in the document — because the
+  # container CLI shipping today does not echo the path back at all (create
+  # takes --kernel; inspect returns no such key), so there is no observed
+  # nesting to hard-code and a guessed `.[0].kernel` would fail exactly as
+  # silently as the regex it replaced. Absent jq, skip: the same thing an
+  # unrecognised format has always done, two lines below.
+  command -v jq > /dev/null 2>&1 || return 0
+  configured=$(container machine inspect "$machine" 2>/dev/null |
+    jq -r '[.. | objects | select(has("kernel")) | .kernel]
+           | map(select(type == "string")) | first // empty' 2>/dev/null)
+  local_kernel="$module_dir/macos/out/vmlinux-kvm"
+
+  if [ -z "$configured" ]; then
+    return 0 # this container CLI does not report it; nothing to check against
+  fi
+  if [ ! -f "$configured" ]; then
+    die "$machine boots a kernel that no longer exists:
+       $configured
+     It was created from a directory that has since been removed (a git worktree,
+     most likely). The machine keeps running until it is stopped, and then cannot
+     start again.
+     fix: build this checkout's kernel and re-point the machine at it —
+       macos/kernel/build.sh
+       container machine set -n $machine kernel=$local_kernel"
+  fi
+  case "$configured" in
+    "$local_kernel") ;;
+    *"/.claude/worktrees/"*)
+      note_stale "$machine boots $configured
+     That is inside a git worktree. macos/out/ is gitignored, so deleting the
+     worktree strands this machine. Re-point it at $local_kernel once built."
+      ;;
+    *)
+      note_stale "$machine boots $configured, not this checkout's
+       $local_kernel
+     That is legal — but the two can drift, and a kernel older than
+     macos/kernel/sparkbox-arm64.fragment fails in ways that look like sparkbox bugs."
+      ;;
+  esac
+}
+
+note_stale() { printf 'WARN  %s\n' "$*" >&2; }
+
+# Is the built kernel older than the config it claims to be built from?
+#
+# macos/out/ is gitignored and macos/kernel/sparkbox-arm64.fragment is not, so
+# the two drift silently: pull a branch that changes the fragment and your
+# kernel is simply wrong, with no signal anywhere. The build already records
+# fragment_sha256 in its manifest, so the comparison costs one shasum.
+#
+# A WARN rather than a failure: a fragment change need not break anything, and
+# the things that DO break have functional probes in the guest script that name
+# themselves. This is the one that explains them.
+check_kernel_freshness() {
+  local manifest=$module_dir/macos/out/kernel-manifest.txt
+  local fragment=$module_dir/macos/kernel/sparkbox-arm64.fragment
+  [ -f "$manifest" ] && [ -f "$fragment" ] || return 0
+  command -v shasum > /dev/null 2>&1 || return 0
+
+  local built want
+  built=$(sed -n 's/^fragment_sha256=//p' "$manifest" | head -1)
+  want=$(shasum -a 256 "$fragment" | awk '{print $1}')
+  [ -n "$built" ] || return 0
+  [ "$built" = "$want" ] && return 0
+
+  note_stale "the built kernel does not match macos/kernel/sparkbox-arm64.fragment
+     built from: $built
+     fragment is: $want
+     The kernel in macos/out/ predates the config checked into this branch, and
+     macos/out/ is gitignored so it did not travel with it.
+     fix: macos/kernel/build.sh"
+}
+
 cmd_ensure() {
   need_container_cli
   require_running
+  check_kernel_path
+  check_kernel_freshness
   echo "== ensure $machine =="
   if run_guest ensure; then
     echo "machine ready"
@@ -341,6 +577,7 @@ cmd_status() {
   fi
   container machine ls 2>/dev/null | sed -n '1p;/^'"$machine"' /p' | sed 's/^/  /'
   echo
+  check_kernel_freshness
   run_guest status
 }
 

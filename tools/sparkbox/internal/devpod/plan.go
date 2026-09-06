@@ -9,6 +9,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/deviceplugin"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/devpod/podspec"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 )
 
 // Options are the local facts the manifest cannot know.
@@ -34,6 +35,14 @@ type Options struct {
 	// admits far more than a laptop can hold. 0 keeps the manifest value and
 	// records the divergence.
 	HostMemMB int64
+	// DefaultVCPUs and DefaultMemMB override SPARKBOX_DEFAULT_VCPUS and
+	// SPARKBOX_DEFAULT_MEM_MB: the size a sandbox gets when nobody named one.
+	// The binary's built-ins are 4 vCPU and 12288 MB because that is a sensible
+	// slice of a CKS node; on a laptop's container machine it is a guest larger
+	// than the whole machine, which boots, thrashes, and never finishes. 0
+	// keeps the built-ins and records the divergence.
+	DefaultVCPUs int64
+	DefaultMemMB int64
 	// NodeName overrides SPARKBOX_NODE_NAME so a dev node does not enroll
 	// under the live node's identity. Empty keeps the manifest value.
 	NodeName string
@@ -659,6 +668,14 @@ func (p *Plan) buildEnv(src *Source, c podspec.Container) ([]KeyValue, error) {
 			if o.HostMemMB > 0 {
 				value = fmt.Sprintf("%d", o.HostMemMB)
 			}
+		case "SPARKBOX_DEFAULT_VCPUS":
+			if o.DefaultVCPUs > 0 {
+				value = fmt.Sprintf("%d", o.DefaultVCPUs)
+			}
+		case "SPARKBOX_DEFAULT_MEM_MB":
+			if o.DefaultMemMB > 0 {
+				value = fmt.Sprintf("%d", o.DefaultMemMB)
+			}
 		}
 		out = append(out, KeyValue{env.Name, value})
 	}
@@ -873,6 +890,27 @@ func (p *Plan) recordDivergences(src *Source, pod podspec.PodSpec) {
 			Area:     "admission",
 			What:     "SPARKBOX_HOST_MEM_MB is the manifest's CKS value",
 			Why:      "admission control will size itself for the cluster node rather than this machine. Set Options.HostMemMB.",
+			Blocking: true,
+		})
+	}
+
+	// The one a right-sized HostMemMB still does not catch. Admission compares
+	// a sandbox against the host, so a single VM at the ceiling is admitted by
+	// a host smaller than the VM: it boots, the guest kernel discovers there is
+	// no RAM behind its 12 GB, and it thrashes at 100% on every vCPU forever
+	// while sshd can no longer even answer with a banner. Measured, on a
+	// container machine with 12079 MB, booting the built-in 12288 MB default.
+	sandboxMem := o.DefaultMemMB
+	if sandboxMem == 0 {
+		sandboxMem = host.DefaultMemMB
+	}
+	if o.HostMemMB > 0 && sandboxMem >= o.HostMemMB {
+		p.add(Divergence{
+			Area: "sandbox size",
+			What: fmt.Sprintf("one sandbox is %d MB on a %d MB machine", sandboxMem, o.HostMemMB),
+			Why: "a guest at least as large as the host it runs on cannot be backed, and nothing refuses it: " +
+				"admission control only asks whether the sandbox fits the host's RAM, which one VM at the ceiling " +
+				"technically does. Set Options.DefaultMemMB to something the machine can hold.",
 			Blocking: true,
 		})
 	}

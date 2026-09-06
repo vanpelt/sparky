@@ -320,3 +320,71 @@ func TestPressureReclaimsTurboBeforeNormalVM(t *testing.T) {
 		t.Fatalf("turbo pressure balloon target = %d, want only the %d MiB excess", stats.TargetMiB, want)
 	}
 }
+
+// TestIdleBalloonNeverSqueezesBelowTheLiveWorkingSet pins the fix for a guest
+// that burned four vCPUs for the better part of an hour and could not be
+// rescued by anything the control plane knew how to do.
+//
+// A 4026 MiB sandbox was ballooned to its 256 MiB reserve two minutes into a
+// boot that had not finished. containerd then failed eleven times, docker took
+// fourteen minutes, and the in-guest agent never started at all — so no traffic
+// ever moved, the activity floor never fired, and nothing deflated the balloon.
+// The reserve is a guess made before the guest exists; what the guest is
+// measurably touching is not, and the balloon device already reports it.
+func TestIdleBalloonNeverSqueezesBelowTheLiveWorkingSet(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 256})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "booting", "alice", "ubuntu", 4, 4026); err != nil {
+		t.Fatal(err)
+	}
+	// Mid-boot with docker coming up: 2 GiB of the 4026 in real use.
+	m.driver.(*mock.Driver).SetInUseMiB("booting", 2048)
+
+	m.boxes["booting"].LastActive = time.Now().Add(-5 * time.Minute)
+	m.reapOnce(ctx, time.Minute, time.Hour)
+
+	st, err := m.balloon.BalloonStats(ctx, "booting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Squeezing to the 256 MiB reserve would reclaim 3770 MiB — the exact
+	// inflation that wedged the real guest.
+	if st.TargetMiB > 4026-2048 {
+		t.Fatalf("balloon reclaimed %d MiB, leaving the guest %d MiB while it was using 2048 MiB",
+			st.TargetMiB, 4026-st.TargetMiB)
+	}
+}
+
+// The same floor, reached through the OTHER caller. The idle reaper is not the
+// only thing that inflates a balloon: reclaimMemory asks for a specific number
+// of megabytes to close a real overage, and only the idle path was ever
+// guarded — so the trap stayed open on the path that fires under genuine
+// memory pressure, exactly when a guest can least afford it.
+//
+// The candidate ranking bounds a reclaim to `observed - reserve`, which hides
+// this for a guest using half its RAM or less: the leftover happens to land
+// above the working set anyway. It stops hiding it once the guest is using
+// more than (MemMB + reserve)/2, which is where a real boot sits. Hence 3000
+// of 4026 and not, say, 2048 — at 2048 this test passes without the fix.
+func TestPressureBalloonNeverSqueezesBelowTheLiveWorkingSet(t *testing.T) {
+	m := internalManager(t, Options{MemReserveMB: 256, OwnerMemoryPoolMB: 512})
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "booting", "alice", "ubuntu", 4, 4026); err != nil {
+		t.Fatal(err)
+	}
+	m.driver.(*mock.Driver).SetInUseMiB("booting", 3000)
+	m.refreshMemoryUsage(ctx)
+	m.boxes["booting"].LastActive = time.Now().Add(-time.Hour)
+
+	// Ask for far more than the guest can safely give.
+	m.reclaimMemory(ctx, "alice", 4000)
+
+	st, err := m.balloon.BalloonStats(ctx, "booting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TargetMiB > 4026-3000 {
+		t.Fatalf("pressure reclaimed %d MiB, leaving the guest %d MiB while it was using 3000 MiB",
+			st.TargetMiB, 4026-st.TargetMiB)
+	}
+}

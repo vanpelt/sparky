@@ -36,6 +36,7 @@ type fakeVM struct {
 	paused        bool
 	memMB         int64
 	balloonTarget int64  // MiB the balloon is holding (0 = deflated)
+	inUseMiB      int64  // MiB the guest is genuinely touching (see SetInUseMiB)
 	cpuNanos      uint64 // synthetic cumulative CPU time (see CPUTimeNanos)
 	netRx, netTx  uint64 // synthetic cumulative network bytes (see NetBytes)
 
@@ -393,13 +394,34 @@ func (d *Driver) BalloonStats(_ context.Context, name string) (vmm.BalloonStats,
 	if !ok || vm.paused {
 		return vmm.BalloonStats{}, fmt.Errorf("vm %q not running", name)
 	}
-	available := max64(0, vm.memMB-vm.balloonTarget-256)
+	inUse := vm.inUseMiB
+	if inUse <= 0 {
+		inUse = defaultInUseMiB
+	}
+	available := max64(0, vm.memMB-vm.balloonTarget-inUse)
 	return vmm.BalloonStats{
 		TargetMiB:    vm.balloonTarget,
 		ActualMiB:    vm.balloonTarget,
 		FreeMiB:      available / 2, // some of the available RAM is reclaimable cache
-		AvailableMiB: available,     // pretend ~256MiB is genuinely in use
+		AvailableMiB: available,     // the rest is what the guest is really touching
 	}, nil
+}
+
+// defaultInUseMiB is the working set a mock guest reports when a test has not
+// said otherwise: small enough that the balloon policy's live-working-set floor
+// never binds, so tests about other things are unaffected by it.
+const defaultInUseMiB = 256
+
+// SetInUseMiB makes the named mock guest report a working set of inUseMiB, the
+// way a real guest mid-build or mid-boot would. It is how a test reaches the
+// balloon policy's "never squeeze a guest below what it is actually using"
+// rule, which is invisible while every guest claims to be using 256 MiB.
+func (d *Driver) SetInUseMiB(name string, inUseMiB int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if vm, ok := d.vms[name]; ok {
+		vm.inUseMiB = inUseMiB
+	}
 }
 
 func max64(a, b int64) int64 {

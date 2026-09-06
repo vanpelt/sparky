@@ -125,7 +125,20 @@ func newNodeStackLogging(t *testing.T, enrol bool, handler slog.Handler) *nodeSt
 	}
 	srv := gw.Server("")
 	go srv.Serve(ln) //nolint:errcheck
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() {
+		srv.Close()
+		// gliderlabs runs every session handler in a goroutine it does not
+		// track, so neither Close nor Shutdown waits for one: Close returns
+		// while a node link can still be halfway through a frame, and applying
+		// a frame reads the placement ledger. The stores below this line — and
+		// the temp dir holding the sqlite file under them — are torn down
+		// next, so without waiting here a live query races the removal and
+		// leaves a freshly recreated -wal behind for RemoveAll to trip over.
+		// ServeLink leaves the fleet only after its read loop returns, which
+		// makes an empty roster the exact signal that no link is still
+		// reading.
+		waitFor(t, "node links to drain", func() bool { return len(flt.Nodes()) == 1 })
+	})
 
 	return &nodeStack{
 		gw: gw, addr: ln.Addr().String(), roster: roster, flt: flt, index: index,
@@ -723,9 +736,14 @@ func TestDedicatedDataLaneBindsToRosterAndControlGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	control.send(t, nodelink.Frame{Type: nodelink.TypeChanged, Body: changed})
-	waitFor(t, "remote sandbox cache", func() bool {
-		_, ok := s.flt.Get("demo")
-		return ok
+	// Reserve already wrote the ledger row and Fleet.Get renders an unplaced
+	// row from the ledger alone, so waiting for the name to resolve would
+	// return before the node's report had reached anything. The owner arrives
+	// only with the Changed frame, which makes it the signal that the link
+	// really did apply it.
+	waitFor(t, "the node's change to be applied", func() bool {
+		b, ok := s.flt.Get("demo")
+		return ok && b.Owner == "alice"
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

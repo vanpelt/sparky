@@ -125,9 +125,11 @@ func serve(args []string) error {
 		defaultImage         = fs.String("default-image", "universal", "rootfs template for new sandboxes")
 		defaultLogin         = fs.String("default-login-user", "sparky", "guest account the gateway SSHes in as; must match the template's baked authorized_keys (our images declare it via the sparkbox.login-user label, published as ROOTFS_LOGIN_USER in the release manifest)")
 		idleTimeout          = fs.Duration("idle-timeout", 30*time.Minute, "pause sandboxes idle longer than this")
-		idleBalloon          = fs.Duration("idle-balloon", 2*time.Minute, "balloon a warm sandbox down to --mem-reserve-mb after this much idle, reclaiming its RAM while it keeps running (0 disables; needs --mem-reserve-mb)")
+		idleBalloon          = fs.Duration("idle-balloon", 5*time.Minute, "balloon a warm sandbox down to its working set after this much idle, reclaiming RAM while it keeps running (0 disables; needs --mem-reserve-mb). Not optional housekeeping: with --mem-reserve-mb set, admission charges every running sandbox the reserve rather than its ceiling, so this is the mechanism that makes that accounting true, and a long value leaves it optimistic for that much longer. Fires on the idle timer alone — --owner-memory-pool-mb drives the separate demand-led reclaim, which is the backstop for real pressure. Safe to keep short because setBalloonTarget never squeezes below the guest's MEASURED working set; it was two minutes with no such floor that used to squeeze guests mid-boot")
 		activityCPU          = fs.Float64("activity-cpu-pct", 0, "treat a sandbox as active while it burns at least this % of one host core (0 disables, the default); opt in for unattended CPU-only work")
 		activityNetKB        = fs.Int64("activity-net-kb", 64, "treat a sandbox as active while it moves at least this many KiB per reaper tick in either direction (0 disables). Idle boxes measure ~3 KB/min, a working agent 400 KB+")
+		defaultVCPUs         = fs.Int64("default-vcpus", 0, "vCPUs for a sandbox created without an explicit size, which is every `new@` sandbox (0 = the built-in 4). Size this for the machine the node is on: admission control compares against host RAM and cannot notice that one VM at the ceiling is larger than the whole host")
+		defaultMemMB         = fs.Int64("default-mem-mb", 0, "RAM in MB for a sandbox created without an explicit size (0 = the built-in 12288). See --default-vcpus")
 		maxPerOwner          = fs.Int("max-running-per-owner", 2, "max concurrently running sandboxes per owner (0 = unlimited); pause with `ssh ctl@host pause <name>`")
 		maxBoxesPerOwner     = fs.Int("max-sandboxes-per-owner", 0, "max total running, paused, and archived sandboxes per owner (0 = unlimited)")
 		memAdmitPct          = fs.Int("mem-admission-pct", 85, "refuse to start a sandbox if running sandboxes' RAM cost would exceed this % of host RAM (0 = disabled)")
@@ -298,6 +300,7 @@ func serve(args []string) error {
 			activityCPU: *activityCPU, activityNetKB: *activityNetKB,
 			maxPerOwner: *maxPerOwner, maxBoxesPerOwner: *maxBoxesPerOwner,
 			memAdmitPct: *memAdmitPct, hostMemMB: *hostMemMB,
+			defaultVCPUs: *defaultVCPUs, defaultMemMB: *defaultMemMB,
 			memReserve: *memReserve, ownerMemPool: *ownerMemPool,
 			ownerMemBurst: *ownerMemBurst, diskPool: *diskPool,
 			controlTransport: *nodeControlTransport, grpcAddr: *nodeGRPCAddr,
@@ -665,6 +668,8 @@ func serve(args []string) error {
 		MaxSandboxesPerOwner: *maxBoxesPerOwner,
 		MemAdmissionPct:      *memAdmitPct,
 		HostMemMB:            hostMem,
+		DefaultVCPUs:         *defaultVCPUs,
+		DefaultMemMB:         *defaultMemMB,
 		MemReserveMB:         *memReserve,
 		OwnerMemoryPoolMB:    *ownerMemPool,
 		OwnerMemoryBurstMB:   *ownerMemBurst,

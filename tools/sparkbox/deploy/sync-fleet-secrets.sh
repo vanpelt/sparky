@@ -33,6 +33,13 @@ set -euo pipefail
 SECRETS_DIR=${SECRETS_DIR:-$HOME/.sparkbox/secrets}
 OP_VAULT=${OP_VAULT:-Sparkbox}
 OP_FIELD=${OP_FIELD:-password}
+# Space-separated secret names this deployment does not use. They are neither
+# generated nor synced nor reported. A deployment that does not own a secret
+# should not mint one: an escrowed value nobody consumes is indistinguishable
+# from one that matters, and the next operator cannot tell which they are
+# looking at. hack/dev/secrets.sh uses this to keep the dev box's identity out
+# of the fleet's GitHub App and Cloudflare entries.
+SECRETS_EXCLUDE=${SECRETS_EXCLUDE:-}
 FLEET_CLUSTER_ID=${FLEET_CLUSTER_ID:-prod}
 
 GATEWAY_HOST_KEY=${GATEWAY_HOST_KEY:-$SECRETS_DIR/gateway_host_key.pem}
@@ -67,6 +74,11 @@ op_args=(--vault "$OP_VAULT")
 [ -n "${OP_ACCOUNT:-}" ] && op_args+=(--account "$OP_ACCOUNT")
 read_args=()
 [ -n "${OP_ACCOUNT:-}" ] && read_args+=(--account "$OP_ACCOUNT")
+
+excluded() {
+  case " $SECRETS_EXCLUDE " in *" $1 "*) return 0 ;; esac
+  return 1
+}
 
 # run_bounded runs a command under a time limit where one is available. macOS
 # has no `timeout` unless coreutils is installed, and this script's whole point
@@ -210,47 +222,53 @@ generate_missing() {
   # trap, and it is echoed for the same reason the console password is: a
   # secret nobody can read is a secret nobody can paste. Rotating it is one
   # edit on each side, with no re-consent and no flag day.
-  local ws=${GITHUB_WEBHOOK_SECRET:-}
-  if [ -z "$ws" ] && [ -f "$SECRETS_DIR/.env" ]; then
-    ws=$(sed -n 's/^SPARKBOX_GITHUB_WEBHOOK_SECRET=//p' "$SECRETS_DIR/.env")
+  if ! excluded github-webhook-secret; then
+    local ws=${GITHUB_WEBHOOK_SECRET:-}
+    if [ -z "$ws" ] && [ -f "$SECRETS_DIR/.env" ]; then
+      ws=$(sed -n 's/^SPARKBOX_GITHUB_WEBHOOK_SECRET=//p' "$SECRETS_DIR/.env")
+    fi
+    if [ -z "$ws" ] && [ -f "$GITHUB_WEBHOOK_SECRET_FILE" ]; then
+      ws=$(cat "$GITHUB_WEBHOOK_SECRET_FILE")
+    fi
+    if [ -z "$ws" ]; then
+      # Hex, not base64: this value is typed or pasted into a web form and then
+      # compared byte for byte, and hex has no characters a form, a shell or a
+      # copy-paste can mangle.
+      ws=$(openssl rand -hex 32)
+      echo "== generated github webhook secret (stored as github-webhook-secret) =="
+      echo "   $ws"
+      echo "   paste it into the App's Settings -> Webhook -> Secret"
+    fi
+    ( umask 077; printf '%s' "$ws" > "$GITHUB_WEBHOOK_SECRET_FILE" )
   fi
-  if [ -z "$ws" ] && [ -f "$GITHUB_WEBHOOK_SECRET_FILE" ]; then
-    ws=$(cat "$GITHUB_WEBHOOK_SECRET_FILE")
-  fi
-  if [ -z "$ws" ]; then
-    # Hex, not base64: this value is typed or pasted into a web form and then
-    # compared byte for byte, and hex has no characters a form, a shell or a
-    # copy-paste can mangle.
-    ws=$(openssl rand -hex 32)
-    echo "== generated github webhook secret (stored as github-webhook-secret) =="
-    echo "   $ws"
-    echo "   paste it into the App's Settings -> Webhook -> Secret"
-  fi
-  ( umask 077; printf '%s' "$ws" > "$GITHUB_WEBHOOK_SECRET_FILE" )
 
   # Cloudflare token and console password are values, not files: stage them as
   # files so the manifest loop stays uniform.
-  local cf=${CLOUDFLARE_API_TOKEN:-}
-  if [ -z "$cf" ] && [ -f "$SECRETS_DIR/.env" ]; then
-    cf=$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$SECRETS_DIR/.env")
-  fi
-  if [ -n "$cf" ]; then
-    ( umask 077; printf '%s' "$cf" > "$SECRETS_DIR/cloudflare_api_token" )
+  if ! excluded cloudflare-api-token; then
+    local cf=${CLOUDFLARE_API_TOKEN:-}
+    if [ -z "$cf" ] && [ -f "$SECRETS_DIR/.env" ]; then
+      cf=$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$SECRETS_DIR/.env")
+    fi
+    if [ -n "$cf" ]; then
+      ( umask 077; printf '%s' "$cf" > "$SECRETS_DIR/cloudflare_api_token" )
+    fi
   fi
 
-  local cp=${CONSOLE_PASSWORD:-}
-  if [ -z "$cp" ] && [ -f "$SECRETS_DIR/.env" ]; then
-    cp=$(sed -n 's/^SPARKBOX_CONSOLE_PASSWORD=//p' "$SECRETS_DIR/.env")
+  if ! excluded console-password; then
+    local cp=${CONSOLE_PASSWORD:-}
+    if [ -z "$cp" ] && [ -f "$SECRETS_DIR/.env" ]; then
+      cp=$(sed -n 's/^SPARKBOX_CONSOLE_PASSWORD=//p' "$SECRETS_DIR/.env")
+    fi
+    if [ -z "$cp" ] && [ -f "$SECRETS_DIR/console_password" ]; then
+      cp=$(cat "$SECRETS_DIR/console_password")
+    fi
+    if [ -z "$cp" ]; then
+      cp=$(openssl rand -base64 18)
+      echo "== generated console password (stored as console-password) =="
+      echo "   $cp"
+    fi
+    ( umask 077; printf '%s' "$cp" > "$SECRETS_DIR/console_password" )
   fi
-  if [ -z "$cp" ] && [ -f "$SECRETS_DIR/console_password" ]; then
-    cp=$(cat "$SECRETS_DIR/console_password")
-  fi
-  if [ -z "$cp" ]; then
-    cp=$(openssl rand -base64 18)
-    echo "== generated console password (stored as console-password) =="
-    echo "   $cp"
-  fi
-  ( umask 077; printf '%s' "$cp" > "$SECRETS_DIR/console_password" )
 }
 
 # --- commands ---------------------------------------------------------------
@@ -263,6 +281,7 @@ cmd_push() {
   local entry name file required
   for entry in "${SECRETS[@]}"; do
     IFS=: read -r name file required <<<"$entry"
+    excluded "$name" && continue
     if [ ! -f "$file" ]; then
       [ "$required" = "1" ] && { echo "   MISSING    $name ($file)"; exit 1; }
       echo "   skipped    $name (no $file)"
@@ -280,6 +299,7 @@ cmd_pull() {
   local entry name file required
   for entry in "${SECRETS[@]}"; do
     IFS=: read -r name file required <<<"$entry"
+    excluded "$name" && continue
     if ! op_read "$name" > "$TMP/payload" 2>/dev/null; then
       [ "$required" = "1" ] && { echo "   MISSING    $name (required)"; exit 1; }
       echo "   absent     $name"
@@ -300,6 +320,7 @@ cmd_status() {
   local entry name file required local_state remote_state match
   for entry in "${SECRETS[@]}"; do
     IFS=: read -r name file required <<<"$entry"
+    excluded "$name" && continue
     local_state=absent; [ -f "$file" ] && local_state=present
     if op_read "$name" > "$TMP/payload" 2>/dev/null; then
       remote_state=present
@@ -327,6 +348,7 @@ case "${1:-}" in
     echo "  status  compare both sides"
     echo
     echo "env: OP_VAULT (=$OP_VAULT)  OP_ACCOUNT  SECRETS_DIR (=$SECRETS_DIR)"
+    echo "     SECRETS_EXCLUDE — names this deployment does not use"
     exit 2
     ;;
 esac

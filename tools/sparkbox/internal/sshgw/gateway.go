@@ -803,6 +803,23 @@ func DialUpstreamVia(ctx context.Context, dial Dialer, addr, user string, key xs
 			}
 			conn.Close()
 			lastErr = err
+			// sshd answered and refused our key. That is as final as a typed
+			// refusal below and must leave the loop for the same reason: the
+			// guest's authorized_keys is baked into its rootfs at create time
+			// and nothing rewrites it afterwards, so it cannot start trusting
+			// us inside a dial budget.
+			//
+			// Retrying it is not merely useless, it DESTROYS the diagnosis.
+			// Measured on the dev box: 250ms apart, a full key exchange each
+			// time, ~2 rejections a second for the whole budget — enough to
+			// cross sshd's MaxStartups, after which it drops connections
+			// before the banner and every later attempt comes back as
+			// `handshake failed: EOF`. The honest answer is only in the FIRST
+			// attempt; the storm then overwrites lastErr with a meaningless
+			// one and the user is told the shell could not be reached.
+			if AuthRejected(err) {
+				return nil, fmt.Errorf("vm ssh not reachable: %w", err)
+			}
 		} else {
 			lastErr = err
 			// Retrying exists because a freshly booted guest's sshd is not up
@@ -1116,19 +1133,62 @@ type dialError struct {
 func (e *dialError) Error() string { return "dial " + e.sandbox + ": " + e.msg }
 func (e *dialError) Unwrap() error { return e.cause }
 
+// DialMessage is the sentence a user gets when a dial to a sandbox's shell
+// failed. Exported because it is the SAME sentence at every door — ssh, the
+// browser terminal, the REST API — and "the same failure reads the same way
+// whichever door you knocked on" is only true for as long as one function
+// decides it. It stopped being true once: the browser terminal carried its own
+// literal, which had drifted to a truncated copy of unreachableShell while its
+// comment still claimed the sentences matched.
+func DialMessage(err error) string {
+	var typed *ctlops.Error
+	if errors.As(err, &typed) {
+		return typed.Msg
+	}
+	if AuthRejected(err) {
+		return StaleGuestKey
+	}
+	return unreachableShell
+}
+
 // dialFailure wraps a dial error for a caller that will store or display the
 // sentence. See the section comment above.
 func dialFailure(sandbox string, err error) error {
-	var typed *ctlops.Error
-	if errors.As(err, &typed) {
-		return &dialError{sandbox: sandbox, msg: typed.Msg, cause: err}
-	}
-	return &dialError{sandbox: sandbox, msg: unreachableShell, cause: err}
+	return &dialError{sandbox: sandbox, msg: DialMessage(err), cause: err}
 }
 
 // unreachableShell is what a user is told when the dial failed for a reason
 // that only an operator's log can usefully carry.
 const unreachableShell = "could not reach the sandbox's shell; it may still be starting"
+
+// StaleGuestKey is the one dial failure that is the user's to fix, so it is the
+// one that names what to do instead of deferring to a log.
+//
+// The guest's authorized_keys is written once, from the rootfs template, when
+// the sandbox is created — the node runs with --disable-host-rootfs-mounts and
+// never mounts a guest filesystem again, so a sandbox that outlives a change of
+// gateway identity is permanently locked out of every route that needs a shell:
+// ssh, the browser terminal, the REST API and secret delivery alike. "It may
+// still be starting" is actively wrong there; the guest is healthy and waiting
+// for a key nobody has any more.
+const StaleGuestKey = "this sandbox trusts an older gateway identity and cannot be reached; " +
+	"it was created before that identity changed, so recreate it (ctl rm, then ssh new+<name>@)"
+
+// authRejected reports whether a guest's sshd completed the handshake and
+// refused the gateway's key — a permanent no, not "not yet".
+//
+// Matched as a substring because x/crypto/ssh composes this with fmt.Errorf and
+// exports no type to check (client_auth.go: "ssh: unable to authenticate,
+// attempted methods %v, no supported methods remain"). The stable half is the
+// prefix; the method list varies with what the server offered, so only the
+// phrase before it can be matched.
+//
+// Deliberately narrow. `handshake failed: EOF` is NOT this: sshd closing before
+// the banner is what an overloaded or still-starting sshd also does, and the
+// retry loop below exists for exactly that case.
+func AuthRejected(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ssh: unable to authenticate")
+}
 
 // failDial answers an interactive session whose sandbox's sshd could not be
 // reached. The cause reaches the log; the terminal gets a sentence.
@@ -1143,7 +1203,11 @@ func failDial(s gssh.Session, log *slog.Logger, sandbox string, err error) {
 		return
 	}
 	log.Error("dial vm failed", "sandbox", sandbox, "err", err)
-	fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n", unreachableShell)
+	// The same sentence the stored path gets, for the same reason: a locked-out
+	// sandbox reads identically whichever door you knocked on. (The typed
+	// ctlops case returned above, so DialMessage's first branch cannot fire.)
+	msg := DialMessage(err)
+	fmt.Fprintf(s.Stderr(), "sparkbox: %s\r\n", msg)
 	s.Exit(1) //nolint:errcheck
 }
 

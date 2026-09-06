@@ -43,6 +43,12 @@ readonly mem_admission_pct="${SPARKBOX_MEM_ADMISSION_PCT:-80}"
 readonly max_running_per_owner="${SPARKBOX_MAX_RUNNING_PER_OWNER:-2}"
 readonly max_sandboxes_per_owner="${SPARKBOX_MAX_SANDBOXES_PER_OWNER:-0}"
 readonly mem_reserve_mb="${SPARKBOX_MEM_RESERVE_MB:-0}"
+# Sandbox size when the creator named none, which is every `new@` sandbox. 0
+# keeps the binary's CKS-sized built-ins (4 vCPU / 12288 MB). A node on smaller
+# hardware has to set these: admission control measures a sandbox against host
+# RAM, so it cannot notice that one VM at the ceiling is bigger than the host.
+readonly default_vcpus="${SPARKBOX_DEFAULT_VCPUS:-0}"
+readonly default_mem_mb="${SPARKBOX_DEFAULT_MEM_MB:-0}"
 readonly owner_memory_pool_mb="${SPARKBOX_OWNER_MEMORY_POOL_MB:-0}"
 readonly owner_memory_burst_mb="${SPARKBOX_OWNER_MEMORY_BURST_MB:-0}"
 readonly disk_pool_mb_per_owner="${SPARKBOX_DISK_POOL_MB_PER_OWNER:-0}"
@@ -79,6 +85,8 @@ validate_nonnegative() {
   esac
 }
 validate_nonnegative SPARKBOX_MEM_RESERVE_MB "$mem_reserve_mb"
+validate_nonnegative SPARKBOX_DEFAULT_VCPUS "$default_vcpus"
+validate_nonnegative SPARKBOX_DEFAULT_MEM_MB "$default_mem_mb"
 validate_nonnegative SPARKBOX_MAX_SANDBOXES_PER_OWNER "$max_sandboxes_per_owner"
 validate_nonnegative SPARKBOX_OWNER_MEMORY_POOL_MB "$owner_memory_pool_mb"
 validate_nonnegative SPARKBOX_OWNER_MEMORY_BURST_MB "$owner_memory_burst_mb"
@@ -452,6 +460,8 @@ exec /usr/local/bin/sparkbox serve \
   --max-running-per-owner "$max_running_per_owner" \
   --max-sandboxes-per-owner "$max_sandboxes_per_owner" \
   --mem-reserve-mb "$mem_reserve_mb" \
+  --default-vcpus "$default_vcpus" \
+  --default-mem-mb "$default_mem_mb" \
   --owner-memory-pool-mb "$owner_memory_pool_mb" \
   --owner-memory-burst-mb "$owner_memory_burst_mb" \
   --disk-pool-mb-per-owner "$disk_pool_mb_per_owner" \

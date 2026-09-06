@@ -42,8 +42,12 @@ func reservedName(name string) bool { return reserved.Name(name) }
 // `new@` path always does; the HTTP API may override). Bounded only by host
 // capacity — an 8c/16t/64GB box fits ~5 of these before overcommit.
 const (
+	// DefaultMemMB is exported because a caller that has to decide whether a
+	// sandbox fits a given machine — internal/devpod, sizing a node for a
+	// laptop's container machine — must read the real number rather than
+	// restate it. defaultVCPUs has no such caller.
 	defaultVCPUs int64 = 4
-	defaultMemMB int64 = 12288
+	DefaultMemMB int64 = 12288
 
 	// activityInterval is the shortest gap between activity marks we retain for
 	// one sandbox. A mark is deliberately approximate: the idle thresholds are
@@ -642,6 +646,8 @@ type Manager struct {
 	ownerMemPoolMB     int64                   // per-owner effective-memory budget; 0 = disabled
 	ownerMemBurstMB    int64                   // temporary per-owner ceiling for turbo; 0 = baseline pool
 	diskPoolMB         int64                   // per-owner pooled-disk budget in MB; 0 = disabled
+	defVCPUs           int64                   // vCPUs for a sandbox created without a size; 0 = DefaultVCPUs
+	defMemMB           int64                   // MB for a sandbox created without a size; 0 = DefaultMemMB
 	archivePfx         string                  // object-key prefix for archives (default "archives")
 	checkpointPfx      string                  // object-key prefix for checkpoints (default "checkpoints")
 	nodeName           string                  // this host's name in capacity reports
@@ -737,6 +743,18 @@ type Options struct {
 	// owners' burst ceilings overlap, and node admission remains authoritative.
 	// Zero uses OwnerMemoryPoolMB (no borrowing above the baseline).
 	OwnerMemoryBurstMB int64
+	// DefaultVCPUs and DefaultMemMB size a sandbox whose caller named no size —
+	// which is every `new@` sandbox. Zero keeps the package defaults below,
+	// which are sized for a CKS node.
+	//
+	// They exist because those defaults are not universally safe: a node runs
+	// them whatever it is, and a dev box inside a 12 GB Linux VM would hand a
+	// single sandbox 12288 MB — a guest larger than the machine hosting it.
+	// Admission control cannot catch that (it compares against HostMemMB, and
+	// one VM at the ceiling still "fits" a host claiming to be a cluster node),
+	// so the size has to be settable per node rather than inferred from one.
+	DefaultVCPUs int64
+	DefaultMemMB int64
 	// NodeName identifies this host in capacity reports (defaults to "local").
 	NodeName string
 	// Arch and Release describe this host in capacity reports: the CPU
@@ -832,6 +850,8 @@ func NewManager(opts Options) (*Manager, error) {
 		checkpointStageDir: opts.CheckpointStagingDir,
 		maxPerOwner:        opts.MaxRunningPerOwner,
 		maxBoxesPerOwner:   opts.MaxSandboxesPerOwner,
+		defVCPUs:           opts.DefaultVCPUs,
+		defMemMB:           opts.DefaultMemMB,
 		memAdmitPct:        opts.MemAdmissionPct,
 		hostMemMB:          opts.HostMemMB,
 		reserveMB:          opts.MemReserveMB,
@@ -951,6 +971,69 @@ func NewManager(opts Options) (*Manager, error) {
 	return m, m.save()
 }
 
+// defaultVCPUs and defaultMemMB are the size a sandbox gets when its creator
+// named none. Options.DefaultVCPUs / DefaultMemMB override the package
+// constants so a node can be sized for the machine it is actually on; see
+// Options for why that is node configuration rather than something admission
+// control can be trusted to catch.
+func (m *Manager) defaultVCPUs() int64 {
+	if m.defVCPUs > 0 {
+		return m.defVCPUs
+	}
+	return defaultVCPUs
+}
+
+func (m *Manager) defaultMemMB() int64 {
+	if m.defMemMB > 0 {
+		return m.defMemMB
+	}
+	return DefaultMemMB
+}
+
+// evenMemMB rounds a guest's RAM down to a whole number of 2 MiB pages, which
+// is what decides whether KVM maps the guest with 2 MiB stage-2 blocks or has
+// to spend a 4 KiB PTE on every page of it.
+//
+// arm64 KVM refuses a block mapping unless the host virtual address and the
+// guest physical address are congruent modulo the block size
+// (arch/arm64/kvm/mmu.c, fault_supports_stage2_huge_mapping):
+//
+//	if ((gpa_start & (map_size - 1)) != (uaddr_start & (map_size - 1)))
+//	        return false;
+//
+// after which user_mem_abort() sets force_pte for the WHOLE memslot, not just
+// the ragged edge. Guest DRAM starts at a 2 MiB-aligned GPA, and firecracker
+// v1.16.1 mmaps guest memory with a plain mmap(NULL, …) — no alignment of its
+// own — so an odd number of MiB reliably lands it 1 MiB off and costs us every
+// block mapping.
+//
+// THIS IS A PROXY FOR A CONDITION THE CODE CANNOT SEE, and it has a
+// prerequisite. What KVM actually tests is the address it got, which depends on
+// the host having a 2 MiB-contiguous page to hand: size parity decides
+// congruence only because transparent huge pages are on. Firecracker never
+// madvises, so a host left on the `madvise` default gets no THP and this buys
+// nothing — hack/dev/machine.sh sets THP=always on the dev box for exactly this
+// reason, and the two are halves of one mechanism.
+//
+// Measured on the Mac dev box, same binary and kernel and rootfs, only the size
+// varied: 10725 MiB spent 2.0 kB of stage-2 tables per MB of guest RAM and took
+// 4.77s to first-touch 512MB, where 10724 and 10726 spent 0.028 kB/MB and took
+// 0.27s. It barely shows on bare metal, where a stage-2 fault costs a
+// microsecond or two, but nested under a Mac's hypervisor each one is ~250us
+// and the 512x fault count dominates everything a guest does with fresh memory:
+// a fresh sandbox booted in 2.4s instead of 27s.
+//
+// Upstream fixes this properly in `feat: align guest memory to 2MiB`
+// (1a6655891b64, 2026-07-15), which over-allocates and trims. That landed two
+// weeks after v1.16.1 and is in no release yet; rounding the size is the half
+// we can do from here, and it stays correct once the other half arrives.
+func evenMemMB(memMB int64) int64 {
+	if memMB <= 2 {
+		return memMB
+	}
+	return memMB &^ 1
+}
+
 func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, memMB int64) (*Sandbox, error) {
 	if !validName(name) {
 		return nil, &NameError{Problem: NameInvalid, Noun: "sandbox", Name: name}
@@ -959,11 +1042,18 @@ func (m *Manager) Create(ctx context.Context, name, owner, image string, vcpus, 
 		return nil, &NameError{Problem: NameReserved, Noun: "sandbox", Name: name}
 	}
 	if vcpus <= 0 {
-		vcpus = defaultVCPUs
+		vcpus = m.defaultVCPUs()
 	}
 	if memMB <= 0 {
-		memMB = defaultMemMB
+		memMB = m.defaultMemMB()
 	}
+	// Round here, where the size is decided, rather than at the VMM: b.MemMB is
+	// what admission charges, what the console reports, and what setBalloonTarget
+	// subtracts the floor from, so a driver that quietly booted something else
+	// would leave every one of those describing a guest that does not exist.
+	// Turbo is safe without its own rounding — TurboFactor is 2, so an even size
+	// doubles to an even size.
+	memMB = evenMemMB(memMB)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// A guest whose authorized_keys is empty is a VM nobody can log into, and
@@ -2955,6 +3045,28 @@ const memoryPressureIdle = 2 * time.Minute
 // deflates directly, without consulting a counter at all.
 const balloonSettle = 3 * time.Minute
 
+// balloonHeadroomPct is the room the idle reaper leaves above a guest's
+// *measured* working set when it squeezes one, on top of --mem-reserve-mb.
+//
+// The reserve alone is a guess made before the guest existed, and squeezing
+// below what the guest is demonstrably touching does not reclaim idle RAM — it
+// starts a reclaim storm. Measured on the Mac dev box: a 4026 MiB guest was
+// ballooned to its 256 MiB reserve two minutes into a boot that had not
+// finished, whereupon containerd failed eleven times, docker took fourteen
+// minutes to start, and all four vCPUs sat at 100% system time in page reclaim
+// for the better part of an hour. Nothing deflated it, because a guest that
+// starved before its agent came up can never produce the traffic that the
+// activity floor reads as life. Scaling the headroom with the working set
+// rather than adding a flat number keeps it honest for both a 200 MiB idle box
+// and a 2 GiB build.
+const balloonHeadroomPct = 50
+
+// minBalloonReclaimMiB is the smallest reclaim worth the guest's page faults.
+// Every inflation costs the guest a reclaim pass and the host a fault storm as
+// the working set comes back, so shaving a few dozen megabytes off an idle box
+// is a straight loss.
+const minBalloonReclaimMiB = 512
+
 // refreshVitals samples every running sandbox's CPU and network counters, adds
 // the network delta to its lifetime totals, and resets the idle clock of any
 // sandbox busier than the configured activity floors.
@@ -3166,6 +3278,17 @@ func (m *Manager) reconcileMemoryPressure(ctx context.Context) {
 	}
 }
 
+// refreshMemoryUsage samples every running guest's working set through the
+// balloon, in parallel, and stores it in m.memUsed.
+//
+// There is no freshness cache in front of this. There was: a 5s TTL, so that the
+// reaper and the pressure controller — same one-minute cadence — would not each
+// pay for a sample. It depended on the two tickers staying within 5s of each
+// other, which is not something either of them promises: the reaper reaches here
+// only after RefreshDiskUsage and refreshVitals, both serial passes over every
+// sandbox. The caller-side guard in reapOnce (anyBalloonCandidate) removes the
+// overlap at its source on almost every tick, which is a fact about the work
+// rather than about when two goroutines happened to wake.
 func (m *Manager) refreshMemoryUsage(ctx context.Context) {
 	sampleCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -3298,7 +3421,19 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 	// Fold in-guest resource use into LastActive before judging idleness, so a
 	// sandbox that is working but receiving no inbound traffic isn't reaped.
 	m.refreshVitals(ctx)
-	for _, b := range m.List() {
+	boxes := m.List()
+	// workingSetFloor reads m.memUsed, so the balloon stage needs working sets
+	// measured now rather than whenever the pressure controller last ran. Only
+	// the balloon stage below consumes them, and it runs on a sandbox that is
+	// idle past balloonAfter and not already ballooned — so scan for one first
+	// rather than sampling unconditionally. The reaper ticks every minute and
+	// --idle-balloon defaults to five, so most ticks have no candidate at all,
+	// and the scan is a pass over a slice we already copied against a round trip
+	// to every running guest's VMM.
+	if m.balloon != nil && m.reserveMB > 0 && balloonAfter > 0 && anyBalloonCandidate(boxes, balloonAfter) {
+		m.refreshMemoryUsage(ctx)
+	}
+	for _, b := range boxes {
 		// Pinned sandboxes hold their full RAM on purpose so in-guest
 		// timers/daemons keep firing; the reaper never touches them.
 		if b.Pinned || b.State != vmm.StateRunning {
@@ -3322,6 +3457,25 @@ func (m *Manager) reapOnce(ctx context.Context, balloonAfter, pauseAfter time.Du
 			}
 		}
 	}
+}
+
+// anyBalloonCandidate reports whether any sandbox would reach the balloon case
+// of reapOnce's switch on this tick. It deliberately mirrors that case's guard —
+// unpinned, running, not already ballooned, idle past balloonAfter — minus the
+// pause branch that takes precedence, which only means we may sample for a
+// sandbox that gets paused instead. That is the safe direction to be wrong in:
+// the cost is one wasted sample, where missing a candidate would balloon it
+// against a stale working set. Keep the two in step.
+func anyBalloonCandidate(boxes []*Sandbox, balloonAfter time.Duration) bool {
+	for _, b := range boxes {
+		if b.Pinned || b.State != vmm.StateRunning || b.Ballooned {
+			continue
+		}
+		if time.Since(b.LastActive) > balloonAfter {
+			return true
+		}
+	}
+	return false
 }
 
 // RefreshDiskUsage re-measures every non-archived sandbox's durable filesystem
@@ -3450,9 +3604,46 @@ func (m *Manager) setBalloonTarget(ctx context.Context, name string, reclaimMiB 
 	if !ok || b.State != vmm.StateRunning || b.Ballooned || m.balloon == nil || m.reserveMB <= 0 {
 		return nil
 	}
-	target := b.MemMB - m.workingSetFloor(b)
+	floor := m.workingSetFloor(b)
+	// Never squeeze a guest below what the balloon device says it is actually
+	// touching. The configured reserve is a guess made before the guest
+	// existed, and going under the live set is self-reinforcing: the guest has
+	// to fault the whole set back in, which pegs its vCPUs, and a guest that
+	// cannot run never produces the activity that would deflate the balloon.
+	//
+	// Both paths get that floor; only the idle path also gets headroom. The
+	// idle path is opportunistic — nobody is waiting for this memory, so
+	// leaving room to grow costs nothing. The pressure path is closing a real
+	// overage, where being too conservative means an admission failure instead
+	// of a thrashing guest, so it reclaims right down to the live set.
+	//
+	// An unmeasured sandbox reads as 0 and keeps the configured reserve, which
+	// is what the pooled accounting already assumes for it. Deliberately not
+	// observedMemMB, whose fall back to the configured ceiling would read as
+	// "using everything" and stop the reaper ballooning at all.
+	if live := m.memUsed[name]; live > 0 {
+		want := live
+		if reclaimMiB <= 0 {
+			want = live + live*balloonHeadroomPct/100
+		}
+		if want > floor {
+			floor = want
+		}
+	}
+	if floor > b.MemMB {
+		floor = b.MemMB
+	}
+	target := b.MemMB - floor
 	if reclaimMiB > 0 && reclaimMiB < target {
 		target = reclaimMiB
+	}
+	// Below the minimum the inflation costs the guest more than the host gains.
+	// The pressure path is exempt: it was asked for a specific number of
+	// megabytes to close a real overage, and a partial answer still helps.
+	if reclaimMiB <= 0 && target < minBalloonReclaimMiB {
+		m.log.Debug("idle balloon declined: too little to reclaim above the live working set",
+			"name", name, "mem_mb", b.MemMB, "floor_mb", floor, "would_reclaim_mb", target)
+		return nil
 	}
 	if target <= 0 {
 		return nil
@@ -3465,12 +3656,21 @@ func (m *Manager) setBalloonTarget(ctx context.Context, name string, reclaimMiB 
 	if reclaimMiB > 0 {
 		m.log.Info("memory pressure ballooned cold sandbox", "name", name, "reclaim_mb", target)
 	} else {
-		m.log.Info("reaper ballooned down idle sandbox", "name", name, "reclaim_mb", target)
+		// floor_mb is the number that matters when this goes wrong: it is what
+		// the guest is left with, and a guest left below its working set will
+		// thrash instead of idling.
+		m.log.Info("reaper ballooned down idle sandbox", "name", name,
+			"reclaim_mb", target, "floor_mb", floor, "measured_mb", m.memUsed[name])
 	}
 	m.observe(b, "ballooned")
 	return m.save()
 }
 
+// workingSetFloor is the configured least-RAM for a sandbox: the admission
+// reserve, doubled for turbo. It is the floor before anything is known about
+// what the guest is actually touching, which is why it is only a ranking
+// quantity here — setBalloonTarget raises it to the measured working set
+// before any balloon is actually inflated. Callers hold m.mu.
 func (m *Manager) workingSetFloor(b *Sandbox) int64 {
 	floor := m.reserveMB
 	if b.Turbo {

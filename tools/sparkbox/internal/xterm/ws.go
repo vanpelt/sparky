@@ -32,6 +32,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/edgeauth"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/sshgw"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
@@ -242,7 +243,13 @@ func (h *Handler) serve(_ context.Context, conn *websocket.Conn, name string, lo
 	stopDial()
 	if err != nil {
 		log.Warn("terminal dial failed", "err", err)
-		sendJSON(conn, statusMsg{Type: "error", Message: "could not reach the sandbox's shell"})
+		// A sandbox that trusts a gateway identity nobody has any more is the
+		// one dial failure with something for the reader to DO, and a browser
+		// tab is the likeliest place to meet it: there is no verbose flag here
+		// and no log to go and read. sshgw.DialMessage is the ssh door's own
+		// ladder, called rather than restated — a hand-copied sentence here had
+		// already drifted from the one it claimed to match.
+		sendJSON(conn, statusMsg{Type: "error", Message: sshgw.DialMessage(err)})
 		closeWith(conn, statusAttachFailed, "could not reach the sandbox")
 		return
 	}
