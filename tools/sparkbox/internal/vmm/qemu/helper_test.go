@@ -4,6 +4,9 @@ package qemu
 
 import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 )
@@ -113,4 +116,66 @@ func TestBoundedLogKeepsTheHeadAndNeverShortWrites(t *testing.T) {
 		_ = concurrent.String()
 	}
 	<-done
+}
+
+// TestTapLifecycleGoesThroughTheGuardedWrappers is a tripwire, and it exists
+// because the thing it guards was already broken once by a clean rebase.
+//
+// Under the privileged helper the tap belongs to the helper: it is created in
+// the shared Pod network namespace by a process that has NET_ADMIN, and this
+// process does not. d.createTap and d.deleteTap are the whole of that
+// knowledge — they return early when d.jailed(). Calling d.net.CreateTap
+// directly bypasses the check, and the failure is not subtle in the way a
+// missed nil check is: every sandbox create fails at
+// "ioctl(TUNSETIFF): Operation not permitted".
+//
+// What made it worth a test rather than a review note is HOW it broke. One
+// branch moved the tap plumbing into internal/vmm/hostnet and rewrote these
+// call sites to d.net.*; a branch stacked on top of it added the d.jailed()
+// guard to the wrappers. Neither change conflicted with the other, git merged
+// both, and the guard ended up in a function nothing called. No unit test
+// noticed, because a fake network has no permissions to lack — it took booting
+// a real guest on a real node to see it.
+func TestTapLifecycleGoesThroughTheGuardedWrappers(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "lifecycle.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse lifecycle.go: %v", err)
+	}
+
+	// The wrappers are the one place the direct calls belong: they are what
+	// the guard guards.
+	allowed := map[string]bool{"createTap": true, "deleteTap": true}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || allowed[fn.Name.Name] {
+			return true
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			// d.net.CreateTap(...) — a selector on a selector.
+			outer, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			inner, ok := outer.X.(*ast.SelectorExpr)
+			if !ok || inner.Sel.Name != "net" {
+				return true
+			}
+			if outer.Sel.Name == "CreateTap" || outer.Sel.Name == "DeleteTap" {
+				t.Errorf("%s: %s calls d.net.%s directly.\n"+
+					"Use d.%s instead: under the privileged helper this process has no "+
+					"NET_ADMIN and the tap is the helper's to create. Read this test's "+
+					"doc comment before changing it.",
+					fset.Position(call.Pos()), fn.Name.Name, outer.Sel.Name,
+					strings.ToLower(outer.Sel.Name[:1])+outer.Sel.Name[1:])
+			}
+			return true
+		})
+		return true
+	})
 }
