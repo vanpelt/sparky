@@ -257,12 +257,15 @@
 <script>
 (function () {
   /*SHARED_JS*/
-  let timer = null;
+  // dashPoller owns refresh()'s cadence: schedule-after-completion (so a slow
+  // response never overlaps the next tick), backoff on failure, and a pause
+  // while the tab is hidden. See shared.js's createPoller.
+  const dashPoller = createPoller(refresh, { interval: 4000 });
 
   function show(view) {
     $("login-view").classList.toggle("hidden", view !== "login");
     $("dash-view").classList.toggle("hidden", view !== "dash");
-    if (view === "login") { clearInterval(timer); timer = null; $("pw").focus(); }
+    if (view === "login") { dashPoller.stop(); $("pw").focus(); }
   }
 
   // wakeChip shows the next platform-scheduled wake for a scale-to-zero
@@ -284,7 +287,7 @@
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       const past = { pause: "paused", resume: "resumed", pin: "pinned", unpin: "unpinned", archive: "archived" };
       toast(name + " " + (past[verb] || verb));
-      await refresh();
+      await dashPoller.run();
     } catch (e) {
       toast(e.message, true);
       btn.disabled = false;
@@ -319,7 +322,7 @@
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       dlg.close();
       toast(name + " removed");
-      await refresh();
+      await dashPoller.run();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -540,7 +543,7 @@
       if (r.status === 401) return show("login");
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       toast("snapshot " + snap + " created with the agent CLIs up to date");
-      await refresh();
+      await dashPoller.run();
     } catch (e) {
       toast(e.message, true);
       btn.disabled = false;
@@ -583,7 +586,7 @@
       if (r.status === 401) return show("login");
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       toast("forked " + name + " from " + snap);
-      await refresh();
+      await dashPoller.run();
     } catch (e) {
       toast(e.message, true);
       btn.disabled = false;
@@ -601,17 +604,23 @@
       if (r.status === 401) return show("login");
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       toast("deleted snapshot " + snap);
-      await refresh();
+      await dashPoller.run();
     } catch (e) {
       toast(e.message, true);
       btn.disabled = false;
     }
   }
 
-  async function refresh() {
+  // refresh is dashPoller's fn: it takes the cycle's AbortSignal, threads it
+  // into every fetch so stop() can actually cancel an in-flight cycle, and
+  // rethrows on failure (after toasting) so the poller's backoff sees it. An
+  // AbortError is rethrown WITHOUT toasting — that is a cancellation the
+  // visitor asked for (leaving the dash view, or the tab being hidden), not a
+  // failure to report.
+  async function refresh(signal) {
     try {
       const [r, rc, rs] = await Promise.all([
-        fetch("/api/sandboxes"), fetch("/api/cluster"), fetch("/api/snapshots"),
+        fetch("/api/sandboxes", { signal }), fetch("/api/cluster", { signal }), fetch("/api/snapshots", { signal }),
       ]);
       if (r.status === 401 || rc.status === 401) return show("login");
       if (!r.ok) throw new Error(r.statusText);
@@ -624,9 +633,10 @@
         const snaps = await rs.json();
         renderSnaps(Array.isArray(snaps) ? snaps : []);
       }
-      if (!timer) timer = setInterval(refresh, 4000);
     } catch (e) {
+      if (e.name === "AbortError") throw e;
       toast("refresh failed: " + e.message, true);
+      throw e;
     }
   }
 
@@ -642,7 +652,7 @@
       });
       if (!r.ok) throw new Error("wrong password");
       $("pw").value = "";
-      await refresh();
+      await dashPoller.start();
     } catch (err) {
       toast(err.message, true);
     } finally {
@@ -658,7 +668,7 @@
   // Reflect the console's own hostname in the header.
   $("domain-label").textContent = location.host;
 
-  refresh();
+  dashPoller.start();
 })();
 </script>
 </body>
