@@ -55,6 +55,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/envs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ghapp"
@@ -1686,12 +1687,22 @@ func (o *Ops) recordReportedScript(e envs.Environment, r SetupReport) {
 // it TRUNCATES rather than skips, because the log is diagnostic text rather
 // than an artifact a later build runs: half of it is still useful, where half
 // a script is not.
+//
+// The truncation keeps the END and lands on a rune boundary, for
+// metadata.selfSetupResult's own reasons (envsetup.go:390-413): a tail is
+// diagnostic output, so the bytes nearest the failure are the useful ones, and
+// cutting by byte count can otherwise land inside a multi-byte rune and leave
+// invalid UTF-8 at the new head — which a caller as far away as the console's
+// JSON encoder would be the one to discover.
 func (o *Ops) recordBuildLog(e envs.Environment, r SetupReport) {
 	log := r.Log
 	if len(log) > MaxSetupLog {
 		o.log.Warn("a builder reported a setup log too large to store in full; truncating",
 			"user", e.Owner, "env", e.Name, "bytes", len(log), "max", MaxSetupLog)
-		log = log[:MaxSetupLog]
+		log = log[len(log)-MaxSetupLog:]
+		for len(log) > 0 && !utf8.RuneStart(log[0]) {
+			log = log[1:]
+		}
 	}
 	if err := o.envs.SetBuildLog(e.Owner, e.Name, log); err != nil {
 		o.log.Warn("could not record a build's setup log",

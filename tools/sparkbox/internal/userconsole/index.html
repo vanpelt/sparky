@@ -3614,8 +3614,19 @@
   // sibling field, for the reason the script editor does the same — the row
   // in `lastEnvs` is at most 4s stale, and the point of opening this is to
   // read the actual bytes.
+  //
+  // The trigger is a <button> in the failed strip and an <a> in the foot
+  // (envStrip/envFoot above), and `.disabled` is a button-only property — set
+  // on an anchor it does nothing, silently. So the double-click guard is a
+  // dataset flag both elements support, and `.disabled` is applied only where
+  // it does anything; `aria-busy` carries the same "this is working" state to
+  // the anchor a screen reader would otherwise get no signal from.
   async function openEnvLog(name, el) {
-    el.disabled = true;
+    if (el.dataset.busy) return;
+    el.dataset.busy = "1";
+    el.setAttribute("aria-busy", "true");
+    const isButton = el.tagName === "BUTTON";
+    if (isButton) el.disabled = true;
     try {
       const got = await api("/api/environments/" + encodeURIComponent(name) + "/log");
       $("env-log-title").textContent = "build log — " + name;
@@ -3626,7 +3637,9 @@
     } catch (e) {
       toast(e.message, true);
     } finally {
-      el.disabled = false;
+      delete el.dataset.busy;
+      el.removeAttribute("aria-busy");
+      if (isButton) el.disabled = false;
     }
   }
 

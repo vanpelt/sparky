@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"slices"
 
@@ -1296,6 +1297,45 @@ func TestSetupDoneRefusesAnOversizedScript(t *testing.T) {
 	}
 	if row.State != envs.StateReady {
 		t.Errorf("state = %q, want the build to have finished anyway", row.State)
+	}
+}
+
+// TestSetupDoneTruncatesAnOversizedLogOnARuneBoundary: unlike the script,
+// truncated rather than refused (recordBuildLog's reasoning) — and truncated
+// from the FRONT, keeping the tail nearest the failure, landing on a rune
+// boundary rather than splitting one. A byte-count cut with no boundary check
+// would corrupt a multi-byte rune sitting across the cut point, which this
+// constructs deliberately: MaxSetupLog bytes from the end of this string lands
+// inside one of the trailing "€" runes, not between two of them.
+func TestSetupDoneTruncatesAnOversizedLogOnARuneBoundary(t *testing.T) {
+	b := newBuildRig(t)
+	b.building("alice", "web", "web-build")
+	box, _ := b.boxes.Get("web-build")
+
+	log := "start\n" + strings.Repeat("€", MaxSetupLog) // well over the cap; 3 bytes/rune
+	if (len(log)-MaxSetupLog)%3 == 0 {
+		t.Fatal("test fixture doesn't straddle a rune — adjust the prefix length")
+	}
+
+	if err := b.ops.SetupDone(context.Background(), box, SetupReport{
+		OK: true, Log: log,
+	}); err != nil {
+		t.Fatalf("SetupDone: %v", err)
+	}
+	b.ops.awaitEnvBuilds()
+
+	got := b.row(t, "alice", "web").BuildLog
+	if !utf8.ValidString(got) {
+		t.Fatalf("build_log is not valid UTF-8: %q", got)
+	}
+	if len(got) > MaxSetupLog {
+		t.Errorf("build_log = %d bytes, want at most %d", len(got), MaxSetupLog)
+	}
+	if !strings.HasSuffix(log, got[len(got)-30:]) {
+		t.Errorf("build_log = %q, want the TAIL of the report kept, not the head", got[:30])
+	}
+	if strings.Contains(got, "start") {
+		t.Errorf("build_log kept the head (%q); the whole point of a tail is the end", got[:30])
 	}
 }
 
