@@ -124,6 +124,19 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 		<-ctx.Done()
 		listener.Close() //nolint:errcheck
 	}()
+	if s.qemu() {
+		// Worth a line of its own: the machine type is what every snapshot on
+		// this node is bound to, and it is resolved from a default unless an
+		// operator passed one. An operator debugging a resume that will not
+		// load needs to be able to read which model was in play without
+		// reconstructing it from a flag they may not have set.
+		// s.opts, NOT opts: newServer takes its argument by value and fills the
+		// machine type in from the shared default, so RunServer's own copy is
+		// still empty here. Logging that one printed a blank machine type —
+		// which is worse than not logging it, because the whole point of the
+		// line is to tell an operator what a snapshot is bound to.
+		s.opts.Logger.Printf("VMM backend: qemu %s, machine type %s", s.opts.QemuBin, s.opts.MachineType)
+	}
 	s.opts.Logger.Printf("privileged VM helper listening on %s for uid %d", opts.SocketPath, opts.ControllerUID)
 	for {
 		conn, err := listener.AcceptUnix()
