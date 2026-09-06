@@ -312,6 +312,12 @@ func asBrowser(r *http.Request) { r.Header.Set("Accept", "text/html,application/
 // fromThePage sets the Origin a real form POST from this door would carry.
 func fromThePage(r *http.Request) { r.Header.Set("Origin", "https://go.example.test") }
 
+// fromReferer sets the Referer header a browser navigation carries, unlike
+// fromThePage's Origin, which only a POST sends.
+func fromReferer(ref string) func(*http.Request) {
+	return func(r *http.Request) { r.Header.Set("Referer", ref) }
+}
+
 // serveLaunch drives the real mux, which is the only way to assert that a route
 // is mounted behind the gate it is supposed to be behind rather than merely
 // that its handler function is correct.
