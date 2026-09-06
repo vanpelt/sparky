@@ -339,32 +339,47 @@ which is the runner that job uses. Applied to `ubuntu-24.04` on x86_64 it is a
 claim about a *different runner image*, and reading one artifact's behaviour as
 another's is the exact mistake feasibility §10 had to correct on hardware.
 
-So the workflow now carries a `kvm-probe` job that records, per run and failing
-on nothing:
+A `kvm-probe` job measured it. **It has been measured, the answer is below, and
+the job has been deleted** — it existed to end an assumption, not to run
+forever. Re-add it from git history if a runner image change makes the question
+live again.
 
-1. whether `/dev/kvm` is present, is a character device rather than a
-   placeholder file, and is readable and writable by the runner user;
-2. whether any writable filesystem supports reflink, and — since the answer for
-   ext4 is no — whether a **loopback XFS** can be created and mounted, which is
-   the fallback both parity runners use;
-3. how much room the disks have, since the fixture is a 25 GiB template.
+Measured on `ubuntu-24.04`, run 34052408229 (4 vCPU, kernel 6.17.0-azure):
 
-**The decision keyed to that probe**, to be taken on its first green run rather
-than now:
+| verdict | value |
+|---|---|
+| `VERDICT_KVM` | `character-device` (`crw-rw---- root kvm 10, 232`) — a real device, **not** a placeholder file |
+| `VERDICT_KVM_ACCESS` | `needs-sudo` — the `runner` user is not in group `kvm`, and passwordless `sudo` is available |
+| CPU | `svm`, `kvm_amd/parameters/nested=1` |
+| `VERDICT_REFLINK $RUNNER_TEMP` | `no` — it is on the ext4 root |
+| `VERDICT_REFLINK /mnt` | `not writable` |
+| `VERDICT_LOOPBACK_XFS` | **`yes`** — `mkfs.xfs -m reflink=1` + `mount -o loop` works under `sudo` |
+| disk | `/dev/root` ext4 145G, **87G available** — ample for a 25 GiB template |
 
-- If `VERDICT_KVM=character-device` and `VERDICT_KVM_ACCESS` is not
-  `unreadable`, and `VERDICT_LOOPBACK_XFS=yes`, then a nightly x86_64 parity job
-  is buildable on hosted runners. It would download the pinned release's
-  `vmlinux-linux-amd64` and `universal-amd64.ext4.zst` — the release workflow
-  already builds both on hosted runners — decompress onto the loopback XFS with
-  `zstd --sparse`, and run the same test binary the other two tiers run. That
-  gives per-night x86_64 coverage without touching the production node, and
-  leaves `run-on-cks.sh` for pre-release checks against the deployed artifact.
-- If the probe says otherwise, Tier 3 is the only x86_64 answer and it stays
-  manual and pre-release. Write that down and stop guessing.
+**The x86_64 runner is nothing like the arm64 one, and the `smoke` job's claim
+does not transfer.** Nested virtualization is on and the reflink fallback works,
+so all three criteria are met: **a nightly x86_64 parity job is buildable on
+hosted runners.** It would download the pinned release's `vmlinux-linux-amd64`
+and `universal-amd64.ext4.zst` — the release workflow already builds both on
+hosted runners — decompress onto a loopback XFS with `zstd --sparse`, and run
+the same test binary the other two tiers run. That gives per-night x86_64
+coverage without touching the production node, and leaves `run-on-cks.sh` for
+pre-release checks against the deployed artifact. It is not built yet; this
+records that nothing blocks it.
 
-Either way the job is nightly or manual, never per-PR: the fixture download and
-a full suite run are minutes, and per-PR value is already covered by Tier 1.
+Two things to carry into building it:
+
+- **Everything needs `sudo`** — `/dev/kvm` is `needs-sudo`, and so are the
+  `mkfs`/`mount` for the scratch filesystem. The test binary has to run as root,
+  which the other two tiers do not require.
+- **The runner's CPU vendor varies between runs.** The two probe runs landed on
+  an Intel host (`vmx`, `kvm_intel…nested=Y`) and an AMD one (`svm`,
+  `kvm_amd…nested=1`). Both had nesting enabled, but a job must not pin a vendor
+  or a `-cpu` model, and a QEMU machine type frozen on one vendor's measurements
+  is a trap here.
+
+The job is nightly or manual, never per-PR: the fixture download and a full
+suite run are minutes, and per-PR value is already covered by Tier 1.
 
 ## What a green run does not tell you
 
