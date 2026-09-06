@@ -1374,3 +1374,151 @@ behaviour, 409 included — when the read fails or the method is absent.
 A residual `template_ambiguous` is still possible from two hand-bound,
 non-environment tags. That one keeps its refusal: nothing here knows which of
 two disks somebody meant, and the environment rule does not apply.
+
+---
+
+## Amendment: an environment can name the VMM it runs on
+
+Part 1 says an environment gathers "the credentials, the checkouts, the egress
+policy and the disk". All four are things an environment CONTAINS. `runner` is
+the first field that is not — it says where the contents are allowed to execute
+— and it exists because a second VMM now exists to choose between
+(`docs/vmm-choice.md`, `docs/qemu-spike.md`). An environment sets it when it
+needs something one VMM does and the other does not; the overwhelming majority
+set nothing and are placed exactly as they always were.
+
+### It is a requirement, not a preference
+
+A sandbox whose environment requires `qemu` is REFUSED when no machine runs
+qemu. It is not quietly placed on a firecracker node.
+
+That direction is not obvious, so it is worth stating why. The only motive for
+setting the field at all is a capability difference — nobody types
+`--runner qemu` for fun — so an environment silently landing on the VMM it
+explicitly declined is the same class of failure as a sandbox quietly booting
+the wrong rootfs (Part 7, "must never degrade into a silent fallback"). It is
+invisible for twenty minutes and then reads as a broken toolchain.
+
+### Where it is enforced, and the shortcut that had to go
+
+`Candidate.Fits` gained the check, but the interesting half is
+`Candidate.runnerFits`, which is split out because it is the one check that also
+runs on the LOCAL candidate. Every other check in `Fits` is deliberately skipped
+for the gateway's own machine — its manager is the authority on whether it can
+take a sandbox, and a second opinion could only disagree. The runner is
+different in kind: the manager is asked to build a sandbox, not to judge whether
+the environment that asked for it wanted this VMM, and nothing ever told it.
+
+`fleet.pick` had a shortcut that returned the local machine without building a
+candidate list at all, whenever no `--node` was given and no placer was
+installed. That is the shape of every single-box deployment and most small ones,
+so a requirement checked only inside `Fits` would have meant nothing, silently,
+on the deployment shape most people run. A required runner now defeats the
+shortcut; everything that requires nothing stays on exactly the path it was on.
+
+On a gateway wired straight to its manager there is no placer and no candidate
+list, so the same question is answered by `host.Manager.Runner()` — which is
+why the manager is told which VMM its driver is. `vmm.Driver` deliberately has
+no name method: nothing in the lifecycle should branch on which implementation
+it got, so the name arrives from the wiring that chose the driver instead.
+
+### What is refused, and what is not
+
+Two environments on one sandbox that require different VMMs is
+`ambiguous_runner`, refused before the first write. This mirrors
+`resolveTemplate` on the same tag list exactly: several tags AGREEING is
+ordinary — `web` and `ci` may both be qemu environments — so what is refused is
+more than one distinct value, not more than one environment carrying one.
+
+A machine that has not said what it runs is never refused. That is a real state
+— a node linked by an older build, one whose first capacity report has not
+landed — and `Fits` has an invariant that unknown must not read as refused,
+because taking a working machine out of the fleet for a reason nobody can see is
+worse than the placement it prevents.
+
+A **mock** node satisfies every requirement, and an environment may not REQUIRE
+mock. The asymmetry is deliberate. `serve --driver mock` is the portable
+development path AGENTS.md tells us to preserve, and without the first rule the
+first person to set `--runner qemu` would find their whole dev loop refusing to
+place anything, reading it as a fleet outage. An environment asking FOR mock is
+a different thing: a request that the platform hand it a fake guest, which is
+never what anyone means.
+
+### Changing it does not move anything
+
+An environment's runner governs the sandboxes made after it is set. The ones
+that exist keep the machine they are on, and they keep working.
+
+This is safe because of a fact `vmm.ClaimStateDir`'s comment already records:
+what an environment binds is a plain compacted rootfs, and a restore from one is
+a cold boot rather than a snapshot resume, so both VMMs boot it identically.
+Only a MEMORY snapshot is VMM-specific, and no environment holds one. Refusing
+the change instead would have meant destroying every sandbox carrying the tag
+before the field could be corrected, which is a worse trade for a mistake that
+is cheap to make.
+
+### The three surfaces, and one trap in the JSON one
+
+`ctl env set web --runner qemu`, `PUT /v1/environments` with a `runner` key, and
+a select in the user console. All three carry it as a POINTER for the reason
+`description` is one — this is create-and-update in one verb, so "not sent" and
+"sent empty" have to be different requests — and here the failure from getting
+it wrong is worse than a wiped description. An environment silently un-pinned by
+a save that never mentioned a runner goes on producing sandboxes, and they go on
+booting, on the other VMM. There is nothing on screen to notice.
+
+The trap is on the way back. `Runner` is `omitempty`, so a CLEARED requirement is
+absent from the response rather than present and empty — and unmarshalling
+absence over an already-populated struct leaves the stale value sitting there.
+A test that reuses its decode target reads a green result for a broken clear.
+`TestEnvironmentRoundTrip` decodes into a fresh struct and says why.
+
+The console select has one guard worth naming: setting a `<select>` to a value
+it has no `<option>` for silently blanks it, so a runner this build does not
+know about — a third VMM, an older console against a newer gateway — would be
+rendered as "any machine" and the next save would send `""` and un-pin the
+environment. `setEnvRunner` appends an ad-hoc option instead, and drops it again
+when the form is reset.
+
+### What this does NOT do
+
+**It does not run two VMMs on one node.** A node runs one, chosen by `--driver`,
+and `ClaimStateDir` already refuses to change it under a populated tree. What
+this amendment adds is the ability to have a firecracker node and a qemu node in
+one fleet and to send work to the right one.
+
+What blocks mixing them on a single machine is **allocation, not safety**, and
+the distinction is worth stating because the obvious guess is the other way
+round. Both backends derive the tap name, the per-slot uid, the guest IPv4/IPv6
+and the MAC from the SLOT alone (`vmhelper.tapName`, `vmhelper.jailUID`), and
+each driver's `freeSlot` scans only its own VMs — so two drivers on one node
+would both pick slot 0.
+
+They would not, however, both GET it. The privileged helper is already the
+single authority on slot ownership: `launch` refuses a slot that is taken
+(`slot already belongs to %s`), and `cpu-time` and `snapshot-outputs` both
+refuse a slot whose active name is not the caller's. That table is keyed by
+slot alone and knows nothing about backends, so the second driver's create
+fails loudly rather than quietly sharing a uid. Off the helper the question
+does not arise either: the QEMU driver has no per-slot uid at all — no
+`JailerUIDBase`, no `SysProcAttr.Credential` — because its confinement is
+written into the argv the helper builds.
+
+So the missing piece is that nothing hands the second driver slot 1. Moving
+allocation into the helper, which already owns occupancy, is the change; and it
+has no recovery consequences, because slots are not persisted anywhere and are
+already reassigned in first-attach order on every restart.
+
+**It does not record the runner in the placement ledger.** It could, and the
+argument for it is drift detection; the argument against is that
+`placement.Open` has no migration loop at all, so a column there breaks every
+existing `sparkbox.db` on the first `SELECT`. The immutability the ledger would
+be documenting is already structural: a sandbox is pinned to a node, a node runs
+one VMM, and `ClaimStateDir` refuses to change that under a populated tree.
+
+The residual hole is an archived sandbox on a node that is later emptied and
+re-provisioned with the other VMM. Its environment still says qemu, its restore
+would cold-boot on firecracker, and nothing checks. It is narrow — the
+re-provision requires `--allow-vmm-change` and an empty tree — and recording the
+runner on the row would not close it either without a check that does not exist.
+Written down rather than fixed.

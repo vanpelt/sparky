@@ -51,6 +51,13 @@ type environmentRequest struct {
 	Secrets     []string          `json:"secrets,omitempty"`
 	Rules       []string          `json:"rules,omitempty"`
 	Vars        []ctlops.EnvVar   `json:"vars,omitempty"`
+	// Runner is the VMM this environment's sandboxes must run on, and it is a
+	// pointer for the same reason Description is: omitted leaves the requirement
+	// alone, `""` drops it. A plain string would make every call that set a
+	// variable also un-pin the environment from its VMM — and unlike a wiped
+	// description that failure is invisible, because the sandbox still boots,
+	// just on the wrong hypervisor.
+	Runner *string `json:"runner,omitempty"`
 	// OpenEgress opts OUT of the default egress rule-set a NEW environment is
 	// given. It is a per-call gesture and is never stored: it means "do not
 	// create one now", not "this environment is permanently open".
@@ -119,7 +126,7 @@ func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request) {
 	args := ctlops.EnvArgs{
 		Name: req.Name, Description: req.Description,
 		Secrets: req.Secrets, Rules: req.Rules, Vars: req.Vars, OpenEgress: req.OpenEgress,
-		Adopt: req.Adopt,
+		Adopt: req.Adopt, Runner: req.Runner,
 	}
 	for _, rp := range req.Repos {
 		args.Repos = append(args.Repos, ctlops.RepoArgs{

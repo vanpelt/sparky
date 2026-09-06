@@ -1490,6 +1490,25 @@ func (f *fakeEnvs) SetBuildSession(owner, name, url string) error {
 	return nil
 }
 
+// Unlike SetBuildSession above, a missing row IS an error here — the real
+// store's contract, and the difference matters: this is somebody changing where
+// a named environment runs, not colour on a build.
+func (f *fakeEnvs) SetRunner(owner, name string, runner vmm.Runner) error {
+	f.c.add("envs.SetRunner %s/%s %s", owner, name, runner)
+	if _, err := vmm.ParseRequirement(string(runner)); err != nil {
+		return fmt.Errorf("%w: %s", envs.ErrInvalidName, err)
+	}
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		return envs.ErrNoSuchEnvironment
+	}
+	e.Runner = runner
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
 func (f *fakeEnvs) SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error {
 	f.c.add("envs.SetBuildDenials %s/%s domains=%d", owner, name, len(domains))
 	k := envKey(owner, name)

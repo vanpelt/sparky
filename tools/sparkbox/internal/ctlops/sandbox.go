@@ -8,6 +8,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // Get resolves a sandbox the caller may act on. Missing and not-yours return the
@@ -102,6 +103,15 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 	if err := o.templateNodeAgrees(op, a.Node, tpl); err != nil {
 		return SandboxInfo{}, err
 	}
+	// Which VMM the tags require, resolved here with the other refusals and for
+	// the same reason: two environments that disagree about it cannot possibly
+	// produce a sandbox, and must not leave tag rows behind for one that never
+	// exists. The requirement itself is enforced in build(), where the machine
+	// is chosen — this is only the part that can fail before any write.
+	runner, err := o.resolveRunner(op, c.Handle, tags)
+	if err != nil {
+		return SandboxInfo{}, err
+	}
 	// Resolved here, with the other refusals and before the first write: a
 	// --ref naming a repository these tags do not select cannot possibly do
 	// what was asked, and must not leave rows behind for a sandbox that never
@@ -117,7 +127,7 @@ func (o *Ops) Create(ctx context.Context, c Caller, a CreateArgs) (SandboxInfo, 
 		o.clearTags(name, c.Handle, tags)
 		return SandboxInfo{}, Fail(op, err)
 	}
-	box, err := o.build(ctx, op, a.Node, name, c.Handle, tpl, a.VCPUs, a.MemMB)
+	box, err := o.build(ctx, op, a.Node, name, c.Handle, tpl, runner, a.VCPUs, a.MemMB)
 	if err != nil {
 		// Don't strand tag rows for a sandbox that never came into being.
 		o.clearTags(name, c.Handle, tags)
@@ -144,6 +154,22 @@ type placer interface {
 	CreateOn(ctx context.Context, node, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error)
 }
 
+// runnerPlacer is a store that can choose a machine by the VMM it runs. Only
+// the fleet implements it; a single-machine deployment answers the same
+// question with localRunner below, because it has exactly one machine and
+// therefore exactly one answer.
+type runnerPlacer interface {
+	PlaceForRunner(runner vmm.Runner, node, image string, vcpus, memMB int64) (string, error)
+}
+
+// localRunner is a store that IS one machine and knows which VMM it runs.
+// *host.Manager satisfies it. A store satisfying neither this nor runnerPlacer
+// is one that has not been told — every mock and every test double — and an
+// unknown runner is never a refusal, here as everywhere else.
+type localRunner interface {
+	Runner() vmm.Runner
+}
+
 // build runs the create on the machine the caller asked for, on the one holding
 // the tag's bound template when they did not, or on whichever one the store
 // chooses when neither names a machine.
@@ -167,10 +193,43 @@ type placer interface {
 // a snapshot image to Sandboxes.Create does NOT place on the template's machine,
 // because fleet.pick short-circuits to the local machine when no placer is
 // installed and no node was preferred.
-func (o *Ops) build(ctx context.Context, op, node, name, owner string, tpl resolvedTemplate, vcpus, memMB int64) (*host.Sandbox, error) {
+func (o *Ops) build(ctx context.Context, op, node, name, owner string, tpl resolvedTemplate, runner vmm.Runner, vcpus, memMB int64) (*host.Sandbox, error) {
 	p, canPlace := o.boxes.(placer)
 	if node == "" && canPlace {
 		node = tpl.Node
+	}
+	// A required VMM is resolved to a machine BEFORE either call below, because
+	// neither can carry it: Create's signature is the single-machine one and
+	// CreateOn's names a machine that has already been chosen. Resolving here
+	// turns "this environment requires qemu" into a node name, after which the
+	// existing path places on it by name exactly as an explicit --node does.
+	//
+	// Note this runs after node may have been set from the template, so a
+	// binding whose machine runs the wrong VMM is refused rather than obeyed —
+	// which is right: the template is a plain rootfs either machine can boot,
+	// so the environment's requirement is the stronger statement of the two.
+	if runner != "" {
+		switch store := o.boxes.(type) {
+		case runnerPlacer:
+			chosen, err := store.PlaceForRunner(runner, node, tpl.Image, vcpus, memMB)
+			if err != nil {
+				// The same explanation CreateOn's failure gets, for the same
+				// reason and in the same case: when the BINDING chose the
+				// machine, "node n1 runs firecracker and this environment
+				// requires qemu" is a true sentence about a machine the caller
+				// never named and cannot see the relevance of. What completes
+				// it is that the tag's snapshot only exists there.
+				if tpl.Tag != "" && node == tpl.Node {
+					return nil, o.templatePlacementFailed(op, tpl, err)
+				}
+				return nil, err
+			}
+			node = chosen
+		case localRunner:
+			if err := runnerAgrees(op, runner, store.Runner()); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if node == "" {
 		return o.boxes.Create(ctx, name, owner, tpl.Image, vcpus, memMB)

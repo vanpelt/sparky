@@ -87,7 +87,11 @@ type envRequest struct {
 	Secrets     []string  `json:"secrets,omitempty"`
 	Rules       []string  `json:"rules,omitempty"`
 	Vars        *[]envVar `json:"vars,omitempty"`
-	OpenEgress  bool      `json:"open_egress,omitempty"`
+	// Runner is a pointer like Description: the form sends "" to mean "any
+	// machine", which has to reach ctlops as a real value rather than as
+	// silence, or the select could never take a requirement back off again.
+	Runner     *string `json:"runner,omitempty"`
+	OpenEgress bool    `json:"open_egress,omitempty"`
 	// Adopt agrees to create an environment over a tag that is already in use.
 	// The panel never sends it on the first attempt: it sends the form, gets a
 	// 409 naming what the tag carries, asks, and sends the same body again with
@@ -165,7 +169,7 @@ func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request) {
 	args := ctlops.EnvArgs{
 		Name: name, Description: req.Description,
 		Secrets: req.Secrets, Rules: req.Rules, OpenEgress: req.OpenEgress,
-		Adopt: req.Adopt,
+		Adopt: req.Adopt, Runner: req.Runner,
 	}
 	for _, rp := range req.Repos {
 		args.Repos = append(args.Repos, ctlops.RepoArgs{

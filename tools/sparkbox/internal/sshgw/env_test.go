@@ -717,3 +717,156 @@ func TestParseEnvAdopt(t *testing.T) {
 		}
 	})
 }
+
+// TestParseEnvRunner pins the pointer, which is the whole of this flag's
+// correctness at the door: a command that does not name a runner must leave
+// EnvArgs.Runner nil, because ctlops reads nil as "leave it alone" and anything
+// else would have `env set web --var LOG=debug` silently drop the VMM the
+// environment's sandboxes are required to run on.
+func TestParseEnvRunner(t *testing.T) {
+	t.Run("it carries the value through", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--runner", "qemu"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if a.Runner == nil || *a.Runner != "qemu" {
+			t.Errorf("runner = %v, want a pointer to %q", a.Runner, "qemu")
+		}
+	})
+
+	t.Run("the equals form too", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--runner=firecracker"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if a.Runner == nil || *a.Runner != "firecracker" {
+			t.Errorf("runner = %v, want a pointer to %q", a.Runner, "firecracker")
+		}
+	})
+
+	// The important one. Every `env set` in the codebase's future that touches
+	// something else runs through this path.
+	t.Run("unnamed leaves it alone", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--var", "K=1"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if a.Runner != nil {
+			t.Errorf("runner = %q on a command that never named one — an unrelated "+
+				"edit must not clear the requirement", *a.Runner)
+		}
+	})
+
+	// The other half of the pointer: empty is a request, not a slip, and it is
+	// the only way back to "place me anywhere".
+	for _, args := range [][]string{
+		{"web", "--runner", ""},
+		{"web", "--runner="},
+	} {
+		t.Run("clearing with "+strings.Join(args[1:], " "), func(t *testing.T) {
+			a, _, err := parseEnvSet(args)
+			if err != nil {
+				t.Fatalf("parseEnvSet(%q): %v", args, err)
+			}
+			if a.Runner == nil {
+				t.Fatal("runner = nil — an empty value must clear the requirement, not be ignored")
+			}
+			if *a.Runner != "" {
+				t.Errorf("runner = %q, want the empty string", *a.Runner)
+			}
+		})
+	}
+
+	// Detached and last: there is no word to take, and taking the flag's own
+	// name would be worse than saying so.
+	t.Run("a dangling flag is refused", func(t *testing.T) {
+		if _, _, err := parseEnvSet([]string{"web", "--runner"}); err == nil ||
+			!strings.Contains(err.Error(), "--runner needs a value") {
+			t.Errorf("err = %v, want a refusal naming the flag", err)
+		}
+	})
+
+	t.Run("it consumes exactly one word", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--runner", "qemu", "--var", "K=1"})
+		if err != nil {
+			t.Fatalf("parseEnvSet: %v", err)
+		}
+		if len(a.Vars) != 1 || a.Vars[0].Name != "K" {
+			t.Errorf("vars = %#v — --runner ate the flag after it", a.Vars)
+		}
+	})
+
+	// The value is passed through unread: ctlops owns the vocabulary and the
+	// sentence that refuses the rest, so the parser must not develop opinions
+	// about which names are runners.
+	t.Run("it does not validate", func(t *testing.T) {
+		a, _, err := parseEnvSet([]string{"web", "--runner", "wat"})
+		if err != nil {
+			t.Fatalf("parseEnvSet refused %q itself: %v", "wat", err)
+		}
+		if a.Runner == nil || *a.Runner != "wat" {
+			t.Errorf("runner = %v, want it handed on verbatim", a.Runner)
+		}
+	})
+}
+
+// TestControlEnvRunner is the flag through the door and back out again in the
+// two renderings that report it, plus the survival property: an edit that names
+// no runner leaves the one that is there.
+func TestControlEnvRunner(t *testing.T) {
+	st := newCtlStack(t)
+
+	s := st.run(t, "alice", "env", "create", "web", "--runner", "qemu")
+	if s.code != 0 {
+		t.Fatalf("create: exit %d, stderr %q", s.code, s.stderr.String())
+	}
+	if want := "created web — qemu only · nothing composed yet  (draft)\r\n"; !strings.HasPrefix(s.out.String(), want) {
+		t.Errorf("create printed %q, want it to start %q", s.out.String(), want)
+	}
+
+	s = st.run(t, "alice", "env", "show", "web")
+	if want := "  runner       qemu — placed only on nodes running it\r\n"; !strings.Contains(s.out.String(), want) {
+		t.Errorf("show is missing %q:\n%s", want, s.out.String())
+	}
+
+	// Pinned to the byte, trailing spaces included: `%-26s` pads by bytes and
+	// both `·` and the truncating `…` are multi-byte, so the column is a
+	// character or two narrower on screen than the format string claims. That
+	// predates the runner — the separator was already there — and this row is
+	// where it would be noticed if anybody ever widened the column.
+	s = st.run(t, "alice", "env", "ls")
+	if want := "web                  draft    qemu only · nothing comp…  \r\n"; s.out.String() != want {
+		t.Errorf("ls printed %q, want %q", s.out.String(), want)
+	}
+
+	// The pointer, at the door: a command about something else must not clear
+	// the requirement.
+	s = st.run(t, "alice", "env", "set", "web", "--description", "the web box")
+	if s.code != 0 {
+		t.Fatalf("set: exit %d, stderr %q", s.code, s.stderr.String())
+	}
+	if got := s.out.String(); got != "updated web — qemu only · nothing composed yet  (draft)\r\n" {
+		t.Errorf("set printed %q — an unrelated edit dropped the runner", got)
+	}
+
+	// And an empty value is the way back. The row disappears from `show`
+	// entirely rather than reading "runner none": requiring nothing is what
+	// almost every environment does.
+	s = st.run(t, "alice", "env", "set", "web", "--runner=")
+	if s.code != 0 {
+		t.Fatalf("clear: exit %d, stderr %q", s.code, s.stderr.String())
+	}
+	s = st.run(t, "alice", "env", "show", "web")
+	if strings.Contains(s.out.String(), "runner") {
+		t.Errorf("show still names a runner after it was cleared:\n%s", s.out.String())
+	}
+
+	// ctlops owns the vocabulary, and this is the sentence it owns.
+	s = st.run(t, "alice", "env", "set", "web", "--runner", "mock")
+	if s.code == 0 {
+		t.Fatalf("`--runner mock` was accepted: %q", s.out.String())
+	}
+	if !strings.Contains(s.stderr.String(), "cannot require") {
+		t.Errorf("stderr = %q, want ctlops' refusal of the mock runner", s.stderr.String())
+	}
+}

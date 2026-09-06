@@ -652,6 +652,7 @@ type Manager struct {
 	checkpointPfx      string                  // object-key prefix for checkpoints (default "checkpoints")
 	nodeName           string                  // this host's name in capacity reports
 	nodeArch           string                  // this host's CPU architecture in capacity reports
+	nodeRunner         vmm.Runner              // the VMM this host runs, in capacity reports
 	nodeRelease        string                  // this host's sparkbox release tag in capacity reports
 	hostVCPUs          int64                   // host logical CPUs for capacity reports; 0 = unknown
 	actCPUPct          float64                 // activity floor: % of one core over a sample; 0 = off
@@ -764,6 +765,17 @@ type Options struct {
 	// deployment has no use for either.
 	Arch    string
 	Release string
+	// Runner is the VMM this host's driver actually is. It cannot be derived
+	// from Driver — vmm.Driver has no name, deliberately, because nothing in
+	// the lifecycle should branch on which implementation it got — so it is
+	// told to the manager by the same wiring that chose the driver.
+	//
+	// It reaches capacity reports for the reason Arch does: an aggregator
+	// deciding where a sandbox lands has to be able to tell one machine from
+	// another, and an environment that requires a VMM is exactly a request to
+	// discriminate on this. Empty when the caller did not say, which reads as
+	// "unknown" everywhere and never as a refusal.
+	Runner vmm.Runner
 	// HostVCPUs is the host's logical CPU count for capacity reports (0 = unknown).
 	HostVCPUs int64
 	// FrontDoor, if set, gets Ensure/Remove calls as sandboxes come and go.
@@ -860,6 +872,7 @@ func NewManager(opts Options) (*Manager, error) {
 		diskPoolMB:         opts.DiskPoolMBPerOwner,
 		nodeName:           opts.NodeName,
 		nodeArch:           opts.Arch,
+		nodeRunner:         opts.Runner,
 		nodeRelease:        opts.Release,
 		hostVCPUs:          opts.HostVCPUs,
 		frontDoor:          opts.FrontDoor,
@@ -1466,6 +1479,11 @@ type NodeCapacity struct {
 	// did. Empty when the host didn't say.
 	Arch    string `json:"arch,omitempty"`
 	Release string `json:"release,omitempty"`
+	// Runner is the VMM this machine runs. It is the same kind of fact as Arch
+	// and it is here for the same reason: an environment may require a VMM, and
+	// the machine that reports one it does not run cannot be told apart from
+	// the machine that has not reported at all. Empty is "did not say".
+	Runner vmm.Runner `json:"runner,omitempty"`
 	// Online and LastSeenAt are filled in by whoever aggregates capacities from
 	// several machines; a manager reporting on itself is online by definition
 	// and leaves LastSeenAt nil, since "now" carries no information.
@@ -1648,6 +1666,15 @@ func (m *Manager) ownerPolicy() OwnerPolicy {
 	}
 }
 
+// Runner is the VMM this manager's driver is, or "" when nothing told it.
+//
+// It exists so a gateway wired straight to its manager — no fleet, no ledger,
+// one machine — can still refuse an environment that requires the other VMM.
+// On that deployment there is no placer to consult and no candidate list to
+// check against, so this accessor is the only thing standing between "this
+// environment requires qemu" and a firecracker sandbox nobody asked for.
+func (m *Manager) Runner() vmm.Runner { return m.nodeRunner }
+
 // Capacity reports this node's resources. Used* counts only running sandboxes,
 // mirroring the admission check: paused sandboxes cost disk, not RAM/CPU.
 func (m *Manager) Capacity() NodeCapacity {
@@ -1656,6 +1683,7 @@ func (m *Manager) Capacity() NodeCapacity {
 	c := NodeCapacity{
 		Node:               m.nodeName,
 		Arch:               m.nodeArch,
+		Runner:             m.nodeRunner,
 		Release:            m.nodeRelease,
 		Online:             true,
 		TotalVCPUs:         m.hostVCPUs,
