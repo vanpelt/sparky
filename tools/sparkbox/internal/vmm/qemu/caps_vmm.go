@@ -93,7 +93,7 @@ func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err er
 		d.mu.Unlock()
 		return 0, 0, fmt.Errorf("vm %q not running", name)
 	}
-	tap := d.net.TapName(st.idx)
+	tap := d.tapName(st.idx)
 	d.mu.Unlock()
 
 	// Guest rx is the tap's tx and vice versa.

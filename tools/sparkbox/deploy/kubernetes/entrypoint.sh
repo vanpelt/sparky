@@ -441,32 +441,36 @@ if [ "$allow_vmm_change" = true ]; then
 	driver_args+=(--allow-vmm-change)
 fi
 
-jail_args=(--jailer "$jailer")
-if [ "$chroot_jailer" = true ]; then
-	jail_args=(--chroot-jailer --jailer-chroot-base "$hot_dir/jailer")
-fi
-# The jailer flags describe Firecracker's confinement and sparkbox REFUSES them
-# alongside --driver qemu rather than ignoring them, because a node that
-# accepted them would look hardened while running an unconfined VMM. Until the
-# privileged helper can launch QEMU, a QEMU node is the direct launcher and says
-# so by not being handed them.
+# How the VMM is confined. The two backends reach the same posture by different
+# routes, and only the FIRECRACKER half is expressed as flags here.
+#
+# --jailer and --chroot-jailer say "the parent builds a chroot and drops
+# privilege before exec". QEMU cannot be launched that way -- it has to open
+# /dev/kvm, the tap, the kernel and the rootfs first and drop afterwards, which
+# it does itself from `-run-with chroot= -runas <uid>:<uid> -sandbox on` on its
+# own command line. sparkbox REFUSES those two flags alongside --driver qemu
+# rather than ignoring them, because a node that accepted them would look
+# hardened while running an unconfined VMM.
+#
+# Everything else is shared: both backends run their VMM inside the privileged
+# helper when one is configured, and both need the chroot base to find it.
 if [ "$vmm_driver" = qemu ]; then
-	jail_args=()
-	if [ "$disable_host_rootfs_mounts" = true ]; then
-		jail_args+=(--disable-host-rootfs-mounts)
+	jail_args=(--jailer-chroot-base "$hot_dir/jailer")
+else
+	jail_args=(--jailer "$jailer")
+	if [ "$chroot_jailer" = true ]; then
+		jail_args=(--chroot-jailer --jailer-chroot-base "$hot_dir/jailer")
 	fi
 fi
-if [ "$vmm_driver" != qemu ]; then
-	if [ "$disable_host_rootfs_mounts" = true ]; then
-		jail_args+=(--disable-host-rootfs-mounts)
-	fi
-	if [ -n "$privileged_helper_socket" ]; then
-		jail_args+=(
-			--privileged-helper-socket "$privileged_helper_socket"
-			--privileged-helper-bin /usr/local/bin/sparkbox-vmm-helper
-			--helper-controller-gid "$controller_gid"
-		)
-	fi
+if [ "$disable_host_rootfs_mounts" = true ]; then
+	jail_args+=(--disable-host-rootfs-mounts)
+fi
+if [ -n "$privileged_helper_socket" ]; then
+	jail_args+=(
+		--privileged-helper-socket "$privileged_helper_socket"
+		--privileged-helper-bin /usr/local/bin/sparkbox-vmm-helper
+		--helper-controller-gid "$controller_gid"
+	)
 fi
 metrics_addr=
 if [ -n "$gateway_addr" ]; then

@@ -217,36 +217,86 @@ func CPUTimeNanos(ctx context.Context, socketPath, name string, slot int) (uint6
 	return response.CPUTimeNanos, err
 }
 
-// LaunchCommand returns the unprivileged process runner handed to the
-// Firecracker SDK. That process owns no VMM privileges: it only holds an
-// authenticated connection open while the helper owns the real Firecracker
-// child. SIGTERM closes the write side, waits for helper cleanup, and exits.
-func LaunchCommand(helperBin, socketPath, name string, slot int, resume bool) *exec.Cmd {
+// Launch is one VMM the controller wants started. It is a struct rather than a
+// parameter list because the machine fields are meaningful to exactly one of
+// the two backends, and a positional call site gives no clue which zeros are
+// deliberate: a Firecracker launch leaves VCPUs, MemMB and Cmdline unset
+// because Firecracker takes an empty argv and is configured over its own REST
+// socket afterwards, while a QEMU launch must carry them because QEMU takes the
+// whole machine on the command line and there is no afterwards.
+//
+// It still names no path, no binary and no command. See Request.
+type Launch struct {
+	Socket string
+	Name   string
+	Slot   int
+	Resume bool
+
+	// The machine, required by a QEMU helper and ignored by a Firecracker one.
+	// The helper decides which of those it is from its OWN startup flag and
+	// validates accordingly, so sending these to a Firecracker helper is
+	// harmless and omitting them from a QEMU one is a refusal, not a default.
+	VCPUs   int64
+	MemMB   int64
+	Cmdline string
+}
+
+func (l Launch) request() Request {
+	req := request(OpLaunch, l.Name, l.Slot)
+	req.Resume = l.Resume
+	req.VCPUs = l.VCPUs
+	req.MemMB = l.MemMB
+	req.Cmdline = l.Cmdline
+	return req
+}
+
+// LaunchCommand returns the unprivileged process runner that stands in for the
+// VMM in the controller. That process owns no VMM privileges: it only holds an
+// authenticated connection open while the helper owns the real VMM child.
+// SIGTERM closes the write side, waits for helper cleanup, and exits.
+//
+// The Firecracker driver hands it to the SDK as its process runner; the QEMU
+// driver keeps it as st.cmd, so every wait, signal and reap in that driver goes
+// on working against a process it can actually see.
+func LaunchCommand(helperBin string, l Launch) *exec.Cmd {
 	args := []string{
 		"launch",
-		"--socket", socketPath,
-		"--name", name,
-		"--slot", strconv.Itoa(slot),
+		"--socket", l.Socket,
+		"--name", l.Name,
+		"--slot", strconv.Itoa(l.Slot),
 	}
-	if resume {
+	if l.Resume {
 		args = append(args, "--resume")
 	}
-	// Do not use CommandContext. The SDK signals this process before cancelling
-	// the VM context; an automatic SIGKILL would bypass the cleanup handshake.
+	// Passed only when set, so a Firecracker launch produces the argv it always
+	// produced and a helper of either vintage sees what it expects.
+	if l.VCPUs != 0 {
+		args = append(args, "--vcpus", strconv.FormatInt(l.VCPUs, 10))
+	}
+	if l.MemMB != 0 {
+		args = append(args, "--mem-mb", strconv.FormatInt(l.MemMB, 10))
+	}
+	if l.Cmdline != "" {
+		// ONE argv element, never a shell word. The value contains spaces by
+		// construction and stays a single token from here to the helper's JSON
+		// to QEMU's -append.
+		args = append(args, "--cmdline", l.Cmdline)
+	}
+	// Do not use CommandContext. The caller signals this process before
+	// cancelling the VM context; an automatic SIGKILL would bypass the cleanup
+	// handshake.
 	return exec.Command(helperBin, args...)
 }
 
 // RunLaunchClient blocks for the lifetime of one VMM. Cancellation asks the
-// server to terminate Firecracker and waits for the tap and jail to be removed.
-func RunLaunchClient(ctx context.Context, socketPath, name string, slot int, resume bool) error {
-	conn, err := dial(ctx, socketPath)
+// server to terminate the VMM and waits for the tap and jail to be removed.
+func RunLaunchClient(ctx context.Context, l Launch) error {
+	conn, err := dial(ctx, l.Socket)
 	if err != nil {
 		return fmt.Errorf("dial privileged helper: %w", err)
 	}
 	defer conn.Close() //nolint:errcheck
-	req := request(OpLaunch, name, slot)
-	req.Resume = resume
-	if err := writeRequest(conn, req); err != nil {
+	if err := writeRequest(conn, l.request()); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(io.LimitReader(conn, 2*maxMessageBytes))

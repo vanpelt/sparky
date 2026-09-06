@@ -143,6 +143,20 @@ spec:
           command:
             - /usr/local/sbin/sparkbox-vmm-helper-entrypoint
           env:
+            # Declared explicitly, and it MUST match sparkbox-node's
+            # SPARKBOX_DRIVER. This container decides which VMM it launches from
+            # its own flag -- the helper protocol carries no command, so the
+            # controller cannot ask -- and a helper serving the other backend
+            # answers the controller's startup ping perfectly well. The mismatch
+            # surfaces as the first launch being refused.
+            #
+            # It is declared with a value rather than left out for the reason
+            # SPARKBOX_DRIVER is declared on sparkbox-node: an env key the
+            # manifest does not declare cannot be rewritten by the dev-box
+            # buildEnv, so "it defaults right anyway" silently stops being
+            # settable.
+            - name: SPARKBOX_DRIVER
+              value: "firecracker"
             - name: SPARKBOX_GUEST_SUBNET
               value: 172.30.0.0/20
             - name: SPARKBOX_RESTRICT_INTERNAL_EGRESS
