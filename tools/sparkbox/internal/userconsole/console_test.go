@@ -192,7 +192,7 @@ func newTestConsoleDomain(t *testing.T, domain, xtermSub string) *testConsole {
 	// A net plane whose machines run no sluice, so bandwidth is 501 — the same
 	// answer the old no-socket syncer gave, now raised by the machine holding
 	// the sandbox rather than by the console.
-	h := New(mgr, routeStore, secretStore, netStore, repoStore, unmeteredPlane{}, favicons, accounts, signer, rec, "my", domain, xtermSub, false, log)
+	h := New(mgr, routeStore, secretStore, netStore, repoStore, unmeteredPlane{}, favicons, accounts, signer, rec, "my", domain, xtermSub, false, 0, log)
 	return &testConsole{h: h.Handler(), handler: h, mgr: mgr, routes: routeStore, secrets: secretStore, netrules: netStore, repos: repoStore, signer: signer, sync: rec}
 }
 

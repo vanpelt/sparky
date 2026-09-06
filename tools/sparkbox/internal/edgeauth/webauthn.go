@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -127,19 +126,7 @@ func (u passkeyUser) WebAuthnCredentials() []webauthn.Credential {
 // the ceremony ever moves to another subdomain.
 func newRelyingParty(cfg LoginConfig) (*webauthn.WebAuthn, string, error) {
 	domain := strings.TrimPrefix(cfg.Domain, ".")
-	scheme := "https"
-	if !cfg.Secure {
-		scheme = "http"
-	}
-	host := cfg.Subdomain + "." + domain
-	defaultPort := 80
-	if cfg.Secure {
-		defaultPort = 443
-	}
-	if cfg.Port != 0 && cfg.Port != defaultPort {
-		host += ":" + strconv.Itoa(cfg.Port)
-	}
-	origin := scheme + "://" + host
+	origin := Origin(cfg.Subdomain, domain, cfg.Secure, cfg.Port)
 	wa, err := webauthn.New(&webauthn.Config{
 		RPID:          domain,
 		RPDisplayName: "sparkbox",

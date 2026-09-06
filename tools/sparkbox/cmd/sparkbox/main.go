@@ -1286,7 +1286,7 @@ func serve(args []string) error {
 			// xtermLabel, not *xtermSub: it is already emptied when there is no
 			// proxy edge, and the console's Terminal button must not link to a
 			// host nothing serves.
-			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, repoStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, log)
+			uc := userconsole.New(mgr, routeStore, secretsStore, netrulesStore, repoStore, flt, faviconCache, userStore, sessionSigner, syncer, *userConsoleSub, *proxyDomain, xtermLabel, *proxyTLS, advertisedPort(*proxyAdvertise, *proxyAddr), log)
 			uc.SetLaunchSubdomain(launchLabel)
 			// The same App the control plane got. Nil-safe: without it the
 			// repo panel still attaches and detaches, and every row's install
@@ -1460,8 +1460,12 @@ func serve(args []string) error {
 				// in the served document is rewritten from them, so a host that
 				// moved either subtree still hands out copy-paste that works.
 				XtermSubdomain: xtermLabel,
-				LoginURL:       "https://" + *loginSub + "." + *proxyDomain + "/",
-				Log:            log,
+				// edgeauth.Origin, not a literal "https://": on a --proxy-tls=false
+				// dev loop the edge speaks plain http on a non-default port, and a
+				// hardcoded https default-port URL would bounce an unauthenticated
+				// caller to a scheme and port nothing here is listening on.
+				LoginURL: edgeauth.Origin(*loginSub, *proxyDomain, *proxyTLS, advertisedPort(*proxyAdvertise, *proxyAddr)) + "/",
+				Log:      log,
 			}
 			if xt != nil {
 				apiCfg.Terminal = terminalBridge{xt}

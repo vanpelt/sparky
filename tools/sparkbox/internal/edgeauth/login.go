@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,6 +218,30 @@ func (h *LoginHandler) logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, h.safeReturn(r.PostForm.Get("return")), http.StatusSeeOther)
 }
 
+// Origin renders the absolute origin a browser reaches <sub>.<domain> at: the
+// scheme the edge actually serves (never assumed to be https — a --proxy-tls=
+// false dev loop serves the whole zone over http), with the advertised port
+// appended whenever it isn't that scheme's default. sub may be "" for the bare
+// domain. port is the LoginConfig.Port convention: 0 means "the scheme's
+// default port", so nothing is appended.
+func Origin(sub, domain string, secure bool, port int) string {
+	scheme := "http"
+	defaultPort := 80
+	if secure {
+		scheme = "https"
+		defaultPort = 443
+	}
+	domain = strings.TrimPrefix(domain, ".")
+	host := domain
+	if sub != "" {
+		host = sub + "." + domain
+	}
+	if port != 0 && port != defaultPort {
+		host += ":" + strconv.Itoa(port)
+	}
+	return scheme + "://" + host
+}
+
 // safeReturn constrains a return URL to this zone, defeating an open-redirect
 // (`?return=https://evil.com`). Anything off-zone or unparseable collapses to
 // the zone root. The scheme rule follows the edge: https-only when the edge
@@ -224,15 +249,7 @@ func (h *LoginHandler) logout(w http.ResponseWriter, r *http.Request) {
 // dev loop serves the whole zone over http, and its consoles hand out http
 // return URLs).
 func (h *LoginHandler) safeReturn(raw string) string {
-	scheme := "https"
-	if !h.cfg.Secure {
-		scheme = "http"
-	}
-	home := strings.TrimPrefix(h.cfg.Domain, ".")
-	if h.cfg.HomeSub != "" {
-		home = h.cfg.HomeSub + "." + home
-	}
-	fallback := scheme + "://" + home + "/"
+	fallback := Origin(h.cfg.HomeSub, h.cfg.Domain, h.cfg.Secure, h.cfg.Port) + "/"
 	if raw == "" {
 		return fallback
 	}

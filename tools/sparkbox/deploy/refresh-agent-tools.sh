@@ -463,10 +463,29 @@ echo ">> ${#STALE[@]} of ${#ALL[@]} template(s) need patching"
 #
 # We satisfy (1) by seeding the config below, and (2) with CLAUDE_CODE_SANDBOXED,
 # a first-class escape hatch in the binary (its trust check opens with
-# `if (CLAUDE_CODE_SANDBOXED) return true`). That flag ALSO stops project-scoped
-# permission rules from being dropped as untrusted, i.e. a cloned repo's
-# .claude/settings.json allow-rules apply without a prompt — correct here, since
-# the VM is itself the sandbox boundary and holds nothing the owner can't reach.
+# `if (CLAUDE_CODE_SANDBOXED) return true`) — that part is confirmed: no TUI
+# dialog appears and no session hangs waiting for one.
+#
+# CONFIRMED WRONG, as of claude-code 2.1.236: the second half of that claim —
+# that the same flag also stops a cloned repo's .claude/settings.json
+# `permissions.allow` entries from being dropped as untrusted — does not hold.
+# Live in a provisioned box, with CLAUDE_CODE_SANDBOXED=1 verified set (checked
+# /etc/environment, `systemctl --user show-environment`, and the shell), both
+# `claude -p` and `claude config list` still print "Ignoring N
+# permissions.allow entries from .claude/settings.json: this workspace has not
+# been trusted", because `hasTrustDialogAccepted` for the project's cwd is
+# never set to true anywhere — CLAUDE_CODE_SANDBOXED silences the interactive
+# prompt without also flipping that flag. The allow-rules a checked-in
+# .claude/settings.json ships are therefore silently inert in every sandbox:
+# not a hang, not a blocked command (defaultMode `auto` below still governs
+# what runs), just an allowlist nobody gets the benefit of.
+#
+# Fixing it needs `projects["<cwd>"].hasTrustDialogAccepted: true` stamped into
+# ~/.claude.json for the path a repo actually lands on, which has to happen
+# wherever a repo is attached and cloned into the guest at boot — this script
+# only patches the rootfs TEMPLATE, before any specific repo or path exists, so
+# it cannot be the one to stamp it. That boot-time step is not in this tree;
+# whoever owns it is the one who can add the stamp.
 #
 # Note this seeds config, never credentials: auth stays the env token that
 # envsync pushes per-tag, and no ~/.claude/.credentials.json is ever written, so

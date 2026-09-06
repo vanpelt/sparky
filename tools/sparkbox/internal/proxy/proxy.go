@@ -312,25 +312,42 @@ func (s *Server) redirectApex(w http.ResponseWriter, r *http.Request) bool {
 	if s.home == "" {
 		return false
 	}
-	h := strings.ToLower(r.Host)
-	port := ""
-	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
-		h, port = h[:i], h[i:]
-	}
-	if strings.TrimSuffix(h, ".") != s.domain {
+	host, port := splitHost(r.Host)
+	if strings.TrimSuffix(host, ".") != s.domain {
 		return false
 	}
+	http.Redirect(w, r, requestScheme(r)+"://"+s.home+"."+s.domain+port+r.URL.RequestURI(), http.StatusFound)
+	return true
+}
+
+// splitHost lowercases a request's Host header and splits it into the bare
+// host and its ":port" suffix (empty when the client's Host header carried
+// none). The bracket check keeps an IPv6 literal's own colons out of the
+// split.
+func splitHost(host string) (bare, port string) {
+	h := strings.ToLower(host)
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
+		return h[:i], h[i:]
+	}
+	return h, ""
+}
+
+// requestScheme reports the scheme this connection was actually reached over.
+// Behind a TLS-terminating front end (the tunnel) the connection here is
+// plain, so X-Forwarded-Proto is what knows; failing that it falls back to
+// whether this listener itself terminated TLS. https is never ASSUMED, which
+// is what lets a --proxy-tls=false dev loop redirect a visitor back to the
+// http:// URL they actually asked for instead of an https one nothing here is
+// listening on. Same rule as the terminal's origin check.
+func requestScheme(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	// Behind a TLS-terminating front end (the tunnel) the connection is plain,
-	// so the header is what knows. Same rule as the terminal's origin check.
 	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
 		scheme = strings.ToLower(strings.TrimSpace(strings.Split(fwd, ",")[0]))
 	}
-	http.Redirect(w, r, scheme+"://"+s.home+"."+s.domain+port+r.URL.RequestURI(), http.StatusFound)
-	return true
+	return scheme
 }
 
 func New(mgr Resumer, store *routes.Store, domain string, log *slog.Logger) *Server {
@@ -786,8 +803,10 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 			" session-token` and send it as `Authorization: Bearer <token>`", http.StatusUnauthorized)
 		return
 	}
-	ret := "https://" + r.Host + r.URL.RequestURI()
-	dest := "https://" + s.loginSub + "." + s.domain + "/?return=" + url.QueryEscape(ret)
+	scheme := requestScheme(r)
+	_, port := splitHost(r.Host)
+	ret := scheme + "://" + r.Host + r.URL.RequestURI()
+	dest := scheme + "://" + s.loginSub + "." + s.domain + port + "/?return=" + url.QueryEscape(ret)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, dest, http.StatusSeeOther)
 }

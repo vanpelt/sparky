@@ -185,8 +185,13 @@
   /* One spinner, in the button, drawn in currentColor so it inherits the
      primary foreground it sits on. The note below says the same thing in words
      and does not need a second one — two spinners on one row read as two things
-     happening. */
-  body.creating form button::before {
+     happening.
+
+     Scoped to .pending, not to every `form button`: the reuse screen has two
+     forms, and only the one that was actually submitted is mid-flight — the
+     other is merely disabled along for the ride (see progress.js). Without
+     this scoping both buttons spin, which reads as two creates running. */
+  body.creating form button.pending::before {
     content: ""; width: 12px; height: 12px; margin-right: 8px; flex: none;
     border: 2px solid currentColor; border-top-color: transparent;
     border-radius: 999px; animation: spin .7s linear infinite;
@@ -195,7 +200,7 @@
   /* A spinner is motion for its own sake, and this page also says what is
      happening in words. Somebody who asked for less of it keeps the words. */
   @media (prefers-reduced-motion: reduce) {
-    body.creating form button::before { animation: none; }
+    body.creating form button.pending::before { animation: none; }
   }
 </style>
 </head>
