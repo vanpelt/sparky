@@ -338,6 +338,15 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 // credentials, and waiting for sshd is the manager's job (and the parity
 // fixture's BootTimeout).
 func (d *Driver) boot(ctx context.Context, name string, st *vmState, rootfs string, restore bool, fresh bool) error {
+	// st.cmd is the liveness predicate, and stopVMM deliberately leaves it set
+	// when a child survived SIGKILL — that process still has this VM's rootfs
+	// and snapshot open. Starting a second QEMU against the same disk is how a
+	// filesystem gets two writers, so refuse instead. The only way to reach
+	// here with st.cmd set is a previous boot or Pause whose stop failed, and
+	// the operator needs to see that rather than a corrupted guest.
+	if st.cmd != nil {
+		return fmt.Errorf("vm %q still has a running VMM process; refusing to start a second one over its disk", name)
+	}
 	dir := d.vmDir(name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -395,8 +404,7 @@ func (d *Driver) boot(ctx context.Context, name string, st *vmState, rootfs stri
 
 	conn, err := d.dialVMM(ctx, name, st)
 	if err != nil {
-		d.stopVMM(st) //nolint:errcheck // the dial error is the one worth reporting
-		return err
+		return d.abandonBoot(st, err)
 	}
 	st.qmp = conn
 
@@ -412,14 +420,12 @@ func (d *Driver) boot(ctx context.Context, name string, st *vmState, rootfs stri
 		}
 		cancel()
 		if err != nil {
-			d.stopVMM(st) //nolint:errcheck
-			return d.vmmError(name, st, fmt.Sprintf("restore vm %q from snapshot", name), err)
+			return d.abandonBoot(st, d.vmmError(name, st, fmt.Sprintf("restore vm %q from snapshot", name), err))
 		}
 	}
 
 	if err := d.awaitRunning(ctx, name, st); err != nil {
-		d.stopVMM(st) //nolint:errcheck
-		return err
+		return d.abandonBoot(st, err)
 	}
 
 	// Guest balloon stats need this QOM property set and one interval to
@@ -444,8 +450,7 @@ func (d *Driver) boot(ctx context.Context, name string, st *vmState, rootfs stri
 	st.statsErr = nil
 	if err := st.qmp.EnableBalloonStats(ctx, balloonStatsIntervalSecs); err != nil {
 		if !restore {
-			d.stopVMM(st) //nolint:errcheck
-			return d.vmmError(name, st, fmt.Sprintf("enable balloon stats for %q", name), err)
+			return d.abandonBoot(st, d.vmmError(name, st, fmt.Sprintf("enable balloon stats for %q", name), err))
 		}
 		st.statsErr = fmt.Errorf("balloon stats were not re-enabled after the restore: %w", err)
 	}
@@ -735,6 +740,13 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 		return nil, fmt.Errorf("no snapshot for %q: %w", name, err)
 	}
 	if err := d.net.CreateTap(ctx, st.idx); err != nil {
+		// CreateTap runs four ip(8) commands and returns on the first failure,
+		// so it can leave the device behind — `ip tuntap add` succeeding and
+		// `ip addr add` failing is the realistic shape. Without this, every
+		// later Resume of this sandbox fails at "Device or resource busy" until
+		// the process restarts and the startup sweep clears it, and the retry
+		// looks like a snapshot problem. Create guards the same case.
+		d.net.DeleteTap(st.idx)
 		return nil, err
 	}
 	// The restore argv is the cold-boot argv plus -incoming, built by the same
@@ -792,6 +804,23 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 }
 
 // --- stopping the VMM ------------------------------------------------------
+
+// abandonBoot stops a VMM that came up but could not be made usable, and
+// returns the error the caller should report.
+//
+// cause is the interesting one — "the monitor never came up", "the restore
+// stream would not load" — so it stays the head of the message. But a failed
+// stopVMM is not noise to drop: it is the one case where a QEMU is still out
+// there holding this VM's rootfs open, st.cmd stays set, and the next Resume
+// would otherwise start a second writer against the same disk. boot refuses
+// that now, which turns a silent corruption into a legible error only if this
+// error survives to be seen.
+func (d *Driver) abandonBoot(st *vmState, cause error) error {
+	if stopErr := d.stopVMM(st); stopErr != nil {
+		return fmt.Errorf("%w (and the VMM would not stop: %w)", cause, stopErr)
+	}
+	return cause
+}
 
 // stopVMM ends the QEMU process for st and does not return until it has been
 // reaped. It is the only thing in this package that stops a VMM.

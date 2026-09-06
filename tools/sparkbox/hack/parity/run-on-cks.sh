@@ -110,13 +110,34 @@ trap cleanup EXIT INT TERM
 out="$sparkbox/.dev/parity"
 mkdir -p "$out"
 
-# Default the image to this checkout's branch tag. Slashes are legal in a branch
-# name and not in a tag, which is the same substitution the workflow makes.
+# Default the image to this checkout's branch tag -- but ONLY when this branch
+# would actually have built one.
+#
+# sparkbox-parity-image.yml pushes $branch_tag on a push that touches the
+# Dockerfile or the workflow, and nothing else; `edge` it pushes only from the
+# default branch. So on the ordinary case -- a branch that changes driver code
+# and wants to run the suite against it -- the branch tag does not exist, the
+# Pod sits in ImagePullBackOff, and this script fails three steps later at a
+# generic 180s wait timeout that names none of that. Ask git which case we are
+# in rather than guessing: the tag exists exactly when the branch touched one of
+# those two paths.
+#
+# Slashes are legal in a branch name and not in a tag, which is the same
+# substitution the workflow makes.
 if [ -z "$image" ]; then
   branch=$(cd "$sparkbox" && git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
   owner=$(cd "$sparkbox" && git remote get-url origin 2>/dev/null \
             | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')
-  image="ghcr.io/${owner:-vanpelt}/sparkbox-parity:${branch:-edge}"
+  tag=edge
+  base=$(cd "$sparkbox" && git rev-parse --verify --quiet origin/main 2>/dev/null || true)
+  if [ -n "$branch" ] && [ -n "$base" ] \
+     && ! (cd "$sparkbox" && git diff --quiet "$base"...HEAD -- \
+             hack/parity/Dockerfile \
+             ../../.github/workflows/sparkbox-parity-image.yml); then
+    tag="$branch"
+  fi
+  image="ghcr.io/${owner:-vanpelt}/sparkbox-parity:${tag}"
+  say "image not given; using $image"
 fi
 
 # Where the node's assets live ON THE HOST. Not /var/lib/sparkbox: that is the

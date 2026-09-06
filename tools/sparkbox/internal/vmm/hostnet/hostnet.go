@@ -68,13 +68,22 @@ func (p Plumbing) HostIP6(idx int) string  { return p.Addr6((idx + 1) * 2) }
 func (p Plumbing) GuestIP6(idx int) string { return p.Addr6((idx+1)*2 + 1) }
 
 // Addr6 places off in the low 32 bits of Prefix6's host portion.
+//
+// It ORs rather than assigns. Assigning is correct only for a prefix of /96 or
+// shorter, where those four bytes are entirely host bits — and callers accept
+// prefixes down to /112. With, say, 2001:db8::abcd:0/112, assignment zeroes
+// bytes 12 and 13 and slot 0's guest address comes out as 2001:db8::3 instead
+// of 2001:db8::abcd:3: an address outside the prefix, which nothing routes.
+// The bound that makes OR safe is the caller's: it refuses a Subnet6 whose host
+// bits cannot cover (capacity*2 + 2) addresses, so off never overflows into the
+// prefix.
 func (p Plumbing) Addr6(off int) string {
 	ip := make(net.IP, net.IPv6len)
 	copy(ip, p.Prefix6)
-	ip[12] = byte(off >> 24)
-	ip[13] = byte(off >> 16)
-	ip[14] = byte(off >> 8)
-	ip[15] = byte(off)
+	ip[12] |= byte(off >> 24)
+	ip[13] |= byte(off >> 16)
+	ip[14] |= byte(off >> 8)
+	ip[15] |= byte(off)
 	return ip.String()
 }
 

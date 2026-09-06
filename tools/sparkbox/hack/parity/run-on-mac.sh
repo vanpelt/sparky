@@ -137,9 +137,16 @@ free -m | sed -n '1,2p'
 # total moved 315.87s -> 225.12s on that change alone, a bigger swing than any
 # difference between the two VMMs. A timing is not comparable to another timing
 # unless this line matches. See docs/vmm-parity-harness.md.
-echo "machine memory: $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo), $(nproc) CPUs"
-n=$(pgrep -c firecracker || true)
-echo "firecracker processes already running on this machine: ${n:-0} (the dev pod's sandboxes)"
+# ESCAPED, all of it. This heredoc is unquoted on purpose -- $pull_ref, $cname
+# and the timeouts below are host variables meant to be substituted here -- so
+# an unescaped $(nproc) runs on the MAC, which has no nproc and no
+# /proc/meminfo. That printed "machine memory: ,  CPUs" and, because ${n:-0}
+# was also expanded against an unset host variable, a firecracker count of 0
+# forever. The line that exists to make two timings comparable was reporting
+# nothing at all.
+echo "machine memory: \$(awk '/MemTotal/ {printf "%.1f GiB", \$2/1048576}' /proc/meminfo), \$(nproc) CPUs"
+n=\$(pgrep -c firecracker || true)
+echo "firecracker processes already running on this machine: \${n:-0} (the dev pod's sandboxes)"
 echo "EXIT 0"
 GUEST
 [ $? -eq 0 ] || die "staging failed"
