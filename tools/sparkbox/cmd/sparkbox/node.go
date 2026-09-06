@@ -225,7 +225,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 			return err
 		}
 	case "qemu":
-		if err := qemuRefusesJailerFlags(opts.jailerBin, opts.chrootJailer, opts.privilegedHelperSocket); err != nil {
+		if err := qemuRefusesJailerFlags(opts.jailerBin, opts.chrootJailer); err != nil {
 			return err
 		}
 		if err := vmm.ClaimStateDir(opts.vmStateDir, opts.driverName, opts.allowVMMChange); err != nil {
@@ -233,7 +233,9 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		}
 		driver, err = newQemuDriver(
 			opts.kernelPath, opts.imageDir, opts.templateDir, opts.vmStateDir,
-			opts.qemuBin, opts.machineType, opts.disableHostRootfsMounts,
+			opts.qemuBin, opts.machineType,
+			opts.privilegedHelperSocket, opts.privilegedHelperBin, opts.helperControllerGID,
+			opts.jailerChrootBase, opts.disableHostRootfsMounts,
 			opts.guestSubnet, opts.subnet6, opts.defaultLogin, opts.guestDNS,
 		)
 		if err != nil {

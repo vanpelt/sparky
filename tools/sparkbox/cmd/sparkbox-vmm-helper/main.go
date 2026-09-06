@@ -39,7 +39,10 @@ func main() {
 func serve(ctx context.Context, logger *log.Logger, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	socket := fs.String("socket", "", "Unix socket exposed to the unprivileged controller")
+	backend := fs.String("backend", "", "VMM this helper launches: firecracker (default) or qemu")
 	firecracker := fs.String("firecracker", "", "fixed Firecracker executable")
+	qemuBin := fs.String("qemu-bin", "", "fixed QEMU system emulator, for --backend qemu")
+	machineType := fs.String("machine-type", "", "qemu -M machine type; must be the versioned type the controller uses, because the migration stream is bound to it")
 	kernel := fs.String("kernel", "", "fixed guest kernel")
 	vmState := fs.String("vm-state-dir", "", "per-VM state root")
 	chrootBase := fs.String("chroot-base", "", "per-slot chroot root")
@@ -53,8 +56,17 @@ func serve(ctx context.Context, logger *log.Logger, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Parsed here rather than inside RunServer so an unknown value is a startup
+	// error with the flag's name in it, not a helper that silently comes up as
+	// Firecracker on a node the operator meant to run QEMU.
+	vmmBackend, err := vmhelper.ParseBackend(*backend)
+	if err != nil {
+		return err
+	}
 	return vmhelper.RunServer(ctx, vmhelper.ServerOptions{
-		SocketPath: *socket, FirecrackerBin: *firecracker, KernelPath: *kernel,
+		SocketPath: *socket, Backend: vmmBackend,
+		QemuBin: *qemuBin, MachineType: *machineType,
+		FirecrackerBin: *firecracker, KernelPath: *kernel,
 		VMStateDir: *vmState, ChrootBase: *chrootBase, Subnet: *subnet, Subnet6: *subnet6,
 		RestrictInternalEgress: *restrictInternalEgress,
 		SluiceSocket:           *sluiceSocket,
@@ -69,10 +81,19 @@ func launch(ctx context.Context, args []string) error {
 	name := fs.String("name", "", "validated VM name")
 	slot := fs.Int("slot", -1, "validated VM network slot")
 	resume := fs.Bool("resume", false, "stage snapshot inputs")
+	// The machine. A QEMU helper requires all three and a Firecracker one
+	// ignores them; neither is decided here, because this client does not know
+	// which backend it is talking to and must not start guessing.
+	vcpus := fs.Int64("vcpus", 0, "guest vCPU count (qemu backend)")
+	memMB := fs.Int64("mem-mb", 0, "guest memory in MiB (qemu backend)")
+	cmdline := fs.String("cmdline", "", "guest kernel command line (qemu backend)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return vmhelper.RunLaunchClient(ctx, *socket, *name, *slot, *resume)
+	return vmhelper.RunLaunchClient(ctx, vmhelper.Launch{
+		Socket: *socket, Name: *name, Slot: *slot, Resume: *resume,
+		VCPUs: *vcpus, MemMB: *memMB, Cmdline: *cmdline,
+	})
 }
 
 func ping(ctx context.Context, args []string) error {

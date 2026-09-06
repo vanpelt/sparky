@@ -79,7 +79,9 @@ func TestServerOwnsEveryExecutableAndPath(t *testing.T) {
 }
 
 func TestLaunchCommandIsOnlyAnUnprivilegedSocketClient(t *testing.T) {
-	cmd := LaunchCommand("/usr/local/bin/sparkbox-vmm-helper", "/run/helper.sock", "box", 7, true)
+	cmd := LaunchCommand("/usr/local/bin/sparkbox-vmm-helper", Launch{
+		Socket: "/run/helper.sock", Name: "box", Slot: 7, Resume: true,
+	})
 	want := []string{
 		"/usr/local/bin/sparkbox-vmm-helper", "launch",
 		"--socket", "/run/helper.sock", "--name", "box", "--slot", "7", "--resume",
@@ -89,6 +91,41 @@ func TestLaunchCommandIsOnlyAnUnprivilegedSocketClient(t *testing.T) {
 	}
 	if cmd.SysProcAttr != nil {
 		t.Fatalf("helper client unexpectedly changes process attributes: %+v", cmd.SysProcAttr)
+	}
+}
+
+// A Firecracker launch must produce the argv it has always produced, byte for
+// byte: the controller and the helper are separate containers with independent
+// restarts, so a rolling update runs a new client against an old helper, and an
+// unconditional --vcpus would be an unknown flag to it.
+func TestLaunchCommandOmitsTheMachineWhenThereIsNone(t *testing.T) {
+	cmd := LaunchCommand("/h", Launch{Socket: "/s", Name: "box", Slot: 0})
+	for _, flag := range []string{"--vcpus", "--mem-mb", "--cmdline", "--resume"} {
+		if slices.Contains(cmd.Args, flag) {
+			t.Errorf("a Firecracker launch carries %s", flag)
+		}
+	}
+}
+
+// The guest command line contains spaces by construction. It has to survive as
+// ONE argv element from here to the helper's JSON to QEMU's -append; a value
+// that split would become several QEMU options chosen by the caller.
+func TestLaunchCommandKeepsTheGuestCmdlineOneArgument(t *testing.T) {
+	const cmdline = "console=ttyS0 root=/dev/vda rw sparkbox_fresh=1"
+	cmd := LaunchCommand("/h", Launch{
+		Socket: "/s", Name: "box", Slot: 3, VCPUs: 2, MemMB: 1024, Cmdline: cmdline,
+	})
+	i := slices.Index(cmd.Args, "--cmdline")
+	if i < 0 || i+1 >= len(cmd.Args) {
+		t.Fatalf("no --cmdline in %v", cmd.Args)
+	}
+	if cmd.Args[i+1] != cmdline {
+		t.Errorf("cmdline argument = %q, want %q", cmd.Args[i+1], cmdline)
+	}
+	// argv[0], "launch", and six flag/value pairs. Counted so a cmdline that
+	// split into words fails here rather than at exec time on a real node.
+	if got := len(cmd.Args); got != 14 {
+		t.Errorf("argv has %d elements, want 14: %v", got, cmd.Args)
 	}
 }
 
@@ -118,7 +155,7 @@ func TestLaunchClientPreservesBufferedFinalResponse(t *testing.T) {
 		_, err = conn.Write([]byte("{\"ok\":true}\n{\"ok\":true}\n"))
 		serverErr <- err
 	}()
-	if err := RunLaunchClient(context.Background(), socket, "box", 2, false); err != nil {
+	if err := RunLaunchClient(context.Background(), Launch{Socket: socket, Name: "box", Slot: 2, Resume: false}); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-serverErr; err != nil {
@@ -154,7 +191,7 @@ func TestLaunchClientWaitsForCleanupAcknowledgement(t *testing.T) {
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- RunLaunchClient(ctx, socket, "box", 2, false) }()
+	go func() { done <- RunLaunchClient(ctx, Launch{Socket: socket, Name: "box", Slot: 2, Resume: false}) }()
 	select {
 	case <-acknowledged:
 	case <-time.After(time.Second):

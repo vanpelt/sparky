@@ -107,23 +107,24 @@ func main() {
 	}
 }
 
-// qemuRefusesJailerFlags rejects --driver qemu combined with any of the
-// Firecracker confinement flags.
+// qemuRefusesJailerFlags rejects --driver qemu combined with the two Firecracker
+// launcher flags that have no QEMU counterpart.
 //
-// It refuses rather than ignores because ignoring is the dangerous option.
-// qemu.Options has no jailer, chroot-jailer or privileged-helper field, so a
-// node started with --driver qemu --chroot-jailer --privileged-helper ... would
-// come up looking exactly like a hardened node and would in fact be running an
-// unconfined VMM as the controller. The operator would have no way to tell:
-// every flag they passed was accepted. An error at startup is the only outcome
-// that cannot be mistaken for the thing they asked for.
+// It refuses rather than ignores because ignoring is the dangerous option. A
+// node started with --driver qemu --chroot-jailer would come up looking exactly
+// like a hardened node while running an unconfined VMM as the controller, and
+// the operator would have no way to tell: every flag they passed was accepted.
+// An error at startup is the only outcome that cannot be mistaken for the thing
+// they asked for.
 //
-// This is a statement about the flags, not about QEMU. QEMU confines itself —
-// `-runas <uid>:<uid> -run-with chroot=<jail> -sandbox on`, measured on the CKS
-// node, produces a process with every capability dropped — but it does so from
-// its own argv rather than through these flags, and until the driver builds
-// that argv there is nothing here to honour them with.
-func qemuRefusesJailerFlags(jailerBin string, chrootJailer bool, privilegedHelperSocket string) error {
+// --privileged-helper-socket is NOT on this list any more, because that path is
+// now implemented: the helper builds the QEMU argv and execs it, and QEMU
+// confines ITSELF from that argv — `-run-with chroot=<jail> -runas <uid>:<uid>
+// -sandbox on`, measured on the production CKS node to reach uid 100000 with
+// CapEff and CapPrm zero. The two flags still refused describe how Firecracker
+// is confined BY ITS PARENT, which is not a thing QEMU can be asked to honour;
+// the jail it uses is the helper's, from --jailer-chroot-base.
+func qemuRefusesJailerFlags(jailerBin string, chrootJailer bool) error {
 	var set []string
 	if jailerBin != "" {
 		set = append(set, "--jailer")
@@ -131,15 +132,13 @@ func qemuRefusesJailerFlags(jailerBin string, chrootJailer bool, privilegedHelpe
 	if chrootJailer {
 		set = append(set, "--chroot-jailer")
 	}
-	if privilegedHelperSocket != "" {
-		set = append(set, "--privileged-helper")
-	}
 	if len(set) == 0 {
 		return nil
 	}
-	return fmt.Errorf("--driver qemu does not implement %s yet, and starting anyway would give you an "+
-		"unconfined VMM that looks confined. Drop the flag to run the direct launcher knowingly, "+
-		"or stay on --driver firecracker", strings.Join(set, " and "))
+	return fmt.Errorf("--driver qemu does not implement %s: those describe how Firecracker is confined "+
+		"by its parent, and QEMU confines itself from its own command line. Use "+
+		"--privileged-helper-socket for a hardened node, or drop the flag to run the direct "+
+		"launcher knowingly", strings.Join(set, " and "))
 }
 
 func serve(args []string) error {
@@ -575,7 +574,7 @@ func serve(args []string) error {
 			return err
 		}
 	case "qemu":
-		if err := qemuRefusesJailerFlags(*jailerBin, *chrootJailer, *privilegedHelper); err != nil {
+		if err := qemuRefusesJailerFlags(*jailerBin, *chrootJailer); err != nil {
 			return err
 		}
 		if err := vmm.ClaimStateDir(*vmStateDir, *driverName, *allowVMMChange); err != nil {
@@ -583,6 +582,7 @@ func serve(args []string) error {
 		}
 		driver, err = newQemuDriver(
 			*kernelPath, *imageDir, *templateDir, *vmStateDir, *qemuBin, *machineType,
+			*privilegedHelper, *privilegedHelperBin, *helperControllerGID, *jailerChrootBase,
 			*noRootfsMounts, *guestSubnet, *subnet6, *defaultLogin, *guestDNS,
 		)
 		if err != nil {
