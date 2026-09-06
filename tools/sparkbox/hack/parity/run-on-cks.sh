@@ -41,11 +41,18 @@
 # Usage:
 #   hack/parity/run-on-cks.sh [--run <regex>] [--pkg <import path>] [--image <ref>]
 #                             [--keep] [--timeout 90m] [--machine-type <name>]
-#                             [--namespace parity] [--context <ctx>]
+#                             [--namespace parity] [--context <ctx>] [--helper]
 #
 # --pkg is what points it at a driver other than firecracker:
 #
 #   hack/parity/run-on-cks.sh --pkg ./internal/vmm/qemu --run TestQEMUParity
+#
+# --helper runs that same suite through the privileged helper -- the launcher a
+# hardened node uses, where the VMM is execed by a root process on the far side
+# of a Unix socket and confines itself. Without it the suite exercises the
+# direct launcher, which is a dev box, not CKS:
+#
+#   hack/parity/run-on-cks.sh --pkg ./internal/vmm/qemu --run TestQEMUParity --helper
 set -uo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -69,6 +76,27 @@ keep=0
 nodedata=
 scratch_gb=40
 login_user=""
+# --helper drives the suite through the PRIVILEGED HELPER instead of the direct
+# launcher, which is the configuration a hardened node actually runs and the one
+# nothing had ever booted a guest through. It changes four things at once, and
+# they are a package rather than a menu:
+#
+#   - a `sparkbox-vmm-helper serve --backend qemu` runs in the Pod as root; it
+#     builds the QEMU argv, creates the tap, and execs a QEMU that confines
+#     ITSELF (-run-with chroot= -runas <uid>:<uid> -sandbox on);
+#   - the test binary runs as an UNPRIVILEGED uid, because the helper refuses a
+#     controller uid of 0 -- that refusal is the boundary's whole point;
+#   - which means the driver cannot loop-mount a rootfs to inject an SSH key
+#     (MEASURED: mount(8) will not set up a loop device for a non-root uid even
+#     with ambient CAP_SYS_ADMIN and CAP_DAC_OVERRIDE), so the suite runs with
+#     --disable-host-rootfs-mounts and this script bakes one key into the
+#     template first -- exactly how a real sandbox gets its key;
+#   - and the kernel is COPIED onto the scratch filesystem, because the helper
+#     hardlinks it into each jail and chmods it 0444, neither of which works
+#     against the read-only /nodedata mount it lives on.
+helper=0
+controller_uid=65532
+controller_gid=65532
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -83,7 +111,11 @@ while [ "$#" -gt 0 ]; do
     --context)   context=${2:?--context needs a value}; shift 2 ;;
     --node-data)  nodedata=${2:?--node-data needs a path}; shift 2 ;;
     --login-user) login_user=${2:?--login-user needs a name}; shift 2 ;;
-    -h|--help)   sed -n '2,55p' "$0"; exit 0 ;;
+    --helper)    helper=1; shift ;;
+    # Print the header block, whatever length it has grown to, rather than a
+    # hardcoded line count that silently truncates the usage the day someone
+    # documents a new flag. (It did.)
+    -h|--help)   sed -n '2,/^set -uo/p' "$0" | sed '$d'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -147,6 +179,14 @@ echo "   package: $pkg"
 ( cd "$sparkbox" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
     go test -c -o "$out/parity-amd64.test" "$pkg" ) || die "go test -c failed"
 ls -lh "$out/parity-amd64.test" | awk '{print "   " $5, $9}'
+if [ "$helper" = 1 ]; then
+  [ "$pkg" = ./internal/vmm/qemu ] \
+    || die "--helper is only wired for --pkg ./internal/vmm/qemu"
+  echo "   plus cmd/sparkbox-vmm-helper"
+  ( cd "$sparkbox" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+      go build -o "$out/sparkbox-vmm-helper" ./cmd/sparkbox-vmm-helper ) \
+    || die "go build sparkbox-vmm-helper failed"
+fi
 
 say "2. namespace/$namespace and the runner Pod"
 # A leftover namespace is almost always a previous --keep run, and reusing its
@@ -209,7 +249,15 @@ fi
 
 say "4. copying the test binary in"
 "${k[@]}" cp "$out/parity-amd64.test" "$namespace/parity:/work/parity.test" || die "kubectl cp failed"
-"${k[@]}" -n "$namespace" exec parity -- chmod +x /work/parity.test
+# 0755, not `+x`: the suite runs as the controller uid under --helper, and a
+# umask that dropped the other-execute bit would fail at exec with a message
+# about the file, not about the uid.
+"${k[@]}" -n "$namespace" exec parity -- chmod 0755 /work/parity.test
+if [ "$helper" = 1 ]; then
+  "${k[@]}" cp "$out/sparkbox-vmm-helper" "$namespace/parity:/work/sparkbox-vmm-helper" \
+    || die "kubectl cp of the helper failed"
+  "${k[@]}" -n "$namespace" exec parity -- chmod 0755 /work/sparkbox-vmm-helper
+fi
 
 say "5. preparing a reflink-capable scratch filesystem"
 # `-i` is mandatory: without it kubectl closes stdin, bash reads EOF, and the
@@ -221,14 +269,19 @@ export DEBIAN_FRONTEND=noninteractive
 # the image by hack/parity/Dockerfile, so a run does not depend on the cluster
 # reaching an Ubuntu mirror. Fail here rather than three minutes later if the
 # image is somehow the wrong one.
-for t in mkfs.xfs e2fsck zerofree zstd ip; do
+for t in mkfs.xfs e2fsck zerofree zstd ip setpriv ssh-keygen; do
   command -v "$t" >/dev/null 2>&1 || { echo "missing $t: wrong image?" >&2; exit 1; }
 done
 truncate -s 30G /work/scratch.xfs
 mkfs.xfs -q -m reflink=1 /work/scratch.xfs
 mkdir -p /work/scratch
 mount -o loop /work/scratch.xfs /work/scratch
-mkdir -p /work/scratch/images /work/scratch/state
+# jailer/ sits beside state/ ON THE SAME FILESYSTEM, and that is not tidiness.
+# The helper hardlinks the rootfs, the kernel and each snapshot output from the
+# VM directory into the per-slot jail, and link(2) is EXDEV across filesystems.
+# Production gets this for free (both are under $hot_dir); here it has to be
+# arranged. assets/ is the same story for the kernel -- see step 5b.
+mkdir -p /work/scratch/images /work/scratch/state /work/scratch/jailer /work/scratch/assets
 
 # One sparse copy in, then every VM is a reflink clone of it. --sparse=always so
 # the 25 GiB ceiling costs its used size and not the ceiling.
@@ -274,26 +327,127 @@ fcbin=$("${k[@]}" -n "$namespace" exec parity -- \
 [ -n "$fcbin" ] || die "no firecracker binary found under $nodedata"
 echo "   image=$image_name login=$login_user kernel=$kernel firecracker=$fcbin"
 
-# QEMU only. The driver REFUSES to default a machine type off arm64
-# (internal/vmm/qemu/qemu.go), and it insists on a VERSIONED name, because the
-# machine model is baked into every migration stream a sandbox pauses into: an
-# unversioned `q35` silently means "whatever this QEMU calls newest", so a QEMU
-# upgrade would strand every existing snapshot. Ask the binary what it has
-# rather than hardcoding a version that expires.
+# QEMU only.
+#
+# THE MACHINE TYPE IS DELIBERATELY LEFT EMPTY unless an operator names one, and
+# that is a correction rather than a simplification. This used to resolve the
+# newest versioned pc-q35-* out of the binary, because the driver refused to
+# default one on amd64 at all. The driver now has a pinned default and it is
+# NOT a bare version -- it is `pc-q35-8.2,sata=off,vmport=off`, where the two
+# suffixes remove ich9-ahci and the VMware backdoor ports (measured with
+# `info qtree`). Resolving one here OVERRODE that, so a green run validated a
+# machine model no production node will ever boot -- and a different device set
+# is a different migration stream, which is the one thing a snapshot cannot
+# survive.
+#
+# Empty means the driver and the helper each take the SAME pinned default from
+# internal/vmm/qemuargs, which is the configuration actually being tested. Step
+# 6c then proves the two processes agreed rather than assuming it.
 qemu_bin=""
 if [ "$pkg" != "./internal/vmm/firecracker" ]; then
   qemu_bin=$("${k[@]}" -n "$namespace" exec parity -- \
     bash -c 'command -v qemu-system-x86_64' 2>/dev/null || true)
   [ -n "$qemu_bin" ] || die "qemu-system-x86_64 not in the image ($image)"
-  if [ -z "$machine_type" ]; then
-    machine_type=$("${k[@]}" -n "$namespace" exec parity -- \
-      bash -c "$qemu_bin -M help | awk '{print \$1}' | grep -E '^pc-q35-[0-9]+\\.[0-9]+$' | sort -V | tail -1")
-  fi
-  [ -n "$machine_type" ] || die "could not resolve a versioned pc-q35-* machine type"
-  echo "   qemu=$qemu_bin machine-type=$machine_type"
+  echo "   qemu=$qemu_bin machine-type=${machine_type:-(the driver pinned default)}"
 fi
 
+# The QEMU driver's own default (SPARKBOX_PARITY_QEMU_SUBNET), stated here
+# because helper mode has to hand the SAME value to two processes: the driver
+# derives each guest's ip= kernel argument from it and the helper addresses the
+# tap from it. Disagree and the guest comes up with an address its gateway is
+# not on, which presents as a boot that never answers SSH.
+qemu_subnet=172.31.1.0/24
+
+if [ "$helper" = 1 ]; then
+  say "5b. baking the parity key into the template, and starting the helper"
+  rm -f "$out/parity_key" "$out/parity_key.pub"
+  ssh-keygen -q -t ed25519 -N '' -C parity -f "$out/parity_key" \
+    || die "ssh-keygen failed"
+  "${k[@]}" cp "$out/parity_key" "$namespace/parity:/work/parity_key" || die "kubectl cp of the key failed"
+  "${k[@]}" cp "$out/parity_key.pub" "$namespace/parity:/work/parity_key.pub" || die "kubectl cp of the pubkey failed"
+  "${k[@]}" -n "$namespace" exec -i parity -- env \
+      LOGIN_USER="$login_user" KERNEL="$kernel" QEMU_BIN="$qemu_bin" \
+      MACHINE_TYPE="$machine_type" SUBNET="$qemu_subnet" \
+      CONTROLLER_UID="$controller_uid" CONTROLLER_GID="$controller_gid" \
+      bash -s <<'HELPER' || die "helper preparation failed"
+set -eu
+
+# The key, into the TEMPLATE. This is how a real sandbox gets one -- the CKS
+# deployment runs with --disable-host-rootfs-mounts and its templates carry a
+# baked authorized_keys -- and here it is also the only way, because the test
+# process is about to stop being root. Done before any VM exists, on our own
+# copy of the image; /nodedata is mounted read-only and is never touched.
+img=$(ls /work/scratch/images/*.ext4 | head -1)
+mnt=$(mktemp -d)
+mount -o loop "$img" "$mnt"
+home=/root
+[ "$LOGIN_USER" = root ] || home="/home/$LOGIN_USER"
+[ -d "$mnt$home" ] || { echo "no $home in the template for login user $LOGIN_USER" >&2; umount "$mnt"; exit 1; }
+mkdir -p "$mnt$home/.ssh"
+cat /work/parity_key.pub >> "$mnt$home/.ssh/authorized_keys"
+chmod 700 "$mnt$home/.ssh"; chmod 600 "$mnt$home/.ssh/authorized_keys"
+# Ownership INSIDE the guest, which is not this container's idea of the user.
+owner=$(stat -c '%u:%g' "$mnt$home")
+chown -R "$owner" "$mnt$home/.ssh"
+umount "$mnt"; rmdir "$mnt"
+echo "baked $(wc -l < /work/parity_key.pub) key into $(basename "$img"):$home/.ssh/authorized_keys"
+
+# The kernel has to live on the scratch filesystem. The helper hardlinks it into
+# every jail and chmods it 0444; /nodedata is read-only (EROFS) and a different
+# filesystem (EXDEV), so both fail there.
+cp "$KERNEL" /work/scratch/assets/vmlinux
+
+# Everything the unprivileged controller reads or writes. The jail base is left
+# alone: the helper creates it 0711 root-owned, which is what makes a slot's
+# jail traversable-but-not-listable to this group.
+chown -R "$CONTROLLER_UID:$CONTROLLER_GID" /work/scratch/images /work/scratch/state /work/scratch/assets
+chmod 0755 /work/scratch
+# /work/vmm is deliberately NOT pre-created: RunServer makes its socket's
+# directory itself and then chowns it root:<controller-gid> 0750, so anything
+# arranged here would just be overwritten.
+chown "$CONTROLLER_UID:$CONTROLLER_GID" /work/parity_key && chmod 0400 /work/parity_key
+
+# --firecracker is deliberately not passed: a qemu backend does not validate it,
+# which is the point of checking the binary by backend rather than both ways.
+setsid /work/sparkbox-vmm-helper serve   --socket /work/vmm/helper.sock   --backend qemu   --qemu-bin "$QEMU_BIN"   --machine-type "$MACHINE_TYPE"   --kernel /work/scratch/assets/vmlinux   --vm-state-dir /work/scratch/state   --chroot-base /work/scratch/jailer   --subnet "$SUBNET"   --jailer-uid-base 100000   --controller-uid "$CONTROLLER_UID"   --controller-gid "$CONTROLLER_GID"   >/work/helper.log 2>&1 &
+
+for _ in $(seq 1 50); do
+  [ -S /work/vmm/helper.sock ] && break
+  sleep 0.2
+done
+[ -S /work/vmm/helper.sock ] || { echo "helper never created its socket:" >&2; cat /work/helper.log >&2; exit 1; }
+# Prove the boundary from the far side: the ping must succeed AS THE CONTROLLER
+# UID, because that is the only uid the helper accepts. A root ping would pass
+# here and tell us nothing about the run that follows.
+setpriv --reuid "$CONTROLLER_UID" --regid "$CONTROLLER_GID" --clear-groups   /work/sparkbox-vmm-helper ping --socket /work/vmm/helper.sock   || { echo "helper refused the controller uid:" >&2; cat /work/helper.log >&2; exit 1; }
+echo "helper up: $(head -1 /work/helper.log)"
+HELPER
+fi
+
+run_log="$out/parity-cks-$(date +%Y%m%d-%H%M%S).log"
+
 say "6. running the suite"
+# Under --helper the suite runs as the CONTROLLER UID, not root, because the
+# helper refuses uid 0 and because an unprivileged controller is the thing being
+# tested. setpriv rather than su: no PAM, no login shell, no environment
+# rewriting between here and the test binary.
+runner=()
+helper_env=()
+if [ "$helper" = 1 ]; then
+  runner=(setpriv --reuid "$controller_uid" --regid "$controller_gid" --clear-groups --)
+  helper_env=(
+    SPARKBOX_PARITY_HELPER_SOCKET=/work/vmm/helper.sock
+    SPARKBOX_PARITY_HELPER_BIN=/work/sparkbox-vmm-helper
+    SPARKBOX_PARITY_HELPER_CHROOT_BASE=/work/scratch/jailer
+    SPARKBOX_PARITY_HELPER_GID="$controller_gid"
+    SPARKBOX_PARITY_SSH_KEY_FILE=/work/parity_key
+    # The kernel the HELPER was started with. Passing the /nodedata path here
+    # would have the driver stat one file while the helper links another --
+    # which would work right up until they differed.
+    SPARKBOX_PARITY_KERNEL=/work/scratch/assets/vmlinux
+  )
+fi
+
 "${k[@]}" -n "$namespace" exec parity -- env \
   SPARKBOX_VMM_PARITY=1 \
   SPARKBOX_PARITY_KERNEL="$kernel" \
@@ -307,10 +461,40 @@ say "6. running the suite"
   SPARKBOX_PARITY_MEM_MB=2048 \
   SPARKBOX_PARITY_BOOT_TIMEOUT_S="$boot_timeout_s" \
   SPARKBOX_PARITY_QEMU="$qemu_bin" \
+  SPARKBOX_PARITY_QEMU_SUBNET="$qemu_subnet" \
   SPARKBOX_PARITY_MACHINE_TYPE="$machine_type" \
-  /work/parity.test -test.run "$runre" -test.v -test.timeout "$timeout" \
-  2>&1 | tee "$out/parity-cks-$(date +%Y%m%d-%H%M%S).log"
+  ${helper_env[@]+"${helper_env[@]}"} \
+  ${runner[@]+"${runner[@]}"} /work/parity.test -test.run "$runre" -test.v -test.timeout "$timeout" \
+  2>&1 | tee "$run_log"
 rc=${PIPESTATUS[0]}
+
+if [ "$helper" = 1 ]; then
+  say "6c. did the two processes describe the same machine?"
+  # The driver decides what machine a sandbox BOOTS as and the helper decides
+  # what machine its snapshot is RESTORED onto. They are separate processes
+  # taking the same pinned default, and QEMU matches a migration stream
+  # positionally against the machine the command line describes -- so a
+  # disagreement here does not fail now, it fails on a resume, an hour later,
+  # on a node where nothing about the sandbox has changed. Cheap to check once
+  # per run; impossible to diagnose from the eventual symptom.
+  helper_machine=$("${k[@]}" -n "$namespace" exec parity -- \
+    sed -n 's/.*machine type //p' /work/helper.log | head -1 | tr -d '\r')
+  driver_machine=$(sed -n 's/.* machine=\([^ ]*\) .*/\1/p' "$run_log" | head -1 | tr -d '\r')
+  echo "   helper: ${helper_machine:-(none)}"
+  echo "   driver: ${driver_machine:-(none)}"
+  if [ -z "$helper_machine" ] || [ "$helper_machine" != "$driver_machine" ]; then
+    echo "   MISMATCH: a sandbox paused by one of these cannot be resumed by the other" >&2
+    rc=1
+  else
+    echo "   agreed"
+  fi
+
+  say "6b. the helper's log"
+  # Always, not only on failure. The helper is where a launch is refused and
+  # where a VMM's exit status is reported, and a green run's log is the baseline
+  # that makes a red one readable.
+  "${k[@]}" -n "$namespace" exec parity -- tail -40 /work/helper.log || true
+fi
 
 say "7. the neighbours"
 # The point of the whole namespace/limits/hostPath dance is that this line is

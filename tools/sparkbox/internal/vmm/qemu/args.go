@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime"
-	"strconv"
-	"strings"
+
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
 )
 
 // This file is the whole of what the driver tells QEMU at exec time: one argv
@@ -26,181 +27,13 @@ import (
 // The argv
 // ---------------------------------------------------------------------------
 
-// qemuSpec is every per-VM input the argv needs, gathered so buildQemuArgs can
-// be called from a test without a Driver, a slot allocation or a disk.
-//
-// RestoreFrom is the whole difference between a cold boot and a restore: empty
-// means cold boot, non-empty appends `-incoming file:<path>`. See buildQemuArgs
-// for why that must remain the only difference.
-type qemuSpec struct {
-	MachineType string // -M, and it must be a VERSIONED name; see Options.MachineType
-	KernelPath  string // -kernel, an uncompressed vmlinux
-	Cmdline     string // -append, from (*Driver).kernelArgs
-	VCPUs       int64  // -smp
-	MemMB       int64  // -m, and the balloon's baseline (see caps_vmm.go)
-	RootfsPath  string // the raw ext4 image backing /dev/vda
-	TapName     string // an already-created host tap, from tapName(idx)
-	MAC         string // from macFor(idx)
-	QMPSocket   string // the monitor socket; boot unlinks it before exec
-	SerialLog   string // -serial file: target
-	RestoreFrom string // "" for a cold boot, else the state.migrate to load
-}
+// The argv itself lives in internal/vmm/qemuargs, because the privileged helper
+// builds it too and QEMU's migration stream is matched positionally against the
+// command line — see that package's doc comment for what a second copy would
+// cost. These aliases keep the driver (and its tests) reading as before.
+type qemuSpec = qemuargs.Spec
 
-// buildQemuArgs returns the arguments to exec QEMU with, NOT including argv[0]
-// (the caller has the resolved binary in Options.QemuBin).
-//
-// COLD BOOT AND RESTORE SHARE THIS FUNCTION ON PURPOSE. There is exactly one
-// list, and restore appends exactly one flag to it. Do not grow a second
-// builder, and do not make any other token conditional on spec.RestoreFrom.
-//
-// Cmdline is an INPUT rather than something built here, and that is what keeps
-// -append inside the guarantee instead of beside it: bootCmdline replays the
-// line the source booted with, so a restore's argv matches token for token and
-// not merely device for device.
-//
-// What breaks if they drift, and why you will not find out here: QEMU's
-// migration stream is a sequence of device sections keyed by device name and
-// qdev/PCI address ("0000:00:02.0/virtio-net"), and the incoming side matches
-// them positionally against the machine the argv describes. Add, remove or
-// reorder a -device and every later device relocates; change -M, -smp or -m and
-// the machine itself no longer matches. QEMU then refuses the load with
-// something like `Unknown savevm section or instance` or
-// `Length mismatch: mach-virt.ram: 0x40000000 in != 0x20000000` and exits
-// nonzero. That is loud, but it is loud on *stderr* *after* exec, on a resume,
-// of a sandbox that paused perfectly well an hour earlier — never at build
-// time and never on the cold boot that created the snapshot. boot captures the
-// child's output into qemu.log precisely so this failure has a diagnostic.
-//
-// Firecracker has no equivalent hazard (it reads the machine config back out of
-// state.snap, which is why fc.go:1073 can pass zeros for vcpus and memMB on the
-// resume path), so this is one of the places a reflex lift from fc.go is wrong.
-func buildQemuArgs(spec qemuSpec) ([]string, error) {
-	if err := spec.validate(); err != nil {
-		return nil, err
-	}
-
-	args := []string{
-		// -cpu host is KVM-only and makes the migration stream host-CPU
-		// specific, so a memory snapshot is node-local. That is already the
-		// contract — PackRootfs drops the snapshot and an archive restore is a
-		// cold boot — but it must not be relaxed without revisiting it.
-		"-M", spec.MachineType,
-		"-cpu", "host",
-		"-enable-kvm",
-		"-m", strconv.FormatInt(spec.MemMB, 10),
-		"-smp", strconv.FormatInt(spec.VCPUs, 10),
-		"-kernel", spec.KernelPath,
-		"-append", spec.Cmdline,
-
-		// The rootfs is a bare ext4 image with no partition table, presented as
-		// /dev/vda. format=raw is explicit so QEMU never probes the guest's own
-		// bytes to decide the image format.
-		"-drive", "file=" + spec.RootfsPath + ",format=raw,if=none,id=rootfs",
-		// romfile= here goes BEYOND the measured line: hack/qemu-spike/probe.sh
-		// carried it on the net and balloon devices only, and that argv booted.
-		// docs/qemu-spike.md states the finding as "every PCI device needs
-		// romfile=", though, and romfile is a property of PCIDevice itself — so
-		// it is accepted on any PCI device and is inert where the build ships no
-		// default ROM. Matching the doc's literal reading costs nothing and
-		// covers the packaged QEMU (or the never-run x86_64 path) whose
-		// virtio-blk-pci does have one, where the failure would otherwise be a
-		// hard exec-time `failed to find romfile ...` with only qemu.log to
-		// show for it.
-		"-device", "virtio-blk-pci,drive=rootfs,romfile=",
-
-		// script=no,downscript=no: the tap already exists and is addressed by
-		// createTap, and QEMU must not run /etc/qemu-ifup against it.
-		"-netdev", "tap,id=net0,ifname=" + spec.TapName + ",script=no,downscript=no",
-		// romfile= is MEASURED, not defensive: the Ubuntu package ships no
-		// option ROMs, so virtio-net-pci without it fails outright with
-		// `failed to find romfile "efi-virtio.rom"` (docs/qemu-spike.md, finding
-		// 4). We boot with -kernel, so the PXE ROM is dead weight anyway.
-		//
-		// mac= is not in the spike's probe.sh. It pins the NIC to the network
-		// slot the way fc.go's macFor does, so a restored guest lands on an
-		// identically configured interface instead of a fresh random address
-		// that its netcfg hook has never seen.
-		"-device", "virtio-net-pci,netdev=net0,mac=" + spec.MAC + ",romfile=",
-
-		// The balloon is on the RESTORE line too, which is the opposite of
-		// Firecracker: fc.go:860 deliberately skips re-adding it on resume
-		// because the snapshot restores the device. Here the device comes from
-		// argv and the stream is matched against argv, so omitting it on the
-		// restore line leaves an incoming device section with nowhere to land.
-		//
-		// deflate-on-oom=on matches the `true` fc.go passes to
-		// NewCreateBalloonHandler: a guest under memory pressure gives its
-		// pages back rather than OOM-killing while the balloon holds them. It
-		// is the one token in this argv no spike run exercised, so a
-		// "Property 'virtio-balloon-pci.deflate-on-oom' not found" from a first
-		// hardware run is this line and nothing subtler.
-		"-device", "virtio-balloon-pci,id=" + balloonDeviceID + ",deflate-on-oom=on,romfile=",
-
-		// server=on,wait=off: QEMU creates the socket and boots immediately
-		// rather than blocking for a monitor client. boot polls for the socket
-		// and then dials.
-		"-qmp", "unix:" + spec.QMPSocket + ",server=on,wait=off",
-
-		"-nographic",
-		"-serial", "file:" + spec.SerialLog,
-		// -monitor none: the HMP monitor would otherwise land on stdio and
-		// compete with -nographic for the console.
-		"-monitor", "none",
-	}
-
-	if spec.RestoreFrom != "" {
-		// APPENDED LAST, and it is the only difference between the two forms.
-		args = append(args, "-incoming", "file:"+spec.RestoreFrom)
-	}
-	return args, nil
-}
-
-// validate rejects a spec that would produce a plausible-looking argv QEMU
-// misreads. The comma check is not paranoia and has no fc.go counterpart:
-// QEMU's -drive/-netdev/-device/-qmp values are comma-separated property lists
-// in which a literal comma must be doubled, so a single comma anywhere in a
-// path silently truncates the value and turns the rest into a garbage property
-// — for -drive that means booting with a different (or no) disk.
-func (s qemuSpec) validate() error {
-	if s.MachineType == "" {
-		// New() refuses to default this off arm64 for a reason; if it is empty
-		// here, bare "virt" would alias whatever machine model the installed
-		// QEMU considers newest and every existing state.migrate would stop
-		// loading after a package upgrade.
-		return fmt.Errorf("qemu argv: machine type is empty")
-	}
-	if s.KernelPath == "" {
-		return fmt.Errorf("qemu argv: kernel path is empty")
-	}
-	if s.Cmdline == "" {
-		return fmt.Errorf("qemu argv: kernel command line is empty")
-	}
-	if s.VCPUs <= 0 {
-		return fmt.Errorf("qemu argv: vcpus is %d; the restore argv must repeat the boot argv's value", s.VCPUs)
-	}
-	if s.MemMB <= 0 {
-		return fmt.Errorf("qemu argv: memory is %d MiB; the restore argv must repeat the boot argv's value", s.MemMB)
-	}
-	for _, f := range []struct{ what, value string }{
-		{"rootfs path", s.RootfsPath},
-		{"tap name", s.TapName},
-		{"mac address", s.MAC},
-		{"qmp socket path", s.QMPSocket},
-		{"serial log path", s.SerialLog},
-		{"incoming snapshot path", s.RestoreFrom},
-	} {
-		if f.value == "" {
-			if f.what == "incoming snapshot path" {
-				continue // empty means "cold boot", not "missing"
-			}
-			return fmt.Errorf("qemu argv: %s is empty", f.what)
-		}
-		if strings.Contains(f.value, ",") {
-			return fmt.Errorf("qemu argv: %s %q contains a comma, which QEMU reads as a property separator", f.what, f.value)
-		}
-	}
-	return nil
-}
+func buildQemuArgs(spec qemuSpec) ([]string, error) { return qemuargs.Build(spec) }
 
 // bootCmdline decides which guest command line one launch gets: a cold boot
 // builds it, a restore REPLAYS the line the source booted with.
@@ -248,7 +81,7 @@ func (d *Driver) qemuArgs(name string, st *vmState, rootfs, cmdline string, rest
 		VCPUs:       st.vcpus,
 		MemMB:       st.memMB,
 		RootfsPath:  rootfs,
-		TapName:     tapName(st.idx),
+		TapName:     d.tapName(st.idx),
 		MAC:         macFor(st.idx),
 		QMPSocket:   d.qmpSocketPath(name),
 		SerialLog:   d.serialLogPath(name),
@@ -376,9 +209,13 @@ func machineIDFor(name string) string {
 // sharing a VMStateDir and a host would otherwise hand the same address to two
 // live guests on the same L2 segment, which presents as intermittent
 // unreachability rather than as a collision.
-func macFor(idx int) string {
-	return fmt.Sprintf("02:5b:01:00:%02x:%02x", (idx>>8)&0xff, idx&0xff)
-}
+// macFor delegates to guestnet so the privileged helper and this driver cannot
+// drift. The helper builds the QEMU argv on its own path and therefore picks
+// the MAC itself; two copies of this formula would eventually disagree, and the
+// symptom would be a sandbox that loses its network on RESUME rather than at
+// boot, because the guest kernel sees an interface its netcfg hook has never
+// seen before.
+func macFor(idx int) string { return guestnet.MACFor(idx) }
 
 // validateGuestDNS accepts only the empty string (feature off), the "gateway"
 // sentinel, or a bare IP literal. Anything else — a hostname, or a value with

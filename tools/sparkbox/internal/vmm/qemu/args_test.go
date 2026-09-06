@@ -290,6 +290,11 @@ func TestBuildQemuArgsColdBoot(t *testing.T) {
 		"-M", "virt-8.2",
 		"-cpu", "host",
 		"-enable-kvm",
+		// Measured hardening, not decoration: see the -nodefaults comment in
+		// args.go for the `info qtree` device lists it is derived from. Its
+		// position in this list is part of the assertion, because the argv is
+		// what the migration stream is matched against.
+		"-nodefaults",
 		"-m", "1024",
 		"-smp", "2",
 		"-kernel", "/assets/vmlinux",
@@ -401,7 +406,7 @@ func TestQemuArgsWiresDriverStateIntoTheSpec(t *testing.T) {
 	if !strings.Contains(argsValueAfter(cold, "-drive"), "file="+rootfs+",") {
 		t.Errorf("-drive must name the VM's own rootfs; got %s", argsValueAfter(cold, "-drive"))
 	}
-	if !strings.Contains(argsValueAfter(cold, "-netdev"), "ifname="+tapName(3)+",") {
+	if !strings.Contains(argsValueAfter(cold, "-netdev"), "ifname="+d.tapName(3)+",") {
 		t.Errorf("-netdev must name this slot's tap; got %s", argsValueAfter(cold, "-netdev"))
 	}
 	if !strings.Contains(argsValueAfter(cold, "-append"), " sparkbox_fresh=1") {
