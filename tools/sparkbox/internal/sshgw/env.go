@@ -59,6 +59,7 @@ const envUsage = "usage: ssh ctl@<gateway> env ls\r\n" +
 	"         --description <text>          every one of them may be repeated\r\n" +
 	"         --open-egress                 on create: skip the default egress rules\r\n" +
 	"         --adopt                       on create: take on a tag already in use\r\n" +
+	"         --runner firecracker|qemu     run only on that VMM; empty clears it\r\n" +
 	"\r\n" +
 	"an environment names a way of working: a checkout, the secrets it needs, the\r\n" +
 	"egress it is allowed, some plain variables, and the disk they were built on.\r\n" +
@@ -277,6 +278,13 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 		}
 	}
 	fmt.Fprintf(s, "  %-12s %s\r\n", "image", image)
+	// And the opposite rule to the image line's, for the opposite reason:
+	// requiring nothing is what almost every environment does, so a row saying
+	// so on every one of them would be a line nobody reads on the page people
+	// come to when a sandbox refused to be placed.
+	if e.Runner != "" {
+		fmt.Fprintf(s, "  %-12s %s — placed only on nodes running it\r\n", "runner", e.Runner)
+	}
 	setup := "none"
 	if e.HasSetup {
 		setup = fmt.Sprintf("%d bytes", e.SetupBytes)
@@ -378,6 +386,16 @@ func (g *Gateway) envShow(s gssh.Session, c ctlops.Caller, name string, log *slo
 // words, with the empty parts left out. Zeros are omitted rather than printed
 // as `0 repos` because a row is read by scanning it, and four zeros are four
 // things to read past.
+//
+// The runner rides in this column rather than in one of its own because the row
+// is already 79 wide and a fifth column would wrap it on an 80-column terminal
+// — and it LEADS rather than trails, because the column is 26 wide and an
+// ordinary environment fills it: `1 repo · 1 secret · 1 rule` is exactly 26, and
+// that is what `env create web --repo x --secret Y` produces, default egress
+// rule-set included. Appended after the counts it would be truncated away on
+// precisely the environments people list. A count that falls off the edge costs
+// a reader nothing they cannot get from `env show`; a placement requirement
+// that falls off the edge is the reason their sandbox will not start.
 func envSummary(e ctlops.EnvironmentInfo) string {
 	var parts []string
 	add := func(n int, one, many string) {
@@ -393,7 +411,10 @@ func envSummary(e ctlops.EnvironmentInfo) string {
 	add(len(e.Rules), "rule", "rules")
 	add(len(e.Vars), "var", "vars")
 	if len(parts) == 0 {
-		return "nothing composed yet"
+		parts = []string{"nothing composed yet"}
+	}
+	if e.Runner != "" {
+		parts = append([]string{e.Runner + " only"}, parts...)
 	}
 	return strings.Join(parts, " · ")
 }
@@ -622,6 +643,26 @@ func parseEnvSet(args []string) (ctlops.EnvArgs, []string, error) {
 				return ctlops.EnvArgs{}, nil, err
 			}
 			a.Description = &v
+		case "--runner":
+			// The one flag whose EMPTY value is a request rather than a slip:
+			// `--runner=` means "place me anywhere again", so it cannot go
+			// through `take`, which refuses a blank on everybody else's behalf.
+			// The consume-the-next-word rule is still `take`'s, spelled out here
+			// only so the blank survives it — and i moves for the detached form
+			// exactly as it does there, so the word after this one is not eaten.
+			if !attached {
+				i++
+				if i >= len(args) {
+					return ctlops.EnvArgs{}, nil, fmt.Errorf(
+						"%s needs a value, e.g. --runner qemu (or --runner= to require nothing)", flag)
+				}
+				value = args[i]
+			}
+			// Passed through unread. ctlops owns which names are runners and the
+			// sentence that refuses the rest; a second opinion here is how one
+			// condition comes to have two wordings.
+			v := value
+			a.Runner = &v
 		default:
 			if strings.HasPrefix(word, "-") {
 				return ctlops.EnvArgs{}, nil, fmt.Errorf("unknown flag %q", word)

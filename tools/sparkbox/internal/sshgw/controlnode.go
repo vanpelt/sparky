@@ -122,6 +122,20 @@ func nodeLine(n ctlops.NodeInfo, flagUnmetered bool) string {
 	line := fmt.Sprintf("%-28s %-9s %-8s %-8s %-13s %s",
 		name, n.Status, presence, arch, boxes, n.FP)
 	line = strings.TrimRight(line, " ") + egress
+	// A suffix rather than a column, like the three below it: the fixed part of
+	// this row is already 28+9+8+8+13 plus a fingerprint, and a sixth column
+	// would wrap it. It is FIRST among the suffixes because it is the one an
+	// operator comes here to read after a create was refused — "no online VM
+	// node runs qemu" sends them to this listing, and guest subnets and
+	// certificate serials are not what they came for.
+	//
+	// Empty on a machine that has not said, which is every unlinked roster row:
+	// this is a live fact off the machine's capacity report, not something the
+	// roster stores, so an offline node honestly shows nothing rather than a
+	// remembered answer that may no longer be true.
+	if n.Runner != "" {
+		line += " vmm=" + n.Runner
+	}
 	if n.GuestSubnet != "" {
 		line += " guest=" + n.GuestSubnet
 	}

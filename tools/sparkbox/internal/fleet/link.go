@@ -518,6 +518,13 @@ type NodeStatus struct {
 	// without is a normal, working, half-metered fleet, and nothing else says
 	// so.
 	Egress bool `json:"egress"`
+	// Runner is the VMM this machine runs, "" when it has not said. It is on
+	// NodeStatus rather than on the embedded nodes.Node because the roster row
+	// is written when a node LINKS and this is a live fact — and because an
+	// environment can require a VMM, which makes "which machines run what" the
+	// first question an operator asks after a placement is refused. A listing
+	// that could not answer it would leave them guessing node by node.
+	Runner vmm.Runner `json:"runner,omitempty"`
 }
 
 // Nodes is every machine in this fleet, this one first and the rest name-sorted.
@@ -548,6 +555,7 @@ func (f *Fleet) statusOf(n Node, local bool) NodeStatus {
 	st.Name = n.Name()
 	st.Arch = facts.Arch
 	st.Release = facts.Release
+	st.Runner = vmm.Runner(facts.Driver)
 	// A machine that is linked (or is this one) has been approved by
 	// definition: an unapproved key never gets past the door. Pending and
 	// disabled rows exist only in the roster, which is where a listing that
