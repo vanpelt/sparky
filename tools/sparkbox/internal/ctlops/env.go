@@ -38,6 +38,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -47,6 +48,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/netrules"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/repos"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // EnvVar is one plain (non-secret) environment variable of an environment.
@@ -191,6 +193,75 @@ type EnvDeleteResult struct {
 	// — and their emptiness is the normal case.
 	KeptVars     []string `json:"kept_vars,omitempty"`
 	KeptSnapshot string   `json:"kept_snapshot,omitempty"`
+}
+
+// resolveRunner is the VMM the tags require, and "" when they require nothing.
+//
+// It mirrors resolveTemplate's rule exactly, because it is the same shape of
+// question asked of the same tag list: several tags agreeing is ordinary and
+// fine — an owner may well want `web` and `ci` to be qemu environments — so
+// what is refused is more than one DISTINCT runner, not more than one
+// environment carrying one.
+//
+// Nothing is refused for a tag that names no environment, or an environment
+// that requires nothing. Those are the overwhelming majority and they must
+// stay on exactly the path they were on.
+func (o *Ops) resolveRunner(op, owner string, tags []string) (vmm.Runner, error) {
+	if o.envs == nil || len(tags) == 0 {
+		return "", nil
+	}
+	list, err := o.envs.List(owner)
+	if err != nil {
+		return "", Fail(op, err)
+	}
+	var (
+		want vmm.Runner
+		from string
+	)
+	for _, e := range list {
+		if e.Runner == "" || !slices.Contains(tags, e.Name) {
+			continue
+		}
+		if want == "" {
+			want, from = e.Runner, e.Name
+			continue
+		}
+		if e.Runner != want {
+			return "", &Error{
+				Kind: KindConflict, Op: op, Code: "ambiguous_runner",
+				Msg: fmt.Sprintf("environment %q requires %s and environment %q requires %s, so this sandbox has nowhere to run",
+					from, want, e.Name, e.Runner),
+				Hint:     "Use one of them, or change one with `ctl env set <name> --runner`.",
+				Verbatim: true,
+				Exit:     1,
+				Status:   http.StatusConflict,
+			}
+		}
+	}
+	return want, nil
+}
+
+// runnerAgrees is resolveRunner's answer checked against a deployment that has
+// exactly one machine, and so exactly one VMM.
+//
+// A fleet gets a sentence naming the machines it looked at; here there are none
+// to name, and the honest sentence is about the host itself. An empty `have` is
+// a host that was never told which VMM it runs, which is every mock and every
+// test double — unknown is not a refusal.
+func runnerAgrees(op string, want, have vmm.Runner) error {
+	if want == "" || have == "" || want.SatisfiedBy(have) {
+		return nil
+	}
+	return &Error{
+		Kind: KindConflict, Op: op, Code: "no_node_runs_runner",
+		Msg: fmt.Sprintf("this host runs %s and this sandbox's environment requires %s", have, want),
+		Hint: "Change the environment's runner with `ctl env set <name> --runner`, " +
+			"or run this host with --driver " + want.String() + ".",
+		Details:  map[string]any{"runner": want.String()},
+		Verbatim: true,
+		Exit:     1,
+		Status:   http.StatusConflict,
+	}
 }
 
 // ---------------------------------------------------------------------------

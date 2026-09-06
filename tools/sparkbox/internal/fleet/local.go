@@ -73,16 +73,25 @@ func (l *localNode) Revoke(string, error) {}
 // Driver, Images and GuestSubnet stay empty because the manager genuinely does
 // not know them — they are flags and directory listings the process that built
 // it holds — and an invented value here would be reported to an operator as
-// fact. Protocol is this build's, which is a fact about this process and not a
+// fact. Driver was in that list until the manager was told its own VMM, which
+// is a fact it now genuinely holds rather than one it would be guessing at. Protocol is this build's, which is a fact about this process and not a
 // guess about another machine.
 func (l *localNode) Facts() Facts {
 	c := l.mgr.Capacity()
 	return Facts{
-		Protocol:  nodelink.Protocol,
-		Node:      l.name,
-		Arch:      c.Arch,
-		OS:        runtime.GOOS,
-		Release:   c.Release,
+		Protocol: nodelink.Protocol,
+		Node:     l.name,
+		Arch:     c.Arch,
+		OS:       runtime.GOOS,
+		Release:  c.Release,
+		// The manager DOES know this one, unlike Version and Images: it was
+		// told which VMM its driver is at construction, by the same wiring that
+		// picked the driver. Reporting it is what lets an environment that
+		// requires a VMM be refused on this machine instead of silently built
+		// here — the gateway's own node is the one a default create lands on,
+		// so leaving it blank would make the requirement vacuous exactly where
+		// it matters most.
+		Driver:    string(c.Runner),
 		Archiving: l.mgr.ArchivingEnabled(),
 		Snapshots: l.mgr.Snapshotter(),
 		// Reported for the same reason a node reports it, and it is a fact this

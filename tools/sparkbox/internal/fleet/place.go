@@ -24,6 +24,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/host"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // Request is what is being placed. It is the create call's arguments plus the
@@ -39,9 +40,18 @@ type Request struct {
 	Image      string
 	Arch       string // "" means the image runs anywhere
 	PreferNode string // the caller's --node; "" leaves the choice open
-	VCPUs      int64
-	MemMB      int64
-	DiskMB     int64
+	// Runner is the VMM the sandbox's environment requires; "" is no
+	// requirement, which is what almost every create carries.
+	//
+	// It is the first constraint in this struct that a caller sets on purpose.
+	// Arch describes the image and PreferNode is a machine name, but a runner
+	// is somebody saying "this work needs that VMM" — so unlike the others it
+	// must not be quietly satisfied by the wrong answer, and pick() refuses to
+	// take its single-box shortcut while one is set.
+	Runner vmm.Runner
+	VCPUs  int64
+	MemMB  int64
+	DiskMB int64
 }
 
 // Candidate is one machine as a placement decision sees it.
@@ -163,6 +173,9 @@ func withLiveTemplates(images []string, templates []*host.Snapshot) []string {
 // make a machine unusable for a reason nobody could see.
 func (c Candidate) Fits(req Request) error {
 	const op = "create"
+	if err := c.runnerFits(req); err != nil {
+		return err
+	}
 	if req.Arch != "" && c.Facts.Arch != "" && req.Arch != c.Facts.Arch {
 		return placementRefused(op, c.Name, ctlops.KindConflict, http.StatusConflict, fmt.Sprintf(
 			"node %q is %s and this sandbox needs %s", c.Name, c.Facts.Arch, req.Arch),
@@ -193,6 +206,36 @@ func (c Candidate) Fits(req Request) error {
 		}
 	}
 	return nil
+}
+
+// runnerFits is the VMM half of Fits, split out because it is the one check
+// that also has to run on the LOCAL candidate.
+//
+// Every other check in Fits is deliberately skipped for this machine — its own
+// manager is the authority on whether it can take a sandbox, and a second
+// opinion here could only disagree with it. The runner is different in kind:
+// the manager is asked to build a sandbox, not to judge whether the environment
+// that asked for it wanted this VMM. It has never been told what was required
+// and cannot refuse on it, so if the gateway does not check here, a default
+// create on a single-box deployment builds on whatever VMM happens to be
+// installed and the requirement silently does nothing.
+//
+// It keeps Fits' unknown-is-not-refused rule: a machine that has not said what
+// it runs is not turned away. That is a real state — a node linked by an older
+// build, or one whose first capacity report has not landed — and refusing on it
+// would take a working machine out of the fleet for a reason nobody can see.
+func (c Candidate) runnerFits(req Request) error {
+	const op = "create"
+	if req.Runner == "" || c.Facts.Driver == "" {
+		return nil
+	}
+	if req.Runner.SatisfiedBy(vmm.Runner(c.Facts.Driver)) {
+		return nil
+	}
+	return placementRefused(op, c.Name, ctlops.KindConflict, http.StatusConflict, fmt.Sprintf(
+		"node %q runs %s and this sandbox's environment requires %s",
+		c.Name, c.Facts.Driver, req.Runner),
+		"Pick a machine running that VMM, or change the environment's runner with `ctl env set <name> --runner`.")
 }
 
 // effectiveMemMB mirrors host.Manager.effectiveMemMB. It is duplicated rather
@@ -230,6 +273,12 @@ func (defaultPlacer) Place(req Request, nodes []Candidate) (string, error) {
 	if req.PreferNode == "" {
 		for _, c := range nodes {
 			if c.Local {
+				// "Otherwise build here" still, but not when here is the wrong
+				// VMM: that is the one thing this machine's own manager cannot
+				// catch on the way past.
+				if err := c.runnerFits(req); err != nil {
+					return "", err
+				}
 				return c.Name, nil
 			}
 		}
@@ -245,7 +294,10 @@ func (defaultPlacer) Place(req Request, nodes []Candidate) (string, error) {
 			// This machine, named explicitly. Its manager is the authority on
 			// whether it can take the sandbox and raises the refusals the
 			// gateway already renders in full — a second opinion here could only
-			// disagree with it.
+			// disagree with it. Except about the VMM, which it was never told.
+			if err := c.runnerFits(req); err != nil {
+				return "", err
+			}
 			return c.Name, nil
 		}
 		if !c.Online {
@@ -297,6 +349,7 @@ func (RemoteOnlyPlacer) Place(req Request, nodes []Candidate) (string, error) {
 
 	var (
 		sawRemote bool
+		sawRunner bool
 		firstFit  error
 	)
 	for _, c := range nodes {
@@ -307,6 +360,9 @@ func (RemoteOnlyPlacer) Place(req Request, nodes []Candidate) (string, error) {
 		if !c.Online {
 			continue
 		}
+		if c.runnerFits(req) == nil {
+			sawRunner = true
+		}
 		if err := c.Fits(req); err != nil {
 			if firstFit == nil {
 				firstFit = err
@@ -314,6 +370,25 @@ func (RemoteOnlyPlacer) Place(req Request, nodes []Candidate) (string, error) {
 			continue
 		}
 		return c.Name, nil
+	}
+	// A required VMM that no online machine runs is answered once, about the
+	// fleet, rather than by handing back whichever machine happened to be first
+	// in the list. With four nodes and one requirement, firstFit's sentence
+	// names an arbitrary machine and reads as a fact about that machine — the
+	// user retries with --node on another one and gets the same shape of
+	// refusal about a different name. The useful sentence is that nothing here
+	// runs it.
+	if req.Runner != "" && !sawRunner && sawRemote {
+		return "", &ctlops.Error{
+			Kind: ctlops.KindCapacity, Op: op, Code: "no_node_runs_runner",
+			Msg: fmt.Sprintf("no online VM node runs %s, which this sandbox's environment requires", req.Runner),
+			Hint: "Bring up a node with --driver " + req.Runner.String() +
+				", or change the environment's runner with `ctl env set <name> --runner`.",
+			Details:  map[string]any{"runner": req.Runner.String()},
+			Verbatim: true,
+			Exit:     1,
+			Status:   http.StatusServiceUnavailable,
+		}
 	}
 	if firstFit != nil {
 		return "", firstFit

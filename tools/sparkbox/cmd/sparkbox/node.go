@@ -330,6 +330,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		ActivityNetBytes:     uint64(opts.activityNetKB) * 1024,
 		NodeName:             opts.nodeName,
 		Arch:                 opts.arch,
+		Runner:               runner,
 		Release:              version,
 		HostVCPUs:            int64(runtime.NumCPU()),
 		Observer:             observer,

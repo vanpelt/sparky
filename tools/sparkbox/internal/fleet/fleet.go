@@ -889,6 +889,31 @@ func (f *Fleet) CreateOn(ctx context.Context, node, name, owner, image string, v
 	return f.create(ctx, node, name, owner, image, vcpus, memMB)
 }
 
+// PlaceForRunner names the machine a sandbox requiring `runner` must be built
+// on: the one the caller asked for when they named one, and otherwise whichever
+// the placement policy chooses among the machines that run it.
+//
+// It exists because the runner cannot ride either create signature. Create's is
+// ctlops.Sandboxes', which *host.Manager satisfies structurally and must not be
+// made to grow a parameter a single machine can only answer one way; CreateOn's
+// names a machine that has already been chosen, which is the decision this is.
+// So ctlops resolves the machine first and then places on it by name, and the
+// whole runner policy stays here with the rest of the placement rules rather
+// than being reimplemented one caller at a time.
+//
+// The refusals are the placer's own, which is the point: "no online VM node
+// runs qemu" and "node n3 runs firecracker and this needs qemu" are sentences a
+// user reads, and they are written once.
+func (f *Fleet) PlaceForRunner(runner vmm.Runner, node, image string, vcpus, memMB int64) (string, error) {
+	n, err := f.pick(Request{
+		Image: image, PreferNode: node, Runner: runner, VCPUs: vcpus, MemMB: memMB,
+	})
+	if err != nil {
+		return "", err
+	}
+	return n.Name(), nil
+}
+
 func (f *Fleet) create(ctx context.Context, prefer, name, owner, image string, vcpus, memMB int64) (*host.Sandbox, error) {
 	n, err := f.pick(Request{
 		Owner: owner, Image: image, PreferNode: prefer, VCPUs: vcpus, MemMB: memMB,
@@ -908,12 +933,20 @@ func (f *Fleet) create(ctx context.Context, prefer, name, owner, image string, v
 // placer installed, defaultPlacer returns the local machine and nothing else
 // can. It is skipped the moment either of those is true, so a deployment that
 // has installed a placer always consults it.
+//
+// A required runner also defeats it, and that is not an optimisation detail. A
+// shortcut that returns the local machine without building a candidate list has
+// no candidate to check the VMM against, so an environment requiring qemu on a
+// firecracker gateway would be built here and the requirement would mean
+// nothing — silently, on the deployment shape that is most common. Going the
+// long way round costs one candidate list on the creates that asked for a VMM
+// and leaves every other create on exactly the path it was on.
 func (f *Fleet) pick(req Request) (Node, error) {
 	f.mu.RLock()
 	p := f.placer
 	f.mu.RUnlock()
 	if p == nil {
-		if req.PreferNode == "" {
+		if req.PreferNode == "" && req.Runner == "" {
 			return f.local, nil
 		}
 		p = defaultPlacer{}
