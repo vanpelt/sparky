@@ -43,12 +43,22 @@ var vmNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}$`)
 
 type ServerOptions struct {
 	SocketPath string
-	// Backend is the VMM this helper launches for its whole life. Empty means
-	// Firecracker, so an existing deployment keeps its behaviour untouched.
+	// SecondSocketPath, when set, is a second listening path serving the
+	// backend that is not the default. It is how one helper backs two drivers
+	// without the request protocol gaining a field that selects behaviour —
+	// see the socket comment in RunServer.
+	SecondSocketPath string
+	// Backend is the VMM reached through SocketPath. Empty means Firecracker,
+	// so an existing deployment keeps its behaviour untouched.
+	//
+	// Which backends this helper serves AT ALL is decided by which binaries it
+	// was configured with, and each served backend gets its own listening path.
+	// Nothing a caller sends selects between them.
 	Backend Backend
-	// QemuBin and MachineType are read only when Backend is BackendQEMU. They
-	// live here rather than in a Request because they select what gets executed
-	// and how the machine is modelled — see the Backend doc comment.
+	// QemuBin and MachineType are read when QEMU is served. They live here
+	// rather than in a Request because they are a path and a machine model —
+	// the things that select what gets executed and how — and those stay the
+	// operator's.
 	QemuBin                string
 	MachineType            string
 	FirecrackerBin         string
@@ -68,6 +78,10 @@ type ServerOptions struct {
 type activeVM struct {
 	name string
 	pid  int
+	// backend is which VMM holds this slot, recorded because the paths that
+	// clean up after it — cleanupSlot, publishSocket, the reaper's log line —
+	// run with no Request in hand and still have to look in the right jail.
+	backend Backend
 }
 
 type server struct {
@@ -92,39 +106,52 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 		}
 		s.opts.Logger.Printf("restricted guest egress enabled with per-TAP source pinning")
 	}
-	if err := os.MkdirAll(filepath.Dir(opts.SocketPath), 0o750); err != nil {
-		return fmt.Errorf("create helper socket directory: %w", err)
-	}
-	if err := os.Chown(filepath.Dir(opts.SocketPath), 0, opts.ControllerGID); err != nil {
-		return fmt.Errorf("own helper socket directory: %w", err)
-	}
-	if err := os.Chmod(filepath.Dir(opts.SocketPath), 0o750); err != nil {
-		return fmt.Errorf("protect helper socket directory: %w", err)
-	}
-	if err := os.Remove(opts.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove stale helper socket: %w", err)
-	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: opts.SocketPath, Net: "unix"})
+	// ONE SOCKET PER BACKEND, AND THE SOCKET IS THE SELECTION. A helper serving
+	// both VMMs has to be told which one a launch wants, and the obvious way —
+	// a field in the request — is the one thing this protocol may not have: the
+	// rule TestRequestHasNoCallerControlledPathOrCommand writes down is that a
+	// request may carry data the helper validates, never anything that SELECTS
+	// BEHAVIOUR. A backend name is a selection however small the set is.
+	//
+	// A listening path is not part of the message. The controller reaches QEMU
+	// by connecting to the socket an operator configured for QEMU, and a
+	// controller that was only told one path can only ever start one VMM —
+	// which is the same property the single-socket helper had, kept rather than
+	// argued away.
+	//
+	// One PROCESS is still the point of the exercise. Two helper processes
+	// sharing a --chroot-base would each apply JailerUIDBase + slot with no
+	// view of the other's allocations, which is the one arrangement in which
+	// the per-slot uid really can be issued twice. Inside one process s.active
+	// is keyed by slot alone and refuses the second claim, whichever socket it
+	// arrived on.
+	sockets, err := s.sockets()
 	if err != nil {
-		return fmt.Errorf("listen on helper socket: %w", err)
+		return err
 	}
+	var listeners []*net.UnixListener
 	defer func() {
-		listener.Close()           //nolint:errcheck
-		os.Remove(opts.SocketPath) //nolint:errcheck
+		for i, l := range listeners {
+			l.Close()                  //nolint:errcheck
+			os.Remove(sockets[i].path) //nolint:errcheck
+		}
 	}()
-	if err := os.Chown(opts.SocketPath, opts.ControllerUID, opts.ControllerGID); err != nil {
-		return fmt.Errorf("own helper socket: %w", err)
-	}
-	if err := os.Chmod(opts.SocketPath, 0o600); err != nil {
-		return fmt.Errorf("protect helper socket: %w", err)
+	for _, sock := range sockets {
+		listener, err := listenOn(sock.path, opts.ControllerUID, opts.ControllerGID)
+		if err != nil {
+			return err
+		}
+		listeners = append(listeners, listener)
 	}
 
 	s.sweepStaleTaps()
 	go func() {
 		<-ctx.Done()
-		listener.Close() //nolint:errcheck
+		for _, l := range listeners {
+			l.Close() //nolint:errcheck
+		}
 	}()
-	if s.qemu() {
+	if s.serves(BackendQEMU) {
 		// Worth a line of its own: the machine type is what every snapshot on
 		// this node is bound to, and it is resolved from a default unless an
 		// operator passed one. An operator debugging a resume that will not
@@ -137,7 +164,23 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 		// line is to tell an operator what a snapshot is bound to.
 		s.opts.Logger.Printf("VMM backend: qemu %s, machine type %s", s.opts.QemuBin, s.opts.MachineType)
 	}
-	s.opts.Logger.Printf("privileged VM helper listening on %s for uid %d", opts.SocketPath, opts.ControllerUID)
+	failed := make(chan error, len(listeners))
+	for i, listener := range listeners {
+		sock := sockets[i]
+		s.opts.Logger.Printf("privileged VM helper listening on %s for %s, uid %d",
+			sock.path, sock.backend, opts.ControllerUID)
+		go func(listener *net.UnixListener, backend Backend) {
+			failed <- s.accept(ctx, listener, backend)
+		}(listener, sock.backend)
+	}
+	// The first listener to fail takes the process down. A helper that kept
+	// serving one backend after the other's socket died would look healthy to
+	// the controller that could still reach it and be permanently unreachable
+	// to the other, which is worse than restarting.
+	return <-failed
+}
+
+func (s *server) accept(ctx context.Context, listener *net.UnixListener, backend Backend) error {
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
@@ -147,13 +190,71 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 			return fmt.Errorf("accept helper connection: %w", err)
 		}
 		uid, err := peerUID(conn)
-		if err != nil || int(uid) != opts.ControllerUID {
+		if err != nil || int(uid) != s.opts.ControllerUID {
 			s.opts.Logger.Printf("refused helper peer uid=%d: %v", uid, err)
 			conn.Close() //nolint:errcheck
 			continue
 		}
-		go s.handle(ctx, conn)
+		go s.handle(ctx, conn, backend)
 	}
+}
+
+// backendSocket is one listening path and the VMM reached through it.
+type backendSocket struct {
+	backend Backend
+	path    string
+}
+
+// sockets is every path this helper listens on. The default backend gets
+// SocketPath, which is the only one a single-backend deployment has and is
+// unchanged from before there was a second.
+func (s *server) sockets() ([]backendSocket, error) {
+	out := []backendSocket{{backend: s.opts.Backend, path: s.opts.SocketPath}}
+	if s.opts.SecondSocketPath == "" {
+		return out, nil
+	}
+	other := BackendQEMU
+	if s.opts.Backend == BackendQEMU {
+		other = BackendFirecracker
+	}
+	if !s.serves(other) {
+		return nil, fmt.Errorf("--second-socket serves %s, but no %s binary was configured", other, other)
+	}
+	if s.opts.SecondSocketPath == s.opts.SocketPath {
+		return nil, errors.New("--second-socket must differ from --socket")
+	}
+	return append(out, backendSocket{backend: other, path: s.opts.SecondSocketPath}), nil
+}
+
+// listenOn creates one helper socket with the ownership and mode every helper
+// socket has had: root-owned directory, 0600 socket, reachable by exactly the
+// controller uid.
+func listenOn(path string, controllerUID, controllerGID int) (*net.UnixListener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("create helper socket directory: %w", err)
+	}
+	if err := os.Chown(filepath.Dir(path), 0, controllerGID); err != nil {
+		return nil, fmt.Errorf("own helper socket directory: %w", err)
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("protect helper socket directory: %w", err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove stale helper socket: %w", err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return nil, fmt.Errorf("listen on helper socket: %w", err)
+	}
+	if err := os.Chown(path, controllerUID, controllerGID); err != nil {
+		listener.Close() //nolint:errcheck
+		return nil, fmt.Errorf("own helper socket: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		listener.Close() //nolint:errcheck
+		return nil, fmt.Errorf("protect helper socket: %w", err)
+	}
+	return listener, nil
 }
 
 func newServer(opts ServerOptions) (*server, error) {
@@ -161,18 +262,34 @@ func newServer(opts ServerOptions) (*server, error) {
 		"socket": opts.SocketPath,
 		"kernel": opts.KernelPath, "vm state": opts.VMStateDir, "chroot": opts.ChrootBase,
 	}
-	// The VMM binary is checked by backend, not both ways: a QEMU node's image
-	// carries firecracker too, but requiring a flag the operator has no reason
-	// to pass would make the QEMU deployment fail on a path it never uses.
-	if opts.Backend == BackendQEMU {
+	if opts.SecondSocketPath != "" {
+		paths["second socket"] = opts.SecondSocketPath
+	}
+	// WHICH BACKENDS THIS HELPER SERVES IS DECIDED HERE, BY WHICH BINARIES IT
+	// WAS GIVEN — not by the --backend flag, which only picks the default among
+	// them. That is the whole of the privilege argument for letting a request
+	// name a backend: an operator who does not want QEMU started passes no
+	// --qemu-bin, and then no request can ask for it.
+	//
+	// It is still checked one way rather than both. A QEMU node's image carries
+	// firecracker too, so requiring both flags would make every existing
+	// single-backend deployment fail on a path it never uses.
+	if opts.Backend == "" {
+		opts.Backend = BackendFirecracker
+	}
+	if opts.QemuBin != "" {
 		if err := defaultMachineType(&opts); err != nil {
 			return nil, err
 		}
 		if err := validateQemuOptions(opts); err != nil {
 			return nil, err
 		}
-	} else {
+	}
+	if opts.FirecrackerBin != "" {
 		paths["firecracker"] = opts.FirecrackerBin
+	}
+	if opts.QemuBin == "" && opts.FirecrackerBin == "" {
+		return nil, errors.New("helper needs at least one VMM binary (--firecracker-bin or --qemu-bin)")
 	}
 	for label, value := range paths {
 		if !filepath.IsAbs(value) || filepath.Clean(value) != value || value == "/" {
@@ -195,7 +312,7 @@ func newServer(opts ServerOptions) (*server, error) {
 	if opts.JailerUIDBase > int(^uint32(0))-network.Capacity() {
 		return nil, errors.New("jailer UID range exceeds uint32")
 	}
-	if opts.Backend != BackendQEMU {
+	if opts.FirecrackerBin != "" {
 		if _, err := os.Stat(opts.FirecrackerBin); err != nil {
 			return nil, fmt.Errorf("firecracker binary: %w", err)
 		}
@@ -217,6 +334,13 @@ func newServer(opts ServerOptions) (*server, error) {
 		return nil, fmt.Errorf("open VM state root: %w", err)
 	}
 	s := &server{opts: opts, network: network, active: make(map[int]activeVM), stateFD: stateFD}
+	// The default has to be a backend this helper can actually start, or every
+	// request that names none would be refused at launch time instead of here.
+	if !s.serves(opts.Backend) {
+		unix.Close(stateFD) //nolint:errcheck
+		return nil, fmt.Errorf("--backend %s was selected but no %s binary was configured",
+			opts.Backend, opts.Backend)
+	}
 	if opts.Subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
 		if err != nil {
@@ -259,7 +383,7 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 	return cred.Uid, nil
 }
 
-func (s *server) handle(ctx context.Context, conn *net.UnixConn) {
+func (s *server) handle(ctx context.Context, conn *net.UnixConn, backend Backend) {
 	defer conn.Close()                                    //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
 	var req Request
@@ -268,7 +392,7 @@ func (s *server) handle(ctx context.Context, conn *net.UnixConn) {
 		return
 	}
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-	if err := s.validateRequest(req); err != nil {
+	if err := s.validateRequest(req, backend); err != nil {
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
@@ -276,21 +400,21 @@ func (s *server) handle(ctx context.Context, conn *net.UnixConn) {
 	case OpPing:
 		s.respond(conn, Response{OK: true})
 	case OpSnapshot:
-		err := s.prepareSnapshotOutputs(req)
+		err := s.prepareSnapshotOutputs(req, backend)
 		s.respondErr(conn, err)
 	case OpCPUTime:
-		nanos, err := s.cpuTime(req)
+		nanos, err := s.cpuTime(req, backend)
 		if err != nil {
 			s.respond(conn, Response{Error: err.Error()})
 		} else {
 			s.respond(conn, Response{OK: true, CPUTimeNanos: nanos})
 		}
 	case OpLaunch:
-		s.launch(ctx, conn, req)
+		s.launch(ctx, conn, req, backend)
 	}
 }
 
-func (s *server) validateRequest(req Request) error {
+func (s *server) validateRequest(req Request, backend Backend) error {
 	// A RANGE, not an equality. The controller and this helper are separate
 	// containers of one Pod with independent restarts, so a rolling update has a
 	// window with one on each image. An equality check turns that window into
@@ -318,7 +442,7 @@ func (s *server) validateRequest(req Request) error {
 	// launched with an empty argv and configured over its own socket afterwards.
 	// Checking them by backend rather than by protocol version is what lets a
 	// version-2 Firecracker client keep sending nothing.
-	if req.Op == OpLaunch && s.opts.Backend == BackendQEMU {
+	if req.Op == OpLaunch && backend == BackendQEMU {
 		if req.Version < 2 {
 			return fmt.Errorf("this helper launches QEMU and needs protocol version 2 or later, "+
 				"but the client sent version %d; the controller container is running an older image", req.Version)
@@ -342,7 +466,7 @@ func (s *server) respondErr(conn net.Conn, err error) {
 	s.respond(conn, Response{OK: true})
 }
 
-func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
+func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request, backend Backend) {
 	launchCtx, cancelLaunch := context.WithCancel(ctx)
 	defer cancelLaunch()
 	disconnected := make(chan struct{}, 1)
@@ -354,12 +478,22 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 	}()
 
 	s.mu.Lock()
+	// THE SLOT IS THE NAMESPACE, AND THIS MAP IS ITS ONLY OWNER. It is keyed by
+	// slot alone and says nothing about backends, which is deliberate: a slot
+	// carries a tap name, a uid, a guest IPv4 and a guest IPv6 that are the same
+	// values whichever VMM is asked for, so two drivers that each allocate from
+	// their own view of the world must collide HERE, loudly, rather than
+	// somewhere downstream where both would appear to succeed.
 	if active, exists := s.active[req.Slot]; exists {
 		s.mu.Unlock()
-		s.respond(conn, Response{Error: fmt.Sprintf("slot already belongs to %s", active.name)})
+		detail := ""
+		if active.backend != backend {
+			detail = fmt.Sprintf(" (a %s VM; this is a %s launch)", active.backend, backend)
+		}
+		s.respond(conn, Response{Error: fmt.Sprintf("slot already belongs to %s%s", active.name, detail)})
 		return
 	}
-	s.active[req.Slot] = activeVM{name: req.Name}
+	s.active[req.Slot] = activeVM{name: req.Name, backend: backend}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -367,34 +501,34 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 		s.mu.Unlock()
 	}()
 
-	if err := s.cleanupSlot(req.Slot); err != nil {
+	if err := s.cleanupSlot(backend, req.Slot); err != nil {
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
 	if err := s.createTap(launchCtx, req.Slot); err != nil {
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
 	if err := s.waitForSluice(launchCtx, tapName(req.Slot)); err != nil {
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
-	if err := s.prepareJail(req); err != nil {
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+	if err := s.prepareJail(req, backend); err != nil {
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
 	if err := launchCtx.Err(); err != nil {
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: "launch client disconnected"})
 		return
 	}
 
-	cmd, logFile, err := s.vmmCommand(req)
+	cmd, logFile, err := s.vmmCommand(req, backend)
 	if err != nil {
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
@@ -406,26 +540,26 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 		defer logFile.Close() //nolint:errcheck
 	}
 	if err := cmd.Start(); err != nil {
-		s.cleanupSlot(req.Slot) //nolint:errcheck
-		s.respond(conn, Response{Error: fmt.Sprintf("start %s: %v", s.vmmName(), err)})
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
+		s.respond(conn, Response{Error: fmt.Sprintf("start %s: %v", s.vmmName(backend), err)})
 		return
 	}
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
-	if err := s.publishSocket(launchCtx, req.Slot, waitCh); err != nil {
+	if err := s.publishSocket(launchCtx, backend, req.Slot, waitCh); err != nil {
 		cmd.Process.Kill() //nolint:errcheck
 		<-waitCh
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		s.respond(conn, Response{Error: err.Error()})
 		return
 	}
 	s.mu.Lock()
-	s.active[req.Slot] = activeVM{name: req.Name, pid: cmd.Process.Pid}
+	s.active[req.Slot] = activeVM{name: req.Name, pid: cmd.Process.Pid, backend: backend}
 	s.mu.Unlock()
 	if err := json.NewEncoder(conn).Encode(Response{OK: true}); err != nil {
 		cmd.Process.Signal(syscall.SIGTERM) //nolint:errcheck
 		<-waitCh
-		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.cleanupSlot(backend, req.Slot) //nolint:errcheck
 		return
 	}
 
@@ -443,10 +577,10 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 	if stopping {
 		processErr = nil
 	}
-	cleanupErr := s.cleanupSlot(req.Slot)
+	cleanupErr := s.cleanupSlot(backend, req.Slot)
 	processErr = errors.Join(processErr, cleanupErr)
 	if processErr != nil {
-		s.respond(conn, Response{Error: fmt.Sprintf("%s exited: %v", s.vmmName(), processErr)})
+		s.respond(conn, Response{Error: fmt.Sprintf("%s exited: %v", s.vmmName(backend), processErr)})
 	} else {
 		s.respond(conn, Response{OK: true})
 	}
@@ -460,8 +594,8 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 // The two branches confine the child in fundamentally different ways — see
 // qemu_linux.go's file comment — and that difference is the whole reason this
 // is a switch rather than a binary name.
-func (s *server) vmmCommand(req Request) (*exec.Cmd, *os.File, error) {
-	if s.qemu() {
+func (s *server) vmmCommand(req Request, backend Backend) (*exec.Cmd, *os.File, error) {
+	if backend == BackendQEMU {
 		return s.qemuCommand(req)
 	}
 	uid := uint32(s.jailUID(req.Slot))
@@ -471,7 +605,7 @@ func (s *server) vmmCommand(req Request) (*exec.Cmd, *os.File, error) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Chroot:     s.jailRoot(req.Slot),
+		Chroot:     s.jailRoot(backend, req.Slot),
 		Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{uid}},
 	}
 	return cmd, nil, nil
@@ -517,8 +651,8 @@ func stopProcess(cmd *exec.Cmd, waitCh <-chan error) error {
 	}
 }
 
-func (s *server) publishSocket(ctx context.Context, slot int, waitCh chan error) error {
-	socket := filepath.Join(s.jailRoot(slot), s.launchSocketName())
+func (s *server) publishSocket(ctx context.Context, backend Backend, slot int, waitCh chan error) error {
+	socket := filepath.Join(s.jailRoot(backend, slot), s.launchSocketName(backend))
 	// Firecracker binds its API socket as almost its first action; QEMU creates
 	// the QMP chardev while it builds the machine from a much longer command
 	// line, so this gate is sized for the slower of the two rather than for the
@@ -530,10 +664,10 @@ func (s *server) publishSocket(ctx context.Context, slot int, waitCh chan error)
 	for {
 		if info, err := os.Lstat(socket); err == nil && info.Mode()&os.ModeSocket != 0 {
 			if err := os.Chown(socket, s.jailUID(slot), s.opts.ControllerGID); err != nil {
-				return fmt.Errorf("share %s control socket: %w", s.vmmName(), err)
+				return fmt.Errorf("share %s control socket: %w", s.vmmName(backend), err)
 			}
 			if err := os.Chmod(socket, 0o660); err != nil {
-				return fmt.Errorf("protect %s control socket: %w", s.vmmName(), err)
+				return fmt.Errorf("protect %s control socket: %w", s.vmmName(backend), err)
 			}
 			return nil
 		}
@@ -542,21 +676,21 @@ func (s *server) publishSocket(ctx context.Context, slot int, waitCh chan error)
 			// The launch path still owns the one Wait result. Put it back so its
 			// failure cleanup cannot block trying to wait a second time.
 			waitCh <- err
-			return fmt.Errorf("%s exited before creating its control socket: %w", s.vmmName(), err)
+			return fmt.Errorf("%s exited before creating its control socket: %w", s.vmmName(backend), err)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("timed out waiting for the %s control socket", s.vmmName())
+			return fmt.Errorf("timed out waiting for the %s control socket", s.vmmName(backend))
 		case <-ticker.C:
 		}
 	}
 }
 
-func (s *server) prepareJail(req Request) error {
-	if s.qemu() {
+func (s *server) prepareJail(req Request, backend Backend) error {
+	if backend == BackendQEMU {
 		return s.prepareQemuJail(req)
 	}
-	root := s.jailRoot(req.Slot)
+	root := s.jailRoot(backend, req.Slot)
 	if err := os.MkdirAll(filepath.Join(root, "dev", "net"), 0o755); err != nil {
 		return fmt.Errorf("create chroot jail: %w", err)
 	}
@@ -584,12 +718,12 @@ func (s *server) prepareJail(req Request) error {
 		return err
 	}
 	resources := []struct{ source, name string }{
-		{filepath.Join(s.vmRel(req.Name), jailedRootfsName), jailedRootfsName},
+		{filepath.Join(s.vmRel(backend, req.Name), jailedRootfsName), jailedRootfsName},
 	}
 	if req.Resume {
 		resources = append(resources,
-			struct{ source, name string }{filepath.Join(s.vmRel(req.Name), jailedMemName), jailedMemName},
-			struct{ source, name string }{filepath.Join(s.vmRel(req.Name), jailedStateName), jailedStateName},
+			struct{ source, name string }{filepath.Join(s.vmRel(backend, req.Name), jailedMemName), jailedMemName},
+			struct{ source, name string }{filepath.Join(s.vmRel(backend, req.Name), jailedStateName), jailedStateName},
 		)
 	}
 	for _, resource := range resources {
@@ -694,21 +828,21 @@ func (s *server) openState(name string, flags uint64) (int, error) {
 	})
 }
 
-func (s *server) prepareSnapshotOutputs(req Request) error {
+func (s *server) prepareSnapshotOutputs(req Request, backend Backend) error {
 	s.mu.Lock()
 	active, ok := s.active[req.Slot]
 	s.mu.Unlock()
-	if !ok || active.name != req.Name || active.pid == 0 {
+	if !ok || active.name != req.Name || active.pid == 0 || active.backend != backend {
 		return errors.New("VM slot is not active for that name")
 	}
 	uid := s.jailUID(req.Slot)
-	root := s.jailRoot(req.Slot)
-	dirFD, err := s.openState(s.vmRel(req.Name), unix.O_PATH|unix.O_DIRECTORY)
+	root := s.jailRoot(backend, req.Slot)
+	dirFD, err := s.openState(s.vmRel(backend, req.Name), unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		return fmt.Errorf("open VM directory: %w", err)
 	}
 	defer unix.Close(dirFD) //nolint:errcheck
-	for _, name := range s.snapshotOutputNames() {
+	for _, name := range s.snapshotOutputNames(backend) {
 		guest := filepath.Join(root, name)
 		unix.Unlinkat(dirFD, name, 0) //nolint:errcheck
 		os.Remove(guest)              //nolint:errcheck
@@ -732,11 +866,15 @@ func (s *server) prepareSnapshotOutputs(req Request) error {
 	return nil
 }
 
-func (s *server) cpuTime(req Request) (uint64, error) {
+func (s *server) cpuTime(req Request, backend Backend) (uint64, error) {
 	s.mu.Lock()
 	active, ok := s.active[req.Slot]
 	s.mu.Unlock()
-	if !ok || active.name != req.Name || active.pid == 0 {
+	// The backend is part of the identity check for the same reason the name
+	// is: the answer is read out of /proc for a pid this map owns, and handing
+	// one driver a reading taken from the other driver's VM would be a wrong
+	// number that looks entirely plausible.
+	if !ok || active.name != req.Name || active.pid == 0 || active.backend != backend {
 		return 0, errors.New("VM slot is not active for that name")
 	}
 	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(active.pid), "stat"))
@@ -745,11 +883,11 @@ func (s *server) cpuTime(req Request) (uint64, error) {
 	}
 	closeParen := strings.LastIndexByte(string(stat), ')')
 	if closeParen < 0 {
-		return 0, fmt.Errorf("malformed %s proc stat", s.vmmName())
+		return 0, fmt.Errorf("malformed %s proc stat", s.vmmName(backend))
 	}
 	fields := strings.Fields(string(stat[closeParen+1:]))
 	if len(fields) < 13 {
-		return 0, fmt.Errorf("short %s proc stat", s.vmmName())
+		return 0, fmt.Errorf("short %s proc stat", s.vmmName(backend))
 	}
 	utime, err := strconv.ParseUint(fields[11], 10, 64)
 	if err != nil {
@@ -792,7 +930,7 @@ func (s *server) createTap(ctx context.Context, slot int) error {
 	return nil
 }
 
-func (s *server) cleanupSlot(slot int) error {
+func (s *server) cleanupSlot(backend Backend, slot int) error {
 	if s.opts.RestrictInternalEgress {
 		s.removeTapSourceRules(slot)
 	}
@@ -800,7 +938,7 @@ func (s *server) cleanupSlot(slot int) error {
 		exec.Command("ip", "-6", "neigh", "del", "proxy", s.guestIP6(slot), "dev", s.uplink6).Run() //nolint:errcheck
 	}
 	exec.Command("ip", "link", "del", tapName(slot)).Run() //nolint:errcheck
-	return os.RemoveAll(s.jailWorkspace(slot))
+	return os.RemoveAll(s.jailWorkspace(backend, slot))
 }
 
 type packetFilterRule struct {
@@ -896,26 +1034,45 @@ func (s *server) sweepStaleTaps() {
 // driver's: internal/vmm/firecracker uses fc-vms, internal/vmm/qemu uses
 // qemu-vms, and the two layouts are deliberately disjoint so one VMM's node
 // cannot half-read the other's sandboxes.
-func (s *server) vmRel(name string) string {
-	if s.qemu() {
+func (s *server) vmRel(backend Backend, name string) string {
+	if backend == BackendQEMU {
 		return filepath.Join("qemu-vms", name)
 	}
 	return filepath.Join("fc-vms", name)
 }
 
+// serves reports whether this helper was configured with a binary for b, which
+// is the only thing that decides whether a request may ask for it.
+func (s *server) serves(backend Backend) bool {
+	switch backend {
+	case BackendQEMU:
+		return s.opts.QemuBin != ""
+	case BackendFirecracker:
+		return s.opts.FirecrackerBin != ""
+	default:
+		return false
+	}
+}
+
 func (s *server) jailUID(slot int) int { return s.opts.JailerUIDBase + slot }
 
-func (s *server) jailWorkspace(slot int) string {
+// The middle component differs by backend, which is what keeps the two jail
+// trees disjoint on a helper serving both: slot 3's QEMU jail and slot 3's
+// Firecracker jail are different directories even though they would share a
+// uid. They never do share one, because s.active refuses the second claim on a
+// slot — but the trees being disjoint is what makes that a refusal rather than
+// a collision already in progress.
+func (s *server) jailWorkspace(backend Backend, slot int) string {
 	dir := filepath.Base(s.opts.FirecrackerBin)
-	if s.qemu() {
+	if backend == BackendQEMU {
 		dir = qemuJailDir
 	}
 	return filepath.Join(s.opts.ChrootBase, dir, fmt.Sprintf("sparkbox-%d", slot))
 }
 
 // vmmName is what this helper calls its VMM in an error a human will read.
-func (s *server) vmmName() string {
-	if s.qemu() {
+func (s *server) vmmName(backend Backend) string {
+	if backend == BackendQEMU {
 		return "QEMU"
 	}
 	return "Firecracker"
@@ -925,8 +1082,8 @@ func (s *server) vmmName() string {
 // migrate produces exactly one where Firecracker produces a pair, and a
 // predicate lifted across that difference matches nothing and silently stops
 // refusing what it exists to refuse.
-func (s *server) snapshotOutputNames() []string {
-	if s.qemu() {
+func (s *server) snapshotOutputNames(backend Backend) []string {
+	if backend == BackendQEMU {
 		return []string{jailedSnapshotName + ".next"}
 	}
 	return []string{jailedMemName + ".next", jailedStateName + ".next"}
@@ -935,14 +1092,16 @@ func (s *server) snapshotOutputNames() []string {
 // launchSocketName is the VMM's control socket inside the jail: Firecracker's
 // REST API, or QEMU's QMP monitor. publishSocket shares whichever it is with
 // the controller group, and the driver derives the same path to dial it.
-func (s *server) launchSocketName() string {
-	if s.qemu() {
+func (s *server) launchSocketName(backend Backend) string {
+	if backend == BackendQEMU {
 		return jailedQMPSocketName
 	}
 	return jailedSocketName
 }
 
-func (s *server) jailRoot(slot int) string { return filepath.Join(s.jailWorkspace(slot), "root") }
+func (s *server) jailRoot(backend Backend, slot int) string {
+	return filepath.Join(s.jailWorkspace(backend, slot), "root")
+}
 
 func tapName(slot int) string { return fmt.Sprintf("sbtap%d", slot) }
 

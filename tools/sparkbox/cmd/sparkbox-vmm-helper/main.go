@@ -38,10 +38,12 @@ func main() {
 
 func serve(ctx context.Context, logger *log.Logger, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	socket := fs.String("socket", "", "Unix socket exposed to the unprivileged controller")
-	backend := fs.String("backend", "", "VMM this helper launches: firecracker (default) or qemu")
-	firecracker := fs.String("firecracker", "", "fixed Firecracker executable")
-	qemuBin := fs.String("qemu-bin", "", "fixed QEMU system emulator, for --backend qemu")
+	socket := fs.String("socket", "", "Unix socket exposed to the unprivileged controller, serving --backend")
+	secondSocket := fs.String("second-socket", "",
+		"optional second Unix socket serving the OTHER configured VMM; which socket a controller dials is what selects its backend")
+	backend := fs.String("backend", "", "VMM reached through --socket: firecracker (default) or qemu")
+	firecracker := fs.String("firecracker", "", "fixed Firecracker executable; configuring it is also what permits serving firecracker")
+	qemuBin := fs.String("qemu-bin", "", "fixed QEMU system emulator; configuring it is also what permits serving qemu")
 	machineType := fs.String("machine-type", "", "qemu -M machine type; must be the versioned type the controller uses, because the migration stream is bound to it")
 	kernel := fs.String("kernel", "", "fixed guest kernel")
 	vmState := fs.String("vm-state-dir", "", "per-VM state root")
@@ -64,7 +66,7 @@ func serve(ctx context.Context, logger *log.Logger, args []string) error {
 		return err
 	}
 	return vmhelper.RunServer(ctx, vmhelper.ServerOptions{
-		SocketPath: *socket, Backend: vmmBackend,
+		SocketPath: *socket, SecondSocketPath: *secondSocket, Backend: vmmBackend,
 		QemuBin: *qemuBin, MachineType: *machineType,
 		FirecrackerBin: *firecracker, KernelPath: *kernel,
 		VMStateDir: *vmState, ChrootBase: *chrootBase, Subnet: *subnet, Subnet6: *subnet6,
