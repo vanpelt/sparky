@@ -14,7 +14,8 @@ Any page can be asked for the terminal instead by adding ?xterm=true to its
 URL — the console's environments tab grows a "Preview terminal" button that
 does exactly this. /ws answers with a fake PTY (see _fake_pty) rather than a
 real sandbox, so the terminal actually connects: enough to check the chrome,
-type into it, and exercise the OSC 52 clipboard addon with its `clip` command.
+type into it, exercise the OSC 52 clipboard addon with its `clip` command, and
+drag an image onto the pane to check the drop-to-paste-a-path protocol.
 
 The page is re-read on every request, so while you edit it you just refresh the
 browser to see changes. No dependencies (stdlib only).
@@ -28,6 +29,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -514,7 +516,8 @@ _PROMPT = "\x1b[32mpreview\x1b[0m:\x1b[34m~\x1b[0m$ "
 _BANNER = (
     "\x1b[36mSparkbox preview shell\x1b[0m \u2014 a fake PTY, not a real sandbox.\r\n"
     "Type \x1b[1mclip\x1b[0m to test the OSC 52 clipboard addon, or drag-select any\r\n"
-    "of this text and Ctrl/Cmd+C to test a plain copy. \x1b[1mexit\x1b[0m ends the\r\n"
+    "of this text and Ctrl/Cmd+C to test a plain copy. Drag an image onto this\r\n"
+    "pane to test the drop-to-paste-a-path protocol. \x1b[1mexit\x1b[0m ends the\r\n"
     "session like a real shell would.\r\n\r\n"
 )
 
@@ -525,6 +528,56 @@ def _osc52_set_clipboard(text):
     # actual navigator.clipboard.writeText() call in the browser.
     b64 = base64.b64encode(text.encode("utf-8")).decode()
     return "\x1b]52;c;" + b64 + "\x07"
+
+
+# Caps the *decoded* image, not the base64 text frame carrying it — matched to
+# what a screenshot or phone photo actually weighs, not to any wire limit.
+_MAX_PASTE_BYTES = 8 * 1024 * 1024
+
+
+def _handle_paste_file(payload, wfile, line):
+    """A dropped image, sent by index.html's drop handler as a text control
+    frame. Mirrors what a real terminal does with a dragged file: the path
+    lands in the current input line as if typed, not the image bytes
+    themselves — whatever the line is (a bare prompt, a half-typed `cat `)
+    decides what becomes of it.
+    """
+    try:
+        msg = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if msg.get("type") != "paste-file":
+        return  # resize and any other control frame: nothing for this fake PTY to do
+    mime = str(msg.get("mime") or "")
+    if not mime.startswith("image/"):
+        _ws_send(wfile, json.dumps(
+            {"type": "paste-error", "message": "only images can be dropped here"}).encode(), 0x1)
+        return
+    try:
+        raw = base64.b64decode(str(msg.get("data") or ""), validate=True)
+    except ValueError:
+        _ws_send(wfile, json.dumps(
+            {"type": "paste-error", "message": "the dropped file could not be decoded"}).encode(), 0x1)
+        return
+    if len(raw) > _MAX_PASTE_BYTES:
+        _ws_send(wfile, json.dumps(
+            {"type": "paste-error", "message": "that image is too large (max 8 MiB)"}).encode(), 0x1)
+        return
+    name = os.path.basename(str(msg.get("name") or "")) or "pasted-image"
+    # A fresh tmp dir per drop, not a shared one, so two drops named
+    # screenshot.png can't clobber each other. The real backend would write
+    # this into the guest over the same SSH session that drives the PTY,
+    # rather than onto this preview's own host.
+    dest = os.path.join(tempfile.mkdtemp(prefix="sparkbox-paste-"), name)
+    with open(dest, "wb") as f:
+        f.write(raw)
+    quoted = dest if not any(c.isspace() for c in dest) else "'" + dest.replace("'", "'\\''") + "'"
+    # A leading space when the line already has something on it — otherwise a
+    # path dropped after "cat " (or after an earlier, still-unsubmitted drop)
+    # runs the two tokens together.
+    text = quoted if not line or line.endswith(b" ") else " " + quoted
+    line.extend(text.encode("utf-8"))
+    _ws_send(wfile, text.encode("utf-8"), 0x2)
 
 
 def _run_fake_command(cmd, wfile):
@@ -560,7 +613,10 @@ def _fake_pty(rfile, wfile):
             if opcode == 0x9:  # ping -> pong, same payload
                 _ws_send(wfile, payload, 0xA)
                 continue
-            if opcode != 0x2:  # only binary frames carry keystrokes; text is resize JSON
+            if opcode == 0x1:  # text frame: resize (ignored here) or a dropped image
+                _handle_paste_file(payload, wfile, line)
+                continue
+            if opcode != 0x2:  # only binary frames carry keystrokes
                 continue
             for b in payload:
                 if b in (0x0D, 0x0A):  # Enter

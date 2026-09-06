@@ -280,6 +280,15 @@
   .xterm .xterm-viewport { scrollbar-width: none; }
   .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
 
+  /* Dropping a file shows an invitation round the whole pane, not just a
+     hover change on the grid underneath it — the grid is what receives the
+     file, but the border is what tells you it will. */
+  #screen.dragover::after {
+    content: ""; position: absolute; inset: 4px; z-index: 2; pointer-events: none;
+    border: 2px dashed hsl(var(--primary)); border-radius: var(--radius);
+    background: hsl(var(--primary) / .06);
+  }
+
   /* Overlay for the states where there is nothing to type into yet. It sits
      over the grid rather than replacing it, so a reconnect does not throw away
      the scrollback the user still wants to read. */
@@ -778,6 +787,8 @@
           overlay("Couldn't attach", m.message, { action: "Try again" });
         } else if (m.type === "exit") {
           note("shell exited with status " + (m.code || 0));
+        } else if (m.type === "paste-error") {
+          toast(m.message, true);
         }
       };
 
@@ -858,6 +869,52 @@
       const b = new Uint8Array(d.length);
       for (let i = 0; i < d.length; i++) b[i] = d.charCodeAt(i) & 255;
       ws.send(b);
+    });
+
+    // Dropping an image sends it as a control frame; the guest writes it to a
+    // tmp path and echoes that path into the current input line, exactly like
+    // dragging a file onto a real terminal emulator does. The bytes never go
+    // through stdin — only the resulting path does, for whatever is on the
+    // line to make of it.
+    const MAX_PASTE_BYTES = 8 * 1024 * 1024;
+    function sendPasteFile(file) {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !ready) {
+        toast("Connect to the sandbox before dropping a file", true);
+        return;
+      }
+      if (!file.type.startsWith("image/")) {
+        toast(file.name + " isn't an image", true);
+        return;
+      }
+      if (file.size > MAX_PASTE_BYTES) {
+        toast(file.name + " is too large (max 8 MiB)", true);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        // readAsDataURL yields "data:<mime>;base64,<payload>" — only the
+        // payload after the comma rides the wire.
+        const b64 = reader.result.slice(reader.result.indexOf(",") + 1);
+        ws.send(JSON.stringify({ type: "paste-file", name: file.name, mime: file.type, data: b64 }));
+      };
+      reader.onerror = () => toast("Couldn't read " + file.name, true);
+      reader.readAsDataURL(file);
+    }
+    ["dragenter", "dragover"].forEach((evt) => {
+      $("screen").addEventListener(evt, (e) => {
+        if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        $("screen").classList.add("dragover");
+      });
+    });
+    ["dragleave", "dragend"].forEach((evt) => {
+      $("screen").addEventListener(evt, () => $("screen").classList.remove("dragover"));
+    });
+    $("screen").addEventListener("drop", (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+      e.preventDefault();
+      $("screen").classList.remove("dragover");
+      Array.from(e.dataTransfer.files).forEach(sendPasteFile);
     });
 
     // One debounce for both signals: a drag-resize fires continuously and each
