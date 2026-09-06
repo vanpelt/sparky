@@ -752,6 +752,7 @@ func serve(args []string) error {
 		CheckpointStagingDir: *vmStateDir,
 		NodeName:             nodeName,
 		Arch:                 *archFlag,
+		Runner:               runner,
 		Release:              version,
 		HostVCPUs:            int64(runtime.NumCPU()),
 		Metrics:              metricsRegistry,

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/ctlops"
@@ -723,5 +724,102 @@ func TestPlacementDoesNotTurnASilentImageListIntoARefusal(t *testing.T) {
 	}
 	if !nodeb.took("create") {
 		t.Fatal("the machine was never asked")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The runner constraint
+// ---------------------------------------------------------------------------
+
+func TestCandidateFitsTheRunner(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		driver string
+		want   vmm.Runner
+		fits   bool
+	}{
+		{"a qemu environment on a qemu node", "qemu", vmm.RunnerQEMU, true},
+		{"a qemu environment on a firecracker node", "firecracker", vmm.RunnerQEMU, false},
+		{"a firecracker environment on a qemu node", "qemu", vmm.RunnerFirecracker, false},
+		{"an environment requiring nothing", "qemu", vmm.RunnerAny, true},
+
+		// The two unknown-is-not-refused cases. A node linked by a build that
+		// predates the field, and a node whose first capacity report has not
+		// landed, both report no driver — and taking a working machine out of
+		// the fleet over that would be a refusal nobody could see the cause of.
+		{"a node that has not said what it runs", "", vmm.RunnerQEMU, true},
+
+		// A mock node answers every requirement, which is what keeps `serve
+		// --driver mock` — the documented standalone path — able to place an
+		// environment that names a real VMM.
+		{"a mock node", "mock", vmm.RunnerQEMU, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fleet.Candidate{Name: "boxb", Facts: fleet.Facts{Driver: tc.driver}}
+			err := c.Fits(fleet.Request{Runner: tc.want})
+			if (err == nil) != tc.fits {
+				t.Fatalf("Fits = %v, want fits=%v", err, tc.fits)
+			}
+			if err == nil {
+				return
+			}
+			// The sentence reaches a user verbatim, so it has to name both
+			// halves of the disagreement.
+			msg := err.Error()
+			for _, want := range []string{"boxb", tc.driver, string(tc.want)} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal %q does not mention %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
+// The load-bearing test of this whole feature.
+//
+// A create with no --node on a gateway with no placer installed used to return
+// the local machine without building a candidate list at all, which is the
+// shape of every single-box deployment and most small ones. If the requirement
+// does not bite here it does not bite anywhere that matters, and it fails
+// SILENTLY: the sandbox builds, on the wrong VMM, and the first person to
+// notice is whoever needed the capability the environment was created for.
+func TestARequiredRunnerIsCheckedOnTheGatewayItself(t *testing.T) {
+	mgr := newManager(t, host.Options{Runner: vmm.RunnerFirecracker})
+	f := newFleet(t, mgr, newIndex(t))
+
+	if _, err := f.PlaceForRunner(vmm.RunnerQEMU, "", "ubuntu", 1, 512); err == nil {
+		t.Fatal("a qemu environment was placed on a firecracker gateway")
+	}
+	node, err := f.PlaceForRunner(vmm.RunnerFirecracker, "", "ubuntu", 1, 512)
+	if err != nil {
+		t.Fatalf("a firecracker environment was refused by a firecracker gateway: %v", err)
+	}
+	if node != mgr.NodeName() {
+		t.Fatalf("placed on %q, want the gateway", node)
+	}
+	// And the shortcut still stands for everything that asks for nothing.
+	if node, err := f.PlaceForRunner(vmm.RunnerAny, "", "ubuntu", 1, 512); err != nil || node != mgr.NodeName() {
+		t.Fatalf("an unconstrained create: node=%q err=%v", node, err)
+	}
+}
+
+// A gateway that was never told which VMM it runs must not start refusing
+// creates. This is every test double and every `serve` invocation that predates
+// the flag being threaded.
+func TestAGatewayThatDidNotSayItsRunnerRefusesNothing(t *testing.T) {
+	mgr := newManager(t, host.Options{})
+	f := newFleet(t, mgr, newIndex(t))
+	if _, err := f.PlaceForRunner(vmm.RunnerQEMU, "", "ubuntu", 1, 512); err != nil {
+		t.Fatalf("a silent gateway refused a create: %v", err)
+	}
+}
+
+// Naming a machine explicitly does not get past the requirement either — the
+// environment said what it needs, and --node is not a way to overrule it.
+func TestANamedMachineStillHasToRunTheRequiredVMM(t *testing.T) {
+	mgr := newManager(t, host.Options{Runner: vmm.RunnerFirecracker})
+	f := newFleet(t, mgr, newIndex(t))
+	if _, err := f.PlaceForRunner(vmm.RunnerQEMU, mgr.NodeName(), "ubuntu", 1, 512); err == nil {
+		t.Fatal("--node placed a qemu environment on a firecracker machine")
 	}
 }
