@@ -67,7 +67,7 @@ func ownableServer(t *testing.T, slot int) *server {
 
 func mustMkVMDir(t *testing.T, s *server, name string) string {
 	t.Helper()
-	dir := filepath.Join(s.opts.VMStateDir, s.vmRel(name))
+	dir := filepath.Join(s.opts.VMStateDir, s.vmRel(BackendQEMU, name))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -85,42 +85,46 @@ func qemuTestRequest() Request {
 // A QEMU node keeps its sandboxes somewhere the firecracker driver does not
 // look, and vice versa. If this drifts from internal/vmm/qemu's vmsSubdir the
 // helper links a rootfs that does not exist, or worse, links the wrong one.
-func TestQemuServerUsesTheQemuLayout(t *testing.T) {
+// ONE server, both layouts. This used to be two tests over two servers, and
+// the change is the point: the layout follows the backend the REQUEST names,
+// not a field frozen when the helper started. A server that answered its
+// startup default here would put a QEMU sandbox in fc-vms and link a rootfs
+// that does not exist — or, worse, one that does and belongs to the other VMM.
+func TestTheLayoutFollowsTheBackendNotTheStartupFlag(t *testing.T) {
 	s := qemuTestServer(t)
-	if got, want := s.vmRel("box"), filepath.Join("qemu-vms", "box"); got != want {
-		t.Errorf("vmRel = %q, want %q", got, want)
-	}
-	if got, want := s.launchSocketName(), "qmp.sock"; got != want {
-		t.Errorf("launchSocketName = %q, want %q", got, want)
-	}
-	if got, want := s.snapshotOutputNames(), []string{"state.migrate.next"}; !slices.Equal(got, want) {
-		t.Errorf("snapshotOutputNames = %v, want %v", got, want)
-	}
-	// The jail path is what the controller derives on its own side to dial the
-	// monitor, so the "qemu" component is a contract with internal/vmm/qemu's
-	// jailRoot, not an implementation detail.
-	if got, want := s.jailRoot(3), "/srv/hot/jailer/qemu/sparkbox-3/root"; got != want {
-		t.Errorf("jailRoot = %q, want %q", got, want)
-	}
-}
+	s.opts.FirecrackerBin = "/srv/assets/firecracker"
 
-// A firecracker helper must be untouched by all of the above: an existing
-// deployment passes no --backend and has to keep its exact behaviour.
-func TestFirecrackerServerLayoutIsUnchanged(t *testing.T) {
-	s := &server{opts: ServerOptions{
-		FirecrackerBin: "/srv/assets/firecracker", ChrootBase: "/srv/hot/jailer",
-	}}
-	if got, want := s.vmRel("box"), filepath.Join("fc-vms", "box"); got != want {
-		t.Errorf("vmRel = %q, want %q", got, want)
-	}
-	if got, want := s.launchSocketName(), "fc.sock"; got != want {
-		t.Errorf("launchSocketName = %q, want %q", got, want)
-	}
-	if got, want := s.snapshotOutputNames(), []string{"mem.snap.next", "state.snap.next"}; !slices.Equal(got, want) {
-		t.Errorf("snapshotOutputNames = %v, want %v", got, want)
-	}
-	if got, want := s.jailRoot(3), "/srv/hot/jailer/firecracker/sparkbox-3/root"; got != want {
-		t.Errorf("jailRoot = %q, want %q", got, want)
+	for _, tc := range []struct {
+		backend  Backend
+		vmRel    string
+		socket   string
+		outputs  []string
+		jailRoot string
+	}{
+		{BackendQEMU, filepath.Join("qemu-vms", "box"), "qmp.sock",
+			[]string{"state.migrate.next"}, "/srv/hot/jailer/qemu/sparkbox-3/root"},
+		{BackendFirecracker, filepath.Join("fc-vms", "box"), "fc.sock",
+			[]string{"mem.snap.next", "state.snap.next"}, "/srv/hot/jailer/firecracker/sparkbox-3/root"},
+	} {
+		t.Run(string(tc.backend), func(t *testing.T) {
+			if got := s.vmRel(tc.backend, "box"); got != tc.vmRel {
+				t.Errorf("vmRel = %q, want %q", got, tc.vmRel)
+			}
+			if got := s.launchSocketName(tc.backend); got != tc.socket {
+				t.Errorf("launchSocketName = %q, want %q", got, tc.socket)
+			}
+			if got := s.snapshotOutputNames(tc.backend); !slices.Equal(got, tc.outputs) {
+				t.Errorf("snapshotOutputNames = %v, want %v", got, tc.outputs)
+			}
+			// The jail path is what the controller derives on its own side to
+			// dial the monitor, so these components are a contract with each
+			// driver's jailRoot, not an implementation detail. That the two
+			// differ is also what keeps the trees disjoint on a helper serving
+			// both, which is why slot 3 appears in each.
+			if got := s.jailRoot(tc.backend, 3); got != tc.jailRoot {
+				t.Errorf("jailRoot = %q, want %q", got, tc.jailRoot)
+			}
+		})
 	}
 }
 
@@ -164,7 +168,7 @@ func TestQemuCommandRunsInTheJailWithoutProcessAttributes(t *testing.T) {
 	if cmd.SysProcAttr != nil {
 		t.Errorf("the QEMU child was given process attributes: %+v", cmd.SysProcAttr)
 	}
-	if got, want := cmd.Dir, s.jailRoot(req.Slot); got != want {
+	if got, want := cmd.Dir, s.jailRoot(BackendQEMU, req.Slot); got != want {
 		t.Errorf("cmd.Dir = %q, want %q", got, want)
 	}
 	if len(cmd.Env) != 0 {

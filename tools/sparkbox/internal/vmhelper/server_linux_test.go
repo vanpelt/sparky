@@ -44,7 +44,7 @@ func TestWaitForSluiceRequiresReadyAcknowledgement(t *testing.T) {
 func TestServerRequestValidationPinsOperationNameAndSlot(t *testing.T) {
 	s := &server{network: guestnet.MustParse("172.30.0.0/20")}
 	valid := request(OpLaunch, "box-1", 7)
-	if err := s.validateRequest(valid); err != nil {
+	if err := s.validateRequest(valid, BackendFirecracker); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*Request){
@@ -56,7 +56,7 @@ func TestServerRequestValidationPinsOperationNameAndSlot(t *testing.T) {
 	} {
 		req := valid
 		mutate(&req)
-		if err := s.validateRequest(req); err == nil {
+		if err := s.validateRequest(req, BackendFirecracker); err == nil {
 			t.Fatalf("invalid request accepted: %+v", req)
 		}
 	}
