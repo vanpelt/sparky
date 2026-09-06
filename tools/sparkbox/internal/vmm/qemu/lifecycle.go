@@ -212,26 +212,6 @@ func (d *Driver) releaseName(name string) {
 	delete(d.creating, name)
 }
 
-// freeSlot returns the lowest network slot no vmState holds. Caller must hold
-// d.mu. Every path that drops a record (Destroy, DropSnapshots, RenameVM)
-// thereby releases its slot for reuse — a reused slot can't collide with a
-// live tap because paused VMs keep their record (idx stays reserved) and the
-// record only goes away after the tap does. The configured prefix determines
-// the bound: every index maps to exactly one /30 inside it.
-func (d *Driver) freeSlot() (int, error) {
-	used := make(map[int]bool, len(d.vms))
-	for _, s := range d.vms {
-		used[s.idx] = true
-	}
-	for idx := 0; idx < d.net.Net.Capacity(); idx++ {
-		if !used[idx] && !d.reservedSlots[idx] {
-			return idx, nil
-		}
-	}
-	return 0, fmt.Errorf("no free network slots in %s (max %d concurrent VMs)",
-		d.net.Net, d.net.Net.Capacity())
-}
-
 // --- Create ----------------------------------------------------------------
 
 func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance, retErr error) {
@@ -334,7 +314,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
 	}
 
-	idx, err := d.freeSlot()
+	idx, err := d.slots.Claim(cfg.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -344,13 +324,16 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	st := &vmState{idx: idx, vcpus: cfg.VCPUs, memMB: cfg.MemMB}
 	if err := d.createTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
-		// this slot; only recording it in d.vms reserves it, so a failed create
-		// leaks no idx.
+		// this slot. The Release is not optional the way it once was: the slot
+		// is reserved by Claim above, not by the d.vms write below, so a failed
+		// create that did not hand it back would leak one every time.
 		d.deleteTap(st.idx)
+		d.slots.Release(cfg.Name)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, st, rootfs, false, fresh); err != nil {
 		d.deleteTap(st.idx)
+		d.slots.Release(cfg.Name)
 		return nil, err
 	}
 	d.vms[cfg.Name] = st
@@ -793,6 +776,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 			err = fmt.Errorf("%w (and its stale snapshot could not be removed: %v)", err, rmErr)
 		}
 		delete(d.vms, name)
+		d.slots.Release(name)
 		return err
 	}
 	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
@@ -916,9 +900,10 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	}
 	d.deleteTap(st.idx)
 	// Drop the record last: it releases the slot (and with it the tap name, the
-	// addresses and the MAC) back to freeSlot, which is only safe once the tap
+	// addresses and the MAC) back to the pool, which is only safe once the tap
 	// is actually gone.
 	delete(d.vms, name)
+	d.slots.Release(name)
 	// The pack artifact is deliberately a SIBLING of this directory, so an
 	// archive in flight survives the destroy that reclaims the hot tier.
 	return os.RemoveAll(d.vmDir(name))

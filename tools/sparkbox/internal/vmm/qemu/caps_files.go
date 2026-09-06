@@ -436,6 +436,7 @@ func (d *Driver) DropSnapshots(name string) error {
 		return err
 	}
 	delete(d.vms, name)
+	d.slots.Release(name)
 	return nil
 }
 
@@ -478,6 +479,7 @@ func (d *Driver) RenameVM(oldName, newName string) error {
 		return err
 	}
 	delete(d.vms, oldName)
+	d.slots.Release(oldName)
 	return nil
 }
 

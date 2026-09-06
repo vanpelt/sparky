@@ -45,6 +45,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/slots"
 )
 
 // ---------------------------------------------------------------------------
@@ -490,6 +491,14 @@ type Options struct {
 	// which are configurable from here, and all of which would then be talking
 	// about devices that do not exist. There is deliberately no flag for it.
 	TapPrefix string
+	// Slots, when set, is the slot namespace this driver allocates from. Nil
+	// gives it a private one covering its whole subnet, which is what a node
+	// running a single VMM wants and what both drivers did before this existed.
+	//
+	// Two drivers on one node MUST share one. Everything a guest is reachable
+	// by comes out of the slot, so two private pools both answering 0 is two
+	// guests claiming one tap, one uid and one pair of addresses.
+	Slots *slots.Pool
 	// JailerChrootBase is the root-owned directory beneath which the helper
 	// builds its per-slot jails, and it must be the helper's --chroot-base.
 	//
@@ -670,6 +679,8 @@ type Driver struct {
 	// dedicated in-prefix sluice DNS listener. They count toward prefix
 	// capacity but are never handed to a VM.
 	reservedSlots map[int]bool
+	// slots is the allocator. reservedSlots is still what SEEDS it.
+	slots *slots.Pool
 }
 
 // Compile-time capability checks: every optional interface in vmm, not the four
@@ -771,6 +782,20 @@ func New(opts Options) (*Driver, error) {
 	d.net.TapPrefix = opts.TapPrefix
 	if d.net.TapPrefix == "" {
 		d.net.TapPrefix = defaultTapPrefix
+	}
+
+	// A pool of this driver's own unless one was handed in, which is what makes
+	// the shared case opt-in: a node running one VMM behaves exactly as it did
+	// when every driver scanned its own records, and a node running two passes
+	// the same pool to both so they cannot be given the same slot — and with it
+	// the same tap, the same uid and the same guest addresses.
+	d.slots = opts.Slots
+	if d.slots == nil {
+		reserved := make([]int, 0, len(d.reservedSlots))
+		for idx := range d.reservedSlots {
+			reserved = append(reserved, idx)
+		}
+		d.slots = slots.New(guestNetwork.String(), guestNetwork.Capacity(), reserved...)
 	}
 
 	if opts.Subnet6 != "" {

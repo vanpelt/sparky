@@ -41,6 +41,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestdisk"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hoststat"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/slots"
 )
 
 // Every optional capability in vmm, asserted at compile time. host.Manager
@@ -94,6 +95,14 @@ type Options struct {
 	// JailerChrootBase is the root-owned directory beneath which the jailer
 	// creates one chroot per live VM. Empty defaults to <VMStateDir>/jailer.
 	JailerChrootBase string
+	// Slots, when set, is the slot namespace this driver allocates from. Nil
+	// gives it a private one covering its whole subnet, which is what a node
+	// running a single VMM wants and what both drivers did before this existed.
+	//
+	// Two drivers on one node MUST share one. Everything a guest is reachable
+	// by comes out of the slot, so two private pools both answering 0 is two
+	// guests claiming one tap, one uid and one pair of addresses.
+	Slots *slots.Pool
 	// JailerUIDBase is the first unprivileged uid/gid used for jailed VMMs.
 	// Each concurrently reserved network slot gets a distinct identity:
 	// JailerUIDBase + slot. Empty defaults to 100000.
@@ -145,6 +154,8 @@ type Driver struct {
 	// dedicated in-prefix sluice DNS listener. They count toward prefix
 	// capacity but are never handed to a VM.
 	reservedSlots map[int]bool
+	// slots is the allocator. reservedSlots is still what SEEDS it.
+	slots *slots.Pool
 }
 
 const (
@@ -278,6 +289,16 @@ func New(opts Options) (*Driver, error) {
 		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
 			d.reservedSlots[index] = true
 		}
+	}
+	// See qemu.New: a private pool unless one was handed in, so a single-VMM
+	// node behaves exactly as it did and a two-VMM node shares one.
+	d.slots = opts.Slots
+	if d.slots == nil {
+		reserved := make([]int, 0, len(d.reservedSlots))
+		for idx := range d.reservedSlots {
+			reserved = append(reserved, idx)
+		}
+		d.slots = slots.New(guestNetwork.String(), guestNetwork.Capacity(), reserved...)
 	}
 	if opts.Subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(opts.Subnet6)
@@ -599,32 +620,33 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 		return nil, fmt.Errorf("vm %q already exists", cfg.Name)
 	}
 
-	idx, err := d.freeSlot()
+	// Every path that drops a record (Destroy, DropSnapshots, RenameVM) hands
+	// the slot back, and a reused slot cannot collide with a live tap because a
+	// paused VM keeps its record and the record only goes away after the tap
+	// does.
+	idx, err := d.slots.Claim(cfg.Name)
 	if err != nil {
 		return nil, err
 	}
 	st := &vmState{idx: idx}
 	if err := d.createTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
-		// this slot; only recording it in d.vms reserves it, so a failed create
-		// leaks no idx.
+		// this slot. The Release is not optional the way it once was: the slot
+		// is reserved by Claim above, not by the d.vms write below, so a failed
+		// create that did not hand it back would leak one every time.
 		d.deleteTap(st.idx)
+		d.slots.Release(cfg.Name)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, cfg.VCPUs, cfg.MemMB, st, rootfs, nil, fresh); err != nil {
 		d.deleteTap(st.idx)
+		d.slots.Release(cfg.Name)
 		return nil, err
 	}
 	d.vms[cfg.Name] = st
 	return d.instance(cfg.Name, st), nil
 }
 
-// freeSlot returns the lowest network slot no vmState holds. Caller must hold
-// d.mu. Every path that drops a record (Destroy, DropSnapshots, RenameVM)
-// thereby releases its slot for reuse — a reused slot can't collide with a
-// live tap because paused VMs keep their record (idx stays reserved) and the
-// record only goes away after the tap does. The configured prefix determines
-// the bound: every index maps to exactly one /30 inside it.
 // vmmLogTail returns the end of a VM's firecracker.log as ONE line, so it can
 // be folded into an error without wrecking a log message. Empty when there is
 // nothing to say, which is the common case on a healthy boot.
@@ -638,20 +660,6 @@ func vmmLogTail(path string) string {
 		b = b[len(b)-maxTail:]
 	}
 	return strings.Join(strings.Fields(string(b)), " ")
-}
-
-func (d *Driver) freeSlot() (int, error) {
-	used := make(map[int]bool, len(d.vms))
-	for _, s := range d.vms {
-		used[s.idx] = true
-	}
-	for idx := 0; idx < d.net.Net.Capacity(); idx++ {
-		if !used[idx] && !d.reservedSlots[idx] {
-			return idx, nil
-		}
-	}
-	return 0, fmt.Errorf("no free network slots in %s (max %d concurrent VMs)",
-		d.net.Net, d.net.Net.Capacity())
 }
 
 // boot starts a Firecracker process for the VM; snapshot, when non-nil, is
@@ -1119,6 +1127,7 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	}
 	d.deleteTap(st.idx)
 	delete(d.vms, name)
+	d.slots.Release(name)
 	return errors.Join(os.RemoveAll(d.vmDir(name)), d.cleanupJail(st.idx))
 }
 
@@ -1464,6 +1473,7 @@ func (d *Driver) DropSnapshots(name string) error {
 		}
 	}
 	delete(d.vms, name)
+	d.slots.Release(name)
 	return nil
 }
 
@@ -1494,6 +1504,7 @@ func (d *Driver) RenameVM(oldName, newName string) error {
 		return err
 	}
 	delete(d.vms, oldName)
+	d.slots.Release(oldName)
 	return nil
 }
 
