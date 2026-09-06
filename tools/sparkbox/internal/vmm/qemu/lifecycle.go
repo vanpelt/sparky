@@ -177,25 +177,16 @@ func (d *Driver) hasSnapshot(name string) (bool, error) {
 func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
 func (d *Driver) guestIP(idx int) string { return d.guestSlot(idx).Guest.String() }
 
-// tapName is derived from the slot alone, like the MAC and the addresses, and
-// is a METHOD because the answer depends on who creates the device.
+// tapName is derived from the slot alone, like the MAC and the addresses.
 //
-// On the direct path this driver creates and sweeps its own taps, and the
-// prefix must differ from the firecracker driver's or one driver's startup
-// sweep would delete the other's live networking (see tapPrefix).
-//
-// Under the helper it creates none: the helper makes the device, in the Pod
-// network namespace shared by both containers, and it calls it sbtap<slot> —
-// the name internal/netpush, internal/hostsetup's sluice --tap-prefix and
-// deploy/sparkbox-net.sh all already hardcode. So this follows the helper's
-// name there, which is what the tapPrefix comment said would happen when this
-// path landed. Neither sweep can reach the other: the helper's runs in the
-// helper, and this driver's is skipped entirely when jailed.
+// It no longer branches on who creates the device, and that is the fix: the
+// helper has always called it sbtap<slot> — the name internal/netpush,
+// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
+// hardcode — while this driver's direct path called it something else, so a
+// direct-launch QEMU node had every one of those talking about a device that
+// did not exist. See defaultTapPrefix.
 func (d *Driver) tapName(idx int) string {
-	if d.jailed() {
-		return helperTapPrefix + strconv.Itoa(idx)
-	}
-	return tapPrefix + strconv.Itoa(idx)
+	return d.tapPrefix + strconv.Itoa(idx)
 }
 
 func (d *Driver) guestSlot(idx int) guestnet.Slot {
@@ -1089,13 +1080,13 @@ func (d *Driver) deleteTap(idx int) {
 // firecracker driver runs the same sweep over "sbtap", and neither prefix is a
 // prefix of the other, so one driver's construction cannot delete the other's
 // live networking.
-func sweepStaleTaps() {
+func (d *Driver) sweepStaleTaps() {
 	out, err := exec.Command("ip", "-o", "link", "show").Output()
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		// "3: sbqtap1@if4: <BROADCAST,...>" -> field 1 is the name.
+		// "3: sbtap1@if4: <BROADCAST,...>" -> field 1 is the name.
 		parts := strings.SplitN(line, ": ", 3)
 		if len(parts) < 2 {
 			continue
@@ -1104,7 +1095,7 @@ func sweepStaleTaps() {
 		if i := strings.IndexByte(name, '@'); i >= 0 {
 			name = name[:i]
 		}
-		if strings.HasPrefix(name, tapPrefix) {
+		if strings.HasPrefix(name, d.tapPrefix) {
 			exec.Command("ip", "link", "del", name).Run() //nolint:errcheck
 		}
 	}
