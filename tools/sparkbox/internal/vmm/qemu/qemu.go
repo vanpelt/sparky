@@ -38,6 +38,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 )
 
 // ---------------------------------------------------------------------------
@@ -56,9 +57,9 @@ import (
 //	              (d *Driver) qemuArgs(...), (d *Driver) bootCmdline(...)
 //	              <- boot calls this to build-or-replay -append,
 //	              (d *Driver) kernelArgs(name string,
-//	              idx int, fresh bool) (string, error), machineIDFor(name string)
-//	              string, macFor(idx int) string, guestDNSArg(guestDNS,
-//	              gatewayIP string) (string, error), validateGuestDNS(guestDNS
+//	              idx int, fresh bool) (string, error), guestargs.MachineID(name string)
+//	              string, macFor(idx int) string, guestargs.DNSArg(guestDNS,
+//	              gatewayIP string) (string, error), guestargs.ValidateDNS(guestDNS
 //	              string) error  <- New calls this one.
 //	lifecycle.go  Create, Pause, Resume, Destroy, plus everything they need:
 //	              boot, stopVMM, freeSlot, reserveName/releaseName,
@@ -618,7 +619,7 @@ func New(opts Options) (*Driver, error) {
 	}
 	opts.Subnet = guestNetwork.String()
 
-	if err := validateGuestDNS(opts.GuestDNS); err != nil {
+	if err := guestargs.ValidateDNS(opts.GuestDNS); err != nil {
 		return nil, err
 	}
 

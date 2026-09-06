@@ -3,10 +3,8 @@
 package qemu
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"net/netip"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 	"runtime"
 	"strconv"
 	"strings"
@@ -320,12 +318,12 @@ func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
 	// after CONFIG_SERIAL_AMBA_PL011 lands.
 	kernelArgs := fmt.Sprintf(
 		"console=%s reboot=k panic=1 root=/dev/vda rw quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s systemd.machine_id=%s",
-		guestConsole(), d.guestIP(idx), d.hostIP(idx), name, machineIDFor(name))
+		guestConsole(), d.guestIP(idx), d.hostIP(idx), name, guestargs.MachineID(name))
 	if d.prefix6 != nil {
 		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
 			d.guestIP6(idx), d.hostIP6(idx))
 	}
-	dnsArg, err := guestDNSArg(d.opts.GuestDNS, d.hostIP(idx))
+	dnsArg, err := guestargs.DNSArg(d.opts.GuestDNS, d.hostIP(idx))
 	if err != nil {
 		return "", err
 	}
@@ -346,32 +344,6 @@ func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
 	return kernelArgs, nil
 }
 
-// machineIDFor derives this sandbox's /etc/machine-id from its name.
-//
-// It exists because of forks and old templates. Current base images and
-// captures carry an empty machine-id, but older templates can be byte-for-byte
-// copies of somebody's populated rootfs, and PID 1 reads that file before any
-// unit runs. systemd reads systemd.machine_id= off the kernel command line when
-// the file is uninitialised; the host writes that argument per boot and no guest
-// can forge it, so every clean fork differs from its parent from PID 1 onward.
-//
-// Derived rather than random so it is STABLE across the sandbox's own boots: a
-// machine id that changed every time would give journald a new machine
-// directory on every resume. It changes on a rename, which is the same
-// tradeoff the hostname already makes.
-//
-// The guest-side pre-capture clear and sparkbox-identity-reset stay regardless:
-// they cover dbus, SSH host keys, old templates, and images with no systemd to
-// read this at all.
-//
-// Byte-identical to fc.go's, deliberately: the same sandbox name must produce
-// the same machine id whichever driver boots it, or moving a rootfs between
-// backends would give journald a new machine directory.
-func machineIDFor(name string) string {
-	sum := sha256.Sum256([]byte("sparkbox-machine-id\x00" + name))
-	return hex.EncodeToString(sum[:16])
-}
-
 // macFor derives a stable locally-administered MAC from the network slot so
 // snapshots restore onto an identically-configured interface.
 //
@@ -383,38 +355,4 @@ func machineIDFor(name string) string {
 // unreachability rather than as a collision.
 func macFor(idx int) string {
 	return fmt.Sprintf("02:5b:01:00:%02x:%02x", (idx>>8)&0xff, idx&0xff)
-}
-
-// validateGuestDNS accepts only the empty string (feature off), the "gateway"
-// sentinel, or a bare IP literal. Anything else — a hostname, or a value with
-// whitespace that would inject extra kernel args — is rejected, so a typo in
-// --guest-dns fails loudly instead of producing a malformed cmdline or an
-// unusable /etc/resolv.conf inside the guest.
-func validateGuestDNS(guestDNS string) error {
-	switch guestDNS {
-	case "", "gateway":
-		return nil
-	}
-	if _, err := netip.ParseAddr(guestDNS); err != nil {
-		return fmt.Errorf("guest-dns %q: must be \"gateway\" or an IP address", guestDNS)
-	}
-	return nil
-}
-
-// guestDNSArg builds the sparkbox_dns kernel-arg fragment (with a leading space)
-// for the guest netcfg hook. The sentinel "gateway" expands to this VM's gateway
-// address, where the sluice allowlist resolver listens; an IP literal is used
-// verbatim. An empty setting yields no arg, leaving the guest on public DNS.
-func guestDNSArg(guestDNS, gatewayIP string) (string, error) {
-	if err := validateGuestDNS(guestDNS); err != nil {
-		return "", err
-	}
-	switch guestDNS {
-	case "":
-		return "", nil
-	case "gateway":
-		return " sparkbox_dns=" + gatewayIP, nil
-	default:
-		return " sparkbox_dns=" + guestDNS, nil
-	}
 }

@@ -4,6 +4,7 @@ package qemu
 
 import (
 	"fmt"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 	"net"
 	"path/filepath"
 	"runtime"
@@ -496,17 +497,17 @@ func TestMachineIDForIsStableAndPerName(t *testing.T) {
 	// from PID 1 onward, and because it must match the firecracker driver's
 	// derivation exactly: the same sandbox name has to keep the same machine id
 	// whichever driver boots it, or journald starts a new machine directory.
-	if got, want := machineIDFor("box"), "096f2f469359b69057d5c4c11e4b6142"; got != want {
-		t.Errorf("machineIDFor(box) = %s, want %s", got, want)
+	if got, want := guestargs.MachineID("box"), "096f2f469359b69057d5c4c11e4b6142"; got != want {
+		t.Errorf("guestargs.MachineID(box) = %s, want %s", got, want)
 	}
-	if got, want := machineIDFor("other"), "23d3a7397ce32deee3ab53e95e3de5e9"; got != want {
-		t.Errorf("machineIDFor(other) = %s, want %s", got, want)
+	if got, want := guestargs.MachineID("other"), "23d3a7397ce32deee3ab53e95e3de5e9"; got != want {
+		t.Errorf("guestargs.MachineID(other) = %s, want %s", got, want)
 	}
-	if len(machineIDFor("box")) != 32 {
-		t.Errorf("systemd.machine_id must be 32 hex characters; got %q", machineIDFor("box"))
+	if len(guestargs.MachineID("box")) != 32 {
+		t.Errorf("systemd.machine_id must be 32 hex characters; got %q", guestargs.MachineID("box"))
 	}
-	if machineIDFor("box") != machineIDFor("box") {
-		t.Error("machineIDFor must be stable across the sandbox's own boots")
+	if guestargs.MachineID("box") != guestargs.MachineID("box") {
+		t.Error("guestargs.MachineID must be stable across the sandbox's own boots")
 	}
 }
 
@@ -525,18 +526,18 @@ func TestGuestDNSArg(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.guestDNS, func(t *testing.T) {
-			got, err := guestDNSArg(tc.guestDNS, "172.31.0.1")
+			got, err := guestargs.DNSArg(tc.guestDNS, "172.31.0.1")
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("guestDNSArg(%q) should have failed", tc.guestDNS)
+					t.Fatalf("guestargs.DNSArg(%q) should have failed", tc.guestDNS)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("guestDNSArg(%q): %v", tc.guestDNS, err)
+				t.Fatalf("guestargs.DNSArg(%q): %v", tc.guestDNS, err)
 			}
 			if got != tc.want {
-				t.Errorf("guestDNSArg(%q) = %q, want %q", tc.guestDNS, got, tc.want)
+				t.Errorf("guestargs.DNSArg(%q) = %q, want %q", tc.guestDNS, got, tc.want)
 			}
 		})
 	}

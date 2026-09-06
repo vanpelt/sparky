@@ -15,8 +15,6 @@ package firecracker
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -39,7 +37,9 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestdisk"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hoststat"
 )
 
 // Every optional capability in vmm, asserted at compile time. host.Manager
@@ -262,7 +262,7 @@ func New(opts Options) (*Driver, error) {
 			}
 		}
 	}
-	if err := validateGuestDNS(opts.GuestDNS); err != nil {
+	if err := guestargs.ValidateDNS(opts.GuestDNS); err != nil {
 		return nil, err
 	}
 	d := &Driver{
@@ -551,40 +551,6 @@ func (d *Driver) guestSlot(idx int) guestnet.Slot {
 	return slot
 }
 
-// validateGuestDNS accepts only the empty string (feature off), the "gateway"
-// sentinel, or a bare IP literal. Anything else — a hostname, or a value with
-// whitespace that would inject extra kernel args — is rejected, so a typo in
-// --guest-dns fails loudly instead of producing a malformed cmdline or an
-// unusable /etc/resolv.conf inside the guest.
-func validateGuestDNS(guestDNS string) error {
-	switch guestDNS {
-	case "", "gateway":
-		return nil
-	}
-	if _, err := netip.ParseAddr(guestDNS); err != nil {
-		return fmt.Errorf("guest-dns %q: must be \"gateway\" or an IP address", guestDNS)
-	}
-	return nil
-}
-
-// guestDNSArg builds the sparkbox_dns kernel-arg fragment (with a leading space)
-// for the guest netcfg hook. The sentinel "gateway" expands to this VM's gateway
-// address, where the sluice allowlist resolver listens; an IP literal is used
-// verbatim. An empty setting yields no arg, leaving the guest on public DNS.
-func guestDNSArg(guestDNS, gatewayIP string) (string, error) {
-	if err := validateGuestDNS(guestDNS); err != nil {
-		return "", err
-	}
-	switch guestDNS {
-	case "":
-		return "", nil
-	case "gateway":
-		return " sparkbox_dns=" + gatewayIP, nil
-	default:
-		return " sparkbox_dns=" + guestDNS, nil
-	}
-}
-
 // IPv6 addressing: each slot gets a point-to-point /127 carved from the /64,
 // host on the even address and guest on the odd one. IPv4 slot indexes begin
 // at zero, so add one before deriving the IPv6 offset: slot idx=0 becomes
@@ -735,12 +701,12 @@ func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
 	// hook (build-rootfs.sh), which reads sparkbox_ip6/sparkbox_gw6 here.
 	kernelArgs := fmt.Sprintf(
 		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s systemd.machine_id=%s",
-		d.guestIP(idx), d.hostIP(idx), name, machineIDFor(name))
+		d.guestIP(idx), d.hostIP(idx), name, guestargs.MachineID(name))
 	if d.prefix6 != nil {
 		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
 			d.guestIP6(idx), d.hostIP6(idx))
 	}
-	dnsArg, err := guestDNSArg(d.opts.GuestDNS, d.hostIP(idx))
+	dnsArg, err := guestargs.DNSArg(d.opts.GuestDNS, d.hostIP(idx))
 	if err != nil {
 		return "", err
 	}
@@ -1562,11 +1528,6 @@ func (d *Driver) RenameVM(oldName, newName string) error {
 	return nil
 }
 
-// userHZ is the fixed unit /proc/<pid>/stat reports utime/stime in (10ms
-// ticks). It is part of the kernel's userspace ABI, constant regardless of
-// the kernel's CONFIG_HZ.
-const userHZ = 100
-
 // CPUTimeNanos implements vmm.CPUStatser: cumulative utime+stime of the
 // firecracker process from /proc/<pid>/stat. This measures the whole FC
 // process (vCPU threads + VMM overhead), so surface it to users as "host
@@ -1587,15 +1548,7 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	ticks, err := procStatCPUTicks(string(data))
-	if err != nil {
-		return 0, err
-	}
-	return ticks * (1_000_000_000 / userHZ), nil
+	return hoststat.CPUNanos(pid)
 }
 
 // NetBytes implements vmm.NetStatser from the host tap's byte counters.
@@ -1613,72 +1566,13 @@ func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err er
 	}
 	tap := tapName(st.idx)
 	// Guest rx is the tap's tx and vice versa.
-	if rx, err = readTapCounter(tap, "tx_bytes"); err != nil {
+	if rx, err = hoststat.TapCounter(tap, "tx_bytes"); err != nil {
 		return 0, 0, err
 	}
-	if tx, err = readTapCounter(tap, "rx_bytes"); err != nil {
+	if tx, err = hoststat.TapCounter(tap, "rx_bytes"); err != nil {
 		return 0, 0, err
 	}
 	return rx, tx, nil
-}
-
-// readTapCounter reads one of a tap device's sysfs byte counters.
-func readTapCounter(tap, stat string) (uint64, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/statistics/%s", tap, stat))
-	if err != nil {
-		return 0, err
-	}
-	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s/%s: %w", tap, stat, err)
-	}
-	return n, nil
-}
-
-// procStatCPUTicks sums the utime and stime fields (14 and 15) of a
-// /proc/<pid>/stat line. The comm field may itself contain spaces and ')',
-// so fields are counted from the last ')' rather than split naively.
-func procStatCPUTicks(stat string) (uint64, error) {
-	i := strings.LastIndexByte(stat, ')')
-	if i < 0 {
-		return 0, fmt.Errorf("malformed stat line %q", stat)
-	}
-	fields := strings.Fields(stat[i+1:])
-	// fields[0] is field 3 (state), so utime/stime land at indices 11/12.
-	if len(fields) < 13 {
-		return 0, fmt.Errorf("stat line has %d fields after comm, want >= 13", len(fields))
-	}
-	utime, err := strconv.ParseUint(fields[11], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("utime: %w", err)
-	}
-	stime, err := strconv.ParseUint(fields[12], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("stime: %w", err)
-	}
-	return utime + stime, nil
-}
-
-// machineIDFor derives this sandbox's /etc/machine-id from its name.
-//
-// It exists because of forks and old templates. Current base images and
-// captures carry an empty machine-id, but older templates can be byte-for-byte
-// copies of somebody's populated rootfs, and PID 1 reads that file before any
-// unit runs. systemd reads systemd.machine_id= off the kernel command line when
-// the file is uninitialised; the host writes that argument per boot and no guest
-// can forge it, so every clean fork differs from its parent from PID 1 onward.
-//
-// Derived rather than random so it is STABLE across the sandbox's own boots: a
-// machine id that changed every time would give journald a new machine
-// directory on every resume. It changes on a rename, which is the same
-// tradeoff the hostname already makes.
-//
-// The guest-side pre-capture clear and sparkbox-identity-reset stay regardless:
-// they cover dbus, SSH host keys, old templates, and images with no systemd to
-// read this at all.
-func machineIDFor(name string) string {
-	sum := sha256.Sum256([]byte("sparkbox-machine-id\x00" + name))
-	return hex.EncodeToString(sum[:16])
 }
 
 func (d *Driver) Close() error {

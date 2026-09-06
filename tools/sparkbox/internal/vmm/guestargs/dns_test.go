@@ -1,6 +1,6 @@
 //go:build linux
 
-package firecracker
+package guestargs
 
 import "testing"
 
@@ -21,18 +21,18 @@ func TestGuestDNSArg(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := guestDNSArg(c.guestDNS, c.gateway)
+			got, err := DNSArg(c.guestDNS, c.gateway)
 			if c.wantErr {
 				if err == nil {
-					t.Fatalf("guestDNSArg(%q, %q) = %q, want error", c.guestDNS, c.gateway, got)
+					t.Fatalf("DNSArg(%q, %q) = %q, want error", c.guestDNS, c.gateway, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("guestDNSArg(%q, %q) unexpected error: %v", c.guestDNS, c.gateway, err)
+				t.Fatalf("DNSArg(%q, %q) unexpected error: %v", c.guestDNS, c.gateway, err)
 			}
 			if got != c.want {
-				t.Errorf("guestDNSArg(%q, %q) = %q, want %q", c.guestDNS, c.gateway, got, c.want)
+				t.Errorf("DNSArg(%q, %q) = %q, want %q", c.guestDNS, c.gateway, got, c.want)
 			}
 		})
 	}

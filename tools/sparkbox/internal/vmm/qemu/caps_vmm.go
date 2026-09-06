@@ -5,11 +5,9 @@ package qemu
 import (
 	"context"
 	"fmt"
-	"os"
-	"strconv"
-	"strings"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hoststat"
 )
 
 // This file is the half of the capability surface that needs a live VM:
@@ -38,8 +36,6 @@ import (
 // monitor (Execute returns errQMPClosed). A call that races a Pause therefore
 // still returns an error, which is the required answer.
 
-const userHZ = 100
-
 // CPUTimeNanos implements vmm.CPUStatser: cumulative utime+stime of the QEMU
 // process from /proc/<pid>/stat. This measures the whole VMM process (vCPU
 // threads + emulation and I/O overhead), so surface it to users as "host CPU",
@@ -67,42 +63,14 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	pid := st.cmd.Process.Pid
 	d.mu.Unlock()
 
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	ns, err := hoststat.CPUNanos(pid)
 	if err != nil {
 		// A QEMU that died on its own leaves the record in place until
 		// something calls Pause or Destroy, so /proc is gone while st.cmd is
 		// not. Say which pid vanished rather than surfacing a bare ENOENT.
 		return 0, fmt.Errorf("vm %q cpu time (pid %d): %w", name, pid, err)
 	}
-	ticks, err := procStatCPUTicks(string(data))
-	if err != nil {
-		return 0, err
-	}
-	return ticks * (1_000_000_000 / userHZ), nil
-}
-
-// procStatCPUTicks sums the utime and stime fields (14 and 15) of a
-// /proc/<pid>/stat line. The comm field may itself contain spaces and ')',
-// so fields are counted from the last ')' rather than split naively.
-func procStatCPUTicks(stat string) (uint64, error) {
-	i := strings.LastIndexByte(stat, ')')
-	if i < 0 {
-		return 0, fmt.Errorf("malformed stat line %q", stat)
-	}
-	fields := strings.Fields(stat[i+1:])
-	// fields[0] is field 3 (state), so utime/stime land at indices 11/12.
-	if len(fields) < 13 {
-		return 0, fmt.Errorf("stat line has %d fields after comm, want >= 13", len(fields))
-	}
-	utime, err := strconv.ParseUint(fields[11], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("utime: %w", err)
-	}
-	stime, err := strconv.ParseUint(fields[12], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("stime: %w", err)
-	}
-	return utime + stime, nil
+	return ns, nil
 }
 
 // NetBytes implements vmm.NetStatser from the host tap's byte counters, which
@@ -129,26 +97,13 @@ func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err er
 	d.mu.Unlock()
 
 	// Guest rx is the tap's tx and vice versa.
-	if rx, err = readTapCounter(tap, "tx_bytes"); err != nil {
+	if rx, err = hoststat.TapCounter(tap, "tx_bytes"); err != nil {
 		return 0, 0, err
 	}
-	if tx, err = readTapCounter(tap, "rx_bytes"); err != nil {
+	if tx, err = hoststat.TapCounter(tap, "rx_bytes"); err != nil {
 		return 0, 0, err
 	}
 	return rx, tx, nil
-}
-
-// readTapCounter reads one of a tap device's sysfs byte counters.
-func readTapCounter(tap, stat string) (uint64, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/statistics/%s", tap, stat))
-	if err != nil {
-		return 0, err
-	}
-	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s/%s: %w", tap, stat, err)
-	}
-	return n, nil
 }
 
 // SetBalloonTarget inflates (or deflates, at 0) the named VM's balloon to

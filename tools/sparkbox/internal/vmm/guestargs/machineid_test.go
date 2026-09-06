@@ -1,6 +1,6 @@
 //go:build linux
 
-package firecracker
+package guestargs
 
 import (
 	"encoding/hex"
@@ -18,11 +18,11 @@ import (
 // cmdline is the only place this can come from and still be right on a fork's
 // FIRST boot.
 func TestMachineIDForIsPerSandboxAndStable(t *testing.T) {
-	parent := machineIDFor("brave-otter")
-	if got := machineIDFor("brave-otter"); got != parent {
+	parent := MachineID("brave-otter")
+	if got := MachineID("brave-otter"); got != parent {
 		t.Errorf("machine id changed between boots of one sandbox: %q then %q", parent, got)
 	}
-	fork := machineIDFor("brave-otter-2")
+	fork := MachineID("brave-otter-2")
 	if fork == parent {
 		t.Errorf("a fork got its parent's machine id (%q); journald, dbus and systemd all key on it", parent)
 	}
