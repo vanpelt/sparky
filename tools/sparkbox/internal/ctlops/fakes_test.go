@@ -1490,6 +1490,21 @@ func (f *fakeEnvs) SetBuildSession(owner, name, url string) error {
 	return nil
 }
 
+func (f *fakeEnvs) SetBuildLog(owner, name, log string) error {
+	f.c.add("envs.SetBuildLog %s/%s %d bytes", owner, name, len(log))
+	k := envKey(owner, name)
+	e, ok := f.rows[k]
+	if !ok {
+		// Colour on a build, not the write that decides its outcome — same
+		// no-op-on-missing-row answer SetBuildSession gives.
+		return nil
+	}
+	e.BuildLog = log
+	e.UpdatedAt = f.clock()
+	f.rows[k] = e
+	return nil
+}
+
 func (f *fakeEnvs) SetBuildDenials(owner, name string, domains []envs.BuildDeniedDomain, overflow uint64) error {
 	f.c.add("envs.SetBuildDenials %s/%s domains=%d", owner, name, len(domains))
 	k := envKey(owner, name)

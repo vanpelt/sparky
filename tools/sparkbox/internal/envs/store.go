@@ -161,7 +161,16 @@ type Environment struct {
 	// column existed. It OUTLIVES the builder deliberately: a successful build
 	// destroys its box, and the transcript is then the only surviving account
 	// of why the setup script looks the way it does.
-	BuildSession        string              `json:"build_session,omitempty"`
+	BuildSession string `json:"build_session,omitempty"`
+	// BuildLog is the guest-authored tail of the most recent build's own
+	// output — the setup script's stdout/stderr in script mode, the runner's
+	// in agent mode — bounded and truncated on the way in (see
+	// ctlops.MaxSetupLog). It is the RUN's log, not the environment's history:
+	// every build overwrites it, empty included, so a builder reused after a
+	// failure never shows a later success wearing the earlier attempt's
+	// output. "" for anything built before this column existed and for a
+	// build whose guest never reported (see expireBuild).
+	BuildLog            string              `json:"build_log,omitempty"`
 	BuildDenials        []BuildDeniedDomain `json:"build_denials,omitempty"`
 	BuildDenialOverflow uint64              `json:"build_denial_overflow,omitempty"`
 	BuiltAt             *time.Time          `json:"built_at,omitempty"`
@@ -307,6 +316,7 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			build_box   TEXT NOT NULL DEFAULT '',
 			build_error TEXT NOT NULL DEFAULT '',
 			build_session TEXT NOT NULL DEFAULT '',
+			build_log TEXT NOT NULL DEFAULT '',
 			build_denials TEXT NOT NULL DEFAULT '',
 			adopted     TEXT NOT NULL DEFAULT '',
 			built_at    TIMESTAMP,
@@ -325,6 +335,14 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 	// most want an agent's transcript are the ones on the host that has been
 	// building them since before this column existed.
 	if err := addColumnIfMissing(db, "environments", "build_session", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
+	// Same reasoning as build_session, one column later: the log a build
+	// produced is worth exactly as much after the builder that produced it is
+	// gone, and a host that has been building environments since before this
+	// column existed should not lose the ability to record the next one.
+	if err := addColumnIfMissing(db, "environments", "build_log", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
@@ -663,6 +681,30 @@ func (s *Store) SetBuildSession(owner, name, url string) error {
 	return err
 }
 
+// SetBuildLog records the guest-authored tail of the most recent build's own
+// output, and is a separate write from SetState for SetBuildSession's reason:
+// build_box names a machine that is cleared the moment a build finishes, and
+// this outlives it.
+//
+// Unlike SetBuildSession's url, an empty log is written just as readily as a
+// full one — there is no "unchanged" reading of a build's own output the way
+// there is for a stored script, so every build's report REPLACES whatever the
+// column held, and a rebuild that produced no output does not leave a stale
+// failure standing as the account of a run that then succeeded.
+//
+// Not finding the row is not an error, for SetBuildSession's reason: this is
+// best-effort colour on a build whose real outcome is written by SetState.
+func (s *Store) SetBuildLog(owner, name, log string) error {
+	name = strings.TrimSpace(name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		UPDATE environments SET build_log = ?, updated_at = ?
+		WHERE owner = ? AND name = ?`,
+		log, time.Now().UTC(), owner, name)
+	return err
+}
+
 // SetBuildDenials records the bounded policy-denial summary for the most
 // recent build. It is best-effort build evidence, like BuildSession, and a
 // missing row is intentionally not promoted into a build failure.
@@ -714,7 +756,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 	rows, err := s.db.Query(`
 		SELECT DISTINCT e.owner, e.name, e.description, e.setup_sh, e.setup_from,
 		       e.setup_seed_sha,
-		       e.build_state, e.build_box, e.build_error, e.build_session, e.build_denials,
+		       e.build_state, e.build_box, e.build_error, e.build_session, e.build_log, e.build_denials,
 		       e.adopted, e.built_at, e.created_at, e.updated_at
 		FROM environments e
 		JOIN sandbox_tags bt ON bt.tag = e.name AND bt.owner = e.owner
@@ -735,7 +777,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 const selectCols = `
 	SELECT owner, name, description, setup_sh, setup_from,
 	       setup_seed_sha,
-	       build_state, build_box, build_error, build_session, build_denials,
+	       build_state, build_box, build_error, build_session, build_log, build_denials,
 	       adopted, built_at, created_at, updated_at
 	FROM environments`
 
@@ -755,7 +797,7 @@ func scanEnv(sc scanner) (Environment, error) {
 	var adopted string
 	if err := sc.Scan(&e.Owner, &e.Name, &e.Description, &e.SetupScript, &e.SetupFrom,
 		&e.SetupSeedSHA,
-		&state, &e.BuildBox, &e.BuildError, &e.BuildSession, &buildDenials,
+		&state, &e.BuildBox, &e.BuildError, &e.BuildSession, &e.BuildLog, &buildDenials,
 		&adopted, &builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Environment{}, ErrNoSuchEnvironment
