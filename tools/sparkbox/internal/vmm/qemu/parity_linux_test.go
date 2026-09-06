@@ -11,6 +11,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemu"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/vmmtest"
 )
 
@@ -366,9 +367,34 @@ func loadParityConfig(t *testing.T) parityConfig {
 	t.Logf("parity fixtures: kernel=%s image=%s/%s.ext4 scratch=%s subnet=%s user=%s qemu=%s machine=%s %dvcpu %dMiB launcher=%s",
 		cfg.kernel, cfg.imageDir, cfg.image, cfg.scratch, cfg.subnet, cfg.loginUser,
 		vmmtest.EnvOr("SPARKBOX_PARITY_QEMU", "(New's default for this arch)"),
-		vmmtest.EnvOr("SPARKBOX_PARITY_MACHINE_TYPE", "(New's default for this arch)"),
+		effectiveMachineType(t, cfg),
 		cfg.vcpus, cfg.memMB, launcher)
 	return cfg
+}
+
+// effectiveMachineType is the machine model this run will actually boot.
+//
+// It exists because the log line used to print the ENV VALUE, with
+// "(New's default for this arch)" standing in for the empty case — so the one
+// field that decides whether a snapshot can ever be restored was the one field
+// the log did not report. That is not a cosmetic gap: run-on-cks.sh compares
+// this against the machine type the privileged helper logged, and a placeholder
+// makes that comparison unable to pass.
+//
+// Resolved through qemuargs.DefaultMachineType, the same function New calls, so
+// this reports New's answer rather than a second guess at it. It is deliberately
+// NOT passed to New: letting New default is what makes the helper-mode
+// comparison a test of two processes independently reaching the same value.
+func effectiveMachineType(t *testing.T, cfg parityConfig) string {
+	t.Helper()
+	if cfg.machineType != "" {
+		return cfg.machineType
+	}
+	machineType, err := qemuargs.DefaultMachineType()
+	if err != nil {
+		t.Fatalf("no default machine type: %v", err)
+	}
+	return machineType
 }
 
 // newParitySigner returns the key this run's guests will accept.
