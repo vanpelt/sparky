@@ -421,7 +421,7 @@
      one card with a form stuck to the top of it. The rule is one list rather
      than a margin on .card because the tables below are the last thing in
      their tab and gain nothing from it. */
-  #env-form-card, #env-script-panel,
+  #env-form-card, #env-script-panel, #env-log-panel,
   #sec-form-card, #nr-form-card, #rp-form-card { margin-bottom: 14px; }
 
   .env-card { margin-bottom: 10px; }
@@ -506,6 +506,10 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
     border-radius: calc(var(--radius) - 2px); border: 1px solid hsl(var(--border));
     background: hsl(var(--background)); color: hsl(var(--foreground)); }
+  /* The log viewer's textarea: same box, visibly not a place to type — the
+     script editor's own readonly field (.secret-form input[readonly]) makes
+     the same choice for the same reason. */
+  .script-box[readonly] { background: hsl(var(--muted) / .6); color: hsl(var(--muted-foreground)); }
   .script-actions { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; }
 
   /* The one <select> in this console — the repo form's Access. The input rules
@@ -936,6 +940,23 @@
           <button class="btn-primary" id="env-script-save">Save script</button>
           <button class="btn-outline" id="env-script-close">Close</button>
           <span class="hint" id="env-script-note"></span>
+        </div>
+      </div>
+
+      <div class="card panel hidden" id="env-log-panel">
+        <div class="panel-head">
+          <h2 id="env-log-title">build log</h2>
+        </div>
+        <div class="notice">
+          What the last build itself printed — the setup script's own output in a script
+          build, the runner's in an agent build. It is a fixed record of that run, capped at a
+          few KB; it does not update while a build is in progress.
+        </div>
+        <div style="padding:14px">
+          <textarea id="env-log" class="script-box" spellcheck="false" readonly></textarea>
+        </div>
+        <div class="script-actions">
+          <button class="btn-outline" id="env-log-close">Close</button>
         </div>
       </div>
 
@@ -3114,13 +3135,19 @@
     const read = e.build_session
       ? sessionLink(e.build_session, "", "Read what the agent did")
       : "";
-    const actions = box || read
+    // What the run ITSELF printed, as opposed to the agent's own narration —
+    // the only account a failed SCRIPT build has, and on a failed agent build
+    // a second, more literal one next to the transcript above.
+    const viewLog = e.has_build_log
+      ? '<button class="btn-outline btn-sm" data-envlog="' + esc(e.name) + '">View log</button>'
+      : "";
+    const actions = box || read || viewLog
       ? '<div class="chips">' +
           (box && live
             ? '<button class="btn-outline btn-sm" data-envterm="' + esc(box) +
               '" data-running="' + (live.state === "running" ? 1 : 0) + '">Open a terminal</button>'
             : "") +
-          read +
+          read + viewLog +
           (box
             ? '<button class="btn-outline btn-sm" data-envcapture="' + esc(e.name) +
               '">Keep this disk</button>'
@@ -3155,7 +3182,13 @@
     const wrote = e.build_session && e.state !== "failed"
       ? " · " + sessionLinkInline(e.build_session, "how it was written")
       : "";
-    return '<div class="env-foot"><div>' + what + wrote + "</div>" +
+    // The failed strip carries its own "View log" button for the same reason
+    // build_session's does — read from the top on a failure, from here once
+    // the build is behind you.
+    const log = e.has_build_log && e.state !== "failed"
+      ? ' · <a href="#" class="linkish" data-envlog="' + esc(e.name) + '">view log</a>'
+      : "";
+    return '<div class="env-foot"><div>' + what + wrote + log + "</div>" +
       '<button class="btn-outline btn-sm" data-envscript="' + esc(e.name) + '">' +
       (e.has_setup ? "Edit script" : "Write one now") + "</button></div>";
   }
@@ -3342,6 +3375,13 @@
       }));
     host.querySelectorAll("button[data-envscript]").forEach((btn) =>
       btn.addEventListener("click", () => openEnvScript(btn.dataset.envscript, btn)));
+    // Both a chip button (the failed strip) and an inline link (the foot) carry
+    // this attribute, so the selector has no tag name.
+    host.querySelectorAll("[data-envlog]").forEach((el) =>
+      el.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        openEnvLog(el.dataset.envlog, el);
+      }));
     host.querySelectorAll("button[data-envedit]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const e = list.find((x) => x.name === btn.dataset.envedit);
@@ -3564,6 +3604,34 @@
   $("env-script-close").addEventListener("click", () => {
     envScriptName = null;
     $("env-script-panel").classList.add("hidden");
+  });
+
+  // ---- the build log viewer ----
+  //
+  // Read-only, unlike the script editor above: nothing typed in this box is
+  // ever sent anywhere, so there is no save button and no `putEnvBuildLog` to
+  // call. It fetches fresh on every open rather than reading has_build_log's
+  // sibling field, for the reason the script editor does the same — the row
+  // in `lastEnvs` is at most 4s stale, and the point of opening this is to
+  // read the actual bytes.
+  async function openEnvLog(name, el) {
+    el.disabled = true;
+    try {
+      const got = await api("/api/environments/" + encodeURIComponent(name) + "/log");
+      $("env-log-title").textContent = "build log — " + name;
+      $("env-log").value = got.log || "";
+      $("env-log-panel").classList.remove("hidden");
+      $("env-log").scrollTop = 0;
+      $("env-log-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      el.disabled = false;
+    }
+  }
+
+  $("env-log-close").addEventListener("click", () => {
+    $("env-log-panel").classList.add("hidden");
   });
 
   // ---- tabs / shell ----

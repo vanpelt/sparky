@@ -229,7 +229,11 @@ _ENVIRONMENTS = [
      "state": "ready", "built_at": _iso(11400), "snapshot": "web-20260902-1412",
      # A finished agent build keeps its transcript, and this is the only thing
      # that survives the builder: the box was destroyed when it succeeded.
-     "build_session": "https://hivemind.example/sessions/web-build"},
+     "build_session": "https://hivemind.example/sessions/web-build",
+     # A successful build's own output outlives the builder too — this is here
+     # so the foot's "· view log" link (as opposed to the failed strip's own
+     # button) is reachable in a preview.
+     "has_build_log": True, "build_log_bytes": 4108},
     # An agent build in flight: no script yet, because writing one is what the
     # agent is doing. This is the state a FIRST build of an environment is in.
     {"name": "selfhost", "description": "single-container selfhost image",
@@ -251,7 +255,11 @@ _ENVIRONMENTS = [
                     "run in it, so no later build could reproduce it. The builder "
                     "weave-py-build is paused \u2014 `ssh weave-py-build@sparkbox.example` to look, "
                     "then `ssh ctl@sparkbox.example env capture weave-py` to finish it, or "
-                    "`ssh ctl@sparkbox.example rm weave-py-build` to start over"},
+                    "`ssh ctl@sparkbox.example rm weave-py-build` to start over",
+     # has_build_log alone is what the card reads to draw the "View log"
+     # button \u2014 the bytes themselves come back from /api/environments/{name}/log
+     # (see _ENV_BUILD_LOGS below), fetched only when that button is pressed.
+     "has_build_log": True, "build_log_bytes": 812},
     {"name": "scratch", "description": "empty starting point for one-off experiments",
      "repos": [], "secrets": [], "rules": [], "vars": [],
      "has_setup": False, "setup_bytes": 0, "setup_from": "", "state": "draft", "snapshot": ""},
@@ -260,6 +268,21 @@ _ENV_SCRIPT = {"from": "agent", "script": "#!/usr/bin/env bash\n"
                "set -euo pipefail\n\n"
                "sudo apt-get -y install postgresql-client\n"
                "pnpm install\n"}
+# What GET /api/environments/{name}/log answers, keyed by environment name —
+# the run's own stdout/stderr, the way SetupReport.Log arrives in the real
+# thing: plain text, not JSON, capped by the gateway at a few KB.
+_ENV_BUILD_LOGS = {
+    "web": "+ sudo apt-get -y install postgresql-client\n"
+           "Reading package lists...\nBuilding dependency tree...\n"
+           "postgresql-client is already the newest version.\n"
+           "+ pnpm install\nLockfile is up to date, resolution step is skipped\n"
+           "Packages: +412\nProgress: resolved 412, reused 412, downloaded 0, added 412, done\n"
+           "Done in 3.8s\n",
+    "weave-py": "+ pip install -e .\nERROR: Could not find a version that satisfies the "
+                "requirement weave-internal-tools>=2.4 (from weave-py)\n"
+                "ERROR: No matching distribution found for weave-internal-tools>=2.4\n"
+                "+ echo 'setup failed'\nsetup failed\n",
+}
 
 def _dom(domain, display, resolved, tx, rx):
     return {"domain": domain, "display": display, "resolved": resolved,
@@ -286,6 +309,7 @@ _STUB = """
   var ME = %(me)s, SECRETS = %(secrets)s, SNAPSHOTS = %(snapshots)s;
   var NETRULES = %(netrules)s, BANDWIDTH = %(bandwidth)s, REPOS = %(repos)s;
   var USAGE = %(usage)s, ENVIRONMENTS = %(environments)s, ENVSCRIPT = %(envscript)s;
+  var ENVBUILDLOGS = %(envbuildlogs)s;
   function machines() {
     tick += 1;
     var list = %(machines_fn)s(tick);
@@ -337,6 +361,10 @@ _STUB = """
     if (u.indexOf("/api/network-rules") >= 0 && m === "GET") return J(NETRULES);
     if (u.indexOf("/api/repos") >= 0 && m === "GET") return J(REPOS);
     if (/\\/api\\/environments\\/[^/]+\\/script/.test(u) && m === "GET") return J(ENVSCRIPT);
+    var envLog = u.match(/\\/api\\/environments\\/([^/]+)\\/log/);
+    if (envLog && m === "GET") {
+      return J({ log: ENVBUILDLOGS[decodeURIComponent(envLog[1])] || "" });
+    }
     if (u.indexOf("/api/environments") >= 0 && m === "GET") return J(ENVIRONMENTS);
     var bw = u.match(/\\/api\\/machines\\/([^/]+)\\/bandwidth/);
     if (bw && m === "GET") return J(BANDWIDTH[decodeURIComponent(bw[1])] || { name: "", domains: [] });
@@ -741,6 +769,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "repos": json.dumps(_REPOS), "usage": json.dumps(_USAGE),
                 "environments": json.dumps(_ENVIRONMENTS),
                 "envscript": json.dumps(_ENV_SCRIPT),
+                "envbuildlogs": json.dumps(_ENV_BUILD_LOGS),
             }
         theme = ""
         if "theme=dark" in self.path:

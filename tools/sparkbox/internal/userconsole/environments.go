@@ -45,6 +45,7 @@ type Environments interface {
 	UnsetEnvVar(ctx context.Context, c ctlops.Caller, env, name string) error
 	EnvScript(c ctlops.Caller, name string) (script, from string, err error)
 	SetEnvScript(c ctlops.Caller, name, script, from string) error
+	EnvBuildLog(c ctlops.Caller, name string) (log string, err error)
 	AdoptRepoScript(ctx context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
 	BuildEnvironment(ctx context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
 	CaptureEnvironment(ctx context.Context, c ctlops.Caller, name string) (ctlops.EnvironmentInfo, error)
@@ -272,6 +273,24 @@ func (h *Handler) putEnvScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// getEnvBuildLog is a route of its own for EnvScript's reason: a listing that
+// inlined a build's whole log per row would be unreadable, and the panel
+// wants only the text. Read-only, unlike getEnvScript/putEnvScript's pair —
+// nothing this panel sends ever becomes this column, only a guest's report
+// does.
+func (h *Handler) getEnvBuildLog(w http.ResponseWriter, r *http.Request) {
+	if h.envs == nil {
+		writeErr(w, http.StatusNotImplemented, "environments are not enabled on this host")
+		return
+	}
+	log, err := h.envs.EnvBuildLog(envCaller(r), r.PathValue("name"))
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"log": log})
 }
 
 // adoptRepoScript replaces this environment's script with the one in an
