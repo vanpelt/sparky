@@ -185,7 +185,13 @@ func TestPrivateRouteRedirectsBrowserAndChallengesAPI(t *testing.T) {
 	as.route(t, "secret", "secret", "alice", port, routes.VisibilityPrivate)
 
 	// Browser with no session -> 303 to the login subdomain, carrying return.
-	resp := as.req(t, "secret.hivemind.tools", asBrowser)
+	// X-Forwarded-Proto simulates the TLS-terminating front end production
+	// runs behind — same convention as TestApexRedirectHonoursForwardedProto —
+	// since the bare httptest request carries no TLS of its own and the
+	// redirect's scheme now follows the request rather than assuming https.
+	resp := as.req(t, "secret.hivemind.tools", asBrowser, func(r *http.Request) {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	})
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303 redirect, got %d", resp.StatusCode)
 	}
