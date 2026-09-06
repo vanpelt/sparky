@@ -33,7 +33,7 @@ func argsTestDriver(t *testing.T, subnet, subnet6, guestDNS string) *Driver {
 			MachineType: "virt-8.2",
 			GuestDNS:    guestDNS,
 		},
-		net: hostnet.Plumbing{Net: guestnet.MustParse(subnet), TapPrefix: tapPrefix},
+		net: hostnet.Plumbing{Net: guestnet.MustParse(subnet), TapPrefix: defaultTapPrefix},
 	}
 	if subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(subnet6)
@@ -278,7 +278,7 @@ func argsValidSpec() qemuSpec {
 		VCPUs:       2,
 		MemMB:       1024,
 		RootfsPath:  "/state/qemu-vms/box/rootfs.ext4",
-		TapName:     "sbqtap3",
+		TapName:     "sbtap3",
 		MAC:         "02:5b:01:00:00:03",
 		QMPSocket:   "/state/qemu-vms/box/qmp.sock",
 		SerialLog:   "/state/qemu-vms/box/serial.log",
@@ -305,7 +305,7 @@ func TestBuildQemuArgsColdBoot(t *testing.T) {
 		"-append", "console=ttyAMA0 root=/dev/vda rw",
 		"-drive", "file=/state/qemu-vms/box/rootfs.ext4,format=raw,if=none,id=rootfs",
 		"-device", "virtio-blk-pci,drive=rootfs,romfile=",
-		"-netdev", "tap,id=net0,ifname=sbqtap3,script=no,downscript=no",
+		"-netdev", "tap,id=net0,ifname=sbtap3,script=no,downscript=no",
 		"-device", "virtio-net-pci,netdev=net0,mac=02:5b:01:00:00:03,romfile=",
 		"-device", "virtio-balloon-pci,id=balloon0,deflate-on-oom=on,romfile=",
 		"-qmp", "unix:/state/qemu-vms/box/qmp.sock,server=on,wait=off",

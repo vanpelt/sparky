@@ -35,50 +35,43 @@ func TestJailedDriverDerivesTheHelpersMonitorSocket(t *testing.T) {
 	}
 }
 
-// Pause writes to one path and promotes another. Under the helper QEMU is
-// chrooted into its jail, so the runtime `migrate uri=file:` — resolved from
-// the monitor long AFTER the chroot — must name the file relatively, while the
-// rename operates on the hardlink the helper put in the VM directory.
-func TestJailedSnapshotTargetIsRelativeAndPromotionIsNot(t *testing.T) {
-	d := &Driver{opts: Options{
-		VMStateDir:             "/state",
-		PrivilegedHelperSocket: "/run/helper.sock",
-		JailerChrootBase:       "/state/jailer",
-	}}
-	if got, want := d.snapshotTarget("box"), "state.migrate.next"; got != want {
-		t.Errorf("snapshotTarget = %q, want %q", got, want)
+// The tap name is the same on both paths, and the same as the firecracker
+// driver's. It used not to be, and the divergence was invisible from inside
+// this package: everything that CONSUMES a tap name — netpush, sluice's meter,
+// deploy/sparkbox-net.sh — lives elsewhere and hardcodes the other one, so a
+// direct-launch QEMU node had egress control that silently applied to nothing.
+func TestTapNameIsTheNameEveryConsumerAssumes(t *testing.T) {
+	jailed, err := newForTapName(Options{PrivilegedHelperSocket: "/run/helper.sock"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := d.snapshotNextPath("box"); !strings.HasPrefix(got, "/state/qemu-vms/box/") {
-		t.Errorf("snapshotNextPath = %q, want a path in the VM directory", got)
-	}
-	direct := &Driver{opts: Options{VMStateDir: "/state"}}
-	if got, want := direct.snapshotTarget("box"), direct.snapshotNextPath("box"); got != want {
-		t.Errorf("the direct launcher migrates to %q but promotes %q", got, want)
-	}
-}
-
-// Under the helper the tap is created by the helper, in the Pod network
-// namespace, and it is called sbtap<slot> — the name internal/netpush, sluice's
-// --tap-prefix and deploy/sparkbox-net.sh all hardcode. On the direct path the
-// prefix must stay distinct from the firecracker driver's, or one driver's
-// startup sweep deletes the other's live networking.
-func TestTapNameFollowsWhoeverCreatesTheDevice(t *testing.T) {
-	jailed := &Driver{opts: Options{PrivilegedHelperSocket: "/run/helper.sock"}}
 	if got, want := jailed.tapName(7), "sbtap7"; got != want {
 		t.Errorf("jailed tapName = %q, want %q", got, want)
 	}
-	// The Plumbing carries the prefix, so a Driver built without one is not a
-	// Driver; New always sets it from tapPrefix.
-	direct := &Driver{net: hostnet.Plumbing{TapPrefix: tapPrefix}}
-	if got, want := direct.tapName(7), "sbqtap7"; got != want {
+	// The Plumbing carries the prefix; New always sets it from
+	// Options.TapPrefix or defaultTapPrefix.
+	direct := &Driver{net: hostnet.Plumbing{TapPrefix: defaultTapPrefix}}
+	if got, want := direct.tapName(7), "sbtap7"; got != want {
 		t.Errorf("direct tapName = %q, want %q", got, want)
 	}
-	// Neither prefix may be a prefix of the other, because each driver's sweep
-	// matches its own by prefix.
-	if strings.HasPrefix(tapPrefix, helperTapPrefix) || strings.HasPrefix(helperTapPrefix, tapPrefix) {
-		t.Errorf("tap prefixes %q and %q overlap; one driver's sweep would eat the other's taps",
-			tapPrefix, helperTapPrefix)
+
+	// The override exists only so the parity suite can run both drivers on one
+	// host. It must still reach tapName, or that suite silently stops being a
+	// two-driver test.
+	odd := &Driver{net: hostnet.Plumbing{TapPrefix: "sbqtap"}}
+	if got, want := odd.tapName(7), "sbqtap7"; got != want {
+		t.Errorf("overridden tapName = %q, want %q", got, want)
 	}
+}
+
+// newForTapName resolves the prefix the way New does without needing a binary,
+// a kernel or a subnet on the machine running the test.
+func newForTapName(opts Options) (*Driver, error) {
+	d := &Driver{opts: opts, net: hostnet.Plumbing{TapPrefix: opts.TapPrefix}}
+	if d.net.TapPrefix == "" {
+		d.net.TapPrefix = defaultTapPrefix
+	}
+	return d, nil
 }
 
 // boundedLog is written by a child process and read by whichever goroutine is

@@ -118,7 +118,7 @@ import (
 //	func (d *Driver) stopVMM(st *vmState) error // nil once the child is reaped, however that happened
 //	func (d *Driver) instance(name string, st *vmState) *vmm.Instance
 //	func (d *Driver) freeSlot() (int, error)    // caller holds d.mu
-//	func d.net.TapName(idx int) string                // tapPrefix + strconv.Itoa(idx)
+//	func (d *Driver) tapName(idx int) string          // d.net.TapPrefix + slot
 //	func d.net.SweepStale()
 //	func hostnet.DefaultRoute6Dev() string
 //
@@ -472,6 +472,24 @@ type Options struct {
 	// HelperControllerGID is the group the helper shares VM files and the QMP
 	// socket with, so this unprivileged process can reach them.
 	HelperControllerGID int
+	// TapPrefix overrides the host tap device name prefix. Empty is
+	// defaultTapPrefix, which is what every deployment uses and what every
+	// consumer of a tap name assumes.
+	//
+	// IT EXISTS FOR ONE CALLER: the parity suite, which exercises this driver
+	// and the firecracker one against real guests on ONE host, concurrently.
+	// Both allocate from slot 0 up, so with one prefix they would name the same
+	// device — and each driver's startup sweep would delete the other's live
+	// taps on top of that. Neither is a production shape: a node runs one VMM,
+	// and under the privileged helper neither driver creates or sweeps a tap at
+	// all.
+	//
+	// Setting it in production silently disables egress control. sluice's meter
+	// attaches to defaultTapPrefix+, netpush keys per-tap policy on it, and
+	// deploy/sparkbox-net.sh writes its iptables rules against it — none of
+	// which are configurable from here, and all of which would then be talking
+	// about devices that do not exist. There is deliberately no flag for it.
+	TapPrefix string
 	// JailerChrootBase is the root-owned directory beneath which the helper
 	// builds its per-slot jails, and it must be the helper's --chroot-base.
 	//
@@ -532,40 +550,26 @@ const (
 	// template, telling the gateway which account to log a fork in as.
 	loginUserSuffix = ".login-user"
 
-	// tapPrefix deliberately differs from the firecracker driver's "sbtap".
-	// Each driver's New() sweeps stale devices carrying its own prefix, so a
-	// shared prefix would mean constructing one driver silently deletes the
-	// other's live networking. Neither prefix is a prefix of the other, so the
-	// two sweeps cannot overlap. (The spike's throwaway probe used "sbtapq0",
-	// which fc's sweep would have eaten — that is how the hazard was noticed.)
+	// defaultTapPrefix is the name EVERY consumer of a tap device already
+	// hardcodes: internal/netpush, internal/vmhelper, internal/hostsetup's
+	// sluice --tap-prefix, deploy/kubernetes/sluice-entrypoint.sh and the
+	// ~15 iptables rules in deploy/sparkbox-net.sh. Both drivers use it.
 	//
-	// UNIFYING THIS IS PLANNED, AND IT BELONGS WITH THE PRIVILEGED HELPER, NOT
-	// BEFORE IT. The payoff is entirely on that path: internal/netpush,
-	// internal/hostsetup's sluice --tap-prefix, internal/vmhelper's own tapName
-	// and deploy/sparkbox-net.sh all hardcode "sbtap", and under the helper the
-	// tap is created by the helper anyway — so a QEMU node running there would
-	// have the driver's name for the device disagree with the device that
-	// exists. That is the change to make, once the driver has a helper path.
+	// THIS USED TO BE "sbqtap" ON THE DIRECT PATH, and that was a silent
+	// product bug rather than a cosmetic difference. On a direct-launch QEMU
+	// node the guests' taps were sbqtap<n>, so sluice's meter — attached to
+	// sbtap+ — never saw them, and netpush pushed per-tap egress policy keyed
+	// on sbtap<n>, a device that did not exist. Egress control was not
+	// degraded on that node; it was absent, and nothing anywhere said so.
 	//
-	// It cannot be made now, and vmm.ClaimStateDir is not enough to make it
-	// safe. The claim stops a second driver from being CONSTRUCTED against a
-	// state directory the first one owns, which covers every deployment. It does
-	// not cover the parity suite: each fixture builds its own MkdirTemp state
-	// dir, so both drivers claim cleanly, while sweepStaleTaps is host-global.
-	// `go test ./...` on a gated Linux host runs the two packages concurrently,
-	// and a shared prefix would have each driver's New() delete the other's live
-	// taps mid-run. When the helper path lands, this constant follows the
-	// helper's name and the sweep gets the same `PrivilegedHelperSocket == ""`
-	// guard fc.go:314 already has — which is what makes it a non-issue there,
-	// because the helper path does not sweep at all.
-	tapPrefix = "sbqtap"
-	// helperTapPrefix is the privileged helper's name for the same device, and
-	// it is the firecracker one because the helper is shared: internal/netpush,
-	// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
-	// match "sbtap", and under the helper the tap is created there. The two
-	// sweeps still cannot collide — this driver does not sweep at all when the
-	// helper is configured.
-	helperTapPrefix = "sbtap"
+	// The divergence bought one thing, named in the comment that used to live
+	// here: each driver's New() sweeps stale devices carrying its own prefix,
+	// so a shared prefix means constructing one driver deletes the other's
+	// live taps. That is now Options.TapPrefix's job, and it is a far better
+	// trade — the sweep hazard is confined to one test fixture, where a lost
+	// tap is a failed test, while the prefix mismatch was confined to
+	// production, where a lost policy is a sandbox with unfiltered egress.
+	defaultTapPrefix = "sbtap"
 
 	// balloonDeviceID is the argv's, from the package that builds the argv:
 	// the QOM path guest stats are read from is derived from `id=`, so the name
@@ -755,12 +759,18 @@ func New(opts Options) (*Driver, error) {
 
 	d := &Driver{
 		opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{},
-		net: hostnet.Plumbing{Net: guestNetwork, TapPrefix: tapPrefix}, reservedSlots: map[int]bool{},
+		net: hostnet.Plumbing{Net: guestNetwork}, reservedSlots: map[int]bool{},
 	}
 	if dnsAddr, err := netip.ParseAddr(opts.GuestDNS); err == nil {
 		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
 			d.reservedSlots[index] = true
 		}
+	}
+	// The prefix every consumer of a tap name already assumes. Options.TapPrefix
+	// overrides it for the parity suite and nothing else.
+	d.net.TapPrefix = opts.TapPrefix
+	if d.net.TapPrefix == "" {
+		d.net.TapPrefix = defaultTapPrefix
 	}
 
 	if opts.Subnet6 != "" {
