@@ -299,7 +299,31 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		h.handoff(w, r, t, best.Info)
 		return
 	}
-	h.render(w, http.StatusOK, h.confirm(c, t, att, best, others))
+	h.render(w, http.StatusOK, h.confirm(c, t, att, best, others, refererIsOwnDomain(r, h.domain)))
+}
+
+// refererIsOwnDomain reports whether r arrived with a Referer naming this
+// deployment's own zone or one of its subdomains — the signal that the
+// visitor followed a link inside the product, such as an environment page's
+// Launch button, rather than one posted somewhere else.
+//
+// An absent or unparsable Referer answers false, same as a foreign one: a
+// stripped Referer is indistinguishable from "came from outside" and gets the
+// same caution a stranger's link would.
+func refererIsOwnDomain(r *http.Request, domain string) bool {
+	if domain == "" {
+		return false
+	}
+	ref := r.Header.Get("Referer")
+	if ref == "" {
+		return false
+	}
+	u, err := url.Parse(ref)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 // home answers GET / on this door: a bare visit to go.<domain>, with no
@@ -382,7 +406,7 @@ func (h *Handler) handoff(w http.ResponseWriter, r *http.Request, t target, info
 // the surprise this page exists to remove — `default` is stamped on every
 // create, so a visitor who has three repositories on `default` gets three
 // checkouts from a link that named one.
-func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, best *candidate, others []candidate) pageData {
+func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, best *candidate, others []candidate, trustedReferrer bool) pageData {
 	choice := h.launchTags(c, att)
 	if t.Env != "" {
 		choice = tagChoice{Tags: []string{t.Env}, Chosen: t.Env}
@@ -435,14 +459,21 @@ func (h *Handler) confirm(c ctlops.Caller, t target, att repos.Repo, best *candi
 		HeadingSlug: att.Slug,
 		Lead: "You have no sandbox holding this repository on this branch yet. " +
 			"Building one takes a few seconds, and it is yours — clicking this link again lands you straight back in it.",
-		Facts: facts,
-		Caution: "Whoever posted this link chose the branch. Its code, and anything an agent reads there, " +
-			"runs in your sandbox with a GitHub token minted for this repository. Only click through for a branch you would run.",
+		Facts:  facts,
 		Action: formAction(t),
 		Submit: "Create a sandbox",
 		Home:   h.homeURL,
 		Others: h.otherBoxes(others),
 		Foot:   foot,
+	}
+	if !trustedReferrer {
+		// A visitor who navigated here from inside the product — the
+		// environment page's own Launch button, say — already trusts the
+		// branch it names; the caution is for whoever followed a link a
+		// stranger posted, which is everyone else, including a bare paste
+		// with no Referer at all.
+		data.Caution = "Whoever posted this link chose the branch. Its code, and anything an agent reads there, " +
+			"runs in your sandbox with a GitHub token minted for this repository. Only click through for a branch you would run."
 	}
 	if t.Fresh {
 		// The visitor arrived here by pressing "create a new one" on the screen

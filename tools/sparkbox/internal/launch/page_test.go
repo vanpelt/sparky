@@ -224,6 +224,43 @@ func TestConfirmPageRenders(t *testing.T) {
 	}
 }
 
+// TestConfirmPageCautionFollowsReferer covers the whole point of the caution
+// sentence: it is for a visitor who arrived from a stranger's link, and it has
+// no business scaring someone who pressed "Launch" on their own environment
+// page and landed here by the ordinary front door.
+func TestConfirmPageCautionFollowsReferer(t *testing.T) {
+	store := attached(testHandle, attachment("main", "hm"), nil)
+
+	for _, tc := range []struct {
+		name       string
+		opts       []func(*http.Request)
+		wantCation bool
+	}{
+		{name: "no referer at all", wantCation: true},
+		{name: "referer from a foreign site",
+			opts: []func(*http.Request){fromReferer("https://evil.example/post")}, wantCation: true},
+		{name: "referer from this zone's own console",
+			opts: []func(*http.Request){fromReferer("https://my.example.test/environments")}, wantCation: false},
+		{name: "referer from this door itself",
+			opts: []func(*http.Request){fromReferer("https://go.example.test/")}, wantCation: false},
+		{name: "referer host merely ends in the zone as a suffix, not a subdomain",
+			opts: []func(*http.Request){fromReferer("https://notexample.test/")}, wantCation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandler(t, &fakeOps{t: t}, store)
+			opts := append([]func(*http.Request){asBrowser, signedIn(t, testHandle)}, tc.opts...)
+			rec := serveLaunch(t, h, http.MethodGet, "https://go.example.test/wandb/hivemind", opts...)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			got := strings.Contains(rec.Body.String(), "chose the branch")
+			if got != tc.wantCation {
+				t.Errorf("caution present = %v, want %v", got, tc.wantCation)
+			}
+		})
+	}
+}
+
 // TestConfirmPageListsTheEscapeHatch covers the one branch case no fold can
 // decide, and the page's answer to it.
 //
