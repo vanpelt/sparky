@@ -1113,8 +1113,6 @@
 <script>
 (function () {
   /*SHARED_JS*/
-  let timer = null;
-
   const ENV_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
   const TAG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
   const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/; // mirrors the host manager's nameRe
@@ -1171,13 +1169,17 @@
       parts.map(encodeURIComponent).join("/") + "?env=" + encodeURIComponent(env);
   }
 
+  // machinesPoller owns refresh()'s cadence: schedule-after-completion (so a
+  // slow response never overlaps the next tick), backoff on failure, and a
+  // pause while the tab is hidden. See shared.js's createPoller.
+  const machinesPoller = createPoller(refresh, { interval: 4000 });
+
   function show(view) {
     $("signin-view").classList.toggle("hidden", view !== "signin");
     $("app-view").classList.toggle("hidden", view !== "app");
     $("error-view").classList.toggle("hidden", view !== "error");
     if (view !== "app") {
-      clearInterval(timer);
-      timer = null;
+      machinesPoller.stop();
     }
     if (view === "signin") {
       $("signin-link").href = location.protocol + "//login." + domain() + portSuffix() +
@@ -1454,10 +1456,11 @@
   // refreshNet fetches one machine's per-domain bandwidth into the cache. A
   // failure (e.g. metering disabled) is stored as an error the panel renders,
   // not thrown, so a poll for an open panel never breaks the dashboard.
-  async function refreshNet(name) {
+  async function refreshNet(name, signal) {
     try {
-      netData[name] = await api("/api/machines/" + encodeURIComponent(name) + "/bandwidth");
+      netData[name] = await api("/api/machines/" + encodeURIComponent(name) + "/bandwidth", { signal });
     } catch (e) {
+      if (e.name === "AbortError") throw e;
       netData[name] = { domains: [], error: e.unauthorized ? "" : e.message };
     }
   }
@@ -1469,7 +1472,9 @@
       netOpen.add(name);
       if (!netData[name]) await refreshNet(name);
     }
-    renderMachines(lastMachines);
+    // lastMachines is stale data as far as CPU sampling is concerned — this is
+    // a repaint of the panel, not a new poll. See renderMachines's sample flag.
+    renderMachines(lastMachines, { sample: false });
   }
 
   // editing reports whether the user is mid-interaction with an inline editor
@@ -1533,12 +1538,35 @@
   // as clickable; renderers re-disable any rebuilt button whose key is here.
   const inflight = new Set();
 
+  // visKey builds the in-flight key for a route-visibility mutation. It is the
+  // ONE place that string gets built: visibility is set per port (a route can
+  // list several ports, each toggled by its own button — see console.go's
+  // setVisibility), so the key must include the port or two concurrently
+  // in-flight requests on the same subdomain collapse into the same key and
+  // the wrong one gets re-enabled. mutate()'s call site and inflightKey below
+  // both go through this so they can never drift apart again the way they did
+  // before ("vis:sub:port" built here, "vis:sub" built there — the mismatch
+  // meant inflight.has() could never match, so a rebuilt visibility button
+  // silently came back enabled mid-request).
+  function visKey(sub, port) {
+    return "vis:" + sub + ":" + (Number(port) || 0);
+  }
+
+  // forgetKey is visKey's same fix for the same reason: forgetPort is also
+  // per-port (DELETE /api/routes/{subdomain}/ports/{port}), so the key has to
+  // include the port here too, built through one function so the mutate() call
+  // site and inflightKey below cannot drift apart the way vis: did.
+  function forgetKey(sub, port) {
+    return "forget:" + sub + ":" + (Number(port) || 0);
+  }
+
   function inflightKey(btn) {
     const d = btn.dataset;
     if (d.act) return "act:" + d.name + ":" + d.act;
     if (d.turbo) return "turbo:" + d.turbo;
     if (d.snap) return "snap:" + d.snap;
-    if (d.vis) return "vis:" + d.sub;
+    if (d.vis) return visKey(d.sub, d.port);
+    if (d.forget) return forgetKey(d.forget, d.port);
     if (d.untag) return "tags:" + d.name;
     if (d.fork) return "fork:" + d.fork;
     if (d.del) return "delsnap:" + d.del;
@@ -1576,7 +1604,7 @@
       inflight.delete(key);
       btn.disabled = false;
     }
-    if (ok) await refresh();
+    if (ok) await machinesPoller.run();
   }
 
   // ---- machines ----
@@ -1895,11 +1923,21 @@
       "</div>";
   }
 
-  function renderMachines(list) {
+  // sample: false repaints from the existing cpuNow/cpuPrev state instead of
+  // taking a fresh reading. toggleNet needs this — it calls back in with
+  // lastMachines, the same array the last real poll already sampled, purely to
+  // redraw the newly opened/closed egress panel. Without this flag that second
+  // call would feed cpuPct the same cpu_seconds at a later "now", corrupting
+  // every visible machine's baseline: an instant spurious 0% on the toggle
+  // itself, then an inflated reading on the next real poll once the window it
+  // divides by has been shortened out from under it.
+  function renderMachines(list, { sample = true } = {}) {
     const now = Date.now();
-    // Always take a CPU sample so the delta window stays fresh even when the
-    // repaint is skipped mid-edit.
-    for (const b of list) cpuNow[b.name] = cpuPct(b, now);
+    if (sample) {
+      // Always take a CPU sample so the delta window stays fresh even when the
+      // repaint is skipped mid-edit.
+      for (const b of list) cpuNow[b.name] = cpuPct(b, now);
+    }
     // The footprint card carries no editable field, so it is painted before
     // the editing() guard: there is nothing on it for a repaint to steal focus
     // from, and holding it stale for as long as someone leaves a tag box
@@ -1950,7 +1988,7 @@
     wrap.querySelectorAll("button[data-vis]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const port = Number(btn.dataset.port) || 0;
-        mutate("vis:" + btn.dataset.sub + ":" + port, btn, async () => {
+        mutate(visKey(btn.dataset.sub, port), btn, async () => {
           await api("/api/routes/" + encodeURIComponent(btn.dataset.sub) + "/visibility",
             { method: "POST", body: { visibility: btn.dataset.vis, port: port } });
           toast(btn.dataset.sub + ":" + port + " is now " + btn.dataset.vis);
@@ -1959,7 +1997,7 @@
     wrap.querySelectorAll("button[data-forget]").forEach((btn) =>
       btn.addEventListener("click", () => {
         const port = Number(btn.dataset.port) || 0;
-        mutate("forget:" + btn.dataset.forget + ":" + port, btn, async () => {
+        mutate(forgetKey(btn.dataset.forget, port), btn, async () => {
           await api("/api/routes/" + encodeURIComponent(btn.dataset.forget) +
             "/ports/" + port, { method: "DELETE" });
           toast("port " + port + " is no longer listed");
@@ -2031,7 +2069,7 @@
         { method: "POST", body: { new_name: newName } });
       dlg.close();
       toast(oldName + " renamed to " + newName + " — hostname updates on next reboot");
-      await refresh();
+      await machinesPoller.run();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -2122,7 +2160,7 @@
         { method: "POST", body: { port: port } });
       dlg.close();
       toast(name + " now forwards port " + port);
-      await refresh();
+      await machinesPoller.run();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -2160,7 +2198,7 @@
         { method: "POST", body: { visibility: "private", port: port } });
       dlg.close();
       toast("port " + port + " added — click its pill to make it public");
-      await refresh();
+      await machinesPoller.run();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -2208,7 +2246,7 @@
       await api("/api/machines/" + encodeURIComponent(name), { method: "DELETE" });
       dlg.close();
       toast(name + " removed");
-      await refresh();
+      await machinesPoller.run();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -2552,7 +2590,7 @@
       toast(name + " saved — new shells see it now; reboot machines to update running processes");
       resetSecretForm();
       closeForm("sec-form-card");
-      await refresh();
+      await machinesPoller.run();
     } catch (e2) {
       toast(e2.message, true);
     } finally {
@@ -2729,7 +2767,7 @@
       toast(name + " saved — applies to tagged machines within seconds");
       resetNetRuleForm();
       closeForm("nr-form-card");
-      await refresh();
+      await machinesPoller.run();
     } catch (e2) {
       toast(e2.message, true);
     } finally {
@@ -2952,7 +2990,7 @@
       toast(slug + " attached — cloned into new machines carrying its tags");
       resetRepoForm();
       closeForm("rp-form-card");
-      await refresh();
+      await machinesPoller.run();
     } catch (e2) {
       toast(e2.message, true);
     } finally {
@@ -3470,7 +3508,7 @@
       toast(name + " saved");
       resetEnvForm();
       closeEnvForm();
-      await refresh();
+      await machinesPoller.run();
     } catch (e2) {
       toast(e2.message, true);
     } finally {
@@ -3515,7 +3553,7 @@
       $("env-script-origin").textContent = SETUP_FROM.manual;
       $("env-script-note").textContent = "saved — the next build runs this";
       toast("setup script saved for " + envScriptName);
-      await refresh();
+      await machinesPoller.run();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -3578,12 +3616,18 @@
     return (await r.json().catch(() => ({}))).error || r.statusText;
   }
 
-  async function refresh() {
+  // refresh is machinesPoller's fn: it takes the cycle's AbortSignal, threads
+  // it into every fetch so stop() can actually cancel an in-flight cycle, and
+  // rethrows on failure so the poller's backoff sees it. An AbortError is
+  // rethrown WITHOUT the usual error/toast treatment below — that is a
+  // cancellation the visitor or the poller asked for (leaving the app view, or
+  // the tab being hidden), not a failure to report.
+  async function refresh(signal) {
     try {
       const [rm, ru, rs, rn, rnr, rrp, rev] = await Promise.all([
-        fetch("/api/machines"), fetch("/api/usage"), fetch("/api/secrets"),
-        fetch("/api/snapshots"), fetch("/api/network-rules"), fetch("/api/repos"),
-        fetch("/api/environments"),
+        fetch("/api/machines", { signal }), fetch("/api/usage", { signal }), fetch("/api/secrets", { signal }),
+        fetch("/api/snapshots", { signal }), fetch("/api/network-rules", { signal }), fetch("/api/repos", { signal }),
+        fetch("/api/environments", { signal }),
       ]);
       if (rm.status === 401) return show("signin");
       if (!rm.ok) throw new Error(await errText(rm));
@@ -3595,7 +3639,7 @@
         const b = lastMachines.find((x) => x.name === n);
         if (!b || b.state !== "running") netOpen.delete(n);
       }
-      await Promise.all([...netOpen].map(refreshNet));
+      await Promise.all([...netOpen].map((n) => refreshNet(n, signal)));
       // The footprint is a summary of the very list below it, so a failure to
       // fetch it hides the card and nothing else. It deliberately does not
       // clear the "updated" stamp: that stamp asserts the panes are current,
@@ -3663,8 +3707,8 @@
         toast("environments refresh failed: " + (await errText(rev)), true);
       }
       if (fresh) $("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
-      if (!timer) timer = setInterval(refresh, 4000);
     } catch (e) {
+      if (e.name === "AbortError") throw e;
       // Before the first successful load nothing is visible yet, so a toast
       // alone would leave a blank page; swap in the retryable error state.
       if ($("app-view").classList.contains("hidden")) {
@@ -3672,6 +3716,7 @@
       } else {
         toast("refresh failed: " + e.message, true);
       }
+      throw e;
     }
   }
 
@@ -3690,7 +3735,7 @@
       if (!e.unauthorized) showError("Couldn't reach the console: " + e.message);
       return;
     }
-    await refresh();
+    await machinesPoller.start();
   }
 
   $("error-retry").addEventListener("click", init);
