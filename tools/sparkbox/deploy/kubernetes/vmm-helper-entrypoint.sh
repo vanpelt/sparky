@@ -15,6 +15,20 @@ readonly sluice_socket="${SPARKBOX_SLUICE_SOCKET:-}"
 readonly helper_socket="${SPARKBOX_PRIVILEGED_HELPER_SOCKET:-/run/sparkbox-vmm/helper.sock}"
 readonly controller_uid="${SPARKBOX_CONTROLLER_UID:-65532}"
 readonly controller_gid="${SPARKBOX_CONTROLLER_GID:-65532}"
+# The VMM this helper launches, for its whole life. It reads the SAME variable
+# the controller container reads, and that is the mechanism keeping them in
+# step: a helper serving firecracker answers the controller's startup ping
+# perfectly well, so a mismatch would first show up as the first launch being
+# refused. There is deliberately nothing in the helper protocol to ask with --
+# the backend is server-side only, because a field letting the unprivileged
+# controller pick which binary root executes would not be a boundary.
+readonly vmm_driver="${SPARKBOX_DRIVER:-firecracker}"
+readonly qemu_machine_type="${SPARKBOX_QEMU_MACHINE_TYPE:-}"
+
+case "$vmm_driver" in
+	firecracker|qemu) ;;
+	*) echo "SPARKBOX_DRIVER must be firecracker or qemu, got: $vmm_driver" >&2; exit 1 ;;
+esac
 
 case "$restrict_internal_egress" in
 	0|1) ;;
@@ -23,6 +37,18 @@ case "$restrict_internal_egress" in
 		exit 1
 		;;
 esac
+
+# QEMU is baked into the image (the Containerfile installs the per-arch
+# qemu-system package) and named for the machine, not for Go's GOARCH:
+# qemu-system-x86_64 and qemu-system-aarch64, which is what uname -m gives.
+qemu_bin=
+if [ "$vmm_driver" = qemu ]; then
+	qemu_bin="$(command -v "qemu-system-$(uname -m)")" || {
+		echo "SPARKBOX_DRIVER=qemu but qemu-system-$(uname -m) is not in PATH" >&2
+		exit 1
+	}
+fi
+readonly qemu_bin
 
 for device in /dev/kvm /dev/net/tun; do
 	if [ ! -c "$device" ]; then
@@ -49,6 +75,7 @@ export SLUICE_DNS_IP="$sluice_dns_ip"
 helper_args=(
 	serve
 	--socket "$helper_socket"
+	--backend "$vmm_driver"
 	--firecracker "$asset_dir/firecracker"
 	--kernel "$asset_dir/vmlinux"
 	--vm-state-dir "$vm_state_dir"
@@ -59,6 +86,16 @@ helper_args=(
 	--controller-uid "$controller_uid"
 	--controller-gid "$controller_gid"
 )
+if [ "$vmm_driver" = qemu ]; then
+	helper_args+=(--qemu-bin "$qemu_bin")
+	# Passed only when the operator set one. Left empty, both this process and
+	# the controller take the same pinned per-arch default from the one place it
+	# is written down (internal/vmm/qemuargs), which is what stops the two from
+	# describing different machines to the same migration stream.
+	if [ -n "$qemu_machine_type" ]; then
+		helper_args+=(--machine-type "$qemu_machine_type")
+	fi
+fi
 if [ "$restrict_internal_egress" = 1 ]; then
 	helper_args+=(--restrict-internal-egress)
 fi

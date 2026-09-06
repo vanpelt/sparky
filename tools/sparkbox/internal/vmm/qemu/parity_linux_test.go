@@ -11,6 +11,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemu"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/vmmtest"
 )
 
@@ -57,17 +58,34 @@ func TestQEMUParity(t *testing.T) {
 		// templates live on. Cross-filesystem is not a slow path here: the
 		// driver refuses to fall back to a full 25 GiB copy, so getting this
 		// wrong fails Create rather than quietly costing a minute a boot.
-		root, err := os.MkdirTemp(cfg.scratch, "case-")
-		if err != nil {
-			t.Fatal(err)
+		// A per-case VMStateDir is right for the direct launcher and IMPOSSIBLE
+		// under the helper: --vm-state-dir is fixed at the helper's startup, and
+		// it holds that directory open as an O_PATH fd for its whole life, so
+		// every path it resolves goes through openat2 relative to that inode.
+		// A MkdirTemp per case would leave the helper resolving against a
+		// deleted directory the moment the first case cleaned up — every
+		// subsequent openState failing ENOENT, which reads like a missing
+		// rootfs rather than like this.
+		//
+		// So helper runs share one directory. That is safe because sandbox
+		// names are time-derived (vmmtest.uniq) and every case destroys what it
+		// created; and nothing is removed at the end, because the Pod is the
+		// thing that gets thrown away.
+		root := cfg.scratch
+		if !cfg.helped() {
+			var err error
+			root, err = os.MkdirTemp(cfg.scratch, "case-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
 		}
-		t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
 
 		templateDir := filepath.Join(root, "templates")
 		if err := os.MkdirAll(templateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		clientKey := vmmtest.NewSigner(t)
+		clientKey := newParitySigner(t, cfg)
 		authorized := string(xssh.MarshalAuthorizedKey(clientKey.PublicKey()))
 
 		// New() is called once per subtest against the same subnet, so slot
@@ -84,6 +102,26 @@ func TestQEMUParity(t *testing.T) {
 			MachineType: cfg.machineType,
 			Subnet:      cfg.subnet,
 			LoginUser:   cfg.loginUser,
+			// All empty on the direct path, and New treats them as the switch
+			// between the two launchers rather than as tuning.
+			PrivilegedHelperSocket: cfg.helperSocket,
+			PrivilegedHelperBin:    cfg.helperBin,
+			JailerChrootBase:       cfg.helperChroot,
+			HelperControllerGID:    int(cfg.helperGID),
+			// Set for helper runs and only for them, which makes those runs the
+			// FIRST parity coverage of the mode CKS actually deploys. It is not
+			// a concession to the harness: the controller there is unprivileged
+			// and cannot loop-mount a guest's ext4 at all, which is the whole
+			// reason the flag exists.
+			DisableHostRootfsMounts: cfg.helped(),
+			// The direct path keeps the prefix the two drivers used to differ
+			// on PERMANENTLY, and it is now confined to exactly here. Both
+			// drivers allocate from slot 0 up, so with one prefix they would
+			// name the same device; the differing prefixes are what let this
+			// suite and the firecracker one run concurrently on a gated host.
+			// Empty under the helper, which creates the taps itself and calls
+			// them what every consumer expects.
+			TapPrefix: cfg.directTapPrefix(),
 		})
 		if err != nil {
 			t.Fatalf("qemu.New: %v", err)
@@ -157,7 +195,10 @@ func TestQEMUParity(t *testing.T) {
 				// is byte-identical to the one the firecracker run exercises,
 				// and if it is wrong a fork shares its parent's host key, which
 				// is a defect worth failing on rather than skipping past.
-				SanitizesForks: true,
+				// ...and FALSE under the helper, because that same gate is what
+				// turns the pass off. Claiming it there would assert a
+				// host-key scrub that provably does not run.
+				SanitizesForks: !cfg.helped(),
 
 				// FALSE, and unlike the others this is not a hedge either — it
 				// is a defect this driver INHERITS, not one it might have.
@@ -204,6 +245,47 @@ type parityConfig struct {
 	loginUser                        string
 	vcpus, memMB                     int64
 	bootTimeout                      time.Duration
+
+	// The privileged-helper fixtures. Empty helperSocket is the DIRECT
+	// LAUNCHER, which is what every parity run before this one exercised and
+	// what a dev box still uses. Set, and this suite drives the same nineteen
+	// cases through internal/vmhelper instead: the driver builds a command line
+	// for nothing, a root process on the far side of a Unix socket builds the
+	// argv and execs a self-confining QEMU, and every capability the suite
+	// checks has to survive that indirection.
+	helperSocket, helperBin, helperChroot string
+	helperGID                             int64
+	// sshKeyFile is a private key the runner has already installed into the
+	// template. It exists because helper mode cannot inject one: the driver
+	// does that by loop-mounting the rootfs, mount(8) refuses to set up a loop
+	// device for anyone but root (MEASURED — ambient CAP_SYS_ADMIN and
+	// CAP_DAC_OVERRIDE are not enough, on arm64 natively), and the helper
+	// REFUSES a controller uid of 0. So helper runs set
+	// DisableHostRootfsMounts, exactly as the CKS deployment does, and take
+	// their key the way a real sandbox takes one: baked into the template.
+	sshKeyFile string
+}
+
+// helped reports whether this run drives the privileged helper. It gates the
+// three things that are genuinely different about that path, all of them in
+// loadParityConfig or the fixture factory rather than scattered.
+func (c parityConfig) helped() bool { return c.helperSocket != "" }
+
+// directTapPrefix keeps this suite's taps out of the firecracker suite's way
+// when both run on one host, and returns empty under the helper, which names
+// the device itself.
+//
+// This is the ONLY place the two drivers' tap names are allowed to differ.
+// They used to differ in the driver itself, which meant a real direct-launch
+// QEMU node named its taps something netpush, sluice and sparkbox-net.sh had
+// never heard of — so egress control on that node applied to nothing, quietly.
+// Keeping the divergence in the test that needs it, rather than in the code
+// that ships, is the whole of the fix.
+func (c parityConfig) directTapPrefix() string {
+	if c.helped() {
+		return ""
+	}
+	return "sbqtap"
 }
 
 // loadParityConfig reads the fixtures from the environment. A missing one is
@@ -219,12 +301,13 @@ type parityConfig struct {
 // over; SPARKBOX_PARITY_QEMU and SPARKBOX_PARITY_MACHINE_TYPE replace it.
 //
 // THE SUBNET IS THE EXCEPTION, and it has its own name and its own default for
-// the same reason tapPrefix differs. Every other shared fixture is read-only
+// the same reason directTapPrefix exists. Every other shared fixture is read-only
 // (the kernel, the image dir) or per-case (VMStateDir is a MkdirTemp, the
 // templates live under it); the subnet is mutable HOST-GLOBAL state. Both
 // drivers' freeSlot starts at 0, so on the shared 172.31.0.0/24 slot 0 is
 // 172.31.0.1/172.31.0.2 in both, and the differing tap prefixes are precisely
-// what stops either sweep from cleaning the collision up. `go test ./...` on a
+// what stops either sweep from cleaning the collision up (see
+// directTapPrefix, which is now the only thing that keeps them apart). `go test ./...` on a
 // gated Linux host runs the two packages concurrently (go test's default -p is
 // GOMAXPROCS), Linux accepts the same host address on sbtap0 and sbqtap0, the
 // route to 172.31.0.0/30 becomes ambiguous, and a dial reaches whichever guest
@@ -248,9 +331,6 @@ type parityConfig struct {
 // docs/qemu-spike.md and hack/qemu-spike/Dockerfile for the image that does.
 func loadParityConfig(t *testing.T) parityConfig {
 	t.Helper()
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		t.Fatalf("%s=1 but /dev/kvm is not usable: %v", vmmtest.GateEnv, err)
-	}
 	cfg := parityConfig{
 		kernel:      vmmtest.MustEnv(t, "SPARKBOX_PARITY_KERNEL"),
 		imageDir:    vmmtest.MustEnv(t, "SPARKBOX_PARITY_IMAGE_DIR"),
@@ -263,6 +343,40 @@ func loadParityConfig(t *testing.T) parityConfig {
 		vcpus:       vmmtest.EnvInt(t, "SPARKBOX_PARITY_VCPUS", 2),
 		memMB:       vmmtest.EnvInt(t, "SPARKBOX_PARITY_MEM_MB", 2048),
 		bootTimeout: time.Duration(vmmtest.EnvInt(t, "SPARKBOX_PARITY_BOOT_TIMEOUT_S", 180)) * time.Second,
+
+		helperSocket: os.Getenv("SPARKBOX_PARITY_HELPER_SOCKET"),
+		helperBin:    os.Getenv("SPARKBOX_PARITY_HELPER_BIN"),
+		helperChroot: os.Getenv("SPARKBOX_PARITY_HELPER_CHROOT_BASE"),
+		helperGID:    vmmtest.EnvInt(t, "SPARKBOX_PARITY_HELPER_GID", 0),
+		sshKeyFile:   os.Getenv("SPARKBOX_PARITY_SSH_KEY_FILE"),
+	}
+	// The /dev/kvm probe belongs to whoever is going to OPEN it, which under the
+	// helper is not this process. On a hardened node the controller has no
+	// device node at all — the device-plugin allocation belongs to the helper —
+	// and the driver's own New() gates its probe the same way. A check here
+	// would make the suite refuse to run in exactly the configuration it exists
+	// to test.
+	if !cfg.helped() {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			t.Fatalf("%s=1 but /dev/kvm is not usable: %v", vmmtest.GateEnv, err)
+		}
+	}
+	if cfg.helped() {
+		for what, v := range map[string]string{
+			"SPARKBOX_PARITY_HELPER_BIN":         cfg.helperBin,
+			"SPARKBOX_PARITY_HELPER_CHROOT_BASE": cfg.helperChroot,
+		} {
+			if v == "" {
+				t.Fatalf("SPARKBOX_PARITY_HELPER_SOCKET is set, so %s is required too", what)
+			}
+		}
+		if cfg.helperGID < 1 {
+			t.Fatal("SPARKBOX_PARITY_HELPER_SOCKET is set, so SPARKBOX_PARITY_HELPER_GID must name the group the helper shares VM files with")
+		}
+		if cfg.sshKeyFile == "" {
+			t.Fatal("SPARKBOX_PARITY_HELPER_SOCKET is set, so SPARKBOX_PARITY_SSH_KEY_FILE is required: " +
+				"helper runs disable host rootfs mounts, so the runner must have baked this key into the template")
+		}
 	}
 	for _, p := range []string{cfg.kernel, filepath.Join(cfg.imageDir, cfg.image+".ext4")} {
 		if _, err := os.Stat(p); err != nil {
@@ -272,10 +386,63 @@ func loadParityConfig(t *testing.T) parityConfig {
 	if err := os.MkdirAll(cfg.scratch, 0o755); err != nil {
 		t.Fatalf("parity scratch dir: %v", err)
 	}
-	t.Logf("parity fixtures: kernel=%s image=%s/%s.ext4 scratch=%s subnet=%s user=%s qemu=%s machine=%s %dvcpu %dMiB",
+	launcher := "direct"
+	if cfg.helped() {
+		launcher = "privileged helper at " + cfg.helperSocket
+	}
+	t.Logf("parity fixtures: kernel=%s image=%s/%s.ext4 scratch=%s subnet=%s user=%s qemu=%s machine=%s %dvcpu %dMiB launcher=%s",
 		cfg.kernel, cfg.imageDir, cfg.image, cfg.scratch, cfg.subnet, cfg.loginUser,
 		vmmtest.EnvOr("SPARKBOX_PARITY_QEMU", "(New's default for this arch)"),
-		vmmtest.EnvOr("SPARKBOX_PARITY_MACHINE_TYPE", "(New's default for this arch)"),
-		cfg.vcpus, cfg.memMB)
+		effectiveMachineType(t, cfg),
+		cfg.vcpus, cfg.memMB, launcher)
 	return cfg
+}
+
+// effectiveMachineType is the machine model this run will actually boot.
+//
+// It exists because the log line used to print the ENV VALUE, with
+// "(New's default for this arch)" standing in for the empty case — so the one
+// field that decides whether a snapshot can ever be restored was the one field
+// the log did not report. That is not a cosmetic gap: run-on-cks.sh compares
+// this against the machine type the privileged helper logged, and a placeholder
+// makes that comparison unable to pass.
+//
+// Resolved through qemuargs.DefaultMachineType, the same function New calls, so
+// this reports New's answer rather than a second guess at it. It is deliberately
+// NOT passed to New: letting New default is what makes the helper-mode
+// comparison a test of two processes independently reaching the same value.
+func effectiveMachineType(t *testing.T, cfg parityConfig) string {
+	t.Helper()
+	if cfg.machineType != "" {
+		return cfg.machineType
+	}
+	machineType, err := qemuargs.DefaultMachineType()
+	if err != nil {
+		t.Fatalf("no default machine type: %v", err)
+	}
+	return machineType
+}
+
+// newParitySigner returns the key this run's guests will accept.
+//
+// The direct launcher generates a fresh one per case and the driver writes it
+// into each rootfs. Helper mode cannot: see parityConfig.sshKeyFile. There the
+// runner generated one keypair, installed the public half into the template
+// before the suite started, and named the private half here — so every case
+// shares a key, which is fine for what these cases assert (they check that the
+// guest is reachable, not that keys are per-sandbox).
+func newParitySigner(t *testing.T, cfg parityConfig) xssh.Signer {
+	t.Helper()
+	if cfg.sshKeyFile != "" {
+		pem, err := os.ReadFile(cfg.sshKeyFile)
+		if err != nil {
+			t.Fatalf("parity ssh key: %v", err)
+		}
+		s, err := xssh.ParsePrivateKey(pem)
+		if err != nil {
+			t.Fatalf("parity ssh key %s: %v", cfg.sshKeyFile, err)
+		}
+		return s
+	}
+	return vmmtest.NewSigner(t)
 }

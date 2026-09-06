@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestdisk"
 )
@@ -72,6 +73,43 @@ func (d *Driver) rootfsPath(name string) string {
 
 func (d *Driver) qmpSocketPath(name string) string {
 	return filepath.Join(d.vmDir(name), qmpSocketName)
+}
+
+// jailed reports whether the privileged helper owns VM launch, tap creation and
+// jail construction for this driver. It is the one predicate that decides which
+// of two quite different worlds a method is in, so it is named rather than
+// spelled out at each site — the same shape fc.go:387 uses.
+func (d *Driver) jailed() bool { return d.opts.PrivilegedHelperSocket != "" }
+
+// jailRoot is the per-slot chroot the helper builds, and the only thing this
+// driver ever reads out of it is the QMP socket. Both halves of the path are
+// fixed by agreement with internal/vmhelper: the "qemu" component is a constant
+// there for exactly this reason, and sparkbox-<slot> matches jailID.
+func (d *Driver) jailRoot(idx int) string {
+	return filepath.Join(d.opts.JailerChrootBase, "qemu", fmt.Sprintf("sparkbox-%d", idx), "root")
+}
+
+// monitorSocket is where this driver dials QEMU's monitor. Under the helper the
+// VMM is confined in a jail this process cannot write to, and the helper chowns
+// the socket to the controller group so it can be reached through a base
+// directory that is traversable but not listable.
+func (d *Driver) monitorSocket(name string, st *vmState) string {
+	if d.jailed() {
+		return filepath.Join(d.jailRoot(st.idx), qmpSocketName)
+	}
+	return d.qmpSocketPath(name)
+}
+
+// snapshotTarget is the path QEMU is told to migrate TO, which is not the path
+// this driver later promotes. Under the helper QEMU is chrooted into its jail,
+// so a runtime `migrate uri=file:` — resolved from the monitor long after the
+// chroot — must name the file relatively; the helper hardlinked the same inode
+// into the VM directory, where snapshotNextPath finds it to rename.
+func (d *Driver) snapshotTarget(name string) string {
+	if d.jailed() {
+		return snapshotName + nextSuffix
+	}
+	return d.snapshotNextPath(name)
 }
 
 // vmmLogPath holds the child's stdout and stderr, truncated per launch. With no
@@ -134,6 +172,18 @@ func (d *Driver) hasSnapshot(name string) (bool, error) {
 }
 
 // --- addressing ------------------------------------------------------------
+
+// tapName is derived from the slot alone, like the MAC and the addresses.
+//
+// It no longer branches on who creates the device, and that is the fix: the
+// helper has always called it sbtap<slot> -- the name internal/netpush,
+// internal/hostsetup's sluice --tap-prefix and deploy/sparkbox-net.sh all
+// hardcode -- while this driver's direct path called it something else, so a
+// direct-launch QEMU node had every one of those talking about a device that
+// did not exist. See Options.TapPrefix.
+func (d *Driver) tapName(idx int) string {
+	return d.net.TapName(idx)
+}
 
 // --- name reservation and slots --------------------------------------------
 
@@ -292,15 +342,15 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	// them: -smp and -m come from the command line on both paths, where
 	// Firecracker recovers them from the snapshot.
 	st := &vmState{idx: idx, vcpus: cfg.VCPUs, memMB: cfg.MemMB}
-	if err := d.net.CreateTap(ctx, st.idx); err != nil {
+	if err := d.createTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
 		// this slot; only recording it in d.vms reserves it, so a failed create
 		// leaks no idx.
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, st, rootfs, false, fresh); err != nil {
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	d.vms[cfg.Name] = st
@@ -351,40 +401,31 @@ func (d *Driver) boot(ctx context.Context, name string, st *vmState, rootfs stri
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	// QEMU does not unlink a stale monitor socket, it just fails to bind — so a
-	// crashed VMM would otherwise make this name unbootable forever.
-	if err := os.Remove(d.qmpSocketPath(name)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("clear stale qmp socket: %w", err)
+	if !d.jailed() {
+		// QEMU does not unlink a stale monitor socket, it just fails to bind —
+		// so a crashed VMM would otherwise make this name unbootable forever.
+		// Under the helper there is nothing to clear and nothing we could:
+		// the socket lives in a jail root this process cannot write to, and the
+		// helper removes the whole jail at every VMM exit.
+		if err := os.Remove(d.qmpSocketPath(name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("clear stale qmp socket: %w", err)
+		}
 	}
 
 	cmdline, err := d.bootCmdline(name, st, restore, fresh)
 	if err != nil {
 		return err
 	}
-	args, err := d.qemuArgs(name, st, rootfs, cmdline, restore)
+
+	cmd, logFile, err := d.vmmCommand(name, st, rootfs, cmdline, restore)
 	if err != nil {
 		return err
 	}
-
-	logFile, err := os.OpenFile(d.vmmLogPath(name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("open vmm log: %w", err)
-	}
 	// The child keeps its own descriptor; ours is only needed to hand over.
-	defer logFile.Close() //nolint:errcheck
-
-	// exec.Command, NOT exec.CommandContext(ctx, ...). QEMU has no ctx-driven
-	// kill of its own, but binding the child to the caller's ctx reintroduces
-	// exactly the bug fc.go:799's vmCtx exists to prevent: ctx here is
-	// request-scoped (the create-on-connect SSH session), so the microVM would
-	// die the instant that first connection closed. stopVMM is the only thing
-	// that ends this process.
-	cmd := exec.Command(d.opts.QemuBin, args...)
-	// Everything on the argv is absolute; running in the VM's own directory just
-	// means a core dump or a stray temp file lands where Destroy will reclaim it.
-	cmd.Dir = dir
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	// (nil under the helper, which opens the log on its side of the boundary.)
+	if logFile != nil {
+		defer logFile.Close() //nolint:errcheck
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start qemu for %q: %w", name, err)
 	}
@@ -462,13 +503,67 @@ func (d *Driver) boot(ctx context.Context, name string, st *vmState, rootfs stri
 	return nil
 }
 
+// vmmCommand builds the process boot supervises, which is QEMU itself on a dev
+// box and a launch client standing in for it on a hardened node.
+//
+// The substitution is what keeps the rest of this file honest. Under the helper
+// the real QEMU is a child of a root process in another container, so st.cmd
+// cannot be it — but the launch client lives exactly as long as that VMM does
+// (the helper answers its half-close only once the VMM, the tap and the jail
+// are gone), so every wait, signal and reap in stopVMM keeps its meaning.
+//
+// It is exec.Command, NOT exec.CommandContext(ctx, ...), on both paths. Neither
+// child has a ctx-driven kill of its own, and binding one to the caller's ctx
+// reintroduces exactly the bug fc.go:799's vmCtx exists to prevent: ctx here is
+// request-scoped (the create-on-connect SSH session), so the microVM would die
+// the instant that first connection closed. stopVMM is the only thing that ends
+// these processes.
+func (d *Driver) vmmCommand(name string, st *vmState, rootfs, cmdline string, restore bool) (*exec.Cmd, *os.File, error) {
+	if d.jailed() {
+		// The argv is built on the far side of the boundary, from this machine
+		// and the helper's own configuration — see internal/vmhelper. What
+		// crosses is data: a validated name and slot, the size of the machine,
+		// and the guest command line. No path, no binary, no command.
+		//
+		// The command line is passed rather than rebuilt for the same reason
+		// bootCmdline replays it: the restore argv must be the boot argv token
+		// for token, and only this process knows what the boot argv was.
+		cmd := vmhelper.LaunchCommand(d.opts.PrivilegedHelperBin, vmhelper.Launch{
+			Socket: d.opts.PrivilegedHelperSocket,
+			Name:   name, Slot: st.idx, Resume: restore,
+			VCPUs: st.vcpus, MemMB: st.memMB, Cmdline: cmdline,
+		})
+		cmd.Env = []string{}
+		// The client's stderr is the only place a helper refusal is written.
+		// See vmState.launchLog.
+		st.launchLog = &boundedLog{}
+		cmd.Stderr = st.launchLog
+		return cmd, nil, nil
+	}
+	args, err := d.qemuArgs(name, st, rootfs, cmdline, restore)
+	if err != nil {
+		return nil, nil, err
+	}
+	logFile, err := os.OpenFile(d.vmmLogPath(name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open vmm log: %w", err)
+	}
+	cmd := exec.Command(d.opts.QemuBin, args...)
+	// Everything on the argv is absolute; running in the VM's own directory just
+	// means a core dump or a stray temp file lands where Destroy will reclaim it.
+	cmd.Dir = d.vmDir(name)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	return cmd, logFile, nil
+}
+
 // dialVMM waits for the monitor to become reachable, giving up early if the
 // child dies rather than burning the whole timeout on a process that is
 // already gone.
 func (d *Driver) dialVMM(ctx context.Context, name string, st *vmState) (*qmpConn, error) {
 	dctx, cancel := context.WithTimeout(ctx, vmmDialTimeout)
 	defer cancel()
-	sock := d.qmpSocketPath(name)
+	sock := d.monitorSocket(name, st)
 	// Both exit checks below must report the same thing; stating it once is
 	// what keeps them from drifting apart.
 	died := func() error {
@@ -563,6 +658,14 @@ func (d *Driver) vmmError(name string, st *vmState, what string, cause error) er
 	if tail := qemuLogTail(d.vmmLogPath(name)); tail != "" {
 		msg = fmt.Sprintf("%s: %s", msg, tail)
 	}
+	// Last, and separately labelled, because it comes from the other side of
+	// the privilege boundary rather than from QEMU: a helper that refused the
+	// launch outright leaves nothing in qemu.log at all.
+	if st.launchLog != nil {
+		if refusal := st.launchLog.String(); refusal != "" {
+			msg = fmt.Sprintf("%s: privileged helper said: %s", msg, refusal)
+		}
+	}
 	return fmt.Errorf("%s", msg)
 }
 
@@ -629,6 +732,21 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	if err := os.Remove(next); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("clear stale snapshot output: %w", err)
 	}
+	if d.jailed() {
+		// A confined QEMU cannot create a file this process can read, and a
+		// file this process creates is not one it can write. The helper does
+		// both halves: it creates the output in the VM directory owned by the
+		// per-slot uid and hardlinks it into the jail, which is the same
+		// create-chown-link pattern fc.go's jailed pause relies on and the one
+		// the CKS measurement proved mandatory — the negative control, with the
+		// file not pre-created, failed with "Permission denied".
+		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := vmhelper.PrepareSnapshotOutputs(hctx, d.opts.PrivilegedHelperSocket, name, st.idx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("privileged helper snapshot outputs for %q: %w", name, err)
+		}
+	}
 
 	// Every other VMM wait in this file has a driver-side ceiling; this is the
 	// longest-running one and it holds d.mu throughout, so it gets one too. See
@@ -638,7 +756,10 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	if err := st.qmp.Stop(sctx); err != nil {
 		return fmt.Errorf("pause vcpus of %q: %w", name, err)
 	}
-	if err := d.snapshotMemory(sctx, name, st, next); err != nil {
+	// The path QEMU writes to is not the path this driver promotes: under the
+	// helper the two are hardlinks to one inode, named relatively inside the
+	// jail and absolutely in the VM directory. See snapshotTarget.
+	if err := d.snapshotMemory(sctx, name, st, d.snapshotTarget(name), next); err != nil {
 		return err
 	}
 	// quit and reap. A child that cannot be reaped still holds the rootfs and
@@ -667,7 +788,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 		// cold-boots from the preserved rootfs. The memory is lost either way;
 		// the disk is intact.
 		err = fmt.Errorf("install memory snapshot for %q: %w", name, err)
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		if rmErr := d.removeSnapshotFiles(name); rmErr != nil {
 			err = fmt.Errorf("%w (and its stale snapshot could not be removed: %v)", err, rmErr)
 		}
@@ -677,14 +798,14 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
 	// Resume recreates it via createTap. Leaving it wedges Resume with
 	// "tuntap add: Device or resource busy" on the still-present device.
-	d.net.DeleteTap(st.idx)
+	d.deleteTap(st.idx)
 	st.paused = true
 	return nil
 }
 
 // snapshotMemory drives migrate + query-migrate and, on failure, puts the guest
 // back the way it found it. Caller holds d.mu and has already stopped the vCPUs.
-func (d *Driver) snapshotMemory(ctx context.Context, name string, st *vmState, next string) error {
+func (d *Driver) snapshotMemory(ctx context.Context, name string, st *vmState, target, next string) error {
 	resumeAndFail := func(err error, what string) error {
 		// Recover on a FRESH context: when the failure IS the caller's ctx
 		// expiring (the migration outran a deadline), resuming on that same dead
@@ -714,7 +835,7 @@ func (d *Driver) snapshotMemory(ctx context.Context, name string, st *vmState, n
 		st.qmp.Cont(rctx) //nolint:errcheck
 		return fmt.Errorf("%s for %q: %w", what, name, err)
 	}
-	if err := st.qmp.MigrateToFile(ctx, next); err != nil {
+	if err := st.qmp.MigrateToFile(ctx, target); err != nil {
 		return resumeAndFail(err, "start memory snapshot")
 	}
 	if err := st.qmp.AwaitMigration(ctx); err != nil {
@@ -739,14 +860,14 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 	if _, err := os.Stat(snapshot); err != nil {
 		return nil, fmt.Errorf("no snapshot for %q: %w", name, err)
 	}
-	if err := d.net.CreateTap(ctx, st.idx); err != nil {
+	if err := d.createTap(ctx, st.idx); err != nil {
 		// CreateTap runs four ip(8) commands and returns on the first failure,
 		// so it can leave the device behind — `ip tuntap add` succeeding and
 		// `ip addr add` failing is the realistic shape. Without this, every
 		// later Resume of this sandbox fails at "Device or resource busy" until
 		// the process restarts and the startup sweep clears it, and the retry
 		// looks like a snapshot problem. Create guards the same case.
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	// The restore argv is the cold-boot argv plus -incoming, built by the same
@@ -759,7 +880,7 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 		// Unlike a failed cold boot the tap here was created by us moments ago,
 		// and leaving it behind makes the next Resume fail with "Device or
 		// resource busy" — a retry would then look like a snapshot problem.
-		d.net.DeleteTap(st.idx)
+		d.deleteTap(st.idx)
 		return nil, err
 	}
 	return d.instance(name, st), nil
@@ -793,7 +914,7 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 			return fmt.Errorf("stop vmm for %q: %w", name, err)
 		}
 	}
-	d.net.DeleteTap(st.idx)
+	d.deleteTap(st.idx)
 	// Drop the record last: it releases the slot (and with it the tap name, the
 	// addresses and the MAC) back to freeSlot, which is only safe once the tap
 	// is actually gone.
@@ -906,3 +1027,22 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 }
 
 // --- host networking --------------------------------------------------------
+
+// createTap and deleteTap add the one thing that is this driver's own: under
+// the privileged helper the tap belongs to the helper, which makes it in the
+// Pod network namespace both containers share and tears it down when the VMM
+// exits. This process has no NET_ADMIN and nothing to do.
+func (d *Driver) createTap(ctx context.Context, idx int) error {
+	if d.jailed() {
+		return nil
+	}
+	return d.net.CreateTap(ctx, idx)
+}
+
+func (d *Driver) deleteTap(idx int) {
+	if d.jailed() {
+		// Helper cleanup is synchronized with the launch-client process exit.
+		return
+	}
+	d.net.DeleteTap(idx)
+}

@@ -5,7 +5,9 @@ package qemu
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hoststat"
 )
@@ -44,8 +46,16 @@ import (
 // This lifts from the firecracker driver unchanged apart from where the pid
 // comes from. Firecracker's SDK owns the child and hands it over via
 // machine.PID(); here the driver owns the exec.Cmd directly, so the pid is
-// st.cmd.Process.Pid. There is deliberately no privileged-helper branch: this
-// driver is the direct launcher only (see Options).
+// st.cmd.Process.Pid.
+//
+// UNDER THE HELPER st.cmd IS NOT THE VMM. It is the launch client, a process
+// that holds a socket open and does nothing else, so its utime+stime never
+// leave zero — and this method returned that zero rather than an error, which
+// is the worse failure: the reaper samples CPU to tell an unattended agent
+// from an idle sandbox (internal/host), so a counter pinned at 0 makes every
+// sandbox on a QEMU node look idle. The real pid lives in the helper's own
+// records, which is what its cpu-time op exists to read. The parity suite's
+// CPUStats case is what caught this, on the first hardware run of that path.
 //
 // QMP has no equivalent query — QEMU will not tell you its own pid — so /proc
 // is not a shortcut, it is the only source.
@@ -55,6 +65,18 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	if !ok || st.cmd == nil {
 		d.mu.Unlock()
 		return 0, fmt.Errorf("vm %q not running", name)
+	}
+	if d.jailed() {
+		// Unlock FIRST. This is an RPC to another process over a unix socket,
+		// and the whole reason this file drops d.mu before its I/O is that
+		// host.Manager fans these out one goroutine per sandbox; holding the
+		// driver lock across a helper round-trip would re-serialize the fleet
+		// behind the slowest one. st.idx is copied out above.
+		idx := st.idx
+		d.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return vmhelper.CPUTimeNanos(ctx, d.opts.PrivilegedHelperSocket, name, idx)
 	}
 	if st.cmd.Process == nil {
 		d.mu.Unlock()
@@ -93,7 +115,7 @@ func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err er
 		d.mu.Unlock()
 		return 0, 0, fmt.Errorf("vm %q not running", name)
 	}
-	tap := d.net.TapName(st.idx)
+	tap := d.tapName(st.idx)
 	d.mu.Unlock()
 
 	// Guest rx is the tap's tx and vice versa.

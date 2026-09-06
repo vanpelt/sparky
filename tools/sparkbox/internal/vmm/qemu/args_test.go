@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
 	"net"
 	"path/filepath"
 	"runtime"
@@ -32,7 +33,7 @@ func argsTestDriver(t *testing.T, subnet, subnet6, guestDNS string) *Driver {
 			MachineType: "virt-8.2",
 			GuestDNS:    guestDNS,
 		},
-		net: hostnet.Plumbing{Net: guestnet.MustParse(subnet), TapPrefix: tapPrefix},
+		net: hostnet.Plumbing{Net: guestnet.MustParse(subnet), TapPrefix: defaultTapPrefix},
 	}
 	if subnet6 != "" {
 		_, ipNet, err := net.ParseCIDR(subnet6)
@@ -277,7 +278,7 @@ func argsValidSpec() qemuSpec {
 		VCPUs:       2,
 		MemMB:       1024,
 		RootfsPath:  "/state/qemu-vms/box/rootfs.ext4",
-		TapName:     "sbqtap3",
+		TapName:     "sbtap3",
 		MAC:         "02:5b:01:00:00:03",
 		QMPSocket:   "/state/qemu-vms/box/qmp.sock",
 		SerialLog:   "/state/qemu-vms/box/serial.log",
@@ -293,13 +294,18 @@ func TestBuildQemuArgsColdBoot(t *testing.T) {
 		"-M", "virt-8.2",
 		"-cpu", "host",
 		"-enable-kvm",
+		// Measured hardening, not decoration: see the -nodefaults comment in
+		// args.go for the `info qtree` device lists it is derived from. Its
+		// position in this list is part of the assertion, because the argv is
+		// what the migration stream is matched against.
+		"-nodefaults",
 		"-m", "1024",
 		"-smp", "2",
 		"-kernel", "/assets/vmlinux",
 		"-append", "console=ttyAMA0 root=/dev/vda rw",
 		"-drive", "file=/state/qemu-vms/box/rootfs.ext4,format=raw,if=none,id=rootfs",
 		"-device", "virtio-blk-pci,drive=rootfs,romfile=",
-		"-netdev", "tap,id=net0,ifname=sbqtap3,script=no,downscript=no",
+		"-netdev", "tap,id=net0,ifname=sbtap3,script=no,downscript=no",
 		"-device", "virtio-net-pci,netdev=net0,mac=02:5b:01:00:00:03,romfile=",
 		"-device", "virtio-balloon-pci,id=balloon0,deflate-on-oom=on,romfile=",
 		"-qmp", "unix:/state/qemu-vms/box/qmp.sock,server=on,wait=off",
@@ -404,7 +410,7 @@ func TestQemuArgsWiresDriverStateIntoTheSpec(t *testing.T) {
 	if !strings.Contains(argsValueAfter(cold, "-drive"), "file="+rootfs+",") {
 		t.Errorf("-drive must name the VM's own rootfs; got %s", argsValueAfter(cold, "-drive"))
 	}
-	if !strings.Contains(argsValueAfter(cold, "-netdev"), "ifname="+d.net.TapName(3)+",") {
+	if !strings.Contains(argsValueAfter(cold, "-netdev"), "ifname="+d.tapName(3)+",") {
 		t.Errorf("-netdev must name this slot's tap; got %s", argsValueAfter(cold, "-netdev"))
 	}
 	if !strings.Contains(argsValueAfter(cold, "-append"), " sparkbox_fresh=1") {
@@ -476,19 +482,19 @@ func TestBootCmdlineReplaysTheBootLineOnARestore(t *testing.T) {
 }
 
 func TestMacForIsSlotStableAndDistinctFromFirecracker(t *testing.T) {
-	if got, want := hostnet.MAC(qemuMACOUI, 0), "02:5b:01:00:00:00"; got != want {
-		t.Errorf("hostnet.MAC(qemuMACOUI, 0) = %s, want %s", got, want)
+	if got, want := guestnet.MACFor(qemuargs.MACOUI, 0), "02:5b:01:00:00:00"; got != want {
+		t.Errorf("guestnet.MACFor(qemuargs.MACOUI, 0) = %s, want %s", got, want)
 	}
-	if got, want := hostnet.MAC(qemuMACOUI, 258), "02:5b:01:00:01:02"; got != want {
-		t.Errorf("hostnet.MAC(qemuMACOUI, 258) = %s, want %s", got, want)
+	if got, want := guestnet.MACFor(qemuargs.MACOUI, 258), "02:5b:01:00:01:02"; got != want {
+		t.Errorf("guestnet.MACFor(qemuargs.MACOUI, 258) = %s, want %s", got, want)
 	}
 	// The firecracker driver's third octet is 00. Two drivers on one host share
 	// an L2 segment, and a duplicated MAC there presents as intermittent
 	// unreachability rather than as a collision anybody can see.
-	if strings.HasPrefix(hostnet.MAC(qemuMACOUI, 1), "02:5b:00:") {
-		t.Errorf("macFor must not collide with the firecracker driver's 02:5b:00: range; got %s", hostnet.MAC(qemuMACOUI, 1))
+	if strings.HasPrefix(guestnet.MACFor(qemuargs.MACOUI, 1), "02:5b:00:") {
+		t.Errorf("macFor must not collide with the firecracker driver's 02:5b:00: range; got %s", guestnet.MACFor(qemuargs.MACOUI, 1))
 	}
-	if hostnet.MAC(qemuMACOUI, 1) == hostnet.MAC(qemuMACOUI, 2) {
+	if guestnet.MACFor(qemuargs.MACOUI, 1) == guestnet.MACFor(qemuargs.MACOUI, 2) {
 		t.Error("macFor must be injective over slots")
 	}
 }

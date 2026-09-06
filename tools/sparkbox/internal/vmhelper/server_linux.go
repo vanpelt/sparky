@@ -42,7 +42,15 @@ const (
 var vmNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}$`)
 
 type ServerOptions struct {
-	SocketPath             string
+	SocketPath string
+	// Backend is the VMM this helper launches for its whole life. Empty means
+	// Firecracker, so an existing deployment keeps its behaviour untouched.
+	Backend Backend
+	// QemuBin and MachineType are read only when Backend is BackendQEMU. They
+	// live here rather than in a Request because they select what gets executed
+	// and how the machine is modelled — see the Backend doc comment.
+	QemuBin                string
+	MachineType            string
 	FirecrackerBin         string
 	KernelPath             string
 	VMStateDir             string
@@ -116,6 +124,19 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 		<-ctx.Done()
 		listener.Close() //nolint:errcheck
 	}()
+	if s.qemu() {
+		// Worth a line of its own: the machine type is what every snapshot on
+		// this node is bound to, and it is resolved from a default unless an
+		// operator passed one. An operator debugging a resume that will not
+		// load needs to be able to read which model was in play without
+		// reconstructing it from a flag they may not have set.
+		// s.opts, NOT opts: newServer takes its argument by value and fills the
+		// machine type in from the shared default, so RunServer's own copy is
+		// still empty here. Logging that one printed a blank machine type —
+		// which is worse than not logging it, because the whole point of the
+		// line is to tell an operator what a snapshot is bound to.
+		s.opts.Logger.Printf("VMM backend: qemu %s, machine type %s", s.opts.QemuBin, s.opts.MachineType)
+	}
 	s.opts.Logger.Printf("privileged VM helper listening on %s for uid %d", opts.SocketPath, opts.ControllerUID)
 	for {
 		conn, err := listener.AcceptUnix()
@@ -136,10 +157,24 @@ func RunServer(ctx context.Context, opts ServerOptions) error {
 }
 
 func newServer(opts ServerOptions) (*server, error) {
-	for label, value := range map[string]string{
-		"socket": opts.SocketPath, "firecracker": opts.FirecrackerBin,
+	paths := map[string]string{
+		"socket": opts.SocketPath,
 		"kernel": opts.KernelPath, "vm state": opts.VMStateDir, "chroot": opts.ChrootBase,
-	} {
+	}
+	// The VMM binary is checked by backend, not both ways: a QEMU node's image
+	// carries firecracker too, but requiring a flag the operator has no reason
+	// to pass would make the QEMU deployment fail on a path it never uses.
+	if opts.Backend == BackendQEMU {
+		if err := defaultMachineType(&opts); err != nil {
+			return nil, err
+		}
+		if err := validateQemuOptions(opts); err != nil {
+			return nil, err
+		}
+	} else {
+		paths["firecracker"] = opts.FirecrackerBin
+	}
+	for label, value := range paths {
 		if !filepath.IsAbs(value) || filepath.Clean(value) != value || value == "/" {
 			return nil, fmt.Errorf("%s path must be an absolute, clean, non-root path", label)
 		}
@@ -160,8 +195,10 @@ func newServer(opts ServerOptions) (*server, error) {
 	if opts.JailerUIDBase > int(^uint32(0))-network.Capacity() {
 		return nil, errors.New("jailer UID range exceeds uint32")
 	}
-	if _, err := os.Stat(opts.FirecrackerBin); err != nil {
-		return nil, fmt.Errorf("firecracker binary: %w", err)
+	if opts.Backend != BackendQEMU {
+		if _, err := os.Stat(opts.FirecrackerBin); err != nil {
+			return nil, fmt.Errorf("firecracker binary: %w", err)
+		}
 	}
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
@@ -254,8 +291,14 @@ func (s *server) handle(ctx context.Context, conn *net.UnixConn) {
 }
 
 func (s *server) validateRequest(req Request) error {
-	if req.Version != ProtocolVersion {
-		return fmt.Errorf("unsupported helper protocol version %d", req.Version)
+	// A RANGE, not an equality. The controller and this helper are separate
+	// containers of one Pod with independent restarts, so a rolling update has a
+	// window with one on each image. An equality check turns that window into
+	// "every launch fails"; accepting the previous version turns it into "the
+	// old client keeps working, without the fields it never sent".
+	if req.Version < MinProtocolVersion || req.Version > ProtocolVersion {
+		return fmt.Errorf("unsupported helper protocol version %d (this helper speaks %d..%d)",
+			req.Version, MinProtocolVersion, ProtocolVersion)
 	}
 	switch req.Op {
 	case OpPing:
@@ -269,6 +312,20 @@ func (s *server) validateRequest(req Request) error {
 	}
 	if req.Slot < 0 || req.Slot >= s.network.Capacity() {
 		return errors.New("VM slot is outside the configured subnet")
+	}
+	// The machine fields are required exactly when this helper is going to build
+	// a QEMU argv out of them, and meaningless otherwise — Firecracker is
+	// launched with an empty argv and configured over its own socket afterwards.
+	// Checking them by backend rather than by protocol version is what lets a
+	// version-2 Firecracker client keep sending nothing.
+	if req.Op == OpLaunch && s.opts.Backend == BackendQEMU {
+		if req.Version < 2 {
+			return fmt.Errorf("this helper launches QEMU and needs protocol version 2 or later, "+
+				"but the client sent version %d; the controller container is running an older image", req.Version)
+		}
+		if err := ValidateMachine(req); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -335,19 +392,22 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 		return
 	}
 
-	uid := uint32(s.jailUID(req.Slot))
-	cmd := exec.Command("/firecracker", "--api-sock", jailedSocketName)
-	cmd.Dir = "/"
-	cmd.Env = []string{}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Chroot:     s.jailRoot(req.Slot),
-		Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{uid}},
+	cmd, logFile, err := s.vmmCommand(req)
+	if err != nil {
+		s.cleanupSlot(req.Slot) //nolint:errcheck
+		s.respond(conn, Response{Error: err.Error()})
+		return
+	}
+	// The child gets its own descriptor at Start; ours is held for the VMM's
+	// lifetime only because that is when this function returns, and released
+	// here so a launch that fails before Start does not leak it. nil on the
+	// Firecracker path, which logs to this process's own stdout and stderr.
+	if logFile != nil {
+		defer logFile.Close() //nolint:errcheck
 	}
 	if err := cmd.Start(); err != nil {
 		s.cleanupSlot(req.Slot) //nolint:errcheck
-		s.respond(conn, Response{Error: fmt.Sprintf("start Firecracker: %v", err)})
+		s.respond(conn, Response{Error: fmt.Sprintf("start %s: %v", s.vmmName(), err)})
 		return
 	}
 	waitCh := make(chan error, 1)
@@ -386,10 +446,35 @@ func (s *server) launch(ctx context.Context, conn *net.UnixConn, req Request) {
 	cleanupErr := s.cleanupSlot(req.Slot)
 	processErr = errors.Join(processErr, cleanupErr)
 	if processErr != nil {
-		s.respond(conn, Response{Error: fmt.Sprintf("Firecracker exited: %v", processErr)})
+		s.respond(conn, Response{Error: fmt.Sprintf("%s exited: %v", s.vmmName(), processErr)})
 	} else {
 		s.respond(conn, Response{OK: true})
 	}
+}
+
+// vmmCommand builds the child process for this helper's backend. It returns an
+// optional log file the caller must close after Start: the QEMU path writes the
+// child's output to a per-VM qemu.log the controller can read back, where the
+// Firecracker path writes to this process's own stdout and stderr.
+//
+// The two branches confine the child in fundamentally different ways — see
+// qemu_linux.go's file comment — and that difference is the whole reason this
+// is a switch rather than a binary name.
+func (s *server) vmmCommand(req Request) (*exec.Cmd, *os.File, error) {
+	if s.qemu() {
+		return s.qemuCommand(req)
+	}
+	uid := uint32(s.jailUID(req.Slot))
+	cmd := exec.Command("/firecracker", "--api-sock", jailedSocketName)
+	cmd.Dir = "/"
+	cmd.Env = []string{}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Chroot:     s.jailRoot(req.Slot),
+		Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{uid}},
+	}
+	return cmd, nil, nil
 }
 
 func (s *server) waitForSluice(ctx context.Context, tap string) error {
@@ -433,18 +518,22 @@ func stopProcess(cmd *exec.Cmd, waitCh <-chan error) error {
 }
 
 func (s *server) publishSocket(ctx context.Context, slot int, waitCh chan error) error {
-	socket := filepath.Join(s.jailRoot(slot), jailedSocketName)
-	deadline := time.NewTimer(5 * time.Second)
+	socket := filepath.Join(s.jailRoot(slot), s.launchSocketName())
+	// Firecracker binds its API socket as almost its first action; QEMU creates
+	// the QMP chardev while it builds the machine from a much longer command
+	// line, so this gate is sized for the slower of the two rather than for the
+	// one it was written against.
+	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if info, err := os.Lstat(socket); err == nil && info.Mode()&os.ModeSocket != 0 {
 			if err := os.Chown(socket, s.jailUID(slot), s.opts.ControllerGID); err != nil {
-				return fmt.Errorf("share Firecracker socket: %w", err)
+				return fmt.Errorf("share %s control socket: %w", s.vmmName(), err)
 			}
 			if err := os.Chmod(socket, 0o660); err != nil {
-				return fmt.Errorf("protect Firecracker socket: %w", err)
+				return fmt.Errorf("protect %s control socket: %w", s.vmmName(), err)
 			}
 			return nil
 		}
@@ -453,17 +542,20 @@ func (s *server) publishSocket(ctx context.Context, slot int, waitCh chan error)
 			// The launch path still owns the one Wait result. Put it back so its
 			// failure cleanup cannot block trying to wait a second time.
 			waitCh <- err
-			return fmt.Errorf("Firecracker exited before creating its socket: %w", err)
+			return fmt.Errorf("%s exited before creating its control socket: %w", s.vmmName(), err)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return errors.New("timed out waiting for Firecracker API socket")
+			return fmt.Errorf("timed out waiting for the %s control socket", s.vmmName())
 		case <-ticker.C:
 		}
 	}
 }
 
 func (s *server) prepareJail(req Request) error {
+	if s.qemu() {
+		return s.prepareQemuJail(req)
+	}
 	root := s.jailRoot(req.Slot)
 	if err := os.MkdirAll(filepath.Join(root, "dev", "net"), 0o755); err != nil {
 		return fmt.Errorf("create chroot jail: %w", err)
@@ -616,7 +708,7 @@ func (s *server) prepareSnapshotOutputs(req Request) error {
 		return fmt.Errorf("open VM directory: %w", err)
 	}
 	defer unix.Close(dirFD) //nolint:errcheck
-	for _, name := range []string{jailedMemName + ".next", jailedStateName + ".next"} {
+	for _, name := range s.snapshotOutputNames() {
 		guest := filepath.Join(root, name)
 		unix.Unlinkat(dirFD, name, 0) //nolint:errcheck
 		os.Remove(guest)              //nolint:errcheck
@@ -653,11 +745,11 @@ func (s *server) cpuTime(req Request) (uint64, error) {
 	}
 	closeParen := strings.LastIndexByte(string(stat), ')')
 	if closeParen < 0 {
-		return 0, errors.New("malformed Firecracker proc stat")
+		return 0, fmt.Errorf("malformed %s proc stat", s.vmmName())
 	}
 	fields := strings.Fields(string(stat[closeParen+1:]))
 	if len(fields) < 13 {
-		return 0, errors.New("short Firecracker proc stat")
+		return 0, fmt.Errorf("short %s proc stat", s.vmmName())
 	}
 	utime, err := strconv.ParseUint(fields[11], 10, 64)
 	if err != nil {
@@ -800,12 +892,54 @@ func (s *server) sweepStaleTaps() {
 	}
 }
 
-func (s *server) vmRel(name string) string { return filepath.Join("fc-vms", name) }
+// vmRel is the per-VM directory beneath VMStateDir, and it must agree with the
+// driver's: internal/vmm/firecracker uses fc-vms, internal/vmm/qemu uses
+// qemu-vms, and the two layouts are deliberately disjoint so one VMM's node
+// cannot half-read the other's sandboxes.
+func (s *server) vmRel(name string) string {
+	if s.qemu() {
+		return filepath.Join("qemu-vms", name)
+	}
+	return filepath.Join("fc-vms", name)
+}
 
 func (s *server) jailUID(slot int) int { return s.opts.JailerUIDBase + slot }
 
 func (s *server) jailWorkspace(slot int) string {
-	return filepath.Join(s.opts.ChrootBase, filepath.Base(s.opts.FirecrackerBin), fmt.Sprintf("sparkbox-%d", slot))
+	dir := filepath.Base(s.opts.FirecrackerBin)
+	if s.qemu() {
+		dir = qemuJailDir
+	}
+	return filepath.Join(s.opts.ChrootBase, dir, fmt.Sprintf("sparkbox-%d", slot))
+}
+
+// vmmName is what this helper calls its VMM in an error a human will read.
+func (s *server) vmmName() string {
+	if s.qemu() {
+		return "QEMU"
+	}
+	return "Firecracker"
+}
+
+// snapshotOutputNames is every file a snapshot of this backend writes. QEMU's
+// migrate produces exactly one where Firecracker produces a pair, and a
+// predicate lifted across that difference matches nothing and silently stops
+// refusing what it exists to refuse.
+func (s *server) snapshotOutputNames() []string {
+	if s.qemu() {
+		return []string{jailedSnapshotName + ".next"}
+	}
+	return []string{jailedMemName + ".next", jailedStateName + ".next"}
+}
+
+// launchSocketName is the VMM's control socket inside the jail: Firecracker's
+// REST API, or QEMU's QMP monitor. publishSocket shares whichever it is with
+// the controller group, and the driver derives the same path to dial it.
+func (s *server) launchSocketName() string {
+	if s.qemu() {
+		return jailedQMPSocketName
+	}
+	return jailedSocketName
 }
 
 func (s *server) jailRoot(slot int) string { return filepath.Join(s.jailWorkspace(slot), "root") }

@@ -1,6 +1,7 @@
 package guestnet
 
 import (
+	"fmt"
 	"net/netip"
 	"testing"
 )
@@ -91,5 +92,66 @@ func TestOverlaps(t *testing.T) {
 		if got := Overlaps(netip.MustParsePrefix(test.a), netip.MustParsePrefix(test.b)); got != test.want {
 			t.Errorf("Overlaps(%s, %s) = %v, want %v", test.a, test.b, got, test.want)
 		}
+	}
+}
+
+// TestMACForIsStableAcrossReleases pins the exact bytes, not just the shape.
+//
+// This is a wire format in the most literal sense. A sandbox paused today is
+// resumed by a build shipped weeks from now, and QEMU takes the MAC from argv on
+// BOTH the cold boot and the restore. Change this formula and every already-
+// paused guest comes back on an interface its netcfg hook has never seen — the
+// sandbox loses its network on resume, long after the change that caused it.
+//
+// The values below were produced by the formula the qemu driver shipped with,
+// which is what makes them the compatible ones rather than merely the current
+// ones.
+func TestMACForIsStableAcrossReleases(t *testing.T) {
+	for index, want := range map[int]string{
+		0:     "02:5b:01:00:00:00",
+		1:     "02:5b:01:00:00:01",
+		3:     "02:5b:01:00:00:03",
+		255:   "02:5b:01:00:00:ff",
+		256:   "02:5b:01:00:01:00",
+		4095:  "02:5b:01:00:0f:ff",
+		65535: "02:5b:01:00:ff:ff",
+	} {
+		if got := MACFor(0x01, index); got != want {
+			t.Errorf("MACFor(%d) = %q, want %q", index, got, want)
+		}
+	}
+}
+
+// TestMACForIsLocallyAdministeredUnicast guards the two bits that decide whether
+// a bridge or a guest kernel will accept the address at all: bit 0 of the first
+// octet must be 0 (unicast, not multicast) and bit 1 must be 1 (locally
+// administered, so it cannot collide with a real vendor's assignment).
+func TestMACForIsLocallyAdministeredUnicast(t *testing.T) {
+	for _, index := range []int{0, 1, 7, 300, 65535} {
+		mac := MACFor(0x01, index)
+		var first int
+		if _, err := fmt.Sscanf(mac[:2], "%x", &first); err != nil {
+			t.Fatalf("MACFor(%d) = %q: unparsable first octet", index, mac)
+		}
+		if first&0x01 != 0 {
+			t.Errorf("MACFor(%d) = %q is a MULTICAST address", index, mac)
+		}
+		if first&0x02 == 0 {
+			t.Errorf("MACFor(%d) = %q is not locally administered", index, mac)
+		}
+	}
+}
+
+// TestMACForIsUniquePerSlot: two sandboxes on one host sharing a MAC is an
+// ARP-level collision that presents as intermittent packet loss for both, which
+// is nobody's first guess.
+func TestMACForIsUniquePerSlot(t *testing.T) {
+	seen := make(map[string]int, 4096)
+	for index := 0; index < 4096; index++ {
+		mac := MACFor(0x01, index)
+		if prev, dup := seen[mac]; dup {
+			t.Fatalf("slots %d and %d both get %s", prev, index, mac)
+		}
+		seen[mac] = index
 	}
 }

@@ -26,6 +26,7 @@
 package qemu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -34,12 +35,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
 )
 
 // ---------------------------------------------------------------------------
@@ -59,7 +64,7 @@ import (
 //	              <- boot calls this to build-or-replay -append,
 //	              (d *Driver) kernelArgs(name string,
 //	              idx int, fresh bool) (string, error), guestargs.MachineID(name string)
-//	              string, hostnet.MAC(qemuMACOUI, idx int) string, guestargs.DNSArg(guestDNS,
+//	              string, guestnet.MACFor(qemuargs.MACOUI, idx int) string, guestargs.DNSArg(guestDNS,
 //	              gatewayIP string) (string, error), guestargs.ValidateDNS(guestDNS
 //	              string) error  <- New calls this one.
 //	lifecycle.go  Create, Pause, Resume, Destroy, plus everything they need:
@@ -113,7 +118,7 @@ import (
 //	func (d *Driver) stopVMM(st *vmState) error // nil once the child is reaped, however that happened
 //	func (d *Driver) instance(name string, st *vmState) *vmm.Instance
 //	func (d *Driver) freeSlot() (int, error)    // caller holds d.mu
-//	func d.net.TapName(idx int) string                // tapPrefix + strconv.Itoa(idx)
+//	func (d *Driver) tapName(idx int) string          // d.net.TapPrefix + slot
 //	func d.net.SweepStale()
 //	func hostnet.DefaultRoute6Dev() string
 //
@@ -254,7 +259,7 @@ import (
 //	-drive file=<rootfs>,format=raw,if=none,id=rootfs
 //	-device virtio-blk-pci,drive=rootfs,romfile=
 //	-netdev tap,id=net0,ifname=<d.net.TapName(idx)>,script=no,downscript=no
-//	-device virtio-net-pci,netdev=net0,mac=<hostnet.MAC(qemuMACOUI, idx)>,romfile=
+//	-device virtio-net-pci,netdev=net0,mac=<guestnet.MACFor(qemuargs.MACOUI, idx)>,romfile=
 //	-device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,romfile=
 //	-qmp unix:<qmp.sock>,server=on,wait=off
 //	-nographic -serial file:<serial.log> -monitor none
@@ -446,6 +451,59 @@ type Options struct {
 	// ever been run on x86_64 and guessing a machine model that determines
 	// snapshot compatibility is not the place to be optimistic.
 	MachineType string
+	// PrivilegedHelperSocket moves VM launch, tap creation and jail construction
+	// into the root-owned helper, exactly as it does for the firecracker driver.
+	// Empty is the DIRECT LAUNCHER: this process execs QEMU itself, which is
+	// what a dev box and the parity suite use.
+	//
+	// It changes what this driver may assume about its own container. On CKS the
+	// controller runs with every capability dropped and NO device node at all —
+	// the device plugin's sparkbox.dev/kvm allocation belongs to the helper — so
+	// the /dev/kvm probe in New and the stale-tap sweep are BOTH conditional on
+	// this being empty, mirroring fc.go:303 and fc.go:314. Measured on the CKS
+	// node: a hostPath bind mount of /dev/kvm is not enough, the device cgroup
+	// refuses it even to uid 0 holding DAC_OVERRIDE, so a driver that probes
+	// unconditionally cannot start in the container that would run it.
+	PrivilegedHelperSocket string
+	// PrivilegedHelperBin is the launch client the driver execs; it holds no
+	// privilege of its own and only keeps an authenticated connection open for
+	// the VMM's lifetime.
+	PrivilegedHelperBin string
+	// HelperControllerGID is the group the helper shares VM files and the QMP
+	// socket with, so this unprivileged process can reach them.
+	HelperControllerGID int
+	// TapPrefix overrides the host tap device name prefix. Empty is
+	// defaultTapPrefix, which is what every deployment uses and what every
+	// consumer of a tap name assumes.
+	//
+	// IT EXISTS FOR ONE CALLER: the parity suite, which exercises this driver
+	// and the firecracker one against real guests on ONE host, concurrently.
+	// Both allocate from slot 0 up, so with one prefix they would name the same
+	// device — and each driver's startup sweep would delete the other's live
+	// taps on top of that. Neither is a production shape: a node runs one VMM,
+	// and under the privileged helper neither driver creates or sweeps a tap at
+	// all.
+	//
+	// Setting it in production silently disables egress control. sluice's meter
+	// attaches to defaultTapPrefix+, netpush keys per-tap policy on it, and
+	// deploy/sparkbox-net.sh writes its iptables rules against it — none of
+	// which are configurable from here, and all of which would then be talking
+	// about devices that do not exist. There is deliberately no flag for it.
+	TapPrefix string
+	// JailerChrootBase is the root-owned directory beneath which the helper
+	// builds its per-slot jails, and it must be the helper's --chroot-base.
+	//
+	// This driver never writes there — it cannot, the jail root is 0710 owned by
+	// a uid this process does not have — and needs it for exactly one thing:
+	// deriving the path of the QMP socket the helper published, so it can dial
+	// the monitor of a VMM it did not start. Empty defaults to
+	// <VMStateDir>/jailer, which is what both entrypoints pass.
+	//
+	// The jail's other path component is a FIXED "qemu", not the emulator's
+	// basename the way Firecracker's is. Deriving it from a binary name would
+	// mean this container needs QEMU's path just to build a string, and would
+	// break silently the day the two containers disagreed about it.
+	JailerChrootBase string
 	// DisableHostRootfsMounts skips per-create key injection and the template
 	// sanitize pass — the two runtime paths that otherwise loop-mount a
 	// guest-authored ext4 in the management process. Templates must then
@@ -492,24 +550,31 @@ const (
 	// template, telling the gateway which account to log a fork in as.
 	loginUserSuffix = ".login-user"
 
-	// tapPrefix deliberately differs from the firecracker driver's "sbtap".
-	// Each driver's New() sweeps stale devices carrying its own prefix, so a
-	// shared prefix would mean constructing one driver silently deletes the
-	// other's live networking. Neither prefix is a prefix of the other, so the
-	// two sweeps cannot overlap. (The spike's throwaway probe used "sbtapq0",
-	// which fc's sweep would have eaten — that is how the hazard was noticed.)
-	tapPrefix = "sbqtap"
+	// defaultTapPrefix is the name EVERY consumer of a tap device already
+	// hardcodes: internal/netpush, internal/vmhelper, internal/hostsetup's
+	// sluice --tap-prefix, deploy/kubernetes/sluice-entrypoint.sh and the
+	// ~15 iptables rules in deploy/sparkbox-net.sh. Both drivers use it.
+	//
+	// THIS USED TO BE "sbqtap" ON THE DIRECT PATH, and that was a silent
+	// product bug rather than a cosmetic difference. On a direct-launch QEMU
+	// node the guests' taps were sbqtap<n>, so sluice's meter — attached to
+	// sbtap+ — never saw them, and netpush pushed per-tap egress policy keyed
+	// on sbtap<n>, a device that did not exist. Egress control was not
+	// degraded on that node; it was absent, and nothing anywhere said so.
+	//
+	// The divergence bought one thing, named in the comment that used to live
+	// here: each driver's New() sweeps stale devices carrying its own prefix,
+	// so a shared prefix means constructing one driver deletes the other's
+	// live taps. That is now Options.TapPrefix's job, and it is a far better
+	// trade — the sweep hazard is confined to one test fixture, where a lost
+	// tap is a failed test, while the prefix mismatch was confined to
+	// production, where a lost policy is a sandbox with unfiltered egress.
+	defaultTapPrefix = "sbtap"
 
-	// qemuMACOUI is the third octet of every guest MAC this driver hands out.
-	// The firecracker driver uses 0x00, so two drivers sharing one host's
-	// subnet — which only the parity suite does — cannot collide.
-	qemuMACOUI = 0x01
-
-	// balloonDeviceID must appear as `id=` on the -device line: the QOM path
-	// guest stats are read from is derived from it, and an unnamed device lands
-	// under /machine/peripheral-anon/device[N] with an index that shifts
-	// whenever another device is added.
-	balloonDeviceID = "balloon0"
+	// balloonDeviceID is the argv's, from the package that builds the argv:
+	// the QOM path guest stats are read from is derived from `id=`, so the name
+	// this driver polls and the name the command line sets must be one value.
+	balloonDeviceID = qemuargs.BalloonDeviceID
 	balloonQOMPath  = "/machine/peripheral/" + balloonDeviceID
 	// balloonStatsIntervalSecs is how often the guest refreshes balloon stats.
 	// It is a QOM property set at runtime, not migrated device state, so boot
@@ -552,6 +617,45 @@ type vmState struct {
 	statsErr error
 	// paused means a memory snapshot exists and Resume can bring it back.
 	paused bool
+	// launchLog captures the privileged helper client's stderr, and is nil on
+	// the direct path where there is no such process.
+	//
+	// It exists because that client is where the most confusing failure on a
+	// hardened node shows up. When the helper refuses a launch — a backend
+	// mismatch between the two containers, a protocol version the other side is
+	// too old for, a slot already in use — the refusal is written there, while
+	// this driver sees only "qemu exited before its monitor was reachable" and
+	// an empty qemu.log the helper never got as far as filling. Folding it into
+	// vmmError puts the reason in the error the operator actually reads.
+	launchLog *boundedLog
+}
+
+// boundedLog is a Writer safe to hand a child process and read concurrently
+// from the goroutine that reports its failure. It keeps only the first
+// boundedLogBytes, because the content worth having is the refusal at the top,
+// not whatever a wedged process writes forever afterwards.
+type boundedLog struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+const boundedLogBytes = 4096
+
+func (b *boundedLog) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := boundedLogBytes - len(b.data); room > 0 {
+		b.data = append(b.data, p[:min(room, len(p))]...)
+	}
+	// Always the full length: a short write would make the child think its
+	// stderr broke, which is not a thing we want to teach it over a log cap.
+	return len(p), nil
+}
+
+func (b *boundedLog) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.TrimSpace(string(b.data))
 }
 
 type Driver struct {
@@ -584,30 +688,56 @@ func New(opts Options) (*Driver, error) {
 		if opts.QemuBin == "" {
 			opts.QemuBin = "qemu-system-aarch64"
 		}
-		if opts.MachineType == "" {
-			opts.MachineType = "virt-8.2"
-		}
 	case "amd64":
 		if opts.QemuBin == "" {
 			opts.QemuBin = "qemu-system-x86_64"
 		}
-		if opts.MachineType == "" {
-			// docs/qemu-spike.md is entirely arm64, and hack/parity/run-on-cks.sh
-			// has never been run. Rather than guess a versioned q35 that every
-			// future snapshot would be bound to, make the first x86_64 operator
-			// state it.
-			return nil, errors.New("qemu driver on amd64 needs an explicit machine type " +
-				"(e.g. pc-q35-8.2): the migration stream is bound to it and no x86_64 run has happened yet")
-		}
 	default:
-		return nil, fmt.Errorf("qemu driver has no known machine type for GOARCH %q", runtime.GOARCH)
+		return nil, fmt.Errorf("qemu driver has no known emulator for GOARCH %q", runtime.GOARCH)
 	}
-	resolved, err := exec.LookPath(opts.QemuBin)
-	if err != nil {
-		return nil, fmt.Errorf("qemu binary: %w", err)
+	if opts.MachineType == "" {
+		// From qemuargs, not from here, because the privileged helper needs the
+		// same answer and a second pinned copy would drift — first visibly on a
+		// resume that cannot load its stream.
+		machineType, err := qemuargs.DefaultMachineType()
+		if err != nil {
+			return nil, fmt.Errorf("qemu driver: %w", err)
+		}
+		opts.MachineType = machineType
 	}
-	if opts.QemuBin, err = filepath.Abs(resolved); err != nil {
-		return nil, fmt.Errorf("qemu binary: %w", err)
+	// The emulator is resolved once, here, so a later PATH change cannot swap
+	// the binary under a running fleet — but ONLY on the direct path. Under the
+	// helper this process never execs QEMU; the helper holds the binary, and
+	// requiring the controller container to carry one too would make the
+	// hardened deployment fail on something it does not use.
+	if opts.PrivilegedHelperSocket == "" {
+		resolved, err := exec.LookPath(opts.QemuBin)
+		if err != nil {
+			return nil, fmt.Errorf("qemu binary: %w", err)
+		}
+		if opts.QemuBin, err = filepath.Abs(resolved); err != nil {
+			return nil, fmt.Errorf("qemu binary: %w", err)
+		}
+	} else {
+		if !filepath.IsAbs(opts.PrivilegedHelperSocket) {
+			return nil, errors.New("privileged helper socket must be an absolute path")
+		}
+		if opts.PrivilegedHelperBin == "" {
+			opts.PrivilegedHelperBin = "sparkbox-vmm-helper"
+		}
+		resolved, err := exec.LookPath(opts.PrivilegedHelperBin)
+		if err != nil {
+			return nil, fmt.Errorf("privileged helper client: %w", err)
+		}
+		if opts.PrivilegedHelperBin, err = filepath.Abs(resolved); err != nil {
+			return nil, fmt.Errorf("privileged helper client: %w", err)
+		}
+		if opts.HelperControllerGID < 1 {
+			return nil, errors.New("privileged helper requires a controller GID")
+		}
+		if opts.JailerChrootBase == "" {
+			opts.JailerChrootBase = filepath.Join(opts.VMStateDir, "jailer")
+		}
 	}
 
 	guestNetwork, err := guestnet.Parse(opts.Subnet)
@@ -629,12 +759,18 @@ func New(opts Options) (*Driver, error) {
 
 	d := &Driver{
 		opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{},
-		net: hostnet.Plumbing{Net: guestNetwork, TapPrefix: tapPrefix}, reservedSlots: map[int]bool{},
+		net: hostnet.Plumbing{Net: guestNetwork}, reservedSlots: map[int]bool{},
 	}
 	if dnsAddr, err := netip.ParseAddr(opts.GuestDNS); err == nil {
 		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
 			d.reservedSlots[index] = true
 		}
+	}
+	// The prefix every consumer of a tap name already assumes. Options.TapPrefix
+	// overrides it for the parity suite and nothing else.
+	d.net.TapPrefix = opts.TapPrefix
+	if d.net.TapPrefix == "" {
+		d.net.TapPrefix = defaultTapPrefix
 	}
 
 	if opts.Subnet6 != "" {
@@ -669,11 +805,20 @@ func New(opts Options) (*Driver, error) {
 		d.net.Uplink6 = hostnet.DefaultRoute6Dev()
 	}
 
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		// -cpu host, which the spike measured and which every timing in it
-		// assumes, is a KVM-only model. TCG would boot and would not be a
-		// sandbox host.
-		return nil, fmt.Errorf("qemu driver requires /dev/kvm: %w", err)
+	// Only the process that will actually open /dev/kvm may insist on it.
+	// Under the privileged helper this one never does — the helper holds the
+	// device-plugin allocation and execs QEMU — and on CKS this container has no
+	// device node at all, so an unconditional probe here is not a safety check,
+	// it is a driver that cannot start. fc.go:303 has had this guard from the
+	// beginning; the qemu driver was written against the direct launcher and
+	// inherited the check without it.
+	if opts.PrivilegedHelperSocket == "" {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			// -cpu host, which the spike measured and which every timing in it
+			// assumes, is a KVM-only model. TCG would boot and would not be a
+			// sandbox host.
+			return nil, fmt.Errorf("qemu driver requires /dev/kvm: %w", err)
+		}
 	}
 	if _, err := os.Stat(opts.KernelPath); err != nil {
 		return nil, fmt.Errorf("kernel image: %w", err)
@@ -682,7 +827,35 @@ func New(opts Options) (*Driver, error) {
 	// would then fail with "Device or resource busy". Nothing of ours is
 	// running in a fresh process, so sweep them now — and only ours: see
 	// tapPrefix.
-	d.net.SweepStale()
+	//
+	// Gated the way the firecracker driver gates it. Under the helper the taps
+	// are not ours to sweep: the helper creates and destroys them, it can still
+	// own running guests when this container restarts alone (separate
+	// containers of one Pod with independent restarts), and `ip link del` on a
+	// live guest's tap would take its network away mid-session. That it
+	// currently fails for lack of NET_ADMIN is an accident of the deployment,
+	// not a design.
+	if opts.PrivilegedHelperSocket == "" {
+		d.net.SweepStale()
+	}
+	if opts.PrivilegedHelperSocket != "" {
+		// Fail at construction rather than at the first Create. The helper is a
+		// separate container of the same Pod, so "it is not there yet" is a
+		// normal startup ordering problem and an operator needs to see it as
+		// one — not as a sandbox that cannot be created for no stated reason.
+		//
+		// This also catches the mismatch that matters most: a helper serving
+		// --backend firecracker answers this ping perfectly well, and the
+		// launch it later refuses is the first sign. There is nothing in the
+		// protocol to ask it with — Backend is deliberately server-side only —
+		// so the entrypoint deriving both from one SPARKBOX_DRIVER is what
+		// keeps them in step.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vmhelper.Ping(ctx, opts.PrivilegedHelperSocket); err != nil {
+			return nil, fmt.Errorf("privileged helper: %w", err)
+		}
+	}
 	return d, nil
 }
 
