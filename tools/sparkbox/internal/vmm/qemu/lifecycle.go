@@ -16,6 +16,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestdisk"
 )
 
 // Timings for the VMM handshake. They bound only this driver's own waits; the
@@ -265,7 +266,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	switch _, err := os.Stat(rootfs); {
 	case os.IsNotExist(err):
 		template := d.templatePath(cfg.Image)
-		if err := reflinkClone(ctx, template, rootfs); err != nil {
+		if err := guestdisk.Clone(ctx, template, rootfs); err != nil {
 			return nil, err
 		}
 		fresh = true
@@ -309,7 +310,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	}
 
 	if !d.opts.DisableHostRootfsMounts {
-		if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
+		if err := guestdisk.InstallAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
 			return nil, fmt.Errorf("install gateway key: %w", err)
 		}
 	}
