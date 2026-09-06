@@ -150,7 +150,13 @@ Two changes now stand between you and that:
   working set and is left alone; a genuinely idle one still gives its RAM back.
   Only the idle path was guarded at first, which left the same trap open on the
   path that fires under real pressure.
-- `--idle-balloon` now defaults to **20 minutes**, not 2.
+- `--idle-balloon` now defaults to **5 minutes**, not 2. It briefly read 20,
+  which was a stand-in for the hazard the floor above had already closed. Two
+  minutes was dangerous because nothing stopped the squeeze, not because two
+  minutes is short — and the timer is not optional housekeeping: with
+  `--mem-reserve-mb` set, admission charges every running sandbox the reserve
+  rather than its ceiling, so ballooning is what makes that accounting true.
+  A long value just leaves the node admitting optimistically for longer.
 
 Genuine memory overage is still reclaimed promptly, by the memory-pressure
 controller, which reclaims exactly the excess from the coldest guests.

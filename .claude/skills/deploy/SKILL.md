@@ -285,53 +285,34 @@ and `-default-vcpus` sized to it (a third of RAM, half the cores; override with
 `sparkbox devpod up` by hand instead, pass all three — `devpod plan` marks both
 omissions `[BLOCKING]`, and that line is the only warning you get.
 
-## A guest pegging its vCPUs is the balloon until proven otherwise
+## If a guest pegs its vCPUs after you roll
 
-Right-sizing does **not** fix a wedged guest, and the first correctly-sized
-replacement wedged identically. The cause is the idle reaper: it used to
-squeeze any sandbox idle for two minutes down to `--mem-reserve-mb` (256 MB),
-including one that had not finished booting. Check firecracker's own log first:
+Right-sizing does not fix a wedged guest — the first correctly-sized
+replacement wedged identically. It was the idle reaper squeezing sandboxes that
+had not finished booting, and the fix has shipped: no path now squeezes below
+the guest's measured working set, and `--idle-balloon` defaults to 5 minutes
+rather than 2.
 
-```sh
-hack/dev/guest.sh console <name> | head        # or, for the raw API log:
-container machine run -i --root --name sparkbox -- bash -s <<'EOF'
-docker logs sparkbox-dev-vmm-helper 2>&1 | grep -F 'Patch request on "/balloon"'
-EOF
-```
+**That applied to CKS too** — `deployment.yaml` never pinned `--idle-balloon`,
+so production ran the two-minute default against 12 GB guests. Worth confirming
+after any roll that changes reaper flags.
 
-An `{"amount_mib": …}` close to the guest's whole `mem_size_mib` is the
-diagnosis. The guest cannot recover from it on its own: the balloon deflates on
-*activity*, `--activity-cpu-pct` is **0 by default**, and a guest starved before
-its agent started moves no network traffic — so being squeezed is what makes it
-look idle, which is what keeps it squeezed.
-
-The reaper no longer squeezes below 1.5x the guest's measured working set, does
-nothing until an owner pool or the node budget is ~85% full, and `--idle-balloon`
-now defaults to 20 minutes rather than 2. **This applies to CKS too** —
-`deployment.yaml` never pinned `--idle-balloon`, so production was running the
-two-minute default against 12 GB guests.
+The diagnosis (reading the balloon PATCH out of firecracker's own log, and why
+a squeezed guest cannot recover on its own) is in
+`hack/dev/README.md` under *The other one: the idle reaper's balloon*.
 
 ## When a guest will not answer
 
-The supported ways into a sandbox — `ssh <name>@gateway`, the browser terminal,
-the REST API — all go through the in-guest agent on `:8000`. A guest whose boot
-never finished has no agent, so all three answer *"could not reach the
-sandbox's shell; it may still be starting"* and there is no next step.
-
-`hack/dev/guest.sh` is that next step:
+Everything supported goes through the in-guest agent on `:8000` — `ssh
+<name>@gateway`, the browser terminal, the REST API — so a guest whose boot
+never finished answers *"could not reach the sandbox's shell"* three ways and
+leaves you no next step. The serial console is that next step; it asks nothing
+of the guest, and ends with a "still waiting" summary naming the units systemd
+is stuck on:
 
 ```sh
-hack/dev/guest.sh console <name>        # the serial console: the boot log
-hack/dev/guest.sh console <name> -f     # follow it
+hack/dev/guest.sh console <name>        # add -f to follow
 ```
-
-`console` needs nothing of the guest at all and ends with a **"still waiting"**
-summary naming the units systemd is stuck on, which is usually the answer.
-
-`console` is the only subcommand. There was a `shell` that forwarded into the
-pod's network namespace to reach the guest's own sshd; it was removed because it
-never reliably worked, and `guest.sh`'s header carries the `docker exec … ssh`
-recipe to use instead.
 
 ## Verify
 
