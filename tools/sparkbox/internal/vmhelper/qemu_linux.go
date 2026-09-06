@@ -182,6 +182,34 @@ func (s *server) openVMMLog(req Request) (*os.File, error) {
 // a validated field of the request. Nothing on the command line is a path or a
 // binary the controller chose.
 func (s *server) qemuCommand(req Request) (*exec.Cmd, *os.File, error) {
+	args, err := s.qemuArgs(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	logFile, err := s.openVMMLog(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd := exec.Command(s.opts.QemuBin, args...)
+	// The working directory is the jail root, which is what makes the relative
+	// paths on the argv resolve to the same files before the chroot as after.
+	cmd.Dir = s.jailRoot(req.Slot)
+	cmd.Env = []string{}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	// Deliberately NO SysProcAttr. See the file comment: chroot(2) here would
+	// take effect before QEMU has opened /dev/kvm or the tap, and setuid(2)
+	// here would take away the privilege it needs to open them at all.
+	return cmd, logFile, nil
+}
+
+// qemuArgs is the argv alone: a pure function of the request and this helper's
+// startup configuration, touching no filesystem. Split out from qemuCommand so
+// the whole command-line contract — the confinement flags, the relative paths,
+// the restore form differing from the boot form by exactly one flag — is
+// testable without a state directory and without the privilege to chown a file
+// to another uid.
+func (s *server) qemuArgs(req Request) ([]string, error) {
 	spec := qemuargs.Spec{
 		MachineType: s.opts.MachineType,
 		KernelPath:  jailedKernelName,
@@ -208,25 +236,7 @@ func (s *server) qemuCommand(req Request) (*exec.Cmd, *os.File, error) {
 	if req.Resume {
 		spec.RestoreFrom = jailedSnapshotName
 	}
-	args, err := qemuargs.Build(spec)
-	if err != nil {
-		return nil, nil, err
-	}
-	logFile, err := s.openVMMLog(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	cmd := exec.Command(s.opts.QemuBin, args...)
-	// The working directory is the jail root, which is what makes the relative
-	// paths on the argv resolve to the same files before the chroot as after.
-	cmd.Dir = s.jailRoot(req.Slot)
-	cmd.Env = []string{}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	// Deliberately NO SysProcAttr. See the file comment: chroot(2) here would
-	// take effect before QEMU has opened /dev/kvm or the tap, and setuid(2)
-	// here would take away the privilege it needs to open them at all.
-	return cmd, logFile, nil
+	return qemuargs.Build(spec)
 }
 
 // validateQemuOptions checks the startup configuration a QEMU helper needs.
