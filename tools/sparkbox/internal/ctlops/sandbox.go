@@ -213,6 +213,15 @@ func (o *Ops) build(ctx context.Context, op, node, name, owner string, tpl resol
 		case runnerPlacer:
 			chosen, err := store.PlaceForRunner(runner, node, tpl.Image, vcpus, memMB)
 			if err != nil {
+				// The same explanation CreateOn's failure gets, for the same
+				// reason and in the same case: when the BINDING chose the
+				// machine, "node n1 runs firecracker and this environment
+				// requires qemu" is a true sentence about a machine the caller
+				// never named and cannot see the relevance of. What completes
+				// it is that the tag's snapshot only exists there.
+				if tpl.Tag != "" && node == tpl.Node {
+					return nil, o.templatePlacementFailed(op, tpl, err)
+				}
 				return nil, err
 			}
 			node = chosen
