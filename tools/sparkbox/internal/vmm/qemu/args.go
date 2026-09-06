@@ -5,6 +5,7 @@ package qemu
 import (
 	"fmt"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"runtime"
 	"strconv"
 	"strings"
@@ -37,8 +38,8 @@ type qemuSpec struct {
 	VCPUs       int64  // -smp
 	MemMB       int64  // -m, and the balloon's baseline (see caps_vmm.go)
 	RootfsPath  string // the raw ext4 image backing /dev/vda
-	TapName     string // an already-created host tap, from tapName(idx)
-	MAC         string // from macFor(idx)
+	TapName     string // an already-created host tap, from d.net.TapName(idx)
+	MAC         string // from hostnet.MAC(qemuMACOUI, idx)
 	QMPSocket   string // the monitor socket; boot unlinks it before exec
 	SerialLog   string // -serial file: target
 	RestoreFrom string // "" for a cold boot, else the state.migrate to load
@@ -251,8 +252,8 @@ func (d *Driver) qemuArgs(name string, st *vmState, rootfs, cmdline string, rest
 		VCPUs:       st.vcpus,
 		MemMB:       st.memMB,
 		RootfsPath:  rootfs,
-		TapName:     tapName(st.idx),
-		MAC:         macFor(st.idx),
+		TapName:     d.net.TapName(st.idx),
+		MAC:         hostnet.MAC(qemuMACOUI, st.idx),
 		QMPSocket:   d.qmpSocketPath(name),
 		SerialLog:   d.serialLogPath(name),
 	}
@@ -318,12 +319,12 @@ func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
 	// after CONFIG_SERIAL_AMBA_PL011 lands.
 	kernelArgs := fmt.Sprintf(
 		"console=%s reboot=k panic=1 root=/dev/vda rw quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s systemd.machine_id=%s",
-		guestConsole(), d.guestIP(idx), d.hostIP(idx), name, guestargs.MachineID(name))
-	if d.prefix6 != nil {
+		guestConsole(), d.net.GuestIP(idx), d.net.HostIP(idx), name, guestargs.MachineID(name))
+	if d.net.Prefix6 != nil {
 		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
-			d.guestIP6(idx), d.hostIP6(idx))
+			d.net.GuestIP6(idx), d.net.HostIP6(idx))
 	}
-	dnsArg, err := guestargs.DNSArg(d.opts.GuestDNS, d.hostIP(idx))
+	dnsArg, err := guestargs.DNSArg(d.opts.GuestDNS, d.net.HostIP(idx))
 	if err != nil {
 		return "", err
 	}
@@ -342,17 +343,4 @@ func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
 		kernelArgs += " sparkbox_fresh=1"
 	}
 	return kernelArgs, nil
-}
-
-// macFor derives a stable locally-administered MAC from the network slot so
-// snapshots restore onto an identically-configured interface.
-//
-// The third octet is 01 where the firecracker driver's is 00. Every other
-// per-slot namespace in this package (the tap name, the /30, the /127) is
-// already distinct from that driver's, and the MAC has to be too: two drivers
-// sharing a VMStateDir and a host would otherwise hand the same address to two
-// live guests on the same L2 segment, which presents as intermittent
-// unreachability rather than as a collision.
-func macFor(idx int) string {
-	return fmt.Sprintf("02:5b:01:00:%02x:%02x", (idx>>8)&0xff, idx&0xff)
 }

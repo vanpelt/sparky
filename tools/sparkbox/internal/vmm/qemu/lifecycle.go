@@ -9,12 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestdisk"
 )
@@ -137,43 +135,6 @@ func (d *Driver) hasSnapshot(name string) (bool, error) {
 
 // --- addressing ------------------------------------------------------------
 
-func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
-func (d *Driver) guestIP(idx int) string { return d.guestSlot(idx).Guest.String() }
-
-// tapName is derived from the slot alone, like the MAC and the addresses. The
-// prefix differs from the firecracker driver's on purpose — see tapPrefix.
-func tapName(idx int) string { return tapPrefix + strconv.Itoa(idx) }
-
-func (d *Driver) guestSlot(idx int) guestnet.Slot {
-	slot, err := d.guestNet.Slot(idx)
-	if err != nil {
-		// Slots are allocated by freeSlot and stored in vmState, so reaching
-		// this means an internal invariant was violated rather than bad input.
-		panic(err)
-	}
-	return slot
-}
-
-// IPv6 addressing: each slot gets a point-to-point /127 carved from the /64,
-// host on the even address and guest on the odd one. IPv4 slot indexes begin
-// at zero, so add one before deriving the IPv6 offset: slot idx=0 becomes
-// ::2 (host) / ::3 (guest), leaving ::1 free for the host's own edge address
-// (the AAAA target). Globally routable, so egress needs no NAT — just host
-// forwarding.
-func (d *Driver) hostIP6(idx int) string  { return d.addr6((idx + 1) * 2) }
-func (d *Driver) guestIP6(idx int) string { return d.addr6((idx+1)*2 + 1) }
-
-func (d *Driver) addr6(off int) string {
-	ip := make(net.IP, net.IPv6len)
-	copy(ip, d.prefix6)
-	// Place the offset in the low 32 bits of the /64's host portion.
-	ip[12] = byte(off >> 24)
-	ip[13] = byte(off >> 16)
-	ip[14] = byte(off >> 8)
-	ip[15] = byte(off)
-	return ip.String()
-}
-
 // --- name reservation and slots --------------------------------------------
 
 // reserveName claims cfg.Name for an in-flight Create so no second Create
@@ -212,13 +173,13 @@ func (d *Driver) freeSlot() (int, error) {
 	for _, s := range d.vms {
 		used[s.idx] = true
 	}
-	for idx := 0; idx < d.guestNet.Capacity(); idx++ {
+	for idx := 0; idx < d.net.Net.Capacity(); idx++ {
 		if !used[idx] && !d.reservedSlots[idx] {
 			return idx, nil
 		}
 	}
 	return 0, fmt.Errorf("no free network slots in %s (max %d concurrent VMs)",
-		d.guestNet, d.guestNet.Capacity())
+		d.net.Net, d.net.Net.Capacity())
 }
 
 // --- Create ----------------------------------------------------------------
@@ -331,15 +292,15 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (inst *vmm.Instance
 	// them: -smp and -m come from the command line on both paths, where
 	// Firecracker recovers them from the snapshot.
 	st := &vmState{idx: idx, vcpus: cfg.VCPUs, memMB: cfg.MemMB}
-	if err := d.createTap(ctx, st.idx); err != nil {
+	if err := d.net.CreateTap(ctx, st.idx); err != nil {
 		// Clean up any half-configured (or stale) device so a retry can reuse
 		// this slot; only recording it in d.vms reserves it, so a failed create
 		// leaks no idx.
-		d.deleteTap(st.idx)
+		d.net.DeleteTap(st.idx)
 		return nil, err
 	}
 	if err := d.boot(ctx, cfg.Name, st, rootfs, false, fresh); err != nil {
-		d.deleteTap(st.idx)
+		d.net.DeleteTap(st.idx)
 		return nil, err
 	}
 	d.vms[cfg.Name] = st
@@ -701,7 +662,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 		// cold-boots from the preserved rootfs. The memory is lost either way;
 		// the disk is intact.
 		err = fmt.Errorf("install memory snapshot for %q: %w", name, err)
-		d.deleteTap(st.idx)
+		d.net.DeleteTap(st.idx)
 		if rmErr := d.removeSnapshotFiles(name); rmErr != nil {
 			err = fmt.Errorf("%w (and its stale snapshot could not be removed: %v)", err, rmErr)
 		}
@@ -711,7 +672,7 @@ func (d *Driver) Pause(ctx context.Context, name string) error {
 	// The VM is gone, so its host-side tap is orphaned. Tear it down here;
 	// Resume recreates it via createTap. Leaving it wedges Resume with
 	// "tuntap add: Device or resource busy" on the still-present device.
-	d.deleteTap(st.idx)
+	d.net.DeleteTap(st.idx)
 	st.paused = true
 	return nil
 }
@@ -773,7 +734,7 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 	if _, err := os.Stat(snapshot); err != nil {
 		return nil, fmt.Errorf("no snapshot for %q: %w", name, err)
 	}
-	if err := d.createTap(ctx, st.idx); err != nil {
+	if err := d.net.CreateTap(ctx, st.idx); err != nil {
 		return nil, err
 	}
 	// The restore argv is the cold-boot argv plus -incoming, built by the same
@@ -786,7 +747,7 @@ func (d *Driver) Resume(ctx context.Context, name string) (*vmm.Instance, error)
 		// Unlike a failed cold boot the tap here was created by us moments ago,
 		// and leaving it behind makes the next Resume fail with "Device or
 		// resource busy" — a retry would then look like a snapshot problem.
-		d.deleteTap(st.idx)
+		d.net.DeleteTap(st.idx)
 		return nil, err
 	}
 	return d.instance(name, st), nil
@@ -820,7 +781,7 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 			return fmt.Errorf("stop vmm for %q: %w", name, err)
 		}
 	}
-	d.deleteTap(st.idx)
+	d.net.DeleteTap(st.idx)
 	// Drop the record last: it releases the slot (and with it the tap name, the
 	// addresses and the MAC) back to freeSlot, which is only safe once the tap
 	// is actually gone.
@@ -901,116 +862,18 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 		inst.State = vmm.StatePaused
 	} else {
 		inst.State = vmm.StateRunning
-		inst.SSHAddr = net.JoinHostPort(d.guestIP(st.idx), "22")
+		inst.SSHAddr = net.JoinHostPort(d.net.GuestIP(st.idx), "22")
 		// HostIP is "the address reachable from the host for the VM's own
 		// services", so it is the GUEST's address, not the host end of the /30.
 		// The proxy reaches in-VM services over the internal v4 hop (works
 		// regardless of whether the guest app binds v4 or ::); the routable v6
 		// is the sandbox's public identity + no-NAT egress.
-		inst.HostIP = d.guestIP(st.idx)
-		if d.prefix6 != nil {
-			inst.GuestV6 = d.guestIP6(st.idx)
+		inst.HostIP = d.net.GuestIP(st.idx)
+		if d.net.Prefix6 != nil {
+			inst.GuestV6 = d.net.GuestIP6(st.idx)
 		}
 	}
 	return inst
 }
 
 // --- host networking --------------------------------------------------------
-
-// createTap sets up the host side of the VM's network: a tap device owned by
-// this process's user with the host-side /30 address. QEMU opens it by name
-// (-netdev tap,ifname=...,script=no), so it must exist before the VMM starts.
-func (d *Driver) createTap(ctx context.Context, idx int) error {
-	tap := tapName(idx)
-	cmds := [][]string{
-		{"ip", "tuntap", "add", "dev", tap, "mode", "tap"},
-		{"ip", "addr", "add", d.hostIP(idx) + "/30", "dev", tap},
-	}
-	if d.prefix6 != nil {
-		// Host side of the point-to-point /127; the connected route this creates
-		// is how inbound traffic to the guest's /128 reaches the tap.
-		cmds = append(cmds, []string{"ip", "-6", "addr", "add", d.hostIP6(idx) + "/127", "dev", tap})
-	}
-	cmds = append(cmds, []string{"ip", "link", "set", "dev", tap, "up"})
-	for _, c := range cmds {
-		if out, err := exec.CommandContext(ctx, c[0], c[1:]...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%v: %v: %s", c, err, strings.TrimSpace(string(out)))
-		}
-	}
-	// Strict reverse-path filtering: drop any packet from this tap whose source
-	// address doesn't route back to it, so a guest can't source-spoof a
-	// neighbour's address across the host's inter-tap forwarding. Set per-tap
-	// because the kernel takes the max of the "all" and per-device values, so a
-	// permissive host default can't undo it.
-	//
-	// Best-effort, like the proxy-NDP setup below: this is defence in depth, not
-	// the guarantee. The metadata service identifies callers by source address
-	// (see internal/metadata), and TCP already makes that unspoofable — a forged
-	// SYN is answered towards the real owner of the address, so the spoofer
-	// never completes the handshake. Failing sandbox creation over this would
-	// trade a whole-host outage for no real security.
-	exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv4.conf."+tap+".rp_filter=1").Run() //nolint:errcheck
-
-	// Answer NDP for this guest's /128 on the uplink so the provider's on-link
-	// delivery of the routed /64 reaches the VM (its address lives on the tap,
-	// not the uplink). Best-effort: the VM still boots if this fails, it just
-	// won't have v6 return traffic. del-then-add keeps it idempotent.
-	if d.prefix6 != nil && d.uplink6 != "" {
-		exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv6.conf."+d.uplink6+".proxy_ndp=1").Run()             //nolint:errcheck
-		exec.CommandContext(ctx, "ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
-		exec.CommandContext(ctx, "ip", "-6", "neigh", "add", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
-	}
-	return nil
-}
-
-// deleteTap is called by Pause, Destroy and both of Create's failure paths, so
-// it has to be idempotent — it is, because every step ignores its error.
-func (d *Driver) deleteTap(idx int) {
-	if d.prefix6 != nil && d.uplink6 != "" {
-		exec.Command("ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
-	}
-	exec.Command("ip", "link", "del", tapName(idx)).Run() //nolint:errcheck
-}
-
-// sweepStaleTaps deletes leftover devices from a prior process. Safe at startup
-// only — call before any VM exists. It matches tapPrefix and nothing else: the
-// firecracker driver runs the same sweep over "sbtap", and neither prefix is a
-// prefix of the other, so one driver's construction cannot delete the other's
-// live networking.
-func sweepStaleTaps() {
-	out, err := exec.Command("ip", "-o", "link", "show").Output()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		// "3: sbqtap1@if4: <BROADCAST,...>" -> field 1 is the name.
-		parts := strings.SplitN(line, ": ", 3)
-		if len(parts) < 2 {
-			continue
-		}
-		name := parts[1]
-		if i := strings.IndexByte(name, '@'); i >= 0 {
-			name = name[:i]
-		}
-		if strings.HasPrefix(name, tapPrefix) {
-			exec.Command("ip", "link", "del", name).Run() //nolint:errcheck
-		}
-	}
-}
-
-// defaultRoute6Dev returns the interface backing the IPv6 default route (e.g.
-// "enp65s0f0"), or "" if there is none. Used to place proxy-NDP entries for
-// guest addresses on the correct uplink.
-func defaultRoute6Dev() string {
-	out, err := exec.Command("ip", "-6", "route", "show", "default").Output()
-	if err != nil {
-		return ""
-	}
-	fields := strings.Fields(string(out))
-	for i, f := range fields {
-		if f == "dev" && i+1 < len(fields) {
-			return fields[i+1]
-		}
-	}
-	return ""
-}

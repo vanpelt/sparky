@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"net"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ func TestV6Addressing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Driver{prefix6: ipNet.IP.To16()}
+	d := &Driver{net: hostnet.Plumbing{Prefix6: ipNet.IP.To16(), TapPrefix: tapPrefix}}
 
 	cases := []struct {
 		idx         int
@@ -35,10 +36,10 @@ func TestV6Addressing(t *testing.T) {
 		{255, "2001:bc8:702:1c7::200", "2001:bc8:702:1c7::201"},
 	}
 	for _, c := range cases {
-		if got := d.hostIP6(c.idx); got != c.host {
+		if got := d.net.HostIP6(c.idx); got != c.host {
 			t.Errorf("idx %d hostIP6 = %s, want %s", c.idx, got, c.host)
 		}
-		if got := d.guestIP6(c.idx); got != c.guest {
+		if got := d.net.GuestIP6(c.idx); got != c.guest {
 			t.Errorf("idx %d guestIP6 = %s, want %s", c.idx, got, c.guest)
 		}
 		// host must be the even (network) address of the /127, guest the odd one.
@@ -55,7 +56,7 @@ func newTestDriver(t *testing.T) *Driver {
 	t.Helper()
 	return &Driver{
 		opts: Options{VMStateDir: t.TempDir()}, vms: map[string]*vmState{},
-		guestNet: guestnet.MustParse(""),
+		net: hostnet.Plumbing{Net: guestnet.MustParse(""), TapPrefix: tapPrefix},
 	}
 }
 
@@ -267,7 +268,7 @@ exit 1
 
 func TestGuestSubnetAddressing(t *testing.T) {
 	d := newTestDriver(t)
-	d.guestNet = guestnet.MustParse("10.44.16.9/20")
+	d.net.Net = guestnet.MustParse("10.44.16.9/20")
 
 	tests := []struct {
 		idx         int
@@ -278,10 +279,10 @@ func TestGuestSubnetAddressing(t *testing.T) {
 		{1023, "10.44.31.253", "10.44.31.254"},
 	}
 	for _, test := range tests {
-		if got := d.hostIP(test.idx); got != test.host {
+		if got := d.net.HostIP(test.idx); got != test.host {
 			t.Errorf("hostIP(%d) = %s, want %s", test.idx, got, test.host)
 		}
-		if got := d.guestIP(test.idx); got != test.guest {
+		if got := d.net.GuestIP(test.idx); got != test.guest {
 			t.Errorf("guestIP(%d) = %s, want %s", test.idx, got, test.guest)
 		}
 	}
@@ -600,9 +601,9 @@ func TestFreeSlotReuse(t *testing.T) {
 	}
 
 	// Exhaustion must error rather than mint an out-of-range address.
-	d.guestNet = guestnet.MustParse("192.0.2.0/28")
+	d.net.Net = guestnet.MustParse("192.0.2.0/28")
 	d.vms = map[string]*vmState{}
-	for i := 0; i < d.guestNet.Capacity(); i++ {
+	for i := 0; i < d.net.Net.Capacity(); i++ {
 		d.vms[fmt.Sprintf("v%d", i)] = &vmState{idx: i, paused: true}
 	}
 	if _, err := d.freeSlot(); err == nil {
@@ -612,7 +613,7 @@ func TestFreeSlotReuse(t *testing.T) {
 
 func TestFreeSlotSkipsHostServiceReservation(t *testing.T) {
 	d := newTestDriver(t)
-	d.guestNet = guestnet.MustParse("10.44.16.0/20")
+	d.net.Net = guestnet.MustParse("10.44.16.0/20")
 	d.reservedSlots = map[int]bool{0: true, 2: true}
 	d.vms["middle"] = &vmState{idx: 1, paused: true}
 

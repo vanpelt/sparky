@@ -39,6 +39,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 )
 
 // ---------------------------------------------------------------------------
@@ -58,7 +59,7 @@ import (
 //	              <- boot calls this to build-or-replay -append,
 //	              (d *Driver) kernelArgs(name string,
 //	              idx int, fresh bool) (string, error), guestargs.MachineID(name string)
-//	              string, macFor(idx int) string, guestargs.DNSArg(guestDNS,
+//	              string, hostnet.MAC(qemuMACOUI, idx int) string, guestargs.DNSArg(guestDNS,
 //	              gatewayIP string) (string, error), guestargs.ValidateDNS(guestDNS
 //	              string) error  <- New calls this one.
 //	lifecycle.go  Create, Pause, Resume, Destroy, plus everything they need:
@@ -112,9 +113,9 @@ import (
 //	func (d *Driver) stopVMM(st *vmState) error // nil once the child is reaped, however that happened
 //	func (d *Driver) instance(name string, st *vmState) *vmm.Instance
 //	func (d *Driver) freeSlot() (int, error)    // caller holds d.mu
-//	func tapName(idx int) string                // tapPrefix + strconv.Itoa(idx)
-//	func sweepStaleTaps()
-//	func defaultRoute6Dev() string
+//	func d.net.TapName(idx int) string                // tapPrefix + strconv.Itoa(idx)
+//	func d.net.SweepStale()
+//	func hostnet.DefaultRoute6Dev() string
 //
 // boot takes the machine size from st (st.vcpus, st.memMB) rather than
 // arguments, so the restore path cannot accidentally pass the zeros
@@ -252,8 +253,8 @@ import (
 //	-kernel <opts.KernelPath> -append "<kernelArgs>"
 //	-drive file=<rootfs>,format=raw,if=none,id=rootfs
 //	-device virtio-blk-pci,drive=rootfs,romfile=
-//	-netdev tap,id=net0,ifname=<tapName(idx)>,script=no,downscript=no
-//	-device virtio-net-pci,netdev=net0,mac=<macFor(idx)>,romfile=
+//	-netdev tap,id=net0,ifname=<d.net.TapName(idx)>,script=no,downscript=no
+//	-device virtio-net-pci,netdev=net0,mac=<hostnet.MAC(qemuMACOUI, idx)>,romfile=
 //	-device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,romfile=
 //	-qmp unix:<qmp.sock>,server=on,wait=off
 //	-nographic -serial file:<serial.log> -monitor none
@@ -345,7 +346,7 @@ import (
 //     all, so the child must be built with exec.Command and killed only by
 //     stopVMM.
 //   - HostIP in vmm.Instance is the GUEST's address (fc.go:2059 returns
-//     d.guestIP(idx)) — "the address reachable from the host for the VM's own
+//     d.net.GuestIP(idx)) — "the address reachable from the host for the VM's own
 //     services". Returning d.hostIP points the whole HTTP proxy at the wrong
 //     end of every /30.
 //   - Create's `fresh` is true ONLY when the rootfs did not exist and was just
@@ -499,6 +500,11 @@ const (
 	// which fc's sweep would have eaten — that is how the hazard was noticed.)
 	tapPrefix = "sbqtap"
 
+	// qemuMACOUI is the third octet of every guest MAC this driver hands out.
+	// The firecracker driver uses 0x00, so two drivers sharing one host's
+	// subnet — which only the parity suite does — cannot collide.
+	qemuMACOUI = 0x01
+
 	// balloonDeviceID must appear as `id=` on the -device line: the QOM path
 	// guest stats are read from is derived from it, and an unnamed device lands
 	// under /machine/peripheral-anon/device[N] with an index that shifts
@@ -555,13 +561,11 @@ type Driver struct {
 	// creating holds the names of Creates that have released d.mu to do their
 	// rootfs disk work. A name is in exactly one of creating and vms.
 	creating map[string]bool
-	guestNet guestnet.Network
+	net      hostnet.Plumbing
 	// reservedSlots holds /30s occupied by a host service address, such as a
 	// dedicated in-prefix sluice DNS listener. They count toward prefix
 	// capacity but are never handed to a VM.
 	reservedSlots map[int]bool
-	prefix6       net.IP // parsed /64 network address; nil disables IPv6
-	uplink6       string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
 // Compile-time capability checks: every optional interface in vmm, not the four
@@ -625,7 +629,7 @@ func New(opts Options) (*Driver, error) {
 
 	d := &Driver{
 		opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{},
-		guestNet: guestNetwork, reservedSlots: map[int]bool{},
+		net: hostnet.Plumbing{Net: guestNetwork, TapPrefix: tapPrefix}, reservedSlots: map[int]bool{},
 	}
 	if dnsAddr, err := netip.ParseAddr(opts.GuestDNS); err == nil {
 		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
@@ -656,13 +660,13 @@ func New(opts Options) (*Driver, error) {
 				)
 			}
 		}
-		d.prefix6 = ipNet.IP.To16()
+		d.net.Prefix6 = ipNet.IP.To16()
 		// Providers deliver the routed /64 on-link: the upstream router
 		// NDP-resolves each guest's /128 on the segment, and the host only
 		// auto-answers for its own addresses. Per-VM addresses live on the
 		// taps, so without proxy NDP on the uplink their return traffic is
 		// dropped. Record the uplink now; createTap adds a proxy entry per guest.
-		d.uplink6 = defaultRoute6Dev()
+		d.net.Uplink6 = hostnet.DefaultRoute6Dev()
 	}
 
 	if _, err := os.Stat("/dev/kvm"); err != nil {
@@ -678,7 +682,7 @@ func New(opts Options) (*Driver, error) {
 	// would then fail with "Device or resource busy". Nothing of ours is
 	// running in a fresh process, so sweep them now — and only ours: see
 	// tapPrefix.
-	sweepStaleTaps()
+	d.net.SweepStale()
 	return d, nil
 }
 
