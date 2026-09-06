@@ -67,6 +67,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 // State is where an environment is in its build. An environment is useful in
@@ -172,6 +173,26 @@ type Environment struct {
 	// exists for exactly one reader — Delete's caller — and the reason is in
 	// the Adopted doc comment.
 	Adopted *Adopted `json:"adopted,omitempty"`
+	// Runner is the VMM this environment's sandboxes must run on, and it is
+	// the one field here that is not a property of the environment's CONTENTS
+	// but of where they are allowed to execute. Empty means no requirement,
+	// which is what every environment created before this column existed
+	// carries and what most environments should go on carrying.
+	//
+	// It is a requirement rather than a preference: a sandbox that cannot be
+	// placed on a node running this VMM is refused, not quietly placed on
+	// another one. The reason is that the only motive for setting it at all is
+	// a capability difference between the two VMMs — an environment asks for
+	// qemu because it needs something firecracker does not do — and an
+	// environment silently landing on the VMM it explicitly declined is the
+	// same class of surprise as a sandbox quietly booting the wrong rootfs.
+	//
+	// Changing it is allowed and affects only sandboxes created afterwards.
+	// Existing ones keep the node they are on, which is safe because the thing
+	// an environment binds — its template — is a plain compacted rootfs that
+	// both VMMs cold-boot identically (vmm.ClaimStateDir's comment says why).
+	// Only a MEMORY snapshot is VMM-specific, and no environment holds one.
+	Runner vmm.Runner `json:"runner,omitempty"`
 }
 
 // Adopted records the configuration an environment INHERITED rather than
@@ -309,6 +330,7 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 			build_session TEXT NOT NULL DEFAULT '',
 			build_denials TEXT NOT NULL DEFAULT '',
 			adopted     TEXT NOT NULL DEFAULT '',
+			runner      TEXT NOT NULL DEFAULT '',
 			built_at    TIMESTAMP,
 			created_at  TIMESTAMP NOT NULL,
 			updated_at  TIMESTAMP NOT NULL,
@@ -350,6 +372,16 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 	// when nothing refused that — and there is no way to reconstruct what that
 	// tag carried on the day, so the migration does not pretend to.
 	if err := addColumnIfMissing(db, "environments", "adopted", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
+	// Empty on every environment that predates this column, and empty is the
+	// only answer that keeps them working: it means "no VMM requirement", so
+	// each one stays placeable on exactly the nodes it was placeable on
+	// yesterday. A migration that guessed the host's current driver instead
+	// would look harmless on a single-VMM fleet and then pin every existing
+	// environment to it the moment a second kind of node appeared.
+	if err := addColumnIfMissing(db, "environments", "runner", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
@@ -663,6 +695,39 @@ func (s *Store) SetBuildSession(owner, name, url string) error {
 	return err
 }
 
+// SetRunner sets (or with an empty value clears) the VMM this environment's
+// sandboxes must run on. It is a separate write from Put for the same reason
+// SetBuildSession is: Put's update branch deliberately touches the description
+// and nothing else, and widening it would make every caller that meant "change
+// the description" capable of silently changing where the environment runs.
+//
+// Unlike the best-effort build writers, a missing row IS an error here. This is
+// a caller changing a property of a specific environment, so "there is no such
+// environment" is the answer, not a no-op that reads to them as success.
+func (s *Store) SetRunner(owner, name string, runner vmm.Runner) error {
+	name = strings.TrimSpace(name)
+	if _, err := vmm.ParseRequirement(string(runner)); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidName, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`
+		UPDATE environments SET runner = ?, updated_at = ?
+		WHERE owner = ? AND name = ?`,
+		string(runner), time.Now().UTC(), owner, name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNoSuchEnvironment
+	}
+	return nil
+}
+
 // SetBuildDenials records the bounded policy-denial summary for the most
 // recent build. It is best-effort build evidence, like BuildSession, and a
 // missing row is intentionally not promoted into a build failure.
@@ -715,7 +780,7 @@ func (s *Store) EnvironmentsForSandbox(sandbox, owner string) ([]Environment, er
 		SELECT DISTINCT e.owner, e.name, e.description, e.setup_sh, e.setup_from,
 		       e.setup_seed_sha,
 		       e.build_state, e.build_box, e.build_error, e.build_session, e.build_denials,
-		       e.adopted, e.built_at, e.created_at, e.updated_at
+		       e.adopted, e.runner, e.built_at, e.created_at, e.updated_at
 		FROM environments e
 		JOIN sandbox_tags bt ON bt.tag = e.name AND bt.owner = e.owner
 		WHERE bt.sandbox = ? AND e.owner = ?
@@ -736,7 +801,7 @@ const selectCols = `
 	SELECT owner, name, description, setup_sh, setup_from,
 	       setup_seed_sha,
 	       build_state, build_box, build_error, build_session, build_denials,
-	       adopted, built_at, created_at, updated_at
+	       adopted, runner, built_at, created_at, updated_at
 	FROM environments`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows, so the column list has
@@ -753,16 +818,18 @@ func scanEnv(sc scanner) (Environment, error) {
 	var builtAt sql.NullTime
 	var buildDenials string
 	var adopted string
+	var runner string
 	if err := sc.Scan(&e.Owner, &e.Name, &e.Description, &e.SetupScript, &e.SetupFrom,
 		&e.SetupSeedSHA,
 		&state, &e.BuildBox, &e.BuildError, &e.BuildSession, &buildDenials,
-		&adopted, &builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		&adopted, &runner, &builtAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Environment{}, ErrNoSuchEnvironment
 		}
 		return Environment{}, err
 	}
 	e.State = State(state)
+	e.Runner = vmm.Runner(runner)
 	if buildDenials != "" {
 		var record buildDenialRecord
 		if err := json.Unmarshal([]byte(buildDenials), &record); err != nil {

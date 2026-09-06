@@ -201,16 +201,25 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 	log.Info("node identity", "node", opts.nodeName,
 		"fingerprint", xssh.FingerprintSHA256(nodeKey.PublicKey()))
 
+	// The runner name is parsed before it is used, because it is no longer only
+	// a switch key: it is reported to the gateway as this node's VMM, and an
+	// environment that requires a VMM is placed by comparing the two. A typo
+	// that reached the capacity report would advertise a runner no environment
+	// can ever match, and the node would simply stop attracting work.
+	runner, err := vmm.ParseRunner(opts.driverName)
+	if err != nil {
+		return err
+	}
 	var driver vmm.Driver
-	switch opts.driverName {
-	case "mock":
+	switch runner {
+	case vmm.RunnerMock:
 		// The node key doubles as the fake guest's host key. A node holds no
 		// gateway host key, and minting one here would leave a gateway identity
 		// lying on a machine that must never be a gateway.
 		md := mock.New(opts.vmStateDir, nodeKey)
 		md.LoginUser = opts.defaultLogin
 		driver = md
-	case "firecracker":
+	case vmm.RunnerFirecracker:
 		if err := vmm.ClaimStateDir(opts.vmStateDir, opts.driverName, opts.allowVMMChange); err != nil {
 			return err
 		}
@@ -224,7 +233,7 @@ func runNode(ctx context.Context, opts nodeOptions) error {
 		if err != nil {
 			return err
 		}
-	case "qemu":
+	case vmm.RunnerQEMU:
 		if err := qemuRefusesJailerFlags(opts.jailerBin, opts.chrootJailer); err != nil {
 			return err
 		}
