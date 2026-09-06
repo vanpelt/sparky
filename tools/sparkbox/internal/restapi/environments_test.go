@@ -23,6 +23,7 @@ func TestEnvironmentRoundTrip(t *testing.T) {
 		"name":        "web",
 		"description": "the marketing site",
 		"vars":        []map[string]string{{"name": "NODE_ENV", "value": "development"}},
+		"runner":      "qemu",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("create = %d: %s", rec.Code, rec.Body)
@@ -36,6 +37,9 @@ func TestEnvironmentRoundTrip(t *testing.T) {
 	}
 	if len(info.Vars) != 1 || info.Vars[0].Name != "NODE_ENV" {
 		t.Errorf("vars = %+v", info.Vars)
+	}
+	if info.Runner != "qemu" {
+		t.Errorf("runner = %q, want it back on the wire under `runner`", info.Runner)
 	}
 	// Never nil: a client that renders `environments[0].repos.length` must not
 	// have to guard against null.
@@ -62,6 +66,39 @@ func TestEnvironmentRoundTrip(t *testing.T) {
 	}
 	if len(info.Vars) != 2 {
 		t.Errorf("vars = %+v, want both", info.Vars)
+	}
+	// The runner survives that call for the same reason, and it matters more:
+	// a wiped description is visible, whereas an environment quietly un-pinned
+	// from its VMM keeps producing sandboxes that boot — on the other one.
+	if info.Runner != "qemu" {
+		t.Errorf("runner = %q, want it untouched by a call that named none", info.Runner)
+	}
+
+	// And "" is not "absent": it is the request that takes the requirement off.
+	rec = ta.do(t, "POST", "/v1/environments", "alice", map[string]any{
+		"name": "web", "runner": "",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear runner = %d: %s", rec.Code, rec.Body)
+	}
+	// A FRESH struct, not the one above: `runner` is omitempty, so a cleared
+	// requirement is absent from the response rather than present and empty —
+	// and unmarshalling absence over a populated field leaves the old value
+	// sitting there, which is a green test for a broken clear.
+	var cleared ctlops.EnvironmentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Runner != "" {
+		t.Errorf("runner = %q, want the empty string to have cleared it", cleared.Runner)
+	}
+
+	// `mock` is a node, never a requirement: an environment asking the platform
+	// for a fake guest would get a sandbox that runs nothing.
+	if rec := ta.do(t, "POST", "/v1/environments", "alice", map[string]any{
+		"name": "web", "runner": "mock",
+	}); rec.Code != http.StatusBadRequest {
+		t.Errorf("runner=mock = %d, want 400: %s", rec.Code, rec.Body)
 	}
 
 	// The listing is an object with a named array, so a cursor can be added

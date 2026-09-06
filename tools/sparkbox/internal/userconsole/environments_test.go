@@ -82,6 +82,9 @@ func (f *fakeEnvOps) PutEnvironment(_ context.Context, c ctlops.Caller, a ctlops
 	if a.Description != nil {
 		e.Description = *a.Description
 	}
+	if a.Runner != nil {
+		e.Runner = *a.Runner
+	}
 	for _, r := range a.Repos {
 		e.Repos = append(e.Repos, r.Slug)
 	}
@@ -313,6 +316,50 @@ func TestAnOmittedDescriptionIsNotAnEmptyOne(t *testing.T) {
 	tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{"description": ""})
 	if f.rows["web"].Description != "" {
 		t.Errorf("description = %q, want an explicit empty one to clear it", f.rows["web"].Description)
+	}
+}
+
+// The panel's half of the runner is markup, and markup this package embeds
+// rather than builds — so the only thing that can catch a control deleted by a
+// careless edit is asking the served page for it. The three strings are the
+// whole feature: the select somebody picks with, the "any machine" option that
+// takes a requirement back off, and the badge that says which one is required.
+func TestIndexShipsTheRunnerControl(t *testing.T) {
+	body := newTestConsole(t).do(t, "GET", "/", "", nil).Body.String()
+	for _, want := range []string{`id="env-runner"`, `value="firecracker"`, `value="qemu"`, "badge runner"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("index.html missing %s", want)
+		}
+	}
+}
+
+// The runner rides the same pointer for a worse failure than a wiped
+// description. An environment un-pinned from its VMM by a save that never
+// mentioned one still produces sandboxes, and they still boot — on the other
+// hypervisor — so there is nothing on screen to notice.
+func TestAnOmittedRunnerIsNotAClearedOne(t *testing.T) {
+	tc := newTestConsole(t)
+	f := withEnvOps(t, tc)
+	f.rows["web"] = ctlops.EnvironmentInfo{Name: "web", Runner: "qemu"}
+
+	tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{"secrets": []string{"X"}})
+	if f.lastArgs.Runner != nil {
+		t.Errorf("runner reached ctlops as %q, want nil from a body that named none", *f.lastArgs.Runner)
+	}
+	if f.rows["web"].Runner != "qemu" {
+		t.Errorf("runner = %q, want it untouched", f.rows["web"].Runner)
+	}
+	// And the select's "Any machine" — an explicit "" — really does take it off.
+	tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{"runner": ""})
+	if f.lastArgs.Runner == nil || *f.lastArgs.Runner != "" {
+		t.Errorf("runner = %v, want a pointer to the empty string", f.lastArgs.Runner)
+	}
+	if f.rows["web"].Runner != "" {
+		t.Errorf("runner = %q, want an explicit empty one to clear it", f.rows["web"].Runner)
+	}
+	tc.do(t, "PUT", "/api/environments/web", "alice", map[string]any{"runner": "firecracker"})
+	if f.rows["web"].Runner != "firecracker" {
+		t.Errorf("runner = %q, want it set", f.rows["web"].Runner)
 	}
 }
 

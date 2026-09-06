@@ -227,6 +227,11 @@ _ENVIRONMENTS = [
                                 {"name": "LOG_LEVEL", "value": "debug"}],
      "has_setup": True, "setup_bytes": 3746, "setup_from": "agent",
      "state": "ready", "built_at": _iso(11400), "snapshot": "web-20260902-1412",
+     # The one fixture with a VMM requirement, and deliberately the card whose
+     # head line is already longest: badge, badge, "built 3h ago · <snapshot>"
+     # and a Launch button is where the runner pill either fits or wraps. The
+     # other three carry none, which is the case that must render nothing.
+     "runner": "qemu",
      # A finished agent build keeps its transcript, and this is the only thing
      # that survives the builder: the box was destroyed when it succeeded.
      "build_session": "https://hivemind.example/sessions/web-build"},
