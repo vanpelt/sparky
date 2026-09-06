@@ -349,23 +349,28 @@ fcbin=$("${k[@]}" -n "$namespace" exec parity -- \
 [ -n "$fcbin" ] || die "no firecracker binary found under $nodedata"
 echo "   image=$image_name login=$login_user kernel=$kernel firecracker=$fcbin"
 
-# QEMU only. The driver REFUSES to default a machine type off arm64
-# (internal/vmm/qemu/qemu.go), and it insists on a VERSIONED name, because the
-# machine model is baked into every migration stream a sandbox pauses into: an
-# unversioned `q35` silently means "whatever this QEMU calls newest", so a QEMU
-# upgrade would strand every existing snapshot. Ask the binary what it has
-# rather than hardcoding a version that expires.
+# QEMU only.
+#
+# THE MACHINE TYPE IS DELIBERATELY LEFT EMPTY unless an operator names one, and
+# that is a correction rather than a simplification. This used to resolve the
+# newest versioned pc-q35-* out of the binary, because the driver refused to
+# default one on amd64 at all. The driver now has a pinned default and it is
+# NOT a bare version -- it is `pc-q35-8.2,sata=off,vmport=off`, where the two
+# suffixes remove ich9-ahci and the VMware backdoor ports (measured with
+# `info qtree`). Resolving one here OVERRODE that, so a green run validated a
+# machine model no production node will ever boot -- and a different device set
+# is a different migration stream, which is the one thing a snapshot cannot
+# survive.
+#
+# Empty means the driver and the helper each take the SAME pinned default from
+# internal/vmm/qemuargs, which is the configuration actually being tested. Step
+# 6c then proves the two processes agreed rather than assuming it.
 qemu_bin=""
 if [ "$pkg" != "./internal/vmm/firecracker" ]; then
   qemu_bin=$("${k[@]}" -n "$namespace" exec parity -- \
     bash -c 'command -v qemu-system-x86_64' 2>/dev/null || true)
   [ -n "$qemu_bin" ] || die "qemu-system-x86_64 not in the image ($image)"
-  if [ -z "$machine_type" ]; then
-    machine_type=$("${k[@]}" -n "$namespace" exec parity -- \
-      bash -c "$qemu_bin -M help | awk '{print \$1}' | grep -E '^pc-q35-[0-9]+\\.[0-9]+$' | sort -V | tail -1")
-  fi
-  [ -n "$machine_type" ] || die "could not resolve a versioned pc-q35-* machine type"
-  echo "   qemu=$qemu_bin machine-type=$machine_type"
+  echo "   qemu=$qemu_bin machine-type=${machine_type:-(the driver pinned default)}"
 fi
 
 # The QEMU driver's own default (SPARKBOX_PARITY_QEMU_SUBNET), stated here
@@ -441,6 +446,8 @@ echo "helper up: $(head -1 /work/helper.log)"
 HELPER
 fi
 
+run_log="$out/parity-cks-$(date +%Y%m%d-%H%M%S).log"
+
 say "6. running the suite"
 # Under --helper the suite runs as the CONTROLLER UID, not root, because the
 # helper refuses uid 0 and because an unprivileged controller is the thing being
@@ -480,10 +487,30 @@ fi
   SPARKBOX_PARITY_MACHINE_TYPE="$machine_type" \
   ${helper_env[@]+"${helper_env[@]}"} \
   ${runner[@]+"${runner[@]}"} /work/parity.test -test.run "$runre" -test.v -test.timeout "$timeout" \
-  2>&1 | tee "$out/parity-cks-$(date +%Y%m%d-%H%M%S).log"
+  2>&1 | tee "$run_log"
 rc=${PIPESTATUS[0]}
 
 if [ "$helper" = 1 ]; then
+  say "6c. did the two processes describe the same machine?"
+  # The driver decides what machine a sandbox BOOTS as and the helper decides
+  # what machine its snapshot is RESTORED onto. They are separate processes
+  # taking the same pinned default, and QEMU matches a migration stream
+  # positionally against the machine the command line describes -- so a
+  # disagreement here does not fail now, it fails on a resume, an hour later,
+  # on a node where nothing about the sandbox has changed. Cheap to check once
+  # per run; impossible to diagnose from the eventual symptom.
+  helper_machine=$("${k[@]}" -n "$namespace" exec parity -- \
+    sed -n 's/.*machine type //p' /work/helper.log | head -1 | tr -d '\r')
+  driver_machine=$(sed -n 's/.* machine=\([^ ]*\) .*/\1/p' "$run_log" | head -1 | tr -d '\r')
+  echo "   helper: ${helper_machine:-(none)}"
+  echo "   driver: ${driver_machine:-(none)}"
+  if [ -z "$helper_machine" ] || [ "$helper_machine" != "$driver_machine" ]; then
+    echo "   MISMATCH: a sandbox paused by one of these cannot be resumed by the other" >&2
+    rc=1
+  else
+    echo "   agreed"
+  fi
+
   say "6b. the helper's log"
   # Always, not only on failure. The helper is where a launch is refused and
   # where a VMM's exit status is reported, and a green run's log is the baseline
