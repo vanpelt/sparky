@@ -43,6 +43,7 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/qemuargs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/slots"
 )
 
 // ---------------------------------------------------------------------------
@@ -470,6 +471,14 @@ type Options struct {
 	// HelperControllerGID is the group the helper shares VM files and the QMP
 	// socket with, so this unprivileged process can reach them.
 	HelperControllerGID int
+	// Slots, when set, is the slot namespace this driver allocates from. Nil
+	// gives it a private one covering its whole subnet, which is what a node
+	// running a single VMM wants and what both drivers did before this existed.
+	//
+	// Two drivers on one node MUST share one. Everything a guest is reachable
+	// by comes out of the slot, so two private pools both answering 0 is two
+	// guests claiming one tap, one uid and one pair of addresses.
+	Slots *slots.Pool
 	// JailerChrootBase is the root-owned directory beneath which the helper
 	// builds its per-slot jails, and it must be the helper's --chroot-base.
 	//
@@ -664,8 +673,11 @@ type Driver struct {
 	// dedicated in-prefix sluice DNS listener. They count toward prefix
 	// capacity but are never handed to a VM.
 	reservedSlots map[int]bool
-	prefix6       net.IP // parsed /64 network address; nil disables IPv6
-	uplink6       string // iface backing the v6 default route, for per-guest proxy NDP
+	// slots is the allocator. reservedSlots is still here because it is what
+	// SEEDS the pool, and because New builds one from it before the pool exists.
+	slots   *slots.Pool
+	prefix6 net.IP // parsed /64 network address; nil disables IPv6
+	uplink6 string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
 // Compile-time capability checks: every optional interface in vmm, not the four
@@ -773,6 +785,19 @@ func New(opts Options) (*Driver, error) {
 		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
 			d.reservedSlots[index] = true
 		}
+	}
+	// A pool of this driver's own unless one was handed in, which is what makes
+	// the shared case opt-in: a node running one VMM behaves exactly as it did
+	// when every driver scanned its own records, and a node running two passes
+	// the same pool to both so they cannot be given the same slot — and with it
+	// the same tap, the same uid and the same guest addresses.
+	d.slots = opts.Slots
+	if d.slots == nil {
+		reserved := make([]int, 0, len(d.reservedSlots))
+		for idx := range d.reservedSlots {
+			reserved = append(reserved, idx)
+		}
+		d.slots = slots.New(guestNetwork.String(), guestNetwork.Capacity(), reserved...)
 	}
 
 	if opts.Subnet6 != "" {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/slots"
 )
 
 // Compile-time capability checks: every optional interface in vmm, not the four
@@ -75,9 +76,15 @@ func TestV6Addressing(t *testing.T) {
 // filesystem work.
 func newTestDriver(t *testing.T) *Driver {
 	t.Helper()
+	network := guestnet.MustParse("")
+	// The pool is not optional even in a test driver: every path that drops a
+	// record hands its slot back, so a nil one panics the first time a VM is
+	// destroyed. New() builds it for every real driver; this is the same thing
+	// for a literal.
 	return &Driver{
 		opts: Options{VMStateDir: t.TempDir()}, vms: map[string]*vmState{},
-		guestNet: guestnet.MustParse(""),
+		guestNet: network,
+		slots:    slots.New(network.String(), network.Capacity()),
 	}
 }
 
@@ -816,19 +823,26 @@ func TestRenameVMRefusals(t *testing.T) {
 	}
 }
 
-// TestFreeSlotReuse checks that slot allocation reclaims indices released by
+// TestSlotReuse checks that slot allocation reclaims indices released by
 // dropped records — Destroy, DropSnapshots (every reboot), and RenameVM all
 // delete the vmState, and a monotonic counter would burn a slot each time
 // until Create failed with an address outside the configured prefix.
-func TestFreeSlotReuse(t *testing.T) {
+//
+// It drives the POOL rather than d.vms, and that is the change: the allocator's
+// truth used to be this driver's own record map, which is exactly why a node
+// running two drivers had two allocators that both answered 0. Seeding d.vms
+// without telling the pool would now be a test that passes while production
+// leaks, so the two are seeded together and checked against each other.
+func TestSlotReuse(t *testing.T) {
 	d := newTestDriver(t)
-	d.vms["a"] = &vmState{idx: 0, paused: true}
-	d.vms["c"] = &vmState{idx: 2, paused: true}
+	hold(t, d, "a", 0)
+	hold(t, d, "c", 2)
 
 	// Lowest free slot, including gaps between live records.
-	if idx, err := d.freeSlot(); err != nil || idx != 1 {
-		t.Fatalf("freeSlot = %d, %v; want 1", idx, err)
+	if idx := claim(t, d, "probe"); idx != 1 {
+		t.Fatalf("claim = %d, want the gap at 1", idx)
 	}
+	d.slots.Release("probe")
 
 	// Dropping a record (here via DropSnapshots, the reboot path) releases its
 	// slot for the next Create.
@@ -836,41 +850,73 @@ func TestFreeSlotReuse(t *testing.T) {
 	if err := d.DropSnapshots("a"); err != nil {
 		t.Fatal(err)
 	}
-	if idx, err := d.freeSlot(); err != nil || idx != 0 {
-		t.Fatalf("freeSlot after DropSnapshots = %d, %v; want 0", idx, err)
+	if idx := claim(t, d, "after-drop"); idx != 0 {
+		t.Fatalf("claim after DropSnapshots = %d, want the released 0", idx)
 	}
+	d.slots.Release("after-drop")
 
 	// RenameVM likewise.
 	touch(t, d, "c", "rootfs.ext4")
 	if err := d.RenameVM("c", "c2"); err != nil {
 		t.Fatal(err)
 	}
-	d.vms["a"] = &vmState{idx: 0, paused: true}
-	d.vms["b"] = &vmState{idx: 1, paused: true}
-	if idx, err := d.freeSlot(); err != nil || idx != 2 {
-		t.Fatalf("freeSlot after RenameVM = %d, %v; want 2", idx, err)
+	hold(t, d, "a", 0)
+	hold(t, d, "b", 1)
+	if idx := claim(t, d, "after-rename"); idx != 2 {
+		t.Fatalf("claim after RenameVM = %d, want the released 2", idx)
 	}
 
-	// Exhaustion must error rather than mint an out-of-range address.
-	d.guestNet = guestnet.MustParse("192.0.2.0/28")
-	d.vms = map[string]*vmState{}
-	for i := 0; i < d.guestNet.Capacity(); i++ {
-		d.vms[fmt.Sprintf("v%d", i)] = &vmState{idx: i, paused: true}
+	// The driver's records and the pool must not have drifted apart. A
+	// disagreement is a slot leak, which surfaces much later as a subnet that
+	// has inexplicably run out.
+	for name := range d.vms {
+		if _, held := d.slots.Held()[name]; !held {
+			t.Errorf("driver holds a record for %q that the pool does not know about", name)
+		}
 	}
-	if _, err := d.freeSlot(); err == nil {
+}
+
+// Exhaustion must error rather than mint an out-of-range address.
+func TestSlotExhaustionIsAnError(t *testing.T) {
+	d := newTestDriver(t)
+	d.guestNet = guestnet.MustParse("192.0.2.0/28")
+	d.slots = slots.New(d.guestNet.String(), d.guestNet.Capacity())
+	for i := 0; i < d.guestNet.Capacity(); i++ {
+		hold(t, d, fmt.Sprintf("v%d", i), i)
+	}
+	if _, err := d.slots.Claim("one-too-many"); err == nil {
 		t.Fatal("expected error with every slot in use")
 	}
 }
 
-func TestFreeSlotSkipsHostServiceReservation(t *testing.T) {
+func TestSlotAllocationSkipsHostServiceReservation(t *testing.T) {
 	d := newTestDriver(t)
 	d.guestNet = guestnet.MustParse("10.44.16.0/20")
-	d.reservedSlots = map[int]bool{0: true, 2: true}
-	d.vms["middle"] = &vmState{idx: 1, paused: true}
+	d.slots = slots.New(d.guestNet.String(), d.guestNet.Capacity(), 0, 2)
+	hold(t, d, "middle", 1)
 
-	if idx, err := d.freeSlot(); err != nil || idx != 3 {
-		t.Fatalf("freeSlot = %d, %v; want first unreserved slot 3", idx, err)
+	if idx := claim(t, d, "next"); idx != 3 {
+		t.Fatalf("claim = %d, want the first unreserved slot 3", idx)
 	}
+}
+
+// hold seeds a VM the way a live driver holds one: a record AND the pool entry
+// that reserves its tap, uid and addresses.
+func hold(t *testing.T, d *Driver, name string, idx int) {
+	t.Helper()
+	if err := d.slots.Hold(name, idx); err != nil {
+		t.Fatalf("hold %s at %d: %v", name, idx, err)
+	}
+	d.vms[name] = &vmState{idx: idx, paused: true}
+}
+
+func claim(t *testing.T, d *Driver, name string) int {
+	t.Helper()
+	idx, err := d.slots.Claim(name)
+	if err != nil {
+		t.Fatalf("claim %s: %v", name, err)
+	}
+	return idx
 }
 
 func TestProcStatCPUTicks(t *testing.T) {
