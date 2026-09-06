@@ -358,6 +358,20 @@ ssh ctl@<domain> env show web          # where it got to
 ssh -t new@<domain> -- --env web       # a sandbox booted from the disk it built
 ```
 
+An environment can also name the VMM it needs, when it needs one:
+
+```
+ssh ctl@<domain> env set web --runner qemu   # place only on nodes running QEMU
+ssh ctl@<domain> env set web --runner=       # place anywhere again
+ssh ctl@<domain> node ls                     # which machines run what (vmm=…)
+```
+
+Most environments should set nothing here and be placed anywhere. Set it when
+the work needs something one VMM does and the other does not, and a sandbox
+that cannot be placed on a machine running it is then **refused** rather than
+quietly built on the other one. A node runs exactly one VMM, chosen by
+`--driver`; this is how a fleet with both in it sends work to the right half.
+
 `env build` boots one ordinary sandbox called `<name>-build` from the stock
 image, runs the environment's setup script inside the primary checkout as the
 login user, and — when the script succeeds — the *gateway* captures that sandbox

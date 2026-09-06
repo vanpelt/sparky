@@ -375,6 +375,16 @@ framing:
    wasted either — its trap list transferred to QEMU almost verbatim.
 5. **Cost the runtime-class seam** (§1b) before justifying any VMM work on
    alignment grounds. It may buy the alignment far more cheaply.
+6. ~~**Give users a way to ask for the second backend.**~~ **Built:** an
+   environment names the VMM it needs (`ctl env set web --runner qemu`), and
+   placement refuses a machine that does not run it — see
+   [environments-design.md](environments-design.md), "an environment can name
+   the VMM it runs on". A node still runs exactly one VMM; what this buys is a
+   fleet with both in it and work routed to the right half. Running both on ONE
+   node is a different change, and the amendment says what blocks it: under the
+   privileged helper the tap name, the per-slot uid and the guest addresses all
+   derive from the slot alone, and two drivers allocating slots independently
+   would hand two tenants the same uid.
 6. **Independent of everything above:** do not ship a `CONFIG_KVM` guest kernel
    until the per-sandbox gate exists. It would turn the idle reaper into a way to
    panic a user's sandbox with no error anywhere.
