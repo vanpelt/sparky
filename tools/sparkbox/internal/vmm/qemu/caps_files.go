@@ -26,11 +26,10 @@ package qemu
 //     snapshot survives the pack, and the disk pausing spent is never
 //     reclaimed. It goes through d.snapshotFiles instead.
 //
-// (docs/cloud-hypervisor-port-design.md flags an ENOTEMPTY variant of the same
-// trap — under Cloud Hypervisor the snapshot is a *directory*, so os.Remove
-// fails on it and only os.RemoveAll works. QEMU's state.migrate is a plain
-// regular file, so os.Remove is correct here; the trap is the naming, not the
-// removal call.)
+// (A third VMM can spring an ENOTEMPTY variant of the same trap: if its
+// snapshot is a *directory*, os.Remove fails on it and only os.RemoveAll works.
+// QEMU's state.migrate is a plain regular file, so os.Remove is correct here;
+// the trap is the naming, not the removal call.)
 //
 // Every snapshot path in this file comes from lifecycle.go's snapshotPath /
 // snapshotNextPath / snapshotFiles / hasSnapshot helpers. No file outside

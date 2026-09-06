@@ -2,8 +2,7 @@
 
 Status: built and green against the Firecracker driver on real hardware,
 2026-09-04. Companion to [vmm-choice.md](vmm-choice.md) §9.2, which is why it
-exists, and [cloud-hypervisor-feasibility.md](cloud-hypervisor-feasibility.md)
-§12, whose closing paragraph asked for exactly this.
+exists.
 
 ## The problem it solves
 
@@ -303,7 +302,8 @@ Two transport details worth keeping, because both cost time to discover:
 hack/parity/run-on-cks.sh
 ```
 
-Same discipline as `hack/m0b/run-on-cks.sh`: its own namespace, `hostPath`
+The discipline, because this is a production cluster with one node whose
+sandboxes belong to people: its own namespace, `hostPath`
 `/dev/kvm` with `privileged: true` (the device plugin cannot help —
 `sparkbox.dev/kvm` is allocatable 1 and held by `vmm-helper`), CPU, memory and
 ephemeral-storage capped, deleted on exit, and `kubectl -n sparkbox-poc get
@@ -409,9 +409,8 @@ Three things, in increasing order of how much they matter.
 interfaces had to be widened, split or relaxed to admit a VMM with a different
 control protocol (QMP, not REST) and a different snapshot mechanism (one
 migration file, not a `mem`/`state` pair). The one interface that was *predicted*
-to be a problem — `Ballooner.BalloonStats`, which
-[cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) §1 shows Cloud
-Hypervisor cannot satisfy from any released version — QEMU satisfies in full, and
+to be a problem — `Ballooner.BalloonStats`, which Cloud Hypervisor cannot
+satisfy from any released version — QEMU satisfies in full, and
 the parity run proves it on hardware: `free 847, available 880 MiB`.
 
 **Several capability implementations lift, but two of them lift *wrongly*, and

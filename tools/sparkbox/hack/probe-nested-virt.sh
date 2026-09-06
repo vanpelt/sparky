@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Host preflight for exposing nested virtualization to sandboxes.
 #
-# Companion to docs/cloud-hypervisor-feasibility.md (§3, M0). It answers, from
-# any Linux shell — a bare host, the DGX, or `kubectl exec -c vmm-helper` into
+# It answers, from any Linux shell — a bare host, the DGX, or `kubectl exec -c vmm-helper` into
 # the CKS node Pod — the questions that decide whether a Node may run a
 # sandbox with `--cpus nested=on`:
 #
@@ -86,7 +85,7 @@ case "$arch" in
     if [ -c /dev/kvm ]; then
       pass "cpu virtualization" "/dev/kvm present (arm64)"
     fi
-    failf "nested on arm64" "Cloud Hypervisor exposes nested only on x86-64; arm64 is parity-only (see docs/cloud-hypervisor-feasibility.md §8.5)"
+    failf "nested on arm64" "nested guests are an x86-64 story on the VMMs we run; arm64 is parity-only"
     ;;
   *)
     failf "architecture" "$arch is not a Sparkbox host architecture"
@@ -277,7 +276,7 @@ if [ -n "${CLOUD_HYPERVISOR:-}" ]; then
       # v50.0 introduced the option, but on AMD `nested=off` was a silent no-op
       # until v52.0 (the CPUID loop broke on leaf 1 before reaching the leaf that
       # carries SVM), and on arm64 `nested=off` was a hard parse error before
-      # v52.0. Both make v52.0 the floor. See docs/cloud-hypervisor-feasibility.md.
+      # v52.0. Both make v52.0 the floor.
       major=$(printf '%s' "$ver" | sed -n 's/.*v\([0-9][0-9]*\)\..*/\1/p')
       if [ -n "$major" ] && [ "$major" -lt 52 ]; then
         failf "cloud-hypervisor" "${ver}: --cpus nested=off is a no-op on AMD and a parse error on arm64 below v52.0"

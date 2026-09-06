@@ -2,13 +2,17 @@
 
 Status: decision document, 2026-09-04. No code changed.
 
-Companions: [cloud-hypervisor-feasibility.md](cloud-hypervisor-feasibility.md)
-(what the port touches, plus the M0/M0b/M0c hardware measurements),
-[cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) (how),
-[nested-virtualization-design.md](nested-virtualization-design.md) (risk register
-and kill criteria), [cocoon-evaluation.md](cocoon-evaluation.md) (why we are not
-adopting someone else's engine). §1a and §1b measure what CoreWeave's own
-sandbox platform actually does, from `coreweave/aviato`.
+Companions: [qemu-spike.md](qemu-spike.md) (what the shipped QEMU driver
+measured) and [vmm-parity-harness.md](vmm-parity-harness.md) (the suite that
+judges any driver). §1a and §1b measure what CoreWeave's own sandbox platform
+actually does, from `coreweave/aviato`.
+
+The Cloud Hypervisor branch of this investigation — a feasibility spike, a port
+design, a per-sandbox nested design, and an evaluation of `cocoonstack/cocoon` —
+was written, argued, and then not taken; §9 item 4 records why QEMU won instead.
+Those four documents are deliberately not carried forward: their durable
+conclusions are §4 and §9 here, and the rest was implementation detail for a
+driver we did not write. Git history has them if they are ever wanted.
 
 This document exists because the spike that produced those found something
 awkward: **the reason we started was not the reason to finish.** We went looking
@@ -220,10 +224,10 @@ it.
 Two Cloud Hypervisor specifics that must be designed for, not discovered:
 
 - **It defaults to host CPU passthrough**, where Firecracker virtualises the CPU
-  model (our M0 measured a Firecracker guest reporting the generic brand string
-  "Intel(R) Xeon(R) Processor" against a host Xeon Platinum 8562Y+). So the
-  masking CPU template that §7 of the feasibility doc treats as optional
-  hardening becomes **mandatory** on Cloud Hypervisor. It is the same lever that
+  model (measured on the CKS node: a Firecracker guest reports the generic brand
+  string "Intel(R) Xeon(R) Processor" against a host Xeon Platinum 8562Y+). So a
+  masking CPU template, optional hardening under Firecracker, becomes
+  **mandatory** on Cloud Hypervisor. It is the same lever that
   gates VMX exposure, so this is one piece of work, not two.
 - **CVE-2026-27211 is precisely our shape.** A guest overwrites sector 0 of its
   own *raw* disk with a crafted QCOW2 header naming a backing file; the host
@@ -241,7 +245,7 @@ knowledgeable reviewer will say so.
 ## 4. Nested virtualization — demote it
 
 We went looking for this and it turned out not to need a port. Measured on the
-CKS node (feasibility §10–§12):
+CKS node, 2026-09-04:
 
 - The node already has `kvm_intel.nested=Y`, KVM advertises VMX, and **every
   sandbox already carries the VMX bit in its CPUID today.**
@@ -298,9 +302,8 @@ future benefit at ≥2 nodes; do not spend it now.
 already does much of what the jailer does, but "much of" is doing work in that
 sentence.
 
-**The migration itself is disruptive.** Feasibility §9 M2: `replicas: 1` +
-`Recreate` + one `sparkbox.dev/kvm` means the node Pod is terminated before the
-new one starts. Every sandbox on the pinned node goes down and comes back on the
+**The migration itself is disruptive.** `replicas: 1` + `Recreate` + one
+`sparkbox.dev/kvm` means the node Pod is terminated before the new one starts. Every sandbox on the pinned node goes down and comes back on the
 other VMM. Budget a window; rollback is a second full Recreate.
 
 ## 7. The counter-case, stated as strongly as we can
@@ -359,18 +362,17 @@ framing:
    [vmm-parity-harness.md](vmm-parity-harness.md) for what the port found).
    Alignment (§1a) was the opening argument, but two things decided it. First,
    Cloud Hypervisor **structurally loses `Ballooner.BalloonStats`** —
-   `/vm.balloon-stats` ships on no released version, and
-   [cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) §1 works
-   out that a driver returning zeros makes `Manager.MemStats` read every sandbox
-   as pegged at its ceiling and balloon *innocent* sandboxes to relieve an
+   `/vm.balloon-stats` ships on no released version (it exists only on unreleased
+   `main`), so a CH driver must either fail the call, losing the live working-set
+   signal fleet-wide, or return zeros — which makes `Manager.MemStats` read every
+   sandbox as pegged at its ceiling and balloon *innocent* sandboxes to relieve an
    overage that does not exist. QEMU answers it from a released version, measured
    on hardware. Second, Cloud Hypervisor is close enough to a Firecracker clone
    — REST on a Unix socket, per-VM argv, a small snapshot file set — that porting
    to it would have proved little about the abstraction; QEMU differs on every
    one of those axes and therefore actually tested it. **The abstraction passed:
-   `driver.go` needed no change.** The Cloud Hypervisor design work is not wasted
-   — it is still the reference for a VMX gate, pausable nested guests and live
-   resize (§4, §5), and its §1 trap list transferred to QEMU almost verbatim.
+   `driver.go` needed no change.** The Cloud Hypervisor design work was not
+   wasted either — its trap list transferred to QEMU almost verbatim.
 5. **Cost the runtime-class seam** (§1b) before justifying any VMM work on
    alignment grounds. It may buy the alignment far more cheaply.
 6. **Independent of everything above:** do not ship a `CONFIG_KVM` guest kernel

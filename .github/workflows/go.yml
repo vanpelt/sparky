@@ -623,9 +623,9 @@ jobs:
   # /dev/kvm is a placeholder file" — which is certainly true of
   # ubuntu-24.04-arm, the runner that job uses, and is a claim about a DIFFERENT
   # runner image when applied to x86_64. docs/vmm-parity-harness.md picks where
-  # the harness runs, and this is the measurement that decision needs; the same
-  # mistake — reading one artifact's behaviour as another's — is what
-  # docs/cloud-hypervisor-feasibility.md section 10 had to correct on hardware.
+  # the harness runs, and this is the measurement that decision needs; reading
+  # one artifact's behaviour as another's is a mistake this project has already
+  # had to correct on hardware once.
   #
   # It records three things and fails on none of them:
   #

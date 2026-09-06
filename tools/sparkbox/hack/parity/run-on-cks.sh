@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The VMM parity suite on the CKS node, x86_64, in a throwaway Pod.
 #
-# Same discipline as hack/m0b/run-on-cks.sh, and for the same reason: this is a
-# production cluster with one node, and the sandboxes on it belong to people.
+# The discipline here exists for one reason: this is a production cluster with
+# one node, and the sandboxes on it belong to people.
 #
 #   - its own namespace, so no selector in sparkbox-poc can reach it;
 #   - hostPath /dev/kvm and `privileged: true`, because the device plugin CANNOT
@@ -243,8 +243,9 @@ echo "template: $(basename "$img")  scratch: $(df -h /work/scratch | tail -1)"
 # moved Firecracker's total by 40%. A timing is comparable to another timing
 # only if this line matches. See docs/vmm-parity-harness.md.
 echo "pod sees: $(nproc) CPUs, $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
-# nproc reports the HOST's 64 CPUs regardless of this Pod's cgroup cap -- the
-# trap hack/m0b hit when it used nproc for -j. cpu.max is the real limit.
+# nproc reports the HOST's 64 CPUs regardless of this Pod's cgroup cap -- an
+# earlier experiment used nproc for -j and oversubscribed the node badly.
+# cpu.max is the real limit.
 echo "cgroup cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo unknown)"
 PREP
 [ $? -eq 0 ] || die "scratch preparation failed"

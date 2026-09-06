@@ -17,8 +17,7 @@ is decisive on its own, and a fourth that is about the abstraction rather than
 the engine.
 
 **QEMU keeps `Ballooner.BalloonStats`; Cloud Hypervisor cannot.**
-[cloud-hypervisor-port-design.md](cloud-hypervisor-port-design.md) §1 spends a
-section on this: `/vm.balloon-stats` exists only on unreleased `main`, so a CH
+`/vm.balloon-stats` exists only on unreleased `main`, so a CH
 driver must either return an error — losing the live working-set signal for the
 whole fleet — or return zeros, which makes `Manager.MemStats` report every
 sandbox as using its full ceiling and balloon *innocent* sandboxes to relieve an
@@ -66,9 +65,10 @@ QEMU driver needs its own, differing in exactly these ways:
    `-M virt` on arm64 gives a PL011 at `ttyAMA0`, and **our guest kernel has no
    PL011 driver** — `-serial file:` captured 0 bytes across every boot while the
    guest was demonstrably healthy over SSH. The arm64 kernel fragment needs
-   `CONFIG_SERIAL_AMBA_PL011`. `cloud-hypervisor-port-design.md` §3.1 predicted
-   this for CH from source; it is now measured, and it applies to QEMU too. A
-   QEMU sandbox is undebuggable by serial until that lands.
+   `CONFIG_SERIAL_AMBA_PL011`. This was predicted for Cloud Hypervisor by
+   reading its `arch/src/aarch64/fdt.rs`, which emits the same PL011; it is now
+   measured, and it applies to QEMU too. A QEMU sandbox is undebuggable by
+   serial until that lands.
 4. **Every PCI device needs `romfile=`.** The Ubuntu package ships no option
    ROMs, so `-device virtio-net-pci,netdev=net0` fails outright with
    `failed to find romfile "efi-virtio.rom"`. We boot with `-kernel`, so the
@@ -88,8 +88,8 @@ QEMU driver needs its own, differing in exactly these ways:
   predicate (`fc.go:1612`) and `Rebooter.DropSnapshots` among them. Lifted
   unchanged against a single `state.migrate`, the stat matches nothing and
   `RenameVM` silently stops refusing the renames it exists to refuse. This is
-  the same trap `cloud-hypervisor-port-design.md` flags for CH's three-file
-  snapshot, and the parity suite's `Rename` case is what catches it.
+  the same trap Cloud Hypervisor's three-file snapshot would have sprung, and
+  the parity suite's `Rename` case is what catches it.
 
 ## Measured: scratch placement dominates everything else
 
@@ -119,7 +119,7 @@ Three of the entries below are now answered, and are struck through.
 - **x86_64.** Everything above is arm64. `hack/parity/run-on-cks.sh` exists and
   has still never been run.
 - **Nested virtualisation through a QEMU snapshot.** Carrying it is Cloud
-  Hypervisor's one measured win (`cloud-hypervisor-feasibility.md` §11). QEMU
+  Hypervisor's one measured win (`vmm-choice.md` §4). QEMU
   almost certainly manages it and that is worth nothing until someone runs it.
 - **Whether `-incoming` tolerates a changed disk.** It must not, and the driver
   contract already assumes it does not, but it was not tested. Still open — the
