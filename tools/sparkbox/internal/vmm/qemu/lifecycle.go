@@ -572,6 +572,10 @@ func (d *Driver) vmmCommand(name string, st *vmState, rootfs, cmdline string, re
 			VCPUs: st.vcpus, MemMB: st.memMB, Cmdline: cmdline,
 		})
 		cmd.Env = []string{}
+		// The client's stderr is the only place a helper refusal is written.
+		// See vmState.launchLog.
+		st.launchLog = &boundedLog{}
+		cmd.Stderr = st.launchLog
 		return cmd, nil, nil
 	}
 	args, err := d.qemuArgs(name, st, rootfs, cmdline, restore)
@@ -683,6 +687,14 @@ func (d *Driver) vmmError(name string, st *vmState, what string, cause error) er
 	}
 	if tail := qemuLogTail(d.vmmLogPath(name)); tail != "" {
 		msg = fmt.Sprintf("%s: %s", msg, tail)
+	}
+	// Last, and separately labelled, because it comes from the other side of
+	// the privilege boundary rather than from QEMU: a helper that refused the
+	// launch outright leaves nothing in qemu.log at all.
+	if st.launchLog != nil {
+		if refusal := st.launchLog.String(); refusal != "" {
+			msg = fmt.Sprintf("%s: privileged helper said: %s", msg, refusal)
+		}
 	}
 	return fmt.Errorf("%s", msg)
 }

@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -610,6 +611,45 @@ type vmState struct {
 	statsErr error
 	// paused means a memory snapshot exists and Resume can bring it back.
 	paused bool
+	// launchLog captures the privileged helper client's stderr, and is nil on
+	// the direct path where there is no such process.
+	//
+	// It exists because that client is where the most confusing failure on a
+	// hardened node shows up. When the helper refuses a launch — a backend
+	// mismatch between the two containers, a protocol version the other side is
+	// too old for, a slot already in use — the refusal is written there, while
+	// this driver sees only "qemu exited before its monitor was reachable" and
+	// an empty qemu.log the helper never got as far as filling. Folding it into
+	// vmmError puts the reason in the error the operator actually reads.
+	launchLog *boundedLog
+}
+
+// boundedLog is a Writer safe to hand a child process and read concurrently
+// from the goroutine that reports its failure. It keeps only the first
+// boundedLogBytes, because the content worth having is the refusal at the top,
+// not whatever a wedged process writes forever afterwards.
+type boundedLog struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+const boundedLogBytes = 4096
+
+func (b *boundedLog) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := boundedLogBytes - len(b.data); room > 0 {
+		b.data = append(b.data, p[:min(room, len(p))]...)
+	}
+	// Always the full length: a short write would make the child think its
+	// stderr broke, which is not a thing we want to teach it over a log cap.
+	return len(p), nil
+}
+
+func (b *boundedLog) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.TrimSpace(string(b.data))
 }
 
 type Driver struct {

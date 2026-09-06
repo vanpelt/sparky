@@ -77,3 +77,44 @@ func TestTapNameFollowsWhoeverCreatesTheDevice(t *testing.T) {
 			tapPrefix, helperTapPrefix)
 	}
 }
+
+// boundedLog is written by a child process and read by whichever goroutine is
+// building the failure message, so the race detector is the point of this test
+// as much as the truncation is.
+func TestBoundedLogKeepsTheHeadAndNeverShortWrites(t *testing.T) {
+	var b boundedLog
+	const refusal = "launch refused: slot already belongs to other\n"
+	n, err := b.Write([]byte(refusal))
+	if err != nil || n != len(refusal) {
+		t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(refusal))
+	}
+	// A short write would make the child believe its stderr broke.
+	flood := make([]byte, boundedLogBytes*2)
+	for i := range flood {
+		flood[i] = 'x'
+	}
+	if n, err := b.Write(flood); err != nil || n != len(flood) {
+		t.Fatalf("Write of %d bytes returned %d, %v", len(flood), n, err)
+	}
+	got := b.String()
+	if len(got) > boundedLogBytes {
+		t.Errorf("boundedLog kept %d bytes, cap is %d", len(got), boundedLogBytes)
+	}
+	// The refusal is at the TOP, which is why the head is what is kept.
+	if !strings.HasPrefix(got, strings.TrimSpace(refusal)) {
+		t.Errorf("the first message was lost: %.60q", got)
+	}
+
+	var concurrent boundedLog
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			concurrent.Write([]byte("helper: refused\n")) //nolint:errcheck
+		}
+	}()
+	for range 100 {
+		_ = concurrent.String()
+	}
+	<-done
+}
